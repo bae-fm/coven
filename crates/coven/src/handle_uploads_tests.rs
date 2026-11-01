@@ -46,7 +46,7 @@ async fn stage(device: &Device, table: &'static str, id: &str, bytes: Vec<u8>) -
     let id = id.to_owned();
     device
         .handle
-        .write_with_files(
+        .test_staged_write(
             move |batch| Ok(batch.put_file("files", bytes, Place::Cloud)),
             move |sql, file| {
                 sql.execute(&format!("INSERT INTO {table}(id,file) VALUES(?1,?2)"), (&id, file))?;
@@ -260,22 +260,15 @@ async fn the_app_finds_a_cloud_imports_move_in_coven_uploads_and_cancels_it() {
     }
     let files = ana
         .handle
-        .write_with_files(
-            move |batch| {
-                Ok(prepared
-                    .into_iter()
-                    .map(|(name, prepared)| {
-                        (name, batch.put_user_file("tracks", prepared, Place::Cloud))
-                    })
-                    .collect::<Vec<_>>())
-            },
-            |sql, files| {
-                for (name, file) in &files {
-                    sql.execute("INSERT INTO tracks(id,file) VALUES(?1,?2)", (name, file))?;
-                }
-                Ok(files.into_iter().map(|(_, file)| file).collect::<Vec<_>>())
-            },
-        )
+        .write(move |sql| {
+            let mut files = Vec::new();
+            for (name, prepared) in prepared {
+                let file = sql.put_user_file("tracks", prepared, Place::Cloud)?;
+                sql.execute("INSERT INTO tracks(id,file) VALUES(?1,?2)", (name, file))?;
+                files.push(file);
+            }
+            Ok(files)
+        })
         .await
         .unwrap();
     let queued = moves(ana, "tracks").await;
@@ -304,7 +297,7 @@ async fn coven_uploads_names_no_move_for_a_bound_upload() {
     let ana = &network.devices[0];
     stopped(ana).await;
     ana.handle
-        .write_with_files(
+        .test_staged_write(
             |batch| {
                 Ok((
                     batch.put_file("files", vec![1; 4096], Place::Cloud),

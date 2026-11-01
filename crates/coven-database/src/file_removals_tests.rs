@@ -145,7 +145,7 @@ fn crashing_file_writer() {
     if phase == "stream" || phase == "transaction" {
         let stream = phase == "stream";
         runtime
-            .block_on(db.write_with_files::<_, _, _, _, crate::DbError>(
+            .block_on(db.staged_write::<_, _, _, _, crate::DbError>(
                 move |batch| {
                     let source = if stream {
                         FileSource::Stream(Box::pin(CrashingReader(false)))
@@ -284,7 +284,7 @@ async fn a_failed_write_keeps_its_error_when_pending_deletion_also_fails() {
         sql.fail_at("_coven_fail_cleanup", "BEFORE DELETE ON _coven_file_removals", "record stays")
     });
     let error = db
-        .write_with_files::<_, _, _, _, crate::DbError>(
+        .staged_write::<_, _, _, _, crate::DbError>(
             |batch| Ok(batch.put_file("files", b"partial".to_vec(), crate::Place::Cloud)),
             |_, _| Err::<(), _>(DbError::StoreClosed),
         )

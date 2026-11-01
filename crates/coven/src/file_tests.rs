@@ -30,7 +30,7 @@ async fn stage_rows(
     bytes: impl Fn(u8) -> FileSource + Send + 'static,
 ) -> Vec<FileId> {
     handle
-        .write_with_files(
+        .test_staged_write(
             move |batch| {
                 Ok((0..count)
                     .map(|id| batch.put_file("files", bytes(id), crate::Place::Cloud))
@@ -274,7 +274,7 @@ async fn thumbnail(
 ) -> FileId {
     let (note, id) = (note.to_owned(), id.to_owned());
     handle
-        .write_with_files(
+        .test_staged_write(
             move |batch| Ok(batch.put_file("thumbnails", bytes, crate::Place::Cloud)),
             move |sql, file| {
                 if insert_note {
@@ -314,20 +314,18 @@ async fn originals_owned_copies_ranges_references_and_deletion_use_the_app_api()
     let note = note_id.clone();
     let attachment = attachment_id.clone();
     let recorded = handle
-        .write_with_files(
-            move |batch| Ok(batch.put_user_file("attachments", prepared, Place::Cloud)),
-            move |sql, file| {
-                sql.execute(
-                    "INSERT INTO notes (id,title,audience) VALUES (?1,?2,'store')",
-                    (&note, "Paint colors"),
-                )?;
-                sql.execute(
-                    "INSERT INTO attachments (id,note_id,title,file) VALUES (?1,?2,?3,?4)",
-                    (&attachment, &note, "Swatches", file),
-                )?;
-                Ok(file)
-            },
-        )
+        .write(move |sql| {
+            let file = sql.put_user_file("attachments", prepared, Place::Cloud)?;
+            sql.execute(
+                "INSERT INTO notes (id,title,audience) VALUES (?1,?2,'store')",
+                (&note, "Paint colors"),
+            )?;
+            sql.execute(
+                "INSERT INTO attachments (id,note_id,title,file) VALUES (?1,?2,?3,?4)",
+                (&attachment, &note, "Swatches", file),
+            )?;
+            Ok(file)
+        })
         .await
         .unwrap();
     let recording = handle.file_ref(recorded).await.unwrap();
@@ -646,21 +644,19 @@ async fn the_apps_sql_reads_uploads_pins_and_pending_records() {
     // thumbnail's alone (§17.3).
     let parent = note.clone();
     let take = handle
-        .write_with_files(
-            move |batch| Ok(batch.put_user_file("attachments", prepared, Place::Cloud)),
-            move |sql, take| {
-                sql.execute("INSERT INTO notes VALUES(?1,'note','store')", [&parent])?;
-                sql.execute(
-                    "INSERT INTO attachments(id,note_id,title,file) VALUES(?1,?2,'take',?3)",
-                    (&recorded, &parent, take),
-                )?;
-                Ok(take)
-            },
-        )
+        .write(move |sql| {
+            let take = sql.put_user_file("attachments", prepared, Place::Cloud)?;
+            sql.execute("INSERT INTO notes VALUES(?1,'note','store')", [&parent])?;
+            sql.execute(
+                "INSERT INTO attachments(id,note_id,title,file) VALUES(?1,?2,'take',?3)",
+                (&recorded, &parent, take),
+            )?;
+            Ok(take)
+        })
         .await
         .unwrap();
     let preview = handle
-        .write_with_files(
+        .test_staged_write(
             move |batch| Ok(batch.put_file("thumbnails", b"preview".to_vec(), crate::Place::Cloud)),
             move |sql, preview| {
                 sql.execute(

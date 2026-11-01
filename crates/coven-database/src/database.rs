@@ -10,6 +10,7 @@ pub(crate) mod file_database;
 
 #[path = "file_staging.rs"]
 mod file_staging;
+pub use file_staging::StagedFiles;
 #[path = "read_pool.rs"]
 mod read_pool;
 use read_pool::ReadPool;
@@ -72,6 +73,9 @@ struct DatabaseInner {
     migrations: Vec<MigrationOutcome>,
     clock: ClockRef,
     ids: IdSourceRef,
+    /// The names of copies being written, or written and waiting for the
+    /// write that names them, which no write's removal takes (Appendix C.3):
+    /// staged app bytes and cache files.
     staging: Mutex<BTreeSet<coven_foundation::files::FileName>>,
     /// The paths of the copies the calls making files device-only are
     /// writing now, which no other write's removal takes (§17.3).
@@ -241,7 +245,6 @@ impl DatabaseInner {
         self.access.call(|| run(self))
     }
 
-    // The caller retains its file-task lease until these names are released.
     // Their durable removal records remain for the next write or open.
     fn release_file_reservations<'a>(
         &self,
@@ -258,8 +261,6 @@ impl DatabaseInner {
     /// follow its commit.
     fn with_files<R, E: crate::WriteFailure>(
         &self,
-        staged: Vec<crate::file_write::StagedFile>,
-        existing: Vec<crate::write_batch::ExistingFile>,
         run: impl FnOnce(&DatabaseConnection, &crate::file_write::FileWrite<'_>) -> Result<R, E>,
     ) -> Result<R, E> {
         let (outcome, chosen, committed) = self.access.with_writer(|writer| {
@@ -268,8 +269,7 @@ impl DatabaseInner {
                 &self.access.write_schema,
                 self.access.device,
                 self.ids.as_ref(),
-                staged,
-                existing,
+                &self.staging,
             );
             let outcome =
                 std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run(writer, &files)));
@@ -552,22 +552,91 @@ impl Database {
         start_call(self.inner.clone(), move |inner| inner.call(|inner| inner.access.read(read)))
     }
 
-    /// Run app SQL and commit its unsigned write record and merge metadata in
-    /// one IMMEDIATE transaction (§4). The closure's result is returned after commit.
+    /// Run app SQL and coven's steps, and commit its unsigned write record
+    /// and merge metadata in one IMMEDIATE transaction (§4). The closure's
+    /// result is returned after commit.
     pub async fn write<F, R>(&self, sql: F) -> Result<R, DbError>
     where
         F: FnOnce(crate::SqlContext<'_, '_>) -> Result<R, DbError> + Send + 'static,
         R: Send + 'static,
     {
-        self.write_with_files(|_| Ok(()), move |context, ()| sql(context)).await
+        self.write_as(sql).await
     }
 
-    /// Stage files, then run the write's SQL with what staging returned, as
-    /// one write (§17.2). App bytes are streamed to coven's own copy before
-    /// the write's transaction begins. A failed write discards all newly
-    /// supplied bytes. Callback errors retain their type alongside rollback or
-    /// byte-cleanup failures.
-    pub async fn write_with_files<F, S, T, R, E>(&self, stage: F, sql: S) -> Result<R, E>
+    /// `write`, for a closure whose failures are `E`: callback errors retain
+    /// their type alongside rollback or byte-cleanup failures.
+    pub async fn write_as<F, R, E>(&self, sql: F) -> Result<R, E>
+    where
+        F: FnOnce(crate::SqlContext<'_, '_>) -> Result<R, E> + Send + 'static,
+        R: Send + 'static,
+        E: crate::WriteFailure + Send + 'static,
+    {
+        self.call(move |inner| {
+            inner.with_files(|writer, files| {
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    writer.local_write(
+                        &inner.access.write_schema,
+                        inner.access.device,
+                        inner.clock.now(),
+                        files,
+                        sql,
+                    )
+                }));
+                // Staged files the write brought in go free once it has
+                // decided: a write that rolled back leaves their bytes to the
+                // removals its cleanup chooses.
+                inner.release_file_reservations(&files.take_brought());
+                #[cfg(any(test, feature = "test-utils"))]
+                writer.checkpoint(crate::test_utils::WriteCheckpoint::StagingReleased);
+                match result {
+                    Ok(result) => result,
+                    Err(panic) => std::panic::resume_unwind(panic),
+                }
+            })
+        })
+        .await
+    }
+
+    /// Stage app bytes for a later write (§17.2): `stage` names each file's
+    /// namespace and place and returns what that write's SQL needs, such as
+    /// the ids staging gave them. Their bytes are streamed to coven's own
+    /// copies, each synced, and flushed, before this returns; close waits for
+    /// that, and for its cleanup if it fails or is cancelled. The result
+    /// holds nothing close waits for. A write takes it with `put_staged`.
+    pub async fn stage_files<F, T, E>(&self, stage: F) -> Result<StagedFiles<T>, E>
+    where
+        F: FnOnce(&mut crate::WriteBatch<'_>) -> Result<T, E> + Send + 'static,
+        T: Send + 'static,
+        E: crate::WriteFailure + Send + 'static,
+    {
+        let lease = self.file_tasks.clone().read_owned().await;
+        let database = self.inner.clone();
+        let (staging, value) = finish_blocking(
+            "stage files",
+            tokio::task::spawn_blocking(crate::commit_scope::bind(move || {
+                file_staging::FileStaging::new(database, lease, stage)
+            }))
+            .await,
+        )?;
+        let (staging, flushed) =
+            staging.write().await.map_err(|shutdown| E::from(DbError::Shutdown(shutdown)))?;
+        match flushed {
+            Ok(_flushed) => Ok(staging.into_staged(value)),
+            // A failed copy or flush removes what the staging wrote.
+            Err(error) => Err(finish_blocking(
+                "discard staged files",
+                tokio::task::spawn_blocking(crate::commit_scope::bind(move || {
+                    Ok::<_, E>(staging.discard::<E>(error))
+                }))
+                .await,
+            )?),
+        }
+    }
+
+    /// Stage app bytes, then run a write that puts them in its rows, as an
+    /// app does with `stage_files` and `put_staged`, for tests.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub async fn staged_write<F, S, T, R, E>(&self, stage: F, write: S) -> Result<R, E>
     where
         F: FnOnce(&mut crate::WriteBatch<'_>) -> Result<T, E> + Send + 'static,
         S: FnOnce(crate::SqlContext<'_, '_>, T) -> Result<R, E> + Send + 'static,
@@ -575,24 +644,12 @@ impl Database {
         R: Send + 'static,
         E: crate::WriteFailure + Send + 'static,
     {
-        let lease = self.file_tasks.clone().read_owned().await;
-        let database = self.inner.clone();
-        let (staging, staged) = finish_blocking(
-            "stage the write's files",
-            tokio::task::spawn_blocking(crate::commit_scope::bind(move || {
-                file_staging::FileStaging::new(database, lease, stage)
-            }))
-            .await,
-        )?;
-        let (staging, result) =
-            staging.write().await.map_err(|shutdown| E::from(DbError::Shutdown(shutdown)))?;
-        finish_blocking(
-            "write",
-            tokio::task::spawn_blocking(crate::commit_scope::bind(move || {
-                staging.finish(result, move |context| sql(context, staged))
-            }))
-            .await,
-        )
+        let staged = self.stage_files(stage).await?;
+        self.write_as(move |sql| {
+            let value = sql.put_staged(staged)?;
+            write(sql, value)
+        })
+        .await
     }
 
     /// Run app SQL that writes device-local tables alone in one IMMEDIATE

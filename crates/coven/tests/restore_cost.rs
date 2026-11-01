@@ -188,25 +188,29 @@ async fn import(handle: &CovenHandle, clock: &BenchClock, library: Library, rele
         let rows = write * RELEASES_PER_WRITE..(write + 1) * RELEASES_PER_WRITE;
         match library {
             Library::Stored => {
-                let staged = rows.clone();
-                handle
-                    .write_with_files(
-                        move |batch| {
-                            let mut files = Vec::new();
-                            for release in staged {
-                                for track in 0..TRACKS_PER_RELEASE {
-                                    let bytes = format!("audio of track {track} of {release}");
-                                    files.push(batch.put_file(
-                                        AUDIO,
-                                        FileSource::Bytes(bytes.into_bytes()),
-                                        Place::Cloud,
-                                    ));
-                                }
+                let releases = rows.clone();
+                let staged = handle
+                    .stage_files(move |batch| {
+                        let mut files = Vec::new();
+                        for release in releases {
+                            for track in 0..TRACKS_PER_RELEASE {
+                                let bytes = format!("audio of track {track} of {release}");
+                                files.push(batch.put_file(
+                                    AUDIO,
+                                    FileSource::Bytes(bytes.into_bytes()),
+                                    Place::Cloud,
+                                ));
                             }
-                            Ok(files)
-                        },
-                        move |sql, files| insert_releases(&sql, rows, Some(files.into_iter())),
-                    )
+                        }
+                        Ok(files)
+                    })
+                    .await
+                    .unwrap();
+                handle
+                    .write(move |sql| {
+                        let files = sql.put_staged(staged)?;
+                        insert_releases(&sql, rows, Some(files.into_iter()))
+                    })
                     .await
                     .unwrap();
             }

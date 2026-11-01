@@ -624,7 +624,7 @@ async fn replaying_waiting_files_keeps_every_queued_copy() {
     let empty_prefix = empty.prefix.clone();
     let empty = empty.concat();
     stage(&db, b"first".to_vec(), true).await.unwrap();
-    db.write_with_files::<_, _, _, _, crate::DbError>(
+    db.staged_write::<_, _, _, _, crate::DbError>(
         |batch| Ok(batch.put_file("files", b"second".to_vec(), crate::Place::Cloud)),
         |sql, file| {
             sql.execute("INSERT INTO files(id,file) VALUES('8',?1)", [file])?;

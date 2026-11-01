@@ -372,7 +372,7 @@ async fn a_self_replacement_waits_for_a_held_write_until_its_file_is_stored() {
         .await;
     let cover = ana
         .database()
-        .write_with_files::<_, _, _, _, coven_database::DbError>(
+        .staged_write::<_, _, _, _, coven_database::DbError>(
             |batch| Ok(batch.put_file("covers", b"cover".to_vec(), Place::Cloud)),
             |sql, file| {
                 sql.execute("INSERT INTO covers(id,file) VALUES('1',?1)", [file])?;

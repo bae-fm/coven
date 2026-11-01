@@ -160,7 +160,7 @@ async fn stopped_store_with_files() -> (tempfile::TempDir, TestCoven, CovenHandl
 async fn attach(handle: &CovenHandle, id: &str) {
     let row = id.to_owned();
     handle
-        .write_with_files(
+        .test_staged_write(
             move |batch| Ok(batch.put_file("files", vec![7; 2048], crate::Place::Cloud)),
             move |sql, file| {
                 sql.execute("INSERT INTO files(id,file) VALUES(?1,?2)", (&row, file))?;

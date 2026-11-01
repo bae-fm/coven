@@ -194,13 +194,11 @@ async fn stalled_pin_downloads_leave_sequence_passes_free() {
     let prepared = coven_database::prepare_user_file(&path, |_| {}).await.unwrap();
     let staged = ana
         .database()
-        .write_with_files::<_, _, _, _, coven_database::DbError>(
-            move |batch| Ok(batch.put_user_file("files", prepared, coven_database::Place::Cloud)),
-            |sql, file| {
-                sql.execute("INSERT INTO files(id,file) VALUES('recording',?1)", [file])?;
-                Ok(file)
-            },
-        )
+        .write_as::<_, _, coven_database::DbError>(move |sql| {
+            let file = sql.put_user_file("files", prepared, coven_database::Place::Cloud)?;
+            sql.execute("INSERT INTO files(id,file) VALUES('recording',?1)", [file])?;
+            Ok(file)
+        })
         .await
         .unwrap();
     ana.files().retry_uploads_now().await.unwrap();

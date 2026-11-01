@@ -45,9 +45,9 @@ pub use coven_database::{
     MigrationError, MoveFile, MoveId, Namespace, OldWrites, OpenStep, Params, Place,
     PreparedUserFile, Provenance, Read, ReconfigurableLiveQuery, ReconfigurableLiveQueryEvent,
     RemovalRule, Replacement, Row, RowAuthorizationFailure, RowChange, RowIdentity, RowKey,
-    SchemaError, SnapshotError, SqlRead, SqlReadContext, SqliteError, SqliteResult, SyncedTable,
-    TemporaryDirectoryError, ToSql, TransferChange, TransferProgress, TransferWatch, UnsentWork,
-    UserFile, WriteBatch, WriteId, WriteWait, BOUND_FILE_LIMIT,
+    SchemaError, SnapshotError, SqlRead, SqlReadContext, SqliteError, SqliteResult, StagedFiles,
+    SyncedTable, TemporaryDirectoryError, ToSql, TransferChange, TransferProgress, TransferWatch,
+    UnsentWork, UserFile, WriteBatch, WriteId, WriteWait, BOUND_FILE_LIMIT,
 };
 pub use coven_database::{
     AnalysisLimit, AutoVacuum, CacheSize, CacheSpill, CheckpointMode, IncrementalVacuum,

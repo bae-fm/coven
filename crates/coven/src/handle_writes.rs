@@ -1,5 +1,5 @@
-//! Writes: the app's SQL and coven's steps, with the files it stages, as
-//! one write (§4, §17.2, E3).
+//! Writes: the app's SQL and coven's steps as one write, and the app bytes
+//! staged before one (§4, §17.2, E3).
 use crate::coven_write::CovenWrite;
 use crate::*;
 
@@ -11,9 +11,7 @@ impl CovenHandle {
         R: Send + 'static,
     {
         let storage = self.storage.clone();
-        self.database
-            .write_with_files(|_| Ok(()), move |sql, ()| write(CovenWrite::new(sql, &storage)))
-            .await
+        self.database.write_as(move |sql| write(CovenWrite::new(sql, &storage))).await
     }
 
     /// Runs one bulk write: SQL that changes device-local tables alone, run
@@ -33,30 +31,41 @@ impl CovenHandle {
         self.database.write_bulk(sql).await
     }
 
-    /// Stage files, then run the write's SQL with what staging returned, as
-    /// one write (§17.2). `stage` stages each file and returns what the SQL
-    /// needs, such as the ids staging gave them; the SQL puts those ids in
-    /// the rows that reference the files. App bytes are streamed to coven's
-    /// own copy before the transaction's writer is taken; close waits for
-    /// staging and its cleanup, including cancellation. The write fails with
-    /// `FileUnknown` if a row references a file coven has no record of in the
-    /// row's audience, `FileUnreferenced` if a staged file has no row, and
-    /// `FileAbsent` or `NotThisDevice` if a new file over an existing file's
-    /// bytes names a file coven has no record of, or one on another device
-    /// only.
-    pub async fn write_with_files<F, S, T, R>(&self, stage: F, write: S) -> CovenResult<R>
+    /// Stages app bytes for a write that puts them in rows (§17.2): `stage`
+    /// stages each file and returns what that write needs, such as the ids
+    /// staging gave them, and the write takes it with
+    /// `CovenWrite::put_staged`. The bytes are streamed to coven's own copies,
+    /// synced and flushed before this returns; close waits for staging and
+    /// its cleanup, including cancellation. The staged files hold nothing
+    /// close waits for: dropped uncommitted, or after the store closes, they
+    /// are removed by the next write or open. An undeclared namespace fails
+    /// with `UndeclaredNamespace`, a user one with `NamespaceKind`.
+    pub async fn stage_files<F, T>(&self, stage: F) -> CovenResult<StagedFiles<T>>
+    where
+        F: FnOnce(&mut WriteBatch<'_>) -> CovenResult<T> + Send + 'static,
+        T: Send + 'static,
+    {
+        self.database.stage_files(stage).await
+    }
+}
+
+#[cfg(test)]
+impl CovenHandle {
+    /// Stage app bytes, then run a write that puts them in its rows, as an
+    /// app does with `stage_files` and `put_staged`, for tests.
+    pub(crate) async fn test_staged_write<F, S, T, R>(&self, stage: F, write: S) -> CovenResult<R>
     where
         F: FnOnce(&mut WriteBatch<'_>) -> CovenResult<T> + Send + 'static,
         S: FnOnce(CovenWrite<'_>, T) -> CovenResult<R> + Send + 'static,
         T: Send + 'static,
         R: Send + 'static,
     {
-        let storage = self.storage.clone();
-        self.database
-            .write_with_files(stage, move |sql, staged| {
-                write(CovenWrite::new(sql, &storage), staged)
-            })
-            .await
+        let staged = self.stage_files(stage).await?;
+        self.write(move |sql| {
+            let value = sql.put_staged(staged)?;
+            write(sql, value)
+        })
+        .await
     }
 }
 

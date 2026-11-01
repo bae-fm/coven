@@ -103,6 +103,7 @@ impl FileWrite<'_> {
     /// Whether this write stages `file` for the cloud.
     fn stages_for_cloud(&self, file: coven_foundation::id_source::FileId) -> bool {
         self.staged
+            .borrow()
             .iter()
             .any(|staged| staged.id == file && staged.place != crate::Place::DeviceOnly)
     }

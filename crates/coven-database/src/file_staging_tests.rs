@@ -56,7 +56,7 @@ fn committed_rows(store: &TestStore) -> i64 {
 
 /// Stage two files and reference each from a row of `files`, in one write.
 async fn write_two(db: &Database, ran: Arc<AtomicBool>) -> Result<(), DbError> {
-    db.write_with_files::<_, _, _, _, DbError>(
+    db.staged_write::<_, _, _, _, DbError>(
         |batch| {
             Ok([b"one", b"two"]
                 .map(|bytes| batch.put_file("files", bytes.to_vec(), crate::Place::Cloud)))
@@ -167,7 +167,7 @@ async fn a_socket_stream_leaves_the_writer_available_and_keeps_its_pending_bytes
     let writing = tokio::spawn({
         let db = db.clone();
         async move {
-            db.write_with_files::<_, _, _, _, crate::DbError>(
+            db.staged_write::<_, _, _, _, crate::DbError>(
                 move |batch| Ok(batch.put_file("files", source, crate::Place::Cloud)),
                 |sql, file| {
                     sql.execute("INSERT INTO files(id,file) VALUES('7',?1)", [file])?;
@@ -190,24 +190,25 @@ async fn a_socket_stream_leaves_the_writer_available_and_keeps_its_pending_bytes
     db.close().await.unwrap();
 }
 
+/// Close waits for a staging in progress, finished or cancelled, but not
+/// for the staged files it returns (§17.2). Those files outlive the store
+/// harmlessly: a write after close fails `StoreClosed`, dropping them
+/// panics nothing, the reopened store refuses them as staged elsewhere
+/// (`NotStagedHere`), and its opening has removed their bytes.
 #[tokio::test(flavor = "current_thread")]
-async fn close_waits_for_staging_and_reopen_removes_cancelled_bytes() {
+async fn close_waits_for_staging_and_reopen_removes_bytes_no_write_took() {
     for cancel in [false, true] {
         let store = TestStore::new();
         let db = open(&store, Provenance::AppProvided).await;
         let (mut producer, reader) = tokio::io::duplex(64);
         let (entered, reading) = tokio::sync::oneshot::channel();
         let source = FileSource::Stream(Box::pin(Started { reader, entered: Some(entered) }));
-        let writing = tokio::spawn({
+        let staging = tokio::spawn({
             let db = db.clone();
             async move {
-                db.write_with_files::<_, _, _, _, crate::DbError>(
-                    move |batch| Ok(batch.put_file("files", source, crate::Place::Cloud)),
-                    |sql, file| {
-                        sql.execute("INSERT INTO files(id,file) VALUES('7',?1)", [file])?;
-                        Ok(())
-                    },
-                )
+                db.stage_files::<_, _, crate::DbError>(move |batch| {
+                    Ok(batch.put_file("files", source, crate::Place::Cloud))
+                })
                 .await
             }
         });
@@ -218,32 +219,75 @@ async fn close_waits_for_staging_and_reopen_removes_cancelled_bytes() {
             Poll::Ready(())
         })
         .await;
-        if cancel {
-            writing.abort();
-            assert!(writing.await.unwrap_err().is_cancelled());
+        let staged = if cancel {
+            staging.abort();
+            assert!(staging.await.unwrap_err().is_cancelled());
+            None
         } else {
             producer.write_all(b"bytes").await.unwrap();
             producer.shutdown().await.unwrap();
-            writing.await.unwrap().unwrap();
-        }
+            Some(staging.await.unwrap().unwrap())
+        };
         tokio::time::timeout(Duration::from_secs(5), closing).await.unwrap().unwrap();
         assert_eq!(owned_paths(&store).len(), 1);
         let sql = rusqlite::Connection::open(store.database_path()).unwrap();
         assert_eq!(
             sql.query_row("SELECT count(*) FROM _coven_file_removals", [], |r| r.get::<_, i64>(0))
                 .unwrap(),
-            i64::from(cancel)
-        );
-        assert_eq!(
-            sql.query_row("SELECT count(*) FROM files", [], |r| r.get::<_, i64>(0)).unwrap(),
-            i64::from(!cancel)
+            1
         );
         drop(sql);
         let reopened = open(&store, Provenance::AppProvided).await;
-        assert_eq!(owned_paths(&store).len(), usize::from(!cancel));
+        assert!(owned_paths(&store).is_empty());
         assert_eq!(local_count(&reopened, "_coven_file_removals"), 0);
+        if let Some(staged) = staged {
+            assert!(matches!(db.write(|_| Ok(())).await, Err(crate::DbError::StoreClosed)));
+            let refused = reopened
+                .write(move |sql| {
+                    let file = sql.put_staged(staged)?;
+                    sql.execute("INSERT INTO files(id,file) VALUES('7',?1)", [file])?;
+                    Ok(())
+                })
+                .await;
+            assert!(matches!(refused, Err(crate::DbError::NotStagedHere)), "{refused:?}");
+        }
         reopened.close().await.unwrap();
     }
+}
+
+/// Files staged and dropped without a write keep no bytes once the next
+/// write has run; files staged in one open store are refused by another's
+/// write (§17.2).
+#[tokio::test]
+async fn staged_files_no_write_takes_go_with_the_next_write() {
+    let store = TestStore::new();
+    let other_store = TestStore::new();
+    let db = open(&store, Provenance::AppProvided).await;
+    let other = open(&other_store, Provenance::AppProvided).await;
+    async fn stage(
+        db: &crate::Database,
+    ) -> Result<crate::StagedFiles<coven_foundation::id_source::FileId>, DbError> {
+        db.stage_files(|batch| Ok(batch.put_file("files", b"photo".to_vec(), crate::Place::Cloud)))
+            .await
+    }
+    drop(stage(&db).await.unwrap());
+    assert_eq!(owned_paths(&store).len(), 1);
+    db.write(|_| Ok(())).await.unwrap();
+    assert!(owned_paths(&store).is_empty());
+    assert_eq!(local_count(&db, "_coven_file_removals"), 0);
+    let staged = stage(&db).await.unwrap();
+    let refused = other
+        .write(move |sql| {
+            let file = sql.put_staged(staged)?;
+            sql.execute("INSERT INTO files(id,file) VALUES('7',?1)", [file])?;
+            Ok(())
+        })
+        .await;
+    assert!(matches!(refused, Err(crate::DbError::NotStagedHere)), "{refused:?}");
+    db.write(|_| Ok(())).await.unwrap();
+    assert!(owned_paths(&store).is_empty());
+    db.close().await.unwrap();
+    other.close().await.unwrap();
 }
 
 #[test]
@@ -261,7 +305,7 @@ fn a_file_reader_and_writer_can_share_one_blocking_worker() {
         let reader = tokio::fs::File::open(original.path()).await.unwrap();
         let file = tokio::time::timeout(
             Duration::from_secs(5),
-            db.write_with_files::<_, _, _, _, crate::DbError>(
+            db.staged_write::<_, _, _, _, crate::DbError>(
                 move |batch| {
                     Ok(batch.put_file(
                         "files",

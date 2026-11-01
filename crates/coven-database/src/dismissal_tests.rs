@@ -496,7 +496,7 @@ impl crate::Database {
         values: &[crate::LostValue],
     ) -> crate::CovenResult<()> {
         let values = values.to_vec();
-        self.write_with_files::<_, _, _, _, crate::CovenError>(
+        self.staged_write::<_, _, _, _, crate::CovenError>(
             |_| Ok(()),
             move |sql, ()| Ok(sql.dismiss_lost_values(&values)?),
         )

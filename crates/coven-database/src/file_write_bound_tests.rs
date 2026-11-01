@@ -40,7 +40,7 @@ async fn stage(
     bytes: Vec<u8>,
     place: Place,
 ) -> Result<FileId, DbError> {
-    db.write_with_files::<_, _, _, _, DbError>(
+    db.staged_write::<_, _, _, _, DbError>(
         move |batch| Ok(batch.put_file(table, bytes, place)),
         move |sql, file| {
             sql.execute(&format!("INSERT INTO {table}(id,file) VALUES(?1,?2)"), (id, file))?;
@@ -112,13 +112,11 @@ async fn a_bound_reference_to_a_users_file_fails_the_write() {
     for place in [Place::DeviceOnly, Place::Cloud] {
         let prepared = prepare_user_file(&path, |_| {}).await.unwrap();
         let staged = db
-            .write_with_files::<_, _, _, _, DbError>(
-                move |batch| Ok(batch.put_user_file("originals", prepared, place)),
-                move |sql, file| {
-                    sql.execute("INSERT INTO originals(id,file) VALUES('1',?1)", [file])?;
-                    Ok(())
-                },
-            )
+            .write_as::<_, _, DbError>(move |sql| {
+                let file = sql.put_user_file("originals", prepared, place)?;
+                sql.execute("INSERT INTO originals(id,file) VALUES('1',?1)", [file])?;
+                Ok(())
+            })
             .await;
         assert!(matches!(
             staged,
@@ -161,7 +159,7 @@ async fn a_bound_upload_holds_its_write_and_every_later_one_until_it_is_stored()
     // One write staging a bound cover and a trailing photo: the cover is a
     // move of its own, which its upload holds this write in.
     let (cover, photo) = db
-        .write_with_files::<_, _, _, _, DbError>(
+        .staged_write::<_, _, _, _, DbError>(
             |batch| {
                 Ok((
                     batch.put_file("covers", b"cover".to_vec(), Place::Cloud),

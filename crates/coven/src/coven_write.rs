@@ -22,6 +22,46 @@ impl<'write> CovenWrite<'write> {
         Self { sql, storage }
     }
 
+    /// Puts files `CovenHandle::stage_files` staged into this write, and
+    /// returns what its batch returned, such as their ids, for this write's
+    /// rows to reference (§17.2). The write makes each file's record, in the
+    /// audience of the rows that name it, and queues its upload for the
+    /// cloud. Files staged by another open store, or by this one before it
+    /// closed, fail with `NotStagedHere`; a file no row names fails the
+    /// write with `FileUnreferenced`.
+    pub fn put_staged<T>(&self, staged: StagedFiles<T>) -> Result<T, DbError> {
+        self.sql.put_staged(staged)
+    }
+
+    /// Stages a user's original, read whole once already, as a new file in
+    /// a user namespace and returns its id for a row to reference: on this
+    /// device only, or for the cloud, with its upload queued. Coven records
+    /// the original's path, size, modification time and the hashes its read
+    /// found, which its upload checks, now or when the file moves to the
+    /// cloud; it never changes the original, nor reads it here (§17.1,
+    /// §17.3). An undeclared namespace fails with `UndeclaredNamespace`, an
+    /// app one with `NamespaceKind`.
+    pub fn put_user_file(
+        &self,
+        namespace: &str,
+        original: PreparedUserFile,
+        place: Place,
+    ) -> Result<FileId, DbError> {
+        self.sql.put_user_file(namespace, original, place)
+    }
+
+    /// Stages a new file over an existing file's bytes, for a row in any
+    /// audience, and returns its id for that row to reference. The write
+    /// makes it in the audience of the rows that reference it, with
+    /// `from`'s namespace, size, place and key; nothing is uploaded again. A
+    /// file on this device only gives a new file on this device only, over
+    /// the same original or coven's copy. The write fails with `FileAbsent`
+    /// if this device has no record of `from`, and with `NotThisDevice` if
+    /// `from` is on another device only (§17.2).
+    pub fn existing_file(&self, from: FileId) -> FileId {
+        self.sql.existing_file(from)
+    }
+
     /// Records a move of these files to the cloud (§17.3).
     pub fn move_to_cloud(&self, files: Vec<MoveFile>) -> Result<MoveId, DbError> {
         self.sql.move_to_cloud(files)

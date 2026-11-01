@@ -41,7 +41,7 @@ reference one file, and a file never changes its bytes: a new image is a new
 file with a new id.
 
 To use a file's bytes in another audience, stage a new file over them with
-`batch.existing_file(file)` and put its id in the row there. The new file has
+`sql.existing_file(file)` in the write and put its id in the row there. The new file has
 the same namespace, size, place and key, nothing is uploaded again, and each
 audience's record changes on its own: making one device-only leaves the
 other's stored. The stored bytes stay until neither record names them. Only
@@ -140,35 +140,47 @@ never encrypt different bytes than the first attempt did.
 
 ## Staging a file
 
-A write stages its files first, then runs its SQL with what staging returned,
-as one write. Staging gives each file a new id, which the SQL puts in the rows
-that reference it. A user's file is read once before the write, with
-`prepare_user_file`:
+A file comes in as a step of a write, which gives it a new id for the write's
+SQL to put in the rows that reference it. A user's file is read once before the
+write, with `prepare_user_file`, and the write stages it with `put_user_file`:
 
 ```rust
 let note = UuidText(Uuid::now_v7());
 let attachment = UuidText(Uuid::now_v7());
 let prepared = prepare_user_file(&path, |read| show_progress(read)).await?;
 
-let file = handle.write_with_files(
-    move |batch| Ok(batch.put_user_file("attachments", prepared, Place::Cloud)),
-    move |sql, file| {
-        sql.execute(
-            "INSERT INTO notes (id, title, audience) VALUES (?1, ?2, ?3)",
-            (&note, "Paint colors", Audience::Store),
-        )?;
-        sql.execute(
-            "INSERT INTO attachments (id, note_id, title, file) VALUES (?1, ?2, ?3, ?4)",
-            (&attachment, &note, "Swatches", file),
-        )?;
-        Ok(file)
-    },
-).await?;
+let file = handle.write(move |sql| {
+    let file = sql.put_user_file("attachments", prepared, Place::Cloud)?;
+    sql.execute(
+        "INSERT INTO notes (id, title, audience) VALUES (?1, ?2, ?3)",
+        (&note, "Paint colors", Audience::Store),
+    )?;
+    sql.execute(
+        "INSERT INTO attachments (id, note_id, title, file) VALUES (?1, ?2, ?3, ?4)",
+        (&attachment, &note, "Swatches", file),
+    )?;
+    Ok(file)
+}).await?;
 ```
 
-App-provided bytes go through `put_file`, which takes a byte buffer or a
-stream, read once before the write takes the database writer, and a `Place`. A
-staged file no row references fails the write with `DbError::FileUnreferenced`.
+App-provided bytes are staged first, outside any write, with `stage_files`:
+its batch's `put_file` takes a byte buffer or a stream, read once, and a
+`Place`, and coven writes and flushes its own copy before the call returns.
+The write then puts the staged files in its rows with `put_staged`:
+
+```rust
+let staged = handle
+    .stage_files(move |batch| Ok(batch.put_file("covers", cover_bytes, Place::Cloud)))
+    .await?;
+let cover = handle.write(move |sql| {
+    let cover = sql.put_staged(staged)?;
+    sql.execute("UPDATE notes SET cover = ?1 WHERE id = ?2", (cover, &note))?;
+    Ok(cover)
+}).await?;
+```
+
+A staged file no row references fails the write with
+`DbError::FileUnreferenced`.
 
 ## On this device only
 
@@ -185,16 +197,14 @@ That device reads it from its bytes there; others get
 
 ```rust
 let prepared = prepare_user_file(&path, |read| show_progress(read)).await?;
-handle.write_with_files(
-    move |batch| Ok(batch.put_user_file("attachments", prepared, Place::DeviceOnly)),
-    move |sql, file| {
-        sql.execute(
-            "INSERT INTO attachments (id, note_id, title, file) VALUES (?1, ?2, ?3, ?4)",
-            (&attachment, &note, "Swatches", file),
-        )?;
-        Ok(())
-    },
-).await?;
+handle.write(move |sql| {
+    let file = sql.put_user_file("attachments", prepared, Place::DeviceOnly)?;
+    sql.execute(
+        "INSERT INTO attachments (id, note_id, title, file) VALUES (?1, ?2, ?3, ?4)",
+        (&attachment, &note, "Swatches", file),
+    )?;
+    Ok(())
+}).await?;
 ```
 
 Before the write, `prepared.size()` and `prepared.modified_at()` give the size

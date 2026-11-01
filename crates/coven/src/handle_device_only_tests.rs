@@ -59,13 +59,11 @@ async fn stage(
     let prepared = prepare_user_file(&path, |_| {}).await.unwrap();
     device
         .handle
-        .write_with_files(
-            move |batch| Ok(batch.put_user_file("tracks", prepared, place)),
-            move |sql, file| {
-                insert(sql, file)?;
-                Ok(file)
-            },
-        )
+        .write(move |sql| {
+            let file = sql.put_user_file("tracks", prepared, place)?;
+            insert(sql, file)?;
+            Ok(file)
+        })
         .await
         .unwrap()
 }
@@ -259,13 +257,11 @@ async fn a_name_that_isnt_utf8_travels_as_the_text_that_shows_it() {
     assert_eq!(name, r"Caf\xE9.flac");
     let file = ana
         .handle
-        .write_with_files(
-            move |batch| Ok(batch.put_user_file("tracks", prepared, Place::Cloud)),
-            move |sql, file| {
-                sql.execute("INSERT INTO tracks(id,file) VALUES(?1,?2)", (&name, file))?;
-                Ok(file)
-            },
-        )
+        .write(move |sql| {
+            let file = sql.put_user_file("tracks", prepared, Place::Cloud)?;
+            sql.execute("INSERT INTO tracks(id,file) VALUES(?1,?2)", (&name, file))?;
+            Ok(file)
+        })
         .await
         .unwrap();
     wait_for_empty_queue(&ana.handle).await;
@@ -503,18 +499,16 @@ async fn refused_paths_and_files_leave_the_folder_alone() {
     let prepared = prepare_user_file(&local_path, |_| {}).await.unwrap();
     let local = ana
         .handle
-        .write_with_files(
-            move |batch| Ok(batch.put_user_file("tracks", prepared, Place::DeviceOnly)),
-            |sql, file| {
-                sql.execute("INSERT INTO tracks(id,file) VALUES('local',?1)", [file])?;
-                Ok(file)
-            },
-        )
+        .write(move |sql| {
+            let file = sql.put_user_file("tracks", prepared, Place::DeviceOnly)?;
+            sql.execute("INSERT INTO tracks(id,file) VALUES('local',?1)", [file])?;
+            Ok(file)
+        })
         .await
         .unwrap();
     let cover = ana
         .handle
-        .write_with_files(
+        .test_staged_write(
             |batch| Ok(batch.put_file("files", b"cover".to_vec(), Place::Cloud)),
             |sql, file| {
                 sql.execute("INSERT INTO covers(id,file) VALUES('cover',?1)", [file])?;

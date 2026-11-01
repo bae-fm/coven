@@ -130,7 +130,7 @@ async fn membership_is_rechecked_after_file_staging_and_refusal_discards_bytes()
     let writing = tokio::spawn({
         let db = db.clone();
         async move {
-            db.write_with_files::<_, _, _, _, crate::DbError>(
+            db.staged_write::<_, _, _, _, crate::DbError>(
                 move |batch| {
                     Ok(batch.put_file(
                         "files",
@@ -183,25 +183,31 @@ async fn a_refused_attachment_rolls_back_its_file_and_keeps_the_original() {
         let before = contents(&db);
         let prepared = crate::prepare_user_file(original.path(), |_| {}).await.unwrap();
         let user = kind == crate::Provenance::UserProvided;
-        let error = db
-            .write_with_files::<_, _, _, _, crate::DbError>(
-                move |batch| {
-                    Ok(if user {
-                        batch.put_user_file("files", prepared, crate::Place::Cloud)
-                    } else {
-                        batch.put_file("files", b"original".to_vec(), crate::Place::Cloud)
-                    })
-                },
-                |sql, file| {
-                    sql.execute(
-                        "INSERT INTO files(id,file,audience) VALUES(?1,?2,?3)",
-                        (ROOT, file, CIRCLE),
-                    )?;
+        let insert = |sql: &crate::SqlContext<'_, '_>, file| {
+            sql.execute(
+                "INSERT INTO files(id,file,audience) VALUES(?1,?2,?3)",
+                (ROOT, file, CIRCLE),
+            )
+        };
+        let error = if user {
+            db.write(move |sql| {
+                let file = sql.put_user_file("files", prepared, crate::Place::Cloud)?;
+                insert(&sql, file)?;
+                Ok(())
+            })
+            .await
+            .unwrap_err()
+        } else {
+            db.staged_write::<_, _, _, _, crate::DbError>(
+                move |batch| Ok(batch.put_file("files", b"original".to_vec(), crate::Place::Cloud)),
+                move |sql, file| {
+                    insert(&sql, file)?;
                     Ok(())
                 },
             )
             .await
-            .unwrap_err();
+            .unwrap_err()
+        };
         assert!(matches!(error, crate::DbError::NotInCircle(id) if id == circle()));
         assert_eq!(contents(&db), before);
         assert!(crate::file_write::tests::owned_paths(&store).is_empty());

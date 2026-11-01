@@ -87,6 +87,41 @@ impl<'connection, 'write> SqlContext<'connection, 'write> {
         self.files.after_commit(Box::new(effect));
     }
 
+    /// Put files `stage_files` staged into this write, and return what its
+    /// batch returned, such as their ids, for this write's rows to name
+    /// (§17.2). Files staged by another open store, or by this one before it
+    /// closed, fail with `NotStagedHere`. A file no row names fails the
+    /// write with `FileUnreferenced`.
+    pub fn put_staged<T>(&self, staged: crate::StagedFiles<T>) -> Result<T, crate::DbError> {
+        self.files.step(|| self.files.put_staged(staged))
+    }
+
+    /// Stage a user's original, read whole once already, as a new file in a
+    /// user namespace, and return its id for a row to reference (§17.1,
+    /// §17.3). Coven records the original's path, size, modification time and
+    /// the hashes its read found; it never reads it here. An undeclared
+    /// namespace fails with `UndeclaredNamespace`, an app one with
+    /// `NamespaceKind`.
+    pub fn put_user_file(
+        &self,
+        namespace: &str,
+        original: crate::PreparedUserFile,
+        place: crate::Place,
+    ) -> Result<coven_foundation::id_source::FileId, crate::DbError> {
+        self.files.step(|| self.files.put_user_file(namespace, original, place))
+    }
+
+    /// Stage a new file over an existing file's bytes, for a row in any
+    /// audience, and return its id (§17.2). The write fails with
+    /// `FileAbsent` if this device has no record of `from`, and with
+    /// `NotThisDevice` if `from` is on another device only.
+    pub fn existing_file(
+        &self,
+        from: coven_foundation::id_source::FileId,
+    ) -> coven_foundation::id_source::FileId {
+        self.files.existing_file(from)
+    }
+
     /// Run one of sync's steps on the journal in this write (§4, §11). A
     /// failed step fails the write, even if the closure goes on and returns
     /// success, since it may have made only part of its change.

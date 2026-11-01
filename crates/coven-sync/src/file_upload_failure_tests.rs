@@ -95,22 +95,15 @@ async fn a_changed_original_fails_its_move_and_switches_nothing() {
     }
     let files = f
         .database
-        .write_with_files::<_, _, _, _, coven_database::DbError>(
-            move |batch| {
-                Ok(prepared
-                    .into_iter()
-                    .map(|prepared| {
-                        batch.put_user_file("files", prepared, coven_database::Place::Cloud)
-                    })
-                    .collect::<Vec<_>>())
-            },
-            |sql, files| {
-                for (id, file) in ["kept", "changed"].iter().zip(&files) {
-                    sql.execute("INSERT INTO files(id,file) VALUES(?1,?2)", (id, file))?;
-                }
-                Ok(files)
-            },
-        )
+        .write(move |sql| {
+            let mut files = Vec::new();
+            for (id, prepared) in ["kept", "changed"].into_iter().zip(prepared) {
+                let file = sql.put_user_file("files", prepared, coven_database::Place::Cloud)?;
+                sql.execute("INSERT INTO files(id,file) VALUES(?1,?2)", (id, file))?;
+                files.push(file);
+            }
+            Ok(files)
+        })
         .await
         .unwrap();
     let changed = f.root.path().join("changed");

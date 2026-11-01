@@ -1,9 +1,10 @@
-//! Async sources are consumed without holding SQLite or a blocking worker.
+//! Staging app bytes before the write that puts them in rows (§17.2): async
+//! sources are consumed without holding SQLite or a blocking worker.
 
 use super::DatabaseInner;
 use crate::file_hashes::FileHasher;
 use crate::file_write::{StagedFile, StagedSource};
-use crate::write_batch::{BatchFile, BatchSource};
+use crate::write_batch::BatchFile;
 use crate::{DbError, FileSource, Place, Provenance, WriteBatch};
 use coven_foundation::files::StoreDirAccess;
 use coven_foundation::files::{FileArea, FileName, FlushBatch, Flushed};
@@ -28,7 +29,6 @@ pub(super) struct FileStaging {
     names: Vec<FileName>,
     sources: VecDeque<StagingSource>,
     staged: Vec<StagedFile>,
-    existing: Vec<crate::write_batch::ExistingFile>,
 }
 
 impl FileStaging {
@@ -37,7 +37,7 @@ impl FileStaging {
         lease: OwnedRwLockReadGuard<()>,
         build: impl FnOnce(&mut WriteBatch<'_>) -> Result<T, E>,
     ) -> Result<(Self, T), E> {
-        let (sources, originals, existing, value) = {
+        let (sources, value) = {
             let slot = database.read().expect("database lock poisoned");
             let inner = slot.as_ref().ok_or(DbError::StoreClosed)?;
             if let Some(error) = inner.access.observer.error() {
@@ -66,24 +66,13 @@ impl FileStaging {
             };
             let prepared = inner.access.with_writer(|writer| {
                 let prepared = built.and_then(|(batch, value)| {
-                    let existing = batch.existing;
                     if batch.files.is_empty() {
-                        return Ok((VecDeque::new(), Vec::new(), existing, value));
+                        return Ok((VecDeque::new(), value));
                     }
                     writer
                         .transaction(|db| {
                             let mut sources = VecDeque::new();
-                            let mut originals = Vec::new();
-                            for BatchFile {
-                                id,
-                                namespace,
-                                source,
-                            } in batch.files
-                            {
-                                let kind = match &source {
-                                    BatchSource::App(..) => Provenance::AppProvided,
-                                    BatchSource::User(..) => Provenance::UserProvided,
-                                };
+                            for BatchFile { id, namespace, source, place } in batch.files {
                                 let declared = inner
                                     .access
                                     .write_schema
@@ -91,50 +80,44 @@ impl FileStaging {
                                     .ok_or_else(|| DbError::UndeclaredNamespace {
                                         namespace: namespace.clone(),
                                     })?;
-                                if declared.kind != kind {
+                                if declared.kind != Provenance::AppProvided {
                                     return Err(DbError::NamespaceKind {
                                         kind: declared.kind.clone(),
                                         namespace,
                                     });
                                 }
-                                match source {
-                                    BatchSource::User(prepared, place) => originals
-                                        .push(staged_original(id, namespace, prepared, place)),
-                                    BatchSource::App(source, place) => {
-                                        let name = FileName::new(inner.ids.new_id().to_string())
-                                            .expect("UUID is a portable filename");
-                                        let recorded = db.internal_execute(
-                                            "INSERT INTO _coven_file_removals(path) SELECT ?1
-                                             WHERE NOT EXISTS(SELECT 1 FROM _coven_device_files WHERE path=?1)
-                                                 AND NOT EXISTS(SELECT 1 FROM _coven_file_uploads WHERE copy=?1)
-                                                 AND NOT EXISTS(SELECT 1 FROM _coven_pin_requests WHERE copy=?1)",
-                                            [name.as_str()],
-                                        )?;
-                                        if recorded != 1 {
-                                            return Err(DbError::FileNameReused { name });
-                                        }
-                                        sources.push_back(StagingSource {
-                                            namespace,
-                                            id,
-                                            name,
-                                            source,
-                                            place,
-                                        });
-                                    }
+                                let name = FileName::new(inner.ids.new_id().to_string())
+                                    .expect("UUID is a portable filename");
+                                let recorded = db.internal_execute(
+                                    "INSERT INTO _coven_file_removals(path) SELECT ?1
+                                     WHERE NOT EXISTS(SELECT 1 FROM _coven_device_files WHERE path=?1)
+                                         AND NOT EXISTS(SELECT 1 FROM _coven_file_uploads WHERE copy=?1)
+                                         AND NOT EXISTS(SELECT 1 FROM _coven_pin_requests WHERE copy=?1)",
+                                    [name.as_str()],
+                                )?;
+                                if recorded != 1 {
+                                    return Err(DbError::FileNameReused { name });
                                 }
+                                sources.push_back(StagingSource {
+                                    namespace,
+                                    id,
+                                    name,
+                                    source,
+                                    place,
+                                });
                             }
-                            Ok((sources, originals, existing, value))
+                            Ok((sources, value))
                         })
                         .map_err(E::from)
                 });
                 match prepared {
-                    Ok((sources, originals, existing, value)) => {
+                    Ok((sources, value)) => {
                         inner
                             .staging
                             .lock()
                             .expect("file staging lock poisoned")
                             .extend(sources.iter().map(|s| s.name.clone()));
-                        Ok::<_, E>(Ok((sources, originals, existing, value)))
+                        Ok::<_, E>(Ok((sources, value)))
                     }
                     Err(error) => Ok(Err((error, super::released(writer, inner)))),
                 }
@@ -151,8 +134,7 @@ impl FileStaging {
                 lease: Some(lease),
                 names: sources.iter().map(|s| s.name.clone()).collect(),
                 sources,
-                staged: originals,
-                existing,
+                staged: Vec::new(),
             },
             value,
         ))
@@ -233,58 +215,41 @@ impl FileStaging {
         Ok((self, flushed))
     }
 
-    pub(super) fn finish<S, R, E: crate::WriteFailure>(
-        mut self,
-        prepared: Result<Flushed, DbError>,
-        sql: S,
-    ) -> Result<R, E>
-    where
-        S: FnOnce(crate::SqlContext<'_, '_>) -> Result<R, E>,
-    {
+    /// Fail the staging with `error`: its names go free and the bytes it
+    /// wrote are removed now, with any other released bytes, as a failed
+    /// write's are; a removal that fails joins the error and keeps its
+    /// record for the next write or open (Appendix C.3).
+    pub(super) fn discard<E: crate::WriteFailure>(mut self, error: DbError) -> E {
         let database = self.database.clone();
         let slot = database.read().expect("database lock poisoned");
         let inner = slot.as_ref().expect("staging holds close guard");
-        let staged = std::mem::take(&mut self.staged);
-        let existing = std::mem::take(&mut self.existing);
-        inner.with_files(staged, existing, |writer, files| {
-            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                // Only once the batch's copies are on the drive may the
-                // commit record them.
-                let _flushed: Flushed = prepared?;
-                writer.local_write(
-                    &inner.access.write_schema,
-                    inner.access.device,
-                    inner.clock.now(),
-                    files,
-                    sql,
-                )
-            }));
-            inner.release_file_reservations(&self.names);
-            let _lease = self.lease.take();
-            #[cfg(any(test, feature = "test-utils"))]
-            writer.checkpoint(crate::test_utils::WriteCheckpoint::StagingReleased);
-            match result {
-                Ok(result) => result,
-                Err(panic) => std::panic::resume_unwind(panic),
-            }
-        })
+        inner.release_file_reservations(&self.names);
+        self.names.clear();
+        let chosen =
+            inner.access.with_writer(|writer| Ok::<_, DbError>(super::released(writer, inner)));
+        let failures = match chosen {
+            Ok(chosen) => inner.remove_chosen(chosen),
+            Err(cleanup) => vec![cleanup],
+        };
+        let _lease = self.lease.take();
+        if failures.is_empty() {
+            E::from(error)
+        } else {
+            E::with_cleanup(E::from(error), failures)
+        }
     }
-}
 
-/// A user's original read whole once, staged where `place` says.
-fn staged_original(
-    id: coven_foundation::id_source::FileId,
-    namespace: String,
-    prepared: crate::PreparedUserFile,
-    place: Place,
-) -> StagedFile {
-    StagedFile {
-        id,
-        namespace,
-        size: prepared.original.size,
-        source: StagedSource::Original(prepared.original),
-        hashes: prepared.hashes,
-        place,
+    /// The staged files, with what the batch returned, for the write that
+    /// puts them in rows. The names stay reserved until that write has
+    /// decided or the files are dropped; the lease close waits for ends here.
+    pub(super) fn into_staged<T>(mut self, value: T) -> StagedFiles<T> {
+        let _lease = self.lease.take();
+        StagedFiles {
+            database: self.database.clone(),
+            names: std::mem::take(&mut self.names),
+            files: std::mem::take(&mut self.staged),
+            value: Some(value),
+        }
     }
 }
 
@@ -297,6 +262,51 @@ impl Drop for FileStaging {
         slot.as_ref()
             .expect("reservation holds close guard")
             .release_file_reservations(&self.names);
+    }
+}
+
+/// App bytes `stage_files` wrote to coven's copies of them, under names
+/// reserved in this store, with what its batch returned, until a write puts
+/// them in rows (§17.2). It holds nothing close waits for. Dropped
+/// uncommitted, or after the store closes, its names go free, and the next
+/// write or open removes the bytes.
+pub struct StagedFiles<T> {
+    database: Arc<RwLock<Option<DatabaseInner>>>,
+    names: Vec<FileName>,
+    files: Vec<StagedFile>,
+    value: Option<T>,
+}
+
+impl<T> StagedFiles<T> {
+    /// The names reserved for these files' copies.
+    pub(crate) fn names(&self) -> &[FileName] {
+        &self.names
+    }
+
+    /// The files, their reserved names and the batch's value, for the write
+    /// taking them; dropping what is left releases nothing.
+    pub(crate) fn take(mut self) -> (Vec<StagedFile>, Vec<FileName>, T) {
+        let value = self.value.take().expect("staged files are taken once");
+        (std::mem::take(&mut self.files), std::mem::take(&mut self.names), value)
+    }
+}
+
+impl<T> std::fmt::Debug for StagedFiles<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StagedFiles").field("files", &self.files.len()).finish_non_exhaustive()
+    }
+}
+
+impl<T> Drop for StagedFiles<T> {
+    fn drop(&mut self) {
+        if self.names.is_empty() {
+            return;
+        }
+        let slot = self.database.read().expect("database lock poisoned");
+        // Closing forgot every reservation with its store.
+        if let Some(inner) = slot.as_ref() {
+            inner.release_file_reservations(&self.names);
+        }
     }
 }
 

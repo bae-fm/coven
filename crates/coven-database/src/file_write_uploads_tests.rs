@@ -16,13 +16,28 @@ async fn stage_row(
     db: &crate::Database,
     stage: impl FnOnce(&mut crate::WriteBatch<'_>) -> FileId + Send + 'static,
 ) -> FileId {
-    db.write_with_files::<_, _, _, _, DbError>(
+    db.staged_write::<_, _, _, _, DbError>(
         move |batch| Ok(stage(batch)),
         |sql, file| {
             sql.execute("INSERT INTO files(id,file) VALUES('7',?1)", [file])?;
             Ok(file)
         },
     )
+    .await
+    .unwrap()
+}
+
+/// Stage a user's original as row 7's file, in one write.
+async fn original_row(
+    db: &crate::Database,
+    original: crate::PreparedUserFile,
+    place: crate::Place,
+) -> FileId {
+    db.write(move |sql| {
+        let file = sql.put_user_file("files", original, place)?;
+        sql.execute("INSERT INTO files(id,file) VALUES('7',?1)", [file])?;
+        Ok(file)
+    })
     .await
     .unwrap()
 }
@@ -82,9 +97,7 @@ async fn an_original_staged_on_this_device_only_is_read_from_disk() {
     let original = tempfile::NamedTempFile::new().unwrap();
     std::fs::write(original.path(), b"recorded original").unwrap();
     let prepared = crate::prepare_user_file(original.path(), |_| {}).await.unwrap();
-    let file =
-        stage_row(&db, |batch| batch.put_user_file("files", prepared, crate::Place::DeviceOnly))
-            .await;
+    let file = original_row(&db, prepared, crate::Place::DeviceOnly).await;
     assert_eq!(local_count(&db, "_coven_file_uploads"), 0);
     let (modified_seconds, modified_nanos) = crate::unix_seconds_and_nanos(
         std::fs::metadata(original.path()).unwrap().modified().unwrap(),
@@ -161,9 +174,7 @@ async fn staging_an_original_on_this_device_only_records_its_hashes() {
     let read = read.into_inner().unwrap();
     assert!(read.windows(2).all(|pair| pair[0] < pair[1]), "{read:?}");
     assert_eq!(read.last(), Some(&(bytes.len() as u64)));
-    let file =
-        stage_row(&db, |batch| batch.put_user_file("files", prepared, crate::Place::DeviceOnly))
-            .await;
+    let file = original_row(&db, prepared, crate::Place::DeviceOnly).await;
     let hash = |bytes: &[u8]| {
         let mut hasher = coven_crypto::ContentHasher::new();
         hasher.update(bytes);
@@ -220,16 +231,13 @@ async fn reading_an_original_gives_the_facts_coven_records() {
     let prepared_path = original("prepared.flac", b"prepared original!");
     let prepared = crate::prepare_user_file(&prepared_path, |_| {}).await.unwrap();
     assert_eq!((prepared.size(), prepared.modified_at()), (18, scanned));
-    let device_only =
-        stage_row(&db, |batch| batch.put_user_file("files", local, crate::Place::DeviceOnly)).await;
+    let device_only = original_row(&db, local, crate::Place::DeviceOnly).await;
     let cloud = db
-        .write_with_files::<_, _, _, _, DbError>(
-            move |batch| Ok(batch.put_user_file("files", prepared, crate::Place::Cloud)),
-            |sql, file| {
-                sql.execute("INSERT INTO files(id,file) VALUES('8',?1)", [file])?;
-                Ok(file)
-            },
-        )
+        .write_as::<_, _, DbError>(move |sql| {
+            let file = sql.put_user_file("files", prepared, crate::Place::Cloud)?;
+            sql.execute("INSERT INTO files(id,file) VALUES('8',?1)", [file])?;
+            Ok(file)
+        })
         .await
         .unwrap();
     for (file, path, size) in [(device_only, local_path, 17), (cloud, prepared_path, 18)] {
@@ -262,13 +270,11 @@ async fn coven_user_files_gives_each_modification_time_exactly() {
         std::fs::write(&path, b"one size").unwrap();
         std::fs::File::options().write(true).open(&path).unwrap().set_modified(time).unwrap();
         let prepared = crate::prepare_user_file(&path, |_| {}).await.unwrap();
-        db.write_with_files::<_, _, _, _, DbError>(
-            move |batch| Ok(batch.put_user_file("files", prepared, crate::Place::DeviceOnly)),
-            move |sql, file| {
-                sql.execute("INSERT INTO files(id,file) VALUES(?1,?2)", (row, file))?;
-                Ok(())
-            },
-        )
+        db.write_as::<_, _, DbError>(move |sql| {
+            let file = sql.put_user_file("files", prepared, crate::Place::DeviceOnly)?;
+            sql.execute("INSERT INTO files(id,file) VALUES(?1,?2)", (row, file))?;
+            Ok(())
+        })
         .await
         .unwrap();
     }
@@ -313,9 +319,7 @@ async fn an_original_named(name: &std::ffi::OsStr, shown: &str) {
     let store = TestStore::new();
     let db = open(&store, Provenance::UserProvided).await;
     let prepared = crate::prepare_user_file(&path, |_| {}).await.unwrap();
-    let file =
-        stage_row(&db, |batch| batch.put_user_file("files", prepared, crate::Place::DeviceOnly))
-            .await;
+    let file = original_row(&db, prepared, crate::Place::DeviceOnly).await;
     let (bytes, text) = db
         .read(|sql| {
             Ok(sql.query_row(
@@ -398,7 +402,7 @@ async fn a_moved_rows_device_only_file_shares_coven_copy() {
     let store = TestStore::new();
     let db = photos(&store).await;
     let before = db
-        .write_with_files::<_, _, _, _, DbError>(
+        .staged_write::<_, _, _, _, DbError>(
             |batch| Ok(batch.put_file("files", b"photo".to_vec(), Place::DeviceOnly)),
             |sql, file| {
                 sql.execute(
@@ -436,7 +440,7 @@ async fn a_move_of_a_file_on_another_device_only_fails() {
     let a = photos(&a_store).await;
     let b = photos(&b_store).await;
     let file = a
-        .write_with_files::<_, _, _, _, DbError>(
+        .staged_write::<_, _, _, _, DbError>(
             |batch| Ok(batch.put_file("files", b"photo".to_vec(), Place::DeviceOnly)),
             |sql, file| {
                 sql.execute(
@@ -484,7 +488,7 @@ async fn a_row_moved_out_of_a_circle_shares_coven_copy() {
     let store = TestStore::new();
     let db = photos(&store).await;
     let before = db
-        .write_with_files::<_, _, _, _, DbError>(
+        .staged_write::<_, _, _, _, DbError>(
             |batch| Ok(batch.put_file("files", b"photo".to_vec(), Place::DeviceOnly)),
             |sql, file| {
                 sql.execute(

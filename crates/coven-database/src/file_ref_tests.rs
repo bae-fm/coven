@@ -140,13 +140,11 @@ async fn original_facts_survive_reopen_and_are_not_replaced_by_new_disk_metadata
     let metadata = std::fs::metadata(&path).unwrap();
     let prepared = prepare_user_file(&path, |_| {}).await.unwrap();
     let file = db
-        .write_with_files::<_, _, _, _, crate::DbError>(
-            move |batch| Ok(batch.put_user_file("files", prepared, crate::Place::Cloud)),
-            |sql, file| {
-                sql.execute("INSERT INTO files(id,file) VALUES('7',?1)", [file])?;
-                Ok(file)
-            },
-        )
+        .write_as::<_, _, crate::DbError>(move |sql| {
+            let file = sql.put_user_file("files", prepared, crate::Place::Cloud)?;
+            sql.execute("INSERT INTO files(id,file) VALUES('7',?1)", [file])?;
+            Ok(file)
+        })
         .await
         .unwrap();
     let reference = db.file_ref(file).await.unwrap();
@@ -209,7 +207,7 @@ async fn an_inherited_audience_rows_file_follows_its_parent() {
     let circle = CircleId(uuid::Uuid::parse_str(CIRCLE).unwrap());
     store.join_circle(&db, circle);
     let file = db
-        .write_with_files::<_, _, _, _, crate::DbError>(
+        .staged_write::<_, _, _, _, crate::DbError>(
             |batch| Ok(batch.put_file("files", b"original".to_vec(), crate::Place::Cloud)),
             |sql, file| {
                 sql.execute("INSERT INTO notes VALUES(?1,'store')", [NOTE])?;

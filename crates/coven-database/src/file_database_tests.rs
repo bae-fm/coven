@@ -103,17 +103,15 @@ async fn stage_kind(
             let path = originals.join(format!("{}", bytes.len()));
             std::fs::write(&path, &bytes).unwrap();
             let prepared = crate::prepare_user_file(&path, |_| {}).await.unwrap();
-            db.write_with_files::<_, _, _, _, DbError>(
-                move |batch| Ok(batch.put_user_file("files", prepared, crate::Place::Cloud)),
-                move |sql, file| {
-                    sql.execute(
-                        "INSERT INTO files(id,file) VALUES('7',?1)
+            db.write_as::<_, _, DbError>(move |sql| {
+                let file = sql.put_user_file("files", prepared, crate::Place::Cloud)?;
+                sql.execute(
+                    "INSERT INTO files(id,file) VALUES('7',?1)
                          ON CONFLICT(id) DO UPDATE SET file=excluded.file",
-                        [file],
-                    )?;
-                    Ok(file)
-                },
-            )
+                    [file],
+                )?;
+                Ok(file)
+            })
             .await
         }
     }

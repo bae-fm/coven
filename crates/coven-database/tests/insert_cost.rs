@@ -147,7 +147,7 @@ const JOINED: [&str; 4] = [
 /// is set and none when not.
 async fn write_releases(db: &Database, files: bool, releases: std::ops::Range<usize>) {
     let (start, end) = (releases.start, releases.end);
-    db.write_with_files::<_, _, _, _, coven_database::DbError>(
+    db.staged_write::<_, _, _, _, coven_database::DbError>(
         move |batch| {
             Ok((0..(end - start) * TRACKS)
                 .map(|_| files.then(|| batch.put_file("audio", vec![7; 64], Place::Cloud).to_string()))

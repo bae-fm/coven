@@ -159,7 +159,7 @@ pub use database::input_database::{
 };
 pub use database::{
     discarded_operations, discarded_store_name, read_store_name, Database, DatabaseBuilder,
-    DatabaseReadHandle,
+    DatabaseReadHandle, StagedFiles,
 };
 pub use declaration::{
     Binding, FileColumn, Namespace, Provenance, RowIdentity, SyncedTable, BOUND_FILE_LIMIT,

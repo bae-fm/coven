@@ -1,18 +1,17 @@
-//! The files one write stages, each given its new id (§17.2).
+//! The app bytes one staging writes to coven's copies of them, each file
+//! given its new id (§17.2).
 
-use crate::PreparedUserFile;
 use coven_foundation::id_source::{FileId, IdSource};
 use std::pin::Pin;
 use tokio::io::AsyncRead;
 
-/// Files to stage in one write; errors discard all its supplied bytes. Each
-/// staged file gets a new id from the store's id source, which the batch
-/// borrows while the app stages; the write's SQL puts the id in the rows that
-/// reference the file.
+/// App bytes to stage, before the write that puts them in rows; a failure
+/// discards all of them. Each staged file gets a new id from the store's id
+/// source, which the batch borrows while the app stages; the write's SQL
+/// puts the id in the rows that reference the file.
 pub struct WriteBatch<'a> {
     ids: &'a dyn IdSource,
     pub(crate) files: Vec<BatchFile>,
-    pub(crate) existing: Vec<ExistingFile>,
 }
 
 /// A new file over an existing file's bytes: its new id, and the file whose
@@ -23,18 +22,12 @@ pub(crate) struct ExistingFile {
     pub(crate) from: FileId,
 }
 
-/// One staged file: its id, its namespace, and its bytes.
+/// One staged file: its id, its namespace, its bytes, and where it is to be.
 pub(crate) struct BatchFile {
     pub(crate) id: FileId,
     pub(crate) namespace: String,
-    pub(crate) source: BatchSource,
-}
-
-/// The bytes of a staged file, the app's or the user's original read whole
-/// once, with where its file is to be.
-pub(crate) enum BatchSource {
-    App(FileSource, Place),
-    User(PreparedUserFile, Place),
+    pub(crate) source: FileSource,
+    pub(crate) place: Place,
 }
 
 /// Where a staged file is to be: on this device only, or uploaded to the
@@ -54,7 +47,7 @@ pub enum Place {
 
 impl<'a> WriteBatch<'a> {
     pub(crate) fn new(ids: &'a dyn IdSource) -> Self {
-        Self { ids, files: Vec::new(), existing: Vec::new() }
+        Self { ids, files: Vec::new() }
     }
 
     /// Stage app bytes as a new file in an app namespace, kept in coven's
@@ -67,38 +60,13 @@ impl<'a> WriteBatch<'a> {
         bytes: impl Into<FileSource>,
         place: Place,
     ) -> FileId {
-        self.push(namespace, BatchSource::App(bytes.into(), place))
-    }
-
-    /// Stage a user's original, read whole once already, as a new file in a
-    /// user namespace: on this device only, or for the cloud. Either way
-    /// coven records the hashes the read found, which its upload checks,
-    /// now or when the file moves to the cloud. Returns the file's id for a
-    /// row to reference.
-    pub fn put_user_file(
-        &mut self,
-        namespace: &str,
-        original: PreparedUserFile,
-        place: Place,
-    ) -> FileId {
-        self.push(namespace, BatchSource::User(original, place))
-    }
-
-    /// Stage a new file over an existing file's bytes, for a row in any
-    /// audience: `from`'s namespace, size, place and key, with nothing
-    /// uploaded again. The write makes it in the audience of the rows that
-    /// reference it, and fails with `FileAbsent` if this device has no
-    /// record of `from`, and `NotThisDevice` if `from` is on another device
-    /// only (§17.2). Returns the new file's id for a row to reference.
-    pub fn existing_file(&mut self, from: FileId) -> FileId {
         let id = FileId(self.ids.new_id());
-        self.existing.push(ExistingFile { id, from });
-        id
-    }
-
-    fn push(&mut self, namespace: &str, source: BatchSource) -> FileId {
-        let id = FileId(self.ids.new_id());
-        self.files.push(BatchFile { id, namespace: namespace.to_owned(), source });
+        self.files.push(BatchFile {
+            id,
+            namespace: namespace.to_owned(),
+            source: bytes.into(),
+            place,
+        });
         id
     }
 }

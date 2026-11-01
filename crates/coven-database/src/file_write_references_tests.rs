@@ -140,7 +140,7 @@ async fn a_file_others_leave_without_references_goes_in_this_devices_next_write(
     let a = open(&a_store, Provenance::AppProvided).await;
     let b = open(&b_store, Provenance::AppProvided).await;
     let file = a
-        .write_with_files::<_, _, _, _, crate::DbError>(
+        .staged_write::<_, _, _, _, crate::DbError>(
             |batch| Ok(batch.put_file("files", b"shared".to_vec(), crate::Place::Cloud)),
             |sql, file| {
                 sql.execute("INSERT INTO files(id,file) VALUES('one',?1),('two',?1)", [file])?;

@@ -30,7 +30,7 @@ async fn a_file_staged_on_this_device_only_reads_here_and_nowhere_else() {
     let a = Fixture::new(Provenance::AppProvided).await;
     let id = a
         .database
-        .write_with_files::<_, _, _, _, coven_database::DbError>(
+        .staged_write::<_, _, _, _, coven_database::DbError>(
             |batch| {
                 Ok(batch.put_file(
                     "files",

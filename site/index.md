@@ -216,13 +216,11 @@ A photo commits in the row's transaction. The laptop takes the row now and
 streams the photo on first view.
 
 ```rust
-handle.write_with_files(
-    move |batch| Ok(batch.put_user_file("photos", photo, Place::Cloud)),
-    move |sql, file| {
-        sql.execute("INSERT INTO photos (id, file) VALUES (?1, ?2)", (id, file))?;
-        Ok(())
-    },
-).await?;
+handle.write(move |sql| {
+    let file = sql.put_user_file("photos", photo, Place::Cloud)?;
+    sql.execute("INSERT INTO photos (id, file) VALUES (?1, ?2)", (id, file))?;
+    Ok(())
+}).await?;
 ```
 
 </div>

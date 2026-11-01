@@ -178,7 +178,7 @@ impl FileDatabase {
         };
         database
             .call(move |inner| {
-                inner.with_files(Vec::new(), Vec::new(), |writer, files| {
+                inner.with_files(|writer, files| {
                     writer.local_write(
                         &inner.access.write_schema,
                         inner.access.device,

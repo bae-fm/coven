@@ -23,13 +23,13 @@ impl FileWrite<'_> {
         &self,
         captured: &BTreeMap<AppKey, crate::write_capture::CapturedRow>,
     ) -> Result<(), DbError> {
-        if self.existing.is_empty() {
+        if self.existing.borrow().is_empty() {
             return Ok(());
         }
         let db = self.database;
         let mut audiences =
-            self.audiences(captured, &self.existing.iter().map(|file| file.id).collect())?;
-        for file in &self.existing {
+            self.audiences(captured, &self.existing.borrow().iter().map(|file| file.id).collect())?;
+        for file in self.existing.borrow().iter() {
             let record =
                 Record::read(db, file.from)?.ok_or(DbError::FileAbsent { file: file.from })?;
             let Some(audience) = audiences.remove(&file.id) else {
@@ -153,7 +153,7 @@ impl FileWrite<'_> {
         }
         Record { id, audience, ..record.clone() }.insert(db)?;
         let bytes = self.staged_bytes(record.id);
-        if self.staged.iter().any(|file| file.id == bytes) {
+        if self.staged.borrow().iter().any(|file| file.id == bytes) {
             self.copies.borrow_mut().entry(bytes).or_default().push(id);
         } else if record.place == Place::DeviceOnly(self.device) {
             super::uploads::share(db, record.id, id)?;

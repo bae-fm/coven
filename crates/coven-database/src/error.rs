@@ -181,6 +181,11 @@ pub enum DbError {
     /// A synced table declaration or schema is invalid.
     #[error(transparent)]
     Schema(#[from] crate::SchemaError),
+    /// A write was given files `stage_files` staged in another open store,
+    /// or in this one before it closed; their names aren't reserved here
+    /// (§17.2).
+    #[error("these files were not staged in this open store")]
+    NotStagedHere,
     /// One of coven's steps in this write failed, and the write's closure
     /// went on to return success: the write rolls back, since a failed step
     /// may have made only part of its change (§4).

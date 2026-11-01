@@ -120,7 +120,7 @@ impl Fixture {
         let id = id.to_owned();
         let file = self
             .database
-            .write_with_files::<_, _, _, _, coven_database::DbError>(
+            .staged_write::<_, _, _, _, coven_database::DbError>(
                 move |batch| Ok(batch.put_file(&namespace, bytes, coven_database::Place::Cloud)),
                 move |sql, file| {
                     sql.execute(&insert, (id, file))?;
@@ -145,15 +145,11 @@ impl Fixture {
         let id = id.to_owned();
         let file = self
             .database
-            .write_with_files::<_, _, _, _, coven_database::DbError>(
-                move |batch| {
-                    Ok(batch.put_user_file("files", prepared, coven_database::Place::Cloud))
-                },
-                move |sql, file| {
-                    sql.execute("INSERT INTO files(id,file) VALUES(?1,?2)", (id, file))?;
-                    Ok(file)
-                },
-            )
+            .write_as::<_, _, coven_database::DbError>(move |sql| {
+                let file = sql.put_user_file("files", prepared, coven_database::Place::Cloud)?;
+                sql.execute("INSERT INTO files(id,file) VALUES(?1,?2)", (id, file))?;
+                Ok(file)
+            })
             .await
             .unwrap();
         self.database.file_ref(file).await.unwrap()
@@ -168,15 +164,12 @@ impl Fixture {
         let prepared = coven_database::prepare_user_file(path, |_| {}).await.unwrap();
         let id = id.to_owned();
         self.database
-            .write_with_files::<_, _, _, _, coven_database::DbError>(
-                move |batch| {
-                    Ok(batch.put_user_file("files", prepared, coven_database::Place::DeviceOnly))
-                },
-                move |sql, file| {
-                    sql.execute("INSERT INTO files(id,file) VALUES(?1,?2)", (id, file))?;
-                    Ok(file)
-                },
-            )
+            .write_as::<_, _, coven_database::DbError>(move |sql| {
+                let file =
+                    sql.put_user_file("files", prepared, coven_database::Place::DeviceOnly)?;
+                sql.execute("INSERT INTO files(id,file) VALUES(?1,?2)", (id, file))?;
+                Ok(file)
+            })
             .await
             .unwrap()
     }

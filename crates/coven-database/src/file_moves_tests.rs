@@ -14,7 +14,7 @@ use coven_foundation::id_source::{FileId, SequentialIds};
 async fn stage(db: &Database, rows: &[&'static str], place: Place) -> Vec<FileId> {
     let rows = rows.to_vec();
     let count = rows.len();
-    db.write_with_files::<_, _, _, _, DbError>(
+    db.staged_write::<_, _, _, _, DbError>(
         move |batch| {
             Ok((0..count)
                 .map(|index| batch.put_file("files", format!("bytes {index}").into_bytes(), place))
@@ -295,13 +295,11 @@ async fn a_moved_original_uploads_with_what_its_staging_recorded() {
     let prepared = crate::prepare_user_file(original.path(), |_| {}).await.unwrap();
     let modified_at = prepared.modified_at();
     let file = db
-        .write_with_files::<_, _, _, _, DbError>(
-            move |batch| Ok(batch.put_user_file("files", prepared, crate::Place::DeviceOnly)),
-            |sql, file| {
-                sql.execute("INSERT INTO files(id,file) VALUES('7',?1)", [file])?;
-                Ok(file)
-            },
-        )
+        .write_as::<_, _, DbError>(move |sql| {
+            let file = sql.put_user_file("files", prepared, crate::Place::DeviceOnly)?;
+            sql.execute("INSERT INTO files(id,file) VALUES('7',?1)", [file])?;
+            Ok(file)
+        })
         .await
         .unwrap();
     let hash = |bytes: &[u8]| {

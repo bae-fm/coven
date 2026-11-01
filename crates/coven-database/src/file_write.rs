@@ -45,6 +45,9 @@ mod copies;
 #[path = "file_write_cache.rs"]
 mod cache;
 
+#[path = "file_write_staging.rs"]
+mod staging;
+
 #[path = "journal.rs"]
 mod journal;
 pub(crate) use copies::Copied;
@@ -54,7 +57,7 @@ pub use journal::Journal;
 #[path = "file_write_tests.rs"]
 pub(crate) mod tests;
 
-/// One file a write's batch staged: its new id, namespace, size, where its
+/// One file a write's steps staged: its new id, namespace, size, where its
 /// bytes are, the hashes from its first read, which an upload checks, now
 /// or when the file moves to the cloud, and where it is to be.
 pub(crate) struct StagedFile {
@@ -96,9 +99,17 @@ pub(crate) struct FileWrite<'a> {
     schema: &'a WriteSchema,
     device: DeviceId,
     ids: &'a dyn IdSource,
-    staged: Vec<StagedFile>,
-    /// The new files the write's batch staged over existing files' bytes.
-    existing: Vec<crate::write_batch::ExistingFile>,
+    /// The names of coven's copies of app bytes that `stage_files` reserved
+    /// in this store and have not been committed or released.
+    reservations: &'a std::sync::Mutex<BTreeSet<FileName>>,
+    /// The files the write's steps stage: app bytes `put_staged` brings,
+    /// and users' originals.
+    staged: RefCell<Vec<StagedFile>>,
+    /// The new files the write's steps make over existing files' bytes.
+    existing: RefCell<Vec<crate::write_batch::ExistingFile>>,
+    /// The reserved names `put_staged` brought into this write, released
+    /// once its transaction has decided.
+    brought: RefCell<Vec<FileName>>,
     /// The new files this write made over a file it stages, by that file:
     /// they keep its bytes and share its upload once it is queued (§17.2).
     copies: RefCell<BTreeMap<FileId, Vec<FileId>>>,
@@ -135,16 +146,17 @@ impl<'a> FileWrite<'a> {
         schema: &'a WriteSchema,
         device: DeviceId,
         ids: &'a dyn IdSource,
-        staged: Vec<StagedFile>,
-        existing: Vec<crate::write_batch::ExistingFile>,
+        reservations: &'a std::sync::Mutex<BTreeSet<FileName>>,
     ) -> Self {
         Self {
             database,
             schema,
             device,
             ids,
-            staged,
-            existing,
+            reservations,
+            staged: RefCell::new(Vec::new()),
+            existing: RefCell::new(Vec::new()),
+            brought: RefCell::new(Vec::new()),
             copies: RefCell::new(BTreeMap::new()),
             made: RefCell::new(BTreeSet::new()),
             held: RefCell::new(BTreeSet::new()),
@@ -331,13 +343,13 @@ impl<'a> FileWrite<'a> {
         &self,
         captured: &BTreeMap<AppKey, crate::write_capture::CapturedRow>,
     ) -> Result<(), DbError> {
-        if self.staged.is_empty() {
+        if self.staged.borrow().is_empty() {
             return Ok(());
         }
         let db = self.database;
         let mut audiences =
-            self.audiences(captured, &self.staged.iter().map(|file| file.id).collect())?;
-        for file in &self.staged {
+            self.audiences(captured, &self.staged.borrow().iter().map(|file| file.id).collect())?;
+        for file in self.staged.borrow().iter() {
             let Some(audience) = audiences.remove(&file.id) else {
                 return Err(DbError::FileUnreferenced {
                     namespace: file.namespace.clone(),
@@ -508,7 +520,7 @@ impl<'a> FileWrite<'a> {
     ) -> Result<(), DbError> {
         let db = self.database;
         let mut group = None;
-        for file in &self.staged {
+        for file in self.staged.borrow().iter() {
             if !self.made.borrow().contains(&file.id) {
                 continue;
             }
@@ -572,7 +584,7 @@ impl<'a> FileWrite<'a> {
 
     pub(crate) fn before_commit(&self) -> Result<(), DbError> {
         let db = self.database;
-        for file in &self.staged {
+        for file in self.staged.borrow().iter() {
             if let StagedSource::Copy(name) = &file.source {
                 self.obsolete.borrow_mut().insert(name.clone());
             }

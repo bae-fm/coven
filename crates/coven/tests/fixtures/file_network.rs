@@ -35,20 +35,22 @@ pub(crate) async fn file_network() -> Network {
 /// Stage these bytes for row `id`; returns the new file's id.
 pub(crate) async fn attach(handle: &CovenHandle, id: &str, bytes: Vec<u8>) -> FileId {
     let row = id.to_owned();
+    let staged = handle
+        .stage_files(move |batch| {
+            Ok(batch.put_file(
+                "files",
+                FileSource::Stream(Box::pin(std::io::Cursor::new(bytes))),
+                Place::Cloud,
+            ))
+        })
+        .await
+        .unwrap();
     handle
-        .write_with_files(
-            move |batch| {
-                Ok(batch.put_file(
-                    "files",
-                    FileSource::Stream(Box::pin(std::io::Cursor::new(bytes))),
-                    Place::Cloud,
-                ))
-            },
-            move |sql, file| {
-                sql.execute("INSERT INTO files(id,file) VALUES(?1,?2)", (&row, file))?;
-                Ok(file)
-            },
-        )
+        .write(move |sql| {
+            let file = sql.put_staged(staged)?;
+            sql.execute("INSERT INTO files(id,file) VALUES(?1,?2)", (&row, file))?;
+            Ok(file)
+        })
         .await
         .unwrap()
 }

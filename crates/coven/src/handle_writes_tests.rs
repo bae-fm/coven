@@ -55,30 +55,26 @@ async fn making_the_store_file_device_only_leaves_the_circles_readable() {
     let prepared = prepare_user_file(&original, |_| {}).await.unwrap();
     let track = ana
         .handle
-        .write_with_files(
-            move |batch| Ok(batch.put_user_file("tracks", prepared, Place::Cloud)),
-            |sql, file| {
-                sql.execute("INSERT INTO tracks(id,file) VALUES('one',?1)", [file])?;
-                Ok(file)
-            },
-        )
+        .write(move |sql| {
+            let file = sql.put_user_file("tracks", prepared, Place::Cloud)?;
+            sql.execute("INSERT INTO tracks(id,file) VALUES('one',?1)", [file])?;
+            Ok(file)
+        })
         .await
         .unwrap();
     wait_for_empty_queue(&ana.handle).await;
     let audience = gifts.to_string();
     let copy = ana
         .handle
-        .write_with_files(
-            move |batch| Ok(batch.existing_file(track)),
-            move |sql, file| {
-                sql.execute(
-                    "INSERT INTO gifts(id,file,audience)
+        .write(move |sql| {
+            let file = sql.existing_file(track);
+            sql.execute(
+                "INSERT INTO gifts(id,file,audience)
                      VALUES('00000000-0000-7000-8000-000000000001',?1,?2)",
-                    (file, audience),
-                )?;
-                Ok(file)
-            },
-        )
+                (file, audience),
+            )?;
+            Ok(file)
+        })
         .await
         .unwrap();
     network.sync(0).await;
@@ -158,7 +154,7 @@ async fn shared_track() -> (Network, CircleId, FileId) {
     ana.handle.circles().add_member(gifts, &ben).await.unwrap();
     let track = ana
         .handle
-        .write_with_files(
+        .test_staged_write(
             |batch| {
                 Ok(batch.put_file(
                     "files",
@@ -216,17 +212,15 @@ async fn a_concurrent_copy_reads_bytes_whose_record_was_deleted() {
     let audience = gifts.to_string();
     let copy = ben
         .handle
-        .write_with_files(
-            move |batch| Ok(batch.existing_file(track)),
-            move |sql, file| {
-                sql.execute(
-                    "INSERT INTO gifts(id,file,audience)
+        .write(move |sql| {
+            let file = sql.existing_file(track);
+            sql.execute(
+                "INSERT INTO gifts(id,file,audience)
                      VALUES('00000000-0000-7000-8000-000000000001',?1,?2)",
-                    (file, audience),
-                )?;
-                Ok(file)
-            },
-        )
+                (file, audience),
+            )?;
+            Ok(file)
+        })
         .await
         .unwrap();
     ana.handle
@@ -287,7 +281,7 @@ async fn a_concurrent_move_reads_bytes_whose_record_was_deleted() {
     let row = "00000000-0000-7000-8000-000000000002";
     let photo = ana
         .handle
-        .write_with_files(
+        .test_staged_write(
             |batch| {
                 Ok(batch.put_file(
                     "files",
@@ -359,7 +353,7 @@ async fn a_concurrent_copy_out_of_a_circle_reads_bytes_whose_record_was_deleted(
     let audience = gifts.to_string();
     let photo = ana
         .handle
-        .write_with_files(
+        .test_staged_write(
             |batch| {
                 Ok(batch.put_file(
                     "files",
@@ -384,13 +378,11 @@ async fn a_concurrent_copy_out_of_a_circle_reads_bytes_whose_record_was_deleted(
     ben.storage.set_online(false);
     let copy = ben
         .handle
-        .write_with_files(
-            move |batch| Ok(batch.existing_file(photo)),
-            |sql, file| {
-                sql.execute("INSERT INTO tracks(id,file) VALUES('two',?1)", [file])?;
-                Ok(file)
-            },
-        )
+        .write(move |sql| {
+            let file = sql.existing_file(photo);
+            sql.execute("INSERT INTO tracks(id,file) VALUES('two',?1)", [file])?;
+            Ok(file)
+        })
         .await
         .unwrap();
     ana.handle
@@ -456,13 +448,11 @@ async fn a_switch_holds_the_bytes_until_its_device_writes_again() {
     let prepared = prepare_user_file(&original, |_| {}).await.unwrap();
     let track = ana
         .handle
-        .write_with_files(
-            move |batch| Ok(batch.put_user_file("tracks", prepared, Place::Cloud)),
-            |sql, file| {
-                sql.execute("INSERT INTO tracks(id,file) VALUES('imported',?1)", [file])?;
-                Ok(file)
-            },
-        )
+        .write(move |sql| {
+            let file = sql.put_user_file("tracks", prepared, Place::Cloud)?;
+            sql.execute("INSERT INTO tracks(id,file) VALUES('imported',?1)", [file])?;
+            Ok(file)
+        })
         .await
         .unwrap();
     wait_for_empty_queue(&ana.handle).await;

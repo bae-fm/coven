@@ -221,7 +221,7 @@ fn every_post_commit_crash_preserves_the_write_for_upload() {
             let (f, handle) = Fixture::new().await;
             handle.set_uploads_paused(true).await.unwrap();
             handle
-                .write_with_files(
+                .test_staged_write(
                     |batch| Ok(batch.put_file("files", b"obsolete".to_vec(), crate::Place::Cloud)),
                     |sql, file| {
                         sql.execute("INSERT INTO files(id,file) VALUES('obsolete',?1)", [file])?;
@@ -358,7 +358,7 @@ async fn identical_app_files_have_distinct_stored_ciphertext() {
     let content = vec![42; 2 * 65536 + 17];
     let input = content.clone();
     let staged = handle
-        .write_with_files(
+        .test_staged_write(
             move |batch| {
                 Ok([
                     batch.put_file("files", input.clone(), crate::Place::Cloud),

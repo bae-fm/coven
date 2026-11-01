@@ -47,7 +47,7 @@ pub(crate) const POLICY: Policy = Policy {
         ("crates/coven-database/src/database.rs", "<free>", "process"),
         ("crates/coven-database/src/database.rs", "<free>", "start_call"),
         ("crates/coven-database/src/database.rs", "Database", "close"),
-        ("crates/coven-database/src/database.rs", "Database", "write_with_files"),
+        ("crates/coven-database/src/database.rs", "Database", "stage_files"),
         ("crates/coven-database/src/database.rs", "DatabaseReadHandle", "close"),
         ("crates/coven-database/src/database_builder.rs", "DatabaseBuilder", "new"),
         ("crates/coven-database/src/database_builder.rs", "DatabaseBuilder", "open"),
@@ -515,6 +515,9 @@ pub(crate) const POLICY: Policy = Policy {
         "BatchFolder",
         "Circles",
         "CacheReservation",
+        // App bytes one staging wrote, until the write that takes them
+        // (§17.3).
+        "StagedFiles",
         // The copies one call making files device-only is writing (§17.3).
         "CopyReservation",
         "UploadedFile",

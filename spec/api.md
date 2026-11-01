@@ -2537,9 +2537,16 @@ fn tables() -> Vec<SyncedTable> {
   [§16.5](coven.md#165-coming-back-after-a-long-absence)).
 
 ```rust
-/// The files staged for one write, each given a new id; a failure discards
-/// them (E3). It borrows the store's id source while the app stages.
+/// The app bytes one staging writes to coven's copies, each file given a
+/// new id; a failure discards them (E3). It borrows the store's id source
+/// while the app stages.
 pub struct WriteBatch<'a> { /* private fields */ }
+
+/// App bytes staged before the write that puts them in rows, with what the
+/// staging's batch returned (§17.3, E3). It holds nothing close waits for:
+/// dropped without a write, or after the store closes, its copies are
+/// removed by the next write or open.
+pub struct StagedFiles<T> { /* private fields */ }
 
 /// One write's SQL and coven's steps, in one transaction (§4, E3).
 pub struct CovenWrite<'write> { /* private fields */ }
@@ -2614,54 +2621,29 @@ impl CovenHandle {
         F: FnOnce(BulkSqlContext<'_>) -> CovenResult<R> + Send + 'static,
         R: Send + 'static;
 
-    /// Stages files, then runs the write's SQL with what staging returned,
-    /// as one write (§17.3). `stage` stages each file and returns what the
-    /// SQL needs, such as the ids staging gave them; the SQL puts those ids
-    /// in the rows that reference the files. App bytes are streamed to
-    /// coven's own copy before the transaction's writer is taken; close waits
-    /// for staging and its cleanup, including cancellation. The write fails
-    /// with `FileUnknown` if a row references a file coven has no record of
-    /// in the row's audience, `FileUnreferenced` if a staged file has no
-    /// row, and `FileAbsent` or `NotThisDevice` if a new file over an
-    /// existing file's bytes names a file coven has no record of, or one on
-    /// another device only.
-    pub async fn write_with_files<F, S, T, R>(&self, stage: F, write: S) -> CovenResult<R>
+    /// Stages app bytes for a write that puts them in rows (§17.3): `stage`
+    /// stages each file and returns what that write needs, such as the ids
+    /// staging gave them, and the write takes it with `put_staged`. The bytes
+    /// are streamed to coven's own copies, synced and flushed before this
+    /// returns; close waits for staging and its cleanup, including
+    /// cancellation, but not for the staged files it returns. An undeclared
+    /// namespace fails with `UndeclaredNamespace`, a user one with
+    /// `NamespaceKind`; a failed copy or flush removes what it wrote.
+    pub async fn stage_files<F, T>(&self, stage: F) -> CovenResult<StagedFiles<T>>
     where
         F: FnOnce(&mut WriteBatch<'_>) -> CovenResult<T> + Send + 'static,
-        S: FnOnce(CovenWrite<'_>, T) -> CovenResult<R> + Send + 'static,
-        T: Send + 'static,
-        R: Send + 'static;
+        T: Send + 'static;
 }
 
 impl WriteBatch<'_> {
     /// Stages app bytes as a new file in an app namespace, kept in coven's
     /// own copy, and returns its id for a row to reference. `bytes` is a
     /// byte buffer, or a stream read once, so a large file never has to fit
-    /// in memory. The write makes the file's record, on this device only; for
-    /// `Place::Cloud` it also queues the upload, which switches the record to
-    /// the cloud when it completes (§17.3). An undeclared namespace fails the
-    /// write with `UndeclaredNamespace`, a user one with `NamespaceKind`.
+    /// in memory. The write that takes it makes the file's record, on this
+    /// device only; for `Place::Cloud` it also queues the upload, which
+    /// switches the record to the cloud when it completes (§17.3).
     pub fn put_file(&mut self, namespace: &str, bytes: impl Into<FileSource>, place: Place)
         -> FileId;
-
-    /// Stages a user's original, read whole once already, as a new file in a
-    /// user namespace and returns its id for a row to reference: on this
-    /// device only, or for the cloud, with its upload queued. Coven records
-    /// the original's path, size, modification time and the hashes its read
-    /// found, which its upload checks, now or when the file moves to the
-    /// cloud; it never changes the original (§17.1, §17.3).
-    pub fn put_user_file(&mut self, namespace: &str, original: PreparedUserFile, place: Place)
-        -> FileId;
-
-    /// Stages a new file over an existing file's bytes, for a row in any
-    /// audience, and returns its id for that row to reference. The write
-    /// makes it in the audience of the rows that reference it, with
-    /// `from`'s namespace, size, place and key; nothing is uploaded again. A
-    /// file on this device only gives a new file on this device only, over
-    /// the same original or coven's copy. The write fails with `FileAbsent`
-    /// if this device has no record of `from`, and with `NotThisDevice` if
-    /// `from` is on another device only (§17.2).
-    pub fn existing_file(&mut self, from: FileId) -> FileId;
 }
 
 /// A portable single filename: ASCII letters, digits, `-`, `_` and interior
@@ -2710,6 +2692,35 @@ pub enum MoveFile {
 }
 
 impl CovenWrite<'_> {
+    /// Puts files `stage_files` staged into this write and returns what its
+    /// batch returned, such as their ids, for this write's rows to reference
+    /// (§17.3). The write makes each file's record, in the audience of the
+    /// rows that name it, and queues its upload for the cloud. Files another
+    /// open store staged, or this one before it closed, fail with
+    /// `NotStagedHere`.
+    pub fn put_staged<T>(&self, staged: StagedFiles<T>) -> Result<T, DbError>;
+
+    /// Stages a user's original, read whole once already, as a new file in a
+    /// user namespace and returns its id for a row to reference: on this
+    /// device only, or for the cloud, with its upload queued. Coven records
+    /// the original's path, size, modification time and the hashes its read
+    /// found, which its upload checks, now or when the file moves to the
+    /// cloud; it never changes the original, nor reads it here (§17.1,
+    /// §17.3). An undeclared namespace fails with `UndeclaredNamespace`, an
+    /// app one with `NamespaceKind`.
+    pub fn put_user_file(&self, namespace: &str, original: PreparedUserFile, place: Place)
+        -> Result<FileId, DbError>;
+
+    /// Stages a new file over an existing file's bytes, for a row in any
+    /// audience, and returns its id for that row to reference. The write
+    /// makes it in the audience of the rows that reference it, with
+    /// `from`'s namespace, size, place and key; nothing is uploaded again. A
+    /// file on this device only gives a new file on this device only, over
+    /// the same original or coven's copy. The write fails with `FileAbsent`
+    /// if this device has no record of `from`, and with `NotThisDevice` if
+    /// `from` is on another device only (§17.2).
+    pub fn existing_file(&self, from: FileId) -> FileId;
+
     /// Records a move of these files to the cloud (§17.3). Each must be on
     /// this device only with no upload queued (`NotThisDevice`,
     /// `NotDeviceOnlyHere`, `FileAbsent`). The write reads no file: a user's
@@ -2806,20 +2817,33 @@ let attachment_id = UuidText(Uuid::now_v7());
 let prepared = prepare_user_file(&path, |read| show_progress(read)).await?;
 
 let file = handle
-    .write_with_files(
-        move |batch| Ok(batch.put_user_file("attachments", prepared, Place::Cloud)),
-        move |sql, file| {
-            sql.execute(
-                "INSERT INTO notes (id, title, audience) VALUES (?1, ?2, ?3)",
-                (&note_id, "Paint colors", Audience::Store),
-            )?;
-            sql.execute(
-                "INSERT INTO attachments (id, note_id, title, file) VALUES (?1, ?2, ?3, ?4)",
-                (&attachment_id, &note_id, "Swatches", file),
-            )?;
-            Ok(file)
-        },
-    )
+    .write(move |sql| {
+        let file = sql.put_user_file("attachments", prepared, Place::Cloud)?;
+        sql.execute(
+            "INSERT INTO notes (id, title, audience) VALUES (?1, ?2, ?3)",
+            (&note_id, "Paint colors", Audience::Store),
+        )?;
+        sql.execute(
+            "INSERT INTO attachments (id, note_id, title, file) VALUES (?1, ?2, ?3, ?4)",
+            (&attachment_id, &note_id, "Swatches", file),
+        )?;
+        Ok(file)
+    })
+    .await?;
+```
+
+App bytes are staged first, outside the write, which puts them in its rows:
+
+```rust
+let staged = handle
+    .stage_files(move |batch| Ok(batch.put_file("covers", cover_bytes, Place::Cloud)))
+    .await?;
+let cover = handle
+    .write(move |sql| {
+        let cover = sql.put_staged(staged)?;
+        sql.execute("UPDATE notes SET cover = ?1 WHERE id = ?2", (cover, &note_id))?;
+        Ok(cover)
+    })
     .await?;
 ```
 
@@ -2828,16 +2852,14 @@ Staging on this device only, then moving to the cloud as one move:
 ```rust
 let prepared = prepare_user_file(&path, |read| show_progress(read)).await?;
 let file = handle
-    .write_with_files(
-        move |batch| Ok(batch.put_user_file("attachments", prepared, Place::DeviceOnly)),
-        move |sql, file| {
-            sql.execute(
-                "INSERT INTO attachments (id, note_id, title, file) VALUES (?1, ?2, ?3, ?4)",
-                (&attachment_id, &note_id, "Swatches", file),
-            )?;
-            Ok(file)
-        },
-    )
+    .write(move |sql| {
+        let file = sql.put_user_file("attachments", prepared, Place::DeviceOnly)?;
+        sql.execute(
+            "INSERT INTO attachments (id, note_id, title, file) VALUES (?1, ?2, ?3, ?4)",
+            (&attachment_id, &note_id, "Swatches", file),
+        )?;
+        Ok(file)
+    })
     .await?;
 // Later, when the person moves it to the cloud: nothing is read again.
 let moved = handle

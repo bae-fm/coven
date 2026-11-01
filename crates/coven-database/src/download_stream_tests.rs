@@ -369,7 +369,7 @@ mod memory {
         };
         let a = open(&sa).await.unwrap();
         let b = open(&sb).await.unwrap();
-        a.write_with_files::<_, _, _, _, crate::DbError>(|batch| {
+        a.staged_write::<_, _, _, _, crate::DbError>(|batch| {
             Ok(batch.put_file("linked-files", b"original".to_vec(), crate::Place::Cloud))
         }, |sql, file| {
             sql.execute("INSERT INTO parents VALUES('parent')", [])?;

@@ -65,13 +65,11 @@ fn insert(
 /// Write a `photos` row `n` in `audience` naming a new file over `from`'s
 /// bytes, returning the new file.
 async fn share_into(db: &crate::Database, n: u8, audience: &'static str, from: FileId) -> FileId {
-    db.write_with_files::<_, _, _, _, DbError>(
-        move |batch| Ok(batch.existing_file(from)),
-        move |sql, file| {
-            insert(&sql, "photos", n, audience, file)?;
-            Ok(file)
-        },
-    )
+    db.write_as::<_, _, DbError>(move |sql| {
+        let file = sql.existing_file(from);
+        insert(&sql, "photos", n, audience, file)?;
+        Ok(file)
+    })
     .await
     .unwrap()
 }
@@ -80,7 +78,7 @@ async fn share_into(db: &crate::Database, n: u8, audience: &'static str, from: F
 async fn stored(db: &crate::Database, bytes: &[u8]) -> FileId {
     let bytes = bytes.to_vec();
     let file = db
-        .write_with_files::<_, _, _, _, DbError>(
+        .staged_write::<_, _, _, _, DbError>(
             move |batch| Ok(batch.put_file("files", bytes, Place::Cloud)),
             |sql, file| {
                 insert(&sql, "photos", 1, "store", file)?;
@@ -155,10 +153,10 @@ async fn a_new_file_over_a_file_this_device_has_no_record_of_fails() {
     let db = open(&store, Provenance::AppProvided).await;
     let unknown = FileId(uuid::Uuid::from_u128(0x0000_0000_0000_4000_8000_0000_0000_0099));
     let error = db
-        .write_with_files::<_, _, _, _, DbError>(
-            move |batch| Ok(batch.existing_file(unknown)),
-            move |sql, file| insert(&sql, "photos", 2, CIRCLE, file),
-        )
+        .write_as::<_, _, DbError>(move |sql| {
+            let file = sql.existing_file(unknown);
+            insert(&sql, "photos", 2, CIRCLE, file)
+        })
         .await
         .unwrap_err();
     assert!(matches!(error, DbError::FileAbsent { file } if file == unknown));
@@ -178,13 +176,11 @@ async fn making_the_store_file_device_only_leaves_the_circles_stored() {
     std::fs::write(&original, b"track").unwrap();
     let prepared = crate::prepare_user_file(&original, |_| {}).await.unwrap();
     let track = db
-        .write_with_files::<_, _, _, _, DbError>(
-            move |batch| Ok(batch.put_user_file("files", prepared, crate::Place::Cloud)),
-            |sql, file| {
-                insert(&sql, "photos", 1, "store", file)?;
-                Ok(file)
-            },
-        )
+        .write_as::<_, _, DbError>(move |sql| {
+            let file = sql.put_user_file("files", prepared, crate::Place::Cloud)?;
+            insert(&sql, "photos", 1, "store", file)?;
+            Ok(file)
+        })
         .await
         .unwrap();
     complete_uploads(&db).await;
@@ -288,13 +284,11 @@ async fn a_device_only_source_gives_a_file_on_this_device_with_the_same_original
     std::fs::write(&original, b"local track").unwrap();
     let prepared = crate::prepare_user_file(&original, |_| {}).await.unwrap();
     let track = db
-        .write_with_files::<_, _, _, _, DbError>(
-            move |batch| Ok(batch.put_user_file("files", prepared, crate::Place::DeviceOnly)),
-            |sql, file| {
-                insert(&sql, "photos", 1, "store", file)?;
-                Ok(file)
-            },
-        )
+        .write_as::<_, _, DbError>(move |sql| {
+            let file = sql.put_user_file("files", prepared, crate::Place::DeviceOnly)?;
+            insert(&sql, "photos", 1, "store", file)?;
+            Ok(file)
+        })
         .await
         .unwrap();
     let copy = share_into(&db, 2, CIRCLE, track).await;
@@ -333,13 +327,11 @@ async fn a_new_file_over_a_file_on_another_device_only_fails() {
     std::fs::write(&original, b"local track").unwrap();
     let prepared = crate::prepare_user_file(&original, |_| {}).await.unwrap();
     let track = a
-        .write_with_files::<_, _, _, _, DbError>(
-            move |batch| Ok(batch.put_user_file("files", prepared, crate::Place::DeviceOnly)),
-            |sql, file| {
-                insert(&sql, "photos", 1, "store", file)?;
-                Ok(file)
-            },
-        )
+        .write_as::<_, _, DbError>(move |sql| {
+            let file = sql.put_user_file("files", prepared, crate::Place::DeviceOnly)?;
+            insert(&sql, "photos", 1, "store", file)?;
+            Ok(file)
+        })
         .await
         .unwrap();
     for write in records(&a) {
@@ -347,10 +339,10 @@ async fn a_new_file_over_a_file_on_another_device_only_fails() {
         b.receive(write.into()).await.unwrap();
     }
     let error = b
-        .write_with_files::<_, _, _, _, DbError>(
-            move |batch| Ok(batch.existing_file(track)),
-            move |sql, file| insert(&sql, "photos", 2, CIRCLE, file),
-        )
+        .write_as::<_, _, DbError>(move |sql| {
+            let file = sql.existing_file(track);
+            insert(&sql, "photos", 2, CIRCLE, file)
+        })
         .await
         .unwrap_err();
     assert!(matches!(error, DbError::NotThisDevice { file } if file == track), "{error:?}");
@@ -369,7 +361,7 @@ async fn a_store_row_names_a_circles_files_bytes_through_a_new_file() {
     let store = TestStore::new();
     let db = open(&store, Provenance::AppProvided).await;
     let photo = db
-        .write_with_files::<_, _, _, _, DbError>(
+        .staged_write::<_, _, _, _, DbError>(
             |batch| Ok(batch.put_file("files", b"photo".to_vec(), Place::Cloud)),
             |sql, file| {
                 insert(&sql, "photos", 1, CIRCLE, file)?;
@@ -405,18 +397,20 @@ async fn a_store_row_names_a_circles_files_bytes_through_a_new_file() {
 async fn a_new_file_over_a_file_the_same_write_stages_shares_its_upload() {
     let store = TestStore::new();
     let db = open(&store, Provenance::AppProvided).await;
+    let staged = db
+        .stage_files::<_, _, DbError>(|batch| {
+            Ok(batch.put_file("files", b"cover".to_vec(), Place::Cloud))
+        })
+        .await
+        .unwrap();
     let (cover, copy) = db
-        .write_with_files::<_, _, _, _, DbError>(
-            |batch| {
-                let cover = batch.put_file("files", b"cover".to_vec(), Place::Cloud);
-                Ok((cover, batch.existing_file(cover)))
-            },
-            |sql, (cover, copy)| {
-                insert(&sql, "photos", 1, "store", cover)?;
-                insert(&sql, "covers", 2, CIRCLE, copy)?;
-                Ok((cover, copy))
-            },
-        )
+        .write(move |sql| {
+            let cover = sql.put_staged(staged)?;
+            let copy = sql.existing_file(cover);
+            insert(&sql, "photos", 1, "store", cover)?;
+            insert(&sql, "covers", 2, CIRCLE, copy)?;
+            Ok((cover, copy))
+        })
         .await
         .unwrap();
     assert_eq!(local_count(&db, "_coven_file_uploads"), 1);
@@ -441,20 +435,22 @@ async fn a_new_file_over_a_file_the_same_write_stages_shares_its_upload() {
 async fn a_new_file_over_a_new_file_over_a_staged_file_shares_its_upload() {
     let store = TestStore::new();
     let db = open(&store, Provenance::AppProvided).await;
+    let staged = db
+        .stage_files::<_, _, DbError>(|batch| {
+            Ok(batch.put_file("files", b"photo".to_vec(), Place::Cloud))
+        })
+        .await
+        .unwrap();
     let (photo, gifts, again) = db
-        .write_with_files::<_, _, _, _, DbError>(
-            |batch| {
-                let photo = batch.put_file("files", b"photo".to_vec(), Place::Cloud);
-                let gifts = batch.existing_file(photo);
-                Ok((photo, gifts, batch.existing_file(gifts)))
-            },
-            |sql, (photo, gifts, again)| {
-                insert(&sql, "photos", 1, "store", photo)?;
-                insert(&sql, "photos", 2, CIRCLE, gifts)?;
-                insert(&sql, "photos", 3, CIRCLE, again)?;
-                Ok((photo, gifts, again))
-            },
-        )
+        .write(move |sql| {
+            let photo = sql.put_staged(staged)?;
+            let gifts = sql.existing_file(photo);
+            let again = sql.existing_file(gifts);
+            insert(&sql, "photos", 1, "store", photo)?;
+            insert(&sql, "photos", 2, CIRCLE, gifts)?;
+            insert(&sql, "photos", 3, CIRCLE, again)?;
+            Ok((photo, gifts, again))
+        })
         .await
         .unwrap();
     assert_eq!(local_count(&db, "_coven_file_uploads"), 1);

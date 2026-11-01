@@ -202,16 +202,14 @@ write drops the loss, on every device ([Merge](/docs/merge#lost-values)).
 ```rust
 let attachment = UuidText(Uuid::now_v7());
 let prepared = coven::prepare_user_file(&path, |read| show_progress(read)).await?;
-let file = handle.write_with_files(
-    move |batch| Ok(batch.put_user_file("attachments", prepared, coven::Place::Cloud)),
-    move |sql, file| {
-        sql.execute(
-            "INSERT INTO attachments (id, note_id, name, file) VALUES (?1, ?2, ?3, ?4)",
-            (&attachment, &note, "receipt.pdf", file),
-        )?;
-        Ok(file)
-    },
-).await?;
+let file = handle.write(move |sql| {
+    let file = sql.put_user_file("attachments", prepared, coven::Place::Cloud)?;
+    sql.execute(
+        "INSERT INTO attachments (id, note_id, name, file) VALUES (?1, ?2, ?3, ?4)",
+        (&attachment, &note, "receipt.pdf", file),
+    )?;
+    Ok(file)
+}).await?;
 ```
 
 The file stays where the user keeps it; coven never moves or changes it. It

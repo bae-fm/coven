@@ -31,7 +31,7 @@ pub(crate) async fn open(store: &TestStore, kind: Provenance) -> Database {
 
 /// Stage `bytes` and point row `7` at it, inserting the row or updating it.
 pub(crate) async fn stage(db: &Database, bytes: Vec<u8>, insert: bool) -> Result<FileId, DbError> {
-    db.write_with_files::<_, _, _, _, crate::DbError>(
+    db.staged_write::<_, _, _, _, crate::DbError>(
         move |batch| Ok(batch.put_file("files", bytes, crate::Place::Cloud)),
         move |sql, file| {
             sql.execute(
@@ -131,7 +131,7 @@ async fn a_stream_exceeds_its_memory_budget_and_is_read_once() {
         directory: store.database_path().parent().unwrap().join("files"),
     }));
     let file = db
-        .write_with_files::<_, _, _, _, crate::DbError>(
+        .staged_write::<_, _, _, _, crate::DbError>(
             move |batch| Ok(batch.put_file("files", source, crate::Place::Cloud)),
             |sql, file| {
                 sql.execute("INSERT INTO files(id,file) VALUES('7',?1)", [file])?;
@@ -172,7 +172,7 @@ async fn failed_sql_stream_and_commit_discard_new_bytes_and_preserve_old_bytes()
     let paths = owned_paths(&store);
     for failure in ["sql", "commit", "stream", "unused"] {
         let error = db
-            .write_with_files::<_, _, _, _, crate::DbError>(
+            .staged_write::<_, _, _, _, crate::DbError>(
                 move |batch| {
                     let source = if failure == "stream" {
                         FileSource::Stream(Box::pin(FailingReader { started: false }))
@@ -278,13 +278,11 @@ async fn originals_are_checked_while_prepared_and_never_under_the_writer() {
     assert!(std::process::Command::new("mkfifo").arg(&path).status().unwrap().success());
     tokio::time::timeout(
         Duration::from_secs(5),
-        db.write_with_files::<_, _, _, _, crate::DbError>(
-            move |batch| Ok(batch.put_user_file("files", prepared, crate::Place::Cloud)),
-            |sql, file| {
-                sql.execute("INSERT INTO files(id,file) VALUES('7',?1)", [file])?;
-                Ok(())
-            },
-        ),
+        db.write_as::<_, _, crate::DbError>(move |sql| {
+            let file = sql.put_user_file("files", prepared, crate::Place::Cloud)?;
+            sql.execute("INSERT INTO files(id,file) VALUES('7',?1)", [file])?;
+            Ok(())
+        }),
     )
     .await
     .expect("a write waited on its original")
@@ -303,13 +301,11 @@ async fn a_user_files_last_reference_forgets_its_original_and_leaves_it() {
     std::fs::write(original.path(), b"original").unwrap();
     let prepared = prepare_user_file(original.path(), |_| {}).await.unwrap();
     let file = db
-        .write_with_files::<_, _, _, _, crate::DbError>(
-            move |batch| Ok(batch.put_user_file("files", prepared, crate::Place::Cloud)),
-            |sql, file| {
-                sql.execute("INSERT INTO files(id,file) VALUES('7',?1)", [file])?;
-                Ok(file)
-            },
-        )
+        .write_as::<_, _, crate::DbError>(move |sql| {
+            let file = sql.put_user_file("files", prepared, crate::Place::Cloud)?;
+            sql.execute("INSERT INTO files(id,file) VALUES('7',?1)", [file])?;
+            Ok(file)
+        })
         .await
         .unwrap();
     assert_eq!(db.user_file(file).await.unwrap().unwrap().path, original.path());
@@ -347,22 +343,23 @@ async fn the_wrong_kind_or_an_undeclared_namespace_fails() {
         ("files", true, Some(Provenance::AppProvided)),
     ] {
         let prepared = prepare_user_file(original.path(), |_| {}).await.unwrap();
-        let error = db
-            .write_with_files::<_, _, _, _, crate::DbError>(
-                move |batch| {
-                    Ok(if user {
-                        batch.put_user_file(namespace, prepared, crate::Place::Cloud)
-                    } else {
-                        batch.put_file(namespace, b"bytes".to_vec(), crate::Place::Cloud)
-                    })
-                },
-                |sql, file| {
-                    sql.execute("INSERT INTO files(id,file) VALUES('7',?1)", [file])?;
-                    Ok(())
-                },
-            )
+        // A user's original is checked in the write, app bytes as staged.
+        let error = if user {
+            db.write(move |sql| {
+                let file = sql.put_user_file(namespace, prepared, crate::Place::Cloud)?;
+                sql.execute("INSERT INTO files(id,file) VALUES('7',?1)", [file])?;
+                Ok(())
+            })
             .await
-            .unwrap_err();
+            .unwrap_err()
+        } else {
+            db.stage_files::<_, _, crate::DbError>(move |batch| {
+                Ok(batch.put_file(namespace, b"bytes".to_vec(), crate::Place::Cloud))
+            })
+            .await
+            .map(drop)
+            .unwrap_err()
+        };
         match expected {
             None => assert!(
                 matches!(&error, DbError::UndeclaredNamespace { namespace: n } if n == namespace),
@@ -398,7 +395,7 @@ async fn a_reference_naming_no_file_or_another_audiences_fails_the_write() {
         .unwrap();
     store.join_circle(&db, circle);
     let file = db
-        .write_with_files::<_, _, _, _, crate::DbError>(
+        .staged_write::<_, _, _, _, crate::DbError>(
             |batch| Ok(batch.put_file("files", b"photo".to_vec(), crate::Place::Cloud)),
             |sql, file| {
                 sql.execute(
@@ -434,7 +431,7 @@ async fn a_reference_naming_no_file_or_another_audiences_fails_the_write() {
     // A staged file is made in the audience of the rows naming it, so rows
     // of two audiences can't name one.
     let error = db
-        .write_with_files::<_, _, _, _, crate::DbError>(
+        .staged_write::<_, _, _, _, crate::DbError>(
             |batch| Ok(batch.put_file("files", b"photo".to_vec(), crate::Place::Cloud)),
             move |sql, file| {
                 sql.execute(
@@ -470,7 +467,7 @@ async fn a_record_reaches_its_circle_and_not_the_store() {
         .unwrap();
     store.join_circle(&db, circle);
     let file = db
-        .write_with_files::<_, _, _, _, crate::DbError>(
+        .staged_write::<_, _, _, _, crate::DbError>(
             |batch| Ok(batch.put_file("files", b"gift".to_vec(), crate::Place::Cloud)),
             move |sql, file| {
                 sql.execute(
@@ -541,7 +538,7 @@ async fn a_deleted_circles_queued_upload_retires() {
         .await
         .unwrap();
     store.join_circle(&db, circle);
-    db.write_with_files::<_, _, _, _, crate::DbError>(
+    db.staged_write::<_, _, _, _, crate::DbError>(
         |batch| Ok(batch.put_file("files", b"gift".to_vec(), crate::Place::Cloud)),
         move |sql, file| {
             sql.execute(
@@ -571,7 +568,7 @@ async fn two_rows_share_a_file_and_it_stays_until_both_go() {
     let store = TestStore::new();
     let db = open(&store, Provenance::AppProvided).await;
     let file = db
-        .write_with_files::<_, _, _, _, crate::DbError>(
+        .staged_write::<_, _, _, _, crate::DbError>(
             |batch| Ok(batch.put_file("files", b"shared".to_vec(), crate::Place::Cloud)),
             |sql, file| {
                 sql.execute("INSERT INTO files(id,file) VALUES('one',?1),('two',?1)", [file])?;
@@ -696,7 +693,7 @@ async fn a_moved_row_gets_a_new_file_in_its_new_audience() {
         ("00000000-0000-4000-8000-000000000011", false),
         ("00000000-0000-4000-8000-000000000012", true),
     ] {
-        db.write_with_files::<_, _, _, _, crate::DbError>(
+        db.staged_write::<_, _, _, _, crate::DbError>(
             |batch| Ok(batch.put_file("files", b"photo".to_vec(), crate::Place::Cloud)),
             move |sql, file| {
                 sql.execute(

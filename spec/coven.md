@@ -5075,11 +5075,24 @@ Ana's delete is published, then become a deletion candidate.
 
 #### 17.3 Staging a file
 
-A write stages its files first, then runs its SQL, as one write
-([api.md E3](api.md#e3-writing)). Staging gives each file a new id, and the
+A file comes into the store as a step of a write (§4,
+[api.md E3](api.md#e3-writing)). The step gives the file a new id, and the
 write's SQL puts that id in the rows that reference it. The app never makes a
 file id. A staged file no row references fails the write with
 `FileUnreferenced`.
+
+There are three ways in. A user's original, read whole once beforehand (below),
+is staged by a step of the write itself: nothing is read under the writer. So
+is a new file over an existing file's bytes (§17.2), which copies no bytes. App
+bytes are different: coven writes its own copy of them, which can take a while
+for a large file or a stream, and no write should hold the writer that long.
+So the app stages app bytes first, outside any write: coven writes each copy,
+syncs it and flushes the batch (Appendix C.3), and hands back the staged files.
+A write then puts them in its rows with `put_staged`. Between the two, nothing
+names the copies but their recorded cleanup, so the staged files hold nothing
+closing the store waits for. Dropped without a write, or still held when the
+store closes, they leave their copies to the next write or open to remove; a
+write of another open store refuses them (`NotStagedHere`).
 
 **On this device only, or for the cloud.** The app says, for each file it
 stages, where the file is to be.
@@ -8102,8 +8115,8 @@ pins) consistent with its database across crashes.
   cache is the drive's, not the file's, so one flush covers every copy the
   write handed to it. Flushing each file's copy and folder on its own was
   most of the time each imported track took.
-- If the flush fails, the write fails: its SQL doesn't run, nothing commits,
-  and the copies are removed like any failed write's.
+- If the flush fails, the staging fails: no write takes its files, and the
+  copies are removed at once, like a failed write's.
 - Elsewhere on Unix, `fsync` already reaches the drive's permanent storage,
   and the write's flush is the folder's `fsync`. Windows writes coven's files
   through, with no folder to sync, and each file's `FlushFileBuffers` already
@@ -9442,6 +9455,7 @@ maps them are with each provider in Appendix E.
 | `DbError::FileUnknown` | a reference names no file this device has a record of in the row's audience, including a restored lost value naming a deleted file | §17.2 |
 | `DbError::FileUnreferenced` | a file the write staged is referenced by none of its rows | §17.3 |
 | `DbError::FileWriteOnce` | a write would change a write-once reference that names a file | §17.2 |
+| `DbError::NotStagedHere` | a write is given staged files another open store staged, or this one before it closed | §17.3 |
 | `DbError::DismissedRowChanged` | a write dismisses a taken-out row and also changes it, or a row its delete cascades to | §8.4 |
 | `DbError::UndeclaredNamespace`, `DbError::NamespaceKind` | a file is staged into a namespace not declared at open, or into one of the other kind; or a bound reference names a user's file | §17.1, §17.4 |
 | `DbError::BoundFileTooLarge` | a bound reference names a file larger than its column's limit | §17.4 |
