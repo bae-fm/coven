@@ -256,17 +256,21 @@ async fn a_move_takes_only_this_devices_files_waiting_for_no_upload() {
     ));
     let absent = FileId(uuid::Uuid::from_u128(77));
     assert!(matches!(refused(&a, absent).await, DbError::FileAbsent { file } if file == absent));
-    // Twice in one write, or in two moves, a file moves once.
-    a.write(move |sql| {
-        sql.move_to_cloud(vec![MoveFile::App(local)])?;
-        assert!(matches!(
-            sql.move_to_cloud(vec![MoveFile::App(local)]),
-            Err(DbError::NotDeviceOnlyHere { .. })
-        ));
-        Ok(())
-    })
-    .await
-    .unwrap();
+    // Twice in one write, or in two moves, a file moves once. The second
+    // move in one write is refused, which fails that write (§4), so nothing
+    // of it moves.
+    let twice = a
+        .write(move |sql| {
+            sql.move_to_cloud(vec![MoveFile::App(local)])?;
+            assert!(matches!(
+                sql.move_to_cloud(vec![MoveFile::App(local)]),
+                Err(DbError::NotDeviceOnlyHere { .. })
+            ));
+            Ok(())
+        })
+        .await;
+    assert!(matches!(twice, Err(DbError::StepFailed)), "{twice:?}");
+    move_files(&a, vec![MoveFile::App(local)]).await.unwrap();
     assert!(matches!(
         refused(&a, local).await,
         DbError::NotDeviceOnlyHere { file } if file == local
