@@ -4,7 +4,6 @@
 //! listing finds is judged by the reference evidence alone, whenever the
 //! listing is taken.
 use crate::{history::History, sequence_sync::SequenceSync, SyncError};
-use coven_format::MemberAccess;
 use coven_foundation::id_source::{DeviceId, MemberId};
 use coven_merge::Slot;
 use coven_storage::{ObjectPrefix, StorageFailure};
@@ -30,8 +29,9 @@ impl History {
     /// Whether this device, `own` of `member`, deletes `uploader`'s stored
     /// files and snapshots: its own, and those of a device gone for good
     /// that is its member's. When the gone device's member has no device
-    /// left that isn't gone, removed or not, the storage owner's devices
-    /// delete them instead (§17.10).
+    /// left that isn't gone, removed or not, every active admin's devices
+    /// delete them instead: a store always keeps an admin (§10.1), and every
+    /// member's provider access reaches the store's objects (§17.10).
     pub(crate) fn deletes_for(&self, own: DeviceId, member: MemberId, uploader: DeviceId) -> bool {
         if own == uploader {
             return true;
@@ -48,14 +48,9 @@ impl History {
             });
         device.member == member
             || (!member_left
-                && match self.state.members.get(&member).map(|value| &value.access) {
-                    // Access-key IDs do not identify an S3 account. The creator is
-                    // the only account owner the authenticated history establishes.
-                    Some(MemberAccess::S3AccessKey { .. }) => {
-                        self.recorded_access().any(|(owner, at, _)| owner == member && at == 1)
-                    }
-                    _ => self.owns_storage(member),
-                })
+                && self.state.members.get(&member).is_some_and(|value| {
+                    !value.removed && value.role == coven_format::admin::MemberRole::Admin
+                }))
     }
 
     /// The latest counted entry that stopped `device` for good (§14.1).

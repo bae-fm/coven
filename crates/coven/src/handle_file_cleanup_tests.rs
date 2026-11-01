@@ -165,11 +165,11 @@ async fn a_member_key_replacement_lets_the_new_pairs_device_clean_up() {
 }
 
 /// Ana removes Ben's phone, his only device, and Ben stays a member. No
-/// device of his is left to clean up, so Ana's, the storage owner's, lists
-/// the phone's folder: the orphan goes and the file his row references stays
+/// device of his is left to clean up, so Ana's, an admin's, lists the
+/// phone's folder: the orphan goes and the file his row references stays
 /// (§17.10).
 #[tokio::test]
-async fn the_storage_owner_cleans_up_after_a_members_last_device() {
+async fn an_admin_cleans_up_after_a_members_last_device() {
     let (network, _, kept) = bens_upload().await;
     let orphan = orphan(&network).await;
     let ana = &network.devices[0];
@@ -177,5 +177,33 @@ async fn the_storage_owner_cleans_up_after_a_members_last_device() {
     network.sync(0).await;
     assert!(ana.storage.status(&orphan).await.unwrap().is_none());
     assert!(file_stored(ana, kept).await);
+    network.close().await;
+}
+
+/// Ana owns the store, and Ben is an admin. Ana's file "kept" is in a row of
+/// hers, and her phone also left an orphan. Ben removes her phone, her only
+/// device, and Ana stays a member. Neither she nor the storage owner has a
+/// device left, so Ben's, an admin's, lists the phone's folder: the orphan
+/// goes and the file her row references stays (§17.10).
+#[tokio::test]
+async fn an_admin_cleans_up_when_the_owner_has_no_device_left() {
+    let mut network = file_network().await;
+    network
+        .join_as(1, InviteTarget::NewMember { role: MemberRole::Admin, name: "Ben".into() })
+        .await;
+    let ana = &network.devices[0];
+    let kept = attach(&ana.handle, "kept", vec![5; 1024]).await;
+    wait_for_empty_queue(&ana.handle).await;
+    network.sync(0).await;
+    network.sync(1).await;
+    let phone = ana.handle.device_id();
+    let orphan =
+        ObjectPath::file(ana.store, phone, FileId(coven_foundation::id_source::UuidIds.new_id()));
+    ana.storage.create(&orphan, b"never named").await.unwrap();
+    let ben = &network.devices[1];
+    ben.handle.remove_device(phone).await.unwrap();
+    network.sync(1).await;
+    assert!(ben.storage.status(&orphan).await.unwrap().is_none());
+    assert!(file_stored(ben, kept).await);
     network.close().await;
 }

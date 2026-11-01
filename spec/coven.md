@@ -5086,11 +5086,11 @@ names it, and goes once a floor names a newer one that has passed grace, as
 Ana's own would.
 
 - **Which device.** The devices that delete the gone device's files (§17.10)
-  delete its snapshots too: its member's other devices, or the store owner's
-  once the member has no device left that isn't gone. The bodies were stored
-  with that member's provider access, as its files were, so these devices have
-  permission to delete them.
-  Every device reads who they are from the same history.
+  delete its snapshots too: its member's other devices, or every active
+  admin's once the member has no device left that isn't gone. Every member's
+  provider access reaches the store's objects (§17.10), so these devices have
+  permission to delete them. Every device reads who they are from the same
+  history.
 - **Which bodies.** Nothing a device announces after the entry that stopped it
   counts (§14.1), and the deleting device has applied that entry, so it holds
   every announcement of the gone device there will ever be. A listed body none
@@ -6368,11 +6368,20 @@ sound whenever it is taken: every file it finds becomes a deletion candidate,
 and the reference evidence above alone decides whether it is deleted.
 
 - **Who cleans up.** The gone device's member's other devices clean up its
-  folder. When the member has no device left that isn't gone, because the
-  member was removed or the gone device was their last, the devices of the
-  member who owns the storage do: on S3, the member who created the store, the
-  only account owner history establishes. Ana removes Ben's phone, his only
-  device, and Ben stays a member: Ana's laptop cleans up the phone's folder.
+  folder. When the member has no device left that isn't gone, because the member
+  was removed or the gone device was their last, every active admin's devices
+  do. A store always keeps an admin (§10.1), so this covers the member who owns
+  the storage having no device left too. Ana removes Ben's phone, his only
+  device, and Ben stays a member: Ana's laptop, an admin's, cleans up the
+  phone's folder. Several admins' devices may clean up the same folder; deleting
+  an absent object succeeds, and each checks the reference evidence itself.
+- **Every admin can.** Every member's provider access reaches the store's
+  objects: an S3 member key may list and delete under the store's prefix
+  (Appendix E.12), and Dropbox and OneDrive share the store's folder with each
+  member's account, as an editor on Dropbox and with write access on OneDrive.
+  On CloudKit coven relies on a participant with write access deleting records
+  another participant saved in the shared zone, which Apple documents for shares
+  but which hasn't been checked live for a zone-wide share (Appendix E.1).
 - **Listed once when it goes.** When the entry that stops a device for good
   applies, the device responsible for its cleanup lists `<store>/files/<device>/`
   in its next pass. A completed listing is recorded with that entry and isn't
@@ -8706,6 +8715,10 @@ role (OS 26 and later) could also add and remove them; coven doesn't grant it.
   metadata](https://developer.apple.com/documentation/cloudkit/ckfetchsharemetadataoperation),
   verifies container, owner and zone, then calls
   [CKAcceptSharesOperation](https://developer.apple.com/documentation/cloudkit/ckacceptsharesoperation).
+- Each participant has read/write permission. Coven relies on such a
+  participant deleting records another participant saved, as Apple documents
+  for a share's participants with write permission, to clean up after a device
+  gone for good (§17.10). This hasn't been checked live for a zone-wide share.
 - Removing a member removes only that participant and saves the share. Owner,
   public or otherwise shared access stays, and is reported.
 
