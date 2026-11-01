@@ -65,7 +65,9 @@ async fn the_committed_state_is_the_stored_one() {
     let store = TestStore::new();
     let db =
         store.builder(notes_tables(), crate::test_utils::notes_migrations()).open().await.unwrap();
-    let until = SystemTime::UNIX_EPOCH + Duration::from_nanos(1_700_000_000_000_000_001);
+    // A microsecond past the millisecond: Windows keeps SystemTime in 100ns
+    // steps, so a nanosecond past it would be dropped before coven saw it.
+    let until = SystemTime::UNIX_EPOCH + Duration::from_micros(1_700_000_000_000_001);
     let committed = change(&db, syncing(false, Some(until))).await;
     let stored = SystemTime::UNIX_EPOCH + Duration::from_millis(1_700_000_000_001);
     assert_eq!(committed, syncing(false, Some(stored)));
