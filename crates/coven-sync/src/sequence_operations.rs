@@ -464,16 +464,16 @@ impl SequenceSync {
                         }
                     }
                     ClaimSettlement::DeviceIdInUse => {
-                        return Err(self.state.stop_copy(
-                            crate::DeviceIdEvidence::UnattemptedSlot {
+                        return Err(self
+                            .stop_copy(crate::DeviceIdEvidence::UnattemptedSlot {
                                 slot: claim
                                     .attempts
                                     .last()
                                     .expect("attempt")
                                     .slot_number()
                                     .expect("slot"),
-                            },
-                        ))
+                            })
+                            .await)
                     }
                     _ => unreachable!("settled create"),
                 }

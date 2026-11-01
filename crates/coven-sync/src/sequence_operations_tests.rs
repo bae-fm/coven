@@ -506,3 +506,41 @@ async fn replacing_ones_own_keys_ends_no_operation() {
     assert!(matches!(outcome(&ben, rename).await, Some(OperationOutcome::Landed(_))));
     close(&[&ana, &ben]).await;
 }
+
+/// Ana's phone is restored from a backup, so two copies share its device
+/// id, and the copy has an invite open and a rename journaled. The original
+/// claims a slot; the copy reads it, a slot signed by its own id that it never
+/// attempted, and stops for good (§19.3). No slot applies that stop, yet it
+/// ends the copy's operations and invites as one would: none would ever run.
+#[tokio::test]
+async fn a_copy_stopped_by_history_ends_its_operations_and_invites() {
+    let group = Group::new();
+    let ana = group.device(1).await;
+    group.create(&ana).await;
+    ana.sync
+        .create_invite(
+            crate::InviteTarget::NewMember { role: MemberRole::Member, name: "Carol".into() },
+            crate::InviteAccess::S3AccessKey {
+                access_key_id: "carol-key".into(),
+                secret_access_key: coven_crypto::SecretText::new("secret".into()),
+            },
+            crate::InviteDelivery::Sent { lifetime: crate::InviteLifetime::Day },
+        )
+        .await
+        .unwrap();
+    let (ana, copy) = group.copy(ana).await;
+    let rename = journal(&copy, StoreChange::RenameStore { name: "Copied".into() }).await;
+    insert(&ana.sync.database, "a", "from the original").await;
+    ana.sync.pass().await.unwrap();
+    assert!(matches!(copy.sync.pass().await, Err(SyncError::DeviceIdInUse(_))));
+    assert_eq!(outcome(&copy, rename).await, refused());
+    assert!(copy.database().read(crate::Invite::list).await.unwrap().is_empty());
+    assert!(copy
+        .database()
+        .operations()
+        .await
+        .unwrap()
+        .iter()
+        .all(|record| record.kind != "invite"));
+    close(&[&ana, &copy]).await;
+}

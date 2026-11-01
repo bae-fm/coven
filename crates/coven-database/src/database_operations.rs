@@ -219,6 +219,20 @@ impl Database {
         .await
     }
 
+    /// End every operation the app's writes journaled that still runs, and
+    /// every invite this device made, as the transaction applying a stop for
+    /// good does, for a stop no slot applies: history shows another copy of
+    /// this installation using its device id (§19.3). A failure fails this
+    /// handle with its cause: they would otherwise run, listed, forever.
+    pub async fn end_for_good(&self) -> Result<(), DbError> {
+        self.call(move |inner| {
+            inner
+                .access
+                .with_writer(|writer| writer.state_transaction(crate::operation::end_for_good))
+        })
+        .await
+    }
+
     /// Retire a finished operation. The caller must publish every reserved entry
     /// before discarding; removing this row cannot retire the publication queue.
     pub async fn finish_operation(&self, id: OperationId) -> Result<(), DbError> {

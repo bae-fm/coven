@@ -6853,7 +6853,11 @@ from being sealed with a reused nonce (Appendix D.4).
 
 **What the app is told.** Besides the evidence above, applying a slot that
 replaces this device's id, removes the device or its member, or replaces its
-member's keys stops it and tells the app (§14.1). Restoring never rescues the old
+member's keys stops it and tells the app (§14.1). A stop on the evidence above
+is for good too, though no slot applies it: the copy ends at once every
+operation its app journaled that still runs, refused with `NotAllowed`, and
+every invite it made, as §14.1 describes. None of them would ever run on the
+copy, and its app would follow them forever. Restoring never rescues the old
 installation's queue (§13.1).
 
 **Resetting a device.** The app can reset the device with

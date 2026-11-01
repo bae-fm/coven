@@ -275,6 +275,19 @@ impl SequenceSync {
             .map(Some)
     }
 
+    /// Stop for good on history showing another copy of this installation
+    /// using its device id (§19.3), and end what this copy's app journaled
+    /// and the invites it made: none would ever run, and no slot applies
+    /// this stop to end them (§14.1). A failed write fails the handle with
+    /// its cause, which every call reports.
+    pub(crate) async fn stop_copy(&self, evidence: crate::DeviceIdEvidence) -> SyncError {
+        let stopped = self.state.stop_copy(evidence);
+        if let Err(error) = self.database.end_for_good().await {
+            tracing::error!("a stopped copy's operations stay journaled: {error}");
+        }
+        stopped
+    }
+
     pub(crate) async fn check_copy(
         &self,
         received: &ReceivedSlot,
@@ -287,9 +300,11 @@ impl SequenceSync {
                 .attempted_slot(received.header.claim, path.clone(), received.digest)
                 .await?
         {
-            return Err(self.state.stop_copy(crate::DeviceIdEvidence::UnattemptedSlot {
-                slot: Slot(received.header.after + 1),
-            }));
+            return Err(self
+                .stop_copy(crate::DeviceIdEvidence::UnattemptedSlot {
+                    slot: Slot(received.header.after + 1),
+                })
+                .await);
         }
         Ok(())
     }
@@ -427,7 +442,7 @@ impl SequenceSync {
     #[deny(clippy::wildcard_enum_match_arm)]
     async fn block(&self, session: &mut Session, slot: Slot, error: SyncError) -> SyncError {
         if let SyncError::DeviceIdInUse(evidence) = error {
-            return self.state.stop_copy(evidence);
+            return self.stop_copy(evidence).await;
         }
         if matches!(error, SyncError::Removed) {
             self.state.set(SequenceStatus::Stopped(crate::SyncFailure::Removed));

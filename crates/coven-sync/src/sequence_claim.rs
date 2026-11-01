@@ -50,9 +50,11 @@ impl SequenceSync {
         };
         let path = claim.attempts.last().expect("journal has an attempt");
         if claim.settlement == ClaimSettlement::DeviceIdInUse {
-            return Err(self.state.stop_copy(crate::DeviceIdEvidence::UnattemptedSlot {
-                slot: path.slot_number().expect("claim slot"),
-            }));
+            return Err(self
+                .stop_copy(crate::DeviceIdEvidence::UnattemptedSlot {
+                    slot: path.slot_number().expect("claim slot"),
+                })
+                .await);
         }
         self.remove_compacted_attempts(&claim, session.floor.as_ref()).await?;
         if claim.settlement == ClaimSettlement::NotLanded {
@@ -104,9 +106,11 @@ impl SequenceSync {
             }
         };
         if result == ClaimSettlement::DeviceIdInUse {
-            return Err(self.state.stop_copy(crate::DeviceIdEvidence::UnattemptedSlot {
-                slot: path.slot_number().expect("claim slot"),
-            }));
+            return Err(self
+                .stop_copy(crate::DeviceIdEvidence::UnattemptedSlot {
+                    slot: path.slot_number().expect("claim slot"),
+                })
+                .await);
         }
         self.remove_compacted_attempts(&claim, floor.as_ref()).await?;
         if result == ClaimSettlement::Landed {
@@ -205,9 +209,11 @@ impl SequenceSync {
             self.database.settle_claim(ClaimRead::Created).await?
         };
         if result == ClaimSettlement::DeviceIdInUse {
-            return Err(self.state.stop_copy(crate::DeviceIdEvidence::UnattemptedSlot {
-                slot: path.slot_number().expect("claim slot"),
-            }));
+            return Err(self
+                .stop_copy(crate::DeviceIdEvidence::UnattemptedSlot {
+                    slot: path.slot_number().expect("claim slot"),
+                })
+                .await);
         }
         self.remove_compacted_attempts(&claim, floor.as_ref()).await?;
         if result == ClaimSettlement::Landed {
@@ -333,16 +339,16 @@ impl SequenceSync {
                         return Ok(());
                     }
                     ClaimSettlement::DeviceIdInUse => {
-                        return Err(self.state.stop_copy(
-                            crate::DeviceIdEvidence::UnattemptedSlot {
+                        return Err(self
+                            .stop_copy(crate::DeviceIdEvidence::UnattemptedSlot {
                                 slot: claim
                                     .attempts
                                     .last()
                                     .expect("attempt")
                                     .slot_number()
                                     .expect("slot"),
-                            },
-                        ))
+                            })
+                            .await)
                     }
                     ClaimSettlement::NotLanded => (),
                 }

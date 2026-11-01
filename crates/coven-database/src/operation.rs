@@ -174,13 +174,32 @@ pub(crate) fn finish(db: &DatabaseConnection, id: OperationId) -> Result<usize, 
 /// invite this device made, once the applied state this transaction commits
 /// stops this installation for good: it removes or replaces this device,
 /// removes its member, or binds its member to a pair it doesn't hold (§12.3,
-/// §14.1). None of them would ever run. The operation whose claim the applied
-/// slots record as landed, the removal itself when this device claimed it,
-/// ends landed at its slot; the stop refuses every other. An invite ends with
-/// the operations it started, its approval's binding and its access record:
-/// their journal rows, open claim and pending records go, and it leaves
-/// `coven_invites` (§13.2).
+/// §14.1). None of them would ever run (`end_for_good`).
 pub(crate) fn end_on_stop(db: &DatabaseConnection) -> Result<(), DbError> {
+    let (running, invites) = journaled_for_good(db)?;
+    if (running.is_empty() && invites.is_empty()) || !stopped(db)? {
+        return Ok(());
+    }
+    end(db, running, invites)
+}
+
+/// End every operation an app's write journaled that still runs, and every
+/// invite this device made, for an installation stopped for good. The
+/// operation whose claim the applied slots record as landed, the removal
+/// itself when this device claimed it, ends landed at its slot; the stop
+/// refuses every other. An invite ends with the operations it started, its
+/// approval's binding and its access record: their journal rows, open claim
+/// and pending records go, and it leaves `coven_invites` (§13.2).
+pub(crate) fn end_for_good(db: &DatabaseConnection) -> Result<(), DbError> {
+    let (running, invites) = journaled_for_good(db)?;
+    end(db, running, invites)
+}
+
+/// The app's operations still running, and the journal rows of invites and
+/// of the operations invites started.
+fn journaled_for_good(
+    db: &DatabaseConnection,
+) -> Result<(Vec<OperationId>, Vec<OperationId>), DbError> {
     let running = db.query(
         "SELECT operation FROM _coven_app_operations WHERE outcome IS NULL ORDER BY operation",
         [],
@@ -191,9 +210,14 @@ pub(crate) fn end_on_stop(db: &DatabaseConnection) -> Result<(), DbError> {
         [INVITE],
         |r| Ok(OperationId(r.get(0)?)),
     )?;
-    if (running.is_empty() && invites.is_empty()) || !stopped(db)? {
-        return Ok(());
-    }
+    Ok((running, invites))
+}
+
+fn end(
+    db: &DatabaseConnection,
+    running: Vec<OperationId>,
+    invites: Vec<OperationId>,
+) -> Result<(), DbError> {
     let landed = crate::claim::landed_operation(db)?;
     for id in running {
         let outcome = match landed {

@@ -662,7 +662,8 @@ steps are every writer that acts on them:
 - a pass, which reads the invite's journal row, does its storage work with no
   transaction open, and writes after. Any other writer may commit in between;
 - a crash, which loses the pass's read and nothing durable;
-- slots a pass applies: the approver's demotion, and a stop for good.
+- what a pass learns: the approver's demotion, and a stop for good, from a
+  slot it applies or from history showing another copy of this device.
 
 The row carries its step, and every change of the row increases it. A pass's
 write, and the pending record it saves for what it found, are conditional on

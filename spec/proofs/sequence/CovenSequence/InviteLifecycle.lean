@@ -13,8 +13,9 @@ Every writer that acts on them is a step:
   transaction open, and only then writes. Between its read and its write any
   other writer may commit;
 - a crash, which loses the pass's read and nothing durable;
-- the slots a pass applies: the approver's demotion, and a stop for good
-  (removal, replacement or member keys replaced, §14.1).
+- what a pass learns: the approver's demotion, and a stop for good (removal,
+  replacement or member keys replaced, §14.1, or history showing another copy
+  of this device, §19.3).
 
 The journal row carries its step, which every change of the row increases.
 A pass's write is conditional on the step it read; so is the pending record
