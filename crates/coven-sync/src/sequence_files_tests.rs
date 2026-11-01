@@ -76,7 +76,7 @@ async fn a_removed_uploader_is_listed_once_at_its_removal() {
     assert_eq!(listings(), 1);
     ana.sync.pass().await.unwrap();
     assert_eq!(listings(), 1);
-    ana.sync.clean_up_removed_files().await.unwrap();
+    ana.sync.clean_up_gone_devices_files().await.unwrap();
     assert_eq!(listings(), 2);
     ana.database().close().await.unwrap();
     ben.database().close().await.unwrap();

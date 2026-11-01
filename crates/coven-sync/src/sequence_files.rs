@@ -141,7 +141,7 @@ impl SequenceSync {
     /// the operation also records. A device gone for good later uploads only
     /// files that can never be referred to, so running this at any time is
     /// safe.
-    pub async fn clean_up_removed_files(&self) -> Result<(), SyncError> {
+    pub async fn clean_up_gone_devices_files(&self) -> Result<(), SyncError> {
         let mut session = self.session.lock().await;
         let member = self.member.read()?.ok_or(StorageFailure::MemberKeysMissing)?;
         let mut ring = self.ring(&mut session, &member).await?;

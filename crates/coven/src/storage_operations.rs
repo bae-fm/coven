@@ -113,13 +113,13 @@ impl StorageConnections {
         live.sync.reload_from_snapshot().await
     }
 
-    pub(crate) async fn clean_up_removed_files(&self) -> Result<(), SyncError> {
+    pub(crate) async fn clean_up_gone_devices_files(&self) -> Result<(), SyncError> {
         let mut live = self.live.lock().await;
         self.ready(&mut live).await?;
         let Connection::Active(live) = &*live else {
             return Err(SyncError::NoStorage);
         };
-        live.sync.clean_up_removed_files().await
+        live.sync.clean_up_gone_devices_files().await
     }
 
     /// Make an invite as a step of an app's write, from the recorded

@@ -6382,12 +6382,12 @@ and the reference evidence above alone decides whether it is deleted.
   the person deletes the key in the provider's console (§14.3), and a device
   gone while its member keeps access can still publish into its folder. The
   app's cleanup of the files of devices gone for good
-  ([api.md E5](api.md#e5-storage-and-sync)) lists the folder of every such
-  device this device is responsible for again, then deletes every candidate
-  nothing refers to that every other device has seen, as above; later passes
-  delete the rest once those devices write. It returns the result, or the
-  failure that stopped it. It can run at any time and as often as the app
-  likes.
+  (`clean_up_gone_devices_files`, [api.md E5](api.md#e5-storage-and-sync)) lists
+  the folder of every such device this device is responsible for again, then
+  deletes every candidate nothing refers to that every other device has seen, as
+  above; later passes delete the rest once those devices write. It returns the
+  result, or the failure that stopped it. It can run at any time and as often as
+  the app likes.
 - An incomplete listing fails visibly and retries. It records nothing, so
   candidates come only from complete listings.
 - **Replacing a member's keys** stops for good each of the member's devices

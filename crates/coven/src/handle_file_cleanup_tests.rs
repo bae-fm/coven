@@ -70,11 +70,11 @@ async fn an_upload_after_removal_is_deleted_by_the_cleanup_call() {
     let late = orphan(&network).await;
     network.sync(0).await;
     assert!(ana.storage.status(&late).await.unwrap().is_some());
-    ana.handle.clean_up_removed_files().await.unwrap();
+    ana.handle.clean_up_gone_devices_files().await.unwrap();
     assert!(ana.storage.status(&late).await.unwrap().is_none());
     assert!(file_stored(&network.devices[1], kept).await);
     // Running it again finds nothing more and keeps what is referenced.
-    ana.handle.clean_up_removed_files().await.unwrap();
+    ana.handle.clean_up_gone_devices_files().await.unwrap();
     assert!(file_stored(&network.devices[1], kept).await);
     network.close().await;
 }
@@ -96,12 +96,12 @@ async fn a_failed_cleanup_listing_reaches_the_caller() {
     );
     ana.storage.set_faults(faults).await;
     assert!(matches!(
-        ana.handle.clean_up_removed_files().await,
+        ana.handle.clean_up_gone_devices_files().await,
         Err(SyncError::Storage(error)) if error.failure() == StorageFailure::Network
     ));
     assert!(ana.storage.status(&late).await.unwrap().is_some());
     ana.storage.set_faults(Faults::none()).await;
-    ana.handle.clean_up_removed_files().await.unwrap();
+    ana.handle.clean_up_gone_devices_files().await.unwrap();
     assert!(ana.storage.status(&late).await.unwrap().is_none());
     network.close().await;
 }

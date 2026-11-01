@@ -16,8 +16,8 @@ impl CovenHandle {
     /// Returns once the listing and deletions finish, or with the failure
     /// that stopped them; `SyncError::SnapshotPending` while a snapshot of
     /// this device's is still being published.
-    pub async fn clean_up_removed_files(&self) -> Result<(), SyncError> {
-        Box::pin(self.storage.clean_up_removed_files()).await
+    pub async fn clean_up_gone_devices_files(&self) -> Result<(), SyncError> {
+        Box::pin(self.storage.clean_up_gone_devices_files()).await
     }
 }
 

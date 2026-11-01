@@ -5143,7 +5143,7 @@ impl CovenHandle {
     /// deletions finish, or with the failure that stopped them, which the
     /// RetainFiles operation also records. `SnapshotPending` while this
     /// device's own snapshot is still being published.
-    pub async fn clean_up_removed_files(&self) -> Result<(), SyncError>;
+    pub async fn clean_up_gone_devices_files(&self) -> Result<(), SyncError>;
 }
 ```
 
