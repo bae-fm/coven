@@ -238,7 +238,14 @@ fn calls_whose_runtime_is_shutting_down_return_shutdown() {
         assert!(matches!(
             database.write(|_| Ok(())).await,
             Err(DbError::Shutdown(Shutdown {
-                operation: "stage the write's files",
+                operation: "database call",
+                outcome: ShutdownOutcome::NotRun,
+            }))
+        ));
+        assert!(matches!(
+            database.stage_files(|_| Ok::<_, DbError>(())).await,
+            Err(DbError::Shutdown(Shutdown {
+                operation: "stage files",
                 outcome: ShutdownOutcome::NotRun,
             }))
         ));
