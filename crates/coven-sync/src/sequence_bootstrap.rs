@@ -297,6 +297,32 @@ impl<'a> KeyScan<'a> {
     }
 }
 
+impl SequenceSync {
+    /// Fail as `restorable` does once the applied history has replaced or
+    /// removed the pair this installation holds after binding it, as for a
+    /// device restoring from an old code (§13.1). A pair the history never
+    /// bound, such as a joiner's before its admission applies, has left
+    /// nothing.
+    pub(crate) fn check_left(
+        &self,
+        session: &Session,
+        member: &MemberIdentity,
+    ) -> Result<(), SyncError> {
+        let keys = member.keys().public_keys();
+        let bound = session
+            .history
+            .bindings
+            .iter()
+            .any(|binding| binding.member == member.member() && binding.keys == keys);
+        match self.admission(session, member) {
+            admission @ (MemberBinding::Replaced | MemberBinding::Removed) if bound => {
+                restorable(admission, member)
+            }
+            _ => Ok(()),
+        }
+    }
+}
+
 /// Check a restored member's pair before it can register: an old restore
 /// code cannot bind its keys back (§13.1).
 pub(crate) fn restorable(

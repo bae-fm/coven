@@ -272,6 +272,13 @@ impl SequenceSync {
                 timing.log(applied, writes, applying, self.clock.elapsed());
             }
             *ring = tentative_ring;
+            // Slots past one that replaced or removed this member's pair are
+            // no longer this installation's to read: a later slot it can't
+            // open, under a key rotated since, would otherwise hide why it
+            // stopped (§13.1).
+            if failure.is_some() || next <= known_end {
+                self.check_left(session, member)?;
+            }
             if let Some((slot, error)) = failure {
                 // A failed slot read supplies no bytes to apply, and a local
                 // failure says nothing about the slot. A failure during

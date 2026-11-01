@@ -3613,7 +3613,10 @@ Ana's new laptop scans the code from her phone and signs in to her Dropbox. Then
    and applies the slots after it.
 2. It checks that the code's id and keys match a current, active member. An old
    code, whose keys have since been replaced, fails with `MemberKeysReplaced`; it
-   can't put its keys back.
+   can't put its keys back. That holds even when the store key was rotated after
+   the replacement, so the old keys can't open the slots that follow: loading
+   stops at the first such slot and reports the replacement it already applied,
+   not the key it lacks.
 3. It registers itself as a new device through an operation (§11). A claim
    interrupted along the way is settled before it is retried or cancelled.
 4. It finishes loading and hands the app the open store.

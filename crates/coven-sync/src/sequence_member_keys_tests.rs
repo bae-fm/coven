@@ -104,6 +104,37 @@ async fn an_admin_publishes_a_prepared_pair_with_copies_for_its_member() {
     }
 }
 
+/// Ana replaces Ben's pair, a pass rotates the store key his old pair could
+/// read, and her next entry goes out under the new key. Ben's laptop, still
+/// on the old pair, reads forward: the slot replacing his pair applies, and
+/// it stops with `MemberKeysReplaced`, not on the later slot it can't open
+/// (§12.3, §13.1).
+#[tokio::test]
+async fn a_replaced_pair_stops_at_its_replacement_before_a_slot_it_cannot_open() {
+    let group = Group::new();
+    let ana = group.device(1).await;
+    let ben = group.device(2).await;
+    group.create(&ana).await;
+    group.admit(&ana, &ben).await;
+    let keys = coven_format::test_utils::keys_from_seed(12).public_keys();
+    ana.sync.replace_member_keys_for(ben.identity.member(), keys).await.unwrap();
+    ana.sync.pass().await.unwrap();
+    assert!(ana.sync.keys.read().unwrap().unwrap().store_key_ids().count() > 1, "rotated");
+    ana.sync
+        .administer(coven_format::admin::StoreChange::RenameStore { name: "Family".into() })
+        .await
+        .unwrap();
+    let result = ben.sync.pass().await;
+    assert!(matches!(result, Err(SyncError::MemberKeysReplaced { .. })), "{result:?}");
+    // A new installation restoring from Ben's old code meets the same.
+    let restored = group.newcomer(ben.identity.clone(), group.storage.for_device()).await;
+    let result = restored.sync.unlock().await;
+    assert!(matches!(result, Err(SyncError::MemberKeysReplaced { .. })), "{result:?}");
+    for device in [&ana, &ben, &restored] {
+        device.sync.database.close().await.unwrap();
+    }
+}
+
 use coven_crypto::custody::Keychain;
 use coven_crypto::SecretBytes;
 
