@@ -91,18 +91,16 @@ async fn a_recovery_invite_rebinds_a_lost_member_through_the_public_calls() {
     let (result, carol) = join_and_approve(&owner.handle, joining, |_| async {}).await;
     let lost = result.unwrap().unwrap();
     let old_code = lost.restore_code().await.unwrap();
-    let recovery = owner
-        .handle
-        .create_invite(
-            InviteTarget::ReplaceMemberKeys { member: carol },
-            InviteAccess::S3AccessKey {
-                access_key_id: "recovery-key".into(),
-                secret_access_key: SecretText::new("recovery-secret".into()),
-            },
-            crate::InviteDelivery::Sent { lifetime: crate::InviteLifetime::Day },
-        )
-        .await
-        .unwrap();
+    let recovery = crate::tests::invite(
+        &owner.handle,
+        InviteTarget::ReplaceMemberKeys { member: carol },
+        InviteAccess::S3AccessKey {
+            access_key_id: "recovery-key".into(),
+            secret_access_key: SecretText::new("recovery-secret".into()),
+        },
+        crate::InviteDelivery::Sent { lifetime: crate::InviteLifetime::Day },
+    )
+    .await;
     assert_eq!(recovery.member, carol);
     let second = Installation::new();
     let joining = second.run(
@@ -357,18 +355,16 @@ async fn a_restore_learns_the_renamed_name_from_the_floor_snapshot() {
 #[tokio::test]
 async fn an_in_person_join_loads_without_an_approval_call() {
     let owner = Owner::new(CloudProvider::S3, false).await;
-    let invite = owner
-        .handle
-        .create_invite(
-            InviteTarget::NewMember { role: MemberRole::Member, name: "Carol".into() },
-            InviteAccess::S3AccessKey {
-                access_key_id: "invited-key".into(),
-                secret_access_key: SecretText::new("invited-secret".into()),
-            },
-            InviteDelivery::InPerson,
-        )
-        .await
-        .unwrap();
+    let invite = crate::tests::invite(
+        &owner.handle,
+        InviteTarget::NewMember { role: MemberRole::Member, name: "Carol".into() },
+        InviteAccess::S3AccessKey {
+            access_key_id: "invited-key".into(),
+            secret_access_key: SecretText::new("invited-secret".into()),
+        },
+        InviteDelivery::InPerson,
+    )
+    .await;
     let install = Installation::new();
     let (_, cancel) = watch::channel(false);
     let joining = install.run(

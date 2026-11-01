@@ -353,10 +353,12 @@ async fn an_explicit_retry_reads_a_request_before_its_backoff_is_due() {
     }
 }
 
-/// A grant the provider refuses answers the call at once with that refusal,
-/// and the invite takes back what it intended (T296).
+/// Ana invites the account that holds the store. The provider refuses the
+/// grant, which is the invite's pending record under its operation, beside
+/// the invite listed without a code; cancelling it ends the invite and takes
+/// back the account's intention (§13.2, §14.2).
 #[tokio::test]
-async fn a_refused_grant_answers_the_invite_call_and_settles_the_invite() {
+async fn a_refused_grant_is_the_invites_pending_record_until_cancelled() {
     let group = Group::shared();
     let ana = group.device(1).await;
     group.create_with_access(&ana, MemberAccess::ProviderAccount("ana@example.org".into())).await;
@@ -368,11 +370,19 @@ async fn a_refused_grant_answers_the_invite_call_and_settles_the_invite() {
             crate::InviteDelivery::Sent { lifetime: crate::InviteLifetime::Day },
         )
         .await;
+    let Err(SyncError::Pending(pending)) = result else { panic!("{:?}", result.err()) };
     assert!(
-        matches!(&result, Err(SyncError::Storage(error)) if error.failure() == coven_storage::StorageFailure::InviteeIsStoreOwner),
-        "{:?}",
-        result.err()
+        matches!(&pending.reason, PendingReason::Storage { failure, .. } if *failure == coven_storage::StorageFailure::InviteeIsStoreOwner),
+        "{pending:?}"
     );
+    let open = listed(&ana).await;
+    assert_eq!(open.len(), 1);
+    assert_eq!(open[0].stage, InviteStage::Granting);
+    assert!(
+        matches!(pending.subject, PendingSubject::Operation { id, .. } if id == open[0].operation)
+    );
+    ana.sync.cancel_invite(open[0].id).await.unwrap();
+    assert!(listed(&ana).await.is_empty());
     assert!(ana
         .sync
         .database
@@ -385,6 +395,54 @@ async fn a_refused_grant_answers_the_invite_call_and_settles_the_invite() {
         ana.sync.database.provider_access("owner@example.test".into()).await.unwrap().unwrap();
     assert!(!access.intended);
     ana.sync.database.close().await.unwrap();
+}
+
+/// Ben makes Ana a member while her phone is behind. Her write makes an
+/// invite for Carol, checked against the slots her phone had applied; the
+/// pass that catches up refuses it before granting anything. The refusal is
+/// the invite's pending record, beside the invite listed without a code,
+/// until her app cancels it (§11.1, §13.2).
+#[tokio::test]
+async fn an_invite_its_maker_can_no_longer_make_is_refused_before_any_grant() {
+    let group = Group::shared();
+    let ana = group.device(1).await;
+    let ben = group.device(2).await;
+    group.create_with_access(&ana, MemberAccess::ProviderAccount("ana@example.org".into())).await;
+    group.admit(&ana, &ben).await;
+    ben.sync.pass().await.unwrap();
+    ben.sync
+        .administer(coven_format::admin::StoreChange::ChangeRole {
+            member: ana.identity.member(),
+            role: MemberRole::Member,
+        })
+        .await
+        .unwrap();
+    let result = ana
+        .sync
+        .create_invite(
+            InviteTarget::NewMember { role: MemberRole::Member, name: "Carol".into() },
+            InviteAccess::ProviderAccount { email: "carol@example.org".into() },
+            crate::InviteDelivery::Sent { lifetime: crate::InviteLifetime::Day },
+        )
+        .await;
+    let Err(SyncError::Pending(pending)) = result else { panic!("{:?}", result.err()) };
+    assert_eq!(pending.reason, PendingReason::Rejected(OperationRejection::NotAllowed));
+    let open = listed(&ana).await;
+    assert_eq!((open.len(), &open[0].stage), (1, &InviteStage::Granting));
+    assert!(
+        matches!(pending.subject, PendingSubject::Operation { id, .. } if id == open[0].operation)
+    );
+    // Nothing was shared with Carol's account.
+    assert!(ana.sync.database.provider_access("carol@example.org".into()).await.unwrap().is_none());
+    // The refusal never retries on its own: later passes leave it.
+    ana.sync.pass().await.unwrap();
+    assert_eq!(listed(&ana).await.len(), 1);
+    ana.sync.cancel_invite(open[0].id).await.unwrap();
+    assert!(listed(&ana).await.is_empty());
+    assert!(ana.sync.database.operations().await.unwrap().is_empty());
+    for device in [&ana, &ben] {
+        device.sync.database.close().await.unwrap();
+    }
 }
 
 /// The app's live query on `coven_invites` follows each invite in the

@@ -4,6 +4,167 @@
 
 use super::*;
 
+/// What the app asks an invite for: whom it adds or recovers, how they
+/// reach storage, and how the invite reaches them (§13.2).
+pub struct NewInvite {
+    /// A new person, or an existing member whose pair the invite replaces.
+    pub target: InviteTarget,
+    /// The provider account to share with, or the S3 key made for them.
+    pub access: InviteAccess,
+    /// In person or sent, which fixes its lifetime and its approval.
+    pub delivery: InviteDelivery,
+}
+
+/// Make an invite, as a step of a write (§13.2), and return its id, the
+/// member id it fixes and its operation. The write checks the invite against
+/// the slots this device has applied, then journals it, with or without
+/// storage; the invite is listed in `coven_invites` from its commit, without
+/// a code. Once the write commits, a pass is asked for, which checks the
+/// invite again against the history it catches up with, grants its storage
+/// access and fixes its code. A check that fails there, or a failed grant,
+/// is the invite's pending record in `coven_pending`, under its operation;
+/// the app cancels the invite to end it. The invite expires after the
+/// delivery's lifetime by this device's clock, from `now`.
+///
+/// Made by a device that isn't a registered admin, the step fails with
+/// `Rejected(NotAllowed)`; for a replacement of a member who isn't active,
+/// with `Rejected(TargetGone)`, and of this device's own member, with
+/// `Rejected(NotAllowed)`. A name that isn't one fails with `Format`, and
+/// access that doesn't fit `location` with its storage failure.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "a step takes the device's identity, its id source, clock and \
+              location, and the sync state its commit wakes, beside the invite"
+)]
+pub fn create_invite(
+    sql: &SqlContext<'_, '_>,
+    device: DeviceId,
+    held: &MemberIdentity,
+    ids: &dyn IdSource,
+    now: SystemTime,
+    location: &coven_storage::StorageConfig,
+    state: Arc<SyncState>,
+    invite: NewInvite,
+) -> Result<(InviteId, MemberId, OperationId), SyncError> {
+    let NewInvite { target, access, delivery } = invite;
+    if let InviteTarget::NewMember { name, .. } = &target {
+        coven_format::value::name(name)?;
+    }
+    if matches!(
+        location,
+        coven_storage::StorageConfig::Dropbox {
+            location: coven_storage::DropboxLocation::AppFolder,
+            ..
+        }
+    ) {
+        return Err(StorageFailure::DropboxAppFolderNotShareable.into());
+    }
+    let grant = invite_grant(access, location.provider())?;
+    let secret = InviteSecret::generate()?;
+    let secret = SecretText::new(serde_json::to_string(secret.to_secret_bytes().as_bytes())?);
+    let expires_at = now.checked_add(delivery.lifetime()).ok_or(
+        StorageFailure::InvalidConfiguration
+            .with_source("the clock cannot represent the invite's expiry"),
+    )?;
+    let id = InviteId(ids.new_id());
+    let made = sql.journal_step(|journal| {
+        let applied = journal.store_state()?;
+        let me = crate::admin_steps::registered(&applied, device, held)?;
+        if !applied
+            .members
+            .get(&me)
+            .is_some_and(|value| !value.removed && value.role == MemberRole::Admin)
+        {
+            return Err(SyncError::Rejected(OperationRejection::NotAllowed));
+        }
+        let (member, binding, invitee) = match target {
+            InviteTarget::NewMember { role, name } => {
+                (MemberId(ids.new_id()), InviteBinding::Add { role }, Some(name))
+            }
+            InviteTarget::ReplaceMemberKeys { member: target } => {
+                let Some(existing) = applied.members.get(&target).filter(|value| !value.removed)
+                else {
+                    return Err(SyncError::Rejected(OperationRejection::TargetGone(
+                        crate::EntryTarget::Member(target),
+                    )));
+                };
+                // Replacing this installation's own pair stops the device that
+                // must finish the invite; members replace their own keys directly.
+                if target == me {
+                    return Err(SyncError::Rejected(OperationRejection::NotAllowed));
+                }
+                if let InviteGrant::Account { email } = &grant {
+                    if !existing
+                        .access
+                        .same_credential(&MemberAccess::ProviderAccount(email.clone()))
+                    {
+                        return Err(StorageFailure::InvalidConfiguration
+                            .with_source(
+                                "a replacement invite shares the member's recorded account",
+                            )
+                            .into());
+                    }
+                }
+                (target, InviteBinding::Replace { expected: existing.keys }, None)
+            }
+        };
+        let work = InviteWork {
+            id,
+            member,
+            invitee,
+            delivery: delivery.kind(),
+            binding,
+            access: grant,
+            secret,
+            expires_at,
+            state: InviteState::Requested,
+        };
+        let operation = journal.start_operation(&NewOperation {
+            kind: INVITE.into(),
+            data: serde_json::to_vec(&work)?,
+            started_by: "create_invite".into(),
+            pauses_writes: false,
+        })?;
+        Ok((id, member, operation))
+    })?;
+    sql.after_commit(move || state.request_pass());
+    Ok(made)
+}
+
+/// The storage access an invite grants, as the location allows it: a
+/// provider account to share with, or an S3 key made for the person.
+fn invite_grant(access: InviteAccess, provider: CloudProvider) -> Result<InviteGrant, SyncError> {
+    match access {
+        InviteAccess::ProviderAccount { email } => {
+            let email = email.trim().to_ascii_lowercase();
+            if email.is_empty() {
+                return Err(StorageFailure::InvalidConfiguration
+                    .with_source("invite account is empty")
+                    .into());
+            }
+            if provider == CloudProvider::S3 {
+                return Err(StorageFailure::InvalidConfiguration
+                    .with_source("an S3 invitation needs its own access key")
+                    .into());
+            }
+            Ok(InviteGrant::Account { email })
+        }
+        InviteAccess::S3AccessKey { access_key_id, secret_access_key } => {
+            if access_key_id.is_empty() || secret_access_key.as_str().is_empty() {
+                return Err(StorageFailure::InvalidConfiguration
+                    .with_source("invite access key is empty")
+                    .into());
+            }
+            if provider != CloudProvider::S3 {
+                return Err(StorageFailure::InvalidConfiguration
+                    .with_source("an access-key invitation requires S3")
+                    .into());
+            }
+            Ok(InviteGrant::S3Key(S3Credentials { access_key_id, secret_access_key }))
+        }
+    }
+}
+
 /// Approve exactly this checked request of a sent invite, as a step of a
 /// write (§13.2), and return the operation that binds its pair: the write
 /// journals it, and the invite's approval begins, with or without storage.
@@ -114,7 +275,7 @@ fn end_invite(
                     return Err(SyncError::InvitationChanged);
                 }
             }
-            (InviteState::Grant | InviteState::Waiting { .. }, None) => (),
+            (InviteState::Requested | InviteState::Grant | InviteState::Waiting { .. }, None) => {}
             _ => return Err(SyncError::InvitationChanged),
         }
         work.state = InviteState::Settled;

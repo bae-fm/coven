@@ -130,9 +130,9 @@ doesn't, and what it assumes. A reader who only wants the story can skip to §3.
 Ana's commit on the plane needs no network. Neither does a read of data already
 on her phone, nor renaming the Gifts circle: her write journals the rename, and
 it lands once she is back online (§11.1). Two things do need storage: reading a
-file whose bytes aren't cached yet (§17.7), and the admin operations that still
-catch up with the sequence before they journal anything, such as making an
-invite (§11.1).
+file whose bytes aren't cached yet (§17.7), and the operations that still catch
+up with the sequence before they journal anything, such as resetting an
+audience (§11.1).
 
 Every check a commit makes uses state already applied on the device. Membership,
 audience and row-key checks (§9.2, §15) can refuse a write, but none of them
@@ -2986,14 +2986,15 @@ to get it right. That path is an *operation*.
 
 1. **Journal.** Record the operation. An admin change the app makes, renaming the
    store, changing a role, removing a member or a device, replacing another
-   member's keys, approving a join request, and making, renaming, deleting or
-   changing the members of a circle, is a step of the app's write (§4). The
-   write checks the change against the slots this device has applied and
-   journals it, offline too. A change that state already refuses fails the
-   write with `SyncError::Rejected(OperationRejection)`; one that state already
-   has journals nothing. The other operations, such as inviting, rotating or
-   resetting, catch up with the sequence first, and a call on a device without
-   storage fails before creating anything.
+   member's keys, and making, renaming, deleting or changing the members of a
+   circle, is a step of the app's write (§4). The write checks the change
+   against the slots this device has applied and journals it, offline too. A
+   change that state already refuses fails the write with
+   `SyncError::Rejected(OperationRejection)`; one that state already has
+   journals nothing. Making, approving, declining and cancelling an invite
+   are steps too (§13.2). The other operations, such as rotating or resetting,
+   catch up with the sequence first, and a call on a device without storage
+   fails before creating anything.
 2. **Catch up and check.** A pass reads and applies the sequence to its end, then
    checks the action again against everything it read. A change that is now
    already satisfied finishes without an entry; one that is no longer allowed is
@@ -3778,10 +3779,25 @@ The entry adding a new member records how they reach storage: their provider
 account, or the id of the S3 key made for them and who holds it. Any admin can
 then take it back later (§14.2, §14.3).
 
+**Making the invite** is a step of a write (§4), with or without storage. Ana's
+app makes Dan's invite and its own row about inviting him in one write. The
+write checks the invite against the slots her phone has applied: she must be a
+registered admin, and a member it recovers must be active. It fixes the member
+id and the secret, journals the invite, and returns its id. A pass then catches
+up and checks the invite again before granting anything: a slot Ana's phone
+hadn't read yet may have taken away her role, or her account's hold on the
+storage. Only then does it share the folder with Dan's account and fix the
+code. The check that refuses it, or a grant the provider refuses, is the
+invite's pending record, under its operation; Ana's app shows it beside the
+invite, and Ana cancels the invite to end it. Without the second check, an
+admin demoted while offline could still share the store's storage with someone
+new.
+
 **Ana's open invites.** Ana's phone lists the invites it made that haven't
 ended: the person's name, the access granted, in person or sent, when it
-expires, the code to show again, and where each is: waiting for its request
-or Ana's decision, or approving it. An approval under way names the
+expires, the operation that names its pending record, and where each is:
+granting its access, waiting for its request or Ana's decision with the code to
+show again, or approving it. An approval under way names the
 operation that binds the pair, so Ana's app shows it as being approved,
 follows its outcome, and offers no second decision. They
 are a view of its operations journal, `coven_invites` (§4), which a live query

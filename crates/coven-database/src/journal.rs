@@ -47,6 +47,12 @@ impl<'write> Journal<'write> {
         crate::sequence::applied(self.files.database)
     }
 
+    /// Journal an operation before its first step, which sync runs and
+    /// ends on its own; `coven_operations` doesn't list it.
+    pub fn start_operation(&self, operation: &NewOperation) -> Result<OperationId, DbError> {
+        crate::operation::insert(self.files.database, operation)
+    }
+
     /// Journal an operation the app's write asks for, of `kind` as sync
     /// names it, before its first step. It is listed in `coven_operations`
     /// from this write's commit until the app acknowledges its outcome.

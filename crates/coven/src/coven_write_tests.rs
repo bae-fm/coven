@@ -218,18 +218,21 @@ async fn a_new_circle_takes_rows_once_its_slot_applies() {
     network.close().await;
 }
 
-/// Ana cancels one of her invites with sync stopped, beside a row of her
-/// app's: the invite leaves her list in that write. Once the other's
-/// lifetime has ended, cancelling it fails her write, which keeps neither
-/// her row nor the cancel; coven writes that invite's expiry itself (§13.2).
+/// Ana makes two invites with sync stopped, in a write beside a row of her
+/// app's: both are listed at once, without codes, which a pass fixes once
+/// storage is connected. She cancels one in a write of its own, and it
+/// leaves her list. Once the other's lifetime has ended, cancelling it fails
+/// her write, which keeps neither her row nor the cancel; coven writes that
+/// invite's expiry itself (§13.2).
 #[tokio::test]
-async fn an_invite_ends_in_the_apps_write_with_sync_stopped() {
+async fn invites_are_made_and_ended_in_the_apps_writes_with_sync_stopped() {
     let network = Network::new(1).await;
     // The expiry wakes by the fixed clock, not after a day.
     network.polling.hold_waits();
     let ana = &network.devices[0].handle;
+    stopped(ana).await;
     let invite = |key: &str| {
-        ana.create_invite(
+        (
             InviteTarget::NewMember { role: MemberRole::Member, name: "Carol".into() },
             InviteAccess::S3AccessKey {
                 access_key_id: key.into(),
@@ -238,26 +241,36 @@ async fn an_invite_ends_in_the_apps_write_with_sync_stopped() {
             crate::InviteDelivery::Sent { lifetime: crate::InviteLifetime::Day },
         )
     };
-    let (first, second) = (invite("first").await.unwrap(), invite("second").await.unwrap());
-    stopped(ana).await;
+    let (first, second) = (invite("first"), invite("second"));
+    let made = ana
+        .write(move |sql| {
+            let first = sql.create_invite(first.0, first.1, first.2)?;
+            let second = sql.create_invite(second.0, second.1, second.2)?;
+            sql.execute("INSERT INTO parents(id,label,value) VALUES('invite','made',1)", [])?;
+            Ok((first, second))
+        })
+        .await
+        .unwrap();
+    let ((first, _, _), (second, _, second_operation)) = made;
     let mut invites = ana.test_invites();
-    assert_eq!(invites.next().await, [first.clone(), second.clone()]);
-    let cancelled = first.id;
+    let listed = invites.next().await;
+    assert_eq!(listed.iter().map(|invite| invite.id).collect::<Vec<_>>(), [first, second]);
+    assert!(listed.iter().all(|invite| invite.stage == InviteStage::Granting));
+    assert_eq!(listed[1].operation, second_operation);
+    assert_eq!(parents(ana).await, 1);
     ana.write(move |sql| {
-        sql.cancel_invite(&cancelled)?;
-        sql.execute("INSERT INTO parents(id,label,value) VALUES('invite','cancelled',1)", [])?;
+        sql.cancel_invite(&first)?;
+        sql.execute("UPDATE parents SET label='cancelled' WHERE id='invite'", [])?;
         Ok(())
     })
     .await
     .unwrap();
-    assert_eq!(invites.next().await, std::slice::from_ref(&second));
-    assert_eq!(parents(ana).await, 1);
-    network.clock.set(second.expires_at);
-    let late = second.id;
+    assert_eq!(invites.next().await, listed[1..]);
+    network.clock.set(listed[1].expires_at);
     let result = ana
         .write(move |sql| {
             sql.execute("INSERT INTO parents(id,label,value) VALUES('late','too late',2)", [])?;
-            sql.cancel_invite(&late)?;
+            sql.cancel_invite(&second)?;
             Ok(())
         })
         .await;

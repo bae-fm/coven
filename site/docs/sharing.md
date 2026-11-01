@@ -59,9 +59,8 @@ admin change follows one path, an *operation*:
    of the app's write. The write checks the change against what this device has
    applied and journals it, offline too, so the app's own rows about it commit
    with it. A change that state already refuses fails the write with
-   `SyncError::Rejected(OperationRejection)`. Making a circle is a step too.
-   Approving a join request is a step too. Making an invite catches up with
-   the sequence first, so it needs storage.
+   `SyncError::Rejected(OperationRejection)`. Making a circle is a step too,
+   and so are making an invite and approving, declining or cancelling one.
 2. **Catch up and check.** A pass reads and applies the sequence to its end and
    checks the change again.
 3. **Prepare.** Record each piece of preparation in the operation's journal
@@ -192,29 +191,36 @@ they match:
 
 ```rust
 // Ana's phone
-let invite = handle
+let (invite, _, _) = handle
     .create_invite(
         InviteTarget::NewMember { role: MemberRole::Member, name: "Dan".into() },
         InviteAccess::ProviderAccount { email: "dan@example.com".into() },
         InviteDelivery::Sent { lifetime: InviteLifetime::Day },
     )
     .await?;
-let InviteStage::Waiting { code, .. } = &invite.stage else { unreachable!() };
-send_to_dan(code);
 
 // Ana's open invites are the coven_invites view, which a live query follows.
 let mut invites = handle.subscribe(Invite::list);
+let mut sent = false;
 while let Some(open) = invites.next().await {
-    let found = open?.into_iter().find(|i| i.id == invite.id).map(|i| i.stage);
-    // Only a request waiting for Ana is hers to decide.
-    if let Some(InviteStage::Waiting { request: Some(request), .. }) = found {
-        // Ana asks Dan for the number his phone shows.
-        if confirm(&request.confirmation).await {
-            handle.approve_join_request(&request).await?;
-        } else {
-            handle.decline_join_request(&request).await?;
+    let found = open?.into_iter().find(|i| i.id == invite).map(|i| i.stage);
+    match found {
+        // A pass has shared the folder with Dan's account and fixed the code.
+        Some(InviteStage::Waiting { code, request: None }) if !sent => {
+            send_to_dan(&code);
+            sent = true;
         }
-        break;
+        // Only a request waiting for Ana is hers to decide.
+        Some(InviteStage::Waiting { request: Some(request), .. }) => {
+            // Ana asks Dan for the number his phone shows.
+            if confirm(&request.confirmation).await {
+                handle.approve_join_request(&request).await?;
+            } else {
+                handle.decline_join_request(&request).await?;
+            }
+            break;
+        }
+        _ => {}
     }
 }
 ```

@@ -226,15 +226,22 @@ let bytes = handle.read_file(&file).await?;
 ## Invite Ben
 
 ```rust
-let invite = handle
+let (invite, ben, _) = handle
     .create_invite(
         InviteTarget::NewMember { role: MemberRole::Member, name: "Ben".into() },
         InviteAccess::ProviderAccount { email: "ben@example.com".into() },
         InviteDelivery::InPerson,
     )
     .await?;
-let InviteStage::Waiting { code, .. } = &invite.stage else { unreachable!() };
-show_qr_code(code);
+// A pass shares the folder with Ben's account, then the invite shows its code.
+let mut invites = handle.subscribe(Invite::list);
+while let Some(open) = invites.next().await {
+    let found = open?.into_iter().find(|i| i.id == invite).map(|i| i.stage);
+    if let Some(InviteStage::Waiting { code, .. }) = found {
+        show_qr_code(&code);
+        break;
+    }
+}
 ```
 
 Ben is beside Ana, so she shows the invite in person. Ben's phone scans the
@@ -247,7 +254,7 @@ one's own, is on the [Sharing](/docs/sharing#adding-a-person-invites) page.
 ## Keep the Gifts list from Carol
 
 ```rust
-let ben = invite.member; // the member id Ana's invite fixed for Ben
+// `ben` is the member id Ana's invite fixed for Ben.
 
 let circles = handle.circles();
 let gifts = circles.create("Gifts").await?;

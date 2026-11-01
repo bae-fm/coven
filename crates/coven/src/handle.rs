@@ -323,17 +323,16 @@ impl CovenHandle {
             .await
             .map_err(OperationError::from)
     }
-    /// Fixes a fresh member id or an existing active replacement target, as
-    /// an admin, then shares access and creates an invitation. An in-person
-    /// invite expires an hour after it is made; a sent one after the lifetime
-    /// chosen. Replacement preserves role, circle memberships and device ids.
+    /// Makes an invite, in a write of its own (`CovenWrite::create_invite`).
     pub async fn create_invite(
         &self,
         target: InviteTarget,
         access: InviteAccess,
         delivery: InviteDelivery,
-    ) -> Result<Invite, SyncError> {
-        Box::pin(self.storage.create_invite(target, access, delivery)).await
+    ) -> Result<(InviteId, MemberId, OperationId), SyncError> {
+        self.write(move |write| Ok(write.create_invite(target, access, delivery)?))
+            .await
+            .map_err(SyncError::from)
     }
     /// Follow `coven_invites` with a live query, as an app does (E10).
     #[cfg(any(test, feature = "test-utils"))]

@@ -463,7 +463,7 @@ async fn admit_member(f: &Fixture, handle: &CovenHandle, keys: &MemberKeys) -> M
         sealed_single::{SingleChunkObject, SingleChunkPrefix},
         Object,
     };
-    let invite = handle
+    let (id, _, _) = handle
         .create_invite(
             InviteTarget::NewMember { role: MemberRole::Member, name: "Carol".into() },
             InviteAccess::S3AccessKey {
@@ -473,6 +473,15 @@ async fn admit_member(f: &Fixture, handle: &CovenHandle, keys: &MemberKeys) -> M
             crate::InviteDelivery::Sent { lifetime: crate::InviteLifetime::Day },
         )
         .await
+        .unwrap();
+    // A pass grants the invite's access and fixes its code.
+    f.sync(handle).await;
+    let invite = handle
+        .read(Invite::list)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|invite| invite.id == id)
         .unwrap();
     let code = coven_format::codes::InviteCode::from_text(invite.shown_code()).unwrap();
     let path = ObjectPath::join_request(f.directory.id(), invite.id);

@@ -173,12 +173,14 @@ impl InviteLifetime {
     }
 }
 
-/// One of this device's open invites, once its storage access has been
-/// granted (§13.2).
+/// One of this device's open invites (§13.2).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Invite {
     /// The one-time request path's identity.
     pub id: InviteId,
+    /// The invite's operation, which names its pending record in
+    /// `coven_pending` while its check or its grant waits or is refused.
+    pub operation: coven_database::OperationId,
     /// The stable member id the invite fixed.
     pub member: MemberId,
     /// The new person's name; `None` for a replacement.
@@ -190,14 +192,19 @@ pub struct Invite {
     pub access: coven_format::MemberAccess,
     /// The delivery's lifetime after creation, on the inviting device's clock.
     pub expires_at: SystemTime,
-    /// Where the invite is: waiting for its request or the app's decision,
-    /// or approving its request.
+    /// Where the invite is: granting its access, waiting for its request or
+    /// the app's decision, or approving its request.
     pub stage: InviteStage,
 }
 
 /// Where one of this device's open invites is (§13.2).
 #[derive(Clone, PartialEq, Eq)]
 pub enum InviteStage {
+    /// The app's write made the invite. A pass checks it against the
+    /// history it catches up with and grants its storage access, and then
+    /// it shows its code. A check that refuses it, or a failed grant, is
+    /// its pending record under its operation; cancelling ends it.
+    Granting,
     /// The code is shown, and the request, once one has arrived and been
     /// checked, waits for the app to approve or decline it.
     Waiting {
@@ -228,6 +235,7 @@ pub enum InviteStage {
 impl std::fmt::Debug for InviteStage {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::Granting => f.write_str("Granting"),
             Self::Waiting { request, .. } => f
                 .debug_struct("Waiting")
                 .field("code", &"[REDACTED]")

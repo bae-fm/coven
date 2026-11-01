@@ -30,6 +30,28 @@ pub(crate) async fn landed(handle: &CovenHandle, journaled: Option<OperationId>)
     }
 }
 
+/// Make an invite, as an app does in a write of its own, and wait for the
+/// pass that grants its access to show its code.
+pub(crate) async fn invite(
+    owner: &CovenHandle,
+    target: InviteTarget,
+    access: InviteAccess,
+    delivery: crate::InviteDelivery,
+) -> Invite {
+    let (id, _, _) = owner.create_invite(target, access, delivery).await.unwrap();
+    owner
+        .test_invites()
+        .wait_for(|invites| {
+            invites
+                .iter()
+                .any(|invite| invite.id == id && !matches!(invite.stage, InviteStage::Granting))
+        })
+        .await
+        .into_iter()
+        .find(|invite| invite.id == id)
+        .expect("the invite is listed")
+}
+
 /// Approve a join request, as an app does in a write of its own, and wait
 /// for its binding to land, which the joining device's admission needs.
 pub(crate) async fn approve(owner: &CovenHandle, request: &JoinRequest) -> Slot {
@@ -233,17 +255,16 @@ impl Network {
     /// Join device `index` through an invite for `target`, approved by device 0.
     pub(crate) async fn join_as(&mut self, index: usize, target: InviteTarget) {
         let owner = &self.devices[0].handle;
-        let invite = owner
-            .create_invite(
-                target,
-                InviteAccess::S3AccessKey {
-                    access_key_id: format!("member-{index}"),
-                    secret_access_key: SecretText::new("secret".into()),
-                },
-                crate::InviteDelivery::Sent { lifetime: crate::InviteLifetime::Day },
-            )
-            .await
-            .unwrap();
+        let invite = crate::tests::invite(
+            owner,
+            target,
+            InviteAccess::S3AccessKey {
+                access_key_id: format!("member-{index}"),
+                secret_access_key: SecretText::new("secret".into()),
+            },
+            crate::InviteDelivery::Sent { lifetime: crate::InviteLifetime::Day },
+        )
+        .await;
         let app = TestCoven::new();
         let app_dir = self.root.path().join(index.to_string());
         std::fs::create_dir(&app_dir).unwrap();

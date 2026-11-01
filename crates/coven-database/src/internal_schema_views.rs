@@ -96,16 +96,18 @@ pub(super) const SCHEMA: &str = concat!(
         LEFT JOIN _coven_stored_files AS f ON u.id IS NULL
             AND f.device=e.device AND f.object=e.file;",
     // This device's invites that haven't ended, in the order they were made,
-    // from the operations journal: each from when its access is granted and
-    // its code can be shown, while its request is awaited or approved, until
-    // a write of its state ends it, approval, decline, cancel or expiry
-    // alike. `invite` is the journal entry, the invite's state as coven-sync
-    // encodes it (`InviteWork`), which its `Invite` reads.
-    "CREATE VIEW coven_invites(invite,position) AS
+    // from the operations journal: each from the write that makes it, while
+    // its access is granted, its request is awaited or approved, until a
+    // write of its state ends it, approval, decline, cancel or expiry alike.
+    // `invite` is the journal entry, the invite's state as coven-sync encodes
+    // it (`InviteWork`), which its `Invite` reads; `operation` names its
+    // pending record in `coven_pending`.
+    "CREATE VIEW coven_invites(invite,operation) AS
         SELECT o.data,o.id
         FROM _coven_operations AS o
         WHERE o.kind='invite'
-            AND (json_type(CAST(o.data AS TEXT),'$.state.Waiting') IS NOT NULL
+            AND (json_extract(CAST(o.data AS TEXT),'$.state') IN ('Requested','Grant')
+                OR json_type(CAST(o.data AS TEXT),'$.state.Waiting') IS NOT NULL
                 OR json_type(CAST(o.data AS TEXT),'$.state.Approving') IS NOT NULL);",
     // The operations the app's writes journaled, in the order they were
     // journaled, each until the app acknowledges its outcome: `kind` as

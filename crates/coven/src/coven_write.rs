@@ -257,6 +257,30 @@ impl<'write> CovenWrite<'write> {
             .administer(&self.sql, StoreChange::RemoveCircleMember { circle, member: *member })
     }
 
+    /// Makes an invite, as an admin, and returns its id, the member id it
+    /// fixes and its operation (§13.2, E10). A new person gets a fresh
+    /// member id; recovering an existing active member keeps their id, role,
+    /// circles and devices. The write checks the invite against the state
+    /// this device has applied and journals it, with or without storage; it
+    /// is listed in `coven_invites` from the commit, without a code. Once
+    /// the write commits, a pass checks it again against the history it
+    /// catches up with, grants the storage access and fixes the code, which
+    /// `coven_invites` then shows. A check that fails there, or a failed
+    /// grant, is the invite's pending record under its operation in
+    /// `coven_pending`; cancelling the invite ends it. An in-person invite
+    /// expires an hour after it is made; a sent one after the lifetime
+    /// chosen. Made by a device that isn't a registered admin it fails with
+    /// `Rejected(NotAllowed)`; an empty name with `Format`; an App-folder
+    /// Dropbox store with `DropboxAppFolderNotShareable`.
+    pub fn create_invite(
+        &self,
+        target: InviteTarget,
+        access: InviteAccess,
+        delivery: InviteDelivery,
+    ) -> Result<(InviteId, MemberId, OperationId), SyncError> {
+        self.storage.create_invite(&self.sql, coven_sync::NewInvite { target, access, delivery })
+    }
+
     /// Approves exactly this checked request of a sent invite (§13.2, E10),
     /// and returns the operation that binds its pair, which
     /// `coven_operations` lists from this write's commit until the app

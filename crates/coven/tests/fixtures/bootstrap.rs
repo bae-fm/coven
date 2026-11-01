@@ -101,14 +101,13 @@ impl Owner {
         } else {
             InviteAccess::ProviderAccount { email: "join@example.com".into() }
         };
-        self.handle
-            .create_invite(
-                InviteTarget::NewMember { role: MemberRole::Member, name: "Carol".into() },
-                access,
-                InviteDelivery::Sent { lifetime: InviteLifetime::Day },
-            )
-            .await
-            .unwrap()
+        crate::tests::invite(
+            &self.handle,
+            InviteTarget::NewMember { role: MemberRole::Member, name: "Carol".into() },
+            access,
+            InviteDelivery::Sent { lifetime: InviteLifetime::Day },
+        )
+        .await
     }
 
     pub(super) fn s3_credentials(&self) -> Option<S3Credentials> {

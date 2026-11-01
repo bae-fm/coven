@@ -21,7 +21,10 @@ impl SequenceSync {
             match record.kind.as_str() {
                 INVITE => {
                     let mut work = InviteWork::read(record)?;
-                    accounts.extend(work.account().map(str::to_owned));
+                    // An invite no pass has checked yet adopted no account.
+                    if !matches!(work.state, InviteState::Requested) {
+                        accounts.extend(work.account().map(str::to_owned));
+                    }
                     if !matches!(work.state, InviteState::Settled) {
                         work.state = InviteState::Settled;
                     }

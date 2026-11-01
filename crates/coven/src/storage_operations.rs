@@ -122,19 +122,26 @@ impl StorageConnections {
         live.sync.clean_up_removed_files().await
     }
 
-    pub(crate) async fn create_invite(
+    /// Make an invite as a step of an app's write, from the recorded
+    /// location: once the write commits, a pass is asked for, which checks
+    /// it again, grants its access and fixes its code (§13.2, E10). A store
+    /// with no recorded location fails with `NoStorage`.
+    pub(crate) fn create_invite(
         &self,
-        target: InviteTarget,
-        access: InviteAccess,
-        delivery: coven_sync::InviteDelivery,
-    ) -> Result<Invite, SyncError> {
-        self.prepare_invite().await?;
-        let mut live = self.live.lock().await;
-        self.ready(&mut live).await?;
-        let Connection::Active(live) = &*live else {
-            return Err(SyncError::NoStorage);
-        };
-        live.sync.create_invite(target, access, delivery).await
+        sql: &coven_database::SqlContext<'_, '_>,
+        invite: coven_sync::NewInvite,
+    ) -> Result<(InviteId, MemberId, OperationId), SyncError> {
+        let location = self.settings.read()?.ok_or(SyncError::NoStorage)?;
+        coven_sync::create_invite(
+            sql,
+            self.device,
+            &self.held()?,
+            self.ids.as_ref(),
+            self.clock.now(),
+            &location,
+            self.publications.state.clone(),
+            invite,
+        )
     }
 
     /// Approve a join request as a step of an app's write, returning the

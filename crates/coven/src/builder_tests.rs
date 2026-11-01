@@ -168,17 +168,16 @@ async fn app_reopening_resumes_operations_and_files_using_one_storage_capability
         handle.circles().add_member(circle.id, &outsider).await,
         Err(SyncError::Rejected(OperationRejection::TargetGone(EntryTarget::Member(id)))) if id == outsider
     ));
-    let invite = handle
-        .create_invite(
-            InviteTarget::NewMember { role: MemberRole::Member, name: "Carol".into() },
-            InviteAccess::S3AccessKey {
-                access_key_id: "invited-key".into(),
-                secret_access_key: SecretText::new("invited-secret".into()),
-            },
-            crate::InviteDelivery::Sent { lifetime: crate::InviteLifetime::Day },
-        )
-        .await
-        .unwrap();
+    let invite = crate::tests::invite(
+        &handle,
+        InviteTarget::NewMember { role: MemberRole::Member, name: "Carol".into() },
+        InviteAccess::S3AccessKey {
+            access_key_id: "invited-key".into(),
+            secret_access_key: SecretText::new("invited-secret".into()),
+        },
+        crate::InviteDelivery::Sent { lifetime: crate::InviteLifetime::Day },
+    )
+    .await;
     let mut invites = handle.test_invites();
     assert_eq!(invites.next().await, std::slice::from_ref(&invite));
     handle.cancel_invite(&invite.id).await.unwrap();

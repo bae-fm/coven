@@ -3002,8 +3002,8 @@ let moved = handle
 | | `file` | for a record about stored bytes or an upload, each file over them on this device: the files the upload stores, or the stored files; NULL otherwise |
 | | `position` | its place in the order the records arose, smallest first; a record whose condition changes keeps its place |
 | | `cause` | the text of the error behind the record, written with it, when this run met that error and no app call received it; NULL otherwise (E5) |
-| `coven_invites`: this device's invites that haven't ended, each from when its access is granted and its code can be shown until approval, decline, cancel or expiry ends it, each a write (E10) | `invite` | the invite with its code and its checked request once one has arrived, read as `Invite` |
-| | `position` | its place in the order the invites were made, smallest first |
+| `coven_invites`: this device's invites that haven't ended, each from the write that makes it until approval, decline, cancel or expiry ends it, each a write (E10) | `invite` | the invite with its stage, read with `operation` by `Invite::list` |
+| | `operation` | the invite's operation, which names its pending record in `coven_pending`, read as `i64` for `OperationId`; smallest first is the order the invites were made |
 | `coven_operations`: each operation an app's write journaled (§11.4), from that write's commit until a write acknowledges it, in the order they were journaled (E6) | `operation` | its id, read as `i64` for `OperationId` |
 | | `kind` | what it does, read as `OperationKind` |
 | | `outcome` | NULL while it runs; then how it ended, read as `OperationOutcome` |
@@ -3029,8 +3029,6 @@ let moved = handle
 impl types::FromSql for PendingRecord;
 /// Reads `coven_sync_status.status`.
 impl types::FromSql for SyncStatus;
-/// Reads `coven_invites.invite`.
-impl types::FromSql for Invite;
 /// Reads `coven_operations.kind`.
 impl types::FromSql for OperationKind;
 /// Reads `coven_operations.outcome` once it is not NULL.
@@ -6158,12 +6156,21 @@ pub enum ProviderSignOut {
   ([§13.2](coven.md#132-adding-a-person-invites)). An in-person invite's request
   is approved by the inviting device as soon as it is read and checked. A sent
   invite's request waits for the admin's decision, with its confirmation number.
+- Making an invite is a step of the app's write (`CovenWrite::create_invite`),
+  with or without storage: it returns the invite's id, the member id it fixes
+  and its operation, and the invite is listed from the write's commit as
+  `InviteStage::Granting`. A pass checks it again against the history it
+  catches up with, grants its access and fixes its code. A check that
+  refuses it, such as the admin's role taken away meanwhile, and a failed
+  grant are the invite's pending record under its operation in
+  `coven_pending`, not an error of any call; the app shows it beside the
+  listed invite and cancels the invite to end it.
 - Only the inviting device lists its open invites, in `coven_invites` (E4),
-  each with its code to show again and the request once one has arrived. An
-  invite is listed once its access is granted and its code can be shown, and
-  the code it lists is the one first shown. Other devices' invites are never
-  listed: only the inviting device can act on one. It looks for the request
-  on the shared backoff; `retry_now` ends that wait (E5).
+  each with its stage: granting, waiting with its code to show again and the
+  request once one has arrived, or approving. The code it lists is the one
+  first shown. Other devices' invites are never listed: only the inviting
+  device can act on one. It looks for the request on the shared backoff;
+  `retry_now` ends that wait (E5).
 - An invite ends in a write: approval, decline and cancel each write it, and
   so does expiry. Approving, declining and cancelling are steps of the app's
   write (`CovenWrite::approve_join_request`, `CovenWrite::decline_join_request`,
@@ -6464,16 +6471,13 @@ impl CovenHandle {
     /// SyncError::SecureStorage(KeyError::KeychainTemporarilyUnavailable).
     pub async fn restore_code_for_transfer(&self) -> Result<String, SyncError>;
 
-    /// Fixes a fresh member id or an existing active replacement target, as
-    /// an admin. An in-person invite expires an hour after it is made; a sent
-    /// one after the lifetime chosen. Replacement preserves role, circle
-    /// memberships and device ids; changed provider access is separate.
+    /// Makes an invite, in a write of its own (`CovenWrite::create_invite`).
     pub async fn create_invite(
         &self,
         target: InviteTarget,
         access: InviteAccess,
         delivery: InviteDelivery,
-    ) -> Result<Invite, SyncError>;
+    ) -> Result<(InviteId, MemberId, OperationId), SyncError>;
 
     /// Approves a request, in a write of its own
     /// (`CovenWrite::approve_join_request`).
@@ -6491,6 +6495,23 @@ impl CovenHandle {
 }
 
 impl CovenWrite<'_> {
+    /// Fixes a fresh member id or an existing active replacement target, as
+    /// an admin, and returns the invite's id, that member id and the
+    /// invite's operation. The write checks the invite against the applied
+    /// state, offline too: one made by a device that isn't a registered
+    /// admin fails with `Rejected(NotAllowed)`, a replacement of a member who
+    /// isn't active with `Rejected(TargetGone)`. A pass then checks it again,
+    /// grants its access and fixes its code, which `coven_invites` shows. An
+    /// in-person invite expires an hour after it is made; a sent one after
+    /// the lifetime chosen. Replacement preserves role, circle memberships
+    /// and device ids; changed provider access is separate.
+    pub fn create_invite(
+        &self,
+        target: InviteTarget,
+        access: InviteAccess,
+        delivery: InviteDelivery,
+    ) -> Result<(InviteId, MemberId, OperationId), SyncError>;
+
     /// For a sent invite: approves exactly this checked request, and returns
     /// the operation that binds its pair, listed in `coven_operations` until
     /// the app acknowledges its outcome (E6). The write checks the approval
@@ -6570,6 +6591,9 @@ pub enum InviteLifetime {
 /// One of this device's open invites, as `coven_invites` lists it (E4).
 pub struct Invite {
     pub id: InviteId,
+    /// Names the invite's pending record in `coven_pending` while its check
+    /// or its grant waits or is refused.
+    pub operation: OperationId,
     pub member: MemberId,
     /// The new person's name; None for a replacement.
     pub invitee: Option<String>,
@@ -6578,13 +6602,18 @@ pub struct Invite {
     /// the S3 key it carries; never a secret (§14.3).
     pub access: MemberAccess,
     pub expires_at: SystemTime,
-    /// Waiting for its request or the app's decision, or approving.
+    /// Granting its access, waiting for its request or the app's decision,
+    /// or approving.
     pub stage: InviteStage,
 }
 
 /// Where an open invite is (§13.2). The app offers approving and declining
 /// only for a request that is `Waiting`.
 pub enum InviteStage {
+    /// Made by the app's write: a pass checks it again and grants its access,
+    /// and then it shows its code. A refusal or failed grant is its pending
+    /// record; cancelling ends it.
+    Granting,
     /// The code to show as a QR code, again whenever the admin asks, and the
     /// checked request once one has arrived, waiting for the app's decision.
     Waiting { code: String, request: Option<JoinRequest> },
@@ -7045,28 +7074,35 @@ let handle = Coven::builder(layout.clone())
 Example, Ana adding Carol. On Ana's phone:
 
 ```rust
-let invite = handle
+let (invite, _, _) = handle
     .create_invite(
         InviteTarget::NewMember { role: MemberRole::Member, name: "Carol".into() },
         InviteAccess::ProviderAccount { email: "carol@example.com".into() },
         InviteDelivery::Sent { lifetime: InviteLifetime::Day },
     )
     .await?;
-let InviteStage::Waiting { code, .. } = &invite.stage else { unreachable!() };
-send_to_carol(code);
 
 let mut invites = handle.subscribe(Invite::list);
+let mut sent = false;
 while let Some(open) = invites.next().await {
-    let found = open?.into_iter().find(|i| i.id == invite.id).map(|i| i.stage);
-    // Only a request waiting for Ana is hers to decide.
-    if let Some(InviteStage::Waiting { request: Some(request), .. }) = found {
-        // Ana asks Carol for the number her phone shows.
-        if confirm(&request.confirmation).await {
-            handle.approve_join_request(&request).await?;
-        } else {
-            handle.decline_join_request(&request).await?;
+    let found = open?.into_iter().find(|i| i.id == invite).map(|i| i.stage);
+    match found {
+        // A pass has granted its access and fixed its code.
+        Some(InviteStage::Waiting { code, request: None }) if !sent => {
+            send_to_carol(&code);
+            sent = true;
         }
-        break;
+        // Only a request waiting for Ana is hers to decide.
+        Some(InviteStage::Waiting { request: Some(request), .. }) => {
+            // Ana asks Carol for the number her phone shows.
+            if confirm(&request.confirmation).await {
+                handle.approve_join_request(&request).await?;
+            } else {
+                handle.decline_join_request(&request).await?;
+            }
+            break;
+        }
+        _ => {}
     }
 }
 ```

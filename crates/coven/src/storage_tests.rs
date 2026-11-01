@@ -298,17 +298,16 @@ async fn an_invite_expires_with_storage_disconnected_and_while_closed() {
     f.setup().await.unwrap();
     status(&f.handle, |s| matches!(s, SyncStatus::Synced { .. })).await;
     let invite = || async {
-        f.handle
-            .create_invite(
-                InviteTarget::NewMember { role: MemberRole::Member, name: "Carol".into() },
-                InviteAccess::S3AccessKey {
-                    access_key_id: "carol-key".into(),
-                    secret_access_key: SecretText::new("carol-secret".into()),
-                },
-                crate::InviteDelivery::Sent { lifetime: crate::InviteLifetime::Hour },
-            )
-            .await
-            .unwrap()
+        crate::tests::invite(
+            &f.handle,
+            InviteTarget::NewMember { role: MemberRole::Member, name: "Carol".into() },
+            InviteAccess::S3AccessKey {
+                access_key_id: "carol-key".into(),
+                secret_access_key: SecretText::new("carol-secret".into()),
+            },
+            crate::InviteDelivery::Sent { lifetime: crate::InviteLifetime::Hour },
+        )
+        .await
     };
     let mut invites = f.handle.test_invites();
     assert!(invites.next().await.is_empty());

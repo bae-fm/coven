@@ -34,7 +34,6 @@ impl crate::Database {
     }
 
     /// Advance an invitation and its account intention atomically.
-    #[cfg(test)]
     pub async fn advance_operation_with_access<P: PendingValue>(
         &self,
         update: crate::OperationUpdate,

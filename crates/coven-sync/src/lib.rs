@@ -70,7 +70,7 @@ pub use saved_code::{
 pub use sequence_state::{PassFailure, SequenceStatus, StatusFailure, SyncState, SyncStatus};
 pub use sequence_sync::sequence_invites::expiry::InviteExpiry;
 pub use sequence_sync::sequence_invites::{
-    approve_join_request, cancel_invite, decline_join_request,
+    approve_join_request, cancel_invite, create_invite, decline_join_request, NewInvite,
 };
 pub use sequence_sync::sequence_join::{JoinOutcome, NextCheck};
 pub use sequence_sync::{retry_pending_operation, SequenceSync};

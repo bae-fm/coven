@@ -32,15 +32,13 @@ async fn reset_owner(network: &mut Network) {
 async fn reset_revokes_open_account_invites_and_deletes_their_requests() {
     let mut network = Network::with_schema(CloudProvider::CloudKit, vec![], vec![]).await;
     let owner = &network.devices[0];
-    let invite = owner
-        .handle
-        .create_invite(
-            InviteTarget::NewMember { role: MemberRole::Member, name: "Carol".into() },
-            InviteAccess::ProviderAccount { email: "carol@example.test".into() },
-            crate::InviteDelivery::Sent { lifetime: crate::InviteLifetime::Day },
-        )
-        .await
-        .unwrap();
+    let invite = crate::tests::invite(
+        &owner.handle,
+        InviteTarget::NewMember { role: MemberRole::Member, name: "Carol".into() },
+        InviteAccess::ProviderAccount { email: "carol@example.test".into() },
+        crate::InviteDelivery::Sent { lifetime: crate::InviteLifetime::Day },
+    )
+    .await;
     let code = coven_sync::read_invite_code(invite.shown_code()).unwrap();
     let coven_storage::InviteStorage::Account(invitation) =
         coven_storage::InviteStorage::decode(code.storage.as_bytes()).unwrap()

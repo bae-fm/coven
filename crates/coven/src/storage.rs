@@ -299,15 +299,6 @@ impl StorageConnections {
         self.codes.location().await
     }
 
-    /// Refuse an invite the location cannot share before any provider change.
-    pub(crate) async fn prepare_invite(&self) -> Result<(), SyncError> {
-        let location = self.codes.location().await?.ok_or(SyncError::NoStorage)?;
-        if matches!(location, StorageConfig::Dropbox { location: DropboxLocation::AppFolder, .. }) {
-            return Err(StorageFailure::DropboxAppFolderNotShareable.into());
-        }
-        Ok(())
-    }
-
     async fn lock_open(&self) -> Result<tokio::sync::MutexGuard<'_, ()>, KeyError> {
         let call = self.calls.lock().await;
         self.keys
