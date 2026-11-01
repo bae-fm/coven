@@ -129,6 +129,19 @@ impl<'write> CovenWrite<'write> {
         self.sql.pin(prepared)
     }
 
+    /// Makes a prepared call's files device-only on this device, each
+    /// switched to its copy, which becomes the original this device
+    /// records, in this write (§17.3). Each must still be one this device
+    /// may make device-only, and still stored where its copy came from
+    /// (`NotInCloud`); copies prepared in another open store, or in this one
+    /// before it closed, fail with `PreparedElsewhere`. A write that also
+    /// removes such a file's last reference fails with
+    /// `DeviceOnlyUnreferenced`. A write that fails leaves the copies
+    /// unswitched, and they are removed once it has.
+    pub fn make_device_only(&self, prepared: PreparedDeviceOnly) -> Result<(), DbError> {
+        self.sql.make_device_only(prepared)
+    }
+
     /// Makes an operation's retry or undo due now, from its recorded
     /// progress (E6): its pending record and retry wait end in this write.
     /// It fails with `NotPending` for an operation that has finished or

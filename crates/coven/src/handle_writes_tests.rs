@@ -92,6 +92,7 @@ async fn making_the_store_file_device_only_leaves_the_circles_readable() {
             music.path(),
             vec![(track, RelativePath::new(["track.flac"]).unwrap())],
             &tokio::sync::watch::channel(false).1,
+            |_| {},
         )
         .await
         .unwrap();
@@ -465,6 +466,7 @@ async fn a_switch_holds_the_bytes_until_its_device_writes_again() {
             music.path(),
             vec![(track, RelativePath::new(["track.flac"]).unwrap())],
             &tokio::sync::watch::channel(false).1,
+            |_| {},
         )
         .await
         .unwrap();

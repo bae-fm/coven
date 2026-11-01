@@ -287,20 +287,26 @@ child of a deleted row, and its lost value can't be restored.
 
 ## Making files device-only
 
-`handle.make_device_only(folder, files, &cancel)` brings cloud files back to
-this device, into the folder the person picked. Each file comes with its path
-under that folder, a `RelativePath`: the names the app gives, outermost
-first, each one name whatever it holds. Coven downloads each file, checking its
-content hash, writes it under a temporary name in its final folder and renames
-it there once it is whole and synced. Then one write switches every file to
-this device only, and `coven_user_files` lists each copy as the file's
-original here. No app row changes, and other devices see the files on this
-device when the write reaches them.
+`handle.prepare_device_only(folder, files, &cancel, on_progress)` brings cloud
+files back to this device, into the folder the person picked. Each file comes
+with its path under that folder, a `RelativePath`: the names the app gives,
+outermost first, each one name whatever it holds. Coven downloads each file,
+checking its content hash, writes it under a temporary name in its final folder
+and renames it there once it is whole and synced, and reports each file's
+bytes, and the call's, as they come down, so the app draws a bar. Then the
+app's write switches every file to this device only with `make_device_only`,
+beside its own rows, and `coven_user_files` lists each copy as the file's
+original here. Other devices see the files on this device when the write
+reaches them. `handle.make_device_only` does both, the switch in a write of
+its own.
 
 ```rust
 let (_stop, cancel) = watch::channel(false);
 let files = vec![(track, RelativePath::new(["Abbey Road", "01 Come Together.flac"])?)];
-handle.make_device_only(&music_folder, files, &cancel).await?;
+let prepared = handle
+    .prepare_device_only(&music_folder, files, &cancel, |progress| draw(progress))
+    .await?;
+handle.write(move |sql| sql.make_device_only(prepared).map_err(Into::into)).await?;
 ```
 
 - Coven writes each name through one rule, the same on every platform, so it

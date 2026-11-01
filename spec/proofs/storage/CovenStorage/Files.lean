@@ -440,6 +440,22 @@ def makeLocal (s : State) (ids : List Nat) : State :=
              writes := s.writes + 1 }
   else s
 
+/-- §17.3: the write making the cloud files `ids` device-only here, as a
+step of the app's write, with the app's own change in it, if any: pointing
+`row` at `file`, or at nothing. The write is refused whole, changing
+nothing, when any of `ids` isn't a cloud file this device has a record of,
+when the app's change names a file this device has no record of, or when it
+removes the last reference to one of `ids`: the copy the switch keeps as that
+file's original would name no file. It is one write. -/
+def makeLocalWith (s : State) (ids : List Nat) : Option (Nat × Option Nat) → State
+  | none => makeLocal s ids
+  | some (row, file) =>
+    let m := makeLocal s ids
+    if ids.all s.inCloud && file.all m.known then
+      let t := change m row file
+      if ids.all t.known then { t with writes := m.writes } else s
+    else s
+
 /-- Another device's switch of record `id` to device `d` only. -/
 def leaveAt (id d : Nat) (rec : Record) : Record :=
   if rec.id == id then { rec with coordinates := .device d, hash := none } else rec
@@ -466,8 +482,9 @@ inductive Step where
   | store (id : Nat) (r : Reference) (hash : Nat)
   /-- Another device's published delete of a record. -/
   | delete (id : Nat)
-  /-- This device's write making cloud files device-only here (§17.3). -/
-  | makeLocal (ids : List Nat)
+  /-- This device's write making cloud files device-only here, with the
+  app's own change in it, if any (§17.3). -/
+  | makeLocal (ids : List Nat) (app : Option (Nat × Option Nat))
   /-- Another device's published write making a file device-only on device
   `d` (§17.3). -/
   | leave (id : Nat) (d : Nat)
@@ -498,7 +515,7 @@ def Step.apply (s : State) : Step → State
              queue := s.queue.map fun u => { u with files := u.files.filter (· != id) }
              candidates :=
                (s.records.filter (·.id == id)).filterMap (·.coordinates.stored) ++ s.candidates }
-  | .makeLocal ids => Files.makeLocal s ids
+  | .makeLocal ids app => makeLocalWith s ids app
   | .leave id d =>
     { s with records := s.records.map (leaveAt id d)
              candidates :=
@@ -968,6 +985,89 @@ theorem make_local_reachable (s : State) (ids : List Nat) (h : Reachable s) :
     · right; right; right; exact hcand
   · exact h
 
+/-- A write's change only deletes records: each record after it was there
+before. -/
+theorem change_records_sub (s : State) (row : Nat) (file : Option Nat) (rec : Record)
+    (h : rec ∈ (change s row file).records) : rec ∈ s.records := by
+  rcases change_cases s row file with e | e | ⟨old, e⟩ <;> rw [e] at h
+  · exact h
+  · exact h
+  · exact ((drop_records _ old rec).mp h).1
+
+/-- A switch of files all in the cloud leaves each of them on this device
+only. -/
+theorem make_local_switched (s : State) (ids : List Nat) (hall : ids.all s.inCloud = true) :
+    ∀ rec ∈ (makeLocal s ids).records, ids.contains rec.id → rec.coordinates = .device s.self := by
+  intro rec hrec hid
+  simp only [makeLocal, hall, ↓reduceIte, List.mem_map] at hrec
+  obtain ⟨y, _, rfl⟩ := hrec
+  by_cases hy : y.id ∈ ids
+  · simp [localRecord, hy]
+  · have same : localRecord s.self ids y = y := by simp [localRecord, hy]
+    rw [same] at hid
+    simp [hy] at hid
+
+/-- The switch's write is the switch alone, the switch with the app's
+change, or, refused, nothing. -/
+theorem make_local_with_cases (s : State) (ids : List Nat) (app : Option (Nat × Option Nat)) :
+    makeLocalWith s ids app = s ∨ makeLocalWith s ids app = makeLocal s ids ∨
+      ∃ row file, ids.all s.inCloud = true ∧ makeLocalWith s ids app =
+        { change (makeLocal s ids) row file with writes := (makeLocal s ids).writes } := by
+  cases app with
+  | none => right; left; rfl
+  | some p =>
+    obtain ⟨row, file⟩ := p
+    simp only [makeLocalWith]
+    split
+    · rename_i hc
+      split
+      · right; right
+        exact ⟨row, file, (Bool.and_eq_true_iff.mp hc).1, rfl⟩
+      · left; rfl
+    · left; rfl
+
+/-- §17.3: the switch with the app's change in it is still one write: either
+every file it names is on this device only afterwards, or nothing changed. -/
+theorem make_local_with_whole (s : State) (ids : List Nat) (app : Option (Nat × Option Nat)) :
+    makeLocalWith s ids app = s ∨
+      ∀ rec ∈ (makeLocalWith s ids app).records, ids.contains rec.id →
+        rec.coordinates = .device s.self := by
+  rcases make_local_with_cases s ids app with e | e | ⟨row, file, hall, e⟩
+  · left; exact e
+  · rw [e]; exact make_local_whole s ids
+  · right; rw [e]
+    intro rec hrec hid
+    exact make_local_switched s ids hall rec (change_records_sub _ row file rec hrec) hid
+
+/-- §17.10: with the app's change in it, the switch still makes no path a
+deletion candidate. -/
+theorem make_local_with_keeps_candidates (s : State) (ids : List Nat)
+    (app : Option (Nat × Option Nat)) :
+    (makeLocalWith s ids app).candidates = s.candidates ∧
+      (makeLocalWith s ids app).stored = s.stored := by
+  rcases make_local_with_cases s ids app with e | e | ⟨row, file, _, e⟩ <;> rw [e]
+  · exact ⟨rfl, rfl⟩
+  · exact ⟨(make_local_keeps_candidates s ids).1, (make_local_keeps_candidates s ids).2.1⟩
+  · have hc := change_keeps_candidates (makeLocal s ids) row file
+    exact ⟨hc.1.trans (make_local_keeps_candidates s ids).1,
+      hc.2.trans (make_local_keeps_candidates s ids).2.1⟩
+
+theorem make_local_with_cloud_stored (s : State) (ids : List Nat)
+    (app : Option (Nat × Option Nat)) (h : CloudStored s) :
+    CloudStored (makeLocalWith s ids app) := by
+  rcases make_local_with_cases s ids app with e | e | ⟨row, file, _, e⟩ <;> rw [e]
+  · exact h
+  · exact make_local_cloud_stored s ids h
+  · exact change_cloud_stored _ row file (make_local_cloud_stored s ids h)
+
+theorem make_local_with_reachable (s : State) (ids : List Nat)
+    (app : Option (Nat × Option Nat)) (h : Reachable s) :
+    Reachable (makeLocalWith s ids app) := by
+  rcases make_local_with_cases s ids app with e | e | ⟨row, file, _, e⟩ <;> rw [e]
+  · exact h
+  · exact make_local_reachable s ids h
+  · exact change_reachable _ row file (make_local_reachable s ids h)
+
 /-- §17.2, §17.9: every step keeps every file whose coordinates say cloud in
 storage. Deleting stored bytes is outside these steps; §17.10 allows it only
 for bytes no record names. -/
@@ -1012,7 +1112,7 @@ theorem step_cloud_stored (s : State) (st : Step) (h : CloudStored s) :
     intro x hx r hc
     simp only [Step.apply, List.mem_filter] at hx
     exact h x hx.1 r hc
-  | makeLocal ids => exact make_local_cloud_stored s ids h
+  | makeLocal ids app => exact make_local_with_cloud_stored s ids app h
   | leave id d =>
     intro x hx r hc
     simp only [Step.apply, List.mem_map] at hx
@@ -1100,7 +1200,7 @@ theorem step_reachable (s : State) (st : Step) (h : Reachable s) :
         List.mem_map_of_mem (f := fun u : Upload => { u with files := u.files.filter (· != id) }) hu, he⟩
     · right; right; left; exact hp
     · right; right; right; simp [Step.apply, hc]
-  | makeLocal ids => exact make_local_reachable s ids h
+  | makeLocal ids app => exact make_local_with_reachable s ids app h
   | leave id d =>
     intro x hx
     rcases h x hx with ⟨y, hy, hc⟩ | hq | hp | hcand

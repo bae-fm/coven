@@ -186,6 +186,14 @@ pub enum DbError {
     /// reserved here (§17.3, §17.8).
     #[error("these files were not prepared in this open store")]
     PreparedElsewhere,
+    /// A write made a file device-only and also removed its last reference,
+    /// so the copy kept as its original would name no file (§17.3). Nothing
+    /// committed.
+    #[error("file {file} made device-only has no reference left in the same write")]
+    DeviceOnlyUnreferenced {
+        /// The file.
+        file: coven_foundation::id_source::FileId,
+    },
     /// A pin prepared over a whole copy already kept found that copy gone
     /// when its write committed it, evicted since: nothing was pinned, and
     /// preparing again downloads it (§17.8).

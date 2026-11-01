@@ -443,6 +443,7 @@ impl CovenBuilder {
             waits,
             ids,
             transfers,
+            clock,
         );
         Ok(CovenReadHandle::new(database, files))
     }
@@ -751,6 +752,7 @@ impl OpeningOwners {
             waits.clone(),
             self.ids.clone(),
             self.transfers.clone(),
+            self.clock.clone(),
         );
         let storage = crate::storage::StorageConnections::new(
             database.clone(),

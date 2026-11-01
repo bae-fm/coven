@@ -141,6 +141,21 @@ impl<'connection, 'write> SqlContext<'connection, 'write> {
         self.files.step(|| self.files.end_pin_request(file))
     }
 
+    /// Switch a prepared call's files to device-only on this device, each to
+    /// its copy, which becomes the original this device records, in this
+    /// write (§17.3). Each must still be one this device may make
+    /// device-only, and still stored where its copy came from
+    /// (`NotInCloud`); copies prepared in another open store, or in this
+    /// one before it closed, fail with `PreparedElsewhere`. A write that
+    /// also removes such a file's last reference fails with
+    /// `DeviceOnlyUnreferenced`.
+    pub fn make_device_only(
+        &self,
+        prepared: crate::PreparedDeviceOnly,
+    ) -> Result<(), crate::DbError> {
+        self.files.step(|| self.files.make_prepared_device_only(prepared))
+    }
+
     /// Run one of sync's steps on the journal in this write (§4, §11). A
     /// failed step fails the write, even if the closure goes on and returns
     /// success, since it may have made only part of its change.

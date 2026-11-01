@@ -268,6 +268,7 @@ impl DatabaseInner {
                 self.access.device,
                 self.ids.as_ref(),
                 &self.staging,
+                &self.copying,
             );
             let outcome =
                 std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run(writer, &files)));
@@ -331,6 +332,15 @@ fn release_reserved<'a>(
     let mut active = reserved.lock().expect("file staging lock poisoned");
     for name in names {
         assert!(active.remove(name), "reserved name is registered");
+    }
+}
+
+/// Let `paths` go from the copies a store keeps out of removals, once the
+/// write that brought them has decided (§17.3).
+fn release_copies(copying: &Mutex<BTreeSet<String>>, paths: &[String]) {
+    let mut held = copying.lock().expect("copying lock poisoned");
+    for path in paths {
+        held.remove(path);
     }
 }
 
@@ -596,6 +606,7 @@ impl Database {
                 // decided: a write that rolled back leaves their bytes to the
                 // removals its cleanup chooses.
                 inner.release_file_reservations(&files.take_brought());
+                release_copies(&inner.copying, &files.take_held_copies());
                 #[cfg(any(test, feature = "test-utils"))]
                 writer.checkpoint(crate::test_utils::WriteCheckpoint::StagingReleased);
                 match result {

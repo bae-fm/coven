@@ -70,6 +70,8 @@ import CovenStorage
 #print axioms CovenStorage.Seen.removed_holds_nothing
 #print axioms CovenStorage.Files.make_local_whole
 #print axioms CovenStorage.Files.make_local_keeps_candidates
+#print axioms CovenStorage.Files.make_local_with_whole
+#print axioms CovenStorage.Files.make_local_with_keeps_candidates
 #print axioms CovenStorage.DeviceOnly.removal_takes_unchanged
 #print axioms CovenStorage.DeviceOnly.person_files_stay
 #print axioms CovenStorage.DeviceOnly.kept_stays

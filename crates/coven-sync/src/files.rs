@@ -31,7 +31,7 @@ pub use coven_database::PinProgress;
 use coven_database::{DbError, FileDatabase};
 use coven_foundation::{files::StoreDir, id_source::IdSourceRef};
 use coven_storage::Storage;
-pub use file_device_only::DeviceOnlyError;
+pub use file_device_only::{DeviceOnlyError, DeviceOnlyStep};
 pub use file_error::FileReadError;
 pub use file_read::{FileRangeStream, FileStream};
 pub use file_status::FileStatus;
@@ -72,6 +72,8 @@ struct FilesInner {
     /// Reopening creates a new connection and permits one attempt again.
     connection_waits: Mutex<BTreeSet<coven_database::RetrySubject>>,
     ids: IdSourceRef,
+    /// Paces the progress a long call reports.
+    clock: coven_foundation::clock::ClockRef,
     /// The persisted pause setting as of the last upload run or app change;
     /// parts check it between sends.
     paused: AtomicBool,
@@ -124,6 +126,7 @@ impl Files {
         waits: Arc<crate::RetryWaits>,
         ids: IdSourceRef,
         transfers: Arc<TransferBudget>,
+        clock: coven_foundation::clock::ClockRef,
     ) -> Self {
         let uploads_changes = database.queued_work_changes();
         let in_flight = database.uploads_in_flight();
@@ -137,6 +140,7 @@ impl Files {
             waits,
             connection_waits: Mutex::new(BTreeSet::new()),
             ids,
+            clock,
             paused: AtomicBool::new(false),
             pause_change: tokio::sync::Mutex::new(()),
             upload_wake: Arc::new(Notify::new()),

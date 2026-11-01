@@ -5240,10 +5240,11 @@ while let Some(changes) = watch.next().await {
   ([§17.8](coven.md#178-cache-and-pinning)): `prepare_pin` downloads, and a
   write's `pin` step keeps what it prepared. While a prepare downloads a file,
   `coven_downloading` lists it (E4).
-- `make_device_only` brings cloud files back to this device, into a folder
-  the person picks, and switches them all to device-only here in one write
-  ([§17.3](coven.md#173-staging-a-file)). A failure or a cancel before that
-  write removes everything the call made.
+- `prepare_device_only` brings cloud files back to this device, into a folder
+  the person picks, reporting each file's bytes and the call's as they
+  download, and a write's `make_device_only` step switches them all to
+  device-only here ([§17.3](coven.md#173-staging-a-file)). A failure or a
+  cancel before that write removes everything the call made.
 
 Ana pins an album and one song cannot be downloaded. The song's reason is in
 `pending()`; pin progress still counts the files and bytes kept. There is no
@@ -5337,27 +5338,41 @@ impl CovenHandle {
     /// user original on this device, or `None` when it has none.
     pub async fn user_file(&self, file: FileId) -> Result<Option<UserFile>, DbError>;
 
-    /// Downloads cloud files to the paths named under `folder`, then
-    /// switches them all to device-only on this device in one write, each
-    /// copy becoming the original this device records (§17.3). Each download
-    /// checks the content hash, and each copy is written under a temporary
-    /// name in its final folder and renamed once synced. The member must be
-    /// in each file's audience and may change every row referencing it
-    /// (`NotInCircle` for a member who left the file's circle, `NotOwner`); a
-    /// file of a circle the member was never in has no record here
-    /// (`FileAbsent`). Only cloud files of user namespaces
-    /// qualify (`NotInCloud`, `NamespaceKind`). Each name is written as one
-    /// rule, the same on every platform, makes it valid on any volume. A path
-    /// through a symbolic link below the folder, where something is already,
-    /// or naming what another path of the call names once written, case and
-    /// Unicode form aside, is refused before anything downloads. Until the write commits, `cancel` stops the call;
-    /// a failure or a cancel removes every copy and folder it made. A dropped
-    /// call's copies go with the store's next write.
+    /// Downloads cloud files to the paths named under `folder`, for a write
+    /// to switch them all to device-only on this device with
+    /// `CovenWrite::make_device_only`, each copy becoming the original this
+    /// device records (§17.3). Each download checks the content hash, and
+    /// each copy is written under a temporary name in its final folder and
+    /// renamed once synced. The member must be in each file's audience and
+    /// may change every row referencing it (`NotInCircle` for a member who
+    /// left the file's circle, `NotOwner`); a file of a circle the member was
+    /// never in has no record here (`FileAbsent`). Only cloud files of user
+    /// namespaces qualify (`NotInCloud`, `NamespaceKind`). Each name is
+    /// written as one rule, the same on every platform, makes it valid on
+    /// any volume. A path through a symbolic link below the folder, where
+    /// something is already, or naming what another path of the call names
+    /// once written, case and Unicode form aside, is refused before anything
+    /// downloads. `on_progress` is called on this task with each file's
+    /// download, at most a few times a second (`DeviceOnlyStep`). Until it
+    /// returns, `cancel` stops the call; a failure or a cancel removes every
+    /// copy and folder it made. A dropped call's copies go with the store's
+    /// next write.
+    pub async fn prepare_device_only(
+        &self,
+        folder: &Path,
+        files: Vec<(FileId, RelativePath)>,
+        cancel: &watch::Receiver<bool>,
+        on_progress: impl Fn(Progress<DeviceOnlyStep>),
+    ) -> Result<PreparedDeviceOnly, DeviceOnlyError>;
+
+    /// `prepare_device_only`, then `CovenWrite::make_device_only` in a write
+    /// of its own. A write that fails removes the copies.
     pub async fn make_device_only(
         &self,
         folder: &Path,
         files: Vec<(FileId, RelativePath)>,
         cancel: &watch::Receiver<bool>,
+        on_progress: impl Fn(Progress<DeviceOnlyStep>),
     ) -> Result<(), DeviceOnlyError>;
 
     /// Prepares keeping stored files whole on this device regardless of the
@@ -5478,6 +5493,39 @@ pub enum CopyPathError {
     File(DiskError),
 }
 
+/// Cloud files downloaded to copies in the person's folder, ready for one
+/// write to make them device-only here (§17.3, E8). It holds nothing close
+/// waits for. Committed by no write, its copies go with the store's next
+/// write or open once it drops.
+pub struct PreparedDeviceOnly { /* private fields */ }
+
+impl PreparedDeviceOnly {
+    /// Removes the copies, and the folders made for them, now. A failed
+    /// removal keeps its record, and the next open removes it.
+    pub async fn abandon(self) -> Result<(), DbError>;
+}
+
+/// A step of preparing files to be made device-only (§17.3), which a host
+/// draws a bar for: one step for each file downloaded, in order. Done and
+/// total count the file's bytes; done plus `before`, out of `all`, is how
+/// far the whole call has come.
+pub enum DeviceOnlyStep {
+    /// Downloading one file to its copy.
+    Downloading { file: FileId, before: u64, all: u64 },
+}
+
+impl CovenWrite<'_> {
+    /// Makes a prepared call's files device-only on this device, each
+    /// switched to its copy, which becomes the original this device records,
+    /// as a step of this write (§4, §17.3). Each must still be one this
+    /// device may make device-only, and still stored where its copy came
+    /// from (`NotInCloud`); copies prepared in another open store, or in
+    /// this one before it closed, fail with `PreparedElsewhere`. A write
+    /// that also removes such a file's last reference fails with
+    /// `DeviceOnlyUnreferenced`. A write that fails removes the copies.
+    pub fn make_device_only(&self, prepared: PreparedDeviceOnly) -> Result<(), DbError>;
+}
+
 /// Why no file of a call was made device-only (§17.3). Whatever the call
 /// made is removed before it returns, or, if that failed too, at the next
 /// open.
@@ -5496,6 +5544,9 @@ pub enum DeviceOnlyError {
     Disk(DiskError),
     /// The app cancelled the call before its files switched.
     Cancelled,
+    /// The write switching the files failed other than in the database, as
+    /// in a failed rollback, keeping its cause.
+    Write(Box<CovenError>),
     /// Removing what the call made failed too; the next open removes it.
     Cleanup { error: Box<DeviceOnlyError>, cleanup: DbError },
 }
@@ -5590,6 +5641,9 @@ pub enum FileReadError {
     Disk(DiskError),
     /// The store cannot be retained while opening its file.
     Lock(StoreLockError),
+    /// The write committing a prepared pin failed other than in the
+    /// database, as in a failed rollback, keeping its cause (§17.8).
+    Write(Box<CovenError>),
 }
 ```
 
@@ -5601,11 +5655,22 @@ let files = tracks
     .iter()
     .map(|track| Ok((track.file, RelativePath::new([album.as_str(), track.name.as_str()])?)))
     .collect::<Result<Vec<_>, RelativePathError>>()?;
-match handle.make_device_only(&music_folder, files, &cancel).await {
-    Ok(()) => show_local(&album),
-    Err(DeviceOnlyError::Path(CopyPathError::Exists(path))) => ask_to_move(&path),
+let prepared = match handle
+    .prepare_device_only(&music_folder, files, &cancel, |progress| show_bar(&album, progress))
+    .await
+{
+    Ok(prepared) => prepared,
+    Err(DeviceOnlyError::Path(CopyPathError::Exists(path))) => return ask_to_move(&path),
     Err(error) => return Err(error.into()),
-}
+};
+let local = album.id.clone();
+handle
+    .write(move |sql| {
+        sql.make_device_only(prepared)?;
+        sql.execute("UPDATE albums SET local_here = 1 WHERE id = ?1", [&local])?;
+        Ok(())
+    })
+    .await?;
 ```
 
 Example:

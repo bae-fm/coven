@@ -102,6 +102,9 @@ pub(crate) struct FileWrite<'a> {
     /// The names of copies reserved in this store, such as staged app bytes
     /// and prepared cache files, not yet committed or released.
     reservations: &'a std::sync::Mutex<BTreeSet<FileName>>,
+    /// The paths of copies calls making files device-only reserve in this
+    /// store, not yet switched or released (§17.3).
+    copying: &'a std::sync::Mutex<BTreeSet<String>>,
     /// The files the write's steps stage: app bytes `put_staged` brings,
     /// and users' originals.
     staged: RefCell<Vec<StagedFile>>,
@@ -110,6 +113,9 @@ pub(crate) struct FileWrite<'a> {
     /// The reserved names `put_staged` and `pin` brought into this write, released
     /// once its transaction has decided.
     brought: RefCell<Vec<FileName>>,
+    /// The copies a prepared device-only switch brought into this write,
+    /// released once its transaction has decided (§17.3).
+    held_copies: RefCell<Vec<String>>,
     /// The new files this write made over a file it stages, by that file:
     /// they keep its bytes and share its upload once it is queued (§17.2).
     copies: RefCell<BTreeMap<FileId, Vec<FileId>>>,
@@ -147,6 +153,7 @@ impl<'a> FileWrite<'a> {
         device: DeviceId,
         ids: &'a dyn IdSource,
         reservations: &'a std::sync::Mutex<BTreeSet<FileName>>,
+        copying: &'a std::sync::Mutex<BTreeSet<String>>,
     ) -> Self {
         Self {
             database,
@@ -154,9 +161,11 @@ impl<'a> FileWrite<'a> {
             device,
             ids,
             reservations,
+            copying,
             staged: RefCell::new(Vec::new()),
             existing: RefCell::new(Vec::new()),
             brought: RefCell::new(Vec::new()),
+            held_copies: RefCell::new(Vec::new()),
             copies: RefCell::new(BTreeMap::new()),
             made: RefCell::new(BTreeSet::new()),
             held: RefCell::new(BTreeSet::new()),
@@ -292,6 +301,12 @@ impl<'a> FileWrite<'a> {
             return Ok(None);
         };
         let unreferenced = references::unreferenced(db, self.schema, store, &record)?;
+        // The copy a switch keeps as a file's original would name no file.
+        if let Some(copy) =
+            self.local.borrow().iter().find(|copy| unreferenced.contains(&copy.file))
+        {
+            return Err(DbError::DeviceOnlyUnreferenced { file: copy.file });
+        }
         if unreferenced.is_empty() {
             *self.deleted.borrow_mut() = Some(unreferenced);
             return Ok(Some(record));

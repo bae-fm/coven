@@ -136,14 +136,17 @@ async fn making_a_kept_file_device_only_here_ends_its_request() {
     assert_eq!(keep_records(&f).await.len(), 1);
     f.storage.set_online(true);
     let music = tempfile::tempdir().unwrap();
-    f.files
-        .make_device_only(
+    let prepared = f
+        .files
+        .prepare_device_only(
             music.path(),
             vec![(file, coven_foundation::files::RelativePath::new(["song.flac"]).unwrap())],
             &tokio::sync::watch::channel(false).1,
+            tokio::sync::watch::channel(None).0,
         )
         .await
         .unwrap();
+    f.database.write(move |sql| sql.make_device_only(prepared)).await.unwrap();
     assert!(f.files.inner.database.pin_requests().await.unwrap().is_empty());
     assert!(keep_records(&f).await.is_empty());
     assert!(!pinned(&f, file).await);

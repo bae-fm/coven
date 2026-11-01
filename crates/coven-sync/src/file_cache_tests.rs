@@ -100,6 +100,7 @@ async fn read_only_downloads_keep_typed_errors_without_writing_pending_records()
         Arc::new(crate::RetryWaits::in_memory(f.clock.clone())),
         f.ids.clone(),
         transfers,
+        std::sync::Arc::new(coven_foundation::clock::SystemClock),
     );
     f.storage.set_online(false);
     assert!(matches!(files.read_file(&file).await, Err(FileReadError::Storage(ref error))

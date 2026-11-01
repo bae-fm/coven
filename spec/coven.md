@@ -5276,18 +5276,31 @@ modification time: every track stays on her laptop, and her app shows which
 track changed.
 
 **Making cloud files device-only.** The app can bring cloud files back to one
-device: `make_device_only` ([api.md E8](api.md#e8-files-and-the-cache)) takes
-the folder the person picked and, for each file, its path under that folder.
+device. It comes in two parts, as pinning does (§17.8). Preparing
+(`prepare_device_only`, [api.md E8](api.md#e8-files-and-the-cache)) takes the
+folder the person picked and, for each file, its path under that folder, and
+downloads the files there. Then a step of a write (§4) switches them all.
 Ben makes an album local again on his laptop, into `Music/Abbey Road/`. Coven
 downloads each track, checking its content hash as every download does
 (§17.7), writes it under a temporary name in its final folder, and renames it
 there once it is whole and synced. The album's folder and the drive's cache
-are flushed once for all the tracks (Appendix C.3). Then one write switches
-every track to Ben's laptop only, and this device records each copy as the
-track's original, in `_coven_user_files`, with the hashes of the bytes it wrote
-there, so a later move to the cloud checks the copy as it checks any original.
-No app row changes. Ana's phone receives the switch
-like any other write, and sees the album on Ben's laptop.
+are flushed once for all the tracks (Appendix C.3). Then Ben's app switches
+every track to his laptop only in one write, in which it also marks the album
+local on his laptop, and this device records each copy as the track's
+original, in `_coven_user_files`, with the hashes of the bytes it wrote there,
+so a later move to the cloud checks the copy as it checks any original. Ana's
+phone receives the switch like any other write, and sees the album on Ben's
+laptop.
+
+- **The download shows its progress.** A whole album can take minutes, so
+  preparing reports, a few times a second, which track it is downloading,
+  how many of that track's bytes are down, and how many of the album's:
+  Ben's app draws a bar for Make Local, not a spinner. The report is the
+  call's own, held in memory.
+- **A write that removes a file's last reference can't switch it.** If Ben's
+  write also deleted the only row naming a track, the copy it keeps as that
+  track's original would name no file. Such a write is refused with
+  `DeviceOnlyUnreferenced`, and nothing of it commits.
 
 - **A path is names.** The app gives each copy's path as names, outermost
   first (`RelativePath`): Ben's app names `AC/DC`, then `Back in Black`, then
@@ -5347,7 +5360,10 @@ like any other write, and sees the album on Ben's laptop.
   characters, so a write by a longer path goes by a `\\?\` path, which has
   no such limit: Ben's copy deep in `Music\` lands however long its path is.
 - **All or nothing.** Until the write commits, a failure or a cancel removes
-  every copy and every folder the call made, and no file switches. A folder
+  every copy and every folder the call made, and no file switches. A write
+  that refuses the switch, or a prepared switch the app abandons, removes them
+  too; one the app drops, or no write takes before the store closes, leaves
+  them to the next write or open. A folder
   counts as the call's only if the call's own mkdir made it: one that was
   there, or that the person made before the call's mkdir reached it, stays,
   and the call's own folder goes only once empty. So a release is never half
@@ -9386,7 +9402,7 @@ Write-ups explain each model and state its assumptions:
 | While a bound upload is queued, no write from the one staging its file on is published; a pass publishing a held write publishes the write ending its upload in the same slot, unless a raise's marker falls between them | `held_unpublished`, `held_with_completion` | `proofs/storage/CovenStorage/Holds.lean` | §17.4 |
 | With a raise's marker between a held write and its completion, the raise waits while the upload is queued, a pass publishing the held write publishes through the marker, and the completion waits for the raise | `raise_waits_for_held`, `held_with_marker`, `completion_after_raise` | `proofs/storage/CovenStorage/Holds.lean` | §17.4, §18.5 |
 | A kept file's pin request is recorded in the write switching it to the cloud, and ends only when the pin is made, the file's record goes or the file leaves the cloud | `requested_by_switch`, `unkept_unrequested`, `request_ends_made_or_gone` | `proofs/storage/CovenStorage/Keep.lean` | §17.3, §17.8 |
-| Making files device-only is one write that switches every file it names to this device, or changes nothing, and makes no path a candidate before it is published | `make_local_whole`, `make_local_keeps_candidates` | `proofs/storage/CovenStorage/Files.lean` | §17.3, §17.10 |
+| Making files device-only is one write that switches every file it names to this device, or changes nothing, and makes no path a candidate before it is published; so is the app's write that carries the switch beside its own change, refused whole if that change removes a switched file's last reference | `make_local_whole`, `make_local_keeps_candidates`, `make_local_with_whole`, `make_local_with_keeps_candidates` | `proofs/storage/CovenStorage/Files.lean` | §17.3, §17.10 |
 | Removing a copy coven placed, as it left it, leaves nothing at its path; no step of coven's, a call's own abandon included, takes away a file the person wrote or changed, or a kept copy; a call's switch keeps all its copies, each placed before it | `removal_takes_unchanged`, `person_files_stay`, `abandon_person_files_stay`, `kept_stays`, `abandon_kept_stays`, `switch_whole` | `proofs/storage/CovenStorage/DeviceOnly.lean` | §17.1, §17.3, C.3 |
 | A folder counts as made only where the call's mkdir found nothing; only an empty made folder no recorded copy needs is taken, so a folder that was there stays; while a call reserves a copy, no step but its own abandon takes the copy, its record or its folders, and once the reservation drops the next write can | `made_only_by_mkdir`, `folder_removal_made_empty`, `found_folder_stays`, `needed_folder_stays`, `reserved_stays`, `released_removable` | `proofs/storage/CovenStorage/DeviceOnly.lean` | §17.3, C.3 |
 | A pin coven keeps for an app file reads no storage when coven's copy checks out, and no attempt reads a user's original for the cache | `copy_reads_no_storage`, `failed_copy_downloads`, `user_downloads`, `original_never_read` | `proofs/io/CovenIO/Keep.lean` | §17.1, §17.8 |
@@ -9491,6 +9507,7 @@ maps them are with each provider in Appendix E.
 | `DbError::MoveUnknown`, `DbError::MoveFinished` | a cancel names a move this device never made, or one that finished | §17.3 |
 | `DbError::MoveBound` | a cancel names a bound file's move, whose upload holds a write | §17.4 |
 | `DbError::NotInCloud` | a call making files device-only names a file on one device only, or one another device's switch took off its stored bytes before this call's write | §17.3 |
+| `DbError::DeviceOnlyUnreferenced` | a write makes a file device-only and also removes its last reference | §17.3 |
 | `DbError::CopyPathTaken` | another call making files device-only is writing a copy at the same path | §17.3 |
 | `DbError::NoLongerStored` | a pin's download finished after the file's record went, or a switch took it off the stored bytes the download fetched; the cache keeps none of them | §17.8 |
 | `DeviceOnlyError` | a call making files device-only switched no file: a refused path (`CopyPathError`), a refused file (`DbError`), a failed download, the disk, a cancel, or a cleanup that failed too | §17.3 |

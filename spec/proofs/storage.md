@@ -166,11 +166,16 @@ made, its file's record is gone or the file has left the cloud: a failed
 attempt and the app's own pins and unpins leave it waiting.
 
 The file model's `makeLocal` step is this device's one write making cloud
-files device-only here (§17.3), and `leave` another device's published one.
-`make_local_whole` shows the write switches every file it names to this
-device, or changes nothing, and `make_local_keeps_candidates` that it makes
+files device-only here (§17.3), with the app's own change in it when the
+switch is a step of the app's write, and `leave` another device's published
+one. `make_local_whole` shows the switch alone changes every file it names
+to this device, or nothing, and `make_local_keeps_candidates` that it makes
 no path a candidate: the stored paths it takes the files off stay with its
-unpublished write, as a delete's do.
+unpublished write, as a delete's do. `make_local_with_whole` and
+`make_local_with_keeps_candidates` show the same of the write carrying the
+app's change, which is refused whole when that change removes a switched
+file's last reference; both still keep every cloud file stored and every
+stored path within reach.
 [DeviceOnly.lean](storage/CovenStorage/DeviceOnly.lean) models the copies
 such a call writes into the person's folder and the folders it makes for
 them: recorded, with which copy lies in which folder, before any of them

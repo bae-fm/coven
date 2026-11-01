@@ -1,20 +1,41 @@
-//! Making cloud files device-only on this device (§17.3): download each to
-//! the path the app names under the folder the person picked, then switch
-//! them all to this device in one write. A call that doesn't reach that
-//! write leaves nothing behind.
+//! Preparing cloud files to be made device-only on this device (§17.3):
+//! download each to the path the app names under the folder the person
+//! picked, reporting how far the downloads have come, for the write that
+//! switches them all to this device. A prepare that fails leaves nothing
+//! behind.
 
 use crate::files::Files;
 use crate::FileReadError;
-use coven_database::{DbError, DeviceOnlyCopy, FileHasher, FilePlace, FileRef, FolderCopy};
+use coven_database::{
+    DbError, DeviceOnlyCopy, FileHasher, FilePlace, FileRef, FolderCopy, PreparedDeviceOnly,
+};
 use coven_foundation::{
     files::{
         observe_metadata, CopyFolder, CopyPathError, FileError as DiskError, FlushBatch, Flushed,
         RelativePath,
     },
     id_source::FileId,
+    progress::{Progress, ProgressReport},
 };
 use std::path::{Path, PathBuf};
 use tokio::sync::watch;
+
+/// A step of preparing files to be made device-only (§17.3, E8), which a
+/// host draws a bar for: one step for each file downloaded, in order. Done
+/// and total count the file's bytes; done plus `before`, out of `all`, is how
+/// far the whole call has come.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DeviceOnlyStep {
+    /// Downloading one file to its copy.
+    Downloading {
+        /// The file.
+        file: FileId,
+        /// The bytes of the files downloaded before it.
+        before: u64,
+        /// The bytes of every file the call downloads.
+        all: u64,
+    },
+}
 
 /// Why no file of a call was made device-only (E8). Whatever the call made
 /// is removed before it returns, or, if removing it failed too, at the next
@@ -53,6 +74,10 @@ pub enum DeviceOnlyError {
     /// The app cancelled the call before its files switched.
     #[error("cancelled")]
     Cancelled,
+    /// The write switching the files failed other than in the database, as
+    /// in a failed rollback, keeping its cause.
+    #[error(transparent)]
+    Write(Box<coven_database::CovenError>),
     /// Removing what the call made failed too. What stays is recorded, and
     /// the next open removes it.
     #[error("{error}; removing the copies failed: {cleanup}")]
@@ -65,23 +90,36 @@ pub enum DeviceOnlyError {
     },
 }
 
+/// A failure of the write switching the files, as the call reports it.
+impl From<coven_database::CovenError> for DeviceOnlyError {
+    fn from(error: coven_database::CovenError) -> Self {
+        match error {
+            coven_database::CovenError::Database(error) => Self::Database(error),
+            error => Self::Write(Box::new(error)),
+        }
+    }
+}
+
 impl Files {
-    /// Download each cloud file to its path under `folder`, then switch them
-    /// all to this device only in one write, each copy becoming the original
-    /// this device records (§17.3). Each download checks the file's content
-    /// hash, and each copy is written under a temporary name in its final
-    /// folder and renamed once synced. Each name is written as the one rule
-    /// for every platform makes it, which keeps it inside the folder. A path
-    /// through a symbolic link below the folder, where something is already,
-    /// or naming what another path names once written, case and Unicode form
-    /// aside, is refused. Until the write commits, `cancel` stops the call;
-    /// a failure or a cancel removes every copy and folder the call made.
-    pub async fn make_device_only(
+    /// Download each cloud file to its path under `folder`, for one write
+    /// to switch them all to this device only, each copy becoming the
+    /// original this device records (§17.3). Each download checks the
+    /// file's content hash, and each copy is written under a temporary name
+    /// in its final folder and renamed once synced. Each name is written as
+    /// the one rule for every platform makes it, which keeps it inside the
+    /// folder. A path through a symbolic link below the folder, where
+    /// something is already, or naming what another path names once
+    /// written, case and Unicode form aside, is refused. `progress` hears
+    /// each file's download and how many of its bytes, and of the call's,
+    /// are down. Until it returns, `cancel` stops the call; a failure or a
+    /// cancel removes every copy and folder the call made.
+    pub async fn prepare_device_only(
         &self,
         folder: &Path,
         files: Vec<(FileId, RelativePath)>,
         cancel: &watch::Receiver<bool>,
-    ) -> Result<(), DeviceOnlyError> {
+        progress: watch::Sender<Option<Progress<DeviceOnlyStep>>>,
+    ) -> Result<PreparedDeviceOnly, DeviceOnlyError> {
         self.inner.check_open()?;
         let mut ids = Vec::new();
         let mut paths = Vec::new();
@@ -115,18 +153,19 @@ impl Files {
         // future drops it too, and the next write removes what it made.
         let reservation = self.inner.database.record_copies(copies.clone()).await?;
         let mut cancel = cancel.clone();
-        let result = match self.download(&folder, &plan.folders, &refs, &copies, &mut cancel).await
+        let mut report = ProgressReport::new(progress, self.inner.clock.clone());
+        let error = match self
+            .download(&folder, &plan.folders, &refs, &copies, &mut cancel, &mut report)
+            .await
         {
-            Ok((switches, flushed)) => self
-                .inner
-                .database
-                .make_device_only(switches, flushed)
-                .await
-                .map_err(DeviceOnlyError::from),
-            Err(error) => Err(error),
-        };
-        let Err(error) = result else {
-            return Ok(());
+            Ok((switches, flushed)) => {
+                return Ok(self.inner.database.prepared_device_only(
+                    reservation,
+                    switches,
+                    flushed,
+                )?)
+            }
+            Err(error) => error,
         };
         let made = copies.into_iter().map(|copy| copy.path).collect();
         let abandoned = self.inner.database.abandon_copies(made).await;
@@ -151,6 +190,7 @@ impl Files {
         files: &[FileRef],
         copies: &[FolderCopy],
         cancel: &mut watch::Receiver<bool>,
+        report: &mut ProgressReport<DeviceOnlyStep>,
     ) -> Result<(Vec<DeviceOnlyCopy>, Flushed), DeviceOnlyError> {
         for made in folders {
             check(cancel)?;
@@ -161,8 +201,12 @@ impl Files {
         }
         let mut switches = Vec::new();
         let mut batch = FlushBatch::new();
+        let all = files.iter().map(FileRef::size).sum();
+        let mut before = 0;
         for (file, copy) in files.iter().zip(copies) {
             check(cancel)?;
+            report.begin(DeviceOnlyStep::Downloading { file: file.id(), before, all }, file.size());
+            let mut done = 0;
             let download = |error| DeviceOnlyError::Download { file: file.id(), error };
             let FilePlace::Cloud { location, .. } = file.place() else {
                 return Err(DbError::NotInCloud { file: file.id() }.into());
@@ -184,7 +228,10 @@ impl Files {
                 let Some(bytes) = bytes else { break };
                 hashes.update(&bytes);
                 writer.append(&bytes).await?;
+                done += bytes.len() as u64;
+                report.done(done);
             }
+            before += file.size();
             writer.publish(&copy.path, &mut batch).await?;
             let observed = observe_metadata(&copy.path).await.map_err(DbError::from)?;
             self.inner.database.place_copy(&observed).await?;

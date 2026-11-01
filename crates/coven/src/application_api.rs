@@ -42,12 +42,13 @@ pub use coven_database::{
     CovenResult, DbError, Determinism, FileColumn, FileLocation, FilePlace, FileRef, FileSource,
     FunctionArguments, LiveQuery, LiveQueryCause, LiveQueryClosed, LiveQueryRequests,
     LiveQueryRevision, LoadStep, Lost, LostCell, LostValue, Migration, MigrationContext,
-    MigrationError, MoveFile, MoveId, Namespace, OldWrites, OpenStep, Params, Place, PreparedPin,
-    PreparedUserFile, Provenance, Read, ReconfigurableLiveQuery, ReconfigurableLiveQueryEvent,
-    RemovalRule, Replacement, Row, RowAuthorizationFailure, RowChange, RowIdentity, RowKey,
-    SchemaError, SnapshotError, SqlRead, SqlReadContext, SqliteError, SqliteResult, StagedFiles,
-    SyncedTable, TemporaryDirectoryError, ToSql, TransferChange, TransferProgress, TransferWatch,
-    UnsentWork, UserFile, WriteBatch, WriteId, WriteWait, BOUND_FILE_LIMIT,
+    MigrationError, MoveFile, MoveId, Namespace, OldWrites, OpenStep, Params, Place,
+    PreparedDeviceOnly, PreparedPin, PreparedUserFile, Provenance, Read, ReconfigurableLiveQuery,
+    ReconfigurableLiveQueryEvent, RemovalRule, Replacement, Row, RowAuthorizationFailure,
+    RowChange, RowIdentity, RowKey, SchemaError, SnapshotError, SqlRead, SqlReadContext,
+    SqliteError, SqliteResult, StagedFiles, SyncedTable, TemporaryDirectoryError, ToSql,
+    TransferChange, TransferProgress, TransferWatch, UnsentWork, UserFile, WriteBatch, WriteId,
+    WriteWait, BOUND_FILE_LIMIT,
 };
 pub use coven_database::{
     AnalysisLimit, AutoVacuum, CacheSize, CacheSpill, CheckpointMode, IncrementalVacuum,
@@ -119,8 +120,9 @@ pub use coven_sync::{
     SyncStatus, WriteCutoff,
 };
 pub use coven_sync::{
-    DeviceOnlyError, DrainOutcome, FileRangeStream, FileReadError, FileStatus, FileStream,
-    PinProgress, QueuedUpload, TransferLimits, UploadPhase, UploadProgress, UploadQueue,
+    DeviceOnlyError, DeviceOnlyStep, DrainOutcome, FileRangeStream, FileReadError, FileStatus,
+    FileStream, PinProgress, QueuedUpload, TransferLimits, UploadPhase, UploadProgress,
+    UploadQueue,
 };
 
 #[cfg(any(test, doctest))]

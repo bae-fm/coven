@@ -664,6 +664,7 @@ async fn prepare_and_load(
             waits.clone(),
             builder.ids.clone(),
             builder.transfers.clone(),
+            clock.clone(),
         );
         let sync = SequenceSync::open(
             database.clone(),

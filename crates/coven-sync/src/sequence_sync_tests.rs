@@ -271,6 +271,7 @@ impl Group {
             waits.clone(),
             ids,
             transfers,
+            std::sync::Arc::new(coven_foundation::clock::SystemClock),
         );
         let sync = Arc::new(
             SequenceSync::open(

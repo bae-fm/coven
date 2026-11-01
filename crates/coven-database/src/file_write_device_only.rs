@@ -75,11 +75,35 @@ pub(crate) fn permitted(
 }
 
 impl FileWrite<'_> {
+    /// Switch a prepared call's files to their copies in this write. Every
+    /// copy must be reserved in this store (`PreparedElsewhere`); the
+    /// reservation is let go once the write has decided.
+    pub(crate) fn make_prepared_device_only(
+        &self,
+        prepared: crate::PreparedDeviceOnly,
+    ) -> Result<(), DbError> {
+        {
+            let copying = self.copying.lock().expect("copying lock poisoned");
+            if prepared.paths().iter().any(|path| !copying.contains(path)) {
+                return Err(DbError::PreparedElsewhere);
+            }
+        }
+        let (copies, paths) = prepared.take();
+        self.held_copies.borrow_mut().extend(paths);
+        self.make_device_only(copies)
+    }
+
+    /// The copies a prepared switch brought into this write, which no
+    /// removal skips once its transaction has decided.
+    pub(crate) fn take_held_copies(&self) -> Vec<String> {
+        std::mem::take(&mut self.held_copies.borrow_mut())
+    }
+
     /// Switch each file to this device only, off the stored bytes its copy
     /// was downloaded from, in this write (§17.3). Each must still be
     /// permitted, and still stored there: a file another device's switch
-    /// took off them meanwhile is `NotInCloud`. No app row changes.
-    pub(crate) fn make_device_only(&self, copies: Vec<DeviceOnlyCopy>) -> Result<(), DbError> {
+    /// took off them meanwhile is `NotInCloud`.
+    fn make_device_only(&self, copies: Vec<DeviceOnlyCopy>) -> Result<(), DbError> {
         let db = self.database;
         for copy in copies {
             let record = permitted(db, self.schema, self.device, copy.file)?;

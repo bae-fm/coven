@@ -450,6 +450,7 @@ async fn budgets_pins_eviction_and_second_device_reads() {
         second.files.inner.waits.clone(),
         second.ids.clone(),
         second.files.inner.transfers.clone(),
+        std::sync::Arc::new(coven_foundation::clock::SystemClock),
     );
     let ref2 = second.database.file_ref(file.id()).await.unwrap();
     assert_eq!(files.read_file(&ref2).await.unwrap(), bytes);
@@ -579,6 +580,7 @@ async fn whole_reads_and_pins_check_the_records_hash_after_authenticating_chunks
         b.files.inner.waits.clone(),
         b.ids.clone(),
         b.files.inner.transfers.clone(),
+        std::sync::Arc::new(coven_foundation::clock::SystemClock),
     );
     let file = b.database.file_ref(uploaded.id()).await.unwrap();
     let stream = files.open_file_stream(&file).await.unwrap();
@@ -769,6 +771,7 @@ async fn paused_files(
         waits,
         ids,
         transfers,
+        std::sync::Arc::new(coven_foundation::clock::SystemClock),
     );
     // The owner's own copy of the setting, which parts check between sends.
     let owner = files.clone();

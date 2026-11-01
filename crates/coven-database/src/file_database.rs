@@ -807,7 +807,7 @@ pub use prepared_pin::PreparedPin;
 
 #[path = "file_database_copies.rs"]
 mod copies;
-pub use copies::{CopyReservation, FolderCopy};
+pub use copies::{CopyReservation, FolderCopy, PreparedDeviceOnly};
 
 #[cfg(test)]
 #[path = "file_database_tests.rs"]

@@ -209,8 +209,9 @@ async fn making_the_store_file_device_only_leaves_the_circles_stored() {
     hashes.update(b"track");
     // The test wrote the copy itself, outside any batch.
     let flushed = coven_foundation::files::FlushBatch::new().flush().await.unwrap();
-    owner
-        .make_device_only(
+    let prepared = owner
+        .prepared_device_only(
+            reservation,
             vec![crate::DeviceOnlyCopy {
                 file: track,
                 location: location.clone(),
@@ -219,9 +220,8 @@ async fn making_the_store_file_device_only_leaves_the_circles_stored() {
             }],
             flushed,
         )
-        .await
         .unwrap();
-    drop(reservation);
+    db.write(move |sql| sql.make_device_only(prepared)).await.unwrap();
     crate::tests::publish(&db).await.unwrap();
     assert_eq!(record(&db, track).place, crate::file_location::Place::DeviceOnly(store.device()));
     // The copy is the original now, with the hashes of the bytes written to

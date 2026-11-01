@@ -150,7 +150,8 @@ pub use authorship::{Authorship, HeaderEvidence};
 pub use coven_merge::Slot;
 pub use coven_merge::WriteId;
 pub use database::file_database::{
-    CacheReservation, CopyReservation, FileDatabase, FolderCopy, LocalEvidence, PreparedPin,
+    CacheReservation, CopyReservation, FileDatabase, FolderCopy, LocalEvidence, PreparedDeviceOnly,
+    PreparedPin,
 };
 pub use database::file_retention::FileCandidate;
 pub use database::input_database::{

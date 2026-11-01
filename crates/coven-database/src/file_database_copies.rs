@@ -158,33 +158,20 @@ impl FileDatabase {
         .await
     }
 
-    /// The one write switching every file of a call to this device only,
-    /// each to its placed copy, which becomes the original this device
-    /// records (§17.3). Each file must still be permitted and still stored
-    /// where its copy came from; otherwise nothing switches. It takes the
-    /// flush of the batch the copies were written in: they are on the drive
-    /// before the commit that records them (Appendix C.3).
-    pub async fn make_device_only(
+    /// The copies a call placed, ready for the write that switches their
+    /// files to them (§17.3). It takes the flush of the batch the copies
+    /// were written in: they are on the drive before the commit that records
+    /// them (Appendix C.3).
+    pub fn prepared_device_only(
         &self,
+        reservation: CopyReservation,
         copies: Vec<DeviceOnlyCopy>,
         _flushed: Flushed,
-    ) -> Result<(), DbError> {
+    ) -> Result<PreparedDeviceOnly, DbError> {
         let FileDatabaseAccess::Writer(database) = &self.access else {
             return Err(read_only());
         };
-        database
-            .call(move |inner| {
-                inner.with_files(|writer, files| {
-                    writer.local_write(
-                        &inner.access.write_schema,
-                        inner.access.device,
-                        inner.clock.now(),
-                        files,
-                        |_sql| files.make_device_only(copies),
-                    )
-                })
-            })
-            .await
+        Ok(PreparedDeviceOnly { database: database.clone(), reservation, copies })
     }
 
     /// Remove what a failing call made: the copies at `paths` it left
@@ -199,14 +186,50 @@ impl FileDatabase {
         let FileDatabaseAccess::Writer(database) = &self.access else {
             return Err(read_only());
         };
-        database
-            .call(move |inner| {
-                let chosen = inner.access.with_writer(|writer| {
-                    Ok::<_, DbError>(crate::file_removals::choose_copies(writer, &paths))
-                })?;
-                inner.finish_removals(Ok::<_, DbError>(()), chosen)
-            })
-            .await
+        remove_copies(database, paths).await
+    }
+}
+
+/// Cloud files downloaded to copies in the person's folder, ready for one
+/// write to make them device-only here (§17.3, E8). It holds nothing close
+/// waits for. Committed by no write, its copies stay reserved while it is
+/// held, and the next write or open removes them once it drops; `abandon`
+/// removes them at once.
+pub struct PreparedDeviceOnly {
+    database: super::Database,
+    reservation: CopyReservation,
+    copies: Vec<DeviceOnlyCopy>,
+}
+
+impl PreparedDeviceOnly {
+    /// The copies' paths, as the store reserving them records them.
+    pub(crate) fn paths(&self) -> &[String] {
+        &self.reservation.paths
+    }
+
+    /// The switches, and the copies' paths, for the write making them;
+    /// the reservation's release is the write's from here.
+    pub(crate) fn take(mut self) -> (Vec<DeviceOnlyCopy>, Vec<String>) {
+        let paths = std::mem::take(&mut self.reservation.paths);
+        (std::mem::take(&mut self.copies), paths)
+    }
+
+    /// Remove the copies, and the folders made for them, now, instead of
+    /// at the next write or open (§17.3). A failed removal keeps its record,
+    /// and the next open removes it.
+    pub async fn abandon(self) -> Result<(), DbError> {
+        let paths = self.reservation.paths.clone();
+        let database = self.database.clone();
+        drop(self);
+        remove_copies(&database, paths).await
+    }
+}
+
+impl std::fmt::Debug for PreparedDeviceOnly {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PreparedDeviceOnly")
+            .field("copies", &self.copies.len())
+            .finish_non_exhaustive()
     }
 }
 
@@ -227,6 +250,20 @@ impl Drop for CopyReservation {
             copying.remove(path);
         }
     }
+}
+
+/// Remove the copies at `paths` a call left unswitched, if they are as it
+/// left them, and the folders made for them, if they are empty, once the
+/// writer is free.
+async fn remove_copies(database: &super::Database, paths: Vec<String>) -> Result<(), DbError> {
+    database
+        .call(move |inner| {
+            let chosen = inner.access.with_writer(|writer| {
+                Ok::<_, DbError>(crate::file_removals::choose_copies(writer, &paths))
+            })?;
+            inner.finish_removals(Ok::<_, DbError>(()), chosen)
+        })
+        .await
 }
 
 /// A path as coven records it: valid Unicode, as planning a copy checks.
