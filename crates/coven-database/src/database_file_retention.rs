@@ -243,8 +243,8 @@ impl Database {
         .await
     }
 
-    /// The counted removal at which this device last listed `device`'s file
-    /// folder, if it did (§17.10).
+    /// The counted entry stopping `device` for good at which this device
+    /// last listed its file folder, if it did (§17.10).
     pub async fn file_scan(&self, device: DeviceId) -> Result<Option<Slot>, DbError> {
         self.call(move |inner| {
             let reader = inner.access.readers.acquire_reader();
@@ -261,24 +261,28 @@ impl Database {
         .await
     }
 
-    /// Record a complete listing of a removed uploader's file folder, taken
-    /// once `removal` cut it off, with every path it found as a candidate.
-    /// Returns false, recording nothing, when `removal` is not a counted
-    /// cut-off for this device: nothing it found could be judged by it.
-    /// Nothing the device writes after the cut-off counts (§14.1), so any
-    /// listing taken after it is sound, however often it is taken (§17.10).
+    /// Record a complete listing of the file folder of an uploader gone for
+    /// good, taken once the entry at `stop` stopped it, with every path it
+    /// found as a candidate. Returns false, recording nothing, when this
+    /// device hasn't applied a counted cut-off at `stop` naming the device or
+    /// its member: the history the caller judged by is not the one applied
+    /// here. Whether a replacement of the member's keys stopped the device,
+    /// which depends on the slot that added it and the entry's author, the
+    /// caller's history decides (§14.1). Nothing the device writes after the
+    /// stop counts, so any listing taken after it is sound, however often it
+    /// is taken (§17.10).
     pub async fn complete_file_scan(
         &self,
         device: DeviceId,
-        removal: Slot,
+        stop: Slot,
         files: BTreeSet<FileId>,
     ) -> Result<bool, DbError> {
         self.call(move |inner| {
             inner.access.with_writer(|writer| {
                 writer.transaction(|db| {
                     let kept: bool = db.query_row(
-                        "SELECT EXISTS(SELECT 1 FROM _coven_cutoffs c JOIN _coven_devices d ON d.device=?1 WHERE c.slot=?2 AND (c.device=d.device OR (c.member=d.member AND c.signing IS NULL)))",
-                        params![device.0.to_be_bytes(), removal.0.to_be_bytes()],
+                        "SELECT EXISTS(SELECT 1 FROM _coven_cutoffs c JOIN _coven_devices d ON d.device=?1 WHERE c.slot=?2 AND (c.device=d.device OR c.member=d.member))",
+                        params![device.0.to_be_bytes(), stop.0.to_be_bytes()],
                         |r| r.get(0),
                     )?;
                     if !kept {
@@ -291,7 +295,7 @@ impl Database {
                         "INSERT INTO _coven_file_scans(device,slot) VALUES(?1,?2) ON CONFLICT(device) DO UPDATE SET slot=excluded.slot",
                         params![
                             device.0.to_be_bytes(),
-                            removal.0.to_be_bytes()
+                            stop.0.to_be_bytes()
                         ],
                     )?;
                     Ok(true)

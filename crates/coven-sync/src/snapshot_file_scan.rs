@@ -1,9 +1,10 @@
-//! Listing a removed uploader's file folder: once when its removal applies,
-//! and again whenever the app asks (§17.10). Nothing the device writes after
-//! its cut-off counts (§14.1), so every file a listing finds is judged by the
-//! reference evidence alone, whenever the listing is taken.
+//! Listing the file folder of an uploader gone for good: once when the entry
+//! that stopped it applies, and again whenever the app asks (§17.10).
+//! Nothing the device writes after that entry counts (§14.1), so every file a
+//! listing finds is judged by the reference evidence alone, whenever the
+//! listing is taken.
 use crate::{history::History, sequence_sync::SequenceSync, SyncError};
-use coven_format::{admin::StoreChange, MemberAccess};
+use coven_format::MemberAccess;
 use coven_foundation::id_source::{DeviceId, MemberId};
 use coven_merge::Slot;
 use coven_storage::{ObjectPrefix, StorageFailure};
@@ -11,21 +12,26 @@ use std::collections::BTreeSet;
 
 pub(crate) struct UploaderScan {
     device: DeviceId,
-    removal: Slot,
+    stop: Slot,
 }
 
-/// Which removed uploaders' folders to list.
+/// Which gone uploaders' folders to list.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Listing {
-    /// Each folder not yet listed at its latest counted removal: what a pass
-    /// lists, so it lists a folder once per removal.
-    AtRemoval,
-    /// Every folder again, for the app's cleanup: a removed device whose key
+    /// Each folder not yet listed at the latest counted entry that stopped
+    /// its device: what a pass lists, so it lists a folder once per entry.
+    AtStop,
+    /// Every folder again, for the app's cleanup: a gone device whose key
     /// still works may have uploaded since.
     Every,
 }
 
 impl History {
+    /// Whether this device, `own` of `member`, deletes `uploader`'s stored
+    /// files and snapshots: its own, and those of a device gone for good
+    /// that is its member's. When the gone device's member has no device
+    /// left that isn't gone, removed or not, the storage owner's devices
+    /// delete them instead (§17.10).
     pub(crate) fn deletes_for(&self, own: DeviceId, member: MemberId, uploader: DeviceId) -> bool {
         if own == uploader {
             return true;
@@ -33,11 +39,15 @@ impl History {
         let Some(device) = self.state.devices.get(&uploader) else {
             return false;
         };
-        if device.active() {
+        if self.gone_for_good(uploader).is_none() {
             return false;
         }
+        let member_left =
+            self.state.devices.iter().any(|(id, value)| {
+                value.member == device.member && self.gone_for_good(*id).is_none()
+            });
         device.member == member
-            || (self.state.members.get(&device.member).is_some_and(|value| value.removed)
+            || (!member_left
                 && match self.state.members.get(&member).map(|value| &value.access) {
                     // Access-key IDs do not identify an S3 account. The creator is
                     // the only account owner the authenticated history establishes.
@@ -48,18 +58,9 @@ impl History {
                 })
     }
 
-    /// The latest counted removal that cut `device` off: its own removal or
-    /// replacement, or its member's removal.
-    fn removal(&self, device: DeviceId) -> Option<Slot> {
-        let member = self.state.devices.get(&device)?.member;
-        self.cutoffs.iter().rev().find_map(|cutoff| match cutoff.change {
-            StoreChange::RemoveMember { member: removed } if removed == member => Some(cutoff.slot),
-            StoreChange::RemoveDevice { device: removed } if removed == device => Some(cutoff.slot),
-            StoreChange::AddDevice { replaces: Some(replaced), .. } if replaced == device => {
-                Some(cutoff.slot)
-            }
-            _ => None,
-        })
+    /// The latest counted entry that stopped `device` for good (§14.1).
+    fn latest_stop(&self, device: DeviceId) -> Option<Slot> {
+        self.stops(device).next_back().map(|(slot, _)| slot)
     }
 }
 
@@ -72,18 +73,13 @@ impl SequenceSync {
     ) -> Result<Vec<UploaderScan>, SyncError> {
         let mut scans = Vec::new();
         for device in uploaders {
-            if history.state.devices.get(device).is_none_or(|device| device.active()) {
-                continue;
-            }
-            let Some(removal) = history.removal(*device) else {
+            let Some(stop) = history.latest_stop(*device) else {
                 continue;
             };
-            if listing == Listing::AtRemoval
-                && self.database.file_scan(*device).await? == Some(removal)
-            {
+            if listing == Listing::AtStop && self.database.file_scan(*device).await? == Some(stop) {
                 continue;
             }
-            scans.push(UploaderScan { device: *device, removal });
+            scans.push(UploaderScan { device: *device, stop });
         }
         Ok(scans)
     }
@@ -105,7 +101,7 @@ impl SequenceSync {
                     }
                 }
             }
-            if !self.database.complete_file_scan(scan.device, scan.removal, files).await? {
+            if !self.database.complete_file_scan(scan.device, scan.stop, files).await? {
                 return Err(StorageFailure::CatchUpRequired.into());
             }
         }

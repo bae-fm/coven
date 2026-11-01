@@ -163,10 +163,10 @@ its worker. `database_changes::tests::io_differential_wakes` compares the
 Rust notification decisions with `ioRunner`. The model concerns which work
 becomes runnable, not a proof of an operating system scheduler.
 
-## Removed-device file scan
+## Gone-device file scan
 
-[Retired.lean](io/CovenIO/Retired.lean) models the removed uploader's folder
-cited by §17.10: files the removed device stores, candidates found by completed
+[Retired.lean](io/CovenIO/Retired.lean) models the folder of an uploader gone
+for good, cited by §17.10: files the gone device stores, candidates found by completed
 listings, and whether a listing has completed. A pass lists the folder only
 until one listing completes; the app's cleanup lists it every time it runs. A
 failed listing records nothing.
@@ -174,9 +174,10 @@ failed listing records nothing.
 `listing_finds_every_file` proves that a completed listing makes every file in
 the folder a candidate, and `candidates_kept` that later events never drop
 one. `failed_listing_records_nothing` and `pass_lists_once` state the retry and
-the once-per-removal rule. `cleanup_finds_a_later_upload` shows why the app's
-cleanup exists: a file uploaded after the listing at removal is missed by every
-later pass and found by the cleanup.
+the rule of one listing per entry that stops the device.
+`cleanup_finds_a_later_upload` shows why the app's cleanup exists: a file
+uploaded after the listing when the device went is missed by every later pass
+and found by the cleanup.
 `sequence_sync::sequence_files::tests::io_differential_file_scan` drives the
 real uploader listing on a removed S3 member's folder through uploads, passes
 and cleanups that complete or fail, and compares the recorded candidates with

@@ -505,3 +505,35 @@ async fn a_scan_needs_a_counted_removal_and_survives_reopening() {
         [found, later]
     );
 }
+
+/// A replacement of a member's keys is a counted cut-off for that member's
+/// devices, so a listing of one of their folders is recorded against it; a
+/// replacement of another member's keys is not (§14.1, §17.10).
+#[tokio::test]
+async fn a_scan_is_recorded_against_a_replacement_of_its_members_keys() {
+    let store = TestStore::new();
+    let db = store.builder(vec![], vec![]).open().await.unwrap();
+    let (uploader, other) = (DeviceId(5), DeviceId(6));
+    TestStore::register(&db, uploader, 1);
+    TestStore::register(&db, other, 2);
+    let member = crate::tests::member(1);
+    let mut state = db.store_state().await.unwrap();
+    let expected = state.members[&member].keys;
+    let keys = crate::tests::keys(3);
+    state.members.get_mut(&member).unwrap().keys = keys;
+    state.bound_keys.insert(keys);
+    let replaced = coven_merge::Slot(db.applied_slot().await.unwrap() + 1);
+    db.admin_fixture(
+        coven_format::admin::StoreChange::ReplaceMemberKeys { member, expected, keys },
+        state,
+        None,
+    )
+    .await
+    .unwrap();
+    let found = FileId(uuid::Uuid::from_u128(11));
+    assert!(!db.complete_file_scan(other, replaced, [found].into()).await.unwrap());
+    assert_eq!(db.file_scan(other).await.unwrap(), None);
+    assert!(db.complete_file_scan(uploader, replaced, [found].into()).await.unwrap());
+    assert_eq!(db.file_scan(uploader).await.unwrap(), Some(replaced));
+    db.close().await.unwrap();
+}

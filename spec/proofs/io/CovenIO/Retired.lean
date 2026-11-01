@@ -2,17 +2,17 @@ import CovenIO.Storage
 
 namespace CovenIO.Retired
 
-/-! ### Cleaning up a removed uploader's folder (§17.10)
+/-! ### Cleaning up the folder of an uploader gone for good (§17.10)
 
-Once a device's removal applies, nothing it writes counts (§14.1). A file it
-uploads afterwards, while its provider access still works, can never be
-referred to, so any listing of its folder is sound whenever it is taken: each
-file it finds becomes a candidate, and retained references alone decide
-whether it is deleted. A pass lists the folder once, when the removal
-applies; the app's cleanup lists it again whenever it is asked. A failed
-listing records nothing and is retried. -/
+Once the entry that stops a device for good applies, such as its removal,
+nothing it writes counts (§14.1). A file it uploads afterwards, while its
+provider access still works, can never be referred to, so any listing of its
+folder is sound whenever it is taken: each file it finds becomes a candidate,
+and retained references alone decide whether it is deleted. A pass lists the
+folder once, when that entry applies; the app's cleanup lists it again
+whenever it is asked. A failed listing records nothing and is retried. -/
 
-/-- One removed uploader's folder as this device knows it: the files stored
+/-- One gone uploader's folder as this device knows it: the files stored
 in it, the candidates its completed listings found, and whether a listing
 has completed. -/
 structure Folder where
@@ -24,7 +24,7 @@ structure Folder where
 def Folder.initial : Folder := ⟨[], [], false⟩
 
 inductive FolderEvent where
-  /-- The removed device uploads a file its key still lets it store. -/
+  /-- The gone device uploads a file its key still lets it store. -/
   | upload (file : Nat)
   /-- A pass: it lists the folder only if no listing has completed yet. -/
   | pass (completes : Bool)

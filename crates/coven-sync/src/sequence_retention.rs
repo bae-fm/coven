@@ -157,9 +157,7 @@ impl SequenceSync {
             .keys()
             .copied()
             .filter(|device| {
-                *device != self.device
-                    && history.gone_for_good(*device).is_some()
-                    && history.deletes_for(self.device, member.member(), *device)
+                *device != self.device && history.deletes_for(self.device, member.member(), *device)
             })
             .collect();
         let mut kept: BTreeSet<Slot> = session

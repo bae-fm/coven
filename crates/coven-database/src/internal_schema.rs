@@ -694,10 +694,11 @@ macro_rules! coven_tables {
                 INSERT INTO _coven_file_candidates SELECT OLD.device,OLD.file,(SELECT applied FROM _coven_sequence WHERE singleton=1) WHERE NOT EXISTS(SELECT 1 FROM _coven_file_protection WHERE device=OLD.device AND file=OLD.file) ON CONFLICT DO UPDATE SET since=max(since,excluded.since);
             END;
         ");
-        // A removed uploader's file folder this device listed when its
-        // removal applied, and that counted removal. A later removal of the
-        // same device's member lists it again; the paths found are
-        // candidates (§17.10).
+        // The file folder of an uploader gone for good that this device
+        // listed when the entry stopping it applied, and that entry's slot.
+        // A later entry stopping the same device again, as its member's
+        // removal does, lists it again; the paths found are candidates
+        // (§17.10).
         $visit!(_coven_file_scans, "
             CREATE TABLE _coven_file_scans (
                 device BLOB PRIMARY KEY NOT NULL CHECK(length(device)=8),

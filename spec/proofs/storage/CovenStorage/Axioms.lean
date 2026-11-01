@@ -67,7 +67,7 @@ import CovenStorage
 #print axioms CovenStorage.Seen.missed_published
 #print axioms CovenStorage.Seen.unseen_copy_unpublished
 #print axioms CovenStorage.Seen.next_write_publishes_copy
-#print axioms CovenStorage.Seen.removed_holds_nothing
+#print axioms CovenStorage.Seen.gone_holds_nothing
 #print axioms CovenStorage.Files.make_local_whole
 #print axioms CovenStorage.Files.make_local_keeps_candidates
 #print axioms CovenStorage.Files.make_local_with_whole

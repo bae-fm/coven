@@ -1,13 +1,13 @@
 namespace CovenStorage.Seen
 
 /-! §17.10: stored bytes outlive the change that left them unnamed until every
-other active device has seen it. Another device may have made a new file over
+other device not gone for good has seen it. Another device may have made a new file over
 the bytes, with `existing_file` or by moving a row, without reading the
 change, in a write it hasn't sent: nothing the uploader reads names the bytes,
 yet that write will. So the uploader counts a candidate from the slot where it
 lost its last name, and deletes it only once every other device has seen that
 slot: it published a write that read through it, its entry added it after
-that slot, or a removal cut it off.
+that slot, or an entry stopped it for good, as its removal does.
 
 A device makes its writes in order, each reading at least as far as the one
 before, since its applied slot never goes back, and each reading through the
@@ -16,12 +16,12 @@ slot that added it, except slot one's offline writes, which read nothing
 
 Proved here: once a device has seen the slot, every write it can still send
 that counts read through it (`seen_unpublished`), so every write of every
-other active device that missed the change is published, where the uploader's
+other device not gone for good that missed the change is published, where the uploader's
 reference evidence finds it (`missed_published`). `unseen_copy_unpublished`
 shows why the rule exists: Ben's copy that missed Ana's delete names the
 bytes, unpublished, while nothing published does. `next_write_publishes_copy`
-shows Ben's next write publishing it, and `removed_holds_nothing` that a
-removed device holds nothing back. -/
+shows Ben's next write publishing it, and `gone_holds_nothing` that a device
+gone for good holds nothing back. -/
 
 /-- One write of another device: the slot its device had read through when
 it was made, and whether it names the stored bytes. -/
@@ -31,13 +31,13 @@ structure Write where
 deriving DecidableEq, Repr
 
 /-- Another device: its writes in the order it made them, how many are
-published, the slot whose entry added it, and whether a removal cut it off,
-after which nothing it sends counts (§14.1). -/
+published, the slot whose entry added it, and whether an entry stopped it
+for good, after which nothing it sends counts (§14.1). -/
 structure Device where
   writes : List Write
   published : Nat
   added : Nat
-  removed : Bool
+  gone : Bool
 deriving Repr
 
 /-- §7.1: each write reads at least as far as the one before it, and at
@@ -49,20 +49,21 @@ def Device.Valid (d : Device) : Prop :=
 /-- The writes still to be sent. -/
 def Device.unpublished (d : Device) : List Write := d.writes.drop d.published
 
-/-- §17.10: the device has seen slot `since`: a removal cut it off, its entry
-added it after `since`, or it published a write that read through `since`. -/
+/-- §17.10: the device has seen slot `since`: an entry stopped it for good,
+its entry added it after `since`, or it published a write that read through
+`since`. -/
 def Device.seen (d : Device) (since : Nat) : Bool :=
-  d.removed || decide (since < d.added) ||
+  d.gone || decide (since < d.added) ||
     (d.writes.take d.published).any (fun w => decide (since ≤ w.readThrough))
 
-/-- Once an active device has seen `since`, every write it can still send
+/-- Once a device not gone for good has seen `since`, every write it can still send
 read through `since`. -/
 theorem seen_unpublished (d : Device) (since : Nat) (v : d.Valid)
-    (h : d.seen since = true) (active : d.removed = false) :
+    (h : d.seen since = true) (notGone : d.gone = false) :
     ∀ w ∈ d.unpublished, since ≤ w.readThrough := by
   intro w hw
   have hmem : w ∈ d.writes := List.mem_of_mem_drop hw
-  simp only [Device.seen, active, Bool.false_or, Bool.or_eq_true, decide_eq_true_eq,
+  simp only [Device.seen, notGone, Bool.false_or, Bool.or_eq_true, decide_eq_true_eq,
     List.any_eq_true] at h
   rcases h with added | ⟨p, hp, hle⟩
   · have := v.2 w hmem
@@ -71,17 +72,17 @@ theorem seen_unpublished (d : Device) (since : Nat) (v : d.Valid)
     rw [← List.take_append_drop d.published d.writes, List.pairwise_append] at pair
     exact Nat.le_trans hle (pair.2.2 p hp w hw)
 
-/-- §17.10: when every other device has seen `since`, each write of an
-active one that didn't read through `since` is published. -/
+/-- §17.10: when every other device has seen `since`, each write of one
+not gone for good that didn't read through `since` is published. -/
 theorem missed_published (others : List Device) (since : Nat)
     (valid : ∀ d ∈ others, d.Valid) (seen : ∀ d ∈ others, d.seen since = true) :
-    ∀ d ∈ others, d.removed = false →
+    ∀ d ∈ others, d.gone = false →
       ∀ w ∈ d.writes, w.readThrough < since → w ∈ d.writes.take d.published := by
-  intro d hd active w hw missed
+  intro d hd notGone w hw missed
   rw [← List.take_append_drop d.published d.writes, List.mem_append] at hw
   rcases hw with hw | hw
   · exact hw
-  · have := seen_unpublished d since (valid d hd) (seen d hd) active w hw
+  · have := seen_unpublished d since (valid d hd) (seen d hd) notGone w hw
     omega
 
 /-- Ana's delete is published in slot 40. Ben's phone, at slot 38, put the
@@ -98,9 +99,9 @@ theorem next_write_publishes_copy :
     let ben : Device := ⟨[⟨38, true⟩, ⟨41, false⟩], 2, 3, false⟩
     ben.seen 40 = true ∧ ben.unpublished = [] := by decide
 
-/-- Once Ben is removed, nothing he sends counts, so he has seen every
-slot. -/
-theorem removed_holds_nothing :
+/-- Once Ben is removed, or another entry stops his phone for good, nothing
+it sends counts, so it has seen every slot. -/
+theorem gone_holds_nothing :
     let ben : Device := ⟨[⟨38, true⟩], 0, 3, true⟩
     ben.seen 40 = true := by decide
 

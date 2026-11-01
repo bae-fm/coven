@@ -496,21 +496,23 @@ holding a file that is on one device only can move its row (`NotThisDevice`).
 Stored bytes are deleted only when nothing can still point at them: no file
 record in a row, lost value, snapshot, queued or published write, or upload
 queue. Deleting too early would leave a record naming bytes that are gone for
-good. A file's record goes with its last reference, and its bytes stay until
-the write deleting it is published. They also stay until every other active
-device has published a write that saw the delete, or the switch making the file
-device-only, so a new file another device made over them meanwhile, with
+good. A file's record goes with its last reference, and its bytes stay until the
+write deleting it is published. They also stay until every other device not gone
+for good has published a write that saw the delete, or the switch making the
+file device-only, so a new file another device made over them meanwhile, with
 `existing_file` or by moving its row, still reads them. An idle device holds
-them until it writes or is removed. A device deletes stored bytes only after
-it has read and checked everything needed to prove nothing names them, and
-only with provider permission. Data it can't read, such as a circle it isn't
-in, means it leaves the bytes alone. A quiet pass never lists files.
+them until it writes or is gone for good. A device deletes stored bytes only
+after it has read and checked everything needed to prove nothing names them, and
+only with provider permission. Data it can't read, such as a circle it isn't in,
+means it leaves the bytes alone. A quiet pass never lists files.
 
-A removed device can leave files that no surviving record names, and until its
-provider access ends it can store more that nothing will ever refer to. When
-its removal applies, the device responsible for the cleanup lists that device's
-file folder once and deletes what nothing refers to. The app can run that
-cleanup again at any time, for example after the person deletes a removed S3
-member's key, to delete files the removed device stored later. Deleting a
+A device gone for good, because it or its member was removed, a reset
+replaced it, or another device replaced its member's keys, can leave files
+that no surviving record names, and until its provider access ends it can
+store more that nothing will ever refer to. When the entry that stopped it
+applies, the device responsible for the cleanup lists that device's file
+folder once and deletes what nothing refers to. The app can run that cleanup
+again at any time, for example after the person deletes a removed S3
+member's key, to delete files the gone device stored later. Deleting a
 file's record forgets coven's record of a user's original; the original itself
 is never deleted by any of this.

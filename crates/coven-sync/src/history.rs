@@ -144,9 +144,20 @@ impl History {
     /// that wrote it does. Another copy of an installation using its device
     /// id is never here: only that installation sees it (§19.3).
     pub(crate) fn gone_for_good(&self, device: DeviceId) -> Option<(Slot, DeviceStop)> {
-        let member = self.state.devices.get(&device)?.member;
-        let added = self.added(device)?;
-        self.cutoffs.iter().find_map(|cutoff| {
+        self.stops(device).next()
+    }
+
+    /// Every counted entry that stops `device` for good, oldest first: the
+    /// first is where it went (`gone_for_good`), and each later one stops it
+    /// again, as its member's removal after its own does.
+    pub(crate) fn stops(
+        &self,
+        device: DeviceId,
+    ) -> impl DoubleEndedIterator<Item = (Slot, DeviceStop)> + '_ {
+        let registered =
+            self.state.devices.get(&device).map(|value| value.member).zip(self.added(device));
+        self.cutoffs.iter().filter_map(move |cutoff| {
+            let (member, added) = registered?;
             let stop = match &cutoff.change {
                 StoreChange::RemoveDevice { device: removed } if *removed == device => {
                     DeviceStop::Removed

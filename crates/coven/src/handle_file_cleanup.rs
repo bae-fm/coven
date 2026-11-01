@@ -1,16 +1,18 @@
-//! Deleting removed devices' stored files at the app's request (§17.10, E5).
+//! Deleting the stored files of devices gone for good at the app's request
+//! (§17.10, E5).
 
 use crate::*;
 
 impl CovenHandle {
-    /// Delete the stored files of removed devices that nothing refers to
-    /// (§17.10): list again the file folder of every removed device this
-    /// device is responsible for, then delete each file found that no
-    /// retained row, write or snapshot names, once every other active device
-    /// has published a write that read past the listing; later passes delete
-    /// the rest as those writes arrive. A removed device can keep
+    /// Delete the stored files of devices gone for good (§14.1) that nothing
+    /// refers to (§17.10): list again the file folder of every such device
+    /// this device is responsible for, then delete each file found that no
+    /// retained row, write or snapshot names, once every other device not
+    /// gone for good has published a write that read past the listing; later
+    /// passes delete the rest as those writes arrive. A gone device can keep
     /// uploading while its provider access still works, but nothing it
-    /// writes after its removal counts, so this is safe to run at any time.
+    /// writes after the entry that stopped it counts, so this is safe to run
+    /// at any time.
     /// Returns once the listing and deletions finish, or with the failure
     /// that stopped them; `SyncError::SnapshotPending` while a snapshot of
     /// this device's is still being published.

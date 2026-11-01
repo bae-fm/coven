@@ -184,7 +184,7 @@ private def wakes (j : Json) : Except String Json := do
     s := next
   return toJson out
 
-/-- `Retired.Folder.step` folded over one removed writer's folder events: an
+/-- `Retired.Folder.step` folded over one gone writer's folder events: an
 upload of a file id, a pass's listing and the app's cleanup listing, each of
 which completes or fails. After each event, `null` while no listing has
 completed, else the candidate file ids in increasing order. -/

@@ -127,7 +127,7 @@ async fn io_differential_file_scan() {
                     .unwrap();
             } else if let Some(completes) = event.get("pass") {
                 let completes = completes.as_bool().unwrap();
-                scan(&ana, ben.sync.device, super::Listing::AtRemoval, completes).await;
+                scan(&ana, ben.sync.device, super::Listing::AtStop, completes).await;
             } else {
                 let completes = event["clean_up"].as_bool().unwrap();
                 scan(&ana, ben.sync.device, super::Listing::Every, completes).await;

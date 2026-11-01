@@ -1484,9 +1484,9 @@ After applying and claiming, the device does the work the new state calls for:
 - **Deleting history.** The device writes the new floor conditionally, then
   deletes the slots below it, and the snapshots nothing loads any more: its own,
   and those of devices gone for good whose files it deletes (§16.6).
-- **Deleting files** needs §17.10's reference checks. Once a device's removal
-  applies, the device responsible for its cleanup lists its whole file folder for
-  deletion.
+- **Deleting files** needs §17.10's reference checks. Once a device is gone for
+  good (§14.1), the device responsible for its cleanup lists its whole file
+  folder for deletion.
 
 At the end, the device's status says how the pass went
 ([api.md E5](api.md#e5-storage-and-sync)). `Blocked` names the slot that stopped
@@ -4207,7 +4207,8 @@ its member's keys, after it registered, written by another device. History
 showing another copy of an installation using its device id doesn't count:
 only that installation can see it (§19.3). Whatever a device gone for good
 left under way stays that way unless others end it: §13.2 covers the join
-requests it was waiting for, and §16.6 its snapshots.
+requests it was waiting for, §16.6 its snapshots, and §17.10 the files it
+left in storage.
 
 A member's removal also ends the person's use of their restore code. Ana removes
 Ben at slot 52. When Ben's phone reads slot 52, it first deletes his restore
@@ -4312,13 +4313,15 @@ it, on her devices or anyone else's.
 
 Until the person deletes the key, the removed member can still upload into
 their file folder. Nothing they write after the removal counts, so those files
-are never referred to; the app's cleanup of removed devices' files (§17.10)
-deletes them.
+are never referred to; the app's cleanup of the files of devices gone for good
+(§17.10) deletes them.
 
 **Key replacement is not cut-off.** Replacing a member's keys (§12.3) changes no
 access record or device id. Old-key writes follow the slot cut-off; provider
-credentials and exposed audience keys have their own recorded work. It doesn't
-certify that a file folder is closed.
+credentials and exposed audience keys have their own recorded work. A device
+holding only the old pair can still upload into its file folder with the
+member's S3 key. Nothing it writes counts any more, so §17.10 cleans that
+folder up as it does a removed device's.
 
 ### 15. Circles
 
@@ -5083,8 +5086,9 @@ Ana's own would.
 
 - **Which device.** The devices that delete the gone device's files (§17.10)
   delete its snapshots too: its member's other devices, or the store owner's
-  once the member has left. The bodies were stored with that member's provider
-  access, as its files were, so these devices have permission to delete them.
+  once the member has no device left that isn't gone. The bodies were stored
+  with that member's provider access, as its files were, so these devices have
+  permission to delete them.
   Every device reads who they are from the same history.
 - **Which bodies.** Nothing a device announces after the entry that stopped it
   counts (§14.1), and the deleting device has applied that entry, so it holds
@@ -6288,9 +6292,9 @@ arrive naming them. Moving A's row into Gifts would be the same. If Ana's
 laptop deleted the bytes, Ben's Gifts file would name bytes that are gone
 ([`unseen_copy_unpublished`](proofs/storage/CovenStorage/Seen.lean)).
 
-So the uploader deletes a candidate only once every other active device has
-published a write that read through the slot where the candidate lost its last
-name: a write whose `read_through` (§7.1) is at least that slot. A device
+So the uploader deletes a candidate only once every other device not gone for
+good (§14.1) has published a write that read through the slot where the
+candidate lost its last name: a write whose `read_through` (§7.1) is at least that slot. A device
 sends its writes in the order it made them (§6.3), so every write Ben made
 before reading slot 40, his copy among them, is published by then, and the
 evidence above sees it. A write he makes after reading slot 40 can name A's
@@ -6312,9 +6316,11 @@ copy no longer names them.
   next write as well. Coven doesn't single out a change's author.
 - **This device needs no such write.** Its own unpublished writes protect what
   they name locally, and its published ones are in the evidence.
-- **A removed device holds nothing.** Nothing it publishes after its removal
-  counts (§14.1), so no write of its can name the bytes again.
-- **An idle device holds the bytes until it writes or is removed.** Ben's
+- **A device gone for good holds nothing.** Nothing it publishes after the
+  entry that stopped it counts (§14.1), so no write of its can name the bytes
+  again. That holds for a phone whose member's keys another device replaced as
+  much as for a removed one: the phone can't sign with the new pair.
+- **An idle device holds the bytes until it writes or is gone for good.** Ben's
   phone left in a drawer keeps A's bytes in storage. That costs storage only:
   no record is wrong while the bytes wait, and deleting them later is the same
   decision, made once Ben writes. Removing the phone (§14) lets them go at
@@ -6334,8 +6340,8 @@ copy no longer names them.
 - **Permission.** A device deletes uploaded files only with provider permission;
   missing permission stays visible (§19.1).
 - **No idle listing.** No quiet pass lists files. File work follows changed
-  records, uploads, retired uploads, deleted history, a device's removal or
-  another device's write reading past a waiting candidate. Announcements and
+  records, uploads, retired uploads, deleted history, a device going for good
+  or another device's write reading past a waiting candidate. Announcements and
   the floor name the snapshots to inspect; file deletion never lists snapshot
   folders.
 - **Ownership stays known.** A file's storage path and coordinates carry the
@@ -6351,28 +6357,32 @@ candidate, once the evidence above shows nothing names it. A crash can't lose
 it: the queue row stays until that transaction, and an attempt still in flight
 retires it only when it ends, so no bytes land after the deletion.
 
-**Files nobody refers to any more.** A removed device can leave files in storage
-that no surviving record names: an upload whose completion write the cut-off
-refused, one still in flight when the device was removed, or one it stored after
-its removal while its provider access still worked. Nothing a device writes after
-its removal applies counts (§14.1), so no write can ever switch a record to such
-a file. Any
-listing of the removed device's folder is therefore sound whenever it is taken:
-every file it finds becomes a deletion candidate, and the reference evidence above
-alone decides whether it is deleted.
+**Files nobody refers to any more.** A device gone for good (§14.1) can leave
+files in storage that no surviving record names: an upload whose completion
+write the cut-off refused, one still in flight when the device went, or one it
+stored afterwards while its provider access still worked. Nothing a device
+writes after the entry that stopped it counts, so no write can ever switch a
+record to such a file. Any listing of the gone device's folder is therefore
+sound whenever it is taken: every file it finds becomes a deletion candidate,
+and the reference evidence above alone decides whether it is deleted.
 
-- **Listed once at removal.** When a device's removal, its replacement or its
-  member's removal applies, the device responsible for its cleanup lists
-  `<store>/files/<device>/` in its next pass. A completed listing is recorded
-  with that removal and isn't repeated after reopening; a later counted removal
-  that also cuts the device off, such as its member's removal after the device's
-  own, lists the folder again.
-- **Listed again when the app asks.** The listing at removal can't find a file
-  the removed device stores later, and nothing tells coven when its access ends:
-  on S3 the person deletes the key in the provider's console (§14.3), and a
-  device removed while its member keeps access can still publish into its folder.
-  The app's cleanup of removed devices' files
-  ([api.md E5](api.md#e5-storage-and-sync)) lists the folder of every removed
+- **Who cleans up.** The gone device's member's other devices clean up its
+  folder. When the member has no device left that isn't gone, because the
+  member was removed or the gone device was their last, the devices of the
+  member who owns the storage do: on S3, the member who created the store, the
+  only account owner history establishes. Ana removes Ben's phone, his only
+  device, and Ben stays a member: Ana's laptop cleans up the phone's folder.
+- **Listed once when it goes.** When the entry that stops a device for good
+  applies, the device responsible for its cleanup lists `<store>/files/<device>/`
+  in its next pass. A completed listing is recorded with that entry and isn't
+  repeated after reopening; a later counted entry that stops the device again,
+  such as its member's removal after the device's own, lists the folder again.
+- **Listed again when the app asks.** The listing when a device goes can't find
+  a file it stores later, and nothing tells coven when its access ends: on S3
+  the person deletes the key in the provider's console (§14.3), and a device
+  gone while its member keeps access can still publish into its folder. The
+  app's cleanup of the files of devices gone for good
+  ([api.md E5](api.md#e5-storage-and-sync)) lists the folder of every such
   device this device is responsible for again, then deletes every candidate
   nothing refers to that every other device has seen, as above; later passes
   delete the rest once those devices write. It returns the result, or the
@@ -6380,9 +6390,19 @@ alone decides whether it is deleted.
   likes.
 - An incomplete listing fails visibly and retries. It records nothing, so
   candidates come only from complete listings.
-- Replacing a member's keys doesn't close a file folder. The slot cut-off
-  (§14.1) decides which writes count, and retained lost values keep their file
-  references.
+- **Replacing a member's keys** stops for good each of the member's devices
+  that holds only the old pair, so their folders are listed as a removed
+  device's is. The device holding the new pair goes on, and so does its
+  folder. The slot cut-off (§14.1) decides which writes count, and retained
+  lost values keep their file references.
+
+Ben's phone is lost while a photo uploads. His laptop replaces his keys
+(§12.3): the phone, holding only the old pair, is gone for good from that slot.
+The laptop's next pass lists the phone's folder, and the photo is in it or
+lands later; the phone's S3 key is Ben's, so it keeps working. The photo's
+completion can't count, so no record names it. Once Ana has written past the
+listing, the laptop deletes it, or the app's next cleanup finds it if it
+landed after the listing. Photos the phone's earlier writes named stay.
 
 Ana removes Ben while his last photo upload is in flight. Her next pass lists his
 file folder; the photo is either in the listing or lands later. Ben's key keeps
@@ -7370,8 +7390,8 @@ an object is stored a listing may still omit it. Certification measures observed
 lag (Appendix E.6); setup records no lag measurement. A finite observation cannot
 establish a maximum lag, and the sequence depends on neither that observation
 nor a listing. Exact reads and status must reflect completed publication.
-A file a removed device's folder listing misses through lag is found by the app's
-next cleanup of removed devices' files (§17.10). A join request a gone
+A file a gone device's folder listing misses through lag is found by the app's
+next cleanup of the files of devices gone for good (§17.10). A join request a gone
 device's listing misses is deleted by its joining device, which finds the
 gone marker (§13.2). The setup check (§20.8) and the
 own-bucket check (§20.7) allow for the margin.
@@ -9672,7 +9692,7 @@ Write-ups explain each model and state its assumptions:
 | A completion happens once, in the transaction retiring its upload; an unconfirmed attempt or a crash before it changes nothing | `completion_idempotent`, `completion_retires_queue`, `unconfirmed_changes_nothing` | `proofs/storage/CovenStorage/Files.lean` | §17.9 |
 | Every file whose coordinates say cloud is in storage, and every stored path is named by a record, queued, kept by an unpublished write or a deletion candidate | `steps_cloud_stored`, `steps_reachable` | `proofs/storage/CovenStorage/Files.lean` | §17.3, §17.10 |
 | A new file over an existing file's bytes, in another audience or its own, keeps every file whose coordinates say cloud in storage and every stored path within deletion's reach; stored bytes are deleted only when no record names them, so they stay while either of two records over them does | `Shared.steps_cloud_stored`, `Shared.steps_reachable`, `purge_unnamed`, `bytes_stay_while_either_record_names_them` | `proofs/storage/CovenStorage/Shared.lean` | §17.2, §17.10 |
-| Once a device has seen the slot where stored bytes lost their last name, every write it can still send that counts read through that slot, so every write of another active device that missed the change is published; a device's next write sends a copy that missed a delete, and a removed device holds nothing back | `seen_unpublished`, `missed_published`, `next_write_publishes_copy`, `removed_holds_nothing` | `proofs/storage/CovenStorage/Seen.lean` | §17.10 |
+| Once a device has seen the slot where stored bytes lost their last name, every write it can still send that counts read through that slot, so every write of another device not gone for good that missed the change is published; a device's next write sends a copy that missed a delete, and a device gone for good holds nothing back | `seen_unpublished`, `missed_published`, `next_write_publishes_copy`, `gone_holds_nothing` | `proofs/storage/CovenStorage/Seen.lean` | §17.10 |
 | *Body.* A copy that missed a delete names the stored bytes in a write its device hasn't sent, while nothing published names them | `unseen_copy_unpublished` | `proofs/storage/CovenStorage/Seen.lean` | §17.10 |
 | No file of a move, or of one write's files for the cloud, is in the cloud unless every file of it is; a move switches only once every one of its uploads is stored | `move_whole`, `switch_needs_every_upload` | `proofs/storage/CovenStorage/Moves.lean` | §17.3 |
 | While a bound upload is queued, no write from the one staging its file on is published; a pass publishing a held write publishes the write ending its upload in the same slot, unless a raise's marker falls between them | `held_unpublished`, `held_with_completion` | `proofs/storage/CovenStorage/Holds.lean` | §17.4 |
@@ -9682,7 +9702,7 @@ Write-ups explain each model and state its assumptions:
 | Removing a copy coven placed, as it left it, leaves nothing at its path; no step of coven's, a call's own abandon included, takes away a file the person wrote or changed, or a kept copy; a call's switch keeps all its copies, each placed before it | `removal_takes_unchanged`, `person_files_stay`, `abandon_person_files_stay`, `kept_stays`, `abandon_kept_stays`, `switch_whole` | `proofs/storage/CovenStorage/DeviceOnly.lean` | §17.1, §17.3, C.3 |
 | A folder counts as made only where the call's mkdir found nothing; only an empty made folder no recorded copy needs is taken, so a folder that was there stays; while a call reserves a copy, no step but its own abandon takes the copy, its record or its folders, and once the reservation drops the next write can | `made_only_by_mkdir`, `folder_removal_made_empty`, `found_folder_stays`, `needed_folder_stays`, `reserved_stays`, `released_removable` | `proofs/storage/CovenStorage/DeviceOnly.lean` | §17.3, C.3 |
 | A pin coven keeps for an app file reads no storage when coven's copy checks out, and no attempt reads a user's original for the cache | `copy_reads_no_storage`, `failed_copy_downloads`, `user_downloads`, `original_never_read` | `proofs/io/CovenIO/Keep.lean` | §17.1, §17.8 |
-| A complete listing of a removed device's folder makes every file in it a candidate; a pass lists once and the app's cleanup finds later uploads | `listing_finds_every_file`, `pass_lists_once`, `cleanup_finds_a_later_upload` | `proofs/io/CovenIO/Retired.lean` | §17.10 |
+| A complete listing of the folder of a device gone for good makes every file in it a candidate; a pass lists once and the app's cleanup finds later uploads | `listing_finds_every_file`, `pass_lists_once`, `cleanup_finds_a_later_upload` | `proofs/io/CovenIO/Retired.lean` | §17.10 |
 
 ### G.7 Schema changes and resets (§18, §19)
 

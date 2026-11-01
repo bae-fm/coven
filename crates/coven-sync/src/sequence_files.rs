@@ -22,7 +22,7 @@ const SEQUENCE_FILES: &str = "sequence-files";
 
 impl SequenceSync {
     /// The uploaders whose files this device deletes: its own, and each
-    /// removed device it is responsible for (§17.10).
+    /// device gone for good it is responsible for (§17.10).
     fn file_uploaders(&self, session: &Session, member: &MemberIdentity) -> BTreeSet<DeviceId> {
         session
             .history
@@ -78,9 +78,9 @@ impl SequenceSync {
         })
     }
 
-    /// A pass's file deletion: list each removed uploader's folder once at
-    /// its removal, then delete every unreferenced candidate. A failure is
-    /// held by the operation, which retries under backoff (§17.10).
+    /// A pass's file deletion: list each gone uploader's folder once at the
+    /// entry that stopped it, then delete every unreferenced candidate. A
+    /// failure is held by the operation, which retries under backoff (§17.10).
     pub(crate) async fn retain_files(
         &self,
         session: &Session,
@@ -88,7 +88,7 @@ impl SequenceSync {
         member: &MemberIdentity,
     ) -> Result<(), SyncError> {
         let uploaders = self.file_uploaders(session, member);
-        let scans = self.uploader_scans(&session.history, &uploaders, Listing::AtRemoval).await?;
+        let scans = self.uploader_scans(&session.history, &uploaders, Listing::AtStop).await?;
         let candidates = self.database.file_candidates(uploaders.clone()).await?;
         let records = self.database.operations().await?;
         let existing = records.iter().find(|record| record.kind == SEQUENCE_FILES);
@@ -133,14 +133,14 @@ impl SequenceSync {
         Ok(())
     }
 
-    /// The app's cleanup of removed devices' files (§17.10): list the folder of
-    /// every removed device this device is responsible for again, then delete
-    /// every file found that nothing refers to and every other device has
-    /// seen lose its last name; later passes delete the rest. It returns once
-    /// that is done, or with the failure that stopped it, which the operation
-    /// also records.
-    /// A device whose removal applied later uploads only files that can never
-    /// be referred to, so running this at any time is safe.
+    /// The app's cleanup of the files of devices gone for good (§17.10): list
+    /// the folder of every such device this device is responsible for again,
+    /// then delete every file found that nothing refers to and every other
+    /// device has seen lose its last name; later passes delete the rest. It
+    /// returns once that is done, or with the failure that stopped it, which
+    /// the operation also records. A device gone for good later uploads only
+    /// files that can never be referred to, so running this at any time is
+    /// safe.
     pub async fn clean_up_removed_files(&self) -> Result<(), SyncError> {
         let mut session = self.session.lock().await;
         let member = self.member.read()?.ok_or(StorageFailure::MemberKeysMissing)?;
@@ -182,24 +182,21 @@ impl SequenceSync {
         }
     }
 
-    /// Whether every other active device has published a write that read
-    /// through `since`, or was added after it (§17.10). A device sends its
-    /// writes in the order it made them, so each one it made without reading
-    /// that far is then published, and the retained slots or snapshots show
-    /// what it names. A removed device's later writes don't count (§14.1),
-    /// and this device's own unpublished writes protect what they name
-    /// locally.
+    /// Whether every other device not gone for good has published a write
+    /// that read through `since`, or was added after it (§17.10). A device
+    /// sends its writes in the order it made them, so each one it made
+    /// without reading that far is then published, and the retained slots or
+    /// snapshots show what it names. A gone device's later writes don't
+    /// count (§14.1), and this device's own unpublished writes protect what
+    /// they name locally.
     async fn seen_by_all(&self, session: &Session) -> Result<impl Fn(Slot) -> bool, SyncError> {
-        let state = &session.history.state;
-        let others: Vec<_> = state
+        let history = &session.history;
+        let others: Vec<_> = history
+            .state
             .devices
-            .iter()
-            .filter(|(device, value)| {
-                **device != self.device
-                    && value.active()
-                    && state.members.get(&value.member).is_some_and(|member| !member.removed)
-            })
-            .map(|(device, _)| (*device, session.history.added(*device)))
+            .keys()
+            .filter(|device| **device != self.device && history.gone_for_good(**device).is_none())
+            .map(|device| (*device, history.added(*device)))
             .collect();
         let reads = self
             .database
