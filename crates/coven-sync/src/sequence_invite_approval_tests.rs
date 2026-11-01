@@ -439,7 +439,7 @@ async fn a_crash_between_any_two_commits_leaves_the_approval_and_its_binding_agr
         .test_on_write_checkpoint(move |point| {
             if point == coven_database::test_utils::WriteCheckpoint::Committed {
                 let copy = tempfile::tempdir().unwrap();
-                crate::tests::copy_tree(&source, copy.path());
+                copy_committed(&source, copy.path());
                 copies.lock().unwrap().push(copy);
             }
         })
@@ -461,5 +461,24 @@ async fn a_crash_between_any_two_commits_leaves_the_approval_and_its_binding_agr
     }
     for device in [&ana, &carol.device] {
         device.sync.database.close().await.unwrap();
+    }
+}
+
+/// Copy an open installation as its last commit left it, as a crash then
+/// would: its database and write-ahead log, without the shared-memory index
+/// SQLite rebuilds from the log on opening, or the lock files, which the
+/// running installation holds locked and opening makes again. Windows
+/// refuses to read a range another process has locked.
+fn copy_committed(from: &std::path::Path, to: &std::path::Path) {
+    for entry in std::fs::read_dir(from).unwrap() {
+        let entry = entry.unwrap();
+        let name = entry.file_name().into_string().unwrap();
+        let target = to.join(&name);
+        if entry.file_type().unwrap().is_dir() {
+            std::fs::create_dir_all(&target).unwrap();
+            copy_committed(&entry.path(), &target);
+        } else if !name.ends_with(".lock") && !name.ends_with("-shm") {
+            std::fs::copy(entry.path(), target).unwrap();
+        }
     }
 }
