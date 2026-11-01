@@ -120,14 +120,22 @@ impl Joining<'_> {
         };
         // The conditions the last check found unmet, shown instead of the wait.
         let mut pending = Vec::new();
+        // Once its copies open, the join has loaded and only waits for the
+        // entry approving it: its status stays at loading, never going back
+        // to waiting (E10).
+        let mut approving = false;
         // Polls back off 1, 2, 4, … 300 seconds apart; the persisted delay
         // survives reopening and a provider cooldown holds them (§6.7).
         loop {
             sync.join_poll_due(&mut self.check, |next_check| {
-                show(waiting(confirmation, &pending, next_check));
+                if !approving {
+                    show(waiting(confirmation, &pending, next_check));
+                }
             })
             .await?;
-            show(waiting(confirmation, &pending, NextCheck::Checking));
+            if !approving {
+                show(waiting(confirmation, &pending, NextCheck::Checking));
+            }
             match loading(sync, sync.join_outcome(&self.identity), status).await? {
                 JoinOutcome::Admitted => {
                     sync.join_poll_settled().await?;
@@ -139,6 +147,10 @@ impl Joining<'_> {
                 }
                 JoinOutcome::Waiting => {
                     pending = database.pending::<coven_sync::PendingRecord>().await?;
+                    sync.join_poll_waiting().await?
+                }
+                JoinOutcome::Approving => {
+                    approving = true;
                     sync.join_poll_waiting().await?
                 }
             }

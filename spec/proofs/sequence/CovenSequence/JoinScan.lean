@@ -235,6 +235,9 @@ theorem no_copy_reaches_end (first head : Nat) :
 
 inductive Outcome where
   | waiting
+  /-- The copies opened and the request remains, but the approving entry
+  has not applied: approval has begun, and its entry follows the copies. -/
+  | approving
   | admitted
   | declined
   deriving DecidableEq
@@ -242,7 +245,14 @@ inductive Outcome where
 /-- Finding a key grants no authority. `binding` is the ordinary reader's
 verified entry from the invite's approving device for this exact pair. -/
 def outcome (key binding pending : Bool) : Outcome :=
-  if key && binding then .admitted else if pending then .waiting else .declined
+  if key && binding then .admitted
+  else if pending then (if key then .approving else .waiting)
+  else .declined
+
+/-- A join whose copies opened never goes back to waiting for them. -/
+theorem opened_never_waits (binding pending : Bool) :
+    outcome true binding pending ≠ .waiting := by
+  cases binding <;> cases pending <;> simp [outcome]
 
 theorem approved_never_declined (pending : Bool) : outcome true true pending = .admitted := by
   simp [outcome]

@@ -6220,7 +6220,10 @@ pub enum ProviderSignOut {
     with each of loading's steps as a `Progress<LoadStep>` (E1,
     [§13.4](coven.md#134-edge-cases-installing-on-the-device)). A join loads in
     the approval check in which its keys first open in that call, so its
-    `Loading` can come while approval is still being checked; a join resumed
+    `Loading` can come while approval is still being checked. A phase never
+    comes back: once a join's keys open, it reports no `WaitingForApproval`
+    or `Pending` again, and checks on its waits for the entry approving it
+    with its status at loading's last step; a join resumed
     part way through loading reports the slots it has left. An app that redraws more slowly
     sees the newest report, as `CovenBuilder::open`'s caller does.
   - An unfinished store is created at its permanent path with a durable

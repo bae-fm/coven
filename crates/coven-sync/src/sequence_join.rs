@@ -25,8 +25,12 @@ pub enum NextCheck {
 /// The joining member's outcome after checking storage (§13.2).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum JoinOutcome {
-    /// The request exists, or copies arrived before the binding entry.
+    /// The request exists and no copy for it has opened.
     Waiting,
+    /// Its copies opened and the store loaded, but the approving device's
+    /// entry has not applied yet: approval has begun, and the entry follows
+    /// the copies (§13.2).
+    Approving,
     /// The approving device's applied entry binds this request's pair.
     Admitted,
     /// The request is gone and no binding admits it.
@@ -94,7 +98,7 @@ impl SequenceSync {
             return Ok(JoinOutcome::Admitted);
         }
         if request.pending(self.storage.as_ref()).await? {
-            return Ok(JoinOutcome::Waiting);
+            return Ok(JoinOutcome::Approving);
         }
         self.read_forward(&mut session, &mut ring, &member).await?;
         Ok(if self.admitted(&session, &member, request) {

@@ -97,6 +97,59 @@ async fn an_in_person_approval_under_way_refuses_the_apps_decisions() {
     }
 }
 
+/// Ana's approval claims Carol's copies, then the entry adding her. A check
+/// between the two opens Carol's keys and loads the store, so the join is
+/// past waiting for her copies: it is `Approving`, never `Waiting` again,
+/// until the entry admits her (§13.2).
+#[tokio::test]
+async fn a_check_between_the_copies_and_the_entry_finds_the_approval_begun() {
+    use coven_storage::test_utils::Faults;
+    let group = Group::shared();
+    let ana = group.device(1).await;
+    group.create_with_access(&ana, MemberAccess::ProviderAccount("ana@example.org".into())).await;
+    let invite = in_person_invite(&ana).await;
+    let carol = join(&group, &invite.code, "Carol's phone").await;
+    assert_eq!(carol.device.sync.join_outcome(&carol.request).await.unwrap(), JoinOutcome::Waiting);
+    // The copy lands in the next slot; the entry after it fails.
+    let entry = ana.sync.database.applied_slot().await.unwrap() + 2;
+    ana.storage
+        .set_faults(Faults {
+            create_failures: [(
+                ObjectPath::slot(group.store, entry.try_into().unwrap()),
+                (coven_storage::StorageFailure::Network, 500),
+            )]
+            .into(),
+            ..Faults::none()
+        })
+        .await;
+    ana.sync.pass().await.unwrap();
+    for _ in 0..2 {
+        assert_eq!(
+            carol.device.sync.join_outcome(&carol.request).await.unwrap(),
+            JoinOutcome::Approving
+        );
+    }
+    ana.storage.set_faults(Faults::none()).await;
+    let operation = ana
+        .sync
+        .database
+        .operations()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|record| record.kind == "invite")
+        .unwrap()
+        .id;
+    ana.sync.retry_pending_operation(operation).await.unwrap();
+    assert_eq!(
+        carol.device.sync.join_outcome(&carol.request).await.unwrap(),
+        JoinOutcome::Admitted
+    );
+    for device in [&ana, &carol.device] {
+        device.sync.database.close().await.unwrap();
+    }
+}
+
 #[tokio::test]
 async fn approval_after_the_approver_lost_its_role_undoes_and_fails() {
     let group = Group::shared();

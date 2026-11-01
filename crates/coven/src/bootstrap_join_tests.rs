@@ -429,6 +429,86 @@ async fn check_now_finds_an_approval_before_the_joins_wait_ends() {
     owner.close().await;
 }
 
+/// Ana's approval claims Carol's copies, then the entry adding her, and the
+/// entry fails to land. Carol's next check opens her keys and loads the
+/// store, and finds no entry; from then on her join reports loading as it
+/// waits for the entry, never waiting for approval again (E10).
+#[tokio::test]
+async fn a_join_whose_keys_opened_never_reports_waiting_again() {
+    use coven_storage::test_utils::{Faults, MemoryRequest};
+    let owner = Owner::new(CloudProvider::S3, false).await;
+    let invite = owner.invite().await;
+    let install = Installation::new();
+    // The joining device's waits end only when the test moves the clock.
+    let builder = install.builder(&owner, owner.recipient()).clock(owner.clock.clone());
+    let control = JoinControl::new();
+    let reported = std::sync::Mutex::new(Vec::new());
+    let (statuses, mut seen) = watch::channel(Vec::<BootstrapStatus>::new());
+    let joining = join_with_invite(
+        builder,
+        &invite.code,
+        "New phone",
+        |status| {
+            let mut reported = reported.lock().unwrap();
+            if reported.last() != Some(&status) {
+                reported.push(status);
+                statuses.send_replace(reported.clone());
+            }
+        },
+        &control,
+    );
+    // Each check that loads or finds no entry ends by asking whether the
+    // request is still there.
+    let request_path = ObjectPath::join_request(owner.directory.id(), invite.id);
+    let checked = || async {
+        let asked = owner.storage.request_trace().len();
+        control.check_now();
+        while !owner.storage.request_trace()[asked..]
+            .contains(&MemoryRequest::Status(request_path.clone()))
+        {
+            tokio::task::yield_now().await;
+        }
+    };
+    let approve = async {
+        seen.wait_for(|reported| {
+            matches!(
+                reported.last(),
+                Some(BootstrapStatus::WaitingForApproval { next_check: NextCheck::At(_), .. })
+            )
+        })
+        .await
+        .unwrap();
+        let request = next_join_request(&owner.handle).await;
+        // The copy lands in the next slot; the entry after it never does.
+        let entry =
+            ObjectPath::slot(owner.directory.id(), (owner.applied().await + 2).try_into().unwrap());
+        owner
+            .storage
+            .set_faults(Faults {
+                create_failures: [(entry, (StorageFailure::Network, 500))].into(),
+                ..Faults::none()
+            })
+            .await;
+        assert!(owner.handle.approve_join_request(&request).await.is_err());
+        // The check that loads, then one more after its wait.
+        checked().await;
+        checked().await;
+        control.cancel();
+    };
+    let (result, ()) = join_with_response(joining, approve).await;
+    assert!(result.is_err());
+    let reported = reported.into_inner().unwrap();
+    let loading = reported
+        .iter()
+        .position(|status| matches!(status, BootstrapStatus::Loading(_)))
+        .expect("the join loaded");
+    assert!(
+        reported[loading..].iter().all(|status| matches!(status, BootstrapStatus::Loading(_))),
+        "{reported:?}"
+    );
+    owner.close().await;
+}
+
 /// Carol's join is approved, then stops while it loads, as when the app is
 /// closed. Her installation had applied the entry adding her; the next call
 /// finds that approval and loads, instead of taking the deleted request for a

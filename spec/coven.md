@@ -3805,6 +3805,10 @@ approving device that admits him, loads the floor's snapshot and applies the
 slots after it in order. If history he had scanned has since been deleted, the
 copies the floor carries supply his keys (§16.4). He registers only with both his
 own sealed keys and that applied entry; copies alone aren't enough.
+Copies opening means approval has begun, and Ana's entry follows them. A
+check that finds his copies but not yet the entry has loaded the store, so
+his status stays at loading while his phone keeps checking for the entry on
+the same waits; it never goes back to waiting for approval.
 
 **Checking for approval.** Dan's phone checks for his copies on the same doubling
 waits, kept across restarts. Its status says when the next check is, and for a
