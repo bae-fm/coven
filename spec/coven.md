@@ -8142,6 +8142,11 @@ device consistent with the database.
   access limited to its own objects and the views. SQL functions such as
   `coven_applying()` and `coven_key()` keep their names.
 - Coven's tables are local only; they never sync.
+- What changes about a row after coven writes it lives in rows of its own
+  beside it, never in the row: SQLite writes a row's whole record again on
+  any update, so a verdict or key choice kept beside a write's plaintext
+  would write all of it again. A write's plaintext, its original changes and
+  its row are each written once.
 - Opening for writing always migrates coven's tables in place before running the
   app's migrations. Each internal migration is atomic.
 - A read-only open refuses tables that need migrating. Any open refuses an
@@ -8153,6 +8158,9 @@ Coven's other tables, besides the merge records Appendix B.1 lists:
 |---|---|
 | `_coven_store` | the store id, current name and the slot that set it, which a saved restore code's name is compared by (§13.1); before slot 1, the local creation name is marked as not yet applied, and counts as set by slot 1 (§10.3) |
 | `_coven_uploads` | each write record waiting to be sent (§4) |
+| `_coven_upload_keys` | the format and key ids a waiting write's first attempt fixed, which every retry seals with again (§6.3) |
+| `_coven_upload_claims` | the claim each waiting write was last sent in, whose landing removes it from `_coven_uploads` (§5.1) |
+| `_coven_authored_admissions` | this device's verdict on each original change it keeps as source evidence, once it has judged it (§9.5) |
 | `_coven_user_files` | a user-provided original's path, as the operating system's bytes, size, modification time and content hash, by file id, while the file's record exists on this device and doesn't put the file on another device only; `coven_user_files` lists all but the hash (§17.3) |
 | `_coven_user_chunks` | the plaintext chunk hashes of each original in `_coven_user_files`, by file id, from the read that staged it or wrote its copy, until its file is stored; a move's upload checks against them (§17.3) |
 | `_coven_device_files` | coven's copy of each app file on this device only, by file id, with its content hash; files over the same bytes share one copy (§17.3) |

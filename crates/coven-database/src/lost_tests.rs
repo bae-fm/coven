@@ -369,7 +369,7 @@ mod dropped_schema {
     fn evidence(db: &Database, table: &str) -> Vec<(Vec<u8>, Option<Vec<u8>>)> {
         db.inspect_writer(|sql| {
             sql.query(
-                "SELECT write_id,admission FROM _coven_authored_changes WHERE table_name=?1 ORDER BY write_id,key",
+                "SELECT c.write_id,a.admission FROM _coven_authored_changes c LEFT JOIN _coven_authored_admissions a USING(write_id,audience,table_name,key) WHERE c.table_name=?1 ORDER BY c.write_id,c.key",
                 [table],
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )

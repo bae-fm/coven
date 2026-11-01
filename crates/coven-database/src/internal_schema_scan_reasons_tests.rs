@@ -99,7 +99,8 @@ mod fixture {
      INSERT INTO _coven_sql_versions SELECT CASE i%2 WHEN 0 THEN 'collation' ELSE 'function' END,'name_' || i,i FROM fixture;
      INSERT INTO _coven_write_headers SELECT device,n,x'00' FROM fixture;
      INSERT INTO _coven_authored_parts SELECT CAST(device || n AS BLOB),audience,x'00',1 FROM fixture;
-     INSERT INTO _coven_authored_changes SELECT CAST(device || n AS BLOB),audience,tab,key,x'00',NULL FROM fixture;
+     INSERT INTO _coven_authored_changes SELECT CAST(device || n AS BLOB),audience,tab,key,x'00' FROM fixture;
+     INSERT INTO _coven_authored_admissions SELECT CAST(device || n AS BLOB),audience,tab,key,x'00' FROM fixture;
      INSERT INTO _coven_creations SELECT tab,key,audience,CAST(device || n AS BLOB),x'00' FROM fixture;
      INSERT INTO _coven_write_evidence SELECT CAST(device || n AS BLOB),x'00',x'00',x'',zeroblob(64) FROM fixture;
      INSERT INTO _coven_part_leaves SELECT CAST(device || n AS BLOB),audience,zeroblob(32) FROM fixture;
@@ -123,7 +124,9 @@ mod fixture {
        (table_name,key,audience,generation,column_id,value,set_by,frozen,replacement_kind,replaced_by)
        SELECT tab,key,audience,counter(1),CASE WHEN i%3=0 THEN i END,
               zeroblob(64),n,i%2,CASE WHEN i%3=0 THEN 'write' ELSE 'rules' END,n FROM fixture;
-     INSERT INTO _coven_uploads SELECT device,n,zeroblob(256),NULL,NULL FROM fixture;
+     INSERT INTO _coven_uploads SELECT device,n,zeroblob(256) FROM fixture;
+     INSERT INTO _coven_upload_keys SELECT device,n,zeroblob(32) FROM fixture;
+     INSERT INTO _coven_upload_claims SELECT device,n,counter(1) FROM fixture;
      INSERT INTO _coven_queued_file_refs SELECT device,substr(key,1,16),device,n FROM fixture;
      INSERT INTO _coven_user_files SELECT 'file_' || i,CAST('path_' || i AS BLOB),i,zeroblob(13),zeroblob(32) FROM fixture;
      INSERT INTO _coven_user_chunks SELECT 'file_' || i,0,zeroblob(32) FROM fixture;

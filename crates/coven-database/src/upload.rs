@@ -156,7 +156,7 @@ struct Oldest {
 fn oldest(database: &DatabaseConnection) -> Result<Option<Oldest>, DbError> {
     Ok(database
         .query(
-            "SELECT rowid,device,number,sealing_keys FROM _coven_uploads ORDER BY rowid LIMIT 1",
+            "SELECT u.rowid,u.device,u.number,k.sealing_keys FROM _coven_uploads u LEFT JOIN _coven_upload_keys k ON k.device=u.device AND k.number=u.number ORDER BY u.rowid LIMIT 1",
             [],
             |r| {
                 Ok(Oldest {
@@ -217,9 +217,22 @@ fn batch(
     device: DeviceId,
     through: u64,
 ) -> Result<Vec<Oldest>, DbError> {
-    database.query("SELECT rowid,device,number,sealing_keys FROM _coven_uploads WHERE device=?1 AND number<=?2 ORDER BY number",
-        params![device.0.to_be_bytes(), through.to_be_bytes()], |row| Ok(Oldest {rowid: row.get(0)?,
-            write: WriteId {device: DeviceId(counter(row.get(1)?)), number: counter(row.get(2)?)}, keys: row.get(3)?}))
+    database.query(
+        "SELECT u.rowid,u.device,u.number,k.sealing_keys FROM _coven_uploads u
+        LEFT JOIN _coven_upload_keys k ON k.device=u.device AND k.number=u.number
+        WHERE u.device=?1 AND u.number<=?2 ORDER BY u.number",
+        params![device.0.to_be_bytes(), through.to_be_bytes()],
+        |row| {
+            Ok(Oldest {
+                rowid: row.get(0)?,
+                write: WriteId {
+                    device: DeviceId(counter(row.get(1)?)),
+                    number: counter(row.get(2)?),
+                },
+                keys: row.get(3)?,
+            })
+        },
+    )
 }
 
 pub(crate) fn prepare_batch<E: From<DbError> + From<coven_format::Error>>(
@@ -233,22 +246,28 @@ pub(crate) fn prepare_batch<E: From<DbError> + From<coven_format::Error>>(
     for entry in batch(database, device, through)? {
         let (header, _, _) = plaintext(database, &entry)?;
         if entry.keys.is_none() {
-            selected.push((entry.rowid, select(&header)?.encode()?));
+            selected.push((entry.write, select(&header)?.encode()?));
         }
         headers.push(header);
     }
     if !selected.is_empty() {
         database.stream_transaction(|database| {
-            for (row, keys) in selected {
-                database.internal_execute(
-                    "UPDATE _coven_uploads SET sealing_keys=?1 WHERE rowid=?2",
-                    params![keys, row],
-                )?;
+            for (write, keys) in selected {
+                keep_keys(database, write, &keys)?;
             }
             Ok(())
         })?;
     }
     Ok(headers)
+}
+
+/// Fix the keys a queued write is sealed with, at its first attempt.
+fn keep_keys(database: &DatabaseConnection, write: WriteId, keys: &[u8]) -> Result<(), DbError> {
+    database.internal_execute(
+        "INSERT INTO _coven_upload_keys(device,number,sealing_keys) VALUES(?1,?2,?3)",
+        params![write.device.0.to_be_bytes(), write.number.to_be_bytes(), keys],
+    )?;
+    Ok(())
 }
 
 pub(crate) fn read_batch<E: From<DbError>>(
@@ -332,10 +351,7 @@ pub(crate) fn prepare(
         if keys.part_keys.len() != header.parts.len() {
             return Err(DbError::Invariant { what: "sealing selects one key per write part" });
         }
-        database.internal_execute(
-            "UPDATE _coven_uploads SET sealing_keys=?1 WHERE rowid=?2",
-            params![keys.encode()?, entry.rowid],
-        )?;
+        keep_keys(database, entry.write, &keys.encode()?)?;
         Ok(Some(entry.write))
     })
 }

@@ -131,7 +131,7 @@ async fn key_selection_rolls_back_and_competing_attempts_keep_one_choice() {
     let original = records(&db);
     let id = original[0].header.position;
     db.inspect_writer(|db| {
-        db.fail_at("_coven_fail", "AFTER UPDATE OF sealing_keys ON _coven_uploads", "failed keys")
+        db.fail_at("_coven_fail", "AFTER INSERT ON _coven_upload_keys", "failed keys")
     });
     assert!(matches!(attempt(&db, 19).await, Err(DbError::Sqlite(_))));
     assert_eq!(selected(&db).await, (id, None));
@@ -160,6 +160,53 @@ async fn key_selection_rolls_back_and_competing_attempts_keep_one_choice() {
     db.prepare_upload(|_, _, _| panic!("retry must keep the first keys")).await.unwrap();
     assert_eq!(selected(&db).await, kept);
     assert_eq!(records(&db), original);
+    db.close().await.unwrap();
+}
+
+/// A queued write's large value goes to the WAL once for each place that
+/// holds it: its row, its original change and its queued record. Judging
+/// the write, fixing its keys and claiming it write what changes beside
+/// those, never them again (Appendix C.1).
+#[tokio::test]
+async fn a_large_write_goes_to_the_wal_once_and_never_again_as_it_is_sent() {
+    const BODY: u64 = 1 << 20;
+    let store = TestStore::new();
+    // Without checkpoints the WAL only grows: each step's frames are what
+    // it adds to the file.
+    let settings = crate::SqliteSettings {
+        wal_autocheckpoint: Some(crate::WalAutocheckpoint::Off),
+        ..crate::SqliteSettings::default()
+    };
+    let db = store
+        .builder(notes(), vec![crate::Migration::addition(1, "schema", NOTES)])
+        .sqlite_settings(settings)
+        .open()
+        .await
+        .unwrap();
+    let wal = || {
+        let mut path = store.database_path().into_os_string();
+        path.push("-wal");
+        std::fs::metadata(path).unwrap().len()
+    };
+    let before = wal();
+    db.write(|sql| {
+        sql.execute("INSERT INTO notes VALUES('1','title',?1)", ["b".repeat(BODY as usize)])?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+    // Three copies, and less than a quarter of one for everything else.
+    let written = wal() - before;
+    assert!(written < 3 * BODY + BODY / 4, "the write added {written} bytes");
+    let id = records(&db)[0].header.position;
+    let before = wal();
+    assert_eq!(attempt(&db, 7).await.unwrap(), Some(id));
+    let keys = wal() - before;
+    assert!(keys < BODY / 4, "fixing its keys added {keys} bytes");
+    let before = wal();
+    landed(&db, id).await;
+    let claimed = wal() - before;
+    assert!(claimed < BODY / 4, "claiming it added {claimed} bytes");
     db.close().await.unwrap();
 }
 

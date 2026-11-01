@@ -453,7 +453,7 @@ pub(crate) fn retain(
     if original.as_ref().is_some_and(|original| *original != bytes) {
         return Err(invalid("original source change changed"));
     }
-    db.internal_execute("INSERT INTO _coven_authored_changes VALUES(?1,?2,?3,?4,?5,NULL) ON CONFLICT(write_id,audience,table_name,key) DO NOTHING",params![write,audience,row.table,row.key,bytes])?;
+    db.internal_execute("INSERT INTO _coven_authored_changes VALUES(?1,?2,?3,?4,?5) ON CONFLICT(write_id,audience,table_name,key) DO NOTHING",params![write,audience,row.table,row.key,bytes])?;
     Ok(())
 }
 
@@ -491,10 +491,17 @@ pub(crate) fn admit(
     let table =
         crate::source_names::table(db, header.schema_version, &row.table, original.schema_version)?
             .ok_or(DbError::DamagedDatabase)?;
-    db.internal_execute(
-        "UPDATE _coven_authored_changes SET admission=?5 WHERE write_id=?1 AND audience=?2 AND table_name=?3 AND key=?4",
-        params![write, audience, table, row.key, stored_verdict(verdict)?],
-    )?;
+    match stored_verdict(verdict)? {
+        Some(admission) => db.internal_execute(
+            "INSERT INTO _coven_authored_admissions VALUES(?1,?2,?3,?4,?5)
+             ON CONFLICT(write_id,audience,table_name,key) DO UPDATE SET admission=excluded.admission",
+            params![write, audience, table, row.key, admission],
+        )?,
+        None => db.internal_execute(
+            "DELETE FROM _coven_authored_admissions WHERE write_id=?1 AND audience=?2 AND table_name=?3 AND key=?4",
+            params![write, audience, table, row.key],
+        )?,
+    };
     Ok(())
 }
 
@@ -503,7 +510,9 @@ pub(crate) fn admit(
 pub(crate) fn retained(db: &DatabaseConnection, source: &ChangeId) -> Result<bool, DbError> {
     let admission: Option<Option<Vec<u8>>> = db
         .query(
-            "SELECT admission FROM _coven_authored_changes WHERE write_id=?1 AND audience=?2 AND table_name=?3 AND key=?4",
+            "SELECT a.admission FROM _coven_authored_changes c
+             LEFT JOIN _coven_authored_admissions a ON a.write_id=c.write_id AND a.audience=c.audience AND a.table_name=c.table_name AND a.key=c.key
+             WHERE c.write_id=?1 AND c.audience=?2 AND c.table_name=?3 AND c.key=?4",
             params![
                 merge_fields::encode_write_id(&source.write)?,
                 audience_text(&source.row.audience),
@@ -520,7 +529,7 @@ pub(crate) fn retained(db: &DatabaseConnection, source: &ChangeId) -> Result<boo
     }
 }
 
-/// NULL stands for a change never judged here.
+/// None stands for a change never judged here, which keeps no admission row.
 pub(crate) fn stored_verdict(verdict: &ChangeVerdict) -> Result<Option<Vec<u8>>, DbError> {
     Ok(match verdict {
         ChangeVerdict::Unjudged => None,
@@ -547,8 +556,9 @@ pub(crate) fn visit_evidence<E: From<DbError>>(
     mut visit: impl FnMut(AuthoredChange) -> Result<(), E>,
 ) -> Result<(), E> {
     db.for_each(
-        "SELECT p.header,p.complete,c.record,c.admission FROM _coven_authored_changes c
+        "SELECT p.header,p.complete,c.record,a.admission FROM _coven_authored_changes c
          JOIN _coven_authored_parts p ON p.write_id=c.write_id AND p.audience=c.audience
+         LEFT JOIN _coven_authored_admissions a ON a.write_id=c.write_id AND a.audience=c.audience AND a.table_name=c.table_name AND a.key=c.key
          WHERE c.audience=?1 ORDER BY c.write_id,c.table_name,c.key",
         [audience_text(audience)],
         |r| {

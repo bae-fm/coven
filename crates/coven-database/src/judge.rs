@@ -497,9 +497,9 @@ pub(crate) fn stored(
     header: &WriteHeader,
     row: &RowId,
 ) -> Result<coven_format::snapshot_rows::ChangeVerdict, DbError> {
-    let admission: Option<Option<Vec<u8>>> = db
+    let admission: Option<Vec<u8>> = db
         .query(
-            "SELECT admission FROM _coven_authored_changes WHERE write_id=?1 AND audience=?2 AND table_name=?3 AND key=?4",
+            "SELECT admission FROM _coven_authored_admissions WHERE write_id=?1 AND audience=?2 AND table_name=?3 AND key=?4",
             params![
                 merge_fields::encode_write_id(&header.position)?,
                 audience_text(&row.audience),
@@ -509,7 +509,7 @@ pub(crate) fn stored(
             |r| r.get(0),
         )?
         .pop();
-    match admission.flatten() {
+    match admission {
         None => Ok(coven_format::snapshot_rows::ChangeVerdict::Unjudged),
         Some(bytes) => {
             merge_fields::decode_change_verdict(&bytes).map_err(|_| DbError::DamagedDatabase)

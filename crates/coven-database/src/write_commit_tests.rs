@@ -381,7 +381,7 @@ async fn seventy_thousand_rows_commit_as_one_queued_write_and_decode_after_reope
 
     let database = store.schema(notes(), NOTES).await.unwrap();
     let bytes = database.inspect_writer(|db| {
-        db.query_row("SELECT record FROM _coven_uploads WHERE sealing_keys IS NULL", [], |r| {
+        db.query_row("SELECT u.record FROM _coven_uploads u LEFT JOIN _coven_upload_keys k USING(device,number) WHERE k.sealing_keys IS NULL", [], |r| {
             r.get::<_, Vec<u8>>(0)
         })
         .unwrap()

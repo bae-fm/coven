@@ -133,7 +133,7 @@ pub(super) fn reason(statement: &Statement, relation: &str) -> Option<&'static s
 ("store_state_tables.rs", "DELETE FROM {table}", table)
     if statement.sql == format!("DELETE FROM {table}") =>
     Some("applying a slot replaces the entire derived table; foreign-key lookups must be indexed"),
-("upload.rs", "SELECT rowid,device,number,sealing_keys FROM _coven_uploads ORDER BY rowid LIMIT 1", "_coven_uploads") =>
+("upload.rs", "SELECT u.rowid,u.device,u.number,k.sealing_keys FROM _coven_uploads u LEFT JOIN _coven_upload_keys k ON k.device=u.device AND k.number=u.number ORDER BY u.rowid LIMIT 1", "u") =>
     Some("rowid order with LIMIT 1 reads only the oldest queued write"),
 ("upload.rs", "SELECT rowid,device,number FROM _coven_uploads ORDER BY rowid", "_coven_uploads") =>
     Some("the queue reader lists every waiting write in insertion order"),

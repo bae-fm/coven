@@ -142,7 +142,9 @@ pub(crate) fn begin<R: Read>(
     append(db, device, number, prepared)?;
     if let ClaimWork::Writes(through) = work {
         db.internal_execute(
-            "UPDATE _coven_uploads SET claim=?1 WHERE device=?2 AND number<=?3",
+            "INSERT INTO _coven_upload_claims(device,number,claim)
+             SELECT device,number,?1 FROM _coven_uploads WHERE device=?2 AND number<=?3
+             ON CONFLICT(device,number) DO UPDATE SET claim=excluded.claim",
             params![
                 number.to_be_bytes().as_slice(),
                 device.0.to_be_bytes().as_slice(),
@@ -379,7 +381,7 @@ pub(crate) fn finish(db: &DatabaseConnection) -> Result<(), DbError> {
         ClaimSettlement::Unknown | ClaimSettlement::Retry => return Err(DbError::ClaimUnsettled),
         ClaimSettlement::Landed if matches!(claim.work, ClaimWork::Writes(_)) => {
             let unconsumed: bool = db.query_row(
-                "SELECT EXISTS(SELECT 1 FROM _coven_uploads u LEFT JOIN _coven_writes w ON substr(w.timestamp,9,8)=u.device AND w.number=u.number WHERE u.device=?1 AND u.claim=?2 AND w.slot IS NULL)",
+                "SELECT EXISTS(SELECT 1 FROM _coven_upload_claims u LEFT JOIN _coven_writes w ON substr(w.timestamp,9,8)=u.device AND w.number=u.number WHERE u.device=?1 AND u.claim=?2 AND w.slot IS NULL)",
                 params![claim.device.0.to_be_bytes(), claim.number.to_be_bytes()],
                 |r| r.get(0),
             )?;
@@ -387,7 +389,8 @@ pub(crate) fn finish(db: &DatabaseConnection) -> Result<(), DbError> {
                 return Err(DbError::ClaimUnsettled);
             }
             db.internal_execute(
-                "DELETE FROM _coven_uploads WHERE device=?1 AND claim=?2",
+                "DELETE FROM _coven_uploads WHERE device=?1 AND number IN
+                 (SELECT number FROM _coven_upload_claims WHERE device=?1 AND claim=?2)",
                 params![
                     claim.device.0.to_be_bytes().as_slice(),
                     claim.number.to_be_bytes().as_slice()

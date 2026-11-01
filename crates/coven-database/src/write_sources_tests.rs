@@ -20,7 +20,7 @@ async fn captures_each_actual_setter_and_keeps_empty_delete_sources() {
     let first = &records[0];
     db.inspect_writer(|db| {
         let judgments = db
-            .query("SELECT admission FROM _coven_authored_changes", [], |r| {
+            .query("SELECT a.admission FROM _coven_authored_changes c LEFT JOIN _coven_authored_admissions a USING(write_id,audience,table_name,key)", [], |r| {
                 r.get::<_, Option<Vec<u8>>>(0)
             })
             .unwrap();
@@ -349,7 +349,7 @@ async fn frozen_display_and_dismissal_preserve_original_parents_sources_and_admi
     });
     let before = target.inspect_writer(|db| {
         db.query(
-            "SELECT record,admission FROM _coven_authored_changes ORDER BY table_name,key",
+            "SELECT c.record,a.admission FROM _coven_authored_changes c LEFT JOIN _coven_authored_admissions a USING(write_id,audience,table_name,key) ORDER BY c.table_name,c.key",
             [],
             |r| Ok((r.get::<_, Vec<u8>>(0)?, r.get::<_, Vec<u8>>(1)?)),
         )
@@ -362,7 +362,7 @@ async fn frozen_display_and_dismissal_preserve_original_parents_sources_and_admi
         assert_eq!(evidence(db, &id).unwrap().original, *original);
         assert_eq!(
             db.query(
-                "SELECT record,admission FROM _coven_authored_changes ORDER BY table_name,key",
+                "SELECT c.record,a.admission FROM _coven_authored_changes c LEFT JOIN _coven_authored_admissions a USING(write_id,audience,table_name,key) ORDER BY c.table_name,c.key",
                 [],
                 |r| Ok((r.get::<_, Vec<u8>>(0)?, r.get::<_, Vec<u8>>(1)?))
             )
@@ -410,7 +410,7 @@ async fn covered_source_streams_authenticate_atomically_and_refuse_conflicting_c
     target.inspect_writer(|db| {
         let unknown: i64 = db
             .query_row(
-                "SELECT count(*) FROM _coven_authored_changes WHERE admission IS NULL",
+                "SELECT count(*) FROM _coven_authored_changes c LEFT JOIN _coven_authored_admissions a USING(write_id,audience,table_name,key) WHERE a.admission IS NULL",
                 [],
                 |r| r.get(0),
             )

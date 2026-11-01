@@ -79,7 +79,9 @@ fn rows(table: &str, key: &[(&str, SqlValue)], columns: &[&str]) -> TableRead {
     }
 }
 
-const UPLOADS: &[&str] = &["record", "sealing_keys", "claim"];
+const UPLOADS: &[&str] = &["record"];
+const UPLOAD_KEYS: &[&str] = &["sealing_keys"];
+const UPLOAD_CLAIMS: &[&str] = &["claim"];
 const DEVICES: &[&str] = &["member", "name", "state"];
 const DATA_RELOADS: &[&str] = &["subject"];
 const BOUNDARIES: &[&str] =
@@ -101,6 +103,8 @@ impl PrerequisiteRows {
                 vec![
                     rows("_coven_sequence", &[], &["applied"]),
                     rows("_coven_uploads", &at, UPLOADS),
+                    rows("_coven_upload_keys", &at, UPLOAD_KEYS),
+                    rows("_coven_upload_claims", &at, UPLOAD_CLAIMS),
                 ]
             }
             Self::Device(id) => vec![rows("_coven_devices", &[("device", device(*id))], DEVICES)],

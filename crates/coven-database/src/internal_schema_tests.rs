@@ -106,6 +106,7 @@ async fn only_the_spec_tables_are_created() {
             [
                 "_coven_absent_snapshots",
                 "_coven_app_operations",
+                "_coven_authored_admissions",
                 "_coven_authored_changes",
                 "_coven_authored_parts",
                 "_coven_bound_keys",
@@ -177,7 +178,9 @@ async fn only_the_spec_tables_are_created() {
                 "_coven_stored_files",
                 "_coven_table_origins",
                 "_coven_unreferenced_files",
+                "_coven_upload_claims",
                 "_coven_upload_files",
+                "_coven_upload_keys",
                 "_coven_upload_pause",
                 "_coven_uploads",
                 "_coven_user_chunks",

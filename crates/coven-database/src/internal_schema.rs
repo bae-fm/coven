@@ -11,12 +11,13 @@
 //! (§18.6) need not have an accepted generation in `_coven_rows`.
 //! An upload's `record` is one plaintext value: the write header frame followed
 //! by its audience parts' row-frame streams. Its first attempt fixes the format
-//! and key ids in `sealing_keys`, encoded as the D9 write prefix. Each attempted
-//! slot keeps its exact ciphertext in the claim journal before storage is called.
-//! `_coven_uploads` retains its rowid for queue order and incremental BLOB reads.
+//! and key ids in `_coven_upload_keys`, encoded as the D9 write prefix. Each
+//! attempted slot keeps its exact ciphertext in the claim journal before storage
+//! is called. `_coven_uploads` retains its rowid for queue order and incremental
+//! BLOB reads.
 //! Cell keys start with the row; column-wide cell edits occur only in migrations.
-//! Original-change admission is NULL until judged here, then this device's
-//! `ChangeVerdict`. Consuming a slot does not establish admission.
+//! An original change has no admission row until judged here, then this
+//! device's `ChangeVerdict`. Consuming a slot does not establish admission.
 //! Write-id indexes serve SQLite's incoming foreign-key checks on INSERT with
 //! RETURNING, which EXPLAIN QUERY PLAN includes alongside explicit lookups.
 
@@ -284,11 +285,23 @@ macro_rules! coven_tables {
                 table_name TEXT NOT NULL,
                 key BLOB NOT NULL,
                 record BLOB NOT NULL,
-                admission BLOB,
                 PRIMARY KEY(write_id,audience,table_name,key),
                 FOREIGN KEY(write_id,audience) REFERENCES _coven_authored_parts(write_id,audience)
             ) STRICT, WITHOUT ROWID;
             CREATE INDEX _coven_authored_changes_audience ON _coven_authored_changes(audience,write_id,table_name,key);
+        ");
+        // This device's verdict on an original change, beside its record for
+        // the reason `_coven_upload_keys` is beside an upload's.
+        $visit!(_coven_authored_admissions, "
+            CREATE TABLE _coven_authored_admissions (
+                write_id BLOB NOT NULL,
+                audience TEXT NOT NULL,
+                table_name TEXT NOT NULL,
+                key BLOB NOT NULL,
+                admission BLOB NOT NULL,
+                PRIMARY KEY(write_id,audience,table_name,key),
+                FOREIGN KEY(write_id,audience,table_name,key) REFERENCES _coven_authored_changes(write_id,audience,table_name,key) ON DELETE CASCADE
+            ) STRICT, WITHOUT ROWID;
         ");
         coven_ownership_tables!($visit);
         coven_sequence_tables!($visit);
@@ -430,10 +443,31 @@ macro_rules! coven_tables {
                 device BLOB NOT NULL CHECK(length(device) = 8),
                 number BLOB NOT NULL CHECK(length(number) = 8 AND number > x'0000000000000000'),
                 record BLOB NOT NULL,
-                sealing_keys BLOB,
-                claim BLOB CHECK(claim IS NULL OR length(claim)=8),
                 PRIMARY KEY(device, number)
             ) STRICT;
+        ");
+        // What changes about a queued write after it is queued lives beside
+        // its record, never in its row: SQLite rewrites a row's whole record
+        // on any update, so setting a field next to the write's plaintext
+        // would write all of it again.
+        $visit!(_coven_upload_keys, "
+            CREATE TABLE _coven_upload_keys (
+                device BLOB NOT NULL,
+                number BLOB NOT NULL,
+                sealing_keys BLOB NOT NULL,
+                PRIMARY KEY(device, number),
+                FOREIGN KEY(device,number) REFERENCES _coven_uploads(device,number) ON DELETE CASCADE
+            ) STRICT, WITHOUT ROWID;
+        ");
+        $visit!(_coven_upload_claims, "
+            CREATE TABLE _coven_upload_claims (
+                device BLOB NOT NULL,
+                number BLOB NOT NULL,
+                claim BLOB NOT NULL CHECK(length(claim)=8),
+                PRIMARY KEY(device, number),
+                FOREIGN KEY(device,number) REFERENCES _coven_uploads(device,number) ON DELETE CASCADE
+            ) STRICT, WITHOUT ROWID;
+            CREATE INDEX _coven_upload_claims_claim ON _coven_upload_claims(device,claim);
         ");
         $visit!(_coven_queued_file_refs, "
             CREATE TABLE _coven_queued_file_refs (
