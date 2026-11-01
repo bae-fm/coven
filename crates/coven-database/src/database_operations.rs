@@ -191,6 +191,26 @@ impl Database {
         .await
     }
 
+    /// Retire an ended invite in one commit with the deletion it leaves
+    /// owed: its marker's, once that has passed (§13.2).
+    pub async fn finish_operation_with_removal(
+        &self,
+        id: OperationId,
+        removal: crate::ObjectRemoval,
+    ) -> Result<(), DbError> {
+        self.call(move |inner| {
+            inner.access.with_writer(|writer| {
+                writer.transaction(|db| {
+                    if crate::operation::finish(db, id)? != 1 {
+                        return Err(DbError::OperationChanged(id));
+                    }
+                    crate::object_removals::record(db, &removal)
+                })
+            })
+        })
+        .await
+    }
+
     /// End an operation another started, with its outcome, in the
     /// transaction that advances its parent past it: the parent's step and
     /// the child's end commit together, so no restart finds one without the

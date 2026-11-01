@@ -41,11 +41,12 @@ impl SequenceSync {
         result
     }
 
-    /// Record a kept replacement's new S3 key for its member: resume the
-    /// unfinished claim, or start it (§14.3). Returns the operation, left for
-    /// the invite to end, and its outcome; no operation when the caught-up
-    /// history already has the record or refuses it.
-    pub(super) async fn record_invite_access(
+    /// Claim an entry the invite owns: its share, its share's end, or a
+    /// kept replacement's new S3 key for its member (§13.2, §14.3). Resume
+    /// the unfinished claim, or start it. Returns the operation, left for the
+    /// invite to end, and its outcome; no operation when the caught-up
+    /// history already has the entry or refuses it.
+    pub(super) async fn claim_for_invite(
         &self,
         session: &mut Session,
         ring: &mut StoreKeyring,

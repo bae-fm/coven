@@ -263,7 +263,10 @@ marker turns away a request sent after the invite ended, which would otherwise
 wait for no one. If the inviting device stops for good, removed, replaced, or
 its member's keys replaced, an admin's device that applies that deletes the
 device's waiting requests and leaves one marker beside them, never deleted,
-which turns away any request sent later. Dan's phone keeps its new keys and
+which turns away any request sent later. The share an invite grants is
+recorded in history before the grant, so the owner's other devices take it
+back when the inviting device stops for good, unless a member or another
+open invite still uses the account. Dan's phone keeps its new keys and
 request across restarts, and picks up where it left off; `join_with_invite`
 returns `None` when the request is declined, the invite is cancelled, or it
 expires. It sends no first request after the invite's expiry, which

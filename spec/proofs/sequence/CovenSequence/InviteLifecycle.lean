@@ -18,7 +18,11 @@ Every writer that acts on them is a step:
   of this device, §19.3);
 - another admin's device applying that stop first: it writes this device's
   gone marker and deletes the joiner's request, and the marker turns away
-  any request sent later (§13.2).
+  any request sent later (§13.2);
+- the invite's share: the account the invite shares the store with, which
+  history records before the grant, and which the owner's devices take back
+  once the invite ended or, the share recorded, its device stopped for good
+  (§13.2, §14.2).
 
 The journal row carries its step, which every change of the row increases.
 A pass's write is conditional on the step it read; so is the pending record
@@ -70,6 +74,8 @@ inductive Outcome where
   | stopped
   deriving DecidableEq, Repr
 
+@[simp] theorem rejected_not_landed : (Outcome.rejected == Outcome.landed) = false := by decide
+
 /-- What the invite is: how it reaches the person, and whether approving it
 also records a new S3 key for an existing member. -/
 structure Config where
@@ -109,12 +115,19 @@ structure World where
   stopped : Bool
   /-- The row a pass read and is acting on; memory only. -/
   read : Option Row
+  /-- History records the invite's share (`AddInviteShare`). -/
+  recorded : Bool
+  /-- The provider share the invite granted stands. -/
+  shared : Bool
+  /-- This device ended the invite's share: it recorded the end, or, with no
+  record, took the share back itself. -/
+  ended : Bool
   deriving DecidableEq, Repr
 
 /-- The invite just made by the app's write (`create_invite`). -/
 def made : World :=
   ⟨some ⟨.requested, 0⟩, none, 0, false, none, 0, false, none, false, false, false, true, false,
-    none⟩
+    none, false, false, false⟩
 
 structure Rules where
   /-- A pass saves its finding only while the row is at the step it read. -/
@@ -134,12 +147,14 @@ structure Rules where
   showApproving : Bool
   /-- The approve step refuses what the applied state refuses. -/
   approveChecksApplied : Bool
+  /-- The pass records the invite's share in history before granting it. -/
+  recordShare : Bool
   deriving DecidableEq, Repr
 
-def Rules.correct : Rules := ⟨true, true, true, true, true, true, true, false⟩
+def Rules.correct : Rules := ⟨true, true, true, true, true, true, true, false, true⟩
 
 /-- The rules the Rust follows, as the differential test drives it. -/
-def Rules.rust : Rules := ⟨true, true, true, true, true, true, true, false⟩
+def Rules.rust : Rules := ⟨true, true, true, true, true, true, true, false, true⟩
 
 /-- Stages that end at the invite's expiry; approval, once begun, finishes. -/
 def expires : Stage → Bool
@@ -246,13 +261,19 @@ inductive Act where
   /-- Another admin's device applies this device's stop for good: it writes
   the gone marker, then deletes the request. -/
   | gone
+  /-- An owner's device takes the invite's share back: this device once it
+  ended the share, or any of them once the share is recorded and this device
+  stopped for good, unless the account is a member's by then. -/
+  | revoke
   deriving DecidableEq, Repr
 
 /-- The pass's write for the row it read. -/
 def commitOf (R : Rules) (c : Config) (w : World) (r : Row) : World :=
   match r.stage with
-  | .requested => if w.approvable then guarded w r (advance · .grant) else recordAt R w r .never
-  | .grant => guarded w r (advance · (.waiting false))
+  | .requested =>
+    if w.approvable then guarded w r fun w => advance { w with recorded := R.recordShare } .grant
+    else recordAt R w r .never
+  | .grant => guarded w r fun w => advance { w with shared := true } (.waiting false)
   | .waiting false =>
     if w.request then
       match c.delivery with
@@ -271,7 +292,8 @@ def commitOf (R : Rules) (c : Config) (w : World) (r : Row) : World :=
   | .recording =>
     if w.approvable || R.settleRefusedRecord then guarded w r (advance · .settled)
     else recordAt R w r .never
-  | .settled => guarded w r fun w => { w with row := none, request := false, pending := none }
+  | .settled => guarded w r fun w =>
+    { w with row := none, request := false, pending := none, ended := true }
 
 /-- The app's step accepts this action now. -/
 def accepted (R : Rules) (w : World) : Act → Bool
@@ -306,6 +328,7 @@ def enabled (R : Rules) (_c : Config) (w : World) : Act → Bool
   | .expiry => w.expired && w.row.any (expires ·.stage)
   | .send => !w.request && !w.gone
   | .gone => !w.gone
+  | .revoke => w.shared && !w.bound && (w.ended || (w.recorded && (w.stopped || w.gone)))
   | a => accepted R w a
 
 def act (R : Rules) (c : Config) (w : World) : Act → World
@@ -337,6 +360,7 @@ def act (R : Rules) (c : Config) (w : World) : Act → World
   | .administer => { w with op := some none }
   | .send => { w with request := true }
   | .gone => { w with gone := true, request := false }
+  | .revoke => { w with shared := false }
 
 inductive Step (R : Rules) (c : Config) : World → World → Prop
   | step (w : World) (a : Act) (h : enabled R c w a = true) : Step R c w (act R c w a)
@@ -389,9 +413,11 @@ def offered (v : View) : Act → Bool
   | _ => false
 
 /-- Nothing left for the app to follow: no invite listed, no operation
-running, no pending record. -/
+running, no pending record, and no share standing for an account no member
+uses. -/
 def quiet (R : Rules) (w : World) : Bool :=
-  (listed R w).isNone && w.outcome != some none && w.op != some none && w.pending.isNone
+  (listed R w).isNone && w.outcome != some none && w.op != some none && w.pending.isNone &&
+    !(w.shared && !w.bound)
 
 /-- How far the listing has gone. It only ever moves forward. -/
 def Listed.rank : Option Listed → Nat
@@ -495,6 +521,18 @@ theorem stays {R : Rules} {c : Config} (P : World → Prop)
     (recordAt R w r p).read = w.read := by
   unfold recordAt; split <;> rfl
 
+@[simp] theorem recordAt_recorded (R : Rules) (w : World) (r : Row) (p : Retry) :
+    (recordAt R w r p).recorded = w.recorded := by
+  unfold recordAt; split <;> rfl
+
+@[simp] theorem recordAt_shared (R : Rules) (w : World) (r : Row) (p : Retry) :
+    (recordAt R w r p).shared = w.shared := by
+  unfold recordAt; split <;> rfl
+
+@[simp] theorem recordAt_ended (R : Rules) (w : World) (r : Row) (p : Retry) :
+    (recordAt R w r p).ended = w.ended := by
+  unfold recordAt; split <;> rfl
+
 @[simp] theorem advance_stopped (w : World) (s : Stage) : (advance w s).stopped = w.stopped := by
   unfold advance; split <;> rfl
 
@@ -523,6 +561,16 @@ theorem stays {R : Rules} {c : Config} (P : World → Prop)
   unfold advance; split <;> rfl
 
 @[simp] theorem advance_read (w : World) (s : Stage) : (advance w s).read = w.read := by
+  unfold advance; split <;> rfl
+
+@[simp] theorem advance_recorded (w : World) (s : Stage) :
+    (advance w s).recorded = w.recorded := by
+  unfold advance; split <;> rfl
+
+@[simp] theorem advance_shared (w : World) (s : Stage) : (advance w s).shared = w.shared := by
+  unfold advance; split <;> rfl
+
+@[simp] theorem advance_ended (w : World) (s : Stage) : (advance w s).ended = w.ended := by
   unfold advance; split <;> rfl
 
 /-! ## Counterexamples
@@ -640,6 +688,29 @@ theorem approval_shown_as_waiting :
       offered (view { Rules.correct with showApproving := false } w) .approve = true ∧
       accepted { Rules.correct with showApproving := false } w .approve = false :=
   ⟨_, rfl, rfl, rfl⟩
+
+def unrecorded : Rules := { Rules.correct with recordShare := false }
+
+/-- A share granted with no record in history, on a device stopped for good
+before it ended the share. -/
+def StrandedShare (w : World) : Prop :=
+  w.shared = true ∧ w.recorded = false ∧ w.ended = false ∧ w.stopped = true ∧ w.bound = false
+
+theorem stranded_share_stays (c : Config) (w : World) (a : Act) (h : StrandedShare w)
+    (e : enabled unrecorded c w a = true) : StrandedShare (act unrecorded c w a) := by
+  obtain ⟨shared, recorded, ended, stopped, bound⟩ := h
+  cases a <;> simp_all [StrandedShare, enabled, act, accepted, applying, unrecorded, Rules.correct]
+  all_goals (repeat' split) <;> simp_all
+
+/-- Without the share recorded before the grant, a device that stops for
+good with its invite's account shared leaves the share standing forever: no
+other device knows of it, and none compares the provider's member list with
+history, which would take away shares made outside coven. -/
+theorem unrecorded_share_strands :
+    ∃ w, trace unrecorded sent made [.read, .commit, .read, .commit, .stop] = some w ∧
+      ∀ w', Steps unrecorded sent w w' → w'.shared = true := by
+  refine ⟨_, rfl, fun w' h => ?_⟩
+  exact (stays _ (stranded_share_stays sent) h ⟨rfl, rfl, rfl, rfl, rfl⟩).1
 
 /-! ## The properties, under the rules -/
 
@@ -775,6 +846,7 @@ theorem inv_step (c : Config) (w : World) (a : Act) (inv : Inv c w)
   case tick => constructor <;> simp_all [act]
   case send => constructor <;> simp_all [act]
   case gone => constructor <;> simp_all [act]
+  case revoke => constructor <;> simp_all [act]
   case retry => constructor <;> simp_all [act]
   case ack =>
     constructor <;> simp_all [act, enabled, accepted]
@@ -835,6 +907,77 @@ theorem inv_step (c : Config) (w : World) (a : Act) (inv : Inv c w)
 theorem reachable_inv (c : Config) {w : World} (h : Reachable Rules.correct c w) : Inv c w :=
   stays (Inv c) (inv_step c) h (inv_made c)
 
+/-! ### No share history doesn't record -/
+
+/-- What every reachable world satisfies about the invite's share. -/
+structure ShareInv (w : World) : Prop where
+  /-- An invite that is granting recorded its share first. -/
+  granting : w.row.map (·.stage) = some .grant → w.recorded = true
+  /-- A standing share is recorded, so the owner's other devices know of it. -/
+  recorded : w.shared = true → w.recorded = true
+  /-- An invite gone from the journal ended its share, or its device stopped
+  for good. -/
+  over : w.row = none → w.ended = true ∨ w.stopped = true
+
+set_option maxHeartbeats 2000000 in
+theorem share_step (c : Config) (w : World) (a : Act) (inv : Inv c w) (sh : ShareInv w)
+    (e : enabled Rules.correct c w a = true) : ShareInv (act Rules.correct c w a) := by
+  obtain ⟨granting, recorded, over⟩ := sh
+  obtain ⟨fresh, readRow, binding, running, early, zero, once, waitingSent, never, stopped⟩ := inv
+  cases a
+  case commit =>
+    rcases hr : w.read with _ | r
+    · simp [enabled, hr] at e
+    obtain ⟨r', hrow, hs⟩ := readRow r hr
+    by_cases cur : atRead w r = true
+    · have same : r' = r := by
+        rcases hs with hs | hs
+        · simp [atRead, hrow] at cur; omega
+        · exact hs
+      subst same
+      obtain ⟨stage, n⟩ := r'
+      cases stage
+      all_goals
+        simp only [act, hr, commitOf, guarded, recordAt, atRead, hrow, Rules.correct, endBinding,
+          bindingOutcome, afterBound, advance]
+        (repeat' split) <;> constructor <;> simp_all
+    · simp only [act, hr, commitOf_stale c w r (by simpa using cur)]
+      exact ⟨granting, recorded, over⟩
+  case lapse =>
+    rcases hr : w.read with _ | r
+    · simp [enabled, hr] at e
+    simp only [act, hr, guarded]
+    split
+    · rcases hrow : w.row with _ | ⟨stage, n⟩
+      · constructor <;> simp_all
+      · constructor <;> simp_all [advance]
+    · constructor <;> simp_all
+  case stop =>
+    simp only [act, stopEffect_correct]
+    constructor <;> simp_all [stopped']
+  case fail p =>
+    rcases hr : w.read with _ | r <;> constructor <;> simp_all [act]
+  case bind => simp [enabled, Rules.correct] at e
+  case expiry | approve | decline | cancel =>
+    rcases hrow : w.row with _ | ⟨stage, n⟩
+    all_goals constructor <;> simp_all [act, enabled, accepted, advance]
+  all_goals
+    rcases hrow : w.row with _ | ⟨stage, n⟩
+    all_goals constructor <;> simp_all [act, enabled, accepted]
+
+theorem reachable_share (c : Config) {w : World} (h : Reachable Rules.correct c w) :
+    Inv c w ∧ ShareInv w :=
+  stays (fun w => Inv c w ∧ ShareInv w)
+    (fun w a ⟨inv, sh⟩ e => ⟨inv_step c w a inv e, share_step c w a inv sh e⟩) h
+    ⟨inv_made c, by constructor <;> simp [made]⟩
+
+/-- A share standing at the provider is always one history records: the
+pass records it before the grant, so the owner's other devices can take it
+back once its device is gone for good (§13.2). -/
+theorem share_recorded (c : Config) {w : World} (h : Reachable Rules.correct c w)
+    (shared : w.shared = true) : w.recorded = true :=
+  (reachable_share c h).2.recorded shared
+
 /-! ### No write from a stale read -/
 
 /-- A pending record always holds what a pass found at the row's current
@@ -858,7 +1001,7 @@ theorem commit_acts_on_read (c : Config) {w : World} {r : Row} (h : Reachable Ru
 
 /-- What coven does on its own, and the app's retry of a record it is shown. -/
 def coven : Act → Bool
-  | .read | .crash | .commit | .lapse | .runOp | .tick | .expiry | .retry => true
+  | .read | .crash | .commit | .lapse | .runOp | .tick | .expiry | .retry | .revoke => true
   | _ => false
 
 inductive Moves (c : Config) : World → World → Prop
@@ -887,7 +1030,7 @@ def stageMeasure : Option Row → Nat
 /-- What is left to do. -/
 def measure (w : World) : Nat :=
   4 * stageMeasure w.row + (!w.expired).toNat + w.read.isSome.toNat + (w.op == some none).toNat +
-    w.pending.isSome.toNat
+    w.pending.isSome.toNat + (w.shared && !w.bound).toNat
 
 theorem one {c : Config} {w : World} (a : Act) (own : coven a = true)
     (e : enabled Rules.correct c w a = true) : Moves c w (act Rules.correct c w a) :=
@@ -896,9 +1039,17 @@ theorem one {c : Config} {w : World} (a : Act) (own : coven a = true)
 set_option maxHeartbeats 2000000 in
 /-- From every reachable state that isn't quiet, coven alone, or the app
 retrying a record it is shown, makes progress. -/
-theorem progress (c : Config) (w : World) (inv : Inv c w) (busy : quiet Rules.correct w = false) :
+theorem progress (c : Config) (w : World) (inv : Inv c w) (sh : ShareInv w)
+    (busy : quiet Rules.correct w = false) :
     ∃ w', Moves c w w' ∧ measure w' < measure w := by
   obtain ⟨fresh, readRow, binding, running, early, zero, once, waitingSent, never, stopped⟩ := inv
+  obtain ⟨_, recorded, over⟩ := sh
+  -- A share owed its revoke is taken back.
+  by_cases owed : w.shared = true ∧ w.bound = false ∧
+      (w.ended = true ∨ (w.recorded = true ∧ (w.stopped = true ∨ w.gone = true)))
+  · obtain ⟨hs, hb, _⟩ := owed
+    refine ⟨_, one .revoke rfl (by simp_all [enabled]), ?_⟩
+    simp [act, measure, hs, hb]
   -- A read in flight is lost.
   rcases hread : w.read with _ | r
   case some =>
@@ -948,7 +1099,7 @@ theorem progress (c : Config) (w : World) (inv : Inv c w) (busy : quiet Rules.co
       rcases staged with h | h | h <;> subst h <;> cases ha : w.approvable <;>
         cases hc : c.records <;>
         simp_all [w₁, act, measure, commitOf, guarded, atRead, advance, stageMeasure, Rules.correct,
-          endBinding, bindingOutcome, afterBound] <;> omega
+          endBinding, bindingOutcome, afterBound, beq_iff_eq] <;> omega
     · rcases staged with h | h | h <;> simp_all
   cases stage
   case requested => exact expiring rfl
@@ -969,7 +1120,8 @@ theorem settles (c : Config) {w : World} (h : Reachable Rules.correct c w) :
   | ind m ih =>
     by_cases q : quiet Rules.correct w = true
     · exact ⟨w, .refl w, q⟩
-    · obtain ⟨w', moves, less⟩ := progress c w (reachable_inv c h) (by simpa using q)
+    · obtain ⟨inv, sh⟩ := reachable_share c h
+      obtain ⟨w', moves, less⟩ := progress c w inv sh (by simpa using q)
       obtain ⟨w'', more, quiet⟩ := ih (measure w') (hm ▸ less) (h.trans moves.steps) rfl
       exact ⟨w'', moves.trans more, quiet⟩
 

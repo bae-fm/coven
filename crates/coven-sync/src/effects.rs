@@ -123,7 +123,13 @@ pub(crate) fn checked_change(
     }
     let authorized = match change {
         CreateStore { .. } | AddDevice { .. } | CreateCircle { .. } => true,
-        RenameStore { .. } | AddMember { .. } | RemoveMember { .. } | ChangeRole { .. } => is_admin,
+        RenameStore { .. }
+        | AddMember { .. }
+        | RemoveMember { .. }
+        | ChangeRole { .. }
+        | AddInviteShare { .. } => is_admin,
+        // Only the device that recorded the share ends it (`History::validate`).
+        EndInviteShare { .. } => true,
         SetAccess { member, access } => {
             member == author
                 || (is_admin && matches!(access, coven_format::MemberAccess::S3AccessKey { .. }))
@@ -312,7 +318,9 @@ pub(crate) fn checked_change(
                 next.circle_deletions.insert(*circle, slot);
             }
         }
-        RotateKey { .. } => {}
+        // An invite's share lives in history, not in the membership state
+        // (`History::invite_shares`).
+        RotateKey { .. } | AddInviteShare { .. } | EndInviteShare { .. } => {}
         RaiseSchema { .. } | Reset { .. } => {
             let boundary = boundary.as_ref().expect("resolved activation");
             if boundary.already_in_place(state) {

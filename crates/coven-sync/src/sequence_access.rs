@@ -26,48 +26,43 @@ impl History {
     }
 
     /// Intentions after this state: an account stays shared while an active
-    /// member or one of this device's open invites uses it (§14.2).
-    pub(crate) fn provider_changes(
-        &self,
-        member: MemberId,
-        invited: &BTreeSet<String>,
-    ) -> Result<ProviderChanges, SyncError> {
+    /// member reaches storage through it or an open invite share names it
+    /// (§14.2). Only the owner's devices change sharing, so only they follow
+    /// invite shares; a member's account is followed everywhere, so another
+    /// admin's device shows the owner's work it waits for.
+    pub(crate) fn provider_changes(&self, member: MemberId) -> Result<ProviderChanges, SyncError> {
+        let owner = self.owns_storage(member);
         let mut changes = ProviderChanges::default();
         let mut accounts = BTreeSet::new();
-        let active: Vec<_> = self
-            .state
-            .members
-            .values()
-            .filter(|value| !value.removed)
-            .map(|value| &value.access)
-            .collect();
-        for (_, _, access) in self.recorded_access() {
-            let intended = active.iter().any(|current| current.same_credential(access));
-            match access {
-                MemberAccess::ProviderAccount(account) => {
-                    let account = account.trim().to_ascii_lowercase();
-                    if !accounts.insert(account.clone()) {
-                        continue;
-                    }
-                    let intended = intended || invited.contains(&account);
-                    changes.accounts.push(ProviderAccessChange {
-                        operation: NewOperation {
-                            kind: "provider-access".into(),
-                            data: serde_json::to_vec(&account)?,
-                            started_by: "coven".into(),
-                            pauses_writes: false,
-                        },
-                        account,
-                        intended,
-                        initially_granted: true,
-                        needs_invitation: false,
-                        owner: self.owns_storage(member),
-                    });
-                }
-                // Coven shares nothing on S3: the person deletes a key
-                // in the provider's console, and coven records nothing (§14.3).
-                MemberAccess::S3AccessKey { .. } => (),
+        // Coven shares nothing on S3: the person deletes a key in the
+        // provider's console, and coven records nothing (§14.3).
+        let members = self.recorded_access().filter_map(|(_, _, access)| match access {
+            MemberAccess::ProviderAccount(account) => Some(account.as_str()),
+            MemberAccess::S3AccessKey { .. } => None,
+        });
+        let shares =
+            self.invite_shares.values().filter(|_| owner).map(|share| share.account.as_str());
+        for account in members.chain(shares) {
+            let account = account.trim().to_ascii_lowercase();
+            if !accounts.insert(account.clone()) {
+                continue;
             }
+            changes.accounts.push(ProviderAccessChange {
+                operation: NewOperation {
+                    kind: "provider-access".into(),
+                    data: serde_json::to_vec(&account)?,
+                    started_by: "coven".into(),
+                    pauses_writes: false,
+                },
+                intended: self.account_intended(&account),
+                account,
+                // A member's access entry describes a grant already made,
+                // and an invite share one its own device makes: a device
+                // that first learns of an account never grants it itself.
+                initially_granted: true,
+                needs_invitation: false,
+                owner,
+            });
         }
         Ok(changes)
     }

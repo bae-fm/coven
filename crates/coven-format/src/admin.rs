@@ -4,7 +4,7 @@ use crate::error::{require, Error, Rule};
 use crate::value::{name, positive, Slot};
 use crate::wire::{wire_struct, Decoder, Encoder, Wire};
 pub use coven_crypto::MemberPublicKeys;
-use coven_foundation::id_source::{CircleId, DeviceId, KeyId, MemberId, StoreId};
+use coven_foundation::id_source::{CircleId, DeviceId, InviteId, KeyId, MemberId, StoreId};
 use coven_merge::Audience;
 
 /// A member's role in the store (§10).
@@ -184,6 +184,21 @@ pub enum StoreChange {
         /// The member's new public pair.
         keys: MemberPublicKeys,
     },
+    /// Record that the writing device's invite shares the store with a
+    /// provider account (§13.2, §14.2). Claimed before the grant, so the
+    /// owner's other devices know of the share and take it back once the
+    /// invite ends or its device is gone for good.
+    AddInviteShare {
+        /// The invite, fixed when it was made.
+        invite: InviteId,
+        /// The provider account the invite shares the store with.
+        account: String,
+    },
+    /// End the share the writing device recorded for its invite (§13.2).
+    EndInviteShare {
+        /// The invite whose share ends.
+        invite: InviteId,
+    },
 }
 
 impl StoreChange {
@@ -202,6 +217,10 @@ impl StoreChange {
                 positive(announcement.0)
             }
             Self::Reset { announcement } => positive(announcement.0),
+            Self::AddInviteShare { account, .. } => {
+                require(!account.trim().is_empty(), "invite share account", Rule::Required)?;
+                crate::error::bound(account.len(), MAX_ACCOUNT, "invite share account")
+            }
             Self::RemoveMember { .. }
             | Self::RotateKey { .. }
             | Self::SetAccess { .. }
@@ -211,7 +230,8 @@ impl StoreChange {
             | Self::DeleteCircle { .. }
             | Self::AddCircleMember { .. }
             | Self::RemoveCircleMember { .. }
-            | Self::ReplaceMemberKeys { .. } => Ok(()),
+            | Self::ReplaceMemberKeys { .. }
+            | Self::EndInviteShare { .. } => Ok(()),
         }
     }
 }
@@ -252,7 +272,17 @@ store_changes!(
     15 => RotateKey { audience, key, key_hash },
     16 => ReplaceMemberKeys { member, expected, keys },
     17 => RenameStore { name => crate::wire::get_name },
+    18 => AddInviteShare { invite, account => get_account },
+    19 => EndInviteShare { invite },
 );
+
+/// The longest provider account an invite share names, as member access
+/// bounds it (D6).
+const MAX_ACCOUNT: usize = 1024;
+
+fn get_account(input: &mut Decoder<'_>) -> Result<String, Error> {
+    crate::wire::get_text(input, MAX_ACCOUNT, "invite share account")
+}
 
 impl StoreChange {
     /// Encode the one bounded kind-4 admin frame (D6).

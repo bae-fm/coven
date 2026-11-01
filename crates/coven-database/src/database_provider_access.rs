@@ -50,32 +50,6 @@ impl crate::Database {
         .await
     }
 
-    /// Retire an invitation with its final account intention in one commit,
-    /// and the deletion it leaves owed: its marker's, once that has passed.
-    pub async fn finish_operation_with_access<P: PendingValue>(
-        &self,
-        id: OperationId,
-        changes: Vec<ProviderAccessChange>,
-        removal: Option<crate::ObjectRemoval>,
-    ) -> Result<(), DbError> {
-        self.call(move |inner| {
-            inner.access.with_writer(|db| {
-                db.transaction(|db| {
-                    if crate::operation::find(db, id)?.is_none() {
-                        return Err(DbError::OperationChanged(id));
-                    }
-                    crate::pending::clear_operation(db, id)?;
-                    db.internal_execute("DELETE FROM _coven_operations WHERE id=?1", [id.0])?;
-                    if let Some(removal) = &removal {
-                        crate::object_removals::record(db, removal)?;
-                    }
-                    adopt::<P>(db, &changes)
-                })
-            })
-        })
-        .await
-    }
-
     /// Fix the request's target before calling storage. A failed or interrupted
     /// request has unknown provider state, so retry must confirm the target again.
     pub async fn start_provider_request<P: PendingValue>(

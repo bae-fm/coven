@@ -600,6 +600,11 @@ pub fn store_changes() -> Vec<StoreChange> {
         },
         StoreChange::ReplaceMemberKeys { member: m, expected: member(), keys: replacement() },
         StoreChange::RenameStore { name: "N".into() },
+        StoreChange::AddInviteShare {
+            invite: InviteId(Uuid::from_bytes([0x55; 16])),
+            account: "dan@example.org".into(),
+        },
+        StoreChange::EndInviteShare { invite: InviteId(Uuid::from_bytes([0x55; 16])) },
     ]
 }
 /// Every independently decoded ordinary object kind.

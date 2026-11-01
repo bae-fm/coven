@@ -3735,7 +3735,7 @@ doesn't let admins grant or revoke, even where the provider would
 Ana may make more than one invite for the same account: she sends Dan one, then
 he comes over and she shows him another in person. The share the first granted
 serves the second, so making it sends no new grant. The account stays shared
-while either invite is open (§14.2).
+while either invite is open (§14.2), whichever of Ana's devices made it.
 
 **What the invite holds:**
 
@@ -3817,6 +3817,18 @@ invite, and Ana cancels the invite to end it. Without the second check, an
 admin demoted while offline could still share the store's storage with someone
 new.
 
+**The invite's share in history.** Before it shares the folder, the pass
+claims an entry recording the *invite share*: the invite's id and Dan's
+account, written by Ana's phone ([format.md D6](format.md#d6-admin-entries)).
+Only a device of the member whose account holds the store records one, once
+per invite, and only that device ends it. Every device reads the share, so
+Ana's laptop knows Dan's account is shared, and why, though it never sees the
+invite itself. The laptop doesn't grant the account; the phone that made the
+invite does. If Ana's phone stopped for good with Dan's account shared and
+nothing in history said so, no device would ever take the share back. The
+entry comes first, so no share exists that history doesn't record. An S3
+invite shares nothing and records no share.
+
 **Ana's open invites.** Ana's phone lists the invites it made that haven't
 ended: the person's name, the access granted, in person or sent, when it
 expires, the operation that names its pending record, and where each is:
@@ -3827,7 +3839,8 @@ follows its outcome, and offers no second decision. They
 are a view of its operations journal, `coven_invites` (§4), which a live query
 follows as each invite changes. Only Ana's phone lists them. Only it holds
 their secrets, so only it can approve, decline or cancel one. Other devices
-learn of Dan when the entry adding him applies.
+learn of Dan when the entry adding him applies; before that they know only
+the account an invite share names.
 
 The code shown again is the one first shown, byte for byte, though Household
 may have been renamed and more slots applied since. Dan's phone binds its saved
@@ -4000,6 +4013,9 @@ grant taken back and its request deleted, while access that active members still
 use stays. Without this, a reset would strand the access the invite granted.
 The invite keeps the id of the phone that made it, so the new installation ends
 the request where Dan's phone sent it, under the old phone's id, not its own.
+The share the old phone recorded ends when the new installation registers in
+its place, which stops the old phone for good; the owner's devices then take
+the account back, as for any phone gone for good (below).
 If her phone stops for good instead, removed or replaced, or its member's keys
 replaced, its open invites end in the transaction that applies the stop
 (§14.1).
@@ -4029,8 +4045,14 @@ new installation registers in its old phone's place in the same slot, so an
 admin's does this for the old phone too, after ending the invites it carried.
 
 Declining, or letting the invite expire, takes back the provider access it
-granted. On S3 there is nothing to take back: the person deletes Dan's key in the
-provider's console, and coven forgets it (§14.3). An invite expires at the time
+granted. Once the invite ends, whether it was approved, declined, cancelled or
+expired, Ana's phone claims the entry ending its share. Every device of Ana's
+that applies it records the account's revocation in that transaction, unless
+an active member or another open invite share still uses the account (§14.2):
+Dan's, once approval adds him. For an approval, the end comes after the entry
+adding Dan, so his account is never unshared in between. On S3 there is
+nothing to take back: the person deletes Dan's key in the provider's console,
+and coven forgets it (§14.3). An invite expires at the time
 fixed when it was made, by the inviting device's clock. Expiry is a write, like
 approving, declining or cancelling: Ana's phone wakes at the earliest open
 invite's expiry and writes it then, with its storage disconnected, offline or
@@ -4039,6 +4061,18 @@ closed. Approving, declining or cancelling once the time has passed fails and
 writes nothing, since ending the invite is the expiry's write. The invite
 leaves her list in that write; its request is deleted and the access goes back
 in a pass, once her phone is connected and online.
+
+**Taking back a gone phone's shares.** A share that Ana's phone recorded
+stays open until the phone ends it, and a phone gone for good never will. So
+an invite share counts only while its device isn't gone for good. Ana's phone
+shares Household with Dan's account for a sent invite; Ben removes the phone
+before Dan answers. When Ana's laptop applies the removal, the share stops
+counting, and in the same transaction the laptop records the revocation of
+Dan's account; its next pass sends it. The laptop keeps the account shared if
+Dan is a member by then, or if one of its own invites names his account too
+(§14.2). It takes back only shares coven recorded, never comparing the
+provider's member list with history: that would take away a share the person
+made outside coven.
 
 Recovering an existing member changes none of their access records or device
 ids. The new installation registers its own fresh device after the key
@@ -4208,8 +4242,8 @@ its member's keys, after it registered, written by another device. History
 showing another copy of an installation using its device id doesn't count:
 only that installation can see it (§19.3). Whatever a device gone for good
 left under way stays that way unless others end it: §13.2 covers the join
-requests it was waiting for, §16.6 its snapshots, and §17.10 the files it
-left in storage.
+requests it was waiting for and the shares its invites granted, §16.6 its
+snapshots, and §17.10 the files it left in storage.
 
 A member's removal also ends the person's use of their restore code. Ana removes
 Ben at slot 52. When Ben's phone reads slot 52, it first deletes his restore
@@ -4250,9 +4284,13 @@ app's pending list shows the provider work's progress, including waits for an
 owner.
 
 - **Dropbox, OneDrive, iCloud:** sharing follows the active members and open
-  invites. Coven changes sharing only from the account that holds the store
+  invites. An open invite is an invite share in history that hasn't ended and
+  whose device isn't gone for good (§13.2), so every device reads the same
+  intent. Coven changes sharing only from the account that holds the store
   (§13.2 says which providers would also let an editor or administrator do it),
-  so that member's device does it when it applies the change. If Ana owns the folder and
+  so that member's devices do it when they apply the change. Only they record
+  work for an invite share: another admin's device never changes sharing, and
+  made no invite whose sharing it could wait for. If Ana owns the folder and
   is offline, Ben's removal applies at once everywhere, but the unsharing waits
   for Ana's next pass.
 - **S3:** each member has their own access key, made in the provider's console.
@@ -7811,14 +7849,18 @@ The owner's device keeps actual access close to intent this way:
 
 Sharing is per account, not per invite: taking access back takes the account's
 access, whatever shared it. So the owner's device leaves an account shared while a
-member in its store reaches storage through it, or while another of its own open
-invites names it.
+member in its store reaches storage through it, or while an open invite share
+names it, whichever of the owner's devices recorded the share (§13.2).
 
 **Edge cases.**
 
-- An invite made at the same moment on another of the owner's devices can lose
-  its access this way. The invited device's join then fails with the provider's
-  permission error, and an admin invites them again, as after any removal (§14.2).
+- Ana's laptop may take back Dan's account just before it applies the share
+  her phone recorded for a new invite to him: removing Dan, say, raced the
+  invite. Applying the share makes the account intended again, and the laptop
+  grants it back, as for any request made obsolete. Until then the joining
+  device can meet the provider's permission error. Without the share in
+  history, the laptop would never learn of the phone's invite, and Dan's
+  access would stay gone.
 - Taking access back removes only what grants that one account. Grants through
   a parent folder, public links, groups, unidentified grantees and the owner's
   own grant, and any share that also grants others, are left in place and
@@ -9661,9 +9703,10 @@ Write-ups explain each model and state its assumptions:
 | A scan with no matching copies reaches the end; an absent request without its approving binding reports declined | `no_copy_reaches_end`, `real_decline` | `proofs/sequence/CovenSequence/JoinScan.lean` | §13.2 |
 | Exponential probes from missing slot 4 all miss a valid retained window at 13–15 containing an applied approval; a missing slot below an existing slot is deleted history | `retained_good`, `approval_is_kept`, `exponential_probes_miss_approval`, `missing_below_existing_is_deleted` | `proofs/sequence/CovenSequence/JoinScanExamples.lean` | §13.2 |
 | No write from a stale read: an invite's pending record holds what a pass found at its row's current step, and a pass's write changes the row only when the row is the one it read | `finding_current`, `commit_acts_on_read` | `proofs/sequence/CovenSequence/InviteLifecycle.lean` | §13.2 |
-| From every reachable state, crashes and stops for good included, coven's own steps, with the app retrying only records it is shown, end the invite and every operation the app journaled: nothing stays listed, running or pending | `settles` | `proofs/sequence/CovenSequence/InviteLifecycle.lean` | §11.4, §13.2, §14.1 |
+| From every reachable state, crashes and stops for good included, coven's own steps, with the app retrying only records it is shown, end the invite and every operation the app journaled, and take back its share unless a member uses the account: nothing stays listed, running, pending or shared | `settles` | `proofs/sequence/CovenSequence/InviteLifecycle.lean` | §11.4, §13.2, §14.1, §14.2 |
+| A share an invite granted is always one history records, so the owner's other devices can take it back once the inviting device is gone for good | `share_recorded` | `proofs/sequence/CovenSequence/InviteLifecycle.lean` | §13.2 |
 | The listed invite and its binding's entry only move forward; the app's offer of approving, declining, cancelling and acknowledging is exactly what the write steps accept; a sent invite is listed as approving exactly while its binding runs | `forward`, `offered_accepted`, `approval_runs_binding` | `proofs/sequence/CovenSequence/InviteLifecycle.lean` | §11.4, §13.2 |
-| Each rule those results need is needed: leaving out the step check, ending operations or invites at a stop, ending a refused access record, ending the binding with its invite, recording the binding, listing approval as its own stage, or leaving an approval's refusal to its pass each has a counterexample | `unguarded_finding_is_stale`, `forgetful_stop_runs_forever`, `stop_strands_approval`, `refused_record_strands`, `split_binding_disagrees`, `reclaim_binds_twice`, `approval_shown_as_waiting`, `demoted_approval_offered` | `proofs/sequence/CovenSequence/InviteLifecycle.lean` | §13.2, §14.1 |
+| Each rule those results need is needed: leaving out the step check, ending operations or invites at a stop, ending a refused access record, ending the binding with its invite, recording the binding, listing approval as its own stage, leaving an approval's refusal to its pass, or recording the share before the grant each has a counterexample | `unguarded_finding_is_stale`, `forgetful_stop_runs_forever`, `stop_strands_approval`, `refused_record_strands`, `split_binding_disagrees`, `reclaim_binds_twice`, `approval_shown_as_waiting`, `demoted_approval_offered`, `unrecorded_share_strands` | `proofs/sequence/CovenSequence/InviteLifecycle.lean` | §13.2, §14.1 |
 | A join's reported phases never go back: waiting, loading, done, across its checks and the calls that resume it. Keeping the opened keys only in the call, or reporting a scan that finds no copy as loading, makes them go back | `phases_forward`, `opened_never_waits`, `resumed_waits_again`, `scan_shown_as_loading` | `proofs/sequence/CovenSequence/JoinStatus.lean` | §13.2 |
 | Writes after a removal or key replacement are refused with rows unchanged and no new unique-value or owner claim, while the claim number is recorded | `cutoff` | `proofs/sequence/CovenSequence/Cutoff.lean` | §14.1 |
 | Circle permission is judged at the authored applied prefix; landing still checks store membership, device removal and key generation | `write_permission_at_authored_prefix` | `proofs/sequence/CovenSequence/Authorship.lean` | §15.6, §15.8 |

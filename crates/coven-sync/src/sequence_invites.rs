@@ -123,12 +123,6 @@ impl InviteWork {
             _ => None,
         }
     }
-    /// An invite whose account intention is adopted and not yet ended: its
-    /// account stays shared (§14.2). One the pass hasn't checked yet holds
-    /// no share.
-    fn shares(&self) -> bool {
-        !matches!(self.state, InviteState::Requested | InviteState::Settled)
-    }
     /// Whether the invite ends at its expiry: it waits for its check, grants
     /// access, or waits for its request or the app's decision. Approval,
     /// once begun, finishes.
@@ -265,20 +259,6 @@ impl Invite {
 }
 
 impl SequenceSync {
-    /// Accounts that this device's open invites still need shared.
-    pub(crate) async fn invited_accounts(&self) -> Result<BTreeSet<String>, SyncError> {
-        let mut accounts = BTreeSet::new();
-        for record in self.database.operations().await? {
-            if record.kind == INVITE {
-                let work = InviteWork::read(&record)?;
-                if work.shares() {
-                    accounts.extend(work.account().map(str::to_owned));
-                }
-            }
-        }
-        Ok(accounts)
-    }
-
     /// Make an invite as the app's write step does, then run a pass, and
     /// return the invite once it shows its code, or its pending record as
     /// the error.
@@ -439,6 +419,13 @@ impl SequenceSync {
                     // the invite's pending record, and fails no pass.
                     if let Err(refusal) = self.check_invite(session, member, &work) {
                         return Ok(InviteProgress::Waiting(self.error_reason(&refusal)));
+                    }
+                    // Recorded before the grant, so no share is ever left
+                    // that only this device knows of.
+                    if let Some(refused) =
+                        self.record_invite_share(session, ring, member, &work).await?
+                    {
+                        return Ok(InviteProgress::Waiting(refused));
                     }
                     work.state = InviteState::Grant;
                     let changes = match work.account() {
@@ -601,7 +588,7 @@ impl SequenceSync {
                         access: work.access.member_access(),
                     };
                     let (record_op, outcome) =
-                        self.record_invite_access(session, ring, member, change).await?;
+                        self.claim_for_invite(session, ring, member, change).await?;
                     // A refused record, as when the member was removed
                     // meanwhile, would never be accepted, so the invite ends,
                     // as a refused binding ends it. The person deletes the
@@ -620,20 +607,9 @@ impl SequenceSync {
                 }
                 InviteState::Settled => {
                     let kept_until = self.end_request(&work).await?;
-                    let changes = match work.account() {
-                        Some(account) => {
-                            let others = self.invited_accounts_except(id).await?;
-                            let used = session.history.state.members.values().any(|value| {
-                                !value.removed
-                                    && value.access.same_credential(&MemberAccess::ProviderAccount(
-                                        account.to_owned(),
-                                    ))
-                            });
-                            let invited = others.contains(account);
-                            vec![self.account_change(account, used || invited, invited)?]
-                        }
-                        None => Vec::new(),
-                    };
+                    // Applying the share's end records its account's
+                    // revoke, unless the account is still used (§14.2).
+                    self.end_invite_share(session, ring, member, &work).await?;
                     // The marker goes once a joining device can no longer
                     // send a first request (`end_request`).
                     let removal = coven_database::ObjectRemoval {
@@ -642,9 +618,7 @@ impl SequenceSync {
                             .to_owned(),
                         after: kept_until,
                     };
-                    self.database
-                        .finish_operation_with_access::<PendingRecord>(id, changes, Some(removal))
-                        .await?;
+                    self.database.finish_operation_with_removal(id, removal).await?;
                     return Ok(InviteProgress::Finished);
                 }
             }
@@ -724,22 +698,6 @@ impl SequenceSync {
             }
         }
         Ok(())
-    }
-
-    async fn invited_accounts_except(
-        &self,
-        id: OperationId,
-    ) -> Result<BTreeSet<String>, SyncError> {
-        let mut accounts = BTreeSet::new();
-        for record in self.database.operations().await? {
-            if record.kind == INVITE && record.id != id {
-                let work = InviteWork::read(&record)?;
-                if work.shares() {
-                    accounts.extend(work.account().map(str::to_owned));
-                }
-            }
-        }
-        Ok(accounts)
     }
 
     fn account_change(
@@ -866,6 +824,9 @@ mod approval;
 
 #[path = "sequence_invite_reset.rs"]
 mod reset;
+
+#[path = "sequence_invite_shares.rs"]
+mod shares;
 
 #[path = "sequence_invite_steps.rs"]
 mod steps;

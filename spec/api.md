@@ -5055,7 +5055,8 @@ pub enum OperationKind {
     ReplaceMemberKeys,
     /// Upload a snapshot, then claim its announcement (§16.2).
     WriteSnapshot,
-    /// Grant access, approve or decline a join, and settle the invite.
+    /// Record the invite's share and grant it, approve or decline a join,
+    /// and settle the invite, recording its share's end (§13.2).
     Invite,
     /// Snapshot and reset an audience (§19.4).
     Reset,

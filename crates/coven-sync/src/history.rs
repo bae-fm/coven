@@ -9,7 +9,7 @@ use coven_format::{
     sealed_slot::SlotObjectPrefix,
     sequence::{SlotFrame, SlotHeader, SnapshotAnnouncement},
 };
-use coven_foundation::id_source::{CircleId, DeviceId, KeyId, MemberId};
+use coven_foundation::id_source::{CircleId, DeviceId, InviteId, KeyId, MemberId};
 use coven_merge::{Audience, Slot};
 use std::collections::BTreeMap;
 
@@ -48,6 +48,18 @@ pub(crate) struct Cutoff {
     pub(crate) change: StoreChange,
 }
 
+/// The share an invite grants, as the inviting device recorded it before
+/// granting it (§13.2): the account stays shared while the share is open,
+/// and the owner's devices take it back once it isn't.
+#[derive(Clone)]
+pub(crate) struct InviteShare {
+    /// The device that made the invite, and alone ends its share.
+    pub(crate) device: DeviceId,
+    pub(crate) account: String,
+    /// Its device recorded the share's end.
+    pub(crate) ended: bool,
+}
+
 /// Changes to existing domain values, rather than a copy of the entire state
 /// at every prefix. Writes resolve their original credentials by `read_through`.
 #[derive(Clone, Default)]
@@ -59,6 +71,8 @@ pub(crate) struct History {
     pub(crate) boundaries: Vec<coven_database::BoundaryCoverage>,
     pub(crate) cutoffs: Vec<Cutoff>,
     pub(crate) bindings: Vec<Binding>,
+    /// Every invite share a counted entry recorded, ended or not.
+    pub(crate) invite_shares: BTreeMap<InviteId, InviteShare>,
     members: BTreeMap<MemberId, BTreeMap<u64, StoreMember>>,
     devices: BTreeMap<DeviceId, BTreeMap<u64, StoreDevice>>,
     circles: BTreeMap<CircleId, BTreeMap<u64, StoreCircle>>,
@@ -179,6 +193,25 @@ impl History {
         })
     }
 
+    /// The invite shares that still hold their accounts: not ended, and
+    /// made by a device not gone for good (§13.2, §14.2).
+    pub(crate) fn open_invite_shares(&self) -> impl Iterator<Item = &InviteShare> {
+        self.invite_shares
+            .values()
+            .filter(|share| !share.ended && self.gone_for_good(share.device).is_none())
+    }
+
+    /// Whether `account` is meant to be shared: an active member reaches
+    /// storage through it, or an open invite share names it (§14.2).
+    pub(crate) fn account_intended(&self, account: &str) -> bool {
+        let access = coven_format::MemberAccess::ProviderAccount(account.to_owned());
+        self.state
+            .members
+            .values()
+            .any(|member| !member.removed && member.access.same_credential(&access))
+            || self.open_invite_shares().any(|share| same_account(&share.account, account))
+    }
+
     pub(crate) fn belonged(&self, audience: &Audience, member: &MemberId, through: u64) -> bool {
         at(&self.members, member, through).is_some_and(|member| !member.removed)
             && match audience {
@@ -215,14 +248,48 @@ impl History {
                 return Err(OperationRejection::StoreOwner);
             }
         }
-        effects::checked_change(
+        let effect = effects::checked_change(
             &self.state,
             header,
             slot,
             change,
             &self.announcements,
             &self.boundaries,
-        )
+        )?;
+        match change {
+            StoreChange::AddInviteShare { invite, account } => {
+                if let Some(share) = self.invite_shares.get(invite) {
+                    // Its device recording the same open share again is
+                    // satisfied; any other use of the id is refused.
+                    return if !share.ended
+                        && share.device == header.device
+                        && same_account(&share.account, account)
+                    {
+                        Ok(None)
+                    } else {
+                        Err(OperationRejection::NotAllowed)
+                    };
+                }
+                // Only the member whose account holds the store shares it
+                // with accounts (§20.9).
+                let account_held = self.state.members.get(&header.author).is_some_and(|member| {
+                    matches!(member.access, coven_format::MemberAccess::ProviderAccount(_))
+                });
+                if !account_held || !self.owns_storage(header.author) {
+                    return Err(OperationRejection::NotAllowed);
+                }
+            }
+            StoreChange::EndInviteShare { invite } => match self.invite_shares.get(invite) {
+                Some(share) if share.device == header.device => {
+                    if share.ended {
+                        return Ok(None);
+                    }
+                }
+                _ => return Err(OperationRejection::NotAllowed),
+            },
+            _ => (),
+        }
+        Ok(effect)
     }
 
     /// Install only the effect validated against this preceding state. Invalid
@@ -236,6 +303,20 @@ impl History {
         };
         if let Some((member, keys)) = bound {
             self.bindings.push(Binding { member, keys, device: header.device });
+        }
+        match &effect.change {
+            StoreChange::AddInviteShare { invite, account } => {
+                self.invite_shares.insert(
+                    *invite,
+                    InviteShare { device: header.device, account: account.clone(), ended: false },
+                );
+            }
+            StoreChange::EndInviteShare { invite } => {
+                if let Some(share) = self.invite_shares.get_mut(invite) {
+                    share.ended = true;
+                }
+            }
+            _ => (),
         }
         changed(&self.state.members, &effect.state.members, slot, &mut self.members);
         changed(&self.state.devices, &effect.state.devices, slot, &mut self.devices);
@@ -441,6 +522,12 @@ pub(crate) fn introduction(change: &StoreChange) -> Option<(Audience, KeyId, [u8
         }
         _ => None,
     }
+}
+
+/// Whether two provider accounts are one, compared as member access compares
+/// them: without case or surrounding space.
+pub(crate) fn same_account(a: &str, b: &str) -> bool {
+    a.trim().eq_ignore_ascii_case(b.trim())
 }
 
 fn held_hash(ring: &StoreKeyring, audience: &Audience, key: KeyId) -> Option<[u8; 32]> {

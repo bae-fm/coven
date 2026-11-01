@@ -796,8 +796,7 @@ impl SequenceSync {
                         .map(|cutoff| (cutoff.slot, cutoff.change.clone()))
                         .collect(),
                     boundaries: at_target.boundaries.clone(),
-                    provider: at_target
-                        .provider_changes(member.member(), &self.invited_accounts().await?)?,
+                    provider: at_target.provider_changes(member.member())?,
                     operation,
                     authorship,
                 },

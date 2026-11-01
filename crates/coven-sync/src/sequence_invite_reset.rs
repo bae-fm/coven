@@ -45,11 +45,11 @@ impl SequenceSync {
         }
         let mut provider = ProviderChanges { accounts: Vec::new() };
         for account in accounts {
-            let used = session.history.state.members.values().any(|value| {
-                !value.removed
-                    && value.access.same_credential(&MemberAccess::ProviderAccount(account.clone()))
-            });
-            let mut change = self.account_change(&account, used, false)?;
+            // An active member or an open invite share, this installation's
+            // under its old id included until its replacement registers,
+            // still holds the account (§14.2).
+            let intended = session.history.account_intended(&account);
+            let mut change = self.account_change(&account, intended, false)?;
             // The discarded invite may have granted access even if its reply
             // was lost. The replacement must issue the owed revocation.
             change.initially_granted = true;

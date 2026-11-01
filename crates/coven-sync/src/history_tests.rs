@@ -370,6 +370,16 @@ struct Household {
 
 impl Household {
     fn new() -> Self {
+        Self::with_access(crate::sequence_sync::tests::access("ana"))
+    }
+
+    /// Household on a provider that shares it with accounts: Ana's account
+    /// holds it.
+    fn shared() -> Self {
+        Self::with_access(coven_format::MemberAccess::ProviderAccount("ana@example.org".into()))
+    }
+
+    fn with_access(access: coven_format::MemberAccess) -> Self {
         let mut household =
             Self { history: History::default(), slots: 0, ana: member(1), ben: member(2) };
         let (ana, ben) = (household.ana, household.ben);
@@ -380,7 +390,7 @@ impl Household {
                 store: StoreId(uuid::Uuid::from_u128(1)),
                 name: "Household".into(),
                 admin: coven_format::test_utils::keys_from_seed(1).public_keys(),
-                access: crate::sequence_sync::tests::access("ana"),
+                access,
                 device_name: "Ana's phone".into(),
                 key: key(90),
                 key_hash: [1; 32],
@@ -418,6 +428,19 @@ impl Household {
         let effect = self.history.validate(&header, slot, &change).unwrap().unwrap();
         self.history.accept_admin(slot, &header, &effect);
         slot
+    }
+
+    /// Validate `change` as the next slot, written by `device` for `author`.
+    fn check(
+        &self,
+        device: u64,
+        author: MemberId,
+        change: StoreChange,
+    ) -> Result<Option<AdminEffect>, OperationRejection> {
+        let slot = Slot(self.slots + 1);
+        let header =
+            SlotHeader { device: DeviceId(device), claim: slot.0, author, after: slot.0 - 1 };
+        self.history.validate(&header, slot, &change)
     }
 
     /// Replace Ana's keys with seed `seed`'s, written by `device`.
@@ -487,4 +510,80 @@ fn a_member_key_replacement_stops_only_her_other_devices_added_before_it() {
         Some((at, DeviceStop::MemberKeysReplaced))
     );
     assert_eq!(household.history.gone_for_good(DeviceId(5)), None);
+}
+
+fn invite(n: u128) -> coven_foundation::id_source::InviteId {
+    coven_foundation::id_source::InviteId(uuid::Uuid::from_u128(n))
+}
+
+fn share(n: u128, account: &str) -> StoreChange {
+    StoreChange::AddInviteShare { invite: invite(n), account: account.into() }
+}
+
+/// Ana's phone shares Household with Carol for an invite, and her laptop
+/// for another. The account stays meant to be shared while either share is
+/// open: the phone's ends when Ben removes the phone, the laptop's when the
+/// laptop ends it. Accounts compare without case (§13.2, §14.2).
+#[test]
+fn an_invite_share_counts_until_it_ends_or_its_device_is_gone_for_good() {
+    let mut household = Household::shared();
+    let (ana, ben) = (household.ana, household.ben);
+    assert!(!household.history.account_intended("carol@example.org"));
+    household.entry(1, ana, share(1, "Carol@example.org"));
+    assert!(household.history.account_intended("carol@example.org"));
+    household.entry(3, ana, share(2, "carol@example.org"));
+    household.entry(2, ben, StoreChange::RemoveDevice { device: DeviceId(1) });
+    assert!(household.history.account_intended("carol@example.org"));
+    household.entry(3, ana, StoreChange::EndInviteShare { invite: invite(2) });
+    assert!(!household.history.account_intended("carol@example.org"));
+}
+
+/// Only a device of the member whose account holds the store records a
+/// share, once for each invite, and only that device ends it. Recording it
+/// again, or ending it again, changes nothing (§13.2, format.md D6).
+#[test]
+fn only_the_owners_device_records_an_invite_share_and_only_it_ends_it() {
+    let mut household = Household::shared();
+    let (ana, ben) = (household.ana, household.ben);
+    // Ben is an admin, but his account doesn't hold the store.
+    assert_eq!(
+        household.check(2, ben, share(1, "carol@example.org")).err(),
+        Some(OperationRejection::NotAllowed)
+    );
+    household.entry(1, ana, share(1, "carol@example.org"));
+    assert!(household.check(1, ana, share(1, "CAROL@example.org")).unwrap().is_none());
+    for (device, change) in [
+        (3, share(1, "carol@example.org")),
+        (1, share(1, "dan@example.org")),
+        (3, StoreChange::EndInviteShare { invite: invite(1) }),
+        (1, StoreChange::EndInviteShare { invite: invite(9) }),
+    ] {
+        assert_eq!(
+            household.check(device, ana, change.clone()).err(),
+            Some(OperationRejection::NotAllowed),
+            "{change:?}"
+        );
+    }
+    household.entry(1, ana, StoreChange::EndInviteShare { invite: invite(1) });
+    assert!(household
+        .check(1, ana, StoreChange::EndInviteShare { invite: invite(1) })
+        .unwrap()
+        .is_none());
+    // An ended invite's id is never shared again.
+    assert_eq!(
+        household.check(1, ana, share(1, "carol@example.org")).err(),
+        Some(OperationRejection::NotAllowed)
+    );
+}
+
+/// On S3 nothing is shared with accounts, so no invite records a share
+/// (§14.3).
+#[test]
+fn an_s3_store_records_no_invite_share() {
+    let household = Household::new();
+    let ana = household.ana;
+    assert_eq!(
+        household.check(1, ana, share(1, "carol@example.org")).err(),
+        Some(OperationRejection::NotAllowed)
+    );
 }

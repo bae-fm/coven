@@ -2,7 +2,8 @@
 //! invite: each case drives one invite on Ana's device through the same
 //! events as the Lean runner, and after each compares what the app sees
 //! (`coven_invites`, `coven_operations`, `coven_pending`), the journal row,
-//! the request in storage, and which of the app's steps a write accepts.
+//! the request in storage, whether Carol's account is shared, and which of
+//! the app's steps a write accepts.
 
 use crate::sequence_sync::sequence_invites::expiry;
 use crate::sequence_sync::tests::*;
@@ -31,6 +32,8 @@ struct Case {
     group: Group,
     ana: Device,
     ben: Device,
+    /// Ana's other device, which takes back the share of her removed one.
+    laptop: Device,
     carol: Option<Joiner>,
     invite: Invite,
     operation: OperationId,
@@ -53,7 +56,27 @@ impl Case {
         group
             .create_with_access(&ana, MemberAccess::ProviderAccount("ana@example.org".into()))
             .await;
-        group.admit(&ana, &ben).await;
+        ana.sync
+            .administer(StoreChange::AddMember {
+                member: ben.identity.member(),
+                keys: ben.identity.keys().public_keys(),
+                role: MemberRole::Admin,
+                access: MemberAccess::ProviderAccount("ben@example.org".into()),
+            })
+            .await
+            .unwrap();
+        ben.sync
+            .administer(StoreChange::AddDevice { name: "Ben".into(), replaces: None })
+            .await
+            .unwrap();
+        let (temp, _) = group.directory();
+        let laptop = group.open(temp, ana.identity.clone()).await;
+        laptop
+            .sync
+            .administer(StoreChange::AddDevice { name: "Ana's laptop".into(), replaces: None })
+            .await
+            .unwrap();
+        ana.sync.pass().await.unwrap();
         ben.sync.pass().await.unwrap();
         let invite = ana
             .sync
@@ -69,6 +92,7 @@ impl Case {
             group,
             ana,
             ben,
+            laptop,
             carol: None,
             invite,
             operation,
@@ -281,13 +305,18 @@ impl Case {
                 if !self.shown || self.sent || !self.journaled().await {
                     return "skipped";
                 }
+                self.sent = true;
+                // Ana's laptop took back the share of her removed device:
+                // Carol's phone can't reach the folder, and sends nothing.
+                if !self.group.storage.shared_with("carol@example.org").await {
+                    return "ok";
+                }
                 let code = self.invite.shown_code().to_owned();
                 let carol = joiner(&self.group, &code, "Carol's phone").await;
                 // Once Ben's pass has ended the requests of Ana's removed
                 // device, its gone marker turns this one away (§13.2).
                 carol.device.sync.submit_join(&carol.request).await.unwrap();
                 self.carol = Some(carol);
-                self.sent = true;
                 "ok"
             }
             "expire" => {
@@ -313,8 +342,10 @@ impl Case {
                 self.ben.sync.pass().await.unwrap();
                 let change = StoreChange::RemoveDevice { device: self.ana.sync.device };
                 self.ben.sync.administer(change).await.unwrap();
-                // Ben's pass ends the requests of Ana's device, gone for good.
+                // Ben's pass ends the requests of Ana's device, gone for good,
+                // and her laptop's takes back the share it recorded.
                 self.ben.sync.pass().await.unwrap();
+                self.laptop.sync.pass().await.unwrap();
                 "ok"
             }
             other => panic!("unknown event {other}"),
@@ -423,12 +454,13 @@ impl Case {
             "pending": pending,
             "journal": self.journaled().await,
             "request": request,
+            "shared": self.group.storage.shared_with("carol@example.org").await,
             "accepted": accepted,
         })
     }
 
     async fn close(self) {
-        for device in [&self.ana, &self.ben] {
+        for device in [&self.ana, &self.ben, &self.laptop] {
             device.database().close().await.unwrap();
         }
         if let Some(carol) = self.carol {
@@ -474,6 +506,12 @@ fn cases() -> Vec<(&'static str, Vec<&'static str>)> {
         ("sent", vec!["demote", "pass", "pass", "retry", "cancel", "pass"]),
         ("sent", vec!["send", "pass", "expire", "approve", "pass"]),
         ("sent", vec!["administer", "pass", "ackOp", "administer", "demote", "pass", "ackOp"]),
+        // The share's end applies in the pass that ends the invite, and the
+        // next takes the account back; a removed device's share is taken
+        // back by the laptop, unless Carol is a member by then.
+        ("sent", vec!["send", "pass", "decline", "pass", "pass"]),
+        ("sent", vec!["pass", "remove", "send", "pass"]),
+        ("inPerson", vec!["send", "pass", "remove", "pass"]),
     ];
     const EVENTS: [&str; 15] = [
         "pass",

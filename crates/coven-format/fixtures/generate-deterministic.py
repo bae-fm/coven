@@ -426,6 +426,8 @@ def changes(sodium):
         b"\x0f" + circle_audience(CIRCLE) + bytes([4]) * 16 + bytes([0xA2]) * 32,
         b"\x10" + ANA + pair(sodium, 0x33) + pair(sodium, 0x34),
         b"\x11" + text(b"N"),
+        b"\x12" + bytes([0x55]) * 16 + text(b"dan@example.org"),
+        b"\x13" + bytes([0x55]) * 16,
     ]
 
 

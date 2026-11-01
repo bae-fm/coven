@@ -5,8 +5,9 @@ import CovenSequence.InviteLifecycle
 `InviteLifecycle`'s steps under `Rules.rust`. Each event takes steps only
 when `enabled` allows them, so every run is a path of `Steps`. The pass
 takes its steps in the order the Rust's pass does: it applies the slots that
-landed for this device, runs the app's admin change, then advances the
-invite until the attempt returns. Storage always answers. -/
+landed for this device, takes back a share whose end an earlier pass
+recorded, runs the app's admin change, then advances the invite until the
+attempt returns. Storage always answers. -/
 namespace SequenceInvites
 open Lean CovenSequence.InviteLifecycle
 
@@ -70,6 +71,7 @@ def pass (c : Config) (run : Run) (during : List Act := []) : Run := Id.run do
     w := (take c w (match slot with | .demote => .demote | .stop => .stop)).1
   let run := { run with landed := [] }
   if w.stopped then return { run with world := after w }
+  w := (take c w .revoke).1
   w := (take c w .runOp).1
   let (next, ran) := attempt c during 16 w
   w := if ran then next else after next
@@ -108,8 +110,11 @@ def event (c : Config) (run : Run) (name : String) : Except String (Run × Strin
   | "remove" =>
     if run.removed then return (run, "skipped")
     -- Ben's pass after his removal lands ends this device's requests at
-    -- once; this device applies the stop at its own next pass.
+    -- once, and the owner's other device, applying the removal, takes the
+    -- recorded share back; this device applies the stop at its own next
+    -- pass.
     let (w, _) := take c run.world .gone
+    let (w, _) := take c w .revoke
     return ({ run with world := w, landed := run.landed ++ [.stop], removed := true }, "ok")
   | _ => throw s!"unknown invite event {name}"
 
@@ -142,6 +147,7 @@ def observe (w : World) (result : String) : Json :=
     ("pending", retryJson w.pending),
     ("journal", toJson w.row.isSome),
     ("request", toJson w.request),
+    ("shared", toJson w.shared),
     ("accepted", toJson ([("approve", Act.approve), ("decline", .decline), ("cancel", .cancel),
       ("retry", .retry), ("ack", .ack), ("ackOp", .ackOp)].filterMap fun (n, a) =>
         if accepted Rules.rust w a then some n else none))]

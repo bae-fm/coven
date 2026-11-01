@@ -839,6 +839,8 @@ An admin frame (kind 4) is `change:u8 | fields`.
 | 15 | Rotate key | `audience:Audience \| key:uuid \| key_hash:32 bytes` |
 | 16 | Replace member keys | `member:MemberId \| expected:MemberKeys \| keys:MemberKeys` |
 | 17 | Rename store | `name:name` |
+| 18 | Add invite share | `invite:uuid \| account:text` |
+| 19 | End invite share | `invite:uuid` |
 
 - Tag 12 is unused.
 - A role is `0` admin or `1` member.
@@ -874,6 +876,19 @@ retires a distinct older device of the same member.
 
 **Access.** Set-access changes its author's own access, or an admin's target
 member's S3 key. The named member must be active.
+
+**Invite shares** record the provider account an invite shares the store with
+(§13.2).
+
+- Add-invite-share requires an admin whose provider account holds the store.
+  `account` is 1 to 1024 bytes of text, not only spaces. Each invite id is
+  recorded once: the same device recording the same open share again, with
+  the account compared without case or surrounding space, is satisfied and
+  changes nothing; any other entry naming a recorded id is refused.
+- End-invite-share requires the device that recorded the share. Ending an
+  ended share is satisfied and changes nothing.
+- A share counts until its end, or until the device that recorded it is gone
+  for good (§14.1).
 
 **Removals and circles.** Remove and circle changes use the immediately preceding
 state, including deleting a circle whose last member leaves.

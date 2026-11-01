@@ -343,6 +343,11 @@ impl MemoryStorage {
     pub async fn set_faults(&self, faults: Faults) {
         self.provider.state.lock().await.faults = faults;
     }
+    /// Whether the store is shared with `account`: granted and not since
+    /// revoked.
+    pub async fn shared_with(&self, account: &str) -> bool {
+        self.provider.state.lock().await.accounts.contains_key(&account.to_ascii_lowercase())
+    }
     /// Model native grants that remain until the owner changes them in the provider.
     pub async fn set_retained_access(&self, account: &str, shares: Vec<RetainedAccess>) {
         let mut state = self.provider.state.lock().await;

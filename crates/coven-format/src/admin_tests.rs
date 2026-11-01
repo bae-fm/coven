@@ -160,7 +160,7 @@ fn introduction_layouts_preserve_exact_key_ids_and_hashes() {
 
 #[test]
 fn store_changes_keep_their_tags_and_reject_truncated_or_extended_payloads() {
-    let tags = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 14, 15, 15, 16, 17];
+    let tags = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 14, 15, 15, 16, 17, 18, 19];
     let changes = test_utils::store_changes();
     assert_eq!(changes.len(), tags.len());
     for (change, tag) in changes.into_iter().zip(tags) {
@@ -246,6 +246,7 @@ fn every_change_fits_one_request_at_its_field_bounds() {
             StoreChange::AddMember { access, .. } | StoreChange::SetAccess { access, .. } => {
                 *access = crate::MemberAccess::S3AccessKey { access_key_id: "a".repeat(1024) };
             }
+            StoreChange::AddInviteShare { account, .. } => *account = "a".repeat(1024),
             StoreChange::RenameStore { name }
             | StoreChange::AddDevice { name, .. }
             | StoreChange::CreateCircle { name, .. }
@@ -381,4 +382,19 @@ fn store_rename_uses_tag_17_and_the_name_bounds() {
             assert!(decoded.is_err());
         }
     }
+}
+
+#[test]
+fn an_invite_share_names_an_account_within_its_bound() {
+    let invite = coven_foundation::id_source::InviteId(uuid::Uuid::from_bytes([0x55; 16]));
+    for (account, valid) in [("dan@example.org", true), ("", false), (" ", false)] {
+        let change = StoreChange::AddInviteShare { invite, account: account.into() };
+        assert_eq!(Object::Admin(change).encode().is_ok(), valid, "{account:?}");
+    }
+    let overlong = StoreChange::AddInviteShare { invite, account: "a".repeat(1025) };
+    assert!(Object::Admin(overlong.clone()).encode().is_err());
+    // A decoder refuses what an encoder would: here, an empty account.
+    let bytes =
+        encode_frame(4, &StoreChange::AddInviteShare { invite, account: String::new() }).unwrap();
+    assert!(Object::decode(&bytes).is_err());
 }

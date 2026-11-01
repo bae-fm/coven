@@ -666,7 +666,11 @@ steps are every writer that acts on them:
   slot it applies or from history showing another copy of this device;
 - another admin's device applying that stop, which may come first: it writes
   this device's gone marker and deletes the joiner's request, and the joiner
-  sends none after it (§13.2).
+  sends none after it (§13.2);
+- the owner's devices taking back the invite's share: the inviting device once
+  it ended the share, any of them once history records the share and the
+  inviting device is gone for good, unless the account is a member's by then
+  (§13.2, §14.2).
 
 The row carries its step, and every change of the row increases it. A pass's
 write, and the pending record it saves for what it found, are conditional on
@@ -677,10 +681,13 @@ record. The properties are proved under `Rules.correct`:
 - `finding_current`, `commit_acts_on_read`: no write from a stale read. A
   pending record holds what a pass found at the row's current step, and a
   pass's write changes the row only when the row is the one it read.
+- `share_recorded`: a share standing at the provider is one history records,
+  because the pass records it before the grant (`ShareInv`).
 - `settles`: every invite and every operation the app journaled ends, on every
   path, crashes and stops included. From any reachable state, coven's own
   steps, with the app retrying only records it is shown, reach a state with no
-  invite listed, no operation running and no pending record. The proof is a
+  invite listed, no operation running, no pending record, and no share
+  standing for an account no member uses. The proof is a
   measure that a step of coven's own lowers from every other state
   (`progress`); it assumes storage eventually answers.
 - `forward`: what the app sees never goes back. The listed invite moves from
@@ -711,6 +718,8 @@ Each rule `correct` has is needed; leaving one out is a checked counterexample:
   waiting request offers approving again, which fails.
 - `demoted_approval_offered`: an approve step that checks the applied state
   refuses a request the app was shown as waiting for its decision.
+- `unrecorded_share_strands`: a share granted without its record, on a device
+  that then stops for good, stands forever: no other device knows of it.
 
 `Rules.rust` names the rules the Rust follows; the differential test compares
 it.
@@ -1012,17 +1021,20 @@ records a kept replacement's S3 key, and `events` a list of `pass`, `send`
 (the joiner writes its request), `approve`, `decline`, `cancel`, `retry`,
 `ack`, `ackOp`, `administer`, `expire`, `demote` and `remove` (another admin's
 slot, applied at the next pass; for `remove`, his pass ends this device's
-requests at once, and a `send` after it finds the gone marker and sends
+requests at once, the owner's other device takes the recorded share back,
+and a `send` after it finds the gone marker, or no share, and sends
 nothing), `raceCancel` and `raceExpire` (a pass with the cancel or the expiry
 committed while it reads the request). A pass applies
-landed slots, runs the admin change, then advances the invite until the
-attempt returns; storage always answers. The answer has one entry for the
+landed slots, takes back a share whose end an earlier pass recorded, runs the
+admin change, then advances the invite until the attempt returns; storage
+always answers. The answer has one entry for the
 invite just made and one after each event: `result` (`ok`, `refused` or
 `skipped`), `invite` as listed (`granting`, `waiting`, `requested`,
 `approving` or null), `binding` and `op` as `coven_operations` lists them
 (`running`, `landed`, `rejected` or null), `pending` (`auto`, `app`, `never`
-or null), `journal`, `request` (the request object is in storage) and
-`accepted`, the app's steps a write accepts now.
+or null), `journal`, `request` (the request object is in storage), `shared`
+(the invite's account is shared) and `accepted`, the app's steps a write
+accepts now.
 
 ## Rust comparisons
 
