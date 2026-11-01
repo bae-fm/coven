@@ -2992,9 +2992,12 @@ to get it right. That path is an *operation*.
    change that state already refuses fails the write with
    `SyncError::Rejected(OperationRejection)`; one that state already has
    journals nothing. Making, approving, declining and cancelling an invite
-   are steps too (§13.2). The other operations, such as rotating or resetting,
-   catch up with the sequence first, and a call on a device without storage
-   fails before creating anything.
+   are steps too (§13.2). Approving is the exception to checking first: its
+   write journals the binding whatever the applied slots say, and a refusal
+   comes from the pass, as the binding's outcome. So the app is never refused
+   an approval of a request it was shown waiting. The other operations, such
+   as rotating or resetting, catch up with the sequence first, and a call on
+   a device without storage fails before creating anything.
 2. **Catch up and check.** A pass reads and applies the sequence to its end, then
    checks the action again against everything it read. A change that is now
    already satisfied finishes without an entry; one that is no longer allowed is
@@ -3758,9 +3761,15 @@ name. The provider sees only an encrypted object under the invite's id.
 An in-person invite's request is approved as soon as these checks pass, in the
 sync pass that read it. A sent invite's request waits for Ana's decision, with
 its confirmation number. Ana's approval is a step of a write (§4), with or
-without storage: the write checks it against the slots her phone has applied
-and journals the operation that binds Dan's pair, which `coven_operations`
-lists until her app acknowledges its outcome (§11.4). A pass then does the
+without storage: the write journals the operation that binds Dan's pair,
+which `coven_operations` lists until her app acknowledges its outcome
+(§11.4). It doesn't check the approval against the slots her phone has
+applied. Ben demoted Ana yesterday, and her phone has applied it; her app
+still shows Dan's request waiting, and approving it journals the binding.
+The pass refuses it, and her app shows the approval refused, with
+`NotAllowed`. Refused by the write instead, the approval would fail on a
+request her app was offering to approve, with nothing in `coven_invites`
+saying why. A pass then does the
 work below. Approval, once begun, finishes: Ana can no longer decline or
 cancel the invite. If the caught-up history refuses the entry, the
 operation ends rejected, and the invite ends as a decline does. The rejection
@@ -9482,7 +9491,7 @@ Write-ups explain each model and state its assumptions:
 | No write from a stale read: an invite's pending record holds what a pass found at its row's current step, and a pass's write changes the row only when the row is the one it read | `finding_current`, `commit_acts_on_read` | `proofs/sequence/CovenSequence/InviteLifecycle.lean` | §13.2 |
 | From every reachable state, crashes and stops for good included, coven's own steps, with the app retrying only records it is shown, end the invite and every operation the app journaled: nothing stays listed, running or pending | `settles` | `proofs/sequence/CovenSequence/InviteLifecycle.lean` | §11.4, §13.2, §14.1 |
 | The listed invite and its binding's entry only move forward; the app's offer of approving, declining, cancelling and acknowledging is exactly what the write steps accept; a sent invite is listed as approving exactly while its binding runs | `forward`, `offered_accepted`, `approval_runs_binding` | `proofs/sequence/CovenSequence/InviteLifecycle.lean` | §11.4, §13.2 |
-| Each rule those results need is needed: leaving out the step check, ending operations or invites at a stop, ending a refused access record, ending the binding with its invite, recording the binding, or listing approval as its own stage each has a counterexample | `unguarded_finding_is_stale`, `forgetful_stop_runs_forever`, `stop_strands_approval`, `refused_record_strands`, `split_binding_disagrees`, `reclaim_binds_twice`, `approval_shown_as_waiting` | `proofs/sequence/CovenSequence/InviteLifecycle.lean` | §13.2, §14.1 |
+| Each rule those results need is needed: leaving out the step check, ending operations or invites at a stop, ending a refused access record, ending the binding with its invite, recording the binding, listing approval as its own stage, or leaving an approval's refusal to its pass each has a counterexample | `unguarded_finding_is_stale`, `forgetful_stop_runs_forever`, `stop_strands_approval`, `refused_record_strands`, `split_binding_disagrees`, `reclaim_binds_twice`, `approval_shown_as_waiting`, `demoted_approval_offered` | `proofs/sequence/CovenSequence/InviteLifecycle.lean` | §13.2, §14.1 |
 | A waiting join's reported phases never go back: waiting, loading, done | `phases_forward`, `waited_after_loading` | `proofs/sequence/CovenSequence/JoinStatus.lean` | §13.2 |
 | Writes after a removal or key replacement are refused with rows unchanged and no new unique-value or owner claim, while the claim number is recorded | `cutoff` | `proofs/sequence/CovenSequence/Cutoff.lean` | §14.1 |
 | Circle permission is judged at the authored applied prefix; landing still checks store membership, device removal and key generation | `write_permission_at_authored_prefix` | `proofs/sequence/CovenSequence/Authorship.lean` | §15.6, §15.8 |

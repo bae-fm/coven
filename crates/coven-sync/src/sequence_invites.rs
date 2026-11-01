@@ -317,12 +317,10 @@ impl SequenceSync {
         request: &JoinRequest,
     ) -> Result<(), SyncError> {
         let request = request.clone();
-        let (device, now, waits, state) =
-            (self.device, self.clock.now(), self.waits.clone(), self.state.clone());
-        let held = self.member.read()?.ok_or(StorageFailure::MemberKeysMissing)?;
+        let (now, waits, state) = (self.clock.now(), self.waits.clone(), self.state.clone());
         let outcome = self
             .journal_and_pass(move |sql| {
-                approve_join_request(sql, device, &held, now, waits, state, &request).map(Some)
+                approve_join_request(sql, now, waits, state, &request).map(Some)
             })
             .await?
             .expect("an approval always journals its binding");

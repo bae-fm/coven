@@ -154,8 +154,6 @@ impl StorageConnections {
     ) -> Result<OperationId, SyncError> {
         coven_sync::approve_join_request(
             sql,
-            self.device,
-            &self.held()?,
             self.clock.now(),
             self.waits.clone(),
             self.publications.state.clone(),

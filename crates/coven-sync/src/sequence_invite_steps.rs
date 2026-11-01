@@ -172,15 +172,15 @@ fn invite_grant(access: InviteAccess, provider: CloudProvider) -> Result<InviteG
 /// copies of every store key and the held circle keys for the request's
 /// pair, then the entry adding the member or replacing their pair; once
 /// begun, approval finishes. The operation's outcome is listed in
-/// `coven_operations`: a rejection ends the invite as a decline does. An
-/// approval the applied state refuses fails the step with `Rejected`. A
-/// request the invite no longer shows, an in-person invite's, whose approval
-/// began on its own, and an invite whose lifetime ended by `now` fail the
-/// step with `InvitationChanged`.
+/// `coven_operations`: a rejection ends the invite as a decline does. The
+/// step doesn't check the approval against the applied state, so the app is
+/// never refused an approval it was shown as waiting: one the history
+/// refuses, as when this admin was demoted, is refused by the pass, as its
+/// binding's outcome. A request the invite no longer shows, an in-person
+/// invite's, whose approval began on its own, and an invite whose lifetime
+/// ended by `now` fail the step with `InvitationChanged`.
 pub fn approve_join_request(
     sql: &SqlContext<'_, '_>,
-    device: DeviceId,
-    held: &MemberIdentity,
     now: SystemTime,
     waits: Arc<RetryWaits>,
     state: Arc<SyncState>,
@@ -199,11 +199,6 @@ pub fn approve_join_request(
             return Err(SyncError::InvitationChanged);
         }
         let change = work.binding_change(&stored)?;
-        let applied = journal.store_state()?;
-        let author = crate::admin_steps::registered(&applied, device, held)?;
-        // A binding the applied state already has is journaled all the
-        // same: the pass finds it satisfied, and the invite ends approved.
-        crate::admin_steps::changes(journal, &applied, device, author, &change)?;
         let binding =
             crate::admin_steps::start(journal, SequenceOperation::change(change), INVITE)?;
         work.state = InviteState::Approving { code, request: stored, binding };

@@ -152,8 +152,14 @@ async fn a_check_between_the_copies_and_the_entry_finds_the_approval_begun() {
     }
 }
 
+/// Ben demotes Ana, and her phone has applied it, when her app approves
+/// Carol's request. The write doesn't check the approval against the
+/// applied state: it journals the binding, and the pass that catches up
+/// refuses it. The refusal is the binding's outcome, and the invite ends as
+/// a decline does. So an approval the app is offered is never one its write
+/// refuses (§11.1, §13.2).
 #[tokio::test]
-async fn approval_after_the_approver_lost_its_role_undoes_and_fails() {
+async fn a_demoted_approvers_approval_is_refused_by_its_pass() {
     let group = Group::shared();
     let ana = group.device(1).await;
     let ben = group.device(2).await;
@@ -162,7 +168,6 @@ async fn approval_after_the_approver_lost_its_role_undoes_and_fails() {
     let invite = invite(&ana).await;
     let carol = join(&group, invite.shown_code(), "Carol's phone").await;
     ana.sync.pass().await.unwrap();
-    let checked = requests(&ana).await;
     ben.sync.pass().await.unwrap();
     ben.sync
         .administer(coven_format::admin::StoreChange::ChangeRole {
@@ -171,11 +176,16 @@ async fn approval_after_the_approver_lost_its_role_undoes_and_fails() {
         })
         .await
         .unwrap();
-    let result = ana.sync.approve_join_request(&checked[0]).await;
-    assert!(
-        matches!(result, Err(SyncError::Rejected(OperationRejection::NotAllowed))),
-        "{result:?}"
+    ana.sync.pass().await.unwrap();
+    let request = requests(&ana).await.remove(0);
+    let binding = approve(&ana, &request).await;
+    assert!(matches!(listed(&ana).await[0].stage, InviteStage::Approving { .. }));
+    ana.sync.pass().await.unwrap();
+    assert_eq!(
+        outcome(&ana, binding).await,
+        Some(OperationOutcome::Rejected(OperationRejection::NotAllowed))
     );
+    assert!(listed(&ana).await.is_empty());
     assert!(ana
         .sync
         .database
@@ -197,14 +207,13 @@ async fn approval_after_the_approver_lost_its_role_undoes_and_fails() {
 /// Approve the request as the app's write step does, without a pass, and
 /// return the operation that binds its pair.
 async fn approve(device: &Device, request: &JoinRequest) -> coven_database::OperationId {
-    let (id, held, state) =
-        (device.sync.device, device.identity.clone(), device.sync.state.clone());
+    let state = device.sync.state.clone();
     let (now, waits, request) =
         (device.sync.clock.now(), device.sync.waits.clone(), request.clone());
     device
         .database()
         .write(move |sql| {
-            crate::approve_join_request(&sql, id, &held, now, waits, state, &request)
+            crate::approve_join_request(&sql, now, waits, state, &request)
                 .map_err(|error| coven_database::DbError::SyncStream(Box::new(error)))
         })
         .await

@@ -6516,9 +6516,10 @@ impl CovenWrite<'_> {
 
     /// For a sent invite: approves exactly this checked request, and returns
     /// the operation that binds its pair, listed in `coven_operations` until
-    /// the app acknowledges its outcome (E6). The write checks the approval
-    /// against the applied state and journals it, offline too; one that state
-    /// refuses fails with `Rejected`. A pass confirms initial and historical
+    /// the app acknowledges its outcome (E6). The write journals it, offline
+    /// too, without checking it against the applied state: a pass checks it
+    /// after catching up, and a refusal, such as this admin's demotion, is
+    /// the operation's outcome. A pass confirms initial and historical
     /// key copies, then adds the new member with the invite's role or
     /// replaces the existing member's keys. Approval, once begun, finishes. A
     /// rejection is the operation's outcome and ends the invite as a decline

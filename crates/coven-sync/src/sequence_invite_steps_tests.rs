@@ -113,10 +113,9 @@ impl Case {
         &self,
         request: JoinRequest,
     ) -> impl FnOnce(&SqlContext<'_, '_>) -> Result<OperationId, SyncError> + Send + 'static {
-        let (device, held, now) =
-            (self.ana.sync.device, self.ana.identity.clone(), self.group.clock.now());
+        let now = self.group.clock.now();
         let (waits, state) = (self.ana.sync.waits.clone(), self.ana.sync.state.clone());
-        move |sql| crate::approve_join_request(sql, device, &held, now, waits, state, &request)
+        move |sql| crate::approve_join_request(sql, now, waits, state, &request)
     }
 
     fn decline_step(

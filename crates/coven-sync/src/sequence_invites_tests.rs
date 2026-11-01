@@ -731,12 +731,12 @@ async fn a_stop_for_good_ends_this_devices_invites() {
     group.clock.set(group.clock.now() + std::time::Duration::from_secs(1));
     ana.sync.pass().await.unwrap();
     let request = requests(&ana).await.remove(0);
-    let (device, held, now) = (ana.sync.device, ana.identity.clone(), group.clock.now());
+    let now = group.clock.now();
     let (waits, state) = (ana.sync.waits.clone(), ana.sync.state.clone());
     let binding = ana
         .database()
         .write(move |sql| {
-            crate::approve_join_request(&sql, device, &held, now, waits, state, &request)
+            crate::approve_join_request(&sql, now, waits, state, &request)
                 .map_err(|error| coven_database::DbError::SyncStream(Box::new(error)))
         })
         .await
