@@ -1,32 +1,40 @@
 //! The answer to the person's retry (§6.7; IO `RetryAnswer`).
 //!
-//! A retry request is a report, so it takes the next report number. The
-//! connection's owner, the connection's first attempt and then its sync
-//! loop, acts on reports when it plans between passes. A pass that begins
-//! takes every waiting request the owner has acted on, and answers them
-//! when it ends; a request made after the owner last acted waits for a
-//! later pass. A pass held by a provider cooldown, or by a failure only new
-//! credentials, an update or a reset can clear, answers the requests the
-//! owner acted on at once. Stopping sync answers every waiting request
-//! `NotSyncing`, and a request made while sync is stopped is answered so at
-//! once. The requests and whether a started connection will plan share one
-//! lock, so a request, stopping and a pass taking its requests each happen
-//! at once (IO `never_stranded`).
+//! What decides it is `coven_retry_effect`'s row: whether a started
+//! connection will plan, whether a failure only new credentials, an update
+//! or a reset can clear holds every pass, and the provider cooldown holding
+//! them. Each step below changes that row and acts on the requests in one
+//! step on the store's writer (`Database::change_retry_state`), so the
+//! answer a request gets is the effect the row shows when it is made (IO
+//! `ask_answers_by_effect`), and a request, stopping and a pass taking its
+//! requests each happen at once (IO `never_stranded`). Each step writes the
+//! cooldown as it stands then, and the row keeps no cooldown while sync is
+//! stopped, since no owner would write its end. The cooldown's end is a
+//! write too: the connection's owner wakes when it ends, and its next step
+//! writes it.
 //!
-//! The same lock keeps the failure the owner found holding every pass. One
-//! decision turns it, whether sync runs and the provider cooldown into both
-//! the held pass's answers and the published `RetryEffect`, what a retry
-//! made now would do (IO `published_answers_at_once`,
-//! `published_pass_runs`). Starting, stopping, the owner's finding and a
-//! cooldown beginning publish it at once. The owner wakes when the cooldown
-//! ends and publishes that as it plans; no pass runs during a cooldown
-//! unless the cooldown began during it, and then the plan after that pass
-//! publishes it.
+//! A retry request is a report, so it takes the next report number. A
+//! request the row answers at once, stopped, held or cooling down, is
+//! answered so; any other waits for a pass. The connection's owner, the
+//! connection's first attempt and then its sync loop, acts on reports when
+//! it plans between passes. A pass begins only while the row lets it, and
+//! takes every waiting request the owner has acted on, answering them when
+//! it ends; a request made after the owner last acted waits for a later
+//! pass. When a failure or cooldown begins to hold the pass, the owner's
+//! next plan answers the requests it acted on at once. Stopping sync
+//! answers every waiting request `NotSyncing`.
+//!
+//! A failed write has failed the store's handle, which every call and live
+//! query then reports, and no later step can commit; the requests waiting
+//! then are answered with that failure.
 
-use crate::{NetworkOwner, PassFailure, RetryWaits};
+use crate::{NetworkOwner, PassFailure, RetryWaits, SyncFailure};
+use coven_database::{DbError, RetryState, RetrySync};
+use coven_foundation::clock::ClockRef;
 use std::{
     future::Future,
     pin::Pin,
+    sync::{Arc, Mutex},
     task::{Context, Poll},
     time::SystemTime,
 };
@@ -59,9 +67,10 @@ impl From<PassFailure> for RetryOutcome {
     }
 }
 
-/// What the person's retry would do if made now (E5): run a pass, or be
-/// answered at once without one. An app offers a retry only while it is
-/// `Pass`; the status says why it is not.
+/// What the person's retry would do if made now (E5), as
+/// `coven_retry_effect` holds it: run a pass, or be answered at once
+/// without one. An app offers a retry only while it is `Pass`; the status
+/// says why it is not.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RetryEffect {
     /// A pass runs for the retry, and its end answers it.
@@ -80,6 +89,53 @@ pub enum RetryEffect {
     /// Sync is stopped or the handle closed: the retry is answered
     /// `NotSyncing` at once.
     NotSyncing,
+}
+
+impl From<RetryState> for RetryEffect {
+    /// A held failure answers before a cooldown: the cooldown's end would
+    /// not let the pass run. `coven_retry_effect.effect` is computed alike.
+    fn from(state: RetryState) -> Self {
+        match (state.sync, state.held) {
+            (RetrySync::Stopped, _) => Self::NotSyncing,
+            (RetrySync::Started { .. }, true) => Self::Failed,
+            (RetrySync::Started { cooling_until: Some(until) }, false) => {
+                Self::CoolingDown { until }
+            }
+            (RetrySync::Started { cooling_until: None }, false) => Self::Pass,
+        }
+    }
+}
+
+impl RetryEffect {
+    /// Read `coven_retry_effect`, as an app's live query does:
+    /// `handle.subscribe(RetryEffect::read)`.
+    pub fn read(sql: coven_database::SqlReadContext<'_>) -> coven_database::CovenResult<Self> {
+        let (effect, until) =
+            sql.query_row("SELECT effect,cooling_until FROM coven_retry_effect", [], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, Option<i64>>(1)?))
+            })?;
+        Ok(match (effect.as_str(), until) {
+            ("pass", None) => Self::Pass,
+            ("cooling_down", Some(until)) => {
+                Self::CoolingDown { until: coven_database::retry_effect_time(until)? }
+            }
+            ("failed", _) => Self::Failed,
+            ("not_syncing", None) => Self::NotSyncing,
+            _ => {
+                return Err(
+                    DbError::Invariant { what: "the retry effect is one coven computes" }.into()
+                )
+            }
+        })
+    }
+
+    /// Follow `coven_retry_effect` with a live query, as an app does.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn follow(
+        database: &coven_database::Database,
+    ) -> coven_database::test_utils::Followed<Self> {
+        coven_database::test_utils::Followed::new(database.subscribe(Self::read))
+    }
 }
 
 /// Resolves when the first sync pass after a retry request ends (E5).
@@ -115,31 +171,65 @@ impl PassRequests {
     }
 }
 
-/// Waiting requests by report number, whether a started connection will
-/// plan, and the failure its owner last found holding every pass; the next
-/// owner says what holds them as it opens.
+/// Waiting requests by report number, and the failure the row says holds
+/// every pass: the error objects a `Failed` answer carries, which the row
+/// can't hold. Both change only in a step on the writer, once the row they
+/// go with commits.
 #[derive(Default)]
 pub(crate) struct Requests {
-    syncing: bool,
     held: Option<PassFailure>,
     waiting: Vec<(u64, oneshot::Sender<RetryOutcome>)>,
 }
 
 impl Requests {
-    /// What a retry made now would do, with the answer it gets at once when
-    /// no pass runs for it. A held failure answers before a cooldown: the
-    /// cooldown's end would not let the pass run.
-    fn decide(&self, cooldown_until: Option<SystemTime>) -> (RetryEffect, Option<RetryOutcome>) {
-        if !self.syncing {
-            (RetryEffect::NotSyncing, Some(RetryOutcome::NotSyncing))
-        } else if let Some(failure) = &self.held {
-            (RetryEffect::Failed, Some(RetryOutcome::Failed(failure.clone())))
-        } else if let Some(until) = cooldown_until {
-            (RetryEffect::CoolingDown { until }, Some(RetryOutcome::CoolingDown { until }))
-        } else {
-            (RetryEffect::Pass, None)
+    /// The answer a request gets at once in `state`, none when a pass
+    /// answers it: the effect's.
+    fn at_once(&self, state: RetryState) -> Option<RetryOutcome> {
+        match RetryEffect::from(state) {
+            RetryEffect::Pass => None,
+            RetryEffect::CoolingDown { until } => Some(RetryOutcome::CoolingDown { until }),
+            RetryEffect::Failed => Some(RetryOutcome::Failed(
+                self.held.clone().expect("the row holds a failure only with its failure"),
+            )),
+            RetryEffect::NotSyncing => Some(RetryOutcome::NotSyncing),
         }
     }
+
+    /// The waiting requests the connection's owner has acted on.
+    fn acted_on(&mut self, handled: u64) -> PassRequests {
+        let (taken, later) = std::mem::take(&mut self.waiting)
+            .into_iter()
+            .partition::<Vec<_>, _>(|(number, _)| *number <= handled);
+        self.waiting = later;
+        PassRequests(taken)
+    }
+}
+
+/// When the live provider cooldown ends, by the store's clock as it was
+/// armed, so writing one cooldown again names the same instant. `None` also
+/// when the clock cannot represent that time; the pass then answers its
+/// requests once the cooldown ends.
+fn cooldown_until(schedule: &Mutex<super::State>, clock: &ClockRef) -> Option<SystemTime> {
+    let elapsed = clock.elapsed();
+    schedule
+        .lock()
+        .expect("retry waits poisoned")
+        .armed
+        .get(&coven_database::RetrySubject::Provider)
+        .filter(|armed| !armed.over(elapsed))?
+        .ends
+}
+
+/// The answer to the requests waiting when a step fails: the failure that
+/// failed the handle, or `NotSyncing` once the store closed.
+fn failed(error: &DbError) -> RetryOutcome {
+    let failure: Arc<dyn std::error::Error + Send + Sync> = match error {
+        DbError::StoreClosed => return RetryOutcome::NotSyncing,
+        DbError::StatePersistence(cause) => cause.clone(),
+        DbError::RollbackFailed => Arc::new(DbError::RollbackFailed),
+        error => Arc::new(std::io::Error::other(error.to_string())),
+    };
+    PassFailure::Failed { error: SyncFailure::Other(failure) }.into()
 }
 
 impl RetryWaits {
@@ -147,88 +237,138 @@ impl RetryWaits {
         self.requests.lock().expect("retry requests poisoned")
     }
 
+    /// The row with the cooldown live as the step that writes it commits,
+    /// while sync is started; while it is stopped, none.
+    pub(super) fn live_cooldown(&self) -> impl FnOnce(RetryState) -> RetryState + Send + 'static {
+        let (schedule, clock) = (self.state.clone(), self.clock.clone());
+        move |state| match state.sync {
+            RetrySync::Stopped => state,
+            RetrySync::Started { .. } => RetryState {
+                sync: RetrySync::Started { cooling_until: cooldown_until(&schedule, &clock) },
+                ..state
+            },
+        }
+    }
+
+    /// Change the row with `change` and the live cooldown, then run `then`
+    /// with the requests and the committed state, in one step on the
+    /// writer. A failed write answers every waiting request with it.
+    async fn step<T: Send + 'static>(
+        self: &Arc<Self>,
+        change: impl FnOnce(RetryState) -> RetryState + Send + 'static,
+        then: impl FnOnce(&RetryWaits, &mut Requests, RetryState) -> T + Send + 'static,
+    ) -> Result<T, DbError> {
+        let Some(database) = &self.database else {
+            return Err(DbError::Invariant { what: "only a handle that writes the store syncs" });
+        };
+        let cooling = self.live_cooldown();
+        let waits = self.clone();
+        let result = database
+            .change_retry_state(
+                move |state| cooling(change(state)),
+                move |state| then(&waits, &mut waits.requests(), state),
+            )
+            .await;
+        if let Err(error) = &result {
+            PassRequests(std::mem::take(&mut self.requests().waiting)).answer(&failed(error));
+        }
+        result
+    }
+
     /// The person asked to retry everything now (§6.7): each owner ends
     /// every ordinary wait it retries when it next plans, as for a network
-    /// report, answered or not, and the provider cooldown holds. The answer
-    /// comes from the first pass that begins after the connection's owner
-    /// acted on the request.
-    pub fn retry_requested(&self) -> RetryAnswer {
+    /// report, answered or not, and the provider cooldown holds. Stopped,
+    /// held or cooling down, as the row says, answers at once; otherwise the
+    /// first pass that begins after the connection's owner acted on the
+    /// request answers it. A closed store answers `NotSyncing`: no pass
+    /// follows.
+    pub async fn retry_requested(self: &Arc<Self>) -> Result<RetryAnswer, DbError> {
         let (answer, answered) = oneshot::channel();
-        let mut requests = self.requests();
-        let number = self.report(crate::retry_waits::Ending::Every);
-        if requests.syncing {
-            requests.waiting.push((number, answer));
-        } else {
-            #[expect(clippy::let_underscore_must_use, reason = "the receiver is still held here")]
-            let _ = answer.send(RetryOutcome::NotSyncing);
+        let asked = self
+            .step(
+                |state| state,
+                move |waits, requests, state| {
+                    let number = waits.report(crate::retry_waits::Ending::Every);
+                    match requests.at_once(state) {
+                        None => requests.waiting.push((number, answer)),
+                        Some(outcome) => {
+                            #[expect(
+                                clippy::let_underscore_must_use,
+                                reason = "the receiver is still held here"
+                            )]
+                            let _ = answer.send(outcome);
+                        }
+                    }
+                },
+            )
+            .await;
+        match asked {
+            Ok(()) => Ok(RetryAnswer(answered)),
+            Err(DbError::StoreClosed) => {
+                let (answer, answered) = oneshot::channel();
+                #[expect(
+                    clippy::let_underscore_must_use,
+                    reason = "the receiver is still held here"
+                )]
+                let _ = answer.send(RetryOutcome::NotSyncing);
+                Ok(RetryAnswer(answered))
+            }
+            Err(error) => Err(error),
         }
-        RetryAnswer(answered)
     }
 
-    /// What a retry made now would do, and its changes (E5).
-    pub fn subscribe_retry_effect(&self) -> tokio::sync::watch::Receiver<RetryEffect> {
-        self.effect.subscribe()
-    }
-
-    /// Publish what a retry made now would do, under the requests' lock so
-    /// publications follow the changes in order, with the answer a retry
-    /// gets at once when no pass runs for it.
-    fn publish(&self, requests: &Requests) -> (RetryEffect, Option<RetryOutcome>) {
-        let (effect, at_once) = requests.decide(self.cooldown_until());
-        self.effect.send_if_modified(|published| std::mem::replace(published, effect) != effect);
-        (effect, at_once)
-    }
-
-    /// The provider cooldown began or grew: publish what a retry would do.
-    pub(crate) fn cooldown_changed(&self) {
-        self.publish(&self.requests());
-    }
-
-    /// A started connection will plan: requests wait for its passes.
-    pub fn sync_started(&self) {
-        let mut requests = self.requests();
-        requests.syncing = true;
-        self.publish(&requests);
+    /// A started connection will plan: requests wait for its passes, and
+    /// the failure its owner last found still holds them.
+    pub async fn sync_started(self: &Arc<Self>) -> Result<(), DbError> {
+        self.step(
+            |state| RetryState { sync: RetrySync::Started { cooling_until: None }, ..state },
+            |_, _, _| (),
+        )
+        .await
     }
 
     /// Sync stopped, or no connection will plan: no pass follows a waiting
     /// request, so each is answered `NotSyncing`. A pass already running
     /// answers the requests it took.
-    pub fn sync_stopped(&self) {
-        let waiting = {
-            let mut requests = self.requests();
-            requests.syncing = false;
-            self.publish(&requests);
-            std::mem::take(&mut requests.waiting)
-        };
-        PassRequests(waiting).answer(&RetryOutcome::NotSyncing);
+    pub async fn sync_stopped(self: &Arc<Self>) -> Result<(), DbError> {
+        let stopped = self
+            .step(
+                |state| RetryState { sync: RetrySync::Stopped, ..state },
+                |_, requests, _| PassRequests(std::mem::take(&mut requests.waiting)),
+            )
+            .await?;
+        stopped.answer(&RetryOutcome::NotSyncing);
+        Ok(())
     }
 
-    /// The waiting requests the connection's owner has acted on.
-    fn acted_on(requests: &mut Requests, handled: u64) -> PassRequests {
-        let (taken, later) = std::mem::take(&mut requests.waiting)
-            .into_iter()
-            .partition::<Vec<_>, _>(|(number, _)| *number <= handled);
-        requests.waiting = later;
-        PassRequests(taken)
-    }
-
-    /// A pass begins: it takes every waiting request the connection's owner
-    /// has acted on (IO `pass_answers_acted_on`).
-    pub fn take_requests(&self) -> PassRequests {
-        let handled = self.handled(NetworkOwner::Connection);
-        Self::acted_on(&mut self.requests(), handled)
+    /// A pass begins, if the row lets one: sync is started, and neither a
+    /// failure nor a cooldown holds it. It takes every waiting request the
+    /// connection's owner has acted on (IO `pass_answers_acted_on`). `None`
+    /// when the row holds the pass, and the owner plans again.
+    pub async fn begin_pass(self: &Arc<Self>) -> Result<Option<PassRequests>, DbError> {
+        self.step(
+            |state| state,
+            |waits, requests, state| {
+                (RetryEffect::from(state) == RetryEffect::Pass)
+                    .then(|| requests.acted_on(waits.handled(NetworkOwner::Connection)))
+            },
+        )
+        .await
     }
 
     /// The connection's owner found what holds every pass: a failure only
     /// new credentials, an update or a reset can clear, or none. It says so
-    /// as it opens and after each pass, before publishing the status a
-    /// failed pass leaves, so the published effect never trails that
-    /// status; each time it plans, `answer_held` says so too.
-    pub fn holds(&self, failure: Option<&PassFailure>) {
-        let mut requests = self.requests();
-        requests.held = failure.cloned();
-        self.publish(&requests);
+    /// as it opens and after each pass, before writing the status a failed
+    /// pass leaves, so the effect never trails that status; each time it
+    /// plans, `answer_held` says so too.
+    pub async fn holds(self: &Arc<Self>, failure: Option<&PassFailure>) -> Result<(), DbError> {
+        let failure = failure.cloned();
+        let held = failure.is_some();
+        self.step(
+            move |state| RetryState { held, ..state },
+            move |_, requests, _| requests.held = failure,
+        )
+        .await
     }
 
     /// The owner plans: it records what holds every pass, as `holds` does,
@@ -236,17 +376,28 @@ impl RetryWaits {
     /// them (IO `held_answers`). A failure only new credentials, an update
     /// or a reset can clear answers `Failed`; otherwise a live provider
     /// cooldown answers `CoolingDown`, and anything else that holds the
-    /// pass leaves them for it. The answer is the published effect's.
-    pub fn answer_held(&self, failure: Option<&PassFailure>) {
-        let handled = self.handled(NetworkOwner::Connection);
-        let mut requests = self.requests();
-        requests.held = failure.cloned();
-        // With no answer at once, a pass runs and answers them.
-        let (effect, Some(outcome)) = self.publish(&requests) else {
-            return;
+    /// pass leaves them for it. The answer is the effect's.
+    pub async fn answer_held(
+        self: &Arc<Self>,
+        failure: Option<&PassFailure>,
+    ) -> Result<(), DbError> {
+        let failure = failure.cloned();
+        let held = failure.is_some();
+        let answered = self
+            .step(
+                move |state| RetryState { held, ..state },
+                move |waits, requests, state| {
+                    requests.held = failure;
+                    // With no answer at once, a pass runs and answers them.
+                    let outcome = requests.at_once(state)?;
+                    let handled = waits.handled(NetworkOwner::Connection);
+                    Some((requests.acted_on(handled), outcome, RetryEffect::from(state)))
+                },
+            )
+            .await?;
+        let Some((acted_on, outcome, effect)) = answered else {
+            return Ok(());
         };
-        let acted_on = Self::acted_on(&mut requests, handled);
-        drop(requests);
         // No pass runs for these requests, so nothing else says what came of
         // the person's retry.
         if !acted_on.0.is_empty() {
@@ -257,32 +408,29 @@ impl RetryWaits {
             );
         }
         acted_on.answer(&outcome);
+        Ok(())
     }
 
     /// The connection's first attempt connected: its requests wait for the
     /// loop's first pass, or are answered `NotSyncing` if sync stopped
     /// meanwhile.
-    pub fn return_requests(&self, taken: PassRequests) {
-        let mut requests = self.requests();
-        if requests.syncing {
-            requests.waiting.extend(taken.0);
-        } else {
-            drop(requests);
-            taken.answer(&RetryOutcome::NotSyncing);
+    pub async fn return_requests(self: &Arc<Self>, taken: PassRequests) -> Result<(), DbError> {
+        let stopped = self
+            .step(
+                |state| state,
+                move |_, requests, state| match state.sync {
+                    RetrySync::Started { .. } => {
+                        requests.waiting.extend(taken.0);
+                        None
+                    }
+                    RetrySync::Stopped => Some(taken),
+                },
+            )
+            .await?;
+        if let Some(stopped) = stopped {
+            stopped.answer(&RetryOutcome::NotSyncing);
         }
-    }
-
-    /// When the live provider cooldown ends, by the store's clock as it
-    /// was recorded, so republishing one cooldown names the same instant.
-    /// `None` also when the clock cannot represent that time; the pass
-    /// then answers its requests once the cooldown ends.
-    fn cooldown_until(&self) -> Option<SystemTime> {
-        let elapsed = self.clock.elapsed();
-        self.lock()
-            .armed
-            .get(&coven_database::RetrySubject::Provider)
-            .filter(|armed| !armed.over(elapsed))?
-            .ends
+        Ok(())
     }
 }
 

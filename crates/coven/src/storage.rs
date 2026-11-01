@@ -303,7 +303,7 @@ impl StorageConnections {
     ) -> Result<(), SyncError> {
         let sync = self.sequence(storage.clone(), live).await?;
         self.files.set_storage(Some(storage), std::future::ready(Ok(()))).await?;
-        self.activate(live, sync, false)
+        self.activate(live, sync, false).await
     }
 
     /// Compose a candidate without replacing the committed connection.
@@ -342,7 +342,7 @@ impl StorageConnections {
     }
 
     /// Install the sequence owner only after connection custody commits.
-    fn activate(
+    async fn activate(
         &self,
         live: &mut Connection,
         sync: Arc<SequenceSync>,
@@ -357,7 +357,7 @@ impl StorageConnections {
             Some(sync.clone()),
         );
         let sync_loop = SyncLoop::new(sync.clone(), codes.clone());
-        let started = if start { sync_loop.start() } else { Ok(()) };
+        let started = if start { sync_loop.start().await } else { Ok(()) };
         *self.control.lock().expect("loop control poisoned") = Some(sync_loop.clone());
         *live = Connection::Active(Live { sync, sync_loop, codes });
         started
@@ -367,14 +367,14 @@ impl StorageConnections {
     /// No connection plans afterwards, so retries waiting for a pass are
     /// answered `NotSyncing`.
     async fn release(&self, live: &mut Connection) -> Result<(), SyncError> {
-        self.waits.sync_stopped();
+        let stopped = self.waits.sync_stopped().await;
         self.control.lock().expect("loop control poisoned").take();
         let closed = match std::mem::replace(live, Connection::Released) {
             Connection::Active(previous) => previous.close().await,
             Connection::Released | Connection::Loaded(_) => Ok(()),
         };
         let released = self.files.set_storage(None, std::future::ready(Ok(()))).await;
-        closed.and(released)
+        closed.and(released).and(stopped.map_err(SyncError::from))
     }
 
     /// Connect with custody's credentials unless this session already has a
@@ -636,7 +636,7 @@ impl StorageConnections {
             Connection::Active(previous) => previous.close().await,
             _ => Ok(()),
         };
-        let started = self.activate(&mut live, sync, true);
+        let started = self.activate(&mut live, sync, true).await;
         self.configured.store(true, Ordering::SeqCst);
         // Custody and provider are committed. Worker failures now belong to
         // sync status; setup must return the connection it published.
@@ -819,7 +819,7 @@ impl StorageConnections {
                     }
                     return Err(error);
                 }
-                owner.waits.sync_stopped();
+                let stopped = owner.waits.sync_stopped().await;
                 owner.control.lock().expect("loop control poisoned").take();
                 let released = match std::mem::replace(&mut *live, Connection::Released) {
                     Connection::Active(previous) => previous.close().await,
@@ -827,13 +827,15 @@ impl StorageConnections {
                 };
                 // Forgetting succeeded. A worker release failure belongs to
                 // status; no later custody read can turn removal into an error.
+                // A failed write of the retry effect has failed the handle.
                 owner
                     .show(match released {
                         Err(error) => SyncStatus::failed(error),
                         Ok(()) if owner.configured.load(Ordering::SeqCst) => SyncStatus::Stopped,
                         Ok(()) => SyncStatus::Disconnected,
                     })
-                    .await
+                    .await?;
+                Ok(stopped?)
             }
             .await;
             result.map_err(|error| match error {

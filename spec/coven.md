@@ -431,8 +431,8 @@ who the members are, and which circles this member is in.
 So the app's SQL can read it through ten views, `coven_uploads`,
 `coven_sending`, `coven_downloading`, `coven_upload_pause`, `coven_pending`,
 `coven_user_files`, `coven_members`, `coven_devices`, `coven_circles` and
-`coven_circle_members`, and four tables, `coven_files`, `coven_pins`,
-`coven_upload_queue` and `coven_sync_status`
+`coven_circle_members`, and five tables, `coven_files`, `coven_pins`,
+`coven_upload_queue`, `coven_sync_status` and `coven_retry_effect`
 ([api.md E4](api.md#e4-reading) lists their columns).
 Ana's photo app lists albums with those still uploading first, as one query:
 
@@ -1637,21 +1637,25 @@ uploads'. A pass runs at once, and the photo uploads.
   the answer says when the cooldown ends; the pass runs then without another
   pull. If a failure only new credentials, an update or a reset can clear holds
   it, the answer is that failure. Waiting would keep the spinner for something
-  a pull can't change.
+  a pull can't change. A retry already waiting when the cooldown or failure
+  begins hears so when the connection next plans.
 - **Stopping answers too.** If sync is stopped, or stops before the pass, the
   answer is that sync isn't running. A pass already running when sync stops
   still finishes and gives its own answer.
 - **The app knows before the person asks.** Dropbox answers a pass with 429
   and Retry-After: 600. Ben's app should not offer Retry Now for the next ten
-  minutes: pressing it would only say the cooldown holds. So coven publishes
-  what a retry made now would do: run a pass, or be answered at once that the
-  cooldown lasts until a given time, that a failure only new credentials, an
-  update or a reset can clear holds the pass, or that sync isn't running
-  ([api.md E5](api.md#e5-storage-and-sync)). One decision gives both that and
-  the answer, so the offer and the answer can't disagree. It changes as sync
-  starts and stops, as a pass fails or succeeds, and as the cooldown begins
-  and ends. Coven wakes when the cooldown ends, so Retry Now comes back
-  without the app watching a clock.
+  minutes: pressing it would only say the cooldown holds. So what a retry made
+  now would do is the one row of `coven_retry_effect`: run a pass, or be
+  answered at once that the cooldown lasts until a given time, that a failure
+  only new credentials, an update or a reset can clear holds the pass, or that
+  sync isn't running ([api.md E5](api.md#e5-storage-and-sync)). Ben's app
+  follows it with a live query. The row holds what decides it, and each change
+  writes the row in the step that makes it, on the store's writer, where the
+  retry's answer is decided from the same row, so the offer and the answer
+  can't disagree. It changes as sync starts and stops, as a pass fails or
+  succeeds, and as the cooldown begins and ends. The cooldown's end is a write
+  too: coven wakes when it ends and writes it, so Retry Now comes back without
+  the app watching a clock.
 - **The answer is about the pass.** Uploads retry on their own schedule, and a
   download when the app next reads or pins its file (§17.7); their failures
   show in `pending()`.
@@ -2463,8 +2467,8 @@ to "Shopping". Every change coven makes is ordinary SQL, including a late write
 taking a row back out (§8.4), so a count a local trigger keeps stays right.
 
 A local trigger can also follow `coven_files`, `coven_pins`,
-`coven_upload_queue` and `coven_sync_status`, the four of coven's tables it may
-(§4). Ben's music app
+`coven_upload_queue`, `coven_sync_status` and `coven_retry_effect`, the five
+of coven's tables it may (§4). Ben's music app
 counts each album's pinned tracks:
 
 ```sql
@@ -2570,17 +2574,19 @@ doesn't, when the database opens and after migrating.
   `RAISE(IGNORE)` and leave the table wrong, so opening or migrating fails with
   `TriggerTiming` for one that doesn't say `AFTER`. A trigger that names no
   time runs before.
-- **A trigger on `coven_files`, `coven_pins`, `coven_upload_queue` or
-  `coven_sync_status` writes only local tables,** and so do the triggers it
-  fires in turn: a pin, a queued file, the sync status and what a trigger keeps
-  of a record are this device's alone. As a migration ends and as the store
-  opens, coven prepares each change to the four tables, which compiles every
+- **A trigger on `coven_files`, `coven_pins`, `coven_upload_queue`,
+  `coven_sync_status` or `coven_retry_effect` writes only local tables,** and
+  so do the triggers it fires in turn: a pin, a queued file, the sync status,
+  the retry effect and what a trigger keeps of a record are this device's
+  alone. As a migration ends and as the store opens, coven prepares each
+  change to the five tables, which compiles every
   trigger it would fire. One that writes a synced table fails with
   `TriggerTarget`, and one that writes coven's tables with `InternalTable`.
-- **A trigger on `coven_files`, `coven_pins`, `coven_upload_queue` or
-  `coven_sync_status` reads only what app SQL reads.** It runs inside coven's own statements, and as
-  coven applies another device's write, and coven judges it there as it judges
-  the app's statements. Otherwise a trigger on `coven_pins` could copy
+- **A trigger on `coven_files`, `coven_pins`, `coven_upload_queue`,
+  `coven_sync_status` or `coven_retry_effect` reads only what app SQL
+  reads.** It runs inside coven's own statements, and as coven applies another
+  device's write, and coven judges it there as it judges the app's
+  statements. Otherwise a trigger on `coven_pins` could copy
   `_coven_cache`'s paths into an app table, and the app would read coven's
   tables after all. The same preparing at open refuses a trigger that reads
   coven's tables with `InternalTable`, and one that calls what only coven's
@@ -6074,7 +6080,7 @@ Adding the same index or trigger to the existing `notes` table is breaking.
 | changes a file reference's binding or size limit | neither: it changes only how this device sends its own writes, which receivers can't tell (§17.4) |
 | drops or renames a table | breaking, since it may have synced |
 | inserts, updates or deletes rows of synced tables | breaking, even if it only adds tables or columns |
-| changes only local tables that keep their names (their columns, indexes and triggers), views, or the app's triggers on `coven_files`, `coven_pins`, `coven_upload_queue` and `coven_sync_status` (§9.4) | neither: they don't sync |
+| changes only local tables that keep their names (their columns, indexes and triggers), views, or the app's triggers on `coven_files`, `coven_pins`, `coven_upload_queue`, `coven_sync_status` and `coven_retry_effect` (§9.4) | neither: they don't sync |
 
 A migration that changes rows is breaking because each device would otherwise
 compute those changes from its own rows, and the devices would disagree.
@@ -6485,7 +6491,8 @@ written, the store's handle fails, as it does when a pending record can't be
 saved (below). The row describes the sync of the handle that holds the store's
 writer lock, so a read-only handle may not read it: that handle can't tell
 whether the writer that last wrote the row still runs, and a writer that ended
-without writing "stopped" left "syncing" behind.
+without writing "stopped" left "syncing" behind. The same holds for
+`coven_retry_effect`, what the person's retry would do (§6.7).
 
 **Refusals and failures.** A *refusal* is permanent: coven downloaded an
 immutable object completely, or a complete independently authenticated file
@@ -7907,8 +7914,10 @@ device consistent with the database.
   only, since SQLite names the view to the authorizer only for what a join
   reads. `coven_pins` and `coven_upload_queue` have the same prefix: tables
   coven's triggers keep, from the internal view `_coven_pin_source` and from
-  the files each upload stores (§4). So does `coven_sync_status`, the one row
-  coven writes as the sync status changes (§19.1). They are coven's objects: the app's
+  the files each upload stores (§4). So do `coven_sync_status`, the one row
+  coven writes as the sync status changes (§19.1), and `coven_retry_effect`,
+  the one row coven writes as what the person's retry would do changes
+  (§6.7). They are coven's objects: the app's
   schema, which migrations compare and breaking migrations keep, doesn't hold
   them. It does hold the app's triggers on them (§9.4).
 - `coven_files` is coven's own synced table of file records (§17.2): `id`,
@@ -9002,7 +9011,8 @@ used to pass collaborators; they are passed by name.
   set up. `start_sync` starts the loop, whose first pass builds the storage
   client from custody credentials (api.md E5). Starting again keeps the running
   loop.
-- **`stop_sync`** returns at once; release follows the active pass and transfers.
+- **`stop_sync`** returns once the waiting retries hear that sync isn't
+  running; release follows the active pass and transfers.
   It keeps session keys, location and credentials. Status reports completion, or
   `Failed` with its cause, without a pending connection record.
   `disconnect_storage` also removes credentials; remote contents stay untouched
@@ -9135,8 +9145,8 @@ Write-ups explain each model and state its assumptions:
 | A reopened wait keeps its backoff and is due within its full wait under any wall clock; without a forward wall-clock jump, each reopen adds at most one start, and a forward jump can end a wait early | `reopen_within_wait`, `reopened_due`, `reopen_rate`, `reopen_unchanged_rate`, `forward_jump_ends_wait` | `proofs/io/CovenIO/WaitingReopen.lean` | §6.7, §21.2 |
 | A network report ends a wait for the network, at once or after the attempt it arrives during, and keeps its backoff; a wait after a provider's answer and a provider cooldown hold, and repeated reports coalesce. Each report adds at most one start to each wait, so n waits gain at most n per report. The ended wait, saved with no full wait left, reopens due under any wall clock; keeping its full wait would bring it back after the wall clock moved backward | `signal_ends_network_wait`, `signal_during_attempt_wakes`, `signal_keeps_backoff`, `signal_keeps_answered_wait`, `signal_keeps_cooldown`, `signals_coalesce`, `signal_rate`, `signal_waits_rate`, `ended_reopens_due`, `kept_wait_returns` | `proofs/io/CovenIO/WaitingNetwork.lean` | §6.7, §21.2 |
 | The person's retry ends every ordinary wait, whatever it names, at once or after the attempt it arrives during, and keeps its backoff; a provider cooldown holds | `retry_ends_wait`, `retry_during_attempt_wakes`, `retry_keeps_backoff`, `retry_keeps_cooldown` | `proofs/io/CovenIO/WaitingNetwork.lean` | §6.7 |
-| The person's retry is answered once, by the first pass that begins after the connection's owner acted on it, never by a pass already running, and requests made together share that pass. A pass held by a provider cooldown, or by a failure only the person can clear, answers at once and runs nothing. Stopping answers every waiting request "not syncing" and leaves a running pass to answer its own. From every reachable state, the owner's own steps answer every request | `answer_final`, `pass_answers_acted_on`, `running_pass_skips`, `next_pass_answers`, `concurrent_requests_share`, `held_answers`, `held_runs_no_pass`, `stopped_answers_at_once`, `stop_lets_pass_answer`, `waits_only_while_syncing`, `never_stranded` | `proofs/io/CovenIO/RetryAnswer.lean` | §6.7 |
-| What coven publishes the person's retry would do is how a retry made then is answered: at once with the answer it names, or by the next pass when it names a pass. Only starting, stopping and a change of what holds the pass change it | `published_answers_at_once`, `published_pass_runs`, `effect_steady` | `proofs/io/CovenIO/RetryAnswer.lean` | §6.7 |
+| The person's retry is answered once, by the first pass that begins after the connection's owner acted on it, never by a pass already running, and requests made together share that pass. A pass held by a provider cooldown, or by a failure only the person can clear, answers at once, and the owner answers a request already waiting when the hold begins, running nothing. Stopping answers every waiting request "not syncing" and leaves a running pass to answer its own. From every reachable state, the owner's own steps answer every request | `answer_final`, `pass_answers_acted_on`, `running_pass_skips`, `next_pass_answers`, `concurrent_requests_share`, `held_answers`, `held_runs_no_pass`, `stopped_answers_at_once`, `stop_lets_pass_answer`, `waits_only_while_syncing`, `never_stranded` | `proofs/io/CovenIO/RetryAnswer.lean` | §6.7 |
+| What `coven_retry_effect` says the person's retry would do is how a retry made then is answered, decided in the step that takes it: at once with the answer it names, or by the next pass when it names a pass. Only starting, stopping and a change of what holds the pass change it | `ask_answers_by_effect`, `effect_answers_at_once`, `effect_pass_runs`, `effect_steady` | `proofs/io/CovenIO/RetryAnswer.lean` | §6.7 |
 | The authored `read_through` and every queued original are preserved; a device's own earlier writes count as read | `authored_readThrough`, `catchup_preserves_originals`, `own_predecessor_is_read` | `proofs/sequence/CovenSequence/Causality.lean` | §7.1 |
 | Given publication after the authored read, a device's own writes in number order, and authored reads that never decrease, slot order consumes every cause first; authored pasts are transitive | `ordered_application_causal`, `past_transitive` | `proofs/sequence/CovenSequence/Causality.lean` | §7.1 |
 | Receivers that agree on a cause's slot agree whether it is in a write's past; later publication adds no intervening remote write | `receivers_agree`, `intervening_write_not_read` | `proofs/sequence/CovenSequence/Causality.lean` | §7.1 |

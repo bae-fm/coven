@@ -78,8 +78,8 @@ async fn an_app_commit_wakes_a_pass_and_a_requested_pass_reads_it_elsewhere() {
     let ana_loop = SyncLoop::new(ana.sync.clone(), ana_codes);
     let (ben_codes, _) = codes(&ben, Keychain::in_memory("sync-loop-ben").unwrap());
     let ben_loop = SyncLoop::new(ben.sync.clone(), ben_codes);
-    ana_loop.start().unwrap();
-    ben_loop.start().unwrap();
+    ana_loop.start().await.unwrap();
+    ben_loop.start().await.unwrap();
     let next = ana.sync.database.applied_slot().await.unwrap() + 1;
     insert(&ana.sync.database, "a", "woken").await;
     reached(&ana, next).await;
@@ -119,7 +119,7 @@ async fn an_ended_operation_wait_does_not_starve_a_requested_pass() {
     group.clock.set(std::time::UNIX_EPOCH + std::time::Duration::from_secs(5));
     let (ana_codes, _) = codes(&ana, Keychain::in_memory("sync-loop-ana").unwrap());
     let ana_loop = SyncLoop::new(ana.sync.clone(), ana_codes);
-    ana_loop.start().unwrap();
+    ana_loop.start().await.unwrap();
     let next = ana.sync.database.applied_slot().await.unwrap() + 1;
     insert(&ana.sync.database, "a", "sent").await;
     reached(&ana, next).await;
@@ -147,7 +147,7 @@ async fn a_damaged_slot_shows_the_loop_blocked_on_it() {
     let mut status = SyncStatus::follow(&ben.sync.database);
     let (ben_codes, _) = codes(&ben, Keychain::in_memory("sync-loop-ben").unwrap());
     let ben_loop = SyncLoop::new(ben.sync.clone(), ben_codes);
-    ben_loop.start().unwrap();
+    ben_loop.start().await.unwrap();
     let shown = status.wait_for(|status| matches!(status, SyncStatus::Blocked { .. })).await;
     assert!(
         matches!(&shown, SyncStatus::Blocked { slot: blocked, reason: PendingReason::Refused(_), .. } if blocked.0 == slot),
@@ -188,7 +188,7 @@ async fn a_status_that_cant_be_written_fails_the_handle() {
     let requests = ana.storage.request_count();
     let (ana_codes, _) = codes(&ana, Keychain::in_memory("sync-loop-ana").unwrap());
     let ana_loop = SyncLoop::new(ana.sync.clone(), ana_codes);
-    ana_loop.start().unwrap();
+    ana_loop.start().await.unwrap();
     let failed = tokio::time::timeout(std::time::Duration::from_secs(10), status.next())
         .await
         .unwrap()
@@ -226,7 +226,7 @@ async fn a_local_failure_retries_the_pass_on_its_own() {
     let mut status = SyncStatus::follow(&ben.sync.database);
     let (ben_codes, _) = codes(&ben, Keychain::in_memory("sync-loop-ben").unwrap());
     let ben_loop = SyncLoop::new(ben.sync.clone(), ben_codes);
-    ben_loop.start().unwrap();
+    ben_loop.start().await.unwrap();
     status.wait_for(|status| matches!(status, SyncStatus::Failed { .. })).await;
     assert_eq!(
         ben.database().pending::<PendingRecord>().await.unwrap(),
@@ -260,7 +260,7 @@ async fn a_removed_device_never_retries_on_a_new_connection() {
     let mut status = SyncStatus::follow(&ben.sync.database);
     let (ben_codes, _) = codes(&ben, Keychain::in_memory("sync-loop-ben").unwrap());
     let worker = SyncLoop::new(ben.sync.clone(), ben_codes);
-    worker.start().unwrap();
+    worker.start().await.unwrap();
     status
         .wait_for(|s| matches!(s, SyncStatus::Failed { failure: StatusFailure::Removed, .. }))
         .await;
@@ -270,7 +270,7 @@ async fn a_removed_device_never_retries_on_a_new_connection() {
     let mut status = SyncStatus::follow(&ben.sync.database);
     let (ben_codes, _) = codes(&ben, Keychain::in_memory("sync-loop-ben").unwrap());
     let worker = SyncLoop::new(ben.sync.clone(), ben_codes);
-    worker.start().unwrap();
+    worker.start().await.unwrap();
     status
         .wait_for(|s| matches!(s, SyncStatus::Failed { failure: StatusFailure::Removed, .. }))
         .await;
@@ -278,10 +278,11 @@ async fn a_removed_device_never_retries_on_a_new_connection() {
     worker.sync_now().unwrap();
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     // Pulling to refresh is told why at once, and runs no pass.
-    let answer =
-        tokio::time::timeout(std::time::Duration::from_secs(5), ben.sync.waits.retry_requested())
-            .await
-            .unwrap();
+    let answer = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        ben.sync.waits.retry_requested().await.unwrap().await
+    })
+    .await
+    .unwrap();
     assert!(
         matches!(answer, RetryOutcome::Failed(PassFailure::Failed { error: SyncFailure::Removed })),
         "{answer:?}"
@@ -329,7 +330,7 @@ async fn idle_passes_come_at_the_shortest_interval_held() {
     let mut status = SyncStatus::follow(&ana.sync.database);
     let (ana_codes, _) = codes(&ana, Keychain::in_memory("sync-often-ana").unwrap());
     let ana_loop = SyncLoop::new(ana.sync.clone(), ana_codes);
-    ana_loop.start().unwrap();
+    ana_loop.start().await.unwrap();
     synced_at(&mut status, 0).await;
     let every_ten = ana.sync.state.sync_often(Duration::from_secs(10));
     let every_five = ana.sync.state.sync_often(Duration::from_secs(5));
@@ -364,7 +365,7 @@ async fn a_held_interval_honors_the_provider_cooldown() {
     let mut status = SyncStatus::follow(&ana.sync.database);
     let (ana_codes, _) = codes(&ana, Keychain::in_memory("sync-often-ana").unwrap());
     let ana_loop = SyncLoop::new(ana.sync.clone(), ana_codes);
-    ana_loop.start().unwrap();
+    ana_loop.start().await.unwrap();
     synced_at(&mut status, 0).await;
     at(&group, 20);
     let often = ana.sync.state.sync_often(Duration::from_secs(5));

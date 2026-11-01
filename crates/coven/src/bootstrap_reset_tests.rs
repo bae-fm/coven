@@ -150,7 +150,7 @@ async fn missing_custody_resets_as_a_new_device_and_keeps_the_notice() {
     f.setup().await.unwrap();
     status(&f.handle, |s| matches!(s, SyncStatus::Synced { .. })).await;
     uploaded(&f, "kept").await;
-    f.handle.stop_sync();
+    f.handle.stop_sync().await.unwrap();
     status(&f.handle, |s| matches!(s, SyncStatus::Stopped)).await;
     f.handle
         .write(|sql| {

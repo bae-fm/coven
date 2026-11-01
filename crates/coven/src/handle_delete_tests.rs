@@ -20,7 +20,7 @@ async fn insert(handle: &CovenHandle, id: &str) {
 
 async fn stopped(handle: &CovenHandle) {
     let mut status = handle.test_sync_status();
-    handle.stop_sync();
+    handle.stop_sync().await.unwrap();
     status.wait_for(|s| matches!(s, SyncStatus::Stopped)).await;
 }
 

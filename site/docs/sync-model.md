@@ -214,12 +214,22 @@ not stretch it past its full length. A provider's `Retry-After` can lengthen a
 wait, and it applies to explicit retries from the app too. A wait for an app
 action or an app update makes no requests at all.
 
+When the person pulls to refresh, `handle.retry_now().await?` ends every
+ordinary wait and returns a future that resolves when the pass it runs ends.
+What a retry would do right now is the one row of the `coven_retry_effect`
+table: `pass`, `cooling_down` until `cooling_until`, `failed` for a failure
+only new credentials, an update or a reset can clear, or `not_syncing`. The
+same row decides the retry's answer, so an app that follows it with a live
+query, `handle.subscribe(RetryEffect::read)`, and offers Retry Now only while
+it says `pass` offers it only when pressing it runs a pass.
+
 ## Status and pending work
 
 `handle.start_sync()` starts the loop; its first pass builds the provider client
 from the credentials in custody. Setting up storage starts it too.
-`handle.stop_sync()` returns at once and stops after the active pass and file
-transfers, keeping keys, credentials and the storage location.
+`handle.stop_sync().await?` returns once waiting retries hear that sync isn't
+running, and stops after the active pass and file transfers, keeping keys,
+credentials and the storage location.
 `handle.disconnect_storage()` also removes this device's storage credentials.
 None of them touch what's in storage.
 

@@ -50,10 +50,11 @@ struct AuthorizationState {
     /// Coven's tables the app statement being prepared reads through one of
     /// coven's views.
     through_views: BTreeSet<String>,
-    /// Whether app SQL may read `coven_sync_status`: only on the handle that
-    /// holds the writer lock, whose own sync the row describes. A read-only
-    /// handle can't tell whether the writer that last wrote it still runs.
-    sync_status: bool,
+    /// Whether app SQL may read `coven_sync_status` and
+    /// `coven_retry_effect`: only on the handle that holds the writer lock,
+    /// whose own sync their rows describe. A read-only handle can't tell
+    /// whether the writer that last wrote them still runs.
+    writer_state: bool,
 }
 
 impl SqlAuthorization {
@@ -64,12 +65,13 @@ impl SqlAuthorization {
     }
 
     /// The authorizer of a read-only handle's connection, which may not read
-    /// the sync status (`internal_schema_sync_status.rs`).
+    /// the sync status or the retry effect (`internal_schema_sync_status.rs`,
+    /// `internal_schema_retry_effect.rs`).
     pub(crate) fn read_only(tables: &[SyncedTable]) -> Self {
         Self::judging(tables, false)
     }
 
-    fn judging(tables: &[SyncedTable], sync_status: bool) -> Self {
+    fn judging(tables: &[SyncedTable], writer_state: bool) -> Self {
         Self {
             state: Arc::new(Mutex::new(AuthorizationState {
                 internal: false,
@@ -91,7 +93,7 @@ impl SqlAuthorization {
                 hidden_rowids: BTreeSet::new(),
                 tables_changed: false,
                 through_views: BTreeSet::new(),
-                sync_status,
+                writer_state,
             })),
         }
     }
@@ -579,18 +581,20 @@ impl AuthorizationState {
         {
             return None;
         }
-        // The status row says what its writer last saw, which a read-only
-        // handle can't tell is still so: a writer that ended without
-        // writing `Stopped` left `Syncing` behind (§19.1). The app's triggers,
-        // judged as coven compiles them, never run on a read-only handle,
-        // which changes no row.
+        // The status and retry rows say what their writer last saw, which a
+        // read-only handle can't tell is still so: a writer that ended
+        // without writing `Stopped` left `Syncing` behind (§19.1). The app's
+        // triggers, judged as coven compiles them, never run on a read-only
+        // handle, which changes no row.
         if let Read { table_name, .. } = context.action {
-            if !self.sync_status
+            if !self.writer_state
                 && !self.internal
-                && table_name.eq_ignore_ascii_case(crate::internal_schema::SYNC_STATUS)
+                && crate::internal_schema::WRITER_STATE
+                    .iter()
+                    .any(|table| table_name.eq_ignore_ascii_case(table))
             {
                 return Some(DbError::StatementForbidden {
-                    operation: "reading the sync status through a read-only handle",
+                    operation: "reading the writer's sync state through a read-only handle",
                 });
             }
         }
@@ -636,8 +640,8 @@ impl AuthorizationState {
                 Some(table_name)
             }
             // The app's triggers may follow coven_files, coven_pins,
-            // coven_upload_queue and coven_sync_status, the tables coven
-            // changes row by row (§9.4).
+            // coven_upload_queue, coven_sync_status and coven_retry_effect,
+            // the tables coven changes row by row (§9.4).
             CreateTrigger { trigger_name, table_name }
             | DropTrigger { trigger_name, table_name }
                 if crate::internal_schema::followed(table_name) =>

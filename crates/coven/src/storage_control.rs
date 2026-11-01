@@ -32,7 +32,7 @@ impl StorageConnections {
         let live = self.live.lock().await;
         if let Connection::Active(connected) = &*live {
             self.epoch.fetch_add(1, Ordering::SeqCst);
-            return connected.sync_loop.start();
+            return connected.sync_loop.start().await;
         }
         // Credentials may have been entered since disconnecting removed them.
         if !self.configured.load(Ordering::SeqCst) && self.codes.connection().await?.is_some() {
@@ -44,7 +44,7 @@ impl StorageConnections {
         let epoch = self.epoch.fetch_add(1, Ordering::SeqCst) + 1;
         self.show(SyncStatus::Syncing).await?;
         // The attempt is the start of the first pass: retries wait for it.
-        self.waits.sync_started();
+        self.waits.sync_started().await?;
         let owner = self.clone();
         *self.attempts.lock().expect("connection attempts poisoned") = Some(ConnectionAttempt {
             epoch,
@@ -65,10 +65,12 @@ impl StorageConnections {
             Err(error) => return self.give_up(coven_sync::connection_failure(error)).await,
         };
         let held = retry.held(&self.waits);
-        self.waits.holds(held);
+        if self.waits.holds(held).await.is_err() {
+            return;
+        }
         if let Some(failure) = held {
             if self.show(failure.clone().into()).await.is_err() {
-                return self.waits.sync_stopped();
+                return self.stopped().await;
             }
         }
         loop {
@@ -86,7 +88,11 @@ impl StorageConnections {
             {
                 return self.give_up(coven_sync::connection_failure(error)).await;
             }
-            self.waits.answer_held(retry.held(&self.waits));
+            // A held pass answers the retries acted on at once, and a
+            // cooldown that ended is written.
+            if self.waits.answer_held(retry.held(&self.waits)).await.is_err() {
+                return;
+            }
             let previous = match self.database.retry_wait(coven_database::RetrySubject::Sync).await
             {
                 Ok(wait) => wait,
@@ -106,7 +112,7 @@ impl StorageConnections {
                     () = async { if let Some(wake) = wake { wake.await } else { std::future::pending().await } } => {}
                     () = async { if let Some(cooldown) = cooldown { cooldown.await } else { std::future::pending().await } } => {}
                     () = stopped => {}
-                    changed = rearmed.changed() => if changed.is_err() { return self.waits.sync_stopped() },
+                    changed = rearmed.changed() => if changed.is_err() { return self.stopped().await },
                 }
                 continue;
             }
@@ -114,9 +120,16 @@ impl StorageConnections {
             if superseded() {
                 break;
             }
-            let requests = self.waits.take_requests();
+            // The attempt begins only as the retry effect's row lets it: a
+            // cooldown that began since the plan holds it, and it plans
+            // again.
+            let requests = match self.waits.begin_pass().await {
+                Ok(Some(requests)) => requests,
+                Ok(None) => continue,
+                Err(_) => return,
+            };
             if let Err(error) = self.show(SyncStatus::Syncing).await {
-                self.waits.sync_stopped();
+                self.stopped().await;
                 return requests
                     .answer(&coven_sync::PassFailure::Failed { error: error.into() }.into());
             }
@@ -146,9 +159,11 @@ impl StorageConnections {
                     return;
                 }
                 Ok(()) => {
-                    self.waits.return_requests(requests);
+                    if self.waits.return_requests(requests).await.is_err() {
+                        return;
+                    }
                     if let Connection::Active(connected) = &*live {
-                        if let Err(error) = connected.sync_loop.start() {
+                        if let Err(error) = connected.sync_loop.start().await {
                             #[expect(
                                 clippy::let_underscore_must_use,
                                 reason = "the attempt ends either way; a failed write has failed the handle, which reports it"
@@ -158,7 +173,7 @@ impl StorageConnections {
                     } else {
                         // Connecting installs the connection's loop; without
                         // one, nothing plans the returned retries.
-                        self.waits.sync_stopped();
+                        self.stopped().await;
                     }
                     return;
                 }
@@ -179,13 +194,18 @@ impl StorageConnections {
                             // What a retry would do changes with the failure
                             // before the person hears it or the status
                             // shows it.
-                            self.waits.holds(retry.held(&self.waits));
+                            if let Err(error) = self.waits.holds(retry.held(&self.waits)).await {
+                                let error = SyncError::from(error);
+                                return requests.answer(
+                                    &coven_sync::PassFailure::Failed { error: error.into() }.into(),
+                                );
+                            }
                             requests.answer(&failure.clone().into());
                             if superseded() {
                                 break;
                             }
                             if self.show(failure.into()).await.is_err() {
-                                return self.waits.sync_stopped();
+                                return self.stopped().await;
                             }
                         }
                         Err(failure) => {
@@ -202,7 +222,7 @@ impl StorageConnections {
             reason = "a failed release is published to the status, which carries it"
         )]
         let _ = self.publish_released(Ok(())).await;
-        self.waits.sync_stopped();
+        self.stopped().await;
     }
 
     /// An attempt that cannot go on shows why; no pass follows it.
@@ -212,15 +232,26 @@ impl StorageConnections {
             reason = "the attempt ends either way; a failed write has failed the handle, which reports it"
         )]
         let _ = self.show(failure.into()).await;
-        self.waits.sync_stopped();
+        self.stopped().await;
+    }
+
+    /// No connection plans after an attempt ends: the waiting retries hear
+    /// so. A failed write has failed the handle and answered them with its
+    /// failure, which every call reports, so the attempt ends either way.
+    async fn stopped(&self) {
+        if let Err(error) = self.waits.sync_stopped().await {
+            tracing::debug!("stopping sync on a failed handle: {error}");
+        }
     }
 
     /// Stop after the active pass and transfers, then release the provider
     /// client; keys, credentials and location remain (E5).
-    /// Retry requests no pass has taken are answered `NotSyncing` now.
-    pub(crate) fn stop(self: &Arc<Self>) {
+    /// Retry requests no pass has taken are answered `NotSyncing` before it
+    /// returns. Stopping goes on even when writing that fails, which has
+    /// failed the handle; the failure is returned.
+    pub(crate) async fn stop(self: &Arc<Self>) -> Result<(), SyncError> {
         let epoch = self.epoch.fetch_add(1, Ordering::SeqCst) + 1;
-        self.waits.sync_stopped();
+        let stopped = self.waits.sync_stopped().await;
         self.stopped.notify_waiters();
         let owner = self.clone();
         tokio::spawn(async move {
@@ -237,6 +268,7 @@ impl StorageConnections {
             )]
             let _ = owner.publish_released(released).await;
         });
+        Ok(stopped?)
     }
 
     /// Request a pass while started.
@@ -258,22 +290,14 @@ impl StorageConnections {
 
     /// The person asked to retry everything now: the same owners end every
     /// ordinary wait they retry (§6.7), and the first pass after the request
-    /// answers it.
-    pub(crate) fn retry_now(&self) -> coven_sync::RetryAnswer {
-        self.waits.retry_requested()
+    /// answers it, or the retry effect's row at once.
+    pub(crate) async fn retry_now(&self) -> Result<coven_sync::RetryAnswer, SyncError> {
+        Ok(self.waits.retry_requested().await?)
     }
 
     /// Hold idle passes at most `interval` apart until the guard drops.
     pub(crate) fn sync_often(&self, interval: std::time::Duration) -> coven_sync::SyncOftenGuard {
         self.publications.state.sync_often(interval)
-    }
-
-    /// What the person's retry would do if made now, published by the
-    /// same decision that answers it.
-    pub(crate) fn subscribe_retry_effect(
-        &self,
-    ) -> tokio::sync::watch::Receiver<coven_sync::RetryEffect> {
-        self.waits.subscribe_retry_effect()
     }
 
     pub(crate) fn subscribe_invites(&self) -> tokio::sync::watch::Receiver<Vec<Invite>> {
@@ -306,7 +330,7 @@ impl StorageConnections {
     /// Finish the connection's work, then release custody owners.
     pub(crate) async fn close(&self) -> Result<(), SyncError> {
         self.epoch.fetch_add(1, Ordering::SeqCst);
-        self.waits.sync_stopped();
+        let stopped = self.waits.sync_stopped().await;
         self.stopped.notify_waiters();
         let attempts = self.attempts.lock().expect("connection attempts poisoned").take();
         if let Some(attempts) = attempts {
@@ -318,6 +342,6 @@ impl StorageConnections {
         let keys = self.keys.lock().expect("store keys lock poisoned").take();
         self.authentication.lock().await.take();
         drop(keys);
-        released
+        released.and(stopped.map_err(SyncError::from))
     }
 }

@@ -144,7 +144,7 @@ async fn stopping_releases_the_provider_and_start_rebuilds_it_once() {
     status(&f.handle, |s| matches!(s, SyncStatus::Synced { .. })).await;
     f.handle.start_sync().await.unwrap();
     assert_eq!(f.connector.clients.lock().unwrap().len(), 1);
-    f.handle.stop_sync();
+    f.handle.stop_sync().await.unwrap();
     status(&f.handle, |s| matches!(s, SyncStatus::Stopped)).await;
     assert!(f.connector.clients.lock().unwrap()[0].upgrade().is_none());
     let code = f.handle.restore_code().await.unwrap();
@@ -169,7 +169,7 @@ async fn a_failed_first_connection_shows_in_status_and_retries_after_backoff() {
     let f = Fixture::new().await;
     f.setup().await.unwrap();
     status(&f.handle, |s| matches!(s, SyncStatus::Synced { .. })).await;
-    f.handle.stop_sync();
+    f.handle.stop_sync().await.unwrap();
     status(&f.handle, |s| matches!(s, SyncStatus::Stopped)).await;
     *f.connector.failure.lock().unwrap() = Some(StorageFailure::Network.into());
     f.handle.start_sync().await.unwrap();
@@ -182,7 +182,7 @@ async fn a_failed_first_connection_shows_in_status_and_retries_after_backoff() {
     // The loop stays started: the pass after backoff connects.
     f.advance(Duration::from_secs(30));
     status(&f.handle, |s| matches!(s, SyncStatus::Synced { .. })).await;
-    f.handle.stop_sync();
+    f.handle.stop_sync().await.unwrap();
     status(&f.handle, |s| matches!(s, SyncStatus::Stopped)).await;
     f.app.fail_next_keychain_operation();
     f.handle.start_sync().await.unwrap();
@@ -200,7 +200,7 @@ async fn stop_queued_while_the_first_pass_connects_releases_the_new_client() {
     let f = Fixture::new().await;
     f.setup().await.unwrap();
     status(&f.handle, |s| matches!(s, SyncStatus::Synced { .. })).await;
-    f.handle.stop_sync();
+    f.handle.stop_sync().await.unwrap();
     status(&f.handle, |s| matches!(s, SyncStatus::Stopped)).await;
     let (entered, entering) = tokio::sync::oneshot::channel();
     let (resume, resumed) = tokio::sync::oneshot::channel();
@@ -209,7 +209,7 @@ async fn stop_queued_while_the_first_pass_connects_releases_the_new_client() {
     // comes from the queued stop.
     f.handle.start_sync().await.unwrap();
     entering.await.unwrap();
-    f.handle.stop_sync();
+    f.handle.stop_sync().await.unwrap();
     resume.send(()).unwrap();
     status(&f.handle, |s| matches!(s, SyncStatus::Stopped)).await;
     assert_eq!(f.connector.clients.lock().unwrap().len(), 2);
@@ -222,7 +222,7 @@ async fn stop_queued_while_the_first_pass_connects_releases_the_new_client() {
 #[tokio::test]
 async fn unconfigured_and_forgotten_storage_stay_disconnected_on_start() {
     let f = Fixture::new().await;
-    f.handle.stop_sync();
+    f.handle.stop_sync().await.unwrap();
     f.handle.start_sync().await.unwrap();
     assert!(matches!(&f.handle.test_sync_status().latest().await, SyncStatus::Disconnected));
     assert!(f.connector.clients.lock().unwrap().is_empty());
@@ -324,7 +324,7 @@ async fn stop_start_idle_tick_offline_recovery_and_close_use_the_injected_clock(
     let f = Fixture::new().await;
     f.setup().await.unwrap();
     status(&f.handle, |s| matches!(s, SyncStatus::Synced { .. })).await;
-    f.handle.stop_sync();
+    f.handle.stop_sync().await.unwrap();
     status(&f.handle, |s| matches!(s, SyncStatus::Stopped)).await;
     f.handle
         .write(|sql| {
@@ -336,7 +336,7 @@ async fn stop_start_idle_tick_offline_recovery_and_close_use_the_injected_clock(
     let before = f.storage.request_count();
     f.advance(Duration::from_secs(90));
     f.handle.sync_now();
-    f.handle.stop_sync();
+    f.handle.stop_sync().await.unwrap();
     status(&f.handle, |s| matches!(s, SyncStatus::Stopped)).await;
     assert_eq!(f.storage.request_count(), before);
     f.handle.start_sync().await.unwrap();
@@ -360,7 +360,7 @@ async fn unlocking_preserves_the_requested_connection_lifetime() {
     let f = Fixture::new().await;
     f.setup().await.unwrap();
     status(&f.handle, |s| matches!(s, SyncStatus::Synced { .. })).await;
-    f.handle.stop_sync();
+    f.handle.stop_sync().await.unwrap();
     status(&f.handle, |s| matches!(s, SyncStatus::Stopped)).await;
     f.app.fail_next_keychain_operation();
     assert!(f.handle.forget_store_keys().await.is_err());
@@ -383,7 +383,7 @@ async fn reconnecting_without_network_is_offline_and_stop_and_close_finish_the_a
     let f = Fixture::new().await;
     f.setup().await.unwrap();
     status(&f.handle, |s| matches!(s, SyncStatus::Synced { .. })).await;
-    f.handle.stop_sync();
+    f.handle.stop_sync().await.unwrap();
     status(&f.handle, |s| matches!(s, SyncStatus::Stopped)).await;
     f.storage.set_online(false);
     let mut requests = f.storage.subscribe_requests();
@@ -416,7 +416,7 @@ async fn reconnecting_without_network_is_offline_and_stop_and_close_finish_the_a
             resume.send(()).unwrap();
             close.await.unwrap();
         } else {
-            f.handle.stop_sync();
+            f.handle.stop_sync().await.unwrap();
             tokio::task::yield_now().await;
             assert!(matches!(&f.handle.test_sync_status().latest().await, SyncStatus::Syncing));
             resume.send(()).unwrap();
@@ -486,7 +486,7 @@ async fn reconnecting_preserves_backoff_and_the_providers_cooldown() {
     f.handle.sync_now();
     tokio::time::sleep(Duration::from_millis(50)).await;
     assert_eq!(f.storage.request_count(), before);
-    f.handle.stop_sync();
+    f.handle.stop_sync().await.unwrap();
     status(&f.handle, |s| matches!(s, SyncStatus::Stopped)).await;
     f.handle.start_sync().await.unwrap();
     tokio::time::sleep(Duration::from_millis(50)).await;
@@ -503,7 +503,7 @@ async fn reconnecting_preserves_backoff_and_the_providers_cooldown() {
         .await;
     f.handle.sync_now();
     status(&f.handle, |s| matches!(s, SyncStatus::Failed { .. })).await;
-    f.handle.stop_sync();
+    f.handle.stop_sync().await.unwrap();
     status(&f.handle, |s| matches!(s, SyncStatus::Stopped)).await;
     let before = f.storage.request_count();
     f.handle.start_sync().await.unwrap();
@@ -624,7 +624,7 @@ async fn setup_refuses_another_location_after_disconnect_and_reopen() {
     let f = Fixture::new().await;
     f.setup().await.unwrap();
     status(&f.handle, |s| matches!(s, SyncStatus::Synced { .. })).await;
-    f.handle.stop_sync();
+    f.handle.stop_sync().await.unwrap();
     status(&f.handle, |s| matches!(s, SyncStatus::Stopped)).await;
     let mut config = f.storage.config();
     let StorageConfig::S3 { prefix, .. } = &mut config else { unreachable!() };
@@ -729,7 +729,7 @@ async fn reconnect_checks_the_provider_and_preserves_the_previous_connection() {
     let f = Fixture::new().await;
     f.setup().await.unwrap();
     status(&f.handle, |s| matches!(s, SyncStatus::Synced { .. })).await;
-    f.handle.stop_sync();
+    f.handle.stop_sync().await.unwrap();
     status(&f.handle, |s| matches!(s, SyncStatus::Stopped)).await;
     let before = f.handle.restore_code().await.unwrap();
     let settings = StorageSettings::new(f.directory.clone());

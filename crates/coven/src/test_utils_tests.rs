@@ -139,7 +139,7 @@ async fn person(handle: &CovenHandle) {
 }
 
 async fn stop(handle: &CovenHandle) {
-    handle.stop_sync();
+    handle.stop_sync().await.unwrap();
     let mut status = handle.test_sync_status();
     let state =
         status.wait_for(|s| matches!(s, SyncStatus::Stopped | SyncStatus::Failed { .. })).await;
@@ -324,7 +324,7 @@ async fn a_live_query_follows_each_sync_status_in_order() {
     assert_eq!(status.next().await, SyncStatus::Syncing);
     release.send(()).unwrap();
     assert!(matches!(status.next().await, SyncStatus::Synced { .. }));
-    handle.stop_sync();
+    handle.stop_sync().await.unwrap();
     assert_eq!(status.next().await, SyncStatus::Stopped);
     handle.close().await.unwrap();
 }

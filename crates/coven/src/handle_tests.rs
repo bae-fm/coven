@@ -426,7 +426,7 @@ async fn workers_share_keys_across_stop_forget_and_reacquisition_until_close() {
     let code = handle.restore_code().await.unwrap();
     for _ in 0..2 {
         let mut status = handle.test_sync_status();
-        handle.stop_sync();
+        handle.stop_sync().await.unwrap();
         status.wait_for(|s| matches!(s, SyncStatus::Stopped)).await;
         assert_eq!(clone.store_key_state().unwrap(), StoreKeyState::Available);
         assert_eq!(handle.restore_code().await.unwrap(), code);
@@ -516,7 +516,7 @@ async fn closing_erases_custody_once_and_fails_later_calls_on_every_clone() {
         .unwrap();
     let clone = handle.clone();
     // Without storage there is no loop to stop; stopping changes nothing.
-    handle.stop_sync();
+    handle.stop_sync().await.unwrap();
     handle.close().await.unwrap();
     assert_eq!(keys.closes.load(Ordering::SeqCst), 1);
     assert_eq!(identity.closes.load(Ordering::SeqCst), 1);
@@ -792,7 +792,7 @@ mod store_rename {
             Err(SyncError::Rejected(OperationRejection::NotAllowed))
         ));
         assert_eq!(owner.store_name().await.unwrap(), "Latest name");
-        owner.stop_sync();
+        owner.stop_sync().await.unwrap();
         owner.test_sync_status().wait_for(|s| matches!(s, SyncStatus::Stopped)).await;
         owner.unlock_store_key().await.unwrap();
         let through = owner.applied_slot().await;

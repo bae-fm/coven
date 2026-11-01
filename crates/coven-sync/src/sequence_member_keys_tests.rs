@@ -210,7 +210,7 @@ async fn a_background_replacement_refreshes_the_code_before_releasing_writes() {
 async fn run_background(ana: &Device, owner: RestoreCodes) {
     let mut status = SyncStatus::follow(&ana.sync.database);
     let control = SyncLoop::new(ana.sync.clone(), owner);
-    control.start().unwrap();
+    control.start().await.unwrap();
     status.wait_for(|status| matches!(status, SyncStatus::Synced { .. })).await;
     control.close().await.unwrap();
 }

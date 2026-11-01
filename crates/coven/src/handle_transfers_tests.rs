@@ -47,7 +47,7 @@ async fn paused_store(
         .unwrap();
     let mut status = handle.test_sync_status();
     status.wait_for(|s| matches!(s, SyncStatus::Synced { .. })).await;
-    handle.stop_sync();
+    handle.stop_sync().await.unwrap();
     status.wait_for(|s| matches!(s, SyncStatus::Stopped)).await;
     handle.unlock_store_key().await.unwrap();
     handle.set_uploads_paused(true).await.unwrap();

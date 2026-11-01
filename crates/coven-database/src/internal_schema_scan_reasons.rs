@@ -38,7 +38,8 @@ pub(super) fn reason(statement: &Statement, relation: &str) -> Option<&'static s
     Some("the table lists every pinned file"),
 ("coven_upload_queue", "SELECT * FROM coven_upload_queue", "coven_upload_queue") =>
     Some("the table lists every queued file"),
-("coven_sync_status", "SELECT * FROM coven_sync_status", "coven_sync_status") =>
+("coven_sync_status", "SELECT * FROM coven_sync_status", "coven_sync_status")
+| ("coven_retry_effect", "SELECT * FROM coven_retry_effect", "coven_retry_effect") =>
     Some("the table holds one row"),
 ("coven_pending", "SELECT * FROM coven_pending", "e") =>
     Some("the view lists every pending record"),

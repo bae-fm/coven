@@ -177,6 +177,11 @@ impl DatabaseBuilder {
         crate::database::file_database::declare_budgets(&writer, &self.namespaces)?;
         crate::file_removals::finish_at_open(&writer, &self.directory)?;
         crate::pending::forget_causes(&writer)?;
+        // No connection plans until sync starts in this process.
+        crate::internal_schema::retry_effect::save(
+            &writer,
+            crate::internal_schema::retry_effect::RetryState::OPENED,
+        )?;
         let mut write_schema = crate::write_schema::WriteSchema::read(&writer, tables.clone())?;
         write_schema.conversions = crate::migration_receive::read(&writer, &migrations)?;
         write_schema.namespaces = self.namespaces;

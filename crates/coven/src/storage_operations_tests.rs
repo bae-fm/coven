@@ -15,7 +15,7 @@ async fn wait_for(handle: &CovenHandle, reached: impl Fn(&SyncStatus) -> bool) {
 }
 
 async fn stop(handle: &CovenHandle) {
-    handle.stop_sync();
+    handle.stop_sync().await.unwrap();
     wait_for(handle, |status| matches!(status, SyncStatus::Stopped)).await;
 }
 

@@ -264,7 +264,7 @@ async fn a_network_report_and_the_persons_retry_end_a_kept_pins_wait() {
     f.files.inner.keep_pinned().await.unwrap();
     assert_eq!(wait(&f).await.unwrap(), answered);
     assert!(!pinned(&f, other).await);
-    f.files.inner.waits.retry_requested();
+    f.files.inner.waits.retry_requested().await.unwrap();
     f.files.inner.keep_pinned().await.unwrap();
     assert!(pinned(&f, other).await);
     f.close().await;

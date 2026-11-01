@@ -100,7 +100,7 @@ async fn covers(device: &Device) -> Vec<(String, bool)> {
 /// Stop the device's sync, so no upload or pass starts until it resumes.
 async fn stopped(device: &Device) {
     let mut status = device.handle.test_sync_status();
-    device.handle.stop_sync();
+    device.handle.stop_sync().await.unwrap();
     status.wait_for(|s| matches!(s, SyncStatus::Stopped)).await;
 }
 

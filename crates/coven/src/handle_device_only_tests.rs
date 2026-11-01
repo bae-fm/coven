@@ -157,7 +157,7 @@ async fn copies_land_and_every_file_switches_in_one_write() {
     // floor's, before it sends anything. Ana's sync stops meanwhile, so the
     // held read is Carol's.
     let mut status = ana.handle.test_sync_status();
-    ana.handle.stop_sync();
+    ana.handle.stop_sync().await.unwrap();
     status.wait_for(|s| matches!(s, SyncStatus::Stopped)).await;
     let (entered, entering) = tokio::sync::oneshot::channel();
     let (release, released) = tokio::sync::oneshot::channel();

@@ -2834,8 +2834,9 @@ let moved = handle
   far a transfer in flight has got, bytes handed over or received included,
   is on the transfer watches (E7, E8): memory only, keyed by file, with no
   table or live query.
-- Open invites have their own stream (E10). The sync status is the table
-  `coven_sync_status` (E5), which a live query follows like any other.
+- Open invites have their own stream (E10). The sync status and what the
+  person's retry would do are the tables `coven_sync_status` and
+  `coven_retry_effect` (E5), which a live query follows like any other.
 - E.g. Ana's app reads `members()` to draw its first list, or subscribes with
   `subscribe_members()` to receive that same list and later committed changes.
 - Subscriptions show current results, as slots apply. Their callback
@@ -2843,8 +2844,8 @@ let moved = handle
 - Offer a removed row elsewhere with the same key (§8.4); copying to a new key
   can produce two rows. Published owner and unique claims follow slot order.
 - *Coven's state in SQL.* App SQL reads ten views of coven's own tables and
-  four tables, `coven_files`, `coven_pins`, `coven_upload_queue` and
-  `coven_sync_status`, in reads,
+  five tables, `coven_files`, `coven_pins`, `coven_upload_queue`,
+  `coven_sync_status` and `coven_retry_effect`, in reads,
   writes and migrations alike
   ([§4](coven.md#4-writing-locally)). They are coven's to define and the app's
   to rely on: the columns below are stable. Each is true in every transaction
@@ -2852,7 +2853,8 @@ let moved = handle
   when coven changes them. The app can't write them, or name an object of its
   own after one.
 - The app's migrations may declare local triggers on `coven_files`,
-  `coven_pins`, `coven_upload_queue` and `coven_sync_status`, AFTER their
+  `coven_pins`, `coven_upload_queue`, `coven_sync_status` and
+  `coven_retry_effect`, AFTER their
   changes, writing only
   local tables and reading only what app SQL reads
   ([§9.4](coven.md#94-triggers)). A trigger on `coven_files` sees each record
@@ -2933,6 +2935,10 @@ let moved = handle
 | `coven_pins`: each file this device keeps pinned, whole on this device (E8); a table, which local triggers can follow | `file` | the file's id |
 | `coven_sync_status`: this installation's sync status, in one row from the store's creation on, with no storage set up too (E5); a table, which local triggers can follow; not readable on a read-only handle | `state` | `disconnected`, `stopped`, `offline`, `syncing`, `synced`, `blocked` or `failed` |
 | | `status` | the status with its details, read as `SyncStatus` |
+| `coven_retry_effect`: what the person's retry would do if made now, in one row from the store's creation on (E5); a table, which local triggers can follow; not readable on a read-only handle | `effect` | `pass`, `cooling_down`, `failed` or `not_syncing`, computed from the columns below, read as `RetryEffect` with `RetryEffect::read` |
+| | `syncing` | 1 while a started connection will plan |
+| | `held` | 1 while a failure only new credentials, an update or a reset can clear holds every pass |
+| | `cooling_until` | while syncing, when the provider cooldown holding every pass ends, in milliseconds since the Unix epoch by the store's clock, rounded up; NULL with no cooldown, and while stopped |
 | `coven_pending`: every pending record (§19.1) | `record` | the record, read as `PendingRecord`, without its cause |
 | | `file` | for a record about stored bytes or an upload, each file over them on this device: the files the upload stores, or the stored files; NULL otherwise |
 | | `position` | its place in the order the records arose, smallest first; a record whose condition changes keeps its place |
@@ -3552,30 +3558,43 @@ while let Some(Ok(values)) = lost.next().await {
     that fails again waits the next longer delay. Provider cooldowns,
     failures that never retry, and waits for new credentials or a new
     connection hold ([§6.7](coven.md#67-waiting-and-retrying)).
-  - `retry_now` returns a `RetryAnswer`, a future that resolves when the
-    first pass after the request ends, so a pull-to-refresh spinner can stay
-    until then: `Synced`, or `Failed` with the pass's failure. A request made
-    while a pass runs waits for the next pass, which it runs; requests made
-    together share one. A pass held by a provider cooldown answers
-    `CoolingDown` with when it ends, and one held by a failure only new
-    credentials, an update or a reset can clear answers `Failed` with that
-    failure, both at once. Stopped sync, or a closed handle, answers
-    `NotSyncing`, and stopping answers every waiting request so. The retry
-    takes effect when called: dropping the future leaves it in place. The
-    answer is about the pass; uploads retry on their own, downloads when the
-    app reads or pins again, and uploads and pins report in `pending()`.
-  - `subscribe_retry_effect` publishes what `retry_now` would do if called
-    now, starting with the current value. `Pass`: a pass runs and its end
-    answers the retry. `CoolingDown { until }`, `Failed` and `NotSyncing`:
-    the retry gets that answer at once, with no pass. A cooldown's `until`
-    is fixed by the store's clock when it is recorded, so the effect and the
-    answer name one instant however often it is published. One decision
-    gives both the effect and the answer, so an app that offers Retry Now
-    only while the effect is `Pass` offers it only when pressing it runs a
-    pass; the status says why it is not. The effect changes as sync starts and stops, as a
-    pass fails or succeeds, as new credentials clear a failure, and as a
-    provider cooldown begins and ends. Coven wakes for the cooldown's end, so
-    the app polls nothing ([§6.7](coven.md#67-waiting-and-retrying)).
+  - `retry_now` returns, once the request is in place, a `RetryAnswer`: a
+    future that resolves when the first pass after the request ends, so a
+    pull-to-refresh spinner can stay until then: `Synced`, or `Failed` with
+    the pass's failure. A request made while a pass runs waits for the next
+    pass, which it runs; requests made together share one. While a provider
+    cooldown holds every pass it resolves at once, `CoolingDown` with when the
+    cooldown ends; while a failure only new credentials, an update or a reset
+    can clear holds them, `Failed` with that failure; while sync is stopped,
+    or on a closed handle, `NotSyncing`. A request already waiting when a
+    cooldown or such a failure begins hears so when the connection's owner
+    next plans, and stopping answers every waiting request `NotSyncing`.
+    Dropping the future leaves the retry in place. The answer is about the
+    pass; uploads retry on their own, downloads when the app reads or pins
+    again, and uploads and pins report in `pending()`.
+  - What `retry_now` would do if called now is the one row of
+    `coven_retry_effect` (E4), which the app follows with a live query, as
+    `RetryEffect::read` reads it, or with a local trigger. `pass`: a pass runs
+    and its end answers the retry. `cooling_down` with `cooling_until`,
+    `failed` and `not_syncing`: the retry gets that answer at once, with no
+    pass. The row holds what decides it, whether sync is started, whether such
+    a failure holds every pass, and the cooldown's end, and computes `effect`
+    from them. Each change writes the row in the step that makes it, on the
+    store's writer, and the retry's answer is decided there from the same row,
+    so an app that offers Retry Now only while the effect is `pass` offers it
+    only when pressing it runs a pass; the status says why it is not. A
+    cooldown's end is fixed by the store's clock when it is recorded and kept
+    to the millisecond, rounded up, so the row and the answer name one
+    instant. Its end is a write too: the connection's owner wakes when the
+    cooldown ends and writes it, and any earlier step that finds it over
+    writes it first, so the app polls nothing. While sync is stopped the row
+    keeps no cooldown, since no owner would write its end; a held failure
+    stays across stopping and starting, as the connection's retry state does.
+    Opening writes `not_syncing` with nothing held
+    ([§6.7](coven.md#67-waiting-and-retrying)).
+  - A write of the row that fails fails the handle, as a pending record does
+    (below), and the requests waiting then are answered `Failed` with that
+    failure. `retry_now` and `stop_sync` return it.
   - [A sync pass (§6)](coven.md#6-a-sync-pass) gives the read, apply, claim and effects order.
     An idle pass reads the next slot and the floor: two requests.
   - A missing slot below the floor reloads its snapshots. Returning devices retain eligible queued
@@ -3601,12 +3620,13 @@ while let Some(Ok(values)) = lost.next().await {
   beside it (`StatusFailure`), so a status read after its process ended still
   says why. The row is there from the store's creation on, saying no storage
   is set up until the first open writes over it, so a read always finds one.
-- The row describes the sync of the handle that holds the store's writer lock.
-  A read-only handle can't tell whether the writer that last wrote it still
-  runs: one that ended without writing `Stopped` left `Syncing` behind, and no
-  write marks its end. So app SQL on a read-only handle may not read the row,
-  directly or through the app's own view: `StatementForbidden`. The app's
-  trigger on it still lets a read-only handle open, since it never runs there.
+- The row, like `coven_retry_effect`'s, describes the sync of the handle that
+  holds the store's writer lock. A read-only handle can't tell whether the
+  writer that last wrote it still runs: one that ended without writing
+  `Stopped` left `Syncing` behind, and no write marks its end. So app SQL on a
+  read-only handle may not read either row, directly or through the app's own
+  view: `StatementForbidden`. The app's trigger on them still lets a
+  read-only handle open, since it never runs there.
 - `Offline` describes the last failed attempt, not the connection's history.
   `Failed`: storage refused the whole pass, or coven's own operation failed;
   one that never clears stops sync until a reset.
@@ -3633,9 +3653,11 @@ while let Some(Ok(values)) = lost.next().await {
 - `start_sync` starts the loop; its first pass builds the provider client from
   custody credentials, failing and backing off like any pass. Tokens refresh
   on provider rejection (§20.2).
-- `stop_sync` returns immediately, releasing providers after the active pass
-  and transfers. Keys, credentials and location remain. Status reports completion
-  or `Failed` with its cause; no pending connection record is written.
+- `stop_sync` returns once `coven_retry_effect` says sync isn't running and
+  the waiting retries are answered, releasing providers after the active pass
+  and transfers. Keys, credentials and location remain. Status reports
+  completion or `Failed` with its cause; no pending connection record is
+  written.
 - `disconnect_storage` also removes this device's storage credentials. It leaves
   storage's contents untouched; syncing requires storage setup again.
 
@@ -4593,9 +4615,12 @@ impl CovenHandle {
     pub async fn start_sync(&self) -> Result<(), SyncError>;
 
     /// Queues stopping after the active pass and transfers, retaining keys,
-    /// credentials and location. Completion publishes Stopped or Disconnected;
-    /// release failures publish Failed with their cause, without a pending record.
-    pub fn stop_sync(&self);
+    /// credentials and location, once `coven_retry_effect` says sync isn't
+    /// running and the waiting retries are answered `NotSyncing`. Completion
+    /// publishes Stopped or Disconnected; release failures publish Failed
+    /// with their cause, without a pending record. A failed write of the row
+    /// has failed the handle; stopping goes on and the failure is returned.
+    pub async fn stop_sync(&self) -> Result<(), SyncError>;
 
     /// Syncs now instead of at the next idle tick. While idle, coven syncs
     /// every 30 seconds, and at once after a local write. Requests coalesce
@@ -4614,16 +4639,11 @@ impl CovenHandle {
     /// backoff, answered or not: the connection's, operations' and
     /// uploads'; each keeps its failure count. Syncs now, as
     /// `sync_now` does. Provider cooldowns and failures that never retry
-    /// hold. Requests coalesce with network reports (§6.7). Resolves when
-    /// the first pass after the request ends; a pass held by a cooldown or
-    /// by a failure only the person can clear answers at once.
-    pub fn retry_now(&self) -> RetryAnswer;
-
-    /// What `retry_now` would do if called now, live. The first value is
-    /// the current effect. One decision gives it and the retry's answer; it
-    /// changes as sync starts and stops, as a pass fails or succeeds, and as
-    /// a provider cooldown begins and ends (§6.7).
-    pub fn subscribe_retry_effect(&self) -> watch::Receiver<RetryEffect>;
+    /// hold. Requests coalesce with network reports (§6.7). The answer
+    /// resolves when the first pass after the request ends, or at once as
+    /// `coven_retry_effect` says when no pass runs for it. A failed write of
+    /// that row has failed the handle, and is returned.
+    pub async fn retry_now(&self) -> Result<RetryAnswer, SyncError>;
 
     /// Idle passes come at most `interval` apart, instead of every 30
     /// seconds, until the guard drops. The shortest interval held wins.
@@ -4748,7 +4768,8 @@ impl Future for RetryAnswer {
     type Output = RetryOutcome;
 }
 
-/// What the person's retry would do if made now.
+/// What the person's retry would do if made now, as `coven_retry_effect`
+/// holds it.
 pub enum RetryEffect {
     /// A pass runs for the retry, and its end answers it.
     Pass,
@@ -4763,6 +4784,11 @@ pub enum RetryEffect {
     /// Sync is stopped or the handle closed: the retry is answered
     /// `NotSyncing` at once.
     NotSyncing,
+}
+
+impl RetryEffect {
+    /// Reads `coven_retry_effect`: `handle.subscribe(RetryEffect::read)`.
+    pub fn read(sql: SqlReadContext<'_>) -> CovenResult<RetryEffect>;
 }
 
 /// Holds idle passes at most its interval apart; dropping it ends the request.

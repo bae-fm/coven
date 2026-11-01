@@ -174,7 +174,7 @@ fn configured(builder: CovenBuilder, library: Library) -> CovenBuilder {
 /// the pass that took the request, not one already running.
 async fn pass(handle: &CovenHandle, clock: &BenchClock) {
     let after = clock.now();
-    match handle.retry_now().await {
+    match handle.retry_now().await.unwrap().await {
         RetryOutcome::Synced { finished_at } => assert!(finished_at >= after),
         outcome => panic!("{outcome:?}"),
     }

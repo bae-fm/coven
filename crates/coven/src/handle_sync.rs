@@ -11,8 +11,12 @@ impl CovenHandle {
     /// Finish the active pass and transfers, then release the provider client.
     /// Keys remain unlocked for the handle session. Completion publishes Stopped,
     /// or Disconnected without configured storage; release failures publish Failed.
-    pub fn stop_sync(&self) {
-        self.storage.stop();
+    /// Returns once `coven_retry_effect` says sync isn't running and the
+    /// waiting retries are answered `NotSyncing`; the release goes on after.
+    /// A failure writing that row has failed the handle; stopping goes on and
+    /// the failure is returned.
+    pub async fn stop_sync(&self) -> Result<(), SyncError> {
+        self.storage.stop().await
     }
     /// Request a pass while started. Requests during a pass, and local writes
     /// committed during it, retain one more pass; the pass's own bookkeeping
@@ -36,25 +40,22 @@ impl CovenHandle {
     /// ended wait keeps its failure count, so a retry that fails again waits
     /// the next longer delay. Requests coalesce as `sync_now` requests do.
     ///
-    /// The retry takes effect at once; the returned future resolves when the
-    /// first pass after it ends: `Synced`, or `Failed` with why. A pass held
-    /// by a provider cooldown answers `CoolingDown` with when it ends, and
-    /// one held by a failure only the person can clear answers `Failed` with
-    /// it, both at once. Stopped sync, or a closed handle, answers
-    /// `NotSyncing`. Dropping the future leaves the retry in place.
-    pub fn retry_now(&self) -> RetryAnswer {
-        self.storage.retry_now()
+    /// The retry takes effect once this returns, with the answer as a
+    /// future, which resolves at once as `coven_retry_effect` says when no
+    /// pass runs for it: `CoolingDown` with when the provider cooldown ends,
+    /// `Failed` with a failure only the person can clear, or `NotSyncing`
+    /// while sync is stopped. Otherwise it resolves when the first pass
+    /// after the retry ends: `Synced`, or `Failed` with why. A closed handle
+    /// answers `NotSyncing`. Dropping the future leaves the retry in place.
+    /// Deciding the answer writes the retry effect's row; a failed write has
+    /// failed the handle, and is returned.
+    pub async fn retry_now(&self) -> Result<RetryAnswer, SyncError> {
+        self.storage.retry_now().await
     }
-    /// What `retry_now` would do if called now, starting with the current
-    /// effect: run a pass, or answer at once `CoolingDown` with when the
-    /// provider cooldown ends, `Failed` for a failure only the person, an
-    /// update or a reset can clear, or `NotSyncing`. One decision gives both
-    /// this and the answer, so an app that offers a retry only while it is
-    /// `Pass` offers one only when pressing it runs a pass. It changes as
-    /// sync starts and stops, as a pass fails or succeeds, and as a provider
-    /// cooldown begins and ends, with no polling.
-    pub fn subscribe_retry_effect(&self) -> tokio::sync::watch::Receiver<RetryEffect> {
-        self.storage.subscribe_retry_effect()
+    /// Follow `coven_retry_effect` with a live query, as an app does (E5).
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn test_retry_effect(&self) -> coven_database::test_utils::Followed<RetryEffect> {
+        RetryEffect::follow(&self.database)
     }
     /// Run idle passes at most `interval` apart, instead of every 30
     /// seconds, until the returned guard drops, such as while a screen

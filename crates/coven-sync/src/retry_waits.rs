@@ -19,7 +19,7 @@ use std::{
     collections::BTreeMap,
     future::Future,
     pin::Pin,
-    sync::Mutex,
+    sync::{Arc, Mutex},
     time::{Duration, SystemTime},
 };
 
@@ -40,7 +40,9 @@ pub struct RetryWaits {
     clock: ClockRef,
     /// Absent for a read-only handle, whose cooldowns last for its session.
     database: Option<Database>,
-    state: Mutex<State>,
+    /// Shared with the writer's steps that write `coven_retry_effect`,
+    /// which read the live cooldown as they commit (`retry_answer.rs`).
+    state: Arc<Mutex<State>>,
     /// What each waiting operation's wait names, and whether it changed.
     evidence: Mutex<operation_evidence::Evidence>,
     /// Bumped whenever a failed attempt arms a new wait, so an owner waiting
@@ -50,9 +52,6 @@ pub struct RetryWaits {
     network: network_report::Reports,
     /// The person's retry requests waiting for a pass (`retry_answer.rs`).
     requests: Mutex<retry_answer::Requests>,
-    /// What a retry made now would do, published whenever the requests'
-    /// state or the provider cooldown changes it.
-    effect: tokio::sync::watch::Sender<RetryEffect>,
     /// The reason last logged for each subject's failure.
     failures: crate::failure_log::FailureLog,
 }
@@ -94,12 +93,11 @@ impl RetryWaits {
         let owner = Self {
             clock,
             database: Some(database),
-            state: Mutex::new(State::default()),
+            state: Arc::default(),
             evidence: Mutex::default(),
             rearmed: tokio::sync::watch::channel(0).0,
             network: network_report::Reports::default(),
             requests: Mutex::default(),
-            effect: tokio::sync::watch::channel(RetryEffect::NotSyncing).0,
             failures: crate::failure_log::FailureLog::default(),
         };
         for (subject, wait) in waits {
@@ -114,12 +112,11 @@ impl RetryWaits {
         Self {
             clock,
             database: None,
-            state: Mutex::new(State::default()),
+            state: Arc::default(),
             evidence: Mutex::default(),
             rearmed: tokio::sync::watch::channel(0).0,
             network: network_report::Reports::default(),
             requests: Mutex::default(),
-            effect: tokio::sync::watch::channel(RetryEffect::NotSyncing).0,
             failures: crate::failure_log::FailureLog::default(),
         }
     }
@@ -393,8 +390,9 @@ impl coven_storage::Cooldown for RetryWaits {
         self.cooldown()
     }
 
-    /// Arm first, so no consumer in this session retries, then persist.
-    /// A cooldown never shortens one already live.
+    /// Arm first, so no consumer in this session retries, then persist it
+    /// with what it makes a retry do, in one transaction
+    /// (`retry_answer.rs`). A cooldown never shortens one already live.
     async fn record(&self, wait: Duration) -> Result<(), StorageError> {
         if self.cooldown().is_some_and(|remaining| remaining >= wait) {
             return Ok(());
@@ -404,10 +402,9 @@ impl coven_storage::Cooldown for RetryWaits {
         })?;
         let cooldown = RetryWait { failures: 0, not_before, wait };
         self.arm(RetrySubject::Provider, &cooldown);
-        self.cooldown_changed();
         match &self.database {
             Some(database) => database
-                .record_retry(RetrySubject::Provider, cooldown)
+                .record_cooldown(cooldown, self.live_cooldown())
                 .await
                 .map_err(|error| StorageFailure::File.with_source(error)),
             None => Ok(()),

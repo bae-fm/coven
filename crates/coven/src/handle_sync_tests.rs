@@ -78,7 +78,7 @@ async fn a_stopped_loop_runs_no_pass_until_started_and_close_ends_it() {
     let network = Network::new(1).await;
     let device = &network.devices[0];
     let mut status = device.handle.test_sync_status();
-    device.handle.stop_sync();
+    device.handle.stop_sync().await.unwrap();
     status.wait_for(|s| matches!(s, SyncStatus::Stopped)).await;
     let before = passes(device);
     insert(&device.handle, "while stopped").await;
@@ -90,7 +90,7 @@ async fn a_stopped_loop_runs_no_pass_until_started_and_close_ends_it() {
     assert_eq!(passes(device) - before, 1);
     // Closing ends the loop: a write committed after stopping is not sent.
     let mut status = device.handle.test_sync_status();
-    device.handle.stop_sync();
+    device.handle.stop_sync().await.unwrap();
     status.wait_for(|s| matches!(s, SyncStatus::Stopped)).await;
     insert(&device.handle, "after stopping").await;
     let storage = device.storage.clone();
@@ -196,7 +196,7 @@ async fn stopping_finishes_a_held_file_upload_and_restarting_resumes_the_queue()
     device.storage.hold_next_creation(ObjectPrefix::files(device.store), started, holding).await;
     let first = attach(&device.handle, "first", vec![1; 2048]).await;
     held.await.unwrap();
-    device.handle.stop_sync();
+    device.handle.stop_sync().await.unwrap();
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert!(!matches!(status.latest().await, SyncStatus::Stopped));
     resume.send(()).unwrap();
@@ -310,7 +310,7 @@ async fn refuse_rotation(
     status: u16,
 ) -> coven_storage::ObjectPath {
     let owner = &network.devices[0];
-    network.devices[1].handle.stop_sync();
+    network.devices[1].handle.stop_sync().await.unwrap();
     let members = owner.handle.members().await.unwrap();
     let removed = members.iter().find(|m| !m.is_self).unwrap().id;
     network.sync(0).await;
@@ -461,7 +461,7 @@ async fn each_attempt_is_offline_or_failed_by_whether_storage_answered() {
     device.storage.set_online(false);
     // Permission failures require app action; a new connection permits a retry.
     let mut status = device.handle.test_sync_status();
-    device.handle.stop_sync();
+    device.handle.stop_sync().await.unwrap();
     status.wait_for(|s| matches!(s, SyncStatus::Stopped)).await;
     device.handle.start_sync().await.unwrap();
     attempt(device, |s| matches!(s, SyncStatus::Offline { .. })).await;
@@ -714,7 +714,7 @@ async fn retry_now_ends_an_answered_upload_backoff() {
     device.handle.network_changed();
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert!(!file_stored(device, photo).await, "a network report ended an answered backoff");
-    device.handle.retry_now();
+    device.handle.retry_now().await.unwrap();
     wait_for_empty_queue(&device.handle).await;
     assert!(file_stored(device, photo).await);
     network.close().await;

@@ -82,6 +82,7 @@ mod removal_schema;
 mod removal_sql;
 mod removal_view;
 mod retry;
+pub use internal_schema::retry_effect::{retry_effect_time, RetryState, RetrySync};
 pub use retry::{RetrySubject, RetryWait};
 mod row_key;
 mod row_queries;

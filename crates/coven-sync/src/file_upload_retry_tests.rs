@@ -703,7 +703,7 @@ async fn the_persons_retry_keeps_a_provider_cooldown() {
     f.storage.set_faults(fail_next(StorageFailure::RateLimited, Some(600))).await;
     assert_eq!(drained(f.files.inner.drain_uploads().await.unwrap()), 0);
     let waits = &f.files.inner.waits;
-    waits.retry_requested();
+    waits.retry_requested().await.unwrap();
     assert!(waits.end_reported_waits(crate::NetworkOwner::Uploads).await.unwrap());
     let ended = retry(&f).await.unwrap();
     assert_eq!((ended.failures, ended.wait), (1, Duration::ZERO));

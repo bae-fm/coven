@@ -5,7 +5,7 @@ async fn repeated_start_preserves_the_connector_waiting_in_backoff() {
     let f = Fixture::new().await;
     f.setup().await.unwrap();
     status(&f.handle, |s| matches!(s, SyncStatus::Synced { .. })).await;
-    f.handle.stop_sync();
+    f.handle.stop_sync().await.unwrap();
     status(&f.handle, |s| matches!(s, SyncStatus::Stopped)).await;
     *f.connector.failure.lock().unwrap() = Some(StorageFailure::Network.into());
     f.handle.start_sync().await.unwrap();
@@ -23,13 +23,13 @@ async fn start_after_stop_during_backoff_owns_a_replacement_connector() {
     let f = Fixture::new().await;
     f.setup().await.unwrap();
     status(&f.handle, |s| matches!(s, SyncStatus::Synced { .. })).await;
-    f.handle.stop_sync();
+    f.handle.stop_sync().await.unwrap();
     status(&f.handle, |s| matches!(s, SyncStatus::Stopped)).await;
     *f.connector.failure.lock().unwrap() = Some(StorageFailure::Network.into());
     f.handle.start_sync().await.unwrap();
     status(&f.handle, |s| matches!(s, SyncStatus::Failed { .. } | SyncStatus::Offline { .. }))
         .await;
-    f.handle.stop_sync();
+    f.handle.stop_sync().await.unwrap();
     f.handle.start_sync().await.unwrap();
     f.advance(Duration::from_secs(30));
     status(&f.handle, |s| matches!(s, SyncStatus::Synced { .. })).await;
@@ -41,7 +41,7 @@ async fn stopping_a_failing_connector_does_not_wait_for_its_backoff() {
     let f = Fixture::new().await;
     f.setup().await.unwrap();
     status(&f.handle, |s| matches!(s, SyncStatus::Synced { .. })).await;
-    f.handle.stop_sync();
+    f.handle.stop_sync().await.unwrap();
     status(&f.handle, |s| matches!(s, SyncStatus::Stopped)).await;
     let (entered, entering) = tokio::sync::oneshot::channel();
     let (resume, resumed) = tokio::sync::oneshot::channel();
@@ -49,7 +49,7 @@ async fn stopping_a_failing_connector_does_not_wait_for_its_backoff() {
     *f.connector.failure.lock().unwrap() = Some(StorageFailure::Network.into());
     f.handle.start_sync().await.unwrap();
     entering.await.unwrap();
-    f.handle.stop_sync();
+    f.handle.stop_sync().await.unwrap();
     resume.send(()).unwrap();
     tokio::time::timeout(Duration::from_secs(10), f.handle.close())
         .await
@@ -61,7 +61,7 @@ async fn stopped_fixture() -> Fixture {
     let f = Fixture::new().await;
     f.setup().await.unwrap();
     status(&f.handle, |s| matches!(s, SyncStatus::Synced { .. })).await;
-    f.handle.stop_sync();
+    f.handle.stop_sync().await.unwrap();
     status(&f.handle, |s| matches!(s, SyncStatus::Stopped)).await;
     f
 }
@@ -200,7 +200,7 @@ async fn stopping_an_inflight_failure_preserves_its_delay_for_the_next_start() {
     *f.connector.failure.lock().unwrap() = Some(StorageFailure::Network.into());
     f.handle.start_sync().await.unwrap();
     entering.await.unwrap();
-    f.handle.stop_sync();
+    f.handle.stop_sync().await.unwrap();
     resume.send(()).unwrap();
     f.handle.start_sync().await.unwrap();
     assert_eq!(f.handle.test_connection_retry_wait().await.unwrap().wait, Duration::from_secs(1));
@@ -247,7 +247,7 @@ async fn a_retry_is_answered_by_the_pass_it_runs() {
     let f = Fixture::new().await;
     f.setup().await.unwrap();
     status(&f.handle, |s| matches!(s, SyncStatus::Synced { .. })).await;
-    let outcome = answer(f.handle.retry_now()).await;
+    let outcome = answer(f.handle.retry_now().await.unwrap()).await;
     assert!(
         matches!(outcome, RetryOutcome::Synced { finished_at } if finished_at == f.clock.now()),
         "{outcome:?}"
@@ -270,7 +270,7 @@ async fn a_retry_during_a_pass_is_answered_by_the_next_pass() {
     f.storage.hold_next_read(floor, entered, resumed).await;
     f.handle.sync_now();
     entering.await.unwrap();
-    let retried = f.handle.retry_now();
+    let retried = f.handle.retry_now().await.unwrap();
     // The held read's response is fixed; the next request is refused.
     f.storage
         .set_faults(Faults {
@@ -304,8 +304,8 @@ async fn retries_during_a_connection_attempt_share_the_next_pass() {
     f.handle.start_sync().await.unwrap();
     entering.await.unwrap();
     let attempts = *f.connector.attempts.borrow();
-    let ana = f.handle.retry_now();
-    let ben = f.handle.retry_now();
+    let ana = f.handle.retry_now().await.unwrap();
+    let ben = f.handle.retry_now().await.unwrap();
     resume.send(()).unwrap();
     for outcome in [answer(ana).await, answer(ben).await] {
         assert!(matches!(outcome, RetryOutcome::Synced { .. }), "{outcome:?}");
@@ -333,7 +333,7 @@ async fn a_retry_during_a_cooldown_says_when_it_ends() {
     f.handle.sync_now();
     status(&f.handle, failed).await;
     let requests = f.storage.request_count();
-    let outcome = answer(f.handle.retry_now()).await;
+    let outcome = answer(f.handle.retry_now().await.unwrap()).await;
     assert!(
         matches!(outcome, RetryOutcome::CoolingDown { until }
             if until == f.clock.now() + Duration::from_secs(200)),
@@ -358,10 +358,10 @@ async fn failed_and_held_attempts_answer_failed_with_their_cause() {
         StorageFailure::Network
             .with_source(std::io::Error::new(std::io::ErrorKind::NotConnected, "offline")),
     );
-    let outcome = answer(f.handle.retry_now()).await;
+    let outcome = answer(f.handle.retry_now().await.unwrap()).await;
     assert!(matches!(outcome, RetryOutcome::Failed(PassFailure::Offline { .. })), "{outcome:?}");
     *f.connector.failure.lock().unwrap() = Some(StorageFailure::Authentication.into());
-    let outcome = answer(f.handle.retry_now()).await;
+    let outcome = answer(f.handle.retry_now().await.unwrap()).await;
     assert!(
         matches!(&outcome, RetryOutcome::Failed(PassFailure::Failed {
             error: SyncFailure::Storage(error)
@@ -369,7 +369,7 @@ async fn failed_and_held_attempts_answer_failed_with_their_cause() {
         "{outcome:?}"
     );
     let attempts = *f.connector.attempts.borrow();
-    let outcome = answer(f.handle.retry_now()).await;
+    let outcome = answer(f.handle.retry_now().await.unwrap()).await;
     assert!(
         matches!(&outcome, RetryOutcome::Failed(PassFailure::Failed {
             error: SyncFailure::Storage(error)
@@ -387,7 +387,7 @@ async fn failed_and_held_attempts_answer_failed_with_their_cause() {
 #[tokio::test]
 async fn stopping_answers_waiting_retries_not_syncing() {
     let f = stopped_fixture().await;
-    let outcome = answer(f.handle.retry_now()).await;
+    let outcome = answer(f.handle.retry_now().await.unwrap()).await;
     assert!(matches!(outcome, RetryOutcome::NotSyncing), "{outcome:?}");
     *f.connector.failure.lock().unwrap() = Some(StorageFailure::Network.into());
     f.handle.start_sync().await.unwrap();
@@ -397,35 +397,29 @@ async fn stopping_answers_waiting_retries_not_syncing() {
     *f.connector.held.lock().await = Some((entered, resumed));
     *f.connector.failure.lock().unwrap() = Some(StorageFailure::Network.into());
     // This retry ends the backoff; the attempt it starts takes it.
-    let taken = f.handle.retry_now();
+    let taken = f.handle.retry_now().await.unwrap();
     entering.await.unwrap();
-    let waiting = f.handle.retry_now();
-    f.handle.stop_sync();
+    let waiting = f.handle.retry_now().await.unwrap();
+    f.handle.stop_sync().await.unwrap();
     let outcome = answer(waiting).await;
     assert!(matches!(outcome, RetryOutcome::NotSyncing), "{outcome:?}");
     resume.send(()).unwrap();
     let outcome = answer(taken).await;
     assert!(matches!(outcome, RetryOutcome::Failed(_)), "{outcome:?}");
     f.handle.close().await.unwrap();
-    let outcome = answer(f.handle.retry_now()).await;
+    let outcome = answer(f.handle.retry_now().await.unwrap()).await;
     assert!(matches!(outcome, RetryOutcome::NotSyncing), "{outcome:?}");
 }
 
-/// What the handle publishes a retry would do, as an app reads it now.
-fn effect(f: &Fixture) -> RetryEffect {
-    *f.handle.subscribe_retry_effect().borrow()
+/// What `coven_retry_effect` says a retry would do, as an app reads it now.
+async fn effect(f: &Fixture) -> RetryEffect {
+    f.handle.read(RetryEffect::read).await.unwrap()
 }
 
-/// Wait, as an app watching the effect would, until it is `expected`.
+/// Wait, as an app's live query on `coven_retry_effect` would, until it is
+/// `expected`.
 async fn effect_becomes(f: &Fixture, expected: RetryEffect) {
-    let mut effect = f.handle.subscribe_retry_effect();
-    let waited =
-        tokio::time::timeout(Duration::from_secs(10), effect.wait_for(|e| *e == expected)).await;
-    assert!(
-        waited.is_ok_and(|changed| changed.is_ok()),
-        "the effect stayed {:?}",
-        *effect.borrow()
-    );
+    f.handle.test_retry_effect().wait_for(|effect| *effect == expected).await;
 }
 
 /// Ana's app offers Retry Now only while the published effect is a pass.
@@ -438,8 +432,8 @@ async fn a_cooldown_is_published_as_the_retry_answers_it() {
     let f = Fixture::new().await;
     f.setup().await.unwrap();
     status(&f.handle, |s| matches!(s, SyncStatus::Synced { .. })).await;
-    assert_eq!(effect(&f), RetryEffect::Pass);
-    let outcome = answer(f.handle.retry_now()).await;
+    assert_eq!(effect(&f).await, RetryEffect::Pass);
+    let outcome = answer(f.handle.retry_now().await.unwrap()).await;
     assert!(matches!(outcome, RetryOutcome::Synced { .. }), "{outcome:?}");
     f.storage
         .set_faults(Faults {
@@ -452,9 +446,9 @@ async fn a_cooldown_is_published_as_the_retry_answers_it() {
     f.handle.sync_now();
     status(&f.handle, failed).await;
     let until = f.clock.now() + Duration::from_secs(200);
-    assert_eq!(effect(&f), RetryEffect::CoolingDown { until });
+    assert_eq!(effect(&f).await, RetryEffect::CoolingDown { until });
     let requests = f.storage.request_count();
-    let outcome = answer(f.handle.retry_now()).await;
+    let outcome = answer(f.handle.retry_now().await.unwrap()).await;
     assert!(
         matches!(outcome, RetryOutcome::CoolingDown { until: at } if at == until),
         "{outcome:?}"
@@ -462,7 +456,7 @@ async fn a_cooldown_is_published_as_the_retry_answers_it() {
     assert_eq!(f.storage.request_count(), requests, "a pass ran in the cooldown");
     f.advance(Duration::from_secs(200));
     effect_becomes(&f, RetryEffect::Pass).await;
-    let outcome = answer(f.handle.retry_now()).await;
+    let outcome = answer(f.handle.retry_now().await.unwrap()).await;
     assert!(matches!(outcome, RetryOutcome::Synced { .. }), "{outcome:?}");
     f.handle.close().await.unwrap();
 }
@@ -485,9 +479,9 @@ async fn a_failure_only_new_credentials_clear_is_published_as_the_retry_answers_
         .await;
     f.handle.sync_now();
     status(&f.handle, failed).await;
-    assert_eq!(effect(&f), RetryEffect::Failed);
+    assert_eq!(effect(&f).await, RetryEffect::Failed);
     let requests = f.storage.request_count();
-    let outcome = answer(f.handle.retry_now()).await;
+    let outcome = answer(f.handle.retry_now().await.unwrap()).await;
     assert!(
         matches!(&outcome, RetryOutcome::Failed(PassFailure::Failed {
             error: SyncFailure::Storage(error)
@@ -495,14 +489,14 @@ async fn a_failure_only_new_credentials_clear_is_published_as_the_retry_answers_
         "{outcome:?}"
     );
     assert_eq!(f.storage.request_count(), requests, "the held pass ran");
-    assert_eq!(effect(&f), RetryEffect::Failed);
+    assert_eq!(effect(&f).await, RetryEffect::Failed);
     f.storage.set_faults(Faults::none()).await;
     f.handle
         .update_credentials("replacement".into(), SecretText::new("secret".into()))
         .await
         .unwrap();
     effect_becomes(&f, RetryEffect::Pass).await;
-    let outcome = answer(f.handle.retry_now()).await;
+    let outcome = answer(f.handle.retry_now().await.unwrap()).await;
     assert!(matches!(outcome, RetryOutcome::Synced { .. }), "{outcome:?}");
     f.handle.close().await.unwrap();
 }
@@ -516,25 +510,25 @@ async fn a_failure_only_new_credentials_clear_is_published_as_the_retry_answers_
 #[tokio::test]
 async fn the_first_attempt_publishes_what_its_retries_get() {
     let f = stopped_fixture().await;
-    assert_eq!(effect(&f), RetryEffect::NotSyncing);
+    assert_eq!(effect(&f).await, RetryEffect::NotSyncing);
     *f.connector.failure.lock().unwrap() = Some(
         StorageFailure::Network
             .with_source(std::io::Error::new(std::io::ErrorKind::NotConnected, "offline")),
     );
     f.handle.start_sync().await.unwrap();
     status(&f.handle, failed).await;
-    assert_eq!(effect(&f), RetryEffect::Pass);
+    assert_eq!(effect(&f).await, RetryEffect::Pass);
     *f.connector.failure.lock().unwrap() = Some(StorageFailure::Authentication.into());
-    let outcome = answer(f.handle.retry_now()).await;
+    let outcome = answer(f.handle.retry_now().await.unwrap()).await;
     assert!(
         matches!(&outcome, RetryOutcome::Failed(PassFailure::Failed {
             error: SyncFailure::Storage(error)
         }) if error.failure() == StorageFailure::Authentication),
         "{outcome:?}"
     );
-    assert_eq!(effect(&f), RetryEffect::Failed);
+    assert_eq!(effect(&f).await, RetryEffect::Failed);
     let attempts = *f.connector.attempts.borrow();
-    let outcome = answer(f.handle.retry_now()).await;
+    let outcome = answer(f.handle.retry_now().await.unwrap()).await;
     assert!(
         matches!(&outcome, RetryOutcome::Failed(PassFailure::Failed {
             error: SyncFailure::Storage(error)
@@ -542,12 +536,11 @@ async fn the_first_attempt_publishes_what_its_retries_get() {
         "{outcome:?}"
     );
     assert_eq!(*f.connector.attempts.borrow(), attempts);
-    f.handle.stop_sync();
-    assert_eq!(effect(&f), RetryEffect::NotSyncing);
-    let outcome = answer(f.handle.retry_now()).await;
+    f.handle.stop_sync().await.unwrap();
+    assert_eq!(effect(&f).await, RetryEffect::NotSyncing);
+    let outcome = answer(f.handle.retry_now().await.unwrap()).await;
     assert!(matches!(outcome, RetryOutcome::NotSyncing), "{outcome:?}");
     f.handle.close().await.unwrap();
-    assert_eq!(effect(&f), RetryEffect::NotSyncing);
 }
 
 /// Two passes answered 429 with a one-second Retry-After leave a two-second
@@ -579,9 +572,9 @@ async fn the_first_attempt_publishes_a_cooldowns_end_within_its_backoff() {
     status(&f.handle, failed).await;
     let backoff = f.handle.test_connection_retry_wait().await.unwrap();
     assert_eq!((backoff.failures, backoff.wait), (2, Duration::from_secs(2)));
-    f.handle.stop_sync();
+    f.handle.stop_sync().await.unwrap();
     status(&f.handle, |s| matches!(s, SyncStatus::Stopped)).await;
-    assert_eq!(effect(&f), RetryEffect::NotSyncing);
+    assert_eq!(effect(&f).await, RetryEffect::NotSyncing);
     f.handle.start_sync().await.unwrap();
     let until = f.clock.now() + Duration::from_secs(1);
     effect_becomes(&f, RetryEffect::CoolingDown { until }).await;
@@ -592,7 +585,7 @@ async fn the_first_attempt_publishes_a_cooldowns_end_within_its_backoff() {
     f.advance(Duration::from_secs(1));
     effect_becomes(&f, RetryEffect::Pass).await;
     assert_eq!(*f.connector.attempts.borrow(), attempts, "the backoff still holds the attempt");
-    let outcome = answer(f.handle.retry_now()).await;
+    let outcome = answer(f.handle.retry_now().await.unwrap()).await;
     assert!(matches!(outcome, RetryOutcome::Synced { .. }), "{outcome:?}");
     f.handle.close().await.unwrap();
 }
@@ -609,8 +602,8 @@ async fn an_uploads_cooldown_is_published_until_it_ends() {
     device.handle.set_uploads_paused(true).await.unwrap();
     attach(&device.handle, "photo", vec![3; 2048]).await;
     network.sync(0).await;
-    let mut effect = device.handle.subscribe_retry_effect();
-    assert_eq!(*effect.borrow_and_update(), RetryEffect::Pass);
+    let mut effect = device.handle.test_retry_effect();
+    assert_eq!(effect.latest().await, RetryEffect::Pass);
     device
         .storage
         .set_faults(Faults {
@@ -623,20 +616,12 @@ async fn an_uploads_cooldown_is_published_until_it_ends() {
         .await;
     device.handle.set_uploads_paused(false).await.unwrap();
     let until = network.clock.now() + Duration::from_secs(200);
-    tokio::time::timeout(Duration::from_secs(5), async {
-        effect.wait_for(|effect| *effect == RetryEffect::CoolingDown { until }).await.unwrap();
-    })
-    .await
-    .expect("the cooldown was published");
+    effect.wait_for(|effect| *effect == RetryEffect::CoolingDown { until }).await;
     // The upload waits, so its retry after the cooldown wakes nothing. Idle
     // passes come every thirty seconds here; the cooldown's end comes first.
     device.handle.set_uploads_paused(true).await.unwrap();
-    tokio::time::timeout(Duration::from_secs(5), async {
-        effect.wait_for(|effect| *effect == RetryEffect::Pass).await.unwrap();
-    })
-    .await
-    .expect("the cooldown's end was published");
-    let outcome = answer(device.handle.retry_now()).await;
+    effect.wait_for(|effect| *effect == RetryEffect::Pass).await;
+    let outcome = answer(device.handle.retry_now().await.unwrap()).await;
     assert!(matches!(outcome, RetryOutcome::Synced { .. }), "{outcome:?}");
     device.handle.set_uploads_paused(false).await.unwrap();
     wait_for_empty_queue(&device.handle).await;
@@ -670,6 +655,6 @@ async fn a_failed_pass_publishes_its_effect_before_its_status() {
     let mut shown = f.handle.test_sync_status();
     resume.send(()).unwrap();
     shown.wait_for(failed).await;
-    assert_eq!(effect(&f), RetryEffect::Failed);
+    assert_eq!(effect(&f).await, RetryEffect::Failed);
     f.handle.close().await.unwrap();
 }

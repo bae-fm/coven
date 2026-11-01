@@ -51,6 +51,19 @@ impl Database {
         .await
     }
 
+    /// Make every later write of the retry effect fail, as a full disk would.
+    pub async fn test_fail_retry_effect(&self) -> Result<(), DbError> {
+        self.call(move |inner| {
+            inner.access.with_writer(|writer| {
+                writer.batch(
+                    "CREATE TEMP TRIGGER fail_retry_effect BEFORE UPDATE ON coven_retry_effect
+                     BEGIN SELECT RAISE(ABORT,'injected retry effect failure'); END;",
+                )
+            })
+        })
+        .await
+    }
+
     /// Model a database last judged by another library release before reopening it.
     pub async fn test_pending_version(&self, version: &'static str) -> Result<(), DbError> {
         self.call(move |inner| {

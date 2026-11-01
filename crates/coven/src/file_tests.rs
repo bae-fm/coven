@@ -68,7 +68,7 @@ async fn uncached_file_bodies_and_sequence_reads_share_the_download_limit() {
         handle.setup_s3_storage(memory.config(), "Device", "key".into(), SecretText::new("secret".into())).await.unwrap();
         let mut status = handle.test_sync_status();
         status.wait_for(|s| matches!(s, SyncStatus::Synced { .. })).await;
-        handle.stop_sync();
+        handle.stop_sync().await.unwrap();
         status.wait_for(|s| matches!(s, SyncStatus::Stopped)).await;
         handle.unlock_store_key().await.unwrap();
         let ids = stage_rows(&handle, 2, |id| vec![id; 2048].into()).await;
@@ -154,7 +154,7 @@ async fn transfer_limits_bound_requests_and_a_changed_limit_applies_to_the_next_
             .unwrap();
         let mut status = handle.test_sync_status();
         status.wait_for(|s| matches!(s, SyncStatus::Synced { .. })).await;
-        handle.stop_sync();
+        handle.stop_sync().await.unwrap();
         status.wait_for(|s| matches!(s, SyncStatus::Stopped)).await;
         handle.unlock_store_key().await.unwrap();
         handle.set_uploads_paused(true).await.unwrap();
@@ -199,7 +199,7 @@ async fn transfer_limits_bound_requests_and_a_changed_limit_applies_to_the_next_
         memory.reset_request_peak();
         handle.pin(&uploaded).await.unwrap();
         assert_eq!(memory.peak_requests(), 1, "the subsequent pin captures the changed limit");
-        handle.stop_sync();
+        handle.stop_sync().await.unwrap();
         status.wait_for(|s| matches!(s, SyncStatus::Stopped)).await;
         memory.set_faults(Faults::none()).await;
         memory.set_online(false);
@@ -474,7 +474,7 @@ async fn uploaded_files_pins_and_read_only_ranges_use_the_composed_owner() {
         .unwrap();
     let mut status = handle.test_sync_status();
     status.wait_for(|s| matches!(s, SyncStatus::Synced { .. })).await;
-    handle.stop_sync();
+    handle.stop_sync().await.unwrap();
     status.wait_for(|s| matches!(s, SyncStatus::Stopped)).await;
     handle.unlock_store_key().await.unwrap();
     handle.set_uploads_paused(true).await.unwrap();
@@ -630,7 +630,7 @@ async fn the_apps_sql_reads_uploads_pins_and_pending_records() {
         .unwrap();
     let mut status = handle.test_sync_status();
     status.wait_for(|s| matches!(s, SyncStatus::Synced { .. })).await;
-    handle.stop_sync();
+    handle.stop_sync().await.unwrap();
     status.wait_for(|s| matches!(s, SyncStatus::Stopped)).await;
     handle.unlock_store_key().await.unwrap();
     handle.set_uploads_paused(true).await.unwrap();

@@ -254,7 +254,7 @@ impl Network {
     pub(crate) async fn pass(&self, index: usize) {
         let handle = &self.devices[index].handle;
         self.clock.set(self.clock.now() + Duration::from_secs(1));
-        match handle.retry_now().await {
+        match handle.retry_now().await.unwrap().await {
             RetryOutcome::Synced { .. } => {}
             outcome => panic!("device {index}: {outcome:?}"),
         }
@@ -650,7 +650,7 @@ async fn removing_a_member_after_a_replacement_key_leaves_no_key_work() {
     network.quiet().await;
     network.devices[0].handle.remove_member(&member).await.unwrap();
     let owner = &network.devices[0].handle;
-    owner.stop_sync();
+    owner.stop_sync().await.unwrap();
     owner.test_sync_status().wait_for(|s| matches!(s, SyncStatus::Stopped)).await;
     // The person deletes both keys in the console; coven records nothing (§14.3).
     assert!(owner.pending().await.unwrap().is_empty());
@@ -660,7 +660,7 @@ async fn removing_a_member_after_a_replacement_key_leaves_no_key_work() {
 #[tokio::test]
 async fn a_returning_device_loads_snapshots_covering_deleted_writes_and_keeps_its_queue() {
     let network = Network::new(2).await;
-    network.devices[1].handle.stop_sync();
+    network.devices[1].handle.stop_sync().await.unwrap();
     let mut status = network.devices[1].handle.test_sync_status();
     status.wait_for(|state| matches!(state, SyncStatus::Stopped)).await;
     network.devices[1]
@@ -699,7 +699,7 @@ async fn a_returning_device_loads_snapshots_covering_deleted_writes_and_keeps_it
 async fn a_missing_reset_body_blocks_its_slot_and_applies_once_it_arrives() {
     let network = Network::new(2).await;
     let reader = &network.devices[1].handle;
-    reader.stop_sync();
+    reader.stop_sync().await.unwrap();
     reader.test_sync_status().wait_for(|s| matches!(s, SyncStatus::Stopped)).await;
     let before = reader.applied_slot().await;
     network.devices[0].handle.reset_store().await.unwrap();
@@ -741,7 +741,7 @@ mod pending_records {
     async fn a_damaged_slot_blocks_the_reader_once_without_reading_it_again() {
         let network = Network::new(2).await;
         let reader = &network.devices[1].handle;
-        reader.stop_sync();
+        reader.stop_sync().await.unwrap();
         reader.test_sync_status().wait_for(|s| matches!(s, SyncStatus::Stopped)).await;
         let mut received = reader.subscribe(|sql| {
             Ok(sql.query("SELECT record FROM coven_pending ORDER BY position", [], |r| {

@@ -1,7 +1,7 @@
 /-! The answer to the person's retry (§6.7, "The person's retry ends every
 ordinary wait"; api.md E5 `retry_now`), as `RetryWaits::retry_requested`,
 `sync_loop.rs` and the connection's first attempt in `storage_control.rs` run
-it.
+it, deciding from `coven_retry_effect`'s row.
 
 A retry request is a report (`WaitingNetwork`): it takes the next report
 number. The connection's owner acts on reports when it plans, between passes
@@ -10,23 +10,31 @@ every waiting request the owner has acted on; a request made after the owner
 last planned, such as one made while a pass runs, waits for a later pass. When
 the pass ends, its requests are answered with its result: synced or failed.
 
-Before a pass begins, the owner may find it held (`wait`): by a provider
-cooldown, or by a failure only new credentials, an update or a reset can
-clear. A held pass would leave the person waiting for something a pull cannot
-change, so the owner answers the requests it acted on at once: cooling down,
-or failed.
+What a retry made now would do (`Loop.effect`) is read from the same state:
+whether a started connection will plan, and what holds the next pass, a
+provider cooldown or a failure only new credentials, an update or a reset can
+clear. A request made while that state holds the pass, or while sync is
+stopped, is answered at once with what the effect names: cooling down, failed,
+or not syncing (`ask`). A held pass would leave the person waiting for
+something a pull cannot change. A request already waiting when a hold begins
+is answered by the owner, between passes, with the hold (`wait`).
 
-Stopping sync answers every waiting request "not syncing", and a request made
-while sync is stopped is answered so at once: no pass will follow it. A pass
+Stopping sync answers every waiting request "not syncing". A pass
 already running when sync stops still ends, and answers its own requests with
 its result. The connection's first attempt is the start of the first pass: if
 it fails, it ends as a failed pass; if it connects (`connected`), its requests
 wait again for the loop's first pass; if sync stopped meanwhile, they are
 answered "not syncing".
 
-Rust keeps the requests and whether a started connection will plan under one
-lock, so a request, stopping and a pass taking its requests each happen at
-once, as one step here.
+Rust keeps whether a started connection will plan and what holds the pass as
+the row of `coven_retry_effect`, which computes the effect from them. Each
+event that changes them commits that row and acts on the requests in one step
+on the store's SQLite writer, which runs one such step at a time, and a
+request, beginning a pass and handing requests back read the row in such a
+step too. So each event happens at once, as one step here, and the effect an
+app reads from the row is the one that answers a request. A cooldown's end
+is such a write as well (`held none`): until a step writes it, the row says
+the cooldown holds.
 
 Proved here: an answer never changes once given (`answer_final`), so each
 request is answered at most once. A request waits only while a started
@@ -40,11 +48,11 @@ held pass answers at once and runs nothing (`held_answers`,
 "not syncing" at once (`stopped_answers_at_once`); stopping during a pass
 leaves that pass's answer to the pass (`stop_lets_pass_answer`). And no
 request is left waiting: from every reachable state, the owner's own steps
-answer every request (`never_stranded`). What a retry made now would do, as
-Rust publishes it, is how a request made then is answered: at once with the
-answer it names (`published_answers_at_once`), or by the next pass
-(`published_pass_runs`). Only starting, stopping and a change of hold change
-it (`effect_steady`), and Rust publishes each. -/
+answer every request (`never_stranded`). What a retry made now would do is
+how a request made then is answered (`ask_answers_by_effect`): at once with
+the answer it names (`effect_answers_at_once`), or by the next pass
+(`effect_pass_runs`). Only starting, stopping and a change of hold change it
+(`effect_steady`), and Rust writes each to the row. -/
 
 namespace CovenIO.RetryAnswer
 
@@ -103,7 +111,7 @@ structure Loop where
   request : Nat → Phase
 
 inductive Event
-  /-- `retry_now`. -/
+  /-- `retry_now`: answered at once as the effect says, or waiting. -/
   | ask
   /-- Another report: `network_changed`. -/
   | report
@@ -112,7 +120,9 @@ inductive Event
   /-- `stop_sync`, closing the handle, disconnecting, or a failure that stops
   the loop. -/
   | stop
-  /-- A cooldown or a held failure begins or ends. -/
+  /-- A cooldown or a held failure begins or ends: a write of the row. A
+  cooldown's end is written by the first step after it, the owner's when it
+  wakes for it. -/
   | held (h : Option Held)
   /-- The owner, between passes, acts on the reports so far. -/
   | plan
@@ -129,14 +139,67 @@ inductive Event
 def Loop.move (s : Loop) (p q : Phase) (pick : Nat → Bool) : Nat → Phase :=
   fun m => if s.request m = p ∧ pick m = true then q else s.request m
 
+/-! ## What a retry would do
+
+What a retry made now would do (`RetryEffect`, `coven_retry_effect.effect`),
+from the state its answers come from: whether a started connection will plan,
+and what holds the next pass. An app offers a retry only while the effect is
+a pass. -/
+
+/-- What a retry made now would do: run a pass, or be answered at once. -/
+inductive Effect
+  | pass
+  | coolingDown
+  | failed
+  | notSyncing
+  deriving DecidableEq, Repr
+
+/-- The effect the row computes. -/
+def Loop.effect (s : Loop) : Effect :=
+  if s.syncing then
+    match s.hold with
+    | some .cooldown => .coolingDown
+    | some .failure => .failed
+    | none => .pass
+  else .notSyncing
+
+/-- The answer the effect says a request gets at once; none when a pass
+answers it. -/
+def Effect.atOnce : Effect → Option Outcome
+  | .pass => none
+  | .coolingDown => some .coolingDown
+  | .failed => some .failed
+  | .notSyncing => some .notSyncing
+
+/-- Where a request made under the effect stands: answered with what it
+names, or waiting for a pass. -/
+def Effect.asked : Effect → Phase
+  | .pass => .waiting
+  | .coolingDown => .answered .coolingDown
+  | .failed => .answered .failed
+  | .notSyncing => .answered .notSyncing
+
+theorem Effect.asked_atOnce (e : Effect) :
+    e.asked = match e.atOnce with
+      | some o => .answered o
+      | none => .waiting := by
+  cases e <;> rfl
+
+theorem Effect.asked_ne_inPass (e : Effect) : e.asked ≠ .inPass := by
+  cases e <;> simp [Effect.asked]
+
+theorem Loop.effect_stopped {s : Loop} (h : s.syncing = false) : s.effect = .notSyncing := by
+  simp [Loop.effect, h]
+
+theorem Loop.effect_free {s : Loop} (syncing : s.syncing = true) (free : s.hold = none) :
+    s.effect = .pass := by
+  simp [Loop.effect, syncing, free]
+
 def step (s : Loop) : Event → Option Loop
   | .ask =>
       some { s with
         reported := s.reported + 1
-        request := fun m =>
-          if m = s.reported + 1 then
-            (if s.syncing then .waiting else .answered .notSyncing)
-          else s.request m }
+        request := fun m => if m = s.reported + 1 then s.effect.asked else s.request m }
   | .report => some { s with reported := s.reported + 1 }
   | .start => some { s with syncing := true }
   | .stop =>
@@ -205,17 +268,17 @@ theorem inv_step {s t : Loop} {e : Event} (inv : Inv s) (h : step s e = some t) 
       · intro hs m
         simp only at hs ⊢
         by_cases hm : m = s.reported + 1
-        · simp [hm, hs]
+        · simp [hm, Loop.effect_stopped hs, Effect.asked]
         · simp only [hm, ite_false]; exact inv.owned hs m
       · intro hr m
         simp only at hr ⊢
         by_cases hm : m = s.reported + 1
-        · cases s.syncing <;> simp [hm]
+        · simp only [hm, ite_true]; exact Effect.asked_ne_inPass _
         · simp only [hm, ite_false]; exact inv.taken hr m
       · intro m hp
         simp only at hp ⊢
         by_cases hm : m = s.reported + 1
-        · cases hs : s.syncing <;> simp [hm, hs] at hp
+        · simp only [hm, ite_true] at hp; exact absurd hp (Effect.asked_ne_inPass _)
         · simp only [hm, ite_false] at hp; exact inv.acted m hp
       · have := inv.within; simp only; omega
   | report =>
@@ -440,11 +503,12 @@ theorem pass_answers_acted_on {es : List Event} {t : Loop} (h : run initial es =
 /-- A request made while a pass runs is not answered by that pass: it is still
 waiting when the pass ends. -/
 theorem running_pass_skips {s t : Loop} (e : PassEnd) (running : s.running = true)
-    (syncing : s.syncing = true) (h : run s [.ask, .finish e] = some t) :
+    (syncing : s.syncing = true) (free : s.hold = none)
+    (h : run s [.ask, .finish e] = some t) :
     t.request (s.reported + 1) = .waiting := by
-  simp [run, step, running, syncing] at h
+  simp [run, step, running] at h
   subst h
-  simp [move_apply]
+  simp [move_apply, Loop.effect_free syncing free, Effect.asked]
 
 /-- The next pass the owner plans answers every waiting request, with its own
 result. -/
@@ -472,7 +536,7 @@ theorem concurrent_requests_share {s t : Loop} (e : PassEnd) (idle : s.running =
     (h : run s [.ask, .ask, .plan, .begin, .finish e] = some t) :
     t.request (s.reported + 1) = .answered e.outcome ∧
       t.request (s.reported + 2) = .answered e.outcome := by
-  simp [run, step, idle, syncing, free] at h
+  simp [run, step, idle, syncing, free, Loop.effect, Effect.asked] at h
   subst h
   constructor
   · simp [move_apply]
@@ -506,7 +570,7 @@ theorem held_runs_no_pass (s : Loop) {hold : Held} (held : s.hold = some hold) :
 syncing" at once. -/
 theorem stopped_answers_at_once (s : Loop) (stopped : s.syncing = false) :
     (step s .ask).map (·.request (s.reported + 1)) = some (.answered .notSyncing) := by
-  simp [step, stopped]
+  simp [step, Loop.effect_stopped stopped, Effect.asked]
 
 /-- Stopping while a pass runs leaves that pass's requests to the pass: they
 get its result, not "not syncing". -/
@@ -602,39 +666,6 @@ theorem never_stranded {es : List Event} {s : Loop} (h : run initial es = some s
         · exact owned e m
       · simp only [run, finished, Option.bind_some]; exact ran
 
-/-! ## What a retry would do
-
-Rust publishes what a retry made now would do (`RetryEffect`), from the same
-state its answers come from: whether a started connection will plan, and
-what holds the next pass. An app offers a retry only while the effect is a
-pass. These theorems prove the effect is how a request made then is
-answered. -/
-
-/-- What a retry made now would do: run a pass, or be answered at once. -/
-inductive Effect
-  | pass
-  | coolingDown
-  | failed
-  | notSyncing
-  deriving DecidableEq, Repr
-
-/-- The published effect. -/
-def Loop.effect (s : Loop) : Effect :=
-  if s.syncing then
-    match s.hold with
-    | some .cooldown => .coolingDown
-    | some .failure => .failed
-    | none => .pass
-  else .notSyncing
-
-/-- The answer the effect says a request gets at once; none when a pass
-answers it. -/
-def Effect.atOnce : Effect → Option Outcome
-  | .pass => none
-  | .coolingDown => some .coolingDown
-  | .failed => some .failed
-  | .notSyncing => some .notSyncing
-
 /-- Events that leave the effect: all but starting, stopping and a change of
 hold, each of which Rust publishes. -/
 def Event.keepsEffect : Event → Bool
@@ -662,43 +693,26 @@ theorem effect_steady {s t : Loop} {e : Event} (keeps : e.keepsEffect = true)
         · simp at h
       · simp at h
 
-/-- When the effect says a request is answered at once, one made then gets
-exactly that answer, from the owner's own steps, and no pass begins for it. -/
-theorem published_answers_at_once {s : Loop} {o : Outcome} (idle : s.running = false)
-    (once : s.effect.atOnce = some o) :
-    ∃ es t, (∀ e ∈ es, owner e = true ∧ e ≠ .begin) ∧ run s (.ask :: es) = some t ∧
-      t.request (s.reported + 1) = .answered o := by
-  cases syncing : s.syncing with
-  | false =>
-      simp [Loop.effect, syncing, Effect.atOnce] at once
-      subst once
-      cases ran : run s [.ask] with
-      | none => simp [run, step] at ran
-      | some t =>
-          refine ⟨[], t, by simp, ran, ?_⟩
-          simp [run, step, syncing] at ran
-          subst ran
-          simp
-  | true =>
-      cases held : s.hold with
-      | none => simp [Loop.effect, syncing, held, Effect.atOnce] at once
-      | some hold =>
-          have outcome : hold.outcome = o := by
-            cases hold <;> simp [Loop.effect, syncing, held, Effect.atOnce, Held.outcome] at once ⊢
-              <;> exact once
-          subst outcome
-          cases ran : run s [.ask, .plan, .wait] with
-          | none => simp [run, step, syncing, held, idle] at ran
-          | some t =>
-              refine ⟨[.plan, .wait], t, by simp [owner], ran, ?_⟩
-              simp [run, step, syncing, held, idle] at ran
-              subst ran
-              simp [move_apply]
+/-- A request made now stands as the effect says: answered with the answer
+it names, or waiting for a pass, decided in the step that takes it. -/
+theorem ask_answers_by_effect (s : Loop) :
+    (step s .ask).map (·.request (s.reported + 1)) =
+      some (match s.effect.atOnce with
+        | some o => .answered o
+        | none => .waiting) := by
+  simp [step, Effect.asked_atOnce]
+
+/-- When the effect names an answer, a request made then gets exactly that
+answer at once, and no step is needed for it. -/
+theorem effect_answers_at_once {s : Loop} {o : Outcome} (once : s.effect.atOnce = some o) :
+    ∃ t, step s .ask = some t ∧ t.request (s.reported + 1) = .answered o := by
+  refine ⟨_, rfl, ?_⟩
+  simp [Effect.asked_atOnce, once]
 
 /-- When the effect is a pass, a request made then is not answered at once:
-nothing holds the pass the owner plans, and the pass that begins next takes
-the request and answers it with its own result. -/
-theorem published_pass_runs {s : Loop} (e : PassEnd) (idle : s.running = false)
+it waits, nothing holds the pass the owner plans, and the pass that begins
+next takes the request and answers it with its own result. -/
+theorem effect_pass_runs {s : Loop} (e : PassEnd) (idle : s.running = false)
     (pass : s.effect = .pass) :
     run s [.ask, .plan, .wait] = none ∧
       ∃ t, run s [.ask, .plan, .begin, .finish e] = some t ∧
@@ -714,7 +728,7 @@ theorem published_pass_runs {s : Loop} (e : PassEnd) (idle : s.running = false)
   | none => simp [run, step, syncing, free, idle] at ran
   | some t =>
       refine ⟨t, rfl, ?_⟩
-      simp [run, step, syncing, free, idle] at ran
+      simp [run, step, syncing, free, idle, pass, Effect.asked] at ran
       subst ran
       simp [move_apply]
 
@@ -732,8 +746,16 @@ theorem ben_waits_for_the_next_pass :
 /-- Ana pulls to refresh during a provider cooldown: she is told so at once,
 and no pass runs for her. -/
 theorem ana_hears_of_the_cooldown :
-    (run ⟨0, 0, true, some .cooldown, false, fun _ => .unasked⟩ [.ask, .plan, .wait]).map
+    (run ⟨0, 0, true, some .cooldown, false, fun _ => .unasked⟩ [.ask]).map
       (·.request 1) = some (.answered .coolingDown) := by
+  decide
+
+/-- Dan pulls to refresh; the provider's cooldown begins before the owner
+plans, and the owner's next plan tells him when it ends. -/
+theorem dan_hears_when_the_cooldown_begins :
+    (run ⟨0, 0, true, none, false, fun _ => .unasked⟩
+      [.ask, .held (some .cooldown), .plan, .wait]).map
+        (·.request 1) = some (.answered .coolingDown) := by
   decide
 
 /-- Carol pulls to refresh, then stops sync before the owner plans: she is

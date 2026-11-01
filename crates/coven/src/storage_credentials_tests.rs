@@ -209,7 +209,7 @@ async fn dropping_a_replacement_waiter_does_not_interrupt_key_installation_or_pu
     let f = Fixture::new().await;
     f.setup().await.unwrap();
     status(&f.handle, |s| matches!(s, SyncStatus::Synced { .. })).await;
-    f.handle.stop_sync();
+    f.handle.stop_sync().await.unwrap();
     status(&f.handle, |s| matches!(s, SyncStatus::Stopped)).await;
     f.handle.unlock_store_key().await.unwrap();
     let before = f.handle.restore_code().await.unwrap();

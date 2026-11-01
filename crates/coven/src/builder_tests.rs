@@ -353,7 +353,7 @@ mod recovery {
                 setup.connection.storage
             );
             let mut status = handle.test_sync_status();
-            handle.stop_sync();
+            handle.stop_sync().await.unwrap();
             status.wait_for(|s| matches!(s, SyncStatus::Stopped)).await;
             handle
                 .write(|sql| {
@@ -364,7 +364,7 @@ mod recovery {
                 .unwrap();
             handle.start_sync().await.unwrap();
             status.wait_for(|s| matches!(s, SyncStatus::Synced { .. })).await;
-            handle.stop_sync();
+            handle.stop_sync().await.unwrap();
             status.wait_for(|s| matches!(s, SyncStatus::Stopped)).await;
             handle
                 .write(|sql| {

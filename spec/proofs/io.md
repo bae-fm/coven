@@ -99,12 +99,15 @@ connection's first attempt is the start of the first pass: a failed attempt
 answers as a failed pass, and a connected one hands its requests to the
 loop's first pass.
 
-Before a pass begins, the owner may find it held, by a provider cooldown or
-by a failure only new credentials, an update or a reset can clear. It then
-answers the requests it acted on at once: cooling down, or failed. Stopping
-sync answers every waiting request "not syncing", and a request made while
-sync is stopped is answered so at once; a pass already running still answers
-its own requests with its result.
+What a retry made now would do, the effect, is read from the state the
+answers come from: whether a started connection will plan, and what holds the
+next pass, a provider cooldown or a failure only new credentials, an update or
+a reset can clear. A request made while the effect names an answer gets it at
+once: cooling down, failed, or not syncing; otherwise it waits for a pass. A
+request already waiting when a hold begins is answered by the owner, between
+passes, with that hold. Stopping sync answers every waiting request "not
+syncing"; a pass already running still answers its own requests with its
+result.
 
 `answer_final` proves an answer never changes, so each request is answered at
 most once. `pass_answers_acted_on`, `running_pass_skips` and
@@ -118,28 +121,34 @@ connection will plan. `never_stranded` proves no request is left waiting:
 from every reachable state, the owner's own steps answer every request,
 with no outside event.
 
-Rust also publishes what a retry made now would do, so an app offers one only
-when it would run a pass. The model's effect reads the same state the answers
-come from: whether a started connection will plan, and what holds the next
-pass. `published_answers_at_once` proves that when the effect names an answer,
-a request made then gets that answer with no pass, and `published_pass_runs`
-that when the effect is a pass, nothing answers the request at once and the
-next pass answers it. `effect_steady` proves only starting, stopping and a
-change of hold change the effect. Rust publishes each of those as it happens,
-except a cooldown's end, which the owner wakes for and publishes when it next
-plans.
+An app offers a retry only when it would run a pass, reading the effect from
+`coven_retry_effect`. `ask_answers_by_effect` proves a request stands as the
+effect says in the step that takes it, `effect_answers_at_once` that when the
+effect names an answer, a request made then gets that answer with no other
+step, and `effect_pass_runs` that when the effect is a pass, nothing answers
+the request at once and the next pass answers it. `effect_steady` proves only
+starting, stopping and a change of hold change the effect.
 
-The model assumes what Rust keeps under one lock: a request, stopping, a
-pass taking its requests, and publishing the effect each happen at once. Rust
-keeps the failure that holds the pass under that lock too, and one decision
-gives both the effect and a held pass's answer. The model leaves out what a
-pass does, keeping only how it ends. `retry_waits::retry_answer::tests` check the
-request list and the effect against these rules; the retry tests in
+The model's atomicity is the store's. Rust keeps whether a started connection
+will plan, whether a failure holds the pass and the cooldown's end as the row
+of `coven_retry_effect`, which computes the effect from them. Each event that
+changes them commits that row and acts on the requests in one step on the
+SQLite writer, which runs one step at a time; a request, a pass beginning and
+an attempt handing its requests back read the row in such a step too. So each
+event happens at once, as one step of the model, and the effect an app reads
+is the one that answers. A pass begins only when the row lets it, as `begin`
+requires. A cooldown's end is a write as well, the model's `held none`: the
+first step after the cooldown ends writes it, the owner's when it wakes for it,
+and until then the row says the cooldown holds. The failure objects a held
+answer carries stay in memory beside the row, written in the same step. The
+model leaves out what a pass does, keeping only how it ends.
+`retry_waits::retry_answer::tests` check the requests and the row against
+these rules, `internal_schema::retry_effect::tests` that the row computes the
+effect and a live query follows it; the retry tests in
 `storage::tests::control` and
 `sequence_sync::sync_loop::tests::a_removed_device_never_retries_on_a_new_connection` check
-the connection's first attempt and its loop, and that the effect each
-publishes is how its retries are answered. No differential runner compares
-them.
+the connection's first attempt and its loop, and that the row each writes is
+how its retries are answered. No differential runner compares them.
 
 ## Work notifications
 

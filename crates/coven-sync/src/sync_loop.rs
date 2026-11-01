@@ -39,12 +39,13 @@ impl SyncLoop {
     }
     /// Start and request an immediate pass. From now on the person's retry
     /// requests wait for this loop's passes.
-    pub fn start(&self) -> Result<(), SyncError> {
-        self.waits.sync_started();
-        self.commands.send(Command::Start).map_err(|_| {
-            self.waits.sync_stopped();
-            DbError::StoreClosed.into()
-        })
+    pub async fn start(&self) -> Result<(), SyncError> {
+        self.waits.sync_started().await?;
+        if self.commands.send(Command::Start).is_err() {
+            self.waits.sync_stopped().await?;
+            return Err(DbError::StoreClosed.into());
+        }
+        Ok(())
     }
     /// Retain one pass request, including while a pass is running.
     pub fn sync_now(&self) -> Result<(), SyncError> {
@@ -52,10 +53,12 @@ impl SyncLoop {
     }
     /// Queue stopping after the active pass and this connection's transfers.
     /// Completion publishes `Stopped`; a release failure publishes `Failed`.
-    /// Retry requests no pass has taken are answered `NotSyncing` now.
-    pub fn stop(&self) -> Result<(), SyncError> {
-        self.waits.sync_stopped();
-        self.commands.send(Command::Stop).map_err(|_| DbError::StoreClosed.into())
+    /// Retry requests no pass has taken are answered `NotSyncing` now. The
+    /// loop stops even when writing that fails, which has failed the handle.
+    pub async fn stop(&self) -> Result<(), SyncError> {
+        let stopped = self.waits.sync_stopped().await;
+        self.commands.send(Command::Stop).map_err(|_| DbError::StoreClosed)?;
+        Ok(stopped?)
     }
     /// Wait for the active pass, retaining its started state, pending work and
     /// retry schedule while the owner prepares a connection or custody change.
@@ -132,6 +135,15 @@ async fn show(sync: &SequenceSync, status: SyncStatus) -> Result<(), DbError> {
     status.record(&sync.database).await
 }
 
+/// Sync stopped as the loop ends or gives up: the waiting retries hear so.
+/// A failed write has failed the handle and answered them with its failure,
+/// which every call reports, so the loop goes on to end either way.
+async fn stopped(waits: &Arc<RetryWaits>) {
+    if let Err(error) = waits.sync_stopped().await {
+        tracing::debug!("stopping sync on a failed handle: {error}");
+    }
+}
+
 /// Wait until `interval` after `from`, by the store's monotonic clock.
 fn idle_wait(
     sync: &SequenceSync,
@@ -153,10 +165,12 @@ async fn run(
         Err(error) => crate::ConnectionRetry::Never(crate::connection_failure(error)),
     };
     let held = retry.held(&sync.waits);
-    sync.waits.holds(held);
+    if sync.waits.holds(held).await.is_err() {
+        return;
+    }
     if let Some(failure) = held {
         if show(&sync, failure.clone().into()).await.is_err() {
-            sync.waits.sync_stopped();
+            stopped(&sync.waits).await;
             return;
         }
     }
@@ -186,12 +200,13 @@ async fn run(
                     break;
                 }
             }
-            // A pass held by a cooldown, or by a failure only the person can
-            // clear, answers the retries acted on at once (IO `held_answers`),
-            // and what a retry would do is published again.
-            if started {
-                sync.waits.answer_held(retry.held(&sync.waits));
-            }
+        }
+        // A pass held by a cooldown, or by a failure only the person can
+        // clear, answers the retries acted on at once (IO `held_answers`),
+        // and what a retry would do is written again, with a cooldown that
+        // ended, paused too.
+        if started && sync.waits.answer_held(retry.held(&sync.waits)).await.is_err() {
+            break;
         }
         // A requested pass waits only for the connection's backoff; an idle
         // loop also wakes for operations' waits and their evidence.
@@ -240,7 +255,7 @@ async fn run(
                                 if retry.held(&sync.waits).is_none() && show(&sync, SyncStatus::Syncing).await.is_err() { break; }
                             }
                             Err(error) => {
-                                sync.waits.sync_stopped();
+                                stopped(&sync.waits).await;
                                 if show(&sync, SyncStatus::failed(error)).await.is_err() { break; }
                             }
                         }
@@ -294,7 +309,7 @@ async fn run(
                 Err(DbError::StoreClosed) => break,
                 Err(error) => {
                     started = false;
-                    sync.waits.sync_stopped();
+                    stopped(&sync.waits).await;
                     if show(&sync, SyncStatus::failed(SyncError::from(error))).await.is_err() { break; }
                 }
             },
@@ -304,11 +319,12 @@ async fn run(
             // A wait armed outside this loop changes the schedule to wake on.
             changed = rearmed.changed(), if started && !paused => if changed.is_err() { break },
             _ = work_wake, if started && !paused && !(pending && due) => pending = true,
-            // The cooldown's end lets a requested pass run, and changes what
-            // the person's retry would do even with no pass requested.
+            // The cooldown's end, which the loop writes as it plans again,
+            // lets a requested pass run, and changes what the person's
+            // retry would do even with no pass requested or while paused.
             _ = async {
                 if let Some(wake) = cooldown { wake.await } else { std::future::pending::<()>().await }
-            }, if started && !paused => {}
+            }, if started => {}
             _ = std::future::ready(()), if started && !paused && pending && due => {
                 pending = false;
                 if let Err(error) = changes.take_changed() {
@@ -317,14 +333,28 @@ async fn run(
                     break;
                 }
                 // The pass answers the retries acted on before it began
-                // (IO `pass_answers_acted_on`).
-                let requests = sync.waits.take_requests();
+                // (IO `pass_answers_acted_on`). It begins only as the
+                // retry effect's row lets it: a cooldown that began since
+                // the plan holds it, and the loop plans again with the pass
+                // still requested.
+                let requests = match sync.waits.begin_pass().await {
+                    Ok(Some(requests)) => requests,
+                    Ok(None) => {
+                        pending = true;
+                        continue;
+                    }
+                    Err(_) => break,
+                };
                 if let Err(error) = show(&sync, SyncStatus::Syncing).await {
                     requests.answer(&PassFailure::Failed { error: SyncError::from(error).into() }.into());
                     break;
                 }
                 let connection_version = sync.waits.connection_version();
-                let outcome = match pass(&sync, &codes).await {
+                let passed = pass(&sync, &codes).await;
+                // The idle interval counts from the pass's end, before the
+                // steps that record how it ended.
+                idle_from = sync.clock.elapsed();
+                let outcome = match passed {
                     Ok(failing) => match retry.succeeded(&sync.database, &sync.waits).await {
                         Ok(()) => match failing {
                             None => {
@@ -365,9 +395,12 @@ async fn run(
                 // What a retry would do changes with the pass's failure, or
                 // with sync stopping, before the status shows it or the
                 // person hears it.
-                sync.waits.holds(retry.held(&sync.waits));
+                if let Err(error) = sync.waits.holds(retry.held(&sync.waits)).await {
+                    requests.answer(&PassFailure::Failed { error: SyncError::from(error).into() }.into());
+                    break;
+                }
                 if !started {
-                    sync.waits.sync_stopped();
+                    stopped(&sync.waits).await;
                 }
                 if let RetryOutcome::Failed(failure) = &outcome {
                     if let Err(error) = show(&sync, failure.clone().into()).await {
@@ -376,7 +409,6 @@ async fn run(
                     }
                 }
                 requests.answer(&outcome);
-                idle_from = sync.clock.elapsed();
                 idle = idle_wait(&sync, idle_from, interval.current());
             }
         }
@@ -385,7 +417,7 @@ async fn run(
     // one, or its owner answers them as it releases; any other end leaves no
     // pass to answer them.
     if closing.is_none() {
-        sync.waits.sync_stopped();
+        stopped(&sync.waits).await;
     }
     // The connection's owners are released before the closer learns so.
     drop(changes);

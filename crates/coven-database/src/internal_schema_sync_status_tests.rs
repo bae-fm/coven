@@ -140,7 +140,7 @@ async fn a_read_only_handle_cant_read_the_sync_status() {
         assert_eq!(
             database_error(error).to_string(),
             DbError::StatementForbidden {
-                operation: "reading the sync status through a read-only handle",
+                operation: "reading the writer's sync state through a read-only handle",
             }
             .to_string(),
             "{statement}"

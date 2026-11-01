@@ -100,10 +100,12 @@ import CovenIO
 #print axioms CovenIO.RetryAnswer.idle_settles
 #print axioms CovenIO.RetryAnswer.never_stranded
 #print axioms CovenIO.RetryAnswer.effect_steady
-#print axioms CovenIO.RetryAnswer.published_answers_at_once
-#print axioms CovenIO.RetryAnswer.published_pass_runs
+#print axioms CovenIO.RetryAnswer.ask_answers_by_effect
+#print axioms CovenIO.RetryAnswer.effect_answers_at_once
+#print axioms CovenIO.RetryAnswer.effect_pass_runs
 #print axioms CovenIO.RetryAnswer.Examples.ben_waits_for_the_next_pass
 #print axioms CovenIO.RetryAnswer.Examples.ana_hears_of_the_cooldown
+#print axioms CovenIO.RetryAnswer.Examples.dan_hears_when_the_cooldown_begins
 #print axioms CovenIO.RetryAnswer.Examples.carol_stops_first
 #print axioms CovenIO.Wakes.initial_covered
 #print axioms CovenIO.Wakes.covered_run

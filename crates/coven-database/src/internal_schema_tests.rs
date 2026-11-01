@@ -67,13 +67,14 @@ async fn only_the_spec_tables_are_created() {
             }
         }
         // What the app's SQL reads (Appendix C.1): the views, the files
-        // table, and the pins, queue and sync status coven keeps as tables,
-        // which the app's triggers may follow.
+        // table, and the pins, queue, sync status and retry effect coven
+        // keeps as tables, which the app's triggers may follow.
         assert_eq!(
             views,
             [
                 ("table".into(), "coven_files".into()),
                 ("table".into(), "coven_pins".into()),
+                ("table".into(), "coven_retry_effect".into()),
                 ("table".into(), "coven_sync_status".into()),
                 ("table".into(), "coven_upload_queue".into()),
                 ("view".into(), "coven_circle_members".into()),
@@ -91,7 +92,8 @@ async fn only_the_spec_tables_are_created() {
         let tables = sql
             .query(
                 "SELECT name FROM sqlite_schema WHERE type='table'
-                 AND name NOT IN('coven_files','coven_pins','coven_upload_queue','coven_sync_status')
+                 AND name NOT IN('coven_files','coven_pins','coven_upload_queue','coven_sync_status',
+                     'coven_retry_effect')
                  ORDER BY name",
                 [],
                 |r| r.get::<_, String>(0),

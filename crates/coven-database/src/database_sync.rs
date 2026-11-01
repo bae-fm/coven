@@ -1,6 +1,7 @@
 //! Database operations used by synchronization, on the retained connections.
 
 use super::Database;
+use crate::internal_schema::retry_effect::{self, RetryState};
 use crate::{CovenResult, DbError};
 
 impl Database {
@@ -244,6 +245,51 @@ impl Database {
             inner.access.with_writer(|writer| {
                 writer.state_transaction(|db| {
                     crate::internal_schema::sync_status::save(db, state, &status)
+                })
+            })
+        })
+        .await
+    }
+
+    /// Change what decides the person's retry, `coven_retry_effect`'s row,
+    /// then run `then` with the state as committed, in one step on the
+    /// writer: no other change to the state, and no other `then`, comes
+    /// between them, so a decision `then` makes from the state is the one
+    /// the row shows. `change` gets the state as the row holds it; `then`
+    /// runs only once the change commits. A failed write fails this handle
+    /// with its cause, as losing a pending record does.
+    pub async fn change_retry_state<T: Send + 'static>(
+        &self,
+        change: impl FnOnce(RetryState) -> RetryState + Send + 'static,
+        then: impl FnOnce(RetryState) -> T + Send + 'static,
+    ) -> Result<T, DbError> {
+        self.call(move |inner| {
+            inner.access.with_writer(|writer| {
+                let state = writer.state_transaction(|db| {
+                    let state = retry_effect::stored(change(retry_effect::read(db)?))?;
+                    retry_effect::save(db, state)?;
+                    Ok(state)
+                })?;
+                Ok(then(state))
+            })
+        })
+        .await
+    }
+
+    /// Record the provider cooldown's wait, and change the retry state as
+    /// `change_retry_state` does, in one transaction: the cooldown that
+    /// holds every pass and the effect it gives a retry commit together.
+    pub async fn record_cooldown(
+        &self,
+        wait: crate::RetryWait,
+        change: impl FnOnce(RetryState) -> RetryState + Send + 'static,
+    ) -> Result<(), DbError> {
+        self.call(move |inner| {
+            inner.access.with_writer(|writer| {
+                writer.state_transaction(|db| {
+                    crate::retry::save(db, crate::RetrySubject::Provider, &wait)?;
+                    let state = retry_effect::stored(change(retry_effect::read(db)?))?;
+                    retry_effect::save(db, state)
                 })
             })
         })
