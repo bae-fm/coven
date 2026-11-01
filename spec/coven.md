@@ -1472,8 +1472,9 @@ After applying and claiming, the device does the work the new state calls for:
 
 - **Provider sharing** follows the active members and open invites (§14.2,
   §20.9). A grant or revocation that fails stays pending with its cause.
-- **S3 keys** no longer current become deletion work. A key's record stays until
-  its deletion is confirmed (§14.3).
+- **S3 keys** no longer current are forgotten. Coven never deletes a key or
+  records one for deletion; the app names it so the person deletes it in the
+  provider's console (§14.3).
 - **Exposed keys** are replaced through the admin operation path. Only a member of
   that audience can supply its new key (§12.2).
 - **Reloads.** A reset, a breaking schema raise or a newly readable circle

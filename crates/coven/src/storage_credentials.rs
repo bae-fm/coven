@@ -20,7 +20,8 @@ impl CovenHandle {
 
     /// Commit a replacement S3 key and publish its id; the restore code is unchanged (E9).
     /// A publication failure retains the credentials; retry with the same key.
-    /// Removal lists this key for deletion even if its access entry is refused.
+    /// Coven never deletes the key it replaces; the person deletes it in the
+    /// provider's console (§14.3).
     /// Once this member's removal applies, returns Removed and saves nothing.
     pub async fn replace_access_key(
         &self,

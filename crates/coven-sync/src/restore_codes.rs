@@ -156,7 +156,8 @@ impl RestoreCodes {
     /// Requires connected storage. Credentials remain committed if publication
     /// fails: the remote entry may already exist. Retry with the same key to
     /// finish publication; queued entry bytes and numbers are reused.
-    /// A removal records this key for deletion even if its entry is refused.
+    /// Coven never deletes the key it replaces; the person deletes it in the
+    /// provider's console (§14.3).
     pub async fn replace_access_key(
         &self,
         access_key_id: String,
