@@ -285,7 +285,9 @@ pub enum Audience {
   `wal_autocheckpoint` pages not yet copied, 1,000 when unset. It waits up to
   100 ms for readers, while coven's writes wait. `WalAutocheckpoint::Off`
   leaves checkpoints to the app. A checkpoint that finds the database busy or
-  locked is tried again at the next commit; any other failure, or a panic,
+  locked, or that SQLite couldn't start because another connection was
+  checkpointing or committing, is tried again at the next commit; any other
+  failure, or a panic,
   fails the handle with `DbError::CheckpointFailed` or
   `DbError::CheckpointPanicked` until the store is reopened.
 - `sqlite_settings()` on either handle reads back the settings SQLite has in
@@ -301,7 +303,10 @@ pub enum Audience {
 - `checkpoint(mode)` checkpoints the store's WAL on the writer, between writes,
   in one of SQLite's modes: `Noop`, which only reads the frame counts,
   `Passive`, `Full`, `Restart` or `Truncate`. It
-  returns what SQLite reports: whether a reader or another writer kept it
+  returns what SQLite reports: `NotStarted` when SQLite read nothing of the
+  WAL, because another connection was checkpointing it, or was committing to
+  it as SQLite read where it ends; it gives up on that at once, without the
+  busy timeout. Otherwise `Ran`: whether a reader or another writer kept it
   from finishing within the busy timeout, the frames in the WAL, and the
   frames copied into the database. After a `Restart` that wasn't busy, the
   next write starts the WAL file over from its start, so the file stops
@@ -2131,6 +2136,7 @@ impl CovenHandle {
     /// Checkpoints the store's WAL between writes, returning what SQLite
     /// reports. `Restart` and `Truncate` wait up to the busy timeout for
     /// reads still using the WAL, and report `busy` if they outlast it.
+    /// `NotStarted` when another connection was checkpointing or committing.
     pub async fn checkpoint(&self, mode: CheckpointMode) -> Result<WalCheckpoint, DbError>;
 
     /// Gives back free pages of a store created with incremental auto-vacuum,
@@ -2258,13 +2264,20 @@ pub enum AutoVacuum { Off, Full, Incremental }
 pub enum CheckpointMode { Noop, Passive, Full, Restart, Truncate }
 
 /// What a checkpoint did, as SQLite reports it.
-pub struct WalCheckpoint {
-    /// `Full`, `Restart` or `Truncate` couldn't finish within the busy timeout.
-    pub busy: bool,
-    /// Frames in the WAL.
-    pub log_frames: u32,
-    /// Frames copied into the database, this time or before.
-    pub checkpointed_frames: u32,
+pub enum WalCheckpoint {
+    /// SQLite read nothing of the WAL: another connection was checkpointing
+    /// it, or committing to it as SQLite read where it ends.
+    NotStarted,
+    /// SQLite read the WAL and copied what it could.
+    Ran {
+        /// `Full`, `Restart` or `Truncate` couldn't finish within the busy
+        /// timeout.
+        busy: bool,
+        /// Frames in the WAL.
+        log_frames: u32,
+        /// Frames copied into the database, this time or before.
+        checkpointed_frames: u32,
+    },
 }
 
 pub enum IncrementalVacuum { All, Pages(NonZeroU32) }

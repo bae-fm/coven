@@ -304,15 +304,22 @@ async fn a_checkpoint_reports_sqlites_frame_counts() {
         .await
         .unwrap();
     write_notes(&database, "first", 10).await;
-    let checkpoint = database.checkpoint(CheckpointMode::Passive).await.unwrap();
-    assert!(!checkpoint.busy);
-    assert!(checkpoint.log_frames > 0);
-    assert_eq!(checkpoint.checkpointed_frames, checkpoint.log_frames);
+    let WalCheckpoint::Ran { busy, log_frames, checkpointed_frames } =
+        database.checkpoint(CheckpointMode::Passive).await.unwrap()
+    else {
+        panic!("the checkpoint read the WAL");
+    };
+    assert!(!busy);
+    assert!(log_frames > 0);
+    assert_eq!(checkpointed_frames, log_frames);
     // A WAL file is a 32-byte header, then frames of a 24-byte header and a page.
-    assert_eq!(wal_bytes(&store), 32 + u64::from(checkpoint.log_frames) * (24 + 4096));
+    assert_eq!(wal_bytes(&store), 32 + u64::from(log_frames) * (24 + 4096));
 
     let checkpoint = database.checkpoint(CheckpointMode::Truncate).await.unwrap();
-    assert_eq!(checkpoint, WalCheckpoint { busy: false, log_frames: 0, checkpointed_frames: 0 });
+    assert_eq!(
+        checkpoint,
+        WalCheckpoint::Ran { busy: false, log_frames: 0, checkpointed_frames: 0 }
+    );
     assert_eq!(wal_bytes(&store), 0);
     database.close().await.unwrap();
 }
@@ -332,15 +339,23 @@ async fn after_a_restart_checkpoint_the_next_writes_reuse_the_wal() {
     write_notes(&database, "unchecked", 1).await;
     assert!(wal_bytes(&store) > written);
 
-    let restart = database.checkpoint(CheckpointMode::Restart).await.unwrap();
-    assert!(!restart.busy);
-    assert_eq!(restart.checkpointed_frames, restart.log_frames);
+    let WalCheckpoint::Ran { busy, log_frames: restart_frames, checkpointed_frames } =
+        database.checkpoint(CheckpointMode::Restart).await.unwrap()
+    else {
+        panic!("the restart read the WAL");
+    };
+    assert!(!busy);
+    assert_eq!(checkpointed_frames, restart_frames);
     let restarted = wal_bytes(&store);
     write_notes(&database, "second", 5).await;
-    let second = database.checkpoint(CheckpointMode::Passive).await.unwrap();
+    let WalCheckpoint::Ran { log_frames: second_frames, .. } =
+        database.checkpoint(CheckpointMode::Passive).await.unwrap()
+    else {
+        panic!("the checkpoint read the WAL");
+    };
     assert_eq!(wal_bytes(&store), restarted, "the WAL did not grow");
     // The log holds only the writes since the restart.
-    assert!(second.log_frames < restart.log_frames);
+    assert!(second_frames < restart_frames);
     database.close().await.unwrap();
 }
 
@@ -372,13 +387,17 @@ async fn a_restart_checkpoint_reports_busy_while_a_read_uses_the_wal() {
             .await
     });
     read.await.unwrap();
-    let busy = database.checkpoint(CheckpointMode::Restart).await.unwrap();
-    assert!(busy.busy);
-    assert!(busy.log_frames > 0);
+    let WalCheckpoint::Ran { busy, log_frames, .. } =
+        database.checkpoint(CheckpointMode::Restart).await.unwrap()
+    else {
+        panic!("the restart read the WAL");
+    };
+    assert!(busy);
+    assert!(log_frames > 0);
     release.send(()).unwrap();
     task.await.unwrap().unwrap();
     let done = database.checkpoint(CheckpointMode::Restart).await.unwrap();
-    assert!(!done.busy);
+    assert!(matches!(done, WalCheckpoint::Ran { busy: false, .. }), "{done:?}");
     database.close().await.unwrap();
 }
 

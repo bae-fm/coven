@@ -64,6 +64,15 @@ impl Database {
         assert_eq!(checkpointers.len(), 2, "the store's database has a checkpointer");
         checkpointers[1].fault(fault);
     }
+
+    /// Run one checkpoint of the store's database now, on its checkpointer's
+    /// connection, as a commit's wake does (§4).
+    pub(crate) fn checkpoint_now(&self) -> Result<(), DbError> {
+        let slot = self.inner.read().unwrap();
+        let checkpointers = &slot.as_ref().unwrap().checkpoints;
+        assert_eq!(checkpointers.len(), 2, "the store's database has a checkpointer");
+        checkpointers[1].run_now()
+    }
 }
 
 impl DatabaseReadHandle {

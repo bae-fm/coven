@@ -570,7 +570,7 @@ async fn the_apps_sqlite_settings_reach_both_handles_from_creation() {
     );
     assert_eq!(chosen(handle.sqlite_settings().await.unwrap()), expected);
     let checkpoint = handle.checkpoint(CheckpointMode::Truncate).await.unwrap();
-    assert!(!checkpoint.busy);
+    assert!(matches!(checkpoint, WalCheckpoint::Ran { busy: false, .. }), "{checkpoint:?}");
     handle.incremental_vacuum(IncrementalVacuum::All).await.unwrap();
     let store = handle.store_id();
     let reader = builder().open_read_only(store).await.unwrap();

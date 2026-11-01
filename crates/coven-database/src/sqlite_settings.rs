@@ -245,14 +245,23 @@ pub enum CheckpointMode {
 
 /// What a checkpoint did, as SQLite reports it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct WalCheckpoint {
-    /// A `Full`, `Restart` or `Truncate` checkpoint could not finish within
-    /// the busy timeout, because a reader or another writer held on.
-    pub busy: bool,
-    /// Frames in the WAL.
-    pub log_frames: u32,
-    /// Frames copied into the database, this time or before.
-    pub checkpointed_frames: u32,
+pub enum WalCheckpoint {
+    /// SQLite read nothing of the WAL, so it reports no frames: another
+    /// connection was checkpointing the WAL, or was committing to it as
+    /// SQLite read where it ends. SQLite gives up on this at once, without
+    /// waiting out the busy timeout.
+    NotStarted,
+    /// SQLite read the WAL and copied what it could.
+    Ran {
+        /// A `Full`, `Restart` or `Truncate` checkpoint could not finish
+        /// within the busy timeout, because a reader or another writer held
+        /// on.
+        busy: bool,
+        /// Frames in the WAL.
+        log_frames: u32,
+        /// Frames copied into the database, this time or before.
+        checkpointed_frames: u32,
+    },
 }
 
 /// How many free pages an incremental vacuum gives back.
@@ -519,8 +528,10 @@ impl DatabaseConnection {
         })
     }
 
-    /// Checkpoint the WAL outside any transaction. This connection is the
-    /// writer, always in WAL mode, so SQLite reports both frame counts.
+    /// Checkpoint the WAL outside any transaction, on a connection in WAL
+    /// mode: the writer, or a checkpointer's own. SQLite reports the frames
+    /// unless it read nothing of the WAL, which it reports as busy with no
+    /// frames.
     pub(crate) fn wal_checkpoint(&self, mode: CheckpointMode) -> Result<WalCheckpoint, DbError> {
         let mode = match mode {
             CheckpointMode::Noop => "NOOP",
@@ -533,12 +544,15 @@ impl DatabaseConnection {
             self.query_row(&format!("PRAGMA main.wal_checkpoint({mode})"), [], |r| {
                 Ok((r.get(0)?, r.get(1)?, r.get(2)?))
             })?;
+        if (busy, log, checkpointed) == (1, -1, -1) {
+            return Ok(WalCheckpoint::NotStarted);
+        }
         let frames = |count: i64| {
             u32::try_from(count).map_err(|_overflow| DbError::Invariant {
-                what: "a checkpoint of the writer's WAL reports its frames",
+                what: "a checkpoint that read the WAL reports its frames",
             })
         };
-        Ok(WalCheckpoint {
+        Ok(WalCheckpoint::Ran {
             busy: busy != 0,
             log_frames: frames(log)?,
             checkpointed_frames: frames(checkpointed)?,

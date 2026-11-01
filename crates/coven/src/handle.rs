@@ -340,6 +340,7 @@ impl CovenHandle {
     /// Checkpoints the store's WAL between writes, returning what SQLite
     /// reports (§4). `Restart` and `Truncate` wait up to the busy timeout for
     /// reads still using the WAL, and report `busy` if they outlast it.
+    /// `NotStarted` when another connection was checkpointing or committing.
     pub async fn checkpoint(&self, mode: CheckpointMode) -> Result<WalCheckpoint, DbError> {
         self.database.checkpoint(mode).await
     }

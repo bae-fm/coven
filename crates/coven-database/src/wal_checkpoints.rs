@@ -13,7 +13,9 @@
 //! from its start.
 //!
 //! A checkpoint that finds the database busy or locked waited out its busy
-//! timeout; the next wake tries again. Any other failure, or a panic in a
+//! timeout; the next wake tries again. So does one SQLite couldn't start,
+//! reading nothing of the WAL, because another connection was checkpointing
+//! it or committing to it right then. Any other failure, or a panic in a
 //! checkpoint, stops checkpointing for good, so the task fails the handle
 //! with it: every later call and live query reports it until the store is
 //! reopened, rather than the store staying open while its WAL grows without
@@ -23,7 +25,7 @@
 use crate::database::with_locked;
 use crate::observation::{CommitObserver, HandleFailure};
 use crate::sqlite::DatabaseConnection;
-use crate::{CheckpointMode, DbError};
+use crate::{CheckpointMode, DbError, WalCheckpoint};
 use coven_foundation::task::TaskFailed;
 use std::num::NonZeroU32;
 use std::ops::ControlFlow;
@@ -207,8 +209,13 @@ impl Checkpoints {
             let Some(writer) = self.writer.upgrade() else {
                 return Ok(());
             };
-            let held = connection.wal_checkpoint(CheckpointMode::Noop)?;
-            if held.log_frames.saturating_sub(held.checkpointed_frames) < self.threshold.get() {
+            // A WAL SQLite couldn't read now is read again at the next wake.
+            let WalCheckpoint::Ran { log_frames, checkpointed_frames, .. } =
+                connection.wal_checkpoint(CheckpointMode::Noop)?
+            else {
+                return Ok(());
+            };
+            if log_frames.saturating_sub(checkpointed_frames) < self.threshold.get() {
                 return Ok(());
             }
             // Copy what no reader needs while coven's writes go on.
@@ -221,11 +228,7 @@ impl Checkpoints {
                 self.fault()?;
                 connection.wal_checkpoint(CheckpointMode::Restart)
             })?;
-            tracing::debug!(
-                frames = held.log_frames,
-                busy = restarted.busy,
-                "checkpointed the WAL"
-            );
+            tracing::debug!(frames = log_frames, ?restarted, "checkpointed the WAL");
             Ok(())
         })
     }

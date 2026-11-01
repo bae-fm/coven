@@ -1,7 +1,10 @@
 use crate::tests::TestStore;
-use crate::{CheckpointMode, CovenError, DbError, Migration, SqliteSettings, WalAutocheckpoint};
+use crate::{
+    CheckpointMode, CovenError, DbError, Migration, SqliteSettings, WalAutocheckpoint,
+    WalCheckpoint,
+};
 use std::num::NonZeroU32;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -18,6 +21,11 @@ impl super::WalCheckpointer {
             .expect("checkpointer lock poisoned")
             .as_ref()
             .map_or(Ok(()), visit)
+    }
+
+    /// Run one wake's checkpoint now, on the calling thread.
+    pub(crate) fn run_now(&self) -> Result<(), crate::DbError> {
+        self.shared.run()
     }
 
     /// Run `fault` as each checkpoint takes the writer.
@@ -63,7 +71,10 @@ async fn add(db: &crate::Database) {
 
 /// Frames the WAL holds now.
 async fn frames(db: &crate::Database) -> u32 {
-    db.checkpoint(CheckpointMode::Noop).await.unwrap().log_frames
+    match db.checkpoint(CheckpointMode::Noop).await.unwrap() {
+        WalCheckpoint::Ran { log_frames, .. } => log_frames,
+        WalCheckpoint::NotStarted => panic!("a NOOP checkpoint between writes reads the WAL"),
+    }
 }
 
 /// The writer never checkpoints as it commits; coven's checkpointer does,
@@ -113,7 +124,7 @@ async fn off_leaves_checkpoints_to_the_app() {
     tokio::time::sleep(Duration::from_millis(50)).await;
     assert!(frames(&db).await >= 400);
     let done = db.checkpoint(CheckpointMode::Truncate).await.unwrap();
-    assert!(!done.busy);
+    assert!(matches!(done, WalCheckpoint::Ran { busy: false, .. }), "{done:?}");
     assert_eq!(frames(&db).await, 0);
     db.close().await.unwrap();
 }
@@ -244,6 +255,80 @@ async fn a_busy_checkpoint_is_tried_again() {
         assert!(writes < 1000, "the checkpoint was not tried again");
     }
     db.read(|sql| Ok(sql.query_row("SELECT 1", [], |r| r.get::<_, i64>(0))?)).await.unwrap();
+    db.close().await.unwrap();
+}
+
+/// Set once the connection holding SQLite's checkpoint lock waits in its
+/// busy handler; the test sets the second to let it give up.
+static HOLDING: AtomicBool = AtomicBool::new(false);
+static RELEASED: AtomicBool = AtomicBool::new(false);
+
+/// A busy handler that waits until the test releases it, then gives up.
+fn wait_for_release(_tries: i32) -> bool {
+    HOLDING.store(true, Ordering::SeqCst);
+    while !RELEASED.load(Ordering::SeqCst) {
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    false
+}
+
+/// Start another connection's RESTART checkpoint, which takes SQLite's
+/// checkpoint lock and holds it while it waits for a reader, until the test
+/// releases it. It returns SQLite's busy column. A try that finds coven's
+/// own checkpointer holding the lock gives up at once, so it tries again.
+async fn hold_the_checkpoint_lock(store: &TestStore) -> std::thread::JoinHandle<i64> {
+    loop {
+        let path = store.database_path();
+        let holder = std::thread::spawn(move || {
+            let connection = rusqlite::Connection::open(path).unwrap();
+            connection.busy_handler(Some(wait_for_release)).unwrap();
+            connection.query_row("PRAGMA wal_checkpoint(RESTART)", [], |r| r.get(0)).unwrap()
+        });
+        while !HOLDING.load(Ordering::SeqCst) && !holder.is_finished() {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+        if HOLDING.load(Ordering::SeqCst) {
+            return holder;
+        }
+        holder.join().unwrap();
+    }
+}
+
+/// While another connection checkpoints the WAL, it holds SQLite's
+/// checkpoint lock, and a checkpoint that finds the lock held reads nothing
+/// of the WAL: SQLite reports busy with no frames. That is the database
+/// busy, not a failure: coven's checkpointer tries again at the next wake,
+/// and the handle goes on (§4).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_checkpoint_another_connection_holds_off_is_tried_again() {
+    let store = TestStore::new();
+    let db = blobs(&store, checkpointed_at_100_pages()).open().await.unwrap();
+    // A reader whose snapshot keeps every later frame in the WAL, so the WAL
+    // stays past the threshold however often coven checkpoints.
+    let reader = rusqlite::Connection::open(store.database_path()).unwrap();
+    reader.execute_batch("BEGIN").unwrap();
+    let _: i64 = reader.query_row("SELECT count(*) FROM blobs", [], |r| r.get(0)).unwrap();
+    for _ in 0..40 {
+        add(&db).await;
+    }
+    let holder = hold_the_checkpoint_lock(&store).await;
+
+    let checkpoint = db.checkpoint(CheckpointMode::Passive).await.unwrap();
+    assert_eq!(checkpoint, WalCheckpoint::NotStarted);
+    // The WAL is past the threshold, so this goes on past reading it to
+    // copying it, which finds the lock held.
+    db.checkpoint_now().unwrap();
+
+    RELEASED.store(true, Ordering::SeqCst);
+    assert_eq!(holder.join().unwrap(), 1, "the other checkpoint gave up waiting for the reader");
+    reader.execute_batch("COMMIT").unwrap();
+    drop(reader);
+    let mut writes = 0;
+    while frames(&db).await >= 100 {
+        add(&db).await;
+        writes += 1;
+        assert!(writes < 100, "coven's checkpoints stopped");
+    }
     db.close().await.unwrap();
 }
 

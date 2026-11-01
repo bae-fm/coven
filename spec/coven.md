@@ -753,16 +753,19 @@ whole WAL and removes its file. Coven's own database beside the store's,
 `inputs.db`, which keeps what this device observed in storage apart from
 the app's writes, is checkpointed the same way.
 
-A checkpoint can fail. When SQLite finds the database busy or locked past
-its wait, coven tries again at the next commit. Any other failure would stop
-coven's checkpoints for good, and the WAL would then grow without bound while
-the store stayed open, so coven fails the handle instead. A checkpoint that
-panics, a bug in coven, fails it with `DbError::CheckpointPanicked`. One that
-SQLite fails, as on a full disk, fails it with `DbError::CheckpointFailed`
-and SQLite's cause. Every later call on that handle and every live query
-fails with it until the store is reopened, as after a failed rollback. A
-runtime that shuts down drops the checkpoint's work with it, which fails
-nothing: the process is ending the store.
+A checkpoint can fail. When SQLite finds the database busy or locked past its
+wait, coven tries again at the next commit. So it does when SQLite can't start
+the checkpoint at all: another connection was checkpointing the WAL, or was
+committing to it just as SQLite read where it ends, and SQLite gives up at
+once, reporting the database busy and no frames. Nothing is wrong then, only
+busy. Any other failure would stop coven's checkpoints for good, and the WAL
+would then grow without bound while the store stayed open, so coven fails the
+handle instead. A checkpoint that panics, a bug in coven, fails it with
+`DbError::CheckpointPanicked`. One that SQLite fails, as on a full disk, fails
+it with `DbError::CheckpointFailed` and SQLite's cause. Every later call on
+that handle and every live query fails with it until the store is reopened, as
+after a failed rollback. A runtime that shuts down drops the checkpoint's work
+with it, which fails nothing: the process is ending the store.
 
 On Windows a store's path is verbatim (`\\?\D:\…`), and SQLite takes a
 path that starts `\\` for a network share. There it locks the WAL's
