@@ -11,7 +11,7 @@ async fn fixture(clock: &Arc<FixedClock>) -> Fixture {
     let f = Fixture::with_clock(Provenance::AppProvided, clock.clone()).await;
     // Only the explicit drains below attempt uploads.
     f.files.stop_background_for_counts().await;
-    f.files.set_uploads_paused(false).await.unwrap();
+    f.set_uploads_paused(false).await;
     f
 }
 
@@ -103,7 +103,7 @@ async fn reopening_keeps_the_remaining_delay_and_its_exponent() {
     clock.set(clock.now() - Duration::from_secs(3600));
     f.reopen().await;
     f.files.stop_background_for_counts().await;
-    f.files.set_uploads_paused(false).await.unwrap();
+    f.set_uploads_paused(false).await;
     advance(&clock, 0);
     // Restart waits min(T - now, W): the backward clock cannot stretch it.
     assert_eq!(retry_in(&f), Some(Duration::from_secs(8)));
@@ -154,7 +154,7 @@ async fn the_worker_wakes_for_a_due_retry_without_another_commit() {
     let file = f.attach("files", "photo", b"photo".to_vec()).await;
     // The database's queue state includes each persisted wait.
     let mut uploads = f.subscribe_queue();
-    f.files.set_uploads_paused(false).await.unwrap();
+    f.set_uploads_paused(false).await;
     tokio::time::timeout(Duration::from_secs(5), async {
         while retry(&f).await.is_none() {
             uploads.next().await.expect("the live query answers").unwrap();
@@ -188,7 +188,7 @@ async fn completed_catch_up_wakes_a_worker_blocked_between_file_sends() {
     let (resume, held) = tokio::sync::oneshot::channel();
     f.storage.hold_next_creation(ObjectPrefix::files(f.directory.id()), started, held).await;
     let mut uploads = f.subscribe_queue();
-    f.files.set_uploads_paused(false).await.unwrap();
+    f.set_uploads_paused(false).await;
     observed.await.unwrap();
     f.send.set(crate::SequenceStatus::Opening);
     resume.send(()).unwrap();
@@ -474,7 +474,7 @@ async fn pausing_between_parts_and_reconnecting_resume_the_recorded_session() {
     *storage.on_part.lock().unwrap() =
         Some(Box::new(move || inner.paused.store(true, std::sync::atomic::Ordering::Release)));
     assert_eq!(f.files.inner.drain_uploads().await.unwrap(), DrainOutcome::Paused);
-    f.files.set_uploads_paused(true).await.unwrap();
+    f.set_uploads_paused(true).await;
     assert_eq!(confirmed(&f).await, CHUNK as u64);
     let paused = &f.queue().await.files[0];
     assert_eq!(
@@ -506,7 +506,7 @@ async fn pausing_between_parts_and_reconnecting_resume_the_recorded_session() {
     f.send.set(crate::SequenceStatus::Opening);
     let reconnected = StepStorage::new(&f, &clock, 0);
     f.files.set_storage(Some(reconnected.clone()), std::future::ready(Ok(()))).await.unwrap();
-    f.files.set_uploads_paused(false).await.unwrap();
+    f.set_uploads_paused(false).await;
     let requests = f.storage.request_trace().len();
     assert!(f.files.inner.drain_uploads().await.is_err());
     assert_eq!(f.storage.request_trace().len(), requests);
@@ -558,7 +558,7 @@ async fn the_queue_reads_the_same_after_reopening_offline() {
     *storage.on_part.lock().unwrap() =
         Some(Box::new(move || inner.paused.store(true, std::sync::atomic::Ordering::Release)));
     assert_eq!(f.files.inner.drain_uploads().await.unwrap(), DrainOutcome::Paused);
-    f.files.set_uploads_paused(true).await.unwrap();
+    f.set_uploads_paused(true).await;
     let before = f.queue().await;
     assert!(before.paused);
     let viewed = f.viewed_queue().await;
@@ -759,7 +759,7 @@ async fn a_single_request_retry_refuses_a_source_changed_after_a_failed_send() {
     f.files.stop_background_for_counts().await;
     let file = f.original("take", &vec![7; CHUNK - 100]).await;
     f.storage.set_faults(Faults { fail_next: 1, ..Faults::none() }).await;
-    f.files.set_uploads_paused(false).await.unwrap();
+    f.set_uploads_paused(false).await;
     f.files.inner.drain_uploads_retrying().await.unwrap();
     assert!(f.queued(&file).await);
     std::fs::write(f.root.path().join("take"), vec![8; CHUNK - 100]).unwrap();

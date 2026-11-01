@@ -48,10 +48,4 @@ impl<'write> Journal<'write> {
     pub fn clear_retry(&self, subject: RetrySubject) -> Result<(), DbError> {
         crate::retry::clear(self.files.database, subject)
     }
-
-    /// Run `effect` once the write has committed, as the in-memory side of
-    /// a step: nothing runs for a write that rolls back.
-    pub fn after_commit(&self, effect: impl FnOnce() + 'static) {
-        self.files.after_commit(Box::new(effect));
-    }
 }

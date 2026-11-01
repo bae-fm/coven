@@ -57,6 +57,14 @@ impl<'write> CovenWrite<'write> {
         self.sql.set_cache_budget(namespace, max_bytes)
     }
 
+    /// Pauses trailing uploads, or resumes them (§17.9). A paused upload
+    /// keeps its place, including a provider upload session in progress,
+    /// and stops between confirmed parts; the setting persists. Bound
+    /// uploads run on, since writes wait for them (§17.4).
+    pub fn set_uploads_paused(&self, paused: bool) -> Result<(), DbError> {
+        self.storage.set_uploads_paused(&self.sql, paused)
+    }
+
     /// Makes an operation's retry or undo due now, from its recorded
     /// progress (E6): its pending record and retry wait end in this write.
     /// It fails with `NotPending` for an operation that has finished or
@@ -65,7 +73,7 @@ impl<'write> CovenWrite<'write> {
     /// can't bypass a provider cooldown. Once the write commits, a pass runs
     /// the operation as soon as storage is connected.
     pub fn retry_pending_operation(&self, operation: OperationId) -> Result<(), OperationError> {
-        self.sql.journal_step(|journal| self.storage.retry_pending_operation(journal, operation))
+        self.storage.retry_pending_operation(&self.sql, operation)
     }
 
     /// Execute one app statement with parameters.

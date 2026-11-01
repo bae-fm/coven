@@ -5815,10 +5815,15 @@ to the same limit, so a cover never waits behind the photos (§17.4).
   left any, are deleted under §17.10.
 - A changed limit applies to the next upload that starts. Uploads in flight
   keep running when the limit drops.
-- Pausing starts no new trailing upload; a bound one runs on (§17.4). A
-  provider cooldown, a required catch-up (§5.4) and a connection change start
-  no new upload of either lane. Uploads in flight finish or stop at their next
-  part, and the worker starts again when the condition ends. A connection
+- Pausing starts no new trailing upload; a bound one runs on (§17.4). The pause
+  is a step of a write (§4), so Ana's app can record "uploads paused for the
+  trip" in its own row in the same write. Once that write commits, and before
+  it returns, the worker takes the new setting, after any run that read the old
+  one has acted on it: so a retry asked after the write returns is never
+  answered with the setting it replaced. A provider cooldown, a required
+  catch-up (§5.4) and a connection change start no new upload of either lane.
+  Uploads in flight finish or stop at their next part, and the worker starts
+  again when the condition ends. A connection
   change waits for the uploads in flight before it swaps the connection.
 - `retry_uploads_now` joins the uploads in progress rather than waiting for
   them. It covers every queued file that can retry, whatever its delay, and

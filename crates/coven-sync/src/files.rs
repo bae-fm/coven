@@ -194,19 +194,31 @@ impl Files {
         // The worker stopping with the store drops the retry unanswered.
         answer.await.unwrap_or_else(|_| Err(DbError::StoreClosed.into()))
     }
-    /// Persist the pause setting; a running trailing upload stops between
-    /// confirmed parts, preserving its provider session (E7). Bound uploads
-    /// run on (§17.4).
-    pub async fn set_uploads_paused(&self, paused: bool) -> Result<(), DbError> {
+    /// Persist the pause setting, as a step of `sql`'s write; a running
+    /// trailing upload stops between confirmed parts, preserving its
+    /// provider session (E7). Bound uploads run on (§17.4). Once the write
+    /// commits, and before it returns, the copy parts check takes the new
+    /// setting, after any upload run that read the old one has acted on it:
+    /// so no retry asked after the write returns is answered from the
+    /// setting it replaced.
+    pub fn set_uploads_paused(
+        &self,
+        sql: &coven_database::SqlContext<'_, '_>,
+        paused: bool,
+    ) -> Result<(), DbError> {
         self.inner.check_open()?;
-        {
-            let _change = self.inner.pause_change.lock().await;
-            self.inner.database.set_uploads_paused(paused).await?;
-            self.inner.paused.store(paused, Ordering::Release);
-        }
-        if !paused {
-            self.inner.upload_wake.notify_one();
-        }
+        sql.set_uploads_paused(paused)?;
+        let inner = self.inner.clone();
+        sql.after_commit(move || {
+            // The write's effects run on its blocking thread, where waiting
+            // for the run is allowed.
+            let change = inner.pause_change.blocking_lock();
+            inner.paused.store(paused, Ordering::Release);
+            drop(change);
+            if !paused {
+                inner.upload_wake.notify_one();
+            }
+        });
         Ok(())
     }
 

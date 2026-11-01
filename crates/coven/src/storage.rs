@@ -269,15 +269,25 @@ impl StorageConnections {
     /// for (E6).
     pub(crate) fn retry_pending_operation(
         &self,
-        journal: &coven_database::Journal<'_>,
+        sql: &coven_database::SqlContext<'_, '_>,
         operation: OperationId,
     ) -> Result<(), SyncError> {
         coven_sync::retry_pending_operation(
-            journal,
+            sql,
             self.waits.clone(),
             self.publications.state.clone(),
             operation,
         )
+    }
+
+    /// Pause trailing uploads, or resume them, as a step of an app's write
+    /// (E7).
+    pub(crate) fn set_uploads_paused(
+        &self,
+        sql: &coven_database::SqlContext<'_, '_>,
+        paused: bool,
+    ) -> Result<(), DbError> {
+        self.files.set_uploads_paused(sql, paused)
     }
 
     pub(crate) async fn storage_config(&self) -> Result<Option<StorageConfig>, SyncError> {

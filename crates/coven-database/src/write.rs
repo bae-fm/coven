@@ -60,6 +60,19 @@ impl<'connection, 'write> SqlContext<'connection, 'write> {
         self.files.step(|| self.files.set_cache_budget(namespace, bytes))
     }
 
+    /// Pause trailing uploads, or resume them, in this write (§17.9). A
+    /// paused upload keeps its place and its provider session.
+    pub fn set_uploads_paused(&self, paused: bool) -> Result<(), crate::DbError> {
+        self.files.step(|| self.files.set_uploads_paused(paused))
+    }
+
+    /// Run `effect` once this write has committed, as the in-memory side of
+    /// one of coven's steps: nothing runs for a write that rolls back. The
+    /// write returns only once every effect has run.
+    pub fn after_commit(&self, effect: impl FnOnce() + 'static) {
+        self.files.after_commit(Box::new(effect));
+    }
+
     /// Run one of sync's steps on the journal in this write (§4, §11). A
     /// failed step fails the write, even if the closure goes on and returns
     /// success, since it may have made only part of its change.

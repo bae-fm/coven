@@ -125,7 +125,7 @@ async fn the_pause_setting_and_queue_survive_reopening_in_one_query() {
     let first = queue.next().await.expect("the live query answers").unwrap();
     assert!(!first.paused);
     assert_eq!(first.uploads.len(), 1);
-    owner.set_uploads_paused(true).await.unwrap();
+    db.write(|sql| sql.set_uploads_paused(true)).await.unwrap();
     assert!(queue.next().await.expect("the live query answers").unwrap().paused);
     let session = SecretBytes::new(b"session".to_vec());
     owner
@@ -144,7 +144,7 @@ async fn the_pause_setting_and_queue_survive_reopening_in_one_query() {
     assert_eq!(db.upload_queue().await.unwrap(), recorded);
     let owner = FileDatabase::new(db.clone());
     assert!(owner.uploads_paused().await.unwrap());
-    owner.set_uploads_paused(false).await.unwrap();
+    db.write(|sql| sql.set_uploads_paused(false)).await.unwrap();
     assert!(!db.upload_queue().await.unwrap().paused);
     db.close().await.unwrap();
 }

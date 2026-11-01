@@ -368,12 +368,6 @@ impl FileDatabase {
     pub async fn uploads_paused(&self) -> Result<bool, DbError> {
         self.read(file_queue::paused).await
     }
-    /// Persist the app's pause setting. A paused upload keeps its place and
-    /// its provider session.
-    pub async fn set_uploads_paused(&self, paused: bool) -> Result<(), DbError> {
-        self.require_writer()?;
-        self.run(move |db, _, _, _| db.transaction(|db| file_queue::set_paused(db, paused))).await
-    }
     /// Each queued upload with this device's pending record about its file,
     /// read in one committed state: the reason an earlier attempt left decides
     /// whether automatic work retries it (§17.9).

@@ -1,5 +1,5 @@
-//! The uploads a write queues for its staged files and moves, and the write
-//! that completes one (§17.3, §17.9).
+//! The uploads a write queues for its staged files and moves, the write
+//! that completes one, and the app's pause of them (§17.3, §17.9).
 
 use super::{FileWrite, StagedFile, StagedSource};
 use crate::{
@@ -169,6 +169,11 @@ pub(crate) fn share(db: &DatabaseConnection, from: FileId, to: FileId) -> Result
 }
 
 impl FileWrite<'_> {
+    /// Persist the app's pause setting for trailing uploads (§17.4).
+    pub(crate) fn set_uploads_paused(&self, paused: bool) -> Result<(), DbError> {
+        crate::file_queue::set_paused(self.database, paused)
+    }
+
     /// The app phase of the write completing upload `upload` (§17.3, §17.9):
     /// its bytes are stored, and once every upload of its move is, this
     /// write switches each file of the move to its stored bytes. A file gone

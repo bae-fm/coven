@@ -25,13 +25,13 @@ pub(crate) enum OperationFailure<'a> {
 /// operation's wait ends in this session too, and a pass is asked for to
 /// run it.
 pub fn retry_pending_operation(
-    journal: &Journal<'_>,
+    sql: &coven_database::SqlContext<'_, '_>,
     waits: Arc<RetryWaits>,
     state: Arc<SyncState>,
     id: OperationId,
 ) -> Result<(), SyncError> {
-    clear_for_retry(journal, id)?;
-    journal.after_commit(move || {
+    sql.journal_step(|journal| clear_for_retry(journal, id))?;
+    sql.after_commit(move || {
         waits.retried(id);
         state.request_pass();
     });

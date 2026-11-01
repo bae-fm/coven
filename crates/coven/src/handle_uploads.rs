@@ -15,11 +15,10 @@ impl CovenHandle {
     pub async fn retry_uploads_now(&self) -> Result<DrainOutcome, SyncError> {
         self.files.retry_uploads_now().await
     }
-    /// Pause trailing uploads, or resume them. A paused upload keeps its
-    /// place, including a provider upload session in progress; the setting
-    /// persists. Bound uploads run on, since writes wait for them (§17.4).
+    /// Pause trailing uploads, or resume them, in a write of its own
+    /// (`CovenWrite::set_uploads_paused`).
     pub async fn set_uploads_paused(&self, paused: bool) -> CovenResult<()> {
-        Ok(self.files.set_uploads_paused(paused).await?)
+        self.write(move |write| Ok(write.set_uploads_paused(paused)?)).await
     }
 }
 

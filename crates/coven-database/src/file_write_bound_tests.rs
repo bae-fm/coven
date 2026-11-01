@@ -238,7 +238,7 @@ async fn the_pause_shows_on_trailing_uploads_only() {
         .unwrap()
     };
     assert_eq!(paused(db.clone()).await, [(photo, false), (cover, false)]);
-    crate::FileDatabase::new(db.clone()).set_uploads_paused(true).await.unwrap();
+    db.write(|sql| sql.set_uploads_paused(true)).await.unwrap();
     assert_eq!(paused(db.clone()).await, [(photo, true), (cover, false)]);
     db.close().await.unwrap();
 }

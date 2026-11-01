@@ -30,7 +30,7 @@ async fn local_reads_settle_only_the_source_condition_they_checked() {
     assert!(f.files.inner.database.uploads().await.unwrap()[0].retry.is_none());
 
     f.storage.set_online(false);
-    f.files.set_uploads_paused(false).await.unwrap();
+    f.set_uploads_paused(false).await;
     f.files.inner.drain_uploads_retrying().await.unwrap();
     let failed_upload = file_records(&f).await;
     assert!(matches!(

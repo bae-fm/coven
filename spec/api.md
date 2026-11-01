@@ -5047,15 +5047,23 @@ impl CovenHandle {
     /// (§6.7).
     pub async fn retry_uploads_now(&self) -> Result<DrainOutcome, SyncError>;
 
-    /// Pauses trailing uploads, or resumes them. A paused upload keeps its
-    /// place, including a provider upload session in progress. Bound uploads
-    /// run on, since writes wait for them (§17.4).
+    /// `CovenWrite::set_uploads_paused`, in a write of its own.
     pub async fn set_uploads_paused(&self, paused: bool) -> CovenResult<()>;
 
     /// How far each file this process is sending has got, by file: every
     /// one being sent first, then each change as its bytes go, until the
     /// store closes. The files are the ones `coven_sending` lists (E4).
     pub fn subscribe_upload_transfers(&self) -> TransferWatch;
+}
+
+impl CovenWrite<'_> {
+    /// Pauses trailing uploads, or resumes them, as a step of this write
+    /// (§4, §17.9). A paused upload keeps its place, including a provider
+    /// upload session in progress, and stops between confirmed parts; the
+    /// setting persists. Bound uploads run on, since writes wait for them
+    /// (§17.4). A retry asked after the write returns is never answered
+    /// from the setting it replaced.
+    pub fn set_uploads_paused(&self, paused: bool) -> Result<(), DbError>;
 }
 
 /// How far one file's transfer has got: the bytes of its encrypted object

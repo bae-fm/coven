@@ -301,21 +301,36 @@ async fn coven_uploads_gives_each_files_confirmed_bytes() {
 
 /// `coven_upload_pause` says whether uploads are paused in one row, with an
 /// empty queue too, and a live query that reads it reruns as the app pauses
-/// or resumes (E4, E7).
+/// or resumes (E4, E7). The pause is a step of the app's write: written
+/// beside an app row, it commits with it, and the live query runs once for
+/// the write.
 #[tokio::test]
 async fn coven_upload_pause_says_whether_uploads_are_paused() {
     use crate::file_write::tests::open;
-    use crate::{FileDatabase, Provenance};
+    use crate::Provenance;
     let store = TestStore::new();
     let db = open(&store, Provenance::AppProvided).await;
-    let mut paused = db.subscribe(|sql| {
-        Ok(sql.query_row("SELECT paused FROM coven_upload_pause", [], |r| r.get::<_, bool>(0))?)
-    });
+    let mut paused = db
+        .subscribe(|sql| {
+            Ok(sql
+                .query_row("SELECT paused FROM coven_upload_pause", [], |r| r.get::<_, bool>(0))?)
+        })
+        .process(Ok);
+    let runs = paused.runs();
     assert!(!paused.next().await.unwrap().unwrap());
-    let owner = FileDatabase::new(db.clone());
-    owner.set_uploads_paused(true).await.unwrap();
+    db.write(|sql| {
+        sql.execute("INSERT INTO files(id) VALUES('paused')", [])?;
+        sql.set_uploads_paused(true)?;
+        assert!(
+            sql.query_row("SELECT paused FROM coven_upload_pause", [], |r| r.get::<_, bool>(0))?
+        );
+        Ok(())
+    })
+    .await
+    .unwrap();
     assert!(paused.next().await.unwrap().unwrap());
-    owner.set_uploads_paused(false).await.unwrap();
+    assert_eq!(runs.writes(), 1);
+    db.write(|sql| sql.set_uploads_paused(false)).await.unwrap();
     assert!(!paused.next().await.unwrap().unwrap());
     db.close().await.unwrap();
 }

@@ -24,6 +24,11 @@ struct Fixture {
     namespaces: Vec<Namespace>,
 }
 impl Fixture {
+    /// Pause trailing uploads, or resume them, in a write as the app does.
+    async fn set_uploads_paused(&self, paused: bool) {
+        let files = self.files.clone();
+        self.database.write(move |sql| files.set_uploads_paused(&sql, paused)).await.unwrap();
+    }
     async fn new(provenance: Provenance) -> Self {
         let clock: ClockRef =
             Arc::new(ClosureClock(|| SystemTime::UNIX_EPOCH + Duration::from_secs(100)));
@@ -176,7 +181,7 @@ impl Fixture {
             .unwrap()
     }
     async fn drain(&self) {
-        self.files.set_uploads_paused(false).await.unwrap();
+        self.set_uploads_paused(false).await;
         self.files.inner.drain_uploads_retrying().await.unwrap();
         for upload in self.queue().await.files {
             let file = self.database.file_ref(upload.file).await.unwrap();
@@ -667,7 +672,7 @@ async fn a_file_is_on_its_device_only_until_its_upload_completes() {
         let a = Fixture::new(provenance.clone()).await;
         let b = Fixture::new(provenance.clone()).await;
         a.files.set_storage(None, std::future::ready(Ok(()))).await.unwrap();
-        a.files.set_uploads_paused(false).await.unwrap();
+        a.set_uploads_paused(false).await;
         let local = match provenance {
             Provenance::AppProvided => a.attach("files", "waiting", b"content".to_vec()).await,
             Provenance::UserProvided => a.original("waiting", b"content").await,
@@ -762,7 +767,7 @@ async fn paused_files(
     ids: IdSourceRef,
     transfers: Arc<coven_storage::TransferBudget>,
 ) -> Files {
-    FileDatabase::new(database.clone()).set_uploads_paused(true).await.unwrap();
+    database.write(|sql| sql.set_uploads_paused(true)).await.unwrap();
     let files = Files::new(
         FileDatabase::new(database.clone()),
         directory.clone(),
@@ -773,7 +778,8 @@ async fn paused_files(
         transfers,
     );
     // The owner's own copy of the setting, which parts check between sends.
-    files.set_uploads_paused(true).await.unwrap();
+    let owner = files.clone();
+    database.write(move |sql| owner.set_uploads_paused(&sql, true)).await.unwrap();
     files
 }
 

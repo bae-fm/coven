@@ -63,7 +63,7 @@ async fn uploads_queued_during_an_upload_fill_every_free_slot() {
     let f = Fixture::new(Provenance::AppProvided).await;
     let gate = gated(&f, 3).await;
     let mut files = vec![f.attach("files", "a", photo(1)).await];
-    f.files.set_uploads_paused(false).await.unwrap();
+    f.set_uploads_paused(false).await;
     until_creates(&f, 1).await;
     for (n, id) in ["b", "c", "d", "e"].into_iter().enumerate() {
         files.push(f.attach("files", id, photo(n as u8 + 2)).await);
@@ -130,14 +130,14 @@ async fn pausing_and_a_cooldown_start_no_new_upload() {
         for id in ["a", "b", "c", "d"] {
             f.attach("files", id, photo(7)).await;
         }
-        f.files.set_uploads_paused(false).await.unwrap();
+        f.set_uploads_paused(false).await;
         until_creates(&f, 2).await;
         if cooldown {
             coven_storage::Cooldown::record(f.files.inner.waits.as_ref(), Duration::from_secs(600))
                 .await
                 .unwrap();
         } else {
-            f.files.set_uploads_paused(true).await.unwrap();
+            f.set_uploads_paused(true).await;
         }
         gate.add_permits(2);
         until_queued(&f, 2).await;
@@ -160,7 +160,7 @@ async fn an_app_retry_joins_the_run_in_progress() {
     for id in ["a", "b", "c"] {
         f.attach("files", id, photo(9)).await;
     }
-    f.files.set_uploads_paused(false).await.unwrap();
+    f.set_uploads_paused(false).await;
     until_creates(&f, 2).await;
     // Both slots are busy, so the run reads the queue, and takes the retry,
     // only once the first upload ends.
@@ -196,12 +196,12 @@ async fn a_retry_after_resuming_is_never_answered_paused() {
         })
         .collect();
     for round in 0..300u16 {
-        f.files.set_uploads_paused(true).await.unwrap();
+        f.set_uploads_paused(true).await;
         f.attach("files", &format!("photo-{round}"), photo(round as u8)).await;
         for _ in 0..round % 16 {
             tokio::task::yield_now().await;
         }
-        f.files.set_uploads_paused(false).await.unwrap();
+        f.set_uploads_paused(false).await;
         assert_ne!(
             f.files.retry_uploads_now().await.unwrap(),
             DrainOutcome::Paused,
@@ -224,9 +224,9 @@ async fn a_retry_after_resuming_as_a_paused_run_ends_is_not_answered_paused() {
     let gate = gated(&f, 1).await;
     f.attach("files", "a", photo(1)).await;
     f.attach("files", "b", photo(2)).await;
-    f.files.set_uploads_paused(false).await.unwrap();
+    f.set_uploads_paused(false).await;
     until_creates(&f, 1).await;
-    f.files.set_uploads_paused(true).await.unwrap();
+    f.set_uploads_paused(true).await;
 
     let (reached, mut ending) = tokio::sync::mpsc::unbounded_channel();
     let (proceed, held) = std::sync::mpsc::channel::<()>();
@@ -244,7 +244,7 @@ async fn a_retry_after_resuming_as_a_paused_run_ends_is_not_answered_paused() {
         .expect("the run ends paused once its upload ends")
         .unwrap();
 
-    f.files.set_uploads_paused(false).await.unwrap();
+    f.set_uploads_paused(false).await;
     let answer = f.files.inner.ask_retry().unwrap();
     proceed.send(()).unwrap();
     gate.add_permits(1);
@@ -271,7 +271,7 @@ async fn a_single_request_is_uploading_without_progress_until_completion_retires
     f.storage
         .hold_next_creation(coven_storage::ObjectPrefix::files(f.directory.id()), started, resume)
         .await;
-    f.files.set_uploads_paused(false).await.unwrap();
+    f.set_uploads_paused(false).await;
     let files = f.files.clone();
     let task = tokio::spawn(async move { files.retry_uploads_now().await });
     tokio::time::timeout(Duration::from_secs(20), receiving).await.unwrap().unwrap();
@@ -322,7 +322,7 @@ async fn the_worker_s_attempts_are_what_sending_reads() {
         }
     };
     assert_eq!(until(&|_| true).await, (Vec::new(), 0, 3));
-    f.files.set_uploads_paused(false).await.unwrap();
+    f.set_uploads_paused(false).await;
     until_creates(&f, 2).await;
     let (sending, counted, queued) = until(&|(sending, _, _)| sending.len() == 2).await;
     let mut first = files[..2].to_vec();

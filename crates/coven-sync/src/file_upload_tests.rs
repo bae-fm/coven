@@ -144,7 +144,7 @@ async fn an_unedited_move_stores_the_bytes_its_import_read() {
     let mut hasher = coven_crypto::ContentHasher::new();
     hasher.update(&imported);
     assert_eq!(upload.content_hash, hasher.finish());
-    f.files.set_uploads_paused(false).await.unwrap();
+    f.set_uploads_paused(false).await;
     f.files.inner.drain_uploads().await.unwrap();
     assert!(f.move_reasons().await.is_empty());
     let stored = f.database.file_ref(file).await.unwrap();
@@ -242,7 +242,7 @@ async fn a_reopened_upload_refuses_a_changed_original_without_a_copy() {
         .unwrap();
     f.reopen().await;
     assert_eq!(f.files.read_file(&file).await.unwrap(), [94; CHUNK * 3 + 18]);
-    f.files.set_uploads_paused(false).await.unwrap();
+    f.set_uploads_paused(false).await;
     f.files.inner.drain_uploads().await.unwrap();
     // The changed original fails its move: nothing was sent, and the file
     // stays on this device only.
@@ -489,7 +489,7 @@ async fn deleting_a_row_during_its_upload_is_not_undone_by_completion() {
 #[tokio::test]
 async fn attaching_starts_upload_after_commit_and_checks_changed_originals() {
     let f = Fixture::new(Provenance::AppProvided).await;
-    f.files.set_uploads_paused(false).await.unwrap();
+    f.set_uploads_paused(false).await;
     f.attach("files", "one", vec![14; CHUNK]).await;
     let mut uploads = f.subscribe_queue();
     tokio::time::timeout(Duration::from_secs(20), async {

@@ -36,7 +36,7 @@ async fn restored_sources_upload_after_backoff() {
         if failure != FileSourceFailure::Missing {
             std::fs::write(&path, vec![42; bytes.len()]).unwrap();
         }
-        f.files.set_uploads_paused(false).await.unwrap();
+        f.set_uploads_paused(false).await;
         let requests = f.storage.request_trace().len();
         for wait in [1, 2] {
             assert_eq!(drained(f.files.inner.drain_uploads().await.unwrap()), 0);
@@ -117,7 +117,7 @@ async fn a_changed_original_fails_its_move_and_switches_nothing() {
     std::fs::write(&changed, vec![6; CHUNK + 3]).unwrap();
     let later = std::time::SystemTime::now() + Duration::from_secs(5);
     std::fs::File::options().write(true).open(&changed).unwrap().set_modified(later).unwrap();
-    f.files.set_uploads_paused(false).await.unwrap();
+    f.set_uploads_paused(false).await;
     f.files.inner.drain_uploads().await.unwrap();
     let records = f.database.pending::<crate::PendingRecord>().await.unwrap();
     let [record] = records.as_slice() else {
@@ -175,7 +175,7 @@ async fn a_move_after_an_edit_keeping_size_and_time_fails_as_changed_and_sends_n
         .write(move |sql| sql.move_to_cloud(vec![coven_database::MoveFile::User(file)]))
         .await
         .unwrap();
-    f.files.set_uploads_paused(false).await.unwrap();
+    f.set_uploads_paused(false).await;
     f.files.inner.drain_uploads().await.unwrap();
     let records = f.database.pending::<crate::PendingRecord>().await.unwrap();
     let [record] = records.as_slice() else {
@@ -207,7 +207,7 @@ async fn a_disk_failure_retries_after_its_backoff() {
     let saved = f.root.path().join("saved");
     std::fs::rename(&path, &saved).unwrap();
     std::os::unix::fs::symlink(&path, &path).unwrap();
-    f.files.set_uploads_paused(false).await.unwrap();
+    f.set_uploads_paused(false).await;
     assert_eq!(drained(f.files.inner.drain_uploads().await.unwrap()), 0);
     assert_eq!(
         f.upload_reason(&file).await,
@@ -296,7 +296,7 @@ async fn failures_that_never_clear_stay_visible_through_reconnect_and_manual_ret
     assert_eq!(drained(f.files.inner.drain_uploads_retrying().await.unwrap()), 0);
     f.reopen().await;
     f.files.stop_background_for_counts().await;
-    f.files.set_uploads_paused(false).await.unwrap();
+    f.set_uploads_paused(false).await;
     assert_eq!(drained(f.files.inner.drain_uploads().await.unwrap()), 0);
     assert_eq!(f.storage.request_trace().len(), requests);
     assert_eq!(f.database.pending::<crate::PendingRecord>().await.unwrap(), records);
@@ -313,7 +313,7 @@ async fn reopening_permits_one_attempt_for_a_connection_failure() {
     assert_eq!(drained(f.files.inner.drain_uploads().await.unwrap()), 0);
     f.reopen().await;
     f.files.stop_background_for_counts().await;
-    f.files.set_uploads_paused(false).await.unwrap();
+    f.set_uploads_paused(false).await;
     f.storage.set_faults(fail_next(StorageFailure::Authentication, None)).await;
     assert_eq!(drained(f.files.inner.drain_uploads().await.unwrap()), 0);
     let requests = f.storage.request_trace().len();
@@ -348,7 +348,7 @@ async fn the_worker_retries_a_restored_original_without_an_app_call() {
     let saved = f.root.path().join("saved");
     std::fs::rename(&path, &saved).unwrap();
     let mut uploads = f.subscribe_queue();
-    f.files.set_uploads_paused(false).await.unwrap();
+    f.set_uploads_paused(false).await;
     for failures in [1, 2] {
         tokio::time::timeout(Duration::from_secs(5), async {
             while retry(&f).await.is_none_or(|wait| wait.failures < failures) {
@@ -384,7 +384,7 @@ async fn the_worker_retries_sign_in_failure_on_client_swap() {
     let file = f.attach("files", "photo", b"photo".to_vec()).await;
     f.storage.set_faults(fail_next(StorageFailure::Authentication, None)).await;
     let mut pending = f.subscribe_pending();
-    f.files.set_uploads_paused(false).await.unwrap();
+    f.set_uploads_paused(false).await;
     tokio::time::timeout(Duration::from_secs(5), async {
         while f.upload_reason(&file).await.is_none() {
             pending.next().await.expect("the live query answers").unwrap();

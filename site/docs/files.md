@@ -376,8 +376,9 @@ confirmed, to order or filter its own rows by it or draw their progress
 ([Coven's state in SQL](/docs/local-data#coven-s-state-in-sql)).
 Its `sending` column, and the `coven_sending` view, say which files this
 device is sending right now.
-`set_uploads_paused(true)` pauses its trailing uploads, keeping each upload's
-place; bound ones run on, since writes wait for them. The `coven_upload_pause`
+`set_uploads_paused(true)`, a step of the app's write or a write of its own on
+the handle, pauses its trailing uploads, keeping each upload's place; bound
+ones run on, since writes wait for them. The `coven_upload_pause`
 view says whether uploads are paused, with nothing queued too. Coven retries
 failures on its own; `retry_uploads_now()` lets the app try early.
 Uploads follow the same stops as writes: a device stuck at a slot, or one that
