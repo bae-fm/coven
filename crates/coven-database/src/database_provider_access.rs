@@ -50,11 +50,13 @@ impl crate::Database {
         .await
     }
 
-    /// Retire an invitation with its final account intention in one commit.
+    /// Retire an invitation with its final account intention in one commit,
+    /// and the deletion it leaves owed: its marker's, once that has passed.
     pub async fn finish_operation_with_access<P: PendingValue>(
         &self,
         id: OperationId,
         changes: Vec<ProviderAccessChange>,
+        removal: Option<crate::ObjectRemoval>,
     ) -> Result<(), DbError> {
         self.call(move |inner| {
             inner.access.with_writer(|db| {
@@ -64,6 +66,9 @@ impl crate::Database {
                     }
                     crate::pending::clear_operation(db, id)?;
                     db.internal_execute("DELETE FROM _coven_operations WHERE id=?1", [id.0])?;
+                    if let Some(removal) = &removal {
+                        crate::object_removals::record(db, removal)?;
+                    }
                     adopt::<P>(db, &changes)
                 })
             })

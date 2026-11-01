@@ -18,7 +18,7 @@ fn every_object_and_snapshot_section_has_pinned_bytes() {
 
 /// Every fixture `fixtures/generate-deterministic.py` writes.
 #[cfg(not(windows))]
-const GENERATED_FIXTURES: [&str; 20] = [
+const GENERATED_FIXTURES: [&str; 21] = [
     "snapshot-settlement-claims.hex",
     "sealed-refused-writes-slot.hex",
     "sealed-reset-ignored-writes-slot.hex",
@@ -29,6 +29,7 @@ const GENERATED_FIXTURES: [&str; 20] = [
     "snapshot-claims.hex",
     "codes.txt",
     "invite-code.hex",
+    "invite-end.hex",
     "restore-code.hex",
     "sealed-circle-key.hex",
     "sealed-join-request.hex",

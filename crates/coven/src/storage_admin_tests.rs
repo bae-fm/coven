@@ -59,7 +59,7 @@ async fn reset_revokes_open_account_invites_and_deletes_their_requests() {
     network.devices[0].handle.start_sync().await.unwrap();
     network.sync(0).await;
     let owner = &network.devices[0];
-    assert!(owner.storage.status(&request).await.unwrap().is_none());
+    assert!(crate::tests::no_request(&owner.storage, &request).await);
     assert!(matches!(carol.read(&request).await,
         Err(error) if error.failure() == coven_storage::StorageFailure::PermissionDenied));
     assert!(owner.handle.pending().await.unwrap().is_empty());

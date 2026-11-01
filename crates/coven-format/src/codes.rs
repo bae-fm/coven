@@ -172,6 +172,9 @@ pub struct InviteCode {
     pub invitee: Option<String>,
     /// How the invite reaches the person, and so how it is approved.
     pub delivery: InviteDeliveryKind,
+    /// When the invite ends, in seconds since the Unix epoch by the inviting
+    /// device's clock: a joining device sends no first request after it.
+    pub expires_at: u64,
     /// The invite named by the join request.
     pub invite: InviteId,
     /// The member id the admin fixed: fresh for an addition, or an existing
@@ -212,6 +215,7 @@ impl InviteCode {
                 self.name.as_bytes(),
                 &invitee,
                 &[self.delivery.byte()],
+                &self.expires_at.to_be_bytes(),
                 self.invite.0.as_bytes(),
                 self.member.0.as_bytes(),
                 secret.as_bytes(),
@@ -235,6 +239,7 @@ impl InviteCode {
             tag => return Err(Error::UnknownTag { field: "option", tag }),
         };
         let delivery = Wire::get(&mut input)?;
+        let expires_at = u64::get(&mut input)?;
         let invite = Wire::get(&mut input)?;
         let member = Wire::get(&mut input)?;
         let mut secret = Zeroizing::new([0; 32]);
@@ -250,6 +255,7 @@ impl InviteCode {
             name: label,
             invitee,
             delivery,
+            expires_at,
             invite,
             member,
             secret,

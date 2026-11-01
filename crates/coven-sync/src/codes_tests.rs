@@ -26,6 +26,7 @@ fn invite(storage: InviteStorage) -> InviteCode {
         name: "Household".into(),
         invitee: Some("Dan".into()),
         delivery: InviteDeliveryKind::Sent,
+        expires_at: 86_400,
         invite: InviteId(uuid::Uuid::from_u128(2)),
         // The admin's chosen id for the invited person, not the inviter's.
         member: MemberId(uuid::Uuid::from_u128(2)),
@@ -157,6 +158,7 @@ fn metadata_validates_kind_checksum_and_storage_without_exposing_secrets() {
                     store_name: "Household".into(),
                     invitee: Some("Dan".into()),
                     delivery: InviteDeliveryKind::Sent,
+                    expires_at: std::time::UNIX_EPOCH + std::time::Duration::from_secs(86_400),
                 }),
             }
         });
@@ -364,12 +366,12 @@ fn typical_codes_keep_their_lengths() {
     assert_eq!(
         lengths,
         vec![
-            ("S3", 269, Some(378), 423),
-            ("S3, detected settings", 341, Some(450), 495),
-            ("Google Cloud Storage", 317, Some(492), 537),
-            ("Dropbox", 257, None, 303),
-            ("OneDrive", 303, None, 489),
-            ("iCloud", 372, None, 527),
+            ("S3", 269, Some(378), 436),
+            ("S3, detected settings", 341, Some(450), 508),
+            ("Google Cloud Storage", 317, Some(492), 549),
+            ("Dropbox", 257, None, 316),
+            ("OneDrive", 303, None, 501),
+            ("iCloud", 372, None, 540),
         ]
     );
 }

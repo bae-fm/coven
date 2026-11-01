@@ -96,16 +96,25 @@ impl Joining<'_> {
         database: &Database,
         status: &impl Fn(BootstrapStatus),
     ) -> Result<bool, BootstrapError> {
+        // An invite that has ended takes no first request (§13.2).
+        if !self.identity.attempted() && !sync.join_open(&self.identity) {
+            return Ok(false);
+        }
         status(BootstrapStatus::Connecting);
         sync.accept_join(&self.invitation).await?;
         if !self.identity.attempted() {
             self.identity.record_attempt(&self.file, self.code)?;
-            if let Err(error) = sync.submit_join(&self.identity).await {
-                // Only a request that may be stored makes its absence final.
-                if matches!(&error, SyncError::Storage(error) if error.refused()) {
-                    self.identity.record_refusal(&self.file, self.code)?;
+            match sync.submit_join(&self.identity).await {
+                Ok(true) => (),
+                // The invite ended first; its marker holds the path.
+                Ok(false) => return Ok(false),
+                Err(error) => {
+                    // Only a request that may be stored makes its absence final.
+                    if matches!(&error, SyncError::Storage(error) if error.refused()) {
+                        self.identity.record_refusal(&self.file, self.code)?;
+                    }
+                    return Err(error.into());
                 }
-                return Err(error.into());
             }
         }
         let confirmation = self.identity.confirmation();

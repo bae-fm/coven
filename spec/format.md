@@ -96,6 +96,7 @@ spaces only separate fields for reading. Example times are UTC.
 | Snapshot | `<store>/snapshots/<audience>/<device>/<n>` | one audience's state at its coverage | D7, D9 |
 | File | `<store>/files/<device>/<object>` | one stored file, encrypted in chunks | D12 |
 | Join request | `<store>/join-requests/<invite>` | a would-be member's id, public keys and device name | D8, D9 |
+| Ended invite's marker | `<store>/join-requests/<invite>`, in the request's place | when it may be deleted | D8 |
 | Restore code, invite code | on paper or a screen, never in storage | what a new device needs to find and open the store | D13 |
 | Saved restore code | iCloud Keychain or Block Store, never in storage | a restore code with the store's name, for the person's next devices | D13 |
 | Bucket marker | `coven-bucket`, at the bucket's root, only where member keys reach the whole bucket | the id of the one store that owns the bucket, as plain text | D10 |
@@ -153,6 +154,7 @@ Format 1 uses these:
 | 33 | Sequence slot | D9 |
 | 34 | Snapshot | D9 |
 | 36 | Join request | D9 |
+| 37 | Ended invite's marker | D8 |
 | 38 | File | D12 |
 | 39 | Floor | D9 |
 
@@ -1339,6 +1341,27 @@ device_name  name
   carries.
 - Require the invite's fixed member id.
 
+### An ended invite's marker (kind 37)
+
+When an invite ends, the inviting device puts a marker in its request's place
+(§13.2): the same path, created once. It is the only object at a join
+request's path that isn't a request, and the only stored object besides the
+bucket marker that isn't sealed: it holds no secret. It is eleven bytes,
+`kind:u8 | format:u16 | kept_until:u64`:
+
+```
+kind         37
+format       u16, the format version
+kept_until   u64, seconds since the Unix epoch
+```
+
+- `kept_until` is when the marker may be deleted: a week after the invite's
+  expiry.
+- A joining device that finds a marker at its request's path, when sending or
+  when checking for its request, ends its join as declined.
+- *Example.* An invite expiring at 1,700,000,000 leaves
+  `25 0001 00000000655D2B80`: 1,700,604,800 is a week later.
+
 ---
 
 ## D9 Sealed objects
@@ -1664,7 +1687,7 @@ provider can't move one object into another's place.
 | `<store>/floor` | Signed, encrypted snapshot references and the first retained slot; conditional replacement |
 | `<store>/snapshots/<audience>/<device>/<n>` | One snapshot, discovered by its announcement |
 | `<store>/files/<device>/<file>` | An uploaded file |
-| `<store>/join-requests/<invite>` | A join request |
+| `<store>/join-requests/<invite>` | A join request, or the marker of its ended invite |
 
 *Example.* Household's slot 41 is
 `5d0c8e2a-7b1f-4c3e-9a64-0f2d8b71c3e5/seq/41`, and a store snapshot Ana's phone
@@ -2045,15 +2068,16 @@ code      bytes
 ### Invite code (kind 11)
 
 An invite code lets a new person ask to join (§13.2). It is
-`store:uuid | name:name | invitee:Option<name> | delivery:u8 | invite:uuid |
-member:MemberId | secret:32 bytes | initial_key:uuid | inviting_writer:DeviceId |
-read_through:u64 | storage:bytes`:
+`store:uuid | name:name | invitee:Option<name> | delivery:u8 | expires_at:u64 |
+invite:uuid | member:MemberId | secret:32 bytes | initial_key:uuid |
+inviting_writer:DeviceId | read_through:u64 | storage:bytes`:
 
 ```
 store            uuid
 name             name
 invitee          Option<name>
 delivery         u8
+expires_at       u64
 invite           uuid
 member           MemberId
 secret           32 bytes
@@ -2068,6 +2092,7 @@ storage          bytes
 | `name` | the current store name copied when the invite is made; loading the store supplies its current name (§13.2) |
 | `invitee` | the new person's name, as the admin typed it; `None` for a replacement, whose member already has one |
 | `delivery` | how the invite reaches the person, which fixes how its request is approved. `0` in person: the inviting device approves on its own. `1` sent: the admin approves after comparing the confirmation number. Any other byte is refused. |
+| `expires_at` | when the invite ends, in whole seconds since the Unix epoch by the inviting device's clock: the joining device sends no first request after it (§13.2) |
 | `invite` | the join request's path |
 | `member` | fixed by the admin: a fresh id for an addition, or an existing active id for a replacement. The signed request must repeat that id. |
 | `secret` | the invite secret, which derives the join request's key (D11) |

@@ -18,6 +18,7 @@ use coven_database::{
 use coven_format::{
     admin::{MemberRole, StoreChange},
     codes::{InviteCode, InviteDeliveryKind},
+    invite_end::InviteEnd,
     sealed_single::SingleChunkObject,
     MemberAccess, Object,
 };
@@ -83,9 +84,9 @@ pub(crate) enum InviteState {
     Approving { code: SecretText, request: Vec<u8>, binding: OperationId },
     /// A kept replacement records the invite's new S3 key for its member.
     Recording,
-    /// The invite ended: delete the request object and settle its
-    /// account's sharing. An S3 key it carried is the person's to delete in
-    /// the provider's console; coven records nothing about it (§14.3).
+    /// The invite ended: put its marker in the request's place and settle
+    /// its account's sharing. An S3 key it carried is the person's to delete
+    /// in the provider's console; coven records nothing about it (§14.3).
     Settled,
 }
 
@@ -388,6 +389,19 @@ impl SequenceSync {
             }
             self.state.check()?;
         }
+        // Ended invites' markers, once no joining device can send a first
+        // request to their paths (`end_request`).
+        for path in self.database.due_object_removals(seconds(self.clock.now())?).await? {
+            let object = ObjectPath::parse(&path).map_err(|error| {
+                StorageFailure::Protocol.with_source(format!("a recorded removal's path: {error}"))
+            })?;
+            match self.storage.delete(&object).await {
+                Ok(()) => (),
+                Err(error) if error.failure() == StorageFailure::NotFound => (),
+                Err(error) => return Err(error.into()),
+            }
+            self.database.object_removed(path).await?;
+        }
         Ok(())
     }
 
@@ -601,16 +615,7 @@ impl SequenceSync {
                     }
                 }
                 InviteState::Settled => {
-                    // Provider deletion is idempotent, including an absent request.
-                    match self
-                        .storage
-                        .delete(&ObjectPath::join_request(self.store(), work.id))
-                        .await
-                    {
-                        Ok(()) => (),
-                        Err(error) if error.failure() == StorageFailure::NotFound => (),
-                        Err(error) => return Err(error.into()),
-                    }
+                    let kept_until = self.end_request(&work).await?;
                     let changes = match work.account() {
                         Some(account) => {
                             let others = self.invited_accounts_except(id).await?;
@@ -625,11 +630,50 @@ impl SequenceSync {
                         }
                         None => Vec::new(),
                     };
+                    // The marker goes once a joining device can no longer
+                    // send a first request (`end_request`).
+                    let removal = coven_database::ObjectRemoval {
+                        path: ObjectPath::join_request(self.store(), work.id).as_str().to_owned(),
+                        after: kept_until,
+                    };
                     self.database
-                        .finish_operation_with_access::<PendingRecord>(id, changes)
+                        .finish_operation_with_access::<PendingRecord>(id, changes, Some(removal))
                         .await?;
                     return Ok(InviteProgress::Finished);
                 }
+            }
+        }
+    }
+
+    /// Put the ended invite's marker in its request's place, and return
+    /// when the marker may go: a week after the invite's expiry, the
+    /// retention grace, so a joining device whose clock lags the inviting
+    /// device's by less than that sends no request after it is gone (§13.2).
+    /// A request sent in between the delete and the create is taken too.
+    async fn end_request(&self, work: &InviteWork) -> Result<u64, SyncError> {
+        let kept_until = seconds(work.expires_at)?
+            .checked_add(super::sequence_retention::GRACE.as_secs())
+            .ok_or(SyncError::SequenceExhausted)?;
+        let marker = InviteEnd { kept_until }.encode();
+        let path = ObjectPath::join_request(self.store(), work.id);
+        loop {
+            match self.storage.delete(&path).await {
+                Ok(()) => (),
+                Err(error) if error.failure() == StorageFailure::NotFound => (),
+                Err(error) => return Err(error.into()),
+            }
+            match self.storage.create(&path, &marker).await {
+                Ok(_) => return Ok(kept_until),
+                Err(error) if error.failure() == StorageFailure::AlreadyExists => {
+                    match self.storage.read(&path).await {
+                        // An earlier attempt's marker, or another device's.
+                        Ok(found) if InviteEnd::decode(&found).is_ok() => return Ok(kept_until),
+                        Ok(_) => (),
+                        Err(error) if error.failure() == StorageFailure::NotFound => (),
+                        Err(error) => return Err(error.into()),
+                    }
+                }
+                Err(error) => return Err(error.into()),
             }
         }
     }
@@ -741,6 +785,7 @@ impl SequenceSync {
             name: store.name.clone(),
             invitee: work.invitee.clone(),
             delivery: work.delivery,
+            expires_at: seconds(work.expires_at)?,
             invite: work.id,
             member: work.member,
             secret: work.secret()?,
@@ -785,6 +830,18 @@ pub(crate) enum InviteProgress {
     Waiting(PendingReason),
     /// The invite's work is done.
     Finished,
+}
+
+/// A time as whole seconds since the Unix epoch, as codes and markers carry
+/// it.
+fn seconds(at: SystemTime) -> Result<u64, SyncError> {
+    Ok(at
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|error| {
+            StorageFailure::InvalidConfiguration
+                .with_source(format!("an invite's time precedes 1970: {error}"))
+        })?
+        .as_secs())
 }
 
 fn decode_request(bytes: &[u8]) -> Result<coven_format::objects::JoinRequest, SyncError> {

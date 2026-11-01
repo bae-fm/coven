@@ -48,6 +48,9 @@ pub struct InviteInfo {
     /// In person or sent: whether the joining device shows a confirmation
     /// number (§13.2).
     pub delivery: InviteDeliveryKind,
+    /// When the invite ends, by the inviting device's clock, to the second:
+    /// the joining device sends no first request after it (§13.2).
+    pub expires_at: std::time::SystemTime,
 }
 
 /// Store, member and provider facts shared by both code kinds.
@@ -114,6 +117,7 @@ pub fn decode_code_info(code: &str) -> Result<CodeInfo, CodeError> {
             store_name: code.name,
             invitee: code.invitee,
             delivery: code.delivery,
+            expires_at: std::time::UNIX_EPOCH + std::time::Duration::from_secs(code.expires_at),
         }),
     })
 }

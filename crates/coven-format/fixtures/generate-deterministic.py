@@ -471,8 +471,13 @@ def invite_code():
     """A sent re-binding invite fixing Ana's existing id, so it names no person,
     for the S3 location with the key made for it."""
     storage = s3_location() + text(b"id") + text(b"secret")
-    return frame(11, STORE + text(b"S") + b"\x00" + u8(1) + bytes([0x55]) * 16 + ANA + bytes([0x66]) * 32
-                 + bytes([1]) * 16 + u64(1) + u64(12) + text(storage))
+    return frame(11, STORE + text(b"S") + b"\x00" + u8(1) + u64(86400) + bytes([0x55]) * 16 + ANA
+                 + bytes([0x66]) * 32 + bytes([1]) * 16 + u64(1) + u64(12) + text(storage))
+
+
+def invite_end():
+    """The marker of an invite that expired at 1,700,000,000, kept a week more."""
+    return bytes([37]) + u16(1) + u64(1_700_000_000 + 7 * 24 * 3600)
 
 
 def load_sodium():
@@ -641,6 +646,7 @@ def main():
         ("sealed-circle-key.hex", circle_key),
         ("restore-code.hex", restore_code()),
         ("invite-code.hex", invite_code()),
+        ("invite-end.hex", invite_end()),
     ]:
         (out / name).write_text(data.hex() + "\n")
     (out / "codes.txt").write_text(

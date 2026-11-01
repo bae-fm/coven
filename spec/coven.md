@@ -3742,6 +3742,7 @@ while either invite is open (§14.2).
 | current store name, copied when the invite is made | showing which store the invite is for |
 | the person's name, as Ana typed it; none when recovering an existing member | the new member's profile, which the app writes |
 | in person or sent | whether Dan's phone shows his confirmation number |
+| when it expires, to the second | Dan's phone sends no first request after it |
 | invite id | the join request's path |
 | the chosen member id | fixed by Ana before she shows the invite |
 | the invite secret | encrypting the request; only Ana's phone has it |
@@ -3877,6 +3878,9 @@ invite secret and tied to the store, the invite and the chosen member id. These
 are not his keys' final custody. Restarting with the same invite and device name
 reuses them, and the same device id.
 
+- It sends no first request once the invite has expired by its own clock: the
+  code carries the expiry, and the join ends as an expired one does, leaving
+  nothing. No device would ever answer that request.
 - It records the create before sending it. If the reply is lost, and on retry
   neither the request nor his sealed keys exist, it treats the invite as finished.
   Sending the request again could revive an invite Ana already declined; Ana can
@@ -3947,10 +3951,27 @@ time; the join stays unfinished and listed. Cancelling before the request is
 sent removes everything, as for a restore.
 
 **Ending an invite.** Once Ana approves, declines or cancels, or the invite
-expires, Ana's phone deletes the request object. Dan's phone sees only that it's
-gone, so a cancel, a decline and an expiry all end his join the same way. Once
-approval has begun, Ana can no longer cancel: the copies for Dan may already be
-claimed, and stopping there would leave him half admitted.
+expires, Ana's phone replaces the request object with a *marker*: it deletes
+the request, then creates the marker at the same path, create-once. Dan's phone
+sees only that his request is gone, so a cancel, a decline and an expiry all
+end his join the same way. Once approval has begun, Ana can no longer cancel:
+the copies for Dan may already be claimed, and stopping there would leave him
+half admitted.
+
+The marker is for a request sent late. Dan scans an S3 invite on Monday and
+opens it on Wednesday, after Ana cancelled it. On S3 nothing was shared, so
+nothing is taken back, and without the marker his request would be stored and
+wait forever for a phone that no longer looks for it. With the marker there,
+his create finds the path taken, his phone reads the marker, and his join ends
+as declined. A request created between Ana's delete and her create is deleted
+too, and the marker created again.
+
+The marker holds no secret, only when it may go: a week, the retention grace
+(§16.4), after the invite's expiry. Until then Ana's phone keeps a record of
+it, and the first pass after deletes it. Dan's phone sends no first request
+once the invite's expiry has passed by its own clock, so a request can arrive
+after the marker is gone only from a phone whose clock lags Ana's by more than
+a week. Coven assumes no clock does.
 
 Declining and cancelling are steps of a write (§4), with or without storage, as
 approving is. Ana's app declines Eve's request and marks its own row about the

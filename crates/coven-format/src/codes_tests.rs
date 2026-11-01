@@ -165,7 +165,7 @@ fn padding_material_lengths_and_hostile_sizes_are_errors() {
     encoded[43] = b'X';
     assert!(matches!(RestoreCode::from_bytes(&encoded), Err(Error::Material(_))));
     let mut encoded = test_utils::invite().to_bytes().unwrap();
-    encoded[126..130].copy_from_slice(&u32::MAX.to_be_bytes());
+    encoded[134..138].copy_from_slice(&u32::MAX.to_be_bytes());
     assert!(matches!(InviteCode::from_bytes(&encoded), Err(Error::Limit { .. })));
 }
 

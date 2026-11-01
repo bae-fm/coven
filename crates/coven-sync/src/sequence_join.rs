@@ -43,8 +43,17 @@ impl SequenceSync {
         Ok(self.storage.join(self.store(), invitation).await?)
     }
 
+    /// Whether the invite still lets the request be sent first now: no
+    /// first request goes out once the invite has ended by this device's
+    /// clock (§13.2).
+    pub fn join_open(&self, request: &JoiningIdentity) -> bool {
+        request.open_at(self.clock.now())
+    }
+
     /// Publish the recorded immutable request after provider acceptance.
-    pub async fn submit_join(&self, request: &JoiningIdentity) -> Result<(), SyncError> {
+    /// `false` when the invite ended before it was sent: its marker holds
+    /// the request's path, and the join ends as declined (§13.2).
+    pub async fn submit_join(&self, request: &JoiningIdentity) -> Result<bool, SyncError> {
         request.publish(self.storage.as_ref()).await
     }
 

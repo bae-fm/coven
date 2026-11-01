@@ -38,12 +38,7 @@ async fn an_approved_request_binds_its_pair_after_copies_and_the_joiner_register
     ana.sync.pass().await.unwrap();
     assert_eq!(ana.storage.request_count() - count, 2, "a checked request waits without reads");
     ana.sync.approve_join_request(&checked[0]).await.unwrap();
-    assert!(group
-        .storage
-        .status(&ObjectPath::join_request(group.store, invite.id))
-        .await
-        .unwrap()
-        .is_none());
+    assert!(no_request(&group.storage, &ObjectPath::join_request(group.store, invite.id)).await);
     assert_eq!(
         carol.device.sync.join_outcome(&carol.request).await.unwrap(),
         JoinOutcome::Admitted
@@ -82,12 +77,7 @@ async fn cancelling_an_invite_with_a_waiting_request_ends_the_join_as_declined()
     assert_eq!(requests(&ana).await.len(), 1);
     ana.sync.cancel_invite(invite.id).await.unwrap();
     assert!(listed(&ana).await.is_empty());
-    assert!(group
-        .storage
-        .status(&ObjectPath::join_request(group.store, invite.id))
-        .await
-        .unwrap()
-        .is_none());
+    assert!(no_request(&group.storage, &ObjectPath::join_request(group.store, invite.id)).await);
     assert_eq!(
         carol.device.sync.join_outcome(&carol.request).await.unwrap(),
         JoinOutcome::Declined
@@ -124,7 +114,7 @@ async fn a_decline_ends_the_invite_in_its_write_and_a_pass_deletes_the_request()
     assert!(group.storage.status(&path).await.unwrap().is_some());
     assert_eq!(carol.device.sync.join_outcome(&carol.request).await.unwrap(), JoinOutcome::Waiting);
     ana.sync.pass().await.unwrap();
-    assert!(group.storage.status(&path).await.unwrap().is_none());
+    assert!(no_request(&group.storage, &path).await);
     assert_eq!(
         carol.device.sync.join_outcome(&carol.request).await.unwrap(),
         JoinOutcome::Declined
@@ -777,4 +767,71 @@ async fn a_stop_for_good_ends_this_devices_invites() {
     for device in [&ana, &ben, &carol.device] {
         device.sync.database.close().await.unwrap();
     }
+}
+
+/// Carol scans an invite on S3 but sends her request only after Ana has
+/// cancelled it and her pass has ended it. Nothing is shared to take back on
+/// S3, so her request could be stored, and wait forever for a device that
+/// no longer looks for it. The ended invite's marker holds the path instead:
+/// her phone's send finds it, and her join ends as declined (§13.2).
+#[tokio::test]
+async fn a_request_sent_after_the_invite_ended_finds_its_marker() {
+    let group = Group::new();
+    let ana = group.device(1).await;
+    group.create(&ana).await;
+    let invite = s3_invite(&ana).await;
+    let code = read_invite_code(invite.shown_code()).unwrap();
+    let (temp, directory) = group.directory();
+    let request = JoiningIdentity::prepare(&directory, &code, "Carol's phone").unwrap();
+    let carol = group.open_with(temp, request.identity(), None, group.storage.for_device()).await;
+    ana.sync.cancel_invite(invite.id).await.unwrap();
+    assert!(ana.database().operations().await.unwrap().is_empty());
+    assert!(!carol.sync.submit_join(&request).await.unwrap(), "the marker turns the request away");
+    assert_eq!(carol.sync.join_outcome(&request).await.unwrap(), JoinOutcome::Declined);
+    for device in [&ana, &carol] {
+        device.sync.database.close().await.unwrap();
+    }
+}
+
+/// The marker stays until no joining device can send a first request: a
+/// week, the retention grace, past the invite's expiry, for a joining
+/// device whose clock lags Ana's. The first pass after then deletes it
+/// (§13.2).
+#[tokio::test]
+async fn an_ended_invites_marker_goes_after_the_grace() {
+    let group = Group::new();
+    let ana = group.device(1).await;
+    group.create(&ana).await;
+    let invite = s3_invite(&ana).await;
+    ana.sync.cancel_invite(invite.id).await.unwrap();
+    let path = ObjectPath::join_request(group.store, invite.id);
+    let marker = group.storage.read(&path).await.unwrap();
+    let kept_until = invite.expires_at + crate::sequence_sync::sequence_retention::GRACE;
+    assert_eq!(
+        coven_format::invite_end::InviteEnd::decode(&marker).unwrap().kept_until,
+        kept_until.duration_since(std::time::UNIX_EPOCH).unwrap().as_secs()
+    );
+    group.clock.set(kept_until - std::time::Duration::from_secs(1));
+    ana.sync.pass().await.unwrap();
+    assert!(group.storage.status(&path).await.unwrap().is_some());
+    group.clock.set(kept_until);
+    ana.sync.pass().await.unwrap();
+    assert!(group.storage.status(&path).await.unwrap().is_none());
+    assert!(ana.database().due_object_removals(u64::MAX).await.unwrap().is_empty());
+    ana.database().close().await.unwrap();
+}
+
+/// A sent invite on S3, with the key Ana made for the person.
+async fn s3_invite(ana: &Device) -> Invite {
+    ana.sync
+        .create_invite(
+            InviteTarget::NewMember { role: MemberRole::Member, name: "Carol".into() },
+            InviteAccess::S3AccessKey {
+                access_key_id: "carol-key".into(),
+                secret_access_key: coven_crypto::SecretText::new("secret".into()),
+            },
+            InviteDelivery::Sent { lifetime: InviteLifetime::Day },
+        )
+        .await
+        .unwrap()
 }

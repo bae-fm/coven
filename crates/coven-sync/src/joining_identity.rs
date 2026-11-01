@@ -4,6 +4,7 @@ use crate::SyncError;
 use coven_crypto::{
     ConfirmationNumber, MemberIdentity, MemberKeys, MemberPublicKeys, ObjectHasher,
 };
+use coven_format::invite_end::InviteEnd;
 use coven_format::{
     codes::{InviteCode, InviteDeliveryKind},
     objects::JoinRequest,
@@ -29,6 +30,9 @@ pub struct JoiningIdentity {
     device_name: String,
     inviting_writer: coven_foundation::id_source::DeviceId,
     read_through: u64,
+    /// When the invite ends, in seconds since the Unix epoch: no first
+    /// request is sent after it.
+    expires_at: u64,
     /// Set for a sent invite, whose admin compares it before approving.
     confirmation: Option<ConfirmationNumber>,
 }
@@ -118,6 +122,7 @@ impl JoiningIdentity {
             device_name: opened.device_name,
             inviting_writer: code.inviting_writer,
             read_through: code.read_through,
+            expires_at: code.expires_at,
         }))
     }
 
@@ -161,6 +166,7 @@ impl JoiningIdentity {
             device_name: device_name.into(),
             inviting_writer: code.inviting_writer,
             read_through: code.read_through,
+            expires_at: code.expires_at,
         };
         identity.save(&directory.owned_file(StoreFile::Bootstrap), code)?;
         Ok(identity)
@@ -248,22 +254,39 @@ impl JoiningIdentity {
 
     /// Publish the recorded immutable request. An occupied path must hold
     /// exactly these bytes (§19.3).
-    pub async fn publish(&self, storage: &dyn Storage) -> Result<(), SyncError> {
+    pub async fn publish(&self, storage: &dyn Storage) -> Result<bool, SyncError> {
         match storage.create(&self.path, &self.request).await {
-            Ok(_) => Ok(()),
+            Ok(_) => Ok(true),
             Err(error) if error.failure() == StorageFailure::AlreadyExists => {
-                if storage.read(&self.path).await? != self.request {
-                    return Err(SyncError::InvitationChanged);
+                let found = storage.read(&self.path).await?;
+                if found == self.request {
+                    return Ok(true);
                 }
-                Ok(())
+                // The invite ended before the request was sent, and its
+                // marker holds the path (§13.2).
+                if InviteEnd::decode(&found).is_ok() {
+                    return Ok(false);
+                }
+                Err(SyncError::InvitationChanged)
             }
             Err(error) => Err(error.into()),
         }
     }
 
-    /// Whether the request object still exists.
+    /// Whether this request is still in storage: an ended invite's marker
+    /// in its place, or nothing, means it is gone.
     pub(crate) async fn pending(&self, storage: &dyn Storage) -> Result<bool, SyncError> {
-        Ok(storage.status(&self.path).await?.is_some())
+        match storage.read(&self.path).await {
+            Ok(found) => Ok(found == self.request),
+            Err(error) if error.failure() == StorageFailure::NotFound => Ok(false),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    /// Whether the invite still lets a first request be sent at `now`.
+    pub(crate) fn open_at(&self, now: std::time::SystemTime) -> bool {
+        now.duration_since(std::time::UNIX_EPOCH)
+            .map_or(true, |since| since.as_secs() < self.expires_at)
     }
 }
 

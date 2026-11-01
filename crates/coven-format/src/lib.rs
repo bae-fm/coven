@@ -16,6 +16,7 @@ pub mod error;
 pub mod file;
 pub mod file_reference;
 pub mod floor;
+pub mod invite_end;
 pub mod key;
 pub mod loss;
 pub mod merge_fields;

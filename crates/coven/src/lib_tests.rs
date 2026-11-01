@@ -474,6 +474,20 @@ pub(crate) fn held(app: &TestCoven, store: StoreId) -> Held {
 }
 
 /// The first checked request among the owner's open invites.
+/// Whether no join request is at `path`: nothing, or the marker an ended
+/// invite leaves in the request's place (§13.2).
+pub(crate) async fn no_request(
+    storage: &coven_storage::test_utils::MemoryStorage,
+    path: &coven_storage::ObjectPath,
+) -> bool {
+    use coven_storage::Storage;
+    match storage.read(path).await {
+        Ok(found) => coven_format::invite_end::InviteEnd::decode(&found).is_ok(),
+        Err(error) if error.failure() == coven_storage::StorageFailure::NotFound => true,
+        Err(error) => panic!("reading the request: {error}"),
+    }
+}
+
 pub(crate) async fn next_join_request(owner: &CovenHandle) -> JoinRequest {
     let invites = owner
         .test_invites()

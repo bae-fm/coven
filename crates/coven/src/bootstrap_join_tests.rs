@@ -460,7 +460,7 @@ async fn a_join_whose_keys_opened_never_reports_waiting_again() {
         let asked = owner.storage.request_trace().len();
         control.check_now();
         while !owner.storage.request_trace()[asked..]
-            .contains(&MemoryRequest::Status(request_path.clone()))
+            .contains(&MemoryRequest::Read(request_path.clone(), None))
         {
             tokio::task::yield_now().await;
         }
@@ -957,5 +957,27 @@ async fn a_removed_members_retained_grant_stays_pending_until_a_retry_revokes_it
     assert_eq!(retained_grant(&owner.handle.pending().await.unwrap()), None);
     // `sync` checks the pass leaves no operation pending.
     owner.sync().await;
+    owner.close().await;
+}
+
+/// Carol scans a sent invite but opens it only once it has ended. Her phone
+/// sends no request, which no device would ever answer, and the join ends as
+/// an expired one does, leaving nothing behind (§13.2).
+#[tokio::test]
+async fn a_join_after_the_invite_ended_sends_no_request() {
+    let owner = Owner::new(CloudProvider::S3, false).await;
+    let invite = owner.invite().await;
+    owner.clock.set(invite.expires_at);
+    let install = Installation::new();
+    let (_, cancel) = watch::channel(false);
+    let result = install
+        .run(&owner, Installation::join_request(&invite), owner.recipient(), &cancel, |_| {})
+        .await;
+    assert!(matches!(result, Ok(None)), "{result:?}");
+    install.absent(owner.directory.id()).await;
+    // Ana's expiry ended the invite: its marker, if her pass has written it,
+    // is all there is at the request's path.
+    let path = coven_storage::ObjectPath::join_request(owner.directory.id(), invite.id);
+    assert!(crate::tests::no_request(&owner.storage, &path).await);
     owner.close().await;
 }

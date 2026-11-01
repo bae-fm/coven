@@ -233,6 +233,35 @@ impl Database {
         .await
     }
 
+    /// The paths of objects whose time to go has passed by `now`, in seconds
+    /// since the Unix epoch.
+    pub async fn due_object_removals(&self, now: u64) -> Result<Vec<String>, DbError> {
+        let now = i64::try_from(now).unwrap_or(i64::MAX);
+        self.call(move |inner| {
+            inner.access.with_committed(|db| {
+                db.query(
+                    "SELECT path FROM _coven_object_removals WHERE after<=?1 ORDER BY after",
+                    [now],
+                    |r| r.get(0),
+                )
+            })
+        })
+        .await
+    }
+
+    /// The object at `path` is gone from storage.
+    pub async fn object_removed(&self, path: String) -> Result<(), DbError> {
+        self.call(move |inner| {
+            inner.access.with_writer(|writer| {
+                writer.transaction(|db| {
+                    db.internal_execute("DELETE FROM _coven_object_removals WHERE path=?1", [&path])
+                        .map(drop)
+                })
+            })
+        })
+        .await
+    }
+
     /// Retire a finished operation. The caller must publish every reserved entry
     /// before discarding; removing this row cannot retire the publication queue.
     pub async fn finish_operation(&self, id: OperationId) -> Result<(), DbError> {

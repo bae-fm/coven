@@ -6194,6 +6194,11 @@ pub enum ProviderSignOut {
   each as `decode_code_info` reads its code, and `resume_join` continues one
   with neither the code nor a new sign-in. Once the request may have been
   sent, a join can't be cancelled; it ends only by approval, decline or expiry.
+- A join sends no first request once the invite's `expires_at` has passed by
+  the joining device's clock: it ends as an expired one does. An ended
+  invite's marker at the request's path (format.md D8) ends a join that
+  finds it, sending or checking, as declined, so a request sent after its
+  invite ended is never stored to wait for no one.
 - The kept sign-in refreshes where it is kept: a rejected token's one refresh
   is committed to the keychain before any connection uses it, and the joined
   store keeps the refreshed tokens. Otherwise a restart after a refresh would
@@ -6316,6 +6321,10 @@ pub struct InviteInfo {
     pub store_name: String,
     pub invitee: Option<String>,
     pub delivery: InviteDeliveryKind,
+    /// When the invite ends, by the inviting device's clock, to the second:
+    /// the joining device sends no first request after it, so the app can
+    /// say until when it may be used (§13.2).
+    pub expires_at: SystemTime,
 }
 
 /// Facts that either code carries, without secrets or a store name.
@@ -6866,7 +6875,8 @@ pub async fn restore_from_saved_code(
 /// On the new person's device: makes their member keys, keeps the code in
 /// this device's keychain, writes a join request to storage, and waits for
 /// approval, then loads the store. Returns `None` when the request is declined
-/// or the invite expires. Dropping the call keeps the unfinished join for
+/// or the invite expires, including when it expired before the request was
+/// sent, which then isn't. Dropping the call keeps the unfinished join for
 /// `resume_join`. Cancelling through `control` once the request may have been
 /// sent ends the call with `BootstrapError::JoinRequestSent`, keeping the
 /// unfinished join, as dropping does.

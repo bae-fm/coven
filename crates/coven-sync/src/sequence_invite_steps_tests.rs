@@ -372,7 +372,12 @@ impl Case {
             Some(Retry::Never | Retry::AfterUpdate) => json!("never"),
         };
         let path = ObjectPath::join_request(self.group.store, self.invite.id);
-        let request = self.group.storage.status(&path).await.unwrap().is_some();
+        // An ended invite's marker in the request's place is no request.
+        let request = match self.group.storage.read(&path).await {
+            Ok(found) => coven_format::invite_end::InviteEnd::decode(&found).is_err(),
+            Err(error) if error.failure() == coven_storage::StorageFailure::NotFound => false,
+            Err(error) => panic!("reading the request: {error}"),
+        };
         let mut accepted = Vec::new();
         if let Some(request) = self.request.clone() {
             let step = self.approve_step(request.clone());

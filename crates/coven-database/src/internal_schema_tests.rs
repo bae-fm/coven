@@ -151,6 +151,7 @@ async fn only_the_spec_tables_are_created() {
                 "_coven_migration_losses",
                 "_coven_migration_prefix",
                 "_coven_moves",
+                "_coven_object_removals",
                 "_coven_operations",
                 "_coven_owner_tables",
                 "_coven_part_leaves",

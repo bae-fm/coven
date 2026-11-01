@@ -359,8 +359,18 @@ pub(super) async fn join(group: &Group, code: &str, name: &str) -> Joiner {
     let storage = MemoryStorage::for_recipient(&group.storage, "carol@example.org").unwrap();
     let device = group.open_with(temp, request.identity(), None, storage).await;
     device.sync.accept_join(&invitation).await.unwrap();
-    device.sync.submit_join(&request).await.unwrap();
+    assert!(device.sync.submit_join(&request).await.unwrap(), "the invite is open");
     Joiner { device, request }
+}
+
+/// Whether no join request is at `path`: nothing, or the marker an ended
+/// invite leaves in the request's place (§13.2).
+pub(crate) async fn no_request(storage: &MemoryStorage, path: &ObjectPath) -> bool {
+    match storage.read(path).await {
+        Ok(found) => coven_format::invite_end::InviteEnd::decode(&found).is_ok(),
+        Err(error) if error.failure() == coven_storage::StorageFailure::NotFound => true,
+        Err(error) => panic!("reading the request: {error}"),
+    }
 }
 
 /// The device's open invites, as `coven_invites` lists them.

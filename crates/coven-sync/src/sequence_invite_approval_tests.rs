@@ -4,7 +4,7 @@ use crate::sequence_sync::tests::*;
 use crate::sequence_sync::OperationState;
 use crate::*;
 use coven_format::{admin::MemberRole, MemberAccess};
-use coven_storage::{ObjectPath, Storage};
+use coven_storage::ObjectPath;
 
 async fn in_person_invite(ana: &Device) -> Invite {
     ana.sync
@@ -28,12 +28,7 @@ async fn an_in_person_request_is_approved_in_the_pass_that_reads_it() {
     let carol = join(&group, invite.shown_code(), "Carol's phone").await;
     ana.sync.pass().await.unwrap();
     assert!(listed(&ana).await.is_empty());
-    assert!(group
-        .storage
-        .status(&ObjectPath::join_request(group.store, invite.id))
-        .await
-        .unwrap()
-        .is_none());
+    assert!(no_request(&group.storage, &ObjectPath::join_request(group.store, invite.id)).await);
     assert_eq!(
         carol.device.sync.join_outcome(&carol.request).await.unwrap(),
         JoinOutcome::Admitted
@@ -362,12 +357,9 @@ async fn a_replacement_invite_keeps_its_expected_pair_across_approval_and_retry(
             .unwrap()
             .iter()
             .all(|record| record.started_by != "invite"));
-        assert!(group
-            .storage
-            .status(&ObjectPath::join_request(group.store, invite.id))
-            .await
-            .unwrap()
-            .is_none());
+        assert!(
+            no_request(&group.storage, &ObjectPath::join_request(group.store, invite.id)).await
+        );
         ana.sync.pass().await.unwrap();
         assert_eq!(ana.sync.database.store_state().await.unwrap().members[&target].keys, competing);
         for device in [&ana, &ben, &carol.device] {
