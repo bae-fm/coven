@@ -88,6 +88,15 @@ impl SequenceSync {
         let originals = database.original_slots().await?;
         let through = database.applied_slot().await?;
         let identity = member.read()?.ok_or(coven_storage::StorageFailure::MemberKeysMissing)?;
+        // A slot binding the member to a pair recorded here is one this
+        // installation can sign with; any other stops it (§12.3).
+        database
+            .hold_member_keys(
+                std::iter::once(identity.keys().public_keys())
+                    .chain(identity.candidate().map(|keys| keys.public_keys()))
+                    .collect(),
+            )
+            .await?;
         // Without store keys in custody, history waits for this member's
         // copies in storage (§12.1).
         let (history, locked) = match keys.read()? {

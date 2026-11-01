@@ -4993,9 +4993,10 @@ while let Some(result) = status.next().await {
 - `coven_operations` (E4) lists each operation an app's write journaled, from
   that write's commit: its outcome is NULL while it runs, then `Landed`,
   `Satisfied` or `Rejected`, written in the transaction that ends its journal
-  row, so no outcome is lost to a dropped call or a restart. Applying this
-  device's own removal ends every one still running, in that transaction
-  ([§14.1](coven.md#141-the-cut-off)). It stays listed
+  row, so no outcome is lost to a dropped call or a restart. Applying a slot
+  that stops this device for good, its removal, its replacement by a reset or
+  a replacement of its member's keys it doesn't hold, ends every one still
+  running, in that transaction ([§14.1](coven.md#141-the-cut-off)). It stays listed
   until a write acknowledges it with `acknowledge_operation`, so an app row
   that names the operation changes in that same write
   ([§11.4](coven.md#114-crashes-and-waiting)).

@@ -171,27 +171,23 @@ pub(crate) fn finish(db: &DatabaseConnection, id: OperationId) -> Result<usize, 
 }
 
 /// End every operation an app's write journaled that still runs, once the
-/// applied state this transaction commits removes this device or its
-/// member: the device stops for good, so none of them would ever run
-/// (§14.1). The operation whose claim the applied slots record as landed,
+/// applied state this transaction commits stops this installation for
+/// good: it removes or replaces this device, removes its member, or binds
+/// its member to a pair it doesn't hold (§12.3, §14.1). None of them would
+/// ever run. The operation whose claim the applied slots record as landed,
 /// the removal itself when this device claimed it, ends landed at its slot;
-/// the removal refuses every other. Their journal rows and open claim end
-/// with them.
-pub(crate) fn end_on_removal(db: &DatabaseConnection) -> Result<(), DbError> {
-    let removed: bool = db.query_row(
-        "SELECT EXISTS(SELECT 1 FROM _coven_devices WHERE device=_coven_device() AND state='removed')",
-        [],
-        |r| r.get(0),
-    )?;
-    if !removed {
-        return Ok(());
-    }
-    let landed = crate::claim::landed_operation(db)?;
+/// the stop refuses every other. Their journal rows and open claim end with
+/// them.
+pub(crate) fn end_on_stop(db: &DatabaseConnection) -> Result<(), DbError> {
     let running = db.query(
         "SELECT operation FROM _coven_app_operations WHERE outcome IS NULL ORDER BY operation",
         [],
         |r| Ok(OperationId(r.get(0)?)),
     )?;
+    if running.is_empty() || !stopped(db)? {
+        return Ok(());
+    }
+    let landed = crate::claim::landed_operation(db)?;
     for id in running {
         let outcome = match landed {
             Some((entry, slot)) if entry == id => crate::OperationOutcome::Landed(slot),
@@ -203,6 +199,43 @@ pub(crate) fn end_on_removal(db: &DatabaseConnection) -> Result<(), DbError> {
         )?;
         crate::claim::drop_operation(db, id)?;
         finish(db, id)?;
+    }
+    Ok(())
+}
+
+/// Whether the applied state stops this installation for good. One whose
+/// device isn't registered yet hasn't started.
+fn stopped(db: &DatabaseConnection) -> Result<bool, DbError> {
+    let held: bool =
+        db.query_row("SELECT EXISTS(SELECT 1 FROM _coven_held_keys)", [], |r| r.get(0))?;
+    if !held {
+        return Err(DbError::Invariant {
+            what: "an installation whose writes journal operations records the pairs it holds",
+        });
+    }
+    let found: Option<(String, bool, bool)> = db
+        .query(
+            "SELECT d.state,m.removed,h.signing IS NOT NULL FROM _coven_devices AS d
+             JOIN _coven_members AS m ON m.member=d.member
+             LEFT JOIN _coven_held_keys AS h ON h.signing=m.signing AND h.sealing=m.sealing
+             WHERE d.device=_coven_device()",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )?
+        .pop();
+    Ok(found.is_some_and(|(state, removed, held)| state != "active" || removed || !held))
+}
+
+/// Record member pairs this installation holds, or is about to keep.
+pub(crate) fn hold_keys(
+    db: &DatabaseConnection,
+    keys: &[coven_crypto::MemberPublicKeys],
+) -> Result<(), DbError> {
+    for pair in keys {
+        db.internal_execute(
+            "INSERT INTO _coven_held_keys(signing,sealing) VALUES(?1,?2) ON CONFLICT DO NOTHING",
+            (pair.signing.as_bytes().as_slice(), pair.sealing.as_bytes().as_slice()),
+        )?;
     }
     Ok(())
 }

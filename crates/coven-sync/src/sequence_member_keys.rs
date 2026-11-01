@@ -204,6 +204,9 @@ impl SequenceSync {
                     None => {
                         let candidate = MemberKeys::generate()?;
                         let keys = candidate.public_keys();
+                        // Recorded before custody keeps it, so no binding to
+                        // it can apply unrecorded (§12.3).
+                        self.database.hold_member_keys(vec![keys]).await?;
                         self.member.persist(&identity.with_candidate(candidate))?;
                         keys
                     }

@@ -87,6 +87,21 @@ impl Database {
         .await
     }
 
+    /// Record member pairs this installation holds, or is about to keep in
+    /// custody, before custody keeps them: applying a binding of its member
+    /// to a pair not recorded stops it for good (§12.3).
+    pub async fn hold_member_keys(
+        &self,
+        keys: Vec<coven_crypto::MemberPublicKeys>,
+    ) -> Result<(), DbError> {
+        self.call(move |inner| {
+            inner.access.with_writer(|writer| {
+                writer.transaction(|db| crate::operation::hold_keys(db, &keys))
+            })
+        })
+        .await
+    }
+
     /// Read the pending condition associated with a journal row.
     pub async fn operation_pending<P: crate::PendingValue>(
         &self,

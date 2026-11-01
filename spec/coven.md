@@ -4042,13 +4042,15 @@ long ago something happened. A removed device, or one holding member keys that
 have been replaced, can't send.
 
 When a device applies its own removal, or its member's, it stops syncing and tells
-the app. The same transaction ends every operation its app's writes journaled
-that still runs (§11.4), since none of them would ever run: the removal itself,
-when this device claimed it, ends landed at its slot, even if the claim never
-settled before the slot arrived, and the removal refuses each other with
-`NotAllowed`. A device whose id was replaced by a reset (§19.3) reports
-`DeviceIdInUse`; one whose member's keys were replaced reports
-`MemberKeysReplaced`.
+the app. A device whose id was replaced by a reset (§19.3) reports
+`DeviceIdInUse`; one whose member's keys were replaced with a pair it doesn't
+hold reports `MemberKeysReplaced`. Each of these stops is for good, so the
+transaction that applies it also ends every operation the app's writes journaled
+that still runs (§11.4): the removal itself, when this device claimed it, ends
+landed at its slot, even if the claim never settled before the slot arrived,
+and the stop refuses each other with `NotAllowed`. To tell a replacement of its
+member's keys from its own, a device records each pair it holds, and the
+candidate its own replacement keeps before custody keeps it (§12.3).
 
 A member's removal also ends the person's use of their restore code. Ana removes
 Ben at slot 52. When Ben's phone reads slot 52, it first deletes his restore

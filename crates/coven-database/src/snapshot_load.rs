@@ -139,7 +139,7 @@ pub(crate) fn load<P: crate::PendingValue>(
         if let Some(operation) = operation {
             crate::operation::advance(database, &operation)?;
         }
-        crate::operation::end_on_removal(database)?;
+        crate::operation::end_on_stop(database)?;
         Ok(loaded)
     })
 }

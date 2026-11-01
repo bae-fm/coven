@@ -70,6 +70,7 @@ mod fixture {
             CAST(printf('%016d',i) AS BLOB) AS member FROM numbers;
      INSERT INTO _coven_operations(id,kind,last_step,data,started_by)
        SELECT i,'kind_' || (i%32),1,x'00','app' FROM fixture;
+     INSERT INTO _coven_held_keys SELECT CAST(printf('%032d',i) AS BLOB),zeroblob(32) FROM fixture;
      INSERT INTO _coven_app_operations SELECT i,'Kind' || (i%32),CASE WHEN i%2=0 THEN x'00' END FROM fixture;
      INSERT INTO _coven_provider_access SELECT 'account_' || i,i%2,NULL,NULL,i,i%2 FROM fixture;
      INSERT INTO _coven_pending(subject,value,operation,object,work,device,file,coven_version)

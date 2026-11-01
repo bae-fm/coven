@@ -746,6 +746,17 @@ macro_rules! coven_tables {
             );
             CREATE INDEX _coven_operations_kind ON _coven_operations(kind);
         ");
+        // Every member pair this installation holds or has held, its kept
+        // candidate included, recorded before custody keeps it: a binding of
+        // its member to a pair not here is one it can't sign with, which
+        // stops it for good (§12.3, §14.1).
+        $visit!(_coven_held_keys, "
+            CREATE TABLE _coven_held_keys (
+                signing BLOB NOT NULL CHECK(length(signing)=32),
+                sealing BLOB NOT NULL CHECK(length(sealing)=32),
+                PRIMARY KEY(signing,sealing)
+            ) STRICT, WITHOUT ROWID;
+        ");
         // The operations the app's writes journaled, each with its kind as
         // coven-sync names it and, once it has finished, its outcome as
         // coven-sync encodes it, until the app acknowledges it
