@@ -403,3 +403,60 @@ async fn applying_this_devices_removal_ends_its_operations_whatever_its_claim_sa
         device.database().close().await.unwrap();
     }
 }
+
+/// Ben journals a rename with his device offline, and Ana removes the
+/// device. Retention deletes the removal's slot before Ben reads it, so the
+/// removal reaches him in the floor's snapshot; loading it ends his
+/// journaled rename, refused, in that transaction (§14.1).
+#[tokio::test]
+async fn a_removal_loaded_from_the_floor_ends_this_devices_operations() {
+    let group = Group::new();
+    let ana = group.device(1).await;
+    let ben = group.device(2).await;
+    group.create(&ana).await;
+    group.admit(&ana, &ben).await;
+    ben.sync.pass().await.unwrap();
+    let (device, state) = (ben.sync.device, ben.sync.state.clone());
+    let rename = ben
+        .database()
+        .write(move |sql| {
+            crate::administer(
+                &sql,
+                device,
+                state,
+                StoreChange::RenameStore { name: "Ben's".into() },
+            )
+            .map_err(|error| coven_database::DbError::SyncStream(Box::new(error)))
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    ana.sync.administer(StoreChange::RemoveDevice { device: ben.sync.device }).await.unwrap();
+    let removal = ana.sync.database.applied_slot().await.unwrap();
+    ana.sync.snapshot(coven_merge::Audience::Store).await.unwrap();
+    group.clock.set(
+        std::time::UNIX_EPOCH
+            + crate::sequence_sync::sequence_retention::GRACE
+            + std::time::Duration::from_secs(1),
+    );
+    ana.sync.pass().await.unwrap();
+    let path = ObjectPath::slot(group.store, removal.try_into().unwrap());
+    assert!(group.storage.status(&path).await.unwrap().is_none());
+    assert!(matches!(ben.sync.pass().await, Err(SyncError::Removed)));
+    let outcome = ben
+        .database()
+        .read(move |sql| {
+            Ok(sql.query_row(
+                "SELECT outcome FROM coven_operations WHERE operation=?1",
+                [rename.0],
+                |row| row.get::<_, OperationOutcome>(0),
+            )?)
+        })
+        .await
+        .unwrap();
+    assert_eq!(outcome, OperationOutcome::Rejected(OperationRejection::NotAllowed));
+    assert!(ben.database().operations().await.unwrap().is_empty());
+    for device in [&ana, &ben] {
+        device.database().close().await.unwrap();
+    }
+}
