@@ -275,12 +275,10 @@ impl CovenHandle {
     ) -> Result<Invite, SyncError> {
         Box::pin(self.storage.create_invite(target, access, delivery)).await
     }
-    /// This device's invites that haven't ended, live, each with its code to
-    /// show again and its request once one has arrived. The first value is the
-    /// current list. Other devices' invites are never listed: only the
-    /// inviting device holds their secrets.
-    pub fn subscribe_invites(&self) -> tokio::sync::watch::Receiver<Vec<Invite>> {
-        self.storage.subscribe_invites()
+    /// Follow `coven_invites` with a live query, as an app does (E10).
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn test_invites(&self) -> coven_database::test_utils::Followed<Vec<Invite>> {
+        Invite::follow(&self.database)
     }
     /// Approve the exact request an open invite shows.
     pub async fn approve_join_request(&self, request: &JoinRequest) -> Result<(), SyncError> {

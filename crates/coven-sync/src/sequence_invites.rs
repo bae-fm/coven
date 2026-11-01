@@ -115,9 +115,83 @@ impl InviteWork {
     fn open(&self) -> bool {
         !matches!(self.state, InviteState::Settled)
     }
+    /// Whether the invite ends at its expiry: it grants access, or waits for
+    /// its request or the app's decision. Approval, once begun, finishes.
+    fn expires(&self) -> bool {
+        matches!(self.state, InviteState::Grant | InviteState::Waiting { .. })
+    }
     fn expired(&self, now: std::time::SystemTime) -> bool {
-        now >= self.expires_at
-            && matches!(self.state, InviteState::Grant | InviteState::Waiting { .. })
+        self.expires() && now >= self.expires_at
+    }
+
+    /// The invite as the app sees it, with the code first shown and the
+    /// checked request, if one has arrived.
+    fn shown(&self, code: &SecretText, request: Option<&[u8]>) -> Result<Invite, SyncError> {
+        Ok(Invite {
+            id: self.id,
+            member: self.member,
+            invitee: self.invitee.clone(),
+            delivery: self.delivery,
+            access: self.access.member_access(),
+            code: code.as_str().to_owned(),
+            expires_at: self.expires_at,
+            request: request.map(|bytes| self.present_request(bytes)).transpose()?,
+        })
+    }
+
+    fn present_request(&self, bytes: &[u8]) -> Result<JoinRequest, SyncError> {
+        let request = decode_request(bytes)?;
+        Ok(JoinRequest {
+            invite: request.invite,
+            member: request.member,
+            confirmation: ConfirmationNumber::of(request.invite, &request.keys),
+            keys: request.keys,
+            device_name: request.device_name,
+            provider_account_email: self.account().map(str::to_owned),
+            record: bytes.to_vec(),
+        })
+    }
+}
+
+/// Reads `coven_invites.invite`: the invite's journal entry, which the view
+/// lists only while its code can be shown.
+impl coven_database::types::FromSql for Invite {
+    fn column_result(
+        value: coven_database::types::ValueRef<'_>,
+    ) -> coven_database::types::FromSqlResult<Self> {
+        let other = |error: SyncError| coven_database::types::FromSqlError::Other(Box::new(error));
+        let work: InviteWork = serde_json::from_slice(value.as_blob()?)
+            .map_err(|error| coven_database::types::FromSqlError::Other(Box::new(error)))?;
+        let (code, request) = match &work.state {
+            InviteState::Waiting { code, request } => (code, request.as_deref()),
+            InviteState::Approving { code, request } => (code, Some(request.as_slice())),
+            InviteState::Grant | InviteState::Recording | InviteState::Settled => {
+                return Err(other(
+                    coven_database::DbError::Invariant {
+                        what: "coven_invites lists invites whose code can be shown",
+                    }
+                    .into(),
+                ))
+            }
+        };
+        work.shown(code, request).map_err(other)
+    }
+}
+
+impl Invite {
+    /// Read `coven_invites`, as an app's live query does:
+    /// `handle.subscribe(Invite::list)`. This device's invites that haven't
+    /// ended, in the order they were made (§13.2).
+    pub fn list(sql: coven_database::SqlReadContext<'_>) -> coven_database::CovenResult<Vec<Self>> {
+        Ok(sql.query("SELECT invite FROM coven_invites ORDER BY position", [], |row| row.get(0))?)
+    }
+
+    /// Follow `coven_invites` with a live query, as an app does.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn follow(
+        database: &coven_database::Database,
+    ) -> coven_database::test_utils::Followed<Vec<Self>> {
+        coven_database::test_utils::Followed::new(database.subscribe(Self::list))
     }
 }
 
@@ -287,7 +361,6 @@ impl SequenceSync {
         }
         match self.run_invite(&mut session, &mut ring, &member, operation).await? {
             InviteProgress::Shown(invite) => {
-                self.publish_invites().await?;
                 // The next pass polls for the request, then backs off.
                 self.state.request_pass();
                 Ok(invite)
@@ -300,36 +373,6 @@ impl SequenceSync {
             }
             InviteProgress::Finished => Err(SyncError::InvitationChanged),
         }
-    }
-
-    /// This device's shown invites that haven't ended, in the order they
-    /// were made, each with its code and its checked request once one has
-    /// arrived (§13.2). Only this device holds their secrets.
-    pub async fn invites(&self) -> Result<Vec<Invite>, SyncError> {
-        let now = self.clock.now();
-        let mut invites = Vec::new();
-        for record in self.database.operations().await? {
-            if record.kind != INVITE {
-                continue;
-            }
-            let work = InviteWork::read(&record)?;
-            if work.expired(now) {
-                continue;
-            }
-            let (code, request) = match &work.state {
-                InviteState::Waiting { code, request } => (code, request.as_deref()),
-                InviteState::Approving { code, request } => (code, Some(request.as_slice())),
-                InviteState::Grant | InviteState::Recording | InviteState::Settled => continue,
-            };
-            invites.push(self.invite_value(&work, code, request)?);
-        }
-        Ok(invites)
-    }
-
-    /// Show the app this device's open invites.
-    pub(crate) async fn publish_invites(&self) -> Result<(), SyncError> {
-        self.state.set_invites(self.invites().await?);
-        Ok(())
     }
 
     /// Approve exactly this checked request of a sent invite: claim copies
@@ -360,17 +403,6 @@ impl SequenceSync {
         request: Option<&JoinRequest>,
         approve: bool,
     ) -> Result<(), SyncError> {
-        let result = self.decide_locked(invite, request, approve).await;
-        self.publish_invites().await?;
-        result
-    }
-
-    async fn decide_locked(
-        &self,
-        invite: InviteId,
-        request: Option<&JoinRequest>,
-        approve: bool,
-    ) -> Result<(), SyncError> {
         let mut session = self.session.lock().await;
         let member = self.member.read()?.ok_or(StorageFailure::MemberKeysMissing)?;
         let mut ring = self.ring(&mut session, &member).await?;
@@ -385,7 +417,11 @@ impl SequenceSync {
             .find(|record| InviteWork::read(record).is_ok_and(|work| work.id == invite))
             .ok_or(SyncError::InvitationChanged)?;
         let mut work = InviteWork::read(&record)?;
-        if work.expired(self.clock.now()) {
+        // The invite's lifetime ended before its expiry was written: the call
+        // writes it, so the listed invites agree with the refusal.
+        let now = self.clock.now();
+        if work.expired(now) {
+            expiry::expire(&self.database, now, &self.waits, &self.state).await?;
             return Err(SyncError::InvitationChanged);
         }
         let (code, stored) = match &work.state {
@@ -395,7 +431,7 @@ impl SequenceSync {
         };
         if let Some(request) = request {
             let bytes = stored.as_ref().ok_or(SyncError::InvitationChanged)?;
-            if self.present_request(&work, bytes)? != *request {
+            if work.present_request(bytes)? != *request {
                 return Err(SyncError::InvitationChanged);
             }
         }
@@ -407,7 +443,14 @@ impl SequenceSync {
         } else {
             InviteState::Settled
         };
-        self.database.advance_operation(work.update(&record)?).await?;
+        match self.database.advance_operation(work.update(&record)?).await {
+            // The invite's expiry, which the handle writes without the
+            // session, came between reading the invite and deciding it.
+            Err(coven_database::DbError::OperationChanged(id)) if id == record.id => {
+                return Err(SyncError::InvitationChanged)
+            }
+            result => result?,
+        }
         loop {
             match self.run_invite(&mut session, &mut ring, &member, record.id).await? {
                 InviteProgress::Finished => return Ok(()),
@@ -449,7 +492,7 @@ impl SequenceSync {
             }
             self.state.check()?;
         }
-        self.publish_invites().await
+        Ok(())
     }
 
     async fn advance_invite(
@@ -501,7 +544,7 @@ impl SequenceSync {
                         }
                     };
                     let code = self.invite_code(session, &work, invitation)?;
-                    let invite = self.invite_value(&work, &code, None)?;
+                    let invite = work.shown(&code, None)?;
                     work.state = InviteState::Waiting { code, request: None };
                     self.database.advance_operation(work.update(&record)?).await?;
                     return Ok(InviteProgress::Shown(invite));
@@ -698,24 +741,6 @@ impl SequenceSync {
         Ok(SecretText::new(code.to_string()))
     }
 
-    fn invite_value(
-        &self,
-        work: &InviteWork,
-        code: &SecretText,
-        request: Option<&[u8]>,
-    ) -> Result<Invite, SyncError> {
-        Ok(Invite {
-            id: work.id,
-            member: work.member,
-            invitee: work.invitee.clone(),
-            delivery: work.delivery,
-            access: work.access.member_access(),
-            code: code.as_str().to_owned(),
-            expires_at: work.expires_at,
-            request: request.map(|bytes| self.present_request(work, bytes)).transpose()?,
-        })
-    }
-
     /// Open and check a request: it repeats the invite's id and member id,
     /// and its own new signing key verifies it (§13.2).
     fn open_request(&self, work: &InviteWork, bytes: &[u8]) -> Result<Vec<u8>, SyncError> {
@@ -737,19 +762,6 @@ impl SequenceSync {
         hasher.update(&envelope.signed_bytes()?);
         request.keys.signing.verify_object(path.as_str(), &hasher.finish(), signature)?;
         Ok(plain.to_vec())
-    }
-
-    fn present_request(&self, work: &InviteWork, bytes: &[u8]) -> Result<JoinRequest, SyncError> {
-        let request = decode_request(bytes)?;
-        Ok(JoinRequest {
-            invite: request.invite,
-            member: request.member,
-            confirmation: ConfirmationNumber::of(request.invite, &request.keys),
-            keys: request.keys,
-            device_name: request.device_name,
-            provider_account_email: work.account().map(str::to_owned),
-            record: bytes.to_vec(),
-        })
     }
 }
 
@@ -779,3 +791,6 @@ mod approval;
 
 #[path = "sequence_invite_reset.rs"]
 mod reset;
+
+#[path = "invite_expiry.rs"]
+pub(crate) mod expiry;

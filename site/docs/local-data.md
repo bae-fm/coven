@@ -429,6 +429,7 @@ tables like these, so the list stays one query over the database:
 | `coven_upload_queue` (a table) | file waiting in this device's upload queue | `file`, `position` |
 | `coven_pins` (a table) | file this device keeps pinned | `file` |
 | `coven_pending` | pending record | `record`, `file`, `position`, `cause` |
+| `coven_invites` | invite this device made that hasn't ended | `invite`, `position` |
 | `coven_members` | member, former ones included | `member`, `role`, `removed`, `is_self` |
 | `coven_devices` | device a member registered | `device`, `member`, `name`, `state`, `is_self` |
 

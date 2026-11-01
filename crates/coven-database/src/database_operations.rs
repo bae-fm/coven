@@ -59,6 +59,34 @@ impl Database {
         .await
     }
 
+    /// Read the journal's rows of `kind` and commit the transitions `step`
+    /// makes from them, in one transaction on the writer: no other write
+    /// comes between the read and the transitions. `step` also returns what
+    /// it concluded from the rows. A failure fails this handle with its
+    /// cause, as losing a pending record does: the rows would go on showing
+    /// the app a state their owner has left.
+    pub async fn advance_operations<T: Send + 'static>(
+        &self,
+        kind: &str,
+        step: impl FnOnce(&[OperationRecord]) -> Result<(Vec<OperationUpdate>, T), DbError>
+            + Send
+            + 'static,
+    ) -> Result<T, DbError> {
+        let kind = kind.to_owned();
+        self.call(move |inner| {
+            inner.access.with_writer(|writer| {
+                writer.state_transaction(|db| {
+                    let (updates, concluded) = step(&crate::operation::of_kind(db, &kind)?)?;
+                    for update in &updates {
+                        crate::operation::advance(db, update)?;
+                    }
+                    Ok(concluded)
+                })
+            })
+        })
+        .await
+    }
+
     /// Read the pending condition associated with a journal row.
     pub async fn operation_pending<P: crate::PendingValue>(
         &self,

@@ -300,10 +300,6 @@ impl StorageConnections {
         self.publications.state.sync_often(interval)
     }
 
-    pub(crate) fn subscribe_invites(&self) -> tokio::sync::watch::Receiver<Vec<Invite>> {
-        self.publications.state.subscribe_invites()
-    }
-
     /// Stopped with storage set up, Disconnected without; a release failure
     /// is Failed with its cause.
     pub(super) async fn publish_released(
@@ -338,6 +334,7 @@ impl StorageConnections {
         }
         let _call = self.calls.lock().await;
         let released = self.release(&mut *self.live.lock().await).await;
+        self.expiry.close().await;
         self.codes.close().await;
         let keys = self.keys.lock().expect("store keys lock poisoned").take();
         self.authentication.lock().await.take();

@@ -50,14 +50,18 @@ pub struct StorageSetup {
 }
 
 /// Write the status an opened store starts with: `Stopped` with storage set
-/// up, `Disconnected` without (E5). Opening writes it before the handle
-/// exists, so no app reads the status a process that closed left behind.
+/// up, `Disconnected` without (E5), and end each invite whose lifetime ended
+/// while it was closed (§13.2). Opening writes them before the handle
+/// exists, so no app reads the status a process that closed left behind, or
+/// an invite that has expired.
 pub(crate) async fn record_opened(
     database: &coven_database::Database,
+    clock: &ClockRef,
     configured: bool,
 ) -> Result<(), SyncError> {
     let status = if configured { SyncStatus::Stopped } else { SyncStatus::Disconnected };
-    status.record(database).await.map_err(SyncError::from)
+    status.record(database).await.map_err(SyncError::from)?;
+    coven_sync::InviteExpiry::opened(database, clock.now()).await.map_err(SyncError::from)
 }
 
 /// What a connection may publish: the sequence owner's gate, and the fresh
@@ -150,6 +154,8 @@ pub(crate) struct StorageConnections {
     authentication: tokio::sync::Mutex<Option<Arc<SessionSignIn>>>,
     /// The connection, if any; held while it changes or works.
     live: tokio::sync::Mutex<Connection>,
+    /// Ends invites as their lifetimes end, connected or not (§13.2).
+    expiry: coven_sync::InviteExpiry,
     /// The connection's loop, for requests that return at once.
     control: std::sync::Mutex<Option<SyncLoop>>,
     /// Whether custody held storage credentials when last observed: start
@@ -198,8 +204,15 @@ impl StorageConnections {
             coven_storage::StorageSettings::new(directory.clone()),
             None,
         );
+        let expiry = coven_sync::InviteExpiry::start(
+            database.clone(),
+            clock.clone(),
+            waits.clone(),
+            publications.state.clone(),
+        );
         Self {
             codes,
+            expiry,
             database,
             files,
             identity,

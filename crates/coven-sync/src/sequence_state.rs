@@ -188,7 +188,6 @@ impl From<PassFailure> for SyncStatus {
 /// Shared state of this open installation. It carries no time-based permission.
 pub struct SyncState {
     status: watch::Sender<SequenceStatus>,
-    invites: watch::Sender<Vec<crate::Invite>>,
     registered: Mutex<bool>,
     /// App work outside the database that the next pass serves.
     wake: tokio::sync::Notify,
@@ -201,7 +200,6 @@ impl SyncState {
     pub fn new() -> Self {
         Self {
             status: watch::channel(SequenceStatus::Opening).0,
-            invites: watch::channel(Vec::new()).0,
             registered: Mutex::new(false),
             wake: tokio::sync::Notify::new(),
             often: crate::sync_often::SyncOften::new(),
@@ -210,11 +208,6 @@ impl SyncState {
     /// Observe progress and blocked causes.
     pub fn subscribe(&self) -> watch::Receiver<SequenceStatus> {
         self.status.subscribe()
-    }
-    /// This device's open invites, each with its request once one has
-    /// arrived, starting with the current list (§13.2).
-    pub fn subscribe_invites(&self) -> watch::Receiver<Vec<crate::Invite>> {
-        self.invites.subscribe()
     }
     /// Ask the running loop for a pass, retained until it waits.
     pub(crate) fn request_pass(&self) {
@@ -233,13 +226,6 @@ impl SyncState {
     /// The wait between idle passes, and its changes.
     pub(crate) fn idle_interval(&self) -> crate::sync_often::IdleInterval {
         self.often.subscribe()
-    }
-    pub(crate) fn set_invites(&self, invites: Vec<crate::Invite>) {
-        self.invites.send_if_modified(|current| {
-            let changed = *current != invites;
-            *current = invites;
-            changed
-        });
     }
     pub(crate) fn set(&self, status: SequenceStatus) {
         self.status.send_replace(status);

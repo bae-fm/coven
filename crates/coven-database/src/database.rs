@@ -377,6 +377,12 @@ impl Database {
         self.table_changes(&["_coven_uploads"], true, true)
     }
 
+    /// Observe operations as they start: rows inserted into the journal,
+    /// such as an invite, whose expiry the handle wakes to write (§13.2).
+    pub fn started_operations(&self) -> crate::DatabaseChanges {
+        self.table_changes(&["_coven_operations"], true, true)
+    }
+
     /// `first` reports the initial state as a change; `inserted_only`
     /// ignores updates and deletions.
     fn table_changes(

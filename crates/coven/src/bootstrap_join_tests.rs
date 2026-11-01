@@ -379,7 +379,7 @@ async fn an_in_person_join_loads_without_an_approval_call() {
         .unwrap()
         .iter()
         .any(|member| member.is_self && member.id == invite.member));
-    assert!(owner.handle.subscribe_invites().borrow().is_empty());
+    assert!(owner.handle.read(Invite::list).await.unwrap().is_empty());
     // The finished join no longer keeps its code.
     assert!(saved_code(&install, owner.directory.id()).is_none());
     handle.close().await.unwrap();

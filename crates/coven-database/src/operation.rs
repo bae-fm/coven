@@ -108,6 +108,17 @@ pub(crate) fn read(db: &DatabaseConnection) -> Result<Vec<OperationRecord>, DbEr
     )
 }
 
+pub(crate) fn of_kind(
+    db: &DatabaseConnection,
+    kind: &str,
+) -> Result<Vec<OperationRecord>, DbError> {
+    db.query(
+        "SELECT id,kind,last_step,data,started_by FROM _coven_operations WHERE kind=?1 ORDER BY id",
+        [kind],
+        record,
+    )
+}
+
 pub(crate) fn find(
     db: &DatabaseConnection,
     id: OperationId,

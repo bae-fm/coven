@@ -193,10 +193,10 @@ async fn app_reopening_resumes_operations_and_files_using_one_storage_capability
         )
         .await
         .unwrap();
-    let invites = handle.subscribe_invites();
-    assert_eq!(invites.borrow().len(), 1);
+    let mut invites = handle.test_invites();
+    assert_eq!(invites.next().await, std::slice::from_ref(&invite));
     handle.cancel_invite(&invite.id).await.unwrap();
-    assert!(invites.borrow().is_empty());
+    assert!(invites.next().await.is_empty());
     assert!(matches!(
         handle.set_member_role(&member.member(), MemberRole::Member).await,
         Err(SyncError::Rejected(OperationRejection::NoAdminLeft))

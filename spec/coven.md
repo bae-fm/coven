@@ -428,10 +428,10 @@ Some of that bookkeeping decides what the app shows: the files its rows
 reference and where each is, which files are still waiting to upload and why,
 which files this device keeps pinned, what can't proceed, how sync is going,
 who the members are, and which circles this member is in.
-So the app's SQL can read it through ten views, `coven_uploads`,
+So the app's SQL can read it through eleven views, `coven_uploads`,
 `coven_sending`, `coven_downloading`, `coven_upload_pause`, `coven_pending`,
-`coven_user_files`, `coven_members`, `coven_devices`, `coven_circles` and
-`coven_circle_members`, and five tables, `coven_files`, `coven_pins`,
+`coven_invites`, `coven_user_files`, `coven_members`, `coven_devices`,
+`coven_circles` and `coven_circle_members`, and five tables, `coven_files`, `coven_pins`,
 `coven_upload_queue`, `coven_sync_status` and `coven_retry_effect`
 ([api.md E4](api.md#e4-reading) lists their columns).
 Ana's photo app lists albums with those still uploading first, as one query:
@@ -3693,10 +3693,11 @@ then take it back later (§14.2, §14.3).
 
 **Ana's open invites.** Ana's phone lists the invites it made that haven't
 ended: the person's name, the access granted, in person or sent, when it
-expires, the request once one has arrived, and the code to show again. Only
-Ana's phone lists them. Only it holds their secrets, so only it can approve,
-decline or cancel one. Other devices learn of Dan when the entry adding him
-applies.
+expires, the request once one has arrived, and the code to show again. They
+are a view of its operations journal, `coven_invites` (§4), which a live query
+follows as each invite changes. Only Ana's phone lists them. Only it holds
+their secrets, so only it can approve, decline or cancel one. Other devices
+learn of Dan when the entry adding him applies.
 
 The code shown again is the one first shown, byte for byte, though Household
 may have been renamed and more slots applied since. Dan's phone binds its saved
@@ -3831,8 +3832,13 @@ use stays. Without this, a reset would strand the access the invite granted.
 Declining, or letting the invite expire, takes back the provider access it
 granted. On S3 there is nothing to take back: the person deletes Dan's key in the
 provider's console, and coven forgets it (§14.3). An invite expires at the time
-fixed when it was made, by the inviting device's clock, when that device is next
-online.
+fixed when it was made, by the inviting device's clock. Expiry is a write, like
+approving, declining or cancelling: Ana's phone wakes at the earliest open
+invite's expiry and writes it then, with its storage disconnected, offline or
+with sync stopped too; opening writes one that ended while the store was
+closed, and a decision Ana makes once the time has passed writes it before it
+fails. The invite leaves her list in that write; its request is deleted and
+the access goes back in a pass, once her phone is connected and online.
 
 Recovering an existing member changes none of their access records or device
 ids. The new installation registers its own fresh device after the key
@@ -7908,8 +7914,8 @@ device consistent with the database.
   `sqlite_autoindex_` prefix before the table name.
 - The views the app's SQL reads use the `coven_` prefix: `coven_uploads`,
   `coven_sending`, `coven_downloading`, `coven_upload_pause`, `coven_pending`,
-  `coven_user_files`, `coven_members`, `coven_devices`, `coven_circles` and
-  `coven_circle_members`
+  `coven_invites`, `coven_user_files`, `coven_members`, `coven_devices`,
+  `coven_circles` and `coven_circle_members`
   ([api.md E4](api.md#e4-reading)). Each reads coven's tables through joins
   only, since SQLite names the view to the authorizer only for what a join
   reads. `coven_pins` and `coven_upload_queue` have the same prefix: tables

@@ -278,6 +278,58 @@ async fn disconnect_waits_for_the_active_pass_and_custody_failure_keeps_sync_run
     f.handle.close().await.unwrap();
 }
 
+/// An invite ends when its lifetime does with storage disconnected too: the
+/// handle writes its expiry, which the app's live query hears, and so does
+/// opening for one that ended while the store was closed (§13.2). The
+/// ended invite's own work waits for a connected pass.
+#[tokio::test]
+async fn an_invite_expires_with_storage_disconnected_and_while_closed() {
+    let f = Fixture::new().await;
+    f.setup().await.unwrap();
+    status(&f.handle, |s| matches!(s, SyncStatus::Synced { .. })).await;
+    let invite = || async {
+        f.handle
+            .create_invite(
+                InviteTarget::NewMember { role: MemberRole::Member, name: "Carol".into() },
+                InviteAccess::S3AccessKey {
+                    access_key_id: "carol-key".into(),
+                    secret_access_key: SecretText::new("carol-secret".into()),
+                },
+                crate::InviteDelivery::Sent { lifetime: crate::InviteLifetime::Hour },
+            )
+            .await
+            .unwrap()
+    };
+    let mut invites = f.handle.test_invites();
+    assert!(invites.next().await.is_empty());
+    // Made after the handle opened, so its expiry joins the handle's wakes.
+    let first = invite().await;
+    assert_eq!(invites.next().await, std::slice::from_ref(&first));
+    f.handle.disconnect_storage().await.unwrap();
+    f.clock.set(first.expires_at - Duration::from_secs(1));
+    let early = tokio::time::timeout(Duration::from_millis(200), invites.next()).await;
+    assert!(early.is_err(), "the invite ended before its lifetime: {early:?}");
+    f.clock.set(first.expires_at);
+    assert!(invites.next().await.is_empty());
+    f.setup().await.unwrap();
+    let second = invite().await;
+    assert_eq!(invites.next().await, std::slice::from_ref(&second));
+    drop(invites);
+    f.handle.close().await.unwrap();
+    f.clock.set(second.expires_at);
+    let handle = builder(
+        &f.app,
+        StoreLayout::new(f._root.path().into()),
+        f.clock.clone(),
+        f.connector.clone(),
+    )
+    .open(f.directory.id(), |_| ())
+    .await
+    .unwrap();
+    assert!(handle.read(Invite::list).await.unwrap().is_empty());
+    handle.close().await.unwrap();
+}
+
 fn builder(
     app: &TestCoven,
     layout: StoreLayout,

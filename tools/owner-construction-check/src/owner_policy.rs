@@ -141,6 +141,9 @@ pub(crate) const POLICY: Policy = Policy {
         ("crates/coven-sync/src/retry_waits.rs", "RetryWaits", "open"),
         ("crates/coven-sync/src/retry_waits.rs", "RetryWaits", "in_memory"),
         ("crates/coven-sync/src/sync_loop.rs", "SyncLoop", "new"),
+        // One invite expiry per writer handle, connected or not; the
+        // handle's storage owner keeps it and stops it as it closes.
+        ("crates/coven-sync/src/invite_expiry.rs", "InviteExpiry", "start"),
         // Credential changes run as owned tasks, so a dropped app future
         // cannot leave custody and the live connection disagreeing.
         ("crates/coven-sync/src/restore_codes.rs", "RestoreCodes", "new"),

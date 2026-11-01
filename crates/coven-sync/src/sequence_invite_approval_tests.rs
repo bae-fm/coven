@@ -25,7 +25,7 @@ async fn an_in_person_request_is_approved_in_the_pass_that_reads_it() {
     let invite = in_person_invite(&ana).await;
     let carol = join(&group, &invite.code, "Carol's phone").await;
     ana.sync.pass().await.unwrap();
-    assert!(ana.sync.invites().await.unwrap().is_empty());
+    assert!(listed(&ana).await.is_empty());
     assert!(group
         .storage
         .status(&ObjectPath::join_request(group.store, invite.id))
@@ -64,9 +64,9 @@ async fn an_in_person_approval_under_way_refuses_the_apps_decisions() {
         })
         .await;
     ana.sync.pass().await.unwrap();
-    let listed = ana.sync.invites().await.unwrap();
-    assert_eq!(listed.len(), 1);
-    let request = listed[0].request.clone().expect("the request being approved");
+    let open = listed(&ana).await;
+    assert_eq!(open.len(), 1);
+    let request = open[0].request.clone().expect("the request being approved");
     assert_eq!(request.device_name, "Carol's phone");
     for result in [
         ana.sync.approve_join_request(&request).await,
@@ -87,7 +87,7 @@ async fn an_in_person_approval_under_way_refuses_the_apps_decisions() {
         .unwrap()
         .id;
     ana.sync.retry_pending_operation(operation).await.unwrap();
-    assert!(ana.sync.invites().await.unwrap().is_empty());
+    assert!(listed(&ana).await.is_empty());
     assert_eq!(
         carol.device.sync.join_outcome(&carol.request).await.unwrap(),
         JoinOutcome::Admitted

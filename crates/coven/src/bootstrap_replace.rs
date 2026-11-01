@@ -173,7 +173,7 @@ pub(super) async fn publish(
     waits: Arc<coven_sync::RetryWaits>,
     configured: bool,
 ) -> Result<CovenHandle, BootstrapError> {
-    if let Err(error) = crate::storage::record_opened(&database, configured).await {
+    if let Err(error) = crate::storage::record_opened(&database, &owners.clock, configured).await {
         return combine(Err(error.into()), close(database).await);
     }
     match replacement.publish() {

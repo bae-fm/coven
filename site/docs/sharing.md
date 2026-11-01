@@ -174,10 +174,10 @@ let invite = handle
     .await?;
 send_to_dan(&invite.code);
 
-let mut invites = handle.subscribe_invites();
-loop {
-    let open = invites.borrow_and_update().clone();
-    if let Some(request) = open.iter().find(|i| i.id == invite.id).and_then(|i| i.request.clone()) {
+// Ana's open invites are the coven_invites view, which a live query follows.
+let mut invites = handle.subscribe(Invite::list);
+while let Some(open) = invites.next().await {
+    if let Some(request) = open?.into_iter().find(|i| i.id == invite.id).and_then(|i| i.request) {
         // Ana asks Dan for the number his phone shows.
         if confirm(&request.confirmation).await {
             handle.approve_join_request(&request).await?;
@@ -186,7 +186,6 @@ loop {
         }
         break;
     }
-    invites.changed().await?;
 }
 ```
 

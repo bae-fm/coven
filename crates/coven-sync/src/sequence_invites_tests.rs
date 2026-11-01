@@ -5,7 +5,7 @@ use coven_storage::{ObjectPath, Storage};
 
 /// The checked requests among the device's open invites.
 pub(super) async fn requests(device: &Device) -> Vec<JoinRequest> {
-    device.sync.invites().await.unwrap().into_iter().filter_map(|invite| invite.request).collect()
+    listed(device).await.into_iter().filter_map(|invite| invite.request).collect()
 }
 
 #[tokio::test]
@@ -79,7 +79,7 @@ async fn cancelling_an_invite_with_a_waiting_request_ends_the_join_as_declined()
     ana.sync.pass().await.unwrap();
     assert_eq!(requests(&ana).await.len(), 1);
     ana.sync.cancel_invite(invite.id).await.unwrap();
-    assert!(ana.sync.invites().await.unwrap().is_empty());
+    assert!(listed(&ana).await.is_empty());
     assert!(group
         .storage
         .status(&ObjectPath::join_request(group.store, invite.id))
@@ -169,6 +169,24 @@ async fn each_delivery_expires_after_its_lifetime_on_the_inviting_device() {
     }
 }
 
+/// Opening ends each invite whose lifetime ended while the store was
+/// closed, before any app reads the invites, and leaves one still open
+/// (§13.2).
+#[tokio::test]
+async fn opening_writes_the_expiry_of_an_invite_that_ended_while_closed() {
+    use std::time::Duration;
+    let group = Group::shared();
+    let ana = group.device(1).await;
+    group.create_with_access(&ana, MemberAccess::ProviderAccount("ana@example.org".into())).await;
+    let invite = invite(&ana).await;
+    let opened = |at| InviteExpiry::opened(&ana.sync.database, at);
+    opened(invite.expires_at - Duration::from_secs(1)).await.unwrap();
+    assert_eq!(listed(&ana).await, std::slice::from_ref(&invite));
+    opened(invite.expires_at).await.unwrap();
+    assert!(listed(&ana).await.is_empty());
+    ana.sync.database.close().await.unwrap();
+}
+
 /// A new person's invite needs a name the format can carry, checked before
 /// any provider change.
 #[tokio::test]
@@ -198,6 +216,8 @@ async fn an_invite_expires_a_day_later_on_the_inviting_device() {
     group.create_with_access(&ana, MemberAccess::ProviderAccount("ana@example.org".into())).await;
     invite(&ana).await;
     group.clock.set(std::time::UNIX_EPOCH + std::time::Duration::from_secs(86_400));
+    ana.sync.pass().await.unwrap();
+    // The pass deletes the request, and the next takes back the share.
     ana.sync.pass().await.unwrap();
     ana.sync.pass().await.unwrap();
     assert!(ana.sync.database.operations().await.unwrap().is_empty());
@@ -329,37 +349,64 @@ async fn a_refused_grant_answers_the_invite_call_and_settles_the_invite() {
     ana.sync.database.close().await.unwrap();
 }
 
-/// The owner's open invites reach the app's subscription without a call:
-/// each as soon as it is shown, with the code it showed, and its checked
-/// request once a pass reads it.
+/// The app's live query on `coven_invites` follows each invite in the
+/// writes that change it, in order and without a call: shown with the code
+/// it showed, then with its checked request once a pass reads it, then gone
+/// once declined.
 #[tokio::test]
-async fn a_pass_publishes_open_invites_and_their_requests_to_the_subscription() {
+async fn a_live_query_follows_each_open_invite_in_order() {
     use coven_format::admin::StoreChange;
     let group = Group::shared();
     let ana = group.device(1).await;
     group.create_with_access(&ana, MemberAccess::ProviderAccount("ana@example.org".into())).await;
-    let invites = ana.sync.state.subscribe_invites();
-    assert!(invites.borrow().is_empty());
+    let mut invites = Invite::follow(&ana.sync.database);
+    assert!(invites.next().await.is_empty());
     let invite = invite(&ana).await;
-    let listed = invites.borrow().clone();
-    assert_eq!(listed.len(), 1);
-    assert_eq!(
-        (listed[0].id, &listed[0].code, &listed[0].request),
-        (invite.id, &invite.code, &None)
-    );
-    assert_eq!(listed[0].invitee.as_deref(), Some("Carol"));
+    let shown = invites.next().await;
+    assert_eq!(shown.len(), 1);
+    assert_eq!((shown[0].id, &shown[0].code, &shown[0].request), (invite.id, &invite.code, &None));
+    assert_eq!(shown[0].invitee.as_deref(), Some("Carol"));
+    assert_eq!(shown[0], invite);
     // A rename and the slots after it leave the code the joiner scanned as
     // it was: its saved request is bound to those exact bytes.
     ana.sync.administer(StoreChange::RenameStore { name: "Family".into() }).await.unwrap();
     let carol = join(&group, &invite.code, "Carol's phone").await;
     ana.sync.pass().await.unwrap();
-    let shown = invites.borrow().clone();
-    assert_eq!(shown, ana.sync.invites().await.unwrap());
-    assert_eq!(shown[0].code, invite.code);
-    let request = shown[0].request.clone().unwrap();
+    let requested = invites.next().await;
+    assert_eq!(requested[0].code, invite.code);
+    let request = requested[0].request.clone().unwrap();
     assert_eq!(request.device_name, "Carol's phone");
     ana.sync.decline_join_request(&request).await.unwrap();
-    assert!(invites.borrow().is_empty());
+    assert!(invites.next().await.is_empty());
+    for device in [&ana, &carol.device] {
+        device.sync.database.close().await.unwrap();
+    }
+}
+
+/// A decision made after the invite's lifetime ended, before anything wrote
+/// its expiry, writes the expiry and fails: the listed invites agree with
+/// the refusal, and the next pass takes back the access (§13.2).
+#[tokio::test]
+async fn a_decision_after_the_lifetime_writes_the_expiry_and_fails() {
+    let group = Group::shared();
+    let ana = group.device(1).await;
+    group.create_with_access(&ana, MemberAccess::ProviderAccount("ana@example.org".into())).await;
+    let invite = invite(&ana).await;
+    let carol = join(&group, &invite.code, "Carol's phone").await;
+    ana.sync.pass().await.unwrap();
+    let request = requests(&ana).await.remove(0);
+    group.clock.set(invite.expires_at);
+    assert_eq!(listed(&ana).await.len(), 1, "only a write ends the invite");
+    let result = ana.sync.approve_join_request(&request).await;
+    assert!(matches!(result, Err(SyncError::InvitationChanged)), "{result:?}");
+    assert!(listed(&ana).await.is_empty());
+    // The pass deletes the request, and the next takes back the share.
+    ana.sync.pass().await.unwrap();
+    ana.sync.pass().await.unwrap();
+    assert!(ana.sync.database.operations().await.unwrap().is_empty());
+    let access =
+        ana.sync.database.provider_access("carol@example.org".into()).await.unwrap().unwrap();
+    assert_eq!((access.intended, access.granted), (false, Some(false)));
     for device in [&ana, &carol.device] {
         device.sync.database.close().await.unwrap();
     }
@@ -487,8 +534,7 @@ async fn a_second_invite_to_an_account_already_shared_is_made() {
         )
         .await
         .unwrap();
-    let open: Vec<_> =
-        ana.sync.invites().await.unwrap().into_iter().map(|invite| invite.id).collect();
+    let open: Vec<_> = listed(&ana).await.into_iter().map(|invite| invite.id).collect();
     assert_eq!(open, [sent.id, in_person.id]);
     // Ending the sent invite leaves the account shared for the one still open.
     ana.sync.cancel_invite(sent.id).await.unwrap();

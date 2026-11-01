@@ -105,7 +105,7 @@ impl SequenceSync {
         if let Some(record) = &blocked {
             state.set(SequenceStatus::Blocked(Box::new(record.clone())));
         }
-        let sync = Self {
+        Ok(Self {
             database,
             storage,
             keys,
@@ -129,9 +129,7 @@ impl SequenceSync {
                 scanned: 1,
                 locked,
             })),
-        };
-        sync.publish_invites().await?;
-        Ok(sync)
+        })
     }
 
     /// Use candidate credentials while retaining this installation's exact
@@ -632,7 +630,7 @@ mod sequence_credentials;
 #[path = "sequence_files.rs"]
 mod sequence_files;
 #[path = "sequence_invites.rs"]
-mod sequence_invites;
+pub(crate) mod sequence_invites;
 #[path = "sequence_join.rs"]
 pub(crate) mod sequence_join;
 #[path = "sequence_keys.rs"]

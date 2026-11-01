@@ -14,7 +14,7 @@
 /// tables coven keeps for the app's triggers to follow
 /// (`internal_schema_pins.rs`, `internal_schema_upload_queue.rs`,
 /// `internal_schema_sync_status.rs`, `internal_schema_retry_effect.rs`).
-const READABLE: [&str; 15] = [
+const READABLE: [&str; 16] = [
     super::FILES,
     "coven_user_files",
     "coven_uploads",
@@ -26,6 +26,7 @@ const READABLE: [&str; 15] = [
     super::SYNC_STATUS,
     super::RETRY_EFFECT,
     "coven_pending",
+    "coven_invites",
     "coven_members",
     "coven_devices",
     "coven_circles",
@@ -93,6 +94,18 @@ pub(super) const SCHEMA: &str = concat!(
         LEFT JOIN _coven_upload_files AS l ON l.upload=u.id
         LEFT JOIN _coven_stored_files AS f ON u.id IS NULL
             AND f.device=e.device AND f.object=e.file;",
+    // This device's invites that haven't ended, in the order they were made,
+    // from the operations journal: each from when its access is granted and
+    // its code can be shown, while its request is awaited or approved, until
+    // a write of its state ends it, approval, decline, cancel or expiry
+    // alike. `invite` is the journal entry, the invite's state as coven-sync
+    // encodes it (`InviteWork`), which its `Invite` reads.
+    "CREATE VIEW coven_invites(invite,position) AS
+        SELECT o.data,o.id
+        FROM _coven_operations AS o
+        WHERE o.kind='invite'
+            AND (json_type(CAST(o.data AS TEXT),'$.state.Waiting') IS NOT NULL
+                OR json_type(CAST(o.data AS TEXT),'$.state.Approving') IS NOT NULL);",
     // Every member this device's applied slots name, former ones included,
     // with their public keys and how they reach storage: the account or the
     // S3 key id the stored access names, whichever it is.

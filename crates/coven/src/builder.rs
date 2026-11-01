@@ -721,7 +721,9 @@ impl OpeningStore {
             .is_some();
         // Boxed, so `open`'s future stays as small as an app's stack needs
         // (`application_api_tests.rs`).
-        Box::pin(crate::storage::record_opened(&database, configured)).await.map_err(sync_error)?;
+        Box::pin(crate::storage::record_opened(&database, &owners.clock, configured))
+            .await
+            .map_err(sync_error)?;
         Ok(owners.into_handle(database, waits, configured))
     }
 }

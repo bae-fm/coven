@@ -362,6 +362,11 @@ pub(super) async fn join(group: &Group, code: &str, name: &str) -> Joiner {
     Joiner { device, request }
 }
 
+/// The device's open invites, as `coven_invites` lists them.
+pub(crate) async fn listed(device: &Device) -> Vec<Invite> {
+    device.sync.database.read(Invite::list).await.unwrap()
+}
+
 pub(super) async fn invite(ana: &Device) -> Invite {
     ana.sync
         .create_invite(

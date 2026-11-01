@@ -2834,16 +2834,16 @@ let moved = handle
   far a transfer in flight has got, bytes handed over or received included,
   is on the transfer watches (E7, E8): memory only, keyed by file, with no
   table or live query.
-- Open invites have their own stream (E10). The sync status and what the
-  person's retry would do are the tables `coven_sync_status` and
-  `coven_retry_effect` (E5), which a live query follows like any other.
+- This device's open invites are the view `coven_invites` (E10), the sync
+  status and what the person's retry would do the tables `coven_sync_status`
+  and `coven_retry_effect` (E5), which a live query follows like any other.
 - E.g. Ana's app reads `members()` to draw its first list, or subscribes with
   `subscribe_members()` to receive that same list and later committed changes.
 - Subscriptions show current results, as slots apply. Their callback
   histories need not match between devices (§10).
 - Offer a removed row elsewhere with the same key (§8.4); copying to a new key
   can produce two rows. Published owner and unique claims follow slot order.
-- *Coven's state in SQL.* App SQL reads ten views of coven's own tables and
+- *Coven's state in SQL.* App SQL reads eleven views of coven's own tables and
   five tables, `coven_files`, `coven_pins`, `coven_upload_queue`,
   `coven_sync_status` and `coven_retry_effect`, in reads,
   writes and migrations alike
@@ -2943,6 +2943,8 @@ let moved = handle
 | | `file` | for a record about stored bytes or an upload, each file over them on this device: the files the upload stores, or the stored files; NULL otherwise |
 | | `position` | its place in the order the records arose, smallest first; a record whose condition changes keeps its place |
 | | `cause` | the text of the error behind the record, written with it, when this run met that error and no app call received it; NULL otherwise (E5) |
+| `coven_invites`: this device's invites that haven't ended, each from when its access is granted and its code can be shown until approval, decline, cancel or expiry ends it, each a write (E10) | `invite` | the invite with its code and its checked request once one has arrived, read as `Invite` |
+| | `position` | its place in the order the invites were made, smallest first |
 | `coven_members`: every member this device's applied slots name, former ones included | `member` | the member id as canonical UUID text, read as `MemberId` |
 | | `role` | `admin` or `member` |
 | | `removed` | 1 for a former member |
@@ -2965,6 +2967,8 @@ let moved = handle
 impl types::FromSql for PendingRecord;
 /// Reads `coven_sync_status.status`.
 impl types::FromSql for SyncStatus;
+/// Reads `coven_invites.invite`.
+impl types::FromSql for Invite;
 /// Reads a file id column: the app's file references and coven's file views.
 impl types::FromSql for FileId;
 /// Reads `coven_uploads.move`, the move `cancel_move` takes.
@@ -5793,9 +5797,21 @@ pub enum ProviderSignOut {
   ([§13.2](coven.md#132-adding-a-person-invites)). An in-person invite's request
   is approved by the inviting device as soon as it is read and checked. A sent
   invite's request waits for the admin's decision, with its confirmation number.
-- Only the inviting device lists its open invites, each with its code to show
-  again and the request once one has arrived. It looks for the request on the
-  shared backoff; `retry_now` ends that wait (E5).
+- Only the inviting device lists its open invites, in `coven_invites` (E4),
+  each with its code to show again and the request once one has arrived. An
+  invite is listed once its access is granted and its code can be shown, and
+  the code it lists is the one first shown. Other devices' invites are never
+  listed: only the inviting device can act on one. It looks for the request
+  on the shared backoff; `retry_now` ends that wait (E5).
+- An invite ends in a write: approval, decline and cancel each write it, and
+  so does expiry. The handle wakes at the earliest open invite's expiry, by
+  the inviting device's clock, and writes it, with storage disconnected,
+  offline or with sync stopped too, so the invite leaves `coven_invites`
+  without a pass; opening writes each expiry already past before the handle
+  exists. Deleting the ended invite's request and taking back its access is
+  then its own work, which a pass does once storage is connected. A failed
+  write fails the handle with its cause, which every call and live query
+  reports.
 - The joining device keeps the invite code in its own keychain, never synced,
   until the join ends. On Dropbox and OneDrive it keeps the join's provider
   sign-in beside the code, in the store's device credentials, so a restart
@@ -6089,17 +6105,12 @@ impl CovenHandle {
         delivery: InviteDelivery,
     ) -> Result<Invite, SyncError>;
 
-    /// This device's invites that haven't ended, live, in the order they were
-    /// made, each with its request once one has arrived. An invite is listed
-    /// once its access is granted and its code can be shown, and the code it
-    /// lists is the one first shown. The first value is the current list.
-    /// Other devices' invites are never listed: only the inviting device can
-    /// act on one.
-    pub fn subscribe_invites(&self) -> watch::Receiver<Vec<Invite>>;
-
     /// For a sent invite: checks the invite's member id and the exact
     /// request's fresh key pair. An in-person invite's request is approved
     /// without this call, and calling it fails with InvitationChanged.
+    /// This call, declining and cancelling each fail with InvitationChanged
+    /// once the invite's lifetime has ended; when nothing has written that
+    /// expiry yet, the call writes it first.
     /// Confirms initial/historical key copies, then adds the new member with
     /// the invite's role or replaces the existing member's keys. A rejected
     /// replacement is reported, not automatically retried with a new entry.
@@ -6159,7 +6170,7 @@ pub enum InviteLifetime {
     Week,
 }
 
-/// One of this device's open invites.
+/// One of this device's open invites, as `coven_invites` lists it (E4).
 pub struct Invite {
     pub id: InviteId,
     pub member: MemberId,
@@ -6175,6 +6186,12 @@ pub struct Invite {
     /// The checked request, once one has arrived. For an in-person invite it
     /// is being approved.
     pub request: Option<JoinRequest>,
+}
+
+impl Invite {
+    /// Reads `coven_invites`, in the order the invites were made, for a
+    /// read or a live query: `handle.subscribe(Invite::list)`.
+    pub fn list(sql: SqlReadContext<'_>) -> CovenResult<Vec<Invite>>;
 }
 
 pub struct JoinRequest {
@@ -6628,10 +6645,9 @@ let invite = handle
     .await?;
 send_to_carol(&invite.code);
 
-let mut invites = handle.subscribe_invites();
-loop {
-    let open = invites.borrow_and_update().clone();
-    if let Some(request) = open.iter().find(|i| i.id == invite.id).and_then(|i| i.request.clone()) {
+let mut invites = handle.subscribe(Invite::list);
+while let Some(open) = invites.next().await {
+    if let Some(request) = open?.into_iter().find(|i| i.id == invite.id).and_then(|i| i.request) {
         // Ana asks Carol for the number her phone shows.
         if confirm(&request.confirmation).await {
             handle.approve_join_request(&request).await?;
@@ -6640,7 +6656,6 @@ loop {
         }
         break;
     }
-    invites.changed().await?;
 }
 ```
 

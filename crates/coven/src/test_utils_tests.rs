@@ -497,10 +497,11 @@ async fn admit_member(f: &Fixture, handle: &CovenHandle, keys: &MemberKeys) -> M
     f.storage.create(&path, &bytes).await.unwrap();
     f.sync(handle).await;
     let request = handle
-        .subscribe_invites()
-        .borrow()
-        .iter()
-        .find_map(|invite| invite.request.clone())
+        .read(Invite::list)
+        .await
+        .unwrap()
+        .into_iter()
+        .find_map(|invite| invite.request)
         .unwrap();
     handle.approve_join_request(&request).await.unwrap();
     assert!(handle.members().await.unwrap().iter().any(|m| m.id == code.member));

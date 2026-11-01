@@ -384,7 +384,7 @@ async fn bootstrap_device(
             // await separates; so is the status the published store opens
             // with (E5).
             let name = match commit::loaded_name(&database).await {
-                Ok(name) => crate::storage::record_opened(&database, true)
+                Ok(name) => crate::storage::record_opened(&database, &clock, true)
                     .await
                     .map(|()| name)
                     .map_err(BootstrapError::from),
