@@ -819,6 +819,10 @@ async fn a_switch_ends_a_request_to_keep_the_file_and_the_keeping_in_flight() {
             break;
         }
     }
+    // The download's end is not the keeping's: that ends in the write
+    // refusing its copy, whose bytes go as it decides. Pins are prepared
+    // one at a time, so the app's own waits for it.
+    drop(ana.handle.prepare_pin(&[]).await.unwrap());
     assert_eq!(ana.handle.files_pinned(&[track]).await.unwrap(), [Some(false)]);
     assert_eq!(cached(ana), 0, "the download keeps no bytes no record names");
     assert!(ana
