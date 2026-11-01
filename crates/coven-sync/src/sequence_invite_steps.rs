@@ -303,3 +303,7 @@ fn invite_record(
     }
     Err(SyncError::InvitationChanged)
 }
+
+#[cfg(test)]
+#[path = "sequence_invite_steps_tests.rs"]
+mod tests;

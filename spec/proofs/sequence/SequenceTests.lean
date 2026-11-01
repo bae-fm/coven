@@ -575,4 +575,31 @@ def keyCase (slots held current : List Json) : Json := json% {
   checkField result ["ledger","name"] (toJson "Family")
   checkField result ["ledger","refused"] (json% [1,5])
 
+-- An invite's events, through the lifecycle model's steps under the Rust's rules.
+#eval do
+  let case := fun (delivery : String) (events : List String) =>
+    json% {"kind":"inviteLifecycle","delivery":$(delivery),"records":false,"events":$(events)}
+  -- Shown, requested, approved, bound and acknowledged.
+  let approved ← run (case "sent" ["send", "pass", "approve", "pass", "ack"])
+  checkField approved ["2","invite"] (toJson "requested")
+  checkField approved ["2","accepted"] (json% ["approve","decline","cancel","retry"])
+  checkField approved ["3","invite"] (toJson "approving")
+  checkField approved ["3","binding"] (toJson "running")
+  checkField approved ["4","invite"] Json.null
+  checkField approved ["4","binding"] (toJson "landed")
+  checkField approved ["5","binding"] Json.null
+  -- An in-person request is approved in the pass that reads it.
+  let inPerson ← run (case "inPerson" ["send", "pass"])
+  checkField inPerson ["2","journal"] (toJson false)
+  -- A cancel while the pass reads the request: nothing is saved over it.
+  let raced ← run (case "sent" ["raceCancel"])
+  checkField raced ["1","invite"] Json.null
+  checkField raced ["1","pending"] Json.null
+  -- The Rust today: a stop leaves an approval under way listed.
+  let stopped ← run (case "sent" ["send", "pass", "approve", "remove", "pass", "expire"])
+  checkField stopped ["6","invite"] (toJson "approving")
+  checkField stopped ["6","binding"] (toJson "rejected")
+  rejects (case "sent" ["wave"])
+  rejects (json% {"kind":"inviteLifecycle","delivery":"posted","records":false,"events":[]})
+
 end SequenceTests

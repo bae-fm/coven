@@ -7810,12 +7810,16 @@ What the models cover:
 - **The merge,** and conversion of old writes.
 - **Snapshot starts:** ordinary snapshots from the floor, and prepared snapshots
   at their raise or reset entries, as §16.3 requires.
+- **An invite and the app's operations** on the device that made them: every
+  writer, a crash between any two transactions, and stops for good. Each ends,
+  what the app sees never goes back, and the app is offered exactly what the
+  write steps accept (§11.4, §13.2).
 - **Pieces of storage behaviour,** such as copy publication.
 
 What they don't cover:
 
 - **The Rust code.** A proof says what its theorem states about the model, under
-  the model's assumptions. Tests run the Rust against the sequence, merge,
+  the model's assumptions. Tests run the Rust against the sequence, invite, merge,
   conversion and storage models on generated cases and compare the answers; that
   is evidence, not proof.
 - **Their own assumptions.** The models take as given correct cryptography,
@@ -9457,6 +9461,11 @@ Write-ups explain each model and state its assumptions:
 | With successful reads and polling, a claimed usable key copy is found despite immediate prefix deletion; an applied approval still admits a member not subsequently removed. The scan projects one store key and exact credential; cryptography and the approver binding are checked by the reader | `approved_progress`, `approved_eventually_key`, `approval_keeps_membership`, `approved_eventually_admitted`, `approved_never_declined` | `proofs/sequence/CovenSequence/JoinScan.lean` | §13.2, §16.6 |
 | A scan with no matching copies reaches the end; an absent request without its approving binding reports declined | `no_copy_reaches_end`, `real_decline` | `proofs/sequence/CovenSequence/JoinScan.lean` | §13.2 |
 | Exponential probes from missing slot 4 all miss a valid retained window at 13–15 containing an applied approval; a missing slot below an existing slot is deleted history | `retained_good`, `approval_is_kept`, `exponential_probes_miss_approval`, `missing_below_existing_is_deleted` | `proofs/sequence/CovenSequence/JoinScanExamples.lean` | §13.2 |
+| No write from a stale read: an invite's pending record holds what a pass found at its row's current step, and a pass's write changes the row only when the row is the one it read | `finding_current`, `commit_acts_on_read` | `proofs/sequence/CovenSequence/InviteLifecycle.lean` | §13.2 |
+| From every reachable state, crashes and stops for good included, coven's own steps, with the app retrying only records it is shown, end the invite and every operation the app journaled: nothing stays listed, running or pending | `settles` | `proofs/sequence/CovenSequence/InviteLifecycle.lean` | §11.4, §13.2, §14.1 |
+| The listed invite and its binding's entry only move forward; the app's offer of approving, declining, cancelling and acknowledging is exactly what the write steps accept; a sent invite is listed as approving exactly while its binding runs | `forward`, `offered_accepted`, `approval_runs_binding` | `proofs/sequence/CovenSequence/InviteLifecycle.lean` | §11.4, §13.2 |
+| Each rule those results need is needed: leaving out the step check, ending operations or invites at a stop, ending a refused access record, ending the binding with its invite, recording the binding, or listing approval as its own stage each has a counterexample | `unguarded_finding_is_stale`, `forgetful_stop_runs_forever`, `stop_strands_approval`, `refused_record_strands`, `split_binding_disagrees`, `reclaim_binds_twice`, `approval_shown_as_waiting` | `proofs/sequence/CovenSequence/InviteLifecycle.lean` | §13.2, §14.1 |
+| A waiting join's reported phases never go back: waiting, loading, done | `phases_forward`, `waited_after_loading` | `proofs/sequence/CovenSequence/JoinStatus.lean` | §13.2 |
 | Writes after a removal or key replacement are refused with rows unchanged and no new unique-value or owner claim, while the claim number is recorded | `cutoff` | `proofs/sequence/CovenSequence/Cutoff.lean` | §14.1 |
 | Circle permission is judged at the authored applied prefix; landing still checks store membership, device removal and key generation | `write_permission_at_authored_prefix` | `proofs/sequence/CovenSequence/Authorship.lean` | §15.6, §15.8 |
 | Ben's unread Gifts removal permits the original under both sending-key selection and application; reading removal forbids a new original | `sending_and_apply_agree`, `removal_read_refused` | `proofs/sequence/SequenceApply.lean` | §15.8 |

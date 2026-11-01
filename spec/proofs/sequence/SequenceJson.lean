@@ -1,6 +1,7 @@
 import SequenceApply
 import SequenceInput
 import SequenceKeys
+import SequenceInvites
 import CovenSequence.Settle
 import CovenSequence.Causality
 import CovenSequence.Device
@@ -341,6 +342,7 @@ def run (j : Json) : Except String Json := do
   | "memberReplacement" => readMemberReplacement j
   | "rotation" => SequenceKeys.readRotation j
   | "queueReload" => readQueueReload j
+  | "inviteLifecycle" => SequenceInvites.readCase j
   | _ => throw "unknown case kind"
 
 end SequenceJson

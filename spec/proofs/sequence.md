@@ -648,6 +648,75 @@ its restore code. `undo_requires_active` permits release only under the held
 active pair. Public pairs are equality-preserving tokens; custody writes and
 restore-code persistence are outside this decision.
 
+## Invites and the app's operations
+
+[`InviteLifecycle`](sequence/CovenSequence/InviteLifecycle.lean) models one
+invite on the device that made it (§13.2), the operation that binds its
+request's pair, and one admin change the app's write journaled (§11.4). Its
+steps are every writer that acts on them:
+
+- the app's write steps: approving, declining and cancelling the invite,
+  retrying its pending record, acknowledging an outcome, journaling an admin
+  change. Each reads and decides in one transaction;
+- the expiry's write, which also reads and decides in one transaction;
+- a pass, which reads the invite's journal row, does its storage work with no
+  transaction open, and writes after. Any other writer may commit in between;
+- a crash, which loses the pass's read and nothing durable;
+- slots a pass applies: the approver's demotion, and a stop for good.
+
+The row carries its step, and every change of the row increases it. A pass's
+write, and the pending record it saves for what it found, are conditional on
+the step it read. Storage may fail any attempt; the failure is the pending
+record. The properties are proved under `Rules.correct`:
+
+- `reachable_inv`: the invariant every reachable state keeps.
+- `finding_current`, `commit_acts_on_read`: no write from a stale read. A
+  pending record holds what a pass found at the row's current step, and a
+  pass's write changes the row only when the row is the one it read.
+- `settles`: every invite and every operation the app journaled ends, on every
+  path, crashes and stops included. From any reachable state, coven's own
+  steps, with the app retrying only records it is shown, reach a state with no
+  invite listed, no operation running and no pending record. The proof is a
+  measure that a step of coven's own lowers from every other state
+  (`progress`); it assumes storage eventually answers.
+- `forward`: what the app sees never goes back. The listed invite moves from
+  granting to waiting, to a request waiting for the app, to approving, to gone;
+  the binding's entry from running to ended to acknowledged.
+- `offered_accepted`: from `coven_invites`, `coven_operations` and
+  `coven_pending` alone, the app's offer of approving, declining, cancelling
+  and acknowledging is exactly what the write steps accept, and every record it
+  is offered to retry can be retried.
+- `approval_runs_binding`: a sent invite listed as approving is exactly one
+  whose binding is listed as running.
+
+Each rule `correct` has is needed; leaving one out is a checked counterexample:
+
+- `unguarded_finding_is_stale`: a finding saved without the step check lands
+  over the app's cancel.
+- `forgetful_stop_runs_forever`: a stop that doesn't end the app's operations
+  leaves one running forever.
+- `stop_strands_approval`: a stop that doesn't end the invites leaves an
+  approval under way listed forever; it never expires.
+- `refused_record_strands`: a refused access record that doesn't end its
+  invite leaves a pending record no one can clear.
+- `split_binding_disagrees`: a binding ended in a transaction of its own shows,
+  after a crash, its outcome beside an approval still under way.
+- `reclaim_binds_twice`: an approval that journals its binding again after a
+  rejected attempt stopped binds twice.
+- `approval_shown_as_waiting`: a listing that shows approval under way as a
+  waiting request offers approving again, which fails.
+- `demoted_approval_offered`: an approve step that checks the applied state
+  refuses a request the app was shown as waiting for its decision.
+
+`Rules.rust` names the rules the Rust follows; the differential test compares
+it.
+
+[`JoinStatus`](sequence/CovenSequence/JoinStatus.lean) models what a waiting
+join reports across its checks. `phases_forward` proves the phases never go
+back: waiting, then loading, then done. `waited_after_loading` shows the
+report without the approving outcome: a check between the copies and the
+entry loaded, and the next one reported waiting again.
+
 ## Settling a claim whose slot was deleted
 
 [`Settle`](sequence/CovenSequence/Settle.lean). Each copy numbers all its slot
@@ -925,6 +994,23 @@ rows before and after loading, a candidate key and the queued schema versions.
 credential generations. The runner evaluates `QueueReload` with these inputs;
 SQL execution, signature checks and extraction from snapshots happen in Rust.
 
+**`inviteLifecycle`** runs one invite's events through `InviteLifecycle`'s
+steps under `Rules.rust`, in [`SequenceInvites`](sequence/SequenceInvites.lean).
+`delivery` is `"sent"` or `"inPerson"`, `records` whether approving also
+records a kept replacement's S3 key, and `events` a list of `pass`, `send`
+(the joiner writes its request), `approve`, `decline`, `cancel`, `retry`,
+`ack`, `ackOp`, `administer`, `expire`, `demote` and `remove` (another admin's
+slot, applied at the next pass), `raceCancel` and `raceExpire` (a pass with the
+cancel or the expiry committed while it reads the request). A pass applies
+landed slots, runs the admin change, then advances the invite until the
+attempt returns; storage always answers. The answer has one entry for the
+invite just made and one after each event: `result` (`ok`, `refused` or
+`skipped`), `invite` as listed (`granting`, `waiting`, `requested`,
+`approving` or null), `binding` and `op` as `coven_operations` lists them
+(`running`, `landed`, `rejected` or null), `pending` (`auto`, `app`, `never`
+or null), `journal`, `request` (the request object is in storage) and
+`accepted`, the app's steps a write accepts now.
+
 ## Rust comparisons
 
 The ignored differential tests use `COVEN_SEQUENCE_LEAN` to run the same JSON
@@ -979,6 +1065,13 @@ and settlement comparisons also include deterministic seeded cases.
   originals. It covers exposed-store-key publication, consecutive store/circle
   rotations and replaced credentials. `rotation_does_not_need_preceding_circle_material`
   additionally exercises the real installer without old circle custody.
+- `coven-sync`'s `invite_lifecycle_matches_lean` drives a real invite on Ana's
+  device through each case's events: Ben demotes or removes her device, Carol's
+  phone sends the request, a pass is held at its read of the request while
+  the cancel or the expiry commits. After each event it compares what Ana's app
+  sees, the journal row, the request in storage, and which steps a write,
+  rolled back after, accepts. Cases name each gap and fixed bug, then 48
+  seeded sequences over every event.
 
 Authentication, row/source validation and the merge are outside the sequence
 runner's abstraction. The comparisons supply their inputs at those boundaries;

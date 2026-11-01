@@ -284,3 +284,21 @@ import SequenceApply
 #print axioms CovenSequence.JoinScan.no_copy_reaches_end
 
 #print axioms CovenSequence.JoinScan.approval_keeps_membership
+
+#print axioms CovenSequence.InviteLifecycle.reachable_inv
+#print axioms CovenSequence.InviteLifecycle.finding_current
+#print axioms CovenSequence.InviteLifecycle.commit_acts_on_read
+#print axioms CovenSequence.InviteLifecycle.settles
+#print axioms CovenSequence.InviteLifecycle.forward
+#print axioms CovenSequence.InviteLifecycle.offered_accepted
+#print axioms CovenSequence.InviteLifecycle.approval_runs_binding
+#print axioms CovenSequence.InviteLifecycle.stop_strands_approval
+#print axioms CovenSequence.InviteLifecycle.refused_record_strands
+#print axioms CovenSequence.InviteLifecycle.split_binding_disagrees
+#print axioms CovenSequence.InviteLifecycle.demoted_approval_offered
+#print axioms CovenSequence.InviteLifecycle.unguarded_finding_is_stale
+#print axioms CovenSequence.InviteLifecycle.forgetful_stop_runs_forever
+#print axioms CovenSequence.InviteLifecycle.reclaim_binds_twice
+#print axioms CovenSequence.InviteLifecycle.approval_shown_as_waiting
+#print axioms CovenSequence.JoinStatus.phases_forward
+#print axioms CovenSequence.JoinStatus.waited_after_loading
