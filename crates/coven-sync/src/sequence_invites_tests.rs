@@ -476,6 +476,51 @@ async fn a_decline_or_cancel_after_the_lifetime_fails_and_leaves_the_expiry() {
     }
 }
 
+/// Ana cancels an invite while a pass is looking for its request. The pass
+/// read the invite before her write ended it, and finds no request: that
+/// finding belongs to a step the invite has left, so it records no wait over
+/// the cancel, and the next pass ends the invite (§13.2, §11.4).
+#[tokio::test]
+async fn a_pass_under_way_records_nothing_over_a_cancel() {
+    let group = Group::shared();
+    let ana = group.device(1).await;
+    group.create_with_access(&ana, MemberAccess::ProviderAccount("ana@example.org".into())).await;
+    let invite = invite(&ana).await;
+    let operation = ana.database().first_operation("invite").await.unwrap().unwrap().id;
+    let (observed, read) = tokio::sync::oneshot::channel();
+    let (resume, held) = tokio::sync::oneshot::channel();
+    ana.storage
+        .hold_next_read(ObjectPath::join_request(group.store, invite.id), observed, held)
+        .await;
+    let cancel = async {
+        read.await.unwrap();
+        let (now, waits, state) =
+            (group.clock.now(), ana.sync.waits.clone(), ana.sync.state.clone());
+        let id = invite.id;
+        ana.sync
+            .database
+            .write(move |sql| {
+                crate::cancel_invite(&sql, now, waits, state, id)
+                    .map_err(|error| coven_database::DbError::SyncStream(Box::new(error)))
+            })
+            .await
+            .unwrap();
+        resume.send(()).unwrap();
+    };
+    let (passed, ()) = tokio::join!(ana.sync.pass(), cancel);
+    passed.unwrap();
+    assert!(ana.database().operation_pending::<PendingRecord>(operation).await.unwrap().is_none());
+    assert!(ana
+        .database()
+        .retry_wait(coven_database::RetrySubject::Operation(operation))
+        .await
+        .unwrap()
+        .is_none());
+    ana.sync.pass().await.unwrap();
+    assert!(ana.database().operation(operation).await.unwrap().is_none());
+    ana.database().close().await.unwrap();
+}
+
 /// A request waiting for the app's decision does not keep an expired invite
 /// open: the next pass takes its grant back (§13.2).
 #[tokio::test]

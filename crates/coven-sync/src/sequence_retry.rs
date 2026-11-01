@@ -116,14 +116,47 @@ impl SequenceSync {
         failure: OperationFailure<'_>,
         ring: &StoreKeyring,
     ) -> Result<(), SyncError> {
+        self.record_failure(id, kind, failure, ring, None).await
+    }
+
+    /// Record an invite's failed attempt, which read the invite at `step`,
+    /// as `record_operation_error` does, while the invite is still at that
+    /// step: the app's write deciding it, or its expiry, may have moved it on
+    /// meanwhile, and the next pass then takes the step they wrote (§13.2).
+    pub(crate) async fn record_invite_error(
+        &self,
+        id: OperationId,
+        step: u32,
+        failure: OperationFailure<'_>,
+        ring: &StoreKeyring,
+    ) -> Result<(), SyncError> {
+        self.record_failure(id, crate::OperationKind::Invite, failure, ring, Some(step)).await
+    }
+
+    async fn record_failure(
+        &self,
+        id: OperationId,
+        kind: crate::OperationKind,
+        failure: OperationFailure<'_>,
+        ring: &StoreKeyring,
+        step: Option<u32>,
+    ) -> Result<(), SyncError> {
         let subject = PendingSubject::Operation { id, kind };
-        let (reason, error, cause): (_, &(dyn std::error::Error + 'static), _) = match &failure {
-            OperationFailure::Held(error) => {
-                (self.error_reason(error), error.cause(), Some(error.cause().to_string()))
+        let (reason, error_source, cause): (_, &(dyn std::error::Error + 'static), _) =
+            match &failure {
+                OperationFailure::Held(error) => {
+                    (self.error_reason(error), error.cause(), Some(error.cause().to_string()))
+                }
+                OperationFailure::Returned(error) => (self.error_reason(error), *error, None),
+            };
+        // Logged before any wait: the error is the attempt's, borrowed.
+        self.waits.failures().failed(&subject, &reason, error_source);
+        let save = |pending, wait| async move {
+            match step {
+                Some(step) => self.database.record_operation_retry_at(pending, wait, step).await,
+                None => self.database.record_operation_retry(pending, wait).await.map(|()| true),
             }
-            OperationFailure::Returned(error) => (self.error_reason(error), *error, None),
         };
-        self.waits.failures().failed(&subject, &reason, error);
         self.waits
             .attempt_scope(id)
             .run(async {
@@ -132,18 +165,25 @@ impl SequenceSync {
                 if pending.retry() == Retry::Automatic {
                     let held = crate::RetryWaits::lacks_key(&pending.reason)
                         .map(|(audience, key)| holds(ring, &audience, key));
-                    self.waits.arm_evidence(id, &pending.reason, held, None);
+                    let reason = pending.reason.clone();
                     let prior = self.database.retry_wait(subject).await?;
                     let wait = self.waits.next(prior.as_ref())?;
-                    if let Err(error) =
-                        self.database.record_operation_retry(pending, Some(wait)).await
-                    {
-                        self.waits.hold(subject);
-                        return Err(error.into());
+                    match save(pending, Some(wait)).await {
+                        Err(error) => {
+                            self.waits.arm_evidence(id, &reason, held, None);
+                            self.waits.hold(subject);
+                            return Err(error.into());
+                        }
+                        // The operation has left the step this attempt read.
+                        Ok(false) => return Ok(()),
+                        Ok(true) => (),
                     }
+                    self.waits.arm_evidence(id, &reason, held, None);
                     self.waits.arm(subject, &wait);
                 } else {
-                    self.database.record_operation_retry(pending, None).await?;
+                    if !save(pending, None).await? {
+                        return Ok(());
+                    }
                     self.waits.forget(subject);
                     self.waits.clear_evidence(id);
                 }

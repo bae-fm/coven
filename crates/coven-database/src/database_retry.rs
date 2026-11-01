@@ -72,12 +72,35 @@ impl Database {
                 .operation()
                 .ok_or(DbError::Invariant { what: "an operation retry names its journal row" })?;
             inner.access.with_writer(|writer| {
+                writer.state_transaction(|db| save_operation_retry(db, id, &record, wait))
+            })
+        })
+        .await
+    }
+
+    /// Persist an operation's failure and its automatic retry deadline
+    /// together, while the operation is still at `step`, the step the failed
+    /// attempt read, and return whether it did. A writer outside the attempt,
+    /// such as the app's write deciding an invite or the invite's expiry, may
+    /// have moved the operation on since, or ended it: the failure then
+    /// belongs to a step the operation has left, and recording it would hold
+    /// the operation's next step back behind a wait it never met.
+    pub async fn record_operation_retry_at<P: crate::PendingValue>(
+        &self,
+        record: P,
+        wait: Option<RetryWait>,
+        step: u32,
+    ) -> Result<bool, DbError> {
+        self.call(move |inner| {
+            let id = record
+                .operation()
+                .ok_or(DbError::Invariant { what: "an operation retry names its journal row" })?;
+            inner.access.with_writer(|writer| {
                 writer.state_transaction(|db| {
-                    crate::pending::save(db, &record)?;
-                    match wait {
-                        Some(wait) => retry::save(db, RetrySubject::Operation(id), &wait),
-                        None => retry::clear(db, RetrySubject::Operation(id)),
+                    if crate::operation::find(db, id)?.is_none_or(|row| row.last_step != step) {
+                        return Ok(false);
                     }
+                    save_operation_retry(db, id, &record, wait).map(|()| true)
                 })
             })
         })
@@ -189,5 +212,19 @@ impl Database {
             inner.access.with_writer(|writer| writer.transaction(|db| retry::clear(db, subject)))
         })
         .await
+    }
+}
+
+/// Save the operation's pending record with its retry wait, or with none.
+fn save_operation_retry<P: crate::PendingValue>(
+    db: &crate::sqlite::DatabaseConnection,
+    id: crate::OperationId,
+    record: &P,
+    wait: Option<RetryWait>,
+) -> Result<(), DbError> {
+    crate::pending::save(db, record)?;
+    match wait {
+        Some(wait) => retry::save(db, RetrySubject::Operation(id), &wait),
+        None => retry::clear(db, RetrySubject::Operation(id)),
     }
 }

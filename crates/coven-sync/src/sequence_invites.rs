@@ -497,12 +497,16 @@ impl SequenceSync {
         Ok(())
     }
 
+    /// Advance the invite as far as it goes now. `step` follows the step
+    /// of the invite's row this attempt last read, which a failure belongs
+    /// to; `None` until it has read the row.
     async fn advance_invite(
         &self,
         session: &mut Session,
         ring: &mut StoreKeyring,
         member: &MemberIdentity,
         id: OperationId,
+        step: &mut Option<u32>,
     ) -> Result<InviteProgress, SyncError> {
         loop {
             let record = self
@@ -510,6 +514,7 @@ impl SequenceSync {
                 .operation(id)
                 .await?
                 .ok_or(coven_database::DbError::OperationChanged(id))?;
+            *step = Some(record.last_step);
             let mut work = InviteWork::read(&record)?;
             if work.expired(self.clock.now()) {
                 work.state = InviteState::Settled;
@@ -600,7 +605,8 @@ impl SequenceSync {
                             work.state = InviteState::Settled;
                             let undo: Result<(), SyncError> = async {
                                 self.database.advance_operation(work.update(&record)?).await?;
-                                Box::pin(self.advance_invite(session, ring, member, id)).await?;
+                                Box::pin(self.advance_invite(session, ring, member, id, step))
+                                    .await?;
                                 Ok(())
                             }
                             .await;

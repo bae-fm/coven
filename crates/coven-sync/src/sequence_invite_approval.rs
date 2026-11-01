@@ -11,7 +11,8 @@ impl SequenceSync {
         id: OperationId,
     ) -> Result<InviteProgress, SyncError> {
         let scope = self.waits.begin_attempt(id);
-        let result = scope.run(self.advance_invite(session, ring, member, id)).await;
+        let mut step = None;
+        let result = scope.run(self.advance_invite(session, ring, member, id, &mut step)).await;
         let pending = match &result {
             Ok(InviteProgress::Waiting(reason)) => {
                 Some(SyncError::Pending(Box::new(PendingRecord::new(
@@ -22,10 +23,13 @@ impl SequenceSync {
             _ => None,
         };
         if let Some(error) = result.as_ref().err().or(pending.as_ref()) {
-            if self.database.operation(id).await?.is_some() {
-                self.record_operation_error(
+            // An attempt that never read the invite's row failed reading the
+            // journal: its error goes to the caller, and no step to record
+            // it against was read.
+            if let Some(step) = step {
+                self.record_invite_error(
                     id,
-                    OperationKind::Invite,
+                    step,
                     crate::sequence_sync::OperationFailure::Returned(error),
                     ring,
                 )

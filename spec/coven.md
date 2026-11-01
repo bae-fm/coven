@@ -3907,7 +3907,11 @@ Ana's app declines Eve's request and marks its own row about the invite
 declined in one write, so the two never disagree. The write ends the invite,
 which leaves her list with it; deleting the request and taking back the access
 follow in a pass. The write reads the invite and ends it in one transaction, so
-no expiry comes between the two.
+no expiry comes between the two. A pass may be looking for Eve's request as the
+write commits. What it finds, or fails to reach, belongs to a step the invite
+has left, so it records no wait or pending record over Ana's decision; the same
+holds for an expiry written under a pass. Otherwise the ended invite would sit
+behind a wait it never met, with its request and access left in place.
 
 If Ana's phone is reset (§19.3) before the invite ends, the reset carries the
 invite into the new database, and it is ended the same way as on expiry: its
