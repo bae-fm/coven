@@ -109,14 +109,11 @@ async fn a_bound_reference_to_a_users_file_fails_the_write() {
     let db = open(&store, FileColumn::new("file").bound()).await;
     let path = store.database_path().parent().unwrap().join("original");
     std::fs::write(&path, b"the person's bytes").unwrap();
-    let sources = [
-        UserSource::DeviceOnly(prepare_user_file(&path, |_| {}).await.unwrap()),
-        UserSource::Cloud(prepare_user_file(&path, |_| {}).await.unwrap()),
-    ];
-    for source in sources {
+    for place in [Place::DeviceOnly, Place::Cloud] {
+        let prepared = prepare_user_file(&path, |_| {}).await.unwrap();
         let staged = db
             .write_with_files::<_, _, _, _, DbError>(
-                move |batch| Ok(batch.put_user_file("originals", source)),
+                move |batch| Ok(batch.put_user_file("originals", prepared, place)),
                 move |sql, file| {
                     sql.execute("INSERT INTO originals(id,file) VALUES('1',?1)", [file])?;
                     Ok(())

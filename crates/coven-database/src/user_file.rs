@@ -32,22 +32,6 @@ impl PreparedUserFile {
     }
 }
 
-/// A user's original to stage, read whole once before the write, and where
-/// its file is to be (§17.3). Every original is read the same way: a file
-/// on this device only may move to the cloud later, and its upload checks
-/// the bytes it sends against what this read found.
-#[derive(Debug)]
-pub enum UserSource {
-    /// On this device only, with no upload.
-    DeviceOnly(PreparedUserFile),
-    /// Uploaded to the cloud, its bytes checked against what was read.
-    Cloud(PreparedUserFile),
-    /// Uploaded, as `Cloud`, and kept whole here too once stored: the write
-    /// switching it to the cloud pins it on this device, which downloads it
-    /// from storage. The original is never read for the cache (§17.8).
-    CloudKeptHere(PreparedUserFile),
-}
-
 /// The facts recorded for the user's original, which coven never changes.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct UserFile {

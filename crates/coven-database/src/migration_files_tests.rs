@@ -33,7 +33,7 @@ async fn file_references_follow_a_rename() {
         let prepared = crate::prepare_user_file(original.path(), |_| {}).await.unwrap();
         let file = db
             .write_with_files::<_, _, _, _, DbError>(
-                move |batch| Ok(batch.put_user_file("files", crate::UserSource::Cloud(prepared))),
+                move |batch| Ok(batch.put_user_file("files", prepared, crate::Place::Cloud)),
                 |sql, file| {
                     sql.execute("INSERT INTO files(id,file) VALUES('7',?1)", [file])?;
                     Ok(file)

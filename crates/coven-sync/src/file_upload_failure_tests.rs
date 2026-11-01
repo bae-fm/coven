@@ -100,7 +100,7 @@ async fn a_changed_original_fails_its_move_and_switches_nothing() {
                 Ok(prepared
                     .into_iter()
                     .map(|prepared| {
-                        batch.put_user_file("files", coven_database::UserSource::Cloud(prepared))
+                        batch.put_user_file("files", prepared, coven_database::Place::Cloud)
                     })
                     .collect::<Vec<_>>())
             },

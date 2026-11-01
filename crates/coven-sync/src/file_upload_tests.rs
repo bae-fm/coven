@@ -394,10 +394,7 @@ async fn uploads_no_file_waits_for_are_retired_unsent() {
                     .database
                     .write_with_files::<_, _, _, _, coven_database::DbError>(
                         move |batch| {
-                            Ok(batch.put_user_file(
-                                "files",
-                                coven_database::UserSource::Cloud(prepared),
-                            ))
+                            Ok(batch.put_user_file("files", prepared, coven_database::Place::Cloud))
                         },
                         |sql, file| {
                             sql.execute("UPDATE files SET file=?1 WHERE id='old'", [file])?;

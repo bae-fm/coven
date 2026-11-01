@@ -6,7 +6,7 @@ use crate::{
     file_write::tests::{has_record, local_count, open, owned_paths},
     tests::TestStore,
     write::tests::records,
-    DbError, FilePlace, LocalFileError, Place, Provenance, UserSource,
+    DbError, FilePlace, LocalFileError, Place, Provenance,
 };
 use coven_foundation::id_source::{FileId, SequentialIds};
 use std::time::Duration;
@@ -83,7 +83,7 @@ async fn an_original_staged_on_this_device_only_is_read_from_disk() {
     std::fs::write(original.path(), b"recorded original").unwrap();
     let prepared = crate::prepare_user_file(original.path(), |_| {}).await.unwrap();
     let file =
-        stage_row(&db, |batch| batch.put_user_file("files", UserSource::DeviceOnly(prepared)))
+        stage_row(&db, |batch| batch.put_user_file("files", prepared, crate::Place::DeviceOnly))
             .await;
     assert_eq!(local_count(&db, "_coven_file_uploads"), 0);
     let (modified_seconds, modified_nanos) = crate::unix_seconds_and_nanos(
@@ -162,7 +162,7 @@ async fn staging_an_original_on_this_device_only_records_its_hashes() {
     assert!(read.windows(2).all(|pair| pair[0] < pair[1]), "{read:?}");
     assert_eq!(read.last(), Some(&(bytes.len() as u64)));
     let file =
-        stage_row(&db, |batch| batch.put_user_file("files", UserSource::DeviceOnly(prepared)))
+        stage_row(&db, |batch| batch.put_user_file("files", prepared, crate::Place::DeviceOnly))
             .await;
     let hash = |bytes: &[u8]| {
         let mut hasher = coven_crypto::ContentHasher::new();
@@ -221,10 +221,10 @@ async fn reading_an_original_gives_the_facts_coven_records() {
     let prepared = crate::prepare_user_file(&prepared_path, |_| {}).await.unwrap();
     assert_eq!((prepared.size(), prepared.modified_at()), (18, scanned));
     let device_only =
-        stage_row(&db, |batch| batch.put_user_file("files", UserSource::DeviceOnly(local))).await;
+        stage_row(&db, |batch| batch.put_user_file("files", local, crate::Place::DeviceOnly)).await;
     let cloud = db
         .write_with_files::<_, _, _, _, DbError>(
-            move |batch| Ok(batch.put_user_file("files", UserSource::Cloud(prepared))),
+            move |batch| Ok(batch.put_user_file("files", prepared, crate::Place::Cloud)),
             |sql, file| {
                 sql.execute("INSERT INTO files(id,file) VALUES('8',?1)", [file])?;
                 Ok(file)
@@ -263,7 +263,7 @@ async fn coven_user_files_gives_each_modification_time_exactly() {
         std::fs::File::options().write(true).open(&path).unwrap().set_modified(time).unwrap();
         let prepared = crate::prepare_user_file(&path, |_| {}).await.unwrap();
         db.write_with_files::<_, _, _, _, DbError>(
-            move |batch| Ok(batch.put_user_file("files", UserSource::DeviceOnly(prepared))),
+            move |batch| Ok(batch.put_user_file("files", prepared, crate::Place::DeviceOnly)),
             move |sql, file| {
                 sql.execute("INSERT INTO files(id,file) VALUES(?1,?2)", (row, file))?;
                 Ok(())
@@ -314,7 +314,7 @@ async fn an_original_named(name: &std::ffi::OsStr, shown: &str) {
     let db = open(&store, Provenance::UserProvided).await;
     let prepared = crate::prepare_user_file(&path, |_| {}).await.unwrap();
     let file =
-        stage_row(&db, |batch| batch.put_user_file("files", UserSource::DeviceOnly(prepared)))
+        stage_row(&db, |batch| batch.put_user_file("files", prepared, crate::Place::DeviceOnly))
             .await;
     let (bytes, text) = db
         .read(|sql| {

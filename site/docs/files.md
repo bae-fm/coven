@@ -151,7 +151,7 @@ let attachment = UuidText(Uuid::now_v7());
 let prepared = prepare_user_file(&path, |read| show_progress(read)).await?;
 
 let file = handle.write_with_files(
-    move |batch| Ok(batch.put_user_file("attachments", UserSource::Cloud(prepared))),
+    move |batch| Ok(batch.put_user_file("attachments", prepared, Place::Cloud)),
     move |sql, file| {
         sql.execute(
             "INSERT INTO notes (id, title, audience) VALUES (?1, ?2, ?3)",
@@ -172,11 +172,11 @@ staged file no row references fails the write with `DbError::FileUnreferenced`.
 
 ## On this device only
 
-A file can stay on the device that staged it, with no upload: `Place::DeviceOnly`
-for app bytes, kept in coven's copy, or `UserSource::DeviceOnly` for a user's
-original. The original is read whole once with `prepare_user_file`, as for the
-cloud, so staging reports progress the same way: coven records its path, size,
-modification time and the hashes of what it read. A later move to the cloud
+A file can stay on the device that staged it, with no upload: `Place::DeviceOnly`,
+for app bytes kept in coven's copy or for a user's original. The original is
+read whole once with `prepare_user_file`, as for the cloud, so staging reports
+progress the same way: coven records its path, size, modification time and the
+hashes of what it read. A later move to the cloud
 checks the bytes it sends against those hashes, so an edit made since, even
 one that keeps the size and modification time, fails the move instead of
 going up. Every device that reads the row sees the file on that device only.
@@ -186,7 +186,7 @@ That device reads it from its bytes there; others get
 ```rust
 let prepared = prepare_user_file(&path, |read| show_progress(read)).await?;
 handle.write_with_files(
-    move |batch| Ok(batch.put_user_file("attachments", UserSource::DeviceOnly(prepared))),
+    move |batch| Ok(batch.put_user_file("attachments", prepared, Place::DeviceOnly)),
     move |sql, file| {
         sql.execute(
             "INSERT INTO attachments (id, note_id, title, file) VALUES (?1, ?2, ?3, ?4)",

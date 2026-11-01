@@ -72,7 +72,7 @@ one device only, this one included while it uploads, fails with
 `FileReadError::DeviceOnly`, and the app pins it once it is stored.
 
 To keep a file here as it goes to the cloud, stage it with
-`Place::CloudKeptHere` or `UserSource::CloudKeptHere`, or move it with
+`Place::CloudKeptHere`, or move it with
 `MoveFile::AppKeptHere` or `MoveFile::UserKeptHere`. The write that switches it
 to the cloud pins it, and coven makes that pin itself, resuming after a restart:
 an app file's cache copy comes from coven's own copy of its bytes, with no

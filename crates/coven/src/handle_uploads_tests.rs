@@ -265,7 +265,7 @@ async fn the_app_finds_a_cloud_imports_move_in_coven_uploads_and_cancels_it() {
                 Ok(prepared
                     .into_iter()
                     .map(|(name, prepared)| {
-                        (name, batch.put_user_file("tracks", UserSource::Cloud(prepared)))
+                        (name, batch.put_user_file("tracks", prepared, Place::Cloud))
                     })
                     .collect::<Vec<_>>())
             },

@@ -5674,8 +5674,8 @@ fails a read.
 app unpins it.
 
 **Kept here.** A file staged for the cloud, or moved to the cloud, can be kept
-here too (`Place::CloudKeptHere`, `UserSource::CloudKeptHere`,
-`MoveFile::AppKeptHere`, `MoveFile::UserKeptHere`;
+here too (`Place::CloudKeptHere`, `MoveFile::AppKeptHere`,
+`MoveFile::UserKeptHere`;
 [api.md E3](api.md#e3-writing)). The write that switches it to the cloud pins
 it on this device: it records a pin request, and coven makes the pin itself,
 resuming after a restart. Ana imports an album to the cloud with "keep a copy

@@ -32,8 +32,7 @@ async fn kept_original(f: &Fixture, id: &str, bytes: &[u8]) -> FileId {
     f.database
         .write_with_files::<_, _, _, _, coven_database::DbError>(
             move |batch| {
-                Ok(batch
-                    .put_user_file("files", coven_database::UserSource::CloudKeptHere(prepared)))
+                Ok(batch.put_user_file("files", prepared, coven_database::Place::CloudKeptHere))
             },
             move |sql, file| {
                 sql.execute("INSERT INTO files(id,file) VALUES(?1,?2)", (id, file))?;

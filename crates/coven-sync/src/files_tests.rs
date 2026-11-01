@@ -142,7 +142,7 @@ impl Fixture {
             .database
             .write_with_files::<_, _, _, _, coven_database::DbError>(
                 move |batch| {
-                    Ok(batch.put_user_file("files", coven_database::UserSource::Cloud(prepared)))
+                    Ok(batch.put_user_file("files", prepared, coven_database::Place::Cloud))
                 },
                 move |sql, file| {
                     sql.execute("INSERT INTO files(id,file) VALUES(?1,?2)", (id, file))?;
@@ -165,8 +165,7 @@ impl Fixture {
         self.database
             .write_with_files::<_, _, _, _, coven_database::DbError>(
                 move |batch| {
-                    Ok(batch
-                        .put_user_file("files", coven_database::UserSource::DeviceOnly(prepared)))
+                    Ok(batch.put_user_file("files", prepared, coven_database::Place::DeviceOnly))
                 },
                 move |sql, file| {
                     sql.execute("INSERT INTO files(id,file) VALUES(?1,?2)", (id, file))?;

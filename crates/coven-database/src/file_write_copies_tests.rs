@@ -11,7 +11,7 @@ use crate::{
     tests::TestStore,
     write::tests::records,
     DbError, FileCandidate, FileColumn, FilePlace, Migration, Place, Provenance, RowIdentity,
-    SyncedTable, UserSource,
+    SyncedTable,
 };
 use coven_foundation::id_source::{CircleId, FileId, SequentialIds};
 use std::collections::BTreeSet;
@@ -179,7 +179,7 @@ async fn making_the_store_file_device_only_leaves_the_circles_stored() {
     let prepared = crate::prepare_user_file(&original, |_| {}).await.unwrap();
     let track = db
         .write_with_files::<_, _, _, _, DbError>(
-            move |batch| Ok(batch.put_user_file("files", UserSource::Cloud(prepared))),
+            move |batch| Ok(batch.put_user_file("files", prepared, crate::Place::Cloud)),
             |sql, file| {
                 insert(&sql, "photos", 1, "store", file)?;
                 Ok(file)
@@ -289,7 +289,7 @@ async fn a_device_only_source_gives_a_file_on_this_device_with_the_same_original
     let prepared = crate::prepare_user_file(&original, |_| {}).await.unwrap();
     let track = db
         .write_with_files::<_, _, _, _, DbError>(
-            move |batch| Ok(batch.put_user_file("files", UserSource::DeviceOnly(prepared))),
+            move |batch| Ok(batch.put_user_file("files", prepared, crate::Place::DeviceOnly)),
             |sql, file| {
                 insert(&sql, "photos", 1, "store", file)?;
                 Ok(file)
@@ -334,7 +334,7 @@ async fn a_new_file_over_a_file_on_another_device_only_fails() {
     let prepared = crate::prepare_user_file(&original, |_| {}).await.unwrap();
     let track = a
         .write_with_files::<_, _, _, _, DbError>(
-            move |batch| Ok(batch.put_user_file("files", UserSource::DeviceOnly(prepared))),
+            move |batch| Ok(batch.put_user_file("files", prepared, crate::Place::DeviceOnly)),
             |sql, file| {
                 insert(&sql, "photos", 1, "store", file)?;
                 Ok(file)

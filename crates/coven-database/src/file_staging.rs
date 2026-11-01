@@ -4,7 +4,7 @@ use super::DatabaseInner;
 use crate::file_hashes::FileHasher;
 use crate::file_write::{StagedFile, StagedSource};
 use crate::write_batch::{BatchFile, BatchSource};
-use crate::{DbError, FileSource, Place, Provenance, UserSource, WriteBatch};
+use crate::{DbError, FileSource, Place, Provenance, WriteBatch};
 use coven_foundation::files::StoreDirAccess;
 use coven_foundation::files::{FileArea, FileName, FlushBatch, Flushed};
 use std::collections::VecDeque;
@@ -82,7 +82,7 @@ impl FileStaging {
                             {
                                 let kind = match &source {
                                     BatchSource::App(..) => Provenance::AppProvided,
-                                    BatchSource::User(_) => Provenance::UserProvided,
+                                    BatchSource::User(..) => Provenance::UserProvided,
                                 };
                                 let declared = inner
                                     .access
@@ -98,20 +98,8 @@ impl FileStaging {
                                     });
                                 }
                                 match source {
-                                    BatchSource::User(source) => {
-                                        let (prepared, place) = match source {
-                                            UserSource::DeviceOnly(prepared) => {
-                                                (prepared, Place::DeviceOnly)
-                                            }
-                                            UserSource::Cloud(prepared) => (prepared, Place::Cloud),
-                                            UserSource::CloudKeptHere(prepared) => {
-                                                (prepared, Place::CloudKeptHere)
-                                            }
-                                        };
-                                        originals.push(staged_original(
-                                            id, namespace, prepared, place,
-                                        ))
-                                    }
+                                    BatchSource::User(prepared, place) => originals
+                                        .push(staged_original(id, namespace, prepared, place)),
                                     BatchSource::App(source, place) => {
                                         let name = FileName::new(inner.ids.new_id().to_string())
                                             .expect("UUID is a portable filename");

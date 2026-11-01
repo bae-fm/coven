@@ -141,7 +141,7 @@ async fn original_facts_survive_reopen_and_are_not_replaced_by_new_disk_metadata
     let prepared = prepare_user_file(&path, |_| {}).await.unwrap();
     let file = db
         .write_with_files::<_, _, _, _, crate::DbError>(
-            move |batch| Ok(batch.put_user_file("files", crate::UserSource::Cloud(prepared))),
+            move |batch| Ok(batch.put_user_file("files", prepared, crate::Place::Cloud)),
             |sql, file| {
                 sql.execute("INSERT INTO files(id,file) VALUES('7',?1)", [file])?;
                 Ok(file)

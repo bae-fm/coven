@@ -187,7 +187,7 @@ async fn a_refused_attachment_rolls_back_its_file_and_keeps_the_original() {
             .write_with_files::<_, _, _, _, crate::DbError>(
                 move |batch| {
                     Ok(if user {
-                        batch.put_user_file("files", crate::UserSource::Cloud(prepared))
+                        batch.put_user_file("files", prepared, crate::Place::Cloud)
                     } else {
                         batch.put_file("files", b"original".to_vec(), crate::Place::Cloud)
                     })

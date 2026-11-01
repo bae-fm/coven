@@ -104,7 +104,7 @@ async fn stage_kind(
             std::fs::write(&path, &bytes).unwrap();
             let prepared = crate::prepare_user_file(&path, |_| {}).await.unwrap();
             db.write_with_files::<_, _, _, _, DbError>(
-                move |batch| Ok(batch.put_user_file("files", crate::UserSource::Cloud(prepared))),
+                move |batch| Ok(batch.put_user_file("files", prepared, crate::Place::Cloud)),
                 move |sql, file| {
                     sql.execute(
                         "INSERT INTO files(id,file) VALUES('7',?1)

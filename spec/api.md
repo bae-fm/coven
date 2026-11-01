@@ -2557,29 +2557,16 @@ impl PreparedUserFile {
     pub fn modified_at(&self) -> SystemTime;
 }
 
-/// A user's original to stage, read whole once before the write, and where
-/// its file is to be (§17.3). A file on this device only may move to the
-/// cloud later, and its upload checks against what this read found.
-pub enum UserSource {
-    /// On this device only, with no upload.
-    DeviceOnly(PreparedUserFile),
-    /// Uploaded to the cloud, its bytes checked against what was read.
-    Cloud(PreparedUserFile),
-    /// Uploaded, as `Cloud`, and kept whole here too once stored: the write
-    /// switching it to the cloud pins it on this device, which downloads it
-    /// from storage. The original is never read for the cache (§17.8).
-    CloudKeptHere(PreparedUserFile),
-}
-
-/// Where a staged file is to be (§17.3).
+/// Where a staged file is to be, app bytes or a user's original (§17.3).
 pub enum Place {
     /// On this device only, with no upload.
     DeviceOnly,
     /// Uploaded; on this device only until its upload is stored.
     Cloud,
     /// Uploaded, as `Cloud`, and kept whole here too once stored: the write
-    /// switching it to the cloud pins it on this device, from coven's copy
-    /// (§17.8).
+    /// switching it to the cloud pins it on this device, which makes its
+    /// cache copy from coven's copy of app bytes, and downloads a user's
+    /// original's from storage, never reading the original (§17.8).
     CloudKeptHere,
 }
 
@@ -2650,12 +2637,14 @@ impl WriteBatch<'_> {
     pub fn put_file(&mut self, namespace: &str, bytes: impl Into<FileSource>, place: Place)
         -> FileId;
 
-    /// Stages a user's original as a new file in a user namespace and
-    /// returns its id for a row to reference: on this device only, or for
-    /// the cloud, with its upload queued. Coven records the original's path,
-    /// size, modification time and the hashes its read found, and never
-    /// changes it (§17.1, §17.3).
-    pub fn put_user_file(&mut self, namespace: &str, source: UserSource) -> FileId;
+    /// Stages a user's original, read whole once already, as a new file in a
+    /// user namespace and returns its id for a row to reference: on this
+    /// device only, or for the cloud, with its upload queued. Coven records
+    /// the original's path, size, modification time and the hashes its read
+    /// found, which its upload checks, now or when the file moves to the
+    /// cloud; it never changes the original (§17.1, §17.3).
+    pub fn put_user_file(&mut self, namespace: &str, original: PreparedUserFile, place: Place)
+        -> FileId;
 
     /// Stages a new file over an existing file's bytes, for a row in any
     /// audience, and returns its id for that row to reference. The write
@@ -2811,7 +2800,7 @@ let prepared = prepare_user_file(&path, |read| show_progress(read)).await?;
 
 let file = handle
     .write_with_files(
-        move |batch| Ok(batch.put_user_file("attachments", UserSource::Cloud(prepared))),
+        move |batch| Ok(batch.put_user_file("attachments", prepared, Place::Cloud)),
         move |sql, file| {
             sql.execute(
                 "INSERT INTO notes (id, title, audience) VALUES (?1, ?2, ?3)",
@@ -2833,7 +2822,7 @@ Staging on this device only, then moving to the cloud as one move:
 let prepared = prepare_user_file(&path, |read| show_progress(read)).await?;
 let file = handle
     .write_with_files(
-        move |batch| Ok(batch.put_user_file("attachments", UserSource::DeviceOnly(prepared))),
+        move |batch| Ok(batch.put_user_file("attachments", prepared, Place::DeviceOnly)),
         move |sql, file| {
             sql.execute(
                 "INSERT INTO attachments (id, note_id, title, file) VALUES (?1, ?2, ?3, ?4)",

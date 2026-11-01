@@ -315,7 +315,7 @@ async fn originals_owned_copies_ranges_references_and_deletion_use_the_app_api()
     let attachment = attachment_id.clone();
     let recorded = handle
         .write_with_files(
-            move |batch| Ok(batch.put_user_file("attachments", crate::UserSource::Cloud(prepared))),
+            move |batch| Ok(batch.put_user_file("attachments", prepared, Place::Cloud)),
             move |sql, file| {
                 sql.execute(
                     "INSERT INTO notes (id,title,audience) VALUES (?1,?2,'store')",
@@ -647,7 +647,7 @@ async fn the_apps_sql_reads_uploads_pins_and_pending_records() {
     let parent = note.clone();
     let take = handle
         .write_with_files(
-            move |batch| Ok(batch.put_user_file("attachments", crate::UserSource::Cloud(prepared))),
+            move |batch| Ok(batch.put_user_file("attachments", prepared, Place::Cloud)),
             move |sql, take| {
                 sql.execute("INSERT INTO notes VALUES(?1,'note','store')", [&parent])?;
                 sql.execute(

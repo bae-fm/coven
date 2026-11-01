@@ -56,7 +56,7 @@ async fn making_the_store_file_device_only_leaves_the_circles_readable() {
     let track = ana
         .handle
         .write_with_files(
-            move |batch| Ok(batch.put_user_file("tracks", UserSource::Cloud(prepared))),
+            move |batch| Ok(batch.put_user_file("tracks", prepared, Place::Cloud)),
             |sql, file| {
                 sql.execute("INSERT INTO tracks(id,file) VALUES('one',?1)", [file])?;
                 Ok(file)
@@ -457,7 +457,7 @@ async fn a_switch_holds_the_bytes_until_its_device_writes_again() {
     let track = ana
         .handle
         .write_with_files(
-            move |batch| Ok(batch.put_user_file("tracks", UserSource::Cloud(prepared))),
+            move |batch| Ok(batch.put_user_file("tracks", prepared, Place::Cloud)),
             |sql, file| {
                 sql.execute("INSERT INTO tracks(id,file) VALUES('imported',?1)", [file])?;
                 Ok(file)

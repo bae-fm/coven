@@ -279,7 +279,7 @@ async fn originals_are_checked_while_prepared_and_never_under_the_writer() {
     tokio::time::timeout(
         Duration::from_secs(5),
         db.write_with_files::<_, _, _, _, crate::DbError>(
-            move |batch| Ok(batch.put_user_file("files", crate::UserSource::Cloud(prepared))),
+            move |batch| Ok(batch.put_user_file("files", prepared, crate::Place::Cloud)),
             |sql, file| {
                 sql.execute("INSERT INTO files(id,file) VALUES('7',?1)", [file])?;
                 Ok(())
@@ -304,7 +304,7 @@ async fn a_user_files_last_reference_forgets_its_original_and_leaves_it() {
     let prepared = prepare_user_file(original.path(), |_| {}).await.unwrap();
     let file = db
         .write_with_files::<_, _, _, _, crate::DbError>(
-            move |batch| Ok(batch.put_user_file("files", crate::UserSource::Cloud(prepared))),
+            move |batch| Ok(batch.put_user_file("files", prepared, crate::Place::Cloud)),
             |sql, file| {
                 sql.execute("INSERT INTO files(id,file) VALUES('7',?1)", [file])?;
                 Ok(file)
@@ -351,7 +351,7 @@ async fn the_wrong_kind_or_an_undeclared_namespace_fails() {
             .write_with_files::<_, _, _, _, crate::DbError>(
                 move |batch| {
                     Ok(if user {
-                        batch.put_user_file(namespace, crate::UserSource::Cloud(prepared))
+                        batch.put_user_file(namespace, prepared, crate::Place::Cloud)
                     } else {
                         batch.put_file(namespace, b"bytes".to_vec(), crate::Place::Cloud)
                     })

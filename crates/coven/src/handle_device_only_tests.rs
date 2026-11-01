@@ -43,15 +43,15 @@ async fn household() -> Network {
     network
 }
 
-/// Stage `bytes` as the user's original `name` under `originals`, as
-/// `source` says, in the row `insert` writes for it. Its upload isn't
+/// Stage `bytes` as the user's original `name` under `originals`, where
+/// `place` says, in the row `insert` writes for it. Its upload isn't
 /// waited for.
 async fn stage(
     device: &Device,
     name: &str,
     originals: &Path,
     bytes: Vec<u8>,
-    source: fn(PreparedUserFile) -> UserSource,
+    place: Place,
     insert: impl FnOnce(SqlContext<'_, '_>, FileId) -> CovenResult<()> + Send + 'static,
 ) -> FileId {
     let path = originals.join(name);
@@ -60,7 +60,7 @@ async fn stage(
     device
         .handle
         .write_with_files(
-            move |batch| Ok(batch.put_user_file("tracks", source(prepared))),
+            move |batch| Ok(batch.put_user_file("tracks", prepared, place)),
             move |sql, file| {
                 insert(sql, file)?;
                 Ok(file)
@@ -80,7 +80,7 @@ async fn import(
     bytes: Vec<u8>,
 ) -> FileId {
     let row = name.to_owned();
-    let file = stage(device, name, originals, bytes, UserSource::Cloud, move |sql, file| {
+    let file = stage(device, name, originals, bytes, Place::Cloud, move |sql, file| {
         sql.execute(&format!("INSERT INTO {table}(id,file) VALUES(?1,?2)"), (&row, file))?;
         Ok(())
     })
@@ -260,7 +260,7 @@ async fn a_name_that_isnt_utf8_travels_as_the_text_that_shows_it() {
     let file = ana
         .handle
         .write_with_files(
-            move |batch| Ok(batch.put_user_file("tracks", UserSource::Cloud(prepared))),
+            move |batch| Ok(batch.put_user_file("tracks", prepared, Place::Cloud)),
             move |sql, file| {
                 sql.execute("INSERT INTO tracks(id,file) VALUES(?1,?2)", (&name, file))?;
                 Ok(file)
@@ -439,20 +439,13 @@ async fn only_a_member_of_the_files_circle_may() {
     for (row, name) in [(1, "one"), (2, "two")] {
         let audience = gifts.to_string();
         tracks.push(
-            stage(
-                ana,
-                name,
-                originals.path(),
-                vec![row; 900],
-                UserSource::Cloud,
-                move |sql, file| {
-                    sql.execute(
-                        "INSERT INTO gifts(id,file,audience) VALUES(?1,?2,?3)",
-                        (format!("00000000-0000-7000-8000-00000000000{row}"), file, audience),
-                    )?;
-                    Ok(())
-                },
-            )
+            stage(ana, name, originals.path(), vec![row; 900], Place::Cloud, move |sql, file| {
+                sql.execute(
+                    "INSERT INTO gifts(id,file,audience) VALUES(?1,?2,?3)",
+                    (format!("00000000-0000-7000-8000-00000000000{row}"), file, audience),
+                )?;
+                Ok(())
+            })
             .await,
         );
     }
@@ -511,7 +504,7 @@ async fn refused_paths_and_files_leave_the_folder_alone() {
     let local = ana
         .handle
         .write_with_files(
-            move |batch| Ok(batch.put_user_file("tracks", UserSource::DeviceOnly(prepared))),
+            move |batch| Ok(batch.put_user_file("tracks", prepared, Place::DeviceOnly)),
             |sql, file| {
                 sql.execute("INSERT INTO tracks(id,file) VALUES('local',?1)", [file])?;
                 Ok(file)
@@ -766,7 +759,7 @@ async fn a_switch_ends_a_request_to_keep_the_file_and_the_keeping_in_flight() {
         "kept",
         originals.path(),
         vec![12; 100_000],
-        UserSource::CloudKeptHere,
+        Place::CloudKeptHere,
         |sql, file| {
             sql.execute("INSERT INTO tracks(id,file) VALUES('kept',?1)", [file])?;
             Ok(())
