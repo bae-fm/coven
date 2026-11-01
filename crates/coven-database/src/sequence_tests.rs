@@ -118,7 +118,6 @@ pub(crate) async fn publish_through(db: &Database, through: u64) -> Result<(), D
                 },
             },
             || Ok(()),
-            None,
         )
         .await?;
     assert_eq!(outcome, ApplyOutcome::Applied);
@@ -165,7 +164,6 @@ impl Database {
                 content: crate::SlotContent::Writes { size: 1, writes: vec![write] },
             },
             authenticate,
-            None,
         )
         .await
     }
@@ -209,7 +207,6 @@ impl Database {
                 },
             },
             || Ok(()),
-            None,
         )
         .await
         .map(drop)

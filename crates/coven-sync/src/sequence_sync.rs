@@ -382,21 +382,20 @@ impl SequenceSync {
             if !effect.reload.is_empty() {
                 let required = effect.reload.clone();
                 // Persist the audience gates before reading any replacement body.
-                self.database.apply_slot::<PendingRecord, _, _>(incoming, || Ok(()), None).await?;
+                self.database.apply_slot::<PendingRecord, _, _>(incoming, || Ok(())).await?;
                 return self.reload_activation(session, at, &required, history, ring, member).await;
             }
         }
         self.keys.persist(ring)?;
-        let result = self
-            .database
-            .apply_slot::<PendingRecord, _, _>(incoming, || Ok(()), None)
-            .await
-            .map_err(|error| {
-                crate::write_object::database_failure(
-                    &self.path(at.0).expect("positive slot"),
-                    error,
-                )
-            })?;
+        let result =
+            self.database.apply_slot::<PendingRecord, _, _>(incoming, || Ok(())).await.map_err(
+                |error| {
+                    crate::write_object::database_failure(
+                        &self.path(at.0).expect("positive slot"),
+                        error,
+                    )
+                },
+            )?;
         match result {
             coven_database::ApplyOutcome::Applied
             | coven_database::ApplyOutcome::AlreadyApplied => {

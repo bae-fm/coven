@@ -416,8 +416,7 @@ mod sequence_differential {
                     digest: *digest.finish().as_bytes(),
                     content: SlotContent::Admin { original: OriginalSlot { slot, object }, effect },
                 },
-                || Ok(()),
-                None
+                || Ok(())
             )
             .await
             .unwrap(),

@@ -240,8 +240,7 @@ async fn an_unread_slot_prevents_a_later_slot_from_committing() {
                 },
                 content: crate::SlotContent::Writes { size: 1, writes: vec![stream(&record)] },
             },
-            || Ok(()),
-            None
+            || Ok(())
         )
         .await,
         Err(DbError::SequenceGap { .. })

@@ -95,7 +95,6 @@ impl Database {
         &self,
         incoming: crate::IncomingSlot<crate::DownloadedWriteStream<R>>,
         authenticate: F,
-        operation: Option<crate::OperationUpdate>,
     ) -> Result<crate::ApplyOutcome, DbError>
     where
         P: crate::PendingValue,
@@ -126,7 +125,6 @@ impl Database {
                                 incoming,
                                 files,
                                 authenticate,
-                                operation,
                             )
                         })
                     })

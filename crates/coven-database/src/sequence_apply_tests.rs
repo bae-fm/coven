@@ -143,7 +143,6 @@ async fn compare(
                 content: SlotContent::Writes { size: 1, writes },
             },
             || Ok(()),
-            None,
         )
         .await
         .unwrap();

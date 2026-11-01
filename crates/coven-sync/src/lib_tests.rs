@@ -50,7 +50,6 @@ pub(crate) async fn apply_write(
                 content: SlotContent::Writes { size: 1, writes: vec![stream] },
             },
             || Ok(()),
-            None,
         )
         .await
 }

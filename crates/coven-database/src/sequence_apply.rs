@@ -71,7 +71,6 @@ pub(crate) fn apply<P: crate::PendingValue>(
     incoming: IncomingSlot<PreparedWrite<'_>>,
     files: &crate::file_write::FileWrite<'_>,
     authenticate: impl FnOnce() -> Result<(), DbError>,
-    operation: Option<crate::OperationUpdate>,
 ) -> Result<crate::ApplyOutcome, DbError> {
     crate::download::source_wait(db.stream_transaction(|db| {
         // Applying a slot runs no migration and no DDL.
@@ -128,9 +127,6 @@ pub(crate) fn apply<P: crate::PendingValue>(
         let deleted = crate::store_state_tables::deleted_circles(db)?;
         crate::download_stage::materialize(db, before, schema, &deleted, touched, files)?;
         files.before_commit()?;
-        if let Some(update) = operation {
-            crate::operation::advance(db, &update)?;
-        }
         crate::operation::end_on_stop(db)?;
         Ok(crate::ApplyOutcome::Applied)
     }))

@@ -199,7 +199,6 @@ async fn apply_claim(
             },
         },
         || Ok(()),
-        None,
     )
     .await
 }
@@ -254,7 +253,7 @@ async fn applied_slot_and_all_effects_commit_together() {
         },
     };
     assert!(db
-        .apply_slot::<Pending, _, _>(incoming, || Err(DbError::TransactionEnded), None)
+        .apply_slot::<Pending, _, _>(incoming, || Err(DbError::TransactionEnded))
         .await
         .is_err());
     assert_eq!(db.applied_slot().await.unwrap(), 0);
@@ -353,7 +352,6 @@ async fn admin(
             },
         },
         || Ok(()),
-        None,
     )
     .await
     .unwrap();
@@ -419,7 +417,6 @@ async fn cutoff_consumes_every_kind_of_removed_author_without_effects() {
                     content: SlotContent::Writes { size: 1, writes: vec![write] },
                 },
                 || Ok(()),
-                None,
             )
             .await
             .unwrap();
@@ -681,7 +678,7 @@ async fn an_admin_slot_waits_until_its_required_reload_can_commit() {
         },
     };
     assert_eq!(
-        db.apply_slot::<Pending, _, _>(incoming(), || Ok(()), None).await.unwrap(),
+        db.apply_slot::<Pending, _, _>(incoming(), || Ok(())).await.unwrap(),
         ApplyOutcome::Waiting(WriteWait::Reload(Audience::Store))
     );
     assert_eq!(db.applied_slot().await.unwrap(), 0);
@@ -741,7 +738,6 @@ async fn preparing_an_incoming_part_leaves_the_application_writer_available() {
                     content: SlotContent::Writes { size: 1, writes: vec![write] },
                 },
                 || Ok(()),
-                None,
             )
             .await
     });
