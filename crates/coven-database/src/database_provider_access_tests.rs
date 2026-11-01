@@ -7,7 +7,6 @@ fn change(intended: bool) -> ProviderAccessChange {
         intended,
         initially_granted: true,
         needs_invitation: false,
-        owner: true,
         operation: NewOperation {
             kind: "provider-access".into(),
             data: b"account@example.com".to_vec(),

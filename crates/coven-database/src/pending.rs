@@ -27,7 +27,7 @@ pub trait PendingValue: Serialize + DeserializeOwned + Send + 'static {
     /// Report an audience whose selected boundary has no committed data input.
     fn reload(audience: coven_merge::Audience) -> Self;
     /// Report one account's unresolved intended sharing change.
-    fn provider_access(operation: OperationId, account: String, grant: bool, owner: bool) -> Self;
+    fn provider_access(operation: OperationId, account: String, grant: bool) -> Self;
     /// Stable identity, ordered as the app presents it.
     type Subject: Serialize + Ord;
     /// The work that cannot advance.

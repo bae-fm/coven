@@ -59,7 +59,7 @@ impl PendingValue for Pending {
     fn reload(_: Audience) -> Self {
         Self { subject: 0, cutoff: None }
     }
-    fn provider_access(id: OperationId, _: String, _: bool, _: bool) -> Self {
+    fn provider_access(id: OperationId, _: String, _: bool) -> Self {
         Self { subject: id.0 as u64, cutoff: None }
     }
     fn writes_refused(slot: Slot, cutoff: Slot, cause: WriteCutoff) -> Self {

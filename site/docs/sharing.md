@@ -373,8 +373,9 @@ work, recorded when the removal applies; the provider work shows in
 On Dropbox, OneDrive and iCloud, coven changes sharing only from the account
 that holds the store ([above](#adding-a-person-invites)), so that member's
 device unshares when it applies the removal. Ben removes Dan while Ana, the folder's owner, is offline: Dan's removal applies
-everywhere at once, Ben's pending list names the wait for Ana, and Ana's next
-pass does the unsharing. The owner's device takes back only a grant to that one
+everywhere at once, and Ana's next pass does the unsharing; her pending list
+shows it until it's done, and Ben's shows nothing for it, since his device can't
+see it happen. The owner's device takes back only a grant to that one
 account, keeps an account shared while another member or open invite uses it,
 and reports grants it can't remove alone, such as a parent folder's share or a
 public link, as `PendingReason::AccessRemains`.

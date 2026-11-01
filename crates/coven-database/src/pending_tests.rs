@@ -43,7 +43,7 @@ enum Reason {
     WritesRefused,
 }
 impl PendingValue for Record {
-    fn provider_access(id: OperationId, _account: String, _grant: bool, _owner: bool) -> Self {
+    fn provider_access(id: OperationId, _account: String, _grant: bool) -> Self {
         operation_record(id)
     }
     fn reload(audience: coven_merge::Audience) -> Self {

@@ -30,7 +30,6 @@ async fn commit(device: &Device, prerequisite: u64) {
                 intended,
                 initially_granted: true,
                 needs_invitation: false,
-                owner: true,
                 operation: operation("provider-access"),
             }],
         )
@@ -73,7 +72,8 @@ async fn history(actions: &[Value]) -> Value {
                                 id,
                                 kind: crate::OperationKind::RetainFiles,
                             },
-                            PendingReason::PendingOwner {
+                            PendingReason::ProviderPending {
+                                action: crate::ProviderAccessAction::Revoke,
                                 account: format!("prerequisite{prerequisite}@example.com"),
                             },
                         )));

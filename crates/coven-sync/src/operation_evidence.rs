@@ -76,7 +76,6 @@ fn needs(reason: &PendingReason, reload: Option<OperationId>) -> Needs {
             Needs { key: Some((audience.clone(), *key)), ..Needs::default() }
         }
         PendingReason::ProviderPending { account, .. }
-        | PendingReason::PendingOwner { account }
         | PendingReason::AccountInUse { account } => {
             rows(vec![PrerequisiteRows::ProviderAccess(account.clone())])
         }

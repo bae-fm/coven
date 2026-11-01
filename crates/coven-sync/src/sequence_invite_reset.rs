@@ -44,6 +44,10 @@ impl SequenceSync {
             }
         }
         let mut provider = ProviderChanges { accounts: Vec::new() };
+        // Only the owner's devices record provider work (§14.2).
+        if !session.history.owns_storage(member.member()) {
+            accounts.clear();
+        }
         for account in accounts {
             // An active member or an open invite share, this installation's
             // under its old id included until its replacement registers,
@@ -53,7 +57,6 @@ impl SequenceSync {
             // The discarded invite may have granted access even if its reply
             // was lost. The replacement must issue the owed revocation.
             change.initially_granted = true;
-            change.owner = session.history.owns_storage(member.member());
             provider.accounts.push(change);
         }
         self.database.record_device_reset::<PendingRecord>(reset, operations, provider).await?;

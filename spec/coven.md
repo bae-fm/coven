@@ -4280,8 +4280,7 @@ access stops him reading anything new. That second step is provider work.
 Applying a removal or an access change records the provider work it needs in the
 same transaction. That is the only way it gets scheduled: the operation that
 claims the removal doesn't revoke anything itself. Once its entry applies, the
-app's pending list shows the provider work's progress, including waits for an
-owner.
+pending list of each device that does the work shows its progress.
 
 - **Dropbox, OneDrive, iCloud:** sharing follows the active members and open
   invites. An open invite is an invite share in history that hasn't ended and
@@ -4289,16 +4288,18 @@ owner.
   intent. Coven changes sharing only from the account that holds the store
   (§13.2 says which providers would also let an editor or administrator do it),
   so that member's devices do it when they apply the change. Only they record
-  work for an invite share: another admin's device never changes sharing, and
-  made no invite whose sharing it could wait for. If Ana owns the folder and
-  is offline, Ben's removal applies at once everywhere, but the unsharing waits
-  for Ana's next pass.
+  the work. Another admin's device can't change sharing, and can't see the
+  owner's device do it, so it records nothing: a wait it showed would never
+  end. If Ana owns the folder and is offline, Ben's removal applies at once
+  everywhere, but the unsharing waits for Ana's next pass.
 - **S3:** each member has their own access key, made in the provider's console.
   Removing Ben ends his membership and coven forgets his key; the person deletes
   it in the console (§14.3).
 
-Ben removes Dan while Ana, the folder owner, is offline. Ben's removal lands, and
-his pending list names the wait for Ana. Ana's next pass does the unsharing.
+Ben removes Dan while Ana, the folder owner, is offline. Ben's removal lands,
+and Ana's devices take Dan's access back: her next pass does the unsharing, and
+her pending list shows it until it's done. Ben's pending list shows nothing for
+it.
 
 The owner's device makes these changes one request at a time, following what
 the applied sequence intends. It revokes only a grant to that one account, keeps

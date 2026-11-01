@@ -13,8 +13,6 @@ pub struct ProviderAccessChange {
     pub initially_granted: bool,
     /// An open invite also needs the provider's acceptance information.
     pub needs_invitation: bool,
-    /// Whether this installation holds the owner's account.
-    pub owner: bool,
     /// The journal payload identifying this account.
     pub operation: NewOperation,
 }
@@ -128,10 +126,7 @@ pub(crate) fn adopt<P: PendingValue>(
                 id
             }
         };
-        crate::pending::save(
-            db,
-            &P::provider_access(id, change.account.clone(), change.intended, change.owner),
-        )?;
+        crate::pending::save(db, &P::provider_access(id, change.account.clone(), change.intended))?;
     }
     Ok(())
 }

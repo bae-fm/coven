@@ -583,7 +583,6 @@ fn missing_prerequisites_retry_automatically() {
             action: ProviderAccessAction::Revoke,
             account: "member@example.org".into(),
         },
-        PendingReason::PendingOwner { account: "owner@example.org".into() },
         PendingReason::AccountInUse { account: "shared@example.org".into() },
     ] {
         assert_eq!(retry(reason.clone()), Retry::Automatic, "{reason:?}");

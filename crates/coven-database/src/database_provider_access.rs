@@ -67,7 +67,7 @@ impl crate::Database {
             db.internal_execute("UPDATE _coven_provider_access SET granted=NULL,invitation=NULL,target=intended WHERE account=?1", [&account])?;
             db.internal_execute("UPDATE _coven_operations SET last_step=1 WHERE id=?1", [id.0])?;
             crate::retry::clear(db, crate::RetrySubject::Operation(id))?;
-            crate::pending::save(db,&P::provider_access(id,account,state.intended,true))?;
+            crate::pending::save(db,&P::provider_access(id,account,state.intended))?;
             Ok(state.intended)
         }))).await
     }
@@ -117,7 +117,7 @@ impl crate::Database {
             } else {
                 db.internal_execute("UPDATE _coven_operations SET last_step=0 WHERE id=?1", [id.0])?;
                 crate::retry::clear(db, crate::RetrySubject::Operation(id))?;
-                crate::pending::save(db,&P::provider_access(id,account,state.intended,true))?;
+                crate::pending::save(db,&P::provider_access(id,account,state.intended))?;
                 Ok(false)
             }
         }))).await

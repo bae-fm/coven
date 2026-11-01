@@ -243,11 +243,6 @@ pub enum PendingReason {
         /// The provider account.
         account: String,
     },
-    /// The owner's device must perform this work.
-    PendingOwner {
-        /// The provider account.
-        account: String,
-    },
     /// Another member or invite still needs this account.
     AccountInUse {
         /// The shared account.
@@ -458,7 +453,6 @@ impl PendingReason {
             | Self::Refused(_)
             | Self::WritesRefused { .. }
             | Self::ProviderPending { .. }
-            | Self::PendingOwner { .. }
             | Self::AccountInUse { .. }
             | Self::AccessRemains { .. }
             | Self::FileUnavailable(_)
@@ -481,7 +475,6 @@ impl PendingReason {
             | Self::KeyUnavailable { .. }
             | Self::NoStorage
             | Self::ProviderPending { .. }
-            | Self::PendingOwner { .. }
             | Self::AccountInUse { .. }
             | Self::Paused => true,
             Self::Original { failure, .. } => *failure == FileSourceFailure::Missing,
@@ -512,7 +505,6 @@ impl PendingReason {
             | Self::Waits(_)
             | Self::KeyUnavailable { .. }
             | Self::ProviderPending { .. }
-            | Self::PendingOwner { .. }
             | Self::AccountInUse { .. } => Retry::Automatic,
             // A missing original's move retries as its upload does, until
             // the original is back; a changed one failed the move, which
@@ -551,20 +543,16 @@ impl coven_database::types::FromSql for PendingRecord {
 }
 
 impl PendingValue for PendingRecord {
-    fn provider_access(id: OperationId, account: String, grant: bool, owner: bool) -> Self {
+    fn provider_access(id: OperationId, account: String, grant: bool) -> Self {
         Self::new(
             PendingSubject::Operation { id, kind: OperationKind::RevokeAccess },
-            if owner {
-                PendingReason::ProviderPending {
-                    action: if grant {
-                        ProviderAccessAction::Grant
-                    } else {
-                        ProviderAccessAction::Revoke
-                    },
-                    account,
-                }
-            } else {
-                PendingReason::PendingOwner { account }
+            PendingReason::ProviderPending {
+                action: if grant {
+                    ProviderAccessAction::Grant
+                } else {
+                    ProviderAccessAction::Revoke
+                },
+                account,
             },
         )
     }

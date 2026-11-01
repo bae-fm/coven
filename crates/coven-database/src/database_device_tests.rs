@@ -17,7 +17,6 @@ fn cleanup() -> (Vec<NewOperation>, ProviderChanges) {
                 intended: false,
                 initially_granted: true,
                 needs_invitation: false,
-                owner: true,
                 operation: operation("provider-access"),
             }],
         },

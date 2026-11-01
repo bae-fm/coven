@@ -27,12 +27,14 @@ impl History {
 
     /// Intentions after this state: an account stays shared while an active
     /// member reaches storage through it or an open invite share names it
-    /// (§14.2). Only the owner's devices change sharing, so only they follow
-    /// invite shares; a member's account is followed everywhere, so another
-    /// admin's device shows the owner's work it waits for.
+    /// (§14.2). Only the owner's devices change sharing, so only they record
+    /// the work: another device could neither do it nor see it done, and a
+    /// wait it showed would never end.
     pub(crate) fn provider_changes(&self, member: MemberId) -> Result<ProviderChanges, SyncError> {
-        let owner = self.owns_storage(member);
         let mut changes = ProviderChanges::default();
+        if !self.owns_storage(member) {
+            return Ok(changes);
+        }
         let mut accounts = BTreeSet::new();
         // Coven shares nothing on S3: the person deletes a key in the
         // provider's console, and coven records nothing (§14.3).
@@ -40,8 +42,7 @@ impl History {
             MemberAccess::ProviderAccount(account) => Some(account.as_str()),
             MemberAccess::S3AccessKey { .. } => None,
         });
-        let shares =
-            self.invite_shares.values().filter(|_| owner).map(|share| share.account.as_str());
+        let shares = self.invite_shares.values().map(|share| share.account.as_str());
         for account in members.chain(shares) {
             let account = account.trim().to_ascii_lowercase();
             if !accounts.insert(account.clone()) {
@@ -61,7 +62,6 @@ impl History {
                 // that first learns of an account never grants it itself.
                 initially_granted: true,
                 needs_invitation: false,
-                owner,
             });
         }
         Ok(changes)
@@ -118,10 +118,12 @@ impl SequenceSync {
                     reason,
                 )
             };
+            // Only the owner's devices record provider work (`provider_changes`).
             if !session.history.owns_storage(member.member()) {
-                return Err(SyncError::Pending(Box::new(condition(PendingReason::PendingOwner {
-                    account,
-                }))));
+                return Err(coven_database::DbError::Invariant {
+                    what: "provider work runs on a device whose member's account holds the store",
+                }
+                .into());
             }
             let target = if record.last_step == 1 {
                 self.database
@@ -173,3 +175,7 @@ impl SequenceSync {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "sequence_access_tests.rs"]
+mod tests;

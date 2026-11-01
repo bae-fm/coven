@@ -717,7 +717,6 @@ impl SequenceSync {
             intended,
             initially_granted: false,
             needs_invitation,
-            owner: true,
         })
     }
 

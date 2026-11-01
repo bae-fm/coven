@@ -4576,7 +4576,6 @@ pub enum PendingReason {
     /// Consumed without effects; a permanent lower-slot cut-off (§14.1).
     WritesRefused { cutoff: Slot, cause: WriteCutoff },
     ProviderPending { action: ProviderAccessAction, account: String },
-    PendingOwner { account: String },
     AccountInUse { account: String },
     AccessRemains { account: String, shares: Vec<RetainedAccess> },
     FileUnavailable(FileMissingReason),
@@ -5853,8 +5852,9 @@ match stream.read_at(resume_at, 256 * 1024).await {
   a separate operation. Neither a restore code nor a key copy proves approval.
 - Removing a member publishes one entry. Applying entries is the single path
   that records provider access work.
-- The pending list describes unresolved access work. Each owner's device
-  serializes grant and revoke requests, and performs the opposite request
+- The pending list describes unresolved access work, on the owner's devices
+  only: no other device records it, since it could neither do the work nor
+  see it done. Each owner's device serializes grant and revoke requests, and performs the opposite request
   when a later slot changes the required access (§20.9, §14.2).
   Pending and failed work appears in `pending()`, with the operation id for
   retry. Derived provider work cannot be discarded while its current
@@ -5970,8 +5970,8 @@ impl CovenWrite<'_> {
     ) -> Result<Option<OperationId>, SyncError>;
 
     /// Removes this member and all their devices (§14.1). Provider work
-    /// appears only in `coven_pending`, including owner waits and retained
-    /// grants. Coven forgets the member's S3 keys; the person deletes them in
+    /// appears only in `coven_pending` on the devices of the member whose
+    /// account holds the store, including retained grants. Coven forgets the member's S3 keys; the person deletes them in
     /// the provider's console (§14.3). An admin removing themselves leaves:
     /// this device deletes their saved restore code and S3 key before
     /// applying the slot, then stops, and the operation ends landed. On
