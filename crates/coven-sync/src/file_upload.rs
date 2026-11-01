@@ -31,7 +31,7 @@ impl FilesInner {
             Ok(stored) => {
                 if stored {
                     self.waits.forget(RetrySubject::Upload(item.id));
-                    self.waits.causes().cleared(&upload_subject(&item.location), |_| true);
+                    self.waits.failures().cleared(&upload_subject(&item.location), |_| true);
                 }
                 Ok(stored)
             }

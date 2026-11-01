@@ -18,17 +18,15 @@ impl FilesInner {
     async fn finish_download(
         &self,
         file: &FileRef,
-        reason: Option<PendingReason>,
+        failed: Option<PendingRecord>,
         whole: bool,
     ) -> Result<(), crate::SyncError> {
         let (location, _) = stored(file).map_err(|_device_only| DbError::Invariant {
             what: "only a stored file is downloaded",
         })?;
         let subject = download_subject(location);
-        match reason {
-            Some(reason) => {
-                Ok(self.database.fail_download(PendingRecord::new(subject, reason)).await?)
-            }
+        match failed {
+            Some(record) => Ok(self.database.fail_download(record).await?),
             None => {
                 // A partial read settles every failure but those a whole
                 // file must clear.
@@ -46,7 +44,7 @@ impl FilesInner {
                         ends(&record.reason)
                     })
                     .await?;
-                self.waits.causes().cleared(&subject, ends);
+                self.waits.failures().cleared(&subject, ends);
                 Ok(())
             }
         }
@@ -67,9 +65,9 @@ impl FilesInner {
             Ok((location, _)) => download_subject(location),
             Err(error) => return Err(error),
         };
-        let reason = match &result {
+        let failed = match &result {
             Err(error) if recorded => {
-                Some(self.file_failure(&subject, FileCopy::Stored, FileFailure::Returned(error)))
+                Some(self.file_failure(subject, FileCopy::Stored, FileFailure::Returned(error)))
             }
             Ok(()) | Err(_) => None,
         };
@@ -77,7 +75,7 @@ impl FilesInner {
         if !recorded {
             return result;
         }
-        let recorded = self.finish_download(file, reason, true).await;
+        let recorded = self.finish_download(file, failed, true).await;
         combine(result, recorded)
     }
 
@@ -194,7 +192,7 @@ impl FilesInner {
                 source_failure(&record.reason)
             })
             .await?;
-        self.waits.causes().cleared(&subject, source_failure);
+        self.waits.failures().cleared(&subject, source_failure);
         if let Some(retry) = retry {
             self.waits.forget(retry);
         }
@@ -207,7 +205,7 @@ impl FilesInner {
             .await?
         {
             self.waits.forget(coven_database::RetrySubject::Upload(upload));
-            self.waits.causes().cleared(&moving, move |reason| original_missing(reason, &path));
+            self.waits.failures().cleared(&moving, move |reason| original_missing(reason, &path));
         }
         Ok(())
     }

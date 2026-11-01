@@ -2890,8 +2890,9 @@ let moved = handle
 - Count what is being sent through `coven_sending`, which holds one row per
   upload in flight and finds each by index. Counting `sending` over
   `coven_uploads` reads every queued file.
-- A pending record's cause lasts only as long as the process too;
-  `subscribe_pending_causes()` gives it by record (E5).
+- A pending record's cause is the text of the error the running process met
+  for it, written with the record. Opening clears every cause: one an earlier
+  run wrote names a failure nothing has met since (E5).
 - *A read's and a lookup's cost, in tests.* With the test-utils feature,
   `test_track_work` counts SQLite's steps as SQLite counts them for each
   statement: the app's statements in `query` and `query_row`, and apart,
@@ -2932,9 +2933,10 @@ let moved = handle
 | `coven_pins`: each file this device keeps pinned, whole on this device (E8); a table, which local triggers can follow | `file` | the file's id |
 | `coven_sync_status`: this installation's sync status, in one row from the store's creation on, with no storage set up too (E5); a table, which local triggers can follow; not readable on a read-only handle | `state` | `disconnected`, `stopped`, `offline`, `syncing`, `synced`, `blocked` or `failed` |
 | | `status` | the status with its details, read as `SyncStatus` |
-| `coven_pending`: every pending record (§19.1) | `record` | the record, read as `PendingRecord`, without the cause only this process holds: `subscribe_pending_causes()` has it (E5) |
+| `coven_pending`: every pending record (§19.1) | `record` | the record, read as `PendingRecord`, without its cause |
 | | `file` | for a record about stored bytes or an upload, each file over them on this device: the files the upload stores, or the stored files; NULL otherwise |
 | | `position` | its place in the order the records arose, smallest first; a record whose condition changes keeps its place |
+| | `cause` | the text of the error behind the record, written with it, when this run met that error and no app call received it; NULL otherwise (E5) |
 | `coven_members`: every member this device's applied slots name, former ones included | `member` | the member id as canonical UUID text, read as `MemberId` |
 | | `role` | `admin` or `member` |
 | | `removed` | 1 for a former member |
@@ -2994,26 +2996,23 @@ let mut sending = handle.subscribe(move |sql| {
 ```
 
 ```rust
-// The photos that can't upload, each with its error: the records from the
-// view, their causes from this process.
+// The photos that can't upload, each with its error.
 let mut failing = handle.subscribe(|sql| {
     Ok(sql.query(
-        "SELECT e.record, p.title FROM coven_pending AS e
+        "SELECT e.record, e.cause, p.title FROM coven_pending AS e
          JOIN photos AS p ON e.file=p.file",
         [],
-        |row| Ok((row.get::<_, PendingRecord>(0)?, row.get::<_, String>(1)?)),
+        |row| {
+            Ok((
+                row.get::<_, PendingRecord>(0)?,
+                row.get::<_, Option<String>>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        },
     )?)
 });
-let mut causes = handle.subscribe_pending_causes();
-let mut rows = Vec::new();
-loop {
-    tokio::select! {
-        Some(result) = failing.next() => rows = result?,
-        Ok(()) = causes.changed() => {}
-        else => break,
-    }
-    let held = causes.borrow_and_update();
-    show_failures(rows.iter().map(|(record, title)| (title, held.cause(record))));
+while let Some(rows) = failing.next().await {
+    show_failures(rows?);
 }
 ```
 
@@ -4340,25 +4339,14 @@ pub struct PendingRecord {
     pub subject: PendingSubject,
     /// The first unmet condition for this subject, kept as a typed value.
     pub reason: PendingReason,
-    /// The error behind `reason`, with every cause below it, while this
-    /// process holds it: an upload, download or read no caller awaited, or
-    /// an attempt of an operation coven drives itself. Never persisted, so a
-    /// record read after a restart has none, and none when the failure went
-    /// back to an app call. Equality ignores it. A record's text names its
-    /// subject, its reason and this error.
-    pub cause: Option<Arc<dyn std::error::Error + Send + Sync>>,
-}
-
-/// The errors this process holds behind pending records (§19.1).
-pub struct PendingCauses { /* private fields */ }
-
-impl PendingCauses {
-    /// The error behind `record`, with every cause below it, while this
-    /// process holds it for exactly the reason the record states.
-    pub fn cause(&self, record: &PendingRecord) -> Option<Arc<dyn std::error::Error + Send + Sync>>;
-
-    /// `records`, each with its cause as `cause` finds it.
-    pub fn attach(&self, records: Vec<PendingRecord>) -> Vec<PendingRecord>;
+    /// The text of the error behind `reason`, naming every cause below it:
+    /// an upload, download or read no caller awaited, an attempt of an
+    /// operation coven drives itself, or what blocked a slot.
+    /// `coven_pending.cause` keeps it, written with the record. Only the run
+    /// that met the error writes one: opening clears every cause, and a
+    /// failure that went back to an app call leaves none. Equality ignores
+    /// it. A record's text names its subject, its reason and this error.
+    pub cause: Option<String>,
 }
 
 /// Stable identities; this device keeps one record per subject.
@@ -4485,7 +4473,7 @@ pub enum Retry {
 }
 
 impl PendingRecord {
-    /// The record of `subject`'s first unmet condition, with no cause held.
+    /// The record of `subject`'s first unmet condition, with no cause.
     pub fn new(subject: PendingSubject, reason: PendingReason) -> Self;
 
     /// Automatic: retryable reads, keys, snapshots, provider work and
@@ -4651,14 +4639,9 @@ impl CovenHandle {
     pub fn subscribe_device_reset(&self) -> LiveQuery<Option<DeviceReset>>;
 
     /// This device's pending work, in the order the records arose, as
-    /// `coven_pending` lists them by position, including offline (§19.1).
+    /// `coven_pending` lists them by position, including offline, each with
+    /// the cause the view keeps beside it (§19.1).
     pub async fn pending(&self) -> CovenResult<Vec<PendingRecord>>;
-
-    /// The errors behind pending records while this process holds them, by
-    /// record: what `coven_pending` leaves out (E4). The first value is the
-    /// current one; another follows whenever the cause some record shows
-    /// appears, changes or ends.
-    pub fn subscribe_pending_causes(&self) -> watch::Receiver<PendingCauses>;
 
     /// How many file uploads and file downloads run at once.
     pub fn transfer_limits(&self) -> TransferLimits;
@@ -4685,9 +4668,9 @@ pub enum SyncFailure {
     /// The provider refused or failed a request.
     Storage(Arc<StorageError>),
     /// The pass finished, but this work of coven's own failed its last
-    /// attempt; it retries under backoff (E5). The record carries the error
-    /// behind it while this process holds it, and the failure's text names
-    /// the subject, the reason and that error.
+    /// attempt; it retries under backoff (E5). The record carries the cause
+    /// it keeps, and the failure's text names the subject, the reason and
+    /// that error.
     Operation(Box<PendingRecord>),
     /// Any other failure, retaining its typed cause.
     Other(Arc<dyn std::error::Error + Send + Sync>),
@@ -4709,10 +4692,10 @@ pub enum SyncStatus {
     /// The pass reached its observed end; other subjects may still be pending.
     Synced { finished_at: SystemTime },
     /// This slot invokes §5.4's stuck-device rule.
-    /// `error` is the text of the error that blocked the slot, while this
-    /// process holds that error; a device that opens already blocked has
-    /// none, since only the reason is saved. Coven logs it when the blocked
-    /// slot or its reason changes.
+    /// `error` is the text of the error that blocked the slot: the cause
+    /// the slot's pending record keeps. A device that opens already blocked
+    /// has none until a pass of its own meets the error. Coven logs it when
+    /// the blocked slot or its reason changes.
     Blocked { slot: Slot, reason: PendingReason, error: Option<String> },
     /// Storage refused the whole pass, or coven's own operation failed.
     Failed { failure: StatusFailure, error: String },
@@ -4738,11 +4721,8 @@ impl SyncStatus {
 /// status it leaves.
 pub enum PassFailure {
     Offline { error: Arc<StorageError> },
-    Blocked {
-        slot: Slot,
-        reason: PendingReason,
-        error: Option<Arc<dyn std::error::Error + Send + Sync>>,
-    },
+    /// `error` is the cause the slot's pending record keeps.
+    Blocked { slot: Slot, reason: PendingReason, error: Option<String> },
     Failed { error: SyncFailure },
 }
 

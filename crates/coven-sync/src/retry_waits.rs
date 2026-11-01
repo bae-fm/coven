@@ -53,8 +53,8 @@ pub struct RetryWaits {
     /// What a retry made now would do, published whenever the requests'
     /// state or the provider cooldown changes it.
     effect: tokio::sync::watch::Sender<RetryEffect>,
-    /// The error behind each failure recorded for a subject in this session.
-    causes: crate::pending_cause::HeldCauses,
+    /// The reason last logged for each subject's failure.
+    failures: crate::failure_log::FailureLog,
 }
 
 #[derive(Default)]
@@ -100,7 +100,7 @@ impl RetryWaits {
             network: network_report::Reports::default(),
             requests: Mutex::default(),
             effect: tokio::sync::watch::channel(RetryEffect::NotSyncing).0,
-            causes: crate::pending_cause::HeldCauses::default(),
+            failures: crate::failure_log::FailureLog::default(),
         };
         for (subject, wait) in waits {
             owner.arm_for(subject, wait.not_before, restart_wait(wait.not_before, now, wait.wait));
@@ -120,13 +120,13 @@ impl RetryWaits {
             network: network_report::Reports::default(),
             requests: Mutex::default(),
             effect: tokio::sync::watch::channel(RetryEffect::NotSyncing).0,
-            causes: crate::pending_cause::HeldCauses::default(),
+            failures: crate::failure_log::FailureLog::default(),
         }
     }
 
-    /// The error behind each failure recorded for a subject in this session.
-    pub(crate) fn causes(&self) -> &crate::pending_cause::HeldCauses {
-        &self.causes
+    /// The reason last logged for each subject's failure.
+    pub(crate) fn failures(&self) -> &crate::failure_log::FailureLog {
+        &self.failures
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, State> {
@@ -183,11 +183,11 @@ impl RetryWaits {
     }
 
     /// The operation advanced or finished: its wait, the evidence its wait
-    /// named and its last failure's cause all end.
+    /// named and its logged failure all end.
     pub(crate) fn operation_advanced(&self, id: coven_database::OperationId) {
         self.clear_evidence(id);
         self.forget(RetrySubject::Operation(id));
-        self.causes.cleared_operation(id);
+        self.failures.cleared_operation(id);
     }
 
     /// Forget operation waits whose operations no longer exist.
@@ -200,7 +200,7 @@ impl RetryWaits {
             _ => true,
         });
         self.retain_evidence(live);
-        self.causes.retain_operations(live);
+        self.failures.retain_operations(live);
     }
 
     /// Whether automatic work on the subject may start now, given its

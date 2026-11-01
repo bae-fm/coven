@@ -29,13 +29,15 @@ pub struct PendingRecord {
     pub subject: PendingSubject,
     /// The first condition in its processing order.
     pub reason: PendingReason,
-    /// The error behind `reason`, while this process holds it: the provider,
-    /// disk or database failure, with every cause below it. Only the reason
-    /// is persisted, so a record read after a restart, or one whose last
-    /// failure went back to an app call, has none. It names the failure and
-    /// is no part of the record's identity: equality ignores it.
+    /// The text of the error behind `reason`: the provider, disk or
+    /// database failure, naming every cause below it. `coven_pending.cause`
+    /// keeps it beside the record, written in the same step. Only the run
+    /// that met the error writes one: opening clears every cause, and a
+    /// record whose last failure went back to an app call has none. It
+    /// names the failure and is no part of the record's identity: equality
+    /// ignores it, and `record` leaves it out.
     #[serde(skip)]
-    pub cause: Option<std::sync::Arc<dyn std::error::Error + Send + Sync>>,
+    pub cause: Option<String>,
 }
 
 impl PartialEq for PendingRecord {
@@ -45,8 +47,8 @@ impl PartialEq for PendingRecord {
 }
 impl Eq for PendingRecord {}
 
-/// The subject and its reason, then the error behind it while this process
-/// holds it, such as `Operation { .. }: Storage { .. }: S3: Network: …`.
+/// The subject and its reason, then the error behind it when the record
+/// keeps one, such as `Operation { .. }: Storage { .. }: S3: Network: …`.
 impl std::fmt::Display for PendingRecord {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{:?}: {:?}", self.subject, self.reason)?;
@@ -302,7 +304,7 @@ pub enum Retry {
     Never,
 }
 impl PendingRecord {
-    /// The record of `subject`'s first unmet condition, with no cause held.
+    /// The record of `subject`'s first unmet condition, with no cause.
     pub fn new(subject: PendingSubject, reason: PendingReason) -> Self {
         Self { subject, reason, cause: None }
     }
@@ -532,7 +534,7 @@ impl PendingReason {
 }
 
 /// A record as coven's `coven_uploads` and `coven_pending` views hold it
-/// (api.md E4), without the cause only this process holds.
+/// (api.md E4), without its cause: `coven_pending.cause` holds that.
 impl coven_database::types::FromSql for PendingRecord {
     fn column_result(
         value: coven_database::types::ValueRef<'_>,
@@ -625,6 +627,12 @@ impl PendingValue for PendingRecord {
             }
             _ => self.retry() == Retry::Automatic,
         }
+    }
+    fn cause(&self) -> Option<&str> {
+        self.cause.as_deref()
+    }
+    fn with_cause(self, cause: Option<String>) -> Self {
+        Self { cause, ..self }
     }
 }
 

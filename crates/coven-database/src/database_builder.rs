@@ -176,6 +176,7 @@ impl DatabaseBuilder {
         )?;
         crate::database::file_database::declare_budgets(&writer, &self.namespaces)?;
         crate::file_removals::finish_at_open(&writer, &self.directory)?;
+        crate::pending::forget_causes(&writer)?;
         let mut write_schema = crate::write_schema::WriteSchema::read(&writer, tables.clone())?;
         write_schema.conversions = crate::migration_receive::read(&writer, &migrations)?;
         write_schema.namespaces = self.namespaces;

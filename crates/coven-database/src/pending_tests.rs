@@ -21,6 +21,8 @@ pub(crate) struct Record {
     subject: Subject,
     reason: Reason,
     operation: Option<OperationId>,
+    #[serde(skip)]
+    cause: Option<String>,
 }
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub(crate) enum Subject {
@@ -49,10 +51,16 @@ impl PendingValue for Record {
             subject: Subject::Audience(crate::write_encoding::audience_text(&audience)),
             reason: Reason::Missing,
             operation: None,
+            cause: None,
         }
     }
     fn writes_refused(slot: crate::Slot, _cutoff: crate::Slot, _cause: crate::WriteCutoff) -> Self {
-        Self { subject: Subject::Slot(slot.0), reason: Reason::WritesRefused, operation: None }
+        Self {
+            subject: Subject::Slot(slot.0),
+            reason: Reason::WritesRefused,
+            operation: None,
+            cause: None,
+        }
     }
     type Subject = Subject;
     fn subject(&self) -> &Subject {
@@ -93,20 +101,27 @@ impl PendingValue for Record {
             Reason::Update(required) => schema >= required,
         }
     }
+    fn cause(&self) -> Option<&str> {
+        self.cause.as_deref()
+    }
+    fn with_cause(self, cause: Option<String>) -> Self {
+        Self { cause, ..self }
+    }
 }
 /// A missing-object record about a numbered subject with no operation.
 pub(crate) fn missing(subject: u64) -> Record {
-    Record { subject: subject.into(), reason: Reason::Missing, operation: None }
+    Record { subject: subject.into(), reason: Reason::Missing, operation: None, cause: None }
 }
 pub(crate) fn operation_record(id: OperationId) -> Record {
     Record {
         subject: Subject::Number(id.0.try_into().unwrap()),
         reason: Reason::Missing,
         operation: Some(id),
+        cause: None,
     }
 }
 fn record(subject: u64) -> Record {
-    Record { subject: subject.into(), reason: Reason::Refused, operation: None }
+    Record { subject: subject.into(), reason: Reason::Refused, operation: None, cause: None }
 }
 
 #[tokio::test]
@@ -386,8 +401,12 @@ async fn a_failed_condition_change_rolls_back_its_completed_step() {
 async fn a_writes_wait_ends_when_slots_cover_it_but_a_verdict_on_its_bytes_remains() {
     let store = TestStore::new();
     let db = store.builder(vec![], vec![]).open().await.unwrap();
-    let observed =
-        |number, reason| Record { subject: Subject::Slot(number), reason, operation: None };
+    let observed = |number, reason| Record {
+        subject: Subject::Slot(number),
+        reason,
+        operation: None,
+        cause: None,
+    };
     let waiting = observed(1, Reason::Missing);
     let refused = observed(2, Reason::Refused);
     let later = observed(3, Reason::Missing);
@@ -416,6 +435,7 @@ async fn a_completed_scan_replaces_exactly_its_own_class_of_records() {
         subject: Subject::Audience(name.into()),
         reason,
         operation: None,
+        cause: None,
     };
     let scanned = |record: &Record| matches!(record.subject, Subject::Audience(_));
     let other = record(1);
@@ -511,4 +531,44 @@ async fn coven_pending_lists_records_in_the_order_they_arose() {
         db.pending::<Record>().await.unwrap().into_iter().map(|record| record.subject).collect();
     assert_eq!(read, [5.into(), 2.into(), 1.into()]);
     db.close().await.unwrap();
+}
+
+/// A record's cause is written with it, in the same commit, so a live
+/// query on `coven_pending` sees the record and its cause arrive together
+/// and change together. Opening clears every cause: the run that wrote it
+/// met that error, and the next run has met none of its own.
+#[tokio::test]
+async fn a_records_cause_is_written_with_it_and_cleared_at_open() {
+    let store = TestStore::new();
+    let db = store.builder(vec![], vec![]).open().await.unwrap();
+    let follow = |db: &crate::Database| {
+        db.subscribe(|sql| {
+            Ok(sql.query("SELECT record,cause FROM coven_pending ORDER BY position", [], |r| {
+                let record: Vec<u8> = r.get(0)?;
+                Ok((serde_json::from_slice::<Record>(&record).unwrap(), r.get(1)?))
+            })?)
+        })
+    };
+    let mut live = follow(&db);
+    let mut next = async || live.next().await.expect("the live query answers").unwrap();
+    assert_eq!(next().await, vec![]);
+    let failed = Record { cause: Some("disk full".into()), ..record(1) };
+    db.record_pending(failed.clone()).await.unwrap();
+    assert_eq!(next().await, vec![(record(1), Some("disk full".to_owned()))]);
+    assert_eq!(db.pending::<Record>().await.unwrap(), vec![failed]);
+    // The same reason met again with another error keeps the newer one;
+    // one an app call received keeps none.
+    db.record_pending(Record { cause: Some("still full".into()), ..record(1) }).await.unwrap();
+    assert_eq!(next().await, vec![(record(1), Some("still full".to_owned()))]);
+    db.record_pending(record(1)).await.unwrap();
+    assert_eq!(next().await, vec![(record(1), None)]);
+    db.record_pending(Record { cause: Some("full again".into()), ..record(1) }).await.unwrap();
+    assert_eq!(next().await, vec![(record(1), Some("full again".to_owned()))]);
+    drop(live);
+    db.close().await.unwrap();
+
+    let db = store.builder(vec![], vec![]).open().await.unwrap();
+    assert_eq!(db.pending::<Record>().await.unwrap(), vec![record(1)]);
+    let mut live = follow(&db);
+    assert_eq!(live.next().await.unwrap().unwrap(), vec![(record(1), None)]);
 }

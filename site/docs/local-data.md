@@ -428,7 +428,7 @@ tables like these, so the list stays one query over the database:
 | `coven_upload_pause` | store, always exactly one row | `paused` |
 | `coven_upload_queue` (a table) | file waiting in this device's upload queue | `file`, `position` |
 | `coven_pins` (a table) | file this device keeps pinned | `file` |
-| `coven_pending` | pending record | `record`, `file`, `position` |
+| `coven_pending` | pending record | `record`, `file`, `position`, `cause` |
 | `coven_members` | member, former ones included | `member`, `role`, `removed`, `is_self` |
 | `coven_devices` | device a member registered | `device`, `member`, `name`, `state`, `is_self` |
 
@@ -498,8 +498,8 @@ let sending = handle.subscribe(move |sql| {
 The bytes the provider has confirmed do last, so `coven_uploads` gives them as
 `bytes_confirmed` and `bytes_total`, NULL for a file sent in one request: an
 album's upload bar is `SUM(bytes_confirmed)` over `SUM(bytes_total)` for its
-photos. The error behind a pending record lasts only as long as the process
-too: `coven_pending` gives the record, and `handle.subscribe_pending_causes()`
-gives its error, found by that record with `causes.borrow().cause(&record)`.
-It sends a new value whenever the error a record would show changes, including
-a retry that fails the same way.
+photos. `coven_pending` gives each pending record's error as `cause`, the
+text coven writes with the record; a retry that fails the same way with a
+different error changes it, and a live query runs again for it. Opening clears
+every cause, so a record from an earlier run shows none until its failure
+happens again.

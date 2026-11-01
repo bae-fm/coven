@@ -82,9 +82,11 @@ pub(super) const SCHEMA: &str = concat!(
     // Every pending record (§19.1), in the order the records arose; a
     // record about stored bytes also names each file over them on this
     // device: the files an upload switches, or the stored files, and a
-    // record about a pin coven keeps names its file.
-    "CREATE VIEW coven_pending(record,file,position) AS
-        SELECT e.value,coalesce(l.file,f.file,e.pin),e.id
+    // record about a pin coven keeps names its file. Its cause is the text
+    // of the error behind it, when this run met that error and no app call
+    // received it.
+    "CREATE VIEW coven_pending(record,file,position,cause) AS
+        SELECT e.value,coalesce(l.file,f.file,e.pin),e.id,e.cause
         FROM _coven_pending AS e
         LEFT JOIN _coven_file_uploads AS u ON u.device=e.device AND u.file=e.file
         LEFT JOIN _coven_upload_files AS l ON l.upload=u.id

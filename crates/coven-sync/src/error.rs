@@ -240,6 +240,15 @@ impl SyncError {
                 == Some(crate::pending::Clears::ByItself)
     }
 
+    /// The error a pending record keeps as its cause, the one `into_shared`
+    /// shares: a local failure's source, any other error itself.
+    pub(crate) fn cause(&self) -> &(dyn std::error::Error + 'static) {
+        match self {
+            Self::Failed { source, .. } => source.as_ref(),
+            error => error,
+        }
+    }
+
     /// The local category and one shared cause, for a status and a waiting
     /// caller failed by the same error.
     pub fn into_shared(self) -> (crate::LocalFailure, Arc<dyn std::error::Error + Send + Sync>) {
@@ -284,8 +293,8 @@ pub enum SyncFailure {
     #[error("storage failed: {0}")]
     Storage(#[source] Arc<StorageError>),
     /// The pass finished, but this work of coven's own failed its last
-    /// attempt; it retries under backoff (E5). The record carries the error
-    /// behind it while this process holds it, and the text names it.
+    /// attempt; it retries under backoff (E5). The record carries the cause
+    /// it keeps, and the text names it.
     #[error("coven's own work failed its last attempt: {0}")]
     Operation(Box<crate::PendingRecord>),
     /// Any other failure, retaining its typed cause.

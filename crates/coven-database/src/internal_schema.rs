@@ -42,6 +42,10 @@ mod sequence;
 
 macro_rules! coven_tables {
     ($visit:ident) => {
+        // A record's cause is the text of the error behind it, written with
+        // the record by the run that met the error. Opening clears every
+        // cause: one from an earlier run names a failure nothing has met
+        // since (§19.1).
         $visit!(_coven_pending, "
             CREATE TABLE _coven_pending (
                 id INTEGER PRIMARY KEY,
@@ -55,6 +59,7 @@ macro_rules! coven_tables {
                 coven_version TEXT NOT NULL,
                 move INTEGER REFERENCES _coven_moves(id),
                 pin TEXT REFERENCES _coven_pin_requests(file) ON DELETE CASCADE,
+                cause TEXT,
                 CHECK((device IS NULL)=(file IS NULL)),
                 CHECK((work IS NULL)=(device IS NULL))
             ) STRICT;

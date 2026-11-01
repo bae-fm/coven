@@ -207,7 +207,7 @@ fn a_failing_operation_names_its_reason_and_cause() {
         "coven's own work failed its last attempt: \
          Operation { id: OperationId(4), kind: RetainFiles }: Failed(Disk)"
     );
-    record.cause = Some(Arc::new(std::io::Error::other("disk full")));
+    record.cause = Some("disk full".into());
     let failure = SyncFailure::Operation(Box::new(record));
     assert!(failure.to_string().ends_with(": Failed(Disk): disk full"), "{failure}");
 }

@@ -545,15 +545,13 @@ move from its `move` column, and cancels it with `cancel_move`. Every track
 stays on her laptop only. A bound file's upload shows NULL there, since its
 move can't be cancelled (§17.4).
 
-The error behind a pending record is another (§19.1). Only the record's
-condition is saved; the error lives in the process that met it. So
-`coven_pending` gives each record without its error, and the app finds the
-error with `subscribe_pending_causes()`, by the record the view gave. Ana's
-photo app lists the photos that can't upload as one live query over
-`coven_pending` and `photos`, and shows each one's error from there. A new
-value follows whenever the error a record would show appears, changes or
-ends. A retry that fails the same way holds its new error while the record
-stays as it was, so the live query alone wouldn't show it.
+The error behind a pending record is in `coven_pending` too (§19.1). Coven
+writes the error's text into the record's `cause` in the same statement that
+writes the record, so a live query sees them arrive and change together.
+Ana's photo app lists the photos that can't upload as one live query over
+`coven_pending` and `photos`, and shows each one's error from its `cause`. A
+retry that fails the same way with a different error changes the `cause` while
+the record stays as it was, and the live query runs again for it.
 
 A live query depends on what its statements read. As SQLite prepares each
 statement, it tells coven the tables and columns the statement reads, and a
@@ -6445,14 +6443,16 @@ The app reads the list with `pending()`, or as a live query over the
   "key not available yet", "waiting for Ana's device to unshare" or "source file
   moved". It stays until that condition changes or the work settles. Time passing
   never clears it.
-- **A record also carries the error behind it,** while the process that met the
-  failure runs. Say Ana's laptop can't reach Dropbox while it uploads a photo: the
-  record's condition is a `Network` failure, and its cause is the error itself,
-  such as a DNS failure for the provider's host. Only the condition is saved, so
-  after a restart the record has no cause until the failure happens again. A
-  failure an app call returns goes to that call instead. A record read through
-  `coven_pending` finds its cause with `subscribe_pending_causes()` (§4). Coven logs each failure
-  once, when its subject's condition appears or changes, not on every retry.
+- **A record also carries the error behind it,** as its cause. Say Ana's laptop
+  can't reach Dropbox while it uploads a photo: the record's condition is a
+  `Network` failure, and its cause is the error's text, such as a DNS failure for
+  the provider's host. Coven writes the cause with the record, in the same
+  statement, and `coven_pending` shows it beside the record (§4). Opening clears
+  every cause: a cause an earlier run wrote names a failure nothing has met since,
+  so after a restart the record has none until the failure happens again. A
+  failure an app call returns goes to that call instead, and the record keeps no
+  cause. Coven logs each failure once, when its subject's condition appears or
+  changes, not on every retry.
 - **A stuck slot has one record** naming its cause (§5.4). Coven doesn't add a
   wait for every later slot it can't reach.
 - **The other subjects** are writes, key copies, snapshots, uploads, downloads,
@@ -7950,7 +7950,7 @@ Coven's other tables, besides the merge records Appendix B.1 lists:
 | `_coven_moves` | each move of this device's files to the cloud, by id, never reused: moving, failed, cancelled or finished; every queued upload names its move, and whether its bytes are stored (§17.3) |
 | `_coven_copy_chunks` | the plaintext chunk hashes of coven's copy of each app file, by the copy, which a move's upload checks (§17.3) |
 | `_coven_unreferenced_files` | the files other devices' writes left with no reference, whose records this device's next write deletes (§17.2) |
-| `_coven_pending` | one record per thing that can't proceed, with the stored bytes it describes and whether it is about their upload or their downloads, or the move it describes, if any, numbered in the order the records arose (§19.1) |
+| `_coven_pending` | one record per thing that can't proceed, with the stored bytes it describes and whether it is about their upload or their downloads, or the move it describes, if any, and the text of the error behind it that this run met, numbered in the order the records arose (§19.1) |
 | `_coven_device_reset` | the reset notice with old and new device ids (§19.3) |
 | `_coven_sql_versions` | the version of each app collation and deterministic function the store's indexes were last built with, and of the SQLite that last opened the store for writing (§4) |
 

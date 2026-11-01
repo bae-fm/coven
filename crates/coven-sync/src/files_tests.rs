@@ -255,18 +255,16 @@ impl Fixture {
             .map(|record| record.reason)
     }
     /// The text of the error the pending record about the file's bytes
-    /// carries, if any.
+    /// keeps as its cause, if any.
     async fn file_cause(&self, file: &FileRef) -> Option<String> {
         let subjects = self.subjects(file).await;
-        let records = self.database.pending::<crate::PendingRecord>().await.unwrap();
-        self.files
-            .subscribe_pending_causes()
-            .borrow()
-            .attach(records)
+        self.database
+            .pending::<crate::PendingRecord>()
+            .await
+            .unwrap()
             .into_iter()
             .find(|record| subjects.contains(&record.subject))
             .and_then(|record| record.cause)
-            .map(|cause| cause.to_string())
     }
     /// The path of a stored file.
     fn path(&self, file: &FileRef) -> coven_storage::ObjectPath {

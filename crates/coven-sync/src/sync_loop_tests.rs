@@ -158,6 +158,11 @@ async fn a_damaged_slot_shows_the_loop_blocked_on_it() {
         panic!("the blocking error was dropped: {shown:?}");
     };
     assert!(error.contains("damaged object"), "{error}");
+    // The slot's pending record keeps the same text as its cause.
+    let records = ben.sync.database.pending::<crate::PendingRecord>().await.unwrap();
+    let subject = crate::PendingSubject::Slot(coven_merge::Slot(slot));
+    let record = records.iter().find(|record| record.subject == subject).unwrap();
+    assert_eq!(record.cause.as_ref(), Some(error));
     ben_loop.close().await.unwrap();
     for device in [&ana, &ben] {
         device.sync.database.close().await.unwrap();

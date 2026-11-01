@@ -717,49 +717,36 @@ async fn the_persons_retry_keeps_a_provider_cooldown() {
     f.close().await;
 }
 
-/// The app reads its pending list from `coven_pending` and follows each
-/// record's cause on the causes' own channel (E4, E5). A failed upload's
-/// record finds its error there; the same failure met again holds its new
-/// error, with the record unchanged; the upload's success ends both.
+/// The app follows a record and its cause with a live query on
+/// `coven_pending` (E4, E5). A failed upload's record arrives with its
+/// error's text in the same commit; a failure an app call received keeps
+/// none; the upload's success ends the record.
 #[tokio::test]
-async fn a_pending_records_cause_is_followed_beside_the_view() {
+async fn a_pending_records_cause_arrives_with_it_in_the_view() {
     let clock = Arc::new(FixedClock::new(SystemTime::UNIX_EPOCH + Duration::from_secs(1000)));
     let f = fixture(&clock).await;
     f.attach("files", "photo", b"photo".to_vec()).await;
-    let mut causes = f.files.subscribe_pending_causes();
-    let viewed = || {
-        f.database.read(|sql| {
-            Ok(sql.query(
-                "SELECT p.record FROM coven_pending AS p
-                 JOIN files AS f ON f.file=p.file WHERE f.id='photo'",
-                [],
-                |row| row.get::<_, crate::PendingRecord>(0),
-            )?)
-        })
-    };
-    assert!(!causes.has_changed().unwrap());
+    let mut viewed = f.database.subscribe(|sql| {
+        Ok(sql.query(
+            "SELECT p.record,p.cause FROM coven_pending AS p
+             JOIN files AS f ON f.file=p.file WHERE f.id='photo'",
+            [],
+            |row| Ok((row.get::<_, crate::PendingRecord>(0)?, row.get::<_, Option<String>>(1)?)),
+        )?)
+    });
+    let mut next = async || viewed.next().await.expect("the live query answers").unwrap();
+    assert!(next().await.is_empty());
     f.storage.set_faults(fail_next(StorageFailure::Network, None)).await;
     assert_eq!(drained(f.files.inner.drain_uploads().await.unwrap()), 0);
-    let records = viewed().await.unwrap();
-    assert_eq!(records.len(), 1);
-    assert_eq!(records[0].reason, network());
-    assert!(causes.has_changed().unwrap());
-    let first = causes.borrow_and_update().cause(&records[0]).unwrap();
-    assert!(first.to_string().contains("Network"), "{first}");
+    let rows = next().await;
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].0.reason, network());
+    let cause = rows[0].1.clone().expect("the record keeps its error's text");
+    assert!(cause.contains("Network"), "{cause}");
 
     advance(&clock, 1);
-    f.storage.set_faults(fail_next(StorageFailure::Network, None)).await;
-    assert_eq!(drained(f.files.inner.drain_uploads().await.unwrap()), 0);
-    assert_eq!(viewed().await.unwrap(), records);
-    assert!(causes.has_changed().unwrap());
-    let again = causes.borrow_and_update().cause(&records[0]).unwrap();
-    assert!(!Arc::ptr_eq(&first, &again));
-
-    advance(&clock, 2);
     assert_eq!(drained(f.files.inner.drain_uploads().await.unwrap()), 1);
-    assert!(viewed().await.unwrap().is_empty());
-    assert!(causes.has_changed().unwrap());
-    assert!(causes.borrow_and_update().cause(&records[0]).is_none());
+    assert!(next().await.is_empty());
     f.close().await;
 }
 

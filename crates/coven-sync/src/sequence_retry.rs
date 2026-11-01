@@ -1,5 +1,4 @@
 //! Operation waits use their own prerequisites and persisted retry deadlines.
-use crate::pending_cause::Failure;
 use crate::{
     sequence_sync::SequenceSync, PendingReason, PendingRecord, PendingSubject, Retry,
     SequenceStatus, SyncError,
@@ -11,7 +10,7 @@ use coven_merge::Audience;
 /// An operation's failed attempt, and who receives its error.
 pub(crate) enum OperationFailure<'a> {
     /// Coven drives the operation and nothing awaits this attempt: the
-    /// error becomes the record's cause.
+    /// record keeps the error's text as its cause.
     Held(SyncError),
     /// The attempt's caller receives this error.
     Returned(&'a SyncError),
@@ -49,7 +48,7 @@ impl SequenceSync {
             self.database.clear_retry(RetrySubject::Operation(id)).await?;
         }
         self.waits.forget(RetrySubject::Operation(id));
-        self.waits.causes().cleared_operation(id);
+        self.waits.failures().cleared_operation(id);
         Ok(())
     }
 
@@ -78,7 +77,8 @@ impl SequenceSync {
 
     /// Record an operation's failed attempt as its pending record and wait.
     /// The failure is logged when the operation's reason appears or changes,
-    /// and its error is held as the record's cause when no caller receives it.
+    /// and the record keeps its error's text as its cause when no caller
+    /// receives the error.
     pub(crate) async fn record_operation_error(
         &self,
         id: OperationId,
@@ -87,19 +87,17 @@ impl SequenceSync {
         ring: &StoreKeyring,
     ) -> Result<(), SyncError> {
         let subject = PendingSubject::Operation { id, kind };
-        let reason = match &failure {
-            OperationFailure::Held(error) => self.error_reason(error),
-            OperationFailure::Returned(error) => self.error_reason(error),
+        let (reason, error, cause): (_, &(dyn std::error::Error + 'static), _) = match &failure {
+            OperationFailure::Held(error) => {
+                (self.error_reason(error), error.cause(), Some(error.cause().to_string()))
+            }
+            OperationFailure::Returned(error) => (self.error_reason(error), *error, None),
         };
-        let failure = match failure {
-            OperationFailure::Held(error) => Failure::Held(error.into_shared().1),
-            OperationFailure::Returned(error) => Failure::Returned(error),
-        };
-        self.waits.causes().failed(&subject, &reason, failure);
+        self.waits.failures().failed(&subject, &reason, error);
         self.waits
             .attempt_scope(id)
             .run(async {
-                let pending = PendingRecord::new(subject, reason);
+                let pending = PendingRecord { subject, reason, cause };
                 let subject = RetrySubject::Operation(id);
                 if pending.retry() == Retry::Automatic {
                     let held = crate::RetryWaits::lacks_key(&pending.reason)

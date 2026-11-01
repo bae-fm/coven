@@ -198,19 +198,10 @@ impl CovenHandle {
         self.database.subscribe_device_reset()
     }
 
-    /// Current local conditions, including while disconnected. Each record
-    /// carries the error behind it while this process holds that error.
+    /// Current local conditions, including while disconnected, each with
+    /// the cause `coven_pending.cause` keeps beside it.
     pub async fn pending(&self) -> CovenResult<Vec<PendingRecord>> {
-        let records = self.database.pending().await?;
-        Ok(self.files.subscribe_pending_causes().borrow().attach(records))
-    }
-
-    /// The errors behind pending records while this process holds them, by
-    /// record: the part of a record `coven_pending` can't hold (E4, E5). The
-    /// first value is the current one, and a new one follows whenever the
-    /// cause some record shows appears, changes or ends.
-    pub fn subscribe_pending_causes(&self) -> tokio::sync::watch::Receiver<PendingCauses> {
-        self.files.subscribe_pending_causes()
+        self.database.pending().await
     }
 
     /// The members and their devices, as this device's applied slots have them (E9).

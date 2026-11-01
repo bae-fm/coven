@@ -50,6 +50,12 @@ impl PendingValue for Pending {
     fn can_retry(&self, _: &str, _: u32) -> bool {
         false
     }
+    fn cause(&self) -> Option<&str> {
+        None
+    }
+    fn with_cause(self, _: Option<String>) -> Self {
+        self
+    }
     fn reload(_: Audience) -> Self {
         Self { subject: 0, cutoff: None }
     }

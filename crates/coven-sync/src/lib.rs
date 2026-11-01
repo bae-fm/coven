@@ -3,6 +3,7 @@
 mod chunk_reader;
 mod effects;
 mod error;
+mod failure_log;
 mod floor_object;
 mod history;
 mod identity;
@@ -11,9 +12,7 @@ mod object_input;
 mod operation_rejection;
 mod operation_types;
 mod pending;
-mod pending_cause;
 mod pending_encoding;
-pub use pending_cause::PendingCauses;
 mod recorded_upload;
 mod refusal;
 mod restore_codes;

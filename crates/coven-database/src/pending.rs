@@ -51,10 +51,16 @@ pub trait PendingValue: Serialize + DeserializeOwned + Send + 'static {
     fn ends_when_covered(&self) -> bool;
     /// Whether automatic work can retry with these installed versions.
     fn can_retry(&self, recorded_coven_version: &str, schema_version: u32) -> bool;
+    /// The text of the error behind this record, which `_coven_pending`
+    /// keeps beside it in the same write: none when no error was met in
+    /// this run, or when an app call received it.
+    fn cause(&self) -> Option<&str>;
+    /// This record as read back, with the cause its row keeps.
+    fn with_cause(self, cause: Option<String>) -> Self;
 }
 
 const SELECT: &str =
-    "SELECT subject,value,operation,object,work,device,file,coven_version,move,pin FROM _coven_pending";
+    "SELECT subject,value,operation,object,work,device,file,coven_version,move,pin,cause FROM _coven_pending";
 
 struct StoredRecord {
     subject: Vec<u8>,
@@ -65,6 +71,7 @@ struct StoredRecord {
     coven_version: String,
     moved: Option<i64>,
     pin: Option<String>,
+    cause: Option<String>,
 }
 impl StoredRecord {
     fn read(row: &rusqlite::Row<'_>) -> rusqlite::Result<Self> {
@@ -85,6 +92,7 @@ impl StoredRecord {
             coven_version: row.get(7)?,
             moved: row.get(8)?,
             pin: row.get(9)?,
+            cause: row.get(10)?,
         })
     }
     fn decode<P: PendingValue>(&self) -> Result<P, DbError> {
@@ -102,7 +110,7 @@ impl StoredRecord {
         {
             return Err(DbError::DamagedDatabase);
         }
-        Ok(record)
+        Ok(record.with_cause(self.cause.clone()))
     }
 }
 
@@ -124,17 +132,26 @@ pub(crate) fn save<P: PendingValue>(db: &DatabaseConnection, record: &P) -> Resu
             None => (None, None, None),
         };
         // A download of bytes no file over them names any more records
-        // nothing: no pin or read can try them again.
+        // nothing: no pin or read can try them again. The cause is the
+        // record's, written with it.
         db.internal_execute(
-            "INSERT INTO _coven_pending(subject,value,operation,object,work,device,file,coven_version,move,pin)
-             SELECT ?1,?2,?3,?4,?5,?6,?7,?8,?9,?10
+            "INSERT INTO _coven_pending(subject,value,operation,object,work,device,file,coven_version,move,pin,cause)
+             SELECT ?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11
              WHERE ?5 IS NOT 'download' OR EXISTS(SELECT 1 FROM _coven_stored_files AS s WHERE s.device=?6 AND s.object=?7)
-             ON CONFLICT(subject) DO UPDATE SET value=excluded.value,operation=excluded.operation,object=excluded.object,work=excluded.work,device=excluded.device,file=excluded.file,coven_version=excluded.coven_version,move=excluded.move,pin=excluded.pin
-             WHERE value!=excluded.value OR coven_version!=excluded.coven_version",
-            rusqlite::params![subject, value, record.operation().map(|id| id.0), stored_object(record), work, device, file, env!("CARGO_PKG_VERSION"), record.move_of(), record.pin_of()],
+             ON CONFLICT(subject) DO UPDATE SET value=excluded.value,operation=excluded.operation,object=excluded.object,work=excluded.work,device=excluded.device,file=excluded.file,coven_version=excluded.coven_version,move=excluded.move,pin=excluded.pin,cause=excluded.cause
+             WHERE value!=excluded.value OR coven_version!=excluded.coven_version OR cause IS NOT excluded.cause",
+            rusqlite::params![subject, value, record.operation().map(|id| id.0), stored_object(record), work, device, file, env!("CARGO_PKG_VERSION"), record.move_of(), record.pin_of(), record.cause()],
         )?;
         Ok(())
     })
+}
+
+/// Opening clears every record's cause: a cause names an error the run that
+/// wrote it met, and a later run has met none of its own yet (§19.1). It
+/// runs before any app query observes the database.
+pub(crate) fn forget_causes(db: &DatabaseConnection) -> Result<(), DbError> {
+    db.internal_execute("UPDATE _coven_pending SET cause=NULL WHERE cause IS NOT NULL", [])?;
+    Ok(())
 }
 
 pub(crate) fn clear<S: Serialize>(db: &DatabaseConnection, subject: &S) -> Result<(), DbError> {

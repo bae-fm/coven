@@ -721,10 +721,10 @@ async fn retry_now_ends_an_answered_upload_backoff() {
 }
 
 /// Ana's pending list is one live query over `coven_pending` and her own
-/// rows. Each row's error comes from `subscribe_pending_causes`, by the
-/// record the view gives, since only this process holds it (E4, E5).
+/// rows. Each row arrives with its error's text in `cause`, written with
+/// the record (E4, E5).
 #[tokio::test]
-async fn a_view_records_cause_is_found_by_its_record() {
+async fn a_view_record_arrives_with_its_cause() {
     let network = file_network().await;
     let device = &network.devices[0];
     device.handle.set_uploads_paused(true).await.unwrap();
@@ -734,16 +734,21 @@ async fn a_view_records_cause_is_found_by_its_record() {
     let mut faults = Faults::none();
     faults.create_failures.insert(path, (StorageFailure::QuotaExceeded, 507));
     device.storage.set_faults(faults).await;
-    let mut causes = device.handle.subscribe_pending_causes();
     let mut list = device.handle.subscribe(|sql| {
         Ok(sql.query(
-            "SELECT e.record,f.id FROM coven_pending AS e JOIN files AS f ON f.file=e.file",
+            "SELECT e.record,e.cause,f.id FROM coven_pending AS e JOIN files AS f ON f.file=e.file",
             [],
-            |row| Ok((row.get::<_, PendingRecord>(0)?, row.get::<_, String>(1)?)),
+            |row| {
+                Ok((
+                    row.get::<_, PendingRecord>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            },
         )?)
     });
     device.handle.set_uploads_paused(false).await.unwrap();
-    let (record, id) = tokio::time::timeout(Duration::from_secs(5), async {
+    let (record, cause, id) = tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             let rows = list.next().await.expect("the live query answers").unwrap();
             if let Some(row) = rows.into_iter().next() {
@@ -757,17 +762,11 @@ async fn a_view_records_cause_is_found_by_its_record() {
     assert!(
         matches!(record.reason, PendingReason::Storage { failure, .. } if failure == StorageFailure::QuotaExceeded)
     );
-    let cause = tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            if let Some(cause) = causes.borrow_and_update().cause(&record) {
-                break cause;
-            }
-            causes.changed().await.unwrap();
-        }
-    })
-    .await
-    .unwrap();
-    assert!(cause.to_string().contains("Quota"), "{cause}");
+    let cause = cause.expect("the record arrives with its error's text");
+    assert!(cause.contains("Quota"), "{cause}");
+    let pending = device.handle.pending().await.unwrap();
+    let listed = pending.into_iter().find(|listed| *listed == record).unwrap();
+    assert_eq!(listed.cause, Some(cause));
     network.close().await;
 }
 

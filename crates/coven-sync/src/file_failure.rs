@@ -1,18 +1,17 @@
-//! The one route from a file's failure to its pending record's reason
-//! (§17.7, §17.9). Uploads, pins and local reads all classify here, and the
-//! error behind the reason is logged and held as the record's cause
-//! (`pending_cause.rs`).
+//! The one route from a file's failure to its pending record (§17.7,
+//! §17.9). Uploads, pins and local reads all classify here; the error
+//! behind the reason is logged (`failure_log.rs`), and its text is the
+//! record's cause when no caller receives it.
 #![deny(clippy::wildcard_enum_match_arm)]
 
 use super::file_error::{FileReadError, TransferError};
-use crate::pending_cause::{Cause, Failure};
 use crate::{
     files::FilesInner, FileMissingReason, FileSourceFailure, LocalFailure, PendingReason,
-    PendingSubject, Prerequisite,
+    PendingRecord, PendingSubject, Prerequisite,
 };
 use coven_database::{FileLocation, FilePlace, FileRef};
 use coven_storage::StorageFailure;
-use std::sync::Arc;
+use std::error::Error;
 
 /// The copy of a file the failed work used.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -26,7 +25,8 @@ pub(super) enum FileCopy {
 
 /// A file's failure, and who receives its error.
 pub(super) enum FileFailure<'a> {
-    /// No caller awaits this attempt: the error becomes the record's cause.
+    /// No caller awaits this attempt: the record keeps the error's text as
+    /// its cause.
     Held(TransferError),
     /// An app call returns this error.
     Returned(&'a TransferError),
@@ -59,28 +59,52 @@ pub(super) fn stored(
     }
 }
 
+impl FileFailure<'_> {
+    /// The error behind the failure, and the cause its record keeps: the
+    /// app-facing read error's text where there is one, and none when a
+    /// caller receives the error.
+    fn error(&self) -> (&(dyn Error + 'static), Option<String>) {
+        match self {
+            FileFailure::Held(error) => {
+                let error = held(error);
+                (error, Some(error.to_string()))
+            }
+            FileFailure::Returned(error) => (*error, None),
+            FileFailure::ReturnedRead(error) => (*error, None),
+        }
+    }
+}
+
 impl FilesInner {
-    /// The first unmet condition `failure` leaves for the stored bytes
-    /// `subject` names. Its error is logged when the reason appears or
-    /// changes, and held as the record's cause when no caller receives it.
+    /// The record of the first unmet condition `failure` leaves for the
+    /// stored bytes `subject` names. Its error is logged when the reason
+    /// appears or changes, and the record keeps its text as its cause when
+    /// no caller receives it.
     pub(super) fn file_failure(
         &self,
-        subject: &PendingSubject,
+        subject: PendingSubject,
         copy: FileCopy,
         failure: FileFailure<'_>,
-    ) -> PendingReason {
+    ) -> PendingRecord {
         let reason = match &failure {
             FileFailure::Held(error) => self.transfer_reason(copy, error),
             FileFailure::Returned(error) => self.transfer_reason(copy, error),
             FileFailure::ReturnedRead(error) => self.read_reason(copy, error),
         };
-        let failure = match failure {
-            FileFailure::Held(error) => Failure::Held(held(error)),
-            FileFailure::Returned(error) => Failure::Returned(error),
-            FileFailure::ReturnedRead(error) => Failure::Returned(error),
-        };
-        self.waits.causes().failed(subject, &reason, failure);
-        reason
+        self.recorded(subject, reason, &failure)
+    }
+
+    /// `failure`'s record, `reason` for `subject`, logged as
+    /// `file_failure` logs one.
+    fn recorded(
+        &self,
+        subject: PendingSubject,
+        reason: PendingReason,
+        failure: &FileFailure<'_>,
+    ) -> PendingRecord {
+        let (error, cause) = failure.error();
+        self.waits.failures().failed(&subject, &reason, error);
+        PendingRecord { subject, reason, cause }
     }
 
     /// The record a failure of this device's upload source leaves (§17.3,
@@ -92,7 +116,7 @@ impl FilesInner {
         location: &FileLocation,
         of: coven_database::MoveId,
         failure: FileFailure<'_>,
-    ) -> crate::PendingRecord {
+    ) -> PendingRecord {
         let read = match &failure {
             FileFailure::Held(TransferError::File(error))
             | FileFailure::Returned(TransferError::File(error)) => Some(error),
@@ -110,19 +134,10 @@ impl FilesInner {
             _ => None,
         };
         let Some((path, source)) = original else {
-            let subject = upload_subject(location);
-            let reason = self.file_failure(&subject, FileCopy::Original, failure);
-            return crate::PendingRecord::new(subject, reason);
+            return self.file_failure(upload_subject(location), FileCopy::Original, failure);
         };
-        let subject = PendingSubject::Move { id: of };
         let reason = PendingReason::Original { path, failure: source };
-        let logged = match failure {
-            FileFailure::Held(error) => Failure::Held(held(error)),
-            FileFailure::Returned(error) => Failure::Returned(error),
-            FileFailure::ReturnedRead(error) => Failure::Returned(error),
-        };
-        self.waits.causes().failed(&subject, &reason, logged);
-        crate::PendingRecord::new(subject, reason)
+        self.recorded(PendingSubject::Move { id: of }, reason, &failure)
     }
 
     fn transfer_reason(&self, copy: FileCopy, error: &TransferError) -> PendingReason {
@@ -190,11 +205,11 @@ impl FilesInner {
     }
 }
 
-/// The error a record keeps as its cause: the app-facing read error where
-/// there is one.
-fn held(error: TransferError) -> Cause {
+/// The error whose text a record keeps as its cause: the app-facing read
+/// error where there is one.
+fn held(error: &TransferError) -> &(dyn Error + 'static) {
     match error {
-        TransferError::File(error) => Arc::new(error),
-        refused @ TransferError::Refused(_) => Arc::new(refused),
+        TransferError::File(error) => error,
+        refused @ TransferError::Refused(_) => refused,
     }
 }

@@ -1,5 +1,4 @@
 //! Event-driven sequence passes with durable backoff and retained app wakes.
-use crate::pending_cause::Failure;
 use crate::{
     PassFailure, RetryOutcome, RetryWaits, SequenceStatus, SequenceSync, SyncError, SyncFailure,
     SyncStatus,
@@ -77,25 +76,24 @@ impl SyncLoop {
         receive.await.map_err(|_| DbError::StoreClosed)?
     }
 }
-/// Coven's own operation whose last attempt failed, if any, with the error
-/// behind it while this process holds it: it retries under its own backoff,
-/// but the pass that left it is not `Synced` (E5).
+/// Coven's own operation whose last attempt failed, if any, with the cause
+/// its record keeps: it retries under its own backoff, but the pass that
+/// left it is not `Synced` (E5).
 async fn failing(sync: &SequenceSync) -> Result<Option<crate::PendingRecord>, SyncError> {
     let records = sync.database.pending::<crate::PendingRecord>().await?;
-    Ok(sync
-        .waits
-        .causes()
-        .attach(records)
-        .into_iter()
-        .find(|record| {
-            matches!(record.subject, crate::PendingSubject::Operation { kind, .. } if kind.coven_owned())
-                && matches!(
-                    record.reason.retry_cause(),
-                    crate::PendingReason::Storage { .. }
-                        | crate::PendingReason::Refused(_)
-                        | crate::PendingReason::Failed(_)
-                )
-        }))
+    Ok(records.into_iter().find(|record| {
+        let coven_owned = matches!(
+            record.subject,
+            crate::PendingSubject::Operation { kind, .. } if kind.coven_owned()
+        );
+        coven_owned
+            && matches!(
+                record.reason.retry_cause(),
+                crate::PendingReason::Storage { .. }
+                    | crate::PendingReason::Refused(_)
+                    | crate::PendingReason::Failed(_)
+            )
+    }))
 }
 
 /// Complete a pass and member-key custody (§11.5).
@@ -108,9 +106,9 @@ async fn pass(
     failing(sync).await
 }
 
-/// What a failed pass shows: a blocked slot, an attempt that received no
-/// provider response, or the failure itself (E5). A blocked slot's error is
-/// logged when the slot or its reason changes.
+/// What a failed pass shows: a blocked slot, with the cause its record
+/// keeps, an attempt that received no provider response, or the failure
+/// itself (E5).
 fn failed(sync: &SequenceSync, error: SyncError) -> PassFailure {
     let blocked = match &*sync.state.subscribe().borrow() {
         SequenceStatus::Blocked(record) => Some(record.as_ref().clone()),
@@ -124,26 +122,7 @@ fn failed(sync: &SequenceSync, error: SyncError) -> PassFailure {
     let crate::PendingSubject::Slot(slot) = record.subject else {
         return crate::connection_failure(error);
     };
-    let causes = sync.waits.causes();
-    let error = match error {
-        // A later pass stops at the block itself: the slot keeps the error
-        // the pass that blocked it returned.
-        SyncError::Pending(block) if *block == record => {
-            causes.failed(
-                &record.subject,
-                &record.reason,
-                Failure::Repeated(&SyncError::Pending(block)),
-            );
-            causes.cause(&record)
-        }
-        // The pass that blocked the slot returns the error that blocked it.
-        error => {
-            let cause = error.into_shared().1;
-            causes.failed(&record.subject, &record.reason, Failure::Held(cause.clone()));
-            Some(cause)
-        }
-    };
-    PassFailure::Blocked { slot, reason: record.reason, error }
+    PassFailure::Blocked { slot, reason: record.reason, error: record.cause }
 }
 
 /// Write `status` for the app, in the step that changes it. A failed write

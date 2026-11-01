@@ -160,12 +160,6 @@ impl Files {
         ))];
         Self { inner, worker: Arc::new(FileWorker { stop, tasks: tokio::sync::Mutex::new(tasks) }) }
     }
-    /// The error behind each failure this store's work recorded in this
-    /// session, by record, and again whenever one a record would show
-    /// appears, changes or ends (E5).
-    pub fn subscribe_pending_causes(&self) -> tokio::sync::watch::Receiver<crate::PendingCauses> {
-        self.inner.waits.causes().subscribe()
-    }
     /// The limits shared by this handle's transfer consumers.
     pub fn transfer_limits(&self) -> TransferLimits {
         self.inner.transfers.limits()

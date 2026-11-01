@@ -163,8 +163,10 @@ pub(super) fn reason(statement: &Statement, relation: &str) -> Option<&'static s
     Some("the marker retains every loss frozen by this migration"),
 ("pending.rs", "{SELECT} ORDER BY id", "_coven_pending") =>
     Some("pending returns every retained condition"),
-("pending.rs", "SELECT subject,value,operation,object,work,device,file,coven_version,move,pin FROM _coven_pending", "_coven_pending") =>
+("pending.rs", "SELECT subject,value,operation,object,work,device,file,coven_version,move,pin,cause FROM _coven_pending", "_coven_pending") =>
     Some("pending returns every retained condition"),
+("pending.rs", "UPDATE _coven_pending SET cause=NULL WHERE cause IS NOT NULL", "_coven_pending") =>
+    Some("once per open: every record's cause names an error an earlier run met"),
 ("pending.rs", "DELETE FROM _coven_pending AS p WHERE NOT EXISTS(SELECT 1 FROM _coven_provider_access a WHERE a.operation=p.operation)", "p") =>
     Some("reset visits every condition; provider-obligation lookups remain indexed"),
 ("published.rs", "SELECT EXISTS(SELECT 1 FROM _coven_published)", "_coven_published") =>

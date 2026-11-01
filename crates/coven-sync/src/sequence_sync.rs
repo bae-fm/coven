@@ -463,7 +463,10 @@ impl SequenceSync {
             | SyncError::DeviceIdInUse(_)
             | SyncError::WrongStore { .. } => PendingReason::Failed(error.local_failure()),
         };
-        let record = PendingRecord::new(PendingSubject::Slot(slot), reason);
+        let subject = PendingSubject::Slot(slot);
+        self.waits.failures().failed(&subject, &reason, error.cause());
+        let cause = blocked_cause(session, &subject, &error);
+        let record = PendingRecord { subject, reason, cause };
         session.blocked = Some(record.clone());
         self.state.set(SequenceStatus::Blocked(Box::new(record.clone())));
         match self.database.record_pending(record).await {
@@ -473,6 +476,22 @@ impl SequenceSync {
             }
         }
     }
+}
+
+/// The cause a blocked slot's record keeps: the text of the error that
+/// blocked it. A pass that stops at the same wait again has no error of its
+/// own, so the record keeps the one this run met for it, if any.
+fn blocked_cause(session: &Session, slot: &PendingSubject, error: &SyncError) -> Option<String> {
+    if let SyncError::Pending(wait) = error {
+        if wait.subject == *slot {
+            return session
+                .blocked
+                .as_ref()
+                .filter(|blocked| **blocked == **wait)
+                .and_then(|blocked| blocked.cause.clone());
+        }
+    }
+    Some(error.cause().to_string())
 }
 
 impl History {

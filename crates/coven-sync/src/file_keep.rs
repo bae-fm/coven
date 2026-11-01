@@ -9,8 +9,8 @@
 use super::file_error::{FileReadError, TransferError};
 use super::file_failure::{stored, FileCopy, FileFailure};
 use crate::{
-    files::file_read::UploadedFile, files::FilesInner, PendingReason, PendingRecord,
-    PendingSubject, Prerequisite, Retry, SyncError,
+    files::file_read::UploadedFile, files::FilesInner, PendingReason, PendingSubject, Prerequisite,
+    Retry, SyncError,
 };
 use coven_crypto::ContentHasher;
 use coven_database::{DbError, FileLocationKey, FileRef, PinRequest, RetrySubject};
@@ -137,7 +137,7 @@ impl FilesInner {
         let subject = RetrySubject::Pin(file.id());
         self.waits.forget(subject);
         self.forget_connection_wait(subject);
-        self.waits.causes().cleared(&PendingSubject::Keep { file: file.id() }, |_| true);
+        self.waits.failures().cleared(&PendingSubject::Keep { file: file.id() }, |_| true);
         Ok(())
     }
 
@@ -155,9 +155,8 @@ impl FilesInner {
         }
         let subject = RetrySubject::Pin(request.file);
         let pending = PendingSubject::Keep { file: request.file };
-        let reason = self.file_failure(&pending, FileCopy::Stored, FileFailure::Held(error));
-        let needs_connection = reason.clears() == Some(crate::pending::Clears::ByPerson);
-        let record = PendingRecord::new(pending, reason);
+        let record = self.file_failure(pending, FileCopy::Stored, FileFailure::Held(error));
+        let needs_connection = record.reason.clears() == Some(crate::pending::Clears::ByPerson);
         let timed = record.retry() == Retry::Automatic
             && record.reason != PendingReason::Waits(Prerequisite::SequenceCatchUp);
         let retry = if timed {

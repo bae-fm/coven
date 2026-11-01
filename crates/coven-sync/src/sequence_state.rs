@@ -56,9 +56,9 @@ pub enum SyncStatus {
         slot: coven_merge::Slot,
         /// Why it cannot apply.
         reason: crate::PendingReason,
-        /// The text of the error that blocked the slot, while this process
-        /// holds that error. A device that opens already blocked has none:
-        /// only the reason is saved.
+        /// The text of the error that blocked the slot: the cause the
+        /// slot's pending record keeps. A device that opens already blocked
+        /// has none until a pass of its own meets the error.
         error: Option<String>,
     },
     /// Storage refused the whole pass, or coven's own operation failed.
@@ -162,9 +162,9 @@ pub enum PassFailure {
         slot: coven_merge::Slot,
         /// Why it cannot apply.
         reason: crate::PendingReason,
-        /// The error that blocked the slot, with every cause below it, while
-        /// this process holds it.
-        error: Option<std::sync::Arc<dyn std::error::Error + Send + Sync>>,
+        /// The text of the error that blocked the slot: the cause the slot's
+        /// pending record keeps.
+        error: Option<String>,
     },
     /// Storage refused the whole pass, or coven's own operation failed.
     Failed {
@@ -179,9 +179,7 @@ impl From<PassFailure> for SyncStatus {
             PassFailure::Offline { error } => {
                 Self::Offline { failure: error.failure(), error: error.to_string() }
             }
-            PassFailure::Blocked { slot, reason, error } => {
-                Self::Blocked { slot, reason, error: error.map(|error| error.to_string()) }
-            }
+            PassFailure::Blocked { slot, reason, error } => Self::Blocked { slot, reason, error },
             PassFailure::Failed { error } => Self::failed(error),
         }
     }

@@ -250,8 +250,8 @@ photo while the rest syncs leaves `Synced`, with a pending record for the
 photo.
 
 Anything that can't proceed has one record in `handle.pending()` (live: a
-query over the `coven_pending` view, with each record's error from
-`subscribe_pending_causes()`), offline too. Each
+query over the `coven_pending` view, with each record's error in its `cause`
+column), offline too. Each
 [`PendingRecord`](rustdoc:struct:coven::PendingRecord) names its subject, such
 as a write, a slot, a file, an operation or the connection, and its first unmet
 condition as a typed [`PendingReason`](rustdoc:enum:coven::PendingReason):
@@ -259,13 +259,14 @@ condition as a typed [`PendingReason`](rustdoc:enum:coven::PendingReason):
 unshare", "source file moved". The record stays until that condition changes
 or the work settles; time passing never clears it. `record.retry()` says how it
 will retry: `Automatic` on the schedule above, `AfterUpdate`, `AppAction` (for
-example new credentials), or `Never`. While the process that met the failure
-runs, `record.cause` holds the error itself; a record read through the
-`coven_pending` view finds it with `subscribe_pending_causes()`
+example new credentials), or `Never`. `record.cause` is the text of the error
+behind it, written with the record by the run that met the error; opening
+clears it, and a failure an app call received leaves none. The
+`coven_pending` view gives it as `cause`
 ([Coven's state in SQL](/docs/local-data#coven-s-state-in-sql)).
 
 If coven can't save a pending record, it stops syncing and fails database calls
-with `DbError::PendingPersistence` until the store is reopened, so the app never
+with `DbError::StatePersistence` until the store is reopened, so the app never
 sees an empty list that hides a lost update.
 
 ## Another copy of the same device
