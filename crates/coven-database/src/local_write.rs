@@ -29,6 +29,7 @@ impl DatabaseConnection {
             let result = {
                 let _scope = database.authorization.write();
                 let result = sql(crate::SqlContext::new(files))?;
+                files.check_steps()?;
                 files.finish_app(|| phase.events())?;
                 result
             };

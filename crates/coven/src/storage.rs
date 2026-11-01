@@ -264,6 +264,22 @@ impl StorageConnections {
         status.record(&self.database).await.map_err(SyncError::from)
     }
 
+    /// Make an operation due now, as a step of an app's write: once the
+    /// write commits, its wait ends in this session and a pass is asked
+    /// for (E6).
+    pub(crate) fn retry_pending_operation(
+        &self,
+        journal: &coven_database::Journal<'_>,
+        operation: OperationId,
+    ) -> Result<(), SyncError> {
+        coven_sync::retry_pending_operation(
+            journal,
+            self.waits.clone(),
+            self.publications.state.clone(),
+            operation,
+        )
+    }
+
     pub(crate) async fn storage_config(&self) -> Result<Option<StorageConfig>, SyncError> {
         let _call = self.lock_open().await?;
         self.codes.location().await

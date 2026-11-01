@@ -121,7 +121,7 @@ mod written_values;
 pub use file_hashes::{FileHasher, FileHashes};
 pub use file_moves::MoveId;
 pub use file_pins::PinRequest;
-pub use file_write::{DeviceOnlyCopy, MoveFile};
+pub use file_write::{DeviceOnlyCopy, Journal, MoveFile};
 pub use pending::{FileWork, PendingValue};
 mod file_protection;
 mod source_names;

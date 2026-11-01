@@ -750,7 +750,10 @@ fn retained_grant(
 /// take back, here one inherited from a parent folder, leaves the revocation
 /// pending as `AccessRemains` with the account and the grant. Later passes
 /// keep it listed, and once the owner has removed the grant at the provider,
-/// a retry finishes the revocation (§14.2, §20.9).
+/// a retry finishes the revocation (§14.2, §20.9). The retry is a step of
+/// a write that changes no synced row, so it queues no upload to wake the
+/// loop: its commit wakes the loop, which revokes the grant with no pass
+/// asked for.
 #[tokio::test]
 async fn a_removed_members_retained_grant_stays_pending_until_a_retry_revokes_it() {
     let owner = Owner::new(CloudProvider::OneDrive, false).await;
@@ -785,7 +788,15 @@ async fn a_removed_members_retained_grant_stays_pending_until_a_retry_revokes_it
     );
 
     owner.storage.set_retained_access("join@example.com", Vec::new()).await;
-    owner.handle.retry_pending_operation(operation).await.unwrap();
+    // The pass the commit wakes finishes at the clock's new time.
+    let mut status = owner.handle.test_sync_status();
+    let finished = owner.clock.now() + std::time::Duration::from_secs(1);
+    owner.clock.set(finished);
+    owner.handle.write(move |sql| Ok(sql.retry_pending_operation(operation)?)).await.unwrap();
+    status
+        .wait_for(|s| matches!(s, SyncStatus::Synced { finished_at } if *finished_at == finished))
+        .await;
+    assert_eq!(retained_grant(&owner.handle.pending().await.unwrap()), None);
     // `sync` checks the pass leaves no operation pending.
     owner.sync().await;
     owner.close().await;

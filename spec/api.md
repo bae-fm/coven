@@ -10,7 +10,7 @@
   belong to the defining crate; dependency-only gates below name that crate.
 - Calls on `handle` are on the `CovenHandle` that opening a store returns.
 - App-facing calls reaching storage or the database are `async`;
-  transaction callbacks (`SqlContext`, `MigrationContext`) are synchronous.
+  transaction callbacks (`CovenWrite`, `MigrationContext`) are synchronous.
 - A row is named by its table and its *key*: the values of its primary key
   columns, in order ([§9.2](coven.md#92-keys-and-unique-values)).
 
@@ -2521,6 +2521,12 @@ fn tables() -> Vec<SyncedTable> {
 
 - App SQL runs in one transaction; errors roll back rows and files
   ([§4](coven.md#4-writing-locally)).
+- Coven's own state changes are steps on the same `CovenWrite`, beside the
+  app's SQL: each runs where it is called, the write's later SQL sees it, and
+  it commits or rolls back with the app's statements. A failed step fails the
+  write even if the closure goes on and returns success (`StepFailed`). A
+  step's refusal passed on with `?` keeps its own error inside the
+  `CovenError`, and `SyncError::from` returns it ([§4](coven.md#4-writing-locally)).
 - A bulk write runs SQL on device-local tables alone, as plain SQLite: no
   row change is recorded, a table empties in one step, and after commit each
   live query that read a table it changed runs again, whatever rows it read
@@ -2535,8 +2541,8 @@ fn tables() -> Vec<SyncedTable> {
 /// them (E3). It borrows the store's id source while the app stages.
 pub struct WriteBatch<'a> { /* private fields */ }
 
-/// A transaction's SQL access, borrowing its connection and write's file state (§4, E3).
-pub struct SqlContext<'connection, 'write> { /* private fields */ }
+/// One write's SQL and coven's steps, in one transaction (§4, E3).
+pub struct CovenWrite<'write> { /* private fields */ }
 
 /// A bulk write's SQL access, borrowing its connection (§4, E3).
 pub struct BulkSqlContext<'connection> { /* private fields */ }
@@ -2584,12 +2590,13 @@ pub struct UserFile {
 pub struct FileRef { /* private fields */ }
 
 impl CovenHandle {
-    /// Runs one write. A statement or shared trigger targeting another owner's
-    /// row refuses the transaction with DbError::NotOwner (§9.6). Authorized
-    /// foreign-key actions may change that row under the declared schema.
-    pub async fn write<F, R>(&self, sql: F) -> CovenResult<R>
+    /// Runs one write: the app's SQL and coven's steps, in one transaction.
+    /// A statement or shared trigger targeting another owner's row refuses
+    /// the transaction with DbError::NotOwner (§9.6). Authorized foreign-key
+    /// actions may change that row under the declared schema.
+    pub async fn write<F, R>(&self, write: F) -> CovenResult<R>
     where
-        F: FnOnce(SqlContext<'_, '_>) -> CovenResult<R> + Send + 'static,
+        F: FnOnce(CovenWrite<'_>) -> CovenResult<R> + Send + 'static,
         R: Send + 'static;
 
     /// Runs one bulk write: SQL that changes device-local tables alone, as
@@ -2618,10 +2625,10 @@ impl CovenHandle {
     /// row, and `FileAbsent` or `NotThisDevice` if a new file over an
     /// existing file's bytes names a file coven has no record of, or one on
     /// another device only.
-    pub async fn write_with_files<F, S, T, R>(&self, stage: F, sql: S) -> CovenResult<R>
+    pub async fn write_with_files<F, S, T, R>(&self, stage: F, write: S) -> CovenResult<R>
     where
         F: FnOnce(&mut WriteBatch<'_>) -> CovenResult<T> + Send + 'static,
-        S: FnOnce(SqlContext<'_, '_>, T) -> CovenResult<R> + Send + 'static,
+        S: FnOnce(CovenWrite<'_>, T) -> CovenResult<R> + Send + 'static,
         T: Send + 'static,
         R: Send + 'static;
 }
@@ -2702,7 +2709,7 @@ pub enum MoveFile {
     AppKeptHere(FileId),
 }
 
-impl SqlContext<'_, '_> {
+impl CovenWrite<'_> {
     /// Records a move of these files to the cloud (§17.3). Each must be on
     /// this device only with no upload queued (`NotThisDevice`,
     /// `NotDeviceOnlyHere`, `FileAbsent`). The write reads no file: a user's
@@ -3164,7 +3171,7 @@ impl SqlReadContext<'_> {
         F: FnMut(&Row<'_>) -> rusqlite::Result<T>;
 }
 
-/// The reads `SqlReadContext`, `SqlContext` and `BulkSqlContext` offer, so
+/// The reads `SqlReadContext`, `CovenWrite` and `BulkSqlContext` offer, so
 /// code that reads the same way inside a write and outside one is written
 /// once. Inside a write it sees the write's own changes.
 pub trait SqlRead {
@@ -3178,7 +3185,7 @@ pub trait SqlRead {
         F: FnMut(&Row<'_>) -> rusqlite::Result<T>;
 }
 impl SqlRead for SqlReadContext<'_> {}
-impl SqlRead for SqlContext<'_, '_> {}
+impl SqlRead for CovenWrite<'_> {}
 impl SqlRead for BulkSqlContext<'_> {}
 
 impl<'a, F, R> Read<'a, F>
@@ -4954,9 +4961,20 @@ pub enum OperationKind {
 /// Operation calls retain the same typed causes as sync calls (§11).
 pub type OperationError = SyncError;
 
+impl CovenWrite<'_> {
+    /// Makes an operation's retry or undo due now, from its recorded
+    /// progress, as a step of this write (§4, §11.4): its pending record and
+    /// retry wait end in the write, with or without storage. It fails with
+    /// `NotPending` for an operation that has finished or never existed, and
+    /// with `Pending` and the record for one whose record never retries, or
+    /// only after an update not installed yet. It can't bypass a provider
+    /// cooldown. Once the write commits, a pass runs the operation as soon as
+    /// storage is connected.
+    pub fn retry_pending_operation(&self, operation: OperationId) -> Result<(), OperationError>;
+}
+
 impl CovenHandle {
-    /// Makes an operation’s retry or undo due now, from its recorded progress.
-    /// It cannot resurrect an invalidated action or bypass provider cooldown.
+    /// The same retry, in a write of its own.
     pub async fn retry_pending_operation(&self, operation: OperationId) -> Result<(), OperationError>;
 
     /// Reloads this device from the latest snapshot, keeping its waiting

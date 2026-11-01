@@ -8,6 +8,7 @@ pub use crate::builder::{
 };
 pub use crate::circles::Circles;
 pub use crate::coven::Coven;
+pub use crate::coven_write::CovenWrite;
 #[cfg(feature = "dev-tools")]
 pub use crate::dev_tools::empty_s3_prefix;
 pub use crate::error::{
@@ -44,9 +45,9 @@ pub use coven_database::{
     MigrationError, MoveFile, MoveId, Namespace, OldWrites, OpenStep, Params, Place,
     PreparedUserFile, Provenance, Read, ReconfigurableLiveQuery, ReconfigurableLiveQueryEvent,
     RemovalRule, Replacement, Row, RowAuthorizationFailure, RowChange, RowIdentity, RowKey,
-    SchemaError, SnapshotError, SqlContext, SqlRead, SqlReadContext, SqliteError, SqliteResult,
-    SyncedTable, TemporaryDirectoryError, ToSql, TransferChange, TransferProgress, TransferWatch,
-    UnsentWork, UserFile, WriteBatch, WriteId, WriteWait, BOUND_FILE_LIMIT,
+    SchemaError, SnapshotError, SqlRead, SqlReadContext, SqliteError, SqliteResult, SyncedTable,
+    TemporaryDirectoryError, ToSql, TransferChange, TransferProgress, TransferWatch, UnsentWork,
+    UserFile, WriteBatch, WriteId, WriteWait, BOUND_FILE_LIMIT,
 };
 pub use coven_database::{
     AnalysisLimit, AutoVacuum, CacheSize, CacheSpill, CheckpointMode, IncrementalVacuum,

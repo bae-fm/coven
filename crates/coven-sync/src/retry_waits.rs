@@ -187,6 +187,13 @@ impl RetryWaits {
         self.failures.cleared_operation(id);
     }
 
+    /// The app retried the operation: its wait ends, and a later failure is
+    /// new.
+    pub(crate) fn retried(&self, id: coven_database::OperationId) {
+        self.forget(RetrySubject::Operation(id));
+        self.failures.cleared_operation(id);
+    }
+
     /// Forget operation waits whose operations no longer exist.
     pub(crate) fn retain_operations(
         &self,

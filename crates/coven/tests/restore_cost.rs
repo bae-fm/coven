@@ -27,9 +27,9 @@
 #![cfg(feature = "test-utils")]
 
 use coven::{
-    Clock, CovenBuilder, CovenHandle, CovenResult, FileColumn, FileId, FileSource, MemoryStorage,
-    Migration, Namespace, ObjectPath, ObjectPrefix, Place, Provenance, RetryOutcome, RowIdentity,
-    SecretText, SqlContext, Storage, StoreLayout, SyncedTable, TestCoven,
+    Clock, CovenBuilder, CovenHandle, CovenResult, CovenWrite, FileColumn, FileId, FileSource,
+    MemoryStorage, Migration, Namespace, ObjectPath, ObjectPrefix, Place, Provenance, RetryOutcome,
+    RowIdentity, SecretText, Storage, StoreLayout, SyncedTable, TestCoven,
 };
 use std::{
     sync::{
@@ -224,7 +224,7 @@ async fn import(handle: &CovenHandle, clock: &BenchClock, library: Library, rele
 /// Insert `releases`, each before its tracks and each track before its file.
 /// A stored library's file rows each name the next of `files`.
 fn insert_releases(
-    sql: &SqlContext<'_, '_>,
+    sql: &CovenWrite<'_>,
     releases: std::ops::Range<usize>,
     mut files: Option<std::vec::IntoIter<FileId>>,
 ) -> CovenResult<()> {

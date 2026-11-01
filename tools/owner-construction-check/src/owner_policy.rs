@@ -485,6 +485,9 @@ pub(crate) const POLICY: Policy = Policy {
         "StreamCapture",
         "MigrationContext",
         "SqlContext",
+        // An app's write borrows the store's operation owner, whose steps
+        // run in it, for that one transaction.
+        "CovenWrite",
         // A bulk write's SQL borrows the writer connection for its one
         // transaction, as a write's does.
         "BulkSqlContext",
@@ -544,6 +547,7 @@ pub(crate) const POLICY: Policy = Policy {
         "FileStream",
         "FileStaging",
         "FileWrite",
+        "CovenWrite",
         "SqlReadContext",
         "Read",
         "ReadOwner",

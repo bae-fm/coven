@@ -255,13 +255,15 @@ impl CovenHandle {
     pub async fn reset_store(&self) -> Result<(), SyncError> {
         self.storage.reset(Audience::Store).await
     }
-    /// Make an operation's retry or undo due now, from its recorded progress.
-    /// It cannot resurrect an invalidated action or bypass provider cooldown.
+    /// Make an operation's retry or undo due now, from its recorded
+    /// progress, in a write of its own (`CovenWrite::retry_pending_operation`).
     pub async fn retry_pending_operation(
         &self,
         operation: OperationId,
     ) -> Result<(), OperationError> {
-        Box::pin(self.storage.retry_pending_operation(operation)).await
+        self.write(move |write| Ok(write.retry_pending_operation(operation)?))
+            .await
+            .map_err(OperationError::from)
     }
     /// Fixes a fresh member id or an existing active replacement target, as
     /// an admin, then shares access and creates an invitation. An in-person

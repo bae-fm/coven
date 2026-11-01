@@ -52,7 +52,7 @@ async fn stage(
     originals: &Path,
     bytes: Vec<u8>,
     place: Place,
-    insert: impl FnOnce(SqlContext<'_, '_>, FileId) -> CovenResult<()> + Send + 'static,
+    insert: impl FnOnce(CovenWrite<'_>, FileId) -> CovenResult<()> + Send + 'static,
 ) -> FileId {
     let path = originals.join(name);
     std::fs::write(&path, &bytes).unwrap();

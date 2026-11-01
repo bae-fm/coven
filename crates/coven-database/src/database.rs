@@ -254,14 +254,15 @@ impl DatabaseInner {
     }
 
     /// Run a write under the writer, then remove the files it released once
-    /// the writer is free (Appendix C.3).
+    /// the writer is free (Appendix C.3), and run what its steps asked to
+    /// follow its commit.
     fn with_files<R, E: crate::WriteFailure>(
         &self,
         staged: Vec<crate::file_write::StagedFile>,
         existing: Vec<crate::write_batch::ExistingFile>,
         run: impl FnOnce(&DatabaseConnection, &crate::file_write::FileWrite<'_>) -> Result<R, E>,
     ) -> Result<R, E> {
-        let (outcome, chosen) = self.access.with_writer(|writer| {
+        let (outcome, chosen, committed) = self.access.with_writer(|writer| {
             let files = crate::file_write::FileWrite::new(
                 writer,
                 &self.access.write_schema,
@@ -276,10 +277,17 @@ impl DatabaseInner {
             // removal records wait for the next open (Appendix C.3).
             let usable = !matches!(self.access.observer.error(), Some(DbError::RollbackFailed));
             let chosen = (outcome.is_ok() || usable).then(|| released(writer, self));
-            Ok::<_, E>((outcome, chosen))
+            Ok::<_, E>((outcome, chosen, files.take_committed()))
         })?;
         match outcome {
-            Ok(result) => self.finish_removals(result, chosen.expect("chosen after a write")),
+            Ok(result) => {
+                let result = self.finish_removals(result, chosen.expect("chosen after a write"));
+                // A write that returns success has committed.
+                if result.is_ok() {
+                    committed.into_iter().for_each(|effect| effect());
+                }
+                result
+            }
             Err(panic) => {
                 if let Some(chosen) = chosen {
                     let failures = self.remove_chosen(chosen);

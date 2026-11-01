@@ -1,15 +1,19 @@
-//! Writes: the app's SQL, with the files it stages, as one write (§4, §17.2,
-//! E3).
+//! Writes: the app's SQL and coven's steps, with the files it stages, as
+//! one write (§4, §17.2, E3).
+use crate::coven_write::CovenWrite;
 use crate::*;
 
 impl CovenHandle {
-    /// Runs one write.
-    pub async fn write<F, R>(&self, sql: F) -> CovenResult<R>
+    /// Runs one write: the app's SQL and coven's steps, in one transaction.
+    pub async fn write<F, R>(&self, write: F) -> CovenResult<R>
     where
-        F: FnOnce(SqlContext<'_, '_>) -> CovenResult<R> + Send + 'static,
+        F: FnOnce(CovenWrite<'_>) -> CovenResult<R> + Send + 'static,
         R: Send + 'static,
     {
-        self.database.write_with_files(|_| Ok(()), move |context, ()| sql(context)).await
+        let storage = self.storage.clone();
+        self.database
+            .write_with_files(|_| Ok(()), move |sql, ()| write(CovenWrite::new(sql, &storage)))
+            .await
     }
 
     /// Runs one bulk write: SQL that changes device-local tables alone, run
@@ -40,14 +44,19 @@ impl CovenHandle {
     /// `FileAbsent` or `NotThisDevice` if a new file over an existing file's
     /// bytes names a file coven has no record of, or one on another device
     /// only.
-    pub async fn write_with_files<F, S, T, R>(&self, stage: F, sql: S) -> CovenResult<R>
+    pub async fn write_with_files<F, S, T, R>(&self, stage: F, write: S) -> CovenResult<R>
     where
         F: FnOnce(&mut WriteBatch<'_>) -> CovenResult<T> + Send + 'static,
-        S: FnOnce(SqlContext<'_, '_>, T) -> CovenResult<R> + Send + 'static,
+        S: FnOnce(CovenWrite<'_>, T) -> CovenResult<R> + Send + 'static,
         T: Send + 'static,
         R: Send + 'static,
     {
-        self.database.write_with_files(stage, sql).await
+        let storage = self.storage.clone();
+        self.database
+            .write_with_files(stage, move |sql, staged| {
+                write(CovenWrite::new(sql, &storage), staged)
+            })
+            .await
     }
 }
 

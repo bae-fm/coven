@@ -2,8 +2,9 @@
 
 use rusqlite::{Params, Row};
 
-/// App SQL inside one local write. Returning an error rolls back every statement.
-/// This borrowed context cannot change the transaction or access coven's tables.
+/// App SQL inside one local write, and coven's steps beside it (§4).
+/// Returning an error rolls back every statement and step. This borrowed
+/// context cannot change the transaction or access coven's tables.
 pub struct SqlContext<'connection, 'write> {
     files: &'write crate::file_write::FileWrite<'connection>,
 }
@@ -20,13 +21,23 @@ impl<'connection, 'write> SqlContext<'connection, 'write> {
         &self,
         files: Vec<crate::MoveFile>,
     ) -> Result<crate::MoveId, crate::DbError> {
-        self.files.move_to_cloud(files)
+        self.files.step(|| self.files.move_to_cloud(files))
     }
 
     /// Cancel a recorded move: every file stays on this device only, and
     /// the move's record ends (§17.3).
     pub fn cancel_move(&self, id: crate::MoveId) -> Result<(), crate::DbError> {
-        self.files.cancel_move(id)
+        self.files.step(|| self.files.cancel_move(id))
+    }
+
+    /// Run one of sync's steps on the journal in this write (§4, §11). A
+    /// failed step fails the write, even if the closure goes on and returns
+    /// success, since it may have made only part of its change.
+    pub fn journal_step<T, E>(
+        &self,
+        step: impl FnOnce(&crate::Journal<'_>) -> Result<T, E>,
+    ) -> Result<T, E> {
+        self.files.step(|| step(&crate::Journal::new(self.files)))
     }
 
     /// Execute one app statement with parameters.

@@ -1,11 +1,12 @@
 //! Operation waits use their own prerequisites and persisted retry deadlines.
 use crate::{
-    sequence_sync::SequenceSync, PendingReason, PendingRecord, PendingSubject, Retry,
-    SequenceStatus, SyncError,
+    sequence_sync::SequenceSync, PendingReason, PendingRecord, PendingSubject, Retry, RetryWaits,
+    SyncError, SyncState,
 };
 use coven_crypto::StoreKeyring;
-use coven_database::{OperationId, OperationRecord, RetrySubject};
+use coven_database::{Journal, OperationId, OperationRecord, RetrySubject};
 use coven_merge::Audience;
+use std::sync::Arc;
 
 /// An operation's failed attempt, and who receives its error.
 pub(crate) enum OperationFailure<'a> {
@@ -16,39 +17,68 @@ pub(crate) enum OperationFailure<'a> {
     Returned(&'a SyncError),
 }
 
+/// Make an operation's retry or undo due now, from its recorded progress,
+/// as a step of a write (E6): its pending record and retry wait end in the
+/// write's transaction. It cannot resurrect an invalidated action, or one
+/// that waits for an update not installed yet, and it can't bypass a
+/// provider cooldown or the stuck-device rule. Once the write commits, the
+/// operation's wait ends in this session too, and a pass is asked for to
+/// run it.
+pub fn retry_pending_operation(
+    journal: &Journal<'_>,
+    waits: Arc<RetryWaits>,
+    state: Arc<SyncState>,
+    id: OperationId,
+) -> Result<(), SyncError> {
+    clear_for_retry(journal, id)?;
+    journal.after_commit(move || {
+        waits.retried(id);
+        state.request_pass();
+    });
+    Ok(())
+}
+
+/// End the operation's pending record and retry wait for a retry, unless
+/// its record never retries, or only after an update not installed yet.
+fn clear_for_retry(journal: &Journal<'_>, id: OperationId) -> Result<(), SyncError> {
+    if journal.operation(id)?.is_none() {
+        return Err(SyncError::NotPending(id));
+    }
+    if let Some(pending) = journal.operation_pending::<PendingRecord>(id)? {
+        if pending.retry() == Retry::Never
+            || (pending.retry() == Retry::AfterUpdate
+                && !journal.pending_can_retry::<PendingRecord>(&pending.subject)?)
+        {
+            return Err(SyncError::Pending(Box::new(pending)));
+        }
+        journal.clear_pending(&pending.subject)?;
+    }
+    journal.clear_retry(RetrySubject::Operation(id))?;
+    Ok(())
+}
+
 impl SequenceSync {
-    /// Make an operation's retry or undo due now, from its recorded progress.
-    /// It cannot resurrect an invalidated action or bypass provider cooldown
-    /// or the stuck-device rule (E6).
-    pub async fn retry_pending_operation(
+    /// Retry an operation and run a pass, as the app's retry does through a
+    /// write.
+    #[cfg(test)]
+    pub(crate) async fn retry_pending_operation(
         &self,
         id: OperationId,
-    ) -> Result<SequenceStatus, SyncError> {
+    ) -> Result<crate::SequenceStatus, SyncError> {
         self.retry_operation(id).await?;
         self.pass().await
     }
 
+    /// Make an operation due now, in a write of its own, for a call that
+    /// goes on to run it.
     pub(crate) async fn retry_operation(&self, id: OperationId) -> Result<(), SyncError> {
-        if self.database.operation(id).await?.is_none() {
-            return Err(SyncError::NotPending(id));
-        }
-        if let Some(pending) = self.database.operation_pending::<PendingRecord>(id).await? {
-            if pending.retry() == Retry::Never
-                || (pending.retry() == Retry::AfterUpdate
-                    && !self
-                        .database
-                        .pending_can_retry::<PendingRecord>(pending.subject.clone())
-                        .await?)
-            {
-                return Err(SyncError::Pending(Box::new(pending)));
-            }
-            self.database.clear_pending(pending.subject).await?;
-        }
-        if self.database.retry_wait(RetrySubject::Operation(id)).await?.is_some() {
-            self.database.clear_retry(RetrySubject::Operation(id)).await?;
-        }
-        self.waits.forget(RetrySubject::Operation(id));
-        self.waits.failures().cleared_operation(id);
+        self.database
+            .write(move |sql| {
+                sql.journal_step(|journal| clear_for_retry(journal, id))
+                    .map_err(|error| coven_database::DbError::SyncStream(Box::new(error)))
+            })
+            .await?;
+        self.waits.retried(id);
         Ok(())
     }
 

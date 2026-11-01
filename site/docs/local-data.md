@@ -314,9 +314,11 @@ The rules for foreign keys, unique constraints, CHECKs and triggers are on the
 ## Writing
 
 A write is one SQLite transaction through `handle.write`. Its closure gets a
-[`SqlContext`](rustdoc:struct:coven::SqlContext) with `execute`,
-`execute_batch`, `query_row` and `query`. If the closure returns an error, or a
-statement fails, the whole transaction rolls back.
+[`CovenWrite`](rustdoc:struct:coven::CovenWrite) with `execute`,
+`execute_batch`, `query_row` and `query`, and coven's own steps, such as
+retrying an operation, which commit or roll back with the app's statements. If
+the closure returns an error, or a statement or a step fails, the whole
+transaction rolls back.
 
 When a write commits, coven records in the same transaction:
 

@@ -181,6 +181,11 @@ pub enum DbError {
     /// A synced table declaration or schema is invalid.
     #[error(transparent)]
     Schema(#[from] crate::SchemaError),
+    /// One of coven's steps in this write failed, and the write's closure
+    /// went on to return success: the write rolls back, since a failed step
+    /// may have made only part of its change (§4).
+    #[error("a step of this write failed")]
+    StepFailed,
     /// App SQL read, changed or defined one of coven's internal objects (§4).
     #[error("app SQL cannot access internal object {table}")]
     InternalTable {

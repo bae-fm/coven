@@ -416,6 +416,18 @@ A write keeps its identity, device and number (`ana-phone`, write 3), from the
 moment it commits. The numbers order one device's writes; they are not storage
 paths.
 
+A write can also carry changes to coven's own state, which the app asks for as
+*steps* beside its SQL. Retrying an operation is one (§11.4). Ana's app keeps a
+row saying she retried revoking Dan's access. Written in a transaction of its
+own, that row and coven's state would disagree between the two commits; as a
+step of the same write, the retry and the row commit together. A step runs
+where the app calls it, so the write's later SQL sees what it changed, and it
+commits or rolls back with the app's statements. A step that fails fails the
+whole write, even if the app's code goes on and returns success
+(`StepFailed`): unlike one SQL statement, a step can fail after making part of
+its change. What a step changes outside the database, such as asking the sync
+loop for a pass, happens only once the write has committed.
+
 Coven keeps its own bookkeeping in tables inside the same database, which the app
 can't read or write. The app reads its own tables normally, on several read-only
 connections at once. It can subscribe to a query, which reruns only when rows it
@@ -3029,7 +3041,11 @@ snapshot body is deleted (§16.3).
   Temporary failures and failed undos retry with the shared backoff (§6.7).
 - **Waits are visible.** Each wait records its first unmet condition (§19.1). The
   app may ask for a retry, but it can't discard a reload or provider work that is
-  required.
+  required. A retry is a step of a write (§4): the operation's pending record and
+  retry wait end in that write, with or without storage, and its commit asks for
+  a pass, which runs the operation once storage is connected. A record that never
+  retries, or only after an update not installed yet, refuses the retry and fails
+  the write.
 - **Occupied paths.** Preparation that creates objects outside the sequence (a
   snapshot, a join request) uses fixed paths. An occupied one
   counts as this attempt's only under §19.3's complete byte comparison with what
@@ -9372,6 +9388,7 @@ maps them are with each provider in Appendix E.
 | `DbError::TooLarge` | one write's plaintext exceeds SQLite's 1 GB value limit | §6.3 |
 | `DbError::ClockOutOfRange` | no timestamp fits in 48 bits of milliseconds | §7.2 |
 | `RollbackFailed` | a rollback failed; every later call on that handle fails until the store is reopened | §4 |
+| `DbError::StepFailed` | one of coven's steps in a write failed and the write's closure still returned success | §4 |
 | `DbError::CheckpointFailed`, `DbError::CheckpointPanicked` | one of coven's WAL checkpoints failed, other than on a busy or locked database, or panicked; every later call on that handle fails until the store is reopened | §4 |
 | `DbError::NotOwner`, `DbError::InvalidForeignKeyEffect` | the author's own check finds a change receivers would refuse under the owner rules | §9.6 |
 | `DbError::ReferenceAudience` | a write or move would leave a row pointing at a row some of its readers can't read | §15.3 |

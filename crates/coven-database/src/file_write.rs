@@ -17,7 +17,7 @@ use coven_foundation::{
 };
 use coven_merge::Audience;
 use std::{
-    cell::RefCell,
+    cell::{Cell, RefCell},
     collections::{BTreeMap, BTreeSet},
 };
 
@@ -42,7 +42,11 @@ pub use device_only::DeviceOnlyCopy;
 
 #[path = "file_write_copies.rs"]
 mod copies;
+
+#[path = "journal.rs"]
+mod journal;
 pub(crate) use copies::Copied;
+pub use journal::Journal;
 
 #[cfg(test)]
 #[path = "file_write_tests.rs"]
@@ -113,6 +117,11 @@ pub(crate) struct FileWrite<'a> {
     /// becomes its original (§17.3).
     local: RefCell<Vec<DeviceOnlyCopy>>,
     obsolete: RefCell<BTreeSet<FileName>>,
+    /// Whether one of coven's steps in this write failed (§4).
+    failed_step: Cell<bool>,
+    /// What runs once this write has committed, in the order its steps
+    /// asked; nothing runs for a write that rolls back.
+    committed: RefCell<Vec<Box<dyn FnOnce()>>>,
 }
 
 impl<'a> FileWrite<'a> {
@@ -140,7 +149,37 @@ impl<'a> FileWrite<'a> {
             moving: RefCell::new(Vec::new()),
             local: RefCell::new(Vec::new()),
             obsolete: RefCell::new(BTreeSet::new()),
+            failed_step: Cell::new(false),
+            committed: RefCell::new(Vec::new()),
         }
+    }
+
+    /// Run one of coven's steps (§4). A failed step may have made part of
+    /// its change, so it fails the write even if the app goes on.
+    pub(crate) fn step<T, E>(&self, run: impl FnOnce() -> Result<T, E>) -> Result<T, E> {
+        let result = run();
+        if result.is_err() {
+            self.failed_step.set(true);
+        }
+        result
+    }
+
+    /// Refuse to commit a write one of whose steps failed (§4).
+    pub(crate) fn check_steps(&self) -> Result<(), DbError> {
+        if self.failed_step.get() {
+            return Err(DbError::StepFailed);
+        }
+        Ok(())
+    }
+
+    /// Run `effect` once this write has committed.
+    pub(crate) fn after_commit(&self, effect: Box<dyn FnOnce()>) {
+        self.committed.borrow_mut().push(effect);
+    }
+
+    /// What runs now that this write has committed.
+    pub(crate) fn take_committed(&self) -> Vec<Box<dyn FnOnce()>> {
+        std::mem::take(&mut self.committed.borrow_mut())
     }
 
     pub(crate) fn execute<P: rusqlite::Params>(

@@ -138,6 +138,19 @@ impl From<coven_database::CovenError> for SyncError {
     }
 }
 
+/// A sync step's failure inside an app's write, as the write's closure
+/// passes it on: a database failure as itself, any other keeping the
+/// step's own error, which converting back to a `SyncError` returns (§4).
+impl From<SyncError> for coven_database::CovenError {
+    fn from(error: SyncError) -> Self {
+        match error {
+            SyncError::Database(error) => Self::Database(error),
+            SyncError::Shutdown(shutdown) => Self::Database(DbError::Shutdown(shutdown)),
+            error => Self::Database(DbError::SyncStream(Box::new(error))),
+        }
+    }
+}
+
 impl From<DbError> for SyncError {
     fn from(error: DbError) -> Self {
         match error {
@@ -149,6 +162,11 @@ impl From<DbError> for SyncError {
             }
             // The process is ending the call; the database did not fail.
             DbError::Shutdown(shutdown) => Self::Shutdown(shutdown),
+            // Sync's own failure inside a database call comes back as itself.
+            DbError::SyncStream(error) => match error.downcast::<SyncError>() {
+                Ok(error) => *error,
+                Err(error) => Self::Database(DbError::SyncStream(error)),
+            },
             error => Self::Database(error),
         }
     }

@@ -93,18 +93,6 @@ impl StorageConnections {
         live.sync.clean_up_removed_files().await
     }
 
-    pub(crate) async fn retry_pending_operation(
-        &self,
-        operation: OperationId,
-    ) -> Result<(), SyncError> {
-        let mut live = self.live.lock().await;
-        self.ready(&mut live).await?;
-        let Connection::Active(live) = &*live else {
-            return Err(SyncError::NoStorage);
-        };
-        live.sync.retry_pending_operation(operation).await.map(drop)
-    }
-
     pub(crate) async fn replace_member_keys_for(
         &self,
         member: MemberId,
