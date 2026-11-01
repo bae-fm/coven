@@ -2,7 +2,7 @@
 
 use crate::SyncError;
 use coven_crypto::{
-    ConfirmationNumber, MemberIdentity, MemberKeys, MemberPublicKeys, ObjectHasher,
+    ConfirmationNumber, EncryptionKey, MemberIdentity, MemberKeys, MemberPublicKeys, ObjectHasher,
 };
 use coven_format::invite_end::InviteEnd;
 use coven_format::{
@@ -25,7 +25,9 @@ pub struct JoiningIdentity {
     identity: MemberIdentity,
     request: Vec<u8>,
     path: ObjectPath,
-    attempted: bool,
+    state: RequestState,
+    /// What seals the saved request for the code it was made for.
+    sealing: Sealing,
     /// The name the device gave itself in its request.
     device_name: String,
     inviting_writer: coven_foundation::id_source::DeviceId,
@@ -35,6 +37,54 @@ pub struct JoiningIdentity {
     expires_at: u64,
     /// Set for a sent invite, whose admin compares it before approving.
     confirmation: Option<ConfirmationNumber>,
+}
+
+/// How far the join has come, as its saved request records it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RequestState {
+    /// Not sent: a retry sends it.
+    Unsent,
+    /// It may have been sent: on restart an absent request is final.
+    Sent,
+    /// Its copies opened this member's keys: approval has begun (§13.2).
+    Opened,
+}
+
+impl RequestState {
+    fn byte(self) -> u8 {
+        match self {
+            Self::Unsent => 0,
+            Self::Sent => 1,
+            Self::Opened => 2,
+        }
+    }
+
+    fn from_byte(byte: u8) -> Option<Self> {
+        match byte {
+            0 => Some(Self::Unsent),
+            1 => Some(Self::Sent),
+            2 => Some(Self::Opened),
+            _ => None,
+        }
+    }
+}
+
+/// The invite secret's key and the complete code that seal the saved
+/// request, so it opens only with the code it was made for.
+struct Sealing {
+    key: EncryptionKey,
+    binding: Zeroizing<Vec<u8>>,
+    path: String,
+}
+
+impl Sealing {
+    fn new(code: &InviteCode) -> Result<Self, SyncError> {
+        Ok(Self {
+            key: code.secret.join_request_key(),
+            binding: code.to_bytes()?,
+            path: local_path(code),
+        })
+    }
 }
 
 impl JoiningIdentity {
@@ -66,24 +116,24 @@ impl JoiningIdentity {
             return Err(SyncError::WrongStore { expected: directory.id(), actual: code.store });
         }
         let file = directory.owned_file(StoreFile::Bootstrap);
-        let binding = code.to_bytes()?;
+        let sealing = Sealing::new(code)?;
         let path = ObjectPath::join_request(code.store, code.invite);
         let prefix = SingleChunkPrefix::JoinRequest;
-        let Some(saved) = file.read_optional()? else {
+        let Some(sealed) = file.read_optional()? else {
             return Ok(None);
         };
-        let bytes = Zeroizing::new(code.secret.join_request_key().open_object_chunk(
-            &local_path(code),
-            &binding,
+        let bytes = Zeroizing::new(sealing.key.open_object_chunk(
+            &sealing.path,
+            &sealing.binding,
             0,
             0,
-            &saved,
+            &sealed,
         )?);
-        let attempted = match bytes.first() {
-            Some(0) => false,
-            Some(1) => true,
-            _ => return Err(coven_database::DbError::DamagedDatabase.into()),
-        };
+        let state = bytes
+            .first()
+            .copied()
+            .and_then(RequestState::from_byte)
+            .ok_or(coven_database::DbError::DamagedDatabase)?;
         let key_length = bytes.get(1..5).ok_or(coven_database::DbError::DamagedDatabase)?;
         let key_length = u32::from_be_bytes(key_length.try_into().expect("four bytes")) as usize;
         let end = 5usize.checked_add(key_length).ok_or(coven_database::DbError::DamagedDatabase)?;
@@ -118,7 +168,8 @@ impl JoiningIdentity {
             identity,
             request,
             path,
-            attempted,
+            state,
+            sealing,
             device_name: opened.device_name,
             inviting_writer: code.inviting_writer,
             read_through: code.read_through,
@@ -162,13 +213,14 @@ impl JoiningIdentity {
             identity,
             request,
             path,
-            attempted: false,
+            state: RequestState::Unsent,
+            sealing: Sealing::new(code)?,
             device_name: device_name.into(),
             inviting_writer: code.inviting_writer,
             read_through: code.read_through,
             expires_at: code.expires_at,
         };
-        identity.save(&directory.owned_file(StoreFile::Bootstrap), code)?;
+        identity.save(&directory.owned_file(StoreFile::Bootstrap))?;
         Ok(identity)
     }
 
@@ -208,42 +260,51 @@ impl JoiningIdentity {
 
     /// Whether publication may already have happened before an interruption.
     pub fn attempted(&self) -> bool {
-        self.attempted
+        self.state != RequestState::Unsent
+    }
+
+    /// Whether this member's keys have opened, in this call or an earlier
+    /// one: approval has begun, and the join never reports waiting for it
+    /// again (§13.2, E10).
+    pub fn opened(&self) -> bool {
+        self.state == RequestState::Opened
     }
 
     /// Record possible publication before issuing it. On restart an absent
     /// request is terminal: re-creating it could resurrect a declined invite.
-    pub fn record_attempt(
-        &mut self,
-        file: &AtomicFile,
-        code: &InviteCode,
-    ) -> Result<(), SyncError> {
-        self.attempted = true;
-        self.save(file, code)
+    pub fn record_attempt(&mut self, file: &AtomicFile) -> Result<(), SyncError> {
+        self.record(RequestState::Sent, file)
     }
 
     /// The provider refused the request, so it was never published: a
     /// retry sends it again (§13.2).
-    pub fn record_refusal(
-        &mut self,
-        file: &AtomicFile,
-        code: &InviteCode,
-    ) -> Result<(), SyncError> {
-        self.attempted = false;
-        self.save(file, code)
+    pub fn record_refusal(&mut self, file: &AtomicFile) -> Result<(), SyncError> {
+        self.record(RequestState::Unsent, file)
     }
 
-    fn save(&self, file: &AtomicFile, code: &InviteCode) -> Result<(), SyncError> {
+    /// This member's copies opened its keys. Recorded before the join
+    /// reports loading, so a resumed join knows approval has begun before
+    /// its first check (§13.2, E10).
+    pub(crate) fn record_opened(&mut self, file: &AtomicFile) -> Result<(), SyncError> {
+        self.record(RequestState::Opened, file)
+    }
+
+    fn record(&mut self, state: RequestState, file: &AtomicFile) -> Result<(), SyncError> {
+        self.state = state;
+        self.save(file)
+    }
+
+    fn save(&self, file: &AtomicFile) -> Result<(), SyncError> {
         let keys = self.identity.keys().to_secret_bytes();
         let mut plain =
             Zeroizing::new(Vec::with_capacity(5 + keys.as_bytes().len() + self.request.len()));
-        plain.push(u8::from(self.attempted));
+        plain.push(self.state.byte());
         plain.extend_from_slice(&(keys.as_bytes().len() as u32).to_be_bytes());
         plain.extend_from_slice(keys.as_bytes());
         plain.extend_from_slice(&self.request);
-        let sealed = code.secret.join_request_key().seal_object_chunk(
-            &local_path(code),
-            &code.to_bytes()?,
+        let sealed = self.sealing.key.seal_object_chunk(
+            &self.sealing.path,
+            &self.sealing.binding,
             0,
             0,
             &plain,

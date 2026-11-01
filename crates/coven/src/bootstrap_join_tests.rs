@@ -31,7 +31,7 @@ async fn resuming_join_authenticates_the_initial_key_and_writer_cursor() {
     let code = coven_sync::read_invite_code(invite.shown_code()).unwrap();
     let mut identity = JoiningIdentity::prepare(&directory, &code, "New phone").unwrap();
     let file = directory.owned_file(StoreFile::Bootstrap);
-    identity.record_attempt(&file, &code).unwrap();
+    identity.record_attempt(&file).unwrap();
     let saved = file.read_optional().unwrap().unwrap();
     // A live directory clone keeps the bootstrap lease, and the join below
     // would wait for it. The file handle names only the path.
@@ -195,60 +195,6 @@ async fn a_refused_join_request_is_sent_again() {
     );
     let (result, _) = join_and_approve(&owner.handle, joining, |_| async {}).await;
     result.unwrap().unwrap().close().await.unwrap();
-    owner.close().await;
-}
-
-/// A join reports opening its new installation, then connecting, then
-/// waiting for approval, then loading (E10). While it waits, a sent invite's
-/// status carries the number Ana's phone shows with the request, and when the
-/// next check runs.
-#[tokio::test]
-async fn a_join_reports_each_bootstrap_phase_in_order() {
-    let owner = Owner::new(CloudProvider::S3, false).await;
-    let invite = owner.invite().await;
-    let install = Installation::new();
-    let (_, cancel) = watch::channel(false);
-    let reported = std::sync::Mutex::new(Vec::new());
-    let joining = install.run(
-        &owner,
-        Installation::join_request(&invite),
-        owner.recipient(),
-        &cancel,
-        |status| {
-            let mut reported = reported.lock().unwrap();
-            if reported.last() != Some(&status) {
-                reported.push(status);
-            }
-        },
-    );
-    let approved = std::sync::Mutex::new(None);
-    let (result, _) = join_and_approve(&owner.handle, joining, |request| {
-        *approved.lock().unwrap() = Some(request);
-        async {}
-    })
-    .await;
-    result.unwrap().unwrap().close().await.unwrap();
-    let reported = reported.into_inner().unwrap();
-    let request = approved.into_inner().unwrap().unwrap();
-    let reported = after_opening(&reported);
-    assert_eq!(reported.first(), Some(&BootstrapStatus::Connecting));
-    assert_honest(reported);
-    let loading = reported
-        .iter()
-        .rev()
-        .take_while(|status| matches!(status, BootstrapStatus::Loading(_)))
-        .count();
-    assert!(loading > 0, "{reported:?}");
-    let waits = &reported[1..reported.len() - loading];
-    assert!(waits.len() >= 2, "{reported:?}");
-    for (index, status) in waits.iter().enumerate() {
-        let BootstrapStatus::WaitingForApproval { confirmation, next_check } = status else {
-            panic!("{status:?} while waiting");
-        };
-        assert_eq!(*confirmation, Some(request.confirmation));
-        // The first check runs at once; then checks and waits alternate.
-        assert_eq!(matches!(next_check, NextCheck::Checking), index % 2 == 0, "{reported:?}");
-    }
     owner.close().await;
 }
 
@@ -422,91 +368,6 @@ async fn check_now_finds_an_approval_before_the_joins_wait_ends() {
     };
     let (result, ()) = join_with_response(joining, approve).await;
     result.unwrap().unwrap().close().await.unwrap();
-    owner.close().await;
-}
-
-/// Ana's approval claims Carol's copies, then the entry adding her, and the
-/// entry fails to land. Carol's next check opens her keys and loads the
-/// store, and finds no entry; from then on her join reports loading as it
-/// waits for the entry, never waiting for approval again (E10).
-#[tokio::test]
-async fn a_join_whose_keys_opened_never_reports_waiting_again() {
-    use coven_storage::test_utils::{Faults, MemoryRequest};
-    let owner = Owner::new(CloudProvider::S3, false).await;
-    let invite = owner.invite().await;
-    let install = Installation::new();
-    // The joining device's waits end only when the test moves the clock.
-    let builder = install.builder(&owner, owner.recipient()).clock(owner.clock.clone());
-    let control = JoinControl::new();
-    let reported = std::sync::Mutex::new(Vec::new());
-    let (statuses, mut seen) = watch::channel(Vec::<BootstrapStatus>::new());
-    let joining = join_with_invite(
-        builder,
-        invite.shown_code(),
-        "New phone",
-        |status| {
-            let mut reported = reported.lock().unwrap();
-            if reported.last() != Some(&status) {
-                reported.push(status);
-                statuses.send_replace(reported.clone());
-            }
-        },
-        &control,
-    );
-    // Each check that loads or finds no entry ends by asking whether the
-    // request is still there.
-    let request_path = ObjectPath::join_request(owner.directory.id(), invite.id);
-    let checked = || async {
-        let asked = owner.storage.request_trace().len();
-        control.check_now();
-        while !owner.storage.request_trace()[asked..]
-            .contains(&MemoryRequest::Read(request_path.clone(), None))
-        {
-            tokio::task::yield_now().await;
-        }
-    };
-    let approve = async {
-        seen.wait_for(|reported| {
-            matches!(
-                reported.last(),
-                Some(BootstrapStatus::WaitingForApproval { next_check: NextCheck::At(_), .. })
-            )
-        })
-        .await
-        .unwrap();
-        let request = next_join_request(&owner.handle).await;
-        // The copy lands in the next slot; the entry after it never does.
-        let entry =
-            ObjectPath::slot(owner.directory.id(), (owner.applied().await + 2).try_into().unwrap());
-        owner
-            .storage
-            .set_faults(Faults {
-                create_failures: [(entry.clone(), (StorageFailure::Network, 500))].into(),
-                ..Faults::none()
-            })
-            .await;
-        owner.handle.approve_join_request(&request).await.unwrap();
-        // The pass the approval asks for claims the copy, then fails at the
-        // entry.
-        while !owner.storage.request_trace().contains(&MemoryRequest::Create(entry.clone())) {
-            tokio::task::yield_now().await;
-        }
-        // The check that loads, then one more after its wait.
-        checked().await;
-        checked().await;
-        control.cancel();
-    };
-    let (result, ()) = join_with_response(joining, approve).await;
-    assert!(result.is_err());
-    let reported = reported.into_inner().unwrap();
-    let loading = reported
-        .iter()
-        .position(|status| matches!(status, BootstrapStatus::Loading(_)))
-        .expect("the join loaded");
-    assert!(
-        reported[loading..].iter().all(|status| matches!(status, BootstrapStatus::Loading(_))),
-        "{reported:?}"
-    );
     owner.close().await;
 }
 

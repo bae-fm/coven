@@ -24,8 +24,9 @@ pub enum BootstrapStatus {
     /// Loading the store from storage: the scan for this member's keys when
     /// the floor holds none, the floor's snapshots, then the slots after
     /// them, each step with how much of it is done (§13.4). A waiting join's
-    /// checks report their scans too. Keeping keys and credentials follows
-    /// the last.
+    /// scan for its keys is part of its wait; the check in which its keys
+    /// open reports that scan, then loads. Keeping keys and credentials
+    /// follows the last.
     Loading(Progress<coven_database::LoadStep>),
     /// The join waits on these first unmet conditions, the records
     /// `pending()` returns once the store is open (§19.1).

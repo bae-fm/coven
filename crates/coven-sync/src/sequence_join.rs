@@ -5,6 +5,7 @@ use super::{
     SequenceSync,
 };
 use crate::{JoiningIdentity, SyncError};
+use coven_foundation::files::{StoreDirAccess, StoreFile};
 use coven_foundation::progress::ProgressReport;
 use coven_storage::{StorageFailure, StorageInvitation};
 use std::time::{Duration, SystemTime};
@@ -58,12 +59,17 @@ impl SequenceSync {
     }
 
     /// Inspect the slots after the invite for copies routed to the request's
-    /// pair; once they open a store key, apply the sequence and look for the
-    /// approving device's binding. Copies alone do not admit (§13.2). A
-    /// check that finds no keys in custody reports its scan for the copies
-    /// to `subscribe_progress`, and once they open, loading's steps, a
-    /// resumed join's too, which may have applied slots before it stopped.
-    pub async fn join_outcome(&self, request: &JoiningIdentity) -> Result<JoinOutcome, SyncError> {
+    /// pair; once they open a store key, record that approval has begun,
+    /// apply the sequence and look for the approving device's binding.
+    /// Copies alone do not admit (§13.2). A check that finds no keys in
+    /// custody reports nothing to `subscribe_progress` while it scans for the
+    /// copies: the scan is part of the wait. Once they open, it reports the
+    /// scan, then loading's steps, a resumed join's too, which may have
+    /// applied slots before it stopped (E10).
+    pub async fn join_outcome(
+        &self,
+        request: &mut JoiningIdentity,
+    ) -> Result<JoinOutcome, SyncError> {
         let mut session = self.session.lock().await;
         let member = self.member.read()?.ok_or(StorageFailure::MemberKeysMissing)?;
         if member.keys().public_keys() != request.identity().keys().public_keys() {
@@ -77,13 +83,15 @@ impl SequenceSync {
         let opening = held.is_none();
         // Such a check scans for this member's copies, and once they open
         // the store, loads it, or the rest of it, reporting each step as
-        // `unlock` does (§13.4).
+        // `unlock` does (§13.4). The scan counts aside until then.
         let mut progress =
             opening.then(|| ProgressReport::new(self.progress.clone(), self.clock.clone()));
-        let mut scan = progress.as_mut().map(KeyScan::new);
+        let (counted, scanned) = watch::channel(None);
+        let mut counting = ProgressReport::new(counted, self.clock.clone());
+        let mut scan = KeyScan::new(&mut counting);
         let mut ring = match held {
             Some(ring) => ring,
-            None => match self.bootstrap_keys(&mut session, &member, scan.as_mut()).await? {
+            None => match self.bootstrap_keys(&mut session, &member, Some(&mut scan)).await? {
                 Bootstrap::Keys(ring) => ring,
                 Bootstrap::Missing(_) | Bootstrap::Empty => {
                     if request.pending(self.storage.as_ref()).await? {
@@ -92,7 +100,7 @@ impl SequenceSync {
                     // Approval may have raced the ending miss. Scan again
                     // after observing request deletion; bootstrap follows any
                     // floor that advances during this final scan as well.
-                    match self.bootstrap_keys(&mut session, &member, scan.as_mut()).await? {
+                    match self.bootstrap_keys(&mut session, &member, Some(&mut scan)).await? {
                         Bootstrap::Keys(ring) => ring,
                         Bootstrap::Missing(_) | Bootstrap::Empty => {
                             return Ok(JoinOutcome::Declined)
@@ -101,6 +109,18 @@ impl SequenceSync {
                 }
             },
         };
+        // Approval has begun. The join keeps that before it reports loading,
+        // so it never reports waiting for approval again, even resumed
+        // (E10).
+        if !request.opened() {
+            request.record_opened(&self.directory.owned_file(StoreFile::Bootstrap))?;
+        }
+        // The scan that found the copies is loading's first step, reported
+        // whole now that it has opened them.
+        if let (Some(progress), Some(scanned)) = (progress.as_mut(), scanned.borrow().clone()) {
+            progress.begin(scanned.step, scanned.total);
+            progress.done(scanned.done);
+        }
         self.restore_history(&mut session, &mut ring, &member).await?;
         self.read_forward_reporting(&mut session, &mut ring, &member, progress.as_mut()).await?;
         if self.admitted(&session, &member, request) {

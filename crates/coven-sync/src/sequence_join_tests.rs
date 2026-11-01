@@ -24,8 +24,11 @@ async fn waiting(group: &Group) -> (Device, Joiner) {
     let ana = group.device(1).await;
     group.create_with_access(&ana, MemberAccess::ProviderAccount("ana@example.org".into())).await;
     let invitation = invite(&ana).await;
-    let carol = join(group, invitation.shown_code(), "Carol's phone").await;
-    assert_eq!(carol.device.sync.join_outcome(&carol.request).await.unwrap(), JoinOutcome::Waiting);
+    let mut carol = join(group, invitation.shown_code(), "Carol's phone").await;
+    assert_eq!(
+        carol.device.sync.join_outcome(&mut carol.request).await.unwrap(),
+        JoinOutcome::Waiting
+    );
     (ana, carol)
 }
 
@@ -72,7 +75,7 @@ async fn approved_with_retention(
     compare: bool,
 ) {
     let group = clocks(provider, deleting);
-    let (ana, carol) = waiting(&group).await;
+    let (ana, mut carol) = waiting(&group).await;
     let scanned = carol.device.sync.session.lock().await.scanned;
     retained_prefix(&group, &ana).await;
     let request = listed(&ana).await.remove(0).shown_request().cloned().unwrap();
@@ -118,7 +121,7 @@ async fn approved_with_retention(
         assert_eq!(current.copies.iter().any(|original| original.slot.0 == *copy), deleted_copy);
     }
     assert!(!carol.request.pending(carol.device.sync.storage.as_ref()).await.unwrap());
-    let outcome = carol.device.sync.join_outcome(&carol.request).await.unwrap();
+    let outcome = carol.device.sync.join_outcome(&mut carol.request).await.unwrap();
     assert_eq!(outcome, JoinOutcome::Admitted);
     if compare {
         let input = serde_json::json!({"kind":"joinScan", "first":current.header.first.0,
@@ -164,13 +167,13 @@ async fn join_scan_retention_matches_lean() {
 
 async fn declined_with_retention(compare: bool) {
     let group = clocks(UNIX_EPOCH, UNIX_EPOCH + Duration::from_secs(1_790_000_000));
-    let (ana, carol) = waiting(&group).await;
+    let (ana, mut carol) = waiting(&group).await;
     let scanned = carol.device.sync.session.lock().await.scanned;
     retained_prefix(&group, &ana).await;
     let request = listed(&ana).await.remove(0).shown_request().cloned().unwrap();
     ana.sync.decline_join_request(&request).await.unwrap();
     // Read the deleted request before the next pass takes back provider access.
-    let outcome = carol.device.sync.join_outcome(&carol.request).await.unwrap();
+    let outcome = carol.device.sync.join_outcome(&mut carol.request).await.unwrap();
     assert_eq!(outcome, JoinOutcome::Declined);
     if compare {
         let current = floor(&group, &ana).await;
@@ -196,7 +199,7 @@ async fn a_real_decline_still_reports_declined_after_retention() {
 #[tokio::test]
 async fn retention_between_the_miss_and_floor_read_cannot_end_an_approved_join() {
     let group = clocks(UNIX_EPOCH, UNIX_EPOCH + Duration::from_secs(1_790_000_000));
-    let (ana, carol) = waiting(&group).await;
+    let (ana, mut carol) = waiting(&group).await;
     let scanned = carol.device.sync.session.lock().await.scanned;
     let (missed, miss) = tokio::sync::oneshot::channel();
     let (resume, held) = tokio::sync::oneshot::channel();
@@ -205,7 +208,7 @@ async fn retention_between_the_miss_and_floor_read_cannot_end_an_approved_join()
         .storage
         .hold_next_read(ObjectPath::slot(group.store, scanned.try_into().unwrap()), missed, held)
         .await;
-    let polling = async { carol.device.sync.join_outcome(&carol.request).await.unwrap() };
+    let polling = async { carol.device.sync.join_outcome(&mut carol.request).await.unwrap() };
     let retention = async {
         miss.await.unwrap();
         retained_prefix(&group, &ana).await;
@@ -236,7 +239,7 @@ async fn retention_between_the_miss_and_floor_read_cannot_end_an_approved_join()
 #[tokio::test]
 async fn a_failed_scan_does_not_advance_past_the_keys_it_could_not_keep() {
     let group = Group::shared();
-    let (ana, carol) = waiting(&group).await;
+    let (ana, mut carol) = waiting(&group).await;
     ana.sync.pass().await.unwrap();
     let request = listed(&ana).await.remove(0).shown_request().cloned().unwrap();
     ana.sync.approve_join_request(&request).await.unwrap();
@@ -254,12 +257,12 @@ async fn a_failed_scan_does_not_advance_past_the_keys_it_could_not_keep() {
         })
         .await;
     let scanned = carol.device.sync.session.lock().await.scanned;
-    assert!(matches!(carol.device.sync.join_outcome(&carol.request).await,
+    assert!(matches!(carol.device.sync.join_outcome(&mut carol.request).await,
         Err(crate::SyncError::Storage(error)) if error.failure() == coven_storage::StorageFailure::Network));
     assert_eq!(carol.device.sync.session.lock().await.scanned, scanned);
     carol.device.storage.set_faults(coven_storage::test_utils::Faults::none()).await;
     assert_eq!(
-        carol.device.sync.join_outcome(&carol.request).await.unwrap(),
+        carol.device.sync.join_outcome(&mut carol.request).await.unwrap(),
         JoinOutcome::Admitted
     );
     for device in [&ana, &carol.device] {
@@ -270,7 +273,7 @@ async fn a_failed_scan_does_not_advance_past_the_keys_it_could_not_keep() {
 #[tokio::test]
 async fn a_failed_history_read_does_not_lose_the_scans_tentative_keys() {
     let group = Group::shared();
-    let (ana, carol) = waiting(&group).await;
+    let (ana, mut carol) = waiting(&group).await;
     ana.sync.pass().await.unwrap();
     let request = listed(&ana).await.remove(0).shown_request().cloned().unwrap();
     ana.sync.approve_join_request(&request).await.unwrap();
@@ -279,7 +282,7 @@ async fn a_failed_history_read_does_not_lose_the_scans_tentative_keys() {
     let (observed, floor_read) = tokio::sync::oneshot::channel();
     let (resume, held) = tokio::sync::oneshot::channel();
     carol.device.storage.hold_next_read(path.clone(), observed, held).await;
-    let polling = carol.device.sync.join_outcome(&carol.request);
+    let polling = carol.device.sync.join_outcome(&mut carol.request);
     let fail_history = async {
         floor_read.await.unwrap();
         // Bootstrap gets its floor response and finds the copy. The next
@@ -301,7 +304,7 @@ async fn a_failed_history_read_does_not_lose_the_scans_tentative_keys() {
     assert_eq!(carol.device.sync.session.lock().await.scanned, scanned);
     carol.device.storage.set_faults(coven_storage::test_utils::Faults::none()).await;
     assert_eq!(
-        carol.device.sync.join_outcome(&carol.request).await.unwrap(),
+        carol.device.sync.join_outcome(&mut carol.request).await.unwrap(),
         JoinOutcome::Admitted
     );
     for device in [&ana, &carol.device] {
@@ -408,7 +411,7 @@ async fn only_a_sent_invites_join_has_a_confirmation_number() {
 #[tokio::test]
 async fn an_admitted_joiner_starts_from_a_fresh_snapshot_without_waiting_for_grace() {
     let group = Group::shared();
-    let (ana, carol) = waiting(&group).await;
+    let (ana, mut carol) = waiting(&group).await;
     for (id, title) in [("a", "one"), ("b", "two"), ("c", "three")] {
         insert(ana.database(), id, title).await;
         ana.sync.pass().await.unwrap();
@@ -424,7 +427,7 @@ async fn an_admitted_joiner_starts_from_a_fresh_snapshot_without_waiting_for_gra
     assert_eq!(current.header.snapshots, [announced]);
     let before = carol.device.storage.request_trace().len();
     assert_eq!(
-        carol.device.sync.join_outcome(&carol.request).await.unwrap(),
+        carol.device.sync.join_outcome(&mut carol.request).await.unwrap(),
         JoinOutcome::Admitted
     );
     assert_eq!(rows(carol.device.database()).await, rows(ana.database()).await);

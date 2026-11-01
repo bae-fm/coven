@@ -301,4 +301,5 @@ import SequenceApply
 #print axioms CovenSequence.InviteLifecycle.reclaim_binds_twice
 #print axioms CovenSequence.InviteLifecycle.approval_shown_as_waiting
 #print axioms CovenSequence.JoinStatus.phases_forward
-#print axioms CovenSequence.JoinStatus.waited_after_loading
+#print axioms CovenSequence.JoinStatus.resumed_waits_again
+#print axioms CovenSequence.JoinStatus.scan_shown_as_loading

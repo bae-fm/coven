@@ -3860,7 +3860,11 @@ own sealed keys and that applied entry; copies alone aren't enough.
 Copies opening means approval has begun, and Ana's entry follows them. A
 check that finds his copies but not yet the entry has loaded the store, so
 his status stays at loading while his phone keeps checking for the entry on
-the same waits; it never goes back to waiting for approval.
+the same waits; it never goes back to waiting for approval. His phone records
+that his keys opened in its saved request (below) before it reports loading.
+Dan closes the app between the copies and the entry; the resumed join reports
+no wait, even before its first check opens his keys again. Without the record,
+it would show the wait again until that check.
 
 **Checking for approval.** Dan's phone checks for his copies on the same doubling
 waits, kept across restarts. Its status says when the next check is, and for a
@@ -4082,8 +4086,12 @@ everything is encrypted.
   approval check in which its keys first open (§13.2), so it can report
   loading before that check finds the entry that admits it. Until then, each
   check reads, for its copies, the slots after its invite that no earlier
-  check in the same call read, and reports that scan between its waits. Each check
-  reports its own steps, from the first.
+  check in the same call read. That scan is part of the wait: the phone still
+  shows that it is checking for approval. A scan that finds no copy reports
+  nothing, since reporting it as loading would put the next wait after
+  loading. The check whose copies open the keys reports its scan as finding
+  keys, then the rest of loading. Each check reports its own steps, from the
+  first.
   The keys are kept only once the store has loaded, so a join that stopped
   part way through loading opens them again in its next call, and that check
   reports the rest. Carol's phone stopped after applying slot 1; its next
@@ -9527,7 +9535,7 @@ Write-ups explain each model and state its assumptions:
 | From every reachable state, crashes and stops for good included, coven's own steps, with the app retrying only records it is shown, end the invite and every operation the app journaled: nothing stays listed, running or pending | `settles` | `proofs/sequence/CovenSequence/InviteLifecycle.lean` | §11.4, §13.2, §14.1 |
 | The listed invite and its binding's entry only move forward; the app's offer of approving, declining, cancelling and acknowledging is exactly what the write steps accept; a sent invite is listed as approving exactly while its binding runs | `forward`, `offered_accepted`, `approval_runs_binding` | `proofs/sequence/CovenSequence/InviteLifecycle.lean` | §11.4, §13.2 |
 | Each rule those results need is needed: leaving out the step check, ending operations or invites at a stop, ending a refused access record, ending the binding with its invite, recording the binding, listing approval as its own stage, or leaving an approval's refusal to its pass each has a counterexample | `unguarded_finding_is_stale`, `forgetful_stop_runs_forever`, `stop_strands_approval`, `refused_record_strands`, `split_binding_disagrees`, `reclaim_binds_twice`, `approval_shown_as_waiting`, `demoted_approval_offered` | `proofs/sequence/CovenSequence/InviteLifecycle.lean` | §13.2, §14.1 |
-| A waiting join's reported phases never go back: waiting, loading, done | `phases_forward`, `waited_after_loading` | `proofs/sequence/CovenSequence/JoinStatus.lean` | §13.2 |
+| A join's reported phases never go back: waiting, loading, done, across its checks and the calls that resume it. Keeping the opened keys only in the call, or reporting a scan that finds no copy as loading, makes them go back | `phases_forward`, `opened_never_waits`, `resumed_waits_again`, `scan_shown_as_loading` | `proofs/sequence/CovenSequence/JoinStatus.lean` | §13.2 |
 | Writes after a removal or key replacement are refused with rows unchanged and no new unique-value or owner claim, while the claim number is recorded | `cutoff` | `proofs/sequence/CovenSequence/Cutoff.lean` | §14.1 |
 | Circle permission is judged at the authored applied prefix; landing still checks store membership, device removal and key generation | `write_permission_at_authored_prefix` | `proofs/sequence/CovenSequence/Authorship.lean` | §15.6, §15.8 |
 | Ben's unread Gifts removal permits the original under both sending-key selection and application; reading removal forbids a new original | `sending_and_apply_agree`, `removal_read_refused` | `proofs/sequence/SequenceApply.lean` | §15.8 |

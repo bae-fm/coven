@@ -201,3 +201,250 @@ async fn a_join_reports_finding_its_keys_before_it_loads() {
     assert_eq!(last.done, last.total, "{loading:?}");
     owner.close().await;
 }
+
+/// A join reports opening its new installation, then connecting, then
+/// waiting for approval, then loading (E10). While it waits, a sent invite's
+/// status carries the number Ana's phone shows with the request, and when the
+/// next check runs.
+#[tokio::test]
+async fn a_join_reports_each_bootstrap_phase_in_order() {
+    let owner = Owner::new(CloudProvider::S3, false).await;
+    let invite = owner.invite().await;
+    let install = Installation::new();
+    let (_, cancel) = watch::channel(false);
+    let reported = std::sync::Mutex::new(Vec::new());
+    let joining = install.run(
+        &owner,
+        Installation::join_request(&invite),
+        owner.recipient(),
+        &cancel,
+        |status| {
+            let mut reported = reported.lock().unwrap();
+            if reported.last() != Some(&status) {
+                reported.push(status);
+            }
+        },
+    );
+    let approved = std::sync::Mutex::new(None);
+    let (result, _) = join_and_approve(&owner.handle, joining, |request| {
+        *approved.lock().unwrap() = Some(request);
+        async {}
+    })
+    .await;
+    result.unwrap().unwrap().close().await.unwrap();
+    let reported = reported.into_inner().unwrap();
+    let request = approved.into_inner().unwrap().unwrap();
+    let reported = after_opening(&reported);
+    assert_eq!(reported.first(), Some(&BootstrapStatus::Connecting));
+    assert_honest(reported);
+    let loading = reported
+        .iter()
+        .rev()
+        .take_while(|status| matches!(status, BootstrapStatus::Loading(_)))
+        .count();
+    assert!(loading > 0, "{reported:?}");
+    let waits = &reported[1..reported.len() - loading];
+    assert!(waits.len() >= 2, "{reported:?}");
+    for (index, status) in waits.iter().enumerate() {
+        let BootstrapStatus::WaitingForApproval { confirmation, next_check } = status else {
+            panic!("{status:?} while waiting");
+        };
+        assert_eq!(*confirmation, Some(request.confirmation));
+        // The first check runs at once; then checks and waits alternate.
+        assert_eq!(matches!(next_check, NextCheck::Checking), index % 2 == 0, "{reported:?}");
+    }
+    owner.close().await;
+}
+
+/// Ana's approval claims Carol's copies, then the entry adding her, and the
+/// entry fails to land. Carol's next check opens her keys and loads the
+/// store, and finds no entry; from then on her join reports loading as it
+/// waits for the entry, never waiting for approval again (E10). Nor does it
+/// once she closes the app and resumes the join: its keys opened in the call
+/// before, so the resumed call reports no wait even before its first check.
+#[tokio::test]
+async fn a_join_whose_keys_opened_never_reports_waiting_again() {
+    use coven_storage::test_utils::{Faults, MemoryRequest};
+    let owner = Owner::new(CloudProvider::S3, false).await;
+    let invite = owner.invite().await;
+    let install = Installation::new();
+    // The joining device's waits end only when the test moves the clock.
+    let builder = install.builder(&owner, owner.recipient()).clock(owner.clock.clone());
+    let control = JoinControl::new();
+    let reported = std::sync::Mutex::new(Vec::new());
+    let (statuses, mut seen) = watch::channel(Vec::<BootstrapStatus>::new());
+    let joining = join_with_invite(
+        builder,
+        invite.shown_code(),
+        "New phone",
+        |status| {
+            let mut reported = reported.lock().unwrap();
+            if reported.last() != Some(&status) {
+                reported.push(status);
+                statuses.send_replace(reported.clone());
+            }
+        },
+        &control,
+    );
+    // Each check that loads or finds no entry ends by asking whether the
+    // request is still there.
+    let request_path = ObjectPath::join_request(owner.directory.id(), invite.id);
+    async fn checked(owner: &Owner, request_path: &ObjectPath, control: &JoinControl) {
+        let asked = owner.storage.request_trace().len();
+        control.check_now();
+        while !owner.storage.request_trace()[asked..]
+            .contains(&MemoryRequest::Read(request_path.clone(), None))
+        {
+            tokio::task::yield_now().await;
+        }
+    }
+    let approve = async {
+        seen.wait_for(|reported| {
+            matches!(
+                reported.last(),
+                Some(BootstrapStatus::WaitingForApproval { next_check: NextCheck::At(_), .. })
+            )
+        })
+        .await
+        .unwrap();
+        let request = next_join_request(&owner.handle).await;
+        // The copy lands in the next slot; the entry after it never does.
+        let entry =
+            ObjectPath::slot(owner.directory.id(), (owner.applied().await + 2).try_into().unwrap());
+        owner
+            .storage
+            .set_faults(Faults {
+                create_failures: [(entry.clone(), (StorageFailure::Network, 500))].into(),
+                ..Faults::none()
+            })
+            .await;
+        owner.handle.approve_join_request(&request).await.unwrap();
+        // The pass the approval asks for claims the copy, then fails at the
+        // entry.
+        while !owner.storage.request_trace().contains(&MemoryRequest::Create(entry.clone())) {
+            tokio::task::yield_now().await;
+        }
+        // The check that loads, then one more after its wait.
+        checked(&owner, &request_path, &control).await;
+        checked(&owner, &request_path, &control).await;
+        control.cancel();
+    };
+    let (result, ()) = join_with_response(joining, approve).await;
+    assert!(result.is_err());
+    let reported = reported.into_inner().unwrap();
+    let loading = reported
+        .iter()
+        .position(|status| matches!(status, BootstrapStatus::Loading(_)))
+        .expect("the join loaded");
+    assert!(
+        reported[loading..].iter().all(|status| matches!(status, BootstrapStatus::Loading(_))),
+        "{reported:?}"
+    );
+    // The entry still hasn't landed when Carol's app resumes the join.
+    let control = JoinControl::new();
+    let reported = std::sync::Mutex::new(Vec::new());
+    let resumed =
+        install.builder(&owner, owner.recipient()).clock(owner.clock.clone()).resume_join(
+            owner.directory.id(),
+            |status| {
+                let mut reported = reported.lock().unwrap();
+                if reported.last() != Some(&status) {
+                    reported.push(status);
+                }
+            },
+            &control,
+        );
+    let check_twice = async {
+        checked(&owner, &request_path, &control).await;
+        checked(&owner, &request_path, &control).await;
+        control.cancel();
+    };
+    let (result, ()) = join_with_response(resumed, check_twice).await;
+    assert!(result.is_err());
+    let reported = reported.into_inner().unwrap();
+    assert!(
+        reported.iter().any(|status| matches!(status, BootstrapStatus::Loading(_))),
+        "{reported:?}"
+    );
+    assert!(
+        !reported.iter().any(|status| matches!(
+            status,
+            BootstrapStatus::WaitingForApproval { .. } | BootstrapStatus::Pending(_)
+        )),
+        "{reported:?}"
+    );
+    owner.close().await;
+}
+
+/// Ana writes a row while Carol's phone waits for approval. Carol's next
+/// check reads Ana's slot as it looks for her copies and finds none: that
+/// scan is part of her wait, so her status stays waiting for approval and
+/// never shows loading before her keys open (E10).
+#[tokio::test]
+async fn a_waiting_joins_scan_reports_its_wait() {
+    use coven_storage::test_utils::MemoryRequest;
+    let owner = Owner::new(CloudProvider::S3, false).await;
+    let invite = owner.invite().await;
+    let install = Installation::new();
+    // The joining device's waits end only when the test moves the clock.
+    let builder = install.builder(&owner, owner.recipient()).clock(owner.clock.clone());
+    let control = JoinControl::new();
+    let reported = std::sync::Mutex::new(Vec::new());
+    let (statuses, mut seen) = watch::channel(Vec::<BootstrapStatus>::new());
+    let joining = join_with_invite(
+        builder,
+        invite.shown_code(),
+        "New phone",
+        |status| {
+            let mut reported = reported.lock().unwrap();
+            if reported.last() != Some(&status) {
+                reported.push(status);
+                statuses.send_replace(reported.clone());
+            }
+        },
+        &control,
+    );
+    let request_path = ObjectPath::join_request(owner.directory.id(), invite.id);
+    let write_and_check = async {
+        seen.wait_for(|reported| {
+            matches!(
+                reported.last(),
+                Some(BootstrapStatus::WaitingForApproval { next_check: NextCheck::At(_), .. })
+            )
+        })
+        .await
+        .unwrap();
+        let before = owner.applied().await;
+        owner
+            .handle
+            .write(|sql| {
+                sql.execute(
+                    "INSERT INTO notes VALUES('later',?1)",
+                    coven_database::params![vec![1_u8; 9]],
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        owner.pass().await;
+        assert!(owner.applied().await > before);
+        let asked = owner.storage.request_trace().len();
+        control.check_now();
+        // The check reads Ana's slot, finds no copy, and asks whether the
+        // request is still there.
+        while !owner.storage.request_trace()[asked..]
+            .contains(&MemoryRequest::Read(request_path.clone(), None))
+        {
+            tokio::task::yield_now().await;
+        }
+        control.cancel();
+    };
+    let (result, ()) = join_with_response(joining, write_and_check).await;
+    assert!(matches!(result, Err(BootstrapError::JoinRequestSent)), "{result:?}");
+    let reported = reported.into_inner().unwrap();
+    assert!(
+        !reported.iter().any(|status| matches!(status, BootstrapStatus::Loading(_))),
+        "{reported:?}"
+    );
+    owner.close().await;
+}

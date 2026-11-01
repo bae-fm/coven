@@ -25,12 +25,12 @@ async fn an_in_person_request_is_approved_in_the_pass_that_reads_it() {
     let ana = group.device(1).await;
     group.create_with_access(&ana, MemberAccess::ProviderAccount("ana@example.org".into())).await;
     let invite = in_person_invite(&ana).await;
-    let carol = join(&group, invite.shown_code(), "Carol's phone").await;
+    let mut carol = join(&group, invite.shown_code(), "Carol's phone").await;
     ana.sync.pass().await.unwrap();
     assert!(listed(&ana).await.is_empty());
     assert!(no_request(&group.storage, &ObjectPath::join_request(group.store, invite.id)).await);
     assert_eq!(
-        carol.device.sync.join_outcome(&carol.request).await.unwrap(),
+        carol.device.sync.join_outcome(&mut carol.request).await.unwrap(),
         JoinOutcome::Admitted
     );
     for device in [&ana, &carol.device] {
@@ -48,7 +48,7 @@ async fn an_in_person_approval_under_way_refuses_the_apps_decisions() {
     let ana = group.device(1).await;
     group.create_with_access(&ana, MemberAccess::ProviderAccount("ana@example.org".into())).await;
     let invite = in_person_invite(&ana).await;
-    let carol = join(&group, invite.shown_code(), "Carol's phone").await;
+    let mut carol = join(&group, invite.shown_code(), "Carol's phone").await;
     let next = ana.sync.database.applied_slot().await.unwrap() + 1;
     ana.storage
         .set_faults(Faults {
@@ -86,7 +86,7 @@ async fn an_in_person_approval_under_way_refuses_the_apps_decisions() {
     ana.sync.retry_pending_operation(operation).await.unwrap();
     assert!(listed(&ana).await.is_empty());
     assert_eq!(
-        carol.device.sync.join_outcome(&carol.request).await.unwrap(),
+        carol.device.sync.join_outcome(&mut carol.request).await.unwrap(),
         JoinOutcome::Admitted
     );
     for device in [&ana, &carol.device] {
@@ -105,8 +105,11 @@ async fn a_check_between_the_copies_and_the_entry_finds_the_approval_begun() {
     let ana = group.device(1).await;
     group.create_with_access(&ana, MemberAccess::ProviderAccount("ana@example.org".into())).await;
     let invite = in_person_invite(&ana).await;
-    let carol = join(&group, invite.shown_code(), "Carol's phone").await;
-    assert_eq!(carol.device.sync.join_outcome(&carol.request).await.unwrap(), JoinOutcome::Waiting);
+    let mut carol = join(&group, invite.shown_code(), "Carol's phone").await;
+    assert_eq!(
+        carol.device.sync.join_outcome(&mut carol.request).await.unwrap(),
+        JoinOutcome::Waiting
+    );
     // The copy lands in the next slot; the entry after it fails.
     let entry = ana.sync.database.applied_slot().await.unwrap() + 2;
     ana.storage
@@ -122,7 +125,7 @@ async fn a_check_between_the_copies_and_the_entry_finds_the_approval_begun() {
     ana.sync.pass().await.unwrap();
     for _ in 0..2 {
         assert_eq!(
-            carol.device.sync.join_outcome(&carol.request).await.unwrap(),
+            carol.device.sync.join_outcome(&mut carol.request).await.unwrap(),
             JoinOutcome::Approving
         );
     }
@@ -139,7 +142,7 @@ async fn a_check_between_the_copies_and_the_entry_finds_the_approval_begun() {
         .id;
     ana.sync.retry_pending_operation(operation).await.unwrap();
     assert_eq!(
-        carol.device.sync.join_outcome(&carol.request).await.unwrap(),
+        carol.device.sync.join_outcome(&mut carol.request).await.unwrap(),
         JoinOutcome::Admitted
     );
     for device in [&ana, &carol.device] {
@@ -161,7 +164,7 @@ async fn a_demoted_approvers_approval_is_refused_by_its_pass() {
     group.create_with_access(&ana, MemberAccess::ProviderAccount("ana@example.org".into())).await;
     group.admit(&ana, &ben).await;
     let invite = invite(&ana).await;
-    let carol = join(&group, invite.shown_code(), "Carol's phone").await;
+    let mut carol = join(&group, invite.shown_code(), "Carol's phone").await;
     ana.sync.pass().await.unwrap();
     ben.sync.pass().await.unwrap();
     ben.sync
@@ -191,7 +194,7 @@ async fn a_demoted_approvers_approval_is_refused_by_its_pass() {
         .all(|record| record.kind != "invite"));
     assert!(!ana.sync.database.store_state().await.unwrap().members.contains_key(&invite.member));
     assert_eq!(
-        carol.device.sync.join_outcome(&carol.request).await.unwrap(),
+        carol.device.sync.join_outcome(&mut carol.request).await.unwrap(),
         JoinOutcome::Declined
     );
     for device in [&ana, &ben, &carol.device] {

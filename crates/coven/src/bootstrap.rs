@@ -540,12 +540,12 @@ impl Installing<'_> {
     }
 }
 
-enum Admission<'a> {
+enum Admission {
     Restoring,
-    Joining(join::Joining<'a>),
+    Joining(join::Joining),
 }
 
-impl Admission<'_> {
+impl Admission {
     /// Once a join's request may have been sent, cancelling can't take it
     /// back: approval could land after its keys were thrown away, leaving a
     /// member no device can act as (§13.2). The join stays unfinished.

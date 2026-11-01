@@ -713,10 +713,17 @@ Each rule `correct` has is needed; leaving one out is a checked counterexample:
 it.
 
 [`JoinStatus`](sequence/CovenSequence/JoinStatus.lean) models what a waiting
-join reports across its checks. `phases_forward` proves the phases never go
-back: waiting, then loading, then done. `waited_after_loading` shows the
-report without the approving outcome: a check between the copies and the
-entry loaded, and the next one reported waiting again.
+join reports across its checks and across the calls that resume it: a call
+may stop between checks, or in the check whose copies opened its keys, after
+it reported loading. The scan for the copies is part of the wait. The first
+check whose copies open the keys records that with the saved request before
+it reports loading. `phases_forward` proves the phases never go back:
+waiting, then loading, then done. Each rule is needed:
+
+- `resumed_waits_again`: with the opened keys kept only in the call, the
+  resumed call reports waiting after the call before it loaded.
+- `scan_shown_as_loading`: a scan that finds no copy, reported as loading,
+  puts the next check's wait after it.
 
 ## Settling a claim whose slot was deleted
 

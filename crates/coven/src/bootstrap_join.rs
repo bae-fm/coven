@@ -8,10 +8,9 @@ use coven_foundation::files::{AtomicFile, StoreDir, StoreFile};
 use coven_sync::{JoinOutcome, JoiningIdentity, NextCheck};
 
 /// A prepared join request with the provider access its invite grants.
-pub(super) struct Joining<'a> {
+pub(super) struct Joining {
     identity: JoiningIdentity,
     invitation: coven_storage::StorageInvitation,
-    code: &'a InviteCode,
     // The encrypted local copy of the request, outside final custody.
     file: AtomicFile,
     /// Changes each time the app asks for a check for approval now.
@@ -21,13 +20,13 @@ pub(super) struct Joining<'a> {
 /// Restore or fix the request, then obtain credentials for the invite's
 /// location: S3 invites carry them, Dropbox and OneDrive use the sign-in the
 /// join keeps on the device beside its code, and CloudKit the Apple account.
-pub(super) fn prepare_request<'a>(
+pub(super) fn prepare_request(
     builder: &CovenBuilder,
     directory: &StoreDir,
-    code: &'a InviteCode,
+    code: &InviteCode,
     name: &DeviceName,
     check: tokio::sync::watch::Receiver<u64>,
-) -> Result<(Joining<'a>, ConnectionCredentials, SignInCustody), BootstrapError> {
+) -> Result<(Joining, ConnectionCredentials, SignInCustody), BootstrapError> {
     let identity = match name {
         DeviceName::Given(name) => JoiningIdentity::prepare(directory, code, name)?,
         DeviceName::Saved => JoiningIdentity::resume(directory, code)?,
@@ -59,19 +58,13 @@ pub(super) fn prepare_request<'a>(
     // Validation refuses a sign-in without the location's access.
     data.validate().map_err(SyncError::from)?;
     Ok((
-        Joining {
-            identity,
-            invitation,
-            code,
-            file: directory.owned_file(StoreFile::Bootstrap),
-            check,
-        },
+        Joining { identity, invitation, file: directory.owned_file(StoreFile::Bootstrap), check },
         data,
         custody,
     ))
 }
 
-impl Joining<'_> {
+impl Joining {
     pub(super) fn identity(&self) -> coven_crypto::MemberIdentity {
         self.identity.identity()
     }
@@ -103,7 +96,7 @@ impl Joining<'_> {
         status(BootstrapStatus::Connecting);
         sync.accept_join(&self.invitation).await?;
         if !self.identity.attempted() {
-            self.identity.record_attempt(&self.file, self.code)?;
+            self.identity.record_attempt(&self.file)?;
             match sync.submit_join(&self.identity).await {
                 Ok(true) => (),
                 // The invite ended first; its marker holds the path.
@@ -111,7 +104,7 @@ impl Joining<'_> {
                 Err(error) => {
                     // Only a request that may be stored makes its absence final.
                     if matches!(&error, SyncError::Storage(error) if error.refused()) {
-                        self.identity.record_refusal(&self.file, self.code)?;
+                        self.identity.record_refusal(&self.file)?;
                     }
                     return Err(error.into());
                 }
@@ -129,23 +122,23 @@ impl Joining<'_> {
         };
         // The conditions the last check found unmet, shown instead of the wait.
         let mut pending = Vec::new();
-        // Once its copies open, the join has loaded and only waits for the
-        // entry approving it: its status stays at loading, never going back
-        // to waiting (E10).
-        let mut approving = false;
+        // Once its copies open, in this call or an earlier one, the join
+        // only waits for the entry approving it: its status stays at
+        // loading, never going back to waiting (E10).
         // Polls back off 1, 2, 4, … 300 seconds apart; the persisted delay
         // survives reopening and a provider cooldown holds them (§6.7).
         loop {
+            let identity = &self.identity;
             sync.join_poll_due(&mut self.check, |next_check| {
-                if !approving {
+                if !identity.opened() {
                     show(waiting(confirmation, &pending, next_check));
                 }
             })
             .await?;
-            if !approving {
+            if !self.identity.opened() {
                 show(waiting(confirmation, &pending, NextCheck::Checking));
             }
-            match loading(sync, sync.join_outcome(&self.identity), status).await? {
+            match loading(sync, sync.join_outcome(&mut self.identity), status).await? {
                 JoinOutcome::Admitted => {
                     sync.join_poll_settled().await?;
                     return Ok(true);
@@ -158,10 +151,7 @@ impl Joining<'_> {
                     pending = database.pending::<coven_sync::PendingRecord>().await?;
                     sync.join_poll_waiting().await?
                 }
-                JoinOutcome::Approving => {
-                    approving = true;
-                    sync.join_poll_waiting().await?
-                }
+                JoinOutcome::Approving => sync.join_poll_waiting().await?,
             }
         }
     }
