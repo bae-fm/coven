@@ -13,7 +13,7 @@ use coven_format::{
     MemberAccess,
 };
 use coven_foundation::clock::Clock;
-use coven_storage::{ObjectPath, Storage};
+use coven_storage::Storage;
 use serde_json::{json, Value};
 use std::time::Duration;
 
@@ -187,7 +187,11 @@ impl Case {
         self.ana
             .storage
             .hold_next_read(
-                ObjectPath::join_request(self.group.store, self.invite.id),
+                coven_storage::ObjectPath::join_request(
+                    self.group.store,
+                    self.ana.sync.device,
+                    self.invite.id,
+                ),
                 observed,
                 held,
             )
@@ -372,7 +376,11 @@ impl Case {
             Some(Retry::AppAction) => json!("app"),
             Some(Retry::Never | Retry::AfterUpdate) => json!("never"),
         };
-        let path = ObjectPath::join_request(self.group.store, self.invite.id);
+        let path = coven_storage::ObjectPath::join_request(
+            self.group.store,
+            self.ana.sync.device,
+            self.invite.id,
+        );
         // An ended invite's marker in the request's place is no request.
         let request = match self.group.storage.read(&path).await {
             Ok(found) => coven_format::invite_end::InviteEnd::decode(&found).is_err(),

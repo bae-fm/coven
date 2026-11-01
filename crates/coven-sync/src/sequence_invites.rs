@@ -515,7 +515,7 @@ impl SequenceSync {
                     return Ok(InviteProgress::Waiting(PendingReason::Paused));
                 }
                 InviteState::Waiting { request: None, code } => {
-                    let path = ObjectPath::join_request(self.store(), work.id);
+                    let path = ObjectPath::join_request(self.store(), self.device, work.id);
                     let bytes = match self.storage.read(&path).await {
                         Ok(bytes) => bytes,
                         Err(error) if error.failure() == StorageFailure::NotFound => {
@@ -633,7 +633,9 @@ impl SequenceSync {
                     // The marker goes once a joining device can no longer
                     // send a first request (`end_request`).
                     let removal = coven_database::ObjectRemoval {
-                        path: ObjectPath::join_request(self.store(), work.id).as_str().to_owned(),
+                        path: ObjectPath::join_request(self.store(), self.device, work.id)
+                            .as_str()
+                            .to_owned(),
                         after: kept_until,
                     };
                     self.database
@@ -655,7 +657,7 @@ impl SequenceSync {
             .checked_add(super::sequence_retention::GRACE.as_secs())
             .ok_or(SyncError::SequenceExhausted)?;
         let marker = InviteEnd { kept_until }.encode();
-        let path = ObjectPath::join_request(self.store(), work.id);
+        let path = ObjectPath::join_request(self.store(), self.device, work.id);
         loop {
             match self.storage.delete(&path).await {
                 Ok(()) => (),
@@ -803,7 +805,7 @@ impl SequenceSync {
     fn open_request(&self, work: &InviteWork, bytes: &[u8]) -> Result<Vec<u8>, SyncError> {
         let envelope = SingleChunkObject::decode(bytes)?;
         let SingleChunkObject::JoinRequest { signature, .. } = &envelope;
-        let path = ObjectPath::join_request(self.store(), work.id);
+        let path = ObjectPath::join_request(self.store(), self.device, work.id);
         let plain = work.secret()?.join_request_key().open_object_chunk(
             path.as_str(),
             &envelope.prefix().encode()?,

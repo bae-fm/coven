@@ -28,7 +28,7 @@ async fn an_in_person_request_is_approved_in_the_pass_that_reads_it() {
     let mut carol = join(&group, invite.shown_code(), "Carol's phone").await;
     ana.sync.pass().await.unwrap();
     assert!(listed(&ana).await.is_empty());
-    assert!(no_request(&group.storage, &ObjectPath::join_request(group.store, invite.id)).await);
+    assert!(no_request(&group.storage, &request_path(&invite)).await);
     assert_eq!(
         carol.device.sync.join_outcome(&mut carol.request).await.unwrap(),
         JoinOutcome::Admitted
@@ -318,7 +318,7 @@ async fn a_replacement_invite_keeps_its_expected_pair_across_approval_and_retry(
             ana.storage
                 .set_faults(coven_storage::test_utils::Faults {
                     delete_failures: [(
-                        ObjectPath::join_request(group.store, invite.id),
+                        request_path(&invite),
                         coven_storage::StorageFailure::PermissionDenied,
                     )]
                     .into(),
@@ -360,9 +360,7 @@ async fn a_replacement_invite_keeps_its_expected_pair_across_approval_and_retry(
             .unwrap()
             .iter()
             .all(|record| record.started_by != "invite"));
-        assert!(
-            no_request(&group.storage, &ObjectPath::join_request(group.store, invite.id)).await
-        );
+        assert!(no_request(&group.storage, &request_path(&invite)).await);
         ana.sync.pass().await.unwrap();
         assert_eq!(ana.sync.database.store_state().await.unwrap().members[&target].keys, competing);
         for device in [&ana, &ben, &carol.device] {

@@ -44,7 +44,7 @@ fn all_layouts_are_canonical_and_store_scoped() {
         ObjectPath::snapshot(STORE_ID, Audience::Store, device, NonZeroU64::MIN),
         ObjectPath::snapshot(STORE_ID, Audience::Circle(CircleId(id)), device, NonZeroU64::MIN),
         ObjectPath::file(STORE_ID, device, FileId(id)),
-        ObjectPath::join_request(STORE_ID, InviteId(id)),
+        ObjectPath::join_request(STORE_ID, device, InviteId(id)),
     ] {
         assert_eq!(ObjectPath::parse(path.as_str()).unwrap(), path);
         assert_eq!(path.store(), STORE_ID);
@@ -101,8 +101,28 @@ fn file_scans_keep_device_prefixes_and_snapshot_paths_keep_their_audience() {
 #[test]
 fn only_join_request_paths_name_an_invite() {
     let invite = InviteId(uuid::Uuid::from_u128(17));
-    assert_eq!(ObjectPath::join_request(STORE_ID, invite).join_request_invite(), Some(invite));
+    let path = ObjectPath::join_request(STORE_ID, DeviceId(42), invite);
+    assert_eq!(path.as_str(), format!("{STORE_ID}/join-requests/42/{}", invite.0));
+    assert_eq!(path.join_request_invite(), Some(invite));
     for path in [ObjectPath::floor(STORE_ID), ObjectPath::slot(STORE_ID, NonZeroU64::MIN)] {
         assert_eq!(path.join_request_invite(), None);
     }
+}
+
+/// A join request lives under the device that made its invite, so other
+/// devices can find every request of a device that is gone for good (§13.2).
+#[test]
+fn join_requests_live_under_their_inviting_device() {
+    let invite = "11111111-1111-1111-1111-111111111111";
+    for tail in [
+        format!("join-requests/{invite}"),
+        format!("join-requests/01/{invite}"),
+        format!("join-requests/+1/{invite}"),
+        "join-requests/1/not-an-invite".to_owned(),
+        format!("join-requests/1/{invite}/extra"),
+    ] {
+        assert!(ObjectPath::parse(&format!("{STORE_ID}/{tail}")).is_err(), "{tail}");
+    }
+    validate_directory(&format!("{STORE_ID}/join-requests/1")).unwrap();
+    assert!(validate_directory(&format!("{STORE_ID}/join-requests/01")).is_err());
 }

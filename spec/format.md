@@ -95,8 +95,8 @@ spaces only separate fields for reading. Example times are UTC.
 | Floor | `<store>/floor` | the first kept slot, one snapshot per audience, and the original key copies a new device needs | D8, D9 |
 | Snapshot | `<store>/snapshots/<audience>/<device>/<n>` | one audience's state at its coverage | D7, D9 |
 | File | `<store>/files/<device>/<object>` | one stored file, encrypted in chunks | D12 |
-| Join request | `<store>/join-requests/<invite>` | a would-be member's id, public keys and device name | D8, D9 |
-| Ended invite's marker | `<store>/join-requests/<invite>`, in the request's place | when it may be deleted | D8 |
+| Join request | `<store>/join-requests/<device>/<invite>`, under the device that made the invite | a would-be member's id, public keys and device name | D8, D9 |
+| Ended invite's marker | `<store>/join-requests/<device>/<invite>`, in the request's place | when it may be deleted | D8 |
 | Restore code, invite code | on paper or a screen, never in storage | what a new device needs to find and open the store | D13 |
 | Saved restore code | iCloud Keychain or Block Store, never in storage | a restore code with the store's name, for the person's next devices | D13 |
 | Bucket marker | `coven-bucket`, at the bucket's root, only where member keys reach the whole bucket | the id of the one store that owns the bucket, as plain text | D10 |
@@ -1687,7 +1687,7 @@ provider can't move one object into another's place.
 | `<store>/floor` | Signed, encrypted snapshot references and the first retained slot; conditional replacement |
 | `<store>/snapshots/<audience>/<device>/<n>` | One snapshot, discovered by its announcement |
 | `<store>/files/<device>/<file>` | An uploaded file |
-| `<store>/join-requests/<invite>` | A join request, or the marker of its ended invite |
+| `<store>/join-requests/<device>/<invite>` | A join request to the device that made the invite, or the marker of its ended invite |
 
 *Example.* Household's slot 41 is
 `5d0c8e2a-7b1f-4c3e-9a64-0f2d8b71c3e5/seq/41`, and a store snapshot Ana's phone

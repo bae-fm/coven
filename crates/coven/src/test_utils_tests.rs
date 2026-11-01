@@ -484,7 +484,7 @@ async fn admit_member(f: &Fixture, handle: &CovenHandle, keys: &MemberKeys) -> M
         .find(|invite| invite.id == id)
         .unwrap();
     let code = coven_format::codes::InviteCode::from_text(invite.shown_code()).unwrap();
-    let path = ObjectPath::join_request(f.directory.id(), invite.id);
+    let path = crate::tests::request_path(&invite);
     let request = Object::JoinRequest(coven_format::objects::JoinRequest {
         invite: invite.id,
         member: code.member,

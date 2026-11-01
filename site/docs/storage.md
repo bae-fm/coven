@@ -49,7 +49,7 @@ Every object path starts with the store's id:
 | `<store>/floor` | the first kept slot and the snapshots each audience relies on; the only object ever replaced |
 | `<store>/snapshots/<audience>/<device>/<n>` | one snapshot, found through its announcement |
 | `<store>/files/<device>/<file>` | one uploaded file |
-| `<store>/join-requests/<invite>` | a join request |
+| `<store>/join-requests/<device>/<invite>` | a join request, under the device that made the invite |
 
 So several stores can share one Dropbox or OneDrive folder, one CloudKit zone,
 or one S3 bucket and prefix, except on an S3 service whose member keys reach a

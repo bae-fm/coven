@@ -117,7 +117,7 @@ impl JoiningIdentity {
         }
         let file = directory.owned_file(StoreFile::Bootstrap);
         let sealing = Sealing::new(code)?;
-        let path = ObjectPath::join_request(code.store, code.invite);
+        let path = ObjectPath::join_request(code.store, code.inviting_writer, code.invite);
         let prefix = SingleChunkPrefix::JoinRequest;
         let Some(sealed) = file.read_optional()? else {
             return Ok(None);
@@ -182,7 +182,7 @@ impl JoiningIdentity {
         code: &InviteCode,
         device_name: &str,
     ) -> Result<Self, SyncError> {
-        let path = ObjectPath::join_request(code.store, code.invite);
+        let path = ObjectPath::join_request(code.store, code.inviting_writer, code.invite);
         let prefix = SingleChunkPrefix::JoinRequest;
         // The request repeats the id the invite fixed and names this
         // device's fresh pair, which signs it (D8).

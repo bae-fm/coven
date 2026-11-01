@@ -278,7 +278,7 @@ fn snapshot_fixture_binds_coverage_and_requires_its_plaintext_end_marker() {
 fn join_fixture_opens_with_the_invite_key_and_requested_signer() {
     let bytes = hex(include_str!("../fixtures/sealed-join-request.hex"));
     let path =
-        "10101010-1010-1010-1010-101010101010/join-requests/55555555-5555-5555-5555-555555555555";
+        "10101010-1010-1010-1010-101010101010/join-requests/1/55555555-5555-5555-5555-555555555555";
     let object = SingleChunkObject::decode(&bytes).unwrap();
     let prefix = object.prefix().encode().unwrap();
     let plain = test_utils::invite()

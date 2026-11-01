@@ -128,7 +128,7 @@ async fn every_prefix_starts_at_its_folder_and_keeps_descendants() {
         ObjectPath::floor(STORE_ID),
         ObjectPath::file(STORE_ID, device, FileId(uuid::Uuid::from_u128(1))),
         ObjectPath::file(STORE_ID, other, FileId(uuid::Uuid::from_u128(1))),
-        ObjectPath::join_request(STORE_ID, InviteId(uuid::Uuid::from_u128(1))),
+        ObjectPath::join_request(STORE_ID, DeviceId(1), InviteId(uuid::Uuid::from_u128(1))),
     ];
     let remote = Arc::new(Mutex::new(Remote::default()));
     for path in &paths {
@@ -235,7 +235,8 @@ async fn failed_continuation_is_not_an_empty_folder_or_partial_success() {
         (403, json!({"error":{".tag":"no_permission"}}), StorageFailure::PermissionDenied),
         (503, json!({}), StorageFailure::Network),
     ] {
-        let path = ObjectPath::join_request(STORE_ID, InviteId(uuid::Uuid::from_u128(1)));
+        let path =
+            ObjectPath::join_request(STORE_ID, DeviceId(1), InviteId(uuid::Uuid::from_u128(1)));
         let item = file_metadata(&path.absolute(), b"join request", &Remote::default());
         let replies = Arc::new(Mutex::new(VecDeque::from([
             (200, json!({"entries":[item.clone()],"has_more":true,"cursor":"next"})),

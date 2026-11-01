@@ -3,7 +3,7 @@ use crate::sequence_sync::tests::*;
 use crate::*;
 use coven_format::{admin::MemberRole, MemberAccess};
 use coven_foundation::clock::Clock;
-use coven_storage::{ObjectPath, Storage};
+use coven_storage::Storage;
 
 /// The checked requests among the device's open invites.
 pub(super) async fn requests(device: &Device) -> Vec<JoinRequest> {
@@ -41,7 +41,7 @@ async fn an_approved_request_binds_its_pair_after_copies_and_the_joiner_register
     ana.sync.pass().await.unwrap();
     assert_eq!(ana.storage.request_count() - count, 2, "a checked request waits without reads");
     ana.sync.approve_join_request(&checked[0]).await.unwrap();
-    assert!(no_request(&group.storage, &ObjectPath::join_request(group.store, invite.id)).await);
+    assert!(no_request(&group.storage, &request_path(&invite)).await);
     assert_eq!(
         carol.device.sync.join_outcome(&mut carol.request).await.unwrap(),
         JoinOutcome::Admitted
@@ -80,7 +80,7 @@ async fn cancelling_an_invite_with_a_waiting_request_ends_the_join_as_declined()
     assert_eq!(requests(&ana).await.len(), 1);
     ana.sync.cancel_invite(invite.id).await.unwrap();
     assert!(listed(&ana).await.is_empty());
-    assert!(no_request(&group.storage, &ObjectPath::join_request(group.store, invite.id)).await);
+    assert!(no_request(&group.storage, &request_path(&invite)).await);
     assert_eq!(
         carol.device.sync.join_outcome(&mut carol.request).await.unwrap(),
         JoinOutcome::Declined
@@ -113,7 +113,7 @@ async fn a_decline_ends_the_invite_in_its_write_and_a_pass_deletes_the_request()
         .await
         .unwrap();
     assert!(listed(&ana).await.is_empty());
-    let path = ObjectPath::join_request(group.store, invite.id);
+    let path = request_path(&invite);
     assert!(group.storage.status(&path).await.unwrap().is_some());
     assert_eq!(
         carol.device.sync.join_outcome(&mut carol.request).await.unwrap(),
@@ -526,9 +526,7 @@ async fn a_pass_under_way_records_nothing_over_a_cancel() {
     let operation = ana.database().first_operation("invite").await.unwrap().unwrap().id;
     let (observed, read) = tokio::sync::oneshot::channel();
     let (resume, held) = tokio::sync::oneshot::channel();
-    ana.storage
-        .hold_next_read(ObjectPath::join_request(group.store, invite.id), observed, held)
-        .await;
+    ana.storage.hold_next_read(request_path(&invite), observed, held).await;
     let cancel = async {
         read.await.unwrap();
         let (now, waits, state) =
@@ -594,7 +592,7 @@ async fn a_network_report_ends_an_offline_invite_wait() {
     let ana = group.device(1).await;
     group.create_with_access(&ana, MemberAccess::ProviderAccount("ana@example.org".into())).await;
     let invite = invite(&ana).await;
-    let request = ObjectPath::join_request(group.store, invite.id);
+    let request = request_path(&invite);
     ana.storage
         .set_faults(coven_storage::test_utils::Faults {
             read_failures: [(request.clone(), coven_storage::StorageFailure::Network)].into(),
@@ -810,7 +808,7 @@ async fn an_ended_invites_marker_goes_after_the_grace() {
     group.create(&ana).await;
     let invite = s3_invite(&ana).await;
     ana.sync.cancel_invite(invite.id).await.unwrap();
-    let path = ObjectPath::join_request(group.store, invite.id);
+    let path = request_path(&invite);
     let marker = group.storage.read(&path).await.unwrap();
     let kept_until = invite.expires_at + crate::sequence_sync::sequence_retention::GRACE;
     assert_eq!(

@@ -588,7 +588,7 @@ def main():
     # The request is sealed with the invite secret's key and signed by the pair it requests.
     join_object = single_chunk(
         sodium, 36, b"", derive(bytes([0x66]) * 32, b"coven/join-request/v1"),
-        STORE_TEXT + b"join-requests/55555555-5555-5555-5555-555555555555",
+        STORE_TEXT + b"join-requests/1/55555555-5555-5555-5555-555555555555",
         join_request(sodium), 0x52, 0x34)
 
     store_key, circle_key = copies(sodium)

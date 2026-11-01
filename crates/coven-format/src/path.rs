@@ -62,15 +62,19 @@ impl ObjectPath {
     pub fn file(store: StoreId, device: DeviceId, name: FileId) -> Self {
         Self(format!("{store}/files/{}/{name}", device.0))
     }
-    /// An encrypted join request under its invite id (§13.2).
-    pub fn join_request(store: StoreId, invite: InviteId) -> Self {
-        Self(format!("{store}/join-requests/{invite}"))
+    /// An encrypted join request under the device that made its invite and
+    /// the invite's id (§13.2).
+    pub fn join_request(store: StoreId, inviting: DeviceId, invite: InviteId) -> Self {
+        Self(format!("{store}/join-requests/{}/{invite}", inviting.0))
     }
     /// The invite named by a join request's path.
     pub fn join_request_invite(&self) -> Option<InviteId> {
-        self.relative()
-            .strip_prefix("join-requests/")
-            .map(|invite| InviteId(invite.parse().expect("validated invite id")))
+        match self.relative().split('/').collect::<Vec<_>>().as_slice() {
+            ["join-requests", _, invite] => {
+                Some(InviteId(invite.parse().expect("validated invite id")))
+            }
+            _ => None,
+        }
     }
     /// Parse a listed or recorded path without permitting traversal or other layouts.
     pub fn parse(value: &str) -> Result<Self, PathError> {
@@ -143,7 +147,7 @@ impl TryFrom<String> for ObjectPath {
                     && decimal(n, true)
             }
             ["files", device, name] => decimal(device, false) && canonical_uuid(name),
-            ["join-requests", invite] => canonical_uuid(invite),
+            ["join-requests", device, invite] => decimal(device, false) && canonical_uuid(invite),
             ["floor"] => true,
             _ => false,
         };
@@ -204,7 +208,7 @@ pub fn validate_directory(value: &str) -> Result<(), PathError> {
     let valid = match parts.as_slice() {
         [] => true,
         ["seq" | "snapshots" | "files" | "join-requests"] => true,
-        ["files", device] => decimal(device, false),
+        ["files", device] | ["join-requests", device] => decimal(device, false),
         ["snapshots", audience] => *audience == "store" || canonical_uuid(audience),
         ["snapshots", audience, device] => {
             (*audience == "store" || canonical_uuid(audience)) && decimal(device, false)

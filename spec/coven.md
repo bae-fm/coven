@@ -3756,9 +3756,11 @@ a new person coven makes a fresh id and Ana picks the role. To recover an existi
 member (§13.3), Ana selects that active member instead, and their role and circles
 are kept. Dan can't pick a different target.
 
-**The join request** lives at `<store>/join-requests/<invite id>`. It holds the
-invite id, the chosen member id, both of Dan's new public keys, and his device's
-name. The provider sees only an encrypted object under the invite's id.
+**The join request** lives at `<store>/join-requests/<device>/<invite id>`,
+under the id of the device that made the invite, which the code carries. It
+holds the invite id, the chosen member id, both of Dan's new public keys, and
+his device's name. The provider sees only an encrypted object under the
+inviting device's id and the invite's id.
 
 **Approving.** Ana's phone opens the request and checks it:
 
@@ -8471,7 +8473,7 @@ identifiers let a reader choose the key before opening the encrypted contents.
 | Key copy (its own slot) | the common slot prefix; audience, copied key id, recipient member, the exact public sealing key, and the sealed box itself | the key, inside a box sealed to the recipient alone; the box also authenticates the clear routing. No store key wraps the box. The slot's body, only an acknowledgement, is under an accepted store key |
 | Any slot | the common slot prefix | its device and claim number, under the store key |
 | Writes slot | the common slot prefix | a header naming which audiences its parts belong to, under the store key; each part under its audience's key |
-| Join request, `<store>/join-requests/<invite id>` | the path | everything, under a key derived from the invite secret; signed with the new member key |
+| Join request, `<store>/join-requests/<device>/<invite id>` | the path | everything, under a key derived from the invite secret; signed with the new member key |
 
 An introduced store key may seal its own introduction (§12.1). In that case its
 id is also the clear slot selector; its key bytes and commitment stay encrypted.

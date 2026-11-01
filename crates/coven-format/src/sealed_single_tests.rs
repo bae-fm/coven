@@ -10,8 +10,11 @@ const MAX_SINGLE_CHUNK_OBJECT: usize = 3 + 4 + MAX_OBJECT + SEALED_OBJECT_CHUNK_
 fn each_single_frame_envelope_authenticates_its_routing_and_signature() {
     for object in [Object::JoinRequest(test_utils::join_request())] {
         let prefix = SingleChunkPrefix::JoinRequest;
-        let path =
-            crate::path::ObjectPath::join_request(STORE_ID, test_utils::join_request().invite);
+        let path = crate::path::ObjectPath::join_request(
+            STORE_ID,
+            test_utils::invite().inviting_writer,
+            test_utils::join_request().invite,
+        );
         let path = path.as_str();
         let plain = object.encode().unwrap();
         let aad = prefix.encode().unwrap();

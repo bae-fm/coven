@@ -474,6 +474,13 @@ pub(crate) fn held(app: &TestCoven, store: StoreId) -> Held {
 }
 
 /// The first checked request among the owner's open invites.
+/// Where `invite`'s join request goes: under the device that made it, as its
+/// code names it (§13.2).
+pub(crate) fn request_path(invite: &Invite) -> coven_storage::ObjectPath {
+    let code = coven_sync::read_invite_code(invite.shown_code()).unwrap();
+    coven_storage::ObjectPath::join_request(code.store, code.inviting_writer, code.invite)
+}
+
 /// Whether no join request is at `path`: nothing, or the marker an ended
 /// invite leaves in the request's place (§13.2).
 pub(crate) async fn no_request(

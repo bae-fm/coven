@@ -523,7 +523,7 @@ impl Discovery {
                 paths.push(path);
             }
         }
-        let join = ObjectPath::join_request(store, InviteId(native.ids.new_id()));
+        let join = ObjectPath::join_request(store, DeviceId(1), InviteId(native.ids.new_id()));
         storage.create(&join, b"join").await.unwrap();
         paths.push(join);
 

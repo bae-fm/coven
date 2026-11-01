@@ -324,6 +324,7 @@ async fn missing_prefix_uses_exact_lookup_and_can_appear_later() {
     );
     let join_request = ObjectPath::join_request(
         STORE_ID,
+        coven_foundation::id_source::DeviceId(1),
         coven_foundation::id_source::InviteId(uuid::Uuid::from_u128(1)),
     );
     provider(&server.url).create(&join_request, b"arrived").await.unwrap();

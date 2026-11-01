@@ -288,7 +288,7 @@ async fn a_join_whose_keys_opened_never_reports_waiting_again() {
     );
     // Each check that loads or finds no entry ends by asking whether the
     // request is still there.
-    let request_path = ObjectPath::join_request(owner.directory.id(), invite.id);
+    let request_path = crate::tests::request_path(&invite);
     async fn checked(owner: &Owner, request_path: &ObjectPath, control: &JoinControl) {
         let asked = owner.storage.request_trace().len();
         control.check_now();
@@ -404,7 +404,7 @@ async fn a_waiting_joins_scan_reports_its_wait() {
         },
         &control,
     );
-    let request_path = ObjectPath::join_request(owner.directory.id(), invite.id);
+    let request_path = crate::tests::request_path(&invite);
     let write_and_check = async {
         seen.wait_for(|reported| {
             matches!(

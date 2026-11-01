@@ -166,7 +166,7 @@ async fn a_recovery_invite_rebinds_a_lost_member_through_the_public_calls() {
 async fn a_refused_join_request_is_sent_again() {
     let owner = Owner::new(CloudProvider::S3, false).await;
     let invite = owner.invite().await;
-    let path = coven_storage::ObjectPath::join_request(owner.directory.id(), invite.id);
+    let path = crate::tests::request_path(&invite);
     owner
         .storage
         .set_faults(coven_storage::test_utils::Faults {
@@ -518,12 +518,7 @@ async fn cancelling_a_sent_join_keeps_it_for_a_later_call() {
     assert!(matches!(result, Err(BootstrapError::JoinRequestSent)), "{result:?}");
     let directory = install.root.path().join("stores").join(owner.directory.id().to_string());
     assert!(directory.exists());
-    assert!(owner
-        .storage
-        .status(&ObjectPath::join_request(owner.directory.id(), invite.id))
-        .await
-        .unwrap()
-        .is_some());
+    assert!(owner.storage.status(&crate::tests::request_path(&invite)).await.unwrap().is_some());
     let builder = install.builder(&owner, owner.recipient());
     assert_eq!(
         builder
@@ -571,12 +566,7 @@ async fn cancel_before_sending(provider: CloudProvider) {
     install.absent(owner.directory.id()).await;
     assert!(saved_code(&install, owner.directory.id()).is_none());
     assert!(!install.root.path().join("stores").join(owner.directory.id().to_string()).exists());
-    assert!(owner
-        .storage
-        .status(&ObjectPath::join_request(owner.directory.id(), invite.id))
-        .await
-        .unwrap()
-        .is_none());
+    assert!(owner.storage.status(&crate::tests::request_path(&invite)).await.unwrap().is_none());
     owner.close().await;
 }
 
@@ -838,7 +828,7 @@ async fn a_join_after_the_invite_ended_sends_no_request() {
     install.absent(owner.directory.id()).await;
     // Ana's expiry ended the invite: its marker, if her pass has written it,
     // is all there is at the request's path.
-    let path = coven_storage::ObjectPath::join_request(owner.directory.id(), invite.id);
+    let path = crate::tests::request_path(&invite);
     assert!(crate::tests::no_request(&owner.storage, &path).await);
     owner.close().await;
 }

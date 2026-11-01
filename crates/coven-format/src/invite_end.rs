@@ -2,7 +2,7 @@
 
 use crate::error::Error;
 
-/// What an ended invite leaves at `<store>/join-requests/<invite>`, created
+/// What an ended invite leaves at `<store>/join-requests/<device>/<invite>`, created
 /// once in place of the request: a joining device that finds it there ends
 /// its join as declined, and a request sent after the invite ended finds the
 /// path taken. It holds no secret, only the time after which any device may

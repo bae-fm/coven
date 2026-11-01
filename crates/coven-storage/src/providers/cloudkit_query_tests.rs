@@ -33,7 +33,7 @@ fn every_prefix_selects_exactly_its_objects_by_directory_equality() {
                 ObjectPath::floor(store),
             ]);
         }
-        paths.push(ObjectPath::join_request(store, InviteId(uuid)));
+        paths.push(ObjectPath::join_request(store, DeviceId(1), InviteId(uuid)));
     }
     for prefix in [
         ObjectPrefix::all(store),

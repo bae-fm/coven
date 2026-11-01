@@ -247,11 +247,7 @@ async fn restart_while_waiting_reuses_the_member_device_and_request_bytes() {
     })
     .await
     .unwrap();
-    let bytes = owner
-        .storage
-        .read(&ObjectPath::join_request(owner.directory.id(), invite.id))
-        .await
-        .unwrap();
+    let bytes = owner.storage.read(&crate::tests::request_path(&invite)).await.unwrap();
     drop(joining);
     let pending = install.layout.begin_bootstrap(owner.directory.id(), &UuidIds).await.unwrap();
     drop(pending.directory().lock_exclusive().unwrap());
@@ -266,14 +262,7 @@ async fn restart_while_waiting_reuses_the_member_device_and_request_bytes() {
         |_| {},
     );
     let approve = async {
-        assert_eq!(
-            owner
-                .storage
-                .read(&ObjectPath::join_request(owner.directory.id(), invite.id))
-                .await
-                .unwrap(),
-            bytes
-        );
+        assert_eq!(owner.storage.read(&crate::tests::request_path(&invite)).await.unwrap(), bytes);
         crate::tests::approve(&owner.handle, &request).await;
     };
     let (result, ()) = join_with_response(resumed, approve).await;
