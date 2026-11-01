@@ -127,9 +127,10 @@ pub enum Replacement {
 }
 ```
 
-`handle.dismiss_lost_values(&values)` drops values the app has dealt with, on
-every device: dismissal is itself a write. To put a value back, the app writes
-it again like any edit.
+`sql.dismiss_lost_values(&values)`, a step of the app's write, drops values the
+app has dealt with, on every device; `handle.dismiss_lost_values(&values)` does
+it in a write of its own. To put a value back, the app writes it again like any
+edit, and dismissing the loss in that same write keeps the two together.
 
 A value stops being lost only when a later write that had read it replaces it
 in place: it sets the same cell, or deletes that row. Changing another cell of

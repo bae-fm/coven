@@ -3149,14 +3149,24 @@ impl CovenHandle {
     /// References show what was written, even if their parents were deleted.
     pub async fn lost_values(&self) -> CovenResult<Vec<LostValue>>;
 
-    /// Dismisses lost values the app has dealt with, in a write, so every
-    /// device drops them from `_coven_lost`; a removed row is deleted for
-    /// good, and never comes back (§8.4). Deleting an owned removed row requires
-    /// its owner's permission (§9.6); dismissing a frozen record changes no row.
+    /// `CovenWrite::dismiss_lost_values`, in a write of its own.
     pub async fn dismiss_lost_values(&self, values: &[LostValue]) -> CovenResult<()>;
 
-    /// The same, as a live query.
+    /// The lost values, as a live query.
     pub fn subscribe_lost_values(&self) -> LiveQuery<Vec<LostValue>>;
+}
+
+impl CovenWrite<'_> {
+    /// Dismisses lost values the app has dealt with, as a step of this write
+    /// (§4, §8.4), so every device drops them from `_coven_lost`; a removed
+    /// row is deleted for good, with its cascade, and never comes back. The
+    /// dismissals follow the app's own changes in the write's record, so a
+    /// value restored and its loss dismissed in one write go together. A
+    /// write that also changes a row its dismissals delete fails with
+    /// `DismissedRowChanged`. Deleting an owned removed row requires its
+    /// owner's permission (§9.6); dismissing a frozen record changes no row.
+    /// A value no longer lost as it was is left alone.
+    pub fn dismiss_lost_values(&self, values: &[LostValue]) -> Result<(), DbError>;
 }
 
 impl SqlReadContext<'_> {

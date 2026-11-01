@@ -23,7 +23,6 @@ use std::{
 
 #[path = "file_write_references.rs"]
 mod references;
-pub(crate) use references::{deletions, unreferenced};
 
 #[path = "file_write_uploads.rs"]
 mod uploads;
@@ -120,6 +119,9 @@ pub(crate) struct FileWrite<'a> {
     /// becomes its original (§17.3).
     local: RefCell<Vec<DeviceOnlyCopy>>,
     obsolete: RefCell<BTreeSet<FileName>>,
+    /// The lost values this write dismisses, which its record carries after
+    /// the app's changes (§8.4).
+    dismissing: RefCell<Vec<crate::LostValue>>,
     /// Whether one of coven's steps in this write failed (§4).
     failed_step: Cell<bool>,
     /// What runs once this write has committed, in the order its steps
@@ -152,9 +154,20 @@ impl<'a> FileWrite<'a> {
             moving: RefCell::new(Vec::new()),
             local: RefCell::new(Vec::new()),
             obsolete: RefCell::new(BTreeSet::new()),
+            dismissing: RefCell::new(Vec::new()),
             failed_step: Cell::new(false),
             committed: RefCell::new(Vec::new()),
         }
+    }
+
+    /// Dismiss these lost values in this write (§8.4).
+    pub(crate) fn dismiss(&self, values: &[crate::LostValue]) {
+        self.dismissing.borrow_mut().extend_from_slice(values);
+    }
+
+    /// The lost values this write dismisses.
+    pub(crate) fn take_dismissals(&self) -> Vec<crate::LostValue> {
+        std::mem::take(&mut self.dismissing.borrow_mut())
     }
 
     /// Run one of coven's steps (§4). A failed step may have made part of
@@ -213,12 +226,6 @@ impl<'a> FileWrite<'a> {
         map: impl FnMut(&rusqlite::Row<'_>) -> rusqlite::Result<T>,
     ) -> rusqlite::Result<Vec<T>> {
         self.database.app_query(sql, params, map)
-    }
-
-    /// The records a write made without SQL deletes, its others' last
-    /// reference gone (§17.2).
-    pub(crate) fn deleting(&self, files: BTreeSet<FileId>) {
-        *self.deleted.borrow_mut() = Some(files);
     }
 
     /// The new files the write's moves made for rows removal rules took out,

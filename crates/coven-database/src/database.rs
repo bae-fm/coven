@@ -539,26 +539,6 @@ impl Database {
         self.read(|sql| sql.lost_values()).await
     }
 
-    /// Dismisses lost values in a write so every device drops them from
-    /// `_coven_lost`; a removed row is deleted for good (§8.4, E4).
-    pub async fn dismiss_lost_values(&self, values: &[LostValue]) -> CovenResult<()> {
-        let values = values.to_vec();
-        self.call(move |inner| {
-            inner.with_files(Vec::new(), Vec::new(), |writer, files| {
-                crate::dismissal::dismiss(
-                    writer,
-                    &inner.access.write_schema,
-                    inner.access.device,
-                    inner.clock.now(),
-                    &values,
-                    files,
-                )
-                .map_err(Into::into)
-            })
-        })
-        .await
-    }
-
     /// Observe the decoded lost cells and removed rows.
     pub fn subscribe_lost_values(&self) -> LiveQuery<Vec<LostValue>> {
         self.subscribe(|sql| sql.lost_values())

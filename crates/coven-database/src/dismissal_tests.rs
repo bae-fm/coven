@@ -61,7 +61,94 @@ async fn dismissed_cell_is_removed_on_both_devices_and_after_reopen() {
     b.close().await.unwrap();
 }
 
+/// Ana restores the title she lost and dismisses its loss in one write
+/// (§8.4): the value and the dismissal commit together, so no state shows
+/// one without the other, and her record carries the row change and the
+/// dismissal in one part, which Ben's device applies as one write.
+#[tokio::test]
+async fn restoring_a_lost_value_and_dismissing_it_is_one_write() {
+    let ids = SequentialIds::new();
+    let sa = TestStore::with_ids(&ids);
+    let sb = TestStore::with_ids(&ids);
+    let a = open(&sa, NOTES).await;
+    let b = open(&sb, NOTES).await;
+    sql(&a, "INSERT INTO notes VALUES('n','initial','')").await.unwrap();
+    crate::author_judgement::tests::deliver(&a, &b).await;
+    sql(&a, "UPDATE notes SET title='a'").await.unwrap();
+    sql(&b, "UPDATE notes SET title='b'").await.unwrap();
+    crate::author_judgement::tests::deliver(&a, &b).await;
+    crate::author_judgement::tests::deliver(&b, &a).await;
+    let loss = a.lost_values().await.unwrap();
+    let [lost] = loss.as_slice() else { panic!("one lost title: {loss:?}") };
+    let crate::Lost::Cell(cell) = &lost.lost else { panic!("a lost cell: {lost:?}") };
+    let crate::types::Value::Text(title) = cell.value.clone() else { panic!("{cell:?}") };
+    let queued = records(&a).len();
+    a.write(move |sql| {
+        sql.execute("UPDATE notes SET title=?1 WHERE id='n'", [&title])?;
+        sql.dismiss_lost_values(&loss)?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+    let written = records(&a);
+    assert_eq!(written.len(), queued + 1);
+    let part = &written.last().unwrap().parts[0];
+    assert_eq!((part.rows.len(), part.dismissals.len()), (1, 1));
+    b.receive(written.last().unwrap().clone().into()).await.unwrap();
+    for db in [&a, &b] {
+        assert!(db.lost_values().await.unwrap().is_empty());
+        assert_eq!(count(db, "_coven_lost"), 0);
+    }
+    assert_eq!(data(&a).await, data(&b).await);
+    a.close().await.unwrap();
+    b.close().await.unwrap();
+}
+
 const UNIQUE: &str = "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY,title TEXT NOT NULL UNIQUE,body TEXT NOT NULL)";
+
+/// A write that dismisses a removed row, deleting it for good, and also
+/// inserts that row's key again, which coven records as a change to the row
+/// that is out, is refused with `DismissedRowChanged`, whichever comes
+/// first in it (§8.4). Nothing of it commits.
+#[tokio::test]
+async fn a_write_that_changes_a_row_it_dismisses_is_refused() {
+    let ids = SequentialIds::new();
+    let sa = TestStore::with_ids(&ids);
+    let sb = TestStore::with_ids(&ids);
+    let a = open(&sa, UNIQUE).await;
+    let b = open(&sb, UNIQUE).await;
+    sql(&a, "INSERT INTO notes VALUES('a','same','a body')").await.unwrap();
+    sql(&b, "INSERT INTO notes VALUES('b','same','b body')").await.unwrap();
+    crate::author_judgement::tests::deliver(&a, &b).await;
+    crate::author_judgement::tests::deliver(&b, &a).await;
+    let loss = a.lost_values().await.unwrap();
+    assert_eq!(loss.len(), 1);
+    let queued = records(&a).len();
+    for dismiss_first in [true, false] {
+        let values = loss.clone();
+        let refused = a
+            .write(move |sql| {
+                if dismiss_first {
+                    sql.dismiss_lost_values(&values)?;
+                }
+                sql.execute("INSERT INTO notes VALUES('b','other','again')", [])?;
+                if !dismiss_first {
+                    sql.dismiss_lost_values(&values)?;
+                }
+                Ok(())
+            })
+            .await;
+        assert!(
+            matches!(&refused, Err(crate::DbError::DismissedRowChanged { table, .. }) if table == "notes"),
+            "{refused:?}"
+        );
+        assert_eq!(a.lost_values().await.unwrap(), loss);
+        assert_eq!(records(&a).len(), queued);
+        assert_eq!(count(&a, "notes"), 1);
+    }
+    a.close().await.unwrap();
+    b.close().await.unwrap();
+}
 
 #[tokio::test]
 async fn dismissed_removed_row_stays_deleted_and_concurrent_edit_is_lost() {
@@ -399,4 +486,20 @@ async fn an_empty_frozen_delete_can_be_dismissed_after_receipt_and_snapshot() {
     b.close().await.unwrap();
     a.close().await.unwrap();
     source.close().await.unwrap();
+}
+
+impl crate::Database {
+    /// Dismiss lost values in a write of their own, as the app's
+    /// `dismiss_lost_values` does.
+    pub(crate) async fn dismiss_lost_values(
+        &self,
+        values: &[crate::LostValue],
+    ) -> crate::CovenResult<()> {
+        let values = values.to_vec();
+        self.write_with_files::<_, _, _, _, crate::CovenError>(
+            |_| Ok(()),
+            move |sql, ()| Ok(sql.dismiss_lost_values(&values)?),
+        )
+        .await
+    }
 }

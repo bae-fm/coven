@@ -4,7 +4,6 @@ use crate::lost::LossTarget;
 use crate::merge_store::MergeStore;
 use crate::sqlite::DatabaseConnection;
 use crate::write_encoding::audience_text;
-use crate::write_rows::AppView;
 use crate::write_schema::WriteSchema;
 use crate::{DbError, LostValue};
 use coven_format::{
@@ -15,87 +14,85 @@ use coven_format::{
 use coven_foundation::id_source::DeviceId;
 use coven_merge::{Change, Operation, RowId, RowState};
 use rusqlite::params;
-use std::{
-    collections::{BTreeMap, BTreeSet, VecDeque},
-    time::SystemTime,
-};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
-pub(crate) fn dismiss(
+/// The deletes and acknowledgements a local write's dismissals add to the
+/// app's own changes (§8.4). Each removed row still lost as it was gets its
+/// delete, with the deletes its CASCADE children need, as steps after the
+/// app's; each acknowledgement still naming a lost value is returned for the
+/// record's parts. A dismissal no longer matching what is lost, as a stale
+/// query's, is left out. A write that also changes a row a dismissal
+/// deletes fails with `DismissedRowChanged`: the delete is for good, and the
+/// app's change would make it something else.
+pub(crate) fn merge(
     database: &DatabaseConnection,
     schema: &WriteSchema,
+    store: &MergeStore<'_>,
     device: DeviceId,
-    now: SystemTime,
     values: &[LostValue],
-    files: &crate::file_write::FileWrite<'_>,
-) -> Result<(), DbError> {
-    database.transaction(|database| {
-        let visible = AppView::after(database, schema);
-        let store = MergeStore::new(database, &visible);
-        let mut changes = BTreeMap::new();
-        let mut acknowledgements = BTreeSet::new();
-        for value in values {
-            match &value.target {
-                LossTarget::Removed { row, generation } => {
-                    let old = store.row(row)?;
-                    // A stale query must not delete a restored or re-created row.
-                    // Only an owned row's owner may delete it; queueing judges that (§9.6).
-                    if old.loss.is_some() && old.state.generation() == *generation {
-                        changes.insert(row.clone(), deletion(database, &store, &old.state)?);
-                    }
+    changes: &mut BTreeMap<RowId, RowChange>,
+    steps: &mut BTreeMap<RowId, Vec<Step>>,
+) -> Result<BTreeSet<Dismissal>, DbError> {
+    let mut deletes = BTreeMap::new();
+    let mut acknowledgements = BTreeSet::new();
+    for value in values {
+        match &value.target {
+            LossTarget::Removed { row, generation } => {
+                let old = store.row(row)?;
+                // A stale query must not delete a restored or re-created row.
+                // Only an owned row's owner may delete it; queueing judges that (§9.6).
+                if old.loss.is_some() && old.state.generation() == *generation {
+                    deletes.insert(row.clone(), deletion(database, store, &old.state)?);
                 }
-                LossTarget::Acknowledgements(dismissals) => {
-                    for dismissal in dismissals {
-                        if contains(database, dismissal)? {
-                            acknowledgements.insert(dismissal.clone());
-                        }
+            }
+            LossTarget::Acknowledgements(dismissals) => {
+                for dismissal in dismissals {
+                    if contains(database, dismissal)? {
+                        acknowledgements.insert(dismissal.clone());
                     }
                 }
             }
         }
-        if changes.is_empty() && acknowledgements.is_empty() {
-            return Ok(());
+    }
+    cascade_deletes(database, schema, store, device, &mut deletes)?;
+    let after = steps.values().flatten().map(|step| step.sequence + 1).max().unwrap_or(0);
+    for (row, mut change) in deletes {
+        if changes.contains_key(&row) || steps.contains_key(&row) {
+            return Err(DbError::DismissedRowChanged {
+                table: row.table.clone(),
+                key: crate::RowKey(
+                    crate::write_rows::key_parameters(&row.key)?.into_iter().collect(),
+                ),
+            });
         }
-        cascade_deletes(database, schema, &store, device, &mut changes)?;
-        let build = |changes| {
-            let mut record = crate::write_record::changed(database, device, now, changes)?;
-            dismissing(&mut record, &acknowledgements);
-            Ok::<_, DbError>(record)
-        };
-        let mut record = build(changes.clone())?;
-        // The same write deletes each file whose last reference its deletes
-        // and dismissals remove (§17.2), each delete a step after its others.
-        let unreferenced = crate::file_write::unreferenced(database, schema, &store, &record)?;
-        if !unreferenced.is_empty() {
-            let sequence = changes
-                .values()
-                .flat_map(|change| &change.execution.steps)
-                .map(|step| step.sequence + 1)
-                .max()
-                .unwrap_or(0);
-            for (mut change, step) in
-                crate::file_write::deletions(database, &store, &unreferenced, sequence)?
-            {
-                if changes.contains_key(&change.row) {
-                    return Err(DbError::Invariant {
-                        what: "a write deleting a file's record makes no other change to it",
-                    });
-                }
-                change.execution.steps.push(step);
-                changes.insert(change.row.clone(), change);
-            }
-            record = build(changes)?;
+        let mut deleted = std::mem::take(&mut change.execution.steps);
+        for step in &mut deleted {
+            step.sequence = step
+                .sequence
+                .checked_add(after)
+                .ok_or(DbError::Invariant { what: "a write has fewer operations" })?;
         }
-        files.deleting(unreferenced);
-        let deleted = crate::store_state_tables::deleted_circles(database)?;
-        let affected = crate::write_apply::WriteApply::new(
-            database, schema, &store, &visible, &visible, &deleted,
-        )
-        .apply(Some(&record), BTreeSet::new())?;
-        files.retain_rows(affected)?;
-        files.before_commit()?;
-        crate::operation::check_write_pause(database)?;
-        crate::write_commit::queue(database, schema, &record)
-    })
+        steps.insert(row.clone(), deleted);
+        changes.insert(row, change);
+    }
+    Ok(acknowledgements)
+}
+
+/// A local write's record with its acknowledgements: `record`, as its
+/// changes make it, with each acknowledgement in its row's audience part,
+/// or, for a write of acknowledgements alone, one `empty` makes for them.
+pub(crate) fn recorded(
+    record: Option<WriteRecord>,
+    acknowledgements: &BTreeSet<Dismissal>,
+    empty: impl FnOnce() -> Result<WriteRecord, DbError>,
+) -> Result<Option<WriteRecord>, DbError> {
+    let mut record = match record {
+        Some(record) => record,
+        None if acknowledgements.is_empty() => return Ok(None),
+        None => empty()?,
+    };
+    dismissing(&mut record, acknowledgements);
+    Ok(Some(record))
 }
 
 /// Add each of `acknowledgements` to the part of `record` in its row's

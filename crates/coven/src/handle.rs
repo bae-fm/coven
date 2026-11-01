@@ -368,11 +368,11 @@ impl CovenHandle {
         self.database.lost_values().await
     }
 
-    /// Dismisses lost values the app has dealt with, in a write, so every
-    /// device drops them from `_coven_lost`; a removed row is deleted for
-    /// good, and never comes back (§8.4).
+    /// Dismisses lost values in a write of its own
+    /// (`CovenWrite::dismiss_lost_values`).
     pub async fn dismiss_lost_values(&self, values: &[LostValue]) -> CovenResult<()> {
-        self.database.dismiss_lost_values(values).await
+        let values = values.to_vec();
+        self.write(move |write| Ok(write.dismiss_lost_values(&values)?)).await
     }
 
     /// The same, as a live query.

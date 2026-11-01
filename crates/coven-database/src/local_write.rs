@@ -6,7 +6,7 @@ use super::transaction_capture::ChangeCapture;
 use super::DatabaseConnection;
 use crate::DbError;
 use coven_foundation::id_source::DeviceId;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::time::SystemTime;
 
 impl DatabaseConnection {
@@ -39,12 +39,12 @@ impl DatabaseConnection {
             let before = crate::write_rows::AppView::before(database, schema, &captured)?;
             let after = crate::write_rows::AppView::after(database, schema);
             let store = crate::merge_store::MergeStore::new(database, &before);
-            let steps =
+            let mut steps =
                 crate::execution_capture::capture(database, schema, &before, &after, &events)?;
             let changed = before.changes(&after, captured.keys().cloned())?;
             // The write's own moves already named their shown rows' new
             // files; only a taken-out row's insert names one (§17.2).
-            let changes = crate::write_record::changes(
+            let mut changes = crate::write_record::changes(
                 database,
                 schema,
                 &before,
@@ -54,8 +54,22 @@ impl DatabaseConnection {
                 &deleted_circles,
                 &files.taken_out_copies(),
             )?;
+            // The write's dismissals follow the app's changes (§8.4).
+            let acknowledgements = crate::dismissal::merge(
+                database,
+                schema,
+                &store,
+                device,
+                &files.take_dismissals(),
+                &mut changes,
+                &mut steps,
+            )?;
             let record = files.delete_unreferenced(&store, changes, steps, |changes, steps| {
-                crate::write_record::record(database, device, now, changes, steps, &store)
+                crate::dismissal::recorded(
+                    crate::write_record::record(database, device, now, changes, steps, &store)?,
+                    &acknowledgements,
+                    || crate::write_record::changed(database, device, now, BTreeMap::new()),
+                )
             })?;
             let affected = crate::write_apply::WriteApply::new(
                 database,

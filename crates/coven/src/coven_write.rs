@@ -65,6 +65,18 @@ impl<'write> CovenWrite<'write> {
         self.storage.set_uploads_paused(&self.sql, paused)
     }
 
+    /// Dismisses lost values the app has dealt with (§8.4): the write's
+    /// record carries the acknowledgements, and the removed rows' deletes
+    /// with their cascades, after the app's own changes, so every device
+    /// drops them from `_coven_lost`. A removed row is deleted for good and
+    /// never comes back. A value no longer lost as it was is left alone.
+    /// Setting a value and dismissing its loss in one write keeps the two
+    /// together; a write that also changes a row its dismissals delete fails
+    /// with `DismissedRowChanged`.
+    pub fn dismiss_lost_values(&self, values: &[LostValue]) -> Result<(), DbError> {
+        self.sql.dismiss_lost_values(values)
+    }
+
     /// Makes an operation's retry or undo due now, from its recorded
     /// progress (E6): its pending record and retry wait end in this write.
     /// It fails with `NotPending` for an operation that has finished or

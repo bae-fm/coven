@@ -473,6 +473,15 @@ pub enum DbError {
         /// The repeated converted reference.
         reference: coven_merge::ForeignKey,
     },
+    /// A write dismissed a removed row, deleting it for good, and also
+    /// changed that row or one its delete cascades to (§8.4).
+    #[error("a write dismissing {table} at {key:?} also changes it")]
+    DismissedRowChanged {
+        /// The declared table.
+        table: String,
+        /// The row's key.
+        key: crate::RowKey,
+    },
     /// A write changed a write-once file reference that named a file (§17.2).
     #[error("file reference on {table} at {key:?} cannot change")]
     FileWriteOnce {

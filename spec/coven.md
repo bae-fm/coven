@@ -2062,10 +2062,22 @@ todo 7's start past its end. Todo 7 is out for both reasons on every device,
 whichever rule a device ran first.
 
 **Dismissing.** The app can dismiss a taken-out row for good
-([api.md E4](api.md#e4-reading)). The dismissal is a write that records a real
-delete of the row, so it never comes back, and its children follow their foreign
-keys' delete actions (§9.1). The same write records deletes for its cascade
-children, including their cascade children. The dismissed lost value is dropped.
+([api.md E4](api.md#e4-reading)). The dismissal is a step of a write (§4), which
+may carry the app's other changes too. It records a real delete of the row, so it
+never comes back, and its children follow their foreign keys' delete actions
+(§9.1). The same write records deletes for its cascade children, including their
+cascade children. The dismissed lost value is dropped. Dismissing a lost value
+that isn't a row, such as Ben's lost title, records an acknowledgement in the
+write instead, and every device drops that value.
+
+The dismissal's deletes and acknowledgements come after the app's own changes in
+the write's record. So restoring a lost value is one write: Ana's app sets note
+42's title back to "Weekly groceries" and dismisses that loss in the same write,
+and no device ever shows the title restored with the loss still listed, or the
+loss gone with the title not yet back. A write that dismisses a taken-out row
+and also changes that row, or a row its delete cascades to, is refused with
+`DismissedRowChanged`: the delete is for good, and the change would make the row
+something else. That includes inserting the row's key again, below.
 
 **Inserting the same key again.** The app can't see a row that is out, so it can
 insert the same shared key again (§9.2). The write records that insert as an
@@ -9430,6 +9442,7 @@ maps them are with each provider in Appendix E.
 | `DbError::FileUnknown` | a reference names no file this device has a record of in the row's audience, including a restored lost value naming a deleted file | §17.2 |
 | `DbError::FileUnreferenced` | a file the write staged is referenced by none of its rows | §17.3 |
 | `DbError::FileWriteOnce` | a write would change a write-once reference that names a file | §17.2 |
+| `DbError::DismissedRowChanged` | a write dismisses a taken-out row and also changes it, or a row its delete cascades to | §8.4 |
 | `DbError::UndeclaredNamespace`, `DbError::NamespaceKind` | a file is staged into a namespace not declared at open, or into one of the other kind; or a bound reference names a user's file | §17.1, §17.4 |
 | `DbError::BoundFileTooLarge` | a bound reference names a file larger than its column's limit | §17.4 |
 | `DbError::DeviceOnly` | a bound reference names a file on one device only that no bound upload stores | §17.4 |

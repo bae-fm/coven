@@ -194,8 +194,8 @@ while let Some(Ok(values)) = lost.next().await {
 }
 ```
 
-Restoring a value is an ordinary write. `dismiss_lost_values` drops the ones the
-person has dealt with, on every device ([Merge](/docs/merge#lost-values)).
+Restoring a value is an ordinary write, and `dismiss_lost_values` in the same
+write drops the loss, on every device ([Merge](/docs/merge#lost-values)).
 
 ## Attach a file
 

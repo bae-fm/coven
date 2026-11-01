@@ -60,6 +60,20 @@ impl<'connection, 'write> SqlContext<'connection, 'write> {
         self.files.step(|| self.files.set_cache_budget(namespace, bytes))
     }
 
+    /// Dismiss lost values the app has dealt with, in this write (§8.4): its
+    /// record carries the acknowledgements and the removed rows' deletes,
+    /// with their cascades, after the app's own changes, so every device
+    /// drops them. A removed row is deleted for good. A value no longer lost
+    /// as it was, such as a row restored since, is left alone. The write
+    /// fails with `DismissedRowChanged` if it also changes a row its
+    /// dismissals delete.
+    pub fn dismiss_lost_values(&self, values: &[crate::LostValue]) -> Result<(), crate::DbError> {
+        self.files.step(|| {
+            self.files.dismiss(values);
+            Ok(())
+        })
+    }
+
     /// Pause trailing uploads, or resume them, in this write (§17.9). A
     /// paused upload keeps its place and its provider session.
     pub fn set_uploads_paused(&self, paused: bool) -> Result<(), crate::DbError> {
