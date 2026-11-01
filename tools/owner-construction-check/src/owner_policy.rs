@@ -59,10 +59,6 @@ pub(crate) const POLICY: Policy = Policy {
         // Name reads open temporary read-only connections at the database boundary.
         ("crates/coven-database/src/database_builder.rs", "<free>", "read_store_name"),
         ("crates/coven-database/src/database_builder.rs", "<free>", "discarded_store_name"),
-        ("crates/coven-database/src/file_database.rs", "CacheReservation", "publish"),
-        // Consumes the upload's cache reservation on its own blocking task,
-        // releasing it after the database guard as `publish` does.
-        ("crates/coven-database/src/file_database.rs", "FileDatabase", "complete_upload"),
         ("crates/coven-database/src/file_database.rs", "FileDatabase", "new"),
         ("crates/coven-database/src/file_database.rs", "FileDatabase", "read_only"),
         ("crates/coven-database/src/file_staging.rs", "FileStaging", "write"),
