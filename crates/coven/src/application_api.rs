@@ -121,8 +121,8 @@ pub use coven_sync::{
 };
 pub use coven_sync::{
     DeviceOnlyError, DeviceOnlyStep, DrainOutcome, FileRangeStream, FileReadError, FileStatus,
-    FileStream, PinProgress, QueuedUpload, TransferLimits, UploadPhase, UploadProgress,
-    UploadQueue,
+    FileStream, PinProgress, QueuedUpload, ReadProgress, TransferLimits, UploadPhase,
+    UploadProgress, UploadQueue,
 };
 
 #[cfg(any(test, doctest))]

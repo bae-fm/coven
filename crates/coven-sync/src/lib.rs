@@ -38,8 +38,8 @@ mod sequence_state;
 mod sync_often;
 pub use files::{
     DeviceOnlyError, DeviceOnlyStep, DrainOutcome, FileRangeStream, FileReadError, FileStatus,
-    FileStream, Files, PinProgress, QueuedUpload, TransferLimits, UploadPhase, UploadProgress,
-    UploadQueue,
+    FileStream, Files, PinProgress, QueuedUpload, ReadProgress, TransferLimits, UploadPhase,
+    UploadProgress, UploadQueue,
 };
 pub use retry_waits::{
     NetworkOwner, PassRequests, RetryAnswer, RetryEffect, RetryOutcome, RetryWaits,

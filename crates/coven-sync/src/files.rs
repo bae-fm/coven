@@ -33,7 +33,7 @@ use coven_foundation::{files::StoreDir, id_source::IdSourceRef};
 use coven_storage::Storage;
 pub use file_device_only::{DeviceOnlyError, DeviceOnlyStep};
 pub use file_error::FileReadError;
-pub use file_read::{FileRangeStream, FileStream};
+pub use file_read::{FileRangeStream, FileStream, ReadProgress};
 pub use file_status::FileStatus;
 pub use file_upload_pool::DrainOutcome;
 pub use file_upload_queue::{QueuedUpload, UploadPhase, UploadProgress, UploadQueue};

@@ -505,6 +505,40 @@ async fn a_verified_range_publishes_as_one_entry() {
     f.close().await;
 }
 
+/// A read that fetches from storage tells how much of its range is here as
+/// the bytes arrive, counting the part the cache already held, and ends at
+/// the whole range; the same read served by the cache tells nothing
+/// (§17.7).
+#[tokio::test]
+async fn a_fetching_read_tells_how_much_of_its_range_is_here() {
+    let f = Fixture::new(Provenance::AppProvided).await;
+    let bytes: Vec<u8> = (0..CHUNK * 3).map(|i| (i % 233) as u8).collect();
+    let file = f.uploaded("progress", bytes.clone()).await;
+    let stream = f.files.open_file_stream(&file).await.unwrap();
+    // The first chunk is cached before the read.
+    stream.read_at(0, 1).await.unwrap();
+    let told = |counts: &std::sync::Arc<std::sync::Mutex<Vec<u64>>>| {
+        let counts = counts.clone();
+        crate::ReadProgress::new(move |here| counts.lock().unwrap().push(here))
+    };
+    let (offset, len) = (5, 3 * CHUNK as u64 - 10);
+    let fetching = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    assert_eq!(
+        stream.read_at_reporting(offset, len, &told(&fetching)).await.unwrap(),
+        bytes[5..3 * CHUNK - 5]
+    );
+    let fetching = fetching.lock().unwrap().clone();
+    assert_eq!(fetching.first(), Some(&(CHUNK as u64 - 5)), "the cached chunk's part");
+    assert_eq!(fetching.last(), Some(&len));
+    assert!(fetching.windows(2).all(|pair| pair[0] <= pair[1]), "{fetching:?}");
+    assert!(fetching.len() > 2, "told as the bytes arrive: {fetching:?}");
+
+    let cached = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    stream.read_at_reporting(offset, len, &told(&cached)).await.unwrap();
+    assert!(cached.lock().unwrap().is_empty());
+    f.close().await;
+}
+
 /// A chunk failing authentication in the middle of a range publishes none
 /// of the range, and leaves no unnamed bytes behind.
 #[tokio::test]

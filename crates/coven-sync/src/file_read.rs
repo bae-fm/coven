@@ -73,8 +73,39 @@ pub(crate) struct UploadedFile {
     path: ObjectPath,
     _lock: StoreReadLock,
 }
+/// Where a read that fetches from storage tells how much of its range is
+/// here: the count of the range's bytes in hand, cached or received, each
+/// time it grows while the read fetches. A read this device serves alone,
+/// from its own copy or the cache, tells it nothing (§17.7).
+#[derive(Clone)]
+pub struct ReadProgress {
+    report: Arc<dyn Fn(u64) + Send + Sync>,
+}
+impl std::fmt::Debug for ReadProgress {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ReadProgress").finish_non_exhaustive()
+    }
+}
+impl ReadProgress {
+    /// Tell `report` each new count of the range's bytes in hand.
+    pub fn new(report: impl Fn(u64) + Send + Sync + 'static) -> Self {
+        Self { report: Arc::new(report) }
+    }
+    fn tell(&self, here: u64) {
+        (self.report)(here);
+    }
+}
+/// A read's range and how much of it the steps before this one put in hand,
+/// for the fetch that follows to count on from.
+struct RangeHere<'a> {
+    progress: &'a ReadProgress,
+    offset: u64,
+    len: u64,
+    here: u64,
+}
 enum ChunkDestination<'a> {
-    Cache,
+    /// The cache, for a read; `None` for one whose progress nothing shows.
+    Cache(Option<RangeHere<'a>>),
     /// A pin's whole file, whose download `meter` hears as its bytes arrive.
     WholeFile(&'a TransferMeter),
 }
@@ -152,6 +183,25 @@ impl FileStream {
     /// chunks, batching adjacent chunks within 1 MiB. Use `read_range` to keep
     /// returned plaintext bounded independently of the requested range length.
     pub async fn read_at(&self, offset: u64, len: u64) -> Result<Vec<u8>, FileReadError> {
+        self.read(offset, len, None).await
+    }
+    /// [`Self::read_at`], telling `progress` how many of the range's bytes are
+    /// here each time that grows while the read fetches from storage. A read
+    /// served from this device's copy or the cache tells it nothing.
+    pub async fn read_at_reporting(
+        &self,
+        offset: u64,
+        len: u64,
+        progress: &ReadProgress,
+    ) -> Result<Vec<u8>, FileReadError> {
+        self.read(offset, len, Some(progress)).await
+    }
+    async fn read(
+        &self,
+        offset: u64,
+        len: u64,
+        progress: Option<&ReadProgress>,
+    ) -> Result<Vec<u8>, FileReadError> {
         match &self.source {
             OpenFile::Local { stream, owner, file, uploading } => {
                 let read = stream.read_at(offset, len).await.map_err(FileReadError::from);
@@ -174,7 +224,7 @@ impl FileStream {
                 } else if !sequential {
                     state.hash = None;
                 }
-                let read = file.range(offset, len).await;
+                let read = file.range(offset, len, progress).await;
                 let bytes = match read {
                     Ok(bytes) => bytes,
                     Err(error) => {
@@ -209,7 +259,8 @@ impl FileStream {
                     let start = offset + len;
                     state.ahead = Some(tokio::spawn(async move {
                         let length = (ahead.header.size() - start).min(REQUEST_BYTES);
-                        let result = ahead.range(start, length).await.map_err(TransferError::from);
+                        let result =
+                            ahead.range(start, length, None).await.map_err(TransferError::from);
                         ahead.owner.finish_read_ahead(&ahead.file, result).await;
                     }));
                 }
@@ -314,7 +365,7 @@ impl UploadedFile {
             &self.path,
             0,
             FILE_HEADER_LEN as u64,
-            &ChunkDestination::Cache,
+            &ByteProgress::unread(),
         )
         .await?;
         self.publish_header(bytes).await
@@ -410,7 +461,12 @@ impl UploadedFile {
         clippy::map_err_ignore,
         reason = "a size past the target integer is TooLarge, which names the field and size"
     )]
-    pub(crate) async fn range(&self, offset: u64, len: u64) -> Result<Vec<u8>, FileReadError> {
+    pub(crate) async fn range(
+        &self,
+        offset: u64,
+        len: u64,
+        progress: Option<&ReadProgress>,
+    ) -> Result<Vec<u8>, FileReadError> {
         self.owner.check_open()?;
         self.check_range(offset, len)?;
         let length = usize::try_from(len).map_err(|_| DbError::TooLarge {
@@ -431,7 +487,14 @@ impl UploadedFile {
         let mut index = offset / size;
         let last = (offset + len - 1) / size;
         while index <= last {
-            let (end, chunks) = self.chunks(index, last, ChunkDestination::Cache).await?;
+            let here = result.len() as u64;
+            let destination = ChunkDestination::Cache(progress.map(|progress| RangeHere {
+                progress,
+                offset,
+                len,
+                here,
+            }));
+            let (end, chunks) = self.chunks(index, last, destination).await?;
             for (number, chunk) in chunks.into_iter().enumerate() {
                 let plain = chunk.plaintext;
                 let position = (index + number as u64) * size;
@@ -498,15 +561,15 @@ impl UploadedFile {
             end_index += 1;
             end = next_end;
         }
+        let received = self.received(&destination, first, end_index, start)?;
         let bytes = if with_header {
             // The header precedes chunk zero: one request carries both.
-            let mut bytes =
-                fetch(&self.owner, &self.file, &self.path, 0, end, &destination).await?;
+            let mut bytes = fetch(&self.owner, &self.file, &self.path, 0, end, &received).await?;
             let chunks = bytes.split_off(FILE_HEADER_LEN);
             self.publish_header(bytes).await?;
             chunks
         } else {
-            fetch(&self.owner, &self.file, &self.path, start, end, &destination).await?
+            fetch(&self.owner, &self.file, &self.path, start, end, &received).await?
         };
         let mut plain = Vec::new();
         let mut cursor = 0;
@@ -525,7 +588,7 @@ impl UploadedFile {
         // file and one row. A failed chunk publishes none of it. A pin writes
         // these bytes to its reserved whole file instead; adding them to the
         // cache too could evict a cached tail before pinning reaches it.
-        if matches!(destination, ChunkDestination::Cache) {
+        if matches!(destination, ChunkDestination::Cache(_)) {
             cache(&self.owner, &self.file, first as i64, (end_index - first + 1) as i64, bytes)
                 .await?;
             self.owner.trim(self.file.namespace()).await;
@@ -535,6 +598,65 @@ impl UploadedFile {
             plain.push(self.open_cached(end_index, bytes)?);
         }
         Ok((end_index, plain))
+    }
+    /// What hears a fetch of chunks `first..=last`, which starts `start`
+    /// bytes into the object. A pin's meter hears the furthest through the
+    /// object the bytes received reach. A read that shows its progress hears,
+    /// from the fetch's start, its range's bytes in hand: those the steps
+    /// before had, and the received part of each fetched chunk that falls in
+    /// the range.
+    #[expect(
+        clippy::map_err_ignore,
+        reason = "a chunk the file size's layout lacks is the disagreement Integrity names"
+    )]
+    fn received(
+        &self,
+        destination: &ChunkDestination<'_>,
+        first: u64,
+        last: u64,
+        start: u64,
+    ) -> Result<ByteProgress, FileReadError> {
+        match destination {
+            ChunkDestination::WholeFile(meter) => {
+                let meter = (*meter).clone();
+                let furthest = std::sync::atomic::AtomicU64::new(start);
+                Ok(ByteProgress::new(move |reached| {
+                    let before = furthest.fetch_max(reached, std::sync::atomic::Ordering::Relaxed);
+                    if reached > before {
+                        meter.reached(reached);
+                    }
+                }))
+            }
+            ChunkDestination::Cache(None) => Ok(ByteProgress::unread()),
+            ChunkDestination::Cache(Some(range)) => {
+                let size = CHUNK_SIZE as u64;
+                // Each fetched chunk's place in the object, its plaintext
+                // length, and the part of the range it holds.
+                let mut chunks = Vec::new();
+                for index in first..=last {
+                    let chunk = self.header.chunk(index).map_err(|_| self.integrity())?;
+                    let plain_start = index * size;
+                    let from = range.offset.max(plain_start) - plain_start;
+                    let to = (range.offset + range.len)
+                        .min(plain_start + chunk.plaintext_length as u64)
+                        - plain_start;
+                    chunks.push((chunk.offset, chunk.plaintext_length as u64, from, to));
+                }
+                let progress = range.progress.clone();
+                let here = range.here;
+                progress.tell(here);
+                Ok(ByteProgress::new(move |reached| {
+                    let fetched: u64 = chunks
+                        .iter()
+                        .map(|&(offset, length, from, to)| {
+                            let received = reached.saturating_sub(offset).min(length);
+                            received.clamp(from, to) - from
+                        })
+                        .sum();
+                    progress.tell(here + fetched);
+                }))
+            }
+        }
     }
     /// Authenticate chunk `index`'s cached bytes.
     fn open_cached(&self, index: u64, bytes: Vec<u8>) -> Result<OpenedChunk, FileReadError> {
@@ -561,17 +683,17 @@ async fn cache(
     owner.database.cache_range(file, first, chunks, name, bytes).await?;
     Ok(())
 }
-/// Fetch `start..end` of the file's object. For a pin's whole file, its
-/// meter hears the furthest through the object the bytes received reach:
-/// storage tells it as the stream is read, and CloudKit also as each part's
-/// fetch goes, ahead of the read.
+/// Fetch `start..end` of the file's object, telling `received` how far
+/// through the object the bytes received reach: storage tells it as the
+/// stream is read, and CloudKit also as each part's fetch goes, ahead of the
+/// read.
 async fn fetch(
     owner: &FilesInner,
     file: &FileRef,
     path: &ObjectPath,
     start: u64,
     end: u64,
-    destination: &ChunkDestination<'_>,
+    received: &ByteProgress,
 ) -> Result<Vec<u8>, FileReadError> {
     let storage = owner
         .storage
@@ -582,21 +704,8 @@ async fn fetch(
     // A stored file's record names it only once it is stored (§17.2):
     // confirmed absence means storage lost it, never a provider failure or
     // an upload to wait for.
-    let received = match destination {
-        ChunkDestination::WholeFile(meter) => {
-            let meter = (*meter).clone();
-            let furthest = std::sync::atomic::AtomicU64::new(start);
-            ByteProgress::new(move |reached| {
-                let before = furthest.fetch_max(reached, std::sync::atomic::Ordering::Relaxed);
-                if reached > before {
-                    meter.reached(reached);
-                }
-            })
-        }
-        ChunkDestination::Cache => ByteProgress::unread(),
-    };
     let mut stream = match storage
-        .stream_object_reporting(path, Some(ByteRange::new(start, end)?), &received)
+        .stream_object_reporting(path, Some(ByteRange::new(start, end)?), received)
         .await
     {
         Ok(stream) => stream,

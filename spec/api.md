@@ -5691,12 +5691,30 @@ impl FileStream {
     /// a short read.
     pub async fn read_at(&self, offset: u64, len: u64) -> Result<Vec<u8>, FileReadError>;
 
+    /// `read_at`, telling `progress` how many of the range's bytes are here
+    /// each time that grows while the read fetches from storage. A read the
+    /// cache or this device's copy serves alone tells it nothing (§17.7).
+    pub async fn read_at_reporting(
+        &self,
+        offset: u64,
+        len: u64,
+        progress: &ReadProgress,
+    ) -> Result<Vec<u8>, FileReadError>;
+
     /// The same range as bounded plaintext buffers, without allocating its
     /// whole length. Authentication precedes each yielded buffer; a complete
     /// sequential read of a stored file checks the record's content hash
     /// before the final buffer. A file this device uploads is read as it is
     /// on disk (§17.7).
     pub fn read_range(&self, offset: u64, len: u64) -> Result<FileRangeStream<'_>, FileReadError>;
+}
+
+/// Where a read tells how many of its range's bytes are here.
+pub struct ReadProgress { /* private */ }
+
+impl ReadProgress {
+    /// Tell `report` each new count of the range's bytes in hand.
+    pub fn new(report: impl Fn(u64) + Send + Sync + 'static) -> Self;
 }
 
 /// A borrowed stream of bounded authenticated plaintext buffers.

@@ -127,7 +127,7 @@ pub(crate) const POLICY: Policy = Policy {
         (MEMORY_CONNECTOR, "MemoryStorage", "with_cooldown"),
         (MEMORY_STORAGE, "MemoryStorage", "for_device"),
         (MEMORY_STORAGE, "MemoryStorage", "for_recipient"),
-        ("crates/coven-sync/src/file_read.rs", "FileStream", "read_at"),
+        ("crates/coven-sync/src/file_read.rs", "FileStream", "read"),
         // Creates a reserved cache file for a pin or an upload's own copy.
         ("crates/coven-sync/src/file_cache.rs", "FilesInner", "create_cache_file"),
         ("crates/coven-sync/src/file_read.rs", "UploadedFile", "open"),

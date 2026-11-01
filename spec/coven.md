@@ -5701,6 +5701,12 @@ seeking within it are reads of different ranges.
   - Neighbouring chunks are fetched together, up to 1 MiB per request.
   - Each chunk is checked as it arrives; a failed check fails the read.
   - Fetched chunks go into the cache, so reading a range again costs nothing.
+  - A read the app asks to report tells it how many of the range's bytes are
+    here each time that grows while it fetches: first the part the cache
+    already held, then each fetched chunk's part as its bytes arrive. A player
+    shows how much of a song's start has downloaded while it waits. A read the
+    cache or this device's copy serves alone tells nothing, so the app learns
+    a read waits on the network only when it does.
 - **While a file is read in order,** coven fetches chunks ahead of the reader, so
   playback doesn't wait on the network. Seeking costs only the chunks under the
   new position.
