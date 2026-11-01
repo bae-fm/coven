@@ -695,6 +695,10 @@ async fn prepare_and_load(
             )
         }
     };
+    #[cfg(test)]
+    if let Some(recorder) = &builder.loading_recorder {
+        recorder.watch(sync.subscribe_progress());
+    }
     let loading = async {
         if let Admission::Joining(joining) = &mut admission {
             if !joining.admit(&sync, &database, status).await? {

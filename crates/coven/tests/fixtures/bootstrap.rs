@@ -1,5 +1,6 @@
 use super::*;
 pub(super) use crate::tests::{join_and_approve, join_with_response, next_join_request};
+use coven_foundation::progress::RecordingClock;
 
 pub(super) fn tables() -> Vec<SyncedTable> {
     vec![SyncedTable::new("notes", RowIdentity::SharedKey)]
@@ -180,6 +181,21 @@ impl Installation {
             .await
     }
 
+    /// A bootstrap, as [`Self::run`], whose loading reports `recorder`
+    /// records at their source.
+    pub(super) async fn run_recorded(
+        &self,
+        owner: &Owner,
+        request: BootstrapRequest,
+        storage: Arc<MemoryStorage>,
+        cancel: &watch::Receiver<bool>,
+        status: impl Fn(BootstrapStatus),
+        recorder: &Arc<RecordingClock<LoadStep>>,
+    ) -> Result<Option<CovenHandle>, BootstrapError> {
+        let builder = self.authenticated_builder(owner, storage).await;
+        bootstrap_device(builder.record_loading(recorder.clone()), request, status, cancel).await
+    }
+
     pub(super) async fn restore(&self, owner: &Owner) -> CovenHandle {
         let (_, cancel) = watch::channel(false);
         restore_from_code(
@@ -311,11 +327,30 @@ pub(super) fn cancel_at(phase: Phase, stop: &watch::Sender<bool>) -> impl Fn(Boo
     }
 }
 
+/// Records every value a bootstrap reports as it loads, keeping time as an
+/// installation's builder does; a host reading the loading watch sees only
+/// the newest value, and can miss a step that ends between two reads.
+pub(super) fn loading_recorder(owner: &Owner) -> Arc<RecordingClock<LoadStep>> {
+    Arc::new(RecordingClock::new(Arc::new(crate::tests::PollingClock::new(owner.clock.clone()))))
+}
+
 /// Every loading report is honest: steps come in the order loading runs
 /// them, from the scan for this member's keys to applying the last slot,
 /// and within a step `done` never goes backwards or passes its total, which
 /// never shrinks (E10).
 pub(super) fn assert_honest(reported: &[BootstrapStatus]) {
+    let loading: Vec<_> = reported
+        .iter()
+        .filter_map(|status| match status {
+            BootstrapStatus::Loading(progress) => Some(progress.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_load_order(&loading);
+}
+
+/// Loading's reports, as [`assert_honest`] checks them.
+pub(super) fn assert_load_order(loading: &[Progress<LoadStep>]) {
     let rank = |step: &LoadStep| match step {
         LoadStep::FindingKeys => 0,
         LoadStep::Streaming(Audience::Store) => 1,
@@ -325,22 +360,15 @@ pub(super) fn assert_honest(reported: &[BootstrapStatus]) {
         LoadStep::Reading => 5,
         LoadStep::Applying => 6,
     };
-    let loading: Vec<_> = reported
-        .iter()
-        .filter_map(|status| match status {
-            BootstrapStatus::Loading(progress) => Some(progress),
-            _ => None,
-        })
-        .collect();
-    for progress in &loading {
-        assert!(progress.done <= progress.total, "{reported:?}");
+    for progress in loading {
+        assert!(progress.done <= progress.total, "{loading:?}");
     }
     for pair in loading.windows(2) {
         let [before, after] = pair else { unreachable!() };
-        assert!(rank(&before.step) <= rank(&after.step), "{reported:?}");
+        assert!(rank(&before.step) <= rank(&after.step), "{loading:?}");
         if before.step == after.step {
-            assert!(before.done <= after.done, "{reported:?}");
-            assert!(before.total <= after.total, "{reported:?}");
+            assert!(before.done <= after.done, "{loading:?}");
+            assert!(before.total <= after.total, "{loading:?}");
         }
     }
 }

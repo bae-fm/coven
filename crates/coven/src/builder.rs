@@ -8,6 +8,8 @@ use coven_crypto::custody::{
 use coven_database::{DatabaseBuilder, OpenStep};
 use coven_foundation::files::StoreDirAccess;
 use coven_foundation::files::StoreFile;
+#[cfg(test)]
+use coven_foundation::progress::RecordingClock;
 use coven_foundation::progress::{forward, Progress};
 use coven_storage::{
     providers::{OAuthFlow, StorageConnector},
@@ -43,6 +45,10 @@ pub struct CovenBuilder {
     /// Stop a replacement right after its swap, as if the process ended there.
     #[cfg(test)]
     interrupt_after_swap: bool,
+    /// Records every value a bootstrap through this builder reports as it
+    /// loads; also the builder's clock.
+    #[cfg(test)]
+    loading_recorder: Option<Arc<RecordingClock<coven_database::LoadStep>>>,
 }
 
 /// Reset transfers its unlocked sessions into the replacement installation.
@@ -78,6 +84,8 @@ impl CovenBuilder {
             keychain: None,
             #[cfg(test)]
             interrupt_after_swap: false,
+            #[cfg(test)]
+            loading_recorder: None,
         }
     }
 
@@ -614,6 +622,19 @@ impl CovenBuilder {
     #[cfg(test)]
     pub(crate) fn interrupt_after_swap(mut self) -> Self {
         self.interrupt_after_swap = true;
+        self
+    }
+
+    /// Keep time by `recorder`, which records every value a bootstrap
+    /// through this builder reports as it loads, values a host reading the
+    /// loading watch could miss.
+    #[cfg(test)]
+    pub(crate) fn record_loading(
+        mut self,
+        recorder: Arc<RecordingClock<coven_database::LoadStep>>,
+    ) -> Self {
+        self.clock = recorder.clone();
+        self.loading_recorder = Some(recorder);
         self
     }
 }
