@@ -52,6 +52,18 @@ impl Database {
         }
         with_locked(&inner.access.writer, |writer| visit(writer)).unwrap();
     }
+
+    /// Run `fault` as each checkpoint of the store's database, not its input
+    /// database's, takes the writer (§4).
+    pub(crate) fn fault_checkpoints(
+        &self,
+        fault: impl FnMut() -> Result<(), DbError> + Send + 'static,
+    ) {
+        let slot = self.inner.read().unwrap();
+        let checkpointers = &slot.as_ref().unwrap().checkpoints;
+        assert_eq!(checkpointers.len(), 2, "the store's database has a checkpointer");
+        checkpointers[1].fault(fault);
+    }
 }
 
 impl DatabaseReadHandle {

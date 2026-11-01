@@ -128,6 +128,20 @@ pub enum DbError {
     /// this handle, read-only or not, refuses calls until reopened (§4).
     #[error("an earlier rollback failed; reopen the store")]
     RollbackFailed,
+    /// One of coven's own WAL checkpoints failed with this cause, other than
+    /// on a busy or locked database, so the store's checkpointing stopped.
+    /// Rather than stay open while its WAL grows without bound, this handle
+    /// and every live query fail with this same cause until reopened (§4).
+    #[error("a WAL checkpoint failed: {0}")]
+    CheckpointFailed(#[source] std::sync::Arc<DbError>),
+    /// One of coven's own WAL checkpoints panicked: a bug in coven. The
+    /// store's checkpointing stopped, so this handle and every live query
+    /// fail with it until reopened (§4).
+    #[error("a WAL checkpoint panicked: {message}")]
+    CheckpointPanicked {
+        /// The text the panic carried.
+        message: String,
+    },
     /// Sync's part of a database transaction failed, keeping sync's own typed
     /// cause, and the transaction did not commit: a streamed transfer's
     /// producer or final authentication check, or the schema publication

@@ -226,7 +226,7 @@ impl<L> DatabaseAccess<L> {
 // SQLite rolls back before this catches an unwind; decoded state changes only
 // after commit. Release each lock before propagating a callback panic so the
 // next caller can still use the committed state.
-fn with_locked<T, R>(value: &Mutex<T>, run: impl FnOnce(&mut T) -> R) -> R {
+pub(crate) fn with_locked<T, R>(value: &Mutex<T>, run: impl FnOnce(&mut T) -> R) -> R {
     let mut guard = value.lock().expect("database state lock poisoned");
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run(&mut guard)));
     drop(guard);

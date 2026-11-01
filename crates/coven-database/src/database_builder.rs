@@ -248,6 +248,7 @@ impl DatabaseBuilder {
             )?,
             &input_writer,
             crate::sqlite_settings::CHECKPOINT_PAGES,
+            observer.clone(),
         )?];
         let inputs = input_database::InputDatabase::new(input_reader, input_writer)?;
         #[cfg(test)]
@@ -266,6 +267,7 @@ impl DatabaseBuilder {
                 checkpointing,
                 &writer,
                 pages,
+                observer.clone(),
             )?);
         }
         tracing::info!(

@@ -152,7 +152,7 @@ A commit can be refused for these local reasons:
 | `FileUnknown`, `FileUnreferenced`, `FileWriteOnce` | a reference names no file of the row's audience, a staged file has no reference, or a write-once reference would change | §17.2, §17.3 |
 | `UndeclaredNamespace`, `NamespaceKind` and other file checks | a file is staged into an undeclared namespace or one of the other kind, or the staged file can't be used | §17.1, [api.md E3](api.md#e3-writing) |
 | `BoundFileTooLarge`, `DeviceOnly`, `NamespaceKind` | a bound reference names a file over its column's limit, a file on one device only that no bound upload stores, or a user's file | §17.4 |
-| `RollbackFailed`, database or disk failures | the database itself failed; each keeps its cause | §4 |
+| `RollbackFailed`, `CheckpointFailed`, `CheckpointPanicked`, database or disk failures | the database itself failed; each keeps its cause | §4 |
 | Closed or unusable installation | nothing can be written | [api.md E1](api.md#e1-opening) |
 
 Schema and migration checks can also refuse opening the database or running a
@@ -753,6 +753,17 @@ whole WAL and removes its file. Coven's own database beside the store's,
 `inputs.db`, which keeps what this device observed in storage apart from
 the app's writes, is checkpointed the same way.
 
+A checkpoint can fail. When SQLite finds the database busy or locked past
+its wait, coven tries again at the next commit. Any other failure would stop
+coven's checkpoints for good, and the WAL would then grow without bound while
+the store stayed open, so coven fails the handle instead. A checkpoint that
+panics, a bug in coven, fails it with `DbError::CheckpointPanicked`. One that
+SQLite fails, as on a full disk, fails it with `DbError::CheckpointFailed`
+and SQLite's cause. Every later call on that handle and every live query
+fails with it until the store is reopened, as after a failed rollback. A
+runtime that shuts down drops the checkpoint's work with it, which fails
+nothing: the process is ending the store.
+
 On Windows a store's path is verbatim (`\\?\D:\…`), and SQLite takes a
 path that starts `\\` for a network share. There it locks the WAL's
 shared-memory file through one handle for every connection in the process,
@@ -1056,8 +1067,8 @@ how the app receives them.
   coven none for one under 100 rows, so every run analyzes each again, which
   reads fewer than 100 rows of each.
 - **A failed handle.** Closing a handle that fails every call (`RollbackFailed`,
-  `StatePersistence`) skips the run, since its writer may still hold a
-  transaction.
+  `StatePersistence`, `CheckpointFailed`, `CheckpointPanicked`) skips the run,
+  since its writer may still hold a transaction.
 - **A collation's function panics.** SQLite has no way for a comparison to fail,
   and any answer coven made up could put an index out of order. So the process
   ends, before the transaction that asked could commit.
@@ -9324,6 +9335,7 @@ maps them are with each provider in Appendix E.
 | `DbError::TooLarge` | one write's plaintext exceeds SQLite's 1 GB value limit | §6.3 |
 | `DbError::ClockOutOfRange` | no timestamp fits in 48 bits of milliseconds | §7.2 |
 | `RollbackFailed` | a rollback failed; every later call on that handle fails until the store is reopened | §4 |
+| `DbError::CheckpointFailed`, `DbError::CheckpointPanicked` | one of coven's WAL checkpoints failed, other than on a busy or locked database, or panicked; every later call on that handle fails until the store is reopened | §4 |
 | `DbError::NotOwner`, `DbError::InvalidForeignKeyEffect` | the author's own check finds a change receivers would refuse under the owner rules | §9.6 |
 | `DbError::ReferenceAudience` | a write or move would leave a row pointing at a row some of its readers can't read | §15.3 |
 | `DbError::NotInCircle` (`NotInCircle`) | a write into a circle the member isn't in, or one absent from the membership this device has applied | §15.6, §15.8 |
