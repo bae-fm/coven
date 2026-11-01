@@ -132,7 +132,8 @@ async fn setup_key_failure_restores_the_separate_saved_values() {
                 f.storage.config(),
                 "Device",
                 "replacement".into(),
-                SecretText::new("secret".into())
+                SecretText::new("secret".into()),
+                |_| {}
             )
             .await,
         Err(StorageSetupError::SecureStorage(KeyError::PassphraseAuthentication))
@@ -268,6 +269,7 @@ async fn custody_failure_rolls_back_credentials_before_claiming_the_creation() {
             "Test device",
             key.into(),
             SecretText::new("secret".into()),
+            |_| {},
         )
     };
     assert!(setup("original").await.is_err());

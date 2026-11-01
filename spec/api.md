@@ -2323,6 +2323,7 @@ handle.authenticate(OAuthAccess::Dropbox(DropboxAccess::AppFolder)).await?;
 handle.setup_oauth_storage(
     StorageConfig::Dropbox { location: DropboxLocation::AppFolder, account_label: None },
     "Ana's phone",
+    |progress| show_setup_step(progress),
 ).await?;
 // A shared choice uses DropboxAccess::FullDropbox and
 // DropboxLocation::SharedFolder { namespace_id } instead.
@@ -3492,6 +3493,19 @@ while let Some(Ok(values)) = lost.next().await {
     setup does not relocate a store already used by other devices.
   - Creating claims slot 1, then the creator’s key-copy slot (§10.3). Waiting
     writes then claim a writes slot through ordinary sync.
+  - Setup can take a while: it may wait out a minute of rate limits, and a
+    reconnect loads what other devices published. So it reports its steps to
+    its `on_progress` as `Progress<StorageSetupStep>`
+    ([E1](#e1-opening)), on the task awaiting it, and the app shows them
+    instead of a bare spinner. S3 lists the bucket's root when creating a
+    store whose member keys reach the whole bucket (`CheckingBucket`), then
+    detects settings (`DetectingSettings`). iCloud prepares a new store's
+    zone (`PreparingZone`); Dropbox and OneDrive read the account's name
+    (`ReadingAccount`). Every setup then connects and checks the provider
+    (`Connecting`). Creating claims slot 1 (`CreatingStore`). Reconnecting
+    loads with loading's own steps and counts (`Loading`, §13.4), then
+    publishes changed access (`RecordingAccess`). A step other than `Loading`
+    is one unit, done when it ends.
 - The app calls `authenticate(access)` on the handle before OAuth setup.
   Coven owns the request, checked redirect and code exchange. The builder's
   presenter opens the page and returns the redirect or cancellation; it receives
@@ -4635,12 +4649,14 @@ pub enum WriteCutoff {
 impl CovenHandle {
     /// Checks S3 and returns its committed location, key state and restore code.
     /// The location includes any detected settings (§20.7).
+    /// `on_progress` is called on this task with each step (E5).
     pub async fn setup_s3_storage(
         &self,
         storage: StorageConfig,
         device_name: &str,
         access_key_id: String,
         secret_access_key: SecretText,
+        on_progress: impl Fn(Progress<StorageSetupStep>),
     ) -> Result<StorageSetup, StorageSetupError>;
 
     /// Probes the S3 service at this location with this member's key (§20.7),
@@ -4661,18 +4677,22 @@ impl CovenHandle {
     /// Sets up Dropbox or OneDrive using coven's held sign-in.
     /// Without a new sign-in, reconnects using this store's custody credentials.
     /// A provider 401 refreshes once and retries once. Never opens sign-in UI.
+    /// `on_progress` is called on this task with each step (E5).
     pub async fn setup_oauth_storage(
         &self,
         storage: StorageConfig,
         device_name: &str,
+        on_progress: impl Fn(Progress<StorageSetupStep>),
     ) -> Result<StorageSetup, StorageSetupError>;
 
     /// Sets up iCloud through the built-in adapter; other platforms return ProviderUnavailable.
     /// Coven obtains the current owner and creates the store's custom zone.
+    /// `on_progress` is called on this task with each step (E5).
     pub async fn setup_cloudkit_storage(
         &self,
         container: &str,
         device_name: &str,
+        on_progress: impl Fn(Progress<StorageSetupStep>),
     ) -> Result<StorageSetup, StorageSetupError>;
 
     /// Opens store keys from their copies sealed to this member in storage
@@ -4886,6 +4906,27 @@ pub struct StorageSetup {
     pub restore_code: SecretText,
 }
 
+/// A step of setting up storage, in the order they run (E5). A step other
+/// than `Loading` is one unit, done when it ends.
+pub enum StorageSetupStep {
+    /// S3, creating a store where member keys reach the whole bucket.
+    CheckingBucket,
+    /// S3: detecting settings and checking them against the service (§20.8).
+    DetectingSettings,
+    /// iCloud, creating a store: reading the account and saving its zone.
+    PreparingZone,
+    /// Dropbox or OneDrive: reading the signed-in account's name.
+    ReadingAccount,
+    /// Connecting and checking the provider; creating claims the bucket.
+    Connecting,
+    /// Creating: claiming slot 1.
+    CreatingStore,
+    /// Reconnecting: loading, with loading's steps and counts (§13.4).
+    Loading(LoadStep),
+    /// Reconnecting with changed access: publishing `Set access`.
+    RecordingAccess,
+}
+
 pub enum StoreKeyState {
     Available,
     Locked,
@@ -4904,7 +4945,8 @@ detection.check(&settings)?;
 let StorageConfig::S3 { profile, .. } = &mut storage else { unreachable!() };
 *profile = Some(S3Profile::Custom(settings));
 
-match handle.setup_s3_storage(storage, device_name, access_key_id, SecretText::new(secret_access_key)).await {
+let secret = SecretText::new(secret_access_key);
+match handle.setup_s3_storage(storage, device_name, access_key_id, secret, show_setup_step).await {
     Ok(setup) => {
         remember(setup.connection.storage);
         show_blurred_qr_code(setup.restore_code.as_str());

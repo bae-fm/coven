@@ -164,13 +164,14 @@ impl Network {
                     "Device 0",
                     "owner-key".into(),
                     SecretText::new("secret".into()),
+                    |_| {},
                 )
                 .await
                 .unwrap(),
             CloudProvider::CloudKit => {
-                handle.setup_cloudkit_storage("container", "Device 0").await.unwrap()
+                handle.setup_cloudkit_storage("container", "Device 0", |_| {}).await.unwrap()
             }
-            _ => handle.setup_oauth_storage(storage.config(), "Device 0").await.unwrap(),
+            _ => handle.setup_oauth_storage(storage.config(), "Device 0", |_| {}).await.unwrap(),
         };
         let initial_layout = StoreLayout::new(app_dir);
         let network = Self {
@@ -640,6 +641,7 @@ async fn removing_a_member_after_a_replacement_key_leaves_no_key_work() {
             "Device 1",
             "replacement-key".into(),
             SecretText::new("replacement-secret".into()),
+            |_| {},
         )
         .await
         .unwrap();

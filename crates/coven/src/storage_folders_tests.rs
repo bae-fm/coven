@@ -268,8 +268,11 @@ async fn onedrive_root_pages_and_creation_return_setup_locations_without_publish
     f.no_credentials();
     assert_eq!(f.handle.storage_config().await.unwrap(), None);
     f.fake.expect(account_reply(CloudProvider::OneDrive, "ana@example.com", 0));
-    let setup =
-        f.handle.setup_oauth_storage(created.storage.clone(), "Ana's laptop").await.unwrap();
+    let setup = f
+        .handle
+        .setup_oauth_storage(created.storage.clone(), "Ana's laptop", |_| {})
+        .await
+        .unwrap();
     assert_eq!(setup.connection.storage, labelled(created.storage, "ana@example.com"));
     f.fake.consumed();
     f.handle.close().await.unwrap();
@@ -326,8 +329,11 @@ async fn dropbox_namespaces_follow_cursors_and_refresh_in_the_same_sign_in_used_
     f.no_credentials();
     assert_eq!(f.handle.storage_config().await.unwrap(), None);
     f.fake.expect(account_reply(CloudProvider::Dropbox, "ana@example.com", 1));
-    let setup =
-        f.handle.setup_oauth_storage(folders[0].storage.clone(), "Ana's laptop").await.unwrap();
+    let setup = f
+        .handle
+        .setup_oauth_storage(folders[0].storage.clone(), "Ana's laptop", |_| {})
+        .await
+        .unwrap();
     assert_eq!(setup.connection.storage, labelled(dropbox("123"), "ana@example.com"));
     let bytes = f.app.store_keychain(f.handle.store_id()).storage_credentials().unwrap().unwrap();
     let StorageCredentials::OAuth(tokens) = StorageCredentials::decode(bytes.as_bytes()).unwrap()
@@ -491,7 +497,7 @@ async fn remote_onedrive_folders_use_the_target_drive_and_item_ids() {
         }]
     );
     f.fake.expect(account_reply(CloudProvider::OneDrive, "ana@example.com", 0));
-    f.handle.setup_oauth_storage(folders[0].storage.clone(), "Ana's laptop").await.unwrap();
+    f.handle.setup_oauth_storage(folders[0].storage.clone(), "Ana's laptop", |_| {}).await.unwrap();
     f.fake.consumed();
     f.handle.close().await.unwrap();
 }
@@ -582,6 +588,7 @@ async fn setup_records_the_account_and_signing_in_again_refreshes_only_the_label
                 .setup_oauth_storage(
                     labelled(location.clone(), "untrusted@example.com"),
                     "Ana's laptop",
+                    |_| {},
                 )
                 .await
                 .unwrap();
@@ -616,7 +623,7 @@ async fn setup_records_the_account_and_signing_in_again_refreshes_only_the_label
             _ => unreachable!(),
         };
         assert!(matches!(
-            f.handle.setup_oauth_storage(elsewhere, "Laptop").await,
+            f.handle.setup_oauth_storage(elsewhere, "Laptop", |_| {}).await,
             Err(StorageSetupError::LocationChangeUnsupported)
         ));
         f.fake.consumed();
@@ -636,7 +643,7 @@ async fn account_lookup_failure_retains_committed_location_credentials_and_code(
         let access = location.oauth_access().unwrap();
         f.handle.authenticate(access).await.unwrap();
         f.fake.expect(account_reply(location.provider(), "ana@example.com", 0));
-        f.handle.setup_oauth_storage(location.clone(), "Laptop").await.unwrap();
+        f.handle.setup_oauth_storage(location.clone(), "Laptop", |_| {}).await.unwrap();
         let code = f.handle.restore_code().await.unwrap();
         let keychain = f.app.store_keychain(f.handle.store_id());
         let credentials = keychain.storage_credentials().unwrap().unwrap();
@@ -644,8 +651,10 @@ async fn account_lookup_failure_retains_committed_location_credentials_and_code(
         f.handle.authenticate(access).await.unwrap();
         f.fake.expect(account_reply(location.provider(), "ignored", 1).status(503));
         assert_eq!(
-            failure(f.handle.setup_oauth_storage(location.clone(), "Laptop").await.unwrap_err())
-                .failure(),
+            failure(
+                f.handle.setup_oauth_storage(location.clone(), "Laptop", |_| {}).await.unwrap_err()
+            )
+            .failure(),
             StorageFailure::Network
         );
         assert_eq!(f.handle.restore_code().await.unwrap(), code);
@@ -655,7 +664,7 @@ async fn account_lookup_failure_retains_committed_location_credentials_and_code(
             credentials.as_bytes()
         );
         f.fake.expect(account_reply(location.provider(), "ana@work.example", 1));
-        f.handle.setup_oauth_storage(location, "Laptop").await.unwrap();
+        f.handle.setup_oauth_storage(location, "Laptop", |_| {}).await.unwrap();
         f.fake.consumed();
         f.handle.close().await.unwrap();
     }
@@ -672,7 +681,8 @@ async fn onedrive_uses_the_principal_name_when_mail_is_absent() {
         let mut reply = account_reply(CloudProvider::OneDrive, "ignored", 0);
         reply.value = value;
         f.fake.expect(reply);
-        let setup = f.handle.setup_oauth_storage(drive("household"), "Laptop").await.unwrap();
+        let setup =
+            f.handle.setup_oauth_storage(drive("household"), "Laptop", |_| {}).await.unwrap();
         assert_eq!(setup.connection.storage, labelled(drive("household"), "ana@example.com"));
         f.fake.consumed();
         f.handle.close().await.unwrap();
@@ -693,7 +703,8 @@ async fn malformed_accounts_fail_before_setup_publishes_anything() {
         reply.value = value;
         f.fake.expect(reply);
         assert_eq!(
-            failure(f.handle.setup_oauth_storage(location, "Laptop").await.unwrap_err()).failure(),
+            failure(f.handle.setup_oauth_storage(location, "Laptop", |_| {}).await.unwrap_err())
+                .failure(),
             StorageFailure::Protocol
         );
         assert_eq!(f.handle.storage_config().await.unwrap(), None);
@@ -712,11 +723,12 @@ async fn refreshing_during_account_lookup_commits_the_replacement_tokens() {
             f.handle.authenticate(location.oauth_access().unwrap()).await.unwrap();
             if reconnect {
                 f.fake.expect(account_reply(location.provider(), "ana@example.com", 0));
-                f.handle.setup_oauth_storage(location.clone(), "Laptop").await.unwrap();
+                f.handle.setup_oauth_storage(location.clone(), "Laptop", |_| {}).await.unwrap();
             }
             f.fake.expect(account_reply(location.provider(), "ignored", 0).status(401));
             f.fake.expect(account_reply(location.provider(), "ana@work.example", 1));
-            let setup = f.handle.setup_oauth_storage(location.clone(), "Laptop").await.unwrap();
+            let setup =
+                f.handle.setup_oauth_storage(location.clone(), "Laptop", |_| {}).await.unwrap();
             assert_eq!(setup.connection.storage, labelled(location.clone(), "ana@work.example"));
             let bytes =
                 f.app.store_keychain(f.handle.store_id()).storage_credentials().unwrap().unwrap();

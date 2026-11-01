@@ -281,7 +281,8 @@ async fn closed_storage_calls_keep_their_public_errors_on_every_clone() {
                 },
                 "Device",
                 "member".into(),
-                SecretText::new("secret".into())
+                SecretText::new("secret".into()),
+                |_| {}
             )
             .await,
         Err(StorageSetupError::SecureStorage(KeyError::StoreClosed))
@@ -295,13 +296,14 @@ async fn closed_storage_calls_keep_their_public_errors_on_every_clone() {
                         namespace_id: "folder".into()
                     }
                 },
-                "Device"
+                "Device",
+                |_| {}
             )
             .await,
         Err(StorageSetupError::SecureStorage(KeyError::StoreClosed))
     ));
     assert!(matches!(
-        handle.setup_cloudkit_storage("container", "Device").await,
+        handle.setup_cloudkit_storage("container", "Device", |_| {}).await,
         Err(StorageSetupError::SecureStorage(KeyError::StoreClosed))
     ));
     assert!(matches!(
@@ -372,7 +374,7 @@ async fn closing_waits_for_setup_after_its_caller_is_cancelled() {
         let (resume, resumed) = tokio::sync::oneshot::channel();
         storage.hold_next_listing(ObjectPrefix::all(directory.id()), entered, resumed).await;
         {
-            let setup = handle.setup_s3_storage(config.clone(), "Device", "member".into(), SecretText::new("secret".into()));
+            let setup = handle.setup_s3_storage(config.clone(), "Device", "member".into(), SecretText::new("secret".into()), |_| {});
             tokio::pin!(setup);
             tokio::select! {
                 result = &mut setup => panic!("setup finished while its provider check was held: {result:?}"),
@@ -417,6 +419,7 @@ async fn workers_share_keys_across_stop_forget_and_reacquisition_until_close() {
             "Owner",
             "owner-key".into(),
             SecretText::new("secret".into()),
+            |_| {},
         )
         .await
         .unwrap();

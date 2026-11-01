@@ -94,6 +94,28 @@ fn a_restarted_operation_begins_its_steps_again() {
     assert_eq!(*receiver.borrow(), at(Step::Copying, 0, 5));
 }
 
+/// Ana's laptop reconnecting the Household store loads it as part of setup:
+/// each step the load begins is relayed at once, units within a step wait
+/// their interval, and a step's last unit is relayed at once.
+#[test]
+fn a_relayed_step_begins_at_once_and_its_units_are_paced() {
+    let clock = Arc::new(SteppedClock(Mutex::new(Duration::ZERO)));
+    let (sender, receiver) = watch::channel(None);
+    let mut report = ProgressReport::new(sender, clock.clone());
+
+    report.relay(Progress { step: Step::Copying, done: 0, total: 3 });
+    assert_eq!(*receiver.borrow(), at(Step::Copying, 0, 3));
+    report.relay(Progress { step: Step::Copying, done: 1, total: 3 });
+    assert_eq!(*receiver.borrow(), at(Step::Copying, 0, 3));
+    clock.advance(REPORT_INTERVAL);
+    report.relay(Progress { step: Step::Copying, done: 2, total: 3 });
+    assert_eq!(*receiver.borrow(), at(Step::Copying, 2, 3));
+    report.relay(Progress { step: Step::Copying, done: 3, total: 3 });
+    assert_eq!(*receiver.borrow(), at(Step::Copying, 3, 3));
+    report.relay(Progress { step: Step::Checking, done: 1, total: 4 });
+    assert_eq!(*receiver.borrow(), at(Step::Checking, 1, 4));
+}
+
 /// Forwarding calls the host with each value it sees, in order, and with
 /// the last one reported just before the work ended; it never repeats one.
 #[tokio::test]

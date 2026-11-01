@@ -75,6 +75,7 @@ async fn application_tests_use_memory_storage_through_the_facade() {
             "Ana's laptop",
             "key".into(),
             coven::SecretText::new("secret".into()),
+            |_| {},
         )
         .await
         .unwrap();

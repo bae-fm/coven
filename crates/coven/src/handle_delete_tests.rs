@@ -146,6 +146,7 @@ async fn stopped_store_with_files() -> (tempfile::TempDir, TestCoven, CovenHandl
             "Laptop",
             "owner".into(),
             SecretText::new("secret".into()),
+            |_| {},
         )
         .await
         .unwrap();

@@ -88,6 +88,7 @@ impl Fixture {
                 "Owner",
                 "owner-key".into(),
                 SecretText::new("secret".into()),
+                |_| {},
             )
             .await
             .unwrap();

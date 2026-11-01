@@ -5,6 +5,7 @@ use crate::{
     *,
 };
 use coven_crypto::custody::{KeySession, PersonEntries};
+use coven_foundation::progress::ProgressReport;
 use coven_storage::{
     providers::{OAuthClients, OAuthFlow, StorageConnector},
     ConnectionCredentials, ProviderAuth, PublicationGate, SetupWaits, Storage, StorageConnection,
@@ -48,6 +49,9 @@ pub struct StorageSetup {
     /// The code for restoring this member on another installation.
     pub restore_code: SecretText,
 }
+
+/// Where a setup call reports its steps, for the handle to forward to the app.
+pub(crate) type SetupProgress = tokio::sync::watch::Sender<Option<Progress<StorageSetupStep>>>;
 
 /// Write the status an opened store starts with: `Stopped` with storage set
 /// up, `Disconnected` without (E5), and end each invite whose lifetime ended
@@ -474,9 +478,11 @@ impl StorageConnections {
         self: &Arc<Self>,
         storage: StorageConfig,
         device_name: &str,
+        progress: SetupProgress,
     ) -> Result<StorageSetup, StorageSetupError> {
         let device_name = device_name.to_owned();
         self.call(move |owner| async move {
+            let mut progress = ProgressReport::new(progress, owner.clock.clone());
             let waits = Arc::new(SetupWaits::default());
             let outcome = async {
                 let provider = storage.provider();
@@ -509,18 +515,20 @@ impl StorageConnections {
                 };
                 let (connector, cooldown) = (owner.connector.as_ref(), &owner.waits);
                 let (location, signed_in) = (&storage, &auth);
-                let storage = waits
-                    .resend(owner.clock.as_ref(), move || {
-                        crate::authentication::label_location(
-                            connector,
-                            location.clone(),
-                            signed_in.clone(),
-                            cooldown.clone(),
-                        )
-                    })
+                let reading = waits.resend(owner.clock.as_ref(), move || {
+                    crate::authentication::label_location(
+                        connector,
+                        location.clone(),
+                        signed_in.clone(),
+                        cooldown.clone(),
+                    )
+                });
+                let storage =
+                    setup_step::single(&mut progress, StorageSetupStep::ReadingAccount, reading)
+                        .await?;
+                let result = owner
+                    .setup_connection(storage, &device_name, auth, sign_in, &waits, &mut progress)
                     .await?;
-                let result =
-                    owner.setup_connection(storage, &device_name, auth, sign_in, &waits).await?;
                 held.take();
                 Ok(result)
             }
@@ -535,10 +543,12 @@ impl StorageConnections {
         self: &Arc<Self>,
         container: &str,
         device_name: &str,
+        progress: SetupProgress,
     ) -> Result<StorageSetup, StorageSetupError> {
         let container = container.to_owned();
         let device_name = device_name.to_owned();
         self.call(move |owner| async move {
+            let mut progress = ProgressReport::new(progress, owner.clock.clone());
             let waits = Arc::new(SetupWaits::default());
             let outcome = async {
                 let storage = match owner.codes.location().await.map_err(setup_error)? {
@@ -554,14 +564,23 @@ impl StorageConnections {
                         // sent again.
                         let (connector, container, store) =
                             (owner.connector.as_ref(), container.as_str(), owner.store());
-                        waits
-                            .resend(owner.clock.as_ref(), move || {
-                                connector.prepare_cloudkit(container, store)
-                            })
+                        let preparing = waits.resend(owner.clock.as_ref(), move || {
+                            connector.prepare_cloudkit(container, store)
+                        });
+                        setup_step::single(&mut progress, StorageSetupStep::PreparingZone, preparing)
                             .await?
                     }
                 };
-                owner.setup_connection(storage, &device_name, ProviderAuth::CloudKit, None, &waits).await
+                owner
+                    .setup_connection(
+                        storage,
+                        &device_name,
+                        ProviderAuth::CloudKit,
+                        None,
+                        &waits,
+                        &mut progress,
+                    )
+                    .await
             }
             .await;
             waits.end();
@@ -588,6 +607,7 @@ impl StorageConnections {
     /// only after the candidate connection has claimed what setup needs.
     /// The connection sends rate-limited requests again while the setup
     /// call's `waits` allow (§20.8); the caller ends them when it returns.
+    /// Its steps go to `progress`, from `Connecting` on.
     async fn setup_connection(
         &self,
         config: StorageConfig,
@@ -595,7 +615,9 @@ impl StorageConnections {
         auth: ProviderAuth,
         sign_in: Option<Arc<SessionSignIn>>,
         waits: &Arc<SetupWaits>,
+        progress: &mut ProgressReport<StorageSetupStep>,
     ) -> Result<StorageSetup, StorageSetupError> {
+        progress.begin(StorageSetupStep::Connecting, 1);
         let credentials = auth.credentials();
         let storage = self
             .connector
@@ -635,6 +657,7 @@ impl StorageConnections {
             },
             _ => coven_format::MemberAccess::ProviderAccount(storage.account().await?),
         };
+        progress.done(1);
         let mut live = self.live.lock().await;
         // The old provider remains installed until every fallible setup step
         // succeeds. Its stopped or started state survives a rejected candidate.
@@ -650,7 +673,7 @@ impl StorageConnections {
                 )
                 .await?;
             let sync = self.sequence(storage.clone(), &live).await?;
-            self.claim_setup(&sync, access, device_name).await?;
+            self.claim_setup(&sync, access, device_name, progress).await?;
             // Claims may use file transfers; only the custody commit runs
             // inside the transfer exclusion needed to replace their provider.
             self.files.set_storage(Some(storage), async { commit().map(drop) }).await?;
@@ -711,6 +734,7 @@ impl StorageConnections {
         sync: &Arc<SequenceSync>,
         access: coven_format::MemberAccess,
         device_name: &str,
+        progress: &mut ProgressReport<StorageSetupStep>,
     ) -> Result<(), SyncError> {
         let state = self.database.store_state().await?;
         let member = self.identity.read()?.ok_or(StorageFailure::MemberKeysMissing)?;
@@ -733,6 +757,7 @@ impl StorageConnections {
             // The creator's sequence owner seals slot 1 and its key copy
             // with the store key custody holds.
             self.persist_keys(&ring)?;
+            progress.begin(StorageSetupStep::CreatingStore, 1);
             let result = sync
                 .administer(coven_format::admin::StoreChange::CreateStore {
                     store: self.store(),
@@ -748,9 +773,15 @@ impl StorageConnections {
             if result.is_err() && held.is_none() && self.database.current_claim().await?.is_none() {
                 self.forget_keys()?;
             }
-            return result;
+            result?;
+            progress.done(1);
+            return Ok(());
         }
-        sync.unlock().await?;
+        let relayed = std::sync::Mutex::new(&mut *progress);
+        coven_foundation::progress::forward(sync.subscribe_progress(), sync.unlock(), |load| {
+            relayed.lock().expect("setup progress poisoned").relay(setup_step::loading(load))
+        })
+        .await?;
         let state = self.database.store_state().await?;
         let recorded = state
             .members
@@ -758,11 +789,11 @@ impl StorageConnections {
             .filter(|value| !value.removed)
             .ok_or(SyncError::Removed)?;
         if !recorded.access.same_credential(&access) {
-            sync.administer(coven_format::admin::StoreChange::SetAccess {
+            let recording = sync.administer(coven_format::admin::StoreChange::SetAccess {
                 member: member.member(),
                 access,
-            })
-            .await?;
+            });
+            setup_step::single(progress, StorageSetupStep::RecordingAccess, recording).await?;
         }
         Ok(())
     }
@@ -895,6 +926,10 @@ mod folders;
 
 #[path = "storage_s3.rs"]
 mod s3;
+
+#[path = "storage_setup_step.rs"]
+mod setup_step;
+pub use setup_step::StorageSetupStep;
 
 #[path = "storage_admin.rs"]
 mod admin;

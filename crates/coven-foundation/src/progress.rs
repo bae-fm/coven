@@ -93,6 +93,20 @@ impl<S: Clone + PartialEq> ProgressReport<S> {
         self.update(Progress { total, ..current }, false);
     }
 
+    /// Report `progress`, which another operation's report gave and the
+    /// caller put in this operation's steps, as the part of this operation
+    /// that other one runs: a step it begins is reported at once, and within
+    /// a step its units are paced as [`Self::done`]'s are.
+    pub fn relay(&mut self, progress: Progress<S>) {
+        match &self.current {
+            Some(current) if current.step == progress.step => {
+                let finished = progress.done == progress.total;
+                self.update(progress, finished);
+            }
+            _ => self.send(progress),
+        }
+    }
+
     /// Report `next` if the step just finished or a report is due; else
     /// keep it for the next report.
     fn update(&mut self, next: Progress<S>, finished: bool) {

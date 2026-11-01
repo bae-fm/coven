@@ -172,6 +172,7 @@ async fn setup(
             "Test device",
             "member-key".into(),
             SecretText::new("secret".into()),
+            |_| {},
         )
         .await
 }

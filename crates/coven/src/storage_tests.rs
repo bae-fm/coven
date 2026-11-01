@@ -1,5 +1,6 @@
 use super::*;
 use crate::tests::wait_for_sent;
+use coven_foundation::progress::RecordingClock;
 use coven_storage::{
     test_utils::{Faults, MemoryStorage},
     Storage, StorageConnection, StorageSettings,
@@ -15,6 +16,9 @@ struct Fixture {
     storage: Arc<MemoryStorage>,
     connector: Arc<TrackingConnector>,
     clock: Arc<FixedClock>,
+    /// The handle's clock: `clock`'s time, recording the steps of a setup
+    /// whose watch a test hands it.
+    recorder: Arc<RecordingClock<StorageSetupStep>>,
     directory: StoreDir,
     _root: tempfile::TempDir,
 }
@@ -44,13 +48,18 @@ impl Fixture {
             attempts: tokio::sync::watch::channel(0).0,
             held: tokio::sync::Mutex::new(None),
         });
-        let handle =
-            builder(&app, StoreLayout::new(root.path().into()), clock.clone(), connector.clone())
-                .open(directory.id(), |_| ())
-                .await
-                .unwrap();
+        let recorder = Arc::new(RecordingClock::new(clock.clone()));
+        let handle = builder(
+            &app,
+            StoreLayout::new(root.path().into()),
+            recorder.clone(),
+            connector.clone(),
+        )
+        .open(directory.id(), |_| ())
+        .await
+        .unwrap();
 
-        Self { app, handle, storage, connector, clock, directory, _root: root }
+        Self { app, handle, storage, connector, clock, recorder, directory, _root: root }
     }
 
     async fn setup(&self) -> Result<StorageSetup, StorageSetupError> {
@@ -60,6 +69,7 @@ impl Fixture {
                 "Test device",
                 "member-key".into(),
                 SecretText::new("secret".into()),
+                |_| {},
             )
             .await
     }
@@ -333,7 +343,7 @@ async fn an_invite_expires_with_storage_disconnected_and_while_closed() {
 fn builder(
     app: &TestCoven,
     layout: StoreLayout,
-    clock: Arc<FixedClock>,
+    clock: ClockRef,
     storage: Arc<dyn StorageConnector>,
 ) -> CovenBuilder {
     app.builder(layout)
@@ -349,6 +359,72 @@ fn builder(
 
 async fn status(handle: &CovenHandle, expected: impl Fn(&SyncStatus) -> bool) {
     handle.test_sync_status().wait_for(expected).await;
+}
+
+/// Run an S3 setup of `f`'s location on `handle`, whose clock is `recorder`,
+/// and return every step it reported, as `(step, done, total)`.
+async fn recorded_setup(
+    f: &Fixture,
+    handle: &CovenHandle,
+    recorder: &RecordingClock<StorageSetupStep>,
+) -> Vec<(StorageSetupStep, u64, u64)> {
+    let (progress, watched) = tokio::sync::watch::channel(None);
+    recorder.watch(watched);
+    handle
+        .setup_s3_reporting(
+            f.storage.config(),
+            "Test device",
+            "member-key".into(),
+            SecretText::new("secret".into()),
+            progress,
+        )
+        .await
+        .unwrap();
+    recorder.seen().into_iter().map(|seen| (seen.step, seen.done, seen.total)).collect()
+}
+
+/// Ana's first setup of the Household store, in a bucket whose member keys
+/// reach all of it, reports each step it runs, in order, each begun and then
+/// done. Her reconnect after the store is disconnected and reopened checks no
+/// bucket and creates nothing: it detects, connects, and finds nothing new to
+/// load and no access to record.
+#[tokio::test]
+async fn setup_reports_each_step_it_runs() {
+    use StorageSetupStep::*;
+    let f = Fixture::new().await;
+    assert_eq!(
+        recorded_setup(&f, &f.handle, &f.recorder).await,
+        [
+            (CheckingBucket, 0, 1),
+            (CheckingBucket, 1, 1),
+            (DetectingSettings, 0, 1),
+            (DetectingSettings, 1, 1),
+            (Connecting, 0, 1),
+            (Connecting, 1, 1),
+            (CreatingStore, 0, 1),
+            (CreatingStore, 1, 1),
+        ]
+    );
+    status(&f.handle, |s| matches!(s, SyncStatus::Synced { .. })).await;
+    f.handle.disconnect_storage().await.unwrap();
+    f.handle.close().await.unwrap();
+
+    let recorder = Arc::new(RecordingClock::new(f.clock.clone()));
+    let layout = StoreLayout::new(f._root.path().into());
+    let reopened = builder(&f.app, layout, recorder.clone(), f.connector.clone())
+        .open(f.directory.id(), |_| ())
+        .await
+        .unwrap();
+    assert_eq!(
+        recorded_setup(&f, &reopened, &recorder).await,
+        [
+            (DetectingSettings, 0, 1),
+            (DetectingSettings, 1, 1),
+            (Connecting, 0, 1),
+            (Connecting, 1, 1),
+        ]
+    );
+    reopened.close().await.unwrap();
 }
 
 #[tokio::test]
@@ -588,6 +664,7 @@ async fn two_stores_share_one_location_without_reading_each_others_history() {
             "Garden device",
             "garden-key".into(),
             SecretText::new("secret".into()),
+            |_| {},
         )
         .await
         .unwrap();
@@ -690,6 +767,7 @@ async fn setup_refuses_another_location_after_disconnect_and_reopen() {
             "Test device",
             "member-key".into(),
             SecretText::new("secret".into()),
+            |_| {},
         )
         .await
         .unwrap_err();
@@ -712,6 +790,7 @@ async fn setup_refuses_another_location_after_disconnect_and_reopen() {
             "Test device",
             "member-key".into(),
             SecretText::new("secret".into()),
+            |_| {},
         )
         .await
         .unwrap_err();
@@ -724,6 +803,7 @@ async fn setup_refuses_another_location_after_disconnect_and_reopen() {
             "Ignored",
             "member-key".into(),
             SecretText::new("secret".into()),
+            |_| {},
         )
         .await
         .unwrap();
@@ -770,6 +850,7 @@ async fn setup_rejects_overwriting_providers_before_committing() {
             "Another name",
             "another-key".into(),
             SecretText::new("another secret".into()),
+            |_| {},
         )
         .await
         .unwrap();
@@ -795,6 +876,7 @@ async fn reconnect_checks_the_provider_and_preserves_the_previous_connection() {
             "Ignored name",
             "replacement".into(),
             SecretText::new("new secret".into()),
+            |_| {},
         )
         .await
         .unwrap_err();

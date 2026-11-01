@@ -277,6 +277,7 @@ async fn saved_location_survives_disconnect_and_reopen_without_custody_reads() {
             "Ana's phone",
             "key".into(),
             SecretText::new("secret".into()),
+            |_| {},
         )
         .await
         .unwrap();
@@ -287,7 +288,13 @@ async fn saved_location_survives_disconnect_and_reopen_without_custody_reads() {
     *bucket = "another-bucket".into();
     assert!(matches!(
         handle
-            .setup_s3_storage(wrong, "Ana's phone", "key".into(), SecretText::new("secret".into()))
+            .setup_s3_storage(
+                wrong,
+                "Ana's phone",
+                "key".into(),
+                SecretText::new("secret".into()),
+                |_| {}
+            )
             .await,
         Err(StorageSetupError::LocationChangeUnsupported)
     ));

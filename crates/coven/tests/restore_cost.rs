@@ -332,6 +332,7 @@ async fn create(
             "Ana's laptop",
             "key".into(),
             SecretText::new("secret".into()),
+            |_| {},
         )
         .await
         .unwrap();

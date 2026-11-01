@@ -168,6 +168,7 @@ async fn creation_initializes_every_builtin_identity_custody_before_setup() {
                 "Phone",
                 "key".into(),
                 SecretText::new("secret".into()),
+                |_| {},
             )
             .await
             .unwrap();

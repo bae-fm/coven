@@ -147,6 +147,7 @@ let setup = handle
     .setup_oauth_storage(
         StorageConfig::Dropbox { location: DropboxLocation::SharedFolder { namespace_id } },
         "Ana's phone",
+        show_setup_step,
     )
     .await?;
 show_blurred_qr_code(setup.restore_code.as_str());

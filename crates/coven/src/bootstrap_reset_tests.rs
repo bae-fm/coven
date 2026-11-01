@@ -44,6 +44,7 @@ impl Fixture {
                 "Test device",
                 "member-key".into(),
                 SecretText::new("secret".into()),
+                |_| {},
             )
             .await
     }

@@ -851,3 +851,36 @@ mod status;
 
 #[path = "member_keys_tests.rs"]
 mod member_keys;
+
+/// Ana's phone sets up the Household store again after her laptop, restored
+/// from her code, registered in a slot the phone hasn't read: setup's last
+/// step loads that slot, counted as loading counts it (§13.4).
+#[tokio::test]
+async fn setting_up_again_loads_what_other_devices_published() {
+    let owner = Owner::new(CloudProvider::S3, false).await;
+    owner.handle.stop_sync().await.unwrap();
+    let install = Installation::new();
+    install.restore(&owner).await.close().await.unwrap();
+    let key = owner.s3_credentials().unwrap();
+    let seen = std::sync::Mutex::new(Vec::new());
+    owner
+        .handle
+        .setup_s3_storage(
+            owner.storage.config(),
+            "Ana’s phone",
+            key.access_key_id,
+            key.secret_access_key,
+            |progress| seen.lock().unwrap().push(progress),
+        )
+        .await
+        .unwrap();
+    let seen = seen.into_inner().unwrap();
+    let last = seen.last().unwrap();
+    assert!(
+        matches!(last.step, StorageSetupStep::Loading(LoadStep::Applying))
+            && last.total > 0
+            && last.done == last.total,
+        "{seen:?}"
+    );
+    owner.close().await;
+}

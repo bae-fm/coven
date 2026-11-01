@@ -77,6 +77,7 @@ async fn set_up(app: TestCoven) -> (Phone, Result<StorageSetup, StorageSetupErro
             "Dan's phone",
             "dan-key".into(),
             SecretText::new("secret".into()),
+            |_| {},
         )
         .await;
     let phone = Phone { app, handle, storage, clock, root };

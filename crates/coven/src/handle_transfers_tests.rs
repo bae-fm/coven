@@ -42,6 +42,7 @@ async fn paused_store(
             "Ana's phone",
             "key".into(),
             SecretText::new("secret".into()),
+            |_| {},
         )
         .await
         .unwrap();

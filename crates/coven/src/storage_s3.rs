@@ -12,6 +12,7 @@ impl StorageConnections {
         device_name: &str,
         access_key_id: String,
         secret_access_key: SecretText,
+        progress: SetupProgress,
     ) -> Result<StorageSetup, StorageSetupError> {
         if storage.provider() != CloudProvider::S3 {
             return Err(StorageFailure::InvalidConfiguration
@@ -21,6 +22,7 @@ impl StorageConnections {
         let credentials = S3Credentials { access_key_id, secret_access_key };
         let device_name = device_name.to_owned();
         self.call(move |owner| async move {
+            let mut progress = ProgressReport::new(progress, owner.clock.clone());
             let waits = Arc::new(SetupWaits::default());
             let outcome = async {
                 let recorded = owner.codes.location().await.map_err(setup_error)?;
@@ -29,23 +31,30 @@ impl StorageConnections {
                 if recorded.is_none() {
                     // Creating the store: where member keys reach the whole
                     // bucket, the bucket must hold nothing but this store (§20.7).
-                    owner
-                        .connector
-                        .check_new_s3_store(
-                            config.clone(),
-                            credentials.clone(),
-                            owner.store(),
-                            &waits,
-                        )
+                    let checking = owner.connector.check_new_s3_store(
+                        config.clone(),
+                        credentials.clone(),
+                        owner.store(),
+                        &waits,
+                    );
+                    setup_step::single(&mut progress, StorageSetupStep::CheckingBucket, checking)
                         .await?;
                 }
                 // §20.8's safety check: the effective settings must agree with what
                 // the service does, before the provider check and any commitment.
-                let detection = owner
-                    .connector
-                    .detect_s3(config.clone(), credentials.clone(), owner.store(), &waits)
-                    .await?;
-                let config = detection.resolve(config)?;
+                let detecting = async {
+                    let detection = owner
+                        .connector
+                        .detect_s3(config.clone(), credentials.clone(), owner.store(), &waits)
+                        .await?;
+                    detection.resolve(config)
+                };
+                let config = setup_step::single(
+                    &mut progress,
+                    StorageSetupStep::DetectingSettings,
+                    detecting,
+                )
+                .await?;
                 owner
                     .setup_connection(
                         config,
@@ -53,6 +62,7 @@ impl StorageConnections {
                         ProviderAuth::S3(credentials),
                         None,
                         &waits,
+                        &mut progress,
                     )
                     .await
             }

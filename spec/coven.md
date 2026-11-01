@@ -7496,6 +7496,16 @@ cooldown (§6.7) counts as one.
 - **It ends with the call.** Once setup returns, its connection, now the
   store's, waits out a rate limit as every connection does (§6.7).
 
+**Setup says how far it has come.** With rate limits waited out, and a
+reconnect loading what other devices published, setup can run long enough that
+a bare spinner leaves the person guessing. So it reports each step as it runs,
+as an open does (§4). Ben's first setup of his R2 bucket reports checking that
+the bucket holds nothing else (§20.7), detecting settings, then connecting,
+which covers both checks here, then creating the store. Ana's laptop
+reconnecting the Household store on Dropbox reports reading the account's
+label, connecting, then loading, with loading's own steps and counts (§13.4).
+api.md E5 lists the steps.
+
 #### 20.9 Sharing with accounts
 
 On Dropbox, OneDrive and iCloud, coven shares a store and takes sharing back

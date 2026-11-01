@@ -20,7 +20,7 @@ pub use crate::saved_restore::{
     forget_saved_restore_code, saved_restore_codes, SavedRestoreCode, SavedRestoreEntry,
 };
 pub use crate::storage::GuidedAccessKey;
-pub use crate::storage::{ConnectedStorage, StorageSetup, StoreKeyState};
+pub use crate::storage::{ConnectedStorage, StorageSetup, StorageSetupStep, StoreKeyState};
 pub use crate::store_layout::{StoreInfo, StoreLayout, StoreLayoutError};
 #[cfg(any(test, feature = "test-utils"))]
 pub use crate::test_utils::TestCoven;

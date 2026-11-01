@@ -74,7 +74,7 @@ it. It returns the person's restore code and starts syncing.
 
 ```rust
 match handle
-    .setup_s3_storage(storage, "Ana's laptop", access_key_id, SecretText::new(secret))
+    .setup_s3_storage(storage, "Ana's laptop", access_key_id, SecretText::new(secret), show_setup_step)
     .await
 {
     Ok(setup) => {
@@ -87,6 +87,10 @@ match handle
 
 There is one call per kind of provider: `setup_s3_storage`,
 `setup_oauth_storage` for Dropbox and OneDrive, and `setup_cloudkit_storage`.
+Each calls its last argument with every step it runs, as a
+`Progress<StorageSetupStep>`, so the app can say what setup is doing: checking
+an S3 bucket, detecting settings, connecting and checking the provider,
+creating the store, or loading what other devices published.
 
 Before setup commits anything, it checks the provider with the credentials just
 supplied: it creates a fresh sealed test object, requires a second create at
@@ -120,7 +124,7 @@ request, checks the redirect, exchanges the code and keeps the tokens.
 ```rust
 handle.authenticate(OAuthAccess::OneDrive).await?;
 handle
-    .setup_oauth_storage(StorageConfig::OneDrive { drive_id, folder_id }, "Ana's laptop")
+    .setup_oauth_storage(StorageConfig::OneDrive { drive_id, folder_id }, "Ana's laptop", show_setup_step)
     .await?;
 ```
 
@@ -151,7 +155,7 @@ CloudKit administrators could also do it
 
 CloudKit is built into coven on Apple platforms. The app supplies its container
 identifier and the iCloud entitlement for it, and calls
-`setup_cloudkit_storage(container, device_name)`. The store is a zone in the
+`setup_cloudkit_storage(container, device_name, on_progress)`. The store is a zone in the
 owner's private database, shared with members through a CloudKit share. Other
 platforms refuse CloudKit at setup with `StorageFailure::ProviderUnavailable`.
 

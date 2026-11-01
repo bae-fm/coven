@@ -65,7 +65,7 @@ async fn uncached_file_bodies_and_sequence_reads_share_the_download_limit() {
             .namespaces(files_namespace())
             .migrations(vec![Migration::addition(1, "files", FILES)])
             .open(directory.id(), |_| ()).await.unwrap();
-        handle.setup_s3_storage(memory.config(), "Device", "key".into(), SecretText::new("secret".into())).await.unwrap();
+        handle.setup_s3_storage(memory.config(), "Device", "key".into(), SecretText::new("secret".into()), |_| {}).await.unwrap();
         let mut status = handle.test_sync_status();
         status.wait_for(|s| matches!(s, SyncStatus::Synced { .. })).await;
         handle.stop_sync().await.unwrap();
@@ -149,6 +149,7 @@ async fn transfer_limits_bound_requests_and_a_changed_limit_applies_to_the_next_
                 "Test device",
                 "key".into(),
                 SecretText::new("secret".into()),
+                |_| {},
             )
             .await
             .unwrap();
@@ -467,6 +468,7 @@ async fn uploaded_files_pins_and_read_only_ranges_use_the_composed_owner() {
             "Laptop",
             "owner".into(),
             SecretText::new("secret".into()),
+            |_| {},
         )
         .await
         .unwrap();
@@ -623,6 +625,7 @@ async fn the_apps_sql_reads_uploads_pins_and_pending_records() {
             "Laptop",
             "owner".into(),
             SecretText::new("secret".into()),
+            |_| {},
         )
         .await
         .unwrap();

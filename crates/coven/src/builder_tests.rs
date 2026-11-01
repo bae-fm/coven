@@ -90,6 +90,7 @@ async fn app_reopening_resumes_operations_and_files_using_one_storage_capability
             "Owner",
             "owner-key".into(),
             SecretText::new("secret".into()),
+            |_| {},
         )
         .await
         .unwrap();
@@ -334,15 +335,16 @@ mod recovery {
                         "Original",
                         "owner".into(),
                         SecretText::new("secret".into()),
+                        |_| {},
                     )
                     .await
                     .unwrap(),
                 CloudProvider::CloudKit => {
-                    handle.setup_cloudkit_storage("test", "Original").await.unwrap()
+                    handle.setup_cloudkit_storage("test", "Original", |_| {}).await.unwrap()
                 }
                 _ => {
                     handle.authenticate(config.oauth_access().unwrap()).await.unwrap();
-                    handle.setup_oauth_storage(config.clone(), "Original").await.unwrap()
+                    handle.setup_oauth_storage(config.clone(), "Original", |_| {}).await.unwrap()
                 }
             };
             assert_eq!(setup.restore_code.as_str(), handle.restore_code().await.unwrap());
@@ -510,6 +512,7 @@ async fn creation_identity_matches_settings_before_and_after_reopening() {
             "Phone",
             "owner".into(),
             SecretText::new("secret".into()),
+            |_| {},
         )
         .await
         .unwrap();
@@ -531,6 +534,7 @@ async fn creation_identity_matches_settings_before_and_after_reopening() {
             "Phone",
             "owner".into(),
             SecretText::new("secret".into()),
+            |_| {},
         )
         .await
         .unwrap();

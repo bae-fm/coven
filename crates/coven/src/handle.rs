@@ -129,14 +129,39 @@ impl CovenHandle {
     /// Check S3 safety and provider operations, then set up S3 using this
     /// member's own access key. The returned location is the recorded one,
     /// carrying detected settings when the endpoint needed them.
+    /// `on_progress` is called on this task with each step as it runs (E1).
     pub async fn setup_s3_storage(
         &self,
         storage: StorageConfig,
         device_name: &str,
         access_key_id: String,
         secret_access_key: SecretText,
+        on_progress: impl Fn(Progress<StorageSetupStep>),
     ) -> Result<StorageSetup, StorageSetupError> {
-        self.storage.setup_s3(storage, device_name, access_key_id, secret_access_key).await
+        let (progress, watched) = tokio::sync::watch::channel(None);
+        let setup = self.setup_s3_reporting(
+            storage,
+            device_name,
+            access_key_id,
+            secret_access_key,
+            progress,
+        );
+        coven_foundation::progress::forward(watched, setup, on_progress).await
+    }
+
+    /// The S3 setup [`Self::setup_s3_storage`] runs, reporting its steps
+    /// into `progress` as it runs them.
+    pub(crate) async fn setup_s3_reporting(
+        &self,
+        storage: StorageConfig,
+        device_name: &str,
+        access_key_id: String,
+        secret_access_key: SecretText,
+        progress: crate::storage::SetupProgress,
+    ) -> Result<StorageSetup, StorageSetupError> {
+        self.storage
+            .setup_s3(storage, device_name, access_key_id, secret_access_key, progress)
+            .await
     }
     /// Probe the S3 service at this location with this member's key (§20.7),
     /// writing only fresh objects under the store's `.coven-check` prefix and
@@ -156,22 +181,30 @@ impl CovenHandle {
         self.storage.authenticate(access).await
     }
     /// Check provider operations and set up OAuth storage using coven's held sign-in.
+    /// `on_progress` is called on this task with each step as it runs (E1).
     pub async fn setup_oauth_storage(
         &self,
         storage: StorageConfig,
         device_name: &str,
+        on_progress: impl Fn(Progress<StorageSetupStep>),
     ) -> Result<StorageSetup, StorageSetupError> {
-        self.storage.setup_oauth(storage, device_name).await
+        let (progress, watched) = tokio::sync::watch::channel(None);
+        let setup = self.storage.setup_oauth(storage, device_name, progress);
+        coven_foundation::progress::forward(watched, setup, on_progress).await
     }
     /// Set up native iCloud storage in the entitled container. Coven obtains the
     /// owner and creates a custom zone; reconnects retain the recorded location.
     /// Unsupported platforms return `StorageFailure::ProviderUnavailable`.
+    /// `on_progress` is called on this task with each step as it runs (E1).
     pub async fn setup_cloudkit_storage(
         &self,
         container: &str,
         device_name: &str,
+        on_progress: impl Fn(Progress<StorageSetupStep>),
     ) -> Result<StorageSetup, StorageSetupError> {
-        self.storage.setup_cloudkit(container, device_name).await
+        let (progress, watched) = tokio::sync::watch::channel(None);
+        let setup = self.storage.setup_cloudkit(container, device_name, progress);
+        coven_foundation::progress::forward(watched, setup, on_progress).await
     }
     /// Open this member's sealed keys and connect without starting the loop.
     pub async fn unlock_store_key(&self) -> Result<ConnectedStorage, StoreKeyUnlockError> {
