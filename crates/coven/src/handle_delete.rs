@@ -45,7 +45,10 @@ impl CovenHandle {
         self.close().await?;
         let directory = self.directory.clone();
         let keychain = self.keychain.clone();
-        crate::coven::blocking(move || crate::coven::delete(&directory, &keychain)).await
+        crate::coven::blocking("delete the store", move || {
+            crate::coven::delete(&directory, &keychain)
+        })
+        .await?
     }
 }
 

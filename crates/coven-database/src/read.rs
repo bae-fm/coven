@@ -209,7 +209,7 @@ where
                 this.state = ReadState::Running(task);
                 Poll::Pending
             }
-            Poll::Ready(result) => Poll::Ready(database::finish_blocking(result)),
+            Poll::Ready(result) => Poll::Ready(database::finish_blocking("read", result)),
         }
     }
 }

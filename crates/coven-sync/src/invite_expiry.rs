@@ -46,7 +46,7 @@ impl InviteExpiry {
     pub async fn close(&self) {
         self.stop.send_replace(true);
         if let Some(task) = self.task.lock().await.take() {
-            crate::files::join(task).await;
+            crate::files::stopped("invite expiry", task).await;
         }
     }
 }

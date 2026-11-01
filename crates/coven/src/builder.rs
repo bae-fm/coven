@@ -266,12 +266,12 @@ impl CovenBuilder {
     /// Errors carry no handle; a published store is closed before returning.
     pub async fn create_store(self, name: &str) -> Result<CovenHandle, StoreCreationError> {
         let name = name.to_owned();
-        crate::coven::completion(tokio::spawn(creation::create(
+        let creating = tokio::spawn(creation::create(
             self,
             name,
             coven_foundation::files::BootstrapStore::publish,
-        )))
-        .await
+        ));
+        crate::coven::completion("create the store", creating).await?
     }
 
     /// Opens the store for reading and writing, taking the store's lock.
@@ -405,7 +405,7 @@ impl CovenBuilder {
         }
         let settings = coven_storage::StorageSettings::new(directory.clone());
         let oauth = self.oauth.clone();
-        let (credentials, data) = crate::coven::blocking(move || {
+        let (credentials, data) = crate::coven::blocking("read the saved credentials", move || {
             let keychain = self.keychain()?;
             let credentials = Arc::new(coven_sync::DeviceCredentials::new(
                 Arc::new(StoreKeychain::new(keychain.clone(), store)),
@@ -415,7 +415,8 @@ impl CovenBuilder {
             let data = credentials.connection(&settings)?;
             Ok::<_, SyncError>((credentials, data))
         })
-        .await?;
+        .await
+        .map_err(SyncError::from)??;
         let storage: Option<Arc<dyn Storage>> = match data {
             Some(data) => {
                 let storage = connector
@@ -479,7 +480,7 @@ impl CovenBuilder {
         let database = self.database(directory.clone())?;
         let lock = directory.lock_for_open().await?;
         let closing = lock.closing_guard();
-        let result = crate::coven::blocking(move || {
+        let result = crate::coven::blocking("open the store's custody", move || {
             let mut builder = self;
             let settings = lock.settings()?;
             let keychain = Arc::new(StoreKeychain::new(builder.keychain()?, settings.id));
@@ -521,7 +522,8 @@ impl CovenBuilder {
             directory.protect_files(&lock).map_err(DbError::Disk)?;
             Ok(OpeningStore { database, lock, builder, directory, keychain })
         })
-        .await;
+        .await
+        .unwrap_or_else(|shutdown| Err(shutdown.into()));
         closing.disarm();
         result
     }
@@ -683,7 +685,7 @@ impl OpeningStore {
         let waits = Arc::new(
             coven_sync::RetryWaits::open(database.clone(), self.builder.clock.clone()).await?,
         );
-        let owners = crate::coven::blocking(move || {
+        let owners = crate::coven::blocking("open the store's owners", move || {
             let owners = self.builder.owners(self.directory, self.keychain)?;
             // The saved restore code's name catches up with this store's
             // when the store's is newer, and an unreadable entry is replaced
@@ -713,7 +715,7 @@ impl OpeningStore {
             }
             Ok::<_, CovenError>(owners)
         })
-        .await?;
+        .await??;
         let configured = owners
             .credentials
             .connection(&coven_storage::StorageSettings::new(owners.directory.clone()))

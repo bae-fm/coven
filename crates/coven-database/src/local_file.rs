@@ -85,9 +85,9 @@ impl LocalFileStream {
     /// Read a positioned range on a blocking worker, retaining this open handle.
     pub async fn read_at(&self, offset: u64, len: u64) -> Result<Vec<u8>, LocalFileError> {
         let file = self.file.clone();
-        crate::database::finish_blocking(
-            tokio::task::spawn_blocking(move || file.read_at(offset, len)).await,
-        )
+        let joined = tokio::task::spawn_blocking(move || file.read_at(offset, len)).await;
+        coven_foundation::unwinding::blocking("read the local file", joined)
+            .map_err(FileError::from)?
     }
 
     /// Read a complete plaintext chunk and compare its first-read hash before

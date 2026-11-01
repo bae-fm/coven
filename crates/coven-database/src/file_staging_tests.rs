@@ -33,7 +33,7 @@ fn cancelled_staging_drops_outside_a_runtime_and_the_next_write_removes_its_byte
         )
         .unwrap()
         .0;
-        let (staging, result) = staging.write().await;
+        let (staging, result) = staging.write().await.unwrap();
         let _flushed = result.unwrap();
         staging
     });

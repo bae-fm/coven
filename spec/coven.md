@@ -1289,9 +1289,9 @@ arrives in a later slot can't let it get past 41.
 - **Refused writes don't stop anything.** Writes cut off by a removal or a key
   replacement are consumed without effect and recorded as `WritesRefused` (§14.1).
   The device moves on to the next slot.
-- **Local failures don't stop it either.** A locked keychain or a failed disk
-  write while applying a slot fails only that pass, and sync tries the slot
-  again (§19.1).
+- **Local failures don't stop it either.** A locked keychain, a failed disk
+  write or the process's runtime shutting down while applying a slot fails
+  only that pass, and sync tries the slot again (§19.1, api.md E15).
 - **What the model covers** is set out in §22.
 
 ### 6. A sync pass
@@ -8907,7 +8907,7 @@ document:
 
 | Crate | Owns | Sections |
 | --- | --- | --- |
-| `coven-foundation` | the clock, the id source, atomic file writes, the store's directory and its lock, turning a panic in background work into a value | §7, §10, §19.3, api.md E1, E15 |
+| `coven-foundation` | the clock, the id source, atomic file writes, the store's directory and its lock, turning a panic in background work into a value, and a runtime shutting down into one | §7, §10, §19.3, api.md E1, E15 |
 | `coven-crypto` | ciphers, sealed boxes, derived keys, file keys, member keys and their custody | §12 |
 | `coven-merge` | timestamps, the merged state, the removal rules and lost values, as functions with no I/O | §7, §8, §15 |
 | `coven-format` | the bytes in storage: slots, inner writes, snapshots, file headers and chunks, encoded, decoded and checked, using merge's and crypto's types | format.md |
@@ -9400,6 +9400,7 @@ the constraint or foreign key (§9, §15.1, §15.2, Appendix A).
 | `Refused(Decryption)`, `Refused(ContentHash)` | a complete chunk failed authentication; authenticated bytes disagree with the content hash | §17.7 |
 | `Failed(Disk)`, `Failed(Database)` | writing the local cache failed; the database failed | §17.7 |
 | `Failed(LocalFailure::Database)` | a database failure, with its cause on the call: `DbError::DamagedDatabase` for a damaged database | §19.1 |
+| `Failed(LocalFailure::Shutdown)` | the runtime shut down and dropped the work, which the next process runs again | api.md E15 |
 | `Waiting` | an upload sent in one request, until confirmed completion removes it | §17.9 |
 | `Automatic`, `AppAction`, `Never` | how a storage failure retries: under backoff, when credentials or the connection change, or not at all | §17.9 |
 | `SessionIdentityUnknown` | an S3 upload session's native id can't be recovered | E.10 |

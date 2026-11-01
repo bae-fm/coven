@@ -177,7 +177,7 @@ impl Files {
         self.inner.closed.store(true, Ordering::Release);
         self.worker.stop.send_replace(true);
         for task in std::mem::take(&mut *self.worker.tasks.lock().await) {
-            join(task).await;
+            stopped("the upload worker", task).await;
         }
         let _drain = self.inner.drain.lock().await;
         let _pins = self.inner.pins.lock().await;
@@ -378,11 +378,12 @@ impl FilesInner {
         }
     }
 }
-pub(crate) async fn join<T>(task: tokio::task::JoinHandle<T>) -> T {
-    match task.await {
-        Ok(value) => value,
-        Err(error) if error.is_panic() => std::panic::resume_unwind(error.into_panic()),
-        Err(error) => panic!("file task cancelled: {error}"),
+/// Wait for a background worker to end as its owner stops it. A panic in it
+/// unwinds into the owner; the runtime dropping it as it shuts down has ended
+/// it too, which is all stopping waits for.
+pub(crate) async fn stopped(worker: &'static str, task: tokio::task::JoinHandle<()>) {
+    if let Err(shutdown) = coven_foundation::unwinding::task(worker, task.await) {
+        tracing::debug!("{shutdown}");
     }
 }
 

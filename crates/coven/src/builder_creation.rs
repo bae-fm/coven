@@ -13,10 +13,21 @@ pub(super) async fn create(
     match prepare(builder, pending.clone(), name, publish).await {
         Ok(handle) => Ok(handle),
         Err(error @ StoreCreationError::PublishedButNotSynced { .. }) => Err(error),
-        Err(error) => Err(match crate::coven::blocking(move || pending.cancel()).await {
-            Ok(()) => error,
-            Err(cleanup) => error.with_cleanup(cleanup.into()),
-        }),
+        Err(error) => {
+            Err(
+                match crate::coven::blocking("remove the unpublished store", move || {
+                    pending.cancel()
+                })
+                .await
+                {
+                    Ok(Ok(())) => error,
+                    Ok(Err(cleanup)) => error.with_cleanup(cleanup.into()),
+                    // The removal never ran, so the unpublished store stays
+                    // on disk.
+                    Err(shutdown) => error.with_cleanup(shutdown.into()),
+                },
+            )
+        }
     }
 }
 
@@ -35,7 +46,7 @@ async fn prepare(
         Ok(waits) => Arc::new(waits),
         Err(error) => return Err(close_failed(&database, CovenError::from(error).into()).await),
     };
-    let prepared = crate::coven::blocking(move || {
+    let prepared = crate::coven::blocking("create the store's custody", move || {
         let keychain = Arc::new(StoreKeychain::new(
             builder.keychain().map_err(CovenError::from)?,
             directory.id(),
@@ -67,7 +78,8 @@ async fn prepare(
             }
         }
     })
-    .await;
+    .await
+    .unwrap_or_else(|shutdown| Err(shutdown.into()));
     let (owners, publication) = match prepared {
         Ok(owners) => owners,
         Err(error) => return Err(close_failed(&database, error).await),

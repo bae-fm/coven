@@ -71,9 +71,12 @@ impl StoreLayout {
             let failed = |source: CovenError| StoreLayoutError::Store { store: id, source };
             let unfinished = {
                 let directory = directory.clone();
-                crate::coven::blocking(move || directory.unfinished_replacement())
-                    .await
-                    .map_err(|error| failed(error.into()))?
+                crate::coven::blocking("read the replacement record", move || {
+                    directory.unfinished_replacement()
+                })
+                .await
+                .map_err(|shutdown| failed(shutdown.into()))?
+                .map_err(|error| failed(error.into()))?
             };
             stores.push(match unfinished {
                 Some(record) => {

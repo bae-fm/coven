@@ -718,7 +718,7 @@ impl Files {
         // retaining the real file owner and its database operations.
         self.worker.stop.send_replace(true);
         for task in std::mem::take(&mut *self.worker.tasks.lock().await) {
-            join(task).await;
+            stopped("the upload worker", task).await;
         }
     }
 }

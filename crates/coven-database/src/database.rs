@@ -366,6 +366,7 @@ impl Database {
         E: From<DbError> + Send + 'static,
     {
         finish_blocking(
+            "database call",
             start_call(self.inner.clone(), move |inner: &DatabaseInner| inner.call(run)).await,
         )
     }
@@ -507,6 +508,7 @@ impl Database {
                 Box::pin(async move {
                     let database = database.upgrade().ok_or(DbError::StoreClosed)?;
                     finish_blocking(
+                        "live query",
                         start_call(database, move |inner| {
                             inner.call(|inner| {
                                 inner
@@ -588,13 +590,16 @@ impl Database {
         let lease = self.file_tasks.clone().read_owned().await;
         let database = self.inner.clone();
         let (staging, staged) = finish_blocking(
+            "stage the write's files",
             tokio::task::spawn_blocking(crate::commit_scope::bind(move || {
                 file_staging::FileStaging::new(database, lease, stage)
             }))
             .await,
         )?;
-        let (staging, result) = staging.write().await;
+        let (staging, result) =
+            staging.write().await.map_err(|shutdown| E::from(DbError::Shutdown(shutdown)))?;
         finish_blocking(
+            "write",
             tokio::task::spawn_blocking(crate::commit_scope::bind(move || {
                 staging.finish(result, move |context| sql(context, staged))
             }))
@@ -673,10 +678,14 @@ impl Database {
     pub async fn close(&self) -> Result<(), DbError> {
         self.closing.begin_close();
         let database = self.clone();
-        finish_blocking(
+        // Closing runs as its own task so that a caller dropping this future
+        // doesn't stop it partway; the runtime dropping that task can.
+        coven_foundation::unwinding::task(
+            "close the store",
             tokio::spawn(async move {
                 let file_tasks = database.file_tasks.clone().write_owned().await;
                 finish_blocking(
+                    "close the store",
                     tokio::task::spawn_blocking(crate::commit_scope::bind(move || {
                         let _file_tasks = file_tasks;
                         let mut slot = database.inner.write().expect("database lock poisoned");
@@ -720,7 +729,7 @@ impl Database {
                 )
             })
             .await,
-        )
+        )?
     }
 }
 
@@ -776,6 +785,7 @@ impl DatabaseReadHandle {
         E: From<DbError> + Send + 'static,
     {
         finish_blocking(
+            "database call",
             start_call(self.inner.clone(), move |access| access.call(|| run(access))).await,
         )
     }
@@ -836,6 +846,7 @@ impl DatabaseReadHandle {
     pub async fn close(&self) -> Result<(), DbError> {
         let handle = self.clone();
         finish_blocking(
+            "close the store",
             tokio::task::spawn_blocking(move || {
                 let mut slot = handle.inner.write().expect("database lock poisoned");
                 slot.take().ok_or(DbError::StoreClosed)?.close()
@@ -860,12 +871,16 @@ where
     }))
 }
 
-pub(crate) fn finish_blocking<T>(result: Result<T, tokio::task::JoinError>) -> T {
-    match result {
-        Ok(result) => result,
-        Err(error) if error.is_panic() => std::panic::resume_unwind(error.into_panic()),
-        Err(error) => panic!("blocking database task was cancelled: {error}"),
-    }
+/// The result of a database call run on the blocking pool as `operation`. A
+/// panic in it unwinds into the caller; the pool dropping it unstarted, as it
+/// does once its runtime begins shutting down, is `DbError::Shutdown`, and
+/// the call changed nothing (E15).
+pub(crate) fn finish_blocking<R, E: From<DbError>>(
+    operation: &'static str,
+    joined: Result<Result<R, E>, tokio::task::JoinError>,
+) -> Result<R, E> {
+    coven_foundation::unwinding::blocking(operation, joined)
+        .map_err(|shutdown| E::from(DbError::Shutdown(shutdown)))?
 }
 
 pub(crate) async fn process<F, T>(process: F) -> CovenResult<T>
@@ -873,7 +888,7 @@ where
     F: FnOnce() -> CovenResult<T> + Send + 'static,
     T: Send + 'static,
 {
-    finish_blocking(tokio::task::spawn_blocking(process).await)
+    finish_blocking("process a read", tokio::task::spawn_blocking(process).await)
 }
 
 #[cfg(test)]

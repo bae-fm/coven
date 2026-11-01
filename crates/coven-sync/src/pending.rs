@@ -166,6 +166,9 @@ pub enum LocalFailure {
     Crypto,
     /// Operation state failed.
     Operation,
+    /// The work's runtime is shutting down and dropped it: the process is
+    /// ending, and the next one runs the work again (E15).
+    Shutdown,
 }
 
 /// The provider's intended sharing change.
@@ -440,7 +443,10 @@ impl PendingReason {
     pub(crate) fn clears(&self) -> Option<Clears> {
         match self.retry_cause() {
             Self::Failed(
-                LocalFailure::Database | LocalFailure::Disk | LocalFailure::KeyCustody,
+                LocalFailure::Database
+                | LocalFailure::Disk
+                | LocalFailure::KeyCustody
+                | LocalFailure::Shutdown,
             ) => Some(Clears::ByItself),
             Self::Failed(LocalFailure::Crypto | LocalFailure::Operation) => Some(Clears::Never),
             Self::Storage { failure, .. } => Some(storage_clears(*failure)),

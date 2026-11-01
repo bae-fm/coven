@@ -267,9 +267,9 @@ impl UploadedFile {
         let (location, hash) = stored(&file)?;
         let location = location.clone();
         let directory = owner.directory.clone();
-        let lock =
-            crate::files::join(tokio::task::spawn_blocking(move || directory.lock_read_only()))
-                .await?;
+        let joined = tokio::task::spawn_blocking(move || directory.lock_read_only()).await;
+        let lock = coven_foundation::unwinding::blocking("lock the store for reading", joined)
+            .map_err(coven_foundation::files::FileError::from)??;
         let coven_format::file_reference::FileReference { device, id, key } =
             location.reference()?;
         let path = ObjectPath::file(owner.directory.id(), device, id);

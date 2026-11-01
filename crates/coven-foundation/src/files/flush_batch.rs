@@ -128,11 +128,8 @@ impl FlushBatch {
         if self.files == 0 {
             return Ok(Flushed(()));
         }
-        match tokio::task::spawn_blocking(move || self.flush_now()).await {
-            Ok(result) => result,
-            Err(error) if error.is_panic() => std::panic::resume_unwind(error.into_panic()),
-            Err(error) => panic!("batch flush task was cancelled: {error}"),
-        }
+        let joined = tokio::task::spawn_blocking(move || self.flush_now()).await;
+        crate::unwinding::blocking("flush the batch", joined)?
     }
 
     fn flush_now(self) -> Result<Flushed, FileError> {

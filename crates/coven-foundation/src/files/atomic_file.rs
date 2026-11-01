@@ -49,6 +49,10 @@ pub enum FileError {
         /// The error removing the temporary file.
         cleanup: Box<dyn std::error::Error + Send + Sync>,
     },
+    /// The operation's runtime is shutting down and dropped it unstarted
+    /// (E15).
+    #[error(transparent)]
+    Shutdown(#[from] crate::task::Shutdown),
 }
 
 impl FileError {
@@ -262,15 +266,11 @@ impl FileWriter {
         // The owned guard carries the OS handle and store lock into the task.
         let mut file = self.file.clone().lock_owned().await;
         let path = self.path.clone();
-        match tokio::task::spawn_blocking(move || {
+        let joined = tokio::task::spawn_blocking(move || {
             run(&mut file, &path).map_err(|source| FileError::at(operation, &path, source))
         })
-        .await
-        {
-            Ok(result) => result,
-            Err(error) if error.is_panic() => std::panic::resume_unwind(error.into_panic()),
-            Err(error) => panic!("owned file task was cancelled: {error}"),
-        }
+        .await;
+        crate::unwinding::blocking(operation, joined)?
     }
 }
 

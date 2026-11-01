@@ -119,11 +119,10 @@ impl LockRegistration {
 
     async fn open_on_worker(self) -> Result<RegisteredLock, StoreLockError> {
         let closing = self.closing_guard();
-        let result = match tokio::task::spawn_blocking(move || self.acquire_file()).await {
-            Ok(result) => result,
-            Err(error) if error.is_panic() => std::panic::resume_unwind(error.into_panic()),
-            Err(error) => panic!("store lock acquisition task was cancelled: {error}"),
-        };
+        let joined = tokio::task::spawn_blocking(move || self.acquire_file()).await;
+        let result = crate::unwinding::blocking("lock the store", joined)
+            .map_err(|shutdown| StoreLockError::File(shutdown.into()))
+            .and_then(|result| result);
         closing.disarm();
         result
     }

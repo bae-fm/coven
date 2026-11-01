@@ -296,15 +296,15 @@ impl StorageConnections {
     ) -> Result<T, E>
     where
         T: Send + 'static,
-        E: From<KeyError> + Send + 'static,
+        E: From<KeyError> + From<crate::task::Shutdown> + Send + 'static,
         F: Future<Output = Result<T, E>> + Send,
     {
         let owner = self.clone();
-        crate::coven::completion(tokio::spawn(async move {
+        let call = tokio::spawn(async move {
             let _call = owner.lock_open().await?;
             run(owner.clone()).await
-        }))
-        .await
+        });
+        crate::coven::completion("storage call", call).await?
     }
 
     /// Compose a sequence owner, its loop and its credential owner on

@@ -26,11 +26,43 @@ pub enum TaskFailed {
     },
     /// The runtime it ran on is shutting down and dropped it before it
     /// finished. Not a bug: the process is ending the work.
-    #[error("{operation} did not finish: its runtime is shutting down")]
-    Shutdown {
-        /// What the work was doing, as its caller named it.
-        operation: &'static str,
-    },
+    #[error(transparent)]
+    Shutdown(Shutdown),
+}
+
+/// Work its runtime dropped as it shut down, before the work finished. Not a
+/// bug: the process is ending the work. The caller gets it as a value and
+/// returns it as its own error (E15).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+#[error("{operation} {outcome}: its runtime is shutting down")]
+pub struct Shutdown {
+    /// What the work was doing, as its caller named it.
+    pub operation: &'static str,
+    /// How far the work got, so whether anything it would change changed.
+    pub outcome: ShutdownOutcome,
+}
+
+/// How far work its runtime dropped got (E15).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ShutdownOutcome {
+    /// The work never started, so nothing it would change changed. tokio
+    /// can't stop a closure on the blocking pool once it has started, so a
+    /// closure the pool dropped is always one it never ran.
+    NotRun,
+    /// The work may have stopped at any of its waits, after some of its
+    /// steps: a task the runtime dropped partway. What it would change may
+    /// be changed in part, so the caller reads that state again before
+    /// relying on it.
+    Unknown,
+}
+
+impl std::fmt::Display for ShutdownOutcome {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::NotRun => "did not run",
+            Self::Unknown => "may have run in part",
+        })
+    }
 }
 
 impl TaskFailed {
@@ -39,19 +71,32 @@ impl TaskFailed {
         Self::Panicked { operation, message: panic_message(payload) }
     }
 
-    /// The failure a joined task's `error` stands for.
+    /// The failure a joined task's `error` stands for. A task the runtime
+    /// dropped may have run in part: `ShutdownOutcome::Unknown`.
     pub fn of_join(operation: &'static str, error: tokio::task::JoinError) -> Self {
+        Self::of_dropped(operation, ShutdownOutcome::Unknown, error)
+    }
+
+    /// `error`'s failure, where a task the runtime dropped got as far as
+    /// `outcome` says.
+    fn of_dropped(
+        operation: &'static str,
+        outcome: ShutdownOutcome,
+        error: tokio::task::JoinError,
+    ) -> Self {
         if error.is_panic() {
             failed_with(operation, error.into_panic())
         } else {
-            Self::Shutdown { operation }
+            Self::Shutdown(Shutdown { operation, outcome })
         }
     }
 
     /// What the failed work was doing, as its caller named it.
     pub fn operation(&self) -> &'static str {
         match self {
-            Self::Panicked { operation, .. } | Self::Shutdown { operation } => operation,
+            Self::Panicked { operation, .. } | Self::Shutdown(Shutdown { operation, .. }) => {
+                operation
+            }
         }
     }
 
@@ -74,12 +119,15 @@ pub fn panic_message(payload: &(dyn Any + Send)) -> String {
 }
 
 /// Run `work` on the blocking pool. A panic in it, or the runtime dropping it
-/// unstarted, comes back as `TaskFailed`, never as an unwind.
+/// unstarted (`ShutdownOutcome::NotRun`), comes back as `TaskFailed`, never
+/// as an unwind.
 pub async fn blocking<T: Send + 'static>(
     operation: &'static str,
     work: impl FnOnce() -> T + Send + 'static,
 ) -> Result<T, TaskFailed> {
-    joined(operation, tokio::task::spawn_blocking(work)).await
+    tokio::task::spawn_blocking(work)
+        .await
+        .map_err(|error| TaskFailed::of_dropped(operation, ShutdownOutcome::NotRun, error))
 }
 
 /// Wait for a task already spawned. Its panic, or the runtime cancelling it,

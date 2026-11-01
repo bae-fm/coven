@@ -37,8 +37,37 @@ async fn joined_turns_a_cancelled_task_into_shutdown() {
     let task = tokio::spawn(std::future::pending::<()>());
     task.abort();
     let failed = joined("wait forever", task).await.expect_err("an aborted task gives no value");
-    assert_eq!(failed, TaskFailed::Shutdown { operation: "wait forever" });
+    assert_eq!(
+        failed,
+        TaskFailed::Shutdown(Shutdown {
+            operation: "wait forever",
+            outcome: ShutdownOutcome::Unknown,
+        })
+    );
     assert!(!failed.is_panic());
+}
+
+#[test]
+fn blocking_sent_after_its_runtime_shut_down_did_not_run() {
+    let runtime = tokio::runtime::Builder::new_current_thread().build().unwrap();
+    let handle = runtime.handle().clone();
+    drop(runtime);
+    let failed = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap()
+        .block_on(async {
+            let _entered = handle.enter();
+            blocking("read the tags", || 1).await
+        })
+        .expect_err("the pool runs nothing once it shut down");
+    assert_eq!(
+        failed,
+        TaskFailed::Shutdown(Shutdown {
+            operation: "read the tags",
+            outcome: ShutdownOutcome::NotRun,
+        })
+    );
+    assert_eq!(failed.to_string(), "read the tags did not run: its runtime is shutting down");
 }
 
 #[tokio::test]

@@ -66,6 +66,12 @@ pub enum CovenError {
         /// The store whose member keys are missing.
         store: coven_foundation::id_source::StoreId,
     },
+    /// The call's runtime is shutting down and dropped coven's work for it
+    /// on the blocking pool unstarted, such as opening's custody work, so
+    /// that work changed nothing (E15). A database call dropped this way is
+    /// `DbError::Shutdown`.
+    #[error(transparent)]
+    Shutdown(#[from] coven_foundation::task::Shutdown),
 }
 
 impl From<rusqlite::Error> for CovenError {
@@ -131,6 +137,12 @@ pub enum DbError {
     /// This handle or a clone has closed the store (E1).
     #[error("store is closed")]
     StoreClosed,
+    /// The call's runtime is shutting down and dropped its work (E15). A
+    /// call the blocking pool dropped unstarted changed nothing
+    /// (`ShutdownOutcome::NotRun`); closing, which runs as its own task, may
+    /// have closed some connections (`ShutdownOutcome::Unknown`).
+    #[error(transparent)]
+    Shutdown(#[from] coven_foundation::task::Shutdown),
     /// SQLite refused or failed a statement, preserving its error.
     #[error(transparent)]
     Sqlite(rusqlite::Error),

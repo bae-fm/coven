@@ -1,6 +1,6 @@
 //! Async sources are consumed without holding SQLite or a blocking worker.
 
-use super::{finish_blocking, DatabaseInner};
+use super::DatabaseInner;
 use crate::file_hashes::FileHasher;
 use crate::file_write::{StagedFile, StagedSource};
 use crate::write_batch::{BatchFile, BatchSource};
@@ -185,8 +185,13 @@ impl FileStaging {
     /// Write each app source to coven's copy of it, each synced with a plain
     /// sync, then flush the batch: the folder and the drive's cache, once,
     /// so every copy is on the drive before the commit that records it
-    /// (Appendix C.3). A failed flush fails the write.
-    pub(super) async fn write(mut self) -> (Self, Result<Flushed, DbError>) {
+    /// (Appendix C.3). A failed flush fails the write. Only the runtime
+    /// shutting down ends the staging here: the pool dropped the creation of
+    /// a copy unstarted, and with it this staging, whose drop releases its
+    /// names; their recorded removals take any bytes written before (E15).
+    pub(super) async fn write(
+        mut self,
+    ) -> Result<(Self, Result<Flushed, DbError>), coven_foundation::task::Shutdown> {
         #[cfg(not(test))]
         let mut batch = FlushBatch::new();
         #[cfg(test)]
@@ -201,26 +206,26 @@ impl FileStaging {
             // Creation owns the staging guard until it finishes. Cancellation
             // cannot remove a name before this blocking call creates its bytes.
             let file_name = name.clone();
-            let (next, writer) = finish_blocking(
-                tokio::task::spawn_blocking(crate::commit_scope::bind(move || {
-                    let writer = (|| -> Result<_, DbError> {
-                        let slot = self.database.read().expect("database lock poisoned");
-                        let inner = slot.as_ref().expect("staging holds close guard");
-                        let lock = inner.access.directory.lock_read_only()?;
-                        Ok(inner
-                            .access
-                            .directory
-                            .file(FileArea::AppProvided, &file_name)
-                            .create_writer(lock)?)
-                    })();
-                    (self, writer)
-                }))
-                .await,
-            );
+            let joined = tokio::task::spawn_blocking(crate::commit_scope::bind(move || {
+                let writer = (|| -> Result<_, DbError> {
+                    let slot = self.database.read().expect("database lock poisoned");
+                    let inner = slot.as_ref().expect("staging holds close guard");
+                    let lock = inner.access.directory.lock_read_only()?;
+                    Ok(inner
+                        .access
+                        .directory
+                        .file(FileArea::AppProvided, &file_name)
+                        .create_writer(lock)?)
+                })();
+                (self, writer)
+            }))
+            .await;
+            let (next, writer) =
+                coven_foundation::unwinding::blocking("create a staged copy", joined)?;
             self = next;
             let writer = match writer {
                 Ok(writer) => writer,
-                Err(error) => return (self, Err(error)),
+                Err(error) => return Ok((self, Err(error))),
             };
             let mut hash = FileHasher::new();
             let mut size = 0;
@@ -237,7 +242,7 @@ impl FileStaging {
                 }
             };
             if let Err(error) = result {
-                return (self, Err(error.into()));
+                return Ok((self, Err(error.into())));
             }
             self.staged.push(StagedFile {
                 id,
@@ -249,7 +254,7 @@ impl FileStaging {
             });
         }
         let flushed = batch.flush().await.map_err(DbError::from);
-        (self, flushed)
+        Ok((self, flushed))
     }
 
     pub(super) fn finish<S, R, E: crate::WriteFailure>(

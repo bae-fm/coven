@@ -82,6 +82,10 @@ pub enum KeyError {
     /// writes it.
     #[error("invalid store id in saved restore-code entry")]
     RestoreCodeStoreId,
+    /// The call's runtime is shutting down and dropped it partway, so what
+    /// it changed in custody is unknown (E15).
+    #[error(transparent)]
+    Shutdown(#[from] coven_foundation::task::Shutdown),
 }
 
 /// A native keychain error whose diagnostic output never includes secret bytes.

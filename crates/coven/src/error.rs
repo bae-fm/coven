@@ -37,6 +37,13 @@ pub enum StoreCreationError {
         #[source]
         source: Box<StoreCreationError>,
     },
+    /// Creation's runtime is shutting down and dropped its work (E15).
+    /// Creation runs as its own task, so with `ShutdownOutcome::Unknown` it
+    /// may have stopped anywhere, before or after publishing the store;
+    /// listing the stores shows which. A step on the blocking pool that the
+    /// runtime dropped is `NotRun`.
+    #[error(transparent)]
+    Shutdown(#[from] crate::task::Shutdown),
 }
 
 impl StoreCreationError {
@@ -64,6 +71,10 @@ pub enum StoreDeletionError {
     /// Removing the store directory failed.
     #[error(transparent)]
     File(#[from] FileError),
+    /// The deletion's runtime is shutting down and dropped it before it
+    /// started, so nothing was deleted (E15).
+    #[error(transparent)]
+    Shutdown(#[from] crate::task::Shutdown),
 }
 
 /// Opening a read-only store or its saved file-storage connection failed.
@@ -101,6 +112,10 @@ pub enum StoreKeyUnlockError {
     /// Sequence validation or local work failed, preserving its cause.
     #[error("opening store keys: {0}")]
     Other(#[source] Box<dyn std::error::Error + Send + Sync>),
+    /// Unlocking's runtime is shutting down and dropped it partway, so
+    /// whether it saved the keys it opened is unknown (E15).
+    #[error(transparent)]
+    Shutdown(#[from] crate::task::Shutdown),
 }
 
 /// What setup and unlock report by name: a removal or a required update,

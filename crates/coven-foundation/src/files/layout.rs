@@ -43,7 +43,8 @@ enum Installations {
 /// A failure reading the app's store directories.
 #[derive(Debug, thiserror::Error)]
 pub enum StoreDirectoriesError {
-    /// The operating system refused a listing or a settings read.
+    /// The operating system refused a listing or a settings read, or the
+    /// listing's runtime is shutting down and it did not run.
     #[error("list stores: {0}")]
     File(#[from] FileError),
 }
@@ -88,11 +89,8 @@ impl StoreDirectories {
         installations: Installations,
     ) -> Result<Vec<StoreId>, StoreDirectoriesError> {
         let layout = self.clone();
-        match tokio::task::spawn_blocking(move || layout.list_stores(installations)).await {
-            Ok(result) => result,
-            Err(error) if error.is_panic() => std::panic::resume_unwind(error.into_panic()),
-            Err(error) => panic!("store listing task cancelled: {error}"),
-        }
+        let joined = tokio::task::spawn_blocking(move || layout.list_stores(installations)).await;
+        crate::unwinding::blocking("list stores", joined).map_err(FileError::from)?
     }
 
     fn list_stores(

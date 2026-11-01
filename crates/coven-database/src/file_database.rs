@@ -749,6 +749,7 @@ impl CacheReservation {
         let mut pending = self;
         let database = pending.database.clone();
         finish_blocking(
+            "publish the cache file",
             tokio::task::spawn_blocking(crate::commit_scope::bind(move || {
                 let slot = database.read().expect("database lock poisoned");
                 let inner = slot.as_ref().ok_or(DbError::StoreClosed)?;

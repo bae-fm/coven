@@ -14,7 +14,9 @@ impl Coven {
         store_dir: &StoreDir,
     ) -> Result<Option<crate::StorageConfig>, crate::StorageError> {
         let settings = coven_storage::StorageSettings::new(store_dir.clone());
-        blocking(move || settings.read()).await
+        blocking("read the storage settings", move || settings.read())
+            .await
+            .map_err(|shutdown| crate::StorageError::from(crate::FileError::from(shutdown)))?
     }
 
     /// Keep SQLite's temporary tables in `directory`, such as the app's cache
@@ -49,10 +51,10 @@ impl Coven {
     /// deletion that failed partway.
     pub async fn discard_store(store_dir: &StoreDir) -> Result<(), StoreDeletionError> {
         let directory = store_dir.clone();
-        blocking(move || {
+        blocking("discard the store", move || {
             delete(&directory, &StoreKeychain::new(Keychain::registered()?, directory.id()))
         })
-        .await
+        .await?
     }
 }
 
@@ -65,16 +67,25 @@ pub(crate) fn delete(directory: &StoreDir, keys: &StoreKeychain) -> Result<(), S
     Ok(())
 }
 
-pub(crate) async fn blocking<T: Send + 'static>(run: impl FnOnce() -> T + Send + 'static) -> T {
-    completion(tokio::task::spawn_blocking(run)).await
+/// Run `run`, the work named `operation`, on the blocking pool. A panic in it
+/// unwinds into the caller; the pool dropping it unstarted, as it does once
+/// its runtime begins shutting down, is a `Shutdown` that changed nothing.
+pub(crate) async fn blocking<T: Send + 'static>(
+    operation: &'static str,
+    run: impl FnOnce() -> T + Send + 'static,
+) -> Result<T, crate::task::Shutdown> {
+    coven_foundation::unwinding::blocking(operation, tokio::task::spawn_blocking(run).await)
 }
 
-pub(crate) async fn completion<T>(task: tokio::task::JoinHandle<T>) -> T {
-    match task.await {
-        Ok(result) => result,
-        Err(error) if error.is_panic() => std::panic::resume_unwind(error.into_panic()),
-        Err(error) => panic!("store operation task cancelled: {error}"),
-    }
+/// Wait for `task`, spawned so the call named `operation` finishes even when
+/// its caller stops waiting. A panic in it unwinds into the caller; the
+/// runtime dropping it as it shuts down is a `Shutdown` that may have run in
+/// part.
+pub(crate) async fn completion<T>(
+    operation: &'static str,
+    task: tokio::task::JoinHandle<T>,
+) -> Result<T, crate::task::Shutdown> {
+    coven_foundation::unwinding::task(operation, task.await)
 }
 
 #[cfg(test)]

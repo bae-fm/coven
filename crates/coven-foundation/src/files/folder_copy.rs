@@ -82,7 +82,7 @@ impl CopyFolder {
     /// Unicode. The folder itself may be reached through a link: the person
     /// picked it.
     pub async fn open(folder: PathBuf) -> Result<Self, CopyPathError> {
-        blocking(move || {
+        blocking("open folder", move || {
             if !folder.is_absolute() {
                 return Err(CopyPathError::NotAFolder(folder));
             }
@@ -119,7 +119,7 @@ impl CopyFolder {
     /// checked for links.
     pub async fn plan(&self, paths: Vec<RelativePath>) -> Result<CopyPlan, CopyPathError> {
         let folder = self.path.clone();
-        blocking(move || plan(&folder, &paths)).await
+        blocking("plan copies", move || plan(&folder, &paths)).await
     }
 
     /// Make the folder at `path`, a path of a plan, and sync the folder
@@ -127,13 +127,13 @@ impl CopyFolder {
     /// there already, made by someone else, which the call never removes.
     pub async fn create_folder(&self, path: PathBuf) -> Result<bool, FileError> {
         let folder = self.clone_handle();
-        blocking(move || folder.make_folder(&path)).await
+        blocking("make folder", move || folder.make_folder(&path)).await
     }
 
     /// Start a copy's bytes at `temporary`, a new file in its final folder.
     pub async fn create_copy(&self, temporary: PathBuf) -> Result<CopyWriter, FileError> {
         let folder = self.clone_handle();
-        blocking(move || folder.make_copy(temporary)).await
+        blocking("create copy", move || folder.make_copy(temporary)).await
     }
 
     fn clone_handle(&self) -> Self {
@@ -397,7 +397,7 @@ impl CopyWriter {
         #[cfg(unix)]
         {
             let (parent, from) = (self.parent.clone(), self.name.clone());
-            let folder = blocking(move || {
+            let folder = blocking("rename copy", move || {
                 use rustix::fs::RenameFlags;
                 let (name, folder) = match (to.file_name(), to.parent()) {
                     (Some(name), Some(folder)) => (name, folder),
@@ -421,7 +421,7 @@ impl CopyWriter {
         #[cfg(windows)]
         {
             let (folder, from) = (self.folder.clone_handle(), self.path.clone());
-            blocking(move || {
+            blocking("rename copy", move || {
                 folder
                     .check_below(&to)
                     .map_err(|source| FileError::at("rename copy", &to, source))?;
@@ -441,8 +441,10 @@ impl CopyWriter {
         // Acquire before spawning so later calls wait for cancelled work too.
         let mut file = self.file.clone().lock_owned().await;
         let path = self.path.clone();
-        blocking(move || run(&mut file).map_err(|source| FileError::at(operation, &path, source)))
-            .await
+        blocking(operation, move || {
+            run(&mut file).map_err(|source| FileError::at(operation, &path, source))
+        })
+        .await
     }
 }
 
@@ -509,12 +511,14 @@ fn sync_parent(path: &Path) -> io::Result<()> {
     Ok(())
 }
 
-async fn blocking<T: Send + 'static>(run: impl FnOnce() -> T + Send + 'static) -> T {
-    match tokio::task::spawn_blocking(run).await {
-        Ok(result) => result,
-        Err(error) if error.is_panic() => std::panic::resume_unwind(error.into_panic()),
-        Err(error) => panic!("copy task was cancelled: {error}"),
-    }
+/// Run `run`, file work named `operation`, on the blocking pool; the pool
+/// dropping it unstarted is `FileError::Shutdown`.
+async fn blocking<T: Send + 'static, E: From<FileError> + Send + 'static>(
+    operation: &'static str,
+    run: impl FnOnce() -> Result<T, E> + Send + 'static,
+) -> Result<T, E> {
+    let joined = tokio::task::spawn_blocking(run).await;
+    crate::unwinding::blocking(operation, joined).map_err(FileError::from)?
 }
 
 #[cfg(test)]

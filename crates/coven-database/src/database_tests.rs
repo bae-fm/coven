@@ -182,6 +182,55 @@ async fn closing_waits_for_a_borrowed_connection_before_releasing_the_lock() {
     store.assert_writer_unlocked();
 }
 
+/// A task that outlives its runtime, as a live query reading on after its
+/// test's runtime shut down, sends its database calls to a blocking pool that
+/// runs nothing more. Each call returns `DbError::Shutdown` instead of
+/// panicking (E15): a call the pool dropped unstarted changed nothing, and
+/// closing, which runs as its own task, can't say how far it got.
+#[test]
+fn calls_whose_runtime_is_shutting_down_return_shutdown() {
+    use coven_foundation::task::{Shutdown, ShutdownOutcome};
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let handle = runtime.handle().clone();
+    let store = TestStore::new();
+    let database =
+        runtime.block_on(store.builder(notes_tables(), notes_migrations()).open()).unwrap();
+    let mut query = database.subscribe(|sql| sql.store_state());
+    drop(runtime);
+    let outlived = tokio::runtime::Builder::new_current_thread().build().unwrap();
+    outlived.block_on(async {
+        let _entered = handle.enter();
+        assert!(matches!(
+            query.next().await,
+            Some(Err(CovenError::Database(DbError::Shutdown(Shutdown {
+                operation: "live query",
+                outcome: ShutdownOutcome::NotRun,
+            }))))
+        ));
+        assert!(matches!(
+            database.schema_version().await,
+            Err(DbError::Shutdown(Shutdown {
+                operation: "database call",
+                outcome: ShutdownOutcome::NotRun,
+            }))
+        ));
+        assert!(matches!(
+            database.write(|_| Ok(())).await,
+            Err(DbError::Shutdown(Shutdown {
+                operation: "stage the write's files",
+                outcome: ShutdownOutcome::NotRun,
+            }))
+        ));
+        assert!(matches!(
+            database.close().await,
+            Err(DbError::Shutdown(Shutdown {
+                operation: "close the store",
+                outcome: ShutdownOutcome::Unknown,
+            }))
+        ));
+    });
+}
+
 #[tokio::test]
 async fn settings_failure_remains_distinct() {
     let store = TestStore::new();

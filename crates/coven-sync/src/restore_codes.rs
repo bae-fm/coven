@@ -127,7 +127,7 @@ impl RestoreCodes {
     /// Credential changes and close wait for this owned operation.
     pub async fn replace_member_keys(&self) -> Result<SecretText, SyncError> {
         let inner = self.inner.clone();
-        crate::files::join(tokio::spawn(async move {
+        let joined = tokio::spawn(async move {
             let guard = inner.lock().await;
             let owner = guard.as_ref().ok_or(DbError::StoreClosed)?;
             // Reject missing location before publishing a new binding.
@@ -138,8 +138,8 @@ impl RestoreCodes {
                 .finish_member_keys(true, |identity, store| owner.refresh_code(identity, store))
                 .await?
                 .expect("the initiating replacement owns code completion"))
-        }))
-        .await
+        });
+        coven_foundation::unwinding::task("replace member keys", joined.await)?
     }
 
     /// Finish the code step of a self-replacement resumed by a sync pass (§11.5).
@@ -163,7 +163,7 @@ impl RestoreCodes {
         secret_access_key: SecretText,
     ) -> Result<(), SyncError> {
         let inner = self.inner.clone();
-        crate::files::join(tokio::spawn(async move {
+        let joined = tokio::spawn(async move {
             let guard = inner.lock().await;
             let owner = guard.as_ref().ok_or(DbError::StoreClosed)?;
             owner
@@ -179,8 +179,8 @@ impl RestoreCodes {
                 .record_access_key(access_key_id)
                 .await?;
             Ok(())
-        }))
-        .await
+        });
+        coven_foundation::unwinding::task("replace the access key", joined.await)?
     }
 
     /// Keep this member's separately supplied S3 key without changing identity,
@@ -192,12 +192,12 @@ impl RestoreCodes {
         secret_access_key: SecretText,
     ) -> Result<(), SyncError> {
         let inner = self.inner.clone();
-        crate::files::join(tokio::spawn(async move {
+        let joined = tokio::spawn(async move {
             let guard = inner.lock().await;
             let owner = guard.as_ref().ok_or(DbError::StoreClosed)?;
             owner.install_s3(S3Credentials { access_key_id, secret_access_key }, false).await
-        }))
-        .await
+        });
+        coven_foundation::unwinding::task("update credentials", joined.await)?
     }
 
     /// Read committed provider data without exposing custody or a connection.

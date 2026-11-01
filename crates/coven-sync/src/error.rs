@@ -118,12 +118,19 @@ pub enum SyncError {
         /// The proposed creation's store.
         actual: StoreId,
     },
+    /// The call's runtime is shutting down and dropped its work (E15). A
+    /// database call the blocking pool dropped unstarted changed nothing; a
+    /// call that runs as its own task, as closing and replacing credentials
+    /// do, may have stopped partway.
+    #[error(transparent)]
+    Shutdown(#[from] coven_foundation::task::Shutdown),
 }
 
 impl From<coven_database::CovenError> for SyncError {
     fn from(error: coven_database::CovenError) -> Self {
         match error {
             coven_database::CovenError::Database(error) => error.into(),
+            coven_database::CovenError::Shutdown(shutdown) => Self::Shutdown(shutdown),
             error => {
                 Self::Failed { failure: crate::LocalFailure::Database, source: Arc::new(error) }
             }
@@ -140,6 +147,8 @@ impl From<DbError> for SyncError {
             error @ (DbError::OperationChanged(_) | DbError::Invariant { .. }) => {
                 Self::Failed { failure: crate::LocalFailure::Database, source: Arc::new(error) }
             }
+            // The process is ending the call; the database did not fail.
+            DbError::Shutdown(shutdown) => Self::Shutdown(shutdown),
             error => Self::Database(error),
         }
     }
@@ -190,7 +199,8 @@ impl SyncError {
             | SyncError::Key(_)
             | SyncError::KeyAlreadyUsed(_)
             | SyncError::DeviceIdInUse(_)
-            | SyncError::WrongStore { .. } => PendingReason::Failed(error.local_failure()),
+            | SyncError::WrongStore { .. }
+            | SyncError::Shutdown(_) => PendingReason::Failed(error.local_failure()),
         }
     }
 
@@ -228,16 +238,20 @@ impl SyncError {
             | Self::MemberKeysReplaced { .. }
             | Self::UpdateRequired(_)
             | Self::WrongStore { .. } => crate::LocalFailure::Operation,
+            Self::Shutdown(_) => crate::LocalFailure::Shutdown,
         }
     }
 
     /// A local database, disk or custody failure that can clear by itself,
-    /// such as a locked keychain or a failed disk write (E5). It fails only
+    /// such as a locked keychain or a failed disk write (E5), or the runtime
+    /// shutting down, which the next process clears (E15). It fails only
     /// this attempt and says nothing about the slot being applied (§19.1).
     pub(crate) fn local_failure_clears_by_itself(&self) -> bool {
-        matches!(self, Self::Database(_) | Self::SecureStorage(_) | Self::Failed { .. })
-            && crate::PendingReason::Failed(self.local_failure()).clears()
-                == Some(crate::pending::Clears::ByItself)
+        matches!(
+            self,
+            Self::Database(_) | Self::SecureStorage(_) | Self::Failed { .. } | Self::Shutdown(_)
+        ) && crate::PendingReason::Failed(self.local_failure()).clears()
+            == Some(crate::pending::Clears::ByItself)
     }
 
     /// The error a pending record keeps as its cause, the one `into_shared`

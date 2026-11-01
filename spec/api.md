@@ -1054,6 +1054,10 @@ pub enum CovenError {
     DeviceKeyMissing { store: StoreId },
     /// A connected store's member keys are missing too; only restore continues.
     MemberKeysMissing { store: StoreId },
+    /// The call's runtime is shutting down and dropped coven's work for it
+    /// unstarted, such as opening's custody work; a dropped database call is
+    /// `DbError::Shutdown` (E15).
+    Shutdown(Shutdown),
 }
 
 /// Invalid input to the pure merge; no partially changed state is returned.
@@ -1116,6 +1120,10 @@ pub enum MergeError {
 pub enum DbError {
     /// This handle or a clone has closed the store (E1).
     StoreClosed,
+    /// The call's runtime is shutting down and dropped its work (E15): a
+    /// call changed nothing (`NotRun`); closing may have stopped partway
+    /// (`Unknown`).
+    Shutdown(Shutdown),
     /// SQLite refused or failed a statement, preserving its error.
     Sqlite(rusqlite::Error),
     /// A statement met damage SQLite reports (`SQLITE_CORRUPT`,
@@ -1496,6 +1504,8 @@ pub enum FileError {
     AfterRemove { path: PathBuf, source: Box<dyn std::error::Error + Send + Sync> },
     /// Removing an unpublished temporary file failed too.
     Cleanup { operation: Box<FileError>, cleanup: Box<dyn std::error::Error + Send + Sync> },
+    /// The operation's runtime is shutting down and dropped it unstarted (E15).
+    Shutdown(Shutdown),
 }
 
 impl FileError {
@@ -1580,7 +1590,8 @@ pub enum StoreLockError {
     ReplacementUnfinished { store: StoreId, by: ReplacedBy },
     /// A supplied lock protects a different directory.
     WrongDirectory(StoreId),
-    /// Opening or locking the lock file failed.
+    /// Opening or locking the lock file failed, or did not run because its
+    /// runtime is shutting down (`FileError::Shutdown`).
     File(FileError),
 }
 
@@ -1643,6 +1654,10 @@ pub enum StoreCreationError {
         /// The directory-sync failure, retaining any close failure as `Cleanup`.
         source: Box<StoreCreationError>,
     },
+    /// Creation's runtime is shutting down and dropped its work (E15). With
+    /// `Unknown` it may have stopped before or after publishing the store;
+    /// listing the stores shows which.
+    Shutdown(Shutdown),
 }
 
 /// The folder for temporary tables could not be named (E1).
@@ -1669,6 +1684,9 @@ pub enum StoreDeletionError {
     Key(KeyError),
     /// Removing the store directory failed.
     File(FileError),
+    /// The deletion's runtime is shutting down and dropped it unstarted;
+    /// nothing was deleted (E15).
+    Shutdown(Shutdown),
 }
 
 /// Unlocking, keeping or forgetting keys or host secrets failed (E1, E11).
@@ -1723,6 +1741,8 @@ pub enum KeyError {
     /// A saved restore-code account's id part is not a store id as coven
     /// writes it.
     RestoreCodeStoreId,
+    /// The call's runtime is shutting down and dropped it partway (E15).
+    Shutdown(Shutdown),
 }
 
 /// Secret bytes crossing custody or code boundaries, erased when dropped (§12.4, §13).
@@ -4206,6 +4226,9 @@ pub enum StorageSetupError {
     UpdateRequired(RequiredUpdate),
     /// Local setup failed, with its cause.
     Internal(Box<dyn std::error::Error + Send + Sync>),
+    /// Setup's runtime is shutting down and dropped it partway, so how much
+    /// of it was saved is unknown (E15).
+    Shutdown(Shutdown),
 }
 
 /// The provider operation checked before setup commits anything (E5).
@@ -4250,6 +4273,9 @@ pub enum StoreKeyUnlockError {
 
     /// Sequence validation or local work failed, preserving its cause.
     Other(Box<dyn std::error::Error + Send + Sync>),
+    /// Unlocking's runtime is shutting down and dropped it partway, so
+    /// whether it kept the keys it opened is unknown (E15).
+    Shutdown(Shutdown),
 }
 
 /// Sync or an administrative operation failed (§10, §14, §18, E5).
@@ -4321,6 +4347,11 @@ pub enum SyncError {
     /// Deleting stored files waits for this unfinished snapshot, whose
     /// journal still owns references no row holds (§17.10).
     SnapshotPending(OperationId),
+    /// The call's runtime is shutting down and dropped its work (E15): a
+    /// database call it made changed nothing; a call that runs as its own
+    /// task, as closing and replacing credentials do, may have stopped
+    /// partway. Its category is `LocalFailure::Shutdown`.
+    Shutdown(Shutdown),
 }
 
 impl SyncError {
@@ -4453,6 +4484,9 @@ pub enum LocalFailure {
     KeyCustody,
     Crypto,
     Operation,
+    /// The work's runtime is shutting down; the next process runs it again,
+    /// so it clears by itself (E15).
+    Shutdown,
 }
 
 pub enum ProviderAccessAction {
@@ -6017,6 +6051,9 @@ pub enum BootstrapError {
     /// Publication took effect, but durability or cleanup failed. The handle
     /// retains the loaded store and its session-only keys.
     Published { handle: CovenHandle, source: Box<BootstrapError> },
+    /// The saved restore codes' keychain work did not run: its runtime is
+    /// shutting down (E15).
+    Shutdown(Shutdown),
 }
 
 /// Opens sign-in and returns the provider's complete redirect URL. Coven holds
@@ -7213,7 +7250,7 @@ pub async fn empty_s3_prefix(
 ) -> Result<EmptiedS3Prefix, EmptyS3PrefixError>;
 ```
 
-### E15 Background work and panics
+### E15 Background work, panics and shutdown
 
 - Work an app runs apart from the caller that waits for it, on tokio's
   blocking pool or as its own task, loses its panic. tokio keeps a task's
@@ -7240,6 +7277,44 @@ pub async fn empty_s3_prefix(
   the process, so such a callback catches the panic and answers with its own
   failure value.
 
+A runtime that shuts down drops the work it has not finished, and coven's own
+calls run work the same way: database calls and file work on the blocking
+pool, and calls that must finish even when their caller stops waiting, such
+as closing a store, as their own task. A runtime shutting down is not a bug,
+so such a call ends with a `Shutdown` in its error instead of a panic.
+
+- Ana's music app keeps a live query of its albums. A test of the app opens
+  the store on its own runtime and ends while the query is still reading.
+  The query's next read goes to a blocking pool that runs nothing more, and
+  its `next` returns `Err(CovenError::Database(DbError::Shutdown(Shutdown {
+  operation: "live query", outcome: ShutdownOutcome::NotRun })))`. Had coven
+  panicked there, the test process would have aborted.
+- `Shutdown.outcome` says how far the work got, so whether a write took
+  effect. tokio can't stop a closure on the blocking pool once it has
+  started, so the pool only drops a closure it never ran: `NotRun`, and
+  nothing the call would change changed. Every database call, coven's file
+  work and the custody work that opening, deleting and the saved restore
+  codes do run this way.
+- A task the runtime drops stops at whichever wait it is at: `Unknown`, and
+  what the call would change may be changed in part. Closing a store or a
+  read-only handle, `create_store`, storage setup, unlocking store keys,
+  `disconnect`, `forget_store_keys`, `replace_member_keys`,
+  `replace_access_key` and `update_credentials` run as their own task. Their
+  caller reads the state again before relying on it: whether the store is
+  listed, or what `storage_config` and the key state say.
+- The error that carries the `Shutdown` is the call's own:
+  `DbError::Shutdown` for a database call, `DiskError::Shutdown` for file
+  work, wherever a disk failure would appear, and a `Shutdown` variant of
+  `CovenError`, `KeyError`, `SyncError`, `StorageSetupError`,
+  `StoreKeyUnlockError`, `StoreCreationError`, `StoreDeletionError` and
+  `BootstrapError` for the calls above. `SyncError` takes a database call's
+  `Shutdown` as its own and reports it as `LocalFailure::Shutdown`, which
+  clears by itself: the next process runs the work again, and a slot whose
+  application it stopped is not blocked (§19.1).
+- A panic in coven's own background work still unwinds into the caller that
+  waits for it, as if the work had run inline. A database call gives an app
+  closure's panic back the same way.
+
 Edge cases:
 
 - After a panic, `caught` drops the future at once, inside a catch of its
@@ -7250,7 +7325,10 @@ Edge cases:
 - A payload that is not text, thrown with `std::panic::panic_any`, gives the
   message "a panic whose payload is not text".
 - tokio reports an aborted task and a task its runtime dropped the same way.
-  `joined` gives `Shutdown` for both.
+  `joined` gives `Shutdown` with `ShutdownOutcome::Unknown` for both;
+  `blocking` gives `ShutdownOutcome::NotRun`.
+- A store's background workers, such as the upload worker, that the runtime
+  dropped have stopped, which is all closing waits for: closing goes on.
 - Dropping the future `blocking` or `joined` returns does not stop work
   already spawned: it runs to its end, and its result or panic is dropped.
 
@@ -7269,12 +7347,32 @@ pub enum TaskFailed {
         message: String,
     },
     /// The runtime it ran on is shutting down and dropped it before it
-    /// finished. Not a bug: the process is ending the work. Shown as
-    /// "{operation} did not finish: its runtime is shutting down".
-    Shutdown {
-        /// What the work was doing, as its caller named it.
-        operation: &'static str,
-    },
+    /// finished. Not a bug: the process is ending the work.
+    Shutdown(Shutdown),
+}
+
+/// Work its runtime dropped as it shut down, before the work finished (E15).
+/// Not a bug: the process is ending the work. Shown as "{operation} did not
+/// run: its runtime is shutting down", or "{operation} may have run in part:
+/// ..." for `Unknown`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+pub struct Shutdown {
+    /// What the work was doing, as its caller named it.
+    pub operation: &'static str,
+    /// How far the work got, so whether anything it would change changed.
+    pub outcome: ShutdownOutcome,
+}
+
+/// How far work its runtime dropped got (E15).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ShutdownOutcome {
+    /// It never started, so nothing it would change changed: a closure the
+    /// blocking pool dropped.
+    NotRun,
+    /// It may have stopped at any of its waits, after some of its steps: a
+    /// task the runtime dropped partway. The caller reads what it would
+    /// change before relying on it.
+    Unknown,
 }
 
 impl TaskFailed {
@@ -7282,7 +7380,7 @@ impl TaskFailed {
     pub fn panicked(operation: &'static str, payload: &(dyn std::any::Any + Send)) -> Self;
 
     /// The failure a joined task's `error` stands for: `Panicked` for a
-    /// panic, `Shutdown` for a cancelled task.
+    /// panic, `Shutdown` with `ShutdownOutcome::Unknown` for a cancelled task.
     pub fn of_join(operation: &'static str, error: tokio::task::JoinError) -> Self;
 
     /// What the failed work was doing, as its caller named it.
@@ -7297,7 +7395,8 @@ impl TaskFailed {
 pub fn panic_message(payload: &(dyn std::any::Any + Send)) -> String;
 
 /// Run `work` on the blocking pool. A panic in it, or the runtime dropping it
-/// unstarted, comes back as `TaskFailed`, never as an unwind.
+/// unstarted (`ShutdownOutcome::NotRun`), comes back as `TaskFailed`, never
+/// as an unwind.
 pub async fn blocking<T: Send + 'static>(
     operation: &'static str,
     work: impl FnOnce() -> T + Send + 'static,

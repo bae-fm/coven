@@ -288,6 +288,10 @@ pub enum StorageSetupError {
     /// A local setup step failed, retaining its cause.
     #[error("storage setup: {0}")]
     Internal(#[source] Box<dyn std::error::Error + Send + Sync>),
+    /// Setup's runtime is shutting down and dropped it partway, so how much
+    /// of it was saved is unknown (E15).
+    #[error(transparent)]
+    Shutdown(#[from] coven_foundation::task::Shutdown),
 }
 
 impl StorageFailure {

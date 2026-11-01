@@ -27,7 +27,7 @@ impl StorageConnections {
             attempts.take()
         };
         if let Some(previous) = previous {
-            crate::coven::completion(previous.task).await;
+            attempt_ended(previous.task).await;
         }
         let live = self.live.lock().await;
         if let Connection::Active(connected) = &*live {
@@ -330,7 +330,7 @@ impl StorageConnections {
         self.stopped.notify_waiters();
         let attempts = self.attempts.lock().expect("connection attempts poisoned").take();
         if let Some(attempts) = attempts {
-            crate::coven::completion(attempts.task).await;
+            attempt_ended(attempts.task).await;
         }
         let _call = self.calls.lock().await;
         let released = self.release(&mut *self.live.lock().await).await;
@@ -340,5 +340,14 @@ impl StorageConnections {
         self.authentication.lock().await.take();
         drop(keys);
         released.and(stopped.map_err(SyncError::from))
+    }
+}
+
+/// Wait for a connection attempt to end. A panic in it unwinds into the
+/// waiter; the runtime dropping it as it shuts down has ended it too, which
+/// is all the waiter needs.
+async fn attempt_ended(task: tokio::task::JoinHandle<()>) {
+    if let Err(shutdown) = crate::coven::completion("connect to storage", task).await {
+        tracing::debug!("{shutdown}");
     }
 }

@@ -100,6 +100,10 @@ pub enum BootstrapError {
         #[source]
         source: Box<BootstrapError>,
     },
+    /// The call's runtime is shutting down and dropped its keychain work
+    /// before it started, so nothing changed (E15).
+    #[error(transparent)]
+    Shutdown(#[from] crate::task::Shutdown),
 }
 
 /// Restore this person's store on a new device, returning its open handle.

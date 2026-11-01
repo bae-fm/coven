@@ -98,14 +98,19 @@ impl FilesInner {
         let directory = self.directory.clone();
         // Cleanup cannot release the name while creation still runs after a
         // cancelled await; the blocking task retains its reservation.
-        let (reservation, writer) = crate::files::join(tokio::task::spawn_blocking(move || {
+        let joined = tokio::task::spawn_blocking(move || {
             let writer = (|| -> Result<_, FileReadError> {
                 let lock = directory.lock_read_only()?;
                 Ok(target.create_writer(lock)?)
             })();
             (reservation, writer)
-        }))
+        })
         .await;
+        // The pool dropping the creation unstarted drops the reservation
+        // with it, which leaves the name to its recorded removal.
+        let (reservation, writer) =
+            coven_foundation::unwinding::blocking("create a cache file", joined)
+                .map_err(coven_foundation::files::FileError::from)?;
         Ok((reservation, writer?))
     }
 }

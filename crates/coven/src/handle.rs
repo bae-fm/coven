@@ -453,11 +453,11 @@ impl CovenHandle {
     pub async fn close(&self) -> Result<(), SyncError> {
         self.closing.begin_close();
         let handle = self.clone();
-        crate::coven::completion(tokio::spawn(async move {
+        let closing = tokio::spawn(async move {
             let storage = handle.storage.close().await;
             handle.files.close().await;
             let custody = handle.custody.clone();
-            crate::coven::blocking(move || {
+            let custody = crate::coven::blocking("close custody", move || {
                 if let Some(custody) = custody.lock().expect("custody lock poisoned").take() {
                     custody.close();
                 }
@@ -470,7 +470,7 @@ impl CovenHandle {
                 Err(SyncError::Database(DbError::StoreClosed)) => Ok(()),
                 result => result,
             };
-            [storage, database.map_err(SyncError::from)]
+            [storage, custody.map_err(SyncError::from), database.map_err(SyncError::from)]
                 .into_iter()
                 .filter_map(Result::err)
                 .reduce(|operation, cleanup| SyncError::Cleanup {
@@ -478,8 +478,8 @@ impl CovenHandle {
                     cleanup: Box::new(cleanup),
                 })
                 .map_or(Ok(()), Err)
-        }))
-        .await
+        });
+        crate::coven::completion("close the store", closing).await?
     }
     /// The last slot this installation applied.
     #[cfg(test)]

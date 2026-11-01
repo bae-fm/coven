@@ -90,23 +90,29 @@ impl TestCoven {
     /// List this installation's saved codes through the production discovery path.
     pub async fn saved_restore_codes(&self) -> Result<Vec<SavedRestoreEntry>, BootstrapError> {
         let keychain = self.keychain.clone();
-        crate::coven::blocking(move || crate::saved_restore::list(keychain)).await
+        crate::coven::blocking("list saved restore codes", move || {
+            crate::saved_restore::list(keychain)
+        })
+        .await?
     }
 
     /// Forget one store's saved code and S3 key through the production path.
     pub async fn forget_saved_restore_code(&self, store: StoreId) -> Result<(), BootstrapError> {
         let keychain = self.keychain.clone();
-        crate::coven::blocking(move || crate::saved_restore::forget(keychain, store)).await
+        crate::coven::blocking("forget the saved restore code", move || {
+            crate::saved_restore::forget(keychain, store)
+        })
+        .await?
     }
 
     /// Discard through the same locked directory and keychain path as `Coven`.
     pub async fn discard_store(&self, directory: &StoreDir) -> Result<(), StoreDeletionError> {
         let directory = directory.clone();
         let keychain = self.keychain.clone();
-        crate::coven::blocking(move || {
+        crate::coven::blocking("discard the store", move || {
             crate::coven::delete(&directory, &StoreKeychain::new(keychain, directory.id()))
         })
-        .await
+        .await?
     }
 
     /// Seed the simulated OS custody as if this installation had opened keys.

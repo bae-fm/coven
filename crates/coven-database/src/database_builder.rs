@@ -114,8 +114,10 @@ impl DatabaseBuilder {
     /// device identity. The lock must protect this builder's directory.
     pub async fn open_locked(self, lock: StoreLock) -> CovenResult<Database> {
         let closing = lock.closing_guard();
-        let result =
-            finish_blocking(tokio::task::spawn_blocking(move || self.open_graph(lock)).await);
+        let result = finish_blocking(
+            "open the store",
+            tokio::task::spawn_blocking(move || self.open_graph(lock)).await,
+        );
         // Cancellation drops the guard while SQLite can still be opening.
         // A returned database carries its own guard across its owning clones.
         closing.disarm();
@@ -126,7 +128,10 @@ impl DatabaseBuilder {
     /// migrating or rebuilding, including from a second process while the
     /// writer is open.
     pub async fn open_read_only(self) -> CovenResult<DatabaseReadHandle> {
-        finish_blocking(tokio::task::spawn_blocking(move || self.open_read_graph()).await)
+        finish_blocking(
+            "open the store read-only",
+            tokio::task::spawn_blocking(move || self.open_read_graph()).await,
+        )
     }
 
     fn open_graph(self, lock: StoreLock) -> CovenResult<Database> {
@@ -399,6 +404,7 @@ pub async fn discarded_operations(
     path: std::path::PathBuf,
 ) -> Result<Vec<crate::OperationRecord>, DbError> {
     finish_blocking(
+        "read the discarded operations",
         tokio::task::spawn_blocking(move || {
             let db = DatabaseConnection::open(
                 &path,
@@ -419,6 +425,7 @@ pub async fn discarded_operations(
 /// needed.
 pub async fn read_store_name(directory: StoreDir) -> CovenResult<String> {
     finish_blocking(
+        "read the store name",
         tokio::task::spawn_blocking(move || {
             let _lock = directory.lock_read_only()?;
             let database = DatabaseConnection::open(
@@ -440,6 +447,7 @@ pub async fn read_store_name(directory: StoreDir) -> CovenResult<String> {
 /// the app's collations or functions.
 pub async fn discarded_store_name(path: std::path::PathBuf) -> Result<String, DbError> {
     finish_blocking(
+        "read the discarded store name",
         tokio::task::spawn_blocking(move || {
             let database = DatabaseConnection::open(
                 &path,
