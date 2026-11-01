@@ -243,9 +243,13 @@ impl FileStaging {
     /// puts them in rows. The names stay reserved until that write has
     /// decided or the files are dropped; the lease close waits for ends here.
     pub(super) fn into_staged<T>(mut self, value: T) -> StagedFiles<T> {
+        let reserved = {
+            let slot = self.database.read().expect("database lock poisoned");
+            slot.as_ref().expect("staging holds close guard").staging.clone()
+        };
         let _lease = self.lease.take();
         StagedFiles {
-            database: self.database.clone(),
+            reserved,
             names: std::mem::take(&mut self.names),
             files: std::mem::take(&mut self.staged),
             value: Some(value),
@@ -271,7 +275,8 @@ impl Drop for FileStaging {
 /// uncommitted, or after the store closes, its names go free, and the next
 /// write or open removes the bytes.
 pub struct StagedFiles<T> {
-    database: Arc<RwLock<Option<DatabaseInner>>>,
+    /// The names the store that staged these files reserves.
+    reserved: Arc<std::sync::Mutex<std::collections::BTreeSet<FileName>>>,
     names: Vec<FileName>,
     files: Vec<StagedFile>,
     value: Option<T>,
@@ -299,14 +304,7 @@ impl<T> std::fmt::Debug for StagedFiles<T> {
 
 impl<T> Drop for StagedFiles<T> {
     fn drop(&mut self) {
-        if self.names.is_empty() {
-            return;
-        }
-        let slot = self.database.read().expect("database lock poisoned");
-        // Closing forgot every reservation with its store.
-        if let Some(inner) = slot.as_ref() {
-            inner.release_file_reservations(&self.names);
-        }
+        super::release_reserved(&self.reserved, &self.names);
     }
 }
 

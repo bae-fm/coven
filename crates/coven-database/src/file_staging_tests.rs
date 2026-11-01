@@ -326,3 +326,44 @@ fn a_file_reader_and_writer_can_share_one_blocking_worker() {
         db.close().await.unwrap();
     });
 }
+
+/// Staged files a write's closure drops without putting them in rows go
+/// free without taking the store's own lock: here a close is waiting for
+/// that lock while the write holds it, and the write still finishes, as
+/// does the close (§17.3).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn staged_files_dropped_in_a_write_go_free_while_the_store_closes() {
+    let store = TestStore::new();
+    let db = open(&store, Provenance::AppProvided).await;
+    let staged = db
+        .stage_files::<_, _, DbError>(|batch| {
+            Ok(batch.put_file("files", b"photo".to_vec(), crate::Place::Cloud))
+        })
+        .await
+        .unwrap();
+    let (entered, entering) = std::sync::mpsc::channel();
+    let (release, released) = std::sync::mpsc::channel::<()>();
+    let writing = tokio::spawn({
+        let db = db.clone();
+        async move {
+            db.write(move |_sql| {
+                entered.send(()).unwrap();
+                released.recv().unwrap();
+                drop(staged);
+                Ok(())
+            })
+            .await
+        }
+    });
+    tokio::task::spawn_blocking(move || entering.recv().unwrap()).await.unwrap();
+    let closing = tokio::spawn({
+        let db = db.clone();
+        async move { db.close().await }
+    });
+    // Absence has no event to wait on: the close gets a window in which to
+    // reach the store's lock and wait for it.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    release.send(()).unwrap();
+    tokio::time::timeout(Duration::from_secs(10), writing).await.unwrap().unwrap().unwrap();
+    tokio::time::timeout(Duration::from_secs(10), closing).await.unwrap().unwrap().unwrap();
+}

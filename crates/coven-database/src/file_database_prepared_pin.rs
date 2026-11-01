@@ -3,16 +3,20 @@
 //! this store, or a checked whole copy already kept. Preparing pins
 //! nothing; the write's `pin` step does, for every file at once.
 
-use super::{read_only, CacheReservation, DatabaseInner, FileDatabase, FileDatabaseAccess};
+use super::{read_only, CacheReservation, FileDatabase, FileDatabaseAccess};
 use crate::{DbError, FileRef};
 use coven_foundation::files::FileName;
-use std::sync::{Arc, RwLock};
+use std::{
+    collections::BTreeSet,
+    sync::{Arc, Mutex},
+};
 
 /// Files ready to pin in one write (§17.8). It holds nothing close waits
 /// for. Dropped uncommitted, or after the store closes, its copies' names go
 /// free, and the next write or open removes their bytes.
 pub struct PreparedPin {
-    database: Arc<RwLock<Option<DatabaseInner>>>,
+    /// The names the store that prepared the pin reserves.
+    reserved: Arc<Mutex<BTreeSet<FileName>>>,
     /// Each file's whole copy, under the name reserved for it.
     copies: Vec<(FileRef, FileName)>,
     /// Files a checked whole copy of which was already kept when prepared.
@@ -31,6 +35,10 @@ impl FileDatabase {
         let FileDatabaseAccess::Writer(database) = &self.access else {
             return Err(read_only());
         };
+        let reserved = {
+            let slot = database.inner.read().expect("database lock poisoned");
+            slot.as_ref().ok_or(DbError::StoreClosed)?.staging.clone()
+        };
         let copies = copies
             .into_iter()
             .map(|mut reservation| {
@@ -39,7 +47,7 @@ impl FileDatabase {
                 (reservation.file.clone(), reservation.name.clone())
             })
             .collect();
-        Ok(PreparedPin { database: database.inner.clone(), copies, kept })
+        Ok(PreparedPin { reserved, copies, kept })
     }
 
     /// Commit a prepared pin in a write of its own, as an app's write does
@@ -84,13 +92,6 @@ impl std::fmt::Debug for PreparedPin {
 
 impl Drop for PreparedPin {
     fn drop(&mut self) {
-        if self.copies.is_empty() {
-            return;
-        }
-        let slot = self.database.read().expect("database lock poisoned");
-        // Closing forgot every reservation with its store.
-        if let Some(inner) = slot.as_ref() {
-            inner.release_file_reservations(self.copies.iter().map(|(_, name)| name));
-        }
+        crate::database::release_reserved(&self.reserved, self.copies.iter().map(|(_, name)| name));
     }
 }

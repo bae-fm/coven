@@ -75,11 +75,12 @@ struct DatabaseInner {
     ids: IdSourceRef,
     /// The names of copies being written, or written and waiting for the
     /// write that names them, which no write's removal takes (Appendix C.3):
-    /// staged app bytes and cache files.
-    staging: Mutex<BTreeSet<coven_foundation::files::FileName>>,
+    /// staged app bytes and cache files. Shared with what holds them, so
+    /// letting one go never takes the store's own lock.
+    staging: Arc<Mutex<BTreeSet<coven_foundation::files::FileName>>>,
     /// The paths of the copies the calls making files device-only are
     /// writing now, which no other write's removal takes (§17.3).
-    copying: Mutex<BTreeSet<String>>,
+    copying: Arc<Mutex<BTreeSet<String>>>,
     /// Runs where released files' bytes are about to go, after the writer is
     /// free, so a test can stall that disk work.
     #[cfg(test)]
@@ -250,10 +251,7 @@ impl DatabaseInner {
         &self,
         names: impl IntoIterator<Item = &'a coven_foundation::files::FileName>,
     ) {
-        let mut active = self.staging.lock().expect("file staging lock poisoned");
-        for name in names {
-            assert!(active.remove(name), "reserved name is registered");
-        }
+        release_reserved(&self.staging, names);
     }
 
     /// Run a write under the writer, then remove the files it released once
@@ -321,6 +319,18 @@ impl DatabaseInner {
         chosen: crate::file_removals::Chosen,
     ) -> Result<R, E> {
         crate::write_failure::after_cleanup(result, self.remove_chosen(chosen))
+    }
+}
+
+/// Let `names` go from the names a store reserves; their durable removal
+/// records remain for the next write or open (Appendix C.3).
+fn release_reserved<'a>(
+    reserved: &Mutex<BTreeSet<coven_foundation::files::FileName>>,
+    names: impl IntoIterator<Item = &'a coven_foundation::files::FileName>,
+) {
+    let mut active = reserved.lock().expect("file staging lock poisoned");
+    for name in names {
+        assert!(active.remove(name), "reserved name is registered");
     }
 }
 

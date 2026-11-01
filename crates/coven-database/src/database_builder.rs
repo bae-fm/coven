@@ -310,8 +310,8 @@ impl DatabaseBuilder {
                 migrations: outcomes,
                 clock,
                 ids,
-                staging: Mutex::new(BTreeSet::new()),
-                copying: Mutex::new(BTreeSet::new()),
+                staging: Arc::new(Mutex::new(BTreeSet::new())),
+                copying: Arc::new(Mutex::new(BTreeSet::new())),
                 #[cfg(test)]
                 removal_gate: Mutex::new(None),
                 #[cfg(test)]

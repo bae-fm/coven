@@ -69,7 +69,6 @@ impl FileDatabase {
             .iter()
             .map(|copy| text(&copy.path).map(str::to_owned))
             .collect::<Result<Vec<_>, _>>()?;
-        let resources = database.inner.clone();
         database
             .call(move |inner| {
                 inner.access.with_writer(|writer| {
@@ -104,10 +103,7 @@ impl FileDatabase {
                         .extend(paths.iter().cloned());
                     Ok::<_, DbError>(())
                 })?;
-                Ok(CopyReservation {
-                    database: resources,
-                    paths,
-                })
+                Ok(CopyReservation { copying: inner.copying.clone(), paths })
             })
             .await
     }
@@ -218,19 +214,17 @@ impl FileDatabase {
 /// write's removal takes while it is held. Dropping it, whatever became of
 /// the call, lets the next write remove those its switch didn't keep.
 pub struct CopyReservation {
-    database: std::sync::Arc<std::sync::RwLock<Option<super::DatabaseInner>>>,
+    /// The copies the store that recorded them keeps out of removals; a
+    /// closed store's records stay for its next open.
+    copying: std::sync::Arc<std::sync::Mutex<std::collections::BTreeSet<String>>>,
     paths: Vec<String>,
 }
 
 impl Drop for CopyReservation {
     fn drop(&mut self) {
-        let slot = self.database.read().expect("database lock poisoned");
-        // A closed store keeps the records for its next open.
-        if let Some(inner) = slot.as_ref() {
-            let mut copying = inner.copying.lock().expect("copying lock poisoned");
-            for path in &self.paths {
-                copying.remove(path);
-            }
+        let mut copying = self.copying.lock().expect("copying lock poisoned");
+        for path in &self.paths {
+            copying.remove(path);
         }
     }
 }
