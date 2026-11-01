@@ -372,18 +372,18 @@ impl SequenceSync {
                             cleanup: Box::new(cleanup),
                         });
                     }
-                    return self.finish(id, OperationOutcome::Rejected(reason)).await;
+                    return self.finish(&record, OperationOutcome::Rejected(reason)).await;
                 }
                 Progress::Running(step) => step,
             };
             match &step {
                 Step::Applied(slot) => {
-                    return self.finish(id, OperationOutcome::Landed(Slot(*slot))).await
+                    return self.finish(&record, OperationOutcome::Landed(Slot(*slot))).await
                 }
-                Step::Satisfied => return self.finish(id, OperationOutcome::Satisfied).await,
+                Step::Satisfied => return self.finish(&record, OperationOutcome::Satisfied).await,
                 Step::SnapshotApplied { artifact, slot } => {
                     self.artifact_file(&artifact.capture.name)?.remove()?;
-                    return self.finish(id, OperationOutcome::Landed(Slot(*slot))).await;
+                    return self.finish(&record, OperationOutcome::Landed(Slot(*slot))).await;
                 }
                 _ => (),
             }
@@ -576,14 +576,50 @@ impl SequenceSync {
     }
 
     /// End the operation's journal row with its outcome, which the app's
-    /// record of it keeps in the same transaction (§11.4).
+    /// record of it keeps in the same transaction (§11.4). An operation an
+    /// invite started stays journaled at its last step: the invite ends it in
+    /// the transaction that moves the invite on, so a restart never finds one
+    /// without the other (§13.2).
     async fn finish(
         &self,
-        id: OperationId,
+        record: &OperationRecord,
         outcome: OperationOutcome,
     ) -> Result<OperationOutcome, SyncError> {
-        self.database.finish_operation_with_outcome(id, outcome.clone()).await?;
+        if !parent_owned(record) {
+            self.database.finish_operation_with_outcome(record.id, outcome.clone()).await?;
+        }
         Ok(outcome)
+    }
+
+    /// Journal `request` as an operation `started_by` names, once the
+    /// caught-up history allows it, and run it, leaving its end to the
+    /// parent (`finish`). `None` when the history refuses it, with that
+    /// refusal as the outcome; journaling nothing, when the history has it
+    /// already.
+    pub(crate) async fn start_child(
+        &self,
+        session: &mut Session,
+        ring: &mut StoreKeyring,
+        member: &MemberIdentity,
+        request: Request,
+        started_by: &str,
+    ) -> Result<(Option<OperationId>, OperationOutcome), SyncError> {
+        match self.validate_request(session, member, &request) {
+            Err(reason) => return Ok((None, OperationOutcome::Rejected(reason))),
+            Ok(false) => return Ok((None, OperationOutcome::Satisfied)),
+            Ok(true) => (),
+        }
+        let work = SequenceOperation { request, progress: Progress::Running(Step::Preparing) };
+        let id = self
+            .database
+            .start_operation(NewOperation {
+                kind: "sequence".into(),
+                data: serde_json::to_vec(&work)?,
+                started_by: started_by.into(),
+                pauses_writes: false,
+            })
+            .await?;
+        Ok((Some(id), self.run_administration(session, ring, member, id).await?))
     }
 
     async fn claim_step(

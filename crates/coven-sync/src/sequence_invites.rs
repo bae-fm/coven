@@ -538,49 +538,33 @@ impl SequenceSync {
                         }
                     }
                 }
-                InviteState::Approving { request, binding, .. } => {
+                InviteState::Approving { binding, .. } => {
                     let binding = *binding;
-                    let change = work.binding_change(request)?;
-                    let ended = match self.database.operation(binding).await? {
-                        Some(_) => {
-                            match self.run_administration(session, ring, member, binding).await? {
-                                OperationOutcome::Rejected(reason) => Approval::Rejected(reason),
-                                OperationOutcome::Landed(_) | OperationOutcome::Satisfied => {
-                                    Approval::Bound
-                                }
-                            }
+                    // The binding ends in the transaction that moves the
+                    // invite on, so it is journaled while the invite approves.
+                    if self.database.operation(binding).await?.is_none() {
+                        return Err(coven_database::DbError::Invariant {
+                            what: "an approving invite's binding ends with its step",
                         }
-                        // The binding's operation ended in an attempt that
-                        // stopped before the invite moved on: it landed if
-                        // the applied history binds the pair.
-                        None if self.binds(session, &change) => Approval::Bound,
-                        None => Approval::RejectedEarlier,
+                        .into());
+                    }
+                    let outcome = self.run_administration(session, ring, member, binding).await?;
+                    work.state = match (&outcome, &work.binding, &work.access) {
+                        (
+                            OperationOutcome::Landed(_) | OperationOutcome::Satisfied,
+                            InviteBinding::Replace { .. },
+                            InviteGrant::S3Key(_),
+                        ) => InviteState::Recording,
+                        _ => InviteState::Settled,
                     };
-                    let reason = match ended {
-                        Approval::Bound => {
-                            work.state = match (&work.binding, &work.access) {
-                                (InviteBinding::Replace { .. }, InviteGrant::S3Key(_)) => {
-                                    InviteState::Recording
-                                }
-                                _ => InviteState::Settled,
-                            };
-                            self.database.advance_operation(work.update(&record)?).await?;
-                            continue;
-                        }
-                        Approval::Rejected(reason) => reason,
-                        Approval::RejectedEarlier => {
-                            tracing::warn!(?id, ?binding, "an approval's binding ended unbound");
-                            work.state = InviteState::Settled;
-                            self.database.advance_operation(work.update(&record)?).await?;
-                            continue;
-                        }
-                    };
-                    work.state = InviteState::Settled;
-                    self.database.advance_operation(work.update(&record)?).await?;
+                    self.database
+                        .finish_operation_advancing(binding, outcome.clone(), work.update(&record)?)
+                        .await?;
                     // A sent invite's rejection is its binding's outcome, which
                     // `coven_operations` lists for the app that approved it.
                     // Coven approved an in-person request on its own, so the
                     // rejection fails the pass, once the invite has ended.
+                    let OperationOutcome::Rejected(reason) = outcome else { continue };
                     if work.delivery == InviteDeliveryKind::Sent {
                         continue;
                     }
@@ -600,24 +584,23 @@ impl SequenceSync {
                         member: work.member,
                         access: work.access.member_access(),
                     };
-                    match self.record_invite_access(session, ring, member, change).await {
-                        Ok(()) => (),
-                        // The applied history refuses the record, as when the
-                        // member was removed meanwhile: nothing would ever
-                        // accept it, so the invite ends, as a refused binding
-                        // ends it. The person deletes the key in the
-                        // provider's console (§14.3).
-                        Err(SyncError::Rejected(reason)) => {
-                            tracing::warn!(
-                                ?id,
-                                ?reason,
-                                "a kept replacement's key record was refused"
-                            );
-                        }
-                        Err(error) => return Err(error),
+                    let (record_op, outcome) =
+                        self.record_invite_access(session, ring, member, change).await?;
+                    // A refused record, as when the member was removed
+                    // meanwhile, would never be accepted, so the invite ends,
+                    // as a refused binding ends it. The person deletes the
+                    // key in the provider's console (§14.3).
+                    if let OperationOutcome::Rejected(reason) = &outcome {
+                        tracing::warn!(?id, ?reason, "a kept replacement's key record was refused");
                     }
                     work.state = InviteState::Settled;
-                    self.database.advance_operation(work.update(&record)?).await?;
+                    let update = work.update(&record)?;
+                    match record_op {
+                        Some(child) => {
+                            self.database.finish_operation_advancing(child, outcome, update).await?
+                        }
+                        None => self.database.advance_operation(update).await?,
+                    }
                 }
                 InviteState::Settled => {
                     // Provider deletion is idempotent, including an absent request.
@@ -794,17 +777,6 @@ impl SequenceSync {
         request.keys.signing.verify_object(path.as_str(), &hasher.finish(), signature)?;
         Ok(plain.to_vec())
     }
-}
-
-/// How an approval's binding ended.
-enum Approval {
-    /// Its entry landed, or the applied history already had it.
-    Bound,
-    /// The caught-up history refused it.
-    Rejected(OperationRejection),
-    /// It ended unbound in an earlier attempt, which stopped before the
-    /// invite moved on.
-    RejectedEarlier,
 }
 
 /// How far one call advanced an invite.

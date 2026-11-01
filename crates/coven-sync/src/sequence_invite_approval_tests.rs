@@ -194,59 +194,6 @@ async fn approval_after_the_approver_lost_its_role_undoes_and_fails() {
     }
 }
 
-/// An approval whose binding's operation ended in an attempt that stopped
-/// before the invite moved on resumes from the applied history: a binding
-/// that landed finishes the approval, and one that didn't ends the invite as
-/// a decline does, without claiming the entry again (§13.2, §11).
-#[tokio::test]
-async fn an_approval_whose_binding_ended_resumes_from_the_applied_history() {
-    for landed in [true, false] {
-        let group = Group::shared();
-        let ana = group.device(1).await;
-        group
-            .create_with_access(&ana, MemberAccess::ProviderAccount("ana@example.org".into()))
-            .await;
-        let invite = invite(&ana).await;
-        let carol = join(&group, invite.shown_code(), "Carol's phone").await;
-        ana.sync.pass().await.unwrap();
-        let record = ana.database().first_operation(INVITE).await.unwrap().unwrap();
-        let mut work = InviteWork::read(&record).unwrap();
-        let InviteState::Waiting { code, request: Some(request) } = &work.state else {
-            panic!("the request waits for Ana");
-        };
-        let change = work.binding_change(request).unwrap();
-        work.state = InviteState::Approving {
-            code: code.clone(),
-            request: request.clone(),
-            // No journal row has this id: the binding's operation has ended.
-            binding: coven_database::OperationId(i64::MAX),
-        };
-        ana.database().advance_operation(work.update(&record).unwrap()).await.unwrap();
-        if landed {
-            ana.sync.administer(change).await.unwrap();
-        }
-        ana.sync.pass().await.unwrap();
-        // The invite has ended, and started no claim; taking back an unused
-        // share is the account's own work.
-        assert!(ana
-            .database()
-            .operations()
-            .await
-            .unwrap()
-            .iter()
-            .all(|record| record.kind != INVITE && record.started_by != INVITE));
-        assert_eq!(
-            ana.sync.database.store_state().await.unwrap().members.contains_key(&invite.member),
-            landed
-        );
-        let expected = if landed { JoinOutcome::Admitted } else { JoinOutcome::Declined };
-        assert_eq!(carol.device.sync.join_outcome(&carol.request).await.unwrap(), expected);
-        for device in [&ana, &carol.device] {
-            device.sync.database.close().await.unwrap();
-        }
-    }
-}
-
 /// Approve the request as the app's write step does, without a pass, and
 /// return the operation that binds its pair.
 async fn approve(device: &Device, request: &JoinRequest) -> coven_database::OperationId {
@@ -467,4 +414,51 @@ async fn a_refused_access_record_ends_its_invite() {
     assert!(ana.database().operations().await.unwrap().is_empty());
     assert!(ana.database().operation_pending::<PendingRecord>(record.id).await.unwrap().is_none());
     ana.database().close().await.unwrap();
+}
+
+/// Ana approves Carol's request, and the pass that runs the approval commits
+/// a transaction at a time. A crash after any of them leaves the database as
+/// it was at that commit; at each, the approval under way is listed exactly
+/// while its binding's operation runs. Ending the binding apart from the
+/// invite left, after a crash between the two, the binding's outcome listed
+/// beside an approval still under way (§11.4, §13.2).
+#[tokio::test]
+async fn a_crash_between_any_two_commits_leaves_the_approval_and_its_binding_agreeing() {
+    let group = Group::shared();
+    let ana = group.device(1).await;
+    group.create_with_access(&ana, MemberAccess::ProviderAccount("ana@example.org".into())).await;
+    let invite = invite(&ana).await;
+    let carol = join(&group, invite.shown_code(), "Carol's phone").await;
+    ana.sync.pass().await.unwrap();
+    let binding = approve(&ana, &requests(&ana).await.remove(0)).await;
+    // Copy the installation as each commit leaves it.
+    let commits = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let (source, copies) = (ana._temp.path().to_owned(), commits.clone());
+    ana.database()
+        .test_on_write_checkpoint(move |point| {
+            if point == coven_database::test_utils::WriteCheckpoint::Committed {
+                let copy = tempfile::tempdir().unwrap();
+                crate::tests::copy_tree(&source, copy.path());
+                copies.lock().unwrap().push(copy);
+            }
+        })
+        .await
+        .unwrap();
+    ana.sync.pass().await.unwrap();
+    let commits = std::mem::take(&mut *commits.lock().unwrap());
+    assert!(commits.len() > 1, "the approval commits more than once");
+    for (at, copy) in commits.into_iter().enumerate() {
+        let crashed = group.open(copy, ana.identity.clone()).await;
+        let approving = listed(&crashed)
+            .await
+            .into_iter()
+            .any(|listed| matches!(listed.stage, InviteStage::Approving { .. }));
+        let running = crashed.database().operation(binding).await.unwrap().is_some();
+        let ended = outcome(&crashed, binding).await.is_some();
+        assert_eq!((approving, running, ended), (approving, approving, !approving), "commit {at}");
+        crashed.database().close().await.unwrap();
+    }
+    for device in [&ana, &carol.device] {
+        device.sync.database.close().await.unwrap();
+    }
 }

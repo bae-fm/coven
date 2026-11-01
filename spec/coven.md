@@ -3764,9 +3764,12 @@ lists until her app acknowledges its outcome (§11.4). A pass then does the
 work below. Approval, once begun, finishes: Ana can no longer decline or
 cancel the invite. If the caught-up history refuses the entry, the
 operation ends rejected, and the invite ends as a decline does. The rejection
-is never claimed again with a new entry, even when the approval stopped
-part way: the invite records the operation it journaled, and once that
-operation has ended, the applied history says whether it bound the pair.
+is never claimed again with a new entry: the invite records the operation it
+journaled, and that operation ends, with its outcome, in the transaction that
+moves the invite on. A crash between any two of the approval's writes leaves
+both under way or both ended. Ending them apart, a crash between the two left
+the binding's outcome in `coven_operations` beside an approval
+`coven_invites` still listed as under way.
 
 Approval records exactly the pair it checked: as *add member* for a fresh id, or
 *replace member keys* for an existing one. A request that changes afterwards

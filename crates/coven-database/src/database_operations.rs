@@ -189,6 +189,36 @@ impl Database {
         .await
     }
 
+    /// End an operation another started, with its outcome, in the
+    /// transaction that advances its parent past it: the parent's step and
+    /// the child's end commit together, so no restart finds one without the
+    /// other. An outcome `coven_operations` lists is written as
+    /// `finish_operation_with_outcome` writes it. A parent that has moved on
+    /// since, or a child already ended, fails with `OperationChanged`.
+    pub async fn finish_operation_advancing(
+        &self,
+        child: OperationId,
+        outcome: crate::OperationOutcome,
+        parent: OperationUpdate,
+    ) -> Result<(), DbError> {
+        self.call(move |inner| {
+            inner.access.with_writer(|writer| {
+                writer.transaction(|db| {
+                    crate::operation::advance(db, &parent)?;
+                    db.internal_execute(
+                        "UPDATE _coven_app_operations SET outcome=?2 WHERE operation=?1",
+                        (child.0, outcome.encode()),
+                    )?;
+                    if crate::operation::finish(db, child)? != 1 {
+                        return Err(DbError::OperationChanged(child));
+                    }
+                    Ok(())
+                })
+            })
+        })
+        .await
+    }
+
     /// Retire a finished operation. The caller must publish every reserved entry
     /// before discarding; removing this row cannot retire the publication queue.
     pub async fn finish_operation(&self, id: OperationId) -> Result<(), DbError> {

@@ -41,39 +41,22 @@ impl SequenceSync {
         result
     }
 
-    /// Record a kept replacement's new S3 key for its member: resume its
-    /// unfinished claim, or start it (§14.3).
+    /// Record a kept replacement's new S3 key for its member: resume the
+    /// unfinished claim, or start it (§14.3). Returns the operation, left for
+    /// the invite to end, and its outcome; no operation when the caught-up
+    /// history already has the record or refuses it.
     pub(super) async fn record_invite_access(
         &self,
         session: &mut Session,
         ring: &mut StoreKeyring,
         member: &MemberIdentity,
         change: StoreChange,
-    ) -> Result<(), SyncError> {
+    ) -> Result<(Option<OperationId>, OperationOutcome), SyncError> {
         // The exact requested entry identifies this invite's unfinished claim.
         if let Some(id) = self.pending_change(&change, INVITE).await? {
-            crate::operation_outcome::into_slot(
-                self.run_administration(session, ring, member, id).await?,
-            )?;
-            return Ok(());
+            return Ok((Some(id), self.run_administration(session, ring, member, id).await?));
         }
-        crate::operation_outcome::into_slot(
-            self.start_request(session, ring, member, Request::Change(change), INVITE).await?,
-        )?;
-        Ok(())
-    }
-
-    /// Whether the applied history binds the pair `change` binds, by this
-    /// device's claim.
-    pub(super) fn binds(&self, session: &Session, change: &StoreChange) -> bool {
-        let (StoreChange::AddMember { member, keys, .. }
-        | StoreChange::ReplaceMemberKeys { member, keys, .. }) = change
-        else {
-            unreachable!("an approval binds a pair")
-        };
-        session.history.bindings.iter().any(|binding| {
-            binding.member == *member && binding.keys == *keys && binding.device == self.device
-        })
+        self.start_child(session, ring, member, Request::Change(change), INVITE).await
     }
 }
 
