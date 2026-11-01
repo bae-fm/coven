@@ -375,7 +375,8 @@ async fn cache_totals_follow_their_records() {
     assert_eq!(total(&db), 111);
     owner.set_budget("files", 1_000).await.unwrap();
     assert_eq!(total(&db), 111);
-    owner.evict(&file).await.unwrap();
+    let id = file.id();
+    db.write(move |sql| sql.evict_file(id)).await.unwrap();
     assert_eq!(total(&db), 0);
     db.close().await.unwrap();
 }

@@ -376,12 +376,6 @@ pub(crate) fn trim_entries(
     }
     Ok(removed)
 }
-/// Drop a file's cache entries; returns their recorded names, whose bytes
-/// the caller removes once the writer is free (Appendix C.3).
-pub(super) fn evict(db: &DatabaseConnection, file: &FileRef) -> Result<Vec<String>, DbError> {
-    let id = id(file)?;
-    db.transaction(|db| remove_entries(db, file.namespace(), &id))
-}
 /// Pin a verified whole cache file, if one is kept. Returns whether one was.
 pub(super) fn pin_complete(db: &DatabaseConnection, file: &FileRef) -> Result<bool, DbError> {
     let (_, hash) = stored(file)?;

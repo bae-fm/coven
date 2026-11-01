@@ -33,8 +33,9 @@ opening (`SchemaError::DuplicateNamespace`).
 When a namespace is over budget, the least recently used files and chunks go
 first. Freeing space never fails a read.
 
-`handle.evict_file(&file)` removes a stored file's copies from the cache,
-pinned or not. It never touches storage or a file waiting to upload; a later
+`sql.evict_file(id)`, a step of the app's write, removes a stored file's
+copies from the cache, pinned or not, and `handle.evict_file(id)` does it in a
+write of its own. It never touches storage or a file waiting to upload; a later
 read downloads it again.
 
 Cached bytes last while a record on the device names them. When the last row

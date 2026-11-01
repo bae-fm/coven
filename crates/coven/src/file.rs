@@ -44,9 +44,10 @@ impl CovenHandle {
     pub fn subscribe_files_pinned(&self, files: &[FileId]) -> LiveQuery<Vec<Option<bool>>> {
         self.database.subscribe_files_pinned(files.to_vec())
     }
-    /// Remove cache copies only, without changing storage or local originals.
-    pub async fn evict_file(&self, file: &FileRef) -> Result<(), FileReadError> {
-        self.files.evict_file(file).await
+    /// Remove cache copies only, in a write of its own
+    /// (`CovenWrite::evict_file`).
+    pub async fn evict_file(&self, file: FileId) -> CovenResult<()> {
+        self.write(move |write| Ok(write.evict_file(file)?)).await
     }
     /// Set and enforce a namespace's independent byte budget.
     pub async fn set_cache_budget(&self, namespace: &str, max_bytes: u64) -> Result<(), DbError> {

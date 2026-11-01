@@ -5733,7 +5733,9 @@ of her app's.
 - A pin belongs to the file, not to a row. `coven_pins` (§4) lists the pinned
   files, so a file two rows reference is pinned once.
 
-The app can remove a stored file from the cache; that never touches storage.
+The app can remove a stored file from the cache, pinned or not, as a step of a
+write (§4); that never touches storage, and the bytes go once the write has
+committed.
 
 **Cached bytes last while a record names them.** Ben's laptop pins photo A,
 then Ana deletes the last row naming it. When her write arrives, the

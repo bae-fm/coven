@@ -41,6 +41,14 @@ impl<'write> CovenWrite<'write> {
         self.sql.unpin(files)
     }
 
+    /// Removes a stored file's cached copies, pinned or not, without
+    /// changing storage or a local original (§17.8). A file this device has
+    /// no record of, or one on one device only, has none. The bytes go once
+    /// the write has committed.
+    pub fn evict_file(&self, file: FileId) -> Result<(), DbError> {
+        self.sql.evict_file(file)
+    }
+
     /// Makes an operation's retry or undo due now, from its recorded
     /// progress (E6): its pending record and retry wait end in this write.
     /// It fails with `NotPending` for an operation that has finished or

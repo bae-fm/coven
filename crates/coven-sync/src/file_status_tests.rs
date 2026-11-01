@@ -260,7 +260,8 @@ async fn observe(
     remote: &FileRef,
     original: &[u8],
 ) -> (Value, Value, Vec<Value>) {
-    b.files.evict_file(remote).await.unwrap();
+    let id = remote.id();
+    b.database.write(move |sql| sql.evict_file(id)).await.unwrap();
     let status = status_result(b.files.file_status(remote).await);
     let before = a.storage.request_trace().len();
     let read = read_result(b.files.read_file(remote).await, original);

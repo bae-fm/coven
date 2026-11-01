@@ -43,18 +43,6 @@ impl Files {
             .try_for_each(|()| std::future::ready(Ok(())))
             .await
     }
-    /// Remove cached bytes only, including pinned bytes; storage is untouched.
-    /// A file only on one device has none.
-    pub async fn evict_file(&self, file: &FileRef) -> Result<(), FileReadError> {
-        self.inner.check_open()?;
-        let _pins = self.inner.pins.lock().await;
-        let _cache = self.inner.cache.write().await;
-        let file = self.inner.current(file).await?;
-        if let FilePlace::Cloud { .. } = file.place() {
-            self.inner.database.evict(&file).await?;
-        }
-        Ok(())
-    }
     /// Set the budget and immediately evict this namespace's unpinned LRU bytes.
     pub async fn set_cache_budget(&self, namespace: &str, max_bytes: u64) -> Result<(), DbError> {
         self.inner.check_open()?;

@@ -5223,6 +5223,13 @@ impl CovenWrite<'_> {
     /// device only, or one this device has no record of, has no pin to
     /// release. A pin coven keeps for a file kept here stays.
     pub fn unpin(&self, files: &[FileId]) -> Result<(), DbError>;
+
+    /// Removes a stored file's copies from the cache, pinned or not, as a
+    /// step of this write (§4, §17.8); the bytes go once it has committed.
+    /// Never touches a file waiting to upload, or storage; a later read
+    /// downloads it again. A file on one device only, or one this device
+    /// has no record of, has none.
+    pub fn evict_file(&self, file: FileId) -> Result<(), DbError>;
 }
 
 /// Progress while keeping files whole on this device (§17.8, E8).
@@ -5327,10 +5334,8 @@ impl CovenHandle {
     /// pin-query type.
     pub fn subscribe_files_pinned(&self, files: &[FileId]) -> LiveQuery<Vec<Option<bool>>>;
 
-    /// Removes a stored file's copies from the cache, pinned or not. Never
-    /// touches a file waiting to upload, or storage; a later read
-    /// downloads it again.
-    pub async fn evict_file(&self, file: &FileRef) -> Result<(), FileReadError>;
+    /// `CovenWrite::evict_file`, in a write of its own.
+    pub async fn evict_file(&self, file: FileId) -> CovenResult<()>;
 
     /// A declared namespace's cache budget, in bytes; each evicts on its own.
     pub async fn set_cache_budget(&self, namespace: &str, max_bytes: u64) -> Result<(), DbError>;

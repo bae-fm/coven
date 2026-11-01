@@ -348,7 +348,8 @@ async fn pin_progress_reads_committed_coverage() {
     drop(stream);
     f.reopen().await;
     assert_eq!(f.database.pin_progress(vec![file.clone()]).await.unwrap(), progress(CHUNK as u64));
-    f.files.evict_file(&file).await.unwrap();
+    let id = file.id();
+    f.database.write(move |sql| sql.evict_file(id)).await.unwrap();
     assert_eq!(f.database.pin_progress(vec![file]).await.unwrap(), progress(0));
     f.close().await;
 }

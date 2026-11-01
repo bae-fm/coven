@@ -29,4 +29,20 @@ impl FileWrite<'_> {
         }
         Ok(())
     }
+
+    /// Remove a stored file's cached copies, pinned or not, with no storage
+    /// operation: every entry of its bytes. A file this device has no record
+    /// of, or one on one device only, has none.
+    pub(crate) fn evict(&self, file: FileId) -> Result<(), DbError> {
+        let db = self.database;
+        let Some(record) = Record::read(db, file)? else {
+            return Ok(());
+        };
+        let file = FileRef::of(record)?;
+        if let FilePlace::Cloud { .. } = file.place() {
+            let id = crate::database::file_database::cache_id(&file)?;
+            crate::database::file_database::remove_cached(db, file.namespace(), &id)?;
+        }
+        Ok(())
+    }
 }

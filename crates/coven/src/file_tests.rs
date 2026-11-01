@@ -194,7 +194,7 @@ async fn transfer_limits_bound_requests_and_a_changed_limit_applies_to_the_next_
         assert_eq!(memory.peak_requests(), 2);
         assert_eq!(handle.pin_progress(uploaded.clone()).await.unwrap().files_completed, 4);
         for file in &uploaded {
-            handle.evict_file(file).await.unwrap();
+            handle.evict_file(file.id()).await.unwrap();
         }
         memory.reset_request_peak();
         handle.pin(&uploaded).await.unwrap();
@@ -206,7 +206,7 @@ async fn transfer_limits_bound_requests_and_a_changed_limit_applies_to_the_next_
         handle.start_sync().await.unwrap();
         status.wait_for(|s| matches!(s, SyncStatus::Offline { .. })).await;
         memory.set_online(true);
-        handle.evict_file(&uploaded[0]).await.unwrap();
+        handle.evict_file(uploaded[0].id()).await.unwrap();
         assert_eq!(handle.read_file(&uploaded[0]).await.unwrap(), vec![0; 2048]);
         memory.set_online(false);
         let before = memory.request_count();
@@ -546,7 +546,7 @@ async fn uploaded_files_pins_and_read_only_ranges_use_the_composed_owner() {
         .open_read_only(directory.id())
         .await
         .unwrap();
-    handle.evict_file(&file).await.unwrap();
+    handle.evict_file(file.id()).await.unwrap();
     let reads = storage.reads().await.len();
     let stream = readonly.open_file_stream(&file).await.unwrap();
     assert_eq!(stream.read_at(1234, 37).await.unwrap(), vec![42; 37]);

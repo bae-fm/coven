@@ -470,7 +470,8 @@ async fn budgets_pins_eviction_and_second_device_reads() {
     let stream = f.files.open_file_stream(&file).await.unwrap();
     stream.read_at(CHUNK as u64, 1).await.unwrap();
     let before = f.storage.request_count();
-    f.files.evict_file(&file).await.unwrap();
+    let id = file.id();
+    f.database.write(move |sql| sql.evict_file(id)).await.unwrap();
     assert_eq!(f.storage.request_count(), before);
     files.close().await;
     second.close().await;
@@ -728,7 +729,8 @@ async fn a_file_is_on_its_device_only_until_its_upload_completes() {
         b.files.pin(std::slice::from_ref(&uploaded)).await.unwrap();
         let id = uploaded.id();
         b.database.write(move |sql| sql.unpin(&[id])).await.unwrap();
-        b.files.evict_file(&uploaded).await.unwrap();
+        let id = uploaded.id();
+        b.database.write(move |sql| sql.evict_file(id)).await.unwrap();
         assert_eq!(b.database.file_ref(local.id()).await.unwrap(), uploaded);
         assert_eq!(b.files.read_file(&uploaded).await.unwrap(), b"content");
         b.close().await;

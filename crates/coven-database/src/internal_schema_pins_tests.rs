@@ -119,6 +119,40 @@ async fn a_local_trigger_follows_each_pin_as_it_changes() {
     db.close().await.unwrap();
 }
 
+/// Evicting a pinned file is a step of the app's write too: its copy and
+/// its pin go in that write, beside the app's change, which a local trigger
+/// on `coven_pins` follows. A write that evicts and then fails keeps both.
+#[tokio::test]
+async fn an_eviction_goes_with_its_write() {
+    let store = TestStore::new();
+    let db = open(&store, vec![Migration::addition(1, "files", FOLLOWED)]).await;
+    let id = pin_stored(&db).await.id();
+    let failed = db
+        .write(move |sql| {
+            sql.evict_file(id)?;
+            Err::<(), _>(DbError::Invariant { what: "the app gives up" })
+        })
+        .await;
+    assert!(matches!(failed, Err(DbError::Invariant { .. })));
+    assert_eq!(local_count(&db, "_coven_cache"), 1);
+    db.write(move |sql| {
+        sql.execute("UPDATE files SET title='not kept' WHERE id='7'", [])?;
+        sql.evict_file(id)?;
+        assert_eq!(
+            sql.query_row("SELECT count(*) FROM pinned_files", [], |r| r.get::<_, i64>(0))?,
+            0
+        );
+        Ok(())
+    })
+    .await
+    .unwrap();
+    assert_eq!(local_count(&db, "_coven_cache"), 0);
+    assert_eq!(local_count(&db, "_coven_file_removals"), 0);
+    assert_eq!(db.files_pinned(vec![id]).await.unwrap(), vec![Some(false)]);
+    assert!(agrees(&db));
+    db.close().await.unwrap();
+}
+
 /// A write that unpins a file and then fails keeps the pin: the step rolls
 /// back with the app's statements.
 #[tokio::test]

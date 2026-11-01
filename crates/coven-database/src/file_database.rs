@@ -673,17 +673,6 @@ impl FileDatabase {
             .await?;
         self.removed(chosen).await
     }
-    /// Remove only cached bytes, pinned or not, without any storage operation.
-    pub async fn evict(&self, file: &FileRef) -> Result<(), DbError> {
-        let file = file.clone();
-        let chosen = self
-            .run(move |db, _, _, _| {
-                let paths = cache::evict(db, &file)?;
-                Ok::<_, DbError>(crate::file_removals::choose_cache(&paths))
-            })
-            .await?;
-        self.removed(chosen).await
-    }
     /// Pin a complete, previously checked cache file of a stored file,
     /// atomically if one exists, and return whether it does. The presence
     /// check and state change share a transaction with eviction.

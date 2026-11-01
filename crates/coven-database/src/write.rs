@@ -41,6 +41,17 @@ impl<'connection, 'write> SqlContext<'connection, 'write> {
         self.files.step(|| self.files.unpin(files))
     }
 
+    /// Remove a stored file's cached copies, pinned or not, in this write,
+    /// with no storage operation (§17.8). A file this device has no record
+    /// of, or one on one device only, has none. The bytes go once the write
+    /// has committed.
+    pub fn evict_file(
+        &self,
+        file: coven_foundation::id_source::FileId,
+    ) -> Result<(), crate::DbError> {
+        self.files.step(|| self.files.evict(file))
+    }
+
     /// Run one of sync's steps on the journal in this write (§4, §11). A
     /// failed step fails the write, even if the closure goes on and returns
     /// success, since it may have made only part of its change.
