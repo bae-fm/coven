@@ -1710,7 +1710,7 @@ provider can't move one object into another's place.
 | `coven-bucket` | Bucket-root create-once ownership marker, only where member keys reach the whole bucket (§20.7) |
 | `<store>/seq/<n>` | One create-once sequence slot |
 | `<store>/floor` | Signed, encrypted snapshot references and the first retained slot; conditional replacement |
-| `<store>/snapshots/<audience>/<device>/<n>` | One snapshot, discovered by its announcement |
+| `<store>/snapshots/<audience>/<device>/<n>` | One snapshot, discovered by its announcement; a device gone for good's folders are listed once, for bodies no announcement names (§16.6) |
 | `<store>/files/<device>/<file>` | An uploaded file |
 | `<store>/join-requests/<device>/<invite>` | A join request to the device that made the invite, or the marker of its ended invite |
 | `<store>/join-requests/<device>/gone` | The marker of a device gone for good, beside its requests; never deleted |

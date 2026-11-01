@@ -52,11 +52,7 @@ impl ObjectPath {
         device: DeviceId,
         number: NonZeroU64,
     ) -> Self {
-        let audience = match audience {
-            Audience::Store => "store".to_owned(),
-            Audience::Circle(circle) => circle.to_string(),
-        };
-        Self(format!("{store}/snapshots/{audience}/{}/{number}", device.0))
+        Self(format!("{store}/snapshots/{}/{}/{number}", audience_part(&audience), device.0))
     }
     /// Encrypted file bytes named by a random UUID (§17.5).
     pub fn file(store: StoreId, device: DeviceId, name: FileId) -> Self {
@@ -189,6 +185,10 @@ impl ObjectPrefix {
     pub fn device_files(store: StoreId, device: DeviceId) -> Self {
         Self(format!("{store}/files/{}/", device.0))
     }
+    /// The snapshots one device stored of one audience (§16.6).
+    pub fn device_snapshots(store: StoreId, audience: Audience, device: DeviceId) -> Self {
+        Self(format!("{store}/snapshots/{}/{}/", audience_part(&audience), device.0))
+    }
     /// Every waiting join request.
     pub fn join_requests(store: StoreId) -> Self {
         Self(format!("{store}/join-requests/"))
@@ -234,6 +234,14 @@ pub fn validate_directory(value: &str) -> Result<(), PathError> {
         return Err(PathError);
     }
     Ok(())
+}
+
+/// An audience as its snapshots' folder spells it: `store` or the circle's id.
+fn audience_part(audience: &Audience) -> String {
+    match audience {
+        Audience::Store => "store".to_owned(),
+        Audience::Circle(circle) => circle.to_string(),
+    }
 }
 
 fn store_id(path: &str) -> StoreId {

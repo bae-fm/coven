@@ -144,6 +144,7 @@ async fn only_the_spec_tables_are_created() {
                 "_coven_file_scans",
                 "_coven_file_uploads",
                 "_coven_foreign_keys",
+                "_coven_gone_snapshots_listed",
                 "_coven_held_keys",
                 "_coven_last_claims",
                 "_coven_lost",

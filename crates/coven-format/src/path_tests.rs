@@ -83,7 +83,21 @@ fn file_scans_keep_device_prefixes_and_snapshot_paths_keep_their_audience() {
         assert_eq!(id.audience, audience);
         assert_eq!(id.device, DeviceId(42));
         assert_eq!(id.number, 1);
+        let folder = ObjectPrefix::device_snapshots(STORE_ID, audience.clone(), DeviceId(42));
+        assert!(folder.contains(&path));
+        for (audience, device) in [
+            (audience.clone(), DeviceId(420)),
+            (audience.clone(), DeviceId(4)),
+            (Audience::Circle(CircleId(uuid::Uuid::from_u128(18))), DeviceId(42)),
+        ] {
+            let other = ObjectPath::snapshot(STORE_ID, audience, device, NonZeroU64::MIN);
+            assert!(!folder.contains(&other));
+        }
     }
+    assert_eq!(
+        ObjectPrefix::device_snapshots(STORE_ID, Audience::Store, DeviceId(42)).as_str(),
+        format!("{STORE_ID}/snapshots/store/42/")
+    );
     for tail in [
         "files/01/11111111-1111-1111-1111-111111111111",
         "files/1/no-id",

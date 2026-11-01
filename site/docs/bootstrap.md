@@ -139,6 +139,13 @@ reads the current floor and decides again. The floor never moves backward. A
 lost reply is settled by reading the floor before deleting anything, and failed
 deletions stay journaled and show in `pending()`.
 
+Each device deletes its own old snapshots once a newer one has passed grace and
+nothing names them. A device gone for good, such as one removed or replaced by
+a reset, never comes back to delete its own, so the devices that delete its
+files delete its snapshots too. They list its snapshot folders once and delete
+every snapshot there no announcement names, and delete its announced ones by
+the same rules as their own.
+
 An audience nobody can snapshot holds its history back. If no member of a
 circle comes online to snapshot it, that circle's uncovered history stays;
 history it already covers is deleted without waiting.

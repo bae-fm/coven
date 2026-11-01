@@ -295,6 +295,39 @@ impl Database {
         .await
     }
 
+    /// The devices gone for good whose snapshot folders this device listed
+    /// (§16.6).
+    pub async fn gone_snapshots_listed(&self) -> Result<BTreeSet<DeviceId>, DbError> {
+        self.call(move |inner| {
+            inner.access.with_committed(|db| {
+                db.query("SELECT device FROM _coven_gone_snapshots_listed", [], |r| {
+                    Ok(DeviceId(u64::from_be_bytes(r.get(0)?)))
+                })
+            })
+        })
+        .await
+        .map(|devices| devices.into_iter().collect())
+    }
+
+    /// This device listed `device`'s snapshot folders and deleted every body
+    /// there that no announcement names (§16.6). Recording it again, after a
+    /// listing repeated because its operation hadn't finished, changes
+    /// nothing.
+    pub async fn record_gone_snapshots_listed(&self, device: DeviceId) -> Result<(), DbError> {
+        self.call(move |inner| {
+            inner.access.with_writer(|writer| {
+                writer.transaction(|db| {
+                    db.internal_execute(
+                        "INSERT INTO _coven_gone_snapshots_listed(device) VALUES(?1) ON CONFLICT DO NOTHING",
+                        [device.0.to_be_bytes()],
+                    )
+                    .map(drop)
+                })
+            })
+        })
+        .await
+    }
+
     /// Retire a finished operation. The caller must publish every reserved entry
     /// before discarding; removing this row cannot retire the publication queue.
     pub async fn finish_operation(&self, id: OperationId) -> Result<(), DbError> {

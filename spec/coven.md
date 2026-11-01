@@ -1482,7 +1482,8 @@ After applying and claiming, the device does the work the new state calls for:
 - **Snapshots** are taken when enough has been written since the last one
   (§16.2).
 - **Deleting history.** The device writes the new floor conditionally, then
-  deletes the slots below it (§16.6).
+  deletes the slots below it, and the snapshots nothing loads any more: its own,
+  and those of devices gone for good whose files it deletes (§16.6).
 - **Deleting files** needs §17.10's reference checks. Once a device's removal
   applies, the device responsible for its cleanup lists its whole file folder for
   deletion.
@@ -4206,7 +4207,7 @@ its member's keys, after it registered, written by another device. History
 showing another copy of an installation using its device id doesn't count:
 only that installation can see it (§19.3). Whatever a device gone for good
 left under way stays that way unless others end it: §13.2 covers the join
-requests it was waiting for.
+requests it was waiting for, and §16.6 its snapshots.
 
 A member's removal also ends the person's use of their restore code. Ana removes
 Ben at slot 52. When Ben's phone reads slot 52, it first deletes his restore
@@ -4817,9 +4818,10 @@ The rules:
   these conditions no longer hold, the device takes the snapshot again before
   trying the next slot.
 - **An abandoned preparation leaves only history.** Its operation's journal
-  deletes the body (§11.3). The announcement stays in the sequence but supplies no
-  usable snapshot, and an announcement alone changes no rows, schema version or
-  reset.
+  deletes the body (§11.3); if the device is gone for good before that undo runs,
+  another device deletes it (§16.6). The announcement stays in the sequence but
+  supplies no usable snapshot, and an announcement alone changes no rows, schema
+  version or reset.
 
 With these rules, a device that has an audience's key can always move forward
 and reach the end of the sequence, without anyone holding deletion back for it.
@@ -5058,15 +5060,49 @@ The rules:
   floor write names, and those a raise or reset still needs. Keep an older body
   until a newer applicable snapshot has passed grace, covers at least as much
   and keeps the needed evidence. Newer announcements do not extend that wait.
-- **Delete only this device's own snapshots.** Whenever a listing shows its own
-  superseded or abandoned snapshots that can never count again, the device
-  deletes them, subject to the protections above. It never takes over another
-  device's snapshot cleanup. An absent device's unused snapshots therefore stay
-  in storage until that device returns; the file cleanup rule in §17.10 does not
-  apply to snapshots.
+- **Each device deletes its own snapshots.** Once the protections above no
+  longer keep one of its announced snapshots, the device deletes the body. An
+  absent device's superseded snapshots wait in storage until it returns. A body
+  it uploaded and never announced is its operation's journal's to delete (§16.2).
+  The one exception is a device gone for good, below.
 - **An audience nobody can snapshot has no deadline.** If no member able to read
   a circle comes online to supply the coverage, that circle's uncovered history
   stays. History it already covers is deleted without waiting for that member.
+
+**Snapshots of a device gone for good.** A device gone for good (§14.1) never
+returns to delete its own snapshots. Without help, its superseded snapshots,
+and the body of a raise or reset it was preparing whose undo never ran, would
+stay in storage forever. Ana's laptop removes her old phone at slot 90. The
+floor names the phone's store snapshot announced at slot 61, and the phone also
+left a store snapshot body numbered 5 that it uploaded for a raise and never
+announced. At its next pass, Ana's laptop lists the phone's snapshot folders,
+`snapshots/<audience>/<phone>/` for the store and each circle, and deletes body
+5: no announcement names it. The snapshot from slot 61 stays while the floor
+names it, and goes once a floor names a newer one that has passed grace, as
+Ana's own would.
+
+- **Which device.** The devices that delete the gone device's files (§17.10)
+  delete its snapshots too: its member's other devices, or the store owner's
+  once the member has left. The bodies were stored with that member's provider
+  access, as its files were, so these devices have permission to delete them.
+  Every device reads who they are from the same history.
+- **Which bodies.** Nothing a device announces after the entry that stopped it
+  counts (§14.1), and the deleting device has applied that entry, so it holds
+  every announcement of the gone device there will ever be. A listed body none
+  of them names can never count, and goes at once. An announced one follows the
+  rules above, as the device's own would: the floor naming it, a pending floor
+  write naming it, or a raise or reset needing it keeps it.
+- **Once.** The deleting device lists the gone device's folders once, journaled,
+  and records that it did. A failed listing stays with its journal and runs again
+  from the start. Announced snapshots need no listing: their announcements name
+  them.
+- **Several at once.** Ana's laptop and her tablet may both do this, and the
+  phone may run until it reads its removal. Each of them deletes only bodies that
+  can never count, and deleting an absent object succeeds, so doing it twice
+  changes nothing.
+- **A body still uploading stays.** A body the phone was still uploading when it
+  was removed can land after the listing. Nothing lists its folders again, so
+  the body stays in storage. No announcement can name it, so it never counts.
 
 ### 17. Files
 
@@ -7314,7 +7350,7 @@ objects are deleted. The floor's clear `first` exposes no additional slot-number
 information; it lets a device without keys find the kept sequence (§13.2).
 
 Listings are used for files, a device gone for good's join requests (§13.2)
-and setup checks, and they follow three rules:
+and snapshot folders (§16.6), and setup checks, and they follow three rules:
 
 - **List the exact place.** On Dropbox and OneDrive every directory in a coven
   path is a real provider folder, and coven lists that folder directly, never the
@@ -9456,8 +9492,8 @@ Lean proofs once, on Linux, since a proof checks the same on any platform.
      while a sync pass is held;
    - after a removal, the next write and snapshots open with the replaced keys
      and fail with the removed member's keys; identical file uploads store
-     different encrypted bytes; snapshots delete the history they cover and the
-     device's own superseded snapshots;
+     different encrypted bytes; snapshots delete the history they cover, the
+     device's own superseded snapshots, and those of a device gone for good;
    - failures injected at each remote-write step roll back app rows, merge
      records, lost values, the applied slot and query notifications; these tests
      use fixed inputs, an injected clock and explicit barriers.

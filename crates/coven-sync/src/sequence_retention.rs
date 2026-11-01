@@ -9,8 +9,9 @@ use crate::{
 use coven_crypto::{MemberIdentity, StoreKeyring};
 use coven_database::{NewOperation, OperationRecord};
 use coven_format::sequence::{Purpose, SnapshotAnnouncement};
+use coven_foundation::id_source::DeviceId;
 use coven_merge::{Audience, Slot};
-use coven_storage::{ObjectPath, StorageFailure, StoredObject};
+use coven_storage::{ObjectPath, ObjectPrefix, StorageFailure, StoredObject};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeSet,
@@ -30,6 +31,9 @@ enum Retention {
     Snapshot(
         #[serde(with = "crate::pending_encoding::snapshot_id")] coven_format::admin::SnapshotId,
     ),
+    /// List the snapshot folders of a device gone for good, deleting every
+    /// body there that no announcement names.
+    GoneListing(DeviceId),
     Capture(FloorCapture),
     Floor(FloorArtifact),
     Delete {
@@ -127,10 +131,13 @@ impl SequenceSync {
         Ok(())
     }
 
-    /// Delete this device's snapshot bodies that nothing still loads: not a
-    /// floor or pending floor snapshot, not the body of a raise or reset
-    /// applied after the floor's coverage, and replaced by a newer usable
-    /// announcement covering at least as much whose slot has passed grace.
+    /// Delete the snapshot bodies of this device, and of each device gone
+    /// for good whose files it deletes (§17.10), that nothing still loads:
+    /// not a floor or pending floor snapshot, not the body of a raise or
+    /// reset applied after the floor's coverage, and replaced by a newer
+    /// usable announcement covering at least as much whose slot has passed
+    /// grace. A gone device's folders are listed once, too, for bodies no
+    /// announcement names: it never runs the undo that would delete them.
     pub(crate) async fn retain_snapshots(
         &self,
         session: &mut Session,
@@ -141,12 +148,27 @@ impl SequenceSync {
             return Ok(());
         }
         let history = &session.history;
+        // The devices gone for good whose files this device deletes: their
+        // stored bytes are its to delete, and they never return to delete
+        // their own (§16.6).
+        let gone: BTreeSet<DeviceId> = history
+            .state
+            .devices
+            .keys()
+            .copied()
+            .filter(|device| {
+                *device != self.device
+                    && history.gone_for_good(*device).is_some()
+                    && history.deletes_for(self.device, member.member(), *device)
+            })
+            .collect();
         let mut kept: BTreeSet<Slot> = session
             .floor
             .as_ref()
             .map(|floor| floor.header.snapshots.iter().copied().collect())
             .unwrap_or_default();
         let mut pending_snapshots = Vec::new();
+        let mut pending_listings = BTreeSet::new();
         for record in self.database.operations().await? {
             if record.kind != "sequence-retention" {
                 continue;
@@ -159,7 +181,25 @@ impl SequenceSync {
                     kept.extend(artifact.capture.announcements.into_iter().map(Slot))
                 }
                 Retention::Snapshot(id) => pending_snapshots.push(id),
+                Retention::GoneListing(device) => {
+                    pending_listings.insert(device);
+                }
                 Retention::Delete { .. } => (),
+            }
+        }
+        if !gone.is_empty() {
+            let listed = self.database.gone_snapshots_listed().await?;
+            for device in
+                gone.difference(&listed).filter(|device| !pending_listings.contains(device))
+            {
+                self.database
+                    .start_operation(NewOperation {
+                        kind: "sequence-retention".into(),
+                        data: serde_json::to_vec(&Retention::GoneListing(*device))?,
+                        started_by: "coven".into(),
+                        pauses_writes: false,
+                    })
+                    .await?;
             }
         }
         let floor_covers = |audience: &Audience| {
@@ -179,7 +219,10 @@ impl SequenceSync {
         };
         for (slot, announcement) in &history.announcements {
             let id = &announcement.snapshot;
-            if id.device != self.device || kept.contains(slot) || pending_snapshots.contains(id) {
+            if (id.device != self.device && !gone.contains(&id.device))
+                || kept.contains(slot)
+                || pending_snapshots.contains(id)
+            {
                 continue;
             }
             if history.boundaries.iter().any(|coverage| {
@@ -231,6 +274,40 @@ impl SequenceSync {
             }
         }
         Ok(None)
+    }
+
+    /// List `device`'s folder of each audience's snapshots and delete every
+    /// body there that no announcement names. The device is gone for good,
+    /// so none can be announced any more; each body the history announced
+    /// waits for the rules its own deletion follows. A failure leaves the
+    /// operation to list again from the start.
+    async fn list_gone_snapshots(
+        &self,
+        history: &crate::history::History,
+        device: DeviceId,
+    ) -> Result<(), SyncError> {
+        let audiences: BTreeSet<_> = std::iter::once(Audience::Store)
+            .chain(history.introductions.iter().map(|intro| intro.audience.clone()))
+            .collect();
+        for audience in audiences {
+            let folder = ObjectPrefix::device_snapshots(self.store(), audience.clone(), device);
+            for object in self.storage.list(&folder).await? {
+                let id = object
+                    .path
+                    .snapshot_id()
+                    .filter(|id| id.audience == audience && id.device == device)
+                    .ok_or_else(|| {
+                        StorageFailure::Protocol
+                            .with_source("snapshot listing names another folder")
+                    })?;
+                if history.announcements.values().any(|announcement| announcement.snapshot == id) {
+                    continue;
+                }
+                self.state.check()?;
+                self.storage.delete(&object.path).await?;
+            }
+        }
+        Ok(())
     }
 
     async fn propose_floor(
@@ -331,6 +408,12 @@ impl SequenceSync {
             self.state.check()?;
             self.storage.delete(&crate::snapshot_object::path(self.store(), &id)?).await?;
             self.database.record_absent_snapshot(id, BTreeSet::new()).await?;
+            self.database.finish_operation(record.id).await?;
+            return Ok(());
+        }
+        if let Retention::GoneListing(device) = work {
+            self.list_gone_snapshots(&session.history, device).await?;
+            self.database.record_gone_snapshots_listed(device).await?;
             self.database.finish_operation(record.id).await?;
             return Ok(());
         }

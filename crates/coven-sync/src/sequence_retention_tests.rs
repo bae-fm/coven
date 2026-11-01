@@ -696,3 +696,143 @@ async fn daily_snapshots_are_named_at_once_and_advance_first_after_grace() {
 async fn sequence_daily_retention_matches_lean() {
     daily_snapshots(true).await;
 }
+
+/// Ana's laptop, a second device of the member that set up the store.
+async fn laptop(group: &Group, ana: &Device) -> Device {
+    let (temp, _) = group.directory();
+    let laptop = group.open(temp, ana.identity.clone()).await;
+    laptop
+        .sync
+        .administer(coven_format::admin::StoreChange::AddDevice {
+            name: "Ana's laptop".into(),
+            replaces: None,
+        })
+        .await
+        .unwrap();
+    laptop
+}
+
+/// Ana's phone snapshots the store, and the phone's next pass writes a floor
+/// naming it. Ben's phone then snapshots the store, and grace passes before
+/// anyone writes a floor again. Ana's laptop removes her phone, which is now
+/// gone for good, so the laptop deletes the phone's snapshots for it (§16.6).
+/// Ben's snapshot has passed grace and covers more, yet the phone's stays
+/// while the floor names it. Once the laptop's next floor names Ben's, the
+/// phone's goes.
+#[tokio::test]
+async fn a_gone_devices_snapshot_the_floor_names_stays_until_the_floor_moves_on() {
+    use coven_merge::Audience;
+    let group = Group::new();
+    let phone = group.device(1).await;
+    let ben = group.device(2).await;
+    group.create(&phone).await;
+    group.admit(&phone, &ben).await;
+    let laptop = laptop(&group, &phone).await;
+    let announced = phone.sync.snapshot(Audience::Store).await.unwrap();
+    phone.sync.pass().await.unwrap();
+    let floor = crate::floor_object::FloorObject::read(
+        phone.database(),
+        &group.storage,
+        &ObjectPath::floor(group.store),
+        None,
+        &mut group.ring.clone(),
+        &phone.identity,
+    )
+    .await
+    .unwrap()
+    .expect("the phone's pass writes a floor");
+    assert_eq!(floor.header.snapshots, [announced]);
+    let id = phone.sync.session.lock().await.history.announcements[&announced].snapshot.clone();
+    let body = crate::snapshot_object::path(group.store, &id).unwrap();
+    ben.sync.pass().await.unwrap();
+    ben.sync.snapshot(Audience::Store).await.unwrap();
+    group.clock.set(
+        std::time::UNIX_EPOCH
+            + crate::sequence_sync::sequence_retention::GRACE
+            + std::time::Duration::from_secs(1),
+    );
+    laptop
+        .sync
+        .administer(coven_format::admin::StoreChange::RemoveDevice { device: phone.sync.device })
+        .await
+        .unwrap();
+    // Snapshot deletion alone, so the floor still names the phone's: a whole
+    // pass would first write a floor naming Ben's.
+    let mut session = laptop.sync.session.lock().await;
+    assert!(session.history.gone_for_good(phone.sync.device).is_some());
+    laptop
+        .sync
+        .retain_snapshots(&mut session, &mut group.ring.clone(), &laptop.identity)
+        .await
+        .unwrap();
+    drop(session);
+    assert!(group.storage.status(&body).await.unwrap().is_some(), "the floor names it");
+    laptop.sync.pass().await.unwrap();
+    assert!(
+        group.storage.status(&body).await.unwrap().is_none(),
+        "a floor naming Ben's snapshot releases the gone phone's"
+    );
+    for device in [&phone, &ben, &laptop] {
+        device.database().close().await.unwrap();
+    }
+}
+
+/// Ana's phone uploaded a store snapshot it never announced, as a raise it
+/// was preparing when it was removed leaves one: no announcement can name it
+/// now, and the phone will never run the preparation's undo. Ana's laptop
+/// removes the phone. Ben's member is neither the phone's nor the store
+/// owner, so his phone leaves the phone's snapshots alone. The laptop is
+/// responsible for the phone's files, so it lists the phone's snapshot
+/// folders once and deletes the body; the phone's announced snapshot, which
+/// the floor names, stays (§16.6).
+#[tokio::test]
+async fn a_gone_devices_unannounced_snapshot_is_deleted_by_the_device_responsible_for_it() {
+    use coven_merge::Audience;
+    let group = Group::new();
+    let phone = group.device(1).await;
+    let ben = group.device(2).await;
+    group.create(&phone).await;
+    group.admit(&phone, &ben).await;
+    let laptop = laptop(&group, &phone).await;
+    let announced = phone.sync.snapshot(Audience::Store).await.unwrap();
+    phone.sync.pass().await.unwrap();
+    let id = phone.sync.session.lock().await.history.announcements[&announced].snapshot.clone();
+    let named = crate::snapshot_object::path(group.store, &id).unwrap();
+    let abandoned = ObjectPath::snapshot(
+        group.store,
+        Audience::Store,
+        phone.sync.device,
+        std::num::NonZeroU64::new(id.number + 1).unwrap(),
+    );
+    group.storage.plant(&abandoned, b"a preparation's body").await.unwrap();
+    laptop
+        .sync
+        .administer(coven_format::admin::StoreChange::RemoveDevice { device: phone.sync.device })
+        .await
+        .unwrap();
+    ben.sync.pass().await.unwrap();
+    assert!(group.storage.status(&abandoned).await.unwrap().is_some(), "not Ben's to delete");
+    laptop.sync.pass().await.unwrap();
+    assert!(group.storage.status(&abandoned).await.unwrap().is_none());
+    assert!(group.storage.status(&named).await.unwrap().is_some(), "the floor names it");
+    let folder = coven_storage::ObjectPrefix::device_snapshots(
+        group.store,
+        Audience::Store,
+        phone.sync.device,
+    );
+    let listings = |device: &Device| {
+        device
+            .storage
+            .request_trace()
+            .iter()
+            .filter(|request| matches!(request, MemoryRequest::List(listed) if *listed == folder))
+            .count()
+    };
+    assert_eq!(listings(&ben), 0);
+    assert_eq!(listings(&laptop), 1);
+    laptop.sync.pass().await.unwrap();
+    assert_eq!(listings(&laptop), 1, "the laptop lists the gone phone's folders once");
+    for device in [&phone, &ben, &laptop] {
+        device.database().close().await.unwrap();
+    }
+}

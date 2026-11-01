@@ -810,6 +810,15 @@ macro_rules! coven_tables {
                 device BLOB PRIMARY KEY NOT NULL CHECK(length(device)=8)
             ) STRICT, WITHOUT ROWID;
         ");
+        // The devices gone for good whose snapshot folders this device
+        // listed, deleting each body there that no announcement names
+        // (§16.6). Their announced snapshots it deletes as its own, by their
+        // announcements.
+        $visit!(_coven_gone_snapshots_listed, "
+            CREATE TABLE _coven_gone_snapshots_listed (
+                device BLOB PRIMARY KEY NOT NULL CHECK(length(device)=8)
+            ) STRICT, WITHOUT ROWID;
+        ");
         // The operations the app's writes journaled, each with its kind as
         // coven-sync names it and, once it has finished, its outcome as
         // coven-sync encodes it, until the app acknowledges it
