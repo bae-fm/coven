@@ -209,11 +209,18 @@ async fn making_the_store_file_device_only_leaves_the_circles_stored() {
         .place_copy(&coven_foundation::files::observe_metadata(&path).await.unwrap())
         .await
         .unwrap();
+    let mut hashes = crate::FileHasher::new();
+    hashes.update(b"track");
     // The test wrote the copy itself, outside any batch.
     let flushed = coven_foundation::files::FlushBatch::new().flush().await.unwrap();
     owner
         .make_device_only(
-            vec![crate::DeviceOnlyCopy { file: track, location: location.clone(), path }],
+            vec![crate::DeviceOnlyCopy {
+                file: track,
+                location: location.clone(),
+                path,
+                hashes: hashes.finish(),
+            }],
             flushed,
         )
         .await
@@ -221,6 +228,14 @@ async fn making_the_store_file_device_only_leaves_the_circles_stored() {
     drop(reservation);
     crate::tests::publish(&db).await.unwrap();
     assert_eq!(record(&db, track).place, crate::file_location::Place::DeviceOnly(store.device()));
+    // The copy is the original now, with the hashes of the bytes written to
+    // it, for a later move to check against.
+    let mut expected = crate::FileHasher::new();
+    expected.update(b"track");
+    assert_eq!(
+        db.inspect_writer(|sql| crate::user_file::hashes(sql, track)).unwrap(),
+        Some(expected.finish())
+    );
     assert_eq!(record(&db, copy).place, crate::file_location::Place::Cloud(location.clone()));
     assert!(!unprotected(&db, store.device()).await.contains(&location.object()));
     db.close().await.unwrap();
@@ -262,7 +277,8 @@ async fn stored_bytes_go_only_when_neither_record_names_them() {
 
 /// Ana imports a track she keeps on her laptop only, and puts it in a Gifts
 /// row. The new file is on her laptop only too, over the same original,
-/// which she reads it from.
+/// which she reads it from, with the hashes the import recorded, so either
+/// file can move to the cloud.
 #[tokio::test]
 async fn a_device_only_source_gives_a_file_on_this_device_with_the_same_original() {
     let store = TestStore::new();
@@ -270,10 +286,10 @@ async fn a_device_only_source_gives_a_file_on_this_device_with_the_same_original
     let originals = tempfile::tempdir().unwrap();
     let original = originals.path().join("track.flac");
     std::fs::write(&original, b"local track").unwrap();
-    let observed = crate::observe_user_file(&original).await.unwrap();
+    let prepared = crate::prepare_user_file(&original, |_| {}).await.unwrap();
     let track = db
         .write_with_files::<_, _, _, _, DbError>(
-            move |batch| Ok(batch.put_user_file("files", UserSource::DeviceOnly(observed))),
+            move |batch| Ok(batch.put_user_file("files", UserSource::DeviceOnly(prepared))),
             |sql, file| {
                 insert(&sql, "photos", 1, "store", file)?;
                 Ok(file)
@@ -287,6 +303,14 @@ async fn a_device_only_source_gives_a_file_on_this_device_with_the_same_original
         FilePlace::DeviceOnly { device: store.device() }
     );
     assert_eq!(db.user_file(copy).await.unwrap().map(|file| file.path), Some(original.clone()));
+    let (imported, shared) = db.inspect_writer(|sql| {
+        (
+            crate::user_file::hashes(sql, track).unwrap(),
+            crate::user_file::hashes(sql, copy).unwrap(),
+        )
+    });
+    assert!(imported.is_some());
+    assert_eq!(shared, imported);
     let reference = db.file_ref(copy).await.unwrap();
     let local = db.open_local_file(&reference).await.unwrap().expect("its original is here");
     assert_eq!(local.read_at(0, reference.size()).await.unwrap(), b"local track");
@@ -307,10 +331,10 @@ async fn a_new_file_over_a_file_on_another_device_only_fails() {
     let originals = tempfile::tempdir().unwrap();
     let original = originals.path().join("track.flac");
     std::fs::write(&original, b"local track").unwrap();
-    let observed = crate::observe_user_file(&original).await.unwrap();
+    let prepared = crate::prepare_user_file(&original, |_| {}).await.unwrap();
     let track = a
         .write_with_files::<_, _, _, _, DbError>(
-            move |batch| Ok(batch.put_user_file("files", UserSource::DeviceOnly(observed))),
+            move |batch| Ok(batch.put_user_file("files", UserSource::DeviceOnly(prepared))),
             |sql, file| {
                 insert(&sql, "photos", 1, "store", file)?;
                 Ok(file)

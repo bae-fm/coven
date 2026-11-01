@@ -145,6 +145,57 @@ async fn a_changed_original_fails_its_move_and_switches_nothing() {
     f.close().await;
 }
 
+/// Ana imports a track to her laptop only, then edits it, and the edit
+/// keeps its size and modification time. Moving it to the cloud later
+/// fails the move as the original having changed: the upload checks the
+/// track's first chunk against the hash the import read, so no byte of the
+/// edit is encrypted or sent, and the track stays on her laptop only.
+#[tokio::test]
+async fn a_move_after_an_edit_keeping_size_and_time_fails_as_changed_and_sends_nothing() {
+    let f = Fixture::new(Provenance::UserProvided).await;
+    f.files.stop_background_for_counts().await;
+    let path = f.root.path().join("track");
+    let imported = vec![7; CHUNK * 2];
+    std::fs::write(&path, &imported).unwrap();
+    let file = f.device_only_original("track", &path).await;
+    let modified = std::fs::metadata(&path).unwrap().modified().unwrap();
+    let mut edited = imported.clone();
+    edited[1] = 8;
+    std::fs::write(&path, &edited).unwrap();
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&path)
+        .unwrap()
+        .set_times(std::fs::FileTimes::new().set_modified(modified))
+        .unwrap();
+    let metadata = std::fs::metadata(&path).unwrap();
+    assert_eq!((metadata.len(), metadata.modified().unwrap()), (imported.len() as u64, modified));
+    let id = f
+        .database
+        .write(move |sql| sql.move_to_cloud(vec![coven_database::MoveFile::User(file)]))
+        .await
+        .unwrap();
+    f.files.set_uploads_paused(false).await.unwrap();
+    f.files.inner.drain_uploads().await.unwrap();
+    let records = f.database.pending::<crate::PendingRecord>().await.unwrap();
+    let [record] = records.as_slice() else {
+        panic!("{records:?}");
+    };
+    assert_eq!(record.subject, crate::PendingSubject::Move { id });
+    assert_eq!(
+        record.reason,
+        PendingReason::Original { path: path.clone(), failure: FileSourceFailure::Changed }
+    );
+    assert_eq!(record.retry(), Retry::AppAction);
+    assert_eq!(f.storage.transferred().await.0, 0);
+    f.files.inner.drain_uploads().await.unwrap();
+    assert!(f.files.inner.database.uploads().await.unwrap().is_empty());
+    let device = f.database.file_ref(file).await.unwrap();
+    assert!(matches!(device.place(), FilePlace::DeviceOnly { .. }));
+    assert_eq!(std::fs::read(&path).unwrap(), edited);
+    f.close().await;
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn a_disk_failure_retries_after_its_backoff() {

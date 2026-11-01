@@ -4892,8 +4892,9 @@ as a song in their music folder.
   is UTF-8 text made from those bytes once: `Caf\xE9.flac` (§17.3).
 - If it moves, or its size or modification time changes, before upload, coven
   reports it as missing or changed, before reading any of it. An edit that
-  keeps both is found by the upload's chunk checks (§17.9); until then, local
-  reads return what's on disk (§17.7).
+  keeps both is found by the upload's chunk checks (§17.9), whether the upload
+  was queued when the file was staged or when it moved to the cloud later;
+  until then, local reads return what's on disk (§17.7).
 - After a successful upload, reads on the staging device use the cache or
   storage. Coven never reads the original again, and it stays where it is. So
   if the file must stay on this device, pinned or kept here (§17.8), the device
@@ -4921,8 +4922,10 @@ memory.
 For both kinds, the first read records the whole-file content hash and a SHA-256
 hash of each 64 KiB chunk of plaintext (the last chunk may be shorter). That read
 happens when coven prepares a user-provided original or stages an app-provided
-file. The chunk hashes stay on the device and are not part of the storage format;
-every upload checks against them (§17.9).
+file, whether the file is to be on this device only or in the cloud. The chunk
+hashes stay on the device and are not part of the storage format; every upload
+checks against them (§17.9), so a file moved to the cloud long after it was
+staged uploads only the bytes its staging read (§17.3).
 
 #### 17.2 Files and references
 
@@ -5054,24 +5057,36 @@ file id. A staged file no row references fails the write with
 stages, where the file is to be.
 
 - **On this device only.** The write records the file with this device as its
-  coordinates and queues no upload. A user's original is observed, not read:
-  coven records its path, size and modification time and computes no hash. An
-  app file is kept in coven's copy of its bytes. Every device that reads the row
-  sees the file on this device only, and nothing on any device waits for it.
+  coordinates and queues no upload. A user's original is read whole once before
+  the write: coven records its path, size, modification time, content hash and
+  chunk hashes. An app file is kept in coven's copy of its bytes, with the same
+  hashes. Every device that reads the row sees the file on this device only,
+  and nothing on any device waits for it.
 - **For the cloud.** The write records the file on this device only, as above,
   and queues its upload. A user's original is read whole once before the write,
-  for its content hash and chunk hashes, which its upload checks.
+  the same way, and its upload checks against what that read found.
 
 Ana imports an album she keeps on her laptop only. Each track is staged on her
-laptop only: coven records where each original is and reads none of them. Ben's
-phone receives the album with every track on Ana's laptop, and reading one
-fails with `DeviceOnly`.
+laptop only: coven reads each original once, records where it is and what its
+bytes were, and uploads nothing. Ben's phone receives the album with every
+track on Ana's laptop, and reading one fails with `DeviceOnly`.
+
+**Why a file on this device only is read whole.** A file kept on one device may
+move to the cloud later (below), and its upload checks the bytes it sends
+against hashes. Hashes taken at that move would describe the file as it is
+then, so an edit since the import that kept its size and modification time
+would go up as if it were the album Ana imported. Taken at the import, they
+describe the bytes the app's rows were written for, and the edit fails the
+move. So staging a user's original reads every byte wherever its file is to
+be, and reports how many it has read as it goes
+([api.md E3](api.md#e3-writing)): an album imported to one device takes as
+long to stage as one imported to the cloud.
 
 **Checking an original against the app's own scan.** Ana's music app scans the
 album, decodes every track for loudness, then stages the tracks. If she
 re-tags a track in between, its bytes are new, and staging it would record it
-under rows that describe the old audio. So the observed or read original gives
-the size and modification time coven will record for it, and the app compares
+under rows that describe the old audio. So the read original gives the size
+and modification time coven will record for it, and the app compares
 them with what its scan saw before the write. The time is the operating
 system's, at its full precision: nanoseconds on macOS and Linux, 100 ns on
 Windows. It is the value coven checks the original against afterwards.
@@ -5089,6 +5104,14 @@ When the file's record goes, coven forgets the original and deletes its copy
 once nothing else names it. When a switch puts the file on another device
 only, as making it device-only there does, coven forgets the original here too
 (below).
+
+**The hashes stay here too.** Each file on this device only keeps, with its
+original or coven's copy, the content hash and chunk hashes its staging read,
+for an upload to check against. They are this device's own: the record's
+`hash` stays NULL until the file is stored (§17.2), since that cell names
+stored bytes, which every device checks a download against. Once the file is
+stored nothing moves it again, so its original's chunk hashes go; its path,
+size, modification time and content hash stay recorded.
 
 **The exact modification time.** Ana's app later checks which imported tracks
 changed on disk, comparing each file's modification time with the one
@@ -5164,11 +5187,12 @@ reference either.
 **Moving files to the cloud.** A write can record a move of files of this
 device that are on it only and wait for no upload: `move_to_cloud`
 ([api.md E3](api.md#e3-writing)). The app decides how much moves as one by what
-it lists; bae moves one release per move. A user's original comes read whole
-once again, with its content hash and chunk hashes, and must still have its
-recorded path, size and modification time (`UserFileChanged` otherwise); an app
-file uploads from coven's copy, with the hashes its staging recorded. Files over
-the same bytes here share one upload.
+it lists; bae moves one release per move. The write reads no file. A user's
+original uploads with the size, modification time, content hash and chunk
+hashes its staging recorded, and its upload checks the bytes it sends against
+them, as every upload does (§17.9); an app file uploads from coven's copy, with
+the hashes its staging recorded. Files over the same bytes here share one
+upload: the same copy, or the same original as one staging recorded it.
 
 - **The move survives restarts,** recorded in the database with its uploads, and
   resumes when the store opens.
@@ -5178,11 +5202,14 @@ the same bytes here share one upload.
   opens it, as on an unplugged drive, the move's record names the original and
   says it is missing, and its upload retries under the shared backoff (§6.7).
   Once it is back, the upload's chunk checks catch any change.
-- **A changed original fails the move.** If an original changed, none of the
-  move's files switches: each stays on this device only, keeping its bytes here,
-  its uploads retire, and bytes they stored become deletion candidates (§17.10).
-  The move stays recorded as failed, its record naming the original and saying
-  it changed, until the app cancels it. A write's own move fails the same way.
+- **A changed original fails the move.** An original changed since its staging,
+  in its size, its modification time or any chunk's bytes, fails its upload
+  before that chunk is encrypted or sent. None of the move's files switches:
+  each stays on this device only, keeping its bytes here, its uploads retire,
+  and bytes they stored become deletion candidates (§17.10). The move stays
+  recorded as failed, its record naming the original and saying it changed,
+  until the app cancels it. A write's own move fails the same way. Moving the
+  file again fails again; the app stages the original afresh, as a new file.
 - **A file drops out with its last reference.** If a row stops referencing a file
   before its move switches, and nothing else references it, the write deletes its
   record as usual (§17.2); the move's other files still switch together.
@@ -5201,8 +5228,9 @@ the same bytes here share one upload.
 Ana's laptop holds an album she imported locally. She moves it to the cloud as
 one move. Her laptop uploads its twelve tracks over an hour; Ben's phone keeps
 seeing the album on her laptop, and when the twelfth track is stored, one write
-switches all twelve. Had she edited a track's tags before its upload, the move
-would have failed: every track stays on her laptop, and her app shows which
+switches all twelve. Had she edited a track's tags since importing it, the move
+would have failed, even had her tag editor kept the track's size and
+modification time: every track stays on her laptop, and her app shows which
 track changed.
 
 **Making cloud files device-only.** The app can bring cloud files back to one
@@ -5214,7 +5242,9 @@ downloads each track, checking its content hash as every download does
 there once it is whole and synced. The album's folder and the drive's cache
 are flushed once for all the tracks (Appendix C.3). Then one write switches
 every track to Ben's laptop only, and this device records each copy as the
-track's original, in `_coven_user_files`. No app row changes. Ana's phone receives the switch
+track's original, in `_coven_user_files`, with the hashes of the bytes it wrote
+there, so a later move to the cloud checks the copy as it checks any original.
+No app row changes. Ana's phone receives the switch
 like any other write, and sees the album on Ben's laptop.
 
 - **A path is names.** The app gives each copy's path as names, outermost
@@ -5785,10 +5815,13 @@ hashes. It keeps no encrypted copy.
   file's record when nothing else references it (§17.3), but an upload in flight
   stays queued until its attempt ends. Its completion then switches no record,
   so a deleted row stays deleted and a changed row keeps its new file.
-- `_coven_user_files` keeps an original's path, size and modification time, by
-  file id, while the file's record exists on this device and doesn't put the
-  file on another device only (§17.3). The transaction that deletes the record,
-  or applies that switch, forgets the original. A queued upload owns
+- `_coven_user_files` keeps an original's path, size, modification time and
+  content hash, by file id, while the file's record exists on this device and
+  doesn't put the file on another device only (§17.3), and `_coven_user_chunks`
+  its chunk hashes until the file is stored. The transaction that deletes the
+  record, or applies that switch, forgets the original; the one switching it
+  to its stored bytes forgets the chunk hashes. A move queues its upload with
+  a copy of these facts. A queued upload owns
   its own copy of the source facts, the original's or the name of coven's copy,
   and keeps them until it settles, so coven's copy stays while either names it.
 
@@ -7966,7 +7999,8 @@ Coven's other tables, besides the merge records Appendix B.1 lists:
 |---|---|
 | `_coven_store` | the store id, current name and the slot that set it, which a saved restore code's name is compared by (§13.1); before slot 1, the local creation name is marked as not yet applied, and counts as set by slot 1 (§10.3) |
 | `_coven_uploads` | each write record waiting to be sent (§4) |
-| `_coven_user_files` | a user-provided original's path, as the operating system's bytes, size and modification time, by file id, while the file's record exists on this device and doesn't put the file on another device only; `coven_user_files` lists them (§17.3) |
+| `_coven_user_files` | a user-provided original's path, as the operating system's bytes, size, modification time and content hash, by file id, while the file's record exists on this device and doesn't put the file on another device only; `coven_user_files` lists all but the hash (§17.3) |
+| `_coven_user_chunks` | the plaintext chunk hashes of each original in `_coven_user_files`, by file id, from the read that staged it or wrote its copy, until its file is stored; a move's upload checks against them (§17.3) |
 | `_coven_device_files` | coven's copy of each app file on this device only, by file id, with its content hash; files over the same bytes share one copy (§17.3) |
 | `_coven_copies` | each copy coven writes into a folder the person picked to make a file device-only: its path, the temporary name it is written under, and whether it is being written, placed and waiting for its switch, kept as an original, or lost to another device's switch, with its size and modification time once placed (§17.3) |
 | `_coven_copy_folders` | the folders a call makes on each copy's path, recorded before it makes them, and whether its own mkdir made each; a folder it made goes when empty with the last copy it holds (§17.3) |

@@ -71,19 +71,19 @@ async fn an_app_file_staged_on_this_device_only_keeps_coven_copy_and_uploads_not
     b.close().await.unwrap();
 }
 
-/// A user's original staged on this device only is observed, not read: its
-/// path, size and modification time are what `coven_user_files` lists, its
-/// reads return what's on disk while those facts hold, and its last
-/// reference going forgets it without touching it.
+/// A user's original staged on this device only: its path, size and
+/// modification time are what `coven_user_files` lists, its reads return
+/// what's on disk while those facts hold, and its last reference going
+/// forgets it, with its hashes, without touching it.
 #[tokio::test]
-async fn an_original_staged_on_this_device_only_is_observed_and_read_from_disk() {
+async fn an_original_staged_on_this_device_only_is_read_from_disk() {
     let store = TestStore::new();
     let db = open(&store, Provenance::UserProvided).await;
     let original = tempfile::NamedTempFile::new().unwrap();
     std::fs::write(original.path(), b"recorded original").unwrap();
-    let observed = crate::observe_user_file(original.path()).await.unwrap();
+    let prepared = crate::prepare_user_file(original.path(), |_| {}).await.unwrap();
     let file =
-        stage_row(&db, |batch| batch.put_user_file("files", UserSource::DeviceOnly(observed)))
+        stage_row(&db, |batch| batch.put_user_file("files", UserSource::DeviceOnly(prepared)))
             .await;
     assert_eq!(local_count(&db, "_coven_file_uploads"), 0);
     let (modified_seconds, modified_nanos) = crate::unix_seconds_and_nanos(
@@ -135,16 +135,73 @@ async fn an_original_staged_on_this_device_only_is_observed_and_read_from_disk()
     .unwrap();
     assert!(!has_record(&db, file));
     assert_eq!(local_count(&db, "_coven_user_files"), 0);
+    assert_eq!(local_count(&db, "_coven_user_chunks"), 0);
     assert_eq!(std::fs::read(original.path()).unwrap(), b"edited original!!");
     db.close().await.unwrap();
 }
 
-/// An app compares an original with what its own scan recorded before
-/// staging it: observing and reading it give the size and modification time
-/// coven then records for it, to the nanosecond, for this device only and
-/// for the cloud alike.
+/// Staging an original on this device only reads it whole once, as staging
+/// for the cloud does, reporting the bytes read as it goes. Its content hash
+/// and the hash of each 64 KiB chunk come from that read and stay on this
+/// device with the original, for a later move to check against. The file's
+/// record still has no hash: it names no stored bytes (§17.3).
 #[tokio::test]
-async fn observing_or_reading_an_original_gives_the_facts_coven_records() {
+async fn staging_an_original_on_this_device_only_records_its_hashes() {
+    let store = TestStore::new();
+    let db = open(&store, Provenance::UserProvided).await;
+    let chunk = coven_format::chunks::CHUNK_SIZE;
+    let bytes: Vec<u8> = (0..chunk * 2 + 5).map(|i| (i % 251) as u8).collect();
+    let original = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(original.path(), &bytes).unwrap();
+    let read = std::sync::Mutex::new(Vec::new());
+    let prepared =
+        crate::prepare_user_file(original.path(), |bytes| read.lock().unwrap().push(bytes))
+            .await
+            .unwrap();
+    let read = read.into_inner().unwrap();
+    assert!(read.windows(2).all(|pair| pair[0] < pair[1]), "{read:?}");
+    assert_eq!(read.last(), Some(&(bytes.len() as u64)));
+    let file =
+        stage_row(&db, |batch| batch.put_user_file("files", UserSource::DeviceOnly(prepared)))
+            .await;
+    let hash = |bytes: &[u8]| {
+        let mut hasher = coven_crypto::ContentHasher::new();
+        hasher.update(bytes);
+        hasher.finish().as_bytes().to_vec()
+    };
+    let (content, chunks, record) = db.inspect_writer(|sql| {
+        let content = sql
+            .query_row("SELECT hash FROM _coven_user_files WHERE file=?1", [file], |r| {
+                r.get::<_, Vec<u8>>(0)
+            })
+            .unwrap();
+        let chunks = sql
+            .query(
+                "SELECT hash FROM _coven_user_chunks WHERE file=?1 ORDER BY chunk",
+                [file],
+                |r| r.get::<_, Vec<u8>>(0),
+            )
+            .unwrap();
+        let record = sql
+            .query_row("SELECT hash FROM main.coven_files WHERE id=?1", [file], |r| {
+                r.get::<_, Option<Vec<u8>>>(0)
+            })
+            .unwrap();
+        (content, chunks, record)
+    });
+    assert_eq!(content, hash(&bytes));
+    assert_eq!(chunks, bytes.chunks(chunk).map(hash).collect::<Vec<_>>());
+    assert_eq!(record, None);
+    assert_eq!(local_count(&db, "_coven_file_uploads"), 0);
+    db.close().await.unwrap();
+}
+
+/// An app compares an original with what its own scan recorded before
+/// staging it: reading it gives the size and modification time coven then
+/// records for it, to the nanosecond, for this device only and for the
+/// cloud alike.
+#[tokio::test]
+async fn reading_an_original_gives_the_facts_coven_records() {
     let store = TestStore::new();
     let db = open(&store, Provenance::UserProvided).await;
     let folder = tempfile::tempdir().unwrap();
@@ -157,15 +214,14 @@ async fn observing_or_reading_an_original_gives_the_facts_coven_records() {
         std::fs::File::options().write(true).open(&path).unwrap().set_modified(scanned).unwrap();
         path
     };
-    let observed_path = original("observed.flac", b"observed original");
-    let observed = crate::observe_user_file(&observed_path).await.unwrap();
-    assert_eq!((observed.size(), observed.modified_at()), (17, scanned));
+    let local_path = original("local.flac", b"local original!!!");
+    let local = crate::prepare_user_file(&local_path, |_| {}).await.unwrap();
+    assert_eq!((local.size(), local.modified_at()), (17, scanned));
     let prepared_path = original("prepared.flac", b"prepared original!");
     let prepared = crate::prepare_user_file(&prepared_path, |_| {}).await.unwrap();
     assert_eq!((prepared.size(), prepared.modified_at()), (18, scanned));
     let device_only =
-        stage_row(&db, |batch| batch.put_user_file("files", UserSource::DeviceOnly(observed)))
-            .await;
+        stage_row(&db, |batch| batch.put_user_file("files", UserSource::DeviceOnly(local))).await;
     let cloud = db
         .write_with_files::<_, _, _, _, DbError>(
             move |batch| Ok(batch.put_user_file("files", UserSource::Cloud(prepared))),
@@ -176,7 +232,7 @@ async fn observing_or_reading_an_original_gives_the_facts_coven_records() {
         )
         .await
         .unwrap();
-    for (file, path, size) in [(device_only, observed_path, 17), (cloud, prepared_path, 18)] {
+    for (file, path, size) in [(device_only, local_path, 17), (cloud, prepared_path, 18)] {
         assert_eq!(
             db.user_file(file).await.unwrap(),
             Some(crate::UserFile { path, size, modified_at: scanned })
@@ -205,9 +261,9 @@ async fn coven_user_files_gives_each_modification_time_exactly() {
         let path = folder.path().join(row);
         std::fs::write(&path, b"one size").unwrap();
         std::fs::File::options().write(true).open(&path).unwrap().set_modified(time).unwrap();
-        let observed = crate::observe_user_file(&path).await.unwrap();
+        let prepared = crate::prepare_user_file(&path, |_| {}).await.unwrap();
         db.write_with_files::<_, _, _, _, DbError>(
-            move |batch| Ok(batch.put_user_file("files", UserSource::DeviceOnly(observed))),
+            move |batch| Ok(batch.put_user_file("files", UserSource::DeviceOnly(prepared))),
             move |sql, file| {
                 sql.execute("INSERT INTO files(id,file) VALUES(?1,?2)", (row, file))?;
                 Ok(())
@@ -256,9 +312,9 @@ async fn an_original_named(name: &std::ffi::OsStr, shown: &str) {
     std::fs::write(&path, b"original bytes").unwrap();
     let store = TestStore::new();
     let db = open(&store, Provenance::UserProvided).await;
-    let observed = crate::observe_user_file(&path).await.unwrap();
+    let prepared = crate::prepare_user_file(&path, |_| {}).await.unwrap();
     let file =
-        stage_row(&db, |batch| batch.put_user_file("files", UserSource::DeviceOnly(observed)))
+        stage_row(&db, |batch| batch.put_user_file("files", UserSource::DeviceOnly(prepared)))
             .await;
     let (bytes, text) = db
         .read(|sql| {

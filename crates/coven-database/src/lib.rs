@@ -118,6 +118,7 @@ pub use sqlite_settings::{
 };
 pub use sqlite_temporary::{set_temporary_directory, TemporaryDirectoryError};
 mod written_values;
+pub use file_hashes::{FileHasher, FileHashes};
 pub use file_moves::MoveId;
 pub use file_pins::PinRequest;
 pub use file_write::{DeviceOnlyCopy, MoveFile};
@@ -194,8 +195,7 @@ pub use sql_read::SqlRead;
 pub use upload::UploadReadError;
 pub use upload::{UploadBytes, UploadParts, WaitingUpload};
 pub use user_file::{
-    observe_user_file, prepare_user_file, unix_seconds_and_nanos, ObservedUserFile,
-    PreparedUserFile, UserFile, UserSource,
+    prepare_user_file, unix_seconds_and_nanos, PreparedUserFile, UserFile, UserSource,
 };
 pub use write::{BulkSqlContext, SqlContext};
 pub use write_batch::{FileSource, Place, WriteBatch};

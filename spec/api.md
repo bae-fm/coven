@@ -2541,12 +2541,11 @@ pub struct SqlContext<'connection, 'write> { /* private fields */ }
 /// A bulk write's SQL access, borrowing its connection (§4, E3).
 pub struct BulkSqlContext<'connection> { /* private fields */ }
 
-/// A user's file checked before a write; callers cannot change its recorded facts (E3).
+/// A user's original read whole once before a write: its path, size and
+/// modification time, and the content hash and chunk hashes of the bytes the
+/// read found, which coven records and checks the original against;
+/// callers cannot change them (E3).
 pub struct PreparedUserFile { /* private fields */ }
-
-/// A user's original observed without reading its bytes: its path, size and
-/// modification time, from a regular file (E3).
-pub struct ObservedUserFile { /* private fields */ }
 
 impl PreparedUserFile {
     /// Its size in bytes when it was read, which coven records and checks
@@ -2558,20 +2557,12 @@ impl PreparedUserFile {
     pub fn modified_at(&self) -> SystemTime;
 }
 
-impl ObservedUserFile {
-    /// Its size in bytes when it was observed, which coven records and
-    /// checks the original against.
-    pub fn size(&self) -> u64;
-    /// Its modification time when it was observed: the exact value coven
-    /// records and checks the original against, at the precision the
-    /// operating system gives (§17.3).
-    pub fn modified_at(&self) -> SystemTime;
-}
-
-/// A user's original to stage, and where its file is to be (§17.3).
+/// A user's original to stage, read whole once before the write, and where
+/// its file is to be (§17.3). A file on this device only may move to the
+/// cloud later, and its upload checks against what this read found.
 pub enum UserSource {
-    /// On this device only; nothing reads its bytes until a read does.
-    DeviceOnly(ObservedUserFile),
+    /// On this device only, with no upload.
+    DeviceOnly(PreparedUserFile),
     /// Uploaded to the cloud, its bytes checked against what was read.
     Cloud(PreparedUserFile),
     /// Uploaded, as `Cloud`, and kept whole here too once stored: the write
@@ -2660,9 +2651,9 @@ impl WriteBatch<'_> {
         -> FileId;
 
     /// Stages a user's original as a new file in a user namespace and
-    /// returns its id for a row to reference: observed, on this device only,
-    /// or read once already, for the cloud, with its upload queued. Coven
-    /// records the original's path, size and modification time, and never
+    /// returns its id for a row to reference: on this device only, or for
+    /// the cloud, with its upload queued. Coven records the original's path,
+    /// size, modification time and the hashes its read found, and never
     /// changes it (§17.1, §17.3).
     pub fn put_user_file(&mut self, namespace: &str, source: UserSource) -> FileId;
 
@@ -2710,11 +2701,11 @@ pub struct MoveId(pub i64);
 
 /// A file of this device, on it only, to move to the cloud (§17.3).
 pub enum MoveFile {
-    /// A user's original, read whole once again before the write: its
-    /// upload checks each chunk against what this read found.
-    User(FileId, PreparedUserFile),
+    /// A user's original: its upload checks the bytes it sends against the
+    /// size, modification time and chunk hashes its staging recorded.
+    User(FileId),
     /// As `User`, and kept whole here too once stored (§17.8).
-    UserKeptHere(FileId, PreparedUserFile),
+    UserKeptHere(FileId),
     /// An app file, uploaded from coven's copy.
     App(FileId),
     /// As `App`, and kept whole here too once stored, its cache copy made
@@ -2725,12 +2716,13 @@ pub enum MoveFile {
 impl SqlContext<'_, '_> {
     /// Records a move of these files to the cloud (§17.3). Each must be on
     /// this device only with no upload queued (`NotThisDevice`,
-    /// `NotDeviceOnlyHere`, `FileAbsent`), and a user's original must still
-    /// have its recorded path, size and modification time
-    /// (`UserFileChanged`). The move survives restarts; once every file is
-    /// stored, one write switches them all to the cloud, changing no app
-    /// row. A missing original waits; a changed one fails the move, whose
-    /// record says which until the app cancels it.
+    /// `NotDeviceOnlyHere`, `FileAbsent`). The write reads no file: a user's
+    /// original uploads with what its staging recorded. The move survives
+    /// restarts; once every file is stored, one write switches them all to
+    /// the cloud, changing no app row. A missing original waits; one changed
+    /// since its staging, even keeping its size and modification time, fails
+    /// the move before a changed byte is sent, and the move's record says
+    /// which until the app cancels it.
     pub fn move_to_cloud(&self, files: Vec<MoveFile>) -> Result<MoveId, DbError>;
 
     /// Cancels a move, failed or still moving: every file stays on this
@@ -2771,18 +2763,15 @@ impl BulkSqlContext<'_> {
 }
 
 /// Reads a user's file once, before the write, recording its size, whole-file
-/// hash and plaintext chunk hashes for uploads. `progress` receives the bytes
-/// read so far. Fails if the file changes while it is read. Its path may be
-/// any the operating system opens, valid Unicode or not (§17.1).
+/// hash and plaintext chunk hashes, which its upload checks, whether it is
+/// staged for the cloud or on this device only and moved later. `progress`
+/// receives the bytes read so far. Fails if the file changes while it is
+/// read. Its path may be any the operating system opens, valid Unicode or
+/// not (§17.1).
 pub async fn prepare_user_file(
     path: &Path,
     progress: impl Fn(u64) + Send + Sync,
 ) -> Result<PreparedUserFile, DbError>;
-
-/// Observes a user's file without reading it: its path, size and
-/// modification time, from a regular file. Its path may be any the
-/// operating system opens, valid Unicode or not (§17.1).
-pub async fn observe_user_file(path: &Path) -> Result<ObservedUserFile, DbError>;
 
 /// The text that shows `path`, as `coven_path_text` shows its recorded bytes
 /// (§17.3): valid UTF-8 as it is, each other byte as `\x` and two uppercase
@@ -2841,10 +2830,10 @@ let file = handle
 Staging on this device only, then moving to the cloud as one move:
 
 ```rust
-let observed = observe_user_file(&path).await?;
+let prepared = prepare_user_file(&path, |read| show_progress(read)).await?;
 let file = handle
     .write_with_files(
-        move |batch| Ok(batch.put_user_file("attachments", UserSource::DeviceOnly(observed))),
+        move |batch| Ok(batch.put_user_file("attachments", UserSource::DeviceOnly(prepared))),
         move |sql, file| {
             sql.execute(
                 "INSERT INTO attachments (id, note_id, title, file) VALUES (?1, ?2, ?3, ?4)",
@@ -2854,10 +2843,9 @@ let file = handle
         },
     )
     .await?;
-// Later, when the person moves it to the cloud.
-let prepared = prepare_user_file(&path, |read| show_progress(read)).await?;
+// Later, when the person moves it to the cloud: nothing is read again.
 let moved = handle
-    .write(move |sql| Ok(sql.move_to_cloud(vec![MoveFile::User(file, prepared)])?))
+    .write(move |sql| Ok(sql.move_to_cloud(vec![MoveFile::User(file)])?))
     .await?;
 ```
 

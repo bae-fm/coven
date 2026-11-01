@@ -3,13 +3,17 @@
 use coven_crypto::{ContentHash, ContentHasher};
 use coven_format::chunks::CHUNK_SIZE;
 
-#[derive(Debug)]
-pub(crate) struct FileHashes {
+/// A file's content hash and the hash of each 64-KiB plaintext chunk, the
+/// last possibly shorter, from one read of its bytes: what an upload checks
+/// each chunk it sends against (§17.1, §17.9).
+#[derive(Debug, Eq, PartialEq)]
+pub struct FileHashes {
     pub(crate) content: ContentHash,
     chunks: Vec<ContentHash>,
 }
 
-pub(crate) struct FileHasher {
+/// Hashes a file's bytes as they pass, in order, into its `FileHashes`.
+pub struct FileHasher {
     content: ContentHasher,
     chunk: ContentHasher,
     in_chunk: usize,
@@ -17,7 +21,9 @@ pub(crate) struct FileHasher {
 }
 
 impl FileHasher {
-    pub(crate) fn new() -> Self {
+    /// A hasher that has seen no bytes.
+    #[expect(clippy::new_without_default, reason = "a hasher starts from no bytes, not a default")]
+    pub fn new() -> Self {
         Self {
             content: ContentHasher::new(),
             chunk: ContentHasher::new(),
@@ -26,7 +32,8 @@ impl FileHasher {
         }
     }
 
-    pub(crate) fn update(&mut self, mut bytes: &[u8]) {
+    /// Hash the file's next bytes.
+    pub fn update(&mut self, mut bytes: &[u8]) {
         self.content.update(bytes);
         while !bytes.is_empty() {
             let length = bytes.len().min(CHUNK_SIZE - self.in_chunk);
@@ -45,7 +52,8 @@ impl FileHasher {
         self.in_chunk = 0;
     }
 
-    pub(crate) fn finish(mut self) -> FileHashes {
+    /// The hashes of every byte seen.
+    pub fn finish(mut self) -> FileHashes {
         if self.in_chunk != 0 {
             self.finish_chunk();
         }

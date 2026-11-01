@@ -368,8 +368,9 @@ pub(crate) fn unlinked(db: &DatabaseConnection) -> Result<Vec<(i64, FileLocation
 }
 
 /// Retire an upload whose move switched its files to the cloud (§17.3):
-/// their copies, needed only while they were on this device only, go with
-/// it, except one a pin request keeps for a file kept here.
+/// their copies and their originals' chunk hashes, needed only while they
+/// were on this device only, go with it, except a copy a pin request keeps
+/// for a file kept here.
 pub(crate) fn switched(db: &DatabaseConnection, id: i64) -> Result<(), DbError> {
     // A file kept here is pinned by the write that switched it: its request
     // keeps coven's copy until the cache copy is made from it (§17.8).
@@ -392,6 +393,12 @@ pub(crate) fn switched(db: &DatabaseConnection, id: i64) -> Result<(), DbError> 
     )? {
         release_copy(db, &path)?;
     }
+    // A stored file never moves again; its original stays recorded.
+    db.internal_execute(
+        "DELETE FROM _coven_user_chunks
+         WHERE file IN (SELECT file FROM _coven_upload_files WHERE upload=?1)",
+        [id],
+    )?;
     retire(db, id)
 }
 

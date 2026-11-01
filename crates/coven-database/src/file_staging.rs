@@ -98,30 +98,18 @@ impl FileStaging {
                                     });
                                 }
                                 match source {
-                                    BatchSource::User(UserSource::DeviceOnly(observed)) => {
-                                        originals.push(StagedFile {
-                                            id,
-                                            namespace,
-                                            size: observed.observed.size(),
-                                            source: StagedSource::Original(observed.observed),
-                                            hashes: None,
-                                            place: Place::DeviceOnly,
-                                        })
-                                    }
-                                    BatchSource::User(UserSource::Cloud(prepared)) => {
+                                    BatchSource::User(source) => {
+                                        let (prepared, place) = match source {
+                                            UserSource::DeviceOnly(prepared) => {
+                                                (prepared, Place::DeviceOnly)
+                                            }
+                                            UserSource::Cloud(prepared) => (prepared, Place::Cloud),
+                                            UserSource::CloudKeptHere(prepared) => {
+                                                (prepared, Place::CloudKeptHere)
+                                            }
+                                        };
                                         originals.push(staged_original(
-                                            id,
-                                            namespace,
-                                            prepared,
-                                            Place::Cloud,
-                                        ))
-                                    }
-                                    BatchSource::User(UserSource::CloudKeptHere(prepared)) => {
-                                        originals.push(staged_original(
-                                            id,
-                                            namespace,
-                                            prepared,
-                                            Place::CloudKeptHere,
+                                            id, namespace, prepared, place,
                                         ))
                                     }
                                     BatchSource::App(source, place) => {
@@ -249,7 +237,7 @@ impl FileStaging {
                 namespace,
                 size,
                 source: StagedSource::Copy(name),
-                hashes: Some(hash.finish()),
+                hashes: hash.finish(),
                 place,
             });
         }
@@ -295,7 +283,7 @@ impl FileStaging {
     }
 }
 
-/// A user's original read whole once, staged for the cloud.
+/// A user's original read whole once, staged where `place` says.
 fn staged_original(
     id: coven_foundation::id_source::FileId,
     namespace: String,
@@ -305,9 +293,9 @@ fn staged_original(
     StagedFile {
         id,
         namespace,
-        size: prepared.observed.size(),
-        source: StagedSource::Original(prepared.observed),
-        hashes: Some(prepared.hashes),
+        size: prepared.original.size,
+        source: StagedSource::Original(prepared.original),
+        hashes: prepared.hashes,
         place,
     }
 }

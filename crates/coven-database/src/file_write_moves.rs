@@ -8,22 +8,22 @@ use crate::{
     file_location::{FileLocation, Place},
     file_moves::{self, MoveState},
     file_table::Record,
-    DbError, MoveId, PreparedUserFile, Provenance,
+    DbError, MoveId, Provenance,
 };
 use coven_crypto::ContentHash;
 use coven_foundation::{files::FileName, id_source::FileId};
 use std::collections::BTreeSet;
 
 /// A file of this device, on it only, to move to the cloud (§17.3, E3).
-#[derive(Debug)]
+#[derive(Clone, Copy, Debug)]
 pub enum MoveFile {
-    /// A user's original, read whole once again before the write: its
-    /// upload checks each chunk against what this read found.
-    User(FileId, PreparedUserFile),
+    /// A user's original: its upload checks the bytes it sends against the
+    /// size, modification time and chunk hashes its staging recorded.
+    User(FileId),
     /// As `User`, and kept whole here too once stored: the write switching
     /// it to the cloud pins it on this device, which downloads it from
     /// storage. The original is never read for the cache (§17.8).
-    UserKeptHere(FileId, PreparedUserFile),
+    UserKeptHere(FileId),
     /// An app file, uploaded from coven's copy.
     App(FileId),
     /// As `App`, and kept whole here too once stored: the cache copy is
@@ -48,17 +48,18 @@ struct MoveUpload {
 
 impl FileWrite<'_> {
     /// Record a move of these files to the cloud (§17.3). Each must be on
-    /// this device only, with no upload queued. A user's original must
-    /// still have its recorded path, size and modification time. The files
-    /// switch to the cloud together, in one write once every one is stored.
+    /// this device only, with no upload queued. A user's original uploads
+    /// with the facts and hashes its staging recorded, so its upload fails
+    /// the move if the original changed since. The files switch to the
+    /// cloud together, in one write once every one is stored.
     pub(crate) fn move_to_cloud(&self, files: Vec<MoveFile>) -> Result<MoveId, DbError> {
         let db = self.database;
         let mut uploads: Vec<MoveUpload> = Vec::new();
         let mut named = BTreeSet::new();
         for file in files {
-            let (id, keep) = match &file {
-                MoveFile::User(id, _) | MoveFile::App(id) => (*id, false),
-                MoveFile::UserKeptHere(id, _) | MoveFile::AppKeptHere(id) => (*id, true),
+            let (id, keep) = match file {
+                MoveFile::User(id) | MoveFile::App(id) => (id, false),
+                MoveFile::UserKeptHere(id) | MoveFile::AppKeptHere(id) => (id, true),
             };
             if !named.insert(id) {
                 continue;
@@ -79,24 +80,18 @@ impl FileWrite<'_> {
                 return Err(DbError::NotDeviceOnlyHere { file: id });
             }
             let upload = match file {
-                MoveFile::User(_, prepared) | MoveFile::UserKeptHere(_, prepared) => {
-                    let recorded =
-                        crate::user_file::read(db, id)?.ok_or_else(|| DbError::NamespaceKind {
-                            namespace: record.namespace.clone(),
-                            kind: Provenance::AppProvided,
-                        })?;
-                    let observed = &prepared.observed;
-                    if recorded.path != observed.path()
-                        || recorded.size != observed.size()
-                        || recorded.modified_at != observed.modified_at()
-                    {
-                        return Err(DbError::UserFileChanged { path: recorded.path });
-                    }
+                MoveFile::User(_) | MoveFile::UserKeptHere(_) => {
+                    let wrong_kind = || DbError::NamespaceKind {
+                        namespace: record.namespace.clone(),
+                        kind: Provenance::AppProvided,
+                    };
+                    let original = crate::user_file::read(db, id)?.ok_or_else(wrong_kind)?;
+                    let hashes = crate::user_file::hashes(db, id)?.ok_or_else(wrong_kind)?;
                     MoveUpload {
                         files: vec![(id, keep)],
-                        size: observed.size(),
-                        source: StagedSource::Original(prepared.observed),
-                        hashes: prepared.hashes,
+                        size: original.size,
+                        source: StagedSource::Original(original),
+                        hashes,
                     }
                 }
                 MoveFile::App(_) | MoveFile::AppKeptHere(_) => {
@@ -113,7 +108,7 @@ impl FileWrite<'_> {
                 }
             };
             // Files over the same bytes here share one upload.
-            match uploads.iter_mut().find(|queued| same_source(&queued.source, &upload.source)) {
+            match uploads.iter_mut().find(|queued| same_bytes(queued, &upload)) {
                 Some(queued) => queued.files.push((id, keep)),
                 None => uploads.push(upload),
             }
@@ -188,10 +183,15 @@ impl FileWrite<'_> {
     }
 }
 
-/// Whether two uploads would send the same bytes here.
-fn same_source(a: &StagedSource, b: &StagedSource) -> bool {
-    match (a, b) {
-        (StagedSource::Original(a), StagedSource::Original(b)) => a.path() == b.path(),
+/// Whether two uploads would send the same bytes here: the same copy, or
+/// the same original as one read recorded it. Two stagings of one path
+/// recorded apart may have read different bytes, and at most one of them
+/// still matches it.
+fn same_bytes(a: &MoveUpload, b: &MoveUpload) -> bool {
+    match (&a.source, &b.source) {
+        (StagedSource::Original(original), StagedSource::Original(other)) => {
+            original == other && a.hashes.content == b.hashes.content
+        }
         (StagedSource::Copy(a), StagedSource::Copy(b)) => a == b,
         _ => false,
     }

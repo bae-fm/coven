@@ -124,6 +124,37 @@ async fn same_size_edits_with_restored_mtime_send_no_changed_chunks() {
     }
 }
 
+/// An original unchanged since its import moves to the cloud: its upload
+/// sends the bytes the import read, checked against the import's hashes,
+/// and the file switches to its stored bytes, which read back as the
+/// import read them.
+#[tokio::test]
+async fn an_unedited_move_stores_the_bytes_its_import_read() {
+    let f = Fixture::new(Provenance::UserProvided).await;
+    f.files.stop_background_for_counts().await;
+    let path = f.root.path().join("track");
+    let imported: Vec<u8> = (0..CHUNK * 2 + 9).map(|i| (i % 253) as u8).collect();
+    std::fs::write(&path, &imported).unwrap();
+    let file = f.device_only_original("track", &path).await;
+    f.database
+        .write(move |sql| sql.move_to_cloud(vec![coven_database::MoveFile::User(file)]))
+        .await
+        .unwrap();
+    let [upload] = f.files.inner.database.uploads().await.unwrap().try_into().unwrap();
+    let mut hasher = coven_crypto::ContentHasher::new();
+    hasher.update(&imported);
+    assert_eq!(upload.content_hash, hasher.finish());
+    f.files.set_uploads_paused(false).await.unwrap();
+    f.files.inner.drain_uploads().await.unwrap();
+    assert!(f.move_reasons().await.is_empty());
+    let stored = f.database.file_ref(file).await.unwrap();
+    assert!(matches!(stored.place(), FilePlace::Cloud { .. }), "{stored:?}");
+    // Reads on this device now use storage, never the original.
+    std::fs::remove_file(&path).unwrap();
+    assert_eq!(f.files.read_file(&stored).await.unwrap(), imported);
+    f.close().await;
+}
+
 #[tokio::test]
 async fn an_upload_reader_retains_the_store_after_its_database_closes() {
     let f = Fixture::new(Provenance::AppProvided).await;

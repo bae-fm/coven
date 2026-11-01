@@ -174,15 +174,19 @@ staged file no row references fails the write with `DbError::FileUnreferenced`.
 
 A file can stay on the device that staged it, with no upload: `Place::DeviceOnly`
 for app bytes, kept in coven's copy, or `UserSource::DeviceOnly` for a user's
-original, observed with `observe_user_file`, which records its path, size and
-modification time without reading it. Every device that reads the row sees the
-file on that device only. That device reads it from its bytes there; others get
+original. The original is read whole once with `prepare_user_file`, as for the
+cloud, so staging reports progress the same way: coven records its path, size,
+modification time and the hashes of what it read. A later move to the cloud
+checks the bytes it sends against those hashes, so an edit made since, even
+one that keeps the size and modification time, fails the move instead of
+going up. Every device that reads the row sees the file on that device only.
+That device reads it from its bytes there; others get
 `FileReadError::DeviceOnly`, and nothing waits for it.
 
 ```rust
-let observed = observe_user_file(&path).await?;
+let prepared = prepare_user_file(&path, |read| show_progress(read)).await?;
 handle.write_with_files(
-    move |batch| Ok(batch.put_user_file("attachments", UserSource::DeviceOnly(observed))),
+    move |batch| Ok(batch.put_user_file("attachments", UserSource::DeviceOnly(prepared))),
     move |sql, file| {
         sql.execute(
             "INSERT INTO attachments (id, note_id, title, file) VALUES (?1, ?2, ?3, ?4)",
@@ -193,9 +197,8 @@ handle.write_with_files(
 ).await?;
 ```
 
-Before the write, `observed.size()` and `observed.modified_at()` give the size
-and modification time coven will record, and `size()` and `modified_at()` on a
-`PreparedUserFile` do the same for the cloud. Compare them with what your own
+Before the write, `prepared.size()` and `prepared.modified_at()` give the size
+and modification time coven will record. Compare them with what your own
 scan saw, so a file changed in between isn't recorded under rows that describe
 its old contents. The time is exact, as the operating system gives it.
 
@@ -233,17 +236,18 @@ Latin-1 bytes on Windows; Unix takes any bytes.
 The files one write stages for the cloud are one *move*: none of them switches
 to the cloud until every one is stored, and then one write switches them all.
 A write can also move files that are on this device only, with
-`sql.move_to_cloud(files)`, which returns the move's `MoveId`. Each
-`MoveFile::User` comes with its original read whole again by
-`prepare_user_file`, and must still be as recorded; `MoveFile::App` uploads
+`sql.move_to_cloud(files)`, which returns the move's `MoveId`. Nothing is read
+again: `MoveFile::User` uploads the original checked against the size,
+modification time and hashes its staging recorded, and `MoveFile::App` uploads
 from coven's copy. A move survives restarts, and its files stay on this device
 only until they switch together, with no row changing.
 
 - An original that's missing, on an unplugged drive say, makes the move wait and
   retry. Its record, with subject `PendingSubject::Move`, names the original.
-- An original that changed fails the move: no file of it switches, each stays on
-  this device only, and its record names the original until the app cancels the
-  move with `sql.cancel_move(id)`.
+- An original that changed since it was staged fails the move, before any
+  changed byte is sent: no file of it switches, each stays on this device only,
+  and its record names the original until the app cancels the move with
+  `sql.cancel_move(id)`. Moving it again fails again; stage the file afresh.
 - Cancelling a move still under way also switches nothing. A write staging
   files for the cloud returns only their ids: read its move, as a `MoveId`,
   from the `move` column of `coven_uploads`, joined with your rows. A bound

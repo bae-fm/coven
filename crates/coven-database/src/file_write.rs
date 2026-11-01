@@ -12,7 +12,7 @@ use crate::{
 };
 use coven_format::value::Value;
 use coven_foundation::{
-    files::{FileName, ObservedFile},
+    files::FileName,
     id_source::{DeviceId, FileId, IdSource},
 };
 use coven_merge::Audience;
@@ -49,22 +49,22 @@ pub(crate) use copies::Copied;
 pub(crate) mod tests;
 
 /// One file a write's batch staged: its new id, namespace, size, where its
-/// bytes are, the hashes from its first read, which an upload checks, and
-/// where it is to be. An original observed without being read has none.
+/// bytes are, the hashes from its first read, which an upload checks, now
+/// or when the file moves to the cloud, and where it is to be.
 pub(crate) struct StagedFile {
     pub(crate) id: FileId,
     pub(crate) namespace: String,
     pub(crate) size: u64,
     pub(crate) source: StagedSource,
-    pub(crate) hashes: Option<crate::file_hashes::FileHashes>,
+    pub(crate) hashes: crate::file_hashes::FileHashes,
     pub(crate) place: crate::Place,
 }
 
 /// Where a staged file's bytes are until its upload: coven's copy of the
-/// app's bytes, or the user's original.
+/// app's bytes, or the user's original as coven records it.
 pub(crate) enum StagedSource {
     Copy(FileName),
-    Original(ObservedFile),
+    Original(crate::UserFile),
 }
 
 /// The reference error of a row naming no file of its audience (§17.2).
@@ -482,9 +482,7 @@ impl<'a> FileWrite<'a> {
                 }
                 continue;
             }
-            let hashes = file.hashes.as_ref().ok_or(DbError::Invariant {
-                what: "a file staged for the cloud has its first read's hashes",
-            })?;
+            let hashes = &file.hashes;
             // The trailing files one write stages for the cloud are one
             // move; a bound file switches on its own, with its held write.
             let holds = if self.held.borrow().contains(&file.id) {

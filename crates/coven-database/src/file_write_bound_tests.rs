@@ -110,7 +110,7 @@ async fn a_bound_reference_to_a_users_file_fails_the_write() {
     let path = store.database_path().parent().unwrap().join("original");
     std::fs::write(&path, b"the person's bytes").unwrap();
     let sources = [
-        UserSource::DeviceOnly(observe_user_file(&path).await.unwrap()),
+        UserSource::DeviceOnly(prepare_user_file(&path, |_| {}).await.unwrap()),
         UserSource::Cloud(prepare_user_file(&path, |_| {}).await.unwrap()),
     ];
     for source in sources {

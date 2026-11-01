@@ -29,20 +29,18 @@ pub(super) struct Completion {
 }
 
 /// Keep a staged file's bytes on this device for `id`, the file whose
-/// record says they are here (§17.3): the user's original as observed, or
-/// coven's copy of app bytes. Its staging cleanup record goes before
-/// anything names the copy.
+/// record says they are here (§17.3): the user's original as read, or
+/// coven's copy of app bytes, each with the hashes its first read found,
+/// which an upload checks if the file moves to the cloud. Its staging
+/// cleanup record goes before anything names the copy.
 pub(super) fn keep_source(
     db: &DatabaseConnection,
     id: FileId,
     file: &StagedFile,
 ) -> Result<(), DbError> {
+    let hashes = &file.hashes;
     match &file.source {
         StagedSource::Copy(name) => {
-            let hashes = file
-                .hashes
-                .as_ref()
-                .ok_or(DbError::Invariant { what: "coven's copy of app bytes has their hashes" })?;
             db.internal_execute(
                 "DELETE FROM _coven_file_removals WHERE path=?1 AND area='files'",
                 [name.as_str()],
@@ -58,22 +56,7 @@ pub(super) fn keep_source(
                 )?;
             }
         }
-        StagedSource::Original(observed) => {
-            let size = i64::try_from(observed.size()).map_err(|_overflow| DbError::TooLarge {
-                field: "file size",
-                actual: observed.size(),
-                maximum: i64::MAX as u64,
-            })?;
-            db.internal_execute(
-                "INSERT INTO _coven_user_files(file,path,size,modified_at) VALUES(?1,?2,?3,?4)",
-                params![
-                    id,
-                    coven_foundation::files::path_bytes(observed.path()),
-                    size,
-                    crate::user_file::encode_time(observed.modified_at())
-                ],
-            )?;
-        }
+        StagedSource::Original(original) => crate::user_file::record(db, id, original, hashes)?,
     }
     Ok(())
 }
@@ -117,9 +100,9 @@ pub(super) fn enqueue(
     let device = location.uploader().0.to_be_bytes();
     let object = location.object().0;
     let (original, modified_at, copy) = match source {
-        StagedSource::Original(observed) => (
-            Some(coven_foundation::files::path_bytes(observed.path())),
-            Some(crate::user_file::encode_time(observed.modified_at())),
+        StagedSource::Original(original) => (
+            Some(coven_foundation::files::path_bytes(&original.path)),
+            Some(crate::user_file::encode_time(original.modified_at)),
             None,
         ),
         StagedSource::Copy(name) => (None, None, Some(name.as_str())),
@@ -168,8 +151,13 @@ pub(crate) fn share(db: &DatabaseConnection, from: FileId, to: FileId) -> Result
         params![from, to],
     )?;
     db.internal_execute(
-        "INSERT INTO _coven_user_files(file,path,size,modified_at)
-         SELECT ?2,path,size,modified_at FROM _coven_user_files WHERE file=?1",
+        "INSERT INTO _coven_user_files(file,path,size,modified_at,hash)
+         SELECT ?2,path,size,modified_at,hash FROM _coven_user_files WHERE file=?1",
+        params![from, to],
+    )?;
+    db.internal_execute(
+        "INSERT INTO _coven_user_chunks(file,chunk,hash)
+         SELECT ?2,chunk,hash FROM _coven_user_chunks WHERE file=?1",
         params![from, to],
     )?;
     db.internal_execute(

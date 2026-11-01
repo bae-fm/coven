@@ -482,7 +482,7 @@ pub enum DbError {
         /// The original path.
         path: std::path::PathBuf,
     },
-    /// The user's original changed after it was observed.
+    /// The user's original changed during preparation or since it was prepared.
     #[error("user file changed: {}", path.display())]
     UserFileChanged {
         /// The original path.

@@ -4,6 +4,7 @@
 
 use super::FileWrite;
 use crate::{
+    file_hashes::FileHashes,
     file_location::{FileLocation, Place},
     file_table::Record,
     sqlite::DatabaseConnection,
@@ -12,13 +13,13 @@ use crate::{
 };
 use coven_foundation::id_source::{DeviceId, FileId};
 use coven_merge::RowId;
-use rusqlite::params;
 use std::path::PathBuf;
 
 /// A cloud file to make device-only here: its id, the stored bytes its copy
-/// was downloaded from, and the copy's path, which becomes the original
-/// this device records (§17.3).
-#[derive(Clone, Debug)]
+/// was downloaded from, the copy's path, which becomes the original this
+/// device records, and the hashes of the bytes written to it, which a later
+/// move to the cloud checks the copy against (§17.3).
+#[derive(Debug)]
 pub struct DeviceOnlyCopy {
     /// The file.
     pub file: FileId,
@@ -26,6 +27,8 @@ pub struct DeviceOnlyCopy {
     pub location: FileLocation,
     /// The copy, placed in its final path.
     pub path: PathBuf,
+    /// The content hash and chunk hashes of the bytes written to the copy.
+    pub hashes: FileHashes,
 }
 
 /// The record of `file` once this device may make it device-only (§17.3):
@@ -91,8 +94,13 @@ impl FileWrite<'_> {
 
     /// Once the write applied, record each copy it switched as its file's
     /// original here, with the size and modification time the copy had when
-    /// it was placed, and keep the copy (§17.3). An original recorded for the
-    /// file before is forgotten, never touched.
+    /// it was placed and the hashes of the bytes written to it, and keep the
+    /// copy (§17.3). An original recorded for the file before is forgotten,
+    /// never touched.
+    #[expect(
+        clippy::map_err_ignore,
+        reason = "a stored value that won't convert or decode is DamagedDatabase"
+    )]
     pub(super) fn keep_device_only(&self) -> Result<(), DbError> {
         let db = self.database;
         for copy in self.local.take() {
@@ -100,17 +108,23 @@ impl FileWrite<'_> {
                 .path
                 .to_str()
                 .ok_or(DbError::Invariant { what: "a copy's path is valid Unicode" })?;
-            db.internal_execute("DELETE FROM _coven_user_files WHERE file=?1", [copy.file])?;
-            let recorded = db.internal_execute(
-                "INSERT INTO _coven_user_files(file,path,size,modified_at)
-                 SELECT ?1,?3,size,modified_at FROM _coven_copies WHERE path=?2 AND state='placed'",
-                params![copy.file, path, coven_foundation::files::path_bytes(&copy.path)],
-            )?;
-            if recorded != 1 {
-                return Err(DbError::Invariant {
+            let (size, modified_at) = db
+                .query(
+                    "SELECT size,modified_at FROM _coven_copies WHERE path=?1 AND state='placed'",
+                    [path],
+                    |r| Ok((r.get::<_, i64>(0)?, r.get::<_, Vec<u8>>(1)?)),
+                )?
+                .pop()
+                .ok_or(DbError::Invariant {
                     what: "a copy is placed before its file switches to it",
-                });
-            }
+                })?;
+            let original = crate::UserFile {
+                path: copy.path.clone(),
+                size: u64::try_from(size).map_err(|_| DbError::DamagedDatabase)?,
+                modified_at: crate::user_file::decode_time(&modified_at)?,
+            };
+            db.internal_execute("DELETE FROM _coven_user_files WHERE file=?1", [copy.file])?;
+            crate::user_file::record(db, copy.file, &original, &copy.hashes)?;
             db.internal_execute("UPDATE _coven_copies SET state='kept' WHERE path=?1", [path])?;
         }
         Ok(())

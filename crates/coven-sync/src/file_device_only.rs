@@ -5,7 +5,7 @@
 
 use crate::files::Files;
 use crate::FileReadError;
-use coven_database::{DbError, DeviceOnlyCopy, FilePlace, FileRef, FolderCopy};
+use coven_database::{DbError, DeviceOnlyCopy, FileHasher, FilePlace, FileRef, FolderCopy};
 use coven_foundation::{
     files::{
         observe_metadata, CopyFolder, CopyPathError, FileError as DiskError, FlushBatch, Flushed,
@@ -171,8 +171,10 @@ impl Files {
             let stream = self.open_file_stream(file).await.map_err(download)?;
             let mut writer = folder.create_copy(copy.temporary.clone()).await?;
             // A whole read in order checks the content hash before its last
-            // bytes are handed over (§17.7).
+            // bytes are handed over (§17.7). The bytes written are hashed as
+            // they go, for a later move of the copy to check against (§17.3).
             let mut range = stream.read_range(0, file.size()).map_err(download)?;
+            let mut hashes = FileHasher::new();
             loop {
                 let bytes = tokio::select! {
                     biased;
@@ -180,12 +182,18 @@ impl Files {
                     bytes = range.next() => bytes.map_err(download)?,
                 };
                 let Some(bytes) = bytes else { break };
+                hashes.update(&bytes);
                 writer.append(&bytes).await?;
             }
             writer.publish(&copy.path, &mut batch).await?;
             let observed = observe_metadata(&copy.path).await.map_err(DbError::from)?;
             self.inner.database.place_copy(&observed).await?;
-            switches.push(DeviceOnlyCopy { file: file.id(), location, path: copy.path.clone() });
+            switches.push(DeviceOnlyCopy {
+                file: file.id(),
+                location,
+                path: copy.path.clone(),
+                hashes: hashes.finish(),
+            });
         }
         check(cancel)?;
         Ok((switches, batch.flush().await?))

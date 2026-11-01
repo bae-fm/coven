@@ -507,11 +507,11 @@ async fn refused_paths_and_files_leave_the_folder_alone() {
     let other = import(ana, "tracks", "other", originals.path(), vec![6; 700]).await;
     let local_path = originals.path().join("local");
     std::fs::write(&local_path, b"on Ana's laptop only").unwrap();
-    let observed = observe_user_file(&local_path).await.unwrap();
+    let prepared = prepare_user_file(&local_path, |_| {}).await.unwrap();
     let local = ana
         .handle
         .write_with_files(
-            move |batch| Ok(batch.put_user_file("tracks", UserSource::DeviceOnly(observed))),
+            move |batch| Ok(batch.put_user_file("tracks", UserSource::DeviceOnly(prepared))),
             |sql, file| {
                 sql.execute("INSERT INTO tracks(id,file) VALUES('local',?1)", [file])?;
                 Ok(file)

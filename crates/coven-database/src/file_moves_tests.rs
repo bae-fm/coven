@@ -275,18 +275,24 @@ async fn a_move_takes_only_this_devices_files_waiting_for_no_upload() {
     b.close().await.unwrap();
 }
 
-/// A user's original to move must still be as recorded: its path, size
-/// and modification time.
+/// Moving a user's original reads nothing: its upload carries the size,
+/// modification time, content hash and chunk hashes its staging recorded,
+/// so it checks the bytes it sends against the import, however the
+/// original stands at the move. Once the move switches the file to the
+/// cloud, the chunk hashes go and the original stays recorded.
 #[tokio::test]
-async fn a_moved_original_must_be_as_recorded() {
+async fn a_moved_original_uploads_with_what_its_staging_recorded() {
     let store = TestStore::new();
     let db = open(&store, Provenance::UserProvided).await;
+    let chunk = coven_format::chunks::CHUNK_SIZE;
+    let imported: Vec<u8> = (0..chunk + 9).map(|i| (i % 249) as u8).collect();
     let original = tempfile::NamedTempFile::new().unwrap();
-    std::fs::write(original.path(), b"recorded").unwrap();
-    let observed = crate::observe_user_file(original.path()).await.unwrap();
+    std::fs::write(original.path(), &imported).unwrap();
+    let prepared = crate::prepare_user_file(original.path(), |_| {}).await.unwrap();
+    let modified_at = prepared.modified_at();
     let file = db
         .write_with_files::<_, _, _, _, DbError>(
-            move |batch| Ok(batch.put_user_file("files", crate::UserSource::DeviceOnly(observed))),
+            move |batch| Ok(batch.put_user_file("files", crate::UserSource::DeviceOnly(prepared))),
             |sql, file| {
                 sql.execute("INSERT INTO files(id,file) VALUES('7',?1)", [file])?;
                 Ok(file)
@@ -294,13 +300,48 @@ async fn a_moved_original_must_be_as_recorded() {
         )
         .await
         .unwrap();
-    std::fs::write(original.path(), b"rewritten, longer").unwrap();
-    let prepared = crate::prepare_user_file(original.path(), |_| {}).await.unwrap();
-    assert!(matches!(
-        move_files(&db, vec![MoveFile::User(file, prepared)]).await,
-        Err(DbError::UserFileChanged { .. })
-    ));
-    assert_eq!(local_count(&db, "_coven_file_uploads"), 0);
+    let hash = |bytes: &[u8]| {
+        let mut hasher = coven_crypto::ContentHasher::new();
+        hasher.update(bytes);
+        hasher.finish()
+    };
+    // The move reads nothing: not even a missing original stops its write.
+    let moved_away = original.path().with_extension("moved");
+    std::fs::rename(original.path(), &moved_away).unwrap();
+    move_files(&db, vec![MoveFile::User(file)]).await.unwrap();
+    std::fs::rename(&moved_away, original.path()).unwrap();
+    let [upload] = FileDatabase::new(db.clone()).uploads().await.unwrap().try_into().unwrap();
+    assert_eq!(upload.files, [file]);
+    assert_eq!(upload.size, imported.len() as u64);
+    assert_eq!(upload.content_hash, hash(&imported));
+    let (queued_time, queued_chunks) = db.inspect_writer(|sql| {
+        let time = sql
+            .query_row(
+                "SELECT modified_at FROM _coven_file_uploads WHERE id=?1",
+                [upload.id],
+                |r| r.get::<_, Vec<u8>>(0),
+            )
+            .unwrap();
+        let chunks = sql
+            .query(
+                "SELECT c.hash FROM _coven_file_chunks AS c JOIN _coven_file_uploads AS u
+                     ON u.device=c.device AND u.file=c.file
+                 WHERE u.id=?1 ORDER BY c.chunk",
+                [upload.id],
+                |r| r.get::<_, Vec<u8>>(0),
+            )
+            .unwrap();
+        (time, chunks)
+    });
+    assert_eq!(crate::user_file::decode_time(&queued_time).unwrap(), modified_at);
+    let imported_chunks: Vec<Vec<u8>> =
+        imported.chunks(chunk).map(|bytes| hash(bytes).as_bytes().to_vec()).collect();
+    assert_eq!(imported_chunks.len(), 2);
+    assert_eq!(queued_chunks, imported_chunks);
+    complete(&db, file).await;
+    assert!(cloud(&db, file));
+    assert_eq!(local_count(&db, "_coven_user_chunks"), 0);
+    assert_eq!(local_count(&db, "_coven_user_files"), 1);
     db.close().await.unwrap();
 }
 

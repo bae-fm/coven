@@ -177,6 +177,7 @@ async fn only_the_spec_tables_are_created() {
                 "_coven_upload_files",
                 "_coven_upload_pause",
                 "_coven_uploads",
+                "_coven_user_chunks",
                 "_coven_user_files",
                 "_coven_write_evidence",
                 "_coven_write_headers",

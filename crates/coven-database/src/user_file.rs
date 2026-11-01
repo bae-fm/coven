@@ -2,62 +2,44 @@
 
 use crate::file_hashes::{FileHasher, FileHashes};
 use crate::DbError;
-use coven_foundation::files::{observe_file, observe_metadata, ObservationError, ObservedFile};
+use coven_foundation::files::{observe_file, ObservationError};
 use std::{
     path::{Path, PathBuf},
     time::SystemTime,
 };
 
-/// An original read and checked before entering a write.
+/// An original read whole once before entering a write: its path, size and
+/// modification time, and the content hash and chunk hashes of the bytes
+/// that read found, which coven records and checks the original against.
 #[derive(Debug)]
 pub struct PreparedUserFile {
-    pub(crate) observed: ObservedFile,
+    pub(crate) original: UserFile,
     pub(crate) hashes: FileHashes,
-}
-
-/// An original observed without reading its bytes: its path, size and
-/// modification time, from a regular file.
-#[derive(Debug)]
-pub struct ObservedUserFile {
-    pub(crate) observed: ObservedFile,
 }
 
 impl PreparedUserFile {
     /// Its size in bytes when it was read, which coven records and checks
     /// the original against.
     pub fn size(&self) -> u64 {
-        self.observed.size()
+        self.original.size
     }
 
     /// Its modification time when it was read: the exact value coven
     /// records and checks the original against, at the precision the
     /// operating system gives.
     pub fn modified_at(&self) -> SystemTime {
-        self.observed.modified_at()
+        self.original.modified_at
     }
 }
 
-impl ObservedUserFile {
-    /// Its size in bytes when it was observed, which coven records and
-    /// checks the original against.
-    pub fn size(&self) -> u64 {
-        self.observed.size()
-    }
-
-    /// Its modification time when it was observed: the exact value coven
-    /// records and checks the original against, at the precision the
-    /// operating system gives.
-    pub fn modified_at(&self) -> SystemTime {
-        self.observed.modified_at()
-    }
-}
-
-/// A user's original to stage, and where its file is to be: on this device
-/// only, observed, or for the cloud, read whole once for its upload (§17.3).
+/// A user's original to stage, read whole once before the write, and where
+/// its file is to be (§17.3). Every original is read the same way: a file
+/// on this device only may move to the cloud later, and its upload checks
+/// the bytes it sends against what this read found.
 #[derive(Debug)]
 pub enum UserSource {
-    /// On this device only; nothing reads its bytes until a read does.
-    DeviceOnly(ObservedUserFile),
+    /// On this device only, with no upload.
+    DeviceOnly(PreparedUserFile),
     /// Uploaded to the cloud, its bytes checked against what was read.
     Cloud(PreparedUserFile),
     /// Uploaded, as `Cloud`, and kept whole here too once stored: the write
@@ -66,26 +48,21 @@ pub enum UserSource {
     CloudKeptHere(PreparedUserFile),
 }
 
-/// Observe a user's original without reading it: coven records its path,
-/// size and modification time and computes no hash.
-pub async fn observe_user_file(path: &Path) -> Result<ObservedUserFile, DbError> {
-    Ok(ObservedUserFile { observed: observe_metadata(path).await? })
-}
-
 /// The facts recorded for the user's original, which coven never changes.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct UserFile {
     /// The user's original path.
     pub path: PathBuf,
-    /// Its observed size in bytes.
+    /// Its recorded size in bytes.
     pub size: u64,
-    /// Its observed modification time.
+    /// Its recorded modification time.
     pub modified_at: SystemTime,
 }
 
 /// Read a user's original once, recording its whole-file hash and each upload
 /// chunk's hash from the same bytes, and reporting total bytes read. Changes
-/// during the read are refused; later ones fail its upload.
+/// during the read are refused; later ones fail its upload, whether it is
+/// staged for the cloud or moved there later.
 pub async fn prepare_user_file(
     path: &Path,
     progress: impl Fn(u64) + Send + Sync,
@@ -98,7 +75,14 @@ pub async fn prepare_user_file(
         progress(read);
     })
     .await?;
-    Ok(PreparedUserFile { observed, hashes: hash.finish() })
+    Ok(PreparedUserFile {
+        original: UserFile {
+            path: observed.path().to_owned(),
+            size: observed.size(),
+            modified_at: observed.modified_at(),
+        },
+        hashes: hash.finish(),
+    })
 }
 
 impl From<ObservationError> for DbError {
@@ -143,6 +127,72 @@ pub(crate) fn encode_time(time: SystemTime) -> Vec<u8> {
     bytes.extend(elapsed.as_secs().to_be_bytes());
     bytes.extend(elapsed.subsec_nanos().to_be_bytes());
     bytes
+}
+
+/// Record `original` as `file`'s original on this device, with the content
+/// hash and chunk hashes of the bytes its read found (§17.3).
+pub(crate) fn record(
+    db: &crate::sqlite::DatabaseConnection,
+    file: coven_foundation::id_source::FileId,
+    original: &UserFile,
+    hashes: &FileHashes,
+) -> Result<(), DbError> {
+    let size = i64::try_from(original.size).map_err(|_overflow| DbError::TooLarge {
+        field: "file size",
+        actual: original.size,
+        maximum: i64::MAX as u64,
+    })?;
+    db.internal_execute(
+        "INSERT INTO _coven_user_files(file,path,size,modified_at,hash) VALUES(?1,?2,?3,?4,?5)",
+        rusqlite::params![
+            file,
+            coven_foundation::files::path_bytes(&original.path),
+            size,
+            encode_time(original.modified_at),
+            hashes.content.as_bytes().as_slice()
+        ],
+    )?;
+    for (index, hash) in hashes.chunks().iter().enumerate() {
+        db.internal_execute(
+            "INSERT INTO _coven_user_chunks(file,chunk,hash) VALUES(?1,?2,?3)",
+            rusqlite::params![file, index as i64, hash.as_bytes().as_slice()],
+        )?;
+    }
+    Ok(())
+}
+
+/// The content hash and chunk hashes recorded with `file`'s original here,
+/// if it has one. Its chunk hashes are kept only while the file is on this
+/// device only: they go once it is stored (§17.3).
+#[expect(
+    clippy::map_err_ignore,
+    reason = "a stored value that won't convert or decode is DamagedDatabase"
+)]
+pub(crate) fn hashes(
+    db: &crate::sqlite::DatabaseConnection,
+    file: coven_foundation::id_source::FileId,
+) -> Result<Option<FileHashes>, DbError> {
+    let decode = |bytes: Vec<u8>| -> Result<coven_crypto::ContentHash, DbError> {
+        Ok(coven_crypto::ContentHash::from_bytes(
+            bytes.try_into().map_err(|_| DbError::DamagedDatabase)?,
+        ))
+    };
+    let Some(content) = db
+        .query("SELECT hash FROM _coven_user_files WHERE file=?1", [file], |r| {
+            r.get::<_, Vec<u8>>(0)
+        })?
+        .pop()
+    else {
+        return Ok(None);
+    };
+    let chunks = db
+        .query("SELECT hash FROM _coven_user_chunks WHERE file=?1 ORDER BY chunk", [file], |r| {
+            r.get::<_, Vec<u8>>(0)
+        })?
+        .into_iter()
+        .map(decode)
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(Some(FileHashes::from_parts(decode(content)?, chunks)))
 }
 
 /// The user's original this device recorded for `file`, if it has one.

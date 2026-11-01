@@ -153,6 +153,29 @@ impl Fixture {
             .unwrap();
         self.database.file_ref(file).await.unwrap()
     }
+    /// Stage the user's original at `path` on this device only, read whole
+    /// once, and point row `id` of `files` at it.
+    async fn device_only_original(
+        &self,
+        id: &str,
+        path: &std::path::Path,
+    ) -> coven_foundation::id_source::FileId {
+        let prepared = coven_database::prepare_user_file(path, |_| {}).await.unwrap();
+        let id = id.to_owned();
+        self.database
+            .write_with_files::<_, _, _, _, coven_database::DbError>(
+                move |batch| {
+                    Ok(batch
+                        .put_user_file("files", coven_database::UserSource::DeviceOnly(prepared)))
+                },
+                move |sql, file| {
+                    sql.execute("INSERT INTO files(id,file) VALUES(?1,?2)", (id, file))?;
+                    Ok(file)
+                },
+            )
+            .await
+            .unwrap()
+    }
     async fn drain(&self) {
         self.files.set_uploads_paused(false).await.unwrap();
         self.files.inner.drain_uploads_retrying().await.unwrap();
