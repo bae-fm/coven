@@ -518,9 +518,10 @@ three being sent took 0.02 ms, where counting `sending` over `coven_uploads`
 read every queued file, in 1 ms. A query that reads neither isn't run again.
 
 Which files are being downloaded to keep whole is the same kind of fact. Ben
-pins an album of 12 tracks; the pin downloads up to the download limit's number
-at once (§17.8). `coven_pins` lists the ones already kept whole, but not which
-of the others are downloading now. `coven_downloading` lists
+prepares a pin of an album of 12 tracks; the prepare downloads up to the
+download limit's number at once (§17.8). `coven_pins` lists none of them until
+the write committing the pin, and nothing stored says which are downloading
+now. `coven_downloading` lists
 each stored file this process is downloading to keep whole, for an app's pin,
 from the same memory. Its live query runs again as
 each download starts or ends, and a reopened store lists none. A read that
@@ -5092,7 +5093,7 @@ A write then puts them in its rows with `put_staged`. Between the two, nothing
 names the copies but their recorded cleanup, so the staged files hold nothing
 closing the store waits for. Dropped without a write, or still held when the
 store closes, they leave their copies to the next write or open to remove; a
-write of another open store refuses them (`NotStagedHere`).
+write of another open store refuses them (`PreparedElsewhere`).
 
 **On this device only, or for the cloud.** The app says, for each file it
 stages, where the file is to be.
@@ -5713,7 +5714,26 @@ fails a read. A new budget is a step of a write (§4): the write sets it and
 evicts down to it, and the evicted bytes go once it has committed.
 
 **Pinning** keeps a file whole on the device regardless of the budget, until the
-app unpins it.
+app unpins it. It comes in two parts. Preparing a pin downloads what each file
+lacks into a whole copy, apart from the cache, and pins nothing. The pin is a
+step of a write (§4), which keeps every prepared file at once. Ben's music app
+prepares an album's pin, then in one write pins its tracks and marks the album
+offline: no state shows the album offline with tracks still to come. The
+download can take minutes, and no write can hold the writer that long, so it
+can't be a step itself.
+
+- **Nothing counts until the write.** A prepared pin committed by no write,
+  because the app dropped it or the process ended, keeps nothing: the whole
+  copies wait under recorded names, which the next write or open removes. An
+  app that wants each track's download to survive a crash prepares and commits
+  each track in turn; one prepared pin over the album keeps all of it or none.
+- **A copy already kept is pinned in place.** If a checked whole copy of a file
+  is already in the cache, preparing notes it instead of downloading. If the
+  budget evicts that copy before the write, the write fails with `PinChanged`,
+  and preparing again downloads the file.
+- **Download failures belong to the prepare.** A failed download is the stored
+  bytes' pending record, as for any pin, and returns to the prepare's caller; a
+  download that succeeds clears it.
 
 **Unpinning** is a step of a write (§4). Ben's music app marks an album as no
 longer offline in the same write that unpins its tracks, so the album's row and
@@ -5729,7 +5749,8 @@ here too (`Place::CloudKeptHere`, `MoveFile::AppKeptHere`,
 it on this device: it records a pin request, and coven makes the pin itself,
 resuming after a restart. Ana imports an album to the cloud with "keep a copy
 here"; her laptop keeps every track whole once the album is stored, with no step
-of her app's.
+of her app's. Coven prepares each such pin as an app's is prepared, and commits
+it in a write of its own that ends its request too.
 
 - **An app file's** cache copy is made from coven's own copy of its bytes, which
   the request keeps until then: each chunk is checked against the hash its
@@ -5748,9 +5769,9 @@ of her app's.
   app's own pin, whose failure goes back to its call and is retried only by the
   app's next pin or read (§17.7).
 
-- Pinning assembles a complete encrypted cache file from cached and fetched
-  chunks, checks its content hash, and syncs it to disk before publishing the pin.
-  Publishing replaces the separate cached chunks in one step. A cancellation or a
+- Preparing assembles a complete encrypted cache file from cached and fetched
+  chunks, checks its content hash, and syncs it to disk. The write publishes it
+  pinned, replacing the separate cached chunks in one step. A cancellation or a
   crash leaves no partly downloaded file exempt from eviction.
 - Only stored bytes are kept. Pinning a file on one device only, this one
   included while it uploads, fails with `DeviceOnly`, on every device; the app
@@ -5777,8 +5798,8 @@ copy stays while any of them is here, as the new file a moved row gets is
 A download under way when the record goes, or leaves its stored bytes, keeps
 nothing either. Ben's laptop is still downloading photo A for his pin when
 Ana's delete arrives. The cache publishes bytes only while a record here
-names them, so a read gets its bytes but caches none, and the pin fails with
-`NoLongerStored`. A pin coven keeps for a file kept here ends, as its request
+names them, so a read gets its bytes but caches none, and the write committing
+the pin fails with `NoLongerStored`. A pin coven keeps for a file kept here ends, as its request
 did. Without this, the pin would publish a copy after the delete removed the
 others, and keep it forever.
 
@@ -5786,9 +5807,10 @@ others, and keep it forever.
 one-time reads and the subscriptions report the same data
 ([api.md E4](api.md#e4-reading)); failures stay in `pending()`.
 
-That coverage counts no byte in flight. A pin assembles its file apart from the
-cache and publishes it whole, so Ben's 40 MB track counts nothing until all of
-it is kept. Which files a pin is downloading now is in `coven_downloading`
+That coverage counts no byte in flight. A pin's prepare assembles each file
+apart from the cache, and its write publishes them whole, so Ben's 40 MB track
+counts nothing until it is kept. Which files a prepare is downloading now is in
+`coven_downloading`
 (§4), and how far each has got is on the download watch
 ([api.md E8](api.md#e8-files-and-the-cache)): how far through the file's
 encrypted object its whole copy has got, out of the object's size, known
@@ -9351,6 +9373,7 @@ Write-ups explain each model and state its assumptions:
 | Reads and status agree on every storage read; a wrong size and a range past the end are damage; a present object is never absent | `read_agrees_with_status`, `wrong_size_read_is_damage`, `past_end_is_damage`, `present_never_absent`, `complete_object_reads` | `proofs/storage/CovenStorage/Files.lean` | §17.6 |
 | Where downloads are checked, including disk-full failures injected through the real Rust reader | (specification) | `proofs/io.md` | §17.7 |
 | A failed pin records its first unmet condition and keeps the verified ranges; a failed read leaves the record as it was, so nothing is pending after it | `failure_atomic`, `failed_read_records_nothing` | `proofs/io/CovenIO/Downloads.lean` | §17.7 |
+| A pin's prepare retains and pins nothing and a successful one clears what was pending; only the write committing it keeps the whole file pinned, and only while a record names its stored bytes; bytes no commit takes are never retained | `prepare_retains_nothing`, `prepared_settles`, `commit_pins`, `unnamed_commit_keeps_nothing`, `uncommitted_never_retained` | `proofs/io/CovenIO/Downloads.lean`, `proofs/io/CovenIO/Trace.lean` | §17.8 |
 | Staging writes no cloud coordinates, for the cloud or on this device only; a completion switches each file still waiting for its upload to the stored location, and an upload no file waits for switches nothing | `stage_writes_no_cloud`, `stage_local_writes_no_cloud`, `completion_stores_waiting`, `stale_completion_writes_nothing` | `proofs/storage/CovenStorage/Files.lean` | §17.3, §17.9 |
 | Two rows share a file and its record stays until both references go; the write removing the last reference deletes the record; a late reference to a deleted record is taken out; once a write leaves a staged file with no reference, its upload's completion writes nothing | `shared_file_stays`, `last_reference_deletes`, `late_reference_taken_out`, `replaced_upload_writes_nothing` | `proofs/storage/CovenStorage/Files.lean` | §17.2, §17.3 |
 | No write of this device makes stored bytes a deletion candidate: a deleted record's bytes stay until that write is published | `change_keeps_candidates`, `settle_keeps_candidates`, `publish_releases` | `proofs/storage/CovenStorage/Files.lean` | §17.2, §17.10 |
@@ -9455,7 +9478,8 @@ maps them are with each provider in Appendix E.
 | `DbError::FileUnknown` | a reference names no file this device has a record of in the row's audience, including a restored lost value naming a deleted file | §17.2 |
 | `DbError::FileUnreferenced` | a file the write staged is referenced by none of its rows | §17.3 |
 | `DbError::FileWriteOnce` | a write would change a write-once reference that names a file | §17.2 |
-| `DbError::NotStagedHere` | a write is given staged files another open store staged, or this one before it closed | §17.3 |
+| `DbError::PreparedElsewhere` | a write is given staged files or a prepared pin from another open store, or from this one before it closed | §17.3, §17.8 |
+| `DbError::PinChanged` | a write commits a prepared pin whose already-kept copy was evicted since | §17.8 |
 | `DbError::DismissedRowChanged` | a write dismisses a taken-out row and also changes it, or a row its delete cascades to | §8.4 |
 | `DbError::UndeclaredNamespace`, `DbError::NamespaceKind` | a file is staged into a namespace not declared at open, or into one of the other kind; or a bound reference names a user's file | §17.1, §17.4 |
 | `DbError::BoundFileTooLarge` | a bound reference names a file larger than its column's limit | §17.4 |

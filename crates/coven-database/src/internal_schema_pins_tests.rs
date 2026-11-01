@@ -1,7 +1,6 @@
 use crate::file_write::tests::{complete_uploads, local_count, namespaces, stage, tables};
 use crate::tests::{database_error, TestStore};
 use crate::{DbError, FileDatabase, Migration, Provenance, SchemaError};
-use coven_foundation::files::FileName;
 
 /// The app's files table, and a local table its triggers keep: the rows
 /// whose file this device has pinned.
@@ -42,16 +41,10 @@ async fn pin_stored(db: &crate::Database) -> crate::FileRef {
     let file = stage(db, b"take".to_vec(), true).await.unwrap();
     // Queued, the file is on this device only: it can't be pinned yet.
     let owner = FileDatabase::new(db.clone());
-    assert!(owner.pin_complete(&db.file_ref(file).await.unwrap()).await.is_err());
+    assert!(owner.whole_kept(&db.file_ref(file).await.unwrap()).await.is_err());
     complete_uploads(db).await;
     let file = db.file_ref(file).await.unwrap();
-    owner
-        .reserve_cache_file(&file, FileName::new("whole").unwrap())
-        .await
-        .unwrap()
-        .publish()
-        .await
-        .unwrap();
+    crate::database::file_database::tests::pin_whole(db, &file, "whole").await.unwrap();
     file
 }
 

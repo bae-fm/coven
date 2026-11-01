@@ -4,7 +4,6 @@ use crate::{
     tests::TestStore,
     Provenance,
 };
-use coven_foundation::files::FileName;
 
 /// A file still queued here is whole on this device: pin progress counts
 /// it complete, before and after reopening (§17.8).
@@ -52,13 +51,7 @@ async fn a_live_pin_answer_follows_coven_pins() {
     let mut live = db.subscribe_files_pinned(vec![file, absent]);
     assert_eq!(live.next().await.unwrap().unwrap(), [Some(false), None]);
     let stored = db.file_ref(file).await.unwrap();
-    crate::FileDatabase::new(db.clone())
-        .reserve_cache_file(&stored, FileName::new("whole").unwrap())
-        .await
-        .unwrap()
-        .publish()
-        .await
-        .unwrap();
+    crate::database::file_database::tests::pin_whole(&db, &stored, "whole").await.unwrap();
     assert_eq!(live.next().await.unwrap().unwrap(), [Some(true), None]);
     assert_eq!(db.files_pinned(vec![file, absent]).await.unwrap(), [Some(true), None]);
     db.close().await.unwrap();

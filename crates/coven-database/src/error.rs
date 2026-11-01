@@ -181,11 +181,19 @@ pub enum DbError {
     /// A synced table declaration or schema is invalid.
     #[error(transparent)]
     Schema(#[from] crate::SchemaError),
-    /// A write was given files `stage_files` staged in another open store,
-    /// or in this one before it closed; their names aren't reserved here
-    /// (§17.2).
-    #[error("these files were not staged in this open store")]
-    NotStagedHere,
+    /// A write was given files staged, or a pin prepared, in another open
+    /// store, or in this one before it closed: the copies they name aren't
+    /// reserved here (§17.3, §17.8).
+    #[error("these files were not prepared in this open store")]
+    PreparedElsewhere,
+    /// A pin prepared over a whole copy already kept found that copy gone
+    /// when its write committed it, evicted since: nothing was pinned, and
+    /// preparing again downloads it (§17.8).
+    #[error("the kept copy of file {file} changed since its pin was prepared")]
+    PinChanged {
+        /// The file.
+        file: coven_foundation::id_source::FileId,
+    },
     /// One of coven's steps in this write failed, and the write's closure
     /// went on to return success: the write rolls back, since a failed step
     /// may have made only part of its change (§4).

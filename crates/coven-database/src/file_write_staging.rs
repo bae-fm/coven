@@ -10,13 +10,13 @@ impl FileWrite<'_> {
     /// Bring files `stage_files` staged in this store into this write, and
     /// return what its batch returned. Each name must still be reserved
     /// here: files staged by another open store, or by this one before it
-    /// closed, aren't (`NotStagedHere`), and keep their names for their own
+    /// closed, aren't (`PreparedElsewhere`), and keep their names for their own
     /// store to release.
     pub(crate) fn put_staged<T>(&self, staged: crate::StagedFiles<T>) -> Result<T, DbError> {
         {
             let reserved = self.reservations.lock().expect("file staging lock poisoned");
             if staged.names().iter().any(|name| !reserved.contains(name)) {
-                return Err(DbError::NotStagedHere);
+                return Err(DbError::PreparedElsewhere);
             }
         }
         let (files, names, value) = staged.take();

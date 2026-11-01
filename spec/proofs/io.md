@@ -11,11 +11,17 @@ operations, snapshot selection, the floor and history deletion.
 [Trace.lean](io/CovenIO/Trace.lean) models a cache by object and byte address.
 A successful cache commit retains bytes; explicit eviction removes them.
 Retained or in-flight bytes cannot be fetched again. The model separates
-receiving bytes from applying their contents.
+receiving bytes from applying their contents, and bytes no commit takes are
+never retained (`uncommitted_never_retained`), as a pin's prepare commits none.
 
 [Downloads.lean](io/CovenIO/Downloads.lean) models validated file chunks,
 observable progress and retry disposition. Disk failure preserves validated
-progress. Only a pin's failure is recorded (`failure_atomic`): a read's goes
+progress. A pin's attempt is its prepare (§17.8): it retains and pins nothing
+(`prepare_retains_nothing`), a successful one clears what was pending
+(`prepared_settles`), and only the app write committing it keeps the whole
+file pinned (`commit_pins`), while a record still names its stored bytes
+(`unnamed_commit_keeps_nothing`). Only a pin's failure is recorded
+(`failure_atomic`): a read's goes
 to its caller and leaves the state as it was (`failed_read_records_nothing`),
 so nothing is pending after it. Only the app's reads and pins download, so
 nothing retries a download on its own (`never_on_its_own`): a failure the
@@ -35,8 +41,8 @@ not prove cipher security or filesystem atomicity.
 compares the retained-range behavior.
 `files::tests::cache::retries::io_differential_download` sends controlled
 network, authentication, content-hash and disk outcomes to the download case,
-through a read and through a pin, and compares completion and the persisted
-retry disposition.
+through a read and through a pin's prepare and the write committing it, and
+compares completion and the persisted retry disposition.
 
 [Keep.lean](io/CovenIO/Keep.lean) models what an attempt at a pin coven keeps
 for a file kept here reads (§17.8). An app file's attempt reads coven's copy and

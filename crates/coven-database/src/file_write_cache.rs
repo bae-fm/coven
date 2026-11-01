@@ -30,6 +30,41 @@ impl FileWrite<'_> {
         Ok(())
     }
 
+    /// Pin a prepared pin's files: publish each whole copy pinned, its older
+    /// entries going, and pin each copy already kept. Every name must be
+    /// reserved in this store (`PreparedElsewhere`); a copy whose file no
+    /// record here names the stored bytes of any more is `NoLongerStored`,
+    /// and a kept copy evicted since is `PinChanged`.
+    pub(crate) fn pin(&self, prepared: crate::PreparedPin) -> Result<(), DbError> {
+        let db = self.database;
+        {
+            let reserved = self.reservations.lock().expect("file staging lock poisoned");
+            if prepared.names().any(|name| !reserved.contains(name)) {
+                return Err(DbError::PreparedElsewhere);
+            }
+        }
+        let (copies, kept) = prepared.take();
+        // The names go free once the write has decided, whatever the rest
+        // of it does.
+        self.brought.borrow_mut().extend(copies.iter().map(|(_, name)| name.clone()));
+        for (file, name) in copies {
+            if !crate::database::file_database::publish_cached(db, &file, &name, true)? {
+                return Err(DbError::NoLongerStored { file: file.id() });
+            }
+        }
+        for file in kept {
+            if !crate::database::file_database::pin_cached(db, &file)? {
+                return Err(DbError::PinChanged { file: file.id() });
+            }
+        }
+        Ok(())
+    }
+
+    /// End the request for the pin coven keeps for `file` (§17.8).
+    pub(crate) fn end_pin_request(&self, file: FileId) -> Result<(), DbError> {
+        crate::file_pins::end(self.database, file)
+    }
+
     /// Set a declared namespace's budget and evict its unpinned entries,
     /// least recently read first, down to it.
     pub(crate) fn set_cache_budget(&self, namespace: &str, bytes: u64) -> Result<(), DbError> {

@@ -394,7 +394,8 @@ async fn cached_bytes_go_with_the_last_record_naming_them() {
         owner.reserve_cache_file(&file, FileName::new("whole").unwrap()).await.unwrap();
     let cache = store.database_path().parent().unwrap().join("cache");
     std::fs::write(cache.join("whole"), b"whole file").unwrap();
-    reservation.publish().await.unwrap();
+    let prepared = owner.prepared_pin(vec![reservation], Vec::new()).unwrap();
+    db.write(move |sql| sql.pin(prepared)).await.unwrap();
     assert_eq!(local_count(&db, "_coven_cache"), 1);
     assert_eq!(local_count(&db, "coven_pins"), 1);
     assert!(cache.join("whole").exists());
@@ -754,4 +755,17 @@ async fn a_namespace_is_declared_once() {
         Err(CovenError::Database(DbError::Schema(SchemaError::DuplicateNamespace { namespace })))
             if namespace == "files"
     ));
+}
+
+/// Pin `file` from a whole cache copy reserved under `name`, in a write, as
+/// a prepared pin's write does.
+pub(crate) async fn pin_whole(
+    db: &crate::Database,
+    file: &crate::FileRef,
+    name: &str,
+) -> Result<(), DbError> {
+    let owner = FileDatabase::new(db.clone());
+    let reservation = owner.reserve_cache_file(file, FileName::new(name).unwrap()).await?;
+    let prepared = owner.prepared_pin(vec![reservation], Vec::new())?;
+    db.write(move |sql| sql.pin(prepared)).await
 }

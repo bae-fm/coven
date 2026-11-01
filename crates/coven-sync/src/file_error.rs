@@ -86,6 +86,18 @@ pub enum FileReadError {
     /// A provider failure, retaining its classification and native cause.
     #[error(transparent)]
     Storage(#[from] StorageError),
+    /// The write committing a prepared pin failed other than in the
+    /// database, as in a failed rollback, keeping its cause (§17.8).
+    #[error(transparent)]
+    Write(Box<coven_database::CovenError>),
+}
+impl From<coven_database::CovenError> for FileReadError {
+    fn from(error: coven_database::CovenError) -> Self {
+        match error {
+            coven_database::CovenError::Database(error) => error.into(),
+            error => Self::Write(Box::new(error)),
+        }
+    }
 }
 impl From<DbError> for FileReadError {
     fn from(error: DbError) -> Self {

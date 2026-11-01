@@ -8,7 +8,9 @@ use crate::{
 };
 use coven_crypto::{ContentHash, ContentHasher, FileKey};
 use coven_database::FileLocationKey;
-use coven_database::{DbError, FileLocation, FilePlace, FileRef, LocalFileStream, TransferMeter};
+use coven_database::{
+    CacheReservation, DbError, FileLocation, FilePlace, FileRef, LocalFileStream, TransferMeter,
+};
 use coven_format::{
     chunks::CHUNK_SIZE,
     file::{FileHeader, FILE_HEADER_LEN},
@@ -345,7 +347,11 @@ impl UploadedFile {
         clippy::map_err_ignore,
         reason = "a size whose encrypted layout overflows is the disagreement Integrity names"
     )]
-    pub(crate) async fn keep_whole(&self) -> Result<(), TransferError> {
+    /// Assemble this file's whole encrypted cache copy, from cached and
+    /// fetched chunks, check its content hash and sync it, under a reserved
+    /// name: the copy a pin's write publishes (§17.8). Nothing is kept until
+    /// then.
+    pub(crate) async fn keep_whole(&self) -> Result<CacheReservation, TransferError> {
         // In flight until it ends, by finishing, failing or being dropped.
         let downloading = self.owner.downloading.start(
             self.location.uploader(),
@@ -383,9 +389,7 @@ impl UploadedFile {
             return Err(TransferError::Refused(crate::Refusal::ContentHash));
         }
         writer.finish().await?;
-        let _cache = self.owner.cache.write().await;
-        reservation.publish().await?;
-        Ok(())
+        Ok(reservation)
     }
     fn integrity(&self) -> FileReadError {
         FileReadError::Integrity { id: self.file.id().to_string(), cause: None }

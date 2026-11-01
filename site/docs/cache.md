@@ -63,14 +63,20 @@ budget, until the app unpins it: the gesture for "keep this for the flight".
 
 ```rust
 let files = vec![handle.file_ref(track_file).await?];
-let mut progress = handle.subscribe_pin_progress(files.clone());
-handle.pin(&files).await?; // returns once every file is whole on this device
+let prepared = handle.prepare_pin(&files).await?; // downloads; pins nothing
+handle.write(move |sql| {
+    sql.pin(prepared)?; // every file whole on this device, as this write commits
+    sql.execute("UPDATE albums SET offline = 1 WHERE id = ?1", [&album])?;
+    Ok(())
+}).await?;
 ```
 
-Pinning assembles a complete cache file from the chunks already cached and the
-ones it fetches, checks it against the record's content hash, and syncs it to
-disk before the pin counts. A cancelled or crashed pin leaves no half-downloaded
-file exempt from eviction. Only stored files are pinned: pinning a file still on
+Preparing assembles a complete cache file from the chunks already cached and
+the ones it fetches, checks it against the record's content hash, and syncs it
+to disk; the write's `pin` step keeps it, so the pin and the app's own rows
+change together. `handle.pin(&files)` prepares and commits in a write of its
+own. A prepared pin no write commits keeps nothing, and a cancelled or crashed
+prepare leaves no half-downloaded file exempt from eviction. Only stored files are pinned: pinning a file still on
 one device only, this one included while it uploads, fails with
 `FileReadError::DeviceOnly`, and the app pins it once it is stored.
 

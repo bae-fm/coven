@@ -47,7 +47,8 @@ private def retained (j : Json) : Except String Json := do
 /-- Whole-object dispositions project the actual provider, authentication and
 local byte-commit results into Downloads' ordered checks, for a read or a pin
 of a file nothing is pending for. A transport failure wins even when an
-earlier chunk already proved the contents invalid. -/
+earlier chunk already proved the contents invalid. A pin's attempt is its
+prepare, and the write that follows a successful one commits it. -/
 private def download (j : Json) : Except String Json := do
   let fetched ← j.getObjValAs? Bool "fetched"
   let authenticated ← j.getObjValAs? Bool "authenticated"
@@ -64,8 +65,10 @@ private def download (j : Json) : Except String Json := do
     last := true
     pin
   }
-  let result := Downloads.apply (.idle []) attempt
-  let retry := (Downloads.pending result).map Downloads.retry
+  let prepared := Downloads.apply (.idle []) attempt
+  let retry := (Downloads.pending prepared).map Downloads.retry
+  let result := if pin && retry.isNone then Downloads.commitPin prepared [attempt.range] true
+    else prepared
   return Json.mkObj [("complete", toJson (Downloads.completed result)),
     ("refused", toJson (retry == some .afterUpdate)),
     ("next_call", toJson (retry == some .nextCall))]

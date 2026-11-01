@@ -98,7 +98,10 @@ theorem pending_replaced (db : Database) (subject : Subject) (state : State) :
 local transaction. The model does not implement those boundaries. Checks
 are in processing order; only a fully successful range reaches commit. A
 failed pin records its first unmet condition; a failed read returns it to
-its caller and leaves the state as it was. -/
+its caller and leaves the state as it was. A pin's attempt is its prepare
+(§17.8): it assembles and checks the whole file apart from the cache, so it
+retains nothing, and its success only settles the pending record. The app
+write that commits it is `commitPin`. -/
 structure Attempt where
   path : Path
   fetched : Except Reason Unit
@@ -119,15 +122,53 @@ def Attempt.checks (a : Attempt) : List (Except Reason Unit) :=
    if a.diskCommitted then .ok () else .error .disk,
    if a.databaseCommitted then .ok () else .error .database]
 
+/-- A prepared pin settles what was pending and keeps what was retained. -/
+def settle : State → State
+  | .unfinished rs _ => .idle rs
+  | s => s
+
+/-- A read's verified range, kept as it commits. -/
+def readCommit (s : State) (attempt : Attempt) : State :=
+  let retained := if attempt.range.index ∈ (ranges s).map Range.index then ranges s
+    else ranges s ++ [attempt.range]
+  if attempt.last && (List.range attempt.chunks).all (fun index => index ∈ retained.map Range.index)
+    then .complete retained false
+  else .unfinished retained (.range attempt.path (attempt.range.index + 1))
+
 def apply (s : State) (attempt : Attempt) : State :=
   match first attempt.checks with
   | some reason => if attempt.pin then .unfinished (ranges s) reason else s
-  | none =>
-      let retained := if attempt.range.index ∈ (ranges s).map Range.index then ranges s
-        else ranges s ++ [attempt.range]
-      if attempt.last && (List.range attempt.chunks).all (fun index => index ∈ retained.map Range.index)
-        then .complete retained attempt.pin
-      else .unfinished retained (.range attempt.path (attempt.range.index + 1))
+  | none => if attempt.pin then settle s else readCommit s attempt
+
+/-- §17.8: the app write committing a prepared pin keeps the whole file it
+assembled, pinned, while a record still names the file's stored bytes;
+otherwise it keeps nothing and the state stays as it was. -/
+def commitPin (s : State) (whole : List Range) (named : Bool) : State :=
+  if named then .complete whole true else s
+
+/-- A pin's prepare retains nothing and pins nothing, whatever its outcome:
+retained bytes and the pin come only from its write. -/
+theorem prepare_retains_nothing (s : State) (attempt : Attempt) (pin : attempt.pin = true) :
+    ranges (apply s attempt) = ranges s ∧ (pinned (apply s attempt) = true → pinned s = true) := by
+  cases hf : first attempt.checks with
+  | some reason => cases s <;> simp [apply, hf, pin, ranges, pinned]
+  | none => cases s <;> simp [apply, hf, pin, settle, ranges, pinned]
+
+/-- A successful prepare leaves nothing pending: the download it records
+clears with it. -/
+theorem prepared_settles (s : State) (attempt : Attempt) (pin : attempt.pin = true)
+    (success : first attempt.checks = none) : pending (apply s attempt) = none := by
+  cases s <;> simp [apply, success, pin, settle, pending]
+
+/-- The write commits the prepared file pinned and whole. -/
+theorem commit_pins (s : State) (whole : List Range) :
+    pinned (commitPin s whole true) = true ∧ ranges (commitPin s whole true) = whole := by
+  simp [commitPin, pinned, ranges]
+
+/-- A file whose stored bytes no record names any more keeps nothing. -/
+theorem unnamed_commit_keeps_nothing (s : State) (whole : List Range) :
+    commitPin s whole false = s := by
+  simp [commitPin]
 
 theorem failure_atomic (s : State) (attempt : Attempt) (reason : Reason)
     (failed : first attempt.checks = some reason) (pin : attempt.pin = true) :
@@ -148,10 +189,13 @@ theorem progress_never_decreases (s : State) (attempt : Attempt) :
   cases hf : first attempt.checks with
   | some reason => cases hp : attempt.pin <;> simp [apply, hf, hp, progress, ranges]
   | none =>
-      by_cases present : attempt.range.index ∈ (ranges s).map Range.index
-      all_goals
-        simp only [apply, hf, present, ↓reduceIte]
-        split <;> simp [progress, ranges, List.map_append, List.sum_append]
+      cases hp : attempt.pin
+      · simp only [apply, hf, hp, Bool.false_eq_true, ↓reduceIte]
+        by_cases present : attempt.range.index ∈ (ranges s).map Range.index
+        all_goals
+          simp only [readCommit, present, ↓reduceIte]
+          split <;> simp [progress, ranges, List.map_append, List.sum_append]
+      · cases s <;> simp [apply, hf, hp, settle, progress, ranges]
 
 theorem committed_ranges_unique (s : State) (attempt : Attempt)
     (unique : ((ranges s).map Range.index).Nodup) :
@@ -159,11 +203,14 @@ theorem committed_ranges_unique (s : State) (attempt : Attempt)
   cases hf : first attempt.checks with
   | some reason => cases hp : attempt.pin <;> simpa [apply, hf, hp, ranges] using unique
   | none =>
-      by_cases present : attempt.range.index ∈ (ranges s).map Range.index
-      · simp only [apply, hf, present, ↓reduceIte]
-        split <;> exact unique
-      · simp only [apply, hf, present, ↓reduceIte]
-        split <;> simpa [ranges, List.map_append, List.nodup_append] using And.intro unique present
+      cases hp : attempt.pin
+      · simp only [apply, hf, hp, Bool.false_eq_true, ↓reduceIte]
+        by_cases present : attempt.range.index ∈ (ranges s).map Range.index
+        · simp only [readCommit, present, ↓reduceIte]
+          split <;> exact unique
+        · simp only [readCommit, present, ↓reduceIte]
+          split <;> simpa [ranges, List.map_append, List.nodup_append] using And.intro unique present
+      · cases s <;> simpa [apply, hf, hp, settle, ranges] using unique
 
 /-- A completion an attempt makes holds every range. A failed read leaves a
 state as it was, so only an attempt on an incomplete state is asked about. -/
@@ -176,17 +223,20 @@ theorem completion_has_all_ranges (s : State) (attempt : Attempt)
       · simp [apply, hf, hp, incomplete] at done
       · simp [apply, hf, hp, completed] at done
   | none =>
-      by_cases present : attempt.range.index ∈ (ranges s).map Range.index
-      all_goals
-        simp only [apply, hf, present, ↓reduceIte] at done ⊢
-        split at done
-        · rename_i covered
-          have all := (Bool.and_eq_true_iff.mp covered).2
-          rw [ite_eq_left covered]
-          change ∀ index, index < attempt.chunks → _
-          intro index bound
-          exact of_decide_eq_true (List.all_eq_true.mp all index (List.mem_range.mpr bound))
-        · simp [completed] at done
+      cases hp : attempt.pin
+      · simp only [apply, hf, hp, Bool.false_eq_true, ↓reduceIte] at done ⊢
+        by_cases present : attempt.range.index ∈ (ranges s).map Range.index
+        all_goals
+          simp only [readCommit, present, ↓reduceIte] at done ⊢
+          split at done
+          · rename_i covered
+            have all := (Bool.and_eq_true_iff.mp covered).2
+            rw [ite_eq_left covered]
+            change ∀ index, index < attempt.chunks → _
+            intro index bound
+            exact of_decide_eq_true (List.all_eq_true.mp all index (List.mem_range.mpr bound))
+          · simp [completed] at done
+      · cases s <;> simp_all [apply, settle, completed]
 
 theorem committed_range_checked (a : Attempt) (success : first a.checks = none) :
     a.authenticated = true ∧ (a.last = true → a.hashMatches = true) ∧

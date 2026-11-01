@@ -391,8 +391,18 @@ pub(crate) fn trim_entries(
     }
     Ok(removed)
 }
+/// Whether a verified whole cache file of this stored file is kept, pinned
+/// or not.
+pub(super) fn whole(db: &DatabaseConnection, file: &FileRef) -> Result<bool, DbError> {
+    let (_, hash) = stored(file)?;
+    db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM _coven_cache WHERE namespace=?1 AND file_id=?2 AND chunk=?4 AND checked_hash=?3)",
+        (file.namespace(), id(file)?, hash.as_bytes().as_slice(), COMPLETE_FILE),
+        |r| r.get(0),
+    )
+}
 /// Pin a verified whole cache file, if one is kept. Returns whether one was.
-pub(super) fn pin_complete(db: &DatabaseConnection, file: &FileRef) -> Result<bool, DbError> {
+pub(crate) fn pin_complete(db: &DatabaseConnection, file: &FileRef) -> Result<bool, DbError> {
     let (_, hash) = stored(file)?;
     Ok(db.internal_execute(
         "UPDATE _coven_cache SET pinned=1 WHERE namespace=?1 AND file_id=?2 AND chunk=?4 AND checked_hash=?3",
@@ -426,7 +436,7 @@ pub(crate) fn kept(db: &DatabaseConnection, file: &FileRef) -> Result<bool, DbEr
     clippy::map_err_ignore,
     reason = "a size past SQLite's integer is TooLarge, which names the field and size"
 )]
-pub(super) fn publish(
+pub(crate) fn publish(
     db: &DatabaseConnection,
     file: &FileRef,
     name: &FileName,

@@ -99,15 +99,15 @@ pub(crate) struct FileWrite<'a> {
     schema: &'a WriteSchema,
     device: DeviceId,
     ids: &'a dyn IdSource,
-    /// The names of coven's copies of app bytes that `stage_files` reserved
-    /// in this store and have not been committed or released.
+    /// The names of copies reserved in this store, such as staged app bytes
+    /// and prepared cache files, not yet committed or released.
     reservations: &'a std::sync::Mutex<BTreeSet<FileName>>,
     /// The files the write's steps stage: app bytes `put_staged` brings,
     /// and users' originals.
     staged: RefCell<Vec<StagedFile>>,
     /// The new files the write's steps make over existing files' bytes.
     existing: RefCell<Vec<crate::write_batch::ExistingFile>>,
-    /// The reserved names `put_staged` brought into this write, released
+    /// The reserved names `put_staged` and `pin` brought into this write, released
     /// once its transaction has decided.
     brought: RefCell<Vec<FileName>>,
     /// The new files this write made over a file it stages, by that file:

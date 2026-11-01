@@ -392,6 +392,59 @@ async fn a_pins_download_is_listed_while_it_runs() {
     f.close().await;
 }
 
+/// Preparing a pin downloads the file whole and pins nothing (§17.8): the
+/// write committing it pins it, beside the app's own row. A prepared pin
+/// dropped uncommitted keeps nothing once the next write has run.
+#[tokio::test]
+async fn a_prepared_pin_pins_nothing_until_its_write_commits_it() {
+    let f = Fixture::new(Provenance::AppProvided).await;
+    let file = f.uploaded("kept", vec![9; CHUNK * 2]).await;
+    f.files.stop_background_for_counts().await;
+    let pinned = || f.database.files_pinned(vec![file.id()]);
+    let prepared = f.files.prepare_pin(std::slice::from_ref(&file)).await.unwrap();
+    assert_eq!(pinned().await.unwrap(), vec![Some(false)]);
+    // The whole copy waits under its reserved name, beside the header the
+    // download cached as a read does.
+    let with_copy = cache_files(&f);
+    drop(prepared);
+    f.database.write(|_| Ok(())).await.unwrap();
+    assert_eq!(cache_files(&f), with_copy - 1, "a pin never committed keeps nothing");
+    let prepared = f.files.prepare_pin(std::slice::from_ref(&file)).await.unwrap();
+    f.database
+        .write(move |sql| {
+            sql.execute("INSERT INTO other(id) VALUES('offline')", [])?;
+            sql.pin(prepared)
+        })
+        .await
+        .unwrap();
+    assert_eq!(pinned().await.unwrap(), vec![Some(true)]);
+    assert_eq!(cache_files(&f), 1);
+    f.close().await;
+}
+
+/// A pin prepared over a whole copy already kept pins that copy when its
+/// write commits; if the copy was evicted in between, the write fails with
+/// `PinChanged` and pins nothing (§17.8).
+#[tokio::test]
+async fn a_kept_copy_evicted_before_the_write_fails_the_pin() {
+    let f = Fixture::new(Provenance::AppProvided).await;
+    let file = f.uploaded("evicted", vec![4; CHUNK]).await;
+    f.files.stop_background_for_counts().await;
+    f.files.pin(std::slice::from_ref(&file)).await.unwrap();
+    let id = file.id();
+    f.database.write(move |sql| sql.unpin(&[id])).await.unwrap();
+    let requests = f.storage.request_count();
+    let prepared = f.files.prepare_pin(std::slice::from_ref(&file)).await.unwrap();
+    assert_eq!(f.storage.request_count(), requests, "the kept copy is not downloaded again");
+    f.database.write(move |sql| sql.evict_file(id)).await.unwrap();
+    let refused = f.database.write(move |sql| sql.pin(prepared)).await;
+    assert!(matches!(refused, Err(DbError::PinChanged { file }) if file == id), "{refused:?}");
+    assert_eq!(f.database.files_pinned(vec![id]).await.unwrap(), vec![Some(false)]);
+    f.files.pin(std::slice::from_ref(&file)).await.unwrap();
+    assert_eq!(f.database.files_pinned(vec![id]).await.unwrap(), vec![Some(true)]);
+    f.close().await;
+}
+
 /// Files in the store's cache folder, published or not.
 fn cache_files(f: &Fixture) -> usize {
     std::fs::read_dir(f.root.path().join("stores").join(f.directory.id().to_string()).join("cache"))

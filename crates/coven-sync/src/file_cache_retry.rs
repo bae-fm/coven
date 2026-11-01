@@ -50,16 +50,17 @@ impl FilesInner {
         }
     }
 
-    /// A pin's outcome: its failure stays the stored bytes' pending record
-    /// until a later pin or read clears it, and a whole copy kept clears
-    /// every condition. The immediate native error survives a failure to
-    /// persist its record too. The caller receives the error, so the record
-    /// keeps none as its cause.
-    pub(super) async fn complete_pin(
+    /// A pin's download outcome, as its prepare meets it: its failure stays
+    /// the stored bytes' pending record until a later pin or read clears
+    /// it, and a whole copy written or already kept clears every
+    /// condition. The immediate native error survives a failure to persist
+    /// its record too. The caller receives the error, so the record keeps
+    /// none as its cause.
+    pub(super) async fn complete_pin<T>(
         &self,
         file: &FileRef,
-        result: Result<(), TransferError>,
-    ) -> Result<(), FileReadError> {
+        result: Result<T, TransferError>,
+    ) -> Result<T, FileReadError> {
         let recorded = !matches!(&result, Err(TransferError::File(error)) if unrecorded(error));
         let subject = match stored(file) {
             Ok((location, _)) => download_subject(location),
@@ -69,7 +70,7 @@ impl FilesInner {
             Err(error) if recorded => {
                 Some(self.file_failure(subject, FileCopy::Stored, FileFailure::Returned(error)))
             }
-            Ok(()) | Err(_) => None,
+            Ok(_) | Err(_) => None,
         };
         let result = result.map_err(|error| returned(file, error));
         if !recorded {

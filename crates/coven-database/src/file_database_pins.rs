@@ -31,6 +31,19 @@ impl FileDatabase {
             })
             .await
     }
+    /// Make the pin coven keeps for `file` from `prepared`, ending its
+    /// request in the same write (§17.8).
+    pub async fn keep(&self, prepared: crate::PreparedPin, file: FileId) -> Result<(), DbError> {
+        let FileDatabaseAccess::Writer(database) = &self.access else {
+            return Err(read_only());
+        };
+        database
+            .write(move |sql| {
+                sql.pin(prepared)?;
+                sql.end_pin_request(file)
+            })
+            .await
+    }
     /// The cache copy couldn't be made from coven's copy: the pin downloads
     /// from storage instead.
     pub async fn drop_pin_copy(&self, file: FileId) -> Result<(), DbError> {

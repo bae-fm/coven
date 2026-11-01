@@ -13,7 +13,9 @@ use crate::{
     Retry, SyncError,
 };
 use coven_crypto::ContentHasher;
-use coven_database::{DbError, FileLocationKey, FileRef, PinRequest, RetrySubject};
+use coven_database::{
+    CacheReservation, DbError, FileLocationKey, FileRef, PinRequest, RetrySubject,
+};
 use coven_format::{chunks::CHUNK_SIZE, file::FileHeader};
 use coven_foundation::files::FileName;
 use coven_storage::ObjectPath;
@@ -43,13 +45,17 @@ impl FilesInner {
             }
             let _pins = self.pins.lock().await;
             self.check_open()?;
-            let outcome = if self.database.pin_complete(&file).await? {
-                Ok(())
-            } else {
-                self.keep(&file, &request).await
+            let outcome = match self.pin_kept(&file, &request, true).await {
+                // The copy already kept was evicted before the pin's write:
+                // the file is kept again from its bytes.
+                Err(TransferError::File(FileReadError::Database(DbError::PinChanged {
+                    ..
+                }))) => self.pin_kept(&file, &request, false).await,
+                outcome => outcome,
             };
             match outcome {
-                Ok(()) => self.ended(&file).await?,
+                // The write making the pin ended its request.
+                Ok(()) => self.ended_here(&file),
                 // The file left the bytes while they downloaded: the write
                 // taking it off them ended the request, and nothing was kept.
                 Err(TransferError::File(FileReadError::Database(DbError::NoLongerStored {
@@ -61,16 +67,35 @@ impl FilesInner {
         Ok(())
     }
 
+    /// Prepare the file's pin, from a whole copy already kept if `kept`
+    /// finds one, and otherwise from its cache copy made here, then make it
+    /// in one write that ends its request too.
+    async fn pin_kept(
+        self: &Arc<Self>,
+        file: &FileRef,
+        request: &PinRequest,
+        kept: bool,
+    ) -> Result<(), TransferError> {
+        let prepared = if kept && self.database.whole_kept(file).await? {
+            self.database.prepared_pin(Vec::new(), vec![file.clone()])?
+        } else {
+            let copy = self.keep(file, request).await?;
+            self.database.prepared_pin(vec![copy], Vec::new())?
+        };
+        self.database.keep(prepared, file.id()).await?;
+        Ok(())
+    }
+
     /// Make the cache copy: from coven's copy while the request keeps one,
     /// or else downloaded.
     async fn keep(
         self: &Arc<Self>,
         file: &FileRef,
         request: &PinRequest,
-    ) -> Result<(), TransferError> {
+    ) -> Result<CacheReservation, TransferError> {
         if let Some(copy) = &request.copy {
             match self.keep_from_copy(file, copy).await {
-                Ok(()) => return Ok(()),
+                Ok(reservation) => return Ok(reservation),
                 Err(
                     error @ TransferError::File(FileReadError::Database(DbError::NoLongerStored {
                         ..
@@ -91,7 +116,11 @@ impl FilesInner {
     /// Write the stored object coven's copy encrypts to, chunk by checked
     /// chunk, as the file's pinned whole cache entry. Its upload sent these
     /// very bytes: the same plaintext under the same key and chunk nonces.
-    async fn keep_from_copy(&self, file: &FileRef, copy: &FileName) -> Result<(), TransferError> {
+    async fn keep_from_copy(
+        &self,
+        file: &FileRef,
+        copy: &FileName,
+    ) -> Result<CacheReservation, TransferError> {
         let (location, content_hash) = stored(file)?;
         let coven_format::file_reference::FileReference { device, id, key } =
             location.reference().map_err(FileReadError::from)?;
@@ -125,20 +154,23 @@ impl FilesInner {
             return Err(TransferError::Refused(crate::Refusal::ContentHash));
         }
         writer.finish().await?;
-        let _cache = self.cache.write().await;
-        reservation.publish().await?;
+        Ok(reservation)
+    }
+
+    /// The file left its stored bytes: its request, record and wait end.
+    async fn ended(&self, file: &FileRef) -> Result<(), SyncError> {
+        self.database.end_pin_request(file.id()).await?;
+        self.ended_here(file);
         Ok(())
     }
 
-    /// The pin is made, or the file left its stored bytes: its request,
-    /// record and wait end.
-    async fn ended(&self, file: &FileRef) -> Result<(), SyncError> {
-        self.database.end_pin_request(file.id()).await?;
+    /// The request ended in a write: its wait and logged failure end in
+    /// this session too.
+    fn ended_here(&self, file: &FileRef) {
         let subject = RetrySubject::Pin(file.id());
         self.waits.forget(subject);
         self.forget_connection_wait(subject);
         self.waits.failures().cleared(&PendingSubject::Keep { file: file.id() }, |_| true);
-        Ok(())
     }
 
     /// Record a failed attempt as the pin's record, with its next wait when

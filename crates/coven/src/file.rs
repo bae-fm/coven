@@ -9,15 +9,22 @@ impl CovenHandle {
     pub async fn file_status(&self, file: &FileRef) -> Result<FileStatus, FileReadError> {
         self.files.file_status(file).await
     }
-    /// Keeps stored files whole on this device regardless of the cache
-    /// budget, downloading what is missing before the call returns. A file
-    /// only on one device, this one included while it uploads, is refused
-    /// with `FileReadError::DeviceOnly` (§17.8), and one whose record goes,
-    /// or leaves its stored bytes, while they download keeps nothing and
-    /// fails with `DbError::NoLongerStored`. Progress is read from
-    /// `pin_progress()`.
+    /// Prepares keeping stored files whole on this device regardless of the
+    /// cache budget (§17.8): downloads what each lacks into a whole copy,
+    /// checked against its content hash, and pins nothing; a write commits
+    /// the result with `CovenWrite::pin`. A file only on one device, this
+    /// one included while it uploads, is refused with
+    /// `FileReadError::DeviceOnly`, and one whose record goes, or leaves its
+    /// stored bytes, while they download keeps nothing and fails with
+    /// `DbError::NoLongerStored`. Which files are downloading is in
+    /// `coven_downloading`, how far each has got on the download watch.
+    pub async fn prepare_pin(&self, files: &[FileRef]) -> Result<PreparedPin, FileReadError> {
+        self.files.prepare_pin(files).await
+    }
+    /// Prepares a pin and commits it in a write of its own.
     pub async fn pin(&self, files: &[FileRef]) -> Result<(), FileReadError> {
-        self.files.pin(files).await
+        let prepared = self.prepare_pin(files).await?;
+        self.write(move |write| Ok(write.pin(prepared)?)).await.map_err(FileReadError::from)
     }
     /// Verified cache coverage for these fixed references, in one snapshot.
     pub async fn pin_progress(&self, files: Vec<FileRef>) -> CovenResult<PinProgress> {

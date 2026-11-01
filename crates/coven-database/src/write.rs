@@ -90,7 +90,7 @@ impl<'connection, 'write> SqlContext<'connection, 'write> {
     /// Put files `stage_files` staged into this write, and return what its
     /// batch returned, such as their ids, for this write's rows to name
     /// (§17.2). Files staged by another open store, or by this one before it
-    /// closed, fail with `NotStagedHere`. A file no row names fails the
+    /// closed, fail with `PreparedElsewhere`. A file no row names fails the
     /// write with `FileUnreferenced`.
     pub fn put_staged<T>(&self, staged: crate::StagedFiles<T>) -> Result<T, crate::DbError> {
         self.files.step(|| self.files.put_staged(staged))
@@ -120,6 +120,25 @@ impl<'connection, 'write> SqlContext<'connection, 'write> {
         from: coven_foundation::id_source::FileId,
     ) -> coven_foundation::id_source::FileId {
         self.files.existing_file(from)
+    }
+
+    /// Pin a prepared pin's files in this write (§17.8): each whole copy
+    /// becomes the file's pinned cache entry, and each copy already kept is
+    /// pinned. Files prepared in another open store, or in this one before
+    /// it closed, fail with `PreparedElsewhere`; a file whose record left
+    /// its stored bytes since with `NoLongerStored`; and a kept copy evicted
+    /// since with `PinChanged`.
+    pub fn pin(&self, prepared: crate::PreparedPin) -> Result<(), crate::DbError> {
+        self.files.step(|| self.files.pin(prepared))
+    }
+
+    /// End the request for the pin coven keeps for `file`, in this write
+    /// (§17.8).
+    pub(crate) fn end_pin_request(
+        &self,
+        file: coven_foundation::id_source::FileId,
+    ) -> Result<(), crate::DbError> {
+        self.files.step(|| self.files.end_pin_request(file))
     }
 
     /// Run one of sync's steps on the journal in this write (§4, §11). A

@@ -27,7 +27,7 @@ impl<'write> CovenWrite<'write> {
     /// rows to reference (§17.2). The write makes each file's record, in the
     /// audience of the rows that name it, and queues its upload for the
     /// cloud. Files staged by another open store, or by this one before it
-    /// closed, fail with `NotStagedHere`; a file no row names fails the
+    /// closed, fail with `PreparedElsewhere`; a file no row names fails the
     /// write with `FileUnreferenced`.
     pub fn put_staged<T>(&self, staged: StagedFiles<T>) -> Result<T, DbError> {
         self.sql.put_staged(staged)
@@ -115,6 +115,18 @@ impl<'write> CovenWrite<'write> {
     /// with `DismissedRowChanged`.
     pub fn dismiss_lost_values(&self, values: &[LostValue]) -> Result<(), DbError> {
         self.sql.dismiss_lost_values(values)
+    }
+
+    /// Keeps a prepared pin's files whole on this device, regardless of the
+    /// cache budget (§17.8): each whole copy becomes the file's pinned cache
+    /// entry, and each copy already kept is pinned, all in this write.
+    /// Files prepared in another open store, or in this one before it
+    /// closed, fail with `PreparedElsewhere`; a file whose record left its
+    /// stored bytes since with `NoLongerStored`; and a copy already kept
+    /// that was evicted since with `PinChanged`, which preparing again
+    /// downloads.
+    pub fn pin(&self, prepared: PreparedPin) -> Result<(), DbError> {
+        self.sql.pin(prepared)
     }
 
     /// Makes an operation's retry or undo due now, from its recorded

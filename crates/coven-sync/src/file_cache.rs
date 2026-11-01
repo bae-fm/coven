@@ -5,18 +5,29 @@ use crate::{
     files::{Files, FilesInner},
     FileReadError,
 };
-use coven_database::{CacheReservation, DbError, FilePlace, FileRef};
+use coven_database::{CacheReservation, DbError, FilePlace, FileRef, PreparedPin};
 use coven_foundation::files::{FileArea, FileName, FileWriter, StoreDirAccess};
 use futures_util::{StreamExt, TryStreamExt};
 
+/// What preparing one file's pin found: a whole copy written for it, or one
+/// already kept.
+enum PreparedFile {
+    Copy(CacheReservation),
+    Kept(FileRef),
+}
+
 impl Files {
-    /// Download missing chunks and retain complete stored files regardless
-    /// of budgets. Progress is the committed coverage `pin_progress` reads. A
-    /// file only on one device, this one included while it uploads, is
-    /// refused: only stored bytes are kept (§17.8). So is one whose record
-    /// goes, or leaves its stored bytes, while they download
+    /// Prepare a pin of stored files (§17.8): download what each lacks, up
+    /// to the download limit at once, into a whole cache copy written,
+    /// synced and checked against its content hash, or note a checked whole
+    /// copy already kept. Nothing is pinned until a write commits the
+    /// result with its `pin` step. Each file's download failure is its
+    /// stored bytes' pending record, as for any pin; a download that
+    /// succeeds clears it. A file only on one device, this one included
+    /// while it uploads, is refused: only stored bytes are kept. So is one
+    /// whose record goes, or leaves its stored bytes, while they download
     /// (`NoLongerStored`).
-    pub async fn pin(&self, files: &[FileRef]) -> Result<(), FileReadError> {
+    pub async fn prepare_pin(&self, files: &[FileRef]) -> Result<PreparedPin, FileReadError> {
         self.inner.check_open()?;
         let _pins = self.inner.pins.lock().await;
         let mut current = Vec::new();
@@ -28,20 +39,36 @@ impl Files {
             current.push(file);
         }
         let limit = self.transfer_limits().downloads.get();
-        futures_util::stream::iter(current)
+        let prepared: Vec<PreparedFile> = futures_util::stream::iter(current)
             .map(|file| async move {
                 let work = async {
-                    if self.inner.database.pin_complete(&file).await? {
-                        return Ok(());
+                    if self.inner.database.whole_kept(&file).await? {
+                        return Ok(PreparedFile::Kept(file.clone()));
                     }
-                    UploadedFile::open(self.inner.clone(), file.clone()).await?.keep_whole().await
+                    let opened = UploadedFile::open(self.inner.clone(), file.clone()).await?;
+                    Ok(PreparedFile::Copy(opened.keep_whole().await?))
                 }
                 .await;
                 self.inner.complete_pin(&file, work).await
             })
             .buffer_unordered(limit)
-            .try_for_each(|()| std::future::ready(Ok(())))
-            .await
+            .try_collect()
+            .await?;
+        let (mut copies, mut kept) = (Vec::new(), Vec::new());
+        for file in prepared {
+            match file {
+                PreparedFile::Copy(copy) => copies.push(copy),
+                PreparedFile::Kept(file) => kept.push(file),
+            }
+        }
+        Ok(self.inner.database.prepared_pin(copies, kept)?)
+    }
+    /// Prepare a pin and commit it in a write of its own, as an app does,
+    /// for tests.
+    #[cfg(test)]
+    pub(crate) async fn pin(&self, files: &[FileRef]) -> Result<(), FileReadError> {
+        let prepared = self.prepare_pin(files).await?;
+        Ok(self.inner.database.commit_pin(prepared).await?)
     }
     /// The namespace's budget, declared or since set (E8).
     pub async fn get_cache_budget(&self, namespace: &str) -> Result<u64, DbError> {

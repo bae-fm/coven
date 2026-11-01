@@ -1,6 +1,6 @@
 //! File metadata operations through the owning database, never through app SQL.
 
-use super::{finish_blocking, Database, DatabaseAccess, DatabaseInner, DatabaseReadHandle};
+use super::{Database, DatabaseAccess, DatabaseInner, DatabaseReadHandle};
 use crate::DatabaseChanges;
 use crate::{
     file_queue, file_ref, sqlite::DatabaseConnection, write_schema::WriteSchema, DbError, FileRef,
@@ -17,8 +17,8 @@ use std::sync::{Arc, RwLock};
 mod cache;
 pub(crate) use cache::{
     declare_budgets, file_id as file_cache_id, id as cache_id, kept as cache_kept,
-    remove_entries as remove_cached, set_budget as set_cache_budget, trim_entries as trim_cached,
-    unpin as unpin_cached,
+    pin_complete as pin_cached, publish as publish_cached, remove_entries as remove_cached,
+    set_budget as set_cache_budget, trim_entries as trim_cached, unpin as unpin_cached,
 };
 
 #[derive(Clone)]
@@ -668,13 +668,6 @@ impl FileDatabase {
             .await?;
         self.removed(chosen).await
     }
-    /// Pin a complete, previously checked cache file of a stored file,
-    /// atomically if one exists, and return whether it does. The presence
-    /// check and state change share a transaction with eviction.
-    pub async fn pin_complete(&self, file: &FileRef) -> Result<bool, DbError> {
-        let file = file.clone();
-        self.run(move |db, _, _, _| db.transaction(|db| cache::pin_complete(db, &file))).await
-    }
     /// Plaintext bytes absent from this namespace's cache; headers and tags
     /// are excluded from application download progress. A file only on this
     /// device is wholly local.
@@ -694,58 +687,12 @@ impl FileDatabase {
 }
 
 /// Bytes reserved for one file's whole encrypted cache file while it is
-/// written: a pin's, or an upload's own copy.
+/// written, until a prepared pin takes it (§17.8).
 pub struct CacheReservation {
     database: Arc<RwLock<Option<DatabaseInner>>>,
     file: FileRef,
     name: FileName,
     lease: Option<tokio::sync::OwnedRwLockReadGuard<()>>,
-}
-impl CacheReservation {
-    /// Atomically publish a fully synced and content-checked whole file as pinned.
-    /// Any older chunk files become recorded removals in the same transaction.
-    /// A file no record here names the stored bytes of any more, as one
-    /// made device-only or deleted while it downloaded, is `NoLongerStored`,
-    /// and its bytes go instead (§17.8).
-    pub async fn publish(self) -> Result<(), DbError> {
-        let mut pending = self;
-        let database = pending.database.clone();
-        finish_blocking(
-            "publish the cache file",
-            tokio::task::spawn_blocking(crate::commit_scope::bind(move || {
-                let slot = database.read().expect("database lock poisoned");
-                let inner = slot.as_ref().ok_or(DbError::StoreClosed)?;
-                let published = inner
-                    .access
-                    .with_writer(|writer| {
-                        let published = writer.transaction(|db| {
-                            cache::publish(db, &pending.file, &pending.name, true)
-                        })?;
-                        pending.release(inner);
-                        Ok::<_, DbError>((published, super::released(writer, inner)))
-                    })
-                    // The entries it replaced, or its own bytes, go once
-                    // the writer is free.
-                    .and_then(|(published, chosen)| {
-                        inner.finish_removals(Ok::<_, DbError>(()), chosen).map(|()| published)
-                    })?;
-                if published {
-                    Ok(())
-                } else {
-                    Err(DbError::NoLongerStored { file: pending.file.id() })
-                }
-            }))
-            .await,
-        )
-    }
-    /// Give up the name once a transaction has decided its bytes: published,
-    /// or left to its recorded removal. Releasing again does nothing.
-    fn release(&mut self, inner: &DatabaseInner) {
-        if self.lease.is_some() {
-            inner.release_file_reservations(std::iter::once(&self.name));
-            self.lease.take();
-        }
-    }
 }
 impl Drop for CacheReservation {
     fn drop(&mut self) {
@@ -854,10 +801,14 @@ pub struct LocalEvidence<P> {
 #[path = "file_database_pins.rs"]
 mod pins;
 
+#[path = "file_database_prepared_pin.rs"]
+mod prepared_pin;
+pub use prepared_pin::PreparedPin;
+
 #[path = "file_database_copies.rs"]
 mod copies;
 pub use copies::{CopyReservation, FolderCopy};
 
 #[cfg(test)]
 #[path = "file_database_tests.rs"]
-mod tests;
+pub(crate) mod tests;

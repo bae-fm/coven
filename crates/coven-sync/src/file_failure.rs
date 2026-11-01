@@ -180,6 +180,7 @@ impl FilesInner {
             (
                 _,
                 FileReadError::Database(_)
+                | FileReadError::Write(_)
                 | FileReadError::RangeOutOfBounds { .. }
                 | FileReadError::DeviceOnly { .. },
             ) => PendingReason::Failed(LocalFailure::Database),

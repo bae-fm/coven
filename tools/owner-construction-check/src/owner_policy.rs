@@ -518,6 +518,10 @@ pub(crate) const POLICY: Policy = Policy {
         // App bytes one staging wrote, until the write that takes them
         // (§17.3).
         "StagedFiles",
+        // Whole copies one pin prepared, until the write that keeps them
+        // (§17.8), and what preparing found for each file.
+        "PreparedPin",
+        "PreparedFile",
         // The copies one call making files device-only is writing (§17.3).
         "CopyReservation",
         "UploadedFile",

@@ -42,7 +42,7 @@ pub use coven_database::{
     CovenResult, DbError, Determinism, FileColumn, FileLocation, FilePlace, FileRef, FileSource,
     FunctionArguments, LiveQuery, LiveQueryCause, LiveQueryClosed, LiveQueryRequests,
     LiveQueryRevision, LoadStep, Lost, LostCell, LostValue, Migration, MigrationContext,
-    MigrationError, MoveFile, MoveId, Namespace, OldWrites, OpenStep, Params, Place,
+    MigrationError, MoveFile, MoveId, Namespace, OldWrites, OpenStep, Params, Place, PreparedPin,
     PreparedUserFile, Provenance, Read, ReconfigurableLiveQuery, ReconfigurableLiveQueryEvent,
     RemovalRule, Replacement, Row, RowAuthorizationFailure, RowChange, RowIdentity, RowKey,
     SchemaError, SnapshotError, SqlRead, SqlReadContext, SqliteError, SqliteResult, StagedFiles,

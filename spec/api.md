@@ -2697,7 +2697,7 @@ impl CovenWrite<'_> {
     /// (§17.3). The write makes each file's record, in the audience of the
     /// rows that name it, and queues its upload for the cloud. Files another
     /// open store staged, or this one before it closed, fail with
-    /// `NotStagedHere`.
+    /// `PreparedElsewhere`.
     pub fn put_staged<T>(&self, staged: StagedFiles<T>) -> Result<T, DbError>;
 
     /// Stages a user's original, read whole once already, as a new file in a
@@ -5237,7 +5237,8 @@ while let Some(changes) = watch.next().await {
   ([§17.4](coven.md#174-bound-and-trailing-references)).
 - A device caches a file when it reads it; nothing downloads a file because
   its record arrived. Pinning keeps a stored file whole on the device
-  ([§17.8](coven.md#178-cache-and-pinning)). While a pin downloads a file,
+  ([§17.8](coven.md#178-cache-and-pinning)): `prepare_pin` downloads, and a
+  write's `pin` step keeps what it prepared. While a prepare downloads a file,
   `coven_downloading` lists it (E4).
 - `make_device_only` brings cloud files back to this device, into a folder
   the person picks, and switches them all to device-only here in one write
@@ -5256,7 +5257,23 @@ progress alone would sit still until then.
 /// Re-exported from coven-format so app buffers use the same chunk size.
 pub const CHUNK_SIZE: usize = 64 * 1024;
 
+/// Stored files ready to be kept whole in one write (§17.8, E8): each
+/// file's whole copy, written and checked under a recorded name, or a
+/// checked whole copy already kept. It holds nothing close waits for:
+/// committed by no write, its copies are removed by the next write or open.
+pub struct PreparedPin { /* private fields */ }
+
 impl CovenWrite<'_> {
+    /// Keeps a prepared pin's files whole on this device regardless of the
+    /// cache budget, as a step of this write (§4, §17.8): each whole copy
+    /// becomes the file's pinned cache entry, and each copy already kept is
+    /// pinned. A pin prepared in another open store, or in this one before
+    /// it closed, fails with `PreparedElsewhere`; a file whose record left
+    /// its stored bytes since with `NoLongerStored`, keeping nothing; and a
+    /// copy already kept that the budget evicted since with `PinChanged`,
+    /// which preparing again downloads.
+    pub fn pin(&self, prepared: PreparedPin) -> Result<(), DbError>;
+
     /// Stops keeping files, as a step of this write (§4, §17.8): each file's
     /// pin ends and its namespace is evicted down to its budget in the
     /// write, and the evicted bytes go once it has committed. A file on one
@@ -5343,16 +5360,22 @@ impl CovenHandle {
         cancel: &watch::Receiver<bool>,
     ) -> Result<(), DeviceOnlyError>;
 
-    /// Keeps stored files whole on this device regardless of the cache
-    /// budget, downloading what is missing before the call returns. A file
-    /// only on one device, this one included while it uploads, is refused
-    /// with `FileReadError::DeviceOnly` (§17.8), and one whose record goes,
-    /// or leaves its stored bytes, while they download keeps nothing and
-    /// fails with `DbError::NoLongerStored`. Progress is read from
-    /// pin_progress(), and the bytes of each download in flight from
+    /// Prepares keeping stored files whole on this device regardless of the
+    /// cache budget (§17.8): downloads what each lacks, up to the download
+    /// limit at once, into a whole copy checked against its content hash,
+    /// or notes a checked whole copy already kept, and pins nothing. A write
+    /// keeps them with `CovenWrite::pin`. A file only on one device, this
+    /// one included while it uploads, is refused with
+    /// `FileReadError::DeviceOnly`, and one whose record goes, or leaves its
+    /// stored bytes, while it downloads keeps nothing. A failed download is
+    /// the stored bytes' pending record; one that succeeds clears it. The
+    /// bytes of each download in flight are on
     /// subscribe_download_transfers(). A file staged or moved to be kept
     /// here needs no call: the write switching it to the cloud pins it, and
-    /// coven makes that pin itself (§17.8).
+    /// coven makes that pin itself.
+    pub async fn prepare_pin(&self, files: &[FileRef]) -> Result<PreparedPin, FileReadError>;
+
+    /// `prepare_pin`, then `CovenWrite::pin` in a write of its own.
     pub async fn pin(&self, files: &[FileRef]) -> Result<(), FileReadError>;
 
     /// Verified cache coverage for these fixed references, in one snapshot.

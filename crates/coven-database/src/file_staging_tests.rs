@@ -194,7 +194,7 @@ async fn a_socket_stream_leaves_the_writer_available_and_keeps_its_pending_bytes
 /// for the staged files it returns (§17.2). Those files outlive the store
 /// harmlessly: a write after close fails `StoreClosed`, dropping them
 /// panics nothing, the reopened store refuses them as staged elsewhere
-/// (`NotStagedHere`), and its opening has removed their bytes.
+/// (`PreparedElsewhere`), and its opening has removed their bytes.
 #[tokio::test(flavor = "current_thread")]
 async fn close_waits_for_staging_and_reopen_removes_bytes_no_write_took() {
     for cancel in [false, true] {
@@ -249,7 +249,7 @@ async fn close_waits_for_staging_and_reopen_removes_bytes_no_write_took() {
                     Ok(())
                 })
                 .await;
-            assert!(matches!(refused, Err(crate::DbError::NotStagedHere)), "{refused:?}");
+            assert!(matches!(refused, Err(crate::DbError::PreparedElsewhere)), "{refused:?}");
         }
         reopened.close().await.unwrap();
     }
@@ -283,7 +283,7 @@ async fn staged_files_no_write_takes_go_with_the_next_write() {
             Ok(())
         })
         .await;
-    assert!(matches!(refused, Err(crate::DbError::NotStagedHere)), "{refused:?}");
+    assert!(matches!(refused, Err(crate::DbError::PreparedElsewhere)), "{refused:?}");
     db.write(|_| Ok(())).await.unwrap();
     assert!(owned_paths(&store).is_empty());
     db.close().await.unwrap();

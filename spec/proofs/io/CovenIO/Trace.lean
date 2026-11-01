@@ -76,4 +76,29 @@ theorem no_duplicate_download {a b : Cache} {events : List CacheEvent} (run : Ca
       · subst e; rw [retained_never_fetched a v retained] at step; cases step
       · exact tail.1 hm
 
+/-- §17.8: bytes are retained only by a commit. A pin's prepare fetches them
+apart from the cache and commits nothing, so bytes a run never commits are
+never retained, however it ends. -/
+theorem uncommitted_never_retained {a b : Cache} {events : List CacheEvent}
+    (run : CacheRun a events b) (v : ByteAddress) (absent : v ∉ a.retained)
+    (uncommitted : .commit v ∉ events) : v ∉ b.retained := by
+  induction run with
+  | nil => exact absent
+  | @cons a b c e es step rest ih =>
+      have ne : e ≠ .commit v := by intro eq; subst e; simp at uncommitted
+      apply ih _ (fun hm => uncommitted (List.mem_cons_of_mem _ hm))
+      cases e <;> simp only [cacheStep] at step
+      · split at step
+        · cases step
+        · cases step; exact absent
+      · split at step
+        · cases step
+          rename_i w _
+          have : w ≠ v := fun eq => ne (by rw [eq])
+          simp [absent, Ne.symm this]
+        · cases step
+      · cases step; exact absent
+      · cases step; simp [absent]
+      · cases step; exact absent
+
 end CovenIO
