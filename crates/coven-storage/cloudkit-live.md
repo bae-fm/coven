@@ -94,13 +94,14 @@ These are instructions for a later live run; preparation does not execute them.
 The selected container's Development schema must allow these record types and
 fields. CloudKit creates types/fields while saving in Development; use CloudKit
 Console to make the directory fields below queryable before
-the listing assertions.
+the listing assertions, and `CovenUpload`'s `directory` before another device
+ends the uploads a device gone for good left (spec §17.10).
 The adapter cannot create indexes through the record framework API.
 
 | Record type | Fields |
 | --- | --- |
 | `CovenObject` | `path: String`, `size: String`, `data: Asset`, `upload: String`, `directory1: String` (queryable), `directory2: String` (queryable), `directory3: String` (queryable), `directory4: String` (queryable) |
-| `CovenUpload` | `path: String`, `total: String`, `confirmed: String`, `state: String`, `owner: Reference` |
+| `CovenUpload` | `path: String`, `total: String`, `confirmed: String`, `state: String`, `owner: Reference`, `directory: String` (queryable) |
 | `CovenAsset` | `data: Asset`, `owner: Reference` |
 | `CovenLiveTestZone` | `test: String` (live tests only) |
 
@@ -116,8 +117,28 @@ record id, dates and change tag. Queries do not request assets.
 object has either one asset or, in `upload`, the name of its upload root. Multipart
 records use reserved names: a root is `<store>/.coven-uploads/<device>/<session>`,
 in the folder of the device that began it, and each part is named by its offset
-under the root. Only `CovenObject` participates in object listings. Production deployments require
-that same schema and indexes deployed to Production through CloudKit Console.
+under the root. A root's `directory` holds its folder,
+`<store>/.coven-uploads/<device>`; the roots a device left are those whose
+`directory` equals its folder and whose `state` isn't `published`, the only
+field such a query requests. Only `CovenObject` participates in object
+listings. Production deployments require that same schema and indexes deployed
+to Production through CloudKit Console.
+
+Making `CovenUpload.directory` queryable, once per container:
+
+1. Sign in to [CloudKit Console](https://icloud.developer.apple.com/) with the
+   team that owns the container, open CloudKit Database, and pick the container,
+   `iCloud.fm.bae.desktop` for bae, in the **Development** environment.
+2. Under Schema, open **Record Types**, select `CovenUpload`, and add the field
+   `directory` of type **String** if it isn't there yet (a save by this version
+   of coven creates it). Save.
+3. Under Schema, open **Indexes**, select `CovenUpload`, add an index on
+   `directory` of type **QUERYABLE**, and save.
+4. Choose **Deploy Schema Changes…**, check that the changes listed are the
+   `directory` field and its index, and deploy them to **Production**.
+
+Until step 4, a Production device's query of upload roots fails, and the
+cleanup that runs it fails visibly and retries (spec §17.10).
 
 The conformance assertions count each submitted `CKQueryOperation`, including
 every cursor continuation, and count its matched records independently of the

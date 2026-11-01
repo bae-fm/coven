@@ -73,7 +73,7 @@ mod fixture {
      INSERT INTO _coven_held_keys SELECT CAST(printf('%032d',i) AS BLOB),zeroblob(32) FROM fixture;
      INSERT INTO _coven_object_removals SELECT 'path_' || i,i FROM fixture;
      INSERT INTO _coven_requests_ended SELECT n FROM fixture;
-     INSERT INTO _coven_gone_snapshots_listed SELECT n FROM fixture;
+     INSERT INTO _coven_gone_storage_cleared SELECT n FROM fixture;
      INSERT INTO _coven_app_operations SELECT i,'Kind' || (i%32),CASE WHEN i%2=0 THEN x'00' END FROM fixture;
      INSERT INTO _coven_provider_access SELECT 'account_' || i,i%2,NULL,NULL,i,i%2 FROM fixture;
      INSERT INTO _coven_pending(subject,value,operation,object,work,device,file,coven_version)

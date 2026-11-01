@@ -44,6 +44,8 @@ mod copy_upload;
 mod detect;
 #[path = "s3_gcs_signing.rs"]
 mod gcs_signing;
+#[path = "s3_left_uploads.rs"]
+mod left_uploads;
 #[path = "s3_listing.rs"]
 mod listing;
 #[path = "s3_metadata.rs"]
@@ -771,6 +773,16 @@ impl ProviderOps for S3Storage {
                 error => Err(error),
             },
         }
+    }
+    async fn device_uploads(
+        &self,
+        store: coven_foundation::id_source::StoreId,
+        device: coven_foundation::id_source::DeviceId,
+    ) -> Result<Vec<crate::LeftUpload>, StorageError> {
+        self.left_uploads(store, device).await
+    }
+    async fn end_left_upload(&self, upload: &crate::LeftUpload) -> Result<(), StorageError> {
+        self.end_left(upload).await
     }
     async fn abort_upload(
         &self,

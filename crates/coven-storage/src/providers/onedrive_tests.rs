@@ -303,6 +303,13 @@ pub(super) async fn endpoint(
             if path.contains("/.coven-uploads/") && state.refuse_temporary_delete {
                 return response(403, json!({"error":{"code":"accessDenied"}}).to_string());
             }
+            // Deleting a folder deletes everything in it.
+            if state.dirs.values().any(|dir| dir == &path) {
+                let inside = format!("{path}/");
+                state.dirs.retain(|_, dir| *dir != path && !dir.starts_with(&inside));
+                state.files.retain(|file, _| !file.starts_with(&inside));
+                return response(204, Vec::new());
+            }
             state.files.remove(&path);
             if path.contains("/.coven-uploads/")
                 && std::mem::take(&mut state.lose_temporary_delete_reply)

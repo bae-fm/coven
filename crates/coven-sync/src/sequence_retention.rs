@@ -11,7 +11,7 @@ use coven_database::{NewOperation, OperationRecord};
 use coven_format::sequence::{Purpose, SnapshotAnnouncement};
 use coven_foundation::id_source::DeviceId;
 use coven_merge::{Audience, Slot};
-use coven_storage::{ObjectPath, ObjectPrefix, StorageFailure, StoredObject};
+use coven_storage::{ObjectPath, StorageFailure, StoredObject};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeSet,
@@ -31,8 +31,9 @@ enum Retention {
     Snapshot(
         #[serde(with = "crate::pending_encoding::snapshot_id")] coven_format::admin::SnapshotId,
     ),
-    /// List the snapshot folders of a device gone for good, deleting every
-    /// body there that no announcement names.
+    /// Clear what a device gone for good left besides its files: end its
+    /// uploads, then list its snapshot folders, deleting every body there
+    /// that no announcement names.
     GoneListing(DeviceId),
     Capture(FloorCapture),
     Floor(FloorArtifact),
@@ -186,7 +187,7 @@ impl SequenceSync {
             }
         }
         if !gone.is_empty() {
-            let listed = self.database.gone_snapshots_listed().await?;
+            let listed = self.database.gone_storage_cleared().await?;
             for device in
                 gone.difference(&listed).filter(|device| !pending_listings.contains(device))
             {
@@ -272,40 +273,6 @@ impl SequenceSync {
             }
         }
         Ok(None)
-    }
-
-    /// List `device`'s folder of each audience's snapshots and delete every
-    /// body there that no announcement names. The device is gone for good,
-    /// so none can be announced any more; each body the history announced
-    /// waits for the rules its own deletion follows. A failure leaves the
-    /// operation to list again from the start.
-    async fn list_gone_snapshots(
-        &self,
-        history: &crate::history::History,
-        device: DeviceId,
-    ) -> Result<(), SyncError> {
-        let audiences: BTreeSet<_> = std::iter::once(Audience::Store)
-            .chain(history.introductions.iter().map(|intro| intro.audience.clone()))
-            .collect();
-        for audience in audiences {
-            let folder = ObjectPrefix::device_snapshots(self.store(), audience.clone(), device);
-            for object in self.storage.list(&folder).await? {
-                let id = object
-                    .path
-                    .snapshot_id()
-                    .filter(|id| id.audience == audience && id.device == device)
-                    .ok_or_else(|| {
-                        StorageFailure::Protocol
-                            .with_source("snapshot listing names another folder")
-                    })?;
-                if history.announcements.values().any(|announcement| announcement.snapshot == id) {
-                    continue;
-                }
-                self.state.check()?;
-                self.storage.delete(&object.path).await?;
-            }
-        }
-        Ok(())
     }
 
     async fn propose_floor(
@@ -410,8 +377,8 @@ impl SequenceSync {
             return Ok(());
         }
         if let Retention::GoneListing(device) = work {
-            self.list_gone_snapshots(&session.history, device).await?;
-            self.database.record_gone_snapshots_listed(device).await?;
+            self.clear_gone_storage(&session.history, device).await?;
+            self.database.record_gone_storage_cleared(device).await?;
             self.database.finish_operation(record.id).await?;
             return Ok(());
         }

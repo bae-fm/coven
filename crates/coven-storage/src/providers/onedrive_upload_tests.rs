@@ -533,3 +533,37 @@ async fn created_bytes_are_heard_in_one_request_and_in_fragments() {
     storage.create_reporting(&path, &[2; 5], &sent).await.unwrap();
     assert_eq!(*heard.lock().unwrap(), [5]);
 }
+
+/// Ben's phone left a temporary on OneDrive whose native upload finished
+/// before its copy. No one else can see or end a native session, which
+/// OneDrive discards at its expiry, but a finished temporary is an ordinary
+/// item that stays. Ben's laptop deletes the phone's folder of temporaries,
+/// and leaves its own (§17.10, Appendix E.2).
+#[tokio::test]
+async fn another_device_deletes_a_devices_folder_of_temporaries() {
+    let state = remote();
+    let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
+    let phone = provider(&server.url);
+    let mut finished = phone.begin_upload(&path(), 4).await.unwrap();
+    phone.upload_part(&mut finished, b"data").await.unwrap();
+    let temporary = temporary_path(&finished);
+    assert!(state.lock().unwrap().files.contains_key(&temporary));
+    let mut laptop = provider(&server.url);
+    laptop.device = coven_foundation::id_source::DeviceId(9);
+    let mut own = laptop
+        .begin_upload(&ObjectPath::slot(STORE_ID, std::num::NonZeroU64::new(2).unwrap()), 4)
+        .await
+        .unwrap();
+    laptop.upload_part(&mut own, b"data").await.unwrap();
+    for _ in 0..2 {
+        laptop.end_device_uploads(STORE_ID, crate::test_utils::DEVICE).await.unwrap();
+        let state = state.lock().unwrap();
+        assert!(!state.files.contains_key(&temporary));
+        let SessionState::OneDrive { temporary: kept, .. } = &own.state else {
+            panic!("OneDrive session")
+        };
+        assert!(state.files.contains_key(&format!("{STORE_ID}/.coven-uploads/9/{kept}")));
+        let phones = format!("{STORE_ID}/.coven-uploads/{}", crate::test_utils::DEVICE.0);
+        assert!(state.dirs.values().all(|dir| dir != &phones));
+    }
+}

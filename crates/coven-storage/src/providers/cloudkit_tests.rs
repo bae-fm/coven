@@ -30,7 +30,7 @@ fn path() -> ObjectPath {
 fn listing_uses_equality_for_directories_longer_than_cloudkits_prefix_limit() {
     let prefix = ObjectPrefix::device_files(path().store(), DeviceId(7));
     assert!(prefix.as_str().len() > 30);
-    let predicate = query::Selection(prefix).predicate().predicateFormat().to_string();
+    let predicate = query::Selection::Objects(prefix).predicate().predicateFormat().to_string();
     assert!(!predicate.contains("BEGINSWITH"), "{predicate}");
     assert!(predicate.contains(" == "), "{predicate}");
 }

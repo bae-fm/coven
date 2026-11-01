@@ -2,6 +2,7 @@
 use super::*;
 
 pub(super) struct Pending {
+    device: coven_foundation::id_source::DeviceId,
     target: UploadTarget,
     total: u64,
     pub(super) bytes: Vec<u8>,
@@ -57,7 +58,51 @@ fn check_target(state: &State, target: &UploadTarget) -> Result<(), StorageError
     Ok(())
 }
 
+impl MemoryStorage {
+    /// Each session still unfinished, in the order it began: the device
+    /// whose connection began it, and its destination.
+    pub async fn unfinished_uploads(
+        &self,
+    ) -> Vec<(coven_foundation::id_source::DeviceId, ObjectPath)> {
+        let state = self.provider.state.lock().await;
+        state
+            .uploads
+            .values()
+            .map(|pending| (pending.device, pending.target.path().clone()))
+            .collect()
+    }
+}
+
 impl MemoryProvider {
+    /// The sessions `device`'s connections began in `store`.
+    pub(super) async fn memory_device_uploads(
+        &self,
+        store: coven_foundation::id_source::StoreId,
+        device: coven_foundation::id_source::DeviceId,
+    ) -> Result<Vec<LeftUpload>, StorageError> {
+        self.before(MemoryRequest::Other("device_uploads")).await?;
+        let state = self.state.lock().await;
+        Ok(state
+            .uploads
+            .iter()
+            .filter(|(_, pending)| {
+                pending.device == device && pending.target.path().store() == store
+            })
+            .map(|(id, _)| LeftUpload(crate::left_upload::Left::Memory(*id)))
+            .collect())
+    }
+    /// End one session another device left; one already ended succeeds.
+    pub(super) async fn memory_end_left_upload(
+        &self,
+        upload: &LeftUpload,
+    ) -> Result<(), StorageError> {
+        let crate::left_upload::Left::Memory(id) = upload.0 else {
+            return Err(StorageFailure::SessionMismatch.into());
+        };
+        self.before(MemoryRequest::Other("end_left_upload")).await?;
+        self.state.lock().await.uploads.remove(&id);
+        Ok(())
+    }
     pub(super) async fn memory_begin_upload(
         &self,
         publication: &PublicationRequest,
@@ -72,7 +117,13 @@ impl MemoryProvider {
         let id = state.next_id()?;
         state.uploads.insert(
             id,
-            Pending { target: target.clone(), total, bytes: Vec::new(), part_size: self.part_size },
+            Pending {
+                device,
+                target: target.clone(),
+                total,
+                bytes: Vec::new(),
+                part_size: self.part_size,
+            },
         );
         Ok(UploadSession {
             device,

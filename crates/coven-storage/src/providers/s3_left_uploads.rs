@@ -1,0 +1,142 @@
+//! Finding and ending the uploads another device left (§17.10, Appendix
+//! E.10). A copy profile stages every session and temporary in the device's
+//! reserved folder; conditional completion puts a session at its destination,
+//! whose path names the device only for its files and snapshots.
+use super::*;
+use crate::left_upload::{Left, LeftUpload};
+use aws_sdk_s3::error::ProvideErrorMetadata;
+use coven_foundation::id_source::{DeviceId, StoreId};
+
+impl S3Storage {
+    /// `device`'s unfinished multipart uploads in its reserved folder and at
+    /// its file and snapshot destinations, then the objects it staged in its
+    /// folder. Sessions come first, so ending them stops any from assembling
+    /// another temporary before the temporaries go.
+    pub(super) async fn left_uploads(
+        &self,
+        store: StoreId,
+        device: DeviceId,
+    ) -> Result<Vec<LeftUpload>, StorageError> {
+        let base = self.prefix.key_prefix();
+        let folder = format!("{base}{}/", coven_format::path::device_uploads(store, device));
+        let mut left = Vec::new();
+        for prefix in [
+            folder.clone(),
+            self.prefix.key_prefix_of(&ObjectPrefix::device_files(store, device)),
+            // Its snapshots sit in one folder per audience, and storage
+            // doesn't know the store's circles: the whole snapshots folder is
+            // listed, and a session kept when its path names the device.
+            format!("{base}{store}/snapshots/"),
+        ] {
+            for (key, id) in self.unfinished_uploads(&prefix).await? {
+                let named = key.starts_with(&folder)
+                    || key
+                        .strip_prefix(&base)
+                        .and_then(|path| ObjectPath::parse(path).ok())
+                        .is_some_and(|path| path.device() == Some(device));
+                if named {
+                    left.push(LeftUpload(Left::S3Multipart { key, id: SecretText::new(id) }));
+                }
+            }
+        }
+        for key in self.keys_under(&folder, self.settings.listing).await? {
+            left.push(LeftUpload(Left::Staged(key)));
+        }
+        Ok(left)
+    }
+
+    /// Abort a left multipart upload, or delete a staged object. One
+    /// already completed, aborted or deleted succeeds.
+    pub(super) async fn end_left(&self, upload: &LeftUpload) -> Result<(), StorageError> {
+        match &upload.0 {
+            Left::S3Multipart { key, id } => match self
+                .client
+                .abort_multipart_upload()
+                .bucket(&self.bucket)
+                .key(key)
+                .upload_id(id.as_str())
+                .send()
+                .await
+            {
+                Ok(_) => Ok(()),
+                Err(error) if error.code() == Some("NoSuchUpload") => Ok(()),
+                Err(error) => Err(s3_error(error)),
+            },
+            Left::Staged(key) => self.delete_key(key).await,
+            _ => Err(StorageFailure::SessionMismatch.into()),
+        }
+    }
+
+    /// Every unfinished multipart upload under `prefix`: its key and upload id.
+    pub(super) async fn unfinished_uploads(
+        &self,
+        prefix: &str,
+    ) -> Result<Vec<(String, String)>, StorageError> {
+        let mut key_marker = None;
+        let mut upload_marker = None;
+        let mut uploads = Vec::new();
+        let mut pages = Pagination::new();
+        loop {
+            let page = self
+                .client
+                .list_multipart_uploads()
+                .bucket(&self.bucket)
+                .prefix(prefix)
+                .set_key_marker(key_marker)
+                .set_upload_id_marker(upload_marker)
+                .send()
+                .await
+                .map_err(s3_error)?;
+            for upload in page.uploads() {
+                let key = metadata::required(upload.key(), "S3 upload listing omitted key")?;
+                within(key, prefix)?;
+                let id = metadata::required(upload.upload_id(), "S3 upload listing omitted id")?;
+                uploads.push((key.to_owned(), id.to_owned()));
+            }
+            if !page
+                .is_truncated()
+                .ok_or(StorageFailure::Protocol.with_source("S3 omitted page completion"))?
+            {
+                return Ok(uploads);
+            }
+            let key = metadata::required(page.next_key_marker(), "S3 omitted upload key marker")?;
+            let id = metadata::required(page.next_upload_id_marker(), "S3 omitted upload marker")?;
+            pages.check(&format!("{key}/{id}"))?;
+            key_marker = Some(key.to_owned());
+            upload_marker = Some(id.to_owned());
+        }
+    }
+
+    /// Every object key under `prefix`, across all pages.
+    pub(super) async fn keys_under(
+        &self,
+        prefix: &str,
+        listing: S3Listing,
+    ) -> Result<Vec<String>, StorageError> {
+        let mut marker = None;
+        let mut keys = Vec::new();
+        let mut pages = Pagination::new();
+        loop {
+            let page = self.list_page(listing, prefix, None, marker, None).await?;
+            for object in page.contents {
+                let key = metadata::required(object.key(), "S3 list entry omitted key")?;
+                within(key, prefix)?;
+                keys.push(key.to_owned());
+            }
+            let Some(next) = page.next else {
+                return Ok(keys);
+            };
+            pages.check(&next)?;
+            marker = Some(next);
+        }
+    }
+}
+
+/// Refuse a listed key outside the requested prefix rather than remove it.
+pub(super) fn within(key: &str, prefix: &str) -> Result<(), StorageError> {
+    if key.starts_with(prefix) {
+        Ok(())
+    } else {
+        Err(StorageFailure::Protocol.with_source("S3 listed a key outside the requested prefix"))
+    }
+}

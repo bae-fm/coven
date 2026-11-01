@@ -1,7 +1,7 @@
 //! Provider calls beneath the common storage contract.
 
 use crate::*;
-use coven_foundation::id_source::DeviceId;
+use coven_foundation::id_source::{DeviceId, StoreId};
 
 /// Native calls used by [`StorageConnection`]. Consumers use [`Storage`];
 /// implementations handle provider protocols after the connection checks paths,
@@ -142,4 +142,17 @@ pub trait ProviderOps: Send + Sync {
         publication: &PublicationRequest,
         session: &UploadSession,
     ) -> Result<(), StorageError>;
+    /// The uploads `device` left in `store` that this sign-in can see: the
+    /// sessions and temporaries in its reserved folder (D10), and, where the
+    /// provider puts a session at its destination, those under the device's
+    /// file and snapshot folders. Every page of each listing is followed.
+    async fn device_uploads(
+        &self,
+        store: StoreId,
+        device: DeviceId,
+    ) -> Result<Vec<LeftUpload>, StorageError>;
+    /// End one upload another device left, as this provider listed it: abort
+    /// the session, or delete what it staged. One already ended succeeds,
+    /// and a published object is never touched.
+    async fn end_left_upload(&self, upload: &LeftUpload) -> Result<(), StorageError>;
 }

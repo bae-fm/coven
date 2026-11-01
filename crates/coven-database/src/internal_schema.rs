@@ -811,12 +811,13 @@ macro_rules! coven_tables {
                 device BLOB PRIMARY KEY NOT NULL CHECK(length(device)=8)
             ) STRICT, WITHOUT ROWID;
         ");
-        // The devices gone for good whose snapshot folders this device
-        // listed, deleting each body there that no announcement names
-        // (§16.6). Their announced snapshots it deletes as its own, by their
+        // The devices gone for good whose storage this device cleared once:
+        // it ended the uploads each left, then listed its snapshot folders,
+        // deleting each body there that no announcement names (§16.6,
+        // §17.10). Their announced snapshots it deletes as its own, by their
         // announcements.
-        $visit!(_coven_gone_snapshots_listed, "
-            CREATE TABLE _coven_gone_snapshots_listed (
+        $visit!(_coven_gone_storage_cleared, "
+            CREATE TABLE _coven_gone_storage_cleared (
                 device BLOB PRIMARY KEY NOT NULL CHECK(length(device)=8)
             ) STRICT, WITHOUT ROWID;
         ");

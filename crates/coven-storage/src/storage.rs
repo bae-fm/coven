@@ -335,4 +335,15 @@ pub trait Storage: Send + Sync {
     /// Explicitly abandon an upload. Dropping a recorded value does not abort it.
     /// Already closed or absent sessions succeed; published objects are preserved.
     async fn abort_upload(&self, session: &UploadSession) -> Result<(), StorageError>;
+    /// End every upload `device` left in `store` that this sign-in can see
+    /// (§17.10): abort its unfinished sessions and delete what it staged in
+    /// its reserved folder. One already ended succeeds, so devices may do it
+    /// at once. A Dropbox session, and a OneDrive native one, is seen by no
+    /// one else and expires on its own: on Dropbox this ends nothing, and on
+    /// OneDrive only staged temporaries (Appendix E.2).
+    async fn end_device_uploads(
+        &self,
+        store: coven_foundation::id_source::StoreId,
+        device: coven_foundation::id_source::DeviceId,
+    ) -> Result<(), StorageError>;
 }

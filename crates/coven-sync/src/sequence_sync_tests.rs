@@ -259,6 +259,7 @@ impl Group {
         let waits = Arc::new(RetryWaits::open(database.clone(), clock.clone()).await.unwrap());
         let transfers = Arc::new(coven_storage::TransferBudget::new(TransferLimits::default()));
         let storage = storage
+            .with_device(device)
             .with_transfers(transfers.clone())
             .with_publication_gate(state.clone())
             .with_cooldown(waits.clone());

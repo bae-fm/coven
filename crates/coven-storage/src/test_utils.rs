@@ -794,6 +794,16 @@ impl ProviderOps for MemoryProvider {
     ) -> Result<UploadSession, StorageError> {
         self.memory_begin_upload(publication, target, total, device).await
     }
+    async fn device_uploads(
+        &self,
+        store: coven_foundation::id_source::StoreId,
+        device: coven_foundation::id_source::DeviceId,
+    ) -> Result<Vec<LeftUpload>, StorageError> {
+        self.memory_device_uploads(store, device).await
+    }
+    async fn end_left_upload(&self, upload: &LeftUpload) -> Result<(), StorageError> {
+        self.memory_end_left_upload(upload).await
+    }
     async fn resume_upload(
         &self,
         publication: &PublicationRequest,

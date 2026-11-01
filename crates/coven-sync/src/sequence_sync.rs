@@ -659,6 +659,8 @@ mod sequence_credentials;
 mod sequence_files;
 #[path = "sequence_gone_requests.rs"]
 mod sequence_gone_requests;
+#[path = "sequence_gone_storage.rs"]
+mod sequence_gone_storage;
 #[path = "sequence_invites.rs"]
 pub(crate) mod sequence_invites;
 #[path = "sequence_join.rs"]

@@ -5134,9 +5134,11 @@ impl CovenHandle {
     pub async fn reset_store(&self) -> Result<(), SyncError>;
 
     /// Deletes the stored files of devices gone for good (§14.1) that nothing
-    /// refers to (§17.10): lists again the file folder of every such device
-    /// this device is responsible for, then deletes each file found that no
-    /// retained row, write or snapshot names, once every other device not
+    /// refers to (§17.10): for every such device this device is responsible
+    /// for, ends the uploads it left and deletes the snapshot bodies of its
+    /// that no announcement names (§16.6), lists its file folder again, then
+    /// deletes each file found that no retained row, write or snapshot
+    /// names, once every other device not
     /// gone for good has published a write that read past the listing; later
     /// passes delete the rest as those writes arrive. Safe at any time; a
     /// gone device may keep uploading until its provider access ends. Returns once the listing and

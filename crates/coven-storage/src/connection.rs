@@ -426,6 +426,26 @@ impl<P: ProviderOps + ?Sized> Storage for StorageConnection<P> {
         })
         .await
     }
+    async fn end_device_uploads(
+        &self,
+        store: coven_foundation::id_source::StoreId,
+        device: DeviceId,
+    ) -> Result<(), StorageError> {
+        self.cooling()?;
+        let left = self
+            .observed(
+                self.send(RequestKind::List, 0, self.provider.device_uploads(store, device)).await,
+            )
+            .await?;
+        for upload in &left {
+            self.cooling()?;
+            self.observed(
+                self.send(upload.request(), 0, self.provider.end_left_upload(upload)).await,
+            )
+            .await?;
+        }
+        Ok(())
+    }
     async fn grant_access(&self, account: &str) -> Result<AccessGrant, StorageError> {
         if self.config().provider() != CloudProvider::S3 {
             self.cooling()?;

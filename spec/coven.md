@@ -4243,7 +4243,7 @@ showing another copy of an installation using its device id doesn't count:
 only that installation can see it (§19.3). Whatever a device gone for good
 left under way stays that way unless others end it: §13.2 covers the join
 requests it was waiting for and the shares its invites granted, §16.6 its
-snapshots, and §17.10 the files it left in storage.
+snapshots, and §17.10 the files and unfinished uploads it left in storage.
 
 A member's removal also ends the person's use of their restore code. Ana removes
 Ben at slot 52. When Ben's phone reads slot 52, it first deletes his restore
@@ -5118,7 +5118,8 @@ and the body of a raise or reset it was preparing whose undo never ran, would
 stay in storage forever. Ana's laptop removes her old phone at slot 90. The
 floor names the phone's store snapshot announced at slot 61, and the phone also
 left a store snapshot body numbered 5 that it uploaded for a raise and never
-announced. At its next pass, Ana's laptop lists the phone's snapshot folders,
+announced. At its next pass, Ana's laptop ends the uploads the phone left
+(§17.10), then lists the phone's snapshot folders,
 `snapshots/<audience>/<phone>/` for the store and each circle, and deletes body
 5: no announcement names it. The snapshot from slot 61 stays while the floor
 names it, and goes once a floor names a newer one that has passed grace, as
@@ -5136,17 +5137,22 @@ Ana's own would.
   of them names can never count, and goes at once. An announced one follows the
   rules above, as the device's own would: the floor naming it, a pending floor
   write naming it, or a raise or reset needing it keeps it.
-- **Once.** The deleting device lists the gone device's folders once, journaled,
-  and records that it did. A failed listing stays with its journal and runs again
-  from the start. Announced snapshots need no listing: their announcements name
-  them.
+- **Once.** The deleting device ends the gone device's uploads and lists its
+  folders once, journaled, and records that it did. A failure stays with its
+  journal, which runs again from the start. Announced snapshots need no
+  listing: their announcements name them.
 - **Several at once.** Ana's laptop and her tablet may both do this, and the
   phone may run until it reads its removal. Each of them deletes only bodies that
   can never count, and deleting an absent object succeeds, so doing it twice
   changes nothing.
-- **A body still uploading stays.** A body the phone was still uploading when it
-  was removed can land after the listing. Nothing lists its folders again, so
-  the body stays in storage. No announcement can name it, so it never counts.
+- **A body landing later waits for the app's cleanup.** The laptop ends the
+  phone's uploads before it lists, so a body whose upload was under way can't
+  land after the listing through that upload. One the phone sends in a single
+  request, or through an upload it starts later while its provider access
+  works, still can. No pass lists the folders again; the app's cleanup of the
+  files of devices gone for good does (§17.10), and deletes such a body. Until
+  then it stays in storage, and no announcement can name it, so it never
+  counts.
 
 ### 17. Files
 
@@ -6431,10 +6437,12 @@ and the reference evidence above alone decides whether it is deleted.
   the person deletes the key in the provider's console (§14.3), and a device
   gone while its member keeps access can still publish into its folder. The
   app's cleanup of the files of devices gone for good
-  (`clean_up_gone_devices_files`, [api.md E5](api.md#e5-storage-and-sync)) lists
-  the folder of every such device this device is responsible for again, then
-  deletes every candidate nothing refers to that every other device has seen, as
-  above; later passes delete the rest once those devices write. It returns the
+  (`clean_up_gone_devices_files`, [api.md E5](api.md#e5-storage-and-sync)) first
+  ends the uploads of every such device this device is responsible for, and
+  deletes the snapshot bodies of its no announcement names (§16.6), then lists
+  each one's folder again and deletes every candidate nothing refers to that
+  every other device has seen, as above; later passes delete the rest once
+  those devices write. It returns the
   result, or the failure that stopped it. It can run at any time and as often as
   the app likes.
 - An incomplete listing fails visibly and retries. It records nothing, so
@@ -6459,6 +6467,44 @@ working until Ana deletes it in the console, and his phone uploads another photo
 before then. Neither upload's completion counts, so no record names them as
 stored. When Ana runs the cleanup after deleting the key, its listing finds both
 photos and she deletes them. A photo a retained record still names stays.
+
+**Uploads a device gone for good never finished.** Ben's phone is sending a
+200 MB video to the store's R2 bucket in parts when Ben's laptop replaces his
+keys. R2 holds the parts in an unfinished multipart upload at the video's path,
+`<store>/files/<phone>/<file>`. The phone will never finish or abort it, and its
+completion couldn't count anyway. The laptop's next pass aborts it, and the
+parts go.
+
+A device's unfinished uploads sit where its device id names them: a provider
+session or a temporary coven staged to publish by copy (§20.6) in the device's
+reserved folder, `<store>/.coven-uploads/<device>/`, or, where the provider puts
+a session at its destination, at a path of the device's files or snapshots. So
+the devices that clean up a gone device's files end its uploads too.
+
+- **When.** In the pass where it first deletes the gone device's snapshots
+  (§16.6), the device ends its uploads, then lists its snapshot folders, once,
+  journaled. The app's cleanup ends them again, with any the gone device started
+  since, before it lists the file folders. Ending the uploads first means none
+  of them can land a file or body after the listing that follows.
+- **How, per provider.** On S3, coven lists the multipart uploads in the
+  device's folder and under its file and snapshot folders, aborts each, then
+  deletes the temporaries in its folder (Appendix E.10). On OneDrive it deletes
+  the device's folder, with every temporary in it (Appendix E.2). On CloudKit it
+  queries the upload records in the device's folder, and deletes each one not
+  published, with its parts (Appendix E.1).
+- **What it can't see.** A Dropbox upload session has no path, and no one but
+  the device that began it can list or end it; Dropbox discards it 7 days after
+  it began. A OneDrive session still receiving parts is the same until it
+  finishes, and OneDrive discards it once it expires. On an S3 service that
+  completes multipart uploads conditionally, a session for a slot or the floor
+  sits at a path naming no device, which other devices' claims share. Coven
+  leaves it: aborting another claimant's session would break its claim
+  (Appendix E.10). R2 aborts it 7 days after it began; RustFS, Ceph RGW and
+  Versity Gateway keep it until a lifecycle rule the bucket's owner sets ends
+  it.
+- **Several at once.** Ending an upload already ended succeeds, so the laptop
+  and Ben's tablet may both do this, and the phone may run on until it reads
+  the entry that stopped it.
 
 #### 17.11 What a device keeps about files
 
@@ -7418,8 +7464,9 @@ The provider already sees every slot number in `<store>/seq/<n>` and which
 objects are deleted. The floor's clear `first` exposes no additional slot-number
 information; it lets a device without keys find the kept sequence (§13.2).
 
-Listings are used for files, a device gone for good's join requests (§13.2)
-and snapshot folders (§16.6), and setup checks, and they follow three rules:
+Listings are used for files, a device gone for good's join requests (§13.2),
+snapshot folders (§16.6) and unfinished uploads (§17.10), and setup checks, and
+they follow three rules:
 
 - **List the exact place.** On Dropbox and OneDrive every directory in a coven
   path is a real provider folder, and coven lists that folder directly, never the
@@ -8711,7 +8758,12 @@ directory. A prefix selects the field at its depth, so a scoped listing is one
 equality query. Queries request only `path` and `size`, exclude assets, and
 follow every [CKQueryOperation
 cursor](https://developer.apple.com/documentation/cloudkit/ckqueryoperation).
-Finding sequence slots uses exact record ids, never queries.
+Finding sequence slots uses exact record ids, never queries. A query needs its
+field made queryable in the container's schema, in Development and deployed to
+Production; the record framework can't create an index, so the app's developer
+does this once in CloudKit Console
+([cloudkit-live.md](../crates/coven-storage/cloudkit-live.md#development-schema)
+lists the fields and the steps).
 
 **Bytes and large objects.** A
 [CKAsset](https://developer.apple.com/documentation/cloudkit/ckasset) carries
@@ -8749,6 +8801,12 @@ skip unrelated parts.
   parts it owns. CloudKit's [deleteSelf
   references](https://developer.apple.com/documentation/cloudkit/ckrecord/reference)
   express that ownership.
+- A root also keeps its reserved folder, `<store>/.coven-uploads/<device>`, in an
+  indexed `directory` field, so another device can find the roots a device gone
+  for good left with one equality query (§17.10). It ends each one not
+  published as an abort does: it saves the root as aborted under the change tag
+  it fetched, so a publication racing it fails, then deletes the root, and its
+  parts with it. A published root stays: it belongs to its object.
 - Native atomic saves need no conditional server-side copy to hide partial
   uploads.
 
@@ -8842,6 +8900,18 @@ place is distinct from every coven path.
 - Abort cancels an open native session and deletes its temporary, including after
   native upload completion. The same cleanup of abandoned recorded sessions
   removes leftovers after a crash.
+- Another device ends the uploads a device gone for good left by deleting that
+  device's folder, `<store>/.coven-uploads/<device>`, which deletes every
+  temporary in it (§17.10). A native session still receiving parts has no item:
+  only the upload URL its device holds reaches it, and OneDrive discards it, with
+  its fragments, once its `expirationDateTime` passes without a fragment
+  ([createUploadSession](https://learn.microsoft.com/en-us/graph/api/driveitem-createuploadsession?view=graph-rest-1.0)).
+- A Dropbox upload session has no path either, and no route lists or ends one;
+  only its id, which the device that began it holds, names it. Dropbox stops
+  accepting it 7 days after it began
+  ([files.stone](https://github.com/dropbox/dropbox-api-spec/blob/main/files.stone)),
+  and coven stages nothing else on Dropbox, so another device ends nothing
+  there.
 - Listings of published objects exclude the temporary namespace, unfinished
   uploads included.
 
@@ -9335,6 +9405,28 @@ completed. So a crashed device's recorded session stays usable by the same
 cleanup of abandoned sessions. Temporaries stay discoverable in the reserved
 place but are excluded from published-object listings.
 
+**Ending a gone device's uploads.** Another device ends what a device gone for
+good left (§17.10) with three multipart-upload listings and one object listing:
+
+- the multipart uploads in the device's folder,
+  `<prefix>/<store>/.coven-uploads/<device>/`, where a copy profile stages every
+  session;
+- those under `<prefix>/<store>/files/<device>/`, and those under
+  `<prefix>/<store>/snapshots/` whose path names the device, where conditional
+  completion puts a session at its destination;
+- then the objects in the device's folder: assembled temporaries and
+  every-copy creates whose copy or deletion never happened.
+
+It aborts each upload, `NoSuchUpload` counting as ended, then deletes each
+object. Aborting first stops a session from assembling another temporary after
+the listing. A session for a slot or the floor under conditional completion sits
+at a path naming no device, shared with other claimants, and stays: only its
+own session can tell it apart. R2 aborts every multipart upload 7 days after it
+began, by a lifecycle rule each bucket has
+([object lifecycles](https://developers.cloudflare.com/r2/buckets/object-lifecycles/));
+RustFS, Ceph RGW and Versity Gateway keep one until a rule the bucket's owner
+sets ends it.
+
 **Concurrent-mutation errors.** AWS `ConditionalRequestConflict`, GCS
 `OperationAborted` and Ceph RGW `ConcurrentModification` mean a concurrent
 mutation, never throttling.
@@ -9391,7 +9483,15 @@ console steps show this policy filled in for the store.
   `s3:prefix` `<prefix>/<store>/*`.
 - An unconditioned statement allows `s3:GetBucketVersioning` and
   `s3:ListBucketMultipartUploads`, which AWS can't limit to a prefix. Neither
-  reads an object.
+  reads an object. The multipart listing finds an upload whose start reply was
+  lost (E.10), and the uploads a device gone for good left (§17.10), which
+  `s3:AbortMultipartUpload` then ends.
+- On GCS the key's service account has `roles/storage.objectUser` on the
+  store's managed folder. That role holds `storage.multipartUploads.list`, but
+  Google doesn't say whether a grant on a managed folder lets the XML API's
+  multipart listing, a request against the bucket, through. It hasn't been
+  checked live; a refusal there fails the listing visibly as a permission
+  failure (§19.1).
 - Never add a `Deny` on `StringNotLike` `s3:prefix`: a request carrying no
   prefix, such as a bucket check, matches the negated condition and would be
   denied.

@@ -510,10 +510,10 @@ A device gone for good, because it or its member was removed, a reset
 replaced it, or another device replaced its member's keys, can leave files
 that no surviving record names, and until its provider access ends it can
 store more that nothing will ever refer to. When the entry that stopped it
-applies, the device responsible for the cleanup lists that device's file
-folder once and deletes what nothing refers to. The app can run that cleanup,
-`clean_up_gone_devices_files`, again at any time, for example after the person
-deletes a removed S3 member's key, to delete files the gone device stored
-later. Deleting a
+applies, the device responsible for the cleanup ends the uploads that device
+never finished, then lists its file folder once and deletes what nothing refers
+to. The app can run that cleanup, `clean_up_gone_devices_files`, again at any
+time, for example after the person deletes a removed S3 member's key, to end
+uploads the gone device started later and delete files it stored later. Deleting a
 file's record forgets coven's record of a user's original; the original itself
 is never deleted by any of this.

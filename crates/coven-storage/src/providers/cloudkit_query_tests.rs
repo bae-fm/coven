@@ -45,7 +45,7 @@ fn every_prefix_selects_exactly_its_objects_by_directory_equality() {
         ObjectPrefix::join_requests(store),
         ObjectPrefix::device_join_requests(store, DeviceId(1)),
     ] {
-        let selection = Selection(prefix.clone());
+        let selection = Selection::Objects(prefix.clone());
         assert_eq!(selection.keys(), ["path", "size"]);
         let predicate = selection.predicate();
         let format = predicate.predicateFormat().to_string();
@@ -104,5 +104,28 @@ fn publication_fields_name_the_object_and_its_directories() {
         for (field, directory) in directories(&path) {
             assert_eq!(record.text(field).unwrap(), directory);
         }
+    }
+}
+
+/// The upload roots a device left are its `CovenUpload` records whose
+/// `directory` is its reserved folder, by equality: never another device's,
+/// nor anything below (D10).
+#[test]
+fn a_devices_upload_roots_are_selected_by_their_folder() {
+    let folder = coven_format::path::device_uploads(store(), DeviceId(7));
+    let selection = Selection::Uploads(folder.clone());
+    assert_eq!(selection.record_type(), "CovenUpload");
+    assert_eq!(selection.keys(), ["state"]);
+    let predicate = selection.predicate();
+    for (directory, selected) in [
+        (folder.clone(), true),
+        (coven_format::path::device_uploads(store(), DeviceId(70)), false),
+        (format!("{folder}/7"), false),
+    ] {
+        let fields = objc2_foundation::NSDictionary::from_slices(
+            &[&*NSString::from_str("directory")],
+            &[&*NSString::from_str(&directory)],
+        );
+        assert_eq!(unsafe { predicate.evaluateWithObject(Some(&fields)) }, selected, "{directory}");
     }
 }

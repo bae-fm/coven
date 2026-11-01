@@ -459,6 +459,16 @@ impl ProviderOps for OneDriveStorage {
             UploadTarget::Replace(_) => Err(StorageFailure::InvalidPart.into()),
         }
     }
+    async fn device_uploads(
+        &self,
+        store: coven_foundation::id_source::StoreId,
+        device: coven_foundation::id_source::DeviceId,
+    ) -> Result<Vec<crate::LeftUpload>, StorageError> {
+        self.left_temporaries(store, device).await
+    }
+    async fn end_left_upload(&self, upload: &crate::LeftUpload) -> Result<(), StorageError> {
+        self.end_left(upload).await
+    }
     async fn abort_upload(
         &self,
         publication: &PublicationRequest,

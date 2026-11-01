@@ -128,3 +128,34 @@ async fn a_replacement_restart_keeps_the_original_revision_after_expiry() {
     assert_eq!(error.failure(), StorageFailure::Conflict);
     assert_eq!(storage.read(&path).await.unwrap(), b"next");
 }
+
+/// Ana's laptop ends the uploads her phone left: the sessions the phone's
+/// connection began in the store, and neither the laptop's own nor one of
+/// another store's. Ending them again succeeds, and the phone's session can
+/// never publish (§17.10).
+#[tokio::test]
+async fn another_device_ends_the_uploads_a_device_left() {
+    use coven_foundation::id_source::{DeviceId, FileId, StoreId};
+    let storage = MemoryStorage::builder().build().unwrap();
+    let (phone, laptop) = (DeviceId(7), DeviceId(8));
+    let file = |store, device: DeviceId| {
+        ObjectPath::file(store, device, FileId(uuid::Uuid::from_u128(u128::from(device.0))))
+    };
+    let elsewhere = StoreId(uuid::Uuid::from_u128(3));
+    let phones = storage.with_device(phone);
+    let mut left = phones.begin_upload(&file(STORE_ID, phone), 4).await.unwrap();
+    phones.begin_upload(&file(elsewhere, phone), 4).await.unwrap();
+    let laptops = storage.with_device(laptop);
+    laptops.begin_upload(&file(STORE_ID, laptop), 4).await.unwrap();
+    for _ in 0..2 {
+        laptops.end_device_uploads(STORE_ID, phone).await.unwrap();
+        assert_eq!(
+            storage.unfinished_uploads().await,
+            vec![(phone, file(elsewhere, phone)), (laptop, file(STORE_ID, laptop))]
+        );
+    }
+    assert_eq!(
+        phones.resume_upload(&mut left).await.unwrap_err().failure(),
+        StorageFailure::SessionExpired
+    );
+}

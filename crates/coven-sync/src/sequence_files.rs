@@ -133,10 +133,12 @@ impl SequenceSync {
         Ok(())
     }
 
-    /// The app's cleanup of the files of devices gone for good (§17.10): list
-    /// the folder of every such device this device is responsible for again,
-    /// then delete every file found that nothing refers to and every other
-    /// device has seen lose its last name; later passes delete the rest. It
+    /// The app's cleanup of the files of devices gone for good (§17.10): for
+    /// every such device this device is responsible for, end the uploads it
+    /// left and delete each snapshot body of its no announcement names
+    /// (§16.6), list its file folder again, then delete every file found
+    /// that nothing refers to and every other device has seen lose its last
+    /// name; later passes delete the rest. It
     /// returns once that is done, or with the failure that stopped it, which
     /// the operation also records. A device gone for good later uploads only
     /// files that can never be referred to, so running this at any time is
@@ -161,7 +163,16 @@ impl SequenceSync {
         let result = self
             .waits
             .begin_attempt(id)
-            .run(self.delete_files(&session, &ring, &member, uploaders, scans, id))
+            .run(async {
+                // A gone device whose key still works may have started
+                // uploads or stored snapshot bodies since its storage was
+                // last cleared. Its uploads end before its folders are
+                // listed again, its files' among them (§16.6).
+                for device in uploaders.iter().filter(|device| **device != self.device) {
+                    self.clear_gone_storage(&session.history, *device).await?;
+                }
+                self.delete_files(&session, &ring, &member, uploaders.clone(), scans, id).await
+            })
             .await;
         match result {
             Ok(()) => {

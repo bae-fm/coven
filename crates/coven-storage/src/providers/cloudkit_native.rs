@@ -325,7 +325,7 @@ pub(super) fn query<T: Send + 'static>(
                 let predicate = selection.predicate();
                 let query = CKQuery::initWithRecordType_predicate(
                     CKQuery::alloc(),
-                    &NSString::from_str("CovenObject"),
+                    &NSString::from_str(selection.record_type()),
                     &predicate,
                 );
                 CKQueryOperation::initWithQuery(CKQueryOperation::alloc(), &query)

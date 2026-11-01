@@ -111,6 +111,13 @@ impl Storage for PlannedStorage {
     async fn abort_upload(&self, _: &UploadSession) -> Result<(), StorageError> {
         unreachable!()
     }
+    async fn end_device_uploads(
+        &self,
+        _: coven_foundation::id_source::StoreId,
+        _: coven_foundation::id_source::DeviceId,
+    ) -> Result<(), StorageError> {
+        unreachable!()
+    }
     async fn create_reporting(
         &self,
         _: &ObjectPath,

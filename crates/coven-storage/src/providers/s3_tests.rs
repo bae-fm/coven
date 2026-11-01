@@ -835,3 +835,6 @@ mod versioning_tests;
 
 #[path = "s3_bucket_claim_tests.rs"]
 mod bucket_claim_tests;
+
+#[path = "s3_left_uploads_tests.rs"]
+mod left_uploads_tests;

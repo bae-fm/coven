@@ -244,7 +244,7 @@ impl ProviderOps for CloudKitStorage {
             let request = native::query(
                 &self.database,
                 &self.zone_id(),
-                query::Selection(prefix.clone()),
+                query::Selection::Objects(prefix.clone()),
                 cursor,
                 move |record| record.listed(&prefix),
                 #[cfg(test)]
@@ -321,6 +321,19 @@ impl ProviderOps for CloudKitStorage {
         session: &mut UploadSession,
     ) -> Result<(), StorageError> {
         self.publish(publication, session).await
+    }
+    async fn device_uploads(
+        &self,
+        store: coven_foundation::id_source::StoreId,
+        device: coven_foundation::id_source::DeviceId,
+    ) -> Result<Vec<crate::LeftUpload>, StorageError> {
+        self.left_roots(store, device).await
+    }
+    async fn end_left_upload(&self, upload: &crate::LeftUpload) -> Result<(), StorageError> {
+        let crate::left_upload::Left::CloudKitRoot(root) = &upload.0 else {
+            return Err(StorageFailure::SessionMismatch.into());
+        };
+        self.end_root(None, root, |_| Ok(())).await
     }
     async fn abort_upload(
         &self,

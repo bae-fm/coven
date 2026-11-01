@@ -417,6 +417,13 @@ impl coven_storage::Storage for StepStorage {
         let result = self.storage.finish_upload(session).await;
         self.record("finish", time, result)
     }
+    async fn end_device_uploads(
+        &self,
+        _: coven_foundation::id_source::StoreId,
+        _: coven_foundation::id_source::DeviceId,
+    ) -> Result<(), coven_storage::StorageError> {
+        unreachable!("no device of these steps is gone")
+    }
     async fn abort_upload(
         &self,
         session: &coven_storage::UploadSession,

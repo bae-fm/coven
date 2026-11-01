@@ -315,12 +315,12 @@ impl Database {
         .await
     }
 
-    /// The devices gone for good whose snapshot folders this device listed
-    /// (§16.6).
-    pub async fn gone_snapshots_listed(&self) -> Result<BTreeSet<DeviceId>, DbError> {
+    /// The devices gone for good whose storage this device cleared once
+    /// (§16.6, §17.10).
+    pub async fn gone_storage_cleared(&self) -> Result<BTreeSet<DeviceId>, DbError> {
         self.call(move |inner| {
             inner.access.with_committed(|db| {
-                db.query("SELECT device FROM _coven_gone_snapshots_listed", [], |r| {
+                db.query("SELECT device FROM _coven_gone_storage_cleared", [], |r| {
                     Ok(DeviceId(u64::from_be_bytes(r.get(0)?)))
                 })
             })
@@ -329,16 +329,16 @@ impl Database {
         .map(|devices| devices.into_iter().collect())
     }
 
-    /// This device listed `device`'s snapshot folders and deleted every body
-    /// there that no announcement names (§16.6). Recording it again, after a
-    /// listing repeated because its operation hadn't finished, changes
-    /// nothing.
-    pub async fn record_gone_snapshots_listed(&self, device: DeviceId) -> Result<(), DbError> {
+    /// This device ended the uploads `device` left, listed its snapshot
+    /// folders and deleted every body there that no announcement names
+    /// (§16.6, §17.10). Recording it again, after clearing repeated because
+    /// its operation hadn't finished, changes nothing.
+    pub async fn record_gone_storage_cleared(&self, device: DeviceId) -> Result<(), DbError> {
         self.call(move |inner| {
             inner.access.with_writer(|writer| {
                 writer.transaction(|db| {
                     db.internal_execute(
-                        "INSERT INTO _coven_gone_snapshots_listed(device) VALUES(?1) ON CONFLICT DO NOTHING",
+                        "INSERT INTO _coven_gone_storage_cleared(device) VALUES(?1) ON CONFLICT DO NOTHING",
                         [device.0.to_be_bytes()],
                     )
                     .map(drop)

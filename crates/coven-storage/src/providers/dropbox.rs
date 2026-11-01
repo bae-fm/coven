@@ -574,6 +574,20 @@ impl ProviderOps for DropboxStorage {
         session.state = SessionState::Complete;
         Ok(())
     }
+    /// A Dropbox upload session has no path and no listing: only its id,
+    /// which the device that began it holds, names it, and Dropbox ends it
+    /// on its own 7 days after it began (Appendix E.2). Coven stages nothing
+    /// else on Dropbox, so nothing another device left is found here.
+    async fn device_uploads(
+        &self,
+        _store: coven_foundation::id_source::StoreId,
+        _device: coven_foundation::id_source::DeviceId,
+    ) -> Result<Vec<crate::LeftUpload>, StorageError> {
+        Ok(Vec::new())
+    }
+    async fn end_left_upload(&self, _upload: &crate::LeftUpload) -> Result<(), StorageError> {
+        Err(StorageFailure::SessionMismatch.with_source("Dropbox lists no upload to end"))
+    }
     async fn abort_upload(
         &self,
         publication: &PublicationRequest,

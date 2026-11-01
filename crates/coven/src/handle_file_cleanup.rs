@@ -5,10 +5,12 @@ use crate::*;
 
 impl CovenHandle {
     /// Delete the stored files of devices gone for good (§14.1) that nothing
-    /// refers to (§17.10): list again the file folder of every such device
-    /// this device is responsible for, then delete each file found that no
-    /// retained row, write or snapshot names, once every other device not
-    /// gone for good has published a write that read past the listing; later
+    /// refers to (§17.10): for every such device this device is responsible
+    /// for, end the uploads it left and delete the snapshot bodies of its
+    /// that no announcement names (§16.6), list its file folder again, then
+    /// delete each file found that no retained row, write or snapshot names,
+    /// once every other device not gone for good has published a write that
+    /// read past the listing; later
     /// passes delete the rest as those writes arrive. A gone device can keep
     /// uploading while its provider access still works, but nothing it
     /// writes after the entry that stopped it counts, so this is safe to run

@@ -101,6 +101,43 @@ impl OneDriveStorage {
         }
         Ok(())
     }
+    /// `device`'s reserved folder, when it exists: what is in it is
+    /// temporaries whose native upload finished before their copy. A native
+    /// session still receiving parts has no item anyone else can see, and
+    /// OneDrive discards it at its expiry (Appendix E.2).
+    pub(super) async fn left_temporaries(
+        &self,
+        store: coven_foundation::id_source::StoreId,
+        device: coven_foundation::id_source::DeviceId,
+    ) -> Result<Vec<crate::LeftUpload>, StorageError> {
+        let folder = coven_format::path::device_uploads(store, device);
+        let url = format!("{}:/{folder}:", self.item(&self.folder, &[])?);
+        let response = self.send(Method::GET, &url, Body::Empty).await?;
+        if response.status().as_u16() == 404 {
+            self.check_folder().await?;
+            return Ok(Vec::new());
+        }
+        http::checked(PROVIDER, response).await?;
+        Ok(vec![crate::LeftUpload(crate::left_upload::Left::Staged(folder))])
+    }
+    /// Delete a device's reserved folder with every temporary in it. An
+    /// absent one succeeds.
+    pub(super) async fn end_left(&self, upload: &crate::LeftUpload) -> Result<(), StorageError> {
+        let crate::left_upload::Left::Staged(folder) = &upload.0 else {
+            return Err(StorageFailure::SessionMismatch.into());
+        };
+        let url = format!("{}:/{folder}:", self.item(&self.folder, &[])?);
+        let response = self.send(Method::DELETE, &url, Body::Empty).await?;
+        if response.status().as_u16() == 404 {
+            self.check_folder().await?;
+        } else {
+            http::checked(PROVIDER, response).await?;
+        }
+        // A remembered id of the deleted folder would send an upload into it.
+        let inside = format!("{folder}/");
+        self.folder_ids.lock().await.retain(|name, _| name != folder && !name.starts_with(&inside));
+        Ok(())
+    }
     pub(super) fn plan_temporary(
         &self,
         path: &ObjectPath,
