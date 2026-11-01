@@ -97,6 +97,7 @@ spaces only separate fields for reading. Example times are UTC.
 | File | `<store>/files/<device>/<object>` | one stored file, encrypted in chunks | D12 |
 | Join request | `<store>/join-requests/<device>/<invite>`, under the device that made the invite | a would-be member's id, public keys and device name | D8, D9 |
 | Ended invite's marker | `<store>/join-requests/<device>/<invite>`, in the request's place | when it may be deleted | D8 |
+| Gone device's marker | `<store>/join-requests/<device>/gone`, beside the device's requests | nothing but its kind and format | D8 |
 | Restore code, invite code | on paper or a screen, never in storage | what a new device needs to find and open the store | D13 |
 | Saved restore code | iCloud Keychain or Block Store, never in storage | a restore code with the store's name, for the person's next devices | D13 |
 | Bucket marker | `coven-bucket`, at the bucket's root, only where member keys reach the whole bucket | the id of the one store that owns the bucket, as plain text | D10 |
@@ -123,9 +124,11 @@ writes slot Ana won in §5.1:
 - **Sealed objects** wrap frames in encryption and signatures (D9), at paths
   from D10, using the keys and contexts of D11.
 
-Files, codes and the bucket marker are the three exceptions. A file has its own
-simpler envelope (D12); a code is a frame turned into text (D13); the bucket
-marker is a store id in plain text, with no envelope at all (D10).
+Files, codes and markers are the exceptions. A file has its own simpler
+envelope (D12); a code is a frame turned into text (D13); the bucket marker is
+a store id in plain text, with no envelope at all (D10). An ended invite's
+marker is a kind, a format and a time; a gone device's marker is a kind and a
+format. Neither is sealed (D8).
 
 ### Kind numbers
 
@@ -157,6 +160,7 @@ Format 1 uses these:
 | 37 | Ended invite's marker | D8 |
 | 38 | File | D12 |
 | 39 | Floor | D9 |
+| 40 | Gone device's marker | D8 |
 
 A kind not in this table doesn't exist in format 1, and a reader refuses it (D1).
 
@@ -1345,9 +1349,9 @@ device_name  name
 
 When an invite ends, the inviting device puts a marker in its request's place
 (§13.2): the same path, created once. It is the only object at a join
-request's path that isn't a request, and the only stored object besides the
-bucket marker that isn't sealed: it holds no secret. It is eleven bytes,
-`kind:u8 | format:u16 | kept_until:u64`:
+request's path that isn't a request. Like the bucket marker and a gone
+device's marker (below), it isn't sealed: it holds no secret. It is eleven
+bytes, `kind:u8 | format:u16 | kept_until:u64`:
 
 ```
 kind         37
@@ -1361,6 +1365,27 @@ kept_until   u64, seconds since the Unix epoch
   when checking for its request, ends its join as declined.
 - *Example.* An invite expiring at 1,700,000,000 leaves
   `25 0001 00000000655D2B80`: 1,700,604,800 is a week later.
+
+### A gone device's marker (kind 40)
+
+When an admin's device applies the entry that stops another device for good,
+it creates that device's gone marker, once, at
+`<store>/join-requests/<device>/gone`, and then deletes the requests and ended
+invites' markers beside it (§13.2). It is three bytes, `kind:u8 | format:u16`,
+and holds nothing else: its path says which device is gone.
+
+```
+kind         40
+format       u16, the format version
+```
+
+- It is never deleted. A request can be sent to the gone device at any time,
+  and no device will ever answer it.
+- A joining device checks for it before sending its request, and while its
+  request waits. Finding it before sending, it sends nothing; finding it
+  beside its waiting request, it deletes the request. Either way its join ends
+  as declined.
+- *Example.* Every gone device's marker is `28 0001`.
 
 ---
 
@@ -1688,6 +1713,7 @@ provider can't move one object into another's place.
 | `<store>/snapshots/<audience>/<device>/<n>` | One snapshot, discovered by its announcement |
 | `<store>/files/<device>/<file>` | An uploaded file |
 | `<store>/join-requests/<device>/<invite>` | A join request to the device that made the invite, or the marker of its ended invite |
+| `<store>/join-requests/<device>/gone` | The marker of a device gone for good, beside its requests; never deleted |
 
 *Example.* Household's slot 41 is
 `5d0c8e2a-7b1f-4c3e-9a64-0f2d8b71c3e5/seq/41`, and a store snapshot Ana's phone

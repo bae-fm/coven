@@ -107,7 +107,10 @@ def event (c : Config) (run : Run) (name : String) : Except String (Run × Strin
     return ({ run with landed := run.landed ++ [.demote], demoted := true }, "ok")
   | "remove" =>
     if run.removed then return (run, "skipped")
-    return ({ run with landed := run.landed ++ [.stop], removed := true }, "ok")
+    -- Ben's pass after his removal lands ends this device's requests at
+    -- once; this device applies the stop at its own next pass.
+    let (w, _) := take c run.world .gone
+    return ({ run with world := w, landed := run.landed ++ [.stop], removed := true }, "ok")
   | _ => throw s!"unknown invite event {name}"
 
 def listedJson : Option Listed → Json

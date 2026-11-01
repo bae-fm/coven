@@ -801,6 +801,15 @@ macro_rules! coven_tables {
             ) STRICT, WITHOUT ROWID;
             CREATE INDEX _coven_object_removals_after ON _coven_object_removals(after);
         ");
+        // The devices gone for good whose join requests this device ended:
+        // it created each one's gone marker, then deleted everything else
+        // under the device's join requests (§13.2). A request that arrives
+        // later is its own joining device's to delete.
+        $visit!(_coven_requests_ended, "
+            CREATE TABLE _coven_requests_ended (
+                device BLOB PRIMARY KEY NOT NULL CHECK(length(device)=8)
+            ) STRICT, WITHOUT ROWID;
+        ");
         // The operations the app's writes journaled, each with its kind as
         // coven-sync names it and, once it has finished, its outcome as
         // coven-sync encodes it, until the app acknowledges it

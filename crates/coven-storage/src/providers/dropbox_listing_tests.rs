@@ -129,6 +129,8 @@ async fn every_prefix_starts_at_its_folder_and_keeps_descendants() {
         ObjectPath::file(STORE_ID, device, FileId(uuid::Uuid::from_u128(1))),
         ObjectPath::file(STORE_ID, other, FileId(uuid::Uuid::from_u128(1))),
         ObjectPath::join_request(STORE_ID, DeviceId(1), InviteId(uuid::Uuid::from_u128(1))),
+        ObjectPath::device_gone(STORE_ID, DeviceId(1)),
+        ObjectPath::join_request(STORE_ID, device, InviteId(uuid::Uuid::from_u128(1))),
     ];
     let remote = Arc::new(Mutex::new(Remote::default()));
     for path in &paths {
@@ -141,6 +143,7 @@ async fn every_prefix_starts_at_its_folder_and_keeps_descendants() {
         ObjectPrefix::files(STORE_ID),
         ObjectPrefix::device_files(STORE_ID, device),
         ObjectPrefix::join_requests(STORE_ID),
+        ObjectPrefix::device_join_requests(STORE_ID, DeviceId(1)),
     ] {
         let listed = storage.list(&prefix).await.unwrap();
         let expected: BTreeSet<_> =

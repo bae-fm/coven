@@ -33,13 +33,17 @@ fn every_prefix_selects_exactly_its_objects_by_directory_equality() {
                 ObjectPath::floor(store),
             ]);
         }
-        paths.push(ObjectPath::join_request(store, DeviceId(1), InviteId(uuid)));
+        for device in [DeviceId(1), DeviceId(10)] {
+            paths.push(ObjectPath::join_request(store, device, InviteId(uuid)));
+            paths.push(ObjectPath::device_gone(store, device));
+        }
     }
     for prefix in [
         ObjectPrefix::all(store),
         ObjectPrefix::files(store),
         ObjectPrefix::device_files(store, DeviceId(7)),
         ObjectPrefix::join_requests(store),
+        ObjectPrefix::device_join_requests(store, DeviceId(1)),
     ] {
         let selection = Selection(prefix.clone());
         assert_eq!(selection.keys(), ["path", "size"]);

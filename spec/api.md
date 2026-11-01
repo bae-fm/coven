@@ -6217,6 +6217,13 @@ pub enum ProviderSignOut {
   invite's marker at the request's path (format.md D8) ends a join that
   finds it, sending or checking, as declined, so a request sent after its
   invite ended is never stored to wait for no one.
+- The other devices end the requests of an inviting device gone for good
+  ([§14.1](coven.md#141-the-cut-off)): an active admin's device that applies
+  the stop creates the gone device's marker beside its requests (format.md
+  D8), then deletes the requests. A join that finds the marker before
+  sending sends nothing; one that finds it beside its waiting request
+  deletes the request. Either ends as declined, and the marker is never
+  deleted.
 - The kept sign-in refreshes where it is kept: a rejected token's one refresh
   is committed to the keychain before any connection uses it, and the joined
   store keeps the refreshed tokens. Otherwise a restart after a refresh would

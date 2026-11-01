@@ -52,11 +52,11 @@ impl History {
     /// replacement, or its member's removal.
     fn removal(&self, device: DeviceId) -> Option<Slot> {
         let member = self.state.devices.get(&device)?.member;
-        self.cutoffs.iter().rev().find_map(|(slot, change)| match change {
-            StoreChange::RemoveMember { member: removed } if *removed == member => Some(*slot),
-            StoreChange::RemoveDevice { device: removed } if *removed == device => Some(*slot),
-            StoreChange::AddDevice { replaces: Some(replaced), .. } if *replaced == device => {
-                Some(*slot)
+        self.cutoffs.iter().rev().find_map(|cutoff| match cutoff.change {
+            StoreChange::RemoveMember { member: removed } if removed == member => Some(cutoff.slot),
+            StoreChange::RemoveDevice { device: removed } if removed == device => Some(cutoff.slot),
+            StoreChange::AddDevice { replaces: Some(replaced), .. } if replaced == device => {
+                Some(cutoff.slot)
             }
             _ => None,
         })

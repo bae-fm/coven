@@ -2,6 +2,8 @@
 
 use super::Database;
 use crate::{DbError, NewOperation, OperationId, OperationRecord, OperationUpdate};
+use coven_foundation::id_source::DeviceId;
+use std::collections::BTreeSet;
 
 impl Database {
     /// Read every unfinished operation, including permanently failed ones.
@@ -256,6 +258,37 @@ impl Database {
                 writer.transaction(|db| {
                     db.internal_execute("DELETE FROM _coven_object_removals WHERE path=?1", [&path])
                         .map(drop)
+                })
+            })
+        })
+        .await
+    }
+
+    /// The devices gone for good whose join requests this device ended
+    /// (§13.2).
+    pub async fn requests_ended(&self) -> Result<BTreeSet<DeviceId>, DbError> {
+        self.call(move |inner| {
+            inner.access.with_committed(|db| {
+                db.query("SELECT device FROM _coven_requests_ended", [], |r| {
+                    Ok(DeviceId(u64::from_be_bytes(r.get(0)?)))
+                })
+            })
+        })
+        .await
+        .map(|devices| devices.into_iter().collect())
+    }
+
+    /// This device ended `device`'s join requests: its gone marker is in
+    /// storage, and nothing else was under its requests when listed (§13.2).
+    pub async fn record_requests_ended(&self, device: DeviceId) -> Result<(), DbError> {
+        self.call(move |inner| {
+            inner.access.with_writer(|writer| {
+                writer.transaction(|db| {
+                    db.internal_execute(
+                        "INSERT INTO _coven_requests_ended(device) VALUES(?1)",
+                        [device.0.to_be_bytes()],
+                    )
+                    .map(drop)
                 })
             })
         })

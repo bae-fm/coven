@@ -357,3 +357,134 @@ fn sequence_key_selection_matches_lean() {
         }
     }
 }
+
+/// Ana's phone (device 1) makes Household and adds Ben as an admin; Ben's
+/// phone (device 2) and Ana's laptop (device 3) register. Each entry goes
+/// through the checks a slot's does, so only what they accept counts.
+struct Household {
+    history: History,
+    slots: u64,
+    ana: MemberId,
+    ben: MemberId,
+}
+
+impl Household {
+    fn new() -> Self {
+        let mut household =
+            Self { history: History::default(), slots: 0, ana: member(1), ben: member(2) };
+        let (ana, ben) = (household.ana, household.ben);
+        household.entry(
+            1,
+            ana,
+            StoreChange::CreateStore {
+                store: StoreId(uuid::Uuid::from_u128(1)),
+                name: "Household".into(),
+                admin: coven_format::test_utils::keys_from_seed(1).public_keys(),
+                access: crate::sequence_sync::tests::access("ana"),
+                device_name: "Ana's phone".into(),
+                key: key(90),
+                key_hash: [1; 32],
+            },
+        );
+        household.entry(
+            1,
+            ana,
+            StoreChange::AddMember {
+                member: ben,
+                keys: coven_format::test_utils::keys_from_seed(2).public_keys(),
+                role: MemberRole::Admin,
+                access: crate::sequence_sync::tests::access("ben"),
+            },
+        );
+        household.entry(
+            2,
+            ben,
+            StoreChange::AddDevice { name: "Ben's phone".into(), replaces: None },
+        );
+        household.entry(
+            3,
+            ana,
+            StoreChange::AddDevice { name: "Ana's laptop".into(), replaces: None },
+        );
+        household
+    }
+
+    /// Claim the next slot with `change`, written by `device` for `author`.
+    fn entry(&mut self, device: u64, author: MemberId, change: StoreChange) -> Slot {
+        self.slots += 1;
+        let slot = Slot(self.slots);
+        let header =
+            SlotHeader { device: DeviceId(device), claim: slot.0, author, after: slot.0 - 1 };
+        let effect = self.history.validate(&header, slot, &change).unwrap().unwrap();
+        self.history.accept_admin(slot, &header, &effect);
+        slot
+    }
+
+    /// Replace Ana's keys with seed `seed`'s, written by `device`.
+    fn replace_anas_keys(&mut self, device: u64, seed: u8) -> Slot {
+        let expected = self.history.state.members[&self.ana].keys;
+        let keys = coven_format::test_utils::keys_from_seed(seed).public_keys();
+        self.entry(
+            device,
+            self.ana,
+            StoreChange::ReplaceMemberKeys { member: self.ana, expected, keys },
+        )
+    }
+}
+
+/// A device's removal, or its member's, stops it for good; so does a reset
+/// registering another installation in its place. The other devices go on
+/// (§14.1).
+#[test]
+fn removal_and_replacement_stop_a_device_for_good() {
+    let mut removed = Household::new();
+    let ben = removed.ben;
+    let at = removed.entry(2, ben, StoreChange::RemoveDevice { device: DeviceId(3) });
+    assert_eq!(removed.history.gone_for_good(DeviceId(3)), Some((at, DeviceStop::Removed)));
+    assert_eq!(removed.history.gone_for_good(DeviceId(1)), None);
+    assert_eq!(removed.history.gone_for_good(DeviceId(2)), None);
+
+    let mut left = Household::new();
+    let (ana, ben) = (left.ana, left.ben);
+    let at = left.entry(2, ben, StoreChange::RemoveMember { member: ana });
+    for device in [DeviceId(1), DeviceId(3)] {
+        assert_eq!(left.history.gone_for_good(device), Some((at, DeviceStop::Removed)));
+    }
+    assert_eq!(left.history.gone_for_good(DeviceId(2)), None);
+
+    let mut reset = Household::new();
+    let at = reset.entry(
+        4,
+        ana,
+        StoreChange::AddDevice { name: "Ana's phone".into(), replaces: Some(DeviceId(1)) },
+    );
+    assert_eq!(reset.history.gone_for_good(DeviceId(1)), Some((at, DeviceStop::Replaced)));
+    assert_eq!(reset.history.gone_for_good(DeviceId(4)), None);
+    // A device history never added isn't gone: there is nothing of it to end.
+    assert_eq!(reset.history.gone_for_good(DeviceId(9)), None);
+}
+
+/// Ana's phone replaces her keys: it holds the new pair, so it goes on, and
+/// her laptop, added before and holding only the old pair, is gone for good.
+/// A device added after the replacement registered with the new pair, so the
+/// replacement doesn't stop it (§12.3, §14.1).
+#[test]
+fn a_member_key_replacement_stops_only_her_other_devices_added_before_it() {
+    let mut household = Household::new();
+    let ana = household.ana;
+    let at = household.replace_anas_keys(1, 5);
+    assert_eq!(household.history.gone_for_good(DeviceId(1)), None);
+    assert_eq!(
+        household.history.gone_for_good(DeviceId(3)),
+        Some((at, DeviceStop::MemberKeysReplaced))
+    );
+    assert_eq!(household.history.gone_for_good(DeviceId(2)), None);
+    household.entry(1, ana, StoreChange::RemoveDevice { device: DeviceId(3) });
+    household.entry(5, ana, StoreChange::AddDevice { name: "Ana's tablet".into(), replaces: None });
+    // The first entry that stopped the laptop is what stopped it.
+    assert_eq!(
+        household.history.gone_for_good(DeviceId(3)),
+        Some((at, DeviceStop::MemberKeysReplaced))
+    );
+    assert_eq!(household.history.gone_for_good(DeviceId(5)), None);
+}

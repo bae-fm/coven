@@ -218,6 +218,7 @@ impl SequenceSync {
         if self.registered(&session) {
             self.resume_access(&mut session, &mut ring, &member).await?;
             self.resume_invites(&mut session, &mut ring, &member).await?;
+            self.end_gone_requests(&session, &member).await?;
             self.resume_member_keys(&mut session, &mut ring).await?;
             let member =
                 self.member.read()?.ok_or(coven_storage::StorageFailure::MemberKeysMissing)?;
@@ -657,6 +658,8 @@ mod sequence_claim;
 mod sequence_credentials;
 #[path = "sequence_files.rs"]
 mod sequence_files;
+#[path = "sequence_gone_requests.rs"]
+mod sequence_gone_requests;
 #[path = "sequence_invites.rs"]
 pub(crate) mod sequence_invites;
 #[path = "sequence_join.rs"]

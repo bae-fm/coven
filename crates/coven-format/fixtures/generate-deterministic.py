@@ -480,6 +480,11 @@ def invite_end():
     return bytes([37]) + u16(1) + u64(1_700_000_000 + 7 * 24 * 3600)
 
 
+def device_gone():
+    """The marker of a device gone for good: its kind and format alone."""
+    return bytes([40]) + u16(1)
+
+
 def load_sodium():
     library = ctypes.util.find_library("sodium")
     # On macOS ctypes searches /usr/local/lib but not Apple-silicon Homebrew's
@@ -647,6 +652,7 @@ def main():
         ("restore-code.hex", restore_code()),
         ("invite-code.hex", invite_code()),
         ("invite-end.hex", invite_end()),
+        ("device-gone.hex", device_gone()),
     ]:
         (out / name).write_text(data.hex() + "\n")
     (out / "codes.txt").write_text(

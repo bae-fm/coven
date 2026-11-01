@@ -790,7 +790,11 @@ impl SequenceSync {
                     slots,
                     target,
                     state: at_target.state.clone(),
-                    cutoffs: at_target.cutoffs.clone(),
+                    cutoffs: at_target
+                        .cutoffs
+                        .iter()
+                        .map(|cutoff| (cutoff.slot, cutoff.change.clone()))
+                        .collect(),
                     boundaries: at_target.boundaries.clone(),
                     provider: at_target
                         .provider_changes(member.member(), &self.invited_accounts().await?)?,

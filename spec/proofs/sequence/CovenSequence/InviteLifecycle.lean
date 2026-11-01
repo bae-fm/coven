@@ -15,7 +15,10 @@ Every writer that acts on them is a step:
 - a crash, which loses the pass's read and nothing durable;
 - what a pass learns: the approver's demotion, and a stop for good (removal,
   replacement or member keys replaced, §14.1, or history showing another copy
-  of this device, §19.3).
+  of this device, §19.3);
+- another admin's device applying that stop first: it writes this device's
+  gone marker and deletes the joiner's request, and the marker turns away
+  any request sent later (§13.2).
 
 The journal row carries its step, which every change of the row increases.
 A pass's write is conditional on the step it read; so is the pending record
@@ -94,6 +97,9 @@ structure World where
   op : Option (Option Outcome)
   /-- The joiner's request object is in storage. -/
   request : Bool
+  /-- This device's gone marker is in storage: another admin's device
+  applied its stop for good (§13.2). -/
+  gone : Bool
   /-- The clock has reached the invite's expiry. -/
   expired : Bool
   /-- The applied state lets this device approve: it is an admin, registered,
@@ -107,7 +113,8 @@ structure World where
 
 /-- The invite just made by the app's write (`create_invite`). -/
 def made : World :=
-  ⟨some ⟨.requested, 0⟩, none, 0, false, none, 0, false, none, false, false, true, false, none⟩
+  ⟨some ⟨.requested, 0⟩, none, 0, false, none, 0, false, none, false, false, false, true, false,
+    none⟩
 
 structure Rules where
   /-- A pass saves its finding only while the row is at the step it read. -/
@@ -236,6 +243,9 @@ inductive Act where
   | administer
   /-- The joiner writes its request. -/
   | send
+  /-- Another admin's device applies this device's stop for good: it writes
+  the gone marker, then deletes the request. -/
+  | gone
   deriving DecidableEq, Repr
 
 /-- The pass's write for the row it read. -/
@@ -294,7 +304,8 @@ def enabled (R : Rules) (_c : Config) (w : World) : Act → Bool
   | .stop => applying w
   | .tick => !w.expired
   | .expiry => w.expired && w.row.any (expires ·.stage)
-  | .send => !w.request
+  | .send => !w.request && !w.gone
+  | .gone => !w.gone
   | a => accepted R w a
 
 def act (R : Rules) (c : Config) (w : World) : Act → World
@@ -325,6 +336,7 @@ def act (R : Rules) (c : Config) (w : World) : Act → World
   | .ackOp => { w with op := none }
   | .administer => { w with op := some none }
   | .send => { w with request := true }
+  | .gone => { w with gone := true, request := false }
 
 inductive Step (R : Rules) (c : Config) : World → World → Prop
   | step (w : World) (a : Act) (h : enabled R c w a = true) : Step R c w (act R c w a)
@@ -754,6 +766,7 @@ theorem inv_stop (c : Config) (w : World) (inv : Inv c w)
   simp only [act, stopEffect_correct]
   constructor <;> simp_all [stopped'] <;> (repeat' split) <;> simp_all
 
+set_option maxHeartbeats 2000000 in
 theorem inv_step (c : Config) (w : World) (a : Act) (inv : Inv c w)
     (e : enabled Rules.correct c w a = true) : Inv c (act Rules.correct c w a) := by
   obtain ⟨fresh, readRow, binding, running, early, zero, once, waitingSent, never, stopped⟩ := inv
@@ -761,6 +774,7 @@ theorem inv_step (c : Config) (w : World) (a : Act) (inv : Inv c w)
   case crash => constructor <;> simp_all [act]
   case tick => constructor <;> simp_all [act]
   case send => constructor <;> simp_all [act]
+  case gone => constructor <;> simp_all [act]
   case retry => constructor <;> simp_all [act]
   case ack =>
     constructor <;> simp_all [act, enabled, accepted]

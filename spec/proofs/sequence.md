@@ -663,7 +663,10 @@ steps are every writer that acts on them:
   transaction open, and writes after. Any other writer may commit in between;
 - a crash, which loses the pass's read and nothing durable;
 - what a pass learns: the approver's demotion, and a stop for good, from a
-  slot it applies or from history showing another copy of this device.
+  slot it applies or from history showing another copy of this device;
+- another admin's device applying that stop, which may come first: it writes
+  this device's gone marker and deletes the joiner's request, and the joiner
+  sends none after it (§13.2).
 
 The row carries its step, and every change of the row increases it. A pass's
 write, and the pending record it saves for what it found, are conditional on
@@ -1008,8 +1011,10 @@ steps under `Rules.rust`, in [`SequenceInvites`](sequence/SequenceInvites.lean).
 records a kept replacement's S3 key, and `events` a list of `pass`, `send`
 (the joiner writes its request), `approve`, `decline`, `cancel`, `retry`,
 `ack`, `ackOp`, `administer`, `expire`, `demote` and `remove` (another admin's
-slot, applied at the next pass), `raceCancel` and `raceExpire` (a pass with the
-cancel or the expiry committed while it reads the request). A pass applies
+slot, applied at the next pass; for `remove`, his pass ends this device's
+requests at once, and a `send` after it finds the gone marker and sends
+nothing), `raceCancel` and `raceExpire` (a pass with the cancel or the expiry
+committed while it reads the request). A pass applies
 landed slots, runs the admin change, then advances the invite until the
 attempt returns; storage always answers. The answer has one entry for the
 invite just made and one after each event: `result` (`ok`, `refused` or

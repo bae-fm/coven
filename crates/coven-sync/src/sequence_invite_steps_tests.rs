@@ -282,7 +282,11 @@ impl Case {
                     return "skipped";
                 }
                 let code = self.invite.shown_code().to_owned();
-                self.carol = Some(join(&self.group, &code, "Carol's phone").await);
+                let carol = joiner(&self.group, &code, "Carol's phone").await;
+                // Once Ben's pass has ended the requests of Ana's removed
+                // device, its gone marker turns this one away (§13.2).
+                carol.device.sync.submit_join(&carol.request).await.unwrap();
+                self.carol = Some(carol);
                 self.sent = true;
                 "ok"
             }
@@ -309,6 +313,8 @@ impl Case {
                 self.ben.sync.pass().await.unwrap();
                 let change = StoreChange::RemoveDevice { device: self.ana.sync.device };
                 self.ben.sync.administer(change).await.unwrap();
+                // Ben's pass ends the requests of Ana's device, gone for good.
+                self.ben.sync.pass().await.unwrap();
                 "ok"
             }
             other => panic!("unknown event {other}"),
@@ -456,6 +462,10 @@ fn cases() -> Vec<(&'static str, Vec<&'static str>)> {
         ("inPerson", vec!["demote", "send", "pass"]),
         // An approval under way when the device stops.
         ("sent", vec!["send", "pass", "approve", "remove", "pass", "expire", "cancel"]),
+        // Another admin's device ends the stopped device's requests, and its
+        // gone marker turns a later one away.
+        ("sent", vec!["send", "remove", "pass"]),
+        ("inPerson", vec!["remove", "send", "pass"]),
         // Waiting invites and the app's operation on a stopped device.
         ("sent", vec!["administer", "send", "pass", "remove", "pass", "cancel", "pass"]),
         // A demoted approver's decisions.

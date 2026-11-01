@@ -258,8 +258,9 @@ async fn an_undecodable_invite_fails_reset_without_a_completion_notice() {
 
 /// Ana's phone is reset while Carol's request waits. The replacement ends
 /// the carried invite where Carol's phone sent its request: under Ana's old
-/// phone, which made the invite, not under the replacement's own id
-/// (§13.2, §19.3).
+/// phone, which made the invite, not under the replacement's own id. The
+/// old phone is gone for good, so the replacement, an admin's device that
+/// applied that, leaves its gone marker there too (§13.2, §19.3).
 #[tokio::test]
 async fn a_carried_invite_ends_its_request_under_the_device_that_made_it() {
     use crate::sequence_sync::tests::{join, no_request, request_path};
@@ -284,7 +285,9 @@ async fn a_carried_invite_ends_its_request_under_the_device_that_made_it() {
     assert!(no_request(&group.storage, &path).await);
     let stored =
         group.storage.list(&coven_storage::ObjectPrefix::join_requests(group.store)).await.unwrap();
-    assert!(stored.iter().all(|object| object.path == path), "{stored:?}");
+    let gone = coven_storage::ObjectPath::device_gone(group.store, ana.sync.device);
+    assert!(stored.iter().any(|object| object.path == gone), "{stored:?}");
+    assert!(stored.iter().all(|object| object.path == path || object.path == gone), "{stored:?}");
     for device in [&ana, &carol.device, &new] {
         device.database().close().await.unwrap();
     }

@@ -4002,6 +4002,30 @@ If her phone stops for good instead, removed or replaced, or its member's keys
 replaced, its open invites end in the transaction that applies the stop
 (§14.1).
 
+**Ending a gone phone's requests.** A request sent to such a phone would wait
+for a device that never reads it again. On S3 nothing shared is taken back, so
+nothing would tell Dan's phone either. So the devices that see the phone gone
+for good (§14.1) end its requests. Ben removes Ana's phone while Dan's request
+waits. When Ben's phone, an admin's, applies the removal, it creates the
+phone's *gone marker*, create-once, at `<store>/join-requests/<device>/gone`,
+beside the phone's requests. Then it lists them and deletes everything else
+there: Dan's request, and the markers of the phone's ended invites. Dan's phone
+finds its request gone and ends his join as declined, as for any ended invite.
+
+The gone marker is never deleted. Eve scans another of the phone's invites a
+day later. Before sending, her phone finds the marker, sends nothing, and her
+join ends as declined. Without the marker, her request would wait forever.
+
+A request can still slip past Ben's listing: one sent just before the marker,
+or one the listing doesn't show yet (§20.4). Its own joining device deletes
+it. Dan's phone, finding the marker while its request is still there, deletes
+the request and ends declined, unless an approval already reached it.
+
+Only an admin's device that applied the stop does this, once for each device
+gone for good; a device registered after the stop never applied it. A reset's
+new installation registers in its old phone's place in the same slot, so an
+admin's does this for the old phone too, after ending the invites it carried.
+
 Declining, or letting the invite expire, takes back the provider access it
 granted. On S3 there is nothing to take back: the person deletes Dan's key in the
 provider's console, and coven forgets it (§14.3). An invite expires at the time
@@ -4170,6 +4194,19 @@ approval under way never expires, so it would stay listed forever. Each leaves
 tell a replacement of its member's keys from its own, a device records each
 pair it holds, and the candidate its own replacement keeps before custody keeps
 it (§12.3).
+
+Every device reads the same entries, so every device can tell which other
+devices have stopped. Ana's laptop registers at slot 30. At slot 48 her phone
+replaces her keys: the phone holds the new pair, and the laptop doesn't. The
+laptop is *gone for good* from slot 48, and the phone isn't. Her tablet,
+registered at slot 50 with the new pair, isn't either. A device is gone for
+good from the first counted entry that stops it: its removal or its member's,
+a reset registering another installation in its place, or a replacement of
+its member's keys, after it registered, written by another device. History
+showing another copy of an installation using its device id doesn't count:
+only that installation can see it (§19.3). Whatever a device gone for good
+left under way stays that way unless others end it: §13.2 covers the join
+requests it was waiting for.
 
 A member's removal also ends the person's use of their restore code. Ana removes
 Ben at slot 52. When Ben's phone reads slot 52, it first deletes his restore
@@ -7276,7 +7313,8 @@ The provider already sees every slot number in `<store>/seq/<n>` and which
 objects are deleted. The floor's clear `first` exposes no additional slot-number
 information; it lets a device without keys find the kept sequence (§13.2).
 
-Listings are used for files and setup checks, and they follow three rules:
+Listings are used for files, a device gone for good's join requests (§13.2)
+and setup checks, and they follow three rules:
 
 - **List the exact place.** On Dropbox and OneDrive every directory in a coven
   path is a real provider folder, and coven lists that folder directly, never the
@@ -7297,7 +7335,9 @@ lag (Appendix E.6); setup records no lag measurement. A finite observation canno
 establish a maximum lag, and the sequence depends on neither that observation
 nor a listing. Exact reads and status must reflect completed publication.
 A file a removed device's folder listing misses through lag is found by the app's
-next cleanup of removed devices' files (§17.10). The setup check (§20.8) and the
+next cleanup of removed devices' files (§17.10). A join request a gone
+device's listing misses is deleted by its joining device, which finds the
+gone marker (§13.2). The setup check (§20.8) and the
 own-bucket check (§20.7) allow for the margin.
 
 #### 20.5 Status, times, revisions and checksums
@@ -7885,9 +7925,10 @@ What the models cover:
 - **Snapshot starts:** ordinary snapshots from the floor, and prepared snapshots
   at their raise or reset entries, as §16.3 requires.
 - **An invite and the app's operations** on the device that made them: every
-  writer, a crash between any two transactions, and stops for good. Each ends,
-  what the app sees never goes back, and the app is offered exactly what the
-  write steps accept (§11.4, §13.2).
+  writer, a crash between any two transactions, and stops for good, which
+  another admin's device may apply first, ending the device's requests. Each
+  ends, what the app sees never goes back, and the app is offered exactly what
+  the write steps accept (§11.4, §13.2).
 - **Pieces of storage behaviour,** such as copy publication.
 
 What they don't cover:
@@ -8476,6 +8517,8 @@ identifiers let a reader choose the key before opening the encrypted contents.
 | Any slot | the common slot prefix | its device and claim number, under the store key |
 | Writes slot | the common slot prefix | a header naming which audiences its parts belong to, under the store key; each part under its audience's key |
 | Join request, `<store>/join-requests/<device>/<invite id>` | the path | everything, under a key derived from the invite secret; signed with the new member key |
+| Ended invite's marker, at its request's path | the path, and when the marker may be deleted | nothing: it holds no secret |
+| Gone device's marker, `<store>/join-requests/<device>/gone` | the path, which names the device gone for good | nothing: it holds no secret |
 
 An introduced store key may seal its own introduction (§12.1). In that case its
 id is also the clear slot selector; its key bytes and commitment stay encrypted.

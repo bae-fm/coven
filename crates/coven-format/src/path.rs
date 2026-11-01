@@ -67,9 +67,15 @@ impl ObjectPath {
     pub fn join_request(store: StoreId, inviting: DeviceId, invite: InviteId) -> Self {
         Self(format!("{store}/join-requests/{}/{invite}", inviting.0))
     }
+    /// The marker of a device gone for good, beside the join requests to
+    /// its invites (§13.2).
+    pub fn device_gone(store: StoreId, device: DeviceId) -> Self {
+        Self(format!("{store}/join-requests/{}/{GONE}", device.0))
+    }
     /// The invite named by a join request's path.
     pub fn join_request_invite(&self) -> Option<InviteId> {
         match self.relative().split('/').collect::<Vec<_>>().as_slice() {
+            ["join-requests", _, GONE] => None,
             ["join-requests", _, invite] => {
                 Some(InviteId(invite.parse().expect("validated invite id")))
             }
@@ -147,6 +153,7 @@ impl TryFrom<String> for ObjectPath {
                     && decimal(n, true)
             }
             ["files", device, name] => decimal(device, false) && canonical_uuid(name),
+            ["join-requests", device, GONE] => decimal(device, false),
             ["join-requests", device, invite] => decimal(device, false) && canonical_uuid(invite),
             ["floor"] => true,
             _ => false,
@@ -162,6 +169,9 @@ impl From<ObjectPath> for String {
         path.0
     }
 }
+
+/// The last part of a gone device's marker's path.
+const GONE: &str = "gone";
 
 /// A prefix of the validated object layout, used for provider listing.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -182,6 +192,11 @@ impl ObjectPrefix {
     /// Every waiting join request.
     pub fn join_requests(store: StoreId) -> Self {
         Self(format!("{store}/join-requests/"))
+    }
+    /// The join requests to one device's invites, the markers of its ended
+    /// invites, and its gone marker once it is gone for good (§13.2).
+    pub fn device_join_requests(store: StoreId, device: DeviceId) -> Self {
+        Self(format!("{store}/join-requests/{}/", device.0))
     }
     /// The store whose objects this prefix selects.
     pub fn store(&self) -> StoreId {

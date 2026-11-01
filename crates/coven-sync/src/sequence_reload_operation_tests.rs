@@ -518,8 +518,8 @@ async fn self_replacement() -> (Value, Value) {
     let session = ana.sync.session.lock().await;
     let later = ana.sync.check_binding(&session, &current);
     assert!(matches!(&later, Err(crate::SyncError::MemberKeysReplaced { .. })), "{later:?}");
-    let replacements: Vec<_> = session.history.cutoffs.iter().filter_map(|(slot,change)|
-        matches!(change, StoreChange::ReplaceMemberKeys { member, .. } if *member == ana.identity.member()).then_some(slot.0)).collect();
+    let replacements: Vec<_> = session.history.cutoffs.iter().filter_map(|cutoff|
+        matches!(cutoff.change, StoreChange::ReplaceMemberKeys { member, .. } if member == ana.identity.member()).then_some(cutoff.slot.0)).collect();
     let later_slot = session.through;
     let generations: Vec<_> = session
         .history

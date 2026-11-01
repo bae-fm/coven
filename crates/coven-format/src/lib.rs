@@ -11,6 +11,7 @@ pub mod chunks;
 pub mod code_fields;
 pub mod codes;
 pub mod coordinates;
+pub mod device_gone;
 pub mod dismissal;
 pub mod error;
 pub mod file;

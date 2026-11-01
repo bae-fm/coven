@@ -347,7 +347,9 @@ pub(super) struct Joiner {
     pub(super) request: JoiningIdentity,
 }
 
-pub(super) async fn join(group: &Group, code: &str, name: &str) -> Joiner {
+/// A joining device for an account invite's `code`: its request prepared
+/// and the provider's share accepted, the request not yet sent.
+pub(super) async fn joiner(group: &Group, code: &str, name: &str) -> Joiner {
     let code = read_invite_code(code).unwrap();
     let InviteStorage::Account(invitation) =
         InviteStorage::decode(code.storage.as_bytes()).unwrap()
@@ -359,8 +361,14 @@ pub(super) async fn join(group: &Group, code: &str, name: &str) -> Joiner {
     let storage = MemoryStorage::for_recipient(&group.storage, "carol@example.org").unwrap();
     let device = group.open_with(temp, request.identity(), None, storage).await;
     device.sync.accept_join(&invitation).await.unwrap();
-    assert!(device.sync.submit_join(&request).await.unwrap(), "the invite is open");
     Joiner { device, request }
+}
+
+/// A joining device that has sent its request to an open invite.
+pub(super) async fn join(group: &Group, code: &str, name: &str) -> Joiner {
+    let joiner = joiner(group, code, name).await;
+    assert!(joiner.device.sync.submit_join(&joiner.request).await.unwrap(), "the invite is open");
+    joiner
 }
 
 /// Where `invite`'s join request goes: under the device that made it, as its

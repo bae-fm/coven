@@ -260,10 +260,14 @@ Approving returns the operation that binds Dan's pair, whose outcome
 `coven_operations` lists; declining or cancelling ends the invite in that write,
 and a pass replaces the request with a marker and takes back the access. The
 marker turns away a request sent after the invite ended, which would otherwise
-wait for no one. Dan's phone keeps its new keys and request across restarts,
-and picks up where it left off; `join_with_invite` returns `None` when the
-request is declined, the invite is cancelled, or it expires. It sends no first
-request after the invite's expiry, which `InviteInfo.expires_at` shows.
+wait for no one. If the inviting device stops for good, removed, replaced, or
+its member's keys replaced, an admin's device that applies that deletes the
+device's waiting requests and leaves one marker beside them, never deleted,
+which turns away any request sent later. Dan's phone keeps its new keys and
+request across restarts, and picks up where it left off; `join_with_invite`
+returns `None` when the request is declined, the invite is cancelled, or it
+expires. It sends no first request after the invite's expiry, which
+`InviteInfo.expires_at` shows.
 
 While a join is under way, Dan's phone also keeps the invite code in its own
 keychain, never synced, and beside it his Dropbox sign-in. If Dan closes the app

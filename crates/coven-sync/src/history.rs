@@ -2,7 +2,7 @@
 
 use crate::{effects, OperationRejection, Refusal, SyncError};
 use coven_crypto::{MemberIdentity, SigningKey, StoreKeyring};
-use coven_database::{AdminEffect, StoreCircle, StoreDevice, StoreMember, StoreState};
+use coven_database::{AdminEffect, DeviceStop, StoreCircle, StoreDevice, StoreMember, StoreState};
 use coven_format::{
     admin::StoreChange,
     sealed_key::KeyCopyPrefix,
@@ -38,6 +38,16 @@ pub(crate) struct Binding {
     pub(crate) device: DeviceId,
 }
 
+/// A counted entry that cut a device or member off (§14.1): a removal, a
+/// reset's registration in a device's place, or a member-key replacement,
+/// with the device that wrote it.
+#[derive(Clone)]
+pub(crate) struct Cutoff {
+    pub(crate) slot: Slot,
+    pub(crate) author: DeviceId,
+    pub(crate) change: StoreChange,
+}
+
 /// Changes to existing domain values, rather than a copy of the entire state
 /// at every prefix. Writes resolve their original credentials by `read_through`.
 #[derive(Clone, Default)]
@@ -47,7 +57,7 @@ pub(crate) struct History {
     pub(crate) copies: Vec<KeyCopy>,
     pub(crate) announcements: BTreeMap<Slot, SnapshotAnnouncement>,
     pub(crate) boundaries: Vec<coven_database::BoundaryCoverage>,
-    pub(crate) cutoffs: Vec<(Slot, StoreChange)>,
+    pub(crate) cutoffs: Vec<Cutoff>,
     pub(crate) bindings: Vec<Binding>,
     members: BTreeMap<MemberId, BTreeMap<u64, StoreMember>>,
     devices: BTreeMap<DeviceId, BTreeMap<u64, StoreDevice>>,
@@ -124,6 +134,38 @@ impl History {
     /// slot, except slot one's offline writes, which read nothing.
     pub(crate) fn added(&self, device: DeviceId) -> Option<u64> {
         self.devices.get(&device)?.keys().next().copied()
+    }
+
+    /// The first counted entry that stopped `device` for good, and how
+    /// (§14.1): its removal or its member's, a reset registering another
+    /// installation in its place, or its member's keys replaced, after it was
+    /// added, by another of the member's devices or an admin's. The pair
+    /// that replacement binds is one the device doesn't hold; the device
+    /// that wrote it does. Another copy of an installation using its device
+    /// id is never here: only that installation sees it (§19.3).
+    pub(crate) fn gone_for_good(&self, device: DeviceId) -> Option<(Slot, DeviceStop)> {
+        let member = self.state.devices.get(&device)?.member;
+        let added = self.added(device)?;
+        self.cutoffs.iter().find_map(|cutoff| {
+            let stop = match &cutoff.change {
+                StoreChange::RemoveDevice { device: removed } if *removed == device => {
+                    DeviceStop::Removed
+                }
+                StoreChange::RemoveMember { member: removed } if *removed == member => {
+                    DeviceStop::Removed
+                }
+                StoreChange::AddDevice { replaces: Some(replaced), .. } if *replaced == device => {
+                    DeviceStop::Replaced
+                }
+                StoreChange::ReplaceMemberKeys { member: replaced, .. }
+                    if *replaced == member && cutoff.slot.0 > added && cutoff.author != device =>
+                {
+                    DeviceStop::MemberKeysReplaced
+                }
+                _ => return None,
+            };
+            Some((cutoff.slot, stop))
+        })
     }
 
     pub(crate) fn belonged(&self, audience: &Audience, member: &MemberId, through: u64) -> bool {
@@ -208,7 +250,11 @@ impl History {
                 | StoreChange::ReplaceMemberKeys { .. }
                 | StoreChange::AddDevice { replaces: Some(_), .. }
         ) {
-            self.cutoffs.push((slot, effect.change.clone()));
+            self.cutoffs.push(Cutoff {
+                slot,
+                author: header.device,
+                change: effect.change.clone(),
+            });
         }
         self.state = effect.state.clone();
     }

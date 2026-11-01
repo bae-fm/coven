@@ -45,6 +45,7 @@ fn all_layouts_are_canonical_and_store_scoped() {
         ObjectPath::snapshot(STORE_ID, Audience::Circle(CircleId(id)), device, NonZeroU64::MIN),
         ObjectPath::file(STORE_ID, device, FileId(id)),
         ObjectPath::join_request(STORE_ID, device, InviteId(id)),
+        ObjectPath::device_gone(STORE_ID, device),
     ] {
         assert_eq!(ObjectPath::parse(path.as_str()).unwrap(), path);
         assert_eq!(path.store(), STORE_ID);
@@ -125,4 +126,32 @@ fn join_requests_live_under_their_inviting_device() {
     }
     validate_directory(&format!("{STORE_ID}/join-requests/1")).unwrap();
     assert!(validate_directory(&format!("{STORE_ID}/join-requests/01")).is_err());
+}
+
+/// A device gone for good has one marker in its join requests' folder. It
+/// names no invite, and the folder's prefix finds the device's requests and
+/// its marker, and no other device's (§13.2).
+#[test]
+fn a_gone_devices_marker_sits_beside_its_requests() {
+    let invite = InviteId(uuid::Uuid::from_u128(17));
+    let gone = ObjectPath::device_gone(STORE_ID, DeviceId(42));
+    assert_eq!(gone.as_str(), format!("{STORE_ID}/join-requests/42/gone"));
+    assert_eq!(ObjectPath::parse(gone.as_str()).unwrap(), gone);
+    assert_eq!(gone.join_request_invite(), None);
+    let folder = ObjectPrefix::device_join_requests(STORE_ID, DeviceId(42));
+    assert_eq!(folder.as_str(), format!("{STORE_ID}/join-requests/42/"));
+    assert!(folder.contains(&gone));
+    assert!(folder.contains(&ObjectPath::join_request(STORE_ID, DeviceId(42), invite)));
+    for other in [DeviceId(4), DeviceId(420)] {
+        assert!(!folder.contains(&ObjectPath::join_request(STORE_ID, other, invite)));
+        assert!(!folder.contains(&ObjectPath::device_gone(STORE_ID, other)));
+    }
+    for tail in [
+        "join-requests/gone",
+        "join-requests/01/gone",
+        "join-requests/1/Gone",
+        "join-requests/1/gone/extra",
+    ] {
+        assert!(ObjectPath::parse(&format!("{STORE_ID}/{tail}")).is_err(), "{tail}");
+    }
 }

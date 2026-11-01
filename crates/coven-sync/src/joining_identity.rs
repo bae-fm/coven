@@ -4,13 +4,13 @@ use crate::SyncError;
 use coven_crypto::{
     ConfirmationNumber, EncryptionKey, MemberIdentity, MemberKeys, MemberPublicKeys, ObjectHasher,
 };
-use coven_format::invite_end::InviteEnd;
 use coven_format::{
     codes::{InviteCode, InviteDeliveryKind},
     objects::JoinRequest,
     sealed_single::{SingleChunkObject, SingleChunkPrefix},
     Object,
 };
+use coven_format::{device_gone::DeviceGone, invite_end::InviteEnd};
 use coven_foundation::files::StoreDirAccess;
 use coven_foundation::files::{AtomicFile, StoreDir, StoreFile};
 use coven_storage::{ObjectPath, Storage, StorageFailure};
@@ -314,8 +314,13 @@ impl JoiningIdentity {
     }
 
     /// Publish the recorded immutable request. An occupied path must hold
-    /// exactly these bytes (§19.3).
+    /// exactly these bytes (§19.3). `false`, sending nothing, once the
+    /// inviting device is gone for good: an admin's device has ended its
+    /// requests, and none would ever be answered (§13.2).
     pub async fn publish(&self, storage: &dyn Storage) -> Result<bool, SyncError> {
+        if self.inviter_gone(storage).await? {
+            return Ok(false);
+        }
         match storage.create(&self.path, &self.request).await {
             Ok(_) => Ok(true),
             Err(error) if error.failure() == StorageFailure::AlreadyExists => {
@@ -335,10 +340,36 @@ impl JoiningIdentity {
     }
 
     /// Whether this request is still in storage: an ended invite's marker
-    /// in its place, or nothing, means it is gone.
+    /// in its place, or nothing, means it is gone. A request beside its
+    /// inviting device's gone marker reached storage after an admin's
+    /// device listed that device's requests, and no device will list them
+    /// again, so this device deletes it, and it is gone too (§13.2).
     pub(crate) async fn pending(&self, storage: &dyn Storage) -> Result<bool, SyncError> {
-        match storage.read(&self.path).await {
-            Ok(found) => Ok(found == self.request),
+        let present = match storage.read(&self.path).await {
+            Ok(found) => found == self.request,
+            Err(error) if error.failure() == StorageFailure::NotFound => false,
+            Err(error) => return Err(error.into()),
+        };
+        if present && self.inviter_gone(storage).await? {
+            match storage.delete(&self.path).await {
+                Ok(()) => (),
+                Err(error) if error.failure() == StorageFailure::NotFound => (),
+                Err(error) => return Err(error.into()),
+            }
+            return Ok(false);
+        }
+        Ok(present)
+    }
+
+    /// Whether the inviting device's gone marker is in storage: it is gone
+    /// for good, and an admin's device has ended its requests (§13.2).
+    async fn inviter_gone(&self, storage: &dyn Storage) -> Result<bool, SyncError> {
+        let marker = ObjectPath::device_gone(self.path.store(), self.inviting_writer);
+        match storage.read(&marker).await {
+            Ok(found) => {
+                DeviceGone::decode(&found)?;
+                Ok(true)
+            }
             Err(error) if error.failure() == StorageFailure::NotFound => Ok(false),
             Err(error) => Err(error.into()),
         }
