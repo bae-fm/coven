@@ -464,7 +464,8 @@ async fn budgets_pins_eviction_and_second_device_reads() {
     let requests = f.storage.request_count();
     assert_eq!(f.files.read_file(&file).await.unwrap(), bytes);
     assert_eq!(f.storage.request_count(), requests);
-    f.files.unpin(std::slice::from_ref(&file)).await.unwrap();
+    let id = file.id();
+    f.database.write(move |sql| sql.unpin(&[id])).await.unwrap();
     assert_eq!(f.database.files_pinned(vec![file.id()]).await.unwrap(), vec![Some(false)]);
     let stream = f.files.open_file_stream(&file).await.unwrap();
     stream.read_at(CHUNK as u64, 1).await.unwrap();
@@ -725,7 +726,8 @@ async fn a_file_is_on_its_device_only_until_its_upload_completes() {
         assert_eq!(b.files.read_file(&uploaded).await.unwrap(), b"content");
         assert!(b.files.inner.database.uploads().await.unwrap().is_empty());
         b.files.pin(std::slice::from_ref(&uploaded)).await.unwrap();
-        b.files.unpin(std::slice::from_ref(&uploaded)).await.unwrap();
+        let id = uploaded.id();
+        b.database.write(move |sql| sql.unpin(&[id])).await.unwrap();
         b.files.evict_file(&uploaded).await.unwrap();
         assert_eq!(b.database.file_ref(local.id()).await.unwrap(), uploaded);
         assert_eq!(b.files.read_file(&uploaded).await.unwrap(), b"content");

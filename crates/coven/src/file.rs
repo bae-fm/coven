@@ -27,9 +27,11 @@ impl CovenHandle {
     pub fn subscribe_pin_progress(&self, files: Vec<FileRef>) -> LiveQuery<PinProgress> {
         self.database.subscribe_pin_progress(files)
     }
-    /// Release pins and apply cache budgets.
-    pub async fn unpin(&self, files: &[FileRef]) -> Result<(), FileReadError> {
-        self.files.unpin(files).await
+    /// Release pins and apply cache budgets, in a write of its own
+    /// (`CovenWrite::unpin`).
+    pub async fn unpin(&self, files: &[FileId]) -> CovenResult<()> {
+        let files = files.to_vec();
+        self.write(move |write| Ok(write.unpin(&files)?)).await
     }
     /// Whether each file is pinned, one answer per file in order, or `None`
     /// for a file this device has no record of. The answer is whether

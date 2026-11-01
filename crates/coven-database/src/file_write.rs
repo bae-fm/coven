@@ -43,6 +43,9 @@ pub use device_only::DeviceOnlyCopy;
 #[path = "file_write_copies.rs"]
 mod copies;
 
+#[path = "file_write_cache.rs"]
+mod cache;
+
 #[path = "journal.rs"]
 mod journal;
 pub(crate) use copies::Copied;

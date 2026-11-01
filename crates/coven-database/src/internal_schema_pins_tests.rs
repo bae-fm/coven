@@ -1,4 +1,4 @@
-use crate::file_write::tests::{complete_uploads, namespaces, stage, tables};
+use crate::file_write::tests::{complete_uploads, local_count, namespaces, stage, tables};
 use crate::tests::{database_error, TestStore};
 use crate::{DbError, FileDatabase, Migration, Provenance, SchemaError};
 use coven_foundation::files::FileName;
@@ -57,22 +57,85 @@ async fn pin_stored(db: &crate::Database) -> crate::FileRef {
 
 /// A local trigger on `coven_pins` keeps the app's own table of pinned
 /// files, in the transaction that changes the pin, and a live query over
-/// that table reruns with it (§9.4, §17.8).
+/// that table reruns with it (§9.4, §17.8). The unpin is a step of the
+/// app's write, beside its own change to the row: the trigger follows it in
+/// that write, the row and the pin change together, and a live query over
+/// `coven_pins` runs once for the write. The namespace's budget then holds
+/// nothing, so the same write evicts the copy, whose name's removal is
+/// settled once it has committed.
 #[tokio::test]
 async fn a_local_trigger_follows_each_pin_as_it_changes() {
     let store = TestStore::new();
     let db = open(&store, vec![Migration::addition(1, "files", FOLLOWED)]).await;
-    let owner = FileDatabase::new(db.clone());
     let mut pinned = db.subscribe(|sql| {
         Ok(sql.query("SELECT id FROM pinned_files ORDER BY id", [], |r| r.get::<_, String>(0))?)
     });
+    let mut pins = db
+        .subscribe(|sql| {
+            Ok(sql.query("SELECT file FROM coven_pins", [], |r| r.get::<_, String>(0))?)
+        })
+        .process(Ok);
+    let runs = pins.runs();
     assert!(pinned.next().await.unwrap().unwrap().is_empty());
+    assert!(pins.next().await.unwrap().unwrap().is_empty());
     let file = pin_stored(&db).await;
     assert_eq!(pinned.next().await.unwrap().unwrap(), ["7"]);
+    assert_eq!(pins.next().await.unwrap().unwrap(), [file.id().to_string()]);
     assert!(agrees(&db));
-    owner.unpin(&file).await.unwrap();
+    let writes = runs.writes();
+    let id = file.id();
+    FileDatabase::new(db.clone()).set_budget("files", 0).await.unwrap();
+    assert_eq!(local_count(&db, "_coven_cache"), 1);
+    db.write(move |sql| {
+        sql.execute("UPDATE files SET title='kept elsewhere' WHERE id='7'", [])?;
+        // The write's later SQL sees the step: the trigger already ran.
+        assert_eq!(
+            sql.query_row("SELECT count(*) FROM pinned_files", [], |r| r.get::<_, i64>(0))?,
+            1
+        );
+        sql.unpin(&[id])?;
+        assert_eq!(
+            sql.query_row("SELECT count(*) FROM pinned_files", [], |r| r.get::<_, i64>(0))?,
+            0
+        );
+        Ok(())
+    })
+    .await
+    .unwrap();
     assert!(pinned.next().await.unwrap().unwrap().is_empty());
+    assert!(pins.next().await.unwrap().unwrap().is_empty());
+    assert_eq!(runs.writes(), writes + 1);
     assert!(agrees(&db));
+    assert_eq!(local_count(&db, "_coven_cache"), 0);
+    assert_eq!(local_count(&db, "_coven_file_removals"), 0);
+    let title = db
+        .read(|sql| {
+            Ok(sql
+                .query_row("SELECT title FROM files WHERE id='7'", [], |r| r.get::<_, String>(0))?)
+        })
+        .await
+        .unwrap();
+    assert_eq!(title, "kept elsewhere");
+    db.close().await.unwrap();
+}
+
+/// A write that unpins a file and then fails keeps the pin: the step rolls
+/// back with the app's statements.
+#[tokio::test]
+async fn an_unpin_rolls_back_with_its_write() {
+    let store = TestStore::new();
+    let db = open(&store, vec![Migration::addition(1, "files", FOLLOWED)]).await;
+    let file = pin_stored(&db).await;
+    let id = file.id();
+    let failed = db
+        .write(move |sql| {
+            sql.unpin(&[id])?;
+            sql.execute("UPDATE files SET title='never kept' WHERE id='7'", [])?;
+            Err::<(), _>(DbError::Invariant { what: "the app gives up" })
+        })
+        .await;
+    assert!(matches!(failed, Err(DbError::Invariant { .. })));
+    assert_eq!(db.files_pinned(vec![id]).await.unwrap(), vec![Some(true)]);
     db.close().await.unwrap();
 }
 

@@ -753,7 +753,7 @@ async fn the_apps_sql_reads_uploads_pins_and_pending_records() {
     }
     assert_eq!(listed, ["preview"]);
     assert_eq!(handle.files_pinned(&[preview]).await.unwrap(), [Some(true)]);
-    handle.unpin(std::slice::from_ref(&stored)).await.unwrap();
+    handle.unpin(&[stored.id()]).await.unwrap();
     assert!(pins.next().await.expect("the live query answers").unwrap().is_empty());
     // Deleting the row deletes its file's record, so nothing of it stays
     // pinned.

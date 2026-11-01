@@ -80,8 +80,10 @@ request to storage, and a user's file downloads, since coven never reads an
 original for the cache. Its failures retry under the shared backoff, with
 pending records of subject `PendingSubject::Keep`.
 
-`handle.unpin(&files)` stops keeping them; they stay in the cache until the
-budget evicts them. To show which files are kept offline, `files_pinned(files)`
+`sql.unpin(&ids)`, a step of the app's write, stops keeping them and evicts
+their namespace down to its budget in that same write, so the app can record
+the change in its own rows as it happens; `handle.unpin(&ids)` is the same
+step in a write of its own. To show which files are kept offline, `files_pinned(files)`
 answers with one `Option<bool>` per file id, `None` for a file this device has
 no record of, and `subscribe_files_pinned` keeps the answer current. The app's
 SQL reads the same answer from the `coven_pins` table, which lists every pinned

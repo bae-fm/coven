@@ -43,21 +43,6 @@ impl Files {
             .try_for_each(|()| std::future::ready(Ok(())))
             .await
     }
-    /// Release budget exemptions, then apply each affected namespace budget.
-    /// A file only on one device has none to release.
-    pub async fn unpin(&self, files: &[FileRef]) -> Result<(), FileReadError> {
-        self.inner.check_open()?;
-        let _pins = self.inner.pins.lock().await;
-        let _cache = self.inner.cache.write().await;
-        for file in files {
-            let file = self.inner.current(file).await?;
-            if let FilePlace::Cloud { .. } = file.place() {
-                self.inner.database.unpin(&file).await?;
-                self.inner.trim(file.namespace()).await;
-            }
-        }
-        Ok(())
-    }
     /// Remove cached bytes only, including pinned bytes; storage is untouched.
     /// A file only on one device has none.
     pub async fn evict_file(&self, file: &FileRef) -> Result<(), FileReadError> {

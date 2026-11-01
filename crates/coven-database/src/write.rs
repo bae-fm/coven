@@ -30,6 +30,17 @@ impl<'connection, 'write> SqlContext<'connection, 'write> {
         self.files.step(|| self.files.cancel_move(id))
     }
 
+    /// Release the pins on these files' stored bytes and evict each of their
+    /// namespaces down to its budget, in this write (§17.8). A file this
+    /// device has no record of, or one on one device only, has no pin to
+    /// release. The evicted bytes go once the write has committed.
+    pub fn unpin(
+        &self,
+        files: &[coven_foundation::id_source::FileId],
+    ) -> Result<(), crate::DbError> {
+        self.files.step(|| self.files.unpin(files))
+    }
+
     /// Run one of sync's steps on the journal in this write (§4, §11). A
     /// failed step fails the write, even if the closure goes on and returns
     /// success, since it may have made only part of its change.

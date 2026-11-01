@@ -1,0 +1,32 @@
+//! The cache changes an app asks for as steps of its write (§4, §17.8):
+//! each runs in the write's transaction, and the bytes it evicts go once
+//! the write has committed and the writer is free (Appendix C.3).
+
+use super::FileWrite;
+use crate::{file_table::Record, DbError, FilePlace, FileRef};
+use coven_foundation::id_source::FileId;
+use std::collections::BTreeSet;
+
+impl FileWrite<'_> {
+    /// Release the pins on these files' stored bytes, then evict each
+    /// namespace they are in down to its budget. A file this device has no
+    /// record of, or one on one device only, has no pin to release.
+    pub(crate) fn unpin(&self, files: &[FileId]) -> Result<(), DbError> {
+        let db = self.database;
+        let mut namespaces = BTreeSet::new();
+        for &id in files {
+            let Some(record) = Record::read(db, id)? else {
+                continue;
+            };
+            let file = FileRef::of(record)?;
+            if let FilePlace::Cloud { .. } = file.place() {
+                crate::database::file_database::unpin_cached(db, &file)?;
+                namespaces.insert(file.namespace().to_owned());
+            }
+        }
+        for namespace in namespaces {
+            crate::database::file_database::trim_cached(db, &namespace)?;
+        }
+        Ok(())
+    }
+}

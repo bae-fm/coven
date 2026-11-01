@@ -5689,6 +5689,13 @@ fails a read.
 **Pinning** keeps a file whole on the device regardless of the budget, until the
 app unpins it.
 
+**Unpinning** is a step of a write (§4). Ben's music app marks an album as no
+longer offline in the same write that unpins its tracks, so the album's row and
+its tracks' pins never disagree. The step releases each file's pin and evicts
+the file's namespace down to its budget, all in that write; the evicted bytes
+go once it has committed and the writer is free (Appendix C.3). A file on one
+device only has no pin to release, nor does one this device has no record of.
+
 **Kept here.** A file staged for the cloud, or moved to the cloud, can be kept
 here too (`Place::CloudKeptHere`, `MoveFile::AppKeptHere`,
 `MoveFile::UserKeptHere`;

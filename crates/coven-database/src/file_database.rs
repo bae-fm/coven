@@ -17,7 +17,7 @@ use std::sync::{Arc, RwLock};
 mod cache;
 pub(crate) use cache::{
     declare_budgets, file_id as file_cache_id, id as cache_id, kept as cache_kept,
-    remove_entries as remove_cached,
+    remove_entries as remove_cached, trim_entries as trim_cached, unpin as unpin_cached,
 };
 
 #[derive(Clone)]
@@ -690,11 +690,6 @@ impl FileDatabase {
     pub async fn pin_complete(&self, file: &FileRef) -> Result<bool, DbError> {
         let file = file.clone();
         self.run(move |db, _, _, _| db.transaction(|db| cache::pin_complete(db, &file))).await
-    }
-    /// Release a stored file's budget exemption.
-    pub async fn unpin(&self, file: &FileRef) -> Result<(), DbError> {
-        let file = file.clone();
-        self.run(move |db, _, _, _| db.transaction(|db| cache::unpin(db, &file))).await
     }
     /// Store a namespace's byte budget. Eviction is requested separately by sync.
     pub async fn set_budget(&self, namespace: &str, bytes: u64) -> Result<(), DbError> {

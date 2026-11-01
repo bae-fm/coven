@@ -5216,6 +5216,15 @@ progress alone would sit still until then.
 /// Re-exported from coven-format so app buffers use the same chunk size.
 pub const CHUNK_SIZE: usize = 64 * 1024;
 
+impl CovenWrite<'_> {
+    /// Stops keeping files, as a step of this write (§4, §17.8): each file's
+    /// pin ends and its namespace is evicted down to its budget in the
+    /// write, and the evicted bytes go once it has committed. A file on one
+    /// device only, or one this device has no record of, has no pin to
+    /// release. A pin coven keeps for a file kept here stays.
+    pub fn unpin(&self, files: &[FileId]) -> Result<(), DbError>;
+}
+
 /// Progress while keeping files whole on this device (§17.8, E8).
 pub struct PinProgress {
     /// Files whose bytes have all been kept.
@@ -5305,8 +5314,8 @@ impl CovenHandle {
     /// one E7 describes.
     pub fn subscribe_download_transfers(&self) -> TransferWatch;
 
-    /// Stops keeping files; they stay in the cache until the budget evicts them.
-    pub async fn unpin(&self, files: &[FileRef]) -> Result<(), FileReadError>;
+    /// `CovenWrite::unpin`, in a write of its own.
+    pub async fn unpin(&self, files: &[FileId]) -> CovenResult<()>;
 
     /// Whether each file is pinned, one answer per file in order, or `None`
     /// for a file this device has no record of. The answer is whether

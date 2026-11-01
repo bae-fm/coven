@@ -329,44 +329,52 @@ pub(crate) fn total(db: &DatabaseConnection, namespace: &str) -> Result<i64, DbE
         .pop()
         .unwrap_or(0))
 }
-/// Evict over-budget entries; returns their recorded names, whose bytes the
-/// caller removes once the writer is free (Appendix C.3).
+/// Evict over-budget entries in a transaction of their own; returns their
+/// recorded names, whose bytes the caller removes once the writer is free
+/// (Appendix C.3).
+pub(super) fn trim(db: &DatabaseConnection, namespace: &str) -> Result<Vec<String>, DbError> {
+    db.transaction(|db| trim_entries(db, namespace))
+}
+/// Evict over-budget entries in the transaction under way, such as a
+/// write's; returns their recorded names, whose bytes go once the writer is
+/// free (Appendix C.3).
 #[expect(
     clippy::map_err_ignore,
     reason = "a stored value that won't convert or decode is DamagedDatabase"
 )]
-pub(super) fn trim(db: &DatabaseConnection, namespace: &str) -> Result<Vec<String>, DbError> {
-    db.transaction(|db| {
-        let budget = budget(db, namespace)?;
-        let mut total = total(db, namespace)?;
-        let mut removed = Vec::new();
-        while u64::try_from(total).map_err(|_| DbError::DamagedDatabase)? > budget {
-            // Chunks need their header for offline opens. Once the last chunk
-            // goes, that header competes on recency with every other entry.
-            let next = db.query(
-                "SELECT path,size FROM _coven_cache AS candidate
+pub(crate) fn trim_entries(
+    db: &DatabaseConnection,
+    namespace: &str,
+) -> Result<Vec<String>, DbError> {
+    let budget = budget(db, namespace)?;
+    let mut total = total(db, namespace)?;
+    let mut removed = Vec::new();
+    while u64::try_from(total).map_err(|_| DbError::DamagedDatabase)? > budget {
+        // Chunks need their header for offline opens. Once the last chunk
+        // goes, that header competes on recency with every other entry.
+        let next = db.query(
+            "SELECT path,size FROM _coven_cache AS candidate
                  WHERE namespace=?1 AND pinned=0
                    AND (chunk!=?2 OR NOT EXISTS(
                        SELECT 1 FROM _coven_cache AS chunks
                        WHERE chunks.namespace=candidate.namespace
                          AND chunks.file_id=candidate.file_id AND chunks.chunk>=0))
                  ORDER BY last_read,path LIMIT 1",
-                (namespace, HEADER),
-                |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)),
-            )?;
-            let Some((path, size)) = next.into_iter().next() else {
-                break;
-            };
-            db.internal_execute("DELETE FROM _coven_cache WHERE path=?1", [&path])?;
-            db.internal_execute(
-                "INSERT INTO _coven_file_removals(area,path) VALUES('cache',?1)",
-                [&path],
-            )?;
-            total -= size;
-            removed.push(path);
-        }
-        Ok(removed)
-    })
+            (namespace, HEADER),
+            |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)),
+        )?;
+        let Some((path, size)) = next.into_iter().next() else {
+            break;
+        };
+        db.internal_execute("DELETE FROM _coven_cache WHERE path=?1", [&path])?;
+        db.internal_execute(
+            "INSERT INTO _coven_file_removals(area,path) VALUES('cache',?1)",
+            [&path],
+        )?;
+        total -= size;
+        removed.push(path);
+    }
+    Ok(removed)
 }
 /// Drop a file's cache entries; returns their recorded names, whose bytes
 /// the caller removes once the writer is free (Appendix C.3).
@@ -382,7 +390,8 @@ pub(super) fn pin_complete(db: &DatabaseConnection, file: &FileRef) -> Result<bo
         (file.namespace(), id(file)?, hash.as_bytes().as_slice(), COMPLETE_FILE),
     )? == 1)
 }
-pub(super) fn unpin(db: &DatabaseConnection, file: &FileRef) -> Result<(), DbError> {
+/// Release a stored file's budget exemption: every entry of its bytes.
+pub(crate) fn unpin(db: &DatabaseConnection, file: &FileRef) -> Result<(), DbError> {
     db.internal_execute(
         "UPDATE _coven_cache SET pinned=0 WHERE namespace=?1 AND file_id=?2",
         (file.namespace(), id(file)?),
