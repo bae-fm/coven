@@ -26,7 +26,9 @@ vec![
 ```
 
 The declared budget applies when the namespace is first declared. After that,
-`handle.set_cache_budget("audio", bytes)` changes it, and
+`sql.set_cache_budget("audio", bytes)`, a step of the app's write, changes it
+and evicts down to it in that write (`handle.set_cache_budget` does the same in
+a write of its own), and
 `handle.get_cache_budget("audio")` reads it. Declaring a namespace twice fails
 opening (`SchemaError::DuplicateNamespace`).
 

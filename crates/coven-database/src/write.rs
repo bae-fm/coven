@@ -52,6 +52,14 @@ impl<'connection, 'write> SqlContext<'connection, 'write> {
         self.files.step(|| self.files.evict(file))
     }
 
+    /// Set a declared namespace's cache budget and evict its unpinned
+    /// entries down to it, in this write (§17.8). An undeclared namespace
+    /// fails with `UndeclaredNamespace`. The evicted bytes go once the write
+    /// has committed.
+    pub fn set_cache_budget(&self, namespace: &str, bytes: u64) -> Result<(), crate::DbError> {
+        self.files.step(|| self.files.set_cache_budget(namespace, bytes))
+    }
+
     /// Run one of sync's steps on the journal in this write (§4, §11). A
     /// failed step fails the write, even if the closure goes on and returns
     /// success, since it may have made only part of its change.

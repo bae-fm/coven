@@ -373,7 +373,7 @@ async fn cache_totals_follow_their_records() {
         .await
         .is_err());
     assert_eq!(total(&db), 111);
-    owner.set_budget("files", 1_000).await.unwrap();
+    db.write(|sql| sql.set_cache_budget("files", 1_000)).await.unwrap();
     assert_eq!(total(&db), 111);
     let id = file.id();
     db.write(move |sql| sql.evict_file(id)).await.unwrap();
@@ -675,8 +675,11 @@ async fn a_namespace_has_the_budget_its_declaration_gives_until_set() {
         owner.budget("other").await,
         Err(DbError::UndeclaredNamespace { namespace }) if namespace == "other"
     ));
-    assert!(matches!(owner.set_budget("other", 1).await, Err(DbError::UndeclaredNamespace { .. })));
-    owner.set_budget("files", 50).await.unwrap();
+    assert!(matches!(
+        db.write(|sql| sql.set_cache_budget("other", 1)).await,
+        Err(DbError::UndeclaredNamespace { .. })
+    ));
+    db.write(|sql| sql.set_cache_budget("files", 50)).await.unwrap();
     db.close().await.unwrap();
     let db = open_with(100).await.unwrap();
     assert_eq!(FileDatabase::new(db.clone()).budget("files").await.unwrap(), 50);
@@ -693,6 +696,47 @@ async fn a_namespace_has_the_budget_its_declaration_gives_until_set() {
         super::cache::trim(sql, "files").unwrap()
     });
     assert_eq!(removed, ["old"]);
+    db.close().await.unwrap();
+}
+
+/// Setting a budget is a step of the app's write (§17.8): the budget and
+/// the eviction it makes commit with the app's row, and a write that fails
+/// keeps neither.
+#[tokio::test]
+async fn a_budget_and_its_eviction_go_with_their_write() {
+    use crate::file_write::tests::local_count;
+    let store = TestStore::new();
+    let db = open(&store, Provenance::AppProvided).await;
+    db.inspect_writer(|sql| {
+        for (path, read) in [("old", 1), ("new", 2)] {
+            sql.internal_execute(
+                "INSERT INTO _coven_cache(namespace,file_id,chunk,path,size,last_read,pinned)
+                 VALUES('files',?1,0,?1,30,?2,0)",
+                (path, read),
+            )
+            .unwrap();
+        }
+    });
+    let failed = db
+        .write(|sql| {
+            sql.set_cache_budget("files", 0)?;
+            Err::<(), _>(DbError::Invariant { what: "the app gives up" })
+        })
+        .await;
+    assert!(matches!(failed, Err(DbError::Invariant { .. })));
+    assert_eq!(local_count(&db, "_coven_cache"), 2);
+    db.write(|sql| {
+        sql.execute("INSERT INTO files(id) VALUES('settings')", [])?;
+        sql.set_cache_budget("files", 30)?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+    assert_eq!(FileDatabase::new(db.clone()).budget("files").await.unwrap(), 30);
+    let left = db.inspect_writer(|sql| {
+        sql.query("SELECT path FROM _coven_cache", [], |r| r.get::<_, String>(0)).unwrap()
+    });
+    assert_eq!(left, ["new"]);
     db.close().await.unwrap();
 }
 

@@ -49,6 +49,14 @@ impl<'write> CovenWrite<'write> {
         self.sql.evict_file(file)
     }
 
+    /// Sets a declared namespace's cache budget and evicts its unpinned
+    /// files and chunks, least recently read first, down to it (§17.8). An
+    /// undeclared namespace fails with `UndeclaredNamespace`. The evicted
+    /// bytes go once the write has committed.
+    pub fn set_cache_budget(&self, namespace: &str, max_bytes: u64) -> Result<(), DbError> {
+        self.sql.set_cache_budget(namespace, max_bytes)
+    }
+
     /// Makes an operation's retry or undo due now, from its recorded
     /// progress (E6): its pending record and retry wait end in this write.
     /// It fails with `NotPending` for an operation that has finished or

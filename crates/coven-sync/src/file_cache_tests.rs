@@ -563,7 +563,10 @@ async fn the_cached_chunk_a_fetch_stops_at_outlasts_older_entries() {
     f.files.read_file(&other).await.unwrap();
     // Both headers and three chunks: the fetched pair leaves room for one of
     // the two chunks already cached.
-    f.files.set_cache_budget("files", 2 * 11 + 3 * (CHUNK as u64 + 16)).await.unwrap();
+    f.database
+        .write(|sql| sql.set_cache_budget("files", 2 * 11 + 3 * (CHUNK as u64 + 16)))
+        .await
+        .unwrap();
     let before = f.storage.ranges().await.len();
     assert_eq!(stream.read_at(0, 3 * CHUNK as u64).await.unwrap(), vec![71; CHUNK * 3]);
     let ranges = f.storage.ranges().await;
@@ -602,7 +605,10 @@ async fn eviction_uses_chunk_recency_and_keeps_namespace_budgets_independent() {
     let other = f.database.file_ref(other.id()).await.unwrap();
     f.files.read_file(&other).await.unwrap();
     let stream = f.files.open_file_stream(&file).await.unwrap();
-    f.files.set_cache_budget("files", 11 + 2 * (CHUNK as u64 + 16)).await.unwrap();
+    f.database
+        .write(|sql| sql.set_cache_budget("files", 11 + 2 * (CHUNK as u64 + 16)))
+        .await
+        .unwrap();
     for index in [0, 1, 0, 2] {
         stream.read_at(index * CHUNK as u64, 1).await.unwrap();
     }
@@ -619,7 +625,7 @@ async fn eviction_uses_chunk_recency_and_keeps_namespace_budgets_independent() {
 #[tokio::test]
 async fn opening_a_file_respects_a_zero_cache_budget_including_empty_files() {
     let f = Fixture::new(Provenance::AppProvided).await;
-    f.files.set_cache_budget("files", 0).await.unwrap();
+    f.database.write(|sql| sql.set_cache_budget("files", 0)).await.unwrap();
     for bytes in [Vec::new(), vec![71; CHUNK]] {
         let id = format!("length-{}", bytes.len());
         let file = f.uploaded(&id, bytes.clone()).await;
@@ -635,7 +641,10 @@ async fn opening_a_file_respects_a_zero_cache_budget_including_empty_files() {
 async fn pinning_preserves_cached_tail_chunks_while_assembling_the_whole_file() {
     let f = Fixture::new(Provenance::AppProvided).await;
     let file = f.uploaded("cached-tail", vec![74; CHUNK * 4]).await;
-    f.files.set_cache_budget("files", 11 + 2 * (CHUNK as u64 + 16)).await.unwrap();
+    f.database
+        .write(|sql| sql.set_cache_budget("files", 11 + 2 * (CHUNK as u64 + 16)))
+        .await
+        .unwrap();
     let stream = f.files.open_file_stream(&file).await.unwrap();
     stream.read_at(3 * CHUNK as u64, CHUNK as u64).await.unwrap();
     // Only the cached tail is verified before pinning; the pin publishes the
@@ -659,7 +668,7 @@ async fn unused_headers_do_not_displace_recently_read_chunks() {
     f.files.open_file_stream(&old).await.unwrap();
     assert!(f.files.inner.database.cached(&old, -1).await.unwrap().is_some());
     let recent = f.uploaded("recent", vec![76; CHUNK]).await;
-    f.files.set_cache_budget("files", 11 + CHUNK as u64 + 16).await.unwrap();
+    f.database.write(|sql| sql.set_cache_budget("files", 11 + CHUNK as u64 + 16)).await.unwrap();
     f.files.open_file_stream(&recent).await.unwrap().read_at(0, 1).await.unwrap();
     assert!(f.files.inner.database.cached(&recent, 0).await.unwrap().is_some());
     assert!(f.files.inner.database.cached(&recent, -1).await.unwrap().is_some());

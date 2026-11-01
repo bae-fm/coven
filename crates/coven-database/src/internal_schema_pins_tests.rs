@@ -84,8 +84,8 @@ async fn a_local_trigger_follows_each_pin_as_it_changes() {
     assert!(agrees(&db));
     let writes = runs.writes();
     let id = file.id();
-    FileDatabase::new(db.clone()).set_budget("files", 0).await.unwrap();
     assert_eq!(local_count(&db, "_coven_cache"), 1);
+    db.write(|sql| sql.set_cache_budget("files", 0)).await.unwrap();
     db.write(move |sql| {
         sql.execute("UPDATE files SET title='kept elsewhere' WHERE id='7'", [])?;
         // The write's later SQL sees the step: the trigger already ran.

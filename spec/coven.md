@@ -5684,7 +5684,8 @@ a file stays whole on a device only when the app pins it. The cache keeps files
 and chunks within a size budget the app declares for each namespace. Each
 namespace evicts on its own ([api.md E8](api.md#e8-files-and-the-cache)). Over
 budget, the least recently used files and chunks go first. Freeing space never
-fails a read.
+fails a read. A new budget is a step of a write (§4): the write sets it and
+evicts down to it, and the evicted bytes go once it has committed.
 
 **Pinning** keeps a file whole on the device regardless of the budget, until the
 app unpins it.

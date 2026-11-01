@@ -5230,6 +5230,13 @@ impl CovenWrite<'_> {
     /// downloads it again. A file on one device only, or one this device
     /// has no record of, has none.
     pub fn evict_file(&self, file: FileId) -> Result<(), DbError>;
+
+    /// Sets a declared namespace's cache budget, in bytes, as a step of this
+    /// write (§4, §17.8), and evicts its unpinned files and chunks, least
+    /// recently read first, down to it; the evicted bytes go once the write
+    /// has committed. An undeclared namespace fails with
+    /// `UndeclaredNamespace`.
+    pub fn set_cache_budget(&self, namespace: &str, max_bytes: u64) -> Result<(), DbError>;
 }
 
 /// Progress while keeping files whole on this device (§17.8, E8).
@@ -5337,8 +5344,9 @@ impl CovenHandle {
     /// `CovenWrite::evict_file`, in a write of its own.
     pub async fn evict_file(&self, file: FileId) -> CovenResult<()>;
 
+    /// `CovenWrite::set_cache_budget`, in a write of its own.
+    pub async fn set_cache_budget(&self, namespace: &str, max_bytes: u64) -> CovenResult<()>;
     /// A declared namespace's cache budget, in bytes; each evicts on its own.
-    pub async fn set_cache_budget(&self, namespace: &str, max_bytes: u64) -> Result<(), DbError>;
     pub async fn get_cache_budget(&self, namespace: &str) -> Result<u64, DbError>;
 }
 

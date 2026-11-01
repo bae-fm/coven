@@ -320,6 +320,21 @@ pub(super) fn budget(db: &DatabaseConnection, namespace: &str) -> Result<u64, Db
         .ok_or_else(|| DbError::UndeclaredNamespace { namespace: namespace.to_owned() })?;
     Ok(u64::from_be_bytes(bytes.try_into().map_err(|_| DbError::DamagedDatabase)?))
 }
+/// Set a declared namespace's budget, in the transaction under way.
+pub(crate) fn set_budget(
+    db: &DatabaseConnection,
+    namespace: &str,
+    bytes: u64,
+) -> Result<(), DbError> {
+    let changed = db.internal_execute(
+        "UPDATE _coven_cache_budgets SET bytes=?2 WHERE namespace=?1",
+        (namespace, bytes.to_be_bytes().as_slice()),
+    )?;
+    if changed == 0 {
+        return Err(DbError::UndeclaredNamespace { namespace: namespace.to_owned() });
+    }
+    Ok(())
+}
 /// The namespace's cached bytes, maintained with its cache records.
 pub(crate) fn total(db: &DatabaseConnection, namespace: &str) -> Result<i64, DbError> {
     Ok(db

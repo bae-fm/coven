@@ -17,7 +17,8 @@ use std::sync::{Arc, RwLock};
 mod cache;
 pub(crate) use cache::{
     declare_budgets, file_id as file_cache_id, id as cache_id, kept as cache_kept,
-    remove_entries as remove_cached, trim_entries as trim_cached, unpin as unpin_cached,
+    remove_entries as remove_cached, set_budget as set_cache_budget, trim_entries as trim_cached,
+    unpin as unpin_cached,
 };
 
 #[derive(Clone)]
@@ -679,23 +680,6 @@ impl FileDatabase {
     pub async fn pin_complete(&self, file: &FileRef) -> Result<bool, DbError> {
         let file = file.clone();
         self.run(move |db, _, _, _| db.transaction(|db| cache::pin_complete(db, &file))).await
-    }
-    /// Store a namespace's byte budget. Eviction is requested separately by sync.
-    pub async fn set_budget(&self, namespace: &str, bytes: u64) -> Result<(), DbError> {
-        let namespace = namespace.to_owned();
-        self.run(move |db, _, _, _| {
-            db.transaction(|db| {
-                let changed = db.internal_execute(
-                    "UPDATE _coven_cache_budgets SET bytes=?2 WHERE namespace=?1",
-                    (&namespace, bytes.to_be_bytes().as_slice()),
-                )?;
-                if changed == 0 {
-                    return Err(DbError::UndeclaredNamespace { namespace });
-                }
-                Ok(())
-            })
-        })
-        .await
     }
     /// Plaintext bytes absent from this namespace's cache; headers and tags
     /// are excluded from application download progress. A file only on this

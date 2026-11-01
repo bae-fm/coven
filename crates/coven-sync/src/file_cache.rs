@@ -43,14 +43,6 @@ impl Files {
             .try_for_each(|()| std::future::ready(Ok(())))
             .await
     }
-    /// Set the budget and immediately evict this namespace's unpinned LRU bytes.
-    pub async fn set_cache_budget(&self, namespace: &str, max_bytes: u64) -> Result<(), DbError> {
-        self.inner.check_open()?;
-        let _cache = self.inner.cache.write().await;
-        self.inner.database.set_budget(namespace, max_bytes).await?;
-        self.inner.database.trim_cache(namespace).await?;
-        Ok(())
-    }
     /// The namespace's budget, declared or since set (E8).
     pub async fn get_cache_budget(&self, namespace: &str) -> Result<u64, DbError> {
         self.inner.check_open()?;

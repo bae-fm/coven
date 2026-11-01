@@ -30,6 +30,14 @@ impl FileWrite<'_> {
         Ok(())
     }
 
+    /// Set a declared namespace's budget and evict its unpinned entries,
+    /// least recently read first, down to it.
+    pub(crate) fn set_cache_budget(&self, namespace: &str, bytes: u64) -> Result<(), DbError> {
+        crate::database::file_database::set_cache_budget(self.database, namespace, bytes)?;
+        crate::database::file_database::trim_cached(self.database, namespace)?;
+        Ok(())
+    }
+
     /// Remove a stored file's cached copies, pinned or not, with no storage
     /// operation: every entry of its bytes. A file this device has no record
     /// of, or one on one device only, has none.

@@ -455,7 +455,7 @@ async fn budgets_pins_eviction_and_second_device_reads() {
     );
     let ref2 = second.database.file_ref(file.id()).await.unwrap();
     assert_eq!(files.read_file(&ref2).await.unwrap(), bytes);
-    f.files.set_cache_budget("files", 1).await.unwrap();
+    f.database.write(|sql| sql.set_cache_budget("files", 1)).await.unwrap();
     f.files.pin(std::slice::from_ref(&file)).await.unwrap();
     assert_eq!(f.database.files_pinned(vec![file.id()]).await.unwrap(), vec![Some(true)]);
     let progress = f.database.pin_progress(vec![file.clone()]).await.unwrap();
@@ -532,7 +532,7 @@ async fn cancelling_a_pin_releases_partial_budget_exemptions() {
     task.abort();
     assert!(task.await.unwrap_err().is_cancelled());
     f.reopen().await;
-    f.files.set_cache_budget("files", 0).await.unwrap();
+    f.database.write(|sql| sql.set_cache_budget("files", 0)).await.unwrap();
     assert_eq!(f.files.inner.database.missing_bytes(&file).await.unwrap(), file.size());
     f.close().await;
 }
