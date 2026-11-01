@@ -114,6 +114,17 @@ impl Group {
         let (temp, _) = self.directory();
         self.open_with(temp, identity, None, storage).await
     }
+    /// A newcomer, as [`Self::newcomer`], that reads `clock` instead of the
+    /// group's.
+    pub(crate) async fn newcomer_with_clock(
+        &self,
+        identity: MemberIdentity,
+        storage: MemoryStorage,
+        clock: coven_foundation::clock::ClockRef,
+    ) -> Device {
+        let (temp, _) = self.directory();
+        self.open_with_clock(temp, identity, None, storage, clock).await
+    }
     /// A new installation's unpublished directory.
     pub(crate) fn directory(&self) -> (tempfile::TempDir, coven_foundation::files::StoreDir) {
         let temp = tempfile::tempdir().unwrap();
@@ -138,6 +149,16 @@ impl Group {
         identity: MemberIdentity,
         ring: Option<StoreKeyring>,
         storage: MemoryStorage,
+    ) -> Device {
+        self.open_with_clock(temp, identity, ring, storage, self.clock.clone()).await
+    }
+    async fn open_with_clock(
+        &self,
+        temp: tempfile::TempDir,
+        identity: MemberIdentity,
+        ring: Option<StoreKeyring>,
+        storage: MemoryStorage,
+        clock: coven_foundation::clock::ClockRef,
     ) -> Device {
         let directory = StoreDirectories::new(temp.path().into()).store_dir(&self.store);
         let mut database = DatabaseBuilder::new(directory.clone());
@@ -172,7 +193,7 @@ impl Group {
             .open()
             .await
             .unwrap();
-        self.attach(temp, identity, ring, storage, database).await
+        self.attach_with_clock(temp, identity, ring, storage, database, clock).await
     }
 
     pub(crate) async fn attach(
@@ -182,6 +203,17 @@ impl Group {
         ring: Option<StoreKeyring>,
         storage: MemoryStorage,
         database: Database,
+    ) -> Device {
+        self.attach_with_clock(temp, identity, ring, storage, database, self.clock.clone()).await
+    }
+    async fn attach_with_clock(
+        &self,
+        temp: tempfile::TempDir,
+        identity: MemberIdentity,
+        ring: Option<StoreKeyring>,
+        storage: MemoryStorage,
+        database: Database,
+        clock: coven_foundation::clock::ClockRef,
     ) -> Device {
         let directory = StoreDirectories::new(temp.path().into()).store_dir(&self.store);
         // As coven's opening does with storage set up, before any loop runs.
@@ -224,7 +256,6 @@ impl Group {
         }
         let device = directory.settings().unwrap().device_id;
         let state = Arc::new(SyncState::new());
-        let clock: coven_foundation::clock::ClockRef = self.clock.clone();
         let waits = Arc::new(RetryWaits::open(database.clone(), clock.clone()).await.unwrap());
         let transfers = Arc::new(coven_storage::TransferBudget::new(TransferLimits::default()));
         let storage = storage

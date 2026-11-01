@@ -1,7 +1,10 @@
 use crate::sequence_sync::tests::*;
 use crate::*;
+use coven_database::LoadStep;
 use coven_format::admin::StoreChange;
+use coven_foundation::progress::{Progress, RecordingClock};
 use coven_storage::{ObjectPath, Storage};
+use std::sync::Arc;
 
 #[tokio::test]
 async fn a_restored_device_opens_its_copy_loads_the_sequence_and_registers() {
@@ -529,23 +532,48 @@ async fn a_restore_reads_slots_ahead_and_a_quiet_pass_still_sends_one_miss() {
     }
 }
 
-/// What `unlock` reports as it loads, in order, each value once.
+/// A new installation of Ana's whose clock records every value loading
+/// reports into its watch, which a host reading the watch could miss.
+async fn recorded_newcomer(group: &Group, ana: &Device) -> (Device, Arc<RecordingClock<LoadStep>>) {
+    let clock = Arc::new(RecordingClock::new(group.clock.clone()));
+    let laptop = group
+        .newcomer_with_clock(ana.identity.clone(), group.storage.for_device(), clock.clone())
+        .await;
+    clock.watch(laptop.sync.subscribe_progress());
+    (laptop, clock)
+}
+
+/// What `unlock` reports as it loads: every value, in order, each once.
 async fn unlock_reports(
-    device: &Device,
-    host: impl Fn(&coven_foundation::progress::Progress<coven_database::LoadStep>),
-) -> Vec<coven_foundation::progress::Progress<coven_database::LoadStep>> {
-    let seen = std::sync::Mutex::new(Vec::new());
-    within(coven_foundation::progress::forward(
-        device.sync.subscribe_progress(),
-        device.sync.unlock(),
-        |progress| {
-            host(&progress);
-            seen.lock().unwrap().push(progress);
-        },
-    ))
-    .await
-    .unwrap();
-    seen.into_inner().unwrap()
+    laptop: &Device,
+    clock: &RecordingClock<LoadStep>,
+) -> Vec<Progress<LoadStep>> {
+    within(laptop.sync.unlock()).await.unwrap();
+    clock.seen()
+}
+
+/// The first time loading reports `step` into `clock`'s watch, it waits
+/// there while Ana's note `id` lands.
+fn land_during(
+    clock: &RecordingClock<LoadStep>,
+    step: LoadStep,
+    ana: &Device,
+    id: &'static str,
+    title: &'static str,
+) {
+    let runtime = tokio::runtime::Handle::current();
+    let landed = std::sync::atomic::AtomicBool::new(false);
+    let writer = ana.sync.clone();
+    clock.on_record(move |progress| {
+        if progress.step == step && !landed.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            tokio::task::block_in_place(|| {
+                runtime.block_on(async {
+                    insert(&writer.database, id, title).await;
+                    writer.pass().await.unwrap();
+                })
+            });
+        }
+    });
 }
 
 /// Loading's steps arrive in the order it runs them: the scan for this
@@ -553,8 +581,7 @@ async fn unlock_reports(
 /// each circle's, installing, the slots installed with them, then reading
 /// and applying the slots after them. Within a step `done` never goes
 /// backwards or passes its total, which never shrinks.
-fn assert_load_order(seen: &[coven_foundation::progress::Progress<coven_database::LoadStep>]) {
-    use coven_database::LoadStep;
+fn assert_load_order(seen: &[Progress<LoadStep>]) {
     let rank = |step: &LoadStep| match step {
         LoadStep::FindingKeys => 0,
         LoadStep::Streaming(coven_merge::Audience::Store) => 1,
@@ -583,7 +610,6 @@ fn assert_load_order(seen: &[coven_foundation::progress::Progress<coven_database
 /// them, ending with the last one applied.
 #[tokio::test]
 async fn a_restore_reports_each_snapshot_then_the_slots_after_them() {
-    use coven_database::LoadStep;
     let group = Group::new();
     let ana = group.device(1).await;
     group.create(&ana).await;
@@ -610,8 +636,8 @@ async fn a_restore_reports_each_snapshot_then_the_slots_after_them() {
     .unwrap()
     .unwrap();
     assert_eq!(floor.announcements.len(), 2);
-    let laptop = group.newcomer(ana.identity.clone(), group.storage.for_device()).await;
-    let seen = unlock_reports(&laptop, |_| ()).await;
+    let (laptop, clock) = recorded_newcomer(&group, &ana).await;
+    let seen = unlock_reports(&laptop, &clock).await;
     assert_load_order(&seen);
     let finished = |step: LoadStep| {
         seen.iter().any(|progress| progress.step == step && progress.done == progress.total)
@@ -633,7 +659,6 @@ async fn a_restore_reports_each_snapshot_then_the_slots_after_them() {
 /// the Reading step's total, and the laptop reads and applies it too.
 #[tokio::test(flavor = "multi_thread")]
 async fn slots_that_land_while_reading_raise_its_total() {
-    use coven_database::LoadStep;
     let group = Group::new();
     let ana = group.device(1).await;
     group.create(&ana).await;
@@ -642,23 +667,9 @@ async fn slots_that_land_while_reading_raise_its_total() {
         ana.sync.pass().await.unwrap();
     }
     let before = ana.sync.database.applied_slot().await.unwrap();
-    let laptop = group.newcomer(ana.identity.clone(), group.storage.for_device()).await;
-    let runtime = tokio::runtime::Handle::current();
-    let landed = std::sync::atomic::AtomicBool::new(false);
-    let seen = unlock_reports(&laptop, |progress| {
-        if progress.step == LoadStep::Reading
-            && !landed.swap(true, std::sync::atomic::Ordering::SeqCst)
-        {
-            // The laptop waits while Ana's note lands.
-            tokio::task::block_in_place(|| {
-                runtime.block_on(async {
-                    insert(&ana.sync.database, "d", "while the laptop reads").await;
-                    ana.sync.pass().await.unwrap();
-                })
-            });
-        }
-    })
-    .await;
+    let (laptop, clock) = recorded_newcomer(&group, &ana).await;
+    land_during(&clock, LoadStep::Reading, &ana, "d", "while the laptop reads");
+    let seen = unlock_reports(&laptop, &clock).await;
     assert_load_order(&seen);
     let totals: Vec<_> = seen
         .iter()
@@ -683,7 +694,6 @@ async fn slots_that_land_while_reading_raise_its_total() {
 /// and the scan reports from its start to its end before the slots apply.
 #[tokio::test]
 async fn a_restore_without_a_floor_reports_finding_its_keys_first() {
-    use coven_database::LoadStep;
     let group = Group::new();
     let ana = group.device(1).await;
     group.create(&ana).await;
@@ -692,16 +702,12 @@ async fn a_restore_without_a_floor_reports_finding_its_keys_first() {
         ana.sync.pass().await.unwrap();
     }
     let through = ana.sync.database.applied_slot().await.unwrap();
-    let laptop = group.newcomer(ana.identity.clone(), group.storage.for_device()).await;
-    let seen = unlock_reports(&laptop, |_| ()).await;
+    let (laptop, clock) = recorded_newcomer(&group, &ana).await;
+    let seen = unlock_reports(&laptop, &clock).await;
     assert_load_order(&seen);
     assert_eq!(
         seen.first(),
-        Some(&coven_foundation::progress::Progress {
-            step: LoadStep::FindingKeys,
-            done: 0,
-            total: through,
-        }),
+        Some(&Progress { step: LoadStep::FindingKeys, done: 0, total: through }),
         "{seen:?}"
     );
     assert!(
@@ -724,7 +730,6 @@ async fn a_restore_without_a_floor_reports_finding_its_keys_first() {
 /// lands later raises the step's total, and the scan reads it too.
 #[tokio::test(flavor = "multi_thread")]
 async fn slots_that_land_while_finding_keys_raise_its_total() {
-    use coven_database::LoadStep;
     let group = Group::new();
     let ana = group.device(1).await;
     group.create(&ana).await;
@@ -740,23 +745,9 @@ async fn slots_that_land_while_finding_keys_raise_its_total() {
         ana.sync.pass().await.unwrap();
     }
     let before = ana.sync.database.applied_slot().await.unwrap();
-    let laptop = group.newcomer(ana.identity.clone(), group.storage.for_device()).await;
-    let runtime = tokio::runtime::Handle::current();
-    let landed = std::sync::atomic::AtomicBool::new(false);
-    let seen = unlock_reports(&laptop, |progress| {
-        if progress.step == LoadStep::FindingKeys
-            && !landed.swap(true, std::sync::atomic::Ordering::SeqCst)
-        {
-            // The laptop waits while Ana's note lands.
-            tokio::task::block_in_place(|| {
-                runtime.block_on(async {
-                    insert(&ana.sync.database, "zz", "while the laptop scans").await;
-                    ana.sync.pass().await.unwrap();
-                })
-            });
-        }
-    })
-    .await;
+    let (laptop, clock) = recorded_newcomer(&group, &ana).await;
+    land_during(&clock, LoadStep::FindingKeys, &ana, "zz", "while the laptop scans");
+    let seen = unlock_reports(&laptop, &clock).await;
     assert_load_order(&seen);
     let totals: Vec<_> = seen
         .iter()

@@ -158,6 +158,89 @@ pub async fn forward<S: Clone + PartialEq, T>(
     }
 }
 
+/// What a hook on a [`RecordingClock`] is called with: each value the
+/// reports send, once, in order.
+#[cfg(feature = "test-utils")]
+type OnRecord<S> = Box<dyn Fn(&Progress<S>) + Send + Sync>;
+
+/// A clock that keeps every value reported into one watch, for a test that
+/// checks steps a host reading the watch could miss. A report reads its
+/// clock just before it sends, so what the watch holds at each reading,
+/// with what it holds at the end, is every value sent, in order. Time and
+/// waits are `clock`'s.
+#[cfg(feature = "test-utils")]
+pub struct RecordingClock<S> {
+    clock: ClockRef,
+    watch: std::sync::OnceLock<watch::Receiver<Option<Progress<S>>>>,
+    seen: std::sync::Mutex<Vec<Progress<S>>>,
+    on_record: std::sync::OnceLock<OnRecord<S>>,
+}
+
+#[cfg(feature = "test-utils")]
+impl<S: Clone + PartialEq> RecordingClock<S> {
+    /// Keep time by `clock`; nothing is recorded until [`Self::watch`].
+    pub fn new(clock: ClockRef) -> Self {
+        Self {
+            clock,
+            watch: std::sync::OnceLock::new(),
+            seen: std::sync::Mutex::new(Vec::new()),
+            on_record: std::sync::OnceLock::new(),
+        }
+    }
+
+    /// Record the values reported into `watch`, from now on.
+    pub fn watch(&self, watch: watch::Receiver<Option<Progress<S>>>) {
+        assert!(self.watch.set(watch).is_ok(), "a recording clock records one watch");
+    }
+
+    /// Call `hook` with each value as it is recorded, on the thread that
+    /// read the clock: when that is the reporting work's, the work waits
+    /// until `hook` returns.
+    pub fn on_record(&self, hook: impl Fn(&Progress<S>) + Send + Sync + 'static) {
+        assert!(self.on_record.set(Box::new(hook)).is_ok(), "a recording clock has one hook");
+    }
+
+    /// Every value reported so far, in order.
+    pub fn seen(&self) -> Vec<Progress<S>> {
+        self.record();
+        self.seen.lock().unwrap().clone()
+    }
+
+    fn record(&self) {
+        let Some(watch) = self.watch.get() else { return };
+        let recorded = {
+            // Held while the watch is read, so two readers record in the
+            // order the values were sent.
+            let mut seen = self.seen.lock().unwrap();
+            let newest = watch.borrow().clone();
+            match newest.filter(|newest| seen.last() != Some(newest)) {
+                Some(newest) => {
+                    seen.push(newest.clone());
+                    newest
+                }
+                None => return,
+            }
+        };
+        if let Some(hook) = self.on_record.get() {
+            hook(&recorded);
+        }
+    }
+}
+
+#[cfg(feature = "test-utils")]
+impl<S: Clone + PartialEq + Send + Sync> crate::clock::Clock for RecordingClock<S> {
+    fn now(&self) -> std::time::SystemTime {
+        self.clock.now()
+    }
+    fn elapsed(&self) -> Duration {
+        self.record();
+        self.clock.elapsed()
+    }
+    fn sleep(&self, duration: Duration) -> std::pin::Pin<Box<dyn Future<Output = ()> + Send>> {
+        self.clock.sleep(duration)
+    }
+}
+
 #[cfg(test)]
 #[path = "progress_tests.rs"]
 mod tests;

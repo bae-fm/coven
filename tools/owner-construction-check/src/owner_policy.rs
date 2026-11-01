@@ -85,6 +85,9 @@ pub(crate) const POLICY: Policy = Policy {
         // Runs its caller's work on a blocking task and waits for it, so the
         // work's panic comes back to the caller as a value (api.md E15).
         ("crates/coven-foundation/src/task.rs", "<free>", "blocking"),
+        // A test clock that keeps time by the clock it is given and records
+        // what one progress watch holds at each reading.
+        ("crates/coven-foundation/src/progress.rs", "RecordingClock", "new"),
         ("crates/coven-foundation/src/files/bootstrap.rs", "<free>", "reserve_bootstrap_directory"),
         // Both store listings read the directory on a blocking task.
         ("crates/coven-foundation/src/files/layout.rs", "StoreDirectories", "listed"),

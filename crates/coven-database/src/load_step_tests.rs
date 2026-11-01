@@ -4,7 +4,7 @@ use crate::tests::TestStore;
 use crate::write::tests::{notes, records, sql, NOTES};
 use coven_foundation::clock::Clock;
 use coven_foundation::id_source::SequentialIds;
-use coven_foundation::progress::{Progress, ProgressReport, REPORT_INTERVAL};
+use coven_foundation::progress::{Progress, ProgressReport, RecordingClock, REPORT_INTERVAL};
 use coven_merge::Audience;
 use std::io::Cursor;
 use std::sync::{Arc, Mutex};
@@ -12,37 +12,15 @@ use std::time::{Duration, SystemTime};
 use tokio::sync::watch;
 
 /// A clock each reading of which moves a report's interval on, so every
-/// update is reported. It keeps what the watch held at each reading: a
-/// report reads the clock just before it sends, so the readings hold every
-/// value it sent but the last, which the watch still holds.
-struct Recording {
-    watch: watch::Receiver<Option<Progress<LoadStep>>>,
-    elapsed: Mutex<Duration>,
-    seen: Mutex<Vec<Progress<LoadStep>>>,
-}
+/// update is reported.
+struct Stepping(Mutex<Duration>);
 
-impl Recording {
-    fn record(&self, value: Option<Progress<LoadStep>>) {
-        let mut seen = self.seen.lock().unwrap();
-        if let Some(value) = value.filter(|value| seen.last() != Some(value)) {
-            seen.push(value);
-        }
-    }
-
-    /// Every value reported, in order.
-    fn all(&self) -> Vec<Progress<LoadStep>> {
-        self.record(self.watch.borrow().clone());
-        self.seen.lock().unwrap().clone()
-    }
-}
-
-impl Clock for Recording {
+impl Clock for Stepping {
     fn now(&self) -> SystemTime {
-        SystemTime::UNIX_EPOCH + self.elapsed()
+        SystemTime::UNIX_EPOCH + *self.0.lock().unwrap()
     }
     fn elapsed(&self) -> Duration {
-        self.record(self.watch.borrow().clone());
-        let mut elapsed = self.elapsed.lock().unwrap();
+        let mut elapsed = self.0.lock().unwrap();
         *elapsed += REPORT_INTERVAL;
         *elapsed
     }
@@ -71,11 +49,8 @@ async fn loading_reports_its_tables_then_its_slots() {
     sql(&a, "UPDATE notes SET title='second'").await.unwrap();
     let after = records(&a).pop().unwrap();
     let (sender, watch) = watch::channel(None);
-    let clock = Arc::new(Recording {
-        watch,
-        elapsed: Mutex::new(Duration::ZERO),
-        seen: Mutex::new(Vec::new()),
-    });
+    let clock = Arc::new(RecordingClock::new(Arc::new(Stepping(Mutex::new(Duration::ZERO)))));
+    clock.watch(watch);
     let reload = crate::tests::reload(
         &b,
         vec![(
@@ -95,7 +70,7 @@ async fn loading_reports_its_tables_then_its_slots() {
     .await
     .unwrap();
 
-    let seen = clock.all();
+    let seen = clock.seen();
     // Each of the six passes counts every table once.
     let passes = seen.first().map_or(0, |first| first.total);
     assert!(passes > 0 && passes.is_multiple_of(crate::snapshot_install::TABLE_PASSES), "{seen:?}");
