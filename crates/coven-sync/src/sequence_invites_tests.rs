@@ -1,3 +1,4 @@
+use super::INVITE;
 use crate::sequence_sync::tests::*;
 use crate::*;
 use coven_format::{admin::MemberRole, MemberAccess};
@@ -699,6 +700,81 @@ async fn a_second_invite_to_an_account_already_shared_is_made() {
         JoinOutcome::Admitted
     );
     for device in [&ana, &carol.device] {
+        device.sync.database.close().await.unwrap();
+    }
+}
+
+/// Ben removes Ana's device while two of her invites are open: one waits for
+/// its request, and Carol's approval is under way. Neither can ever finish on
+/// a device stopped for good, so the transaction that applies the removal
+/// ends both with the device: nothing of hers stays listed, running or
+/// pending (§13.2, §14.1).
+#[tokio::test]
+async fn a_stop_for_good_ends_this_devices_invites() {
+    let group = Group::shared();
+    let ana = group.device(1).await;
+    let ben = group.device(2).await;
+    group.create_with_access(&ana, MemberAccess::ProviderAccount("ana@example.org".into())).await;
+    group.admit(&ana, &ben).await;
+    let approving = invite(&ana).await;
+    let waiting = ana
+        .sync
+        .create_invite(
+            InviteTarget::NewMember { role: MemberRole::Member, name: "Dan".into() },
+            InviteAccess::ProviderAccount { email: "dan@example.org".into() },
+            InviteDelivery::Sent { lifetime: InviteLifetime::Day },
+        )
+        .await
+        .unwrap();
+    let carol = join(&group, approving.shown_code(), "Carol's phone").await;
+    // Dan's invite made a pass that found no request yet, which waits its backoff.
+    group.clock.set(group.clock.now() + std::time::Duration::from_secs(1));
+    ana.sync.pass().await.unwrap();
+    let request = requests(&ana).await.remove(0);
+    let (device, held, now) = (ana.sync.device, ana.identity.clone(), group.clock.now());
+    let (waits, state) = (ana.sync.waits.clone(), ana.sync.state.clone());
+    let binding = ana
+        .database()
+        .write(move |sql| {
+            crate::approve_join_request(&sql, device, &held, now, waits, state, &request)
+                .map_err(|error| coven_database::DbError::SyncStream(Box::new(error)))
+        })
+        .await
+        .unwrap();
+    assert_eq!(listed(&ana).await.len(), 2);
+    ben.sync.pass().await.unwrap();
+    ben.sync
+        .administer(coven_format::admin::StoreChange::RemoveDevice { device: ana.sync.device })
+        .await
+        .unwrap();
+    assert!(matches!(ana.sync.pass().await, Err(SyncError::Removed)));
+    assert!(listed(&ana).await.is_empty(), "{:?}", listed(&ana).await);
+    let operations = ana.database().operations().await.unwrap();
+    assert!(
+        operations.iter().all(|record| record.kind != INVITE && record.started_by != INVITE),
+        "{operations:?}"
+    );
+    let outcome = ana
+        .database()
+        .read(move |sql| {
+            Ok(sql.query_row(
+                "SELECT outcome FROM coven_operations WHERE operation=?1",
+                [binding.0],
+                |row| row.get::<_, Option<OperationOutcome>>(0),
+            )?)
+        })
+        .await
+        .unwrap();
+    assert_eq!(outcome, Some(OperationOutcome::Rejected(OperationRejection::NotAllowed)));
+    for invite in [&approving, &waiting] {
+        assert!(ana
+            .database()
+            .operation_pending::<PendingRecord>(invite.operation)
+            .await
+            .unwrap()
+            .is_none());
+    }
+    for device in [&ana, &ben, &carol.device] {
         device.sync.database.close().await.unwrap();
     }
 }

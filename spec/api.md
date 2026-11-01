@@ -6170,7 +6170,9 @@ pub enum ProviderSignOut {
   request once one has arrived, or approving. The code it lists is the one
   first shown. Other devices' invites are never listed: only the inviting
   device can act on one. It looks for the request on the shared backoff;
-  `retry_now` ends that wait (E5).
+  `retry_now` ends that wait (E5). Applying a slot that stops the device for
+  good ends every invite it made, in that transaction
+  ([§14.1](coven.md#141-the-cut-off)).
 - An invite ends in a write: approval, decline and cancel each write it, and
   so does expiry. Approving, declining and cancelling are steps of the app's
   write (`CovenWrite::approve_join_request`, `CovenWrite::decline_join_request`,

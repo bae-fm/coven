@@ -170,21 +170,28 @@ pub(crate) fn finish(db: &DatabaseConnection, id: OperationId) -> Result<usize, 
     db.internal_execute("DELETE FROM _coven_operations WHERE id=?1", [id.0])
 }
 
-/// End every operation an app's write journaled that still runs, once the
-/// applied state this transaction commits stops this installation for
-/// good: it removes or replaces this device, removes its member, or binds
-/// its member to a pair it doesn't hold (§12.3, §14.1). None of them would
-/// ever run. The operation whose claim the applied slots record as landed,
-/// the removal itself when this device claimed it, ends landed at its slot;
-/// the stop refuses every other. Their journal rows and open claim end with
-/// them.
+/// End every operation an app's write journaled that still runs, and every
+/// invite this device made, once the applied state this transaction commits
+/// stops this installation for good: it removes or replaces this device,
+/// removes its member, or binds its member to a pair it doesn't hold (§12.3,
+/// §14.1). None of them would ever run. The operation whose claim the applied
+/// slots record as landed, the removal itself when this device claimed it,
+/// ends landed at its slot; the stop refuses every other. An invite ends with
+/// the operations it started, its approval's binding and its access record:
+/// their journal rows, open claim and pending records go, and it leaves
+/// `coven_invites` (§13.2).
 pub(crate) fn end_on_stop(db: &DatabaseConnection) -> Result<(), DbError> {
     let running = db.query(
         "SELECT operation FROM _coven_app_operations WHERE outcome IS NULL ORDER BY operation",
         [],
         |r| Ok(OperationId(r.get(0)?)),
     )?;
-    if running.is_empty() || !stopped(db)? {
+    let invites = db.query(
+        "SELECT id FROM _coven_operations WHERE kind=?1 OR started_by=?1 ORDER BY id",
+        [INVITE],
+        |r| Ok(OperationId(r.get(0)?)),
+    )?;
+    if (running.is_empty() && invites.is_empty()) || !stopped(db)? {
         return Ok(());
     }
     let landed = crate::claim::landed_operation(db)?;
@@ -200,8 +207,16 @@ pub(crate) fn end_on_stop(db: &DatabaseConnection) -> Result<(), DbError> {
         crate::claim::drop_operation(db, id)?;
         finish(db, id)?;
     }
+    for id in invites {
+        crate::claim::drop_operation(db, id)?;
+        finish(db, id)?;
+    }
     Ok(())
 }
+
+/// The kind of an invite's journal row, and the `started_by` of the
+/// operations it starts, as coven-sync names them.
+const INVITE: &str = "invite";
 
 /// Whether the applied state stops this installation for good. One whose
 /// device isn't registered yet hasn't started.

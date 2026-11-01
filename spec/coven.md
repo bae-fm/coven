@@ -3950,6 +3950,9 @@ If Ana's phone is reset (§19.3) before the invite ends, the reset carries the
 invite into the new database, and it is ended the same way as on expiry: its
 grant taken back and its request deleted, while access that active members still
 use stays. Without this, a reset would strand the access the invite granted.
+If her phone stops for good instead, removed or replaced, or its member's keys
+replaced, its open invites end in the transaction that applies the stop
+(§14.1).
 
 Declining, or letting the invite expire, takes back the provider access it
 granted. On S3 there is nothing to take back: the person deletes Dan's key in the
@@ -4097,9 +4100,13 @@ hold reports `MemberKeysReplaced`. Each of these stops is for good, so the
 transaction that applies it also ends every operation the app's writes journaled
 that still runs (§11.4): the removal itself, when this device claimed it, ends
 landed at its slot, even if the claim never settled before the slot arrived,
-and the stop refuses each other with `NotAllowed`. To tell a replacement of its
-member's keys from its own, a device records each pair it holds, and the
-candidate its own replacement keeps before custody keeps it (§12.3).
+and the stop refuses each other with `NotAllowed`. The same transaction ends
+this device's invites: none of them can finish on a stopped device, and an
+approval under way never expires, so it would stay listed forever. Each leaves
+`coven_invites` with its approval's binding and its pending record (§13.2). To
+tell a replacement of its member's keys from its own, a device records each
+pair it holds, and the candidate its own replacement keeps before custody keeps
+it (§12.3).
 
 A member's removal also ends the person's use of their restore code. Ana removes
 Ben at slot 52. When Ben's phone reads slot 52, it first deletes his restore

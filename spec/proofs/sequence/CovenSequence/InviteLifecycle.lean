@@ -129,7 +129,7 @@ structure Rules where
 def Rules.correct : Rules := ⟨true, true, true, true, true, true, true, false⟩
 
 /-- The rules the Rust follows, as the differential test drives it. -/
-def Rules.rust : Rules := ⟨true, true, false, true, false, false, true, true⟩
+def Rules.rust : Rules := ⟨true, true, true, true, false, false, true, true⟩
 
 /-- Stages that end at the invite's expiry; approval, once begun, finishes. -/
 def expires : Stage → Bool
@@ -193,11 +193,9 @@ def stopEffect (R : Rules) (w : World) : World :=
         outcome := if w.outcome = some none then some (some .rejected) else w.outcome
         binding := if w.outcome = some none then false else w.binding }
     else w
-  if R.endInvitesOnStop then
-    let w := { w with binding := false }
-    match w.row with
-    | some r => if r.stage = .settled then w else advance w .settled
-    | none => w
+  -- The invite's journal row goes, with its binding's and its pending
+  -- record; a pass's attempt on it has nothing left to write.
+  if R.endInvitesOnStop then { w with binding := false, row := none, pending := none, read := none }
   else w
 
 inductive Act where
@@ -730,19 +728,18 @@ def stopped' (w : World) : World :=
     approvable := false
     op := if w.op = some none then some (some .rejected) else w.op
     outcome := if w.outcome = some none then some (some .rejected) else w.outcome
-    binding := false }
+    binding := false
+    row := none
+    pending := none
+    read := none }
 
-@[simp] theorem stopped'_row (w : World) : (stopped' w).row = w.row := rfl
+@[simp] theorem stopped'_row (w : World) : (stopped' w).row = none := rfl
 @[simp] theorem stopped'_bindings (w : World) : (stopped' w).bindings = w.bindings := rfl
 @[simp] theorem stopped'_outcome (w : World) : (stopped' w).outcome =
     if w.outcome = some none then some (some .rejected) else w.outcome := rfl
 
-theorem stopEffect_correct (w : World) :
-    stopEffect Rules.correct w = match w.row with
-      | some r => if r.stage = .settled then stopped' w else advance (stopped' w) .settled
-      | none => stopped' w := by
-  simp only [stopEffect, Rules.correct, stopped']
-  cases w.row <;> rfl
+theorem stopEffect_correct (w : World) : stopEffect Rules.correct w = stopped' w := by
+  simp [stopEffect, Rules.correct, stopped']
 
 set_option maxHeartbeats 2000000 in
 theorem inv_stop (c : Config) (w : World) (inv : Inv c w)
@@ -752,13 +749,7 @@ theorem inv_stop (c : Config) (w : World) (inv : Inv c w)
       (w.read = none ∨ ∃ a, w.read = some a ∧ a.stage = .approving) := by
     simpa [enabled, applying] using e
   simp only [act, stopEffect_correct]
-  rcases hrow : w.row with _ | ⟨stage, n⟩
-  · rcases reading with hread | ⟨a, hread, hs⟩ <;>
-      constructor <;> simp_all [stopped'] <;> (repeat' split) <;> simp_all
-  · have := read_advance hrow readRow
-    cases stage <;> rcases reading with hread | ⟨a, hread, hs⟩ <;>
-      simp only [stopped', advance, hrow] <;>
-      constructor <;> simp_all [expires] <;> (repeat' split) <;> simp_all
+  constructor <;> simp_all [stopped'] <;> (repeat' split) <;> simp_all
 
 theorem inv_step (c : Config) (w : World) (a : Act) (inv : Inv c w)
     (e : enabled Rules.correct c w a = true) : Inv c (act Rules.correct c w a) := by
@@ -1027,7 +1018,7 @@ theorem stop_forward (c : Config) (w : World) :
       bindingRank w ≤ bindingRank (act Rules.correct c w .stop) := by
   simp only [act, stopEffect_correct]
   rcases hrow : w.row with _ | ⟨_ | _ | (_ | _) | _ | _ | _, n⟩ <;>
-    simp [hrow, stageRank, advance, bindingRank, entryRank] <;> (repeat' split) <;> simp_all
+    simp [stopped', stageRank, bindingRank, entryRank] <;> (repeat' split) <;> simp_all
 
 set_option maxHeartbeats 2000000 in
 /-- Every step moves the listed invite and its binding's operation forward,

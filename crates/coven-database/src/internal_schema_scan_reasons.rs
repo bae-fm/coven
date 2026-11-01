@@ -94,6 +94,8 @@ pub(super) fn reason(statement: &Statement, relation: &str) -> Option<&'static s
     Some("opening makes every abandoned cache range write a removal"),
 ("operation.rs", "SELECT id,kind,last_step,data,started_by FROM _coven_operations ORDER BY id", "_coven_operations") =>
     Some("operations() returns every unfinished journal entry"),
+("operation.rs", "SELECT id FROM _coven_operations WHERE kind=?1 OR started_by=?1 ORDER BY id", "_coven_operations") =>
+    Some("the transaction that stops this device for good ends every invite and every operation an invite started, among the unfinished journal entries"),
 ("snapshot_conflicts.rs" | "snapshot_materialize.rs", _, "i" | "b") =>
     Some("a reload visits each row it installed, or had before, once; each lookup of the device's own records is indexed"),
 ("snapshot_files.rs", _, "c" | "p" | "d" | "temp._coven_install_stored" | "temp._coven_install_references") =>

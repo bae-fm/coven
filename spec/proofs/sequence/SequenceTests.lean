@@ -595,10 +595,11 @@ def keyCase (slots held current : List Json) : Json := json% {
   let raced ← run (case "sent" ["raceCancel"])
   checkField raced ["1","invite"] Json.null
   checkField raced ["1","pending"] Json.null
-  -- The Rust today: a stop leaves an approval under way listed.
-  let stopped ← run (case "sent" ["send", "pass", "approve", "remove", "pass", "expire"])
-  checkField stopped ["6","invite"] (toJson "approving")
-  checkField stopped ["6","binding"] (toJson "rejected")
+  -- A stop for good ends an approval under way with the device.
+  let stopped ← run (case "sent" ["send", "pass", "approve", "remove", "pass"])
+  checkField stopped ["5","invite"] Json.null
+  checkField stopped ["5","journal"] (toJson false)
+  checkField stopped ["5","binding"] (toJson "rejected")
   rejects (case "sent" ["wave"])
   rejects (json% {"kind":"inviteLifecycle","delivery":"posted","records":false,"events":[]})
 
