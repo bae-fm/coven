@@ -59,8 +59,8 @@ admin change follows one path, an *operation*:
    of the app's write. The write checks the change against what this device has
    applied and journals it, offline too, so the app's own rows about it commit
    with it. A change that state already refuses fails the write with
-   `SyncError::Rejected(OperationRejection)`. Making a circle or an invite
-   catches up with the sequence first, so it needs storage.
+   `SyncError::Rejected(OperationRejection)`. Making a circle is a step too.
+   An invite catches up with the sequence first, so it needs storage.
 2. **Catch up and check.** A pass reads and applies the sequence to its end and
    checks the change again.
 3. **Prepare.** Record each piece of preparation in the operation's journal

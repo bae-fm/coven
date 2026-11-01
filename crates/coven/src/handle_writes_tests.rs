@@ -48,7 +48,7 @@ async fn making_the_store_file_device_only_leaves_the_circles_readable() {
         .await;
     network.sync(0).await;
     let (ana, carol) = (&network.devices[0], &network.devices[1]);
-    let gifts = ana.handle.circles().create("Gifts").await.unwrap();
+    let gifts = crate::tests::circle(&ana.handle, "Gifts").await;
     let originals = tempfile::tempdir().unwrap();
     let original = originals.path().join("track.flac");
     std::fs::write(&original, vec![7; 100_000]).unwrap();
@@ -151,7 +151,7 @@ async fn shared_track() -> (Network, CircleId, FileId) {
     let ana = &network.devices[0];
     let ben =
         ana.handle.members().await.unwrap().into_iter().find(|member| !member.is_self).unwrap().id;
-    let gifts = ana.handle.circles().create("Gifts").await.unwrap();
+    let gifts = crate::tests::circle(&ana.handle, "Gifts").await;
     ana.handle.circles().add_member(gifts, &ben).await.unwrap();
     let track = ana
         .handle

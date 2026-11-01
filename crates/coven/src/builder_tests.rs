@@ -4,7 +4,7 @@ use coven_database::DatabaseBuilder;
 use coven_foundation::files::StoreDirAccess;
 use coven_storage::{test_utils::MemoryStorage, Storage};
 use std::sync::Arc;
-use std::{future::Future, task::Poll, time::UNIX_EPOCH};
+use std::time::UNIX_EPOCH;
 
 fn tables() -> Vec<SyncedTable> {
     vec![SyncedTable::new("attachments", RowIdentity::SharedKey)
@@ -116,25 +116,9 @@ async fn app_reopening_resumes_operations_and_files_using_one_storage_capability
     let members = handle.members().await.unwrap();
     assert_eq!(members.len(), 1);
     assert!(members[0].is_self);
-    assert!(matches!(handle.circles().create("Disconnected").await, Err(SyncError::NoStorage)));
-    handle.unlock_store_key().await.unwrap();
-    let (started, observed) = tokio::sync::oneshot::channel();
-    let (resume, held) = tokio::sync::oneshot::channel();
-    storage.hold_next_creation(ObjectPrefix::all(directory.id()), started, held).await;
-    let circles = handle.circles();
-    let mut waiting = Box::pin(circles.create("Interrupted"));
-    std::future::poll_fn(|cx| {
-        assert!(waiting.as_mut().poll(cx).is_pending());
-        Poll::Ready(())
-    })
-    .await;
-    observed.await.unwrap();
-    storage.set_online(false);
-    resume.send(()).unwrap();
-    // The circle's operation stays journaled after its offline attempt.
-    assert!(waiting.await.is_err());
+    // With no connection, the write still journals the circle (§11.1).
+    let (interrupted, _) = handle.circles().create("Interrupted").await.unwrap();
     handle.close().await.unwrap();
-    storage.set_online(true);
     let handle = open().open(directory.id(), |_| ()).await.unwrap();
     handle.unlock_store_key().await.unwrap();
     // The pause setting survived reopening; the app resumes uploads.
@@ -175,7 +159,7 @@ async fn app_reopening_resumes_operations_and_files_using_one_storage_capability
     handle.start_sync().await.unwrap();
     status.wait_for(|s| matches!(s, SyncStatus::Synced { .. })).await;
     let circle = handle.circles().list().await.unwrap().remove(0);
-    assert_eq!(circle.name, "Interrupted");
+    assert_eq!((circle.id, circle.name.as_str()), (interrupted, "Interrupted"));
     crate::tests::landed(&handle, handle.circles().rename(circle.id, "Family").await.unwrap())
         .await;
     assert!(handle.circles().members(circle.id).await.unwrap()[0].is_self);

@@ -513,7 +513,9 @@ async fn admit_member(f: &Fixture, handle: &CovenHandle, keys: &MemberKeys) -> M
 async fn removal_preserves_key_material_and_publishes_only_the_member_target() {
     let (f, handle) = Fixture::new().await;
     let removed = admit_member(&f, &handle, member(29).keys()).await;
-    let circle = handle.circles().create("Shared").await.unwrap();
+    let (circle, created) = handle.circles().create("Shared").await.unwrap();
+    f.sync(&handle).await;
+    crate::tests::landed(&handle, Some(created)).await;
     let added = handle.circles().add_member(circle, &removed).await.unwrap();
     f.sync(&handle).await;
     crate::tests::landed(&handle, added).await;

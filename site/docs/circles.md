@@ -135,7 +135,7 @@ Circle calls live on `handle.circles()`:
 
 ```rust
 let circles = handle.circles();
-let gifts = circles.create("Gifts").await?;          // this member is its first member
+let (gifts, _) = circles.create("Gifts").await?;     // this member is its first member
 circles.add_member(gifts, &ben).await?;              // Some(OperationId)
 circles.rename(gifts, "Birthday gifts").await?;
 let mine = circles.list().await?;                    // the circles this member is in
@@ -147,11 +147,12 @@ circles.delete(gifts).await?;
 Any member of the store can make a circle and is its first member. Only the
 circle's own members rename it, add and remove its members, rotate its key and
 delete it; an admin outside it can't. Each call is an admin operation
-([Sharing](/docs/sharing#how-admin-changes-are-made)). Making a circle needs
-storage. Renaming, deleting and changing its members are steps of a write,
+([Sharing](/docs/sharing#how-admin-changes-are-made)). Making, renaming,
+deleting and changing its members are steps of a write, `create_circle`,
 `rename_circle`, `delete_circle`, `add_circle_member` and
 `remove_circle_member`, journaled offline too; the calls above make each in a
-write of its own and return the operation's id. A change no longer allowed is
+write of its own and return the operation's id. A new circle takes rows once
+its slot applies. A change no longer allowed is
 `SyncError::Rejected`: `NotAllowed` for a caller without authority,
 `TargetGone(..)` for a member, device or circle that no longer exists. The write
 fails with it when this device's state already refuses the change; otherwise

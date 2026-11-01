@@ -145,7 +145,7 @@ async fn rotation_does_not_need_preceding_circle_material() {
     let mut ring = StoreKeyring::new(held.store_key(outer).unwrap().clone());
     assert_eq!(ring.circle_key_ids(circle).count(), 0);
     ana.sync
-        .install_key(&mut session, &mut ring, &ana.identity, Audience::Circle(circle), None)
+        .install_key(&mut session, &mut ring, &ana.identity, Audience::Circle(circle))
         .await
         .unwrap();
     let intro = session.history.introductions.last().unwrap();

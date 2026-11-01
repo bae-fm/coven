@@ -424,7 +424,7 @@ async fn workers_share_keys_across_stop_forget_and_reacquisition_until_close() {
         .await
         .unwrap();
     let clone = handle.clone();
-    let circle = clone.circles().create("Shared").await.unwrap();
+    let circle = crate::tests::circle(&clone, "Shared").await;
     assert!(keys.keys.lock().unwrap().as_ref().unwrap().circle_key_ids(circle).next().is_some());
     let code = handle.restore_code().await.unwrap();
     for _ in 0..2 {

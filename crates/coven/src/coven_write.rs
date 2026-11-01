@@ -10,9 +10,9 @@ use coven_format::admin::StoreChange;
 /// the write, even if the closure goes on and returns success. Returning an
 /// error rolls back every statement and step.
 ///
-/// An administrative change is checked against the state this device has
-/// applied and journaled as an operation, with or without storage (§11.1).
-/// Its step returns the operation's id, which `coven_operations` lists from
+/// An administrative change, and making a circle, is checked against the
+/// state this device has applied and journaled as an operation, with or
+/// without storage (§11.1). Its step returns the operation's id, which `coven_operations` lists from
 /// the write's commit until the app acknowledges its outcome, or `None` when
 /// the applied state already has what it asks for. A change the applied
 /// state refuses fails with `Rejected`. Once the write commits, a pass
@@ -207,6 +207,16 @@ impl<'write> CovenWrite<'write> {
         keys: MemberPublicKeys,
     ) -> Result<Option<OperationId>, SyncError> {
         self.storage.replace_member_keys_for(&self.sql, *member, keys)
+    }
+
+    /// Makes a circle with this member as its first member, and returns its
+    /// id with the operation's (§15.5, E12). Any active member of the store
+    /// may make one. Its first key, the copy that hands it to this member
+    /// and its introduction follow in a pass, so rows go into the circle
+    /// once its slot applies. A name that isn't a valid name fails with
+    /// `Format`.
+    pub fn create_circle(&self, name: &str) -> Result<(CircleId, OperationId), SyncError> {
+        self.storage.create_circle(&self.sql, name.into())
     }
 
     /// Renames a circle this member is in, without changing its key,

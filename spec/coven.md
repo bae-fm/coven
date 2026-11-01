@@ -131,8 +131,8 @@ Ana's commit on the plane needs no network. Neither does a read of data already
 on her phone, nor renaming the Gifts circle: her write journals the rename, and
 it lands once she is back online (§11.1). Two things do need storage: reading a
 file whose bytes aren't cached yet (§17.7), and the admin operations that still
-catch up with the sequence before they journal anything, such as making a
-circle or an invite (§11.1).
+catch up with the sequence before they journal anything, such as an invite
+(§11.1).
 
 Every check a commit makes uses state already applied on the device. Membership,
 audience and row-key checks (§9.2, §15) can refuse a write, but none of them
@@ -2986,13 +2986,13 @@ to get it right. That path is an *operation*.
 
 1. **Journal.** Record the operation. An admin change the app makes, renaming the
    store, changing a role, removing a member or a device, replacing another
-   member's keys, and renaming, deleting or changing the members of a circle, is
-   a step of the app's write (§4). The write checks the change against the slots
+   member's keys, and making, renaming, deleting or changing the members of a
+   circle, is a step of the app's write (§4). The write checks the change against the slots
    this device has applied and journals it, offline too. A change that state
    already refuses fails the write with `SyncError::Rejected(OperationRejection)`;
    one that state already has journals nothing. The other operations, such as
-   making a circle, inviting, rotating or resetting, catch up with the sequence
-   first, and a call on a device without storage fails before creating anything.
+   inviting, rotating or resetting, catch up with the sequence first, and a
+   call on a device without storage fails before creating anything.
 2. **Catch up and check.** A pass reads and applies the sequence to its end, then
    checks the action again against everything it read. A change that is now
    already satisfied finishes without an entry; one that is no longer allowed is
@@ -4314,7 +4314,12 @@ only one, since each reads different rows.
 #### 15.5 Running a circle
 
 Circles are made, and members added and removed, by admin entries, under §10's
-rules. Any member of the store can make a circle and is its first member. Its own
+rules. Any member of the store can make a circle and is its first member.
+Making one is a step of a write (§11.1): it returns the circle's id at once,
+and its first key, the copy that hands the key to its maker and its
+introduction follow in a pass. A row goes into the circle only once that slot
+applies, since a write checks membership against the slots its device has
+applied (§15.6). Its own
 members rename it, add and remove its members, rotate its key and delete it; an
 admin outside the circle can't.
 

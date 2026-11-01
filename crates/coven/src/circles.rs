@@ -5,10 +5,10 @@ use crate::{
     OperationId, SyncError,
 };
 
-/// A borrowed namespace whose work remains owned by the open store. Each
-/// change is its `CovenWrite` step in a write of its own, returning the
-/// operation's id, or `None` when the applied state already has what it asks
-/// for (§11.1). Lists read the committed state, as their subscriptions do.
+/// A borrowed namespace whose work remains owned by the open store. Making a
+/// circle and each change is its `CovenWrite` step in a write of its own,
+/// returning the operation's id; a change returns `None` when the applied
+/// state already has what it asks for (§11.1). Lists read the committed state, as their subscriptions do.
 pub struct Circles<'a> {
     /// The handle whose writes the changes are steps of.
     handle: &'a CovenHandle,
@@ -29,9 +29,13 @@ impl<'a> Circles<'a> {
         self.storage.reset(Audience::Circle(circle)).await
     }
 
-    /// Make a circle with this member as its first member.
-    pub async fn create(&self, name: &str) -> Result<CircleId, SyncError> {
-        self.storage.create_circle(name.into()).await
+    /// Make a circle (`CovenWrite::create_circle`).
+    pub async fn create(&self, name: &str) -> Result<(CircleId, OperationId), SyncError> {
+        let name = name.to_owned();
+        self.handle
+            .write(move |write| Ok(write.create_circle(&name)?))
+            .await
+            .map_err(SyncError::from)
     }
     /// Rename a circle (`CovenWrite::rename_circle`).
     pub async fn rename(

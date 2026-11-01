@@ -7264,9 +7264,9 @@ pub trait MemberKeyCustody: Send + Sync {
 ### E12 Circles
 
 - A circle's members add and remove its members ([§15.5](coven.md#155-running-a-circle)).
-  Renaming, deleting and changing a circle's members are steps of an app's
-  write, journaled offline too (E6); making a circle first catches up on
-  reachable storage (§10).
+  Making, renaming, deleting and changing a circle's members are steps of an
+  app's write, journaled offline too (E6). A new circle takes rows once its
+  slot applies.
 - Circle-changing calls return `SyncError` ([E5](#e5-storage-and-sync)), as member calls
   do ([E9](#e9-members-and-devices)). Validation uses the latest applied prefix:
   `Rejected(NotAllowed)` for authority, `Rejected(NoAdminLeft)` for the
@@ -7285,8 +7285,8 @@ impl CovenHandle {
 }
 
 impl Circles<'_> {
-    /// Makes a circle with this member in it.
-    pub async fn create(&self, name: &str) -> Result<CircleId, SyncError>;
+    /// Makes a circle, in a write of its own (`CovenWrite::create_circle`).
+    pub async fn create(&self, name: &str) -> Result<(CircleId, OperationId), SyncError>;
 
     /// Renames a circle, in a write of its own (`CovenWrite::rename_circle`).
     pub async fn rename(&self, circle: CircleId, name: &str) -> Result<Option<OperationId>, SyncError>;
@@ -7326,6 +7326,13 @@ impl Circles<'_> {
 }
 
 impl CovenWrite<'_> {
+    /// Makes a circle with this member as its first member and returns its id
+    /// with the operation's. Any active member may. Its first key, the copy
+    /// that hands it to this member and its introduction follow in a pass;
+    /// rows go into it once its slot applies (§15.5). A name that isn't a
+    /// valid name fails with `Format`.
+    pub fn create_circle(&self, name: &str) -> Result<(CircleId, OperationId), SyncError>;
+
     /// Renames a circle. Its key, members and rows don't change.
     pub fn rename_circle(&self, circle: CircleId, name: &str) -> Result<Option<OperationId>, SyncError>;
 

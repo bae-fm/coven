@@ -1,14 +1,15 @@
 //! Administrative changes as steps of the app's write (§4, §11.1): the
 //! write checks the change against the state this device has applied and
-//! journals it, with or without storage. A pass then catches up, validates
+//! journals it, with or without storage. Making a circle is one too. A pass then catches up, validates
 //! it again against everything it read, and claims its slot; one the
 //! caught-up state refuses is undone and rejected (§11.2).
 
 use crate::sequence_sync::sequence_operations::SequenceOperation;
 use crate::{effects, OperationRejection, SyncError, SyncState};
+use coven_crypto::MemberIdentity;
 use coven_database::{Journal, NewOperation, OperationId, SqlContext, StoreState};
 use coven_format::{admin::StoreChange, sequence::SlotHeader};
-use coven_foundation::id_source::{DeviceId, MemberId};
+use coven_foundation::id_source::{CircleId, DeviceId, IdSource, KeyId, MemberId};
 use coven_merge::Slot;
 use std::sync::Arc;
 
@@ -22,10 +23,11 @@ use std::sync::Arc;
 pub fn administer(
     sql: &SqlContext<'_, '_>,
     device: DeviceId,
+    held: &MemberIdentity,
     state: Arc<SyncState>,
     change: StoreChange,
 ) -> Result<Option<OperationId>, SyncError> {
-    journal_change(sql, device, state, |_, _| Ok(change))
+    journal_change(sql, device, held, state, |_, _| Ok(change))
 }
 
 /// Journal the replacement of another member's public pair with `keys`, as
@@ -37,11 +39,12 @@ pub fn administer(
 pub fn replace_member_keys_for(
     sql: &SqlContext<'_, '_>,
     device: DeviceId,
+    held: &MemberIdentity,
     state: Arc<SyncState>,
     member: MemberId,
     keys: coven_crypto::MemberPublicKeys,
 ) -> Result<Option<OperationId>, SyncError> {
-    journal_change(sql, device, state, |applied, author| {
+    journal_change(sql, device, held, state, |applied, author| {
         if member == author {
             return Err(SyncError::Rejected(OperationRejection::NotAllowed));
         }
@@ -54,35 +57,87 @@ pub fn replace_member_keys_for(
     })
 }
 
+/// Journal making a circle, with this device's member as its first member,
+/// as a step of a write, and return the new circle's id with the
+/// operation's (§15.5). Any active member of the store may make one; the
+/// pass keeps the circle's first key in custody, then claims its copy and
+/// its introduction. The app can write rows into the circle once its slot
+/// applies. A name that isn't a valid name fails with `Format`.
+pub fn create_circle(
+    sql: &SqlContext<'_, '_>,
+    device: DeviceId,
+    held: &MemberIdentity,
+    ids: &dyn IdSource,
+    state: Arc<SyncState>,
+    name: String,
+) -> Result<(CircleId, OperationId), SyncError> {
+    coven_format::value::name(&name)?;
+    let circle = CircleId(ids.new_id());
+    let key = KeyId(ids.new_id());
+    let operation = sql.journal_step(|journal| {
+        registered(&journal.store_state()?, device, held)?;
+        start(journal, SequenceOperation::circle(circle, name, key), "key")
+    })?;
+    sql.after_commit(move || state.request_pass());
+    Ok((circle, operation))
+}
+
+/// This device's member, while the applied state has both active and binds
+/// the member to the pair this installation holds, or its kept candidate:
+/// only then does it author admin entries (§10, §12.3). A replaced binding
+/// fails with `MemberKeysReplaced`, as the pass that applied it reported.
+fn registered(
+    applied: &StoreState,
+    device: DeviceId,
+    held: &MemberIdentity,
+) -> Result<MemberId, SyncError> {
+    let member = applied.devices.get(&device).filter(|registered| registered.active()).and_then(
+        |registered| effects::member(applied, &registered.member).map(|m| (registered.member, m)),
+    );
+    let Some((id, member)) = member else {
+        return Err(SyncError::Rejected(OperationRejection::NotAllowed));
+    };
+    if member.keys != held.keys().public_keys()
+        && held.candidate().map(|keys| keys.public_keys()) != Some(member.keys)
+    {
+        return Err(SyncError::MemberKeysReplaced { member: id });
+    }
+    Ok(id)
+}
+
+/// Journal the operation as one the app's write asked for.
+fn start(
+    journal: &Journal<'_>,
+    work: SequenceOperation,
+    started_by: &str,
+) -> Result<OperationId, SyncError> {
+    let kind = work.kind().listed();
+    let operation = NewOperation {
+        kind: "sequence".into(),
+        data: serde_json::to_vec(&work)?,
+        started_by: started_by.into(),
+        pauses_writes: false,
+    };
+    Ok(journal.start_app_operation(&operation, &kind)?)
+}
+
 /// Build the change from the applied state and this device's member, check
 /// it there, and journal it in the write.
 fn journal_change(
     sql: &SqlContext<'_, '_>,
     device: DeviceId,
+    held: &MemberIdentity,
     state: Arc<SyncState>,
     change: impl FnOnce(&StoreState, MemberId) -> Result<StoreChange, SyncError>,
 ) -> Result<Option<OperationId>, SyncError> {
     let journaled = sql.journal_step(|journal| {
         let applied = journal.store_state()?;
-        let author = applied
-            .devices
-            .get(&device)
-            .filter(|registered| registered.active())
-            .map(|registered| registered.member)
-            .ok_or(SyncError::Rejected(OperationRejection::NotAllowed))?;
+        let author = registered(&applied, device, held)?;
         let change = change(&applied, author)?;
         if !changes(journal, &applied, device, author, &change)? {
             return Ok(None);
         }
-        let work = SequenceOperation::change(change);
-        let kind = work.kind().listed();
-        let operation = NewOperation {
-            kind: "sequence".into(),
-            data: serde_json::to_vec(&work)?,
-            started_by: "operation".into(),
-            pauses_writes: false,
-        };
-        Ok::<_, SyncError>(Some(journal.start_app_operation(&operation, &kind)?))
+        start(journal, SequenceOperation::change(change), "operation").map(Some)
     })?;
     if journaled.is_some() {
         sql.after_commit(move || state.request_pass());

@@ -46,7 +46,7 @@ pub use retry_waits::{
 };
 pub use sync_often::SyncOftenGuard;
 
-pub use admin_steps::{administer, replace_member_keys_for};
+pub use admin_steps::{administer, create_circle, replace_member_keys_for};
 pub use codes::{
     decode_code_info, read_invite_code, read_restore_code, CodeError, CodeInfo, CodeKind,
     CodeMetadata, InviteInfo,

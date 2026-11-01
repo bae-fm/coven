@@ -106,6 +106,10 @@ async fn member_keys_are_replaced_through_the_public_calls() {
         owner.handle.replace_member_keys_for(&carol, prepared.public_keys()).await,
         Err(SyncError::Rejected(OperationRejection::KeysAlreadyUsed))
     ));
+    // Its pass applies the replacement and stops; its admin writes refuse
+    // from then on.
+    handle.start_sync().await.unwrap();
+    handle.test_sync_status().wait_for(|s| matches!(s, SyncStatus::Blocked { .. })).await;
     let stopped = handle.circles().create("Garden").await;
     assert!(
         matches!(&stopped, Err(SyncError::MemberKeysReplaced { member }) if *member == carol),

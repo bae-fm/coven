@@ -86,7 +86,7 @@ async fn stopped(handle: &CovenHandle) {
 async fn an_admin_change_journals_beside_the_apps_row_and_lands_once_sync_runs() {
     let network = Network::new(1).await;
     let ana = &network.devices[0].handle;
-    let gifts = ana.circles().create("Gifts").await.unwrap();
+    let gifts = crate::tests::circle(ana, "Gifts").await;
     stopped(ana).await;
     let rename = ana
         .write(move |sql| {
@@ -160,7 +160,7 @@ async fn a_change_the_applied_state_refuses_fails_the_write() {
 async fn a_rejection_met_in_a_pass_stays_listed_until_acknowledged() {
     let mut network = Network::new(2).await;
     let (ana, ben) = (&network.devices[0].handle, &network.devices[1].handle);
-    let gifts = ana.circles().create("Gifts").await.unwrap();
+    let gifts = crate::tests::circle(ana, "Gifts").await;
     let bens = ben.members().await.unwrap().into_iter().find(|m| m.is_self).unwrap().id;
     crate::tests::landed(ana, ana.circles().add_member(gifts, &bens).await.unwrap()).await;
     network.sync(1).await;
@@ -180,5 +180,40 @@ async fn a_rejection_met_in_a_pass_stays_listed_until_acknowledged() {
     ana.write(move |sql| Ok(sql.acknowledge_operation(rename)?)).await.unwrap();
     assert_eq!(listed(&ana, rename).await, None);
     ana.close().await.unwrap();
+    network.close().await;
+}
+
+/// Ana makes Gifts with sync stopped. Her write journals the circle and
+/// returns its id, but a row into Gifts must wait: the write checks
+/// membership against the slots her device has applied, and Gifts exists
+/// once its slot applies (§15.5).
+#[tokio::test]
+async fn a_new_circle_takes_rows_once_its_slot_applies() {
+    let network = Network::new(1).await;
+    let ana = &network.devices[0].handle;
+    stopped(ana).await;
+    let note = |audience: String| {
+        move |sql: CovenWrite<'_>| {
+            sql.execute(
+                "INSERT INTO circle_notes(id,value,audience) VALUES('00000000-0000-7000-8000-000000000100',1,?1)",
+                [audience],
+            )?;
+            Ok(())
+        }
+    };
+    let (gifts, created) = ana.circles().create("Gifts").await.unwrap();
+    assert_eq!(listed(ana, created).await, Some((OperationKind::CreateCircle, None)));
+    let early = ana.write(note(gifts.to_string())).await;
+    assert!(
+        matches!(early, Err(CovenError::Database(DbError::NotInCircle(circle))) if circle == gifts),
+        "{early:?}"
+    );
+    ana.start_sync().await.unwrap();
+    crate::tests::landed(ana, Some(created)).await;
+    ana.write(note(gifts.to_string())).await.unwrap();
+    assert_eq!(ana.circles().list().await.unwrap()[0].id, gifts);
+    // A name that isn't one journals nothing.
+    let unnamed = ana.circles().create("").await;
+    assert!(matches!(unnamed, Err(SyncError::Format(_))), "{unnamed:?}");
     network.close().await;
 }

@@ -440,7 +440,7 @@ async fn only_a_member_who_may_change_every_referencing_row_may() {
 async fn only_a_member_of_the_files_circle_may() {
     let network = household().await;
     let (ana, carol) = (&network.devices[0], &network.devices[1]);
-    let gifts = ana.handle.circles().create("Gifts").await.unwrap();
+    let gifts = crate::tests::circle(&ana.handle, "Gifts").await;
     network.sync(0).await;
     network.sync(1).await;
     let originals = tempfile::tempdir().unwrap();

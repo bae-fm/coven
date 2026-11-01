@@ -727,6 +727,63 @@ impl SequenceSync {
         Ok(())
     }
 }
+#[cfg(test)]
+impl SequenceSync {
+    /// Run one of the app's journal steps in a write of its own, then a
+    /// pass, and return the operation's outcome as `coven_operations` lists
+    /// it; `None` when the step journaled nothing.
+    pub(crate) async fn journal_and_pass(
+        &self,
+        step: impl FnOnce(&coven_database::SqlContext<'_, '_>) -> Result<Option<OperationId>, SyncError>
+            + Send
+            + 'static,
+    ) -> Result<Option<OperationOutcome>, SyncError> {
+        let journaled = self
+            .database
+            .write(move |sql| {
+                step(&sql).map_err(|error| coven_database::DbError::SyncStream(Box::new(error)))
+            })
+            .await?;
+        let Some(id) = journaled else {
+            return Ok(None);
+        };
+        self.pass().await?;
+        let outcome = self
+            .database
+            .read(move |sql| {
+                Ok(sql.query_row(
+                    "SELECT outcome FROM coven_operations WHERE operation=?1",
+                    [id.0],
+                    |row| row.get::<_, OperationOutcome>(0),
+                )?)
+            })
+            .await?;
+        Ok(Some(outcome))
+    }
+
+    /// Make a circle as the app's write step does, and run the pass that
+    /// lands it, returning its rejection as the error.
+    pub(crate) async fn create_circle(
+        &self,
+        name: String,
+    ) -> Result<coven_foundation::id_source::CircleId, SyncError> {
+        let (device, ids, state) = (self.device, self.ids.clone(), self.state.clone());
+        let held = self.member.read()?.ok_or(coven_storage::StorageFailure::MemberKeysMissing)?;
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        let outcome = self
+            .journal_and_pass(move |sql| {
+                let (circle, operation) =
+                    crate::create_circle(sql, device, &held, ids.as_ref(), state, name)?;
+                sender.send(circle).expect("the caller waits");
+                Ok(Some(operation))
+            })
+            .await?
+            .expect("making a circle always journals");
+        crate::operation_outcome::into_slot(outcome)?;
+        Ok(receiver.await.expect("the step sent the circle"))
+    }
+}
+
 mod change {
     use super::*;
     pub(super) fn serialize<S: serde::Serializer>(

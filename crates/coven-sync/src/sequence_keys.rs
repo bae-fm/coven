@@ -37,22 +37,20 @@ impl KeyPreparation {
     }
 }
 
-impl SequenceSync {
-    /// Create a new circle and the copies that introduce its first key.
-    pub async fn create_circle(self: &Arc<Self>, name: String) -> Result<CircleId, SyncError> {
-        let circle = CircleId(self.ids.new_id());
-        self.change_key(Audience::Circle(circle), Some(name)).await?;
-        Ok(circle)
+impl SequenceOperation {
+    /// Making a circle with its first key, before its first step: the pass
+    /// keeps the key in custody, then claims its copy and its introduction.
+    pub(crate) fn circle(circle: CircleId, name: String, key: KeyId) -> Self {
+        Self {
+            request: Request::Key(KeyPreparation::Circle { circle, name, key }),
+            progress: Progress::Running(Step::Preparing),
+        }
     }
+}
+
+impl SequenceSync {
     /// Replace an audience key through the administrative journal.
     pub async fn rotate_key(self: &Arc<Self>, audience: Audience) -> Result<(), SyncError> {
-        self.change_key(audience, None).await
-    }
-    async fn change_key(
-        self: &Arc<Self>,
-        audience: Audience,
-        name: Option<String>,
-    ) -> Result<(), SyncError> {
         let owner = self.clone();
         tokio::spawn(async move {
             let mut session = owner.session.lock().await;
@@ -62,7 +60,7 @@ impl SequenceSync {
             owner.read_forward(&mut session, &mut ring, &member).await?;
             owner.settle_open(&mut session, &mut ring, &member).await?;
             owner.resume_administration(&mut session, &mut ring, &member).await?;
-            owner.install_key(&mut session, &mut ring, &member, audience, name).await
+            owner.install_key(&mut session, &mut ring, &member, audience).await
         })
         .await
         .map_err(|error| SyncError::disk(std::io::Error::other(error)))?
@@ -73,16 +71,8 @@ impl SequenceSync {
         ring: &mut StoreKeyring,
         member: &MemberIdentity,
         audience: Audience,
-        name: Option<String>,
     ) -> Result<(), SyncError> {
-        let id = KeyId(self.ids.new_id());
-        let target = match (audience, name) {
-            (Audience::Circle(circle), Some(name)) => {
-                KeyPreparation::Circle { circle, name, key: id }
-            }
-            (audience, None) => KeyPreparation::Rotation { audience, key: id },
-            (Audience::Store, Some(_)) => unreachable!("only circle creation names its audience"),
-        };
+        let target = KeyPreparation::Rotation { audience, key: KeyId(self.ids.new_id()) };
         let work = SequenceOperation {
             request: Request::Key(target),
             progress: Progress::Running(Step::Preparing),
@@ -191,7 +181,7 @@ impl SequenceSync {
                 if self.journaled(rotates).await? {
                     continue;
                 }
-                let result = self.install_key(session, ring, member, audience.clone(), None).await;
+                let result = self.install_key(session, ring, member, audience.clone()).await;
                 self.own_work(result, rotates).await?;
             }
         }

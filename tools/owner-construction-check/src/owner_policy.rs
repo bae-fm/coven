@@ -157,7 +157,7 @@ pub(crate) const POLICY: Policy = Policy {
         // An operation's call runs as its own task, so a dropped app future
         // cannot abandon a provider request already sent (§11).
         ("crates/coven-sync/src/sequence_operations.rs", "SequenceSync", "submit"),
-        ("crates/coven-sync/src/sequence_keys.rs", "SequenceSync", "change_key"),
+        ("crates/coven-sync/src/sequence_keys.rs", "SequenceSync", "rotate_key"),
         ("crates/coven/src/bootstrap.rs", "<free>", "bootstrap_device"),
         ("crates/coven/src/bootstrap.rs", "<free>", "join_with_invite"),
         ("crates/coven/src/bootstrap.rs", "<free>", "resume_join"),

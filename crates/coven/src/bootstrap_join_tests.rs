@@ -127,6 +127,10 @@ async fn a_recovery_invite_rebinds_a_lost_member_through_the_public_calls() {
     assert_eq!(info.devices.len(), 2);
     assert!(info.devices.iter().all(|d| d.state == DeviceState::Active));
     assert!(owner.handle.pending().await.unwrap().is_empty());
+    // Its pass applies the replacement and stops; its admin writes refuse
+    // from then on.
+    lost.start_sync().await.unwrap();
+    lost.test_sync_status().wait_for(|s| matches!(s, SyncStatus::Blocked { .. })).await;
     let stopped = lost.circles().create("Garden").await;
     assert!(
         matches!(&stopped, Err(SyncError::MemberKeysReplaced { member }) if *member == carol),

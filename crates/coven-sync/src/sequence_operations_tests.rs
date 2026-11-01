@@ -362,8 +362,9 @@ async fn applying_this_devices_removal_ends_its_operations_whatever_its_claim_sa
     ben.sync.pass().await.unwrap();
     let journal = |change: StoreChange| {
         let (device, state) = (ben.sync.device, ben.sync.state.clone());
+        let held = ben.identity.clone();
         ben.database().write(move |sql| {
-            crate::administer(&sql, device, state, change)
+            crate::administer(&sql, device, &held, state, change)
                 .map_err(|error| coven_database::DbError::SyncStream(Box::new(error)))
         })
     };
@@ -416,17 +417,13 @@ async fn a_removal_loaded_from_the_floor_ends_this_devices_operations() {
     group.create(&ana).await;
     group.admit(&ana, &ben).await;
     ben.sync.pass().await.unwrap();
-    let (device, state) = (ben.sync.device, ben.sync.state.clone());
+    let (device, state, held) = (ben.sync.device, ben.sync.state.clone(), ben.identity.clone());
     let rename = ben
         .database()
         .write(move |sql| {
-            crate::administer(
-                &sql,
-                device,
-                state,
-                StoreChange::RenameStore { name: "Ben's".into() },
-            )
-            .map_err(|error| coven_database::DbError::SyncStream(Box::new(error)))
+            let change = StoreChange::RenameStore { name: "Ben's".into() };
+            crate::administer(&sql, device, &held, state, change)
+                .map_err(|error| coven_database::DbError::SyncStream(Box::new(error)))
         })
         .await
         .unwrap()

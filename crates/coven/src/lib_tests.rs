@@ -30,6 +30,14 @@ pub(crate) async fn landed(handle: &CovenHandle, journaled: Option<OperationId>)
     }
 }
 
+/// Make a circle, as an app does in a write of its own, and wait for it to
+/// land, as the app's rows in it need.
+pub(crate) async fn circle(handle: &CovenHandle, name: &str) -> CircleId {
+    let (circle, operation) = handle.circles().create(name).await.unwrap();
+    landed(handle, Some(operation)).await;
+    circle
+}
+
 #[test]
 fn file_name_error_fields_are_available_through_the_facade() {
     let name: FileName = FileName::new("attachment.data").unwrap();
@@ -534,7 +542,7 @@ async fn seeded_whole_system_convergence() {
         let task = tokio::spawn(async move {
             let mut random = Generator::new(seed);
             let mut network = Network::new(2 + (seed % 3) as usize).await;
-            let circle = network.devices[0].handle.circles().create("Friends").await.unwrap();
+            let circle = crate::tests::circle(&network.devices[0].handle, "Friends").await;
             for device in &network.devices[1..] {
                 let member = device
                     .handle

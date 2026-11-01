@@ -17,7 +17,19 @@ impl StorageConnections {
         sql: &coven_database::SqlContext<'_, '_>,
         change: StoreChange,
     ) -> Result<Option<OperationId>, SyncError> {
-        coven_sync::administer(sql, self.device, self.publications.state.clone(), change)
+        coven_sync::administer(
+            sql,
+            self.device,
+            &self.held()?,
+            self.publications.state.clone(),
+            change,
+        )
+    }
+
+    /// The member pair this installation holds, which an admin step checks
+    /// the applied binding against.
+    fn held(&self) -> Result<MemberIdentity, SyncError> {
+        Ok(self.identity.read()?.ok_or(StorageFailure::MemberKeysMissing)?)
     }
 
     /// Journal a device's removal as a step of an app's write, and say how
@@ -44,6 +56,7 @@ impl StorageConnections {
         coven_sync::replace_member_keys_for(
             sql,
             self.device,
+            &self.held()?,
             self.publications.state.clone(),
             member,
             keys,
@@ -65,13 +78,20 @@ impl StorageConnections {
         }
     }
 
-    pub(crate) async fn create_circle(&self, name: String) -> Result<CircleId, SyncError> {
-        let mut live = self.live.lock().await;
-        self.ready(&mut live).await?;
-        let Connection::Active(live) = &*live else {
-            return Err(SyncError::NoStorage);
-        };
-        live.sync.create_circle(name).await
+    /// Journal making a circle as a step of an app's write (§15.5, E12).
+    pub(crate) fn create_circle(
+        &self,
+        sql: &coven_database::SqlContext<'_, '_>,
+        name: String,
+    ) -> Result<(CircleId, OperationId), SyncError> {
+        coven_sync::create_circle(
+            sql,
+            self.device,
+            &self.held()?,
+            self.ids.as_ref(),
+            self.publications.state.clone(),
+            name,
+        )
     }
 
     /// Snapshot an audience and claim its reset (§19.4).

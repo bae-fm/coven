@@ -267,27 +267,15 @@ impl SequenceSync {
         keys: MemberPublicKeys,
     ) -> Result<(), SyncError> {
         let (device, state) = (self.device, self.state.clone());
-        let journaled = self
-            .database
-            .write(move |sql| {
-                crate::replace_member_keys_for(&sql, device, state, member, keys)
-                    .map_err(|error| coven_database::DbError::SyncStream(Box::new(error)))
+        let held = self.member.read()?.ok_or(StorageFailure::MemberKeysMissing)?;
+        let outcome = self
+            .journal_and_pass(move |sql| {
+                crate::replace_member_keys_for(sql, device, &held, state, member, keys)
             })
             .await?;
-        let Some(id) = journaled else {
+        let Some(outcome) = outcome else {
             return Ok(());
         };
-        self.pass().await?;
-        let outcome = self
-            .database
-            .read(move |sql| {
-                Ok(sql.query_row(
-                    "SELECT outcome FROM coven_operations WHERE operation=?1",
-                    [id.0],
-                    |row| row.get::<_, crate::OperationOutcome>(0),
-                )?)
-            })
-            .await?;
         crate::operation_outcome::into_slot(outcome).map(drop)
     }
 }
