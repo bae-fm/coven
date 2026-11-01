@@ -3996,6 +3996,8 @@ If Ana's phone is reset (§19.3) before the invite ends, the reset carries the
 invite into the new database, and it is ended the same way as on expiry: its
 grant taken back and its request deleted, while access that active members still
 use stays. Without this, a reset would strand the access the invite granted.
+The invite keeps the id of the phone that made it, so the new installation ends
+the request where Dan's phone sent it, under the old phone's id, not its own.
 If her phone stops for good instead, removed or replaced, or its member's keys
 replaced, its open invites end in the transaction that applies the stop
 (§14.1).

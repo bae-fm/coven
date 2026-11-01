@@ -110,6 +110,7 @@ pub fn create_invite(
         };
         let work = InviteWork {
             id,
+            device,
             member,
             invitee,
             delivery: delivery.kind(),

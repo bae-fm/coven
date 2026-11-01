@@ -93,6 +93,10 @@ pub(crate) enum InviteState {
 #[derive(Serialize, Deserialize)]
 pub(crate) struct InviteWork {
     id: InviteId,
+    /// The device that made the invite, under which its request lives. A
+    /// reset carries the invite to an installation with another id, which
+    /// ends the request where it is (§13.2, §19.3).
+    device: DeviceId,
     member: MemberId,
     /// The new person's name; `None` for a replacement.
     invitee: Option<String>,
@@ -515,7 +519,7 @@ impl SequenceSync {
                     return Ok(InviteProgress::Waiting(PendingReason::Paused));
                 }
                 InviteState::Waiting { request: None, code } => {
-                    let path = ObjectPath::join_request(self.store(), self.device, work.id);
+                    let path = ObjectPath::join_request(self.store(), work.device, work.id);
                     let bytes = match self.storage.read(&path).await {
                         Ok(bytes) => bytes,
                         Err(error) if error.failure() == StorageFailure::NotFound => {
@@ -633,7 +637,7 @@ impl SequenceSync {
                     // The marker goes once a joining device can no longer
                     // send a first request (`end_request`).
                     let removal = coven_database::ObjectRemoval {
-                        path: ObjectPath::join_request(self.store(), self.device, work.id)
+                        path: ObjectPath::join_request(self.store(), work.device, work.id)
                             .as_str()
                             .to_owned(),
                         after: kept_until,
@@ -657,7 +661,7 @@ impl SequenceSync {
             .checked_add(super::sequence_retention::GRACE.as_secs())
             .ok_or(SyncError::SequenceExhausted)?;
         let marker = InviteEnd { kept_until }.encode();
-        let path = ObjectPath::join_request(self.store(), self.device, work.id);
+        let path = ObjectPath::join_request(self.store(), work.device, work.id);
         loop {
             match self.storage.delete(&path).await {
                 Ok(()) => (),
@@ -792,7 +796,7 @@ impl SequenceSync {
             member: work.member,
             secret: work.secret()?,
             initial_key,
-            inviting_writer: self.device,
+            inviting_writer: work.device,
             read_through: session.through,
             storage: storage.encode()?,
         }
@@ -805,7 +809,7 @@ impl SequenceSync {
     fn open_request(&self, work: &InviteWork, bytes: &[u8]) -> Result<Vec<u8>, SyncError> {
         let envelope = SingleChunkObject::decode(bytes)?;
         let SingleChunkObject::JoinRequest { signature, .. } = &envelope;
-        let path = ObjectPath::join_request(self.store(), self.device, work.id);
+        let path = ObjectPath::join_request(self.store(), work.device, work.id);
         let plain = work.secret()?.join_request_key().open_object_chunk(
             path.as_str(),
             &envelope.prefix().encode()?,

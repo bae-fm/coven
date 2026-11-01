@@ -255,3 +255,37 @@ async fn an_undecodable_invite_fails_reset_without_a_completion_notice() {
     ana.database().close().await.unwrap();
     new.database().close().await.unwrap();
 }
+
+/// Ana's phone is reset while Carol's request waits. The replacement ends
+/// the carried invite where Carol's phone sent its request: under Ana's old
+/// phone, which made the invite, not under the replacement's own id
+/// (§13.2, §19.3).
+#[tokio::test]
+async fn a_carried_invite_ends_its_request_under_the_device_that_made_it() {
+    use crate::sequence_sync::tests::{join, no_request, request_path};
+    use coven_storage::Storage;
+    let group = Group::shared();
+    let ana = group.device(1).await;
+    group.create_with_access(&ana, MemberAccess::ProviderAccount("ana@example.org".into())).await;
+    let invite = ana
+        .sync
+        .create_invite(
+            InviteTarget::NewMember { role: MemberRole::Member, name: "Carol".into() },
+            InviteAccess::ProviderAccount { email: "carol@example.org".into() },
+            crate::InviteDelivery::Sent { lifetime: crate::InviteLifetime::Day },
+        )
+        .await
+        .unwrap();
+    let carol = join(&group, invite.shown_code(), "Carol's phone").await;
+    let new = replacement(&group, &ana).await;
+    carry(&ana, &new).await;
+    new.sync.pass().await.unwrap();
+    let path = request_path(&invite);
+    assert!(no_request(&group.storage, &path).await);
+    let stored =
+        group.storage.list(&coven_storage::ObjectPrefix::join_requests(group.store)).await.unwrap();
+    assert!(stored.iter().all(|object| object.path == path), "{stored:?}");
+    for device in [&ana, &carol.device, &new] {
+        device.database().close().await.unwrap();
+    }
+}
