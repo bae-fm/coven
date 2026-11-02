@@ -121,6 +121,14 @@ impl TestCoven {
         StoreKeyCustody::persist(&KeyringCustody::new(keychain), keys)
     }
 
+    /// Delete this installation's storage credentials for `store`, as the
+    /// person deleting the keychain entry by hand does. The recorded location
+    /// stays: a handle opened afterwards reports no storage set up on this
+    /// device, and setup connects that location again.
+    pub fn lose_storage_credentials(&self, store: StoreId) -> Result<(), KeyError> {
+        StoreKeychain::new(self.keychain.clone(), store).delete_storage_credentials()
+    }
+
     /// This installation's custody for one store, to read what it holds.
     #[cfg(test)]
     pub(crate) fn store_keychain(&self, store: StoreId) -> StoreKeychain {

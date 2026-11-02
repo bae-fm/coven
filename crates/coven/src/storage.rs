@@ -836,17 +836,6 @@ impl StorageConnections {
         .await
     }
 
-    pub(crate) async fn disconnect(self: &Arc<Self>) -> Result<(), SyncError> {
-        self.call(|owner| async move {
-            let mut live = owner.live.lock().await;
-            owner.codes.forget_credentials().await?;
-            let released = owner.release(&mut live).await;
-            owner.authentication.lock().await.take();
-            owner.publish_released(released).await
-        })
-        .await
-    }
-
     pub(crate) async fn forget_store_keys(self: &Arc<Self>) -> Result<(), KeyError> {
         self.call(|owner| async move {
             let mut live = owner.live.lock().await;

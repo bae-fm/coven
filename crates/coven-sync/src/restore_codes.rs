@@ -56,7 +56,7 @@ struct RestoreCodesInner {
 }
 
 impl RestoreCodes {
-    /// The recorded location survives disconnecting its credentials.
+    /// The recorded location survives losing this device's credentials.
     pub async fn location(&self) -> Result<Option<coven_storage::StorageConfig>, SyncError> {
         let owner = self.inner.lock().await;
         let owner = owner.as_ref().ok_or(coven_database::DbError::StoreClosed)?;
@@ -205,16 +205,6 @@ impl RestoreCodes {
     pub async fn connection(&self) -> Result<Option<ConnectionCredentials>, SyncError> {
         let guard = self.inner.lock().await;
         guard.as_ref().ok_or(DbError::StoreClosed)?.connection()
-    }
-
-    /// Remove local credentials before disconnecting; failed removal changes no connection.
-    pub async fn forget_credentials(&self) -> Result<(), SyncError> {
-        let guard = self.inner.lock().await;
-        guard
-            .as_ref()
-            .ok_or(DbError::StoreClosed)?
-            .credentials
-            .write(|keychains| keychains.delete_storage_credentials())
     }
 
     /// Reserve the credential owner until remote setup either commits or fails.

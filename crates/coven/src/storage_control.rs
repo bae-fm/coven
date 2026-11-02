@@ -34,7 +34,7 @@ impl StorageConnections {
             self.epoch.fetch_add(1, Ordering::SeqCst);
             return connected.sync_loop.start().await;
         }
-        // Credentials may have been entered since disconnecting removed them.
+        // Credentials may have been entered since the store opened without them.
         if !self.configured.load(Ordering::SeqCst) && self.codes.connection().await?.is_some() {
             self.configured.store(true, Ordering::SeqCst);
         }

@@ -9722,16 +9722,16 @@ used to pass collaborators; they are passed by name.
   handle and then discards the store, as one removing a store it could not
   finish opening does, would otherwise be refused while blocking work of the
   dropped handle still holds the writer lock.
-- **Opening** leaves configured storage `Stopped`, or `Disconnected` when none is
-  set up. `start_sync` starts the loop, whose first pass builds the storage
-  client from custody credentials (api.md E5). Starting again keeps the running
-  loop.
+- **Opening** leaves configured storage `Stopped`, or `Disconnected` when none
+  is set up on this device: no recorded location, or one whose credentials
+  custody no longer holds, as after a keychain entry deleted by hand. Setup
+  then reconnects at the recorded location. `start_sync` starts the loop, whose
+  first pass builds the storage client from custody credentials (api.md E5).
+  Starting again keeps the running loop.
 - **`stop_sync`** returns once the waiting retries hear that sync isn't
   running; release follows the active pass and transfers.
   It keeps session keys, location and credentials. Status reports completion, or
-  `Failed` with its cause, without a pending connection record.
-  `disconnect_storage` also removes credentials; remote contents stay untouched
-  (api.md E5).
+  `Failed` with its cause, without a pending connection record (api.md E5).
 - **Custody.** A closed custody owner is represented by the absence of its held
   custody, with no separate closed flag. Storage calls serialize with closing;
   calls already started finish even if the app drops their future. Sign-in stays

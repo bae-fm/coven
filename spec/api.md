@@ -163,7 +163,7 @@ pub enum Audience {
   `StorageConfig`, including the member's account label, so an app can show
   "Dropbox: ana@example.com" without keeping a second copy. Neither returns
   credentials or contacts storage. Before setup they return
-  `None`; disconnect retains the location, and unreadable settings remain an error.
+  `None`; once set up, the location stays, and unreadable settings remain an error.
 - Store lock files live beside each store directory: the writer, reader and
   bootstrap locks. Deletion holds all three while removing the directory, then
   releases and removes every lock file, so a deleted store leaves nothing named
@@ -567,6 +567,11 @@ impl TestCoven {
         directory: &StoreDir,
         keys: &StoreKeyring,
     ) -> Result<(), KeyError>;
+
+    /// Delete this installation's storage credentials for one store, as a
+    /// keychain entry deleted by hand: the location stays recorded, and the
+    /// store opens with no storage set up on this device (Appendix F.4).
+    pub fn lose_storage_credentials(&self, store: StoreId) -> Result<(), KeyError>;
 
     /// Refuse the next keychain operation before changing any stored value.
     pub fn fail_next_keychain_operation(&self);
@@ -3503,8 +3508,8 @@ while let Some(Ok(values)) = lost.next().await {
   first time it connects, and connects this device to it.
   - Paths start with this store's id. Other stores can share the location,
     except on an S3 service whose member keys reach a whole bucket (below).
-  - After `disconnect_storage`, setup reconnects at the recorded location.
-    It refuses a different location with `LocationChangeUnsupported`;
+  - Once a location is recorded, setup reconnects at it, such as after this
+    device's credentials were lost. It refuses a different location with `LocationChangeUnsupported`;
     setup does not relocate a store already used by other devices. The
     member whose account holds the store reconnects with that account;
     another account fails with `StoreOwner` (§20.9).
@@ -3755,8 +3760,6 @@ while let Some(Ok(values)) = lost.next().await {
   and transfers. Keys, credentials and location remain. Status reports
   completion or `Failed` with its cause; no pending connection record is
   written.
-- `disconnect_storage` also removes this device's storage credentials. It leaves
-  storage's contents untouched; syncing requires storage setup again.
 
 Storage failures retain the same `StorageFailure` through setup, sync status,
 uploads, reads and operations. Their `StorageError` carries the native cause
@@ -4725,11 +4728,6 @@ impl CovenHandle {
     /// Whether the held session has the store key: `Available` or `Locked`.
     /// Reads no custody and derives no passphrase key.
     pub fn store_key_state(&self) -> Result<StoreKeyState, KeyError>;
-
-    /// Finishes the active pass, removes this device's storage credentials and
-    /// drops the provider client. If removing credentials fails, the connection
-    /// and loop state stay. Storage's contents are untouched.
-    pub async fn disconnect_storage(&self) -> Result<(), SyncError>;
 
     /// Starts syncing with the keys unlocked for this session; the first pass
     /// connects. Does nothing if already running or no storage is set up.
@@ -7809,7 +7807,7 @@ so such a call ends with a `Shutdown` in its error instead of a panic.
 - A task the runtime drops stops at whichever wait it is at: `Unknown`, and
   what the call would change may be changed in part. Closing a store or a
   read-only handle, `create_store`, storage setup, unlocking store keys,
-  `disconnect`, `forget_store_keys`, `replace_member_keys`,
+  `forget_store_keys`, `replace_member_keys`,
   `replace_access_key` and `update_credentials` run as their own task. Their
   caller reads the state again before relying on it: whether the store is
   listed, or what `storage_config` and the key state say.

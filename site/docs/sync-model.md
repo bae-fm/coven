@@ -230,8 +230,7 @@ from the credentials in custody. Setting up storage starts it too.
 `handle.stop_sync().await?` returns once waiting retries hear that sync isn't
 running, and stops after the active pass and file transfers, keeping keys,
 credentials and the storage location.
-`handle.disconnect_storage()` also removes this device's storage credentials.
-None of them touch what's in storage.
+Neither touches what's in storage.
 
 The sync status is the one row of the `coven_sync_status` table, which coven
 writes as the status changes. A live query on it, read as `SyncStatus`, gets

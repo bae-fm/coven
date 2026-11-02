@@ -256,7 +256,7 @@ fn identity(app: &TestCoven, id: StoreId) -> MemberIdentity {
 }
 
 #[tokio::test]
-async fn saved_location_survives_disconnect_and_reopen_without_custody_reads() {
+async fn saved_location_survives_lost_credentials_and_reopen_without_custody_reads() {
     let root = tempfile::tempdir().unwrap();
     let layout = StoreLayout::new(root.path().into());
     let app = TestCoven::new();
@@ -299,13 +299,12 @@ async fn saved_location_survives_disconnect_and_reopen_without_custody_reads() {
         Err(StorageSetupError::LocationChangeUnsupported)
     ));
     assert_eq!(handle.storage_config().await.unwrap(), expected);
-    handle.disconnect_storage().await.unwrap();
-    assert_eq!(handle.storage_config().await.unwrap(), expected);
     handle.close().await.unwrap();
     assert!(matches!(
         handle.storage_config().await,
         Err(SyncError::SecureStorage(KeyError::StoreClosed))
     ));
+    app.lose_storage_credentials(directory.id()).unwrap();
     let reopened = builder().open(directory.id(), |_| ()).await.unwrap();
     assert_eq!(reopened.storage_config().await.unwrap(), expected);
     reopened.close().await.unwrap();

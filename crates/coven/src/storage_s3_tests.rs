@@ -202,7 +202,6 @@ async fn an_uncatalogued_endpoint_is_set_up_and_reconnected_with_detected_settin
     );
     // Reconnecting with the same location and no profile reuses the
     // recorded settings rather than refusing a location change.
-    opened.handle.disconnect_storage().await.unwrap();
     let reconnected = setup(&opened.handle, uncatalogued(None)).await.unwrap();
     assert_eq!(reconnected.connection.storage, detected);
     assert_eq!(reconnected.restore_code.as_str(), connected.restore_code.as_str());
@@ -323,7 +322,6 @@ async fn an_r2_store_is_created_only_in_a_bucket_of_its_own() {
     assert_eq!(storage.request_count(), before);
     assert_eq!(StorageSettings::new(second.directory.clone()).read().unwrap(), None);
     // Reconnecting reads the bucket marker, without listing the root.
-    first.handle.disconnect_storage().await.unwrap();
     setup(&first.handle, r2("")).await.unwrap();
     first.handle.close().await.unwrap();
     second.handle.close().await.unwrap();
@@ -377,7 +375,6 @@ async fn reconnect_refuses_a_bucket_marker_naming_another_store() {
     let storage = Arc::new(MemoryStorage::builder().location(r2("")).build().unwrap());
     let opened = open(storage.clone()).await;
     setup(&opened.handle, r2("")).await.unwrap();
-    opened.handle.disconnect_storage().await.unwrap();
     let other = StoreId(uuid::Uuid::from_bytes([0x20; 16]));
     storage.plant_bucket_claim(Some(other.to_string().into_bytes())).await;
     let error = setup(&opened.handle, r2("")).await.unwrap_err();

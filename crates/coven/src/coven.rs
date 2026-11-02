@@ -9,7 +9,7 @@ pub struct Coven;
 
 impl Coven {
     /// Read the saved storage location without opening the store or its custody.
-    /// None means storage has never been set up; disconnect retains the location.
+    /// None means storage has never been set up; once set up, the location stays.
     pub async fn storage_config(
         store_dir: &StoreDir,
     ) -> Result<Option<crate::StorageConfig>, crate::StorageError> {

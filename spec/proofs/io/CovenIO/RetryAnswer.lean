@@ -117,8 +117,7 @@ inductive Event
   | report
   /-- `start_sync`, or setup starting a new connection's loop. -/
   | start
-  /-- `stop_sync`, closing the handle, disconnecting, or a failure that stops
-  the loop. -/
+  /-- `stop_sync`, closing the handle, or a failure that stops the loop. -/
   | stop
   /-- A cooldown or a held failure begins or ends: a write of the row. A
   cooldown's end is written by the first step after it, the owner's when it

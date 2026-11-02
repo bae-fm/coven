@@ -318,10 +318,6 @@ async fn closed_storage_calls_keep_their_public_errors_on_every_clone() {
         handle.unlock_store_key().await,
         Err(StoreKeyUnlockError::SecureStorage(KeyError::StoreClosed))
     ));
-    assert!(matches!(
-        handle.disconnect_storage().await,
-        Err(SyncError::SecureStorage(KeyError::StoreClosed))
-    ));
     assert!(matches!(handle.forget_store_keys().await, Err(KeyError::StoreClosed)));
 }
 

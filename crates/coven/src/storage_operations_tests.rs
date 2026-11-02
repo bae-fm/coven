@@ -122,19 +122,25 @@ async fn a_removed_member_cannot_save_storage_credentials() {
     let replaced = ben.handle.replace_access_key(id, secret).await;
     assert!(matches!(replaced, Err(SyncError::Removed)), "{replaced:?}");
     assert_eq!(held(&ben.app), before);
-    for connected in [true, false] {
-        if !connected {
-            ben.handle.disconnect_storage().await.unwrap();
-        }
+    let laptop = &laptop;
+    let refused = |handle: CovenHandle| async move {
         let (id, secret) = key();
-        let result = ben.handle.update_credentials(id, secret).await;
+        let result = handle.update_credentials(id, secret).await;
         assert!(matches!(result, Err(SyncError::Removed)), "{result:?}");
         assert!(ben.app.person_entries(ben.store).s3_credentials().unwrap().is_none());
         assert!(crate::tests::readable(laptop.saved_restore_codes().await.unwrap()).is_empty());
-        // Disconnecting removed this device's own credentials; none return.
-        assert_eq!(held(&ben.app), before.clone().filter(|_| connected));
-    }
-    network.close().await;
+    };
+    refused(ben.handle.clone()).await;
+    assert_eq!(held(&ben.app), before);
+    // Without a connection, and with this device's own credentials gone, as
+    // when the person deletes the keychain entry: none return.
+    ben.handle.close().await.unwrap();
+    ben.app.lose_storage_credentials(ben.store).unwrap();
+    let reopened = network.reopen(ben).open(ben.store, |_| ()).await.unwrap();
+    refused(reopened.clone()).await;
+    assert_eq!(held(&ben.app), None);
+    reopened.close().await.unwrap();
+    ana.handle.close().await.unwrap();
 }
 
 /// Ben, an admin, removes himself. His restore code and S3 key go with his

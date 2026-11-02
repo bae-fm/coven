@@ -302,7 +302,7 @@ async fn coven_refuses_a_pin_trigger_that_could_break_its_rules() {
 }
 
 /// 10,000 releases of 12 files, each release with its pinned files counted
-/// by the app's local triggers, as bae's disconnect dialog counts them.
+/// by the app's local triggers.
 const RELEASES: &str =
     "CREATE TABLE releases(id TEXT NOT NULL PRIMARY KEY, stored INTEGER NOT NULL);
      CREATE TABLE release_files(id TEXT NOT NULL PRIMARY KEY, release_id TEXT NOT NULL,

@@ -77,6 +77,23 @@ impl Fixture {
     fn advance(&self, duration: Duration) {
         self.clock.set(self.clock.now() + duration);
     }
+
+    /// Close the handle, delete this device's storage credentials as the
+    /// person deleting the keychain entry does, and open the store again: its
+    /// location stays recorded, with no storage set up on this device.
+    async fn lose_credentials(&mut self) {
+        self.handle.close().await.unwrap();
+        self.app.lose_storage_credentials(self.directory.id()).unwrap();
+        self.handle = builder(
+            &self.app,
+            StoreLayout::new(self._root.path().into()),
+            self.recorder.clone(),
+            self.connector.clone(),
+        )
+        .open(self.directory.id(), |_| ())
+        .await
+        .unwrap();
+    }
 }
 
 struct TrackingConnector {
@@ -232,70 +249,32 @@ async fn stop_queued_while_the_first_pass_connects_releases_the_new_client() {
 }
 
 #[tokio::test]
-async fn unconfigured_and_forgotten_storage_stay_disconnected_on_start() {
-    let f = Fixture::new().await;
+async fn unconfigured_storage_and_lost_credentials_stay_disconnected_on_start() {
+    let mut f = Fixture::new().await;
     f.handle.stop_sync().await.unwrap();
     f.handle.start_sync().await.unwrap();
     assert!(matches!(&f.handle.test_sync_status().latest().await, SyncStatus::Disconnected));
     assert!(f.connector.clients.lock().unwrap().is_empty());
     f.setup().await.unwrap();
     status(&f.handle, |s| matches!(s, SyncStatus::Synced { .. })).await;
-    f.handle.disconnect_storage().await.unwrap();
+    f.lose_credentials().await;
     f.handle.start_sync().await.unwrap();
     assert!(matches!(&f.handle.test_sync_status().latest().await, SyncStatus::Disconnected));
-    assert!(f.connector.clients.lock().unwrap()[0].upgrade().is_none());
-    assert!(f.handle.restore_code().await.is_ok());
-    f.handle.close().await.unwrap();
-    let handle = builder(
-        &f.app,
-        StoreLayout::new(f._root.path().into()),
-        f.clock.clone(),
-        f.connector.clone(),
-    )
-    .open(f.directory.id(), |_| ())
-    .await
-    .unwrap();
-    handle.start_sync().await.unwrap();
-    assert!(matches!(&handle.test_sync_status().latest().await, SyncStatus::Disconnected));
-    handle.close().await.unwrap();
-}
-
-#[tokio::test]
-async fn disconnect_waits_for_the_active_pass_and_custody_failure_keeps_sync_running() {
-    let f = Fixture::new().await;
-    f.setup().await.unwrap();
-    status(&f.handle, |s| matches!(s, SyncStatus::Synced { .. })).await;
-    f.app.fail_next_keychain_operation();
-    assert!(matches!(f.handle.disconnect_storage().await, Err(SyncError::SecureStorage(_))));
-    assert!(matches!(&f.handle.test_sync_status().latest().await, SyncStatus::Synced { .. }));
-    let code = f.handle.restore_code().await.unwrap();
-    let (entered, entering) = tokio::sync::oneshot::channel();
-    let (resume, resumed) = tokio::sync::oneshot::channel();
-    f.storage.hold_next_read(ObjectPath::floor(f.directory.id()), entered, resumed).await;
-    f.handle.sync_now();
-    entering.await.unwrap();
-    let disconnect = f.handle.disconnect_storage();
-    tokio::pin!(disconnect);
-    tokio::select! {
-        result = &mut disconnect => panic!("disconnect completed during a pass: {result:?}"),
-        _ = tokio::time::sleep(Duration::from_millis(100)) => {}
+    {
+        let clients = f.connector.clients.lock().unwrap();
+        assert_eq!(clients.len(), 1, "starting without credentials connects nothing");
+        assert!(clients[0].upgrade().is_none());
     }
-    assert_eq!(f.handle.restore_code().await.unwrap(), code);
-    assert!(f.connector.clients.lock().unwrap()[0].upgrade().is_some());
-    resume.send(()).unwrap();
-    disconnect.await.unwrap();
-    assert!(matches!(&f.handle.test_sync_status().latest().await, SyncStatus::Disconnected));
-    assert!(f.connector.clients.lock().unwrap()[0].upgrade().is_none());
     assert!(f.handle.restore_code().await.is_ok());
     f.handle.close().await.unwrap();
 }
 
-/// An invite ends when its lifetime does with storage disconnected too: the
-/// handle writes its expiry, which the app's live query hears, and so does
-/// opening for one that ended while the store was closed (§13.2). The
-/// ended invite's own work waits for a connected pass.
+/// An invite ends when its lifetime does with sync stopped too: the handle
+/// writes its expiry, which the app's live query hears, and so does opening
+/// for one that ended while the store was closed (§13.2). The ended invite's
+/// own work waits for a connected pass.
 #[tokio::test]
-async fn an_invite_expires_with_storage_disconnected_and_while_closed() {
+async fn an_invite_expires_with_sync_stopped_and_while_closed() {
     let f = Fixture::new().await;
     f.setup().await.unwrap();
     status(&f.handle, |s| matches!(s, SyncStatus::Synced { .. })).await;
@@ -316,7 +295,7 @@ async fn an_invite_expires_with_storage_disconnected_and_while_closed() {
     // Made after the handle opened, so its expiry joins the handle's wakes.
     let first = invite().await;
     assert_eq!(invites.next().await, std::slice::from_ref(&first));
-    f.handle.disconnect_storage().await.unwrap();
+    f.handle.stop_sync().await.unwrap();
     f.clock.set(first.expires_at - Duration::from_secs(1));
     let early = tokio::time::timeout(Duration::from_millis(200), invites.next()).await;
     assert!(early.is_err(), "the invite ended before its lifetime: {early:?}");
@@ -386,9 +365,9 @@ async fn recorded_setup(
 
 /// Ana's first setup of the Household store, in a bucket whose member keys
 /// reach all of it, reports each step it runs, in order, each begun and then
-/// done. Her reconnect after the store is disconnected and reopened checks no
-/// bucket and creates nothing: it detects, connects, and finds nothing new to
-/// load and no access to record.
+/// done. Her reconnect after this device lost its credentials and reopened
+/// checks no bucket and creates nothing: it detects, connects, and finds
+/// nothing new to load and no access to record.
 #[tokio::test]
 async fn setup_reports_each_step_it_runs() {
     use StorageSetupStep::*;
@@ -407,8 +386,8 @@ async fn setup_reports_each_step_it_runs() {
         ]
     );
     status(&f.handle, |s| matches!(s, SyncStatus::Synced { .. })).await;
-    f.handle.disconnect_storage().await.unwrap();
     f.handle.close().await.unwrap();
+    f.app.lose_storage_credentials(f.directory.id()).unwrap();
 
     let recorder = Arc::new(RecordingClock::new(f.clock.clone()));
     let layout = StoreLayout::new(f._root.path().into());
@@ -751,7 +730,7 @@ struct RefusePersist {
 }
 
 #[tokio::test]
-async fn setup_refuses_another_location_after_disconnect_and_reopen() {
+async fn setup_refuses_another_location_after_lost_credentials_and_reopen() {
     let f = Fixture::new().await;
     f.setup().await.unwrap();
     status(&f.handle, |s| matches!(s, SyncStatus::Synced { .. })).await;
@@ -775,8 +754,8 @@ async fn setup_refuses_another_location_after_disconnect_and_reopen() {
         .unwrap_err();
     assert_eq!(error.to_string(), "storage location change is unsupported");
     assert_eq!(f.handle.restore_code().await.unwrap(), before);
-    f.handle.disconnect_storage().await.unwrap();
     f.handle.close().await.unwrap();
+    f.app.lose_storage_credentials(f.directory.id()).unwrap();
     let handle = builder(
         &f.app,
         StoreLayout::new(f._root.path().into()),
@@ -861,7 +840,7 @@ async fn setup_rejects_overwriting_providers_before_committing() {
 
 #[tokio::test]
 async fn reconnect_checks_the_provider_and_preserves_the_previous_connection() {
-    let f = Fixture::new().await;
+    let mut f = Fixture::new().await;
     f.setup().await.unwrap();
     status(&f.handle, |s| matches!(s, SyncStatus::Synced { .. })).await;
     f.handle.stop_sync().await.unwrap();
@@ -891,7 +870,7 @@ async fn reconnect_checks_the_provider_and_preserves_the_previous_connection() {
     assert_eq!(f.storage.list(&ObjectPrefix::all(f.directory.id())).await.unwrap(), objects);
     assert!(matches!(&f.handle.test_sync_status().latest().await, SyncStatus::Stopped));
     f.storage.set_faults(Faults::none()).await;
-    f.handle.disconnect_storage().await.unwrap();
+    f.lose_credentials().await;
     f.storage.set_faults(Faults { overwrite_create: true, ..Faults::none() }).await;
     assert!(
         matches!(f.setup().await.unwrap_err(), StorageSetupError::ProviderCheck { check: StorageCheck::CreateOnce, source } if source.failure() == StorageFailure::Protocol)

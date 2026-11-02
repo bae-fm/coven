@@ -110,7 +110,7 @@ impl CovenHandle {
     }
 
     /// The committed storage location, without credentials or provider requests.
-    /// None before setup; disconnect retains it. A closed handle refuses the call.
+    /// None before setup; once set up, it stays. A closed handle refuses the call.
     pub async fn storage_config(&self) -> Result<Option<StorageConfig>, SyncError> {
         self.storage.storage_config().await
     }
@@ -213,12 +213,6 @@ impl CovenHandle {
     pub fn store_key_state(&self) -> Result<StoreKeyState, KeyError> {
         self.storage.key_state()
     }
-    /// Finish the active pass, forget credentials, then release the provider.
-    /// A custody failure preserves the current connection and loop state.
-    pub async fn disconnect_storage(&self) -> Result<(), SyncError> {
-        self.storage.disconnect().await
-    }
-
     /// The latest completed replacement stored in this installation, or None.
     /// It survives reopening; unsent edits of the old copy were discarded (§19.3).
     pub async fn device_reset(&self) -> CovenResult<Option<DeviceReset>> {

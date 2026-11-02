@@ -153,7 +153,7 @@ async fn assert_connected_key(f: &Fixture, id: &str, secret: &str) {
 }
 
 #[tokio::test]
-async fn connected_and_disconnected_updates_install_the_supplied_key_without_changing_the_code() {
+async fn connected_and_signed_out_updates_install_the_supplied_key_without_changing_the_code() {
     let f = Fixture::new().await;
     f.setup().await.unwrap();
     status(&f.handle, |s| matches!(s, SyncStatus::Synced { .. })).await;
@@ -173,34 +173,39 @@ async fn connected_and_disconnected_updates_install_the_supplied_key_without_cha
         .unwrap();
     assert_connected_key(&f, "published", "published-secret").await;
     assert_eq!(f.handle.restore_code().await.unwrap(), before);
-    f.handle.disconnect_storage().await.unwrap();
-    assert_eq!(f.handle.restore_code().await.unwrap(), before);
-    f.handle
-        .update_credentials("disconnected".into(), SecretText::new("disconnected-secret".into()))
+    f.handle.close().await.unwrap();
+    // The device's key is gone, as when the person deletes the keychain entry.
+    f.app.lose_storage_credentials(f.directory.id()).unwrap();
+    let reopen = || {
+        builder(
+            &f.app,
+            StoreLayout::new(f._root.path().into()),
+            f.clock.clone(),
+            f.connector.clone(),
+        )
+        .open(f.directory.id(), |_| ())
+    };
+    let handle = reopen().await.unwrap();
+    assert!(matches!(&handle.test_sync_status().latest().await, SyncStatus::Disconnected));
+    assert_eq!(handle.restore_code().await.unwrap(), before);
+    handle
+        .update_credentials("signed-out".into(), SecretText::new("signed-out-secret".into()))
         .await
         .unwrap();
-    f.handle.start_sync().await.unwrap();
-    status(&f.handle, |s| matches!(s, SyncStatus::Synced { .. })).await;
-    assert_connected_key(&f, "disconnected", "disconnected-secret").await;
-    assert_eq!(f.handle.restore_code().await.unwrap(), before);
+    handle.start_sync().await.unwrap();
+    status(&handle, |s| matches!(s, SyncStatus::Synced { .. })).await;
+    assert_connected_key(&f, "signed-out", "signed-out-secret").await;
+    assert_eq!(handle.restore_code().await.unwrap(), before);
     assert_eq!(settings.read().unwrap(), location);
     assert_eq!(
         coven_sync::read_restore_code(&before).unwrap().member_keys.to_secret_bytes().as_bytes(),
         member.as_bytes()
     );
-    f.handle.close().await.unwrap();
-    let handle = builder(
-        &f.app,
-        StoreLayout::new(f._root.path().into()),
-        f.clock.clone(),
-        f.connector.clone(),
-    )
-    .open(f.directory.id(), |_| ())
-    .await
-    .unwrap();
+    handle.close().await.unwrap();
+    let handle = reopen().await.unwrap();
     handle.start_sync().await.unwrap();
     status(&handle, |s| matches!(s, SyncStatus::Synced { .. })).await;
-    assert_connected_key(&f, "disconnected", "disconnected-secret").await;
+    assert_connected_key(&f, "signed-out", "signed-out-secret").await;
     assert_eq!(handle.restore_code().await.unwrap(), before);
     handle.close().await.unwrap();
 }

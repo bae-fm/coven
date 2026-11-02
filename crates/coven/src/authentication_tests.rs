@@ -184,10 +184,11 @@ async fn handle_sign_in_setup_refresh_and_reopen_keep_tokens_in_coven() {
     // A clock set a year ahead does not expire the token; the provider's
     // rejection does, and the next request refreshes it once.
     clock.set(clock.now() + std::time::Duration::from_secs(365 * 24 * 3600));
-    let handle = builder(layout, keychain, clock, storage.clone(), &sign_in)
-        .open(directory.id(), |_| ())
-        .await
-        .unwrap();
+    let handle =
+        builder(layout.clone(), keychain.clone(), clock.clone(), storage.clone(), &sign_in)
+            .open(directory.id(), |_| ())
+            .await
+            .unwrap();
     handle.unlock_store_key().await.unwrap();
     assert_eq!(sign_in.request_count(), 1, "a token is used until rejected");
     storage.reject_access_token("access-0").await;
@@ -208,8 +209,14 @@ async fn handle_sign_in_setup_refresh_and_reopen_keep_tokens_in_coven() {
     );
     assert_eq!(sign_in.request_count(), 2);
     assert_eq!(sign_in.presenter.calls.load(Ordering::SeqCst), 2);
-    handle.disconnect_storage().await.unwrap();
-    assert!(scoped.storage_credentials().unwrap().is_none());
+    handle.close().await.unwrap();
+    // The device's tokens are gone, as when the person deletes the keychain
+    // entry: connecting the recorded location again needs a new sign-in.
+    scoped.delete_storage_credentials().unwrap();
+    let handle = builder(layout, keychain, clock, storage.clone(), &sign_in)
+        .open(directory.id(), |_| ())
+        .await
+        .unwrap();
     assert!(matches!(
         handle.setup_oauth_storage(storage.config(), "Laptop", |_| {}).await,
         Err(StorageSetupError::OAuth(OAuthError::Reauthorize(CloudProvider::Dropbox)))

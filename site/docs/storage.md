@@ -105,8 +105,9 @@ commit together once the connection is ready.
 
 Setting up a store that already exists elsewhere fails with
 `StorageFailure::StoreExists`: another installation claimed slot 1 there first,
-so this device should restore or join instead. After `disconnect_storage`,
-setup reconnects at the recorded location; a different location fails with
+so this device should restore or join instead. Once a location is recorded,
+setup reconnects at it, such as after this device's credentials were lost;
+a different location fails with
 `StorageSetupError::LocationChangeUnsupported`, because the store's other
 devices still use the old one.
 

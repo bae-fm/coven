@@ -521,6 +521,9 @@ rusqlite_reexport = "coven-database"
     "TestCoven::create_closed_store",
     "TestCoven::discard_store",
     "TestCoven::keep_store_keys",
+    # Deleting one store's credentials reaches its device-only entries, as a
+    # person deleting the keychain entry by hand does.
+    "TestCoven::lose_storage_credentials",
     "TestCoven::new",
     # Another of the person's devices shares only the person entries.
     "TestCoven::another_device",

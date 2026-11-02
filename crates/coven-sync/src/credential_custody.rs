@@ -30,11 +30,6 @@ impl CredentialKeychains {
         Ok(self.device.storage_credentials()?)
     }
 
-    /// Remove this device's provider credentials; an absent entry succeeds.
-    pub fn delete_storage_credentials(&self) -> Result<(), SyncError> {
-        Ok(self.device.delete_storage_credentials()?)
-    }
-
     /// Save the saved restore code with the store's name, or the entry's
     /// when that is newer, where the keychain keeps person entries (§13.1).
     pub fn refresh_restore_code(
