@@ -5,7 +5,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use crate::crate_dependencies::{dependency_entries, workspace_package};
+use crate::crate_dependencies::{dependency_entries, dependency_package};
 use crate::module_sources::test_module_files;
 use crate::policy::Policy;
 use crate::syntax::RustFile;
@@ -77,7 +77,12 @@ pub(crate) enum LoadError {
     CrateInsideMember { path: PathBuf },
 }
 
-pub(crate) fn load(root: &Path) -> Result<Workspace, LoadError> {
+/// The workspace at `root`. `library_names` holds the policy's dependencies
+/// whose library is not named after their package (`Policy::library_names`).
+pub(crate) fn load(
+    root: &Path,
+    library_names: &BTreeMap<String, String>,
+) -> Result<Workspace, LoadError> {
     let workspace_manifest = root.join("Cargo.toml");
     let Some(toml::Value::Table(mut workspace_table)) =
         parse_manifest(&workspace_manifest)?.remove("workspace")
@@ -148,13 +153,15 @@ pub(crate) fn load(root: &Path) -> Result<Workspace, LoadError> {
         let names = dependency_entries(&manifest.table)
             .into_iter()
             .map(|(name, entry)| {
-                let package = if entry.get("workspace").and_then(toml::Value::as_bool) == Some(true)
-                {
-                    workspace_package(&workspace, name)
+                let package = dependency_package(&workspace, name, entry);
+                // A renamed dependency goes by its key; any other by its
+                // package's library name.
+                let source_name = if package != *name {
+                    name.replace('-', "_")
                 } else {
-                    entry.get("package").and_then(toml::Value::as_str).unwrap_or(name).to_string()
+                    library_name(&package, library_names)
                 };
-                (name.replace('-', "_"), package.replace('-', "_"))
+                (source_name, package.replace('-', "_"))
             })
             .collect::<BTreeMap<_, _>>();
         packages.push((format!("{member}/"), name, names));
@@ -206,6 +213,12 @@ impl Manifest {
     pub(crate) fn package_name(&self) -> Option<String> {
         self.table.get("package")?.get("name")?.as_str().map(str::to_string)
     }
+}
+
+/// The name source code gives a package's library: the policy's row for it,
+/// else the package's name with `-` as `_`, as Cargo names it by default.
+fn library_name(package: &str, library_names: &BTreeMap<String, String>) -> String {
+    library_names.get(package).cloned().unwrap_or_else(|| package.replace('-', "_"))
 }
 
 fn read(path: &Path) -> Result<String, LoadError> {

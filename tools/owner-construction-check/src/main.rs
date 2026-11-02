@@ -49,15 +49,15 @@ fn main() {
             std::process::exit(2);
         }
     };
-    let workspace = match sources::load(&root) {
-        Ok(workspace) => workspace,
+    let policy = match policy::Policy::read(&root) {
+        Ok(policy) => policy,
         Err(error) => {
             eprintln!("owner-construction-check: {error}");
             std::process::exit(2);
         }
     };
-    let policy = match policy::Policy::read(&root) {
-        Ok(policy) => policy,
+    let workspace = match sources::load(&root, &policy.library_names) {
+        Ok(workspace) => workspace,
         Err(error) => {
             eprintln!("owner-construction-check: {error}");
             std::process::exit(2);

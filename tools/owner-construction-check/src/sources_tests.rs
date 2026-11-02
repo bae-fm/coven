@@ -52,7 +52,7 @@ fn members_anywhere_give_their_files_a_package() {
     fixture.write("app-util/Cargo.toml", "[package]\nname = \"app-util\"\n");
     fixture.write("app-util/build.rs", "fn main() {}");
     fixture.write("app-ignored/src/lib.rs", "");
-    let workspace = load(&fixture.0).expect("load the fixture workspace");
+    let workspace = load(&fixture.0, &BTreeMap::new()).expect("load the fixture workspace");
     let files = workspace
         .files
         .iter()
@@ -106,6 +106,31 @@ fn members_are_directories_that_hold_one_package_each() {
         for (path, contents) in files {
             fixture.write(path, contents);
         }
-        assert!(load(&fixture.0).is_err(), "{members} {files:?}");
+        assert!(load(&fixture.0, &BTreeMap::new()).is_err(), "{members} {files:?}");
     }
+}
+
+/// Source code names a dependency by its library, which a package may name
+/// otherwise than itself; a renamed dependency goes by its key.
+#[test]
+fn dependencies_go_by_their_library_or_their_rename() {
+    let fixture = Fixture::new("libraries");
+    fixture.write(
+        "Cargo.toml",
+        "[workspace]\nmembers = [\"app\"]\n[workspace.dependencies]\ncoreaudio-rs = \"0.14\"\nhttp = { version = \"1\", package = \"reqwest\" }\n",
+    );
+    fixture.write(
+        "app/Cargo.toml",
+        "[package]\nname = \"app\"\n[dependencies]\ncoreaudio-rs.workspace = true\nhttp.workspace = true\nserde-json = { version = \"1\", package = \"serde_json\" }\n",
+    );
+    fixture.write("app/src/lib.rs", "");
+    let libraries = BTreeMap::from([("coreaudio-rs".to_string(), "coreaudio".to_string())]);
+    let workspace = load(&fixture.0, &libraries).expect("load the fixture workspace");
+    assert_eq!(
+        workspace.files[0].extern_crates,
+        BTreeMap::from(
+            [("coreaudio", "coreaudio_rs"), ("http", "reqwest"), ("serde_json", "serde_json")]
+                .map(|(name, package)| (name.to_string(), package.to_string()))
+        )
+    );
 }

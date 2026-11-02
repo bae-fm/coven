@@ -76,6 +76,20 @@ fn members_named_by_the_policy_exist_and_crates_are_not_tools() {
 
 /// A home that moved would cover nothing, so it must hold a source.
 #[test]
+fn library_names_name_a_dependency() {
+    let mut workspace = workspace(Vec::new(), &[("crates/app", "app")]);
+    workspace.manifests[0].table =
+        "[package]\nname = \"app\"\n[dependencies]\ncoreaudio-rs.workspace = true"
+            .parse()
+            .expect("fixture manifest");
+    let policy = Policy::fixture(
+        r#"rules = ["conventions"]
+        library_names = { "coreaudio-rs" = "coreaudio", "objc2-rs" = "objc2" }"#,
+    );
+    assert_eq!(stale_rows(&workspace, &policy), ["library_names: no member depends on objc2-rs"]);
+}
+
+#[test]
 fn every_capability_home_holds_a_source() {
     let files = vec![RustFile::fixture("crates/app-foundation/src/files/atomic.rs", "")];
     let rows = r#"

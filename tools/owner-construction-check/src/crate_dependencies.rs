@@ -56,7 +56,7 @@ pub(crate) fn find_crate_dependency_violations(
             let (Some(from), Some(from_rank)) = (&package, rank) else {
                 continue;
             };
-            let to = workspace_package(workspace, dependency);
+            let to = dependency_package(workspace, dependency, entry);
             let Some(to_rank) = policy.crate_order.iter().position(|name| *name == to) else {
                 continue;
             };
@@ -110,9 +110,24 @@ fn entry_keys(entry: &toml::Value) -> Vec<String> {
     }
 }
 
+/// The package a member's dependency entry names: through the workspace's
+/// dependency table for `workspace = true`, else its own `package` key, else
+/// the key itself.
+pub(crate) fn dependency_package(
+    workspace: &Workspace,
+    dependency: &str,
+    entry: &toml::Value,
+) -> String {
+    if entry.get("workspace").and_then(toml::Value::as_bool) == Some(true) {
+        workspace_package(workspace, dependency)
+    } else {
+        entry.get("package").and_then(toml::Value::as_str).unwrap_or(dependency).to_string()
+    }
+}
+
 /// The package a member's dependency key resolves to through the workspace's
 /// dependency table, which may rename it.
-pub(crate) fn workspace_package(workspace: &Workspace, dependency: &str) -> String {
+fn workspace_package(workspace: &Workspace, dependency: &str) -> String {
     workspace
         .workspace_dependencies
         .get(dependency)

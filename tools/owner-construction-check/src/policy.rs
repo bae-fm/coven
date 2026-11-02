@@ -136,6 +136,12 @@ pub(crate) struct Policy {
     /// module of the crate.
     #[serde(default)]
     pub(crate) closed_session_types: BTreeSet<String>,
+    /// Dependencies whose library, as source code names it, is not their
+    /// package's name with `-` as `_`: `"coreaudio-rs" = "coreaudio"`. The
+    /// checker reads the workspace's manifests, not its dependencies', so a
+    /// library's own name reaches it only here.
+    #[serde(default)]
+    pub(crate) library_names: BTreeMap<String, String>,
     /// Names the type rows use for types that dependencies outside the
     /// workspace declare, such as a runtime handle or a lock. The rules match
     /// types by name, so each must be named by a crate source and declared by

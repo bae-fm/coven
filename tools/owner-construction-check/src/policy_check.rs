@@ -9,6 +9,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use syn::visit::{self, Visit};
 
 use crate::capability_construction::construction_only_types;
+use crate::crate_dependencies::{dependency_entries, dependency_package};
 use crate::database_boundary::schema_table_macros;
 use crate::policy::Policy;
 use crate::sources::Workspace;
@@ -22,6 +23,7 @@ pub(crate) fn stale_rows(workspace: &Workspace, policy: &Policy) -> Vec<String> 
         stale.push("rules: the policy selects no rules".to_string());
     }
     stale.extend(unknown_members(workspace, policy));
+    stale.extend(unknown_libraries(workspace, policy));
     stale.extend(missing_homes(&crate_files, policy));
     stale.extend(missing_composition_roots(&crate_files, policy));
     stale.extend(invalid_capability_factories(&crate_files, policy));
@@ -63,6 +65,22 @@ fn unknown_members(workspace: &Workspace, policy: &Policy) -> Vec<String> {
         }
     }
     stale
+}
+
+/// `library_names` names packages a member depends on.
+fn unknown_libraries(workspace: &Workspace, policy: &Policy) -> Vec<String> {
+    let dependencies = workspace
+        .manifests
+        .iter()
+        .flat_map(|manifest| dependency_entries(&manifest.table))
+        .map(|(name, entry)| dependency_package(workspace, name, entry))
+        .collect::<BTreeSet<_>>();
+    policy
+        .library_names
+        .keys()
+        .filter(|package| !dependencies.contains(*package))
+        .map(|package| format!("library_names: no member depends on {package}"))
+        .collect()
 }
 
 /// A home is a source file, or a directory (ending in `/`) holding one.
