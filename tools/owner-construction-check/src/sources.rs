@@ -6,6 +6,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use crate::crate_dependencies::{dependency_entries, workspace_package};
+use crate::module_sources::test_module_files;
 use crate::syntax::RustFile;
 
 pub(crate) struct Workspace {
@@ -174,9 +175,14 @@ pub(crate) fn load(root: &Path) -> Result<Workspace, LoadError> {
                 syntax,
                 lines: source.lines().count(),
                 extern_crates: extern_crates.clone(),
+                test_module: false,
             })
         })
         .collect::<Result<Vec<_>, LoadError>>()?;
+    let test_modules = test_module_files(&workspace.files);
+    for file in &mut workspace.files {
+        file.test_module = test_modules.contains(&file.relative_path);
+    }
     Ok(workspace)
 }
 

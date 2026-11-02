@@ -21,6 +21,9 @@ pub(crate) struct RustFile {
     pub(crate) lines: usize,
     /// Cargo dependency names, including aliases, mapped to their crate names.
     pub(crate) extern_crates: BTreeMap<String, String>,
+    /// Whether only test-only module declarations reach the file, as one
+    /// declared `#[cfg(test)] mod tests;` (`module_sources::test_module_files`).
+    pub(crate) test_module: bool,
 }
 
 impl RustFile {
@@ -39,14 +42,22 @@ impl RustFile {
             syntax: syn::parse_file(source).expect("parse fixture"),
             lines: source.lines().count(),
             extern_crates: BTreeMap::new(),
+            test_module: false,
         }
+    }
+
+    /// Test code: a file the test layout of Appendix F.5 names as tests, or
+    /// one only test-only module declarations reach. Nothing else is —
+    /// test-support modules behind a `test-utils` feature are production
+    /// sources and answer to every rule.
+    pub(crate) fn is_test_source(&self) -> bool {
+        self.test_module || self.is_test_source_by_name()
     }
 
     /// The test layout of Appendix F.5: a source's tests live beside it in
     /// `<name>_tests.rs`, and integration tests in a member's `tests/`
-    /// directory. Nothing else is test code — test-support modules behind a
-    /// `test-utils` feature are production sources and answer to every rule.
-    pub(crate) fn is_test_source(&self) -> bool {
+    /// directory.
+    pub(crate) fn is_test_source_by_name(&self) -> bool {
         self.is_integration_test_source() || self.relative_path.ends_with("_tests.rs")
     }
 

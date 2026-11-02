@@ -1,7 +1,7 @@
 //! Rust module identities, including modules whose files use `#[path]`.
 
-use std::collections::BTreeMap;
-use std::path::Path;
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::{Path, PathBuf};
 
 use crate::syntax::{is_test_only, RustFile};
 
@@ -60,6 +60,13 @@ fn collect(
     if modules.insert(file.relative_path.clone(), module.clone()).is_some() {
         return;
     }
+    let (directory, child_directory) = directories(file);
+    collect_items(&file.syntax.items, &module, &directory, &child_directory, sources, modules);
+}
+
+/// The directory a file's `#[path]` attributes are relative to, and the one
+/// its child modules' files live in.
+fn directories(file: &RustFile) -> (PathBuf, PathBuf) {
     let path = Path::new(&file.relative_path);
     let directory = path.parent().expect("source directory");
     let child_directory = if matches!(
@@ -70,7 +77,43 @@ fn collect(
     } else {
         directory.join(path.file_stem().expect("source stem"))
     };
-    collect_items(&file.syntax.items, &module, directory, &child_directory, sources, modules);
+    (directory.to_path_buf(), child_directory)
+}
+
+/// Where a module declaration's contents are.
+enum ModuleContents<'a> {
+    /// Inline, in this directory for its own children.
+    Inline(&'a [syn::Item], PathBuf),
+    /// In whichever of these files exists.
+    Files(Vec<String>),
+}
+
+fn module_contents<'a>(
+    item: &'a syn::ItemMod,
+    path_directory: &Path,
+    child_directory: &Path,
+) -> ModuleContents<'a> {
+    let name = item.ident.to_string();
+    let explicit = item.attrs.iter().find(|attr| attr.path().is_ident("path")).map(|attr| {
+        let syn::Meta::NameValue(value) = &attr.meta else {
+            panic!("path attribute must have a value")
+        };
+        let syn::Expr::Lit(syn::ExprLit { lit: syn::Lit::Str(value), .. }) = &value.value else {
+            panic!("path attribute must be a string")
+        };
+        value.value()
+    });
+    match (&item.content, explicit) {
+        (Some((_, items)), explicit) => ModuleContents::Inline(
+            items,
+            child_directory.join(explicit.as_deref().unwrap_or(&name)),
+        ),
+        (None, Some(path)) => ModuleContents::Files(vec![normalize(&path_directory.join(path))]),
+        (None, None) => ModuleContents::Files(vec![
+            normalize(&child_directory.join(format!("{name}.rs"))),
+            normalize(&child_directory.join(&name).join("mod.rs")),
+        ]),
+    }
 }
 
 fn collect_items(
@@ -86,34 +129,79 @@ fn collect_items(
         if is_test_only(&item.attrs) {
             continue;
         }
-        let name = item.ident.to_string();
         let mut child = module.to_vec();
-        child.push(name.clone());
-        let explicit = item.attrs.iter().find(|attr| attr.path().is_ident("path")).map(|attr| {
-            let syn::Meta::NameValue(value) = &attr.meta else {
-                panic!("path attribute must have a value")
-            };
-            let syn::Expr::Lit(syn::ExprLit { lit: syn::Lit::Str(value), .. }) = &value.value
-            else {
-                panic!("path attribute must be a string")
-            };
-            value.value()
-        });
-        if let Some((_, items)) = &item.content {
-            let directory = child_directory.join(explicit.as_deref().unwrap_or(&name));
-            collect_items(items, &child, &directory, &directory, sources, modules);
-        } else {
-            let paths = match explicit {
-                Some(path) => vec![path_directory.join(path)],
-                None => vec![
-                    child_directory.join(format!("{name}.rs")),
-                    child_directory.join(&name).join("mod.rs"),
-                ],
-            };
-            for path in paths {
-                let path = normalize(&path);
-                if let Some(file) = sources.get(path.as_str()).filter(|file| production(file)) {
-                    collect(file, child.clone(), sources, modules);
+        child.push(item.ident.to_string());
+        match module_contents(item, path_directory, child_directory) {
+            ModuleContents::Inline(items, directory) => {
+                collect_items(items, &child, &directory, &directory, sources, modules);
+            }
+            ModuleContents::Files(paths) => {
+                for path in paths {
+                    if let Some(file) = sources.get(path.as_str()).filter(|file| production(file)) {
+                        collect(file, child.clone(), sources, modules);
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// The files that only test-only module declarations reach, such as one
+/// declared `#[cfg(test)] mod tests;`: test code, whatever they are named.
+/// A file some production declaration also reaches is production, and one no
+/// crate root reaches keeps what its name says.
+pub(crate) fn test_module_files(files: &[RustFile]) -> BTreeSet<String> {
+    let sources =
+        files.iter().map(|file| (file.relative_path.as_str(), file)).collect::<BTreeMap<_, _>>();
+    let mut reached = [BTreeSet::new(), BTreeSet::new()];
+    for file in files {
+        if matches!(
+            Path::new(&file.relative_path).file_name().and_then(|name| name.to_str()),
+            Some("lib.rs" | "main.rs")
+        ) {
+            reach(file, false, &sources, &mut reached);
+        }
+    }
+    let [production, test] = reached;
+    test.difference(&production).cloned().collect()
+}
+
+/// `reached[0]` holds the files reached through production declarations,
+/// `reached[1]` those reached through a test-only one.
+fn reach(
+    file: &RustFile,
+    in_test: bool,
+    sources: &BTreeMap<&str, &RustFile>,
+    reached: &mut [BTreeSet<String>; 2],
+) {
+    let in_test = in_test || file.is_test_source_by_name() || is_test_only(&file.syntax.attrs);
+    if !reached[usize::from(in_test)].insert(file.relative_path.clone()) {
+        return;
+    }
+    let (directory, child_directory) = directories(file);
+    reach_items(&file.syntax.items, in_test, &directory, &child_directory, sources, reached);
+}
+
+fn reach_items(
+    items: &[syn::Item],
+    in_test: bool,
+    path_directory: &Path,
+    child_directory: &Path,
+    sources: &BTreeMap<&str, &RustFile>,
+    reached: &mut [BTreeSet<String>; 2],
+) {
+    for item in items {
+        let syn::Item::Mod(item) = item else { continue };
+        let in_test = in_test || is_test_only(&item.attrs);
+        match module_contents(item, path_directory, child_directory) {
+            ModuleContents::Inline(items, directory) => {
+                reach_items(items, in_test, &directory, &directory, sources, reached);
+            }
+            ModuleContents::Files(paths) => {
+                for path in paths {
+                    if let Some(file) = sources.get(path.as_str()) {
+                        reach(file, in_test, sources, reached);
+                    }
                 }
             }
         }

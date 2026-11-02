@@ -31,8 +31,9 @@ impl Drop for Fixture {
 }
 
 /// Members at the workspace root, as in a workspace without a `crates/`
-/// directory: each file knows its member, and its member's `tests/` alone
-/// holds integration tests.
+/// directory: each file knows its member; its member's `tests/` holds
+/// integration tests, and a file only `#[cfg(test)]` declarations reach is
+/// test code too.
 #[test]
 fn members_anywhere_give_their_files_a_package() {
     let fixture = Fixture::new("members");
@@ -44,7 +45,8 @@ fn members_anywhere_give_their_files_a_package() {
         "app-core/Cargo.toml",
         "[package]\nname = \"app-core\"\n[dependencies]\nutil.workspace = true\n",
     );
-    fixture.write("app-core/src/lib.rs", "mod db;");
+    fixture.write("app-core/src/lib.rs", "mod db; #[cfg(test)] mod checks;");
+    fixture.write("app-core/src/checks.rs", "");
     fixture.write("app-core/src/db/tests/bench.rs", "");
     fixture.write("app-core/tests/flow.rs", "");
     fixture.write("app-util/Cargo.toml", "[package]\nname = \"app-util\"\n");
@@ -66,6 +68,7 @@ fn members_anywhere_give_their_files_a_package() {
     assert_eq!(
         files,
         [
+            ("app-core/src/checks.rs", "app-core/", "app-core", true),
             ("app-core/src/db/tests/bench.rs", "app-core/", "app-core", false),
             ("app-core/src/lib.rs", "app-core/", "app-core", false),
             ("app-core/tests/flow.rs", "app-core/", "app-core", true),
@@ -73,7 +76,7 @@ fn members_anywhere_give_their_files_a_package() {
         ]
     );
     assert_eq!(
-        workspace.files[1].extern_crates,
+        workspace.files[2].extern_crates,
         BTreeMap::from([("util".to_string(), "app_util".to_string())])
     );
     assert_eq!(
