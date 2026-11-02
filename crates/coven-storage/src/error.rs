@@ -282,6 +282,11 @@ pub enum StorageSetupError {
     /// This device or its member was removed from the store (§14.1).
     #[error("this device or its member was removed")]
     Removed,
+    /// This member's account holds the store, and setup signed in with
+    /// another account. Their access stays on the account that holds it:
+    /// the person signs in with that one (§10.1, §20.9).
+    #[error("the store's owner must sign in with the account that holds it")]
+    StoreOwner,
     /// The store needs a newer app schema or coven format (§18).
     #[error("an update is required: {0:?}")]
     UpdateRequired(coven_format::RequiredUpdate),

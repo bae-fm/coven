@@ -877,6 +877,10 @@ retires a distinct older device of the same member.
 **Access.** Set-access changes its author's own access, or an admin's target
 member's S3 key. The named member must be active.
 
+**The account that holds the store.** On a store a provider account holds, the
+member whose account holds it can't be removed, and can't move to another
+account: that remove-member, or that set-access, is refused (`StoreOwner`).
+
 **Invite shares** record the provider account an invite shares the store with
 (§13.2).
 

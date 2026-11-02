@@ -18,9 +18,10 @@ pub enum EntryTarget {
 /// Why the current applied state refuses an administrative operation.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum OperationRejection {
-    /// The provider account owns the store and cannot be removed (§10.1):
-    /// OneDrive and CloudKit can't hand a store to another account, and coven
-    /// doesn't use Dropbox's ownership transfer (bae-fm/coven#237).
+    /// The provider account owns the store: its member can't be removed, and
+    /// their access can't move to another account (§10.1): OneDrive and
+    /// CloudKit can't hand a store to another account, and coven doesn't use
+    /// Dropbox's ownership transfer (bae-fm/coven#237).
     StoreOwner,
     /// The target is absent, removed, or cannot be reused.
     TargetGone(EntryTarget),

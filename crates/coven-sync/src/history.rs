@@ -234,6 +234,14 @@ impl History {
         Ok(signer)
     }
 
+    /// Whether `member`'s provider account holds the store (§20.9). An S3
+    /// store is held by no account.
+    fn holds_store(&self, member: MemberId) -> bool {
+        self.state.members.get(&member).is_some_and(|current| {
+            matches!(current.access, coven_format::MemberAccess::ProviderAccount(_))
+        }) && self.owns_storage(member)
+    }
+
     pub(crate) fn validate(
         &self,
         header: &SlotHeader,
@@ -241,10 +249,7 @@ impl History {
         change: &StoreChange,
     ) -> Result<Option<AdminEffect>, OperationRejection> {
         if let StoreChange::RemoveMember { member } = change {
-            if self.state.members.get(member).is_some_and(|current| {
-                matches!(current.access, coven_format::MemberAccess::ProviderAccount(_))
-            }) && self.owns_storage(*member)
-            {
+            if self.holds_store(*member) {
                 return Err(OperationRejection::StoreOwner);
             }
         }
@@ -257,6 +262,14 @@ impl History {
             &self.boundaries,
         )?;
         match change {
+            // The owner's access stays on the account that holds the store:
+            // moved to another, no member would reach storage through it,
+            // and nobody could share the store or take sharing back (§20.9).
+            StoreChange::SetAccess { member, .. }
+                if effect.is_some() && self.holds_store(*member) =>
+            {
+                return Err(OperationRejection::StoreOwner);
+            }
             StoreChange::AddInviteShare { invite, account } => {
                 if let Some(share) = self.invite_shares.get(invite) {
                     // Its device recording the same open share again is
@@ -272,10 +285,7 @@ impl History {
                 }
                 // Only the member whose account holds the store shares it
                 // with accounts (§20.9).
-                let account_held = self.state.members.get(&header.author).is_some_and(|member| {
-                    matches!(member.access, coven_format::MemberAccess::ProviderAccount(_))
-                });
-                if !account_held || !self.owns_storage(header.author) {
+                if !self.holds_store(header.author) {
                     return Err(OperationRejection::NotAllowed);
                 }
             }

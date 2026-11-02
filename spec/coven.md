@@ -2873,10 +2873,15 @@ A store may have several admins. The store always keeps at least one: removing
 the last admin, or demoting them, is refused. The member whose provider account
 holds the store (the Dropbox folder's owner, say) can't be removed either,
 because in coven nobody else can take provider access back; coven refuses with
-`SyncError::StoreOwner` before claiming anything (§14.2). On OneDrive and
-CloudKit that is final: neither can hand a store to another account. Dropbox can
-(`transfer_folder`), after which the old owner would be removable, but coven
-doesn't use that transfer (bae-fm/coven#237).
+`SyncError::StoreOwner` before claiming anything (§14.2). Nor can that
+member's access move to another account: nobody would then reach storage
+through the account that holds the store, so nobody could share it or take
+sharing back. The access change is refused the same way, so storage setup
+signed in with another account fails with `StorageSetupError::StoreOwner`
+and commits nothing (§20.9). On OneDrive and CloudKit that is final: neither
+can hand a store to another account. Dropbox can (`transfer_folder`), after
+which the old owner would be removable, but coven doesn't use that transfer
+(bae-fm/coven#237).
 
 #### 10.2 Admin entries
 
@@ -4287,10 +4292,11 @@ pending list of each device that does the work shows its progress.
   whose device isn't gone for good (§13.2), so every device reads the same
   intent. Coven changes sharing only from the account that holds the store
   (§13.2 says which providers would also let an editor or administrator do it),
-  so that member's devices do it when they apply the change. Only they record
-  the work. Another admin's device can't change sharing, and can't see the
-  owner's device do it, so it records nothing: a wait it showed would never
-  end. If Ana owns the folder and is offline, Ben's removal applies at once
+  so that member's devices do it when they apply the change, and that
+  member's access stays on that account (§10.1). Only they record the work.
+  Another admin's device can't change sharing, and can't see the owner's
+  device do it, so it records nothing: a wait it showed would never end. If
+  Ana owns the folder and is offline, Ben's removal applies at once
   everywhere, but the unsharing waits for Ana's next pass.
 - **S3:** each member has their own access key, made in the provider's console.
   Removing Ben ends his membership and coven forgets his key; the person deletes
@@ -7893,7 +7899,13 @@ provider's: §13.2 names what Dropbox and CloudKit would also allow. So:
 
 - that member's devices make invites (§13.2);
 - any admin can remove a member, and the owner's device takes that member's
-  access back when it applies the removal (§14.2).
+  access back when it applies the removal (§14.2);
+- that member can't be removed, and their access can't move to another
+  account: either would leave the store in an account no member reaches it
+  through. Ana set up Household on Dropbox, and later signs in on her laptop
+  with her work account, which Household was shared with too. Setup fails
+  with `StorageSetupError::StoreOwner` and changes nothing; she signs in with
+  the account that holds Household (§10.1).
 
 Coven promises the access the applied sequence intends. Provider requests take
 time and can fail, so actual access need not match that intent at every instant.
@@ -10008,7 +10020,7 @@ the constraint or foreign key (§9, §15.1, §15.2, Appendix A).
 | `WritesRefused` | writes cut off by a removal or key replacement were consumed; names the deciding entry | §14.1, §19.1 |
 | `SyncError::DeviceIdInUse` | another installation uses this device's id, or a reset replaced it | §5.1, §5.3, §14.1, §19.3 |
 | `MemberKeysReplaced` | this device holds member keys that were replaced, or an old restore code is used | §12.3, §13.1, §14.1 |
-| `SyncError::StoreOwner` | a removal targets the member whose account holds the store | §10.1, §14.2 |
+| `SyncError::StoreOwner` | a removal targets the member whose account holds the store, or an access change moves that member to another account; storage setup reports it as `StorageSetupError::StoreOwner` | §10.1, §14.2, §20.9 |
 | `SyncError::Rejected(OperationRejection)` | an admin change the applied state refuses, as a write asks for it or after the operation loses a race; an operation the app's write journaled ends rejected in `coven_operations` instead | §11.1, §11.4 |
 | `AccessRemains` | a grant coven leaves in place: through a parent folder, a public link or a group, to an unidentified grantee, or the owner's own | §14.2 |
 | `DeviceReset` | the notice, stored in `_coven_device_reset`, that a reset replaced this device | §17.8, §19.3 |

@@ -3502,7 +3502,9 @@ while let Some(Ok(values)) = lost.next().await {
     except on an S3 service whose member keys reach a whole bucket (below).
   - After `disconnect_storage`, setup reconnects at the recorded location.
     It refuses a different location with `LocationChangeUnsupported`;
-    setup does not relocate a store already used by other devices.
+    setup does not relocate a store already used by other devices. The
+    member whose account holds the store reconnects with that account;
+    another account fails with `StoreOwner` (§20.9).
   - Creating claims slot 1, then the creator’s key-copy slot (§10.3). Waiting
     writes then claim a writes slot through ordinary sync.
   - Setup can take a while: it may wait out a minute of rate limits, and a
@@ -4290,6 +4292,10 @@ pub enum StorageSetupError {
     SecureStorage(KeyError),
     /// This device or its member was removed from the store (§14.1).
     Removed,
+    /// This member's account holds the store, and setup signed in with
+    /// another account. Their access stays on the account that holds it:
+    /// the person signs in with that one (§10.1, §20.9).
+    StoreOwner,
     /// The store needs a newer app schema or coven format (§18).
     UpdateRequired(RequiredUpdate),
     /// Local setup failed, with its cause.
@@ -4396,9 +4402,9 @@ pub enum SyncError {
     /// The request or invitation is absent, expired, or no longer matches.
     InvitationChanged,
     /// The member's provider account holds the store, so they can't be
-    /// removed (§10.1, §20.9, §14.2): OneDrive and CloudKit can't hand a store
-    /// to another account, and coven doesn't use Dropbox's ownership transfer
-    /// (bae-fm/coven#237).
+    /// removed and their access can't move to another account (§10.1, §20.9,
+    /// §14.2): OneDrive and CloudKit can't hand a store to another account,
+    /// and coven doesn't use Dropbox's ownership transfer (bae-fm/coven#237).
     StoreOwner,
     /// This call needs a newer app schema or coven format (§18).
     UpdateRequired(RequiredUpdate),
@@ -4644,9 +4650,10 @@ pub enum OperationRejection {
     MemberKeysChanged(MemberId),
     NotAllowed,
 
-    /// The provider account owns the store and cannot be removed (§10.1):
-    /// OneDrive and CloudKit can't hand a store to another account, and coven
-    /// doesn't use Dropbox's ownership transfer (bae-fm/coven#237).
+    /// The provider account owns the store: its member can't be removed, and
+    /// their access can't move to another account (§10.1): OneDrive and
+    /// CloudKit can't hand a store to another account, and coven doesn't use
+    /// Dropbox's ownership transfer (bae-fm/coven#237).
     StoreOwner,
 }
 

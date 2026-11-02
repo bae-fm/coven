@@ -370,16 +370,22 @@ struct Household {
 
 impl Household {
     fn new() -> Self {
-        Self::with_access(crate::sequence_sync::tests::access("ana"))
+        Self::with_access(
+            crate::sequence_sync::tests::access("ana"),
+            crate::sequence_sync::tests::access("ben"),
+        )
     }
 
     /// Household on a provider that shares it with accounts: Ana's account
-    /// holds it.
+    /// holds it, and Ben reaches it from his own.
     fn shared() -> Self {
-        Self::with_access(coven_format::MemberAccess::ProviderAccount("ana@example.org".into()))
+        Self::with_access(account("ana@example.org"), account("ben@example.org"))
     }
 
-    fn with_access(access: coven_format::MemberAccess) -> Self {
+    fn with_access(
+        access: coven_format::MemberAccess,
+        ben_access: coven_format::MemberAccess,
+    ) -> Self {
         let mut household =
             Self { history: History::default(), slots: 0, ana: member(1), ben: member(2) };
         let (ana, ben) = (household.ana, household.ben);
@@ -403,7 +409,7 @@ impl Household {
                 member: ben,
                 keys: coven_format::test_utils::keys_from_seed(2).public_keys(),
                 role: MemberRole::Admin,
-                access: crate::sequence_sync::tests::access("ben"),
+                access: ben_access,
             },
         );
         household.entry(
@@ -510,6 +516,43 @@ fn a_member_key_replacement_stops_only_her_other_devices_added_before_it() {
         Some((at, DeviceStop::MemberKeysReplaced))
     );
     assert_eq!(household.history.gone_for_good(DeviceId(5)), None);
+}
+
+fn account(email: &str) -> coven_format::MemberAccess {
+    coven_format::MemberAccess::ProviderAccount(email.into())
+}
+
+/// Ana's account holds Household. Moving her access to another account
+/// would leave the folder in an account no member reaches storage through,
+/// and nobody could share it or take sharing back, so it is refused; her
+/// own account spelled another way changes nothing. Ben moves his own
+/// access freely (§14.2, §20.9, format.md D6).
+#[test]
+fn the_owner_cannot_move_her_access_off_the_account_that_holds_the_store() {
+    let household = Household::shared();
+    let (ana, ben) = (household.ana, household.ben);
+    let set = |member, email| StoreChange::SetAccess { member, access: account(email) };
+    for device in [1, 3] {
+        assert_eq!(
+            household.check(device, ana, set(ana, "ana@work.example")).err(),
+            Some(OperationRejection::StoreOwner)
+        );
+    }
+    assert!(household.check(1, ana, set(ana, " ANA@example.org")).unwrap().is_none());
+    assert!(household.check(2, ben, set(ben, "ben@work.example")).unwrap().is_some());
+}
+
+/// On S3 no account holds the store: Ana, who made it, replaces her key as
+/// any member does (§14.3).
+#[test]
+fn an_s3_store_creator_replaces_her_key() {
+    let household = Household::new();
+    let ana = household.ana;
+    let change = StoreChange::SetAccess {
+        member: ana,
+        access: crate::sequence_sync::tests::access("ana-2"),
+    };
+    assert!(household.check(1, ana, change).unwrap().is_some());
 }
 
 fn invite(n: u128) -> coven_foundation::id_source::InviteId {

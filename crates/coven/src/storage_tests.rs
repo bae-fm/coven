@@ -904,6 +904,50 @@ async fn reconnect_checks_the_provider_and_preserves_the_previous_connection() {
     f.handle.close().await.unwrap();
 }
 
+/// Ana's account holds Household on iCloud, and Household was shared with
+/// her work account too. Setting up again signed in with it is refused:
+/// no member would reach storage through the account that holds the store,
+/// so nobody could share it or take sharing back. Setup commits nothing, and
+/// her access still names the account that holds the store (§10.1, §20.9).
+#[tokio::test]
+async fn setup_with_an_account_other_than_the_one_holding_the_store_is_refused() {
+    let root = tempfile::tempdir().unwrap();
+    let app = TestCoven::new();
+    let layout = StoreLayout::new(root.path().into());
+    let clock = Arc::new(FixedClock::new(UNIX_EPOCH + Duration::from_secs(1000)));
+    let storage = Arc::new(
+        MemoryStorage::builder()
+            .provider(CloudProvider::CloudKit)
+            .clock(clock.clone())
+            .build()
+            .unwrap(),
+    );
+    let StorageConfig::CloudKit { container, .. } = storage.config() else { unreachable!() };
+    let directory = app.create_closed_store(&layout, "Household", Arc::new(UuidIds)).await.unwrap();
+    let handle = builder(&app, layout.clone(), clock.clone(), storage.clone())
+        .open(directory.id(), |_| ())
+        .await
+        .unwrap();
+    handle.setup_cloudkit_storage(&container, "Ana's Mac", |_| {}).await.unwrap();
+    let owner = handle.members().await.unwrap().into_iter().find(|m| m.is_self).unwrap().access;
+    let coven_storage::AccessGrant::Granted { invitation } =
+        storage.grant_access("ana@work.example").await.unwrap()
+    else {
+        panic!("an account grant")
+    };
+    let work = Arc::new(MemoryStorage::for_recipient(&storage, "ana@work.example").unwrap());
+    work.join(directory.id(), &invitation).await.unwrap();
+    let code = handle.restore_code().await.unwrap();
+    handle.close().await.unwrap();
+    let handle = builder(&app, layout, clock, work).open(directory.id(), |_| ()).await.unwrap();
+    let result = handle.setup_cloudkit_storage(&container, "Ana's Mac", |_| {}).await;
+    assert!(matches!(result, Err(StorageSetupError::StoreOwner)), "{result:?}");
+    assert_eq!(handle.restore_code().await.unwrap(), code);
+    let members = handle.members().await.unwrap();
+    assert_eq!(members.into_iter().find(|m| m.is_self).unwrap().access, owner);
+    handle.close().await.unwrap();
+}
+
 #[path = "storage_credentials_tests.rs"]
 mod credential_changes;
 
