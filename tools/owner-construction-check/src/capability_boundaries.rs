@@ -5,8 +5,8 @@
 //!
 //! The check is syntactic: naming the crate or the path is the violation, so a
 //! new direct use fails before compilation and review. It reads inside macro
-//! calls too, so `format!("{}", Uuid::new_v4())` is a direct use. Test sources and
-//! `cfg(test)` items are exempt — fixtures may assemble raw material.
+//! calls too, so `format!("{}", Uuid::new_v4())` is a direct use. It reads no
+//! test code (`test_code.rs`): fixtures may assemble raw material.
 
 use std::collections::BTreeSet;
 
@@ -17,7 +17,7 @@ use syn::visit::{self, Visit};
 use crate::finding::Finding;
 use crate::macros::{parse_macro_body, token_paths};
 use crate::policy::{describe_homes, Capability, Gate, Policy};
-use crate::syntax::{flatten_use_tree, is_test_only, type_name, RustFile};
+use crate::syntax::{flatten_use_tree, type_name, RustFile};
 
 pub(crate) fn find_capability_boundary_violations(
     files: &[RustFile],
@@ -25,9 +25,6 @@ pub(crate) fn find_capability_boundary_violations(
 ) -> Vec<Finding> {
     let mut violations = BTreeSet::new();
     for file in files {
-        if file.is_test_source() {
-            continue;
-        }
         let gated = policy
             .capabilities
             .iter()
@@ -169,17 +166,7 @@ impl<'ast> Visit<'ast> for CapabilityBoundaryVisitor<'_, '_> {
         visit::visit_attribute(self, node);
     }
 
-    fn visit_item_mod(&mut self, node: &'ast syn::ItemMod) {
-        if is_test_only(&node.attrs) {
-            return;
-        }
-        visit::visit_item_mod(self, node);
-    }
-
     fn visit_item_impl(&mut self, node: &'ast syn::ItemImpl) {
-        if is_test_only(&node.attrs) {
-            return;
-        }
         let previous = std::mem::replace(
             &mut self.current_type,
             type_name(&node.self_ty).unwrap_or_else(|| "<impl>".into()),
@@ -189,9 +176,6 @@ impl<'ast> Visit<'ast> for CapabilityBoundaryVisitor<'_, '_> {
     }
 
     fn visit_item_fn(&mut self, node: &'ast syn::ItemFn) {
-        if is_test_only(&node.attrs) {
-            return;
-        }
         let previous = self.rooted;
         self.rooted =
             self.policy.is_composition_root(self.path, "<free>", &node.sig.ident.to_string());
@@ -200,9 +184,6 @@ impl<'ast> Visit<'ast> for CapabilityBoundaryVisitor<'_, '_> {
     }
 
     fn visit_impl_item_fn(&mut self, node: &'ast syn::ImplItemFn) {
-        if is_test_only(&node.attrs) {
-            return;
-        }
         let previous = self.rooted;
         self.rooted = self.policy.is_composition_root(
             self.path,

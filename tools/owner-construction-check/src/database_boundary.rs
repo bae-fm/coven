@@ -4,7 +4,8 @@
 //! Outside the homes of the policy's database capability, naming a raw
 //! rusqlite handle — connection, session or transaction — is the violation, as
 //! is writing SQL that names one of the tables the database's schema module
-//! declares. rusqlite's values, results and parameter macros stay allowed.
+//! declares. rusqlite's values, results and parameter macros stay allowed. It
+//! reads no test code (`test_code.rs`).
 
 use crate::finding::Finding;
 use std::collections::BTreeSet;

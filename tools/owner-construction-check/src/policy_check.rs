@@ -12,26 +12,19 @@ use crate::capability_construction::construction_only_types;
 use crate::database_boundary::schema_table_macros;
 use crate::policy::Policy;
 use crate::sources::Workspace;
-use crate::syntax::{
-    collect_declared_types, is_test_only, type_name, type_names, RustFile, TypeNames,
-};
+use crate::syntax::{collect_declared_types, type_name, type_names, RustFile, TypeNames};
 
 /// Each policy row that names something the workspace does not hold.
 pub(crate) fn stale_rows(workspace: &Workspace, policy: &Policy) -> Vec<String> {
-    let crate_files = workspace
-        .files
-        .iter()
-        .filter(|file| !policy.is_tool(&file.package))
-        .cloned()
-        .collect::<Vec<_>>();
+    let crate_files = workspace.crate_code(policy);
     let mut stale = Vec::new();
     if policy.rules.is_empty() {
         stale.push("rules: the policy selects no rules".to_string());
     }
     stale.extend(unknown_members(workspace, policy));
-    stale.extend(missing_homes(&workspace.files, policy));
-    stale.extend(missing_composition_roots(&workspace.files, policy));
-    stale.extend(invalid_capability_factories(&workspace.files, policy));
+    stale.extend(missing_homes(&crate_files, policy));
+    stale.extend(missing_composition_roots(&crate_files, policy));
+    stale.extend(invalid_capability_factories(&crate_files, policy));
     stale.extend(undeclared_types(&crate_files, policy));
     stale.extend(missing_capability_traits(&crate_files, policy));
     stale.extend(invalid_database(&crate_files, workspace, policy));
@@ -93,8 +86,8 @@ fn missing_homes(files: &[RustFile], policy: &Policy) -> Vec<String> {
         .collect()
 }
 
-/// Every non-test free function and method, keyed by its file, its type
-/// (`<free>` for a free function) and its name.
+/// Every free function and method of the crates' production code, keyed by
+/// its file, its type (`<free>` for a free function) and its name.
 fn declared_methods(files: &[RustFile]) -> BTreeMap<(String, String, String), syn::Signature> {
     struct MethodCollector<'a> {
         path: &'a str,
@@ -103,36 +96,23 @@ fn declared_methods(files: &[RustFile]) -> BTreeMap<(String, String, String), sy
 
     impl Visit<'_> for MethodCollector<'_> {
         fn visit_item_fn(&mut self, node: &syn::ItemFn) {
-            if !is_test_only(&node.attrs) {
-                self.methods.insert(
-                    (self.path.to_string(), "<free>".into(), node.sig.ident.to_string()),
-                    node.sig.clone(),
-                );
-                visit::visit_item_fn(self, node);
-            }
-        }
-
-        fn visit_item_mod(&mut self, node: &syn::ItemMod) {
-            if !is_test_only(&node.attrs) {
-                visit::visit_item_mod(self, node);
-            }
+            self.methods.insert(
+                (self.path.to_string(), "<free>".into(), node.sig.ident.to_string()),
+                node.sig.clone(),
+            );
+            visit::visit_item_fn(self, node);
         }
 
         fn visit_item_impl(&mut self, node: &syn::ItemImpl) {
-            if is_test_only(&node.attrs) {
-                return;
-            }
             let Some(owner) = type_name(&node.self_ty) else {
                 return;
             };
             for item in &node.items {
                 if let syn::ImplItem::Fn(method) = item {
-                    if !is_test_only(&method.attrs) {
-                        self.methods.insert(
-                            (self.path.to_string(), owner.clone(), method.sig.ident.to_string()),
-                            method.sig.clone(),
-                        );
-                    }
+                    self.methods.insert(
+                        (self.path.to_string(), owner.clone(), method.sig.ident.to_string()),
+                        method.sig.clone(),
+                    );
                 }
             }
             visit::visit_item_impl(self, node);
@@ -140,7 +120,7 @@ fn declared_methods(files: &[RustFile]) -> BTreeMap<(String, String, String), sy
     }
 
     let mut methods = BTreeMap::new();
-    for file in files.iter().filter(|file| !file.is_test_source()) {
+    for file in files {
         MethodCollector { path: &file.relative_path, methods: &mut methods }
             .visit_file(&file.syntax);
     }
@@ -204,7 +184,7 @@ fn invalid_capability_factories(files: &[RustFile], policy: &Policy) -> Vec<Stri
 fn undeclared_types(crate_files: &[RustFile], policy: &Policy) -> Vec<String> {
     let declared = collect_declared_types(crate_files);
     let mut mentioned = TypeNames::default();
-    for file in crate_files.iter().filter(|file| !file.is_test_source()) {
+    for file in crate_files {
         mentioned.visit_file(&file.syntax);
     }
     let named = policy.named_types();

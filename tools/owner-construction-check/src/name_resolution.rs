@@ -10,7 +10,7 @@ use syn::visit::{self, Visit};
 
 use crate::macros::parse_macro_body;
 use crate::module_sources::module_sources;
-use crate::syntax::{is_test_only, path_names, RustFile};
+use crate::syntax::{path_names, RustFile};
 
 pub(crate) type ItemPath = Vec<String>;
 type Position = (usize, usize);
@@ -570,27 +570,17 @@ impl Collector<'_> {
 
 impl<'ast> Visit<'ast> for Collector<'_> {
     fn visit_item(&mut self, node: &'ast syn::Item) {
-        let (attrs, ident) = match node {
-            syn::Item::Fn(item) => (&item.attrs, Some(&item.sig.ident)),
-            syn::Item::Struct(item) => (&item.attrs, Some(&item.ident)),
-            syn::Item::Enum(item) => (&item.attrs, Some(&item.ident)),
-            syn::Item::Union(item) => (&item.attrs, Some(&item.ident)),
-            syn::Item::Type(item) => (&item.attrs, Some(&item.ident)),
-            syn::Item::Trait(item) => (&item.attrs, Some(&item.ident)),
-            syn::Item::Const(item) => (&item.attrs, Some(&item.ident)),
-            syn::Item::Static(item) => (&item.attrs, Some(&item.ident)),
-            syn::Item::Mod(item) => (&item.attrs, None),
-            syn::Item::Impl(item) => (&item.attrs, None),
-            syn::Item::Use(item) => (&item.attrs, None),
-            syn::Item::Macro(item) => (&item.attrs, None),
-            _ => {
-                visit::visit_item(self, node);
-                return;
-            }
+        let ident = match node {
+            syn::Item::Fn(item) => Some(&item.sig.ident),
+            syn::Item::Struct(item) => Some(&item.ident),
+            syn::Item::Enum(item) => Some(&item.ident),
+            syn::Item::Union(item) => Some(&item.ident),
+            syn::Item::Type(item) => Some(&item.ident),
+            syn::Item::Trait(item) => Some(&item.ident),
+            syn::Item::Const(item) => Some(&item.ident),
+            syn::Item::Static(item) => Some(&item.ident),
+            _ => None,
         };
-        if is_test_only(attrs) {
-            return;
-        }
         if let Some(ident) = ident {
             let namespace =
                 if matches!(node, syn::Item::Fn(_) | syn::Item::Const(_) | syn::Item::Static(_)) {
@@ -630,9 +620,6 @@ impl<'ast> Visit<'ast> for Collector<'_> {
     }
 
     fn visit_item_extern_crate(&mut self, node: &'ast syn::ItemExternCrate) {
-        if is_test_only(&node.attrs) {
-            return;
-        }
         let name = node.rename.as_ref().map_or(&node.ident, |(_, name)| name).to_string();
         let target = if node.ident == "self" {
             self.resolver.scopes[self.scope].module[0].clone()
@@ -689,15 +676,11 @@ impl<'ast> Visit<'ast> for Collector<'_> {
     }
 
     fn visit_impl_item_fn(&mut self, node: &'ast syn::ImplItemFn) {
-        if !is_test_only(&node.attrs) {
-            self.scoped(node.span(), |collector| visit::visit_impl_item_fn(collector, node));
-        }
+        self.scoped(node.span(), |collector| visit::visit_impl_item_fn(collector, node));
     }
 
     fn visit_trait_item_fn(&mut self, node: &'ast syn::TraitItemFn) {
-        if !is_test_only(&node.attrs) {
-            self.scoped(node.span(), |collector| visit::visit_trait_item_fn(collector, node));
-        }
+        self.scoped(node.span(), |collector| visit::visit_trait_item_fn(collector, node));
     }
 
     fn visit_type_param(&mut self, node: &'ast syn::TypeParam) {
@@ -705,9 +688,7 @@ impl<'ast> Visit<'ast> for Collector<'_> {
     }
 
     fn visit_foreign_item_fn(&mut self, node: &'ast syn::ForeignItemFn) {
-        if !is_test_only(&node.attrs) {
-            self.declare(&node.sig.ident, Namespace::Value);
-        }
+        self.declare(&node.sig.ident, Namespace::Value);
     }
 
     fn visit_item_macro(&mut self, node: &'ast syn::ItemMacro) {

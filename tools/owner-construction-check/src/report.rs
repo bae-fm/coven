@@ -51,14 +51,10 @@ pub(crate) fn check_packages(
 }
 
 /// The policy's selected rules. The dependency, capability and owner rules
-/// read crates; conventions also read tools.
+/// read the crates' production code; conventions read every file, tools and
+/// tests included.
 fn check_paths(workspace: &Workspace, policy: &Policy, roots: &[&str]) -> Report {
-    let files = workspace
-        .files
-        .iter()
-        .filter(|file| !policy.is_tool(&file.package))
-        .cloned()
-        .collect::<Vec<_>>();
+    let files = workspace.crate_code(policy);
     let graph = OwnerGraph::collect(&files, policy);
     let mut findings = Vec::new();
     if policy.selects(Rule::CrateDependencies) {

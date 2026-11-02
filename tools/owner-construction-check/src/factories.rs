@@ -7,7 +7,7 @@ use syn::visit::{self, Visit};
 use crate::finding::Finding;
 use crate::macros::parse_macro_body;
 use crate::name_resolution::{qualified_path, ItemPath, NameResolver, ResolutionError};
-use crate::syntax::{is_test_only, type_names, RustFile};
+use crate::syntax::{type_names, RustFile};
 
 pub(crate) struct Factories {
     pub(crate) results: BTreeMap<ItemPath, BTreeMap<Option<ItemPath>, BTreeSet<String>>>,
@@ -63,16 +63,12 @@ impl Factories {
             associated_types: BTreeSet::new(),
         };
         let mut traits = BTreeMap::new();
-        for file in
-            files.iter().filter(|file| !file.is_test_source() && !is_test_only(&file.syntax.attrs))
-        {
+        for file in files {
             TraitCollector { path: &file.relative_path, resolver, traits: &mut traits }
                 .visit_file(&file.syntax);
         }
         let mut aliases = Vec::new();
-        for file in
-            files.iter().filter(|file| !file.is_test_source() && !is_test_only(&file.syntax.attrs))
-        {
+        for file in files {
             Collector {
                 path: &file.relative_path,
                 resolver,
@@ -181,16 +177,7 @@ impl Collector<'_> {
 }
 
 impl<'ast> Visit<'ast> for Collector<'_> {
-    fn visit_item_mod(&mut self, node: &'ast syn::ItemMod) {
-        if !is_test_only(&node.attrs) {
-            visit::visit_item_mod(self, node);
-        }
-    }
-
     fn visit_item_fn(&mut self, node: &'ast syn::ItemFn) {
-        if is_test_only(&node.attrs) {
-            return;
-        }
         if let syn::ReturnType::Type(_, output) = &node.sig.output {
             let results =
                 type_names(output).intersection(self.constructed).cloned().collect::<BTreeSet<_>>();
@@ -209,7 +196,7 @@ impl<'ast> Visit<'ast> for Collector<'_> {
     }
 
     fn visit_item_enum(&mut self, node: &'ast syn::ItemEnum) {
-        if !is_test_only(&node.attrs) && self.constructed.contains(&node.ident.to_string()) {
+        if self.constructed.contains(&node.ident.to_string()) {
             for variant in &node.variants {
                 self.record(
                     self.resolver.definition(self.path, &node.ident),
@@ -222,7 +209,7 @@ impl<'ast> Visit<'ast> for Collector<'_> {
     }
 
     fn visit_item_type(&mut self, node: &'ast syn::ItemType) {
-        if !is_test_only(&node.attrs) && self.constructed.contains(&node.ident.to_string()) {
+        if self.constructed.contains(&node.ident.to_string()) {
             if let syn::Type::Path(target) = node.ty.as_ref() {
                 if let Some(target) = self.resolve(&target.path) {
                     self.factories.associated_types.insert(node.ident.to_string());
@@ -233,9 +220,6 @@ impl<'ast> Visit<'ast> for Collector<'_> {
     }
 
     fn visit_item_impl(&mut self, node: &'ast syn::ItemImpl) {
-        if is_test_only(&node.attrs) {
-            return;
-        }
         let syn::Type::Path(ty) = node.self_ty.as_ref() else {
             return;
         };
@@ -253,14 +237,12 @@ impl<'ast> Visit<'ast> for Collector<'_> {
             trait_path.as_ref().and_then(|path| self.traits.get(path)).cloned().unwrap_or_default();
         for item in &node.items {
             if let syn::ImplItem::Fn(method) = item {
-                if !is_test_only(&method.attrs) {
-                    let names = match &method.sig.output {
-                        syn::ReturnType::Type(_, output) => type_names(output),
-                        syn::ReturnType::Default => BTreeSet::new(),
-                    };
-                    methods.retain(|(name, _)| method.sig.ident != name.as_str());
-                    methods.push((method.sig.ident.to_string(), names));
-                }
+                let names = match &method.sig.output {
+                    syn::ReturnType::Type(_, output) => type_names(output),
+                    syn::ReturnType::Default => BTreeSet::new(),
+                };
+                methods.retain(|(name, _)| method.sig.ident != name.as_str());
+                methods.push((method.sig.ident.to_string(), names));
             }
         }
         let factory = self.resolve(&ty.path);
@@ -288,27 +270,16 @@ struct TraitCollector<'a> {
 }
 
 impl<'ast> Visit<'ast> for TraitCollector<'_> {
-    fn visit_item_mod(&mut self, node: &'ast syn::ItemMod) {
-        if !is_test_only(&node.attrs) {
-            visit::visit_item_mod(self, node);
-        }
-    }
-
     fn visit_item_trait(&mut self, node: &'ast syn::ItemTrait) {
-        if is_test_only(&node.attrs) {
-            return;
-        }
         let methods =
             self.traits.entry(self.resolver.definition(self.path, &node.ident)).or_default();
         for item in &node.items {
             if let syn::TraitItem::Fn(method) = item {
-                if !is_test_only(&method.attrs) {
-                    let names = match &method.sig.output {
-                        syn::ReturnType::Type(_, output) => type_names(output),
-                        syn::ReturnType::Default => BTreeSet::new(),
-                    };
-                    methods.push((method.sig.ident.to_string(), names));
-                }
+                let names = match &method.sig.output {
+                    syn::ReturnType::Type(_, output) => type_names(output),
+                    syn::ReturnType::Default => BTreeSet::new(),
+                };
+                methods.push((method.sig.ident.to_string(), names));
             }
         }
         visit::visit_item_trait(self, node);

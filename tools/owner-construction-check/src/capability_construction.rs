@@ -5,7 +5,8 @@
 //! Capability factory definitions may build their declared result; owner factories
 //! require a root entry themselves. Both have their use sites checked.
 //! Only the policy's named receiver factories may derive capabilities
-//! from an injected owner. Test sources and `cfg(test)` items may assemble capabilities.
+//! from an injected owner. Test code may assemble capabilities; the rule reads
+//! none (`test_code.rs`).
 //! `Default` is forbidden on capability types: inferred `Default::default()`
 //! cannot be resolved by a syntax checker.
 
@@ -21,7 +22,7 @@ use crate::macros::{parse_macro_body, token_paths};
 use crate::name_resolution::{qualified_path, NameResolver};
 use crate::owner_graph::OwnerGraph;
 use crate::policy::Policy;
-use crate::syntax::{is_test_only, type_name, type_names, RustFile};
+use crate::syntax::{type_name, type_names, RustFile};
 
 #[derive(Debug, Eq, PartialEq, Ord, PartialOrd)]
 pub(crate) enum ConstructionKind {
@@ -29,9 +30,10 @@ pub(crate) enum ConstructionKind {
     DefaultImplementation,
 }
 
-/// Read implementations before inspecting use sites, across every source and
-/// without evaluating cfg predicates. Both construction and parameter checks
-/// use this set, so an implementation needs no additional policy entry.
+/// Read implementations before inspecting use sites, across the crates'
+/// production code and without evaluating cfg predicates other than `test`.
+/// Both construction and parameter checks use this set, so an implementation
+/// needs no additional policy entry.
 pub(crate) fn construction_only_types(files: &[RustFile], policy: &Policy) -> BTreeSet<String> {
     let mut types = policy.construction_only_capability_types.clone();
     for file in files {
@@ -89,9 +91,6 @@ pub(crate) fn find_capability_construction_violations(
     let mut violations = BTreeSet::new();
     let factories = Factories::collect(files, &constructed, &resolver, &mut violations);
     for file in files {
-        if file.is_test_source() || is_test_only(&file.syntax.attrs) {
-            continue;
-        }
         let mut visitor = ConstructionVisitor {
             path: &file.relative_path,
             policy,
@@ -458,100 +457,72 @@ impl<'ast> Visit<'ast> for ConstructionVisitor<'_> {
         self.scope = previous;
     }
 
-    fn visit_item_mod(&mut self, node: &'ast syn::ItemMod) {
-        if !is_test_only(&node.attrs) {
-            visit::visit_item_mod(self, node);
-        }
-    }
-
     fn visit_item_trait(&mut self, node: &'ast syn::ItemTrait) {
-        if !is_test_only(&node.attrs) {
-            let previous = self
-                .current_type
-                .replace(TypeContext::new(syn::Path::from(node.ident.clone()), None));
-            visit::visit_item_trait(self, node);
-            self.current_type = previous;
-        }
+        let previous =
+            self.current_type.replace(TypeContext::new(syn::Path::from(node.ident.clone()), None));
+        visit::visit_item_trait(self, node);
+        self.current_type = previous;
     }
 
     fn visit_trait_item_fn(&mut self, node: &'ast syn::TraitItemFn) {
-        if !is_test_only(&node.attrs) {
-            let scope = ConstructionScope::Factory(self.factory_results(&node.sig));
-            let previous = std::mem::replace(&mut self.scope, scope);
-            let bindings = std::mem::take(&mut self.bindings);
-            self.bind_inputs(&node.sig);
-            visit::visit_trait_item_fn(self, node);
-            self.bindings = bindings;
-            self.scope = previous;
-        }
+        let scope = ConstructionScope::Factory(self.factory_results(&node.sig));
+        let previous = std::mem::replace(&mut self.scope, scope);
+        let bindings = std::mem::take(&mut self.bindings);
+        self.bind_inputs(&node.sig);
+        visit::visit_trait_item_fn(self, node);
+        self.bindings = bindings;
+        self.scope = previous;
     }
 
     fn visit_item_fn(&mut self, node: &'ast syn::ItemFn) {
-        if !is_test_only(&node.attrs) {
-            let rooted =
-                self.policy.is_composition_root(self.path, "<free>", &node.sig.ident.to_string());
-            let scope = if rooted {
-                ConstructionScope::CompositionRoot
-            } else {
-                ConstructionScope::Factory(self.factory_results(&node.sig))
-            };
-            let previous = std::mem::replace(&mut self.scope, scope);
-            let current_type = self.current_type.take();
-            let method = self.current_method.replace(node.sig.ident.to_string());
-            self.bind_inputs(&node.sig);
-            visit::visit_item_fn(self, node);
-            self.current_type = current_type;
-            self.current_method = method;
-            self.scope = previous;
-        }
+        let rooted =
+            self.policy.is_composition_root(self.path, "<free>", &node.sig.ident.to_string());
+        let scope = if rooted {
+            ConstructionScope::CompositionRoot
+        } else {
+            ConstructionScope::Factory(self.factory_results(&node.sig))
+        };
+        let previous = std::mem::replace(&mut self.scope, scope);
+        let current_type = self.current_type.take();
+        let method = self.current_method.replace(node.sig.ident.to_string());
+        self.bind_inputs(&node.sig);
+        visit::visit_item_fn(self, node);
+        self.current_type = current_type;
+        self.current_method = method;
+        self.scope = previous;
     }
 
     fn visit_item_const(&mut self, node: &'ast syn::ItemConst) {
-        if !is_test_only(&node.attrs) {
-            self.check_item_type(&node.ty, node.span());
-            visit::visit_item_const(self, node);
-        }
+        self.check_item_type(&node.ty, node.span());
+        visit::visit_item_const(self, node);
     }
 
     fn visit_item_static(&mut self, node: &'ast syn::ItemStatic) {
-        if !is_test_only(&node.attrs) {
-            self.check_item_type(&node.ty, node.span());
-            visit::visit_item_static(self, node);
-        }
+        self.check_item_type(&node.ty, node.span());
+        visit::visit_item_static(self, node);
     }
 
     fn visit_impl_item_const(&mut self, node: &'ast syn::ImplItemConst) {
-        if !is_test_only(&node.attrs) {
-            self.check_item_type(&node.ty, node.span());
-            visit::visit_impl_item_const(self, node);
-        }
+        self.check_item_type(&node.ty, node.span());
+        visit::visit_impl_item_const(self, node);
     }
 
     fn visit_trait_item_const(&mut self, node: &'ast syn::TraitItemConst) {
-        if !is_test_only(&node.attrs) {
-            self.check_item_type(&node.ty, node.span());
-            visit::visit_trait_item_const(self, node);
-        }
+        self.check_item_type(&node.ty, node.span());
+        visit::visit_trait_item_const(self, node);
     }
 
     fn visit_item_struct(&mut self, node: &'ast syn::ItemStruct) {
-        if !is_test_only(&node.attrs) {
-            self.check_default_derive(&node.ident, &node.attrs);
-            visit::visit_item_struct(self, node);
-        }
+        self.check_default_derive(&node.ident, &node.attrs);
+        visit::visit_item_struct(self, node);
     }
 
     fn visit_item_enum(&mut self, node: &'ast syn::ItemEnum) {
-        if !is_test_only(&node.attrs) {
-            self.check_default_derive(&node.ident, &node.attrs);
-            visit::visit_item_enum(self, node);
-        }
+        self.check_default_derive(&node.ident, &node.attrs);
+        visit::visit_item_enum(self, node);
     }
 
     fn visit_item_impl(&mut self, node: &'ast syn::ItemImpl) {
-        if is_test_only(&node.attrs) {
-            return;
-        }
         let previous = std::mem::replace(
             &mut self.current_type,
             match node.self_ty.as_ref() {
@@ -572,9 +543,6 @@ impl<'ast> Visit<'ast> for ConstructionVisitor<'_> {
     }
 
     fn visit_impl_item_fn(&mut self, node: &'ast syn::ImplItemFn) {
-        if is_test_only(&node.attrs) {
-            return;
-        }
         let method = node.sig.ident.to_string();
         let allowed = self.policy.is_composition_root(
             self.path,
@@ -603,9 +571,6 @@ impl<'ast> Visit<'ast> for ConstructionVisitor<'_> {
     }
 
     fn visit_local(&mut self, node: &'ast syn::Local) {
-        if is_test_only(&node.attrs) {
-            return;
-        }
         // The initializer (and let-else branch) sees the previous binding.
         visit::visit_local(self, node);
         self.bind_pattern(&node.pat);
@@ -667,9 +632,6 @@ impl<'ast> Visit<'ast> for ConstructionVisitor<'_> {
     }
 
     fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
-        if is_test_only(&node.attrs) {
-            return;
-        }
         if matches!(node.receiver.as_ref(), syn::Expr::Path(path) if path.path.is_ident("self")) {
             self.check_own_method(&node.method.to_string(), node.span());
         }
@@ -682,9 +644,6 @@ impl<'ast> Visit<'ast> for ConstructionVisitor<'_> {
     }
 
     fn visit_expr_call(&mut self, node: &'ast syn::ExprCall) {
-        if is_test_only(&node.attrs) {
-            return;
-        }
         self.check_callee(&node.func);
         for argument in &node.args {
             self.visit_expr(argument);
@@ -692,9 +651,6 @@ impl<'ast> Visit<'ast> for ConstructionVisitor<'_> {
     }
 
     fn visit_expr_struct(&mut self, node: &'ast syn::ExprStruct) {
-        if is_test_only(&node.attrs) {
-            return;
-        }
         self.check_value_path(
             &qualified_path(&node.path),
             node.span(),
@@ -702,18 +658,6 @@ impl<'ast> Visit<'ast> for ConstructionVisitor<'_> {
             None,
         );
         visit::visit_expr_struct(self, node);
-    }
-
-    fn visit_expr_block(&mut self, node: &'ast syn::ExprBlock) {
-        if !is_test_only(&node.attrs) {
-            visit::visit_expr_block(self, node);
-        }
-    }
-
-    fn visit_stmt_macro(&mut self, node: &'ast syn::StmtMacro) {
-        if !is_test_only(&node.attrs) {
-            visit::visit_stmt_macro(self, node);
-        }
     }
 
     fn visit_macro(&mut self, node: &'ast syn::Macro) {

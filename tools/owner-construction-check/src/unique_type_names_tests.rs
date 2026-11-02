@@ -1,7 +1,10 @@
 use super::*;
+use crate::test_code::production_code;
 
+/// The rule as the checker runs it: on the files' production code.
 fn find_unique_type_name_violations(files: &[RustFile], policy: &Policy) -> Vec<Finding> {
-    super::find_unique_type_name_violations(files, policy, &OwnerGraph::collect(files, policy))
+    let files = production_code(files);
+    super::find_unique_type_name_violations(&files, policy, &OwnerGraph::collect(&files, policy))
 }
 
 fn duplicate_at(name: &str, paths: &[&str]) -> Vec<Finding> {

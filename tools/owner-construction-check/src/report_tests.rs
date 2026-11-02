@@ -105,6 +105,38 @@ fn test_only_duplicate_capability_names_pass() {
     assert!(report.is_empty(), "{:?}", report.lines());
 }
 
+/// Every rule but the conventions reads the same production code: a test
+/// source and a test-only item may hold raw material and hand out what an
+/// owner holds.
+#[test]
+fn test_code_answers_only_to_the_conventions() {
+    let mut policy = Policy::gated_fixture();
+    policy.capability_types.insert("DatabaseConnection".into());
+    policy.internal_dependency_types.insert("DatabaseConnection".into());
+    let report = check(
+        &workspace(vec![
+            RustFile::fixture(
+                "crates/app-sync/src/lib.rs",
+                r#"
+                struct DatabaseConnection;
+                struct Store { connection: DatabaseConnection }
+                impl Store {
+                    #[cfg(test)]
+                    pub(crate) fn connection(&self) -> &DatabaseConnection { &self.connection }
+                }
+                #[cfg(test)] #[path = "lib_tests.rs"] mod tests;
+                "#,
+            ),
+            RustFile::fixture(
+                "crates/app-sync/src/lib_tests.rs",
+                "use rusqlite::Connection; pub(crate) struct Probe { pub(crate) store: Store }",
+            ),
+        ]),
+        &policy,
+    );
+    assert!(report.is_empty(), "{:?}", report.lines());
+}
+
 #[test]
 fn tools_answer_to_the_conventions_but_not_to_the_capability_table() {
     let mut policy = Policy::gated_fixture();

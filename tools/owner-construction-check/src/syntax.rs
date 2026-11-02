@@ -1,6 +1,7 @@
 //! Syntax helpers the checks share: the parsed source file, the type names a
 //! type mentions, the declared types and their fields, and how a test source
-//! or a test-only item is recognized.
+//! or a test-only item is recognized (`test_code.rs` removes both before the
+//! rules of Appendix F.1 to F.3 read the crates).
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -143,9 +144,7 @@ pub(crate) struct StructInfo {
 /// fields mention.
 pub(crate) fn collect_declared_types(files: &[RustFile]) -> BTreeMap<String, StructInfo> {
     let mut types = BTreeMap::new();
-    for file in
-        files.iter().filter(|file| !file.is_test_source() && !is_test_only(&file.syntax.attrs))
-    {
+    for file in files {
         DeclarationCollector { path: &file.relative_path, types: &mut types }
             .visit_file(&file.syntax);
     }
@@ -159,24 +158,14 @@ struct DeclarationCollector<'a> {
 
 impl<'ast> Visit<'ast> for DeclarationCollector<'_> {
     fn visit_item(&mut self, node: &'ast syn::Item) {
-        let (attrs, name) = match node {
-            syn::Item::Struct(item) => (&item.attrs, Some(&item.ident)),
-            syn::Item::Enum(item) => (&item.attrs, Some(&item.ident)),
-            syn::Item::Union(item) => (&item.attrs, Some(&item.ident)),
-            syn::Item::Trait(item) => (&item.attrs, Some(&item.ident)),
-            syn::Item::Type(item) => (&item.attrs, Some(&item.ident)),
-            syn::Item::Mod(item) => (&item.attrs, None),
-            syn::Item::Fn(item) => (&item.attrs, None),
-            syn::Item::Impl(item) => (&item.attrs, None),
-            syn::Item::Const(item) => (&item.attrs, None),
-            syn::Item::Static(item) => (&item.attrs, None),
-            syn::Item::ForeignMod(item) => (&item.attrs, None),
-            syn::Item::Macro(item) => (&item.attrs, None),
-            _ => return,
+        let name = match node {
+            syn::Item::Struct(item) => Some(&item.ident),
+            syn::Item::Enum(item) => Some(&item.ident),
+            syn::Item::Union(item) => Some(&item.ident),
+            syn::Item::Trait(item) => Some(&item.ident),
+            syn::Item::Type(item) => Some(&item.ident),
+            _ => None,
         };
-        if is_test_only(attrs) {
-            return;
-        }
         if let Some(name) = name {
             let fields = match node {
                 syn::Item::Struct(item) => {
@@ -206,32 +195,6 @@ impl<'ast> Visit<'ast> for DeclarationCollector<'_> {
             info.declarations.push((self.path.to_string(), name.span().start().line));
         }
         visit::visit_item(self, node);
-    }
-
-    fn visit_impl_item(&mut self, node: &'ast syn::ImplItem) {
-        let attrs = match node {
-            syn::ImplItem::Fn(item) => &item.attrs,
-            syn::ImplItem::Const(item) => &item.attrs,
-            syn::ImplItem::Type(item) => &item.attrs,
-            syn::ImplItem::Macro(item) => &item.attrs,
-            _ => return,
-        };
-        if !is_test_only(attrs) {
-            visit::visit_impl_item(self, node);
-        }
-    }
-
-    fn visit_trait_item(&mut self, node: &'ast syn::TraitItem) {
-        let attrs = match node {
-            syn::TraitItem::Fn(item) => &item.attrs,
-            syn::TraitItem::Const(item) => &item.attrs,
-            syn::TraitItem::Type(item) => &item.attrs,
-            syn::TraitItem::Macro(item) => &item.attrs,
-            _ => return,
-        };
-        if !is_test_only(attrs) {
-            visit::visit_trait_item(self, node);
-        }
     }
 
     fn visit_macro(&mut self, node: &'ast syn::Macro) {

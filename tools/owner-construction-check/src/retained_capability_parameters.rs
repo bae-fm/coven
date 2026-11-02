@@ -10,9 +10,7 @@ use syn::spanned::Spanned;
 use crate::capability_construction::construction_only_types;
 use crate::finding::Finding;
 use crate::policy::Policy;
-use crate::syntax::{
-    is_test_only, output_contains_owner, supplied_type_names, type_name, RustFile,
-};
+use crate::syntax::{output_contains_owner, supplied_type_names, type_name, RustFile};
 
 pub(crate) fn find_retained_capability_parameter_violations(
     files: &[RustFile],
@@ -22,9 +20,6 @@ pub(crate) fn find_retained_capability_parameter_violations(
     let capabilities = construction_only_types(files, policy);
     let mut violations = BTreeSet::new();
     for file in files {
-        if file.is_test_source() {
-            continue;
-        }
         find_in_items(
             &file.relative_path,
             &file.syntax.items,
@@ -48,9 +43,6 @@ fn find_in_items(
     for item in items {
         match item {
             syn::Item::Impl(item) => {
-                if is_test_only(&item.attrs) {
-                    continue;
-                }
                 let Some(owner) = type_name(&item.self_ty) else {
                     continue;
                 };
@@ -61,9 +53,6 @@ fn find_in_items(
                     let syn::ImplItem::Fn(method) = impl_item else {
                         continue;
                     };
-                    if is_test_only(&method.attrs) {
-                        continue;
-                    }
                     if output_contains_owner(&method.sig.output, &owner)
                         || policy.is_composition_root(path, &owner, &method.sig.ident.to_string())
                     {
@@ -85,9 +74,6 @@ fn find_in_items(
                 }
             }
             syn::Item::Mod(item) => {
-                if is_test_only(&item.attrs) {
-                    continue;
-                }
                 if let Some((_, items)) = &item.content {
                     find_in_items(path, items, owners, policy, capabilities, violations);
                 }

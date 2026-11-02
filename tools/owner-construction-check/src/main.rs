@@ -30,6 +30,7 @@ mod retained_capability_parameters;
 mod rust_prelude;
 mod sources;
 mod syntax;
+mod test_code;
 mod test_layout;
 mod unique_type_names;
 

@@ -6,7 +6,7 @@
 //! retains is every type its fields reach. A method that returns a retained
 //! internal dependency, a wrapper that itself exposes one, or a service the
 //! owner retains, leaks it — unless the method consumes a task and hands
-//! its product on to the next one.
+//! its product on to the next one. It reads no test code (`test_code.rs`).
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -18,7 +18,7 @@ use crate::finding::Finding;
 use crate::owner_graph::OwnerGraph;
 use crate::policy::Policy;
 use crate::syntax::{
-    is_test_only, supplied_type_names, type_name, type_names, visibility_crosses_owner, RustFile,
+    supplied_type_names, type_name, type_names, visibility_crosses_owner, RustFile,
 };
 
 struct OwnerMethod {
@@ -157,7 +157,7 @@ fn collect_retained_service_owner_fields_in_items(
 ) {
     for item in items {
         match item {
-            syn::Item::Struct(item) if !is_test_only(&item.attrs) => {
+            syn::Item::Struct(item) => {
                 let owner = item.ident.to_string();
                 for (index, field) in item.fields.iter().enumerate() {
                     if !visibility_crosses_owner(&field.vis) {
@@ -181,7 +181,7 @@ fn collect_retained_service_owner_fields_in_items(
                     ));
                 }
             }
-            syn::Item::Mod(item) if !is_test_only(&item.attrs) => {
+            syn::Item::Mod(item) => {
                 if let Some((_, items)) = &item.content {
                     collect_retained_service_owner_fields_in_items(
                         path,
@@ -207,11 +207,7 @@ fn collect_database_callables(
     leaks: &mut BTreeSet<Finding>,
 ) {
     for file in files {
-        if file.is_test_source()
-            || !policy
-                .database_homes()
-                .iter()
-                .any(|home| file.relative_path.starts_with(home.as_str()))
+        if !policy.database_homes().iter().any(|home| file.relative_path.starts_with(home.as_str()))
         {
             continue;
         }
@@ -232,7 +228,7 @@ fn collect_database_callables_in_items(
 ) {
     for item in items {
         match item {
-            syn::Item::Fn(function) if !is_test_only(&function.attrs) => {
+            syn::Item::Fn(function) => {
                 collect_database_signature(
                     path,
                     None,
@@ -242,7 +238,7 @@ fn collect_database_callables_in_items(
                     leaks,
                 );
             }
-            syn::Item::Impl(implementation) if !is_test_only(&implementation.attrs) => {
+            syn::Item::Impl(implementation) => {
                 let Some(owner) = type_name(&implementation.self_ty) else {
                     continue;
                 };
@@ -250,9 +246,6 @@ fn collect_database_callables_in_items(
                     let syn::ImplItem::Fn(method) = item else {
                         continue;
                     };
-                    if is_test_only(&method.attrs) {
-                        continue;
-                    }
                     collect_database_signature(
                         path,
                         Some(&owner),
@@ -264,17 +257,13 @@ fn collect_database_callables_in_items(
                 }
             }
             syn::Item::Trait(trait_item)
-                if !is_test_only(&trait_item.attrs)
-                    && matches!(trait_item.vis, syn::Visibility::Public(_)) =>
+                if matches!(trait_item.vis, syn::Visibility::Public(_)) =>
             {
                 let owner = trait_item.ident.to_string();
                 for item in &trait_item.items {
                     let syn::TraitItem::Fn(method) = item else {
                         continue;
                     };
-                    if is_test_only(&method.attrs) {
-                        continue;
-                    }
                     collect_database_signature(
                         path,
                         Some(&owner),
@@ -285,7 +274,7 @@ fn collect_database_callables_in_items(
                     );
                 }
             }
-            syn::Item::Mod(module) if !is_test_only(&module.attrs) => {
+            syn::Item::Mod(module) => {
                 if let Some((_, items)) = &module.content {
                     collect_database_callables_in_items(path, items, raw_database_types, leaks);
                 }
@@ -344,9 +333,8 @@ fn collect_crate_root_session_fields(
     leaks: &mut BTreeSet<Finding>,
 ) {
     for file in files {
-        if file.is_test_source()
-            || !(file.relative_path.ends_with("/src/lib.rs")
-                || file.relative_path.ends_with("/src/main.rs"))
+        if !(file.relative_path.ends_with("/src/lib.rs")
+            || file.relative_path.ends_with("/src/main.rs"))
         {
             continue;
         }
@@ -355,7 +343,7 @@ fn collect_crate_root_session_fields(
                 continue;
             };
             let session = item.ident.to_string();
-            if is_test_only(&item.attrs) || !policy.closed_session_types.contains(&session) {
+            if !policy.closed_session_types.contains(&session) {
                 continue;
             }
             for field in &item.fields {
@@ -371,9 +359,6 @@ fn collect_crate_root_session_fields(
 fn collect_owner_methods(files: &[RustFile]) -> Vec<OwnerMethod> {
     let mut methods = Vec::new();
     for file in files {
-        if file.is_test_source() {
-            continue;
-        }
         collect_owner_methods_in_items(&file.relative_path, &file.syntax.items, &mut methods);
     }
     methods
@@ -407,7 +392,7 @@ fn collect_owner_methods_in_items(path: &str, items: &[syn::Item], methods: &mut
                     methods.push(owner_method(path, &owner, &method.sig, true));
                 }
             }
-            syn::Item::Mod(item) if !is_test_only(&item.attrs) => {
+            syn::Item::Mod(item) => {
                 if let Some((_, items)) = &item.content {
                     collect_owner_methods_in_items(path, items, methods);
                 }

@@ -9776,7 +9776,11 @@ Lean proofs once, on Linux, since a proof checks the same on any platform.
    `owner-construction-check.toml` at the workspace root. The policy holds
    everything the rules know about coven: the rules it runs, the crate order,
    the capabilities and their homes, the composition roots and the types the
-   rules name. The checker's own source names none of it.
+   rules name. The checker's own source names none of it. Test code answers to
+   none of these rules, only to F.5's: the `<name>_tests.rs` files, each crate's
+   `tests/` directory, files only test modules declare, and every item that
+   compiles only into tests. A test may assemble its own graph (F.3) from raw
+   material, and nothing outside tests can reach what it builds.
 4. The checker's check of the policy, before any rule: every member, file,
    type and composition root the policy names must exist, so the policy can't
    go stale.

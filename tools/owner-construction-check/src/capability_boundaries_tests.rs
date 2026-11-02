@@ -1,4 +1,5 @@
 use super::*;
+use crate::test_code::production_code;
 
 fn assert_findings(
     actual: &[Finding],
@@ -15,7 +16,7 @@ fn assert_findings(
 
 fn violations(path: &str, source: &str) -> Vec<Finding> {
     find_capability_boundary_violations(
-        &[RustFile::fixture(path, source)],
+        &production_code(&[RustFile::fixture(path, source)]),
         &Policy::gated_fixture(),
     )
 }
@@ -62,7 +63,11 @@ fn network_crates_are_allowed_in_the_providers() {
         ),
         RustFile::fixture("crates/app-storage/src/providers/s3.rs", "use aws_sdk_s3::Client;"),
     ];
-    assert!(find_capability_boundary_violations(&files, &Policy::gated_fixture()).is_empty());
+    assert!(find_capability_boundary_violations(
+        &production_code(&files),
+        &Policy::gated_fixture()
+    )
+    .is_empty());
 }
 
 #[test]
@@ -85,7 +90,11 @@ fn cfg_test_items_and_test_sources_are_exempt() {
         ),
         RustFile::fixture("crates/app-sync/src/workflow_tests.rs", "use reqwest::Client;"),
     ];
-    assert!(find_capability_boundary_violations(&files, &Policy::gated_fixture()).is_empty());
+    assert!(find_capability_boundary_violations(
+        &production_code(&files),
+        &Policy::gated_fixture()
+    )
+    .is_empty());
 }
 
 #[test]
@@ -112,7 +121,11 @@ fn app_crypto_owns_every_primitive() {
             "use crypto_box::SalsaBox; use chacha20poly1305::XChaCha20Poly1305; use rand::rngs::OsRng;",
         ),
     ];
-    assert!(find_capability_boundary_violations(&files, &Policy::gated_fixture()).is_empty());
+    assert!(find_capability_boundary_violations(
+        &production_code(&files),
+        &Policy::gated_fixture()
+    )
+    .is_empty());
 }
 
 #[test]
@@ -271,7 +284,11 @@ fn the_clock_and_the_id_source_own_their_reads() {
             "fn new_id() -> String { uuid::Uuid::new_v4().to_string() }",
         ),
     ];
-    assert!(find_capability_boundary_violations(&files, &Policy::gated_fixture()).is_empty());
+    assert!(find_capability_boundary_violations(
+        &production_code(&files),
+        &Policy::gated_fixture()
+    )
+    .is_empty());
 }
 
 #[test]

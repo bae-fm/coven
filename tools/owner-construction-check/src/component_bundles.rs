@@ -13,9 +13,7 @@ use syn::spanned::Spanned;
 use syn::visit::{self, Visit};
 
 use crate::macros::parse_macro_body;
-use crate::syntax::{
-    is_test_only, output_contains_owner, type_name, visibility_crosses_owner, RustFile,
-};
+use crate::syntax::{output_contains_owner, type_name, visibility_crosses_owner, RustFile};
 
 #[derive(Default)]
 struct BundleTypeInfo {
@@ -29,9 +27,6 @@ pub(crate) fn find_component_bundle_violations(files: &[RustFile]) -> Vec<Findin
     let bundle_types = collect_bundle_types(files);
     let mut violations = BTreeSet::new();
     for file in files {
-        if file.is_test_source() {
-            continue;
-        }
         let mut visitor = ComponentBundleVisitor {
             path: &file.relative_path,
             bundle_types: &bundle_types,
@@ -45,9 +40,6 @@ pub(crate) fn find_component_bundle_violations(files: &[RustFile]) -> Vec<Findin
 fn collect_bundle_types(files: &[RustFile]) -> BTreeSet<String> {
     let mut types = BTreeMap::new();
     for file in files {
-        if file.is_test_source() {
-            continue;
-        }
         collect_bundle_type_info(&file.syntax.items, &mut types);
     }
     types
@@ -64,13 +56,13 @@ fn collect_bundle_types(files: &[RustFile]) -> BTreeSet<String> {
 fn collect_bundle_type_info(items: &[syn::Item], types: &mut BTreeMap<String, BundleTypeInfo>) {
     for item in items {
         match item {
-            syn::Item::Struct(item) if !is_test_only(&item.attrs) => {
+            syn::Item::Struct(item) => {
                 let info = types.entry(item.ident.to_string()).or_default();
                 info.field_count = item.fields.len();
                 info.public_fields =
                     item.fields.iter().filter(|field| visibility_crosses_owner(&field.vis)).count();
             }
-            syn::Item::Impl(item) if item.trait_.is_none() && !is_test_only(&item.attrs) => {
+            syn::Item::Impl(item) if item.trait_.is_none() => {
                 let Some(name) = type_name(&item.self_ty) else {
                     continue;
                 };
@@ -79,9 +71,6 @@ fn collect_bundle_type_info(items: &[syn::Item], types: &mut BTreeMap<String, Bu
                     let syn::ImplItem::Fn(method) = method else {
                         continue;
                     };
-                    if is_test_only(&method.attrs) {
-                        continue;
-                    }
                     info.inherent_methods.push((
                         method.sig.ident.to_string(),
                         output_contains_owner(&method.sig.output, &name),
@@ -89,7 +78,7 @@ fn collect_bundle_type_info(items: &[syn::Item], types: &mut BTreeMap<String, Bu
                     ));
                 }
             }
-            syn::Item::Mod(item) if !is_test_only(&item.attrs) => {
+            syn::Item::Mod(item) => {
                 if let Some((_, items)) = &item.content {
                     collect_bundle_type_info(items, types);
                 }

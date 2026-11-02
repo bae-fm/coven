@@ -1,10 +1,13 @@
 use super::*;
+use crate::test_code::production_code;
 
+/// The rule as the checker runs it: on the files' production code.
 fn find_capability_construction_violations(files: &[RustFile], policy: &Policy) -> Vec<Finding> {
+    let files = production_code(files);
     super::find_capability_construction_violations(
-        files,
+        &files,
         policy,
-        &OwnerGraph::collect(files, policy),
+        &OwnerGraph::collect(&files, policy),
     )
 }
 
