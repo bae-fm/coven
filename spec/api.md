@@ -6267,6 +6267,10 @@ pub enum ProviderSignOut {
   `SyncError::MemberKeysReplaced` when authenticated history shows an old
   code. If the current snapshot cannot be opened, report the unavailable
   key instead of inferring membership. Restore never rebinds old keys.
+  Before registering, restore checks the signed-in account or S3 key: the
+  member whose account holds the store fails with `SyncError::StoreOwner`
+  under another account. After registering, it records a changed account or
+  key as the member's access, as setup does.
 - Each call takes the app's layout-scoped `CovenBuilder`, plus its code,
   device name, status callback and cancellation receiver, and
   returns the open `CovenHandle`. Restore also accepts the separately

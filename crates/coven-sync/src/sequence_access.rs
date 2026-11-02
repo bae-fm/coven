@@ -2,7 +2,7 @@
 use crate::{
     history::History,
     sequence_sync::{SequenceSync, Session},
-    OperationKind, PendingReason, PendingRecord, PendingSubject, SyncError,
+    OperationKind, OperationRejection, PendingReason, PendingRecord, PendingSubject, SyncError,
 };
 use coven_crypto::{MemberIdentity, StoreKeyring};
 use coven_database::{
@@ -40,6 +40,26 @@ impl History {
         };
         crate::effects::member(&self.state, &member)
             .is_some_and(|current| created.same_credential(&current.access))
+    }
+
+    /// Whether `member` may reach storage with `access` (format.md D6): it
+    /// is the kind of access the store's creation records, a provider
+    /// account or an S3 key (§10.3), and the member whose account holds the
+    /// store stays on that account. Moved to another, no member would reach
+    /// storage through it, and nobody could share the store or take sharing
+    /// back (§20.9).
+    pub(crate) fn access_allowed(
+        &self,
+        member: MemberId,
+        access: &MemberAccess,
+    ) -> Result<(), OperationRejection> {
+        let Some(created) = self.store_access().filter(|created| created.same_kind(access)) else {
+            return Err(OperationRejection::NotAllowed);
+        };
+        if self.holds_store(member) && !created.same_credential(access) {
+            return Err(OperationRejection::StoreOwner);
+        }
+        Ok(())
     }
 
     /// Intentions after this state: an account stays shared while an active
@@ -86,6 +106,16 @@ impl History {
 }
 
 impl SequenceSync {
+    /// Refuse `access` as this member's own where history would refuse
+    /// recording it (format.md D6). A restore checks before registering its
+    /// device, so a member who could never record the access it signed in
+    /// with leaves no device behind (§20.9).
+    pub async fn check_access(&self, access: &MemberAccess) -> Result<(), SyncError> {
+        let member = self.member.read()?.ok_or(coven_storage::StorageFailure::MemberKeysMissing)?;
+        let session = self.session.lock().await;
+        Ok(session.history.access_allowed(member.member(), access)?)
+    }
+
     pub(crate) async fn resume_access(
         &self,
         session: &mut Session,

@@ -644,12 +644,7 @@ impl StorageConnections {
         if new_store {
             storage.claim_bucket(self.store()).await?;
         }
-        let access = match &credentials {
-            StorageCredentials::S3(keys) => coven_format::MemberAccess::S3AccessKey {
-                access_key_id: keys.access_key_id.clone(),
-            },
-            _ => coven_format::MemberAccess::ProviderAccount(storage.account().await?),
-        };
+        let access = member_access(&credentials, &storage).await?;
         progress.done(1);
         let mut live = self.live.lock().await;
         // The old provider remains installed until every fallible setup step
@@ -776,16 +771,8 @@ impl StorageConnections {
         })
         .await?;
         let state = self.database.store_state().await?;
-        let recorded = state
-            .members
-            .get(&member.member())
-            .filter(|value| !value.removed)
-            .ok_or(SyncError::Removed)?;
-        if !recorded.access.same_credential(&access) {
-            let recording = sync.administer(coven_format::admin::StoreChange::SetAccess {
-                member: member.member(),
-                access,
-            });
+        if let Some(change) = access_change(&state, member.member(), access)? {
+            let recording = sync.administer(change);
             setup_step::single(progress, StorageSetupStep::RecordingAccess, recording).await?;
         }
         Ok(())
@@ -930,6 +917,34 @@ pub use admin::GuidedAccessKey;
 
 #[path = "storage_operations.rs"]
 mod operations;
+
+/// How this member reaches storage over `storage` signed in with
+/// `credentials`: the S3 key, or the signed-in account (§20.2).
+pub(crate) async fn member_access(
+    credentials: &StorageCredentials,
+    storage: &StorageConnection,
+) -> Result<coven_format::MemberAccess, coven_storage::StorageError> {
+    Ok(match credentials {
+        StorageCredentials::S3(keys) => {
+            coven_format::MemberAccess::S3AccessKey { access_key_id: keys.access_key_id.clone() }
+        }
+        _ => coven_format::MemberAccess::ProviderAccount(storage.account().await?),
+    })
+}
+
+/// The entry recording `access` as `member`'s own, when history records
+/// another: setup and restore keep the recorded access the one the member
+/// uses (§14.2).
+pub(crate) fn access_change(
+    state: &coven_database::StoreState,
+    member: MemberId,
+    access: coven_format::MemberAccess,
+) -> Result<Option<coven_format::admin::StoreChange>, SyncError> {
+    let recorded =
+        state.members.get(&member).filter(|value| !value.removed).ok_or(SyncError::Removed)?;
+    Ok((!recorded.access.same_credential(&access))
+        .then_some(coven_format::admin::StoreChange::SetAccess { member, access }))
+}
 
 #[cfg(test)]
 #[path = "storage_tests.rs"]

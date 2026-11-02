@@ -3645,9 +3645,19 @@ Ana's new laptop scans the code from her phone and signs in to her Dropbox. Then
    the replacement, so the old keys can't open the slots that follow: loading
    stops at the first such slot and reports the replacement it already applied,
    not the key it lacks.
-3. It registers itself as a new device through an operation (§11). A claim
+3. It checks the account it signed in with, or the S3 key it was given,
+   against how history lets Ana reach storage. Her Dropbox account holds
+   Household, so another account fails with `SyncError::StoreOwner` before the
+   laptop registers (§20.9): registered, it would stand for a restore that can
+   never finish.
+4. It registers itself as a new device through an operation (§11). A claim
    interrupted along the way is settled before it is retried or cancelled.
-4. It finishes loading and hands the app the open store.
+5. If the account or key differs from the one history records for Ana, it
+   records the new one, as setup does, so her recorded access is the one she
+   uses (§14.2). Ben, whose account doesn't hold Household, can restore
+   signed in with another account that reaches it; history then records that
+   account as his.
+6. It finishes loading and hands the app the open store.
 
 Restoring always makes a fresh device. It doesn't rescue the old installation's
 unsent writes.
@@ -10029,7 +10039,7 @@ the constraint or foreign key (§9, §15.1, §15.2, Appendix A).
 | `WritesRefused` | writes cut off by a removal or key replacement were consumed; names the deciding entry | §14.1, §19.1 |
 | `SyncError::DeviceIdInUse` | another installation uses this device's id, or a reset replaced it | §5.1, §5.3, §14.1, §19.3 |
 | `MemberKeysReplaced` | this device holds member keys that were replaced, or an old restore code is used | §12.3, §13.1, §14.1 |
-| `SyncError::StoreOwner` | a removal targets the member whose account holds the store, or an access change moves that member to another account; storage setup reports it as `StorageSetupError::StoreOwner` | §10.1, §14.2, §20.9 |
+| `SyncError::StoreOwner` | a removal targets the member whose account holds the store, or an access change moves that member to another account, as a restore under another account would; storage setup reports it as `StorageSetupError::StoreOwner` | §10.1, §13.1, §14.2, §20.9 |
 | `SyncError::Rejected(OperationRejection)` | an admin change the applied state refuses, as a write asks for it or after the operation loses a race; an operation the app's write journaled ends rejected in `coven_operations` instead | §11.1, §11.4 |
 | `AccessRemains` | a grant coven leaves in place: through a parent folder, a public link or a group, to an unidentified grantee, or the owner's own | §14.2 |
 | `DeviceReset` | the notice, stored in `_coven_device_reset`, that a reset replaced this device | §17.8, §19.3 |

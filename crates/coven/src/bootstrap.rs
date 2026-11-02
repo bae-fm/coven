@@ -721,6 +721,20 @@ async fn prepare_and_load(
             requests = %storage.requests().since(&unlocking.1),
             "read the store forward with this member's keys"
         );
+        // A restore checks the access it reaches storage with before it
+        // registers, and records it after, as setup does, so the member's
+        // recorded access is the one in use (§13.1). A joiner's is the one
+        // its approval recorded from the invite.
+        let access = match admission {
+            Admission::Restoring => {
+                let access = crate::storage::member_access(&data.credentials, &storage)
+                    .await
+                    .map_err(SyncError::from)?;
+                sync.check_access(&access).await?;
+                Some(access)
+            }
+            Admission::Joining(_) => None,
+        };
         let registered = database
             .store_state()
             .await?
@@ -736,6 +750,12 @@ async fn prepare_and_load(
                 requests = %storage.requests().since(&registering.1),
                 "registered this device"
             );
+        }
+        if let Some(access) = access {
+            let state = database.store_state().await?;
+            if let Some(change) = crate::storage::access_change(&state, member.member(), access)? {
+                sync.administer(change).await?;
+            }
         }
         // The notice commits before any handle is published (E5).
         if let Some(replacement) = replacement {

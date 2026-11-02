@@ -254,21 +254,8 @@ impl History {
             &self.boundaries,
         )?;
         match change {
-            // A member reaches the store with the kind of access its
-            // creation records: a provider account, or an S3 key (§10.3).
-            StoreChange::AddMember { access, .. } | StoreChange::SetAccess { access, .. }
-                if !self.store_access().is_some_and(|created| created.same_kind(access)) =>
-            {
-                return Err(OperationRejection::NotAllowed);
-            }
-            // The owner's access stays on the account that holds the store:
-            // moved to another, no member would reach storage through it,
-            // and nobody could share the store or take sharing back (§20.9).
-            StoreChange::SetAccess { member, .. }
-                if effect.is_some() && self.holds_store(*member) =>
-            {
-                return Err(OperationRejection::StoreOwner);
-            }
+            StoreChange::AddMember { member, access, .. }
+            | StoreChange::SetAccess { member, access } => self.access_allowed(*member, access)?,
             StoreChange::AddInviteShare { invite, account } => {
                 if let Some(share) = self.invite_shares.get(invite) {
                     // Its device recording the same open share again is

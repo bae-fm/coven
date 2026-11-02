@@ -878,3 +878,67 @@ async fn setting_up_again_loads_what_other_devices_published() {
     );
     owner.close().await;
 }
+
+/// Ana's account holds Household on iCloud, and Household was shared with
+/// her work account too. Restoring on her laptop signed in with the work
+/// account is refused before the laptop registers: no member would reach
+/// storage through the account that holds the store, and the laptop's
+/// registration would stand for a restore that can't finish (§10.1, §20.9).
+#[tokio::test]
+async fn restoring_the_owner_with_another_account_is_refused_before_registering() {
+    let owner = Owner::new(CloudProvider::CloudKit, false).await;
+    let coven_storage::AccessGrant::Granted { invitation } =
+        owner.storage.grant_access("ana@work.example").await.unwrap()
+    else {
+        panic!("an account grant")
+    };
+    let work = Arc::new(MemoryStorage::for_recipient(&owner.storage, "ana@work.example").unwrap());
+    work.join(owner.directory.id(), &invitation).await.unwrap();
+    let devices = owner.handle.members().await.unwrap()[0].devices.len();
+    let install = Installation::new();
+    let (_, cancel) = watch::channel(false);
+    let result = restore_from_code(
+        install.authenticated_builder(&owner, work).await,
+        &owner.code.to_text().unwrap(),
+        None,
+        "Ana’s laptop",
+        |_| {},
+        &cancel,
+    )
+    .await;
+    assert!(matches!(result, Err(BootstrapError::Sync(SyncError::StoreOwner))), "{result:?}");
+    install.absent(owner.directory.id()).await;
+    owner.sync().await;
+    assert_eq!(owner.handle.members().await.unwrap()[0].devices.len(), devices);
+    owner.close().await;
+}
+
+/// Ana restores Household on S3 with a key she made for her laptop. As
+/// setup does, the restore records the key she now reaches storage with, so
+/// her access names the key in use (§14.3, §20.2).
+#[tokio::test]
+async fn restoring_with_another_key_records_it() {
+    let owner = Owner::new(CloudProvider::S3, false).await;
+    let install = Installation::new();
+    let (_, cancel) = watch::channel(false);
+    let handle = restore_from_code(
+        install.authenticated_builder(&owner, owner.storage.clone()).await,
+        &owner.code.to_text().unwrap(),
+        Some(S3Credentials {
+            access_key_id: "laptop-key".into(),
+            secret_access_key: SecretText::new("laptop secret".into()),
+        }),
+        "Ana’s laptop",
+        |_| {},
+        &cancel,
+    )
+    .await
+    .unwrap();
+    let members = handle.members().await.unwrap();
+    assert_eq!(
+        members.into_iter().find(|member| member.is_self).unwrap().access,
+        MemberAccess::S3AccessKey { access_key_id: "laptop-key".into() }
+    );
+    handle.close().await.unwrap();
+    owner.close().await;
+}
