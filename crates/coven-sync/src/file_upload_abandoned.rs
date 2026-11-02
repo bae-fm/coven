@@ -1,0 +1,45 @@
+//! Ending the provider session of an upload no file waits for any more,
+//! before it retires (§17.9). Retiring the queue row alone would drop the
+//! only record of the session, leaving the parts or temporary it holds at
+//! the provider for good.
+
+use crate::{files::file_failure::upload_subject, files::FilesInner, PendingRecord, SyncError};
+use coven_storage::UploadSession;
+
+impl FilesInner {
+    /// Abort the recorded session of each upload no file waits for, not in
+    /// flight and due, then forget it, so the upload retires with the rest.
+    /// A session already complete needs no abort, and one of a location this
+    /// store has moved from is beyond this connection. A failed abort is the
+    /// upload's failure, recorded and retried as an attempt's is. Without
+    /// storage nothing is aborted, and those uploads stay queued.
+    pub(super) async fn end_abandoned_sessions(&self) -> Result<(), SyncError> {
+        let Some(storage) = self.storage.read().expect("storage lock poisoned").clone() else {
+            return Ok(());
+        };
+        let in_flight = self.in_flight.current();
+        for (item, record) in
+            self.database.abandoned_uploads::<PendingRecord>(upload_subject).await?
+        {
+            if in_flight.contains(&item.location.object())
+                || !self.retry_due(&item, record.as_ref())
+            {
+                continue;
+            }
+            let session = match &item.session {
+                Some(bytes) => UploadSession::decode(bytes.as_bytes())?,
+                None => continue,
+            };
+            let ended = if session.is_complete() || !session.is_at(&storage.config()) {
+                Ok(())
+            } else {
+                storage.abort_upload(&session).await
+            };
+            match ended {
+                Ok(()) => self.database.forget_session(item.id).await?,
+                Err(error) => self.record_failure(&item, error.into()).await?,
+            }
+        }
+        Ok(())
+    }
+}

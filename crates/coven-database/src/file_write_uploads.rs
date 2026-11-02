@@ -224,7 +224,7 @@ impl FileWrite<'_> {
         let mut retired = Vec::new();
         let mut completion = self.completion.borrow_mut();
         let completion = completion.get_or_insert_with(Completion::default);
-        for (id, location) in crate::file_queue::unlinked(self.database)? {
+        for (id, location) in crate::file_queue::retirable(self.database)? {
             if in_flight.contains(&location.object()) {
                 continue;
             }

@@ -266,7 +266,9 @@ impl FilesInner {
         }
         // Uploads no file waits for any more go first, paused or not and
         // with no storage too; an attempt in flight retires its own as it
-        // ends (§17.9).
+        // ends (§17.9). One holding a provider session has it aborted
+        // first, which needs storage.
+        self.end_abandoned_sessions().await?;
         for id in self.database.retire_unlinked(self.in_flight.current(), upload_subject).await? {
             self.waits.forget(RetrySubject::Upload(id));
         }

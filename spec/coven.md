@@ -6165,6 +6165,19 @@ to the same limit, so a cover never waits behind the photos (§17.4).
   worker first retires those uploads not in flight, paused or not, and with no
   storage connected too. A retired upload's stored bytes, if an earlier attempt
   left any, are deleted under §17.10.
+- **An upload holding a provider session aborts it before it retires.** Ana
+  deletes a 300 MB video whose upload sent two parts before the network
+  dropped. The provider still holds those parts in the upload's session, and
+  the queue row is the only record of it: retiring the row alone would leave
+  the parts there for good. So the worker's next run, once the failed part's
+  retry delay has passed, aborts the session (a temporary staged for it goes
+  too, §20.6), forgets it, and only then retires the upload. Aborting needs
+  storage, so with none connected the upload stays queued. A failed abort is
+  the upload's failure, recorded and retried like an attempt's, and the upload
+  stays queued meanwhile; aborting an ended session succeeds, so a retry after
+  a crash is safe. A session already complete needs no abort, and one at a
+  location the store has moved from is out of this connection's reach, so it
+  is forgotten.
 - A changed limit applies to the next upload that starts. Uploads in flight
   keep running when the limit drops.
 - Pausing starts no new trailing upload; a bound one runs on (§17.4). The pause
@@ -6397,8 +6410,9 @@ copy no longer names them.
 **Uploads no file waits for.** Only an upload's completion would switch a record
 to its location, so the bytes of an upload whose files were all deleted
 (§17.3), if any reached storage, are named by no record, write or snapshot. The
-transaction that retires the upload ends the queue's protection and makes the
-path a deletion candidate. The uploader then deletes it like any other
+transaction that retires the upload, after any provider session it held is
+aborted (§17.9), ends the queue's protection and makes the path a deletion
+candidate. The uploader then deletes it like any other
 candidate, once the evidence above shows nothing names it. A crash can't lose
 it: the queue row stays until that transaction, and an attempt still in flight
 retires it only when it ends, so no bytes land after the deletion.

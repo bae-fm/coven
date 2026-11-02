@@ -18,6 +18,8 @@ mod file_read;
 mod file_status;
 #[path = "file_upload.rs"]
 mod file_upload;
+#[path = "file_upload_abandoned.rs"]
+mod file_upload_abandoned;
 #[path = "file_upload_failure.rs"]
 mod file_upload_failure;
 #[path = "file_upload_pool.rs"]

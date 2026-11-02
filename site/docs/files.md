@@ -351,7 +351,10 @@ handle.write(move |sql| sql.make_device_only(prepared).map_err(Into::into)).awai
 
 A separate upload worker sends queued files, outside sync passes, so a pass
 never waits for a file and a file never holds up the write that staged it. An
-upload no file waits for any more is retired without sending more.
+upload no file waits for any more is retired without sending more. If it had
+begun a provider session, the worker aborts the session first, so the parts it
+sent don't stay at the provider; until that abort succeeds, which needs
+storage, the upload stays queued.
 
 Each attempt, retries included, checks the source's size, and a user
 original's modification time, before sending any bytes. As it streams, it

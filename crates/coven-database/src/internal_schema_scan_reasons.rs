@@ -67,8 +67,10 @@ pub(super) fn reason(statement: &Statement, relation: &str) -> Option<&'static s
     Some("the file queue reader returns every upload a file waits for"),
 ("file_queue.rs", "SELECT u.id,u.location,u.size,u.hash,u.queued_at,u.session,u.bytes_confirmed, u.bytes_total,r.failures,r.not_before,r.wait,u.move,u.stored,u.holds FROM _coven_file_uploads AS u LEFT JOIN _coven_retries AS r ON r.upload=u.id ORDER BY u.id", "u") =>
     Some("tests read every queued upload, those no file waits for included"),
-("file_queue.rs", "SELECT u.id,u.location FROM _coven_file_uploads AS u WHERE NOT EXISTS(SELECT 1 FROM _coven_upload_files AS l WHERE l.upload=u.id) ORDER BY u.id", "u") =>
-    Some("each upload worker run retires every upload no file waits for"),
+("file_queue.rs", "SELECT u.id,u.location FROM _coven_file_uploads AS u WHERE u.session IS NULL AND NOT EXISTS(SELECT 1 FROM _coven_upload_files AS l WHERE l.upload=u.id) ORDER BY u.id", "u") =>
+    Some("each upload worker run retires every upload no file waits for and no session holds"),
+("file_queue.rs", "SELECT u.id,u.location,u.size,u.hash,u.queued_at,u.session,u.bytes_confirmed, u.bytes_total,r.failures,r.not_before,r.wait,u.move,u.stored,u.holds FROM _coven_file_uploads AS u LEFT JOIN _coven_retries AS r ON r.upload=u.id WHERE u.session IS NOT NULL AND NOT EXISTS(SELECT 1 FROM _coven_upload_files AS l WHERE l.upload=u.id) ORDER BY u.id", "u") =>
+    Some("each upload worker run aborts the session of every upload no file waits for"),
 ("file_table.rs", "SELECT table_name,column_name,write_once FROM _coven_file_columns ORDER BY table_name,column_name", "_coven_file_columns") =>
     Some("opening and each migration compare every registered file column with the declarations"),
 ("file_protection.rs", "SELECT DISTINCT table_name,key FROM _coven_file_references", "_coven_file_references") =>

@@ -255,7 +255,7 @@ impl FileDatabase {
             .call(move |inner| {
                 inner
                     .access
-                    .with_committed(|db| Ok::<_, DbError>(!file_queue::unlinked(db)?.is_empty()))
+                    .with_committed(|db| Ok::<_, DbError>(!file_queue::retirable(db)?.is_empty()))
             })
             .await?;
         if !work {
@@ -386,6 +386,45 @@ impl FileDatabase {
                         Ok((upload, record))
                     })
                     .collect()
+            })
+        })
+        .await
+    }
+    /// Each upload no file waits for any more that still records a provider
+    /// session, with this device's pending record about its file, read in one
+    /// committed state: its session is aborted before it retires (§17.9).
+    pub async fn abandoned_uploads<P: crate::PendingValue>(
+        &self,
+        subject: impl Fn(&crate::FileLocation) -> P::Subject + Send + 'static,
+    ) -> Result<Vec<(FileUpload, Option<P>)>, DbError> {
+        self.run(move |db, _, _, _| {
+            db.read_transaction(|| {
+                file_queue::abandoned(db)?
+                    .into_iter()
+                    .map(|upload| {
+                        let record = crate::pending::find::<P>(db, &subject(&upload.location))?;
+                        Ok((upload, record))
+                    })
+                    .collect()
+            })
+        })
+        .await
+    }
+    /// Forget the session of upload `id` once storage has aborted it, if no
+    /// file waits for the upload: it then retires with the others (§17.9).
+    /// One a file waits for again keeps its record, and its next attempt
+    /// finds the session gone and starts another.
+    pub async fn forget_session(&self, id: i64) -> Result<(), DbError> {
+        self.require_writer()?;
+        self.run(move |db, _, _, _| {
+            db.transaction(|db| {
+                db.internal_execute(
+                    "UPDATE _coven_file_uploads SET session=NULL,bytes_confirmed=NULL,bytes_total=NULL
+                     WHERE id=?1
+                     AND NOT EXISTS(SELECT 1 FROM _coven_upload_files WHERE upload=?1)",
+                    [id],
+                )
+                .map(drop)
             })
         })
         .await

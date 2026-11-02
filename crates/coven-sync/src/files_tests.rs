@@ -39,6 +39,16 @@ impl Fixture {
     }
     /// A provider taking one request up to `single_limit` encrypted bytes.
     async fn with_single_limit(provenance: Provenance, clock: ClockRef, single_limit: u64) -> Self {
+        Self::with_provider(provenance, clock, single_limit, coven_storage::CloudProvider::Dropbox)
+            .await
+    }
+    /// The same, on the deterministic provider standing in for `provider`.
+    async fn with_provider(
+        provenance: Provenance,
+        clock: ClockRef,
+        single_limit: u64,
+        provider: coven_storage::CloudProvider,
+    ) -> Self {
         let root = tempfile::tempdir().unwrap();
         let ids: IdSourceRef = Arc::new(UuidIds);
         let layout = StoreDirectories::new(root.path().to_owned());
@@ -51,7 +61,7 @@ impl Fixture {
         let database = builder(&directory, &ids, &clock, &namespaces).open().await.unwrap();
         let storage = Arc::new(
             MemoryStorage::builder()
-                .provider(coven_storage::CloudProvider::Dropbox)
+                .provider(provider)
                 .clock(clock.clone())
                 .transfer_limits(single_limit, CHUNK)
                 .build()
@@ -536,6 +546,8 @@ async fn cancelling_a_pin_releases_partial_budget_exemptions() {
     f.close().await;
 }
 
+#[path = "file_upload_abandoned_tests.rs"]
+mod abandoned_tests;
 #[path = "file_cache_tests.rs"]
 mod cache;
 #[path = "file_keep_tests.rs"]

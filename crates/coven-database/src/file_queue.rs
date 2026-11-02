@@ -181,6 +181,24 @@ pub(crate) fn read(db: &DatabaseConnection) -> Result<Vec<FileUpload>, DbError> 
     decode_uploads(db, rows)
 }
 
+/// The uploads no file waits for any more that still record a provider
+/// session, oldest first: each retires once its session is aborted, since
+/// retiring the row alone would leave the session's parts at the provider
+/// for good (§17.9).
+pub(crate) fn abandoned(db: &DatabaseConnection) -> Result<Vec<FileUpload>, DbError> {
+    let rows = db.query(
+        "SELECT u.id,u.location,u.size,u.hash,u.queued_at,u.session,u.bytes_confirmed,
+                u.bytes_total,r.failures,r.not_before,r.wait,u.move,u.stored,u.holds
+         FROM _coven_file_uploads AS u LEFT JOIN _coven_retries AS r ON r.upload=u.id
+         WHERE u.session IS NOT NULL
+         AND NOT EXISTS(SELECT 1 FROM _coven_upload_files AS l WHERE l.upload=u.id)
+         ORDER BY u.id",
+        [],
+        upload_row,
+    )?;
+    decode_uploads(db, rows)
+}
+
 /// Every queued upload, those no file waits for included, oldest first.
 #[cfg(any(test, feature = "test-utils"))]
 pub(crate) fn read_all(db: &DatabaseConnection) -> Result<Vec<FileUpload>, DbError> {
@@ -353,11 +371,13 @@ pub(crate) fn chunk_hash(
     Ok(ContentHash::from_bytes(hash.try_into().map_err(|_| DbError::DamagedDatabase)?))
 }
 
-/// Queued uploads no file waits for any more, with their locations.
-pub(crate) fn unlinked(db: &DatabaseConnection) -> Result<Vec<(i64, FileLocation)>, DbError> {
+/// Queued uploads no file waits for any more and no provider session
+/// holds, with their locations: those that retire now (§17.9).
+pub(crate) fn retirable(db: &DatabaseConnection) -> Result<Vec<(i64, FileLocation)>, DbError> {
     db.query(
         "SELECT u.id,u.location FROM _coven_file_uploads AS u
-         WHERE NOT EXISTS(SELECT 1 FROM _coven_upload_files AS l WHERE l.upload=u.id)
+         WHERE u.session IS NULL
+         AND NOT EXISTS(SELECT 1 FROM _coven_upload_files AS l WHERE l.upload=u.id)
          ORDER BY u.id",
         [],
         |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)),
