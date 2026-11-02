@@ -17,6 +17,7 @@ pub(crate) enum Left {
     Staged(String),
     /// A CloudKit upload root that isn't published; deleting it deletes the
     /// parts it owns.
+    #[cfg(target_vendor = "apple")]
     CloudKitRoot(String),
     /// A session of the deterministic provider.
     #[cfg(any(test, feature = "test-utils"))]
