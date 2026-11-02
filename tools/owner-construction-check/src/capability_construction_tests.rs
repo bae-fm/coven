@@ -348,6 +348,24 @@ fn self_does_not_hide_construction_in_a_runtime_method() {
     );
 }
 
+/// In another crate's macro whose arguments are no Rust syntax, only a path
+/// in a value's place constructs; a type names none.
+#[test]
+fn unparsed_macro_tokens_construct_only_in_a_value_s_place() {
+    for source in [
+        "fn run() { external! { => clock: SystemClock, } }",
+        "fn run() { external! { => impl Holder for SystemClock {} } }",
+        "fn run() { external! { => held: Option<Arc<SystemClock>>, } }",
+        "fn run() { external! { => fn read() -> SystemClock {} } }",
+    ] {
+        assert!(check("crates/app/src/runtime.rs", source).is_empty(), "{source}");
+    }
+    assert_eq!(
+        check("crates/app/src/runtime.rs", "fn run() { external! { => SystemClock.now() } }"),
+        findings("crates/app/src/runtime.rs", &[(1, "<free>::run", "SystemClock")])
+    );
+}
+
 #[test]
 fn macro_arguments_and_bodies_are_checked() {
     for (caller, capability, source) in [

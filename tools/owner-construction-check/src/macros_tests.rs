@@ -1,4 +1,5 @@
 use super::*;
+use std::collections::BTreeSet;
 
 fn mac(source: &str) -> syn::Macro {
     syn::parse_str(source).expect("parse fixture macro")
@@ -53,4 +54,39 @@ fn token_strings_reach_nested_groups() {
         .map(|string| string.value())
         .collect::<Vec<_>>();
     assert_eq!(strings, ["DELETE FROM t"]);
+}
+
+#[test]
+fn token_paths_tell_types_from_values() {
+    let paths = token_paths(
+        mac(r#"m! {
+            impl Handle for Bridge {
+                fn open(setup: Option<Arc<Setup>>, runtime: &mut Runtime) -> Opened {
+                    let pair: (Left, Right) = (Left::new(), Right);
+                    let call: Box<dyn Fn(Argument) -> Output> = make(Value);
+                    if ready { let typed: Typed = make(Value); }
+                    Built { runtime: Runtime::new(), unit: Unit }
+                }
+            }
+        }"#)
+        .tokens,
+    );
+    let named = |type_position: bool| {
+        paths
+            .iter()
+            .filter(|path| path.type_position == type_position && !path.after_dot)
+            .map(|path| path.segments.join("::"))
+            .collect::<BTreeSet<_>>()
+    };
+    let types = named(true);
+    for name in [
+        "Handle", "Bridge", "open", "Option", "Arc", "Setup", "Runtime", "Opened", "Left", "Right",
+        "Box", "Fn", "Argument", "Output", "Typed",
+    ] {
+        assert!(types.contains(name), "{name} is a type: {types:?}");
+    }
+    let values = named(false);
+    for name in ["Left::new", "Right", "make", "Value", "Built", "Runtime::new", "Unit"] {
+        assert!(values.contains(name), "{name} is a value: {values:?}");
+    }
 }

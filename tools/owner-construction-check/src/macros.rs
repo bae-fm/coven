@@ -9,8 +9,9 @@
 //! a rule visits them as code, with every rule it applies elsewhere. A
 //! `matches!` call is an expression and a pattern, visited as each. When they
 //! don't, as in `tokio::select!`, the rule reads the tokens: the paths, the
-//! calls and the string literals in them. `cfg!` and `stringify!` take no
-//! code, and are read as neither.
+//! calls and the string literals in them, each path marked as a type or a
+//! value by the tokens around it, so the construction rule counts only values.
+//! `cfg!` and `stringify!` take no code, and are read as neither.
 
 use proc_macro2::{Delimiter, Span, TokenStream, TokenTree};
 use syn::parse::Parser;
@@ -119,23 +120,159 @@ pub(crate) struct TokenPath {
     /// An absolute path uses the external-crate namespace even if a local
     /// module has the same name.
     pub(crate) leading_colon: bool,
+    /// Whether the path names a type rather than a value (`type_position`).
+    pub(crate) type_position: bool,
 }
 
 /// Every path in `tokens`, nested groups included. A leading `::` is recorded
 /// separately from the path's segments.
 pub(crate) fn token_paths(tokens: TokenStream) -> Vec<TokenPath> {
     let mut paths = Vec::new();
-    collect_token_paths(tokens, &mut paths);
+    collect_token_paths(tokens, Context::Code, &mut paths);
     paths
 }
 
-fn collect_token_paths(tokens: TokenStream, paths: &mut Vec<TokenPath>) {
+/// What a group's tokens are.
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum Context {
+    /// Code, where a path is a value unless something says it is a type.
+    Code,
+    /// A type's tokens: `(A, B)`, `[A; 3]`, `Fn(A)`'s arguments.
+    Type,
+    /// A struct literal's fields, where `field: value` names a value.
+    Literal,
+}
+
+/// What the tokens before a path say about it.
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum Introducer {
+    /// A single `:`: a type in a field, parameter or `let`, or a struct
+    /// literal's field value.
+    Colon,
+    /// `->`, `impl`, `dyn`, `for`, `as`, `where`, or a declaration's keyword.
+    Type,
+    None,
+}
+
+/// What comes before the path or group starting at `start`, skipping the
+/// `&`, `&mut`, `*const`, `*mut` and lifetimes a type can start with.
+fn introducer(trees: &[TokenTree], start: usize) -> Introducer {
+    let mut index = start;
+    while let Some(before) = index.checked_sub(1) {
+        match &trees[before] {
+            TokenTree::Punct(punct) if matches!(punct.as_char(), '&' | '*') => index = before,
+            TokenTree::Ident(ident) if ident == "mut" || ident == "const" => index = before,
+            TokenTree::Ident(_)
+                if before >= 1
+                    && matches!(&trees[before - 1], TokenTree::Punct(punct) if punct.as_char() == '\'') =>
+            {
+                index = before - 1;
+            }
+            _ => break,
+        }
+    }
+    let Some(before) = index.checked_sub(1) else { return Introducer::None };
+    match &trees[before] {
+        TokenTree::Punct(colon) if colon.as_char() == ':' => {
+            let doubled = before >= 1
+                && matches!(&trees[before - 1], TokenTree::Punct(punct) if punct.as_char() == ':');
+            if doubled {
+                Introducer::None
+            } else {
+                Introducer::Colon
+            }
+        }
+        TokenTree::Punct(arrow) if arrow.as_char() == '>' => {
+            let after_minus = before >= 1
+                && matches!(&trees[before - 1], TokenTree::Punct(punct) if punct.as_char() == '-');
+            if after_minus {
+                Introducer::Type
+            } else {
+                Introducer::None
+            }
+        }
+        TokenTree::Ident(keyword)
+            if matches!(
+                keyword.to_string().as_str(),
+                "impl"
+                    | "dyn"
+                    | "for"
+                    | "as"
+                    | "where"
+                    | "struct"
+                    | "enum"
+                    | "union"
+                    | "trait"
+                    | "type"
+                    | "mod"
+                    | "use"
+                    | "fn"
+            ) =>
+        {
+            Introducer::Type
+        }
+        _ => Introducer::None,
+    }
+}
+
+/// `<` opens type arguments after a path or `::`; elsewhere it compares.
+fn opens_type_arguments(trees: &[TokenTree], index: usize) -> bool {
+    index >= 1
+        && match &trees[index - 1] {
+            TokenTree::Ident(_) => true,
+            TokenTree::Punct(punct) => punct.as_char() == ':',
+            _ => false,
+        }
+}
+
+/// A path names a type or a declaration, not a value, when it follows `->`,
+/// `impl`, `dyn`, `for`, `as` or a declaration's keyword. Otherwise a path
+/// followed by `(` is a call, unless it names one of the `Fn` traits; and any
+/// other path is a type inside type arguments or a group a type opens
+/// (`Fn(A)`, `(A, B)` after `:`), or after a single `:` with no struct
+/// literal after it, unless it is a struct literal's field value.
+fn collect_token_paths(tokens: TokenStream, context: Context, paths: &mut Vec<TokenPath>) {
     let trees = tokens.into_iter().collect::<Vec<_>>();
+    let mut type_arguments = 0usize;
+    // The index right after the last path, and what a group there is.
+    let mut last_path = None;
+    let introduces_type = |trees: &[TokenTree], start: usize| match introducer(trees, start) {
+        Introducer::Type => true,
+        Introducer::Colon => context != Context::Literal,
+        Introducer::None => false,
+    };
     let mut index = 0;
     while index < trees.len() {
         match &trees[index] {
+            // A brace group is a body, or a struct literal after a value's
+            // path; never a type.
+            TokenTree::Group(group) if group.delimiter() == Delimiter::Brace => {
+                let literal = last_path == Some((index, Context::Literal));
+                let context = if literal { Context::Literal } else { Context::Code };
+                collect_token_paths(group.stream(), context, paths);
+                index += 1;
+            }
             TokenTree::Group(group) => {
-                collect_token_paths(group.stream(), paths);
+                let opened_by_type = context == Context::Type
+                    || type_arguments > 0
+                    || last_path == Some((index, Context::Type))
+                    || introduces_type(&trees, index);
+                let context = if opened_by_type { Context::Type } else { Context::Code };
+                collect_token_paths(group.stream(), context, paths);
+                index += 1;
+            }
+            TokenTree::Punct(punct) if punct.as_char() == '<' => {
+                if opens_type_arguments(&trees, index) {
+                    type_arguments += 1;
+                }
+                index += 1;
+            }
+            TokenTree::Punct(punct) if punct.as_char() == '>' => {
+                let arrow = index >= 1
+                    && matches!(&trees[index - 1], TokenTree::Punct(before) if matches!(before.as_char(), '-' | '='));
+                if type_arguments > 0 && !arrow {
+                    type_arguments -= 1;
+                }
                 index += 1;
             }
             TokenTree::Ident(ident) => {
@@ -156,15 +293,45 @@ fn collect_token_paths(tokens: TokenStream, paths: &mut Vec<TokenPath>) {
                     Some(TokenTree::Group(group)) => Some(group.delimiter()),
                     _ => None,
                 };
+                let leading_colon = index >= 2
+                    && matches!(&trees[index - 2], TokenTree::Punct(punct) if punct.as_char() == ':')
+                    && matches!(&trees[index - 1], TokenTree::Punct(punct) if punct.as_char() == ':');
+                let start = if leading_colon { index - 2 } else { index };
+                let fn_trait =
+                    matches!(segments.last().map(String::as_str), Some("Fn" | "FnMut" | "FnOnce"));
+                let call = followed_by == Some(Delimiter::Parenthesis) && !fn_trait;
+                let type_position = !after_dot
+                    && match introducer(&trees, start) {
+                        Introducer::Type => true,
+                        _ if call => false,
+                        _ if context == Context::Type || type_arguments > 0 => true,
+                        Introducer::Colon => {
+                            context != Context::Literal && followed_by != Some(Delimiter::Brace)
+                        }
+                        Introducer::None => false,
+                    };
+                // A brace after a value's path opens a struct literal, except
+                // after a method or field name, or in a condition, where
+                // Rust allows no literal.
+                let condition = start >= 1
+                    && matches!(&trees[start - 1], TokenTree::Ident(keyword)
+                        if matches!(keyword.to_string().as_str(), "if" | "while" | "match" | "in"));
+                let group = if type_position {
+                    Context::Type
+                } else if after_dot || condition {
+                    Context::Code
+                } else {
+                    Context::Literal
+                };
+                last_path = Some((cursor, group));
                 paths.push(TokenPath {
                     segments,
                     span: ident.span(),
                     followed_by,
                     after_dot,
                     receiver,
-                    leading_colon: index >= 2
-                        && matches!(&trees[index - 2], TokenTree::Punct(punct) if punct.as_char() == ':')
-                        && matches!(&trees[index - 1], TokenTree::Punct(punct) if punct.as_char() == ':'),
+                    leading_colon,
+                    type_position,
                 });
                 index = cursor;
             }

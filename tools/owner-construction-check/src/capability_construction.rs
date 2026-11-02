@@ -687,7 +687,7 @@ impl<'ast> Visit<'ast> for ConstructionVisitor<'_> {
                         && path.followed_by == Some(proc_macro2::Delimiter::Parenthesis)
                     {
                         self.check_own_method(&path.segments[0], path.span);
-                    } else if !path.after_dot {
+                    } else if !path.after_dot && !path.type_position {
                         let mut segments = path.segments;
                         if path.leading_colon {
                             segments.insert(0, String::new());
