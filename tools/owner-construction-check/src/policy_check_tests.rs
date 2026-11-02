@@ -307,6 +307,44 @@ fn the_database_schema_module_declares_exactly_its_table_macros() {
     );
 }
 
+/// Domains place each schema table once, in homes that hold a source.
+#[test]
+fn domains_place_each_schema_table_once() {
+    let schema = RustFile::fixture(
+        "crates/app-foundation/src/schema.rs",
+        r#"macro_rules! app_tables {
+            ($visit:ident) => { $visit!(_app_writes, "key TEXT"); $visit!(_app_rows, "key TEXT"); };
+        }"#,
+    );
+    let rows = r#"
+        [database]
+        capability = "SQLite"
+        schema = "crates/app-foundation/src/schema.rs"
+        table_macros = ["app_tables"]
+        [[database.domains]]
+        name = "writes"
+        homes = ["crates/app-foundation/src/schema.rs", "crates/app-foundation/src/moved/"]
+        tables = ["_app_writes", "_app_gone"]
+        [[database.domains]]
+        name = "writes"
+        homes = ["crates/app-foundation/src/"]
+        tables = ["_APP_WRITES"]
+        [[capabilities]]
+        name = "SQLite"
+        homes = ["crates/app-foundation/src/"]
+    "#;
+    assert_eq!(
+        stale(vec![schema], rows),
+        [
+            "database: domain writes has home crates/app-foundation/src/moved/, which holds no source",
+            "database: domain writes is named twice",
+            "database: table _APP_WRITES is in domains writes and writes",
+            "database: schema table _app_rows is in no domain",
+            "database: domain table _app_gone is not a schema table",
+        ]
+    );
+}
+
 #[test]
 fn external_types_are_named_by_a_crate_and_declared_by_none() {
     let files = vec![

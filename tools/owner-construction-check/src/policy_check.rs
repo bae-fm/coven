@@ -12,7 +12,7 @@ use crate::capability_construction::construction_only_types;
 use crate::crate_code::CrateCode;
 use crate::crate_dependencies::{dependency_entries, dependency_package};
 use crate::database_boundary::schema_table_macros;
-use crate::policy::Policy;
+use crate::policy::{Database, Policy};
 use crate::sources::Workspace;
 use crate::syntax::{collect_declared_types, type_name, type_names, RustFile, TypeNames};
 
@@ -88,20 +88,22 @@ fn unknown_libraries(workspace: &Workspace, policy: &Policy) -> Vec<String> {
 }
 
 /// A home is a source file, or a directory (ending in `/`) holding one.
+fn holds_source(files: &[RustFile], home: &str) -> bool {
+    files.iter().any(|file| {
+        if home.ends_with('/') {
+            file.relative_path.starts_with(home)
+        } else {
+            file.relative_path == home
+        }
+    })
+}
+
 fn missing_homes(files: &[RustFile], policy: &Policy) -> Vec<String> {
     policy
         .capabilities
         .iter()
         .flat_map(|capability| capability.homes.iter().map(move |home| (capability, home)))
-        .filter(|(_, home)| {
-            !files.iter().any(|file| {
-                if home.ends_with('/') {
-                    file.relative_path.starts_with(home.as_str())
-                } else {
-                    file.relative_path == **home
-                }
-            })
-        })
+        .filter(|(_, home)| !holds_source(files, home))
         .map(|(capability, home)| {
             format!("capabilities: {} has home {home}, which holds no source", capability.name)
         })
@@ -275,6 +277,7 @@ fn invalid_database(
             stale.push(format!("database: rusqlite_reexport {package} is not a workspace member"));
         }
     }
+    stale.extend(invalid_domains(crate_files, database));
     let Some(schema_root) = &database.schema else {
         if !database.table_macros.is_empty() {
             stale.push("database: table_macros without a schema module".to_string());
@@ -300,6 +303,56 @@ fn invalid_database(
                 "database: schema table macro {} is missing from table_macros",
                 declared.name
             ));
+        }
+    }
+    // With a schema module, the domains place each of its tables once, so a
+    // new table is placed when it lands and none goes unguarded.
+    if !database.domains.is_empty() {
+        let schema = macros
+            .iter()
+            .filter(|declared| database.table_macros.contains(&declared.name))
+            .flat_map(|declared| declared.tables.iter().map(|table| table.to_lowercase()))
+            .collect::<BTreeSet<_>>();
+        let placed = database
+            .domains
+            .iter()
+            .flat_map(|domain| domain.tables.iter().map(|table| table.to_lowercase()))
+            .collect::<BTreeSet<_>>();
+        for table in schema.difference(&placed) {
+            stale.push(format!("database: schema table {table} is in no domain"));
+        }
+        for table in placed.difference(&schema) {
+            stale.push(format!("database: domain table {table} is not a schema table"));
+        }
+    }
+    stale
+}
+
+/// Each domain has a unique name and homes that hold a source, and no table
+/// is in two domains.
+fn invalid_domains(crate_files: &[RustFile], database: &Database) -> Vec<String> {
+    let mut stale = Vec::new();
+    let mut names = BTreeSet::new();
+    let mut owners = BTreeMap::new();
+    for domain in &database.domains {
+        if !names.insert(domain.name.as_str()) {
+            stale.push(format!("database: domain {} is named twice", domain.name));
+        }
+        for home in &domain.homes {
+            if !holds_source(crate_files, home) {
+                stale.push(format!(
+                    "database: domain {} has home {home}, which holds no source",
+                    domain.name
+                ));
+            }
+        }
+        for table in &domain.tables {
+            if let Some(other) = owners.insert(table.to_lowercase(), domain.name.as_str()) {
+                stale.push(format!(
+                    "database: table {table} is in domains {other} and {}",
+                    domain.name
+                ));
+            }
         }
     }
     stale

@@ -9667,6 +9667,15 @@ the clock it was given, and a test gives it a fixed one.
   only `test-utils` allows replacing their source (api.md E1).
 - A method never takes a raw capability as a parameter, such as a store directory
   or a database connection; it calls the capability's owner instead.
+- Inside `coven-database`, a table that one module writes is that module's:
+  SQL elsewhere may read it, but writes it only by calling that module. The
+  sequence claims (§5.1) belong to the claim module, the remote observations
+  committed beside app writes to the input database, the published merge
+  state to its own module, and membership and audiences (§10, §15) to the
+  store's state tables. Every other table of Appendix C is written across the crate. The
+  checker finds a write in SQL text, a statement or a trigger's body; SQL
+  built while the program runs names its table nowhere in the source, so the
+  checker can't see it.
 
 ### F.3 Owners and tasks
 
@@ -9775,12 +9784,13 @@ Lean proofs once, on Linux, since a proof checks the same on any platform.
    crate, including inside macro calls, against the policy file,
    `owner-construction-check.toml` at the workspace root. The policy holds
    everything the rules know about coven: the rules it runs, the crate order,
-   the capabilities and their homes, the composition roots and the types the
-   rules name. The checker's own source names none of it. Test code answers to
-   none of these rules, only to F.5's: the `<name>_tests.rs` files, each crate's
-   `tests/` directory, files only test modules declare, and every item that
-   compiles only into tests. A test may assemble its own graph (F.3) from raw
-   material, and nothing outside tests can reach what it builds.
+   the capabilities and their homes, the tables each part of the database
+   writes, the composition roots and the types the rules name. The checker's
+   own source names none of it. Test code answers to none of these rules, only
+   to F.5's: the `<name>_tests.rs` files, each crate's `tests/` directory,
+   files only test modules declare, and every item that compiles only into
+   tests. A test may assemble its own graph (F.3) from raw material, and
+   nothing outside tests can reach what it builds.
    The checker expands each of coven's own `macro_rules!` where it is invoked,
    as rustc does, and checks the code it writes there, in the function the
    invocation is in. A definition is no code until it is used. An invocation

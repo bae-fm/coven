@@ -281,6 +281,137 @@ table_macros = ["coven_tables", "coven_ownership_tables", "coven_input_tables", 
 # types its own SQL uses.
 rusqlite_reexport = "coven-database"
 
+# Appendix F.2: the database's tables by the module that writes them. SQL
+# anywhere may read a table; only its domain's homes write it, in a statement
+# or a trigger's body. The tables no one module writes form the database's own
+# domain, which every module of coven-database writes.
+
+[[database.domains]]
+name = "sequence claims"
+homes = ["crates/coven-database/src/claim.rs"]
+tables = [
+    "_coven_claim_attempts",
+    "_coven_claim_chunks",
+    "_coven_claim_counters",
+    "_coven_claim_journal",
+    "_coven_upload_claims",
+]
+
+[[database.domains]]
+name = "remote observations"
+homes = ["crates/coven-database/src/input_database.rs", "crates/coven-database/src/internal_schema_input.rs"]
+tables = [
+    "_coven_input_budget",
+    "_coven_input_files",
+    "_coven_input_objects",
+    "_coven_input_ranges",
+    "_coven_input_unread",
+]
+
+[[database.domains]]
+name = "published merge state"
+homes = ["crates/coven-database/src/published.rs", "crates/coven-database/src/published_migration.rs"]
+tables = [
+    "_coven_published",
+    "_coven_published_creations",
+    "_coven_published_file_refs",
+    "_coven_published_losses",
+    "_coven_published_rows",
+]
+
+[[database.domains]]
+name = "membership and audiences"
+homes = ["crates/coven-database/src/store_state_tables.rs"]
+tables = [
+    "_coven_bound_keys",
+    "_coven_circle_deletions",
+    "_coven_circle_members",
+    "_coven_circles",
+    "_coven_devices",
+    "_coven_members",
+]
+
+[[database.domains]]
+name = "database"
+homes = ["crates/coven-database/src/"]
+tables = [
+    "_coven_absent_snapshots",
+    "_coven_app_operations",
+    "_coven_authored_admissions",
+    "_coven_authored_changes",
+    "_coven_authored_parts",
+    "_coven_boundaries",
+    "_coven_cache",
+    "_coven_cache_budgets",
+    "_coven_cache_writes",
+    "_coven_cells",
+    "_coven_claims",
+    "_coven_column_origins",
+    "_coven_columns",
+    "_coven_constraints",
+    "_coven_conversion_schemas",
+    "_coven_copies",
+    "_coven_copy_chunks",
+    "_coven_copy_folders",
+    "_coven_creations",
+    "_coven_cutoffs",
+    "_coven_data_reloads",
+    "_coven_device_files",
+    "_coven_device_reset",
+    "_coven_file_candidates",
+    "_coven_file_chunks",
+    "_coven_file_columns",
+    "_coven_file_references",
+    "_coven_file_removals",
+    "_coven_file_scans",
+    "_coven_file_uploads",
+    "_coven_foreign_keys",
+    "_coven_gone_storage_cleared",
+    "_coven_held_keys",
+    "_coven_last_claims",
+    "_coven_lost",
+    "_coven_migration_losses",
+    "_coven_migration_prefix",
+    "_coven_moves",
+    "_coven_object_removals",
+    "_coven_operations",
+    "_coven_owner_tables",
+    "_coven_part_leaves",
+    "_coven_part_proofs",
+    "_coven_pending",
+    "_coven_pin_requests",
+    "_coven_provider_access",
+    "_coven_queued_file_refs",
+    "_coven_raise_captures",
+    "_coven_references",
+    "_coven_requests_ended",
+    "_coven_retries",
+    "_coven_row_file_refs",
+    "_coven_rows",
+    "_coven_sequence",
+    "_coven_slot_records",
+    "_coven_snapshot_reservation",
+    "_coven_snapshot_schema",
+    "_coven_sql_versions",
+    "_coven_store",
+    "_coven_stored_files",
+    "_coven_table_origins",
+    "_coven_unreferenced_files",
+    "_coven_upload_files",
+    "_coven_upload_keys",
+    "_coven_upload_pause",
+    "_coven_uploads",
+    "_coven_user_chunks",
+    "_coven_user_files",
+    "_coven_write_evidence",
+    "_coven_write_headers",
+    "_coven_write_pause",
+    "_coven_write_refusals",
+    "_coven_write_slots",
+    "_coven_writes",
+    "_coven_written_values",
+]
+
 # One list for owner construction, runtime acquisition and task starts.
 # Owner constructors include their private representations; names grant no
 # exemption.

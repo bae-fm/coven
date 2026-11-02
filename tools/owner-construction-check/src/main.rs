@@ -31,6 +31,7 @@ mod report;
 mod retained_capability_parameters;
 mod rust_prelude;
 mod sources;
+mod sql_writes;
 mod syntax;
 mod test_code;
 mod test_layout;

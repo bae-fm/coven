@@ -29,7 +29,8 @@ pub(crate) enum Rule {
     /// task starts only at composition roots (`capability_boundaries.rs`).
     CapabilityBoundaries,
     /// Appendix F.2: raw SQLite handles and SQL on the database's internal
-    /// tables stay in the database's homes (`database_boundary.rs`).
+    /// tables stay in the database's homes, and each domain's tables are
+    /// written only in its homes (`database_boundary.rs`).
     DatabaseBoundary,
     /// Appendix F.3: an owner never hands out what it holds
     /// (`owner_dependency_boundary.rs`).
@@ -234,6 +235,23 @@ pub(crate) struct Database {
     /// names the crate, not SQLite.
     #[serde(default)]
     pub(crate) rusqlite_reexport: Option<String>,
+    /// The tables, grouped by the part of the workspace that writes them.
+    #[serde(default)]
+    pub(crate) domains: Vec<Domain>,
+}
+
+/// A domain: tables that only its homes write. SQL elsewhere may read them;
+/// writing one — `INSERT`, `UPDATE`, `DELETE` or `REPLACE`, in a statement or
+/// in a trigger's body — is the domain's own work (`sql_writes.rs`).
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct Domain {
+    pub(crate) name: String,
+    /// Path prefixes, relative to the workspace root, where SQL writes the
+    /// domain's tables. A prefix ending in `/` names a directory.
+    pub(crate) homes: Vec<String>,
+    /// Table names, as SQL writes them; they compare without case.
+    pub(crate) tables: Vec<String>,
 }
 
 #[derive(Debug, thiserror::Error)]

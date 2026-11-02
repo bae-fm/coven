@@ -4,11 +4,19 @@
 //! Outside the homes of the policy's database capability, naming a raw
 //! rusqlite handle — connection, session or transaction — is the violation, as
 //! is writing SQL that names one of the tables the database's schema module
-//! declares. rusqlite's values, results and parameter macros stay allowed. It
-//! reads no test code (`test_code.rs`).
+//! declares. rusqlite's values, results and parameter macros stay allowed.
+//!
+//! Each table the policy places in a domain is written only in that
+//! domain's homes, in every file, the database's homes included: a string
+//! literal whose SQL writes it elsewhere is the violation (`sql_writes.rs`).
+//! Reads are free across domains. SQL the program builds at runtime, from
+//! `format!` or by joining pieces, names its table nowhere in the source, so
+//! the rule cannot see it.
+//!
+//! It reads no test code (`test_code.rs`).
 
 use crate::finding::Finding;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use proc_macro2::Span;
 use syn::spanned::Spanned;
@@ -16,7 +24,8 @@ use syn::visit::{self, Visit};
 
 use crate::macros::{parse_macro_body, token_paths, token_strings, unparsed_tokens};
 use crate::module_sources::module_sources;
-use crate::policy::{describe_homes, Policy};
+use crate::policy::{describe_homes, Domain, Policy};
+use crate::sql_writes::written_tables;
 use crate::syntax::RustFile;
 
 /// rusqlite's raw handles. Only the database crate holds one.
@@ -42,15 +51,20 @@ pub(crate) fn find_database_boundary_violations(
         .as_ref()
         .and_then(|database| database.rusqlite_reexport.as_deref())
         .map(|package| package.replace('-', "_"));
+    let domains = policy
+        .database
+        .iter()
+        .flat_map(|database| &database.domains)
+        .flat_map(|domain| domain.tables.iter().map(move |table| (table.to_lowercase(), domain)))
+        .collect::<BTreeMap<_, _>>();
     for file in files {
-        if homes.iter().any(|home| file.relative_path.starts_with(home.as_str())) {
-            continue;
-        }
         let mut visitor = DatabaseBoundaryVisitor {
             path: &file.relative_path,
+            in_database: homes.iter().any(|home| file.relative_path.starts_with(home.as_str())),
             confined_to: &confined_to,
             reexporting_crate: reexporting_crate.as_deref(),
             tables: &tables,
+            domains: &domains,
             violations: &mut violations,
         };
         visitor.visit_file(&file.syntax);
@@ -60,16 +74,24 @@ pub(crate) fn find_database_boundary_violations(
 
 struct DatabaseBoundaryVisitor<'a> {
     path: &'a str,
+    /// Whether the file is in one of the database's homes, where raw handles
+    /// and SQL on the database's own tables belong.
+    in_database: bool,
     /// The database's homes, as findings name them.
     confined_to: &'a str,
     /// The crate, as Rust names it, whose `rusqlite` re-export may be imported.
     reexporting_crate: Option<&'a str>,
     tables: &'a BTreeSet<String>,
+    /// Each domain's tables, lowercase, and the domain.
+    domains: &'a BTreeMap<String, &'a Domain>,
     violations: &'a mut BTreeSet<Finding>,
 }
 
 impl DatabaseBoundaryVisitor<'_> {
     fn record(&mut self, kind: &str, span: Span) {
+        if self.in_database {
+            return;
+        }
         self.violations.insert(Finding::new(
             self.path,
             span.start().line,
@@ -82,8 +104,25 @@ impl DatabaseBoundaryVisitor<'_> {
     }
 
     fn check_sql(&mut self, literal: &syn::LitStr) {
-        if let Some(table) = schema_table_in_sql(&literal.value(), self.tables) {
+        let sql = literal.value();
+        if let Some(table) = schema_table_in_sql(&sql, self.tables) {
             self.record(&format!("SQL on the database's own table {table}"), literal.span());
+        }
+        for table in written_tables(&sql) {
+            let Some(domain) = self.domains.get(&table) else { continue };
+            if domain.homes.iter().any(|home| self.path.starts_with(home.as_str())) {
+                continue;
+            }
+            self.violations.insert(Finding::new(
+                self.path,
+                literal.span().start().line,
+                format!(
+                    "SQL writes {table}, which only the {} domain writes, in {}",
+                    domain.name,
+                    describe_homes(&domain.homes)
+                ),
+                "a table is written only in its domain's homes; ask the domain to make the write, or move the SQL there",
+            ));
         }
     }
 }
