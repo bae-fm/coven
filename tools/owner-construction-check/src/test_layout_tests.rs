@@ -13,7 +13,7 @@ fn conventions(files: &[(&str, &str)]) -> Vec<(String, usize, String)> {
 fn the_prescribed_layout_passes() {
     assert!(conventions(&[
         (
-            "crates/coven-sync/src/pull.rs",
+            "crates/app-sync/src/pull.rs",
             r#"
             fn pull() {}
             #[cfg(test)]
@@ -22,23 +22,23 @@ fn the_prescribed_layout_passes() {
             "#,
         ),
         (
-            "crates/coven-sync/src/pull_tests.rs",
+            "crates/app-sync/src/pull_tests.rs",
             "#[test] fn pulls() {} mod helpers { fn fixture() {} }",
         ),
-        ("crates/coven-sync/tests/sync_tests.rs", "#[test] fn syncs() {}"),
-        ("crates/coven-sync/tests/two_devices.rs", "#[test] fn converges() {}"),
+        ("crates/app-sync/tests/sync_tests.rs", "#[test] fn syncs() {}"),
+        ("crates/app-sync/tests/two_devices.rs", "#[test] fn converges() {}"),
     ])
     .is_empty());
 }
 
 #[test]
 fn a_singular_test_file_is_rejected_with_its_rename() {
-    let files = [RustFile::fixture("crates/coven-sync/src/pull_test.rs", "")];
+    let files = [RustFile::fixture("crates/app-sync/src/pull_test.rs", "")];
     let violations = find_test_layout_violations(&files);
     assert_eq!(
         violations,
         [Finding::new(
-            "crates/coven-sync/src/pull_test.rs",
+            "crates/app-sync/src/pull_test.rs",
             1,
             "test files are named <name>_tests.rs; rename pull_test.rs to pull_tests.rs",
             Convention::SingularTestFile.remedy(),
@@ -49,9 +49,9 @@ fn a_singular_test_file_is_rejected_with_its_rename() {
 #[test]
 fn a_test_file_without_its_subject_is_rejected() {
     assert_eq!(
-        conventions(&[("crates/coven-sync/src/pull_tests.rs", "#[test] fn pulls() {}")]),
+        conventions(&[("crates/app-sync/src/pull_tests.rs", "#[test] fn pulls() {}")]),
         vec![(
-            "crates/coven-sync/src/pull_tests.rs".to_string(),
+            "crates/app-sync/src/pull_tests.rs".to_string(),
             1,
             Convention::OrphanTestFile.message("pull_tests.rs")
         )],
@@ -62,7 +62,7 @@ fn a_test_file_without_its_subject_is_rejected() {
 fn an_inline_test_module_is_rejected() {
     assert_eq!(
         conventions(&[(
-            "crates/coven-sync/src/pull.rs",
+            "crates/app-sync/src/pull.rs",
             r#"
             fn pull() {}
             #[cfg(test)]
@@ -78,12 +78,12 @@ fn an_inline_test_module_is_rejected() {
         )]),
         vec![
             (
-                "crates/coven-sync/src/pull.rs".to_string(),
+                "crates/app-sync/src/pull.rs".to_string(),
                 4,
                 Convention::InlineTestModule.message("pull.rs")
             ),
             (
-                "crates/coven-sync/src/pull.rs".to_string(),
+                "crates/app-sync/src/pull.rs".to_string(),
                 10,
                 Convention::InlineTestModule.message("pull.rs")
             ),
@@ -103,7 +103,7 @@ fn a_test_module_declared_elsewhere_than_the_sibling_is_rejected() {
         #[path = "pull_tests.rs"]
         mod checks;
     "#;
-    let violations = conventions(&[("crates/coven-sync/src/pull.rs", source)]);
+    let violations = conventions(&[("crates/app-sync/src/pull.rs", source)]);
     assert_eq!(
         violations
             .iter()
@@ -120,7 +120,7 @@ fn a_test_module_declared_elsewhere_than_the_sibling_is_rejected() {
 #[test]
 fn modules_that_compile_into_production_are_not_test_modules() {
     assert!(conventions(&[(
-        "crates/coven-sync/src/pull.rs",
+        "crates/app-sync/src/pull.rs",
         r#"
         #[cfg(not(test))]
         mod live {}

@@ -1,15 +1,12 @@
-//! Reading the workspace: every Rust file under `crates/` and `tools/`, parsed,
-//! and every member manifest, plus the workspace manifest's dependency table.
+//! Reading the workspace: every member the workspace manifest lists, each
+//! Rust file under it parsed and tagged with its package, every member
+//! manifest, and the workspace manifest's dependency table.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use crate::crate_dependencies::{dependency_entries, workspace_package};
 use crate::syntax::RustFile;
-
-/// The directories, relative to the workspace root, whose files the checker
-/// reads. A directory that does not exist yet holds nothing.
-const SOURCE_ROOTS: &[&str] = &["crates", "tools"];
 
 pub(crate) struct Workspace {
     pub(crate) files: Vec<RustFile>,
@@ -65,84 +62,128 @@ pub(crate) enum LoadError {
     },
     #[error("{} has no [workspace] table", path.display())]
     NotAWorkspace { path: PathBuf },
+    #[error("{}: workspace members are listed by directory, without globs: {member}", path.display())]
+    MemberPattern { path: PathBuf, member: String },
+    #[error("{} has no [package] name", path.display())]
+    UnnamedPackage { path: PathBuf },
+    #[error("workspace member {inner} lies inside member {outer}")]
+    NestedMember { outer: String, inner: String },
+    #[error("{} has no Cargo.toml", path.display())]
+    MissingManifest { path: PathBuf },
+    #[error("{} is a crate outside the workspace inside one of its members", path.display())]
+    CrateInsideMember { path: PathBuf },
 }
 
 pub(crate) fn load(root: &Path) -> Result<Workspace, LoadError> {
+    let workspace_manifest = root.join("Cargo.toml");
+    let Some(toml::Value::Table(mut workspace_table)) =
+        parse_manifest(&workspace_manifest)?.remove("workspace")
+    else {
+        return Err(LoadError::NotAWorkspace { path: workspace_manifest });
+    };
+    let members = match workspace_table.remove("members") {
+        Some(toml::Value::Array(members)) => members
+            .into_iter()
+            .map(|member| match member {
+                toml::Value::String(member)
+                    if !member.contains(['*', '?', '[']) && !member.is_empty() =>
+                {
+                    Ok(member.trim_end_matches('/').to_string())
+                }
+                member => Err(LoadError::MemberPattern {
+                    path: workspace_manifest.clone(),
+                    member: member.to_string(),
+                }),
+            })
+            .collect::<Result<Vec<_>, _>>()?,
+        _ => Vec::new(),
+    };
+    // A file belongs to the one member whose directory holds it.
+    for outer in &members {
+        for inner in &members {
+            if inner != outer && (outer == "." || inner.starts_with(&format!("{outer}/"))) {
+                return Err(LoadError::NestedMember { outer: outer.clone(), inner: inner.clone() });
+            }
+        }
+    }
+    let workspace_dependencies = match workspace_table.remove("dependencies") {
+        Some(toml::Value::Table(dependencies)) => dependencies,
+        _ => toml::Table::new(),
+    };
     let mut rust_paths = Vec::new();
     let mut manifest_paths = Vec::new();
-    for source_root in SOURCE_ROOTS {
-        let directory = root.join(source_root);
-        if directory.is_dir() {
-            collect_paths(&directory, &mut rust_paths, &mut manifest_paths)?;
-        }
+    for member in &members {
+        collect_paths(&root.join(member), &mut rust_paths, &mut manifest_paths)?;
     }
     rust_paths.sort();
     manifest_paths.sort();
-    let files = rust_paths
-        .into_iter()
-        .map(|path| {
-            let source = read(&path)?;
-            let syntax = syn::parse_file(&source)
-                .map_err(|source| LoadError::ParseFile { path: path.clone(), source })?;
-            Ok(RustFile {
-                relative_path: relative(root, &path)?,
-                syntax,
-                lines: source.lines().count(),
-                extern_crates: BTreeMap::new(),
-            })
-        })
-        .collect::<Result<Vec<_>, LoadError>>()?;
+    if let Some(path) = manifest_paths
+        .iter()
+        .find(|path| !members.iter().any(|member| **path == root.join(member).join("Cargo.toml")))
+    {
+        return Err(LoadError::CrateInsideMember { path: path.clone() });
+    }
     let manifests = manifest_paths
         .into_iter()
         .map(|path| {
             Ok(Manifest { relative_path: relative(root, &path)?, table: parse_manifest(&path)? })
         })
         .collect::<Result<Vec<_>, LoadError>>()?;
-    let workspace_manifest = root.join("Cargo.toml");
-    let workspace_dependencies = parse_manifest(&workspace_manifest)?
-        .remove("workspace")
-        .and_then(|workspace| match workspace {
-            toml::Value::Table(mut workspace) => Some(workspace.remove("dependencies")),
-            _ => None,
-        })
-        .ok_or(LoadError::NotAWorkspace { path: workspace_manifest })?
-        .and_then(|dependencies| match dependencies {
-            toml::Value::Table(dependencies) => Some(dependencies),
-            _ => None,
-        })
-        .unwrap_or_default();
-    let mut workspace = Workspace { files, manifests, workspace_dependencies };
-    let dependencies = workspace
-        .manifests
-        .iter()
-        .map(|manifest| {
-            let names = dependency_entries(&manifest.table)
-                .into_iter()
-                .map(|(name, entry)| {
-                    let package =
-                        if entry.get("workspace").and_then(toml::Value::as_bool) == Some(true) {
-                            workspace_package(&workspace, name)
-                        } else {
-                            entry
-                                .get("package")
-                                .and_then(toml::Value::as_str)
-                                .unwrap_or(name)
-                                .to_string()
-                        };
-                    (name.replace('-', "_"), package.replace('-', "_"))
-                })
-                .collect::<BTreeMap<_, _>>();
-            (manifest.relative_path.trim_end_matches("Cargo.toml"), names)
-        })
-        .collect::<Vec<_>>();
-    for file in &mut workspace.files {
-        if let Some((_, names)) =
-            dependencies.iter().find(|(directory, _)| file.relative_path.starts_with(directory))
-        {
-            file.extern_crates = names.clone();
-        }
+    let mut workspace = Workspace { files: Vec::new(), manifests, workspace_dependencies };
+    // Each member's root directory, package name and dependency names.
+    let mut packages = Vec::new();
+    for member in &members {
+        let relative_path = format!("{member}/Cargo.toml");
+        let manifest = workspace
+            .manifests
+            .iter()
+            .find(|manifest| manifest.relative_path == relative_path)
+            .ok_or_else(|| LoadError::MissingManifest { path: root.join(&relative_path) })?;
+        let name = manifest
+            .package_name()
+            .ok_or_else(|| LoadError::UnnamedPackage { path: root.join(&relative_path) })?;
+        let names = dependency_entries(&manifest.table)
+            .into_iter()
+            .map(|(name, entry)| {
+                let package = if entry.get("workspace").and_then(toml::Value::as_bool) == Some(true)
+                {
+                    workspace_package(&workspace, name)
+                } else {
+                    entry.get("package").and_then(toml::Value::as_str).unwrap_or(name).to_string()
+                };
+                (name.replace('-', "_"), package.replace('-', "_"))
+            })
+            .collect::<BTreeMap<_, _>>();
+        packages.push((format!("{member}/"), name, names));
     }
+    workspace.files = rust_paths
+        .into_iter()
+        .map(|path| {
+            let relative_path = relative(root, &path)?;
+            let (package_root, package, extern_crates) = packages
+                .iter()
+                .find(|(package_root, _, _)| relative_path.starts_with(package_root.as_str()))
+                .expect("every source lies under the member it was collected from");
+            let source = read(&path)?;
+            let syntax = syn::parse_file(&source)
+                .map_err(|source| LoadError::ParseFile { path: path.clone(), source })?;
+            Ok(RustFile {
+                relative_path,
+                package_root: package_root.clone(),
+                package: package.clone(),
+                syntax,
+                lines: source.lines().count(),
+                extern_crates: extern_crates.clone(),
+            })
+        })
+        .collect::<Result<Vec<_>, LoadError>>()?;
     Ok(workspace)
+}
+
+impl Manifest {
+    pub(crate) fn package_name(&self) -> Option<String> {
+        self.table.get("package")?.get("name")?.as_str().map(str::to_string)
+    }
 }
 
 fn read(path: &Path) -> Result<String, LoadError> {
@@ -195,3 +236,7 @@ fn collect_paths(
     }
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "sources_tests.rs"]
+mod tests;

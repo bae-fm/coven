@@ -7,7 +7,7 @@ use syn::visit::{self, Visit};
 use crate::finding::Finding;
 use crate::macros::parse_macro_body;
 use crate::name_resolution::{qualified_path, ItemPath, NameResolver, ResolutionError};
-use crate::syntax::{is_test_only, is_test_source, type_names, RustFile};
+use crate::syntax::{is_test_only, type_names, RustFile};
 
 pub(crate) struct Factories {
     pub(crate) results: BTreeMap<ItemPath, BTreeMap<Option<ItemPath>, BTreeSet<String>>>,
@@ -63,16 +63,16 @@ impl Factories {
             associated_types: BTreeSet::new(),
         };
         let mut traits = BTreeMap::new();
-        for file in files.iter().filter(|file| {
-            !is_test_source(&file.relative_path) && !is_test_only(&file.syntax.attrs)
-        }) {
+        for file in
+            files.iter().filter(|file| !file.is_test_source() && !is_test_only(&file.syntax.attrs))
+        {
             TraitCollector { path: &file.relative_path, resolver, traits: &mut traits }
                 .visit_file(&file.syntax);
         }
         let mut aliases = Vec::new();
-        for file in files.iter().filter(|file| {
-            !is_test_source(&file.relative_path) && !is_test_only(&file.syntax.attrs)
-        }) {
+        for file in
+            files.iter().filter(|file| !file.is_test_source() && !is_test_only(&file.syntax.attrs))
+        {
             Collector {
                 path: &file.relative_path,
                 resolver,

@@ -21,7 +21,7 @@ use crate::macros::{parse_macro_body, token_paths};
 use crate::name_resolution::{qualified_path, NameResolver};
 use crate::owner_graph::OwnerGraph;
 use crate::policy::Policy;
-use crate::syntax::{is_test_only, is_test_source, type_name, type_names, RustFile};
+use crate::syntax::{is_test_only, type_name, type_names, RustFile};
 
 #[derive(Debug, Eq, PartialEq, Ord, PartialOrd)]
 pub(crate) enum ConstructionKind {
@@ -33,17 +33,16 @@ pub(crate) enum ConstructionKind {
 /// without evaluating cfg predicates. Both construction and parameter checks
 /// use this set, so an implementation needs no additional policy entry.
 pub(crate) fn construction_only_types(files: &[RustFile], policy: &Policy) -> BTreeSet<String> {
-    let mut types =
-        policy.construction_only_capability_types.iter().map(|name| (*name).to_string()).collect();
+    let mut types = policy.construction_only_capability_types.clone();
     for file in files {
-        ImplementationCollector { traits: policy.capability_traits, types: &mut types }
+        ImplementationCollector { traits: &policy.capability_traits, types: &mut types }
             .visit_file(&file.syntax);
     }
     types
 }
 
 struct ImplementationCollector<'a> {
-    traits: &'a [&'a str],
+    traits: &'a BTreeSet<String>,
     types: &'a mut BTreeSet<String>,
 }
 
@@ -51,9 +50,10 @@ impl<'ast> Visit<'ast> for ImplementationCollector<'_> {
     fn visit_item_impl(&mut self, node: &'ast syn::ItemImpl) {
         if let Some((path, _)) = &node.trait_ {
             if node.modifiers.polarity.is_none()
-                && path.segments.last().is_some_and(|trait_name| {
-                    self.traits.contains(&trait_name.ident.to_string().as_str())
-                })
+                && path
+                    .segments
+                    .last()
+                    .is_some_and(|trait_name| self.traits.contains(&trait_name.ident.to_string()))
             {
                 if let Some(name) = type_name(&node.self_ty) {
                     self.types.insert(name);
@@ -80,8 +80,7 @@ pub(crate) fn find_capability_construction_violations(
         .owners
         .iter()
         .filter(|name| {
-            !policy.task_types.contains(&name.as_str())
-                && !policy.capability_types.contains(&name.as_str())
+            !policy.task_types.contains(*name) && !policy.capability_types.contains(*name)
         })
         .cloned()
         .collect::<BTreeSet<_>>();
@@ -90,7 +89,7 @@ pub(crate) fn find_capability_construction_violations(
     let mut violations = BTreeSet::new();
     let factories = Factories::collect(files, &constructed, &resolver, &mut violations);
     for file in files {
-        if is_test_source(&file.relative_path) || is_test_only(&file.syntax.attrs) {
+        if file.is_test_source() || is_test_only(&file.syntax.attrs) {
             continue;
         }
         let mut visitor = ConstructionVisitor {
@@ -307,13 +306,11 @@ impl ConstructionVisitor<'_> {
                 if let Some(results) = products {
                     for result in results {
                         let permitted_receiver = path.len() >= 2
-                            && self.policy.capability_factories.iter().any(
-                                |(_, owner, method, product)| {
-                                    *owner == path[path.len() - 2]
-                                        && *method == path[path.len() - 1]
-                                        && *product == result
-                                },
-                            );
+                            && self.policy.capability_factories.iter().any(|factory| {
+                                factory.owner == path[path.len() - 2]
+                                    && factory.method == path[path.len() - 1]
+                                    && factory.product == *result
+                            });
                         if !permitted_receiver
                             && (kind != ReferenceKind::Receiver || self.owners.contains(result))
                         {
@@ -378,15 +375,13 @@ impl ConstructionVisitor<'_> {
             .filter(|name| self.capabilities.contains(name))
             .filter(|name| {
                 signature.receiver().is_none()
-                    || self.policy.capability_factories.iter().any(
-                        |(path, owner, method, product)| {
-                            *path == self.path
-                                && self.current_type.as_ref().map(|ty| ty.name.as_str())
-                                    == Some(*owner)
-                                && signature.ident == *method
-                                && *product == name
-                        },
-                    )
+                    || self.policy.capability_factories.iter().any(|factory| {
+                        factory.path == self.path
+                            && self.current_type.as_ref().map(|ty| ty.name.as_str())
+                                == Some(factory.owner.as_str())
+                            && signature.ident == factory.method
+                            && factory.product == *name
+                    })
             })
             .collect()
     }

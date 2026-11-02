@@ -2,8 +2,8 @@
 //!
 //! - Each crate depends only on crates above it in the list — earlier in the
 //!   policy's `crate_order` — and the separated pairs never depend on each
-//!   other. Every crate under `crates/` has a row, so a new crate is placed
-//!   when it lands. Dev-dependencies answer to the same order: a test that
+//!   other. Every member the policy does not name a tool is a crate and has
+//!   a row, so a new crate is placed when it lands. Dev-dependencies answer to the same order: a test that
 //!   reaches up the list belongs to the crate whose types it builds.
 //! - Each external dependency's version is set once, in the workspace: a
 //!   member names a dependency with `workspace = true` and, at most, the
@@ -17,14 +17,14 @@ use std::collections::BTreeSet;
 
 use crate::finding::Finding;
 use crate::policy::Policy;
-use crate::sources::{Manifest, Workspace};
+use crate::sources::Workspace;
 
 const DEPENDENCY_TABLES: &[&str] = &["dependencies", "dev-dependencies", "build-dependencies"];
 
 /// What a member may say about a dependency besides `workspace = true`.
 const MEMBER_DEPENDENCY_KEYS: &[&str] = &["workspace", "features", "optional"];
 
-const REMEDY: &str = "each crate depends only on crates above it in Appendix F.1's list, and each external dependency's version is set once in [workspace.dependencies]";
+const REMEDY: &str = "each crate depends only on crates above it in the policy's crate_order, and each external dependency's version is set once in [workspace.dependencies]";
 
 pub(crate) fn find_crate_dependency_violations(
     workspace: &Workspace,
@@ -32,8 +32,8 @@ pub(crate) fn find_crate_dependency_violations(
 ) -> Vec<Finding> {
     let mut violations = BTreeSet::new();
     for manifest in &workspace.manifests {
-        let is_crate = manifest.relative_path.starts_with("crates/");
-        let package = package_name(manifest);
+        let package = manifest.package_name();
+        let is_crate = package.as_deref().is_some_and(|package| !policy.is_tool(package));
         let rank = package
             .as_deref()
             .and_then(|package| policy.crate_order.iter().position(|name| *name == package));
@@ -60,8 +60,8 @@ pub(crate) fn find_crate_dependency_violations(
             let Some(to_rank) = policy.crate_order.iter().position(|name| *name == to) else {
                 continue;
             };
-            if policy.separated_crates.iter().any(|pair| {
-                *pair == (from.as_str(), to.as_str()) || *pair == (to.as_str(), from.as_str())
+            if policy.separated_crates.iter().any(|(first, second)| {
+                (first == from && *second == to) || (*first == to && second == from)
             }) {
                 violations.insert(Finding::new(
                     &manifest.relative_path,
@@ -80,10 +80,6 @@ pub(crate) fn find_crate_dependency_violations(
         }
     }
     violations.into_iter().collect()
-}
-
-fn package_name(manifest: &Manifest) -> Option<String> {
-    manifest.table.get("package")?.get("name")?.as_str().map(str::to_string)
 }
 
 /// Every dependency entry of every dependency table, target-specific ones

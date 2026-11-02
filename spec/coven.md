@@ -9772,9 +9772,14 @@ Lean proofs once, on Linux, since a proof checks the same on any platform.
 2. The dependency rules of F.1, with `cargo deny check bans` for the crates
    `deny.toml` refuses.
 3. The rules of F.2 and F.3, by a checker that reads the syntax tree of every
-   crate, including inside macro calls, against the policy file.
-4. The checker's own guard tests: every file, owner and composition root the
-   policy names must exist, so the policy can't go stale.
+   crate, including inside macro calls, against the policy file,
+   `owner-construction-check.toml` at the workspace root. The policy holds
+   everything the rules know about coven: the rules it runs, the crate order,
+   the capabilities and their homes, the composition roots and the types the
+   rules name. The checker's own source names none of it.
+4. The checker's check of the policy, before any rule: every member, file,
+   type and composition root the policy names must exist, so the policy can't
+   go stale.
 5. The visibility and file-size rules of F.5.
 6. `cargo doc` with broken links denied.
 7. Every crate built without test code, so an item only tests use shows up as

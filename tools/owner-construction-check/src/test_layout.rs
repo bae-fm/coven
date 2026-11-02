@@ -13,7 +13,7 @@ use syn::visit::{self, Visit};
 
 use crate::conventions::Convention;
 use crate::finding::Finding;
-use crate::syntax::{is_integration_test_source, is_test_only, is_test_source, RustFile};
+use crate::syntax::{is_test_only, RustFile};
 
 pub(crate) fn find_test_layout_violations(files: &[RustFile]) -> Vec<Finding> {
     let paths = files.iter().map(|file| file.relative_path.as_str()).collect::<BTreeSet<_>>();
@@ -26,11 +26,11 @@ pub(crate) fn find_test_layout_violations(files: &[RustFile]) -> Vec<Finding> {
         }
         if let Some(subject) = name.strip_suffix("_tests.rs") {
             let sibling = format!("{directory}/{subject}.rs");
-            if !is_integration_test_source(path) && !paths.contains(sibling.as_str()) {
+            if !file.is_integration_test_source() && !paths.contains(sibling.as_str()) {
                 violations.push(violation(path, 1, Convention::OrphanTestFile));
             }
         }
-        if is_test_source(path) {
+        if file.is_test_source() {
             continue;
         }
         let mut visitor = TestModuleVisitor {

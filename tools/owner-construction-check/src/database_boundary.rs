@@ -1,10 +1,10 @@
-//! The SQLite capability (Appendix F.2): nothing outside coven-database gets the
-//! SQLite connection; it asks the database owner to run a write.
+//! The SQLite capability (Appendix F.2): nothing outside the database's homes
+//! gets the SQLite connection; it asks the database owner to run a write.
 //!
-//! Outside the SQLite homes, naming a raw rusqlite handle — connection,
-//! session or transaction — is the violation, as is writing SQL that names one
-//! of coven's own tables. rusqlite's values, results and parameter macros are
-//! part of the API (api.md) and stay allowed.
+//! Outside the homes of the policy's database capability, naming a raw
+//! rusqlite handle — connection, session or transaction — is the violation, as
+//! is writing SQL that names one of the tables the database's schema module
+//! declares. rusqlite's values, results and parameter macros stay allowed.
 
 use crate::finding::Finding;
 use std::collections::BTreeSet;
@@ -15,7 +15,7 @@ use syn::visit::{self, Visit};
 
 use crate::macros::{parse_macro_body, token_paths, token_strings};
 use crate::module_sources::module_sources;
-use crate::policy::Policy;
+use crate::policy::{describe_homes, Policy};
 use crate::syntax::RustFile;
 
 /// rusqlite's raw handles. Only the database crate holds one.
@@ -30,15 +30,23 @@ pub(crate) fn find_database_boundary_violations(
     policy: &Policy,
 ) -> Vec<Finding> {
     let mut violations = BTreeSet::new();
-    let coven_tables = collect_coven_table_names(files, policy);
+    let homes = policy.database_homes();
+    let confined_to = describe_homes(homes);
+    let tables = collect_schema_table_names(files, policy);
+    let reexporting_crate = policy
+        .database
+        .as_ref()
+        .and_then(|database| database.rusqlite_reexport.as_deref())
+        .map(|package| package.replace('-', "_"));
     for file in files {
-        if policy.capabilities.sqlite.homes.iter().any(|home| file.relative_path.starts_with(home))
-        {
+        if homes.iter().any(|home| file.relative_path.starts_with(home.as_str())) {
             continue;
         }
         let mut visitor = DatabaseBoundaryVisitor {
             path: &file.relative_path,
-            coven_tables: &coven_tables,
+            confined_to: &confined_to,
+            reexporting_crate: reexporting_crate.as_deref(),
+            tables: &tables,
             violations: &mut violations,
         };
         visitor.visit_file(&file.syntax);
@@ -48,20 +56,30 @@ pub(crate) fn find_database_boundary_violations(
 
 struct DatabaseBoundaryVisitor<'a> {
     path: &'a str,
-    coven_tables: &'a BTreeSet<String>,
+    /// The database's homes, as findings name them.
+    confined_to: &'a str,
+    /// The crate, as Rust names it, whose `rusqlite` re-export may be imported.
+    reexporting_crate: Option<&'a str>,
+    tables: &'a BTreeSet<String>,
     violations: &'a mut BTreeSet<Finding>,
 }
 
 impl DatabaseBoundaryVisitor<'_> {
     fn record(&mut self, kind: &str, span: Span) {
-        self.violations.insert(Finding::new(self.path, span.start().line,
-            format!("{kind} is confined to coven-database"),
-            "ask the database owner to run the work; raw SQLite and coven's own SQL live in coven-database"));
+        self.violations.insert(Finding::new(
+            self.path,
+            span.start().line,
+            format!("{kind} is confined to {}", self.confined_to),
+            format!(
+                "ask the database owner to run the work; raw SQLite and SQL on the database's own tables live in {}",
+                self.confined_to
+            ),
+        ));
     }
 
     fn check_sql(&mut self, literal: &syn::LitStr) {
-        if let Some(table) = coven_table_in_sql(&literal.value(), self.coven_tables) {
-            self.record(&format!("coven-owned SQL for table {table}"), literal.span());
+        if let Some(table) = schema_table_in_sql(&literal.value(), self.tables) {
+            self.record(&format!("SQL on the database's own table {table}"), literal.span());
         }
     }
 }
@@ -76,7 +94,13 @@ impl<'ast> Visit<'ast> for DatabaseBoundaryVisitor<'_> {
 
     fn visit_item_use(&mut self, node: &'ast syn::ItemUse) {
         let mut capabilities = BTreeSet::new();
-        collect_forbidden_sqlite_imports(&node.tree, false, false, &mut capabilities);
+        collect_forbidden_sqlite_imports(
+            &node.tree,
+            self.reexporting_crate,
+            false,
+            false,
+            &mut capabilities,
+        );
         for capability in capabilities {
             self.record(capability, node.span());
         }
@@ -117,13 +141,15 @@ impl<'ast> Visit<'ast> for DatabaseBoundaryVisitor<'_> {
 }
 
 /// The tables the policy's schema module declares through its table macros.
-fn collect_coven_table_names(files: &[RustFile], policy: &Policy) -> BTreeSet<String> {
-    let Some((schema_root, table_macros)) = policy.database_schema else {
+fn collect_schema_table_names(files: &[RustFile], policy: &Policy) -> BTreeSet<String> {
+    let Some((schema_root, table_macros)) = policy.database.as_ref().and_then(|database| {
+        database.schema.as_deref().map(|schema| (schema, &database.table_macros))
+    }) else {
         return BTreeSet::new();
     };
     schema_table_macros(files, schema_root)
         .into_iter()
-        .filter(|table_macro| table_macros.contains(&table_macro.name.as_str()))
+        .filter(|table_macro| table_macros.contains(&table_macro.name))
         .flat_map(|table_macro| table_macro.tables)
         .collect()
 }
@@ -183,7 +209,7 @@ fn collect_table_macro_invocations(
     }
 }
 
-fn coven_table_in_sql<'a>(sql: &str, tables: &'a BTreeSet<String>) -> Option<&'a str> {
+fn schema_table_in_sql<'a>(sql: &str, tables: &'a BTreeSet<String>) -> Option<&'a str> {
     let words = sql
         .split(|character: char| !(character.is_ascii_alphanumeric() || character == '_'))
         .filter(|word| !word.is_empty())
@@ -212,10 +238,11 @@ fn coven_table_in_sql<'a>(sql: &str, tables: &'a BTreeSet<String>) -> Option<&'a
     tables.iter().find(|table| words.iter().any(|word| word == table.as_str())).map(String::as_str)
 }
 
-/// `under_database`: the import goes through coven-database's re-export of
-/// rusqlite for the API, which names the database crate, not SQLite.
+/// `under_database`: the import goes through the policy's re-exporting crate,
+/// whose `rusqlite` re-export names that crate, not SQLite.
 fn collect_forbidden_sqlite_imports(
     tree: &syn::UseTree,
+    reexporting_crate: Option<&str>,
     under_rusqlite: bool,
     under_database: bool,
     capabilities: &mut BTreeSet<&'static str>,
@@ -223,8 +250,9 @@ fn collect_forbidden_sqlite_imports(
     match tree {
         syn::UseTree::Path(path) => collect_forbidden_sqlite_imports(
             &path.tree,
+            reexporting_crate,
             under_rusqlite || path.ident == "rusqlite",
-            under_database || path.ident == "coven_database",
+            under_database || reexporting_crate.is_some_and(|name| path.ident == name),
             capabilities,
         ),
         syn::UseTree::Name(name) => {
@@ -237,6 +265,7 @@ fn collect_forbidden_sqlite_imports(
             for item in &group.items {
                 collect_forbidden_sqlite_imports(
                     item,
+                    reexporting_crate,
                     under_rusqlite,
                     under_database,
                     capabilities,

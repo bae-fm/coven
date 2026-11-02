@@ -5,7 +5,7 @@ pub(crate) struct Finding {
     pub(crate) path: String,
     pub(crate) line: usize,
     pub(crate) message: String,
-    pub(crate) remedy: &'static str,
+    pub(crate) remedy: String,
 }
 
 impl Finding {
@@ -13,8 +13,8 @@ impl Finding {
         path: &str,
         line: usize,
         message: impl Into<String>,
-        remedy: &'static str,
+        remedy: impl Into<String>,
     ) -> Self {
-        Self { path: path.into(), line, message: message.into(), remedy }
+        Self { path: path.into(), line, message: message.into(), remedy: remedy.into() }
     }
 }

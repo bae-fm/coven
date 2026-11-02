@@ -3,7 +3,8 @@
 //!
 //! - `pub(in path)` and `super::super::` are not used: an item needed
 //!   elsewhere moves to where both callers can see it.
-//! - `coven` re-exports the API at its root and keeps every module private.
+//! - The policy's API crate re-exports the API at its root and keeps every
+//!   module private.
 //! - A source file holds at most 1,000 lines.
 //! - A source's tests live beside it in `<name>_tests.rs` (`test_layout.rs`).
 
@@ -18,9 +19,6 @@ use crate::macros::token_paths;
 use crate::syntax::RustFile;
 use crate::test_layout::find_test_layout_violations;
 
-/// The crate whose root re-exports the API (Appendix F.5).
-const API_CRATE_SOURCES: &str = "crates/coven/src/";
-
 /// The most lines a source file holds (Appendix F.5). There is no exception list.
 const MAX_FILE_LINES: usize = 1_000;
 
@@ -28,7 +26,6 @@ const MAX_FILE_LINES: usize = 1_000;
 pub(crate) enum Convention {
     DeepParentPath,
     RestrictedVisibility,
-    PublicApiModule,
     /// A source file longer than `MAX_FILE_LINES`.
     LongFile {
         lines: usize,
@@ -50,7 +47,6 @@ impl Convention {
             Convention::DeepParentPath | Convention::RestrictedVisibility => {
                 "move an item needed elsewhere to where both callers can see it"
             }
-            Convention::PublicApiModule => "declare the module private and `pub use` its API items",
             Convention::LongFile { .. } => {
                 "split a long file along its domain and ownership boundaries, without exposing an owner's state to make the split compile"
             }
@@ -76,10 +72,6 @@ impl Convention {
                 "paths cannot skip over the immediate parent module with super::super".to_string()
             }
             Convention::RestrictedVisibility => "pub(in path) visibility is forbidden".to_string(),
-            Convention::PublicApiModule => {
-                "the coven crate keeps every module private and re-exports its API at its root"
-                    .to_string()
-            }
             Convention::LongFile { lines } => {
                 format!("holds {lines} lines; a source file holds at most {MAX_FILE_LINES}")
             }
@@ -102,7 +94,13 @@ impl Convention {
     }
 }
 
-pub(crate) fn find_convention_violations(files: &[RustFile]) -> Vec<Finding> {
+const PUBLIC_API_MODULE_REMEDY: &str = "declare the module private and `pub use` its API items";
+
+/// `api_crate`: the package whose root re-exports the API.
+pub(crate) fn find_convention_violations(
+    files: &[RustFile],
+    api_crate: Option<&str>,
+) -> Vec<Finding> {
     let mut violations = BTreeSet::new();
     for file in files {
         if file.lines > MAX_FILE_LINES {
@@ -111,8 +109,12 @@ pub(crate) fn find_convention_violations(files: &[RustFile]) -> Vec<Finding> {
                     .finding(&file.relative_path, MAX_FILE_LINES + 1),
             );
         }
+        let api_crate = api_crate.filter(|api_crate| {
+            file.package == *api_crate
+                && file.relative_path.starts_with(&format!("{}src/", file.package_root))
+        });
         let mut visitor =
-            ConventionVisitor { path: &file.relative_path, violations: &mut violations };
+            ConventionVisitor { path: &file.relative_path, api_crate, violations: &mut violations };
         visitor.visit_file(&file.syntax);
     }
     violations.extend(find_test_layout_violations(files));
@@ -121,6 +123,8 @@ pub(crate) fn find_convention_violations(files: &[RustFile]) -> Vec<Finding> {
 
 struct ConventionVisitor<'a> {
     path: &'a str,
+    /// The API crate's name, when this file is one of its sources.
+    api_crate: Option<&'a str>,
     violations: &'a mut BTreeSet<Finding>,
 }
 
@@ -198,10 +202,15 @@ impl<'ast> Visit<'ast> for ConventionVisitor<'_> {
     }
 
     fn visit_item_mod(&mut self, node: &'ast syn::ItemMod) {
-        if self.path.starts_with(API_CRATE_SOURCES)
-            && !matches!(node.vis, syn::Visibility::Inherited)
-        {
-            self.record(Convention::PublicApiModule, node.ident.span());
+        if let Some(api_crate) = self.api_crate {
+            if !matches!(node.vis, syn::Visibility::Inherited) {
+                self.violations.insert(Finding::new(
+                    self.path,
+                    node.ident.span().start().line,
+                    format!("the {api_crate} crate keeps every module private and re-exports its API at its root"),
+                    PUBLIC_API_MODULE_REMEDY,
+                ));
+            }
         }
         visit::visit_item_mod(self, node);
     }

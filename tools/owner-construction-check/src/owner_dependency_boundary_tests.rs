@@ -1,24 +1,32 @@
 use super::*;
-use crate::policy::{Capabilities, Capability};
 
-const PATH: &str = "crates/coven-database/src/work.rs";
-const POLICY: Policy = Policy {
-    capability_types: &["Clock", "DatabaseConnection", "Permit"],
-    internal_dependency_types: &["DatabaseConnection"],
-    non_owner_types: &["Transfer"],
-    task_types: &["Plan", "Permit"],
-    closed_session_types: &["Session"],
-    composition_roots: &[(PATH, "Owner", "open")],
-    capabilities: Capabilities {
-        sqlite: Capability { name: "SQLite", homes: &["crates/coven-database/src/"], gates: &[] },
-        ..Policy::EMPTY.capabilities
-    },
-    ..Policy::EMPTY
-};
+const PATH: &str = "crates/app-database/src/work.rs";
+fn policy() -> Policy {
+    Policy::fixture(&format!(
+        r#"
+        capability_types = ["Clock", "DatabaseConnection", "Permit"]
+        internal_dependency_types = ["DatabaseConnection"]
+        non_owner_types = ["Transfer"]
+        task_types = ["Plan", "Permit"]
+        closed_session_types = ["Session"]
+
+        [composition_roots]
+        "{PATH}" = ["Owner::open"]
+
+        [database]
+        capability = "SQLite"
+
+        [[capabilities]]
+        name = "SQLite"
+        homes = ["crates/app-database/src/"]
+        "#
+    ))
+}
 
 fn leaks(path: &str, source: &str) -> Vec<Finding> {
     let files = [RustFile::fixture(path, source)];
-    find_owner_dependency_leaks(&files, &POLICY, &OwnerGraph::collect(&files, &POLICY))
+    let policy = policy();
+    find_owner_dependency_leaks(&files, &policy, &OwnerGraph::collect(&files, &policy))
 }
 
 fn findings(path: &str, messages: &[&str]) -> Vec<Finding> {
@@ -71,7 +79,7 @@ fn public_fields_cannot_expose_owners_even_through_transfer_values() {
 #[test]
 fn crate_root_sessions_cannot_expose_internal_dependencies_to_every_module() {
     let source = "struct Session { connection: DatabaseConnection }";
-    let path = "crates/coven-database/src/lib.rs";
+    let path = "crates/app-database/src/lib.rs";
     assert_eq!(
         leaks(path, source),
         findings(
@@ -159,7 +167,7 @@ fn consuming_tasks_can_transfer_products_but_cannot_lend_or_expose_raw_handles()
 fn a_listed_root_can_return_the_graph_it_constructs() {
     let source = "struct Child { clock: Clock } struct Owner { child: Child } impl Owner { pub fn open(&self) -> Child { todo!() } }";
     assert!(leaks(PATH, source).is_empty());
-    let path = "crates/coven-database/src/elsewhere.rs";
+    let path = "crates/app-database/src/elsewhere.rs";
     assert_eq!(
         leaks(path, source),
         findings(path, &["Owner::open returns retained dependency Child"])

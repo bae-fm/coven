@@ -18,8 +18,7 @@ use crate::finding::Finding;
 use crate::owner_graph::OwnerGraph;
 use crate::policy::Policy;
 use crate::syntax::{
-    is_test_only, is_test_source, supplied_type_names, type_name, type_names,
-    visibility_crosses_owner, RustFile,
+    is_test_only, supplied_type_names, type_name, type_names, visibility_crosses_owner, RustFile,
 };
 
 struct OwnerMethod {
@@ -42,15 +41,9 @@ pub(crate) fn find_owner_dependency_leaks(
 ) -> Vec<Finding> {
     let methods = collect_owner_methods(files);
     let raw = RAW_SQLITE_HANDLES.iter().map(|(name, _)| name.to_string()).collect::<BTreeSet<_>>();
-    let capabilities =
-        policy.capability_types.iter().map(|name| name.to_string()).collect::<BTreeSet<_>>();
-    let services = graph.owners.union(&capabilities).cloned().collect::<BTreeSet<_>>();
-    let internal = policy
-        .internal_dependency_types
-        .iter()
-        .map(|name| name.to_string())
-        .chain(raw.iter().cloned())
-        .collect::<BTreeSet<_>>();
+    let capabilities = &policy.capability_types;
+    let services = graph.owners.union(capabilities).cloned().collect::<BTreeSet<_>>();
+    let internal = policy.internal_dependency_types.union(&raw).cloned().collect::<BTreeSet<_>>();
     let retained = methods
         .iter()
         .map(|method| (method.owner.clone(), graph.retained(&method.owner)))
@@ -72,7 +65,7 @@ pub(crate) fn find_owner_dependency_leaks(
                     && !transfers_task(method, output, policy);
                 let new_service = method.public
                     && graph.owners.contains(output)
-                    && !policy.task_types.contains(&output.as_str())
+                    && !policy.task_types.contains(output)
                     && !capabilities.contains(output);
                 let leaks_directly = raw.contains(output)
                     || (internal.contains(output) && held.contains(output))
@@ -132,7 +125,7 @@ const REMEDY: &str = "an owner never hands out what it holds; callers ask it to 
 /// task. Borrowed getters and wrappers exposing raw dependencies
 /// still answer to the ordinary leak rules.
 fn transfers_task(method: &OwnerMethod, output: &str, policy: &Policy) -> bool {
-    method.consumes_owner && !method.borrows_output && policy.task_types.contains(&output)
+    method.consumes_owner && !method.borrows_output && policy.task_types.contains(output)
 }
 
 fn collect_retained_service_owner_fields(
@@ -214,13 +207,11 @@ fn collect_database_callables(
     leaks: &mut BTreeSet<Finding>,
 ) {
     for file in files {
-        if is_test_source(&file.relative_path)
+        if file.is_test_source()
             || !policy
-                .capabilities
-                .sqlite
-                .homes
+                .database_homes()
                 .iter()
-                .any(|home| file.relative_path.starts_with(home))
+                .any(|home| file.relative_path.starts_with(home.as_str()))
         {
             continue;
         }
@@ -353,7 +344,7 @@ fn collect_crate_root_session_fields(
     leaks: &mut BTreeSet<Finding>,
 ) {
     for file in files {
-        if is_test_source(&file.relative_path)
+        if file.is_test_source()
             || !(file.relative_path.ends_with("/src/lib.rs")
                 || file.relative_path.ends_with("/src/main.rs"))
         {
@@ -364,8 +355,7 @@ fn collect_crate_root_session_fields(
                 continue;
             };
             let session = item.ident.to_string();
-            if is_test_only(&item.attrs) || !policy.closed_session_types.contains(&session.as_str())
-            {
+            if is_test_only(&item.attrs) || !policy.closed_session_types.contains(&session) {
                 continue;
             }
             for field in &item.fields {
@@ -381,7 +371,7 @@ fn collect_crate_root_session_fields(
 fn collect_owner_methods(files: &[RustFile]) -> Vec<OwnerMethod> {
     let mut methods = Vec::new();
     for file in files {
-        if is_test_source(&file.relative_path) {
+        if file.is_test_source() {
             continue;
         }
         collect_owner_methods_in_items(&file.relative_path, &file.syntax.items, &mut methods);

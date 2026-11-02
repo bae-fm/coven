@@ -1,5 +1,4 @@
 use super::*;
-use crate::owner_policy::POLICY;
 
 fn assert_findings(
     actual: &[Finding],
@@ -15,7 +14,10 @@ fn assert_findings(
 }
 
 fn violations(path: &str, source: &str) -> Vec<Finding> {
-    find_capability_boundary_violations(&[RustFile::fixture(path, source)], &POLICY)
+    find_capability_boundary_violations(
+        &[RustFile::fixture(path, source)],
+        &Policy::gated_fixture(),
+    )
 }
 
 fn kind(finding: &Finding) -> &str {
@@ -36,7 +38,7 @@ fn kinds(path: &str, source: &str) -> BTreeSet<String> {
 fn network_crates_are_rejected_outside_the_providers() {
     assert_eq!(
         kinds(
-            "crates/coven-sync/src/leak.rs",
+            "crates/app-sync/src/leak.rs",
             r#"
             use reqwest::Client;
             fn serve() { let router = axum::Router::new(); }
@@ -53,20 +55,20 @@ fn network_crates_are_rejected_outside_the_providers() {
 #[test]
 fn network_crates_are_allowed_in_the_providers() {
     let files = [
-        RustFile::fixture("crates/coven-storage/src/providers/dropbox.rs", "use reqwest::Client;"),
+        RustFile::fixture("crates/app-storage/src/providers/dropbox.rs", "use reqwest::Client;"),
         RustFile::fixture(
-            "crates/coven-storage/src/providers/oauth.rs",
+            "crates/app-storage/src/providers/oauth.rs",
             "use axum::Router; use open;",
         ),
-        RustFile::fixture("crates/coven-storage/src/providers/s3.rs", "use aws_sdk_s3::Client;"),
+        RustFile::fixture("crates/app-storage/src/providers/s3.rs", "use aws_sdk_s3::Client;"),
     ];
-    assert!(find_capability_boundary_violations(&files, &POLICY).is_empty());
+    assert!(find_capability_boundary_violations(&files, &Policy::gated_fixture()).is_empty());
 }
 
 #[test]
 fn network_crates_are_rejected_in_storage_outside_the_providers() {
     assert_eq!(
-        kinds("crates/coven-storage/src/upload.rs", "use reqwest::Client;"),
+        kinds("crates/app-storage/src/upload.rs", "use reqwest::Client;"),
         BTreeSet::from(["HTTP client (reqwest)"].map(str::to_string)),
     );
 }
@@ -75,64 +77,64 @@ fn network_crates_are_rejected_in_storage_outside_the_providers() {
 fn cfg_test_items_and_test_sources_are_exempt() {
     let files = [
         RustFile::fixture(
-            "crates/coven-sync/src/workflow.rs",
+            "crates/app-sync/src/workflow.rs",
             r#"
             #[cfg(test)]
             fn helper() { let _ = reqwest::Client::new(); }
             "#,
         ),
-        RustFile::fixture("crates/coven-sync/src/workflow_tests.rs", "use reqwest::Client;"),
+        RustFile::fixture("crates/app-sync/src/workflow_tests.rs", "use reqwest::Client;"),
     ];
-    assert!(find_capability_boundary_violations(&files, &POLICY).is_empty());
+    assert!(find_capability_boundary_violations(&files, &Policy::gated_fixture()).is_empty());
 }
 
 #[test]
-fn signing_primitives_are_rejected_outside_coven_crypto() {
+fn signing_primitives_are_rejected_outside_app_crypto() {
     let violations = violations(
-        "crates/coven-sync/src/leak.rs",
+        "crates/app-sync/src/leak.rs",
         r#"
         use ed25519_dalek::SigningKey;
         fn forge() { let _ = ed25519_dalek::Signature::from_bytes(&[0; 64]); }
         "#,
     );
-    assert_findings(&violations, "crates/coven-sync/src/leak.rs", &[2, 3],
-        "signing keys (ed25519-dalek) (cryptography) is used directly only in crates/coven-crypto/src/",
+    assert_findings(&violations, "crates/app-sync/src/leak.rs", &[2, 3],
+        "signing keys (ed25519-dalek) (cryptography) is used directly only in crates/app-crypto/src/",
         "reach a capability through the owner that holds it, given to you when you are built");
 }
 
 #[test]
-fn coven_crypto_owns_every_primitive() {
+fn app_crypto_owns_every_primitive() {
     let files = [
-        RustFile::fixture("crates/coven-crypto/src/derive.rs", "use hkdf::Hkdf; use sha2::Sha256;"),
-        RustFile::fixture("crates/coven-crypto/src/naming.rs", "use hmac::Mac;"),
+        RustFile::fixture("crates/app-crypto/src/derive.rs", "use hkdf::Hkdf; use sha2::Sha256;"),
+        RustFile::fixture("crates/app-crypto/src/naming.rs", "use hmac::Mac;"),
         RustFile::fixture(
-            "crates/coven-crypto/src/sealing.rs",
+            "crates/app-crypto/src/sealing.rs",
             "use crypto_box::SalsaBox; use chacha20poly1305::XChaCha20Poly1305; use rand::rngs::OsRng;",
         ),
     ];
-    assert!(find_capability_boundary_violations(&files, &POLICY).is_empty());
+    assert!(find_capability_boundary_violations(&files, &Policy::gated_fixture()).is_empty());
 }
 
 #[test]
-fn the_keychain_is_rejected_outside_custody_even_inside_coven_crypto() {
-    let violations = violations("crates/coven-crypto/src/keys.rs", "use keyring_core::Entry;");
+fn the_keychain_is_rejected_outside_custody_even_inside_app_crypto() {
+    let violations = violations("crates/app-crypto/src/keys.rs", "use keyring_core::Entry;");
     assert_findings(
         &violations,
-        "crates/coven-crypto/src/keys.rs",
+        "crates/app-crypto/src/keys.rs",
         &[1],
-        "platform keychain (OS keychain) is used directly only in crates/coven-crypto/src/custody/",
+        "platform keychain (OS keychain) is used directly only in crates/app-crypto/src/custody/",
         "reach a capability through the owner that holds it, given to you when you are built",
     );
     assert!(
-        kinds("crates/coven-crypto/src/custody/keychain.rs", "use keyring_core::Entry;").is_empty()
+        kinds("crates/app-crypto/src/custody/keychain.rs", "use keyring_core::Entry;").is_empty()
     );
 }
 
 #[test]
-fn sqlite_beneath_rusqlite_is_rejected_outside_coven_database() {
+fn sqlite_beneath_rusqlite_is_rejected_outside_app_database() {
     assert_eq!(
         kinds(
-            "crates/coven-sync/src/leak.rs",
+            "crates/app-sync/src/leak.rs",
             "fn open() { unsafe { libsqlite3_sys::sqlite3_initialize(); } }",
         ),
         BTreeSet::from(["SQLite library (rusqlite / libsqlite3-sys)"].map(str::to_string)),
@@ -142,7 +144,7 @@ fn sqlite_beneath_rusqlite_is_rejected_outside_coven_database() {
 #[test]
 fn runtime_construction_is_rejected_outside_composition_roots() {
     let violations = violations(
-        "crates/coven-sync/src/transfer.rs",
+        "crates/app-sync/src/transfer.rs",
         r#"
         fn build() {
             let runtime = tokio::runtime::Builder::new_current_thread().build().unwrap();
@@ -155,7 +157,7 @@ fn runtime_construction_is_rejected_outside_composition_roots() {
     );
     assert_findings(
         &violations,
-        "crates/coven-sync/src/transfer.rs",
+        "crates/app-sync/src/transfer.rs",
         &[3, 7],
         "runtime construction outside a composition root",
         "start long-lived work only at a listed root, which must retain and stop it",
@@ -164,10 +166,12 @@ fn runtime_construction_is_rejected_outside_composition_roots() {
 
 #[test]
 fn a_lifetime_authority_starts_its_work() {
-    const AUTHORITY: Policy = Policy {
-        composition_roots: &[("crates/coven-sync/src/sync_loop.rs", "<free>", "start")],
-        ..POLICY
-    };
+    let mut authority = Policy::gated_fixture();
+    authority.composition_roots.push(crate::policy::CompositionRoot {
+        path: "crates/app-sync/src/sync_loop.rs".into(),
+        owner: "<free>".into(),
+        method: "start".into(),
+    });
     let source = r#"
         fn start(handle: tokio::runtime::Handle) {
             let _ = tokio::runtime::Builder::new_multi_thread().build();
@@ -177,12 +181,12 @@ fn a_lifetime_authority_starts_its_work() {
     "#;
     let file = |path| [RustFile::fixture(path, source)];
     assert!(find_capability_boundary_violations(
-        &file("crates/coven-sync/src/sync_loop.rs"),
-        &AUTHORITY
+        &file("crates/app-sync/src/sync_loop.rs"),
+        &authority
     )
     .is_empty());
     let elsewhere =
-        find_capability_boundary_violations(&file("crates/coven-sync/src/upload.rs"), &AUTHORITY)
+        find_capability_boundary_violations(&file("crates/app-sync/src/upload.rs"), &authority)
             .into_iter()
             .map(|violation| kind(&violation).to_string())
             .collect::<BTreeSet<_>>();
@@ -195,7 +199,7 @@ fn a_lifetime_authority_starts_its_work() {
 #[test]
 fn spawning_work_is_rejected_outside_composition_roots() {
     let violations = violations(
-        "crates/coven-sync/src/upload.rs",
+        "crates/app-sync/src/upload.rs",
         r#"
         async fn upload(handle: tokio::runtime::Handle) {
             tokio::spawn(async {});
@@ -206,7 +210,7 @@ fn spawning_work_is_rejected_outside_composition_roots() {
     );
     assert_findings(
         &violations,
-        "crates/coven-sync/src/upload.rs",
+        "crates/app-sync/src/upload.rs",
         &[3, 4, 5],
         "thread or task spawn outside a composition root",
         "start long-lived work only at a listed root, which must retain and stop it",
@@ -216,7 +220,7 @@ fn spawning_work_is_rejected_outside_composition_roots() {
 #[test]
 fn runtime_handles_are_injectable_but_not_ambiently_acquired() {
     assert!(kinds(
-        "crates/coven-sync/src/staging.rs",
+        "crates/app-sync/src/staging.rs",
         r#"
         struct Staging { runtime: tokio::runtime::Handle }
         impl Staging {
@@ -227,12 +231,12 @@ fn runtime_handles_are_injectable_but_not_ambiently_acquired() {
     .is_empty());
 
     let violations = violations(
-        "crates/coven-sync/src/workflow.rs",
+        "crates/app-sync/src/workflow.rs",
         "fn grab() { let _ = tokio::runtime::Handle::current(); }",
     );
     assert_findings(
         &violations,
-        "crates/coven-sync/src/workflow.rs",
+        "crates/app-sync/src/workflow.rs",
         &[1],
         "ambient runtime acquisition outside a composition root",
         "start long-lived work only at a listed root, which must retain and stop it",
@@ -243,7 +247,7 @@ fn runtime_handles_are_injectable_but_not_ambiently_acquired() {
 fn time_ids_and_randomness_are_rejected_outside_their_homes() {
     assert_eq!(
         kinds(
-            "crates/coven-merge/src/leak.rs",
+            "crates/app-merge/src/leak.rs",
             r#"
             fn stamp() -> std::time::SystemTime { std::time::SystemTime::now() }
             fn when() -> chrono::DateTime<chrono::Utc> { chrono::Utc::now() }
@@ -259,15 +263,15 @@ fn time_ids_and_randomness_are_rejected_outside_their_homes() {
 fn the_clock_and_the_id_source_own_their_reads() {
     let files = [
         RustFile::fixture(
-            "crates/coven-foundation/src/clock.rs",
+            "crates/app-foundation/src/clock.rs",
             "fn now() -> chrono::DateTime<chrono::Utc> { chrono::Utc::now() }",
         ),
         RustFile::fixture(
-            "crates/coven-foundation/src/id_source.rs",
+            "crates/app-foundation/src/id_source.rs",
             "fn new_id() -> String { uuid::Uuid::new_v4().to_string() }",
         ),
     ];
-    assert!(find_capability_boundary_violations(&files, &POLICY).is_empty());
+    assert!(find_capability_boundary_violations(&files, &Policy::gated_fixture()).is_empty());
 }
 
 #[test]
@@ -284,15 +288,15 @@ fn timers_belong_to_the_injected_clock() {
         "fn wait() { std::thread::sleep_until(deadline); }",
     ] {
         assert_eq!(
-            kinds("crates/coven-sync/src/operations.rs", source),
+            kinds("crates/app-sync/src/operations.rs", source),
             BTreeSet::from(["system clock"].map(str::to_string)),
             "{source}",
         );
-        assert!(kinds("crates/coven-foundation/src/clock.rs", source).is_empty());
-        assert!(kinds("crates/coven-sync/src/operations_tests.rs", source).is_empty());
+        assert!(kinds("crates/app-foundation/src/clock.rs", source).is_empty());
+        assert!(kinds("crates/app-sync/src/operations_tests.rs", source).is_empty());
     }
     assert!(kinds(
-        "crates/coven-sync/src/operations.rs",
+        "crates/app-sync/src/operations.rs",
         "async fn wait(clock: ClockRef) { clock.sleep(std::time::Duration::from_secs(1)).await; }",
     )
     .is_empty());
@@ -302,7 +306,7 @@ fn timers_belong_to_the_injected_clock() {
 fn files_are_rejected_outside_foundations_file_boundary() {
     assert_eq!(
         kinds(
-            "crates/coven-sync/src/leak.rs",
+            "crates/app-sync/src/leak.rs",
             r#"
             use std::fs;
             fn stage() { let _ = tempfile::NamedTempFile::new(); }
@@ -312,7 +316,7 @@ fn files_are_rejected_outside_foundations_file_boundary() {
         BTreeSet::from(["filesystem"].map(str::to_string)),
     );
     assert!(
-        kinds("crates/coven-foundation/src/files/atomic_file.rs", "use std::fs::File;").is_empty()
+        kinds("crates/app-foundation/src/files/atomic_file.rs", "use std::fs::File;").is_empty()
     );
 }
 
@@ -323,17 +327,17 @@ fn platform_file_operations_obey_the_same_filesystem_boundary() {
         "use windows_sys::Win32::Storage::FileSystem::{MoveFileExW, SetFileAttributesW};",
     ] {
         assert_eq!(
-            kinds("crates/coven-sync/src/leak.rs", source),
+            kinds("crates/app-sync/src/leak.rs", source),
             BTreeSet::from(["filesystem"].map(str::to_string)),
         );
-        assert!(kinds("crates/coven-foundation/src/files/atomic_file.rs", source).is_empty());
+        assert!(kinds("crates/app-foundation/src/files/atomic_file.rs", source).is_empty());
     }
 }
 
 #[test]
 fn a_local_item_sharing_a_gated_crate_name_is_not_a_crate_reference() {
     assert!(kinds(
-        "crates/coven-crypto/src/sealing.rs",
+        "crates/app-crypto/src/sealing.rs",
         r#"
         fn open(key: &[u8], nonce: &[u8], ciphertext: &[u8]) -> Vec<u8> { Vec::new() }
         fn unlock() { let _ = open(&[], &[], &[]); }
@@ -342,7 +346,7 @@ fn a_local_item_sharing_a_gated_crate_name_is_not_a_crate_reference() {
     .is_empty());
 
     assert_eq!(
-        kinds("crates/coven-crypto/src/sealing.rs", "use open;"),
+        kinds("crates/app-crypto/src/sealing.rs", "use open;"),
         BTreeSet::from(["browser opener (open)"].map(str::to_string))
     );
 }
@@ -350,7 +354,7 @@ fn a_local_item_sharing_a_gated_crate_name_is_not_a_crate_reference() {
 #[test]
 fn id_validation_is_not_gated_generation() {
     assert!(kinds(
-        "crates/coven-sync/src/session.rs",
+        "crates/app-sync/src/session.rs",
         "fn validate(value: &str) -> bool { uuid::Uuid::parse_str(value).is_ok() }",
     )
     .is_empty());
@@ -359,7 +363,7 @@ fn id_validation_is_not_gated_generation() {
 #[test]
 fn doc_comments_do_not_trip_capability_boundaries() {
     assert!(kinds(
-        "crates/coven-sync/src/workflow.rs",
+        "crates/app-sync/src/workflow.rs",
         r#"
         /// Uses reqwest internally via the storage owner; see tokio::runtime docs.
         fn documented() {}
@@ -372,17 +376,17 @@ fn doc_comments_do_not_trip_capability_boundaries() {
 fn a_capability_used_inside_a_macro_call_is_a_direct_use() {
     let source = r#"fn label() -> String { format!("{}", uuid::Uuid::new_v4()) }"#;
     assert_eq!(
-        kinds("crates/coven-sync/src/label.rs", source),
+        kinds("crates/app-sync/src/label.rs", source),
         BTreeSet::from(["id generation (uuid)"].map(str::to_string))
     );
-    assert!(kinds("crates/coven-foundation/src/id_source.rs", source).is_empty());
+    assert!(kinds("crates/app-foundation/src/id_source.rs", source).is_empty());
 }
 
 #[test]
 fn nested_macro_calls_and_method_calls_inside_them_are_read() {
     assert_eq!(
         kinds(
-            "crates/coven-sync/src/upload.rs",
+            "crates/app-sync/src/upload.rs",
             r#"
             fn start(handle: tokio::runtime::Handle) {
                 assert!(vec![handle.spawn(async {})].len() == 1);
@@ -398,7 +402,7 @@ fn nested_macro_calls_and_method_calls_inside_them_are_read() {
 fn a_macro_rules_body_is_read_as_tokens() {
     assert_eq!(
         kinds(
-            "crates/coven-sync/src/macros.rs",
+            "crates/app-sync/src/macros.rs",
             r#"
             macro_rules! stamp {
                 ($handle:expr) => {
@@ -415,15 +419,15 @@ fn a_macro_rules_body_is_read_as_tokens() {
 fn rusqlite_is_used_only_by_the_database_crate() {
     let source = "use rusqlite::Connection; fn open() { let _ = Connection::open_in_memory(); }";
     assert_eq!(
-        kinds("crates/coven-storage/src/leak.rs", source),
+        kinds("crates/app-storage/src/leak.rs", source),
         BTreeSet::from(["SQLite library (rusqlite / libsqlite3-sys)"].map(str::to_string))
     );
-    assert!(kinds("crates/coven-database/src/sqlite.rs", source).is_empty());
+    assert!(kinds("crates/app-database/src/sqlite.rs", source).is_empty());
 }
 
 #[test]
 fn sql_value_conversions_are_allowed_without_allowing_database_access() {
-    let path = "crates/coven-foundation/src/uuid_text.rs";
+    let path = "crates/app-foundation/src/uuid_text.rs";
     assert!(kinds(
         path,
         r#"
@@ -446,7 +450,7 @@ fn sql_value_conversions_are_allowed_without_allowing_database_access() {
 #[test]
 fn an_unlisted_function_in_an_authoritys_file_cannot_spawn() {
     assert!(!violations(
-        "crates/coven-sync/src/sync_loop.rs",
+        "crates/app-sync/src/sync_loop.rs",
         "fn unrelated() { tokio::spawn(async {}); }"
     )
     .is_empty());

@@ -16,8 +16,8 @@ use syn::visit::{self, Visit};
 
 use crate::finding::Finding;
 use crate::macros::{parse_macro_body, token_paths};
-use crate::policy::{Capability, Gate, Policy};
-use crate::syntax::{flatten_use_tree, is_test_only, is_test_source, type_name, RustFile};
+use crate::policy::{describe_homes, Capability, Gate, Policy};
+use crate::syntax::{flatten_use_tree, is_test_only, type_name, RustFile};
 
 pub(crate) fn find_capability_boundary_violations(
     files: &[RustFile],
@@ -25,13 +25,12 @@ pub(crate) fn find_capability_boundary_violations(
 ) -> Vec<Finding> {
     let mut violations = BTreeSet::new();
     for file in files {
-        if is_test_source(&file.relative_path) {
+        if file.is_test_source() {
             continue;
         }
         let gated = policy
             .capabilities
-            .all()
-            .into_iter()
+            .iter()
             .filter(|capability| {
                 !capability.homes.iter().any(|home| file.relative_path.starts_with(home))
             })
@@ -68,11 +67,7 @@ impl<'p> CapabilityBoundaryVisitor<'_, 'p> {
                 "{} ({}) is used directly only in {}",
                 gate.kind,
                 capability.name,
-                if capability.homes.is_empty() {
-                    "no file yet".to_string()
-                } else {
-                    capability.homes.join(", ")
-                }
+                describe_homes(&capability.homes)
             ),
             "reach a capability through the owner that holds it, given to you when you are built",
         ));
@@ -89,14 +84,14 @@ impl<'p> CapabilityBoundaryVisitor<'_, 'p> {
 
     fn check_method(&mut self, name: &str, span: Span) {
         if !self.rooted {
-            for gate in self.policy.task_starts {
-                if gate.method_patterns.contains(&name) {
+            for gate in &self.policy.task_starts {
+                if gate.method_patterns.iter().any(|method| method == name) {
                     self.record_task_start(gate, span);
                 }
             }
         }
         for &(capability, gate) in self.gated {
-            if gate.method_patterns.contains(&name) {
+            if gate.method_patterns.iter().any(|method| method == name) {
                 self.record(capability, gate, span);
             }
         }
@@ -108,7 +103,7 @@ impl<'p> CapabilityBoundaryVisitor<'_, 'p> {
     /// item and must not match a gated crate of the same name.
     fn check_segments(&mut self, segments: &[String], is_import: bool, span: Span) {
         if !self.rooted {
-            for gate in self.policy.task_starts {
+            for gate in &self.policy.task_starts {
                 if gate_matches(gate, segments, is_import) {
                     self.record_task_start(gate, span);
                 }

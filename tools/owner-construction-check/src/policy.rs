@@ -1,180 +1,392 @@
-//! The shape of the policy file (`owner_policy.rs`, Appendix F.3): every name the
-//! rules read about this workspace — the crate order, where each capability
-//! lives, the construction and task-start roots, and the types that
-//! are capabilities, owners, tasks or plain values.
+//! The policy file (Appendix F.3): what the checked workspace says about
+//! itself. The workspace keeps it at its root as `owner-construction-check.toml`:
+//! the rules it runs, its crates in dependency order, where each capability
+//! lives, the construction and task-start roots, and the types that are
+//! capabilities, owners, tasks or plain values. The checker's source names
+//! none of them; each workspace that runs it supplies its own.
 //!
-//! Guard tests require listed files, types and callables to exist.
+//! `policy_check.rs` holds every row against the workspace before any rule
+//! runs, so a row naming something that moved fails instead of covering nothing.
 
-/// `(source file, type, method)`: a callable allowed to construct owners or
-/// start tasks (Appendix F.3), including owner constructors and feature-gated fixtures.
-/// `<free>` in the type position names a free function such as restore bootstrap.
-pub(crate) type CompositionRoot = (&'static str, &'static str, &'static str);
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::{Path, PathBuf};
 
-/// `(source file, owner, receiver method, capability)`: an owner may derive
-/// this capability from the one it was given, such as a directory naming one
-/// of its files. This grants no authority to construct unrelated capabilities.
-pub(crate) type CapabilityFactory = (&'static str, &'static str, &'static str, &'static str);
+use serde::de::Error as _;
+use serde::{Deserialize, Deserializer};
 
-/// `(schema module root, table macros)`: where coven's own tables are declared.
-/// The schema module is the root file and every module beneath it, wherever
-/// `#[path]` puts its file. Each `$visit!(table, …)` inside one of the named
-/// top-level `macro_rules!` in that module declares a table whose SQL only the
-/// database crate writes.
-pub(crate) type DatabaseSchema = (&'static str, &'static [&'static str]);
+/// The policy file's name, at the root of the workspace it describes.
+pub(crate) const FILE_NAME: &str = "owner-construction-check.toml";
 
+/// The groups of rules a policy selects. A workspace runs exactly the ones it
+/// lists, so it can adopt them one at a time.
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum Rule {
+    /// Appendix F.1: the crate order, and dependency versions set once in the
+    /// workspace (`crate_dependencies.rs`).
+    CrateDependencies,
+    /// Appendix F.2: each capability used directly only in its homes, and
+    /// task starts only at composition roots (`capability_boundaries.rs`).
+    CapabilityBoundaries,
+    /// Appendix F.2: raw SQLite handles and SQL on the database's internal
+    /// tables stay in the database's homes (`database_boundary.rs`).
+    DatabaseBoundary,
+    /// Appendix F.3: an owner never hands out what it holds
+    /// (`owner_dependency_boundary.rs`).
+    OwnerDependencies,
+    /// Appendix F.2: a method never takes a construction-only capability
+    /// (`retained_capability_parameters.rs`).
+    RetainedCapabilityParameters,
+    /// Appendix F.3: no struct built only to be destructured
+    /// (`component_bundles.rs`).
+    ComponentBundles,
+    /// Appendix F.3: owners and capabilities are constructed only at
+    /// composition roots (`capability_construction.rs`).
+    CapabilityConstruction,
+    /// Appendix F.5: visibility, file length and test layout (`conventions.rs`).
+    Conventions,
+}
+
+impl Rule {
+    /// Whether the rule infers owners and matches types by name, so it needs
+    /// every name it reasons about declared once (`unique_type_names.rs`).
+    pub(crate) fn reads_owner_graph(self) -> bool {
+        matches!(
+            self,
+            Rule::OwnerDependencies
+                | Rule::RetainedCapabilityParameters
+                | Rule::CapabilityConstruction
+        )
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct Policy {
-    /// Appendix F.1: the workspace's crates in dependency order. A crate depends only
-    /// on crates earlier in this list. Rows are added as crates land, in the
-    /// spec's order.
-    pub(crate) crate_order: &'static [&'static str],
+    /// The rule groups this workspace runs.
+    #[serde(default)]
+    pub(crate) rules: BTreeSet<Rule>,
+    /// Workspace members that answer only to the conventions, such as this
+    /// checker. Every other member is a crate and answers to every rule.
+    #[serde(default)]
+    pub(crate) tools: BTreeSet<String>,
+    /// The crate whose root re-exports the API and keeps every module private
+    /// (Appendix F.5).
+    #[serde(default)]
+    pub(crate) api_crate: Option<String>,
+    /// Appendix F.1: the workspace's crates in dependency order. A crate depends
+    /// only on crates earlier in this list.
+    #[serde(default)]
+    pub(crate) crate_order: Vec<String>,
     /// Appendix F.1: pairs of crates in `crate_order` that never depend on each
     /// other in either direction.
-    pub(crate) separated_crates: &'static [(&'static str, &'static str)],
-    /// Appendix F.2: each capability, the one place that uses it directly, and what
-    /// using it directly looks like in source.
-    pub(crate) capabilities: Capabilities,
-    pub(crate) database_schema: Option<DatabaseSchema>,
-    pub(crate) composition_roots: &'static [CompositionRoot],
-    /// Runtime acquisition and task starts require an entry in the same list.
-    pub(crate) task_starts: &'static [Gate],
-    pub(crate) capability_factories: &'static [CapabilityFactory],
+    #[serde(default)]
+    pub(crate) separated_crates: Vec<(String, String)>,
+    /// Appendix F.2: each capability, the one place that uses it directly, and
+    /// what using it directly looks like in source.
+    #[serde(default)]
+    pub(crate) capabilities: Vec<Capability>,
+    #[serde(default)]
+    pub(crate) database: Option<Database>,
+    /// Every callable allowed to construct owners or start tasks (Appendix F.3),
+    /// including owner constructors and feature-gated fixtures. The file lists
+    /// them by source file: `Type::method`, or a free function's name.
+    #[serde(default, deserialize_with = "composition_roots")]
+    pub(crate) composition_roots: Vec<CompositionRoot>,
+    /// Runtime acquisition and task starts require an entry in
+    /// `composition_roots`.
+    #[serde(default)]
+    pub(crate) task_starts: Vec<Gate>,
+    /// Receiver methods through which an owner may derive a capability from the
+    /// one it was given, such as a directory naming one of its files. The file
+    /// lists them by source file: `"Type::method" = "Product"`.
+    #[serde(default, deserialize_with = "capability_factories")]
+    pub(crate) capability_factories: Vec<CapabilityFactory>,
     /// Types that hold a capability. A type holding one of these, or holding
     /// an owner, is an owner.
-    pub(crate) capability_types: &'static [&'static str],
+    #[serde(default)]
+    pub(crate) capability_types: BTreeSet<String>,
     /// Capability interfaces. Every workspace implementation is construction-only,
     /// including generic implementations and feature-gated test support.
-    pub(crate) capability_traits: &'static [&'static str],
-    /// Raw capabilities fixed when the owner graph is built, such as the store
-    /// directory, which have no capability trait. These and the implementations
-    /// of `capability_traits` may be acquired only at composition roots, and
-    /// accepted as parameters only by constructors and composition roots.
-    pub(crate) construction_only_capability_types: &'static [&'static str],
+    #[serde(default)]
+    pub(crate) capability_traits: BTreeSet<String>,
+    /// Raw capabilities fixed when the owner graph is built, which have no
+    /// capability trait. These and the implementations of `capability_traits`
+    /// may be acquired only at composition roots, and accepted as parameters
+    /// only by constructors and composition roots.
+    #[serde(default)]
+    pub(crate) construction_only_capability_types: BTreeSet<String>,
     /// Values, configuration and proofs that name a capability in a field but
     /// do not own its lifetime.
-    pub(crate) non_owner_types: &'static [&'static str],
+    #[serde(default)]
+    pub(crate) non_owner_types: BTreeSet<String>,
     /// API namespaces that borrow an owner without becoming one.
-    pub(crate) borrowed_facade_types: &'static [&'static str],
-    /// Tasks (Appendix F.3): values that live for one piece of work and are then
-    /// dropped, such as one sync pass.
-    pub(crate) task_types: &'static [&'static str],
+    #[serde(default)]
+    pub(crate) borrowed_facade_types: BTreeSet<String>,
+    /// Tasks (Appendix F.3): values that live for one piece of work and are
+    /// then dropped.
+    #[serde(default)]
+    pub(crate) task_types: BTreeSet<String>,
     /// Dependencies an owner keeps to itself; returning one it retains leaks
     /// it. The raw SQLite handles are always included.
-    pub(crate) internal_dependency_types: &'static [&'static str],
+    #[serde(default)]
+    pub(crate) internal_dependency_types: BTreeSet<String>,
     /// Sessions that borrow internal dependencies for closed work. One
     /// declared at a crate root would expose those dependencies to every
     /// module of the crate.
-    pub(crate) closed_session_types: &'static [&'static str],
+    #[serde(default)]
+    pub(crate) closed_session_types: BTreeSet<String>,
 }
 
-/// Appendix F.2's table: each capability and the one place that uses it directly.
-pub(crate) struct Capabilities {
-    pub(crate) network: Capability,
-    pub(crate) cryptography: Capability,
-    pub(crate) sqlite: Capability,
-    pub(crate) keychain: Capability,
-    pub(crate) time: Capability,
-    pub(crate) ids: Capability,
-    pub(crate) files: Capability,
+/// `(source file, type, method)`: a callable allowed to construct owners or
+/// start tasks. A free function has `<free>` in the type position.
+#[derive(Debug, Clone, Eq, PartialEq, Ord, PartialOrd)]
+pub(crate) struct CompositionRoot {
+    pub(crate) path: String,
+    pub(crate) owner: String,
+    pub(crate) method: String,
 }
 
-impl Capabilities {
-    pub(crate) fn all(&self) -> [&Capability; 7] {
-        [
-            &self.network,
-            &self.cryptography,
-            &self.sqlite,
-            &self.keychain,
-            &self.time,
-            &self.ids,
-            &self.files,
-        ]
-    }
+/// `(source file, owner, receiver method, capability)`: an owner may derive
+/// this capability from the one it was given. This grants no authority to
+/// construct unrelated capabilities.
+#[derive(Debug, Clone, Eq, PartialEq, Ord, PartialOrd)]
+pub(crate) struct CapabilityFactory {
+    pub(crate) path: String,
+    pub(crate) owner: String,
+    pub(crate) method: String,
+    pub(crate) product: String,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct Capability {
-    pub(crate) name: &'static str,
+    pub(crate) name: String,
     /// Path prefixes, relative to the workspace root, where the capability is
     /// used directly. A prefix ending in `/` names a directory.
-    pub(crate) homes: &'static [&'static str],
-    pub(crate) gates: &'static [Gate],
+    #[serde(default)]
+    pub(crate) homes: Vec<String>,
+    #[serde(default)]
+    pub(crate) gates: Vec<Gate>,
 }
 
 /// One way of using a capability directly: naming any of `crates`, writing a
-/// path containing any of `path_patterns` as adjacent segments, or calling a
-/// method named in `method_patterns`.
+/// path containing any of `paths` as adjacent segments, or calling a method
+/// named in `methods`.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct Gate {
-    pub(crate) kind: &'static str,
-    pub(crate) crates: &'static [&'static str],
-    pub(crate) path_patterns: &'static [&'static [&'static str]],
+    pub(crate) kind: String,
+    #[serde(default)]
+    pub(crate) crates: Vec<String>,
+    /// Written as Rust paths, `std::fs`.
+    #[serde(default, rename = "paths", deserialize_with = "rust_paths")]
+    pub(crate) path_patterns: Vec<Vec<String>>,
     /// Method names whose receiver-call form (`x.name(...)`) is gated; `syn`
     /// does not surface a method call as a path.
-    pub(crate) method_patterns: &'static [&'static str],
+    #[serde(default, rename = "methods")]
+    pub(crate) method_patterns: Vec<String>,
 }
 
-#[cfg(test)]
-impl Capability {
-    pub(crate) const NONE: Capability = Capability { name: "none", homes: &[], gates: &[] };
+/// The SQLite capability and the database's own tables: outside the named
+/// capability's homes, nothing names a raw rusqlite handle or writes SQL on
+/// one of the schema's tables.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct Database {
+    /// The capability, in `capabilities`, whose homes hold the raw handles.
+    pub(crate) capability: String,
+    /// The schema module's root file. The module is that file and every
+    /// module beneath it, wherever `#[path]` puts its file. Each
+    /// `$visit!(table, …)` inside one of `table_macros`, top-level
+    /// `macro_rules!` in that module, declares a table whose SQL only the
+    /// database's homes write.
+    #[serde(default)]
+    pub(crate) schema: Option<String>,
+    #[serde(default)]
+    pub(crate) table_macros: Vec<String>,
+    /// A crate whose `rusqlite` re-export other crates may import: that path
+    /// names the crate, not SQLite.
+    #[serde(default)]
+    pub(crate) rusqlite_reexport: Option<String>,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum PolicyError {
+    #[error("read {}: {source}", path.display())]
+    Read {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("parse {}: {source}", path.display())]
+    Parse {
+        path: PathBuf,
+        #[source]
+        source: toml::de::Error,
+    },
 }
 
 impl Policy {
+    /// The policy at the root of the workspace at `root`.
+    pub(crate) fn read(root: &Path) -> Result<Policy, PolicyError> {
+        let path = root.join(FILE_NAME);
+        let text = std::fs::read_to_string(&path)
+            .map_err(|source| PolicyError::Read { path: path.clone(), source })?;
+        toml::from_str(&text).map_err(|source| PolicyError::Parse { path, source })
+    }
+
+    pub(crate) fn selects(&self, rule: Rule) -> bool {
+        self.rules.contains(&rule)
+    }
+
+    /// Whether a workspace member answers only to the conventions.
+    pub(crate) fn is_tool(&self, package: &str) -> bool {
+        self.tools.contains(package)
+    }
+
     /// The same exact location grants owner construction and task-start authority.
     pub(crate) fn is_composition_root(&self, path: &str, owner: &str, method: &str) -> bool {
-        self.composition_roots.contains(&(path, owner, method))
+        self.composition_roots
+            .iter()
+            .any(|root| root.path == path && root.owner == owner && root.method == method)
+    }
+
+    /// The homes of the database's capability: where raw SQLite handles and
+    /// SQL on the database's internal tables are allowed.
+    pub(crate) fn database_homes(&self) -> &[String] {
+        self.database
+            .as_ref()
+            .and_then(|database| {
+                self.capabilities.iter().find(|capability| capability.name == database.capability)
+            })
+            .map_or(&[], |capability| capability.homes.as_slice())
     }
 
     /// Every type name the policy holds, with the row it came from.
-    pub(crate) fn named_types(&self) -> Vec<(&'static str, &'static str)> {
-        let lists: [(&str, &[&str]); 8] = [
-            ("capability_types", self.capability_types),
-            ("capability_traits", self.capability_traits),
-            ("construction_only_capability_types", self.construction_only_capability_types),
-            ("non_owner_types", self.non_owner_types),
-            ("borrowed_facade_types", self.borrowed_facade_types),
-            ("task_types", self.task_types),
-            ("internal_dependency_types", self.internal_dependency_types),
-            ("closed_session_types", self.closed_session_types),
+    pub(crate) fn named_types(&self) -> Vec<(&'static str, &str)> {
+        let lists: [(&str, &BTreeSet<String>); 8] = [
+            ("capability_types", &self.capability_types),
+            ("capability_traits", &self.capability_traits),
+            ("construction_only_capability_types", &self.construction_only_capability_types),
+            ("non_owner_types", &self.non_owner_types),
+            ("borrowed_facade_types", &self.borrowed_facade_types),
+            ("task_types", &self.task_types),
+            ("internal_dependency_types", &self.internal_dependency_types),
+            ("closed_session_types", &self.closed_session_types),
         ];
         let mut named = lists
             .into_iter()
-            .flat_map(|(row, names)| names.iter().map(move |name| (row, *name)))
+            .flat_map(|(row, names)| names.iter().map(move |name| (row, name.as_str())))
             .collect::<Vec<_>>();
-        for (_, owner, _) in self.composition_roots {
-            if *owner != "<free>" {
-                named.push(("composition_roots", *owner));
+        for root in &self.composition_roots {
+            if root.owner != "<free>" {
+                named.push(("composition_roots", root.owner.as_str()));
             }
         }
-        for (_, owner, _, product) in self.capability_factories {
-            named.push(("capability_factories", owner));
-            named.push(("capability_factories", product));
+        for factory in &self.capability_factories {
+            named.push(("capability_factories", factory.owner.as_str()));
+            named.push(("capability_factories", factory.product.as_str()));
         }
         named
     }
 
-    /// A policy naming nothing, for tests to fill in the rows they exercise.
+    /// A policy from its text, for tests to name the rows they exercise.
     #[cfg(test)]
-    pub(crate) const EMPTY: Policy = Policy {
-        crate_order: &[],
-        separated_crates: &[],
-        capabilities: Capabilities {
-            network: Capability::NONE,
-            cryptography: Capability::NONE,
-            sqlite: Capability::NONE,
-            keychain: Capability::NONE,
-            time: Capability::NONE,
-            ids: Capability::NONE,
-            files: Capability::NONE,
-        },
-        database_schema: None,
-        composition_roots: &[],
-        task_starts: &[],
-        capability_factories: &[],
-        capability_types: &[],
-        capability_traits: &[],
-        construction_only_capability_types: &[],
-        non_owner_types: &[],
-        borrowed_facade_types: &[],
-        task_types: &[],
-        internal_dependency_types: &[],
-        closed_session_types: &[],
-    };
+    pub(crate) fn fixture(text: &str) -> Policy {
+        toml::from_str(text).expect("parse fixture policy")
+    }
+
+    /// The fixture policy the rule tests share: every rule, and the
+    /// capability table and task starts of a workspace of `app-*` crates.
+    #[cfg(test)]
+    pub(crate) fn gated_fixture() -> Policy {
+        Policy::fixture(include_str!("policy_fixture.toml"))
+    }
 }
+
+/// Where a capability is used directly, as findings name it.
+pub(crate) fn describe_homes(homes: &[String]) -> String {
+    if homes.is_empty() {
+        "no file yet".to_string()
+    } else {
+        homes.join(", ")
+    }
+}
+
+/// `[composition_roots]`: each source file's callables, `Type::method` or a
+/// free function's name.
+fn composition_roots<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Vec<CompositionRoot>, D::Error> {
+    let mut roots = Vec::new();
+    for (path, callables) in BTreeMap::<String, Vec<String>>::deserialize(deserializer)? {
+        for callable in callables {
+            let (owner, method) = match split_callable(&callable) {
+                Some((owner, method)) => (owner.to_string(), method.to_string()),
+                None if is_identifier(&callable) => ("<free>".to_string(), callable),
+                None => {
+                    return Err(D::Error::custom(format!(
+                        "composition root {callable:?} in {path} is neither `Type::method` nor a function name"
+                    )))
+                }
+            };
+            roots.push(CompositionRoot { path: path.clone(), owner, method });
+        }
+    }
+    Ok(roots)
+}
+
+/// `[capability_factories]`: each source file's `"Type::method" = "Product"`.
+fn capability_factories<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Vec<CapabilityFactory>, D::Error> {
+    let mut factories = Vec::new();
+    for (path, methods) in BTreeMap::<String, BTreeMap<String, String>>::deserialize(deserializer)?
+    {
+        for (callable, product) in methods {
+            let Some((owner, method)) = split_callable(&callable) else {
+                return Err(D::Error::custom(format!(
+                    "capability factory {callable:?} in {path} is not `Type::method`"
+                )));
+            };
+            factories.push(CapabilityFactory {
+                path: path.clone(),
+                owner: owner.to_string(),
+                method: method.to_string(),
+                product,
+            });
+        }
+    }
+    Ok(factories)
+}
+
+/// `Type::method`, both parts identifiers.
+fn split_callable(callable: &str) -> Option<(&str, &str)> {
+    callable
+        .split_once("::")
+        .filter(|(owner, method)| is_identifier(owner) && is_identifier(method))
+}
+
+fn is_identifier(name: &str) -> bool {
+    !name.is_empty()
+        && name.chars().all(|character| character.is_alphanumeric() || character == '_')
+}
+
+/// Rust paths written as text, `std::fs`, split into their segments.
+fn rust_paths<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<Vec<String>>, D::Error> {
+    Vec::<String>::deserialize(deserializer)?
+        .into_iter()
+        .map(|path| {
+            let segments = path.split("::").map(str::to_string).collect::<Vec<_>>();
+            if segments.iter().any(|segment| !is_identifier(segment)) {
+                return Err(D::Error::custom(format!("{path:?} is not a Rust path")));
+            }
+            Ok(segments)
+        })
+        .collect()
+}
+
+#[cfg(test)]
+#[path = "policy_tests.rs"]
+mod tests;

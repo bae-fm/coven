@@ -3,7 +3,7 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use crate::syntax::{is_test_only, is_test_source, RustFile};
+use crate::syntax::{is_test_only, RustFile};
 
 pub(crate) fn module_sources(files: &[RustFile]) -> BTreeMap<String, Vec<String>> {
     let sources =
@@ -12,7 +12,7 @@ pub(crate) fn module_sources(files: &[RustFile]) -> BTreeMap<String, Vec<String>
     for file in files.iter().filter(|file| production(file)) {
         let path = Path::new(&file.relative_path);
         if matches!(path.file_name().and_then(|name| name.to_str()), Some("lib.rs" | "main.rs")) {
-            let module = inferred_module(&file.relative_path);
+            let module = inferred_module(file);
             collect(file, module, &sources, &mut modules);
         }
     }
@@ -20,20 +20,30 @@ pub(crate) fn module_sources(files: &[RustFile]) -> BTreeMap<String, Vec<String>
     // root in the input. Their conventional module path remains well-defined.
     for file in files.iter().filter(|file| production(file)) {
         if !modules.contains_key(&file.relative_path) {
-            collect(file, inferred_module(&file.relative_path), &sources, &mut modules);
+            collect(file, inferred_module(file), &sources, &mut modules);
         }
     }
     modules
 }
 
 fn production(file: &RustFile) -> bool {
-    !is_test_source(&file.relative_path) && !is_test_only(&file.syntax.attrs)
+    !file.is_test_source() && !is_test_only(&file.syntax.attrs)
 }
 
-fn inferred_module(path: &str) -> Vec<String> {
-    let components = path.split('/').collect::<Vec<_>>();
-    let mut module = vec![components[1].replace('-', "_")];
-    module.extend(components[3..components.len() - 1].iter().map(|part| part.to_string()));
+/// The crate is the file's package; the module path is the file's directories
+/// beneath the member's source directory (`src/`, or `examples/` and the like),
+/// then its stem unless that names the directory's own module.
+fn inferred_module(file: &RustFile) -> Vec<String> {
+    let components = file
+        .relative_path
+        .strip_prefix(file.package_root.as_str())
+        .expect("a source lies under its member")
+        .split('/')
+        .collect::<Vec<_>>();
+    let mut module = vec![file.package.replace('-', "_")];
+    if let [_, directories @ .., _] = components.as_slice() {
+        module.extend(directories.iter().map(|part| part.to_string()));
+    }
     let stem = components.last().expect("source filename").trim_end_matches(".rs");
     if !matches!(stem, "lib" | "main" | "mod") {
         module.push(stem.to_string());

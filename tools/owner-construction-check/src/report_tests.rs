@@ -1,5 +1,19 @@
 use super::*;
-use crate::owner_policy::POLICY;
+use crate::policy::CompositionRoot;
+
+/// A policy running every rule, with the given rows.
+fn policy(rows: &str) -> Policy {
+    Policy::fixture(&format!(
+        r#"rules = ["crate-dependencies", "capability-boundaries", "database-boundary",
+            "owner-dependencies", "retained-capability-parameters", "component-bundles",
+            "capability-construction", "conventions"]
+        {rows}"#
+    ))
+}
+
+fn root(path: &str, owner: &str, method: &str) -> CompositionRoot {
+    CompositionRoot { path: path.into(), owner: owner.into(), method: method.into() }
+}
 
 fn check(workspace: &Workspace, policy: &Policy) -> Report {
     check_packages(workspace, policy, &[]).unwrap()
@@ -11,7 +25,7 @@ fn workspace(files: Vec<RustFile>) -> Workspace {
 
 fn capability_implementations() -> RustFile {
     RustFile::fixture(
-        "crates/coven-foundation/src/implementations.rs",
+        "crates/app-foundation/src/implementations.rs",
         r#"
         trait Clock {} trait IdSource {} struct SystemClock; struct UuidIds; impl Clock for SystemClock {}
         impl IdSource for UuidIds {}
@@ -21,12 +35,12 @@ fn capability_implementations() -> RustFile {
 
 #[test]
 fn an_empty_workspace_passes() {
-    assert!(check(&workspace(Vec::new()), &POLICY).is_empty());
+    assert!(check(&workspace(Vec::new()), &Policy::gated_fixture()).is_empty());
 }
 
 #[test]
 fn duplicate_capability_and_owner_names_report_every_declaration() {
-    const POLICY: Policy = Policy { capability_types: &["Clock"], ..Policy::EMPTY };
+    let policy = policy(r#"capability_types = ["Clock"]"#);
     for (name, first, second) in [
         ("Clock", "trait Clock {}", "struct Clock;"),
         ("Worker", "trait Clock {} struct Worker { clock: Box<dyn Clock> }", "struct Worker;"),
@@ -36,14 +50,14 @@ fn duplicate_capability_and_owner_names_report_every_declaration() {
                 RustFile::fixture("crates/first/src/lib.rs", first),
                 RustFile::fixture("crates/second/src/lib.rs", second),
             ]),
-            &POLICY,
+            &policy,
         );
         assert!(!report.is_empty(), "accepted duplicate {name}");
         assert_eq!(
             report.lines(),
             [
                 format!("crates/first/src/lib.rs:1: type {name} is declared more than once: crates/first/src/lib.rs, crates/second/src/lib.rs"),
-                "type names used by the policy, construction-only capabilities and inferred owners must be unique across crates/".to_string(),
+                "type names used by the policy, construction-only capabilities and inferred owners must be unique across the workspace's crates".to_string(),
             ],
         );
     }
@@ -56,40 +70,45 @@ fn duplicate_plain_value_names_pass() {
             RustFile::fixture("crates/first/src/lib.rs", "struct Value(u64);"),
             RustFile::fixture("crates/second/src/lib.rs", "struct Value(String);"),
         ]),
-        &Policy::EMPTY,
+        &policy(""),
     );
     assert!(report.is_empty(), "{:?}", report.lines());
 }
 
 #[test]
 fn tool_declarations_do_not_make_crate_names_ambiguous() {
-    const POLICY: Policy = Policy { capability_types: &["Clock"], ..Policy::EMPTY };
+    let policy = policy(
+        r#"capability_types = ["Clock"]
+        tools = ["second"]"#,
+    );
     let report = check(
         &workspace(vec![
             RustFile::fixture("crates/first/src/lib.rs", "trait Clock {}"),
             RustFile::fixture("tools/second/src/main.rs", "struct Clock;"),
         ]),
-        &POLICY,
+        &policy,
     );
     assert!(report.is_empty(), "{:?}", report.lines());
 }
 
 #[test]
 fn test_only_duplicate_capability_names_pass() {
-    const POLICY: Policy = Policy { capability_types: &["Clock"], ..Policy::EMPTY };
+    let policy = policy(r#"capability_types = ["Clock"]"#);
     let report = check(
         &workspace(vec![
             RustFile::fixture("crates/first/src/lib.rs", "trait Clock {}"),
             RustFile::fixture("crates/second/src/lib.rs", "#[cfg(test)] struct Clock;"),
             RustFile::fixture("crates/second/src/lib_tests.rs", "struct Clock;"),
         ]),
-        &POLICY,
+        &policy,
     );
     assert!(report.is_empty(), "{:?}", report.lines());
 }
 
 #[test]
 fn tools_answer_to_the_conventions_but_not_to_the_capability_table() {
+    let mut policy = Policy::gated_fixture();
+    policy.tools.insert("report".into());
     let report = check(
         &workspace(vec![RustFile::fixture(
             "tools/report/src/main.rs",
@@ -98,7 +117,7 @@ fn tools_answer_to_the_conventions_but_not_to_the_capability_table() {
             pub(in crate::sources) fn read() {}
             "#,
         )]),
-        &POLICY,
+        &policy,
     );
     assert_eq!(
         report.lines(),
@@ -113,15 +132,15 @@ fn tools_answer_to_the_conventions_but_not_to_the_capability_table() {
 fn crates_answer_to_every_rule() {
     let report = check(
         &workspace(vec![RustFile::fixture(
-            "crates/coven-merge/src/merge.rs",
+            "crates/app-merge/src/merge.rs",
             "fn now() { let _ = std::time::SystemTime::now(); }",
         )]),
-        &POLICY,
+        &Policy::gated_fixture(),
     );
     assert_eq!(
         report.lines(),
         vec![
-            "crates/coven-merge/src/merge.rs:1: system clock (current time) is used directly only in crates/coven-foundation/src/clock.rs".to_string(),
+            "crates/app-merge/src/merge.rs:1: system clock (current time) is used directly only in crates/app-foundation/src/clock.rs".to_string(),
             "reach a capability through the owner that holds it, given to you when you are built".to_string(),
         ],
     );
@@ -136,14 +155,14 @@ fn concrete_clock_and_ids_cannot_be_constructed_outside_composition_roots() {
         "std::sync::Arc::new(UuidIds)",
     ] {
         let source = format!(
-            "use coven_foundation::implementations::*; fn acquire() {{ let _ = {expression}; }}"
+            "use app_foundation::implementations::*; fn acquire() {{ let _ = {expression}; }}"
         );
         let report = check(
             &workspace(vec![
                 capability_implementations(),
-                RustFile::fixture("crates/coven/src/runtime.rs", &source),
+                RustFile::fixture("crates/app/src/runtime.rs", &source),
             ]),
-            &POLICY,
+            &Policy::gated_fixture(),
         );
         assert!(!report.is_empty(), "accepted {expression}");
         assert!(report.lines().iter().any(|line| line.contains("outside a composition root")));
@@ -152,17 +171,15 @@ fn concrete_clock_and_ids_cannot_be_constructed_outside_composition_roots() {
 
 #[test]
 fn composition_roots_can_construct_and_use_concrete_clock_and_ids() {
-    const ROOT_POLICY: crate::policy::Policy = crate::policy::Policy {
-        composition_roots: &[("crates/coven/src/builder.rs", "Builder", "open")],
-        ..POLICY
-    };
+    let mut root_policy = Policy::gated_fixture();
+    root_policy.composition_roots.push(root("crates/app/src/builder.rs", "Builder", "open"));
     let report = check(
         &workspace(vec![
             capability_implementations(),
             RustFile::fixture(
-                "crates/coven/src/builder.rs",
+                "crates/app/src/builder.rs",
                 r#"
-            use coven_foundation::implementations::*; struct Builder;
+            use app_foundation::implementations::*; struct Builder;
             impl Builder {
                 fn open() {
                     let clock = std::sync::Arc::new(SystemClock);
@@ -174,7 +191,7 @@ fn composition_roots_can_construct_and_use_concrete_clock_and_ids() {
             "#,
             ),
         ]),
-        &ROOT_POLICY,
+        &root_policy,
     );
     assert!(report.is_empty(), "{:?}", report.lines());
 }
@@ -184,7 +201,7 @@ fn inferred_default_construction_is_prevented_at_its_implementation() {
     let report = check(
         &workspace(vec![
             RustFile::fixture(
-                "crates/coven-foundation/src/clock.rs",
+                "crates/app-foundation/src/clock.rs",
                 r#"
                 trait Clock {} struct SuppliedClock(u64);
                 #[cfg(feature = "test-utils")] impl Clock for SuppliedClock {}
@@ -192,41 +209,38 @@ fn inferred_default_construction_is_prevented_at_its_implementation() {
             "#,
             ),
             RustFile::fixture(
-                "crates/coven/src/runtime.rs",
+                "crates/app/src/runtime.rs",
                 "fn run() { let clock: SuppliedClock = Default::default(); }",
             ),
         ]),
-        &POLICY,
+        &Policy::gated_fixture(),
     );
-    assert_eq!(report.0, [Finding::new("crates/coven-foundation/src/clock.rs", 4,
+    assert_eq!(report.0, [Finding::new("crates/app-foundation/src/clock.rs", 4,
         "implements Default for capability SuppliedClock, which permits implicit construction through Default::default()",
         "construct owners and capabilities explicitly at the listed roots; inject them elsewhere; do not implement or derive Default")]);
 }
 
 #[test]
 fn one_exact_list_entry_allows_construction_and_task_starts() {
-    const PATH: &str = "crates/coven-sync/src/fixture.rs";
-    const ROOTED: Policy = Policy {
-        capability_types: &["Clock"],
-        composition_roots: &[(PATH, "Worker", "open")],
-        task_starts: POLICY.task_starts,
-        ..Policy::EMPTY
-    };
+    const PATH: &str = "crates/app-sync/src/fixture.rs";
+    let mut rooted = policy(r#"capability_types = ["Clock"]"#);
+    rooted.composition_roots.push(root(PATH, "Worker", "open"));
+    rooted.task_starts = Policy::gated_fixture().task_starts;
     for (path, owner, method, allowed) in [
         (PATH, "Worker", "open", true),
         (PATH, "Worker", "other", false),
         (PATH, "Other", "open", false),
-        ("crates/coven-sync/src/elsewhere.rs", "Worker", "open", false),
+        ("crates/app-sync/src/elsewhere.rs", "Worker", "open", false),
     ] {
         let source = format!("extern crate tokio; struct Other; struct Worker {{ clock: Clock }} impl {owner} {{ fn {method}(clock: Clock) {{ let _ = Worker {{ clock }}; tokio::spawn(async {{}}); }} }}");
-        let report = check(&workspace(vec![RustFile::fixture(path, &source)]), &ROOTED);
+        let report = check(&workspace(vec![RustFile::fixture(path, &source)]), &rooted);
         let expected =
             if allowed { Vec::new() } else { unrooted_worker(path, &format!("{owner}::{method}")) };
         assert_eq!(report.0, expected);
     }
     let source = "extern crate tokio; struct Worker { clock: Clock } impl Worker { fn open() { fn hidden(clock: Clock) { Worker { clock }; tokio::spawn(async {}); } } }";
     assert_eq!(
-        check(&workspace(vec![RustFile::fixture(PATH, source)]), &ROOTED).0,
+        check(&workspace(vec![RustFile::fixture(PATH, source)]), &rooted).0,
         unrooted_worker(PATH, "<free>::hidden")
     );
 }
@@ -260,18 +274,15 @@ fn package_selection_uses_manifest_names_and_directory_boundaries() {
         member("tools/selected", "selected-package"),
         member("tools/selected-other", "other-package"),
     ];
-    let all = check(&workspace, &Policy::EMPTY);
+    let policy = policy(r#"tools = ["selected-package", "other-package"]"#);
+    let all = check(&workspace, &policy);
     assert_eq!(all.0.len(), 2);
-    let selected =
-        check_packages(&workspace, &Policy::EMPTY, &["selected-package".into()]).unwrap();
+    let selected = check_packages(&workspace, &policy, &["selected-package".into()]).unwrap();
     assert_eq!(selected.0.len(), 1);
     assert_eq!(selected.0[0].path, "tools/selected/src/main.rs");
-    let both = check_packages(
-        &workspace,
-        &Policy::EMPTY,
-        &["selected-package".into(), "other-package".into()],
-    )
-    .unwrap();
+    let both =
+        check_packages(&workspace, &policy, &["selected-package".into(), "other-package".into()])
+            .unwrap();
     assert_eq!(both.0, all.0);
 }
 
@@ -280,34 +291,63 @@ fn package_selection_keeps_dependency_definitions_for_owner_analysis() {
     let mut workspace = workspace(vec![
         capability_implementations(),
         RustFile::fixture(
-            "crates/coven/src/runtime.rs",
-            "use coven_foundation::implementations::*; fn acquire() { let _ = SystemClock; }",
+            "crates/app/src/runtime.rs",
+            "use app_foundation::implementations::*; fn acquire() { let _ = SystemClock; }",
         ),
     ]);
-    workspace.manifests = vec![
-        member("crates/coven-foundation", "coven-foundation"),
-        member("crates/coven", "coven"),
-    ];
-    let selected = check_packages(&workspace, &POLICY, &["coven".into()]).unwrap();
+    workspace.manifests =
+        vec![member("crates/app-foundation", "app-foundation"), member("crates/app", "app")];
+    let selected = check_packages(&workspace, &Policy::gated_fixture(), &["app".into()]).unwrap();
     assert!(selected.lines().iter().any(|line| line.contains("outside a composition root")));
     assert!(!selected.lines().iter().any(|line| line.contains("cannot resolve")));
 }
 
 #[test]
 fn package_selection_cannot_hide_an_ambiguous_workspace_graph() {
-    const POLICY: Policy = Policy { capability_types: &["Clock"], ..Policy::EMPTY };
+    let policy = policy(r#"capability_types = ["Clock"]"#);
     let mut workspace = workspace(vec![
         RustFile::fixture("crates/first/src/lib.rs", "trait Clock {}"),
         RustFile::fixture("crates/second/src/lib.rs", "struct Clock;"),
     ]);
     workspace.manifests = vec![member("crates/second", "second")];
-    let selected = check_packages(&workspace, &POLICY, &["second".into()]).unwrap();
+    let selected = check_packages(&workspace, &policy, &["second".into()]).unwrap();
     assert!(selected.0.iter().any(|finding| finding.path == "crates/first/src/lib.rs"
         && finding.message.contains("declared more than once")));
 }
 
 #[test]
 fn an_unknown_package_is_an_error() {
-    let result = check_packages(&workspace(Vec::new()), &Policy::EMPTY, &["missing".into()]);
+    let result = check_packages(&workspace(Vec::new()), &policy(""), &["missing".into()]);
     assert!(matches!(result, Err(UnknownPackage(package)) if package == "missing"));
+}
+
+#[test]
+fn only_the_selected_rules_run() {
+    let files = || {
+        workspace(vec![
+            RustFile::fixture("crates/first/src/lib.rs", "trait Clock {}"),
+            RustFile::fixture(
+                "crates/second/src/lib.rs",
+                "struct Clock; pub(in crate::x) fn now() { let _ = std::time::SystemTime::now(); }",
+            ),
+        ])
+    };
+    let mut selected = Policy::gated_fixture();
+    selected.capability_types.insert("Clock".into());
+    let messages = |policy: &Policy| {
+        check(&files(), policy).0.into_iter().map(|finding| finding.message).collect::<Vec<_>>()
+    };
+    selected.rules = [Rule::Conventions].into();
+    assert_eq!(messages(&selected), ["pub(in path) visibility is forbidden"]);
+    selected.rules = [Rule::CapabilityBoundaries].into();
+    assert_eq!(
+        messages(&selected),
+        ["system clock (current time) is used directly only in crates/app-foundation/src/clock.rs"]
+    );
+    // Name-based owner rules need every name they reason about declared once.
+    selected.rules = [Rule::OwnerDependencies].into();
+    assert_eq!(
+        messages(&selected),
+        ["type Clock is declared more than once: crates/first/src/lib.rs, crates/second/src/lib.rs"]
+    );
 }

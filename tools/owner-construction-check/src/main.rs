@@ -1,11 +1,13 @@
 //! The structural checker of Appendix F.6. It reads the syntax tree of every Rust
 //! file and every member manifest in the workspace and holds them to the
-//! dependency rules of Appendix F.1, the capability and owner rules of F.2 and F.3 —
-//! against the policy file, `owner_policy.rs` — and the conventions of F.5.
+//! dependency rules of Appendix F.1, the capability and owner rules of F.2 and F.3,
+//! and the conventions of F.5 — the ones the workspace's policy file,
+//! `owner-construction-check.toml` at its root, selects, against that policy.
 //!
-//! `owner-construction-check [workspace root] [package ...]` runs every rule.
-//! Package names limit diagnostics while keeping the complete workspace for
-//! analysis. It exits 1 when a rule is broken and 2 for invalid inputs.
+//! `owner-construction-check [workspace root] [package ...]` checks the policy,
+//! then runs its rules. Package names limit diagnostics while keeping the
+//! complete workspace for analysis. It exits 1 when a rule is broken and 2 for
+//! invalid inputs, a policy row naming something the workspace lacks among them.
 
 mod capability_boundaries;
 mod capability_construction;
@@ -21,8 +23,8 @@ mod module_sources;
 mod name_resolution;
 mod owner_dependency_boundary;
 mod owner_graph;
-mod owner_policy;
 mod policy;
+mod policy_check;
 mod report;
 mod retained_capability_parameters;
 mod rust_prelude;
@@ -53,7 +55,25 @@ fn main() {
             std::process::exit(2);
         }
     };
-    let report = match report::check_packages(&workspace, &owner_policy::POLICY, &packages) {
+    let policy = match policy::Policy::read(&root) {
+        Ok(policy) => policy,
+        Err(error) => {
+            eprintln!("owner-construction-check: {error}");
+            std::process::exit(2);
+        }
+    };
+    let stale = policy_check::stale_rows(&workspace, &policy);
+    if !stale.is_empty() {
+        eprintln!(
+            "owner-construction-check: {} names what the workspace does not hold:",
+            policy::FILE_NAME
+        );
+        for row in stale {
+            eprintln!("  {row}");
+        }
+        std::process::exit(2);
+    }
+    let report = match report::check_packages(&workspace, &policy, &packages) {
         Ok(report) => report,
         Err(error) => {
             eprintln!("owner-construction-check: {error}");

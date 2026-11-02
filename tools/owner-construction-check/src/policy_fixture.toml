@@ -1,0 +1,163 @@
+# The fixture policy the rule tests share: a workspace of `app-*` crates under
+# crates/, its capability table and its task starts.
+
+rules = [
+    "crate-dependencies",
+    "capability-boundaries",
+    "database-boundary",
+    "owner-dependencies",
+    "retained-capability-parameters",
+    "component-bundles",
+    "capability-construction",
+    "conventions",
+]
+api_crate = "app"
+capability_traits = ["Clock", "IdSource"]
+
+[database]
+capability = "SQLite"
+
+[[task_starts]]
+kind = "runtime construction"
+paths = ["Runtime::new", "Builder::new_current_thread", "Builder::new_multi_thread"]
+
+[[task_starts]]
+kind = "ambient runtime acquisition"
+paths = ["Handle::current", "Handle::try_current"]
+
+[[task_starts]]
+kind = "thread or task spawn"
+paths = ["tokio::spawn", "task::spawn", "task::spawn_blocking", "task::spawn_local", "thread::spawn"]
+methods = ["spawn", "spawn_blocking", "spawn_local"]
+
+[[capabilities]]
+name = "network"
+homes = ["crates/app-storage/src/providers/"]
+
+[[capabilities.gates]]
+kind = "CloudKit framework"
+crates = ["objc2_cloud_kit"]
+
+[[capabilities.gates]]
+kind = "HTTP client (reqwest)"
+crates = ["reqwest"]
+
+[[capabilities.gates]]
+kind = "HTTP server (axum)"
+crates = ["axum"]
+
+[[capabilities.gates]]
+kind = "AWS SDK"
+crates = [
+    "aws_config",
+    "aws_sdk_s3",
+    "aws_sdk_sts",
+    "aws_credential_types",
+    "aws_smithy_http_client",
+    "aws_smithy_runtime_api",
+    "aws_smithy_types",
+    "smithy_transport_reqwest",
+]
+
+[[capabilities.gates]]
+kind = "browser opener (open)"
+crates = ["open"]
+
+[[capabilities.gates]]
+kind = "sockets"
+paths = ["std::net", "tokio::net"]
+
+[[capabilities]]
+name = "cryptography"
+homes = ["crates/app-crypto/src/"]
+
+[[capabilities.gates]]
+kind = "signing keys (ed25519-dalek)"
+crates = ["ed25519_dalek"]
+
+[[capabilities.gates]]
+kind = "sealed-box keys (crypto_box / x25519-dalek)"
+crates = ["crypto_box", "x25519_dalek"]
+
+[[capabilities.gates]]
+kind = "AEAD cipher (chacha20poly1305)"
+crates = ["chacha20poly1305"]
+
+[[capabilities.gates]]
+kind = "key derivation (hkdf / argon2)"
+crates = ["hkdf", "argon2"]
+
+[[capabilities.gates]]
+kind = "keyed hashes (hmac / sha2)"
+crates = ["hmac", "sha2"]
+
+[[capabilities.gates]]
+kind = "randomness"
+crates = ["rand", "rand_core", "getrandom"]
+paths = ["OsRng", "thread_rng", "ThreadRng"]
+
+[[capabilities]]
+name = "SQLite"
+homes = ["crates/app-database/src/"]
+
+[[capabilities.gates]]
+kind = "SQLite library (rusqlite / libsqlite3-sys)"
+crates = ["rusqlite", "libsqlite3_sys"]
+
+[[capabilities]]
+name = "OS keychain"
+homes = ["crates/app-crypto/src/custody/"]
+
+[[capabilities.gates]]
+kind = "platform keychain"
+crates = [
+    "keyring",
+    "keyring_core",
+    "apple_native_keyring_store",
+    "android_native_keyring_store",
+    "windows_native_keyring_store",
+    "zbus_secret_service_keyring_store",
+    "security_framework",
+]
+
+[[capabilities]]
+name = "current time"
+homes = ["crates/app-foundation/src/clock.rs"]
+
+[[capabilities.gates]]
+kind = "system clock"
+paths = [
+    "SystemTime::now",
+    "Instant::now",
+    "Utc::now",
+    "Local::now",
+    "OffsetDateTime::now_utc",
+    "OffsetDateTime::now_local",
+    "tokio::time",
+    "thread::sleep",
+    "thread::sleep_until",
+]
+
+[[capabilities]]
+name = "new ids"
+homes = ["crates/app-foundation/src/id_source.rs"]
+
+[[capabilities.gates]]
+kind = "id generation (uuid)"
+paths = ["Uuid::new_v4", "Uuid::new_v7", "Uuid::now_v7"]
+
+[[capabilities]]
+name = "files on disk"
+homes = ["crates/app-foundation/src/files/"]
+
+[[capabilities.gates]]
+kind = "filesystem"
+crates = ["tempfile"]
+paths = [
+    "std::fs",
+    "tokio::fs",
+    "unix::fs",
+    "windows::fs",
+    "rustix::fs",
+    "windows_sys::Win32::Storage::FileSystem",
+]

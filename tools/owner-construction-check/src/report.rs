@@ -9,7 +9,7 @@ use crate::database_boundary::find_database_boundary_violations;
 use crate::finding::Finding;
 use crate::owner_dependency_boundary::find_owner_dependency_leaks;
 use crate::owner_graph::OwnerGraph;
-use crate::policy::Policy;
+use crate::policy::{Policy, Rule};
 use crate::retained_capability_parameters::find_retained_capability_parameter_violations;
 use crate::sources::Workspace;
 #[cfg(test)]
@@ -50,20 +50,45 @@ pub(crate) fn check_packages(
     Ok(check_paths(workspace, policy, &roots))
 }
 
-/// The capability and owner rules read crates; conventions also read tools.
+/// The policy's selected rules. The dependency, capability and owner rules
+/// read crates; conventions also read tools.
 fn check_paths(workspace: &Workspace, policy: &Policy, roots: &[&str]) -> Report {
-    let files =
-        workspace.files.iter().filter(|file| file.is_crate_source()).cloned().collect::<Vec<_>>();
+    let files = workspace
+        .files
+        .iter()
+        .filter(|file| !policy.is_tool(&file.package))
+        .cloned()
+        .collect::<Vec<_>>();
     let graph = OwnerGraph::collect(&files, policy);
     let mut findings = Vec::new();
-    findings.extend(find_crate_dependency_violations(workspace, policy));
-    findings.extend(find_database_boundary_violations(&files, policy));
-    findings.extend(find_owner_dependency_leaks(&files, policy, &graph));
-    findings.extend(find_retained_capability_parameter_violations(&files, &graph.owners, policy));
-    findings.extend(find_component_bundle_violations(&files));
-    findings.extend(find_capability_boundary_violations(&files, policy));
-    findings.extend(find_capability_construction_violations(&files, policy, &graph));
-    findings.extend(find_convention_violations(&workspace.files));
+    if policy.selects(Rule::CrateDependencies) {
+        findings.extend(find_crate_dependency_violations(workspace, policy));
+    }
+    if policy.selects(Rule::DatabaseBoundary) {
+        findings.extend(find_database_boundary_violations(&files, policy));
+    }
+    if policy.selects(Rule::OwnerDependencies) {
+        findings.extend(find_owner_dependency_leaks(&files, policy, &graph));
+    }
+    if policy.selects(Rule::RetainedCapabilityParameters) {
+        findings.extend(find_retained_capability_parameter_violations(
+            &files,
+            &graph.owners,
+            policy,
+        ));
+    }
+    if policy.selects(Rule::ComponentBundles) {
+        findings.extend(find_component_bundle_violations(&files));
+    }
+    if policy.selects(Rule::CapabilityBoundaries) {
+        findings.extend(find_capability_boundary_violations(&files, policy));
+    }
+    if policy.selects(Rule::CapabilityConstruction) {
+        findings.extend(find_capability_construction_violations(&files, policy, &graph));
+    }
+    if policy.selects(Rule::Conventions) {
+        findings.extend(find_convention_violations(&workspace.files, policy.api_crate.as_deref()));
+    }
     findings.retain(|finding| {
         roots.is_empty()
             || finding.path == "Cargo.toml"
@@ -71,7 +96,9 @@ fn check_paths(workspace: &Workspace, policy: &Policy, roots: &[&str]) -> Report
     });
     // Ambiguous names invalidate the workspace graph, even when the first
     // declaration (where the diagnostic points) is outside selected packages.
-    findings.extend(find_unique_type_name_violations(&files, policy, &graph));
+    if policy.rules.iter().any(|rule| rule.reads_owner_graph()) {
+        findings.extend(find_unique_type_name_violations(&files, policy, &graph));
+    }
     findings.sort();
     findings.dedup();
     Report(findings)
@@ -88,8 +115,8 @@ impl Report {
         let mut remedies = Vec::new();
         for finding in &self.0 {
             lines.push(format!("{}:{}: {}", finding.path, finding.line, finding.message));
-            if !remedies.contains(&finding.remedy) {
-                remedies.push(finding.remedy);
+            if !remedies.contains(&finding.remedy.as_str()) {
+                remedies.push(finding.remedy.as_str());
             }
         }
         lines.extend(remedies.into_iter().map(str::to_string));

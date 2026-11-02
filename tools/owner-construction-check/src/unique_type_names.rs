@@ -1,5 +1,6 @@
 //! Name-based matching requires a unique declaration for each policy type,
-//! construction-only capability and inferred owner across `crates/`. Policy
+//! construction-only capability and inferred owner across the workspace's
+//! crates. Policy
 //! guards check that named types exist; this rule rejects ambiguous names.
 //! Test-only declarations are excluded; `test-utils` declarations count.
 
@@ -29,7 +30,7 @@ pub(crate) fn find_unique_type_name_violations(
             let (path, line) = &declarations[0];
             let paths = declarations.iter().map(|(path, _)| path.clone()).collect::<BTreeSet<_>>().into_iter().collect::<Vec<_>>();
             Finding::new(path, *line, format!("type {name} is declared more than once: {}", paths.join(", ")),
-                "type names used by the policy, construction-only capabilities and inferred owners must be unique across crates/")
+                "type names used by the policy, construction-only capabilities and inferred owners must be unique across the workspace's crates")
         }).collect()
 }
 

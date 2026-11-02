@@ -24,20 +24,24 @@ fn findings(path: &str, sites: &[(usize, &str, &str)]) -> Vec<Finding> {
         .collect()
 }
 
-const POLICY: Policy = Policy {
-    capability_traits: &["Clock", "IdSource"],
-    construction_only_capability_types: &["StoreDir", "AtomicFile", "ClockRef", "IdSourceRef"],
-    composition_roots: &[("crates/coven/src/builder.rs", "Builder", "open")],
-    ..Policy::EMPTY
-};
+fn policy() -> Policy {
+    Policy::fixture(
+        r#"
+        capability_traits = ["Clock", "IdSource"]
+        construction_only_capability_types = ["StoreDir", "AtomicFile", "ClockRef", "IdSourceRef"]
+        [composition_roots]
+        "crates/app/src/builder.rs" = ["Builder::open"]
+        "#,
+    )
+}
 
 fn check(path: &str, source: &str) -> Vec<Finding> {
     find_capability_construction_violations(
         &[
-            RustFile::fixture("crates/coven-foundation/src/capabilities.rs", CAPABILITIES),
-            RustFile::fixture(path, &format!("{source} use coven_foundation::capabilities::*;")),
+            RustFile::fixture("crates/app-foundation/src/capabilities.rs", CAPABILITIES),
+            RustFile::fixture(path, &format!("{source} use app_foundation::capabilities::*;")),
         ],
-        &POLICY,
+        &policy(),
     )
 }
 
@@ -75,20 +79,20 @@ const CAPABILITIES: &str = r#"
 fn test_factories_do_not_assign_capability_types_to_production_values() {
     let source = "struct AtomicFile; fn consume<T>(_: T) {} fn work(file: File, directory: Path) {\n    consume(file);\n    consume(directory);\n    let _ = AtomicFile::new(path);\n}";
     let files = [
-        RustFile::fixture("crates/coven/src/work.rs", source),
+        RustFile::fixture("crates/app/src/work.rs", source),
         RustFile::fixture(
-            "crates/coven/src/values.rs",
+            "crates/app/src/values.rs",
             "fn file() -> Value { todo!() } fn read() { file(); }",
         ),
         RustFile::fixture(
-            "crates/coven/src/work_tests.rs",
+            "crates/app/src/work_tests.rs",
             "fn file() -> AtomicFile { todo!() } fn directory() -> StoreDir { todo!() }",
         ),
     ];
-    let violations = find_capability_construction_violations(&files, &POLICY);
+    let violations = find_capability_construction_violations(&files, &policy());
     assert_eq!(
         violations,
-        findings("crates/coven/src/work.rs", &[(4, "<free>::work", "AtomicFile")])
+        findings("crates/app/src/work.rs", &[(4, "<free>::work", "AtomicFile")])
     );
 }
 
@@ -113,7 +117,7 @@ fn test_only_factories_do_not_change_production_factory_results() {
             Factory::build();
         }
     "#;
-    assert!(check("crates/coven/src/work.rs", source).is_empty());
+    assert!(check("crates/app/src/work.rs", source).is_empty());
 }
 
 #[test]
@@ -131,10 +135,10 @@ fn local_bindings_shadow_factory_names_but_factory_references_still_count() {
             match input { Some(file) => consume(file), None => {} }
         }
     "#;
-    let violations = check("crates/coven/src/work.rs", source);
+    let violations = check("crates/app/src/work.rs", source);
     assert_eq!(
         violations,
-        findings("crates/coven/src/work.rs", &[(6, "<free>::work", "AtomicFile")])
+        findings("crates/app/src/work.rs", &[(6, "<free>::work", "AtomicFile")])
     );
 }
 
@@ -149,33 +153,31 @@ fn binding_scopes_do_not_hide_factory_references_after_they_end() {
         "while let Some(file) = input { consume(file); }",
     ] {
         let source = format!("fn file() -> AtomicFile {{ AtomicFile::new(path) }}\nfn work() {{\n{statement}\nlet factory = file;\n}}");
-        let violations = check("crates/coven/src/work.rs", &source);
+        let violations = check("crates/app/src/work.rs", &source);
         assert_eq!(
             violations,
-            findings("crates/coven/src/work.rs", &[(4, "<free>::work", "AtomicFile")]),
+            findings("crates/app/src/work.rs", &[(4, "<free>::work", "AtomicFile")]),
             "{source}"
         );
     }
     let source = "fn file() -> AtomicFile { AtomicFile::new(path) }\nfn work() {\nlet file = file;\nconsume(file);\n}";
-    let violations = check("crates/coven/src/work.rs", source);
+    let violations = check("crates/app/src/work.rs", source);
     assert_eq!(
         violations,
-        findings("crates/coven/src/work.rs", &[(3, "<free>::work", "AtomicFile")])
+        findings("crates/app/src/work.rs", &[(3, "<free>::work", "AtomicFile")])
     );
 }
 
 #[test]
 fn injected_owner_factory_authority_is_explicit_and_limited_to_its_product() {
-    const DERIVED: Policy = Policy {
-        capability_types: &["StoreDir"],
-        capability_factories: &[(
-            "crates/coven-foundation/src/directory.rs",
-            "StoreDir",
-            "file",
-            "AtomicFile",
-        )],
-        ..POLICY
-    };
+    let mut derived = policy();
+    derived.capability_types.insert("StoreDir".into());
+    derived.capability_factories.push(crate::policy::CapabilityFactory {
+        path: "crates/app-foundation/src/directory.rs".into(),
+        owner: "StoreDir".into(),
+        method: "file".into(),
+        product: "AtomicFile".into(),
+    });
     let source = r#"
         struct StoreDir; struct AtomicFile; impl StoreDir {
             fn file(&self) -> AtomicFile { AtomicFile::new(self.path()) }
@@ -187,11 +189,11 @@ fn injected_owner_factory_authority_is_explicit_and_limited_to_its_product() {
         }
     "#;
     for (path, expected_lines) in [
-        ("crates/coven-foundation/src/directory.rs", vec![4]),
-        ("crates/coven-foundation/src/other.rs", vec![3, 4]),
+        ("crates/app-foundation/src/directory.rs", vec![4]),
+        ("crates/app-foundation/src/other.rs", vec![3, 4]),
     ] {
         let violations =
-            find_capability_construction_violations(&[RustFile::fixture(path, source)], &DERIVED);
+            find_capability_construction_violations(&[RustFile::fixture(path, source)], &derived);
         assert_eq!(
             violations.iter().map(|v| v.line).collect::<Vec<_>>(),
             expected_lines,
@@ -208,13 +210,13 @@ fn injected_owner_factory_authority_is_explicit_and_limited_to_its_product() {
         }
     "#;
     let violations = find_capability_construction_violations(
-        &[RustFile::fixture("crates/coven-foundation/src/directory.rs", source)],
-        &DERIVED,
+        &[RustFile::fixture("crates/app-foundation/src/directory.rs", source)],
+        &derived,
     );
     assert_eq!(
         violations,
         findings(
-            "crates/coven-foundation/src/directory.rs",
+            "crates/app-foundation/src/directory.rs",
             &[(4, "StoreDir::file", "StoreDir"), (5, "<free>::nested", "AtomicFile"),]
         )
     );
@@ -227,7 +229,7 @@ fn unit_value_paths_and_empty_literals_are_construction() {
             "SystemClock",
             [
                 "SystemClock",
-                "coven_foundation::capabilities::SystemClock.now()",
+                "app_foundation::capabilities::SystemClock.now()",
                 "SystemClock {}",
                 "Clock::now(&SystemClock)",
                 "Arc::new(SystemClock)",
@@ -237,7 +239,7 @@ fn unit_value_paths_and_empty_literals_are_construction() {
             "UuidIds",
             [
                 "UuidIds",
-                "coven_foundation::capabilities::UuidIds.new_id()",
+                "app_foundation::capabilities::UuidIds.new_id()",
                 "UuidIds {}",
                 "IdSource::new_id(&UuidIds)",
                 "Arc::new(UuidIds)",
@@ -246,10 +248,10 @@ fn unit_value_paths_and_empty_literals_are_construction() {
     ] {
         for expression in expressions {
             let source = format!("fn acquire() {{ let _ = {expression}; }}");
-            let violations = check("crates/coven/src/runtime.rs", &source);
+            let violations = check("crates/app/src/runtime.rs", &source);
             assert_eq!(
                 violations,
-                findings("crates/coven/src/runtime.rs", &[(1, "<free>::acquire", capability)]),
+                findings("crates/app/src/runtime.rs", &[(1, "<free>::acquire", capability)]),
                 "{expression}"
             );
         }
@@ -260,25 +262,25 @@ fn unit_value_paths_and_empty_literals_are_construction() {
 fn unit_paths_in_patterns_match_values_without_constructing_them() {
     let source = r#"
         fn work(clock: Option<SystemClock>) {
-            match clock { Some(coven_foundation::capabilities::SystemClock) => {} _ => {} }
-            if let Some(coven_foundation::capabilities::SystemClock) = clock {}
-            let _ = matches!(clock, Some(coven_foundation::capabilities::SystemClock));
-            let _ = coven_foundation::capabilities::SystemClock;
+            match clock { Some(app_foundation::capabilities::SystemClock) => {} _ => {} }
+            if let Some(app_foundation::capabilities::SystemClock) = clock {}
+            let _ = matches!(clock, Some(app_foundation::capabilities::SystemClock));
+            let _ = app_foundation::capabilities::SystemClock;
         }
     "#;
     assert_eq!(
-        check("crates/coven/src/work.rs", source),
-        findings("crates/coven/src/work.rs", &[(6, "<free>::work", "SystemClock")])
+        check("crates/app/src/work.rs", source),
+        findings("crates/app/src/work.rs", &[(6, "<free>::work", "SystemClock")])
     );
 }
 
 #[test]
 fn imports_types_and_injected_capabilities_do_not_construct_values() {
     let violations = check(
-        "crates/coven/src/runtime.rs",
+        "crates/app/src/runtime.rs",
         r#"
-        use coven_foundation::capabilities::SystemClock;
-        use coven_foundation::capabilities::UuidIds;
+        use app_foundation::capabilities::SystemClock;
+        use app_foundation::capabilities::UuidIds;
         struct Runtime { clock: SystemClock, ids: UuidIds }
         impl Runtime {
             fn run(&self) { self.clock.now(); self.ids.new_id(); }
@@ -294,10 +296,10 @@ fn imports_types_and_injected_capabilities_do_not_construct_values() {
 #[test]
 fn composition_authority_matches_the_file_type_and_method() {
     for (path, owner, method, allowed) in [
-        ("crates/coven/src/builder.rs", "Builder", "open", true),
-        ("crates/coven/src/runtime.rs", "Builder", "open", false),
-        ("crates/coven/src/builder.rs", "Runtime", "open", false),
-        ("crates/coven/src/builder.rs", "Builder", "run", false),
+        ("crates/app/src/builder.rs", "Builder", "open", true),
+        ("crates/app/src/runtime.rs", "Builder", "open", false),
+        ("crates/app/src/builder.rs", "Runtime", "open", false),
+        ("crates/app/src/builder.rs", "Builder", "run", false),
     ] {
         let source = format!(
             "impl {owner} {{ fn {method}() {{ let _ = SystemClock.now(); let _ = UuidIds.new_id(); }} }}"
@@ -310,7 +312,7 @@ fn composition_authority_matches_the_file_type_and_method() {
 #[test]
 fn nested_callables_do_not_inherit_composition_authority() {
     let violations = check(
-        "crates/coven/src/builder.rs",
+        "crates/app/src/builder.rs",
         r#"
         impl Builder {
             fn open() {
@@ -325,7 +327,7 @@ fn nested_callables_do_not_inherit_composition_authority() {
     assert_eq!(
         violations,
         findings(
-            "crates/coven/src/builder.rs",
+            "crates/app/src/builder.rs",
             &[(5, "<free>::acquire", "SystemClock"), (6, "<free>::ids", "UuidIds")]
         )
     );
@@ -334,12 +336,12 @@ fn nested_callables_do_not_inherit_composition_authority() {
 #[test]
 fn self_does_not_hide_construction_in_a_runtime_method() {
     let violations = check(
-        "crates/coven-foundation/src/clock.rs",
+        "crates/app-foundation/src/clock.rs",
         "impl SystemClock { fn run(&self) { let _ = Self; } }",
     );
     assert_eq!(
         violations,
-        findings("crates/coven-foundation/src/clock.rs", &[(1, "SystemClock::run", "SystemClock")])
+        findings("crates/app-foundation/src/clock.rs", &[(1, "SystemClock::run", "SystemClock")])
     );
 }
 
@@ -351,10 +353,10 @@ fn macro_arguments_and_bodies_are_checked() {
         ("<free>::acquire", "UuidIds", "fn acquire() { let _ = wrap!(UuidIds.new_id()); }"),
         ("<free>::<item>", "UuidIds", "macro_rules! acquire { () => { UuidIds.new_id() }; }"),
     ] {
-        let violations = check("crates/coven/src/runtime.rs", source);
+        let violations = check("crates/app/src/runtime.rs", source);
         assert_eq!(
             violations,
-            findings("crates/coven/src/runtime.rs", &[(1, caller, capability)]),
+            findings("crates/app/src/runtime.rs", &[(1, caller, capability)]),
             "{source}"
         );
     }
@@ -363,12 +365,12 @@ fn macro_arguments_and_bodies_are_checked() {
 #[test]
 fn test_fixtures_may_construct_capabilities() {
     assert!(check(
-        "crates/coven/src/runtime_tests.rs",
+        "crates/app/src/runtime_tests.rs",
         "fn fixture() { let _ = SystemClock.now(); let _ = UuidIds.new_id(); }",
     )
     .is_empty());
     let violations = check(
-        "crates/coven/src/runtime.rs",
+        "crates/app/src/runtime.rs",
         r#"
         #[cfg(test)] fn fixture() { let _ = SystemClock.now(); }
         #[cfg(test)] const IDS: UuidIds = UuidIds;
@@ -388,13 +390,13 @@ fn test_fixtures_may_construct_capabilities() {
 fn assert_root_only(statement: &str, capability: &str) {
     for (method, allowed) in [("run", false), ("open", true)] {
         let source = format!("impl Builder {{ fn {method}() {{ {statement} }} }}");
-        let violations = check("crates/coven/src/builder.rs", &source);
+        let violations = check("crates/app/src/builder.rs", &source);
         if allowed {
             assert!(violations.is_empty(), "{source}: {violations:?}");
         } else {
             assert_eq!(
                 violations,
-                findings("crates/coven/src/builder.rs", &[(1, "Builder::run", capability)]),
+                findings("crates/app/src/builder.rs", &[(1, "Builder::run", capability)]),
                 "{source}"
             );
         }
@@ -407,7 +409,7 @@ fn every_value_form_requires_a_composition_root() {
         ("SystemClock", "SystemClock"),
         ("SystemClock", "SystemClock {}"),
         ("FixedClock", "FixedClock(17)"),
-        ("FixedClock", "coven_foundation::capabilities::fakes::FixedClock(17)"),
+        ("FixedClock", "app_foundation::capabilities::fakes::FixedClock(17)"),
         ("ClosureClock", "ClosureClock::<F>(f)"),
         ("SequentialIds", "SequentialIds { next: 17 }"),
         ("SequentialIds", "SequentialIds { next: 17, ..other }"),
@@ -443,12 +445,12 @@ fn static_and_const_items_require_a_composition_root() {
         ] {
             assert_root_only(&format!("{keyword} CLOCK: {ty} = {initializer};"), "SystemClock");
             let violations = check(
-                "crates/coven/src/builder.rs",
+                "crates/app/src/builder.rs",
                 &format!("{keyword} CLOCK: {ty} = {initializer};"),
             );
             assert_eq!(
                 violations,
-                findings("crates/coven/src/builder.rs", &[(1, "<free>::<item>", "SystemClock")]),
+                findings("crates/app/src/builder.rs", &[(1, "<free>::<item>", "SystemClock")]),
                 "{keyword} {ty} = {initializer}: {violations:?}"
             );
         }
@@ -477,11 +479,11 @@ fn arbitrary_associated_factories_are_checked_at_the_use_site() {
             let source = format!(
                 "{definitions} impl Builder {{ fn {method}() {{ let _ = {expression}; }} }}"
             );
-            let violations = check("crates/coven/src/builder.rs", &source);
+            let violations = check("crates/app/src/builder.rs", &source);
             assert_eq!(
                 violations,
                 findings(
-                    "crates/coven/src/builder.rs",
+                    "crates/app/src/builder.rs",
                     if allowed { &[] } else { &[(8, "Builder::run", "FixedClock")] }
                 ),
                 "{source}: {violations:?}"
@@ -489,7 +491,7 @@ fn arbitrary_associated_factories_are_checked_at_the_use_site() {
         }
     }
     assert!(check(
-        "crates/coven/src/runtime.rs",
+        "crates/app/src/runtime.rs",
         &format!("{definitions} fn run() {{ FixedClock::resolution(); }}")
     )
     .is_empty());
@@ -510,11 +512,11 @@ fn trait_provided_associated_factories_are_checked() {
                 impl Builder {{ fn {method}() {{ let _ = {expression}; }} }}
             "#
             );
-            let violations = check("crates/coven/src/builder.rs", &source);
+            let violations = check("crates/app/src/builder.rs", &source);
             assert_eq!(
                 violations,
                 findings(
-                    "crates/coven/src/builder.rs",
+                    "crates/app/src/builder.rs",
                     if allowed { &[] } else { &[(4, "Builder::run", "FixedClock")] }
                 ),
                 "{source}: {violations:?}"
@@ -536,11 +538,11 @@ fn factory_authority_is_limited_to_its_result_and_body() {
             fn replace(&self) -> Self { Self(17) }
         }
     "#;
-    let violations = check("crates/coven-foundation/src/fakes.rs", source);
+    let violations = check("crates/app-foundation/src/fakes.rs", source);
     assert_eq!(
         violations,
         findings(
-            "crates/coven-foundation/src/fakes.rs",
+            "crates/app-foundation/src/fakes.rs",
             &[
                 (4, "FixedClock::new", "SystemClock"),
                 (5, "<free>::run", "FixedClock"),
@@ -562,11 +564,11 @@ fn factory_helpers_do_not_hide_construction_from_callers() {
                 impl Builder {{ fn {method}() {{ let _ = {expression}; }} }}
             "#
             );
-            let violations = check("crates/coven/src/builder.rs", &source);
+            let violations = check("crates/app/src/builder.rs", &source);
             assert_eq!(
                 violations,
                 findings(
-                    "crates/coven/src/builder.rs",
+                    "crates/app/src/builder.rs",
                     if allowed { &[] } else { &[(4, "Builder::run", "FixedClock")] }
                 ),
                 "{source}: {violations:?}"
@@ -585,38 +587,35 @@ fn default_cannot_make_capability_construction_implicit() {
         "#[derive(Debug, std::default::Default)] struct FixedClock(u64);",
         "#[cfg_attr(feature = \"test-utils\", derive(Default))] struct FixedClock(u64);",
     ] {
-        let violations = check("crates/coven-foundation/src/fakes.rs", definition);
+        let violations = check("crates/app-foundation/src/fakes.rs", definition);
         assert!(!violations.is_empty(), "accepted {definition}");
         assert!(violations
             .iter()
             .all(|violation| violation.message.starts_with("implements Default for capability")));
     }
-    assert!(check(
-        "crates/coven-foundation/src/values.rs",
-        "#[derive(Default)] struct Value(u64);"
-    )
-    .is_empty());
+    assert!(check("crates/app-foundation/src/values.rs", "#[derive(Default)] struct Value(u64);")
+        .is_empty());
 }
 
 #[test]
 fn default_is_forbidden_even_when_declared_inside_a_root_but_test_items_are_exempt() {
     let declaration = "impl Default for FixedClock { fn default() -> Self { Self(17) } }";
     let violations = check(
-        "crates/coven/src/builder.rs",
+        "crates/app/src/builder.rs",
         &format!("impl Builder {{ fn open() {{ {declaration} }} }}"),
     );
     assert_eq!(
         violations,
-        [Finding::new("crates/coven/src/builder.rs", 1,
+        [Finding::new("crates/app/src/builder.rs", 1,
             "implements Default for capability FixedClock, which permits implicit construction through Default::default()", REMEDY)]
     );
     for source in [
         format!("#[cfg(test)] {declaration}"),
         "#[cfg(test)] #[derive(Default)] struct FixedClock(u64);".to_string(),
     ] {
-        assert!(check("crates/coven-foundation/src/fakes.rs", &source).is_empty());
+        assert!(check("crates/app-foundation/src/fakes.rs", &source).is_empty());
     }
-    assert!(check("crates/coven-foundation/src/clock_tests.rs", declaration).is_empty());
+    assert!(check("crates/app-foundation/src/clock_tests.rs", declaration).is_empty());
 }
 
 #[test]
@@ -626,10 +625,10 @@ fn associated_constants_are_not_composition_roots() {
         ("Factory::<item>", "impl Factory { const CLOCK: FixedClock = supplied; }"),
         ("Factory::<item>", "trait Factory { const CLOCK: FixedClock = supplied; }"),
     ] {
-        let violations = check("crates/coven-foundation/src/fakes.rs", source);
+        let violations = check("crates/app-foundation/src/fakes.rs", source);
         assert_eq!(
             violations,
-            findings("crates/coven-foundation/src/fakes.rs", &[(1, caller, "FixedClock")]),
+            findings("crates/app-foundation/src/fakes.rs", &[(1, caller, "FixedClock")]),
             "{source}"
         );
     }
@@ -637,11 +636,11 @@ fn associated_constants_are_not_composition_roots() {
 
 #[test]
 fn trait_implementations_are_collected_across_crates_modules_and_features() {
-    assert!(POLICY.capability_traits.contains(&"Clock"));
+    assert!(policy().capability_traits.contains("Clock"));
     let files = [
-        RustFile::fixture("crates/coven-foundation/src/clock.rs", "pub trait Clock {}"),
+        RustFile::fixture("crates/app-foundation/src/clock.rs", "pub trait Clock {}"),
         RustFile::fixture(
-            "crates/coven/src/builder.rs",
+            "crates/app/src/builder.rs",
             "struct Builder; impl Builder { fn run() { let _ = other::provider::nested::Provider::<u64>(17); } }",
         ),
         RustFile::fixture(
@@ -650,15 +649,15 @@ fn trait_implementations_are_collected_across_crates_modules_and_features() {
             mod nested {
                 struct Provider<T>(T);
                 #[cfg(feature = "test-utils")]
-                impl<T: Send + Sync> coven_foundation::clock::Clock for Provider<T> {}
+                impl<T: Send + Sync> app_foundation::clock::Clock for Provider<T> {}
             }
         "#,
         ),
     ];
-    let violations = find_capability_construction_violations(&files, &POLICY);
+    let violations = find_capability_construction_violations(&files, &policy());
     assert_eq!(
         violations,
-        findings("crates/coven/src/builder.rs", &[(1, "Builder::run", "Provider")])
+        findings("crates/app/src/builder.rs", &[(1, "Builder::run", "Provider")])
     );
 }
 
@@ -666,23 +665,23 @@ fn trait_implementations_are_collected_across_crates_modules_and_features() {
 fn trait_fakes_are_allowed_only_in_roots_and_test_code() {
     let source = "fn fixture() { let _ = FixedClock(17); let _ = SequentialIds { next: 1 }; }";
     for path in [
-        "crates/coven/src/runtime_tests.rs",
-        "crates/coven/tests/runtime.rs",
-        "crates/coven/tests/support/fixture.rs",
+        "crates/app/src/runtime_tests.rs",
+        "crates/app/tests/runtime.rs",
+        "crates/app/tests/support/fixture.rs",
     ] {
         assert!(check(path, source).is_empty(), "{path}");
     }
     for attribute in ["#[cfg(test)]", "#[test]"] {
-        assert!(check("crates/coven/src/runtime.rs", &format!("{attribute} {source}")).is_empty());
+        assert!(check("crates/app/src/runtime.rs", &format!("{attribute} {source}")).is_empty());
     }
     for attribute in
         ["", "#[cfg(feature = \"test-utils\")]", "#[cfg(any(test, feature = \"test-utils\"))]"]
     {
-        let violations = check("crates/coven/src/runtime.rs", &format!("{attribute} {source}"));
+        let violations = check("crates/app/src/runtime.rs", &format!("{attribute} {source}"));
         assert_eq!(
             violations,
             findings(
-                "crates/coven/src/runtime.rs",
+                "crates/app/src/runtime.rs",
                 &[(1, "<free>::fixture", "FixedClock"), (1, "<free>::fixture", "SequentialIds")]
             ),
             "{attribute}"
@@ -692,13 +691,15 @@ fn trait_fakes_are_allowed_only_in_roots_and_test_code() {
 
 #[test]
 fn named_free_roots_construct_capabilities_without_authorizing_other_functions() {
-    let policy = Policy {
-        composition_roots: &[("crates/coven/src/bootstrap.rs", "<free>", "restore")],
-        construction_only_capability_types: &["Keychain"],
-        ..Policy::EMPTY
-    };
+    let policy = Policy::fixture(
+        r#"
+        construction_only_capability_types = ["Keychain"]
+        [composition_roots]
+        "crates/app/src/bootstrap.rs" = ["restore"]
+        "#,
+    );
     let files = [RustFile::fixture(
-        "crates/coven/src/bootstrap.rs",
+        "crates/app/src/bootstrap.rs",
         r#"
         struct Keychain; fn restore() { let _ = Keychain::new(); }
         fn unrelated() { let _ = Keychain::new(); }
@@ -707,6 +708,6 @@ fn named_free_roots_construct_capabilities_without_authorizing_other_functions()
     let violations = find_capability_construction_violations(&files, &policy);
     assert_eq!(
         violations,
-        findings("crates/coven/src/bootstrap.rs", &[(3, "<free>::unrelated", "Keychain")])
+        findings("crates/app/src/bootstrap.rs", &[(3, "<free>::unrelated", "Keychain")])
     );
 }

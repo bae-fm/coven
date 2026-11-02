@@ -1,0 +1,710 @@
+# coven's policy for the structural checker (tools/owner-construction-check,
+# Appendix F.3 and F.6): the rules it runs and every name they read about this
+# workspace. The checker fails when a row names a member, file, type or
+# callable the workspace does not hold.
+
+rules = [
+    "crate-dependencies",
+    "capability-boundaries",
+    "database-boundary",
+    "owner-dependencies",
+    "retained-capability-parameters",
+    "component-bundles",
+    "capability-construction",
+    "conventions",
+]
+
+# The checker itself answers only to the conventions.
+tools = ["owner-construction-check"]
+
+# coven re-exports the API at its root and keeps every module private (F.5).
+api_crate = "coven"
+
+# Appendix F.1: the crates in dependency order.
+crate_order = [
+    "coven-foundation",
+    "coven-crypto",
+    "coven-merge",
+    "coven-format",
+    "coven-database",
+    "coven-storage",
+    "coven-sync",
+    "coven",
+]
+separated_crates = [["coven-database", "coven-storage"]]
+
+# These are the leaf capabilities. Owners retaining them receive them
+# through constructors; their implementations keep raw OS handles private.
+capability_types = [
+    "Clock",
+    "ClockRef",
+    "SystemClock",
+    "IdSource",
+    "IdSourceRef",
+    "UuidIds",
+    "StoreLayout",
+    "StoreDirectories",
+    "BootstrapStore",
+    "ReplacementStore",
+    "StoreDir",
+    "AtomicFile",
+    "FileWriter",
+    "FileReader",
+    "AssetFiles",
+    "AssetFile",
+    "StoreLock",
+    "StoreReadLock",
+    "StoreDeletionLock",
+    "Keychain",
+    "StoreKeychain",
+    "PersonEntries",
+    "KeyringCustody",
+    "StoreKeyCustody",
+    "MemberKeyCustody",
+    "CustodyPersistence",
+    "StorageConnector",
+    "Storage",
+    "ProviderOps",
+    "OAuthClients",
+    "OAuthPresenter",
+    "OAuthSession",
+    "DatabaseConnection",
+]
+capability_traits = [
+    "Clock",
+    "IdSource",
+    "StoreKeyCustody",
+    "MemberKeyCustody",
+    "CustodyPersistence",
+    "StorageConnector",
+    "Storage",
+    "ProviderOps",
+    "OAuthPresenter",
+]
+construction_only_capability_types = [
+    "AssetFiles",
+    "AssetFile",
+    "BootstrapStore",
+    "ReplacementStore",
+    "StoreDir",
+    "StoreLock",
+    "StoreReadLock",
+    "StoreDeletionLock",
+    "AtomicFile",
+    "FileWriter",
+    "ClockRef",
+    "IdSourceRef",
+    "Keychain",
+    "StoreKeychain",
+    "PersonEntries",
+    "OAuthClients",
+    "OAuthSession",
+    "DatabaseConnection",
+]
+non_owner_types = [
+    # A cursor over retained provider bytes names the input connection,
+    # whose lifetime the database owns: closing it invalidates the cursor.
+    "RetainedBytes",
+    # Failure transport may carry a published handle; it does not own store lifetime.
+    "BootstrapError",
+    "StoreCreationError",
+    "KeyCustody",
+    "IdentityCustody",
+    "Command",
+    "Request",
+    # A handle on the providers' one HTTP client, cloned into each
+    # connection and admin call as the reqwest client inside it is. It
+    # holds the connector's clock only to time the stall window (§6.7).
+    "HttpClient",
+    # When one HTTP exchange last moved bytes; it lives for that exchange.
+    "ExchangeProgress",
+    # A connection's request totals. It holds the connection's clock
+    # only to time each request, and lives with that connection.
+    "RequestTally",
+    # One long operation's progress reports. It holds the operation's
+    # clock only to pace them, and lives for that operation.
+    "ProgressReport",
+]
+# Writes borrow the database's retained connection and id source; app
+# SQL receives none of those dependencies.
+borrowed_facade_types = [
+    "SnapshotMetadata",
+    # A run of slot reads borrows the sequence owner and hands each slot's
+    # bytes to its reader in order.
+    "SlotReads",
+    # These readers borrow a connection for one committed read or transaction.
+    "DatabaseMetadata",
+    "PreparedBytes",
+    "PreparedInputs",
+    "PreparedRecords",
+    "PreparedWrite",
+    "PreparedPart",
+    "PreparedSnapshot",
+    # One batch of a snapshot's staging writes its records through the
+    # input connection's transaction for that batch.
+    "RecordStaging",
+    "ClaimBytes",
+    "Circles",
+    "FileWrite",
+    # A write's batch borrows the store's id source while the app
+    # stages its files, giving each a new id.
+    "WriteBatch",
+    "SqlReadContext",
+    "Read",
+    "ReadOwner",
+    "ChangeCapture",
+    "StreamCapture",
+    "MigrationContext",
+    "SqlContext",
+    # An app's write borrows the store's operation owner, whose steps
+    # run in it, for that one transaction.
+    "CovenWrite",
+    # A bulk write's SQL borrows the writer connection for its one
+    # transaction, as a write's does.
+    "BulkSqlContext",
+    "SqlTransaction",
+    "ReaderLease",
+    "AppView",
+    "MergeStore",
+    "WriteMetadata",
+    "DatabaseRemovalView",
+    "WriteApply",
+    # A local write's operation hook, its phases and their capture borrow
+    # the writer connection for one transaction.
+    "EventCapture",
+    "LocalPhase",
+    "Tracker",
+    "PreWrite",
+]
+task_types = [
+    "OpenFile",
+    "LocalFileReader",
+    "LockedWriter",
+    # The files one commit records, and each folder they were made in,
+    # until the flush before that commit (Appendix C.3).
+    "FlushBatch",
+    "BatchFolder",
+    "Circles",
+    "CacheReservation",
+    # App bytes one staging wrote, until the write that takes them
+    # (§17.3).
+    "StagedFiles",
+    # Whole copies one pin prepared, until the write that keeps them
+    # (§17.8), and what preparing found for each file.
+    "PreparedPin",
+    "PreparedFile",
+    # The copies one call making files device-only wrote, until the
+    # write that switches them (§17.3).
+    "PreparedDeviceOnly",
+    # The copies one call making files device-only is writing (§17.3).
+    "CopyReservation",
+    "UploadedFile",
+    "RetainedInput",
+    "ObjectInput",
+    "InputStream",
+    # One run of consecutive slot reads.
+    "SlotReads",
+    # One floor observation, snapshot read or upload source.
+    "FloorObject",
+    "SnapshotObject",
+    "ReadSnapshot",
+    "SelectedSnapshot",
+    # One snapshot's records, staged while its body streams until the
+    # load or file check that reads them.
+    "SnapshotStaging",
+    "StagedRows",
+    "StagedSnapshot",
+    "StagedRecords",
+    "ReloadStart",
+    # One reload's selected streams and installation target.
+    "ReloadInputs",
+    "ClaimSource",
+    "SnapshotUploadSource",
+    "FloorUploadSource",
+    "FileTransfer",
+    "FileRangeStream",
+    "FileWorker",
+    "LocalFileStream",
+    "FileStream",
+    "FileStaging",
+    "FileWrite",
+    "CovenWrite",
+    "SqlReadContext",
+    "Read",
+    "ReadOwner",
+    "ChangeCapture",
+    "StreamCapture",
+    "LiveQuery",
+    "ReconfigurableLiveQuery",
+    "SqlTransaction",
+    "ReaderLease",
+    "AppView",
+    "MergeStore",
+    "WriteMetadata",
+    "DatabaseRemovalView",
+    "WriteApply",
+    # A local write's operation hook, its phases and their capture borrow
+    # the writer connection for one transaction.
+    "EventCapture",
+    "LocalPhase",
+    "Tracker",
+    "PreWrite",
+]
+internal_dependency_types = ["DatabaseConnection"]
+closed_session_types = [
+    "FileWrite",
+    "SqlReadContext",
+    "MigrationContext",
+    "SqlContext",
+    "BulkSqlContext",
+    "AppView",
+    "MergeStore",
+    "WriteMetadata",
+    "DatabaseRemovalView",
+    "WriteApply",
+    # A local write's operation hook, its phases and their capture borrow
+    # the writer connection for one transaction.
+    "EventCapture",
+    "LocalPhase",
+    "Tracker",
+    "PreWrite",
+]
+
+# The raw handles and coven's own SQL are the database boundary's subject;
+# the SQLite capability's row names the database's home and the SQLite
+# library beneath rusqlite.
+[database]
+capability = "SQLite"
+schema = "crates/coven-database/src/internal_schema.rs"
+table_macros = ["coven_tables", "coven_ownership_tables", "coven_input_tables", "coven_sequence_tables"]
+# The API re-exports the database crate's `rusqlite` so a host can name the
+# types its own SQL uses.
+rusqlite_reexport = "coven-database"
+
+# One list for owner construction, runtime acquisition and task starts.
+# Owner constructors include their private representations; names grant no
+# exemption.
+[composition_roots]
+"crates/coven-foundation/src/files/atomic_file.rs" = ["FileWriter::run"]
+# A batch's flush syncs its folders and the drive's cache on a blocking
+# task, which the write waits for before its commit.
+"crates/coven-foundation/src/files/flush_batch.rs" = ["FlushBatch::flush"]
+# Copies into a folder the person picked do their file work on a blocking
+# task, which finishes even if the call is dropped (§17.3).
+"crates/coven-foundation/src/files/folder_copy.rs" = ["blocking"]
+# Runs its caller's work on a blocking task and waits for it, so the work's
+# panic comes back to the caller as a value (api.md E15).
+"crates/coven-foundation/src/task.rs" = ["blocking"]
+# A test clock that keeps time by the clock it is given and records what one
+# progress watch holds at each reading.
+"crates/coven-foundation/src/progress.rs" = ["RecordingClock::new"]
+"crates/coven-foundation/src/files/bootstrap.rs" = ["reserve_bootstrap_directory"]
+# Both store listings read the directory on a blocking task.
+"crates/coven-foundation/src/files/layout.rs" = ["StoreDirectories::listed"]
+"crates/coven-foundation/src/files/lock_registry.rs" = ["LockRegistration::open_on_worker"]
+# A replacement composes the new installation beside the old one, holding
+# the store's writer lock until it is in place.
+"crates/coven-foundation/src/files/replacement.rs" = ["begin"]
+
+"crates/coven-crypto/src/custody/key_session.rs" = [
+    "KeySession::open",
+    "KeySession::store",
+    "KeySession::member",
+]
+"crates/coven-crypto/src/custody/passphrase.rs" = ["PassphraseCustody::new"]
+"crates/coven-crypto/src/custody/store_custody.rs" = ["StoreCustody::new"]
+"crates/coven-crypto/src/custody/keychain_test_utils.rs" = [
+    # Another of the person's devices shares only the person entries.
+    "Keychain::another_device",
+    # An Android phone keeps the person entries in Block Store, and a new
+    # phone set up from it receives a copy of them.
+    "Keychain::in_memory_block_store",
+    "Keychain::set_up_new_device",
+    "Keychain::restore_new_device_from_cloud",
+]
+
+"crates/coven-database/src/database.rs" = [
+    "process",
+    "start_call",
+    "Database::close",
+    "Database::stage_files",
+    "DatabaseReadHandle::close",
+]
+"crates/coven-database/src/database_builder.rs" = [
+    "DatabaseBuilder::new",
+    "DatabaseBuilder::open",
+    "DatabaseBuilder::open_graph",
+    "DatabaseBuilder::open_locked",
+    "DatabaseBuilder::open_read_graph",
+    "DatabaseBuilder::open_read_only",
+    "discarded_operations",
+    # Name reads open temporary read-only connections at the database boundary.
+    "read_store_name",
+    "discarded_store_name",
+]
+"crates/coven-database/src/file_database.rs" = ["FileDatabase::new", "FileDatabase::read_only"]
+"crates/coven-database/src/file_staging.rs" = ["FileStaging::write"]
+"crates/coven-database/src/local_file.rs" = ["LocalFileStream::read_at"]
+"crates/coven-database/src/read_pool.rs" = ["ReadPool::new"]
+"crates/coven-database/src/input_database.rs" = ["InputDatabase::new"]
+# Removes an abandoned snapshot staging's records on a blocking task once
+# its last owner drops; closing the store waits for it (§16.2).
+"crates/coven-database/src/snapshot_staging.rs" = ["StagedRows::drop"]
+# Starts a database's checkpointer task, which the store stops as it closes
+# (§4).
+"crates/coven-database/src/wal_checkpoints.rs" = ["WalCheckpointer::start"]
+
+"crates/coven-storage/src/providers/connector.rs" = [
+    "ProviderConnector::with_folders",
+    "ProviderConnector::connect",
+    "ProviderConnector::new",
+]
+"crates/coven-storage/src/providers/oauth_folders.rs" = ["OAuthFolders::new"]
+"crates/coven-storage/src/memory_connector.rs" = [
+    "MemoryStorage::with_transfers",
+    "MemoryStorage::connect",
+    "MemoryStorage::shared_connection",
+    "MemoryStorage::with_publication_gate",
+    "MemoryStorage::with_cooldown",
+    "MemoryStorage::with_device",
+]
+"crates/coven-storage/src/test_utils.rs" = [
+    "MemoryStorage::builder",
+    "MemoryStorage::from_memory",
+    "MemoryStorage::clone",
+    "MemoryStorage::connect_device",
+    "MemoryStorage::for_device",
+    "MemoryStorage::for_recipient",
+]
+"crates/coven-storage/src/conformance.rs" = ["Conformance::new"]
+"crates/coven-storage/src/memory_storage_builder.rs" = [
+    "MemoryStorageBuilder::new",
+    "MemoryStorageBuilder::build",
+]
+"crates/coven-storage/src/providers/cloudkit.rs" = ["CloudKitStorage::new"]
+"crates/coven-storage/src/providers/dropbox.rs" = ["DropboxStorage::new"]
+"crates/coven-storage/src/providers/oauth.rs" = ["OAuthFlow::new"]
+"crates/coven-storage/src/providers/onedrive.rs" = ["OneDriveStorage::new"]
+"crates/coven-storage/src/providers/s3.rs" = ["S3Storage::new", "S3Storage::with_settings"]
+# The S3 client's signing clock and its refusal handling (§20.7).
+"crates/coven-storage/src/providers/s3_clock.rs" = ["SigningClock::new", "ClockSkew::new"]
+# Detection connects one candidate per signer, then its probe runner.
+"crates/coven-storage/src/providers/s3_detect.rs" = ["detect"]
+# A new store's own-bucket check connects one candidate per signer.
+"crates/coven-storage/src/providers/s3_own_bucket.rs" = ["check_new_store"]
+# Emptying an S3 prefix, a development tool, connects to the location with
+# its own settings (api.md E14).
+"crates/coven-storage/src/providers/s3_empty.rs" = ["empty_prefix"]
+"crates/coven-storage/src/settings.rs" = ["StorageSettings::new"]
+
+"crates/coven-sync/src/file_read.rs" = ["FileStream::read", "UploadedFile::open"]
+# Creates a reserved cache file for a pin or an upload's own copy.
+"crates/coven-sync/src/file_cache.rs" = ["FilesInner::create_cache_file"]
+"crates/coven-sync/src/files.rs" = ["Files::new"]
+# One retry schedule per opened installation, injected into every worker and
+# connection; a read-only handle keeps its own in memory.
+"crates/coven-sync/src/retry_waits.rs" = ["RetryWaits::open", "RetryWaits::in_memory"]
+"crates/coven-sync/src/sync_loop.rs" = ["SyncLoop::new"]
+# One invite expiry per writer handle, connected or not; the handle's
+# storage owner keeps it and stops it as it closes.
+"crates/coven-sync/src/invite_expiry.rs" = ["InviteExpiry::start"]
+# Credential changes run as owned tasks, so a dropped app future cannot
+# leave custody and the live connection disagreeing.
+"crates/coven-sync/src/restore_codes.rs" = [
+    "RestoreCodes::new",
+    "RestoreCodes::replace_member_keys",
+    "RestoreCodes::replace_access_key",
+    "RestoreCodes::update_credentials",
+]
+# A sign-in's custody: device custody once per opened installation, session
+# custody per completed sign-in until publication (§20.2).
+"crates/coven-sync/src/sign_in.rs" = ["DeviceCredentials::new", "SessionSignIn::new"]
+"crates/coven-sync/src/credential_custody.rs" = ["CredentialKeychains::new"]
+# The sequence owner composes its file transfers and pass state.
+"crates/coven-sync/src/sequence_sync.rs" = ["SequenceSync::open", "SequenceSync::reconnect"]
+# An operation's call runs as its own task, so a dropped app future cannot
+# abandon a provider request already sent (§11).
+"crates/coven-sync/src/sequence_operations.rs" = ["SequenceSync::submit"]
+"crates/coven-sync/src/sequence_keys.rs" = ["SequenceSync::rotate_key"]
+
+# The development tool's entry point builds the production connector with the
+# system clock and random ids, as the builder does (api.md E14).
+"crates/coven/src/dev_tools.rs" = ["empty_s3_prefix"]
+"crates/coven/src/bootstrap.rs" = [
+    "bootstrap_device",
+    "join_with_invite",
+    "resume_join",
+    # Listing reads each unfinished installation's saved code.
+    "unfinished_joins",
+    "prepare_and_load",
+    "restore_from_code",
+    "restore_from_saved_code",
+]
+"crates/coven/src/bootstrap_commit.rs" = [
+    "publish_bootstrap",
+    # Committing custody reads and restores the installation's settings.
+    "commit",
+]
+"crates/coven/src/bootstrap_join.rs" = ["prepare_request"]
+# Restore connects through the builder's held sign-in.
+"crates/coven/src/restore_credentials.rs" = ["restore_connection"]
+# A join keeps its sign-in in the device custody it composes for the store,
+# beside its saved code (§13.2).
+"crates/coven/src/bootstrap_authentication.rs" = ["join_sign_in"]
+"crates/coven/src/bootstrap_replace.rs" = [
+    "replace_installation",
+    "open_swapped",
+    "publish",
+    "restore_device",
+]
+"crates/coven/src/bootstrap_reset.rs" = ["reset_device", "reset_unconnected"]
+"crates/coven/src/builder.rs" = [
+    "CovenBuilder::authenticate",
+    "CovenBuilder::connector",
+    "CovenBuilder::database",
+    "CovenBuilder::keychain",
+    # Builder setters replace a configured or already-unlocked custody choice.
+    "CovenBuilder::key_custody",
+    "CovenBuilder::identity_custody",
+    "CovenBuilder::make_identity",
+    "CovenBuilder::make_keys",
+    "CovenBuilder::new",
+    "CovenBuilder::oauth_flow",
+    "CovenBuilder::open",
+    "CovenBuilder::open_graph",
+    "CovenBuilder::reset_device",
+    "CovenBuilder::restore_device",
+    "CovenBuilder::resume_join",
+    "CovenBuilder::open_read_only",
+    "CovenBuilder::owners",
+    "CovenBuilder::create_store",
+    "OpeningOwners::into_handle",
+    "OpeningStore::open",
+]
+"crates/coven/src/builder_creation.rs" = ["create", "prepare"]
+"crates/coven/src/coven.rs" = [
+    "blocking",
+    "Coven::builder",
+    "Coven::storage_config",
+    "Coven::discard_store",
+]
+"crates/coven/src/store_layout.rs" = ["StoreLayout::new"]
+# Recovery discovery and forgetting acquire the registered keychain and scope
+# its entries.
+"crates/coven/src/saved_restore.rs" = [
+    "saved_restore_codes",
+    "list",
+    "forget_saved_restore_code",
+    "forget",
+]
+"crates/coven/src/handle.rs" = ["CovenHandle::close", "CovenHandle::new"]
+"crates/coven/src/read_handle.rs" = ["CovenReadHandle::close", "CovenReadHandle::new"]
+"crates/coven/src/storage.rs" = [
+    # A completed sign-in becomes this session's custody.
+    "StorageConnections::authenticate",
+    "StorageConnections::call",
+    "StorageConnections::new",
+    "StorageConnections::release",
+    # Setup, unlocking, starting and loading compose a connection's sequence
+    # owner, loop and credential owner at runtime.
+    "StorageConnections::attach",
+    "StorageConnections::sequence",
+    "StorageConnections::activate",
+    "StorageConnections::setup_connection",
+    "StorageConnections::forget_store_keys",
+]
+# A started loop's connection attempts outlive the start call; close stops
+# and awaits them. Stopping releases the client after the pass.
+"crates/coven/src/storage_control.rs" = ["StorageConnections::start", "StorageConnections::stop"]
+"crates/coven/src/test_utils.rs" = [
+    "TestCoven::builder",
+    "TestCoven::create_closed_store",
+    "TestCoven::discard_store",
+    "TestCoven::keep_store_keys",
+    "TestCoven::new",
+    # Another of the person's devices shares only the person entries.
+    "TestCoven::another_device",
+    # An Android phone keeps the person entries in Block Store, and a new
+    # phone set up from it receives a copy of them.
+    "TestCoven::with_block_store",
+    "TestCoven::set_up_new_device",
+    "TestCoven::restore_new_device_from_cloud",
+]
+
+# These methods derive a scoped capability from their injected directory.
+# They do not acquire an unrelated directory or file for another owner.
+[capability_factories."crates/coven-foundation/src/files/asset_files.rs"]
+"AssetFiles::stage" = "AssetFile"
+
+[capability_factories."crates/coven-foundation/src/files/layout.rs"]
+"StoreDirectories::begin_bootstrap" = "BootstrapStore"
+"StoreDirectories::begin_replacement" = "ReplacementStore"
+"StoreDirectories::store_dir" = "StoreDir"
+"StoreDirectories::create_store_dir" = "StoreDir"
+
+[capability_factories."crates/coven-foundation/src/files/bootstrap.rs"]
+"BootstrapStore::directory" = "StoreDir"
+
+[capability_factories."crates/coven-foundation/src/files/replacement.rs"]
+"ReplacementStore::directory" = "StoreDir"
+
+[capability_factories."crates/coven-foundation/src/files/directory.rs"]
+"StoreDir::lock_for_deletion" = "StoreDeletionLock"
+"StoreDir::lock_read_only" = "StoreReadLock"
+"StoreDir::lock_exclusive" = "StoreLock"
+"StoreDir::lock_for_open" = "StoreLock"
+"StoreDir::owned_file" = "AtomicFile"
+"StoreDir::file" = "AtomicFile"
+
+[capability_factories."crates/coven-foundation/src/files/atomic_file.rs"]
+"AtomicFile::create_writer" = "FileWriter"
+
+[[task_starts]]
+kind = "runtime construction"
+paths = ["Runtime::new", "Builder::new_current_thread", "Builder::new_multi_thread"]
+
+[[task_starts]]
+kind = "ambient runtime acquisition"
+paths = ["Handle::current", "Handle::try_current"]
+
+[[task_starts]]
+kind = "thread or task spawn"
+paths = ["tokio::spawn", "task::spawn", "task::spawn_blocking", "task::spawn_local", "thread::spawn"]
+methods = ["spawn", "spawn_blocking", "spawn_local"]
+
+# Appendix F.2's table: each capability, the paths the spec assigns it, and
+# what using it directly looks like.
+
+[[capabilities]]
+name = "network"
+homes = ["crates/coven-storage/src/providers/"]
+
+[[capabilities.gates]]
+kind = "CloudKit framework"
+crates = ["objc2_cloud_kit"]
+
+[[capabilities.gates]]
+kind = "HTTP client (reqwest)"
+crates = ["reqwest"]
+
+[[capabilities.gates]]
+kind = "HTTP server (axum)"
+crates = ["axum"]
+
+[[capabilities.gates]]
+kind = "AWS SDK"
+crates = [
+    "aws_config",
+    "aws_sdk_s3",
+    "aws_sdk_sts",
+    "aws_credential_types",
+    "aws_smithy_http_client",
+    "aws_smithy_runtime_api",
+    "aws_smithy_types",
+    "smithy_transport_reqwest",
+]
+
+[[capabilities.gates]]
+kind = "browser opener (open)"
+crates = ["open"]
+
+[[capabilities.gates]]
+kind = "sockets"
+paths = ["std::net", "tokio::net"]
+
+[[capabilities]]
+name = "cryptography"
+homes = ["crates/coven-crypto/src/"]
+
+[[capabilities.gates]]
+kind = "signing keys (ed25519-dalek)"
+crates = ["ed25519_dalek"]
+
+[[capabilities.gates]]
+kind = "sealed-box keys (crypto_box / x25519-dalek)"
+crates = ["crypto_box", "x25519_dalek"]
+
+[[capabilities.gates]]
+kind = "AEAD cipher (chacha20poly1305)"
+crates = ["chacha20poly1305"]
+
+[[capabilities.gates]]
+kind = "key derivation (hkdf / argon2)"
+crates = ["hkdf", "argon2"]
+
+[[capabilities.gates]]
+kind = "keyed hashes (hmac / sha2)"
+crates = ["hmac", "sha2"]
+
+[[capabilities.gates]]
+kind = "randomness"
+crates = ["rand", "rand_core", "getrandom"]
+paths = ["OsRng", "thread_rng", "ThreadRng"]
+
+[[capabilities]]
+name = "SQLite"
+homes = ["crates/coven-database/src/"]
+
+[[capabilities.gates]]
+kind = "SQLite library (rusqlite / libsqlite3-sys)"
+crates = ["rusqlite", "libsqlite3_sys"]
+
+[[capabilities]]
+name = "OS keychain"
+homes = ["crates/coven-crypto/src/custody/"]
+
+[[capabilities.gates]]
+kind = "platform keychain"
+crates = [
+    "keyring",
+    "keyring_core",
+    "apple_native_keyring_store",
+    "android_native_keyring_store",
+    "windows_native_keyring_store",
+    "zbus_secret_service_keyring_store",
+    "security_framework",
+]
+
+[[capabilities]]
+name = "current time"
+homes = ["crates/coven-foundation/src/clock.rs"]
+
+[[capabilities.gates]]
+kind = "system clock"
+paths = [
+    "SystemTime::now",
+    "Instant::now",
+    "Utc::now",
+    "Local::now",
+    "OffsetDateTime::now_utc",
+    "OffsetDateTime::now_local",
+    "tokio::time",
+    "thread::sleep",
+    "thread::sleep_until",
+]
+
+# Only generation is gated: parsing and validating an id is a deterministic
+# transformation any module may perform.
+[[capabilities]]
+name = "new ids"
+homes = ["crates/coven-foundation/src/id_source.rs"]
+
+[[capabilities.gates]]
+kind = "id generation (uuid)"
+paths = ["Uuid::new_v4", "Uuid::new_v7", "Uuid::now_v7"]
+
+[[capabilities]]
+name = "files on disk"
+homes = ["crates/coven-foundation/src/files/"]
+
+[[capabilities.gates]]
+kind = "filesystem"
+crates = ["tempfile"]
+paths = [
+    "std::fs",
+    "tokio::fs",
+    "unix::fs",
+    "windows::fs",
+    "rustix::fs",
+    "windows_sys::Win32::Storage::FileSystem",
+]

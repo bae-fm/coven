@@ -14,8 +14,7 @@ use syn::visit::{self, Visit};
 
 use crate::macros::parse_macro_body;
 use crate::syntax::{
-    is_test_only, is_test_source, output_contains_owner, type_name, visibility_crosses_owner,
-    RustFile,
+    is_test_only, output_contains_owner, type_name, visibility_crosses_owner, RustFile,
 };
 
 #[derive(Default)]
@@ -30,7 +29,7 @@ pub(crate) fn find_component_bundle_violations(files: &[RustFile]) -> Vec<Findin
     let bundle_types = collect_bundle_types(files);
     let mut violations = BTreeSet::new();
     for file in files {
-        if is_test_source(&file.relative_path) {
+        if file.is_test_source() {
             continue;
         }
         let mut visitor = ComponentBundleVisitor {
@@ -46,7 +45,7 @@ pub(crate) fn find_component_bundle_violations(files: &[RustFile]) -> Vec<Findin
 fn collect_bundle_types(files: &[RustFile]) -> BTreeSet<String> {
     let mut types = BTreeMap::new();
     for file in files {
-        if is_test_source(&file.relative_path) {
+        if file.is_test_source() {
             continue;
         }
         collect_bundle_type_info(&file.syntax.items, &mut types);

@@ -11,7 +11,7 @@ use crate::capability_construction::construction_only_types;
 use crate::finding::Finding;
 use crate::policy::Policy;
 use crate::syntax::{
-    is_test_only, is_test_source, output_contains_owner, supplied_type_names, type_name, RustFile,
+    is_test_only, output_contains_owner, supplied_type_names, type_name, RustFile,
 };
 
 pub(crate) fn find_retained_capability_parameter_violations(
@@ -22,7 +22,7 @@ pub(crate) fn find_retained_capability_parameter_violations(
     let capabilities = construction_only_types(files, policy);
     let mut violations = BTreeSet::new();
     for file in files {
-        if is_test_source(&file.relative_path) {
+        if file.is_test_source() {
             continue;
         }
         find_in_items(

@@ -11,6 +11,11 @@ use syn::visit::{self, Visit};
 pub(crate) struct RustFile {
     /// Relative to the workspace root, with `/` separators.
     pub(crate) relative_path: String,
+    /// The directory of the workspace member that holds the file, relative to
+    /// the workspace root and ending in `/`.
+    pub(crate) package_root: String,
+    /// That member's package name.
+    pub(crate) package: String,
     pub(crate) syntax: syn::File,
     /// How many lines the source holds.
     pub(crate) lines: usize,
@@ -19,20 +24,37 @@ pub(crate) struct RustFile {
 }
 
 impl RustFile {
+    /// A file of the member named by the path's first two segments, as in
+    /// `crates/<package>/src/lib.rs`.
     #[cfg(test)]
     pub(crate) fn fixture(relative_path: &str, source: &str) -> Self {
+        let mut segments = relative_path.split('/');
+        let (Some(directory), Some(package)) = (segments.next(), segments.next()) else {
+            panic!("fixture path {relative_path} names no member directory");
+        };
         RustFile {
             relative_path: relative_path.to_string(),
+            package_root: format!("{directory}/{package}/"),
+            package: package.to_string(),
             syntax: syn::parse_file(source).expect("parse fixture"),
             lines: source.lines().count(),
             extern_crates: BTreeMap::new(),
         }
     }
 
-    /// Whether the file belongs to one of the workspace's crates, which the
-    /// Appendix F.1 to F.3 rules govern; tools answer only to the conventions.
-    pub(crate) fn is_crate_source(&self) -> bool {
-        self.relative_path.starts_with("crates/")
+    /// The test layout of Appendix F.5: a source's tests live beside it in
+    /// `<name>_tests.rs`, and integration tests in a member's `tests/`
+    /// directory. Nothing else is test code — test-support modules behind a
+    /// `test-utils` feature are production sources and answer to every rule.
+    pub(crate) fn is_test_source(&self) -> bool {
+        self.is_integration_test_source() || self.relative_path.ends_with("_tests.rs")
+    }
+
+    /// A file under its member's own `tests/` directory.
+    pub(crate) fn is_integration_test_source(&self) -> bool {
+        self.relative_path
+            .strip_prefix(self.package_root.as_str())
+            .is_some_and(|path| path.starts_with("tests/"))
     }
 }
 
@@ -110,9 +132,8 @@ pub(crate) struct StructInfo {
 /// fields mention.
 pub(crate) fn collect_declared_types(files: &[RustFile]) -> BTreeMap<String, StructInfo> {
     let mut types = BTreeMap::new();
-    for file in files
-        .iter()
-        .filter(|file| !is_test_source(&file.relative_path) && !is_test_only(&file.syntax.attrs))
+    for file in
+        files.iter().filter(|file| !file.is_test_source() && !is_test_only(&file.syntax.attrs))
     {
         DeclarationCollector { path: &file.relative_path, types: &mut types }
             .visit_file(&file.syntax);
@@ -236,23 +257,6 @@ pub(crate) fn visibility_crosses_owner(visibility: &syn::Visibility) -> bool {
 /// The identifiers of a path's segments.
 pub(crate) fn path_names(path: &syn::Path) -> Vec<String> {
     path.segments.iter().map(|segment| segment.ident.to_string()).collect()
-}
-
-/// The test layout of Appendix F.5: a source's tests live beside it in
-/// `<name>_tests.rs`, and integration tests in a crate's `tests/` directory.
-/// Nothing else is test code — test-support modules behind a `test-utils`
-/// feature are production sources and answer to every rule.
-pub(crate) fn is_test_source(path: &str) -> bool {
-    is_integration_test_source(path) || path.ends_with("_tests.rs")
-}
-
-/// A file under a crate's or tool's own `tests/` directory.
-pub(crate) fn is_integration_test_source(path: &str) -> bool {
-    let mut segments = path.split('/');
-    matches!(
-        (segments.next(), segments.next(), segments.next()),
-        (Some("crates" | "tools"), Some(_), Some("tests"))
-    )
 }
 
 /// Whether an item compiles only into tests: a `#[test]` (or `#[tokio::test]`

@@ -3,13 +3,14 @@ use crate::owner_graph::OwnerGraph;
 
 #[test]
 fn callbacks_consume_the_retained_capability_but_factories_supply_one() {
-    const POLICY: Policy = Policy {
-        capability_types: &["DatabaseConnection"],
-        construction_only_capability_types: &["DatabaseConnection"],
-        ..Policy::EMPTY
-    };
+    let policy = Policy::fixture(
+        r#"
+        capability_types = ["DatabaseConnection"]
+        construction_only_capability_types = ["DatabaseConnection"]
+        "#,
+    );
     let files = [RustFile::fixture(
-        "crates/coven-database/src/database.rs",
+        "crates/app-database/src/database.rs",
         r#"
         struct DatabaseConnection;
         struct Database { connection: DatabaseConnection }
@@ -23,8 +24,8 @@ fn callbacks_consume_the_retained_capability_but_factories_supply_one() {
         }
         "#,
     )];
-    let graph = OwnerGraph::collect(&files, &POLICY);
-    let violations = find_retained_capability_parameter_violations(&files, &graph.owners, &POLICY);
+    let graph = OwnerGraph::collect(&files, &policy);
+    let violations = find_retained_capability_parameter_violations(&files, &graph.owners, &policy);
     let methods: BTreeSet<_> = violations
         .iter()
         .map(|v| v.message.split("::").nth(1).unwrap().split(' ').next().unwrap())
@@ -34,13 +35,14 @@ fn callbacks_consume_the_retained_capability_but_factories_supply_one() {
 
 #[test]
 fn retained_owner_runtime_method_cannot_accept_the_store_directory() {
-    const POLICY: Policy = Policy {
-        capability_types: &["Database", "StoreDir"],
-        construction_only_capability_types: &["StoreDir"],
-        ..Policy::EMPTY
-    };
+    let policy = Policy::fixture(
+        r#"
+        capability_types = ["Database", "StoreDir"]
+        construction_only_capability_types = ["StoreDir"]
+        "#,
+    );
     let files = vec![RustFile::fixture(
-        "crates/coven/src/rows.rs",
+        "crates/app/src/rows.rs",
         r#"
         struct StoreDir;
         struct Database;
@@ -55,13 +57,13 @@ fn retained_owner_runtime_method_cannot_accept_the_store_directory() {
         }
         "#,
     )];
-    let graph = OwnerGraph::collect(&files, &POLICY);
-    let violations = find_retained_capability_parameter_violations(&files, &graph.owners, &POLICY);
+    let graph = OwnerGraph::collect(&files, &policy);
+    let violations = find_retained_capability_parameter_violations(&files, &graph.owners, &policy);
 
     assert_eq!(
         violations,
         [Finding::new(
-            "crates/coven/src/rows.rs",
+            "crates/app/src/rows.rs",
             11,
             "Rows::execute accepts construction-only capability StoreDir at runtime",
             "a method never takes a raw capability; it uses the one its owner was built with"
@@ -71,22 +73,24 @@ fn retained_owner_runtime_method_cannot_accept_the_store_directory() {
 
 #[test]
 fn trait_implementations_have_the_same_parameter_boundary_as_explicit_capabilities() {
-    const POLICY: Policy = Policy {
-        capability_types: &["Clock"],
-        capability_traits: &["Clock"],
-        composition_roots: &[("crates/coven/src/runtime.rs", "Runtime", "open")],
-        ..Policy::EMPTY
-    };
+    let policy = Policy::fixture(
+        r#"
+        capability_types = ["Clock"]
+        capability_traits = ["Clock"]
+        [composition_roots]
+        "crates/app/src/runtime.rs" = ["Runtime::open"]
+        "#,
+    );
     let files = vec![
         RustFile::fixture(
-            "crates/coven-foundation/src/clock.rs",
+            "crates/app-foundation/src/clock.rs",
             r#"
             #[cfg(feature = "test-utils")]
             impl<T> Clock for SuppliedClock<T> {}
         "#,
         ),
         RustFile::fixture(
-            "crates/coven/src/runtime.rs",
+            "crates/app/src/runtime.rs",
             r#"
             struct Runtime { clock: Box<dyn Clock> }
             impl Runtime {
@@ -98,12 +102,12 @@ fn trait_implementations_have_the_same_parameter_boundary_as_explicit_capabiliti
         "#,
         ),
     ];
-    let graph = OwnerGraph::collect(&files, &POLICY);
-    let violations = find_retained_capability_parameter_violations(&files, &graph.owners, &POLICY);
+    let graph = OwnerGraph::collect(&files, &policy);
+    let violations = find_retained_capability_parameter_violations(&files, &graph.owners, &policy);
     assert_eq!(
         violations,
         [Finding::new(
-            "crates/coven/src/runtime.rs",
+            "crates/app/src/runtime.rs",
             6,
             "Runtime::run accepts construction-only capability SuppliedClock at runtime",
             "a method never takes a raw capability; it uses the one its owner was built with"
