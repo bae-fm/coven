@@ -450,7 +450,12 @@ fn sql_value_conversions_are_allowed_without_allowing_database_access() {
         r#"
         use rusqlite::ToSql;
         use rusqlite::types::{FromSql, FromSqlResult, FromSqlError, ToSqlOutput, Value, ValueRef};
+        use rusqlite::types::{ToSql as Bind, Type};
         fn bind() -> rusqlite::Result<ToSqlOutput<'static>> { todo!() }
+        impl rusqlite::types::ToSql for Key { fn to_sql(&self) -> rusqlite::Result<ToSqlOutput<'_>> { todo!() } }
+        fn refuse(index: usize) -> rusqlite::Error {
+            rusqlite::Error::InvalidColumnType(index, String::new(), rusqlite::types::Type::Null)
+        }
     "#
     )
     .is_empty());

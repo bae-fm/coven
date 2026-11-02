@@ -115,19 +115,23 @@ impl<'p> CapabilityBoundaryVisitor<'_, 'p> {
 }
 
 fn gate_matches(gate: &Gate, segments: &[String], is_import: bool) -> bool {
-    // SQL value conversions acquire no connection or other capability.
+    // SQL value conversions, and the errors and column types they report,
+    // acquire no connection or other capability. rusqlite exports `ToSql` both
+    // at its root and from `types`.
     if segments.first().is_some_and(|name| name == "rusqlite") {
         let path: Vec<_> = segments.iter().map(String::as_str).collect();
         if matches!(
             path.as_slice(),
-            ["rusqlite", "ToSql" | "Result", ..]
+            ["rusqlite", "ToSql" | "Result" | "Error", ..]
                 | [
                     "rusqlite",
                     "types",
                     "FromSql"
                         | "FromSqlError"
                         | "FromSqlResult"
+                        | "ToSql"
                         | "ToSqlOutput"
+                        | "Type"
                         | "Value"
                         | "ValueRef",
                     ..
