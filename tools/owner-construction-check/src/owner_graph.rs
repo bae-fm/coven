@@ -11,7 +11,7 @@ pub(crate) struct OwnerGraph {
 
 impl OwnerGraph {
     pub(crate) fn collect(files: &[RustFile], policy: &Policy) -> Self {
-        let types = collect_declared_types(files);
+        let types = collect_declared_types(files, &policy.phantom_type_arguments);
         let owners = infer_owners(&types, policy);
         Self { types, owners }
     }

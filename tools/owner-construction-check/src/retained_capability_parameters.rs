@@ -53,8 +53,11 @@ fn find_in_items(
                     let syn::ImplItem::Fn(method) = impl_item else {
                         continue;
                     };
-                    if output_contains_owner(&method.sig.output, &owner)
-                        || policy.is_composition_root(path, &owner, &method.sig.ident.to_string())
+                    if output_contains_owner(
+                        &method.sig.output,
+                        &owner,
+                        &policy.phantom_type_arguments,
+                    ) || policy.is_composition_root(path, &owner, &method.sig.ident.to_string())
                     {
                         continue;
                     }
@@ -62,7 +65,7 @@ fn find_in_items(
                         let syn::FnArg::Typed(input) = input else {
                             continue;
                         };
-                        let names = supplied_type_names(&input.ty);
+                        let names = supplied_type_names(&input.ty, &policy.phantom_type_arguments);
                         for capability in capabilities {
                             if names.contains(capability) {
                                 violations.insert(Finding::new(path, input.span().start().line,

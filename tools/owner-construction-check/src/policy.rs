@@ -136,6 +136,12 @@ pub(crate) struct Policy {
     /// module of the crate.
     #[serde(default)]
     pub(crate) closed_session_types: BTreeSet<String>,
+    /// Generic types that hold no value of their type arguments, such as a
+    /// router typed by the state it will later be given: `Router<AppState>`
+    /// holds no `AppState`. A type argument of one is no value the type holds,
+    /// so returning one constructs none and a field holding one retains none.
+    #[serde(default)]
+    pub(crate) phantom_type_arguments: BTreeSet<String>,
     /// Dependencies whose library, as source code names it, is not their
     /// package's name with `-` as `_`: `"coreaudio-rs" = "coreaudio"`. The
     /// checker reads the workspace's manifests, not its dependencies', so a
@@ -277,7 +283,7 @@ impl Policy {
 
     /// Every type name the policy holds, with the row it came from.
     pub(crate) fn named_types(&self) -> Vec<(&'static str, &str)> {
-        let lists: [(&str, &BTreeSet<String>); 8] = [
+        let lists: [(&str, &BTreeSet<String>); 9] = [
             ("capability_types", &self.capability_types),
             ("capability_traits", &self.capability_traits),
             ("construction_only_capability_types", &self.construction_only_capability_types),
@@ -286,6 +292,7 @@ impl Policy {
             ("task_types", &self.task_types),
             ("internal_dependency_types", &self.internal_dependency_types),
             ("closed_session_types", &self.closed_session_types),
+            ("phantom_type_arguments", &self.phantom_type_arguments),
         ];
         let mut named = lists
             .into_iter()

@@ -223,6 +223,20 @@ fn every_type_the_policy_names_is_declared_by_a_crate() {
 }
 
 #[test]
+fn phantom_type_arguments_name_a_type() {
+    let files =
+        vec![RustFile::fixture("crates/app/src/server.rs", "fn mount(router: Router<()>) {}")];
+    assert_eq!(
+        stale(
+            files.clone(),
+            r#"phantom_type_arguments = ["Router", "Missing"]
+            external_types = ["Router"]"#
+        ),
+        ["phantom_type_arguments: no crate declares Missing"]
+    );
+}
+
+#[test]
 fn capability_traits_are_declared_traits() {
     let rows = r#"
         capability_types = ["Clock", "IdSource"]

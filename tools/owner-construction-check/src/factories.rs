@@ -51,9 +51,12 @@ impl Factories {
         }
     }
 
+    /// `phantoms`: the policy's generic types whose type arguments are no
+    /// product (`Policy::phantom_type_arguments`).
     pub(crate) fn collect(
         files: &[RustFile],
         constructed: &BTreeSet<String>,
+        phantoms: &BTreeSet<String>,
         resolver: &NameResolver,
         findings: &mut BTreeSet<Finding>,
     ) -> Self {
@@ -64,7 +67,7 @@ impl Factories {
         };
         let mut traits = BTreeMap::new();
         for file in files {
-            TraitCollector { path: &file.relative_path, resolver, traits: &mut traits }
+            TraitCollector { path: &file.relative_path, resolver, phantoms, traits: &mut traits }
                 .visit_file(&file.syntax);
         }
         let mut aliases = Vec::new();
@@ -73,6 +76,7 @@ impl Factories {
                 path: &file.relative_path,
                 resolver,
                 constructed,
+                phantoms,
                 traits: &traits,
                 factories: &mut factories,
                 aliases: &mut aliases,
@@ -127,6 +131,7 @@ struct Collector<'a> {
     path: &'a str,
     resolver: &'a NameResolver,
     constructed: &'a BTreeSet<String>,
+    phantoms: &'a BTreeSet<String>,
     traits: &'a BTreeMap<ItemPath, Vec<(String, BTreeSet<String>)>>,
     factories: &'a mut Factories,
     aliases: &'a mut Vec<(ItemPath, ItemPath)>,
@@ -179,8 +184,10 @@ impl Collector<'_> {
 impl<'ast> Visit<'ast> for Collector<'_> {
     fn visit_item_fn(&mut self, node: &'ast syn::ItemFn) {
         if let syn::ReturnType::Type(_, output) = &node.sig.output {
-            let results =
-                type_names(output).intersection(self.constructed).cloned().collect::<BTreeSet<_>>();
+            let results = type_names(output, self.phantoms)
+                .intersection(self.constructed)
+                .cloned()
+                .collect::<BTreeSet<_>>();
             if !results.is_empty() {
                 self.factories.free_names.insert(node.sig.ident.to_string());
                 self.factories
@@ -238,7 +245,7 @@ impl<'ast> Visit<'ast> for Collector<'_> {
         for item in &node.items {
             if let syn::ImplItem::Fn(method) = item {
                 let names = match &method.sig.output {
-                    syn::ReturnType::Type(_, output) => type_names(output),
+                    syn::ReturnType::Type(_, output) => type_names(output, self.phantoms),
                     syn::ReturnType::Default => BTreeSet::new(),
                 };
                 methods.retain(|(name, _)| method.sig.ident != name.as_str());
@@ -266,6 +273,7 @@ impl<'ast> Visit<'ast> for Collector<'_> {
 struct TraitCollector<'a> {
     path: &'a str,
     resolver: &'a NameResolver,
+    phantoms: &'a BTreeSet<String>,
     traits: &'a mut BTreeMap<ItemPath, Vec<(String, BTreeSet<String>)>>,
 }
 
@@ -276,7 +284,7 @@ impl<'ast> Visit<'ast> for TraitCollector<'_> {
         for item in &node.items {
             if let syn::TraitItem::Fn(method) = item {
                 let names = match &method.sig.output {
-                    syn::ReturnType::Type(_, output) => type_names(output),
+                    syn::ReturnType::Type(_, output) => type_names(output, self.phantoms),
                     syn::ReturnType::Default => BTreeSet::new(),
                 };
                 methods.push((method.sig.ident.to_string(), names));

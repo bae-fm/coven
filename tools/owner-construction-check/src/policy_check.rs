@@ -182,7 +182,8 @@ fn invalid_capability_factories(files: &[RustFile], policy: &Policy) -> Vec<Stri
                     signature.receiver().is_some()
                         && match &signature.output {
                             syn::ReturnType::Type(_, output) => {
-                                type_names(output).contains(&factory.product)
+                                type_names(output, &policy.phantom_type_arguments)
+                                    .contains(&factory.product)
                             }
                             syn::ReturnType::Default => false,
                         }
@@ -200,8 +201,10 @@ fn invalid_capability_factories(files: &[RustFile], policy: &Policy) -> Vec<Stri
 /// A type the policy names is declared by a crate, or is one of its external
 /// types: named by a crate's production source and declared by none.
 fn undeclared_types(crate_files: &[RustFile], policy: &Policy) -> Vec<String> {
-    let declared = collect_declared_types(crate_files);
-    let mut mentioned = TypeNames::default();
+    let declared = collect_declared_types(crate_files, &policy.phantom_type_arguments);
+    // Every name, type arguments of phantom generics included.
+    let every_argument = BTreeSet::new();
+    let mut mentioned = TypeNames::new(&every_argument);
     for file in crate_files {
         mentioned.visit_file(&file.syntax);
     }

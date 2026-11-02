@@ -39,7 +39,8 @@ pub(crate) fn find_owner_dependency_leaks(
     policy: &Policy,
     graph: &OwnerGraph,
 ) -> Vec<Finding> {
-    let methods = collect_owner_methods(files);
+    let phantoms = &policy.phantom_type_arguments;
+    let methods = collect_owner_methods(files, phantoms);
     let raw = RAW_SQLITE_HANDLES.iter().map(|(name, _)| name.to_string()).collect::<BTreeSet<_>>();
     let capabilities = &policy.capability_types;
     let services = graph.owners.union(capabilities).cloned().collect::<BTreeSet<_>>();
@@ -49,7 +50,7 @@ pub(crate) fn find_owner_dependency_leaks(
         .map(|method| (method.owner.clone(), graph.retained(&method.owner)))
         .collect::<BTreeMap<_, _>>();
     let mut leaks = BTreeSet::new();
-    collect_retained_service_owner_fields(files, graph, &graph.owners, &services, &mut leaks);
+    collect_retained_service_owner_fields(files, graph, &services, phantoms, &mut leaks);
     collect_crate_root_session_fields(files, &internal, policy, &mut leaks);
     collect_database_callables(files, &raw, policy, &mut leaks);
     // A wrapper's getters expose the same dependencies as returning them directly.
@@ -131,8 +132,8 @@ fn transfers_task(method: &OwnerMethod, output: &str, policy: &Policy) -> bool {
 fn collect_retained_service_owner_fields(
     files: &[RustFile],
     graph: &OwnerGraph,
-    service_owners: &BTreeSet<String>,
     retained_service_types: &BTreeSet<String>,
+    phantoms: &BTreeSet<String>,
     leaks: &mut BTreeSet<Finding>,
 ) {
     for file in files {
@@ -140,8 +141,8 @@ fn collect_retained_service_owner_fields(
             &file.relative_path,
             &file.syntax.items,
             graph,
-            service_owners,
             retained_service_types,
+            phantoms,
             leaks,
         );
     }
@@ -151,8 +152,8 @@ fn collect_retained_service_owner_fields_in_items(
     path: &str,
     items: &[syn::Item],
     graph: &OwnerGraph,
-    service_owners: &BTreeSet<String>,
     retained_service_types: &BTreeSet<String>,
+    phantoms: &BTreeSet<String>,
     leaks: &mut BTreeSet<Finding>,
 ) {
     for item in items {
@@ -163,11 +164,12 @@ fn collect_retained_service_owner_fields_in_items(
                     if !visibility_crosses_owner(&field.vis) {
                         continue;
                     }
-                    let exposes_service = supplied_type_names(&field.ty).iter().any(|name| {
-                        retained_service_types.contains(name)
-                            || !graph.retained(name).is_disjoint(retained_service_types)
-                    });
-                    if !service_owners.contains(&owner) && !exposes_service {
+                    let exposes_service =
+                        supplied_type_names(&field.ty, phantoms).iter().any(|name| {
+                            retained_service_types.contains(name)
+                                || !graph.retained(name).is_disjoint(retained_service_types)
+                        });
+                    if !graph.owners.contains(&owner) && !exposes_service {
                         continue;
                     }
                     let line = field.span().start().line;
@@ -187,8 +189,8 @@ fn collect_retained_service_owner_fields_in_items(
                         path,
                         items,
                         graph,
-                        service_owners,
                         retained_service_types,
+                        phantoms,
                         leaks,
                     );
                 }
@@ -215,6 +217,7 @@ fn collect_database_callables(
             &file.relative_path,
             &file.syntax.items,
             raw_database_types,
+            &policy.phantom_type_arguments,
             leaks,
         );
     }
@@ -224,6 +227,7 @@ fn collect_database_callables_in_items(
     path: &str,
     items: &[syn::Item],
     raw_database_types: &BTreeSet<String>,
+    phantoms: &BTreeSet<String>,
     leaks: &mut BTreeSet<Finding>,
 ) {
     for item in items {
@@ -235,6 +239,7 @@ fn collect_database_callables_in_items(
                     &function.sig,
                     matches!(function.vis, syn::Visibility::Public(_)),
                     raw_database_types,
+                    phantoms,
                     leaks,
                 );
             }
@@ -252,6 +257,7 @@ fn collect_database_callables_in_items(
                         &method.sig,
                         matches!(method.vis, syn::Visibility::Public(_)),
                         raw_database_types,
+                        phantoms,
                         leaks,
                     );
                 }
@@ -270,13 +276,20 @@ fn collect_database_callables_in_items(
                         &method.sig,
                         true,
                         raw_database_types,
+                        phantoms,
                         leaks,
                     );
                 }
             }
             syn::Item::Mod(module) => {
                 if let Some((_, items)) = &module.content {
-                    collect_database_callables_in_items(path, items, raw_database_types, leaks);
+                    collect_database_callables_in_items(
+                        path,
+                        items,
+                        raw_database_types,
+                        phantoms,
+                        leaks,
+                    );
                 }
             }
             _ => {}
@@ -290,12 +303,13 @@ fn collect_database_signature(
     signature: &syn::Signature,
     expose_parameters: bool,
     raw_database_types: &BTreeSet<String>,
+    phantoms: &BTreeSet<String>,
     leaks: &mut BTreeSet<Finding>,
 ) {
     let callable = signature.ident.to_string();
     let line = signature.ident.span().start().line;
     if let syn::ReturnType::Type(_, output) = &signature.output {
-        for dependency in type_names(output).intersection(raw_database_types) {
+        for dependency in type_names(output, phantoms).intersection(raw_database_types) {
             let callable =
                 owner.map_or_else(|| callable.clone(), |owner| format!("{owner}::{callable}"));
             leaks.insert(Finding::new(
@@ -313,7 +327,7 @@ fn collect_database_signature(
         let syn::FnArg::Typed(input) = input else {
             continue;
         };
-        for dependency in type_names(&input.ty).intersection(raw_database_types) {
+        for dependency in type_names(&input.ty, phantoms).intersection(raw_database_types) {
             let callable =
                 owner.map_or_else(|| callable.clone(), |owner| format!("{owner}::{callable}"));
             leaks.insert(Finding::new(
@@ -347,7 +361,9 @@ fn collect_crate_root_session_fields(
                 continue;
             }
             for field in &item.fields {
-                for dependency in type_names(&field.ty).intersection(internal_dependencies) {
+                for dependency in type_names(&field.ty, &policy.phantom_type_arguments)
+                    .intersection(internal_dependencies)
+                {
                     leaks.insert(Finding::new(&file.relative_path, item.ident.span().start().line,
                         format!("crate-root {session} exposes internal dependency {dependency} to every module"), REMEDY));
                 }
@@ -356,15 +372,25 @@ fn collect_crate_root_session_fields(
     }
 }
 
-fn collect_owner_methods(files: &[RustFile]) -> Vec<OwnerMethod> {
+fn collect_owner_methods(files: &[RustFile], phantoms: &BTreeSet<String>) -> Vec<OwnerMethod> {
     let mut methods = Vec::new();
     for file in files {
-        collect_owner_methods_in_items(&file.relative_path, &file.syntax.items, &mut methods);
+        collect_owner_methods_in_items(
+            &file.relative_path,
+            &file.syntax.items,
+            phantoms,
+            &mut methods,
+        );
     }
     methods
 }
 
-fn collect_owner_methods_in_items(path: &str, items: &[syn::Item], methods: &mut Vec<OwnerMethod>) {
+fn collect_owner_methods_in_items(
+    path: &str,
+    items: &[syn::Item],
+    phantoms: &BTreeSet<String>,
+    methods: &mut Vec<OwnerMethod>,
+) {
     for item in items {
         match item {
             syn::Item::Impl(item) => {
@@ -380,6 +406,7 @@ fn collect_owner_methods_in_items(path: &str, items: &[syn::Item], methods: &mut
                         &owner,
                         &method.sig,
                         visibility_crosses_owner(&method.vis),
+                        phantoms,
                     ));
                 }
             }
@@ -389,12 +416,12 @@ fn collect_owner_methods_in_items(path: &str, items: &[syn::Item], methods: &mut
                     let syn::TraitItem::Fn(method) = item else {
                         continue;
                     };
-                    methods.push(owner_method(path, &owner, &method.sig, true));
+                    methods.push(owner_method(path, &owner, &method.sig, true, phantoms));
                 }
             }
             syn::Item::Mod(item) => {
                 if let Some((_, items)) = &item.content {
-                    collect_owner_methods_in_items(path, items, methods);
+                    collect_owner_methods_in_items(path, items, phantoms, methods);
                 }
             }
             _ => {}
@@ -402,10 +429,16 @@ fn collect_owner_methods_in_items(path: &str, items: &[syn::Item], methods: &mut
     }
 }
 
-fn owner_method(path: &str, owner: &str, signature: &syn::Signature, public: bool) -> OwnerMethod {
+fn owner_method(
+    path: &str,
+    owner: &str,
+    signature: &syn::Signature,
+    public: bool,
+    phantoms: &BTreeSet<String>,
+) -> OwnerMethod {
     let mut output = match &signature.output {
         syn::ReturnType::Default => BTreeSet::new(),
-        syn::ReturnType::Type(_, output) => type_names(output),
+        syn::ReturnType::Type(_, output) => type_names(output, phantoms),
     };
     output.remove("Self");
     output.remove(owner);
@@ -414,7 +447,7 @@ fn owner_method(path: &str, owner: &str, signature: &syn::Signature, public: boo
         .iter()
         .flat_map(|input| match input {
             syn::FnArg::Receiver(_) => BTreeSet::new(),
-            syn::FnArg::Typed(input) => type_names(&input.ty),
+            syn::FnArg::Typed(input) => type_names(&input.ty, phantoms),
         })
         .collect();
     OwnerMethod {

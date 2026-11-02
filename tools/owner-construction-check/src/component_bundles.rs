@@ -13,6 +13,7 @@ use syn::spanned::Spanned;
 use syn::visit::{self, Visit};
 
 use crate::macros::parse_macro_body;
+use crate::policy::Policy;
 use crate::syntax::{output_contains_owner, type_name, visibility_crosses_owner, RustFile};
 
 #[derive(Default)]
@@ -23,8 +24,11 @@ struct BundleTypeInfo {
     inherent_methods: Vec<(String, bool, bool)>,
 }
 
-pub(crate) fn find_component_bundle_violations(files: &[RustFile]) -> Vec<Finding> {
-    let bundle_types = collect_bundle_types(files);
+pub(crate) fn find_component_bundle_violations(
+    files: &[RustFile],
+    policy: &Policy,
+) -> Vec<Finding> {
+    let bundle_types = collect_bundle_types(files, &policy.phantom_type_arguments);
     let mut violations = BTreeSet::new();
     for file in files {
         let mut visitor = ComponentBundleVisitor {
@@ -37,10 +41,10 @@ pub(crate) fn find_component_bundle_violations(files: &[RustFile]) -> Vec<Findin
     violations.into_iter().collect()
 }
 
-fn collect_bundle_types(files: &[RustFile]) -> BTreeSet<String> {
+fn collect_bundle_types(files: &[RustFile], phantoms: &BTreeSet<String>) -> BTreeSet<String> {
     let mut types = BTreeMap::new();
     for file in files {
-        collect_bundle_type_info(&file.syntax.items, &mut types);
+        collect_bundle_type_info(&file.syntax.items, phantoms, &mut types);
     }
     types
         .into_iter()
@@ -53,7 +57,11 @@ fn collect_bundle_types(files: &[RustFile]) -> BTreeSet<String> {
         .collect()
 }
 
-fn collect_bundle_type_info(items: &[syn::Item], types: &mut BTreeMap<String, BundleTypeInfo>) {
+fn collect_bundle_type_info(
+    items: &[syn::Item],
+    phantoms: &BTreeSet<String>,
+    types: &mut BTreeMap<String, BundleTypeInfo>,
+) {
     for item in items {
         match item {
             syn::Item::Struct(item) => {
@@ -73,14 +81,14 @@ fn collect_bundle_type_info(items: &[syn::Item], types: &mut BTreeMap<String, Bu
                     };
                     info.inherent_methods.push((
                         method.sig.ident.to_string(),
-                        output_contains_owner(&method.sig.output, &name),
+                        output_contains_owner(&method.sig.output, &name, phantoms),
                         method.sig.receiver().is_some(),
                     ));
                 }
             }
             syn::Item::Mod(item) => {
                 if let Some((_, items)) = &item.content {
-                    collect_bundle_type_info(items, types);
+                    collect_bundle_type_info(items, phantoms, types);
                 }
             }
             _ => {}

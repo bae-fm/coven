@@ -89,7 +89,13 @@ pub(crate) fn find_capability_construction_violations(
     let constructed = capabilities.union(&owners).cloned().collect();
     let resolver = NameResolver::collect(files);
     let mut violations = BTreeSet::new();
-    let factories = Factories::collect(files, &constructed, &resolver, &mut violations);
+    let factories = Factories::collect(
+        files,
+        &constructed,
+        &policy.phantom_type_arguments,
+        &resolver,
+        &mut violations,
+    );
     for file in files {
         let mut visitor = ConstructionVisitor {
             path: &file.relative_path,
@@ -359,7 +365,7 @@ impl ConstructionVisitor<'_> {
     }
 
     fn check_item_type(&mut self, ty: &syn::Type, span: Span) {
-        for name in type_names(ty) {
+        for name in type_names(ty, &self.policy.phantom_type_arguments) {
             self.record(&name, span, ConstructionKind::Value);
         }
     }
@@ -368,7 +374,7 @@ impl ConstructionVisitor<'_> {
         let syn::ReturnType::Type(_, output) = &signature.output else {
             return BTreeSet::new();
         };
-        type_names(output)
+        type_names(output, &self.policy.phantom_type_arguments)
             .iter()
             .map(|name| self.resolve_self(name).to_string())
             .filter(|name| self.capabilities.contains(name))

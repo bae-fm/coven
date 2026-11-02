@@ -74,7 +74,7 @@ fn check_paths(workspace: &Workspace, policy: &Policy, roots: &[&str]) -> Report
         ));
     }
     if policy.selects(Rule::ComponentBundles) {
-        findings.extend(find_component_bundle_violations(&files));
+        findings.extend(find_component_bundle_violations(&files, policy));
     }
     if policy.selects(Rule::CapabilityBoundaries) {
         findings.extend(find_capability_boundary_violations(&files, policy));

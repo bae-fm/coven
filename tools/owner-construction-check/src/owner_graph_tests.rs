@@ -481,3 +481,21 @@ fn function_pointer_fields_retain_only_their_outputs() {
     assert!(!graph.owners.contains("Takes"));
     assert!(graph.owners.contains("Gives"));
 }
+
+/// A generic type the policy says holds no value of its type arguments
+/// produces none of them when returned, and retains none in a field.
+#[test]
+fn phantom_type_arguments_are_neither_products_nor_retained() {
+    let source = "struct AppState { clock: Clock } \
+        fn mount(router: Router<AppState>) -> Router<AppState> { todo!() } \
+        fn run() { mount(router); } \
+        struct Server { router: Router<AppState> } \
+        fn serve() { let _ = Server { router }; }";
+    assert_eq!(
+        constructions(source, &policy()),
+        [finding("<free>::run", "AppState"), finding("<free>::serve", "Server")]
+    );
+    let mut phantom = policy();
+    phantom.phantom_type_arguments.insert("Router".into());
+    assert!(constructions(source, &phantom).is_empty());
+}

@@ -1,4 +1,5 @@
 use super::*;
+use std::collections::BTreeSet;
 
 #[test]
 fn item_declarations_keep_the_invocations_names() {
@@ -8,7 +9,7 @@ fn item_declarations_keep_the_invocations_names() {
     let syn::Item::Struct(item) = &expanded.items[0] else { panic!("struct declaration") };
     assert_eq!(item.ident, "Worker");
     assert_eq!(
-        crate::syntax::type_names(&item.fields.iter().next().unwrap().ty),
+        crate::syntax::type_names(&item.fields.iter().next().unwrap().ty, &BTreeSet::new()),
         ["Clock".into()].into()
     );
     assert_eq!(expanded.items.len(), 2);
