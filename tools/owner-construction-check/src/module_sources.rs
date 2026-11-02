@@ -81,7 +81,10 @@ struct Items<'a> {
 
 /// The file an item-position `include!("…")` reads, relative to the
 /// directory of the file the call is in. Its items are the including
-/// module's, and their child modules resolve as the includer's do.
+/// module's. The module declarations among them resolve against the included
+/// file's own directory, `#[path]` and child modules alike, as rustc resolves
+/// those of a `mod.rs`: `mod case;` in `src/tests/list.rs` is
+/// `src/tests/case.rs`, wherever the `include!` is.
 fn included_file(item: &syn::Item, file_directory: &Path) -> Option<String> {
     let syn::Item::Macro(item) = item else { return None };
     if !item.mac.path.is_ident("include") {
@@ -89,6 +92,13 @@ fn included_file(item: &syn::Item, file_directory: &Path) -> Option<String> {
     }
     let path = item.mac.parse_body::<syn::LitStr>().ok()?;
     Some(normalize(&file_directory.join(path.value())))
+}
+
+/// Where an included file's items resolve what they name: everything against
+/// the file's own directory (`included_file`).
+fn included_items(file: &RustFile) -> Items<'_> {
+    let directory = Path::new(&file.relative_path).parent().expect("source directory");
+    Items { path_directory: directory, child_directory: directory, file_directory: directory }
 }
 
 /// The directory a file's `#[path]` attributes are relative to, and the one
@@ -160,9 +170,7 @@ fn collect_items(
             }
             if let Some(file) = sources.get(path.as_str()).filter(|file| production(file)) {
                 if modules.insert(file.relative_path.clone(), module.to_vec()).is_none() {
-                    let directory =
-                        Path::new(&file.relative_path).parent().expect("source directory");
-                    let items = Items { file_directory: directory, ..directories };
+                    let items = included_items(file);
                     collect_items(&file.syntax.items, module, items, sources, modules);
                 }
             }
@@ -251,9 +259,7 @@ fn reach_items(
                 let in_test =
                     in_test || file.is_test_source_by_name() || is_test_only(&file.syntax.attrs);
                 if reached[usize::from(in_test)].insert(file.relative_path.clone()) {
-                    let directory =
-                        Path::new(&file.relative_path).parent().expect("source directory");
-                    let items = Items { file_directory: directory, ..directories };
+                    let items = included_items(file);
                     reach_items(&file.syntax.items, in_test, items, sources, reached);
                 }
             }

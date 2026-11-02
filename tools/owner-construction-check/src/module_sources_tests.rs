@@ -72,3 +72,24 @@ fn included_files_belong_to_the_including_module() {
             .into()
     );
 }
+
+/// rustc resolves a module declared in an included file against that file's
+/// directory, `#[path]` and plain declarations alike, not the includer's.
+#[test]
+fn modules_an_included_file_declares_resolve_from_its_directory() {
+    let files = [
+        ("crates/app/src/lib.rs", "mod work; #[cfg(test)] #[path = \"lib_tests.rs\"] mod tests;"),
+        ("crates/app/src/work.rs", r#"include!("work/parts/listed.rs");"#),
+        ("crates/app/src/work/parts/listed.rs", r#"#[path = "pathed.rs"] mod pathed; mod plain;"#),
+        ("crates/app/src/work/parts/pathed.rs", ""),
+        ("crates/app/src/work/parts/plain.rs", ""),
+        ("crates/app/src/lib_tests.rs", r#"include!("cases/listed.rs");"#),
+        ("crates/app/src/cases/listed.rs", r#"#[path = "round_trips.rs"] mod round_trips;"#),
+        ("crates/app/src/cases/round_trips.rs", ""),
+    ]
+    .map(|(path, source)| RustFile::fixture(path, source));
+    let modules = module_sources(&files);
+    assert_eq!(modules["crates/app/src/work/parts/pathed.rs"], ["app", "work", "pathed"]);
+    assert_eq!(modules["crates/app/src/work/parts/plain.rs"], ["app", "work", "plain"]);
+    assert!(test_module_files(&files).contains("crates/app/src/cases/round_trips.rs"));
+}
