@@ -3,7 +3,7 @@
 //! names (§16.6, §17.10). It never returns to clear them itself, and the
 //! devices that delete its files delete these too.
 
-use super::SequenceSync;
+use super::{SequenceSync, Session};
 use crate::{history::History, SyncError};
 use coven_foundation::id_source::DeviceId;
 use coven_merge::Audience;
@@ -11,18 +11,20 @@ use coven_storage::{ObjectPrefix, StorageFailure};
 use std::collections::BTreeSet;
 
 impl SequenceSync {
-    /// End the uploads `device` left, then delete each snapshot body in its
-    /// folders that no announcement names. Uploads go first: a session ended
-    /// here can't store a body after the listing. A failure leaves the
+    /// End the uploads `device` left, with every session at a slot this
+    /// device has applied, whoever began it, then delete each snapshot body
+    /// in its folders that no announcement names. Uploads go first: a session
+    /// ended here can't store a body after the listing. A failure leaves the
     /// caller to clear again from the start.
     pub(super) async fn clear_gone_storage(
         &self,
-        history: &History,
+        session: &Session,
         device: DeviceId,
     ) -> Result<(), SyncError> {
         self.state.check()?;
         self.storage.end_device_uploads(self.store(), device).await?;
-        self.list_gone_snapshots(history, device).await
+        self.storage.end_settled_claims(self.store(), session.through).await?;
+        self.list_gone_snapshots(&session.history, device).await
     }
 
     /// List `device`'s folder of each audience's snapshots and delete every

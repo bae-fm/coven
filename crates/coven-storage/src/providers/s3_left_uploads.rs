@@ -45,6 +45,32 @@ impl S3Storage {
         Ok(left)
     }
 
+    /// The unfinished multipart uploads at slots 1 to `through`. Only
+    /// conditional completion puts a claim's session at its slot's path; a
+    /// copy profile stages it in its device's folder, so nothing is listed.
+    pub(super) async fn settled_claims(
+        &self,
+        store: StoreId,
+        through: u64,
+    ) -> Result<Vec<LeftUpload>, StorageError> {
+        if self.settings.copy_publication.multipart().is_some() {
+            return Ok(Vec::new());
+        }
+        let base = self.prefix.key_prefix();
+        let mut left = Vec::new();
+        for (key, id) in self.unfinished_uploads(&format!("{base}{store}/seq/")).await? {
+            let settled = key
+                .strip_prefix(&base)
+                .and_then(|path| ObjectPath::parse(path).ok())
+                .and_then(|path| path.slot_number())
+                .is_some_and(|slot| slot.0 <= through);
+            if settled {
+                left.push(LeftUpload(Left::S3Multipart { key, id: SecretText::new(id) }));
+            }
+        }
+        Ok(left)
+    }
+
     /// Abort a left multipart upload, or delete a staged object. One
     /// already completed, aborted or deleted succeeds.
     pub(super) async fn end_left(&self, upload: &LeftUpload) -> Result<(), StorageError> {

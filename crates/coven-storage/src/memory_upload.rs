@@ -91,6 +91,26 @@ impl MemoryProvider {
             .map(|(id, _)| LeftUpload(crate::left_upload::Left::Memory(*id)))
             .collect())
     }
+    /// The sessions at slots 1 to `through` of `store`, whoever began them:
+    /// the deterministic provider holds a claim's session at its slot, as
+    /// conditional completion on S3 does.
+    pub(super) async fn memory_settled_claim_uploads(
+        &self,
+        store: coven_foundation::id_source::StoreId,
+        through: u64,
+    ) -> Result<Vec<LeftUpload>, StorageError> {
+        self.before(MemoryRequest::Other("settled_claim_uploads")).await?;
+        let state = self.state.lock().await;
+        Ok(state
+            .uploads
+            .iter()
+            .filter(|(_, pending)| {
+                let path = pending.target.path();
+                path.store() == store && path.slot_number().is_some_and(|slot| slot.0 <= through)
+            })
+            .map(|(id, _)| LeftUpload(crate::left_upload::Left::Memory(*id)))
+            .collect())
+    }
     /// End one session another device left; one already ended succeeds.
     pub(super) async fn memory_end_left_upload(
         &self,

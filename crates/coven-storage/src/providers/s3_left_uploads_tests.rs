@@ -76,3 +76,26 @@ async fn another_device_ends_a_devices_sessions_at_destinations_naming_it() {
     expected.sort();
     assert_eq!(left, expected);
 }
+
+/// On R2, a claim's multipart upload sits at its slot's path. Once this
+/// device has applied slot 2, every session left at slots 1 and 2 can never
+/// publish, whoever began it: create-once refuses it there. Those are
+/// aborted; the session at slot 3, not yet applied, stays (Appendix E.10).
+#[tokio::test]
+async fn sessions_at_applied_slots_are_ended_whoever_began_them() {
+    let state = Arc::new(Mutex::new(Remote::default()));
+    let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
+    let settings = profile::CataloguedProfile::named(S3ProfileName::R2).settings;
+    let storage = profile_provider(&server.url, settings);
+    let other = laptop(profile_provider(&server.url, settings));
+    for (connection, number) in [(&storage, 1), (&other, 2), (&other, 3)] {
+        let mut session = connection.begin_upload(&slot(number), 4).await.unwrap();
+        connection.upload_part(&mut session, b"data").await.unwrap();
+    }
+    for _ in 0..2 {
+        storage.end_settled_claims(STORE_ID, 2).await.unwrap();
+        let state = state.lock().unwrap();
+        let left: Vec<_> = state.uploads.values().map(|upload| upload.key.clone()).collect();
+        assert_eq!(left, [slot(3).as_str().to_owned()]);
+    }
+}

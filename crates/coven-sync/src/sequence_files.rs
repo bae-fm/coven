@@ -169,7 +169,7 @@ impl SequenceSync {
                 // last cleared. Its uploads end before its folders are
                 // listed again, its files' among them (§16.6).
                 for device in uploaders.iter().filter(|device| **device != self.device) {
-                    self.clear_gone_storage(&session.history, *device).await?;
+                    self.clear_gone_storage(&session, *device).await?;
                 }
                 self.delete_files(&session, &ring, &member, uploaders.clone(), scans, id).await
             })

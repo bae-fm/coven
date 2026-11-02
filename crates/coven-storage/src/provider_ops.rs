@@ -151,6 +151,16 @@ pub trait ProviderOps: Send + Sync {
         store: StoreId,
         device: DeviceId,
     ) -> Result<Vec<LeftUpload>, StorageError>;
+    /// The unfinished sessions at slots 1 to `through` of `store`, whoever
+    /// began them: where a claim's session sits at its slot's path, one at
+    /// a slot this device has applied can never publish, since create-once
+    /// refuses it there. A provider that puts no session at a slot's path
+    /// returns none.
+    async fn settled_claim_uploads(
+        &self,
+        store: StoreId,
+        through: u64,
+    ) -> Result<Vec<LeftUpload>, StorageError>;
     /// End one upload another device left, as this provider listed it: abort
     /// the session, or delete what it staged. One already ended succeeds,
     /// and a published object is never touched.

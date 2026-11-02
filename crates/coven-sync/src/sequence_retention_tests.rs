@@ -836,3 +836,32 @@ async fn a_gone_devices_unannounced_snapshot_is_deleted_by_the_device_responsibl
         device.database().close().await.unwrap();
     }
 }
+
+/// A claim's session left at a slot the sequence has filled can never
+/// publish, whoever began it, and nothing would ever end it. The pass that
+/// writes a floor ends every session at a slot it has applied; one at a slot
+/// past them stays (§16.6, §17.10).
+#[tokio::test]
+async fn a_floor_write_ends_the_sessions_left_at_applied_slots() {
+    use coven_merge::Audience;
+    let group = Group::new();
+    let ana = group.device(1).await;
+    group.create(&ana).await;
+    let through = ana.sync.session.lock().await.through;
+    let slot = |number| ObjectPath::slot(group.store, std::num::NonZeroU64::new(number).unwrap());
+    let other = group.storage.with_device(coven_foundation::id_source::DeviceId(99));
+    // A claim racing Ana's next one, at a slot the sequence fills next.
+    other.begin_upload(&slot(through + 1), 4).await.unwrap();
+    other.begin_upload(&slot(through + 5), 4).await.unwrap();
+    ana.sync.snapshot(Audience::Store).await.unwrap();
+    ana.sync.pass().await.unwrap();
+    assert!(ana.sync.session.lock().await.through > through);
+    assert!(
+        group.storage.status(&ObjectPath::floor(group.store)).await.unwrap().is_some(),
+        "the pass writes a floor"
+    );
+    let left: Vec<_> =
+        group.storage.unfinished_uploads().await.into_iter().map(|(_, path)| path).collect();
+    assert_eq!(left, [slot(through + 5)]);
+    ana.database().close().await.unwrap();
+}

@@ -377,7 +377,7 @@ impl SequenceSync {
             return Ok(());
         }
         if let Retention::GoneListing(device) = work {
-            self.clear_gone_storage(&session.history, device).await?;
+            self.clear_gone_storage(session, device).await?;
             self.database.record_gone_storage_cleared(device).await?;
             self.database.finish_operation(record.id).await?;
             return Ok(());
@@ -475,6 +475,10 @@ impl SequenceSync {
             record.last_step = update.last_step;
             self.database.advance_operation(update).await?;
         }
+        // A claim's session left at a slot this device has applied can never
+        // publish, whoever began it, and nothing else would end it (§17.10).
+        self.state.check()?;
+        self.storage.end_settled_claims(self.store(), session.through).await?;
         self.database.finish_operation(record.id).await?;
         Ok(())
     }

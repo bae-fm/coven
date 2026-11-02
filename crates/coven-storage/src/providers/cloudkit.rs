@@ -329,6 +329,15 @@ impl ProviderOps for CloudKitStorage {
     ) -> Result<Vec<crate::LeftUpload>, StorageError> {
         self.left_roots(store, device).await
     }
+    /// A claim's session is a root in its device's folder, which ending that
+    /// device's uploads deletes; none sits at a slot's path.
+    async fn settled_claim_uploads(
+        &self,
+        _store: coven_foundation::id_source::StoreId,
+        _through: u64,
+    ) -> Result<Vec<crate::LeftUpload>, StorageError> {
+        Ok(Vec::new())
+    }
     async fn end_left_upload(&self, upload: &crate::LeftUpload) -> Result<(), StorageError> {
         let crate::left_upload::Left::CloudKitRoot(root) = &upload.0 else {
             return Err(StorageFailure::SessionMismatch.into());

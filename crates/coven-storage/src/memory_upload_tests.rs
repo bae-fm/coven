@@ -159,3 +159,24 @@ async fn another_device_ends_the_uploads_a_device_left() {
         StorageFailure::SessionExpired
     );
 }
+
+/// A session at a slot this device has applied can never publish, whoever
+/// began it, and is ended; one at a later slot, at a file's path or in
+/// another store stays (§17.10).
+#[tokio::test]
+async fn sessions_at_applied_slots_are_ended_whoever_began_them() {
+    use coven_foundation::id_source::{DeviceId, FileId, StoreId};
+    let storage = MemoryStorage::builder().build().unwrap();
+    let slot = |store, number| ObjectPath::slot(store, std::num::NonZeroU64::new(number).unwrap());
+    let elsewhere = StoreId(uuid::Uuid::from_u128(3));
+    let file = ObjectPath::file(STORE_ID, DeviceId(7), FileId(uuid::Uuid::from_u128(1)));
+    for path in
+        [slot(STORE_ID, 1), slot(STORE_ID, 2), slot(STORE_ID, 3), slot(elsewhere, 1), file.clone()]
+    {
+        storage.with_device(DeviceId(7)).begin_upload(&path, 4).await.unwrap();
+    }
+    storage.end_settled_claims(STORE_ID, 2).await.unwrap();
+    let left: Vec<_> =
+        storage.unfinished_uploads().await.into_iter().map(|(_, path)| path).collect();
+    assert_eq!(left, [slot(STORE_ID, 3), slot(elsewhere, 1), file]);
+}

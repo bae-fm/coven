@@ -801,6 +801,13 @@ impl ProviderOps for MemoryProvider {
     ) -> Result<Vec<LeftUpload>, StorageError> {
         self.memory_device_uploads(store, device).await
     }
+    async fn settled_claim_uploads(
+        &self,
+        store: coven_foundation::id_source::StoreId,
+        through: u64,
+    ) -> Result<Vec<LeftUpload>, StorageError> {
+        self.memory_settled_claim_uploads(store, through).await
+    }
     async fn end_left_upload(&self, upload: &LeftUpload) -> Result<(), StorageError> {
         self.memory_end_left_upload(upload).await
     }

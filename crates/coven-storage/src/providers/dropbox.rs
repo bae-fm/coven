@@ -585,6 +585,15 @@ impl ProviderOps for DropboxStorage {
     ) -> Result<Vec<crate::LeftUpload>, StorageError> {
         Ok(Vec::new())
     }
+    /// A Dropbox session has no path; its slot is named only when it
+    /// finishes, so none sits at a slot's path.
+    async fn settled_claim_uploads(
+        &self,
+        _store: coven_foundation::id_source::StoreId,
+        _through: u64,
+    ) -> Result<Vec<crate::LeftUpload>, StorageError> {
+        Ok(Vec::new())
+    }
     async fn end_left_upload(&self, _upload: &crate::LeftUpload) -> Result<(), StorageError> {
         Err(StorageFailure::SessionMismatch.with_source("Dropbox lists no upload to end"))
     }

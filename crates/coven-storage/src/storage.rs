@@ -335,6 +335,17 @@ pub trait Storage: Send + Sync {
     /// Explicitly abandon an upload. Dropping a recorded value does not abort it.
     /// Already closed or absent sessions succeed; published objects are preserved.
     async fn abort_upload(&self, session: &UploadSession) -> Result<(), StorageError>;
+    /// End every unfinished session at slots 1 to `through` of `store`,
+    /// which this device has applied, whoever began it (§17.10): create-once
+    /// refuses each of them there, so none can ever publish, and a claimant
+    /// whose session is ended settles its claim as lost, as a refused one
+    /// does. Ending one already ended succeeds. Only S3 under conditional
+    /// completion puts a claim's session at its slot's path.
+    async fn end_settled_claims(
+        &self,
+        store: coven_foundation::id_source::StoreId,
+        through: u64,
+    ) -> Result<(), StorageError>;
     /// End every upload `device` left in `store` that this sign-in can see
     /// (§17.10): abort its unfinished sessions and delete what it staged in
     /// its reserved folder. One already ended succeeds, so devices may do it

@@ -781,6 +781,13 @@ impl ProviderOps for S3Storage {
     ) -> Result<Vec<crate::LeftUpload>, StorageError> {
         self.left_uploads(store, device).await
     }
+    async fn settled_claim_uploads(
+        &self,
+        store: coven_foundation::id_source::StoreId,
+        through: u64,
+    ) -> Result<Vec<crate::LeftUpload>, StorageError> {
+        self.settled_claims(store, through).await
+    }
     async fn end_left_upload(&self, upload: &crate::LeftUpload) -> Result<(), StorageError> {
         self.end_left(upload).await
     }

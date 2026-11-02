@@ -1484,7 +1484,9 @@ After applying and claiming, the device does the work the new state calls for:
   (§16.2).
 - **Deleting history.** The device writes the new floor conditionally, then
   deletes the slots below it, and the snapshots nothing loads any more: its own,
-  and those of devices gone for good whose files it deletes (§16.6).
+  and those of devices gone for good whose files it deletes (§16.6). It also
+  ends every upload session left at a slot it has applied, which can never
+  publish (§17.10).
 - **Deleting files** needs §17.10's reference checks. Once a device is gone for
   good (§14.1), the device responsible for its cleanup lists its whole file
   folder for deletion.
@@ -6534,13 +6536,22 @@ the devices that clean up a gone device's files end its uploads too.
 - **What it can't see.** A Dropbox upload session has no path, and no one but
   the device that began it can list or end it; Dropbox discards it 7 days after
   it began. A OneDrive session still receiving parts is the same until it
-  finishes, and OneDrive discards it once it expires. On an S3 service that
-  completes multipart uploads conditionally, a session for a slot or the floor
-  sits at a path naming no device, which other devices' claims share. Coven
-  leaves it: aborting another claimant's session would break its claim
-  (Appendix E.10). R2 aborts it 7 days after it began; RustFS, Ceph RGW and
-  Versity Gateway keep it until a lifecycle rule the bucket's owner sets ends
-  it.
+  finishes, and OneDrive discards it once it expires.
+- **Sessions at shared paths end once they can't publish.** On an S3 service
+  that completes multipart uploads conditionally, a claim's session sits at its
+  slot's path and a floor write's at the floor's, naming no device, so no
+  device can tell whose one is. None is ended for being a gone device's; one is
+  ended once it provably can never publish, whoever began it. Ana's phone
+  stopped while its claim for slot 41 was going up in parts, and Ben's claim
+  filled slot 41. Create-once refuses any other completion there, so once a
+  device has applied slot 41 it aborts every session left at `seq/1` to
+  `seq/41`: each time it writes a floor, which also covers its own sessions a
+  crash left, and when it clears a gone device's storage. A claimant still
+  running whose session is aborted this way settles its claim as lost, exactly
+  as a refused completion does (Appendix E.10). A session at a slot not yet
+  applied, or at the floor, stays. R2 aborts it 7 days after it began; RustFS,
+  Ceph RGW and Versity Gateway keep it until a lifecycle rule the bucket's
+  owner sets ends it.
 - **Several at once.** Ending an upload already ended succeeds, so the laptop
   and Ben's tablet may both do this, and the phone may run on until it reads
   the entry that stopped it.
@@ -8004,7 +8015,7 @@ Each kind of work adds its own requests:
 | admin preparation | its actual requests: key copies, access changes, snapshot uploads |
 | a snapshot | its upload, its announcement claim, the floor write naming it (§16.6), and the writer's next pass reading that floor's bytes once |
 | a reload | the floor's named snapshots, and the slots after them it needs |
-| deleting history | the floor upload's parts and one conditional publication, its cleanup, and the deletes |
+| deleting history | the floor upload's parts and one conditional publication, its cleanup, the deletes, and one listing of the sessions left at applied slots (§17.10) |
 | files | their own reads, upload parts and deletes, outside the pass; a bound upload's requests are the same as a trailing one's, sent in its own lane (§17.4) |
 | reading an object | one bounded stream; a snapshot's start takes at most two range requests and the rest one more stream, read once (§6.5, §16.2) |
 
@@ -9351,10 +9362,12 @@ then gains the native id.
 - A record made before a start whose reply was lost keeps its unresolved session.
 - Recovery may abort only uploads proven to belong to that session. A shared
   slot path doesn't establish ownership; a private staging name can identify its
-  own uploads.
+  own uploads. Ending dead sessions (below) rests on something else: not whose
+  a session is, but that it can never publish.
 - If the native id can't be recovered, coven reports `SessionIdentityUnknown` and
   keeps the journal until provider evidence settles cleanup.
-- Aborting never deletes a destination or another claimant's session.
+- Aborting never deletes a destination. It ends another claimant's session only
+  once that session can never publish (below).
 - Retrying or resuming a record derives the same name, including after multipart
   completion or a lost copy reply. A floor replacement also retains its original
   observed revision; a replacement session never acquires a newer one.
@@ -9464,10 +9477,23 @@ good left (§17.10) with three multipart-upload listings and one object listing:
 
 It aborts each upload, `NoSuchUpload` counting as ended, then deletes each
 object. Aborting first stops a session from assembling another temporary after
-the listing. A session for a slot or the floor under conditional completion sits
-at a path naming no device, shared with other claimants, and stays: only its
-own session can tell it apart. R2 aborts every multipart upload 7 days after it
-began, by a lifecycle rule each bucket has
+the listing.
+
+**Ending sessions that can never publish.** Under conditional completion, a
+claim's session sits at its slot's key and a floor write's at the floor's,
+where no device's id appears and other claimants' sessions share the key. So
+none is ended for being a gone device's. One is ended once it can never
+publish, whoever began it, and that rests on create-once alone: once slot `n`
+is published, the service refuses every other completion at `seq/n`. A device
+that has applied slot `n` lists the multipart uploads under `<prefix>/<store>/seq/`
+and aborts each at a slot up to its applied one, after each floor write and
+when it clears a gone device's storage (§17.10). A copy profile puts no session
+at a slot's key, so it lists nothing there. A claimant whose session was
+aborted finds `NoSuchUpload` at completion; its recovery then reads the slot,
+finds another object, and settles the claim as lost, as after a refused
+completion. A session at a slot not yet applied, or at the floor, stays. R2
+aborts every multipart upload 7 days after it began, by a lifecycle rule each
+bucket has
 ([object lifecycles](https://developers.cloudflare.com/r2/buckets/object-lifecycles/));
 RustFS, Ceph RGW and Versity Gateway keep one until a rule the bucket's owner
 sets ends it.

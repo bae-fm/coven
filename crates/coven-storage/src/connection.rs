@@ -131,6 +131,17 @@ impl<P: ProviderOps + ?Sized> StorageConnection<P> {
     ) -> Result<T, StorageError> {
         crate::cooldown::observed(self.cooldown.as_ref(), result).await
     }
+    /// End each upload a listing found, counting each request.
+    async fn end_left(&self, left: &[LeftUpload]) -> Result<(), StorageError> {
+        for upload in left {
+            self.cooling()?;
+            self.observed(
+                self.send(upload.request(), 0, self.provider.end_left_upload(upload)).await,
+            )
+            .await?;
+        }
+        Ok(())
+    }
     async fn list_checked(&self, prefix: &ObjectPrefix) -> Result<Vec<StoredObject>, StorageError> {
         let mut listing = ObjectListing::new(prefix.clone(), self.config().provider());
         self.send(RequestKind::List, 0, self.provider.list(&mut listing)).await?;
@@ -426,6 +437,24 @@ impl<P: ProviderOps + ?Sized> Storage for StorageConnection<P> {
         })
         .await
     }
+    async fn end_settled_claims(
+        &self,
+        store: coven_foundation::id_source::StoreId,
+        through: u64,
+    ) -> Result<(), StorageError> {
+        self.cooling()?;
+        let left = self
+            .observed(
+                self.send(
+                    RequestKind::List,
+                    0,
+                    self.provider.settled_claim_uploads(store, through),
+                )
+                .await,
+            )
+            .await?;
+        self.end_left(&left).await
+    }
     async fn end_device_uploads(
         &self,
         store: coven_foundation::id_source::StoreId,
@@ -437,14 +466,7 @@ impl<P: ProviderOps + ?Sized> Storage for StorageConnection<P> {
                 self.send(RequestKind::List, 0, self.provider.device_uploads(store, device)).await,
             )
             .await?;
-        for upload in &left {
-            self.cooling()?;
-            self.observed(
-                self.send(upload.request(), 0, self.provider.end_left_upload(upload)).await,
-            )
-            .await?;
-        }
-        Ok(())
+        self.end_left(&left).await
     }
     async fn grant_access(&self, account: &str) -> Result<AccessGrant, StorageError> {
         if self.config().provider() != CloudProvider::S3 {
