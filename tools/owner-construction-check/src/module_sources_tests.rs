@@ -47,3 +47,28 @@ fn files_only_test_only_declarations_reach_are_test_modules() {
         .into()
     );
 }
+
+/// `include!` makes the included file's items the includer's, child modules
+/// and all, so an included file and what it declares belong where the call is.
+#[test]
+fn included_files_belong_to_the_including_module() {
+    let files = [
+        ("crates/app/src/lib.rs", "mod work; #[cfg(test)] mod tests;"),
+        ("crates/app/src/work.rs", r#"include!("work/parts.rs");"#),
+        ("crates/app/src/work/parts.rs", "mod nested; fn part() {}"),
+        ("crates/app/src/work/nested.rs", ""),
+        ("crates/app/src/tests.rs", r#"include!("tests/list.rs");"#),
+        ("crates/app/src/tests/list.rs", "mod case;"),
+        ("crates/app/src/tests/case.rs", ""),
+    ]
+    .map(|(path, source)| RustFile::fixture(path, source));
+    let modules = module_sources(&files);
+    assert_eq!(modules["crates/app/src/work/parts.rs"], ["app", "work"]);
+    assert_eq!(modules["crates/app/src/work/nested.rs"], ["app", "work", "nested"]);
+    assert_eq!(
+        test_module_files(&files),
+        ["crates/app/src/tests.rs", "crates/app/src/tests/case.rs", "crates/app/src/tests/list.rs"]
+            .map(str::to_string)
+            .into()
+    );
+}

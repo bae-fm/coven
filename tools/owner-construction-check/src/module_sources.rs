@@ -61,7 +61,34 @@ fn collect(
         return;
     }
     let (directory, child_directory) = directories(file);
-    collect_items(&file.syntax.items, &module, &directory, &child_directory, sources, modules);
+    let items = Items {
+        path_directory: &directory,
+        child_directory: &child_directory,
+        file_directory: &directory,
+    };
+    collect_items(&file.syntax.items, &module, items, sources, modules);
+}
+
+/// Where a run of items resolves what it names: `#[path]` attributes against
+/// `path_directory`, child module files in `child_directory`, and `include!`
+/// against `file_directory`, the directory of the file the items are in.
+#[derive(Clone, Copy)]
+struct Items<'a> {
+    path_directory: &'a Path,
+    child_directory: &'a Path,
+    file_directory: &'a Path,
+}
+
+/// The file an item-position `include!("…")` reads, relative to the
+/// directory of the file the call is in. Its items are the including
+/// module's, and their child modules resolve as the includer's do.
+fn included_file(item: &syn::Item, file_directory: &Path) -> Option<String> {
+    let syn::Item::Macro(item) = item else { return None };
+    if !item.mac.path.is_ident("include") {
+        return None;
+    }
+    let path = item.mac.parse_body::<syn::LitStr>().ok()?;
+    Some(normalize(&file_directory.join(path.value())))
 }
 
 /// The directory a file's `#[path]` attributes are relative to, and the one
@@ -119,12 +146,28 @@ fn module_contents<'a>(
 fn collect_items(
     items: &[syn::Item],
     module: &[String],
-    path_directory: &Path,
-    child_directory: &Path,
+    directories: Items<'_>,
     sources: &BTreeMap<&str, &RustFile>,
     modules: &mut BTreeMap<String, Vec<String>>,
 ) {
+    let Items { path_directory, child_directory, file_directory } = directories;
     for item in items {
+        if let Some(path) = included_file(item, file_directory) {
+            if let syn::Item::Macro(macro_item) = item {
+                if is_test_only(&macro_item.attrs) {
+                    continue;
+                }
+            }
+            if let Some(file) = sources.get(path.as_str()).filter(|file| production(file)) {
+                if modules.insert(file.relative_path.clone(), module.to_vec()).is_none() {
+                    let directory =
+                        Path::new(&file.relative_path).parent().expect("source directory");
+                    let items = Items { file_directory: directory, ..directories };
+                    collect_items(&file.syntax.items, module, items, sources, modules);
+                }
+            }
+            continue;
+        }
         let syn::Item::Mod(item) = item else { continue };
         if is_test_only(&item.attrs) {
             continue;
@@ -133,7 +176,12 @@ fn collect_items(
         child.push(item.ident.to_string());
         match module_contents(item, path_directory, child_directory) {
             ModuleContents::Inline(items, directory) => {
-                collect_items(items, &child, &directory, &directory, sources, modules);
+                let inline = Items {
+                    path_directory: &directory,
+                    child_directory: &directory,
+                    file_directory,
+                };
+                collect_items(items, &child, inline, sources, modules);
             }
             ModuleContents::Files(paths) => {
                 for path in paths {
@@ -179,23 +227,48 @@ fn reach(
         return;
     }
     let (directory, child_directory) = directories(file);
-    reach_items(&file.syntax.items, in_test, &directory, &child_directory, sources, reached);
+    let items = Items {
+        path_directory: &directory,
+        child_directory: &child_directory,
+        file_directory: &directory,
+    };
+    reach_items(&file.syntax.items, in_test, items, sources, reached);
 }
 
 fn reach_items(
     items: &[syn::Item],
     in_test: bool,
-    path_directory: &Path,
-    child_directory: &Path,
+    directories: Items<'_>,
     sources: &BTreeMap<&str, &RustFile>,
     reached: &mut [BTreeSet<String>; 2],
 ) {
+    let Items { path_directory, child_directory, file_directory } = directories;
     for item in items {
+        if let Some(path) = included_file(item, file_directory) {
+            let syn::Item::Macro(macro_item) = item else { continue };
+            let in_test = in_test || is_test_only(&macro_item.attrs);
+            if let Some(file) = sources.get(path.as_str()) {
+                let in_test =
+                    in_test || file.is_test_source_by_name() || is_test_only(&file.syntax.attrs);
+                if reached[usize::from(in_test)].insert(file.relative_path.clone()) {
+                    let directory =
+                        Path::new(&file.relative_path).parent().expect("source directory");
+                    let items = Items { file_directory: directory, ..directories };
+                    reach_items(&file.syntax.items, in_test, items, sources, reached);
+                }
+            }
+            continue;
+        }
         let syn::Item::Mod(item) = item else { continue };
         let in_test = in_test || is_test_only(&item.attrs);
         match module_contents(item, path_directory, child_directory) {
             ModuleContents::Inline(items, directory) => {
-                reach_items(items, in_test, &directory, &directory, sources, reached);
+                let inline = Items {
+                    path_directory: &directory,
+                    child_directory: &directory,
+                    file_directory,
+                };
+                reach_items(items, in_test, inline, sources, reached);
             }
             ModuleContents::Files(paths) => {
                 for path in paths {
