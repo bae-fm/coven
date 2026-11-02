@@ -335,6 +335,15 @@ pub trait Storage: Send + Sync {
     /// Explicitly abandon an upload. Dropping a recorded value does not abort it.
     /// Already closed or absent sessions succeed; published objects are preserved.
     async fn abort_upload(&self, session: &UploadSession) -> Result<(), StorageError>;
+    /// End every unfinished session at `store`'s floor begun before the
+    /// current floor was published, whoever began it (§17.10): each observed
+    /// an older revision, so none can publish. Only where the provider dates
+    /// a session's start, certified per S3 profile (Appendix E.6); elsewhere
+    /// it sends nothing.
+    async fn end_superseded_floor_sessions(
+        &self,
+        store: coven_foundation::id_source::StoreId,
+    ) -> Result<(), StorageError>;
     /// End every unfinished session at slots 1 to `through` of `store`,
     /// which this device has applied, whoever began it (§17.10): create-once
     /// refuses each of them there, so none can ever publish, and a claimant

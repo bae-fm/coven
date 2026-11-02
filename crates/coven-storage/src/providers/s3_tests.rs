@@ -45,10 +45,15 @@ struct PendingUpload {
     key: String,
     token: String,
     parts: BTreeMap<u32, Vec<u8>>,
+    /// When the service says it began, as ListMultipartUploads gives it.
+    initiated: String,
 }
 #[derive(Default)]
 struct Remote {
     gcs: bool,
+    /// The `Initiated` time of the next upload begun; objects are all dated
+    /// 2026-10-06T00:00:00Z.
+    next_initiated: Option<String>,
     allowed_prefix: Option<String>,
     bucket_error: Option<(&'static str, u16)>,
     requests: Vec<(Method, Uri)>,
@@ -139,7 +144,11 @@ fn respond(
         .to_owned();
         state.next_upload += 1;
         let id = state.next_upload.to_string();
-        state.uploads.insert(id.clone(), PendingUpload { key, token, parts: BTreeMap::new() });
+        let initiated =
+            state.next_initiated.clone().unwrap_or_else(|| "2026-10-06T00:00:00.000Z".into());
+        state
+            .uploads
+            .insert(id.clone(), PendingUpload { key, token, parts: BTreeMap::new(), initiated });
         if std::mem::replace(&mut state.lose_initiation_reply, false) {
             return response(503, "<Error><Code>ServiceUnavailable</Code></Error>");
         }

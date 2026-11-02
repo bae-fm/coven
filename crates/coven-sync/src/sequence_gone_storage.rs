@@ -12,7 +12,8 @@ use std::collections::BTreeSet;
 
 impl SequenceSync {
     /// End the uploads `device` left, with every session at a slot this
-    /// device has applied, whoever began it, then delete each snapshot body
+    /// device has applied or at the floor begun before the current floor,
+    /// whoever began it, then delete each snapshot body
     /// in its folders that no announcement names. Uploads go first: a session
     /// ended here can't store a body after the listing. A failure leaves the
     /// caller to clear again from the start.
@@ -24,6 +25,7 @@ impl SequenceSync {
         self.state.check()?;
         self.storage.end_device_uploads(self.store(), device).await?;
         self.storage.end_settled_claims(self.store(), session.through).await?;
+        self.storage.end_superseded_floor_sessions(self.store()).await?;
         self.list_gone_snapshots(&session.history, device).await
     }
 

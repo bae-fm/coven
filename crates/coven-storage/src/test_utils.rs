@@ -808,6 +808,15 @@ impl ProviderOps for MemoryProvider {
     ) -> Result<Vec<LeftUpload>, StorageError> {
         self.memory_settled_claim_uploads(store, through).await
     }
+    fn dates_floor_sessions(&self) -> bool {
+        true
+    }
+    async fn superseded_floor_uploads(
+        &self,
+        floor: &StoredObject,
+    ) -> Result<Vec<LeftUpload>, StorageError> {
+        self.memory_superseded_floor_uploads(floor).await
+    }
     async fn end_left_upload(&self, upload: &LeftUpload) -> Result<(), StorageError> {
         self.memory_end_left_upload(upload).await
     }

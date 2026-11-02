@@ -161,6 +161,21 @@ pub trait ProviderOps: Send + Sync {
         store: StoreId,
         through: u64,
     ) -> Result<Vec<LeftUpload>, StorageError>;
+    /// Whether this provider dates an unfinished floor session's start so
+    /// that one begun before the current floor's publication can be told
+    /// apart (Appendix E.10). Asking sends nothing.
+    fn dates_floor_sessions(&self) -> bool {
+        false
+    }
+    /// The unfinished sessions at the floor's path begun before `floor`, the
+    /// current floor, was published: each observed an older revision, so
+    /// none can publish. Asked only where [`Self::dates_floor_sessions`].
+    async fn superseded_floor_uploads(
+        &self,
+        _floor: &StoredObject,
+    ) -> Result<Vec<LeftUpload>, StorageError> {
+        Ok(Vec::new())
+    }
     /// End one upload another device left, as this provider listed it: abort
     /// the session, or delete what it staged. One already ended succeeds,
     /// and a published object is never touched.

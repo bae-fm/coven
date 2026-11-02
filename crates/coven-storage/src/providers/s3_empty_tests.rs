@@ -21,6 +21,7 @@ fn seeded() -> Arc<Mutex<Remote>> {
                     key: key.to_string(),
                     token: "token".into(),
                     parts: BTreeMap::new(),
+                    initiated: "2026-10-06T00:00:00.000Z".into(),
                 };
                 (id.to_string(), upload)
             })

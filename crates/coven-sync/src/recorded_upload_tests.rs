@@ -111,6 +111,12 @@ impl Storage for PlannedStorage {
     async fn abort_upload(&self, _: &UploadSession) -> Result<(), StorageError> {
         unreachable!()
     }
+    async fn end_superseded_floor_sessions(
+        &self,
+        _: coven_foundation::id_source::StoreId,
+    ) -> Result<(), StorageError> {
+        unreachable!()
+    }
     async fn end_settled_claims(
         &self,
         _: coven_foundation::id_source::StoreId,

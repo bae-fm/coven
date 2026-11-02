@@ -437,6 +437,25 @@ impl<P: ProviderOps + ?Sized> Storage for StorageConnection<P> {
         })
         .await
     }
+    async fn end_superseded_floor_sessions(
+        &self,
+        store: coven_foundation::id_source::StoreId,
+    ) -> Result<(), StorageError> {
+        if !self.provider.dates_floor_sessions() {
+            return Ok(());
+        }
+        let Some(floor) = self.status(&ObjectPath::floor(store)).await? else {
+            return Ok(());
+        };
+        self.cooling()?;
+        let left = self
+            .observed(
+                self.send(RequestKind::List, 0, self.provider.superseded_floor_uploads(&floor))
+                    .await,
+            )
+            .await?;
+        self.end_left(&left).await
+    }
     async fn end_settled_claims(
         &self,
         store: coven_foundation::id_source::StoreId,

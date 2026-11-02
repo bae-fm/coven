@@ -1485,8 +1485,8 @@ After applying and claiming, the device does the work the new state calls for:
 - **Deleting history.** The device writes the new floor conditionally, then
   deletes the slots below it, and the snapshots nothing loads any more: its own,
   and those of devices gone for good whose files it deletes (§16.6). It also
-  ends every upload session left at a slot it has applied, which can never
-  publish (§17.10).
+  ends every upload session that can never publish: those left at a slot it has
+  applied, and where certified, floor sessions begun before the floor (§17.10).
 - **Deleting files** needs §17.10's reference checks. Once a device is gone for
   good (§14.1), the device responsible for its cleanup lists its whole file
   folder for deletion.
@@ -6548,10 +6548,15 @@ the devices that clean up a gone device's files end its uploads too.
   `seq/41`: each time it writes a floor, which also covers its own sessions a
   crash left, and when it clears a gone device's storage. A claimant still
   running whose session is aborted this way settles its claim as lost, exactly
-  as a refused completion does (Appendix E.10). A session at a slot not yet
-  applied, or at the floor, stays. R2 aborts it 7 days after it began; RustFS,
-  Ceph RGW and Versity Gateway keep it until a lifecycle rule the bucket's
-  owner sets ends it.
+  as a refused completion does (Appendix E.10). A floor session can publish
+  only while the floor keeps the revision it observed, so one begun before the
+  current floor was published is dead too, and is ended the same way, where
+  the service is certified to date a session's start in order with
+  publications (Appendix E.6). A session at a slot not yet applied, a floor
+  session begun after the current floor, and every floor session on a service
+  not certified for it, stay. R2 aborts those 7 days after they began; RustFS,
+  Ceph RGW and Versity Gateway keep them until a lifecycle rule the bucket's
+  owner sets ends them.
 - **Several at once.** Ending an upload already ended succeeds, so the laptop
   and Ben's tablet may both do this, and the phone may run on until it reads
   the entry that stopped it.
@@ -8015,7 +8020,7 @@ Each kind of work adds its own requests:
 | admin preparation | its actual requests: key copies, access changes, snapshot uploads |
 | a snapshot | its upload, its announcement claim, the floor write naming it (§16.6), and the writer's next pass reading that floor's bytes once |
 | a reload | the floor's named snapshots, and the slots after them it needs |
-| deleting history | the floor upload's parts and one conditional publication, its cleanup, the deletes, and one listing of the sessions left at applied slots (§17.10) |
+| deleting history | the floor upload's parts and one conditional publication, its cleanup, the deletes, one listing of the sessions left at applied slots, and on a profile certified to date them, the floor's status and one listing of floor sessions (§17.10) |
 | files | their own reads, upload parts and deletes, outside the pass; a bound upload's requests are the same as a trailing one's, sent in its own lane (§17.4) |
 | reading an object | one bounded stream; a snapshot's start takes at most two range requests and the rest one more stream, read once (§6.5, §16.2) |
 
@@ -9228,6 +9233,20 @@ It prints each trial, then `copy_reply_time_equals_status` and
 that falls short only leaves status to the HEAD. The ignored `s3_copy_reply`
 test runs this observation alone, with the location's profile.
 
+**The upload initiation time** (from suite 7). Ending a floor session begun
+before the current floor was published (E.10) needs the service to list each
+unfinished upload's `Initiated` time, never earlier than a publication that
+finished before the upload began, and never later than one that came after. On
+a profile publishing by conditional completion, the suite runs 20 trials 50 ms
+apart: read the floor's time by status, begin a floor session and list its
+start, abort it, then replace the floor and read the new time. Every trial must
+list the start, at or after the earlier floor's second and at or before the
+later one's. It prints each trial and `upload_initiation_ordered`. A passing
+run prints the profile's `upload_initiation` certification beside its others;
+that certification enables only the floor rule, and never decides the verdict.
+A copy profile prints `upload_initiation publication=copy`: its floor sessions
+sit in a device's folder (§20.6).
+
 **Results.**
 
 - A service that returns no checksum on any probe, even with checksum mode, is
@@ -9491,9 +9510,22 @@ when it clears a gone device's storage (§17.10). A copy profile puts no session
 at a slot's key, so it lists nothing there. A claimant whose session was
 aborted finds `NoSuchUpload` at completion; its recovery then reads the slot,
 finds another object, and settles the claim as lost, as after a refused
-completion. A session at a slot not yet applied, or at the floor, stays. R2
-aborts every multipart upload 7 days after it began, by a lifecycle rule each
-bucket has
+completion.
+
+A floor session publishes only while the floor keeps the revision it observed
+before it began. So once the current floor was published in an earlier second
+than a session's `Initiated` time in the multipart listing says it began, that
+session observed an older revision and is dead. The device reads the floor's
+status and lists the uploads at the floor's key, and aborts each begun in a
+strictly earlier second than the floor's publication, in the same two places.
+That rests on the service never dating a session begun after a publication
+earlier than it, which only a profile certified for it by suite 7 (E.6) is
+trusted with; no profile holds that certification yet, so until one does, no
+floor session is ended this way. A listing there without `Initiated` is a
+protocol failure. A session at a slot not yet applied, a floor session begun
+in the floor's second or later, and every floor session on a profile not
+certified for it, stay. R2 aborts every multipart upload 7 days after it began,
+by a lifecycle rule each bucket has
 ([object lifecycles](https://developers.cloudflare.com/r2/buckets/object-lifecycles/));
 RustFS, Ceph RGW and Versity Gateway keep one until a rule the bucket's owner
 sets ends it.

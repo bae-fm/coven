@@ -417,6 +417,12 @@ impl coven_storage::Storage for StepStorage {
         let result = self.storage.finish_upload(session).await;
         self.record("finish", time, result)
     }
+    async fn end_superseded_floor_sessions(
+        &self,
+        _: coven_foundation::id_source::StoreId,
+    ) -> Result<(), coven_storage::StorageError> {
+        unreachable!("these steps write no floor")
+    }
     async fn end_settled_claims(
         &self,
         _: coven_foundation::id_source::StoreId,

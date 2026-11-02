@@ -475,10 +475,12 @@ impl SequenceSync {
             record.last_step = update.last_step;
             self.database.advance_operation(update).await?;
         }
-        // A claim's session left at a slot this device has applied can never
+        // A claim's session left at a slot this device has applied, or a
+        // floor session begun before the floor now published, can never
         // publish, whoever began it, and nothing else would end it (§17.10).
         self.state.check()?;
         self.storage.end_settled_claims(self.store(), session.through).await?;
+        self.storage.end_superseded_floor_sessions(self.store()).await?;
         self.database.finish_operation(record.id).await?;
         Ok(())
     }

@@ -180,3 +180,24 @@ async fn sessions_at_applied_slots_are_ended_whoever_began_them() {
         storage.unfinished_uploads().await.into_iter().map(|(_, path)| path).collect();
     assert_eq!(left, [slot(STORE_ID, 3), slot(elsewhere, 1), file]);
 }
+
+/// A floor session begun before the current floor was published observed an
+/// older revision and can never publish, so it is ended; one begun in the
+/// floor's second or later stays (Appendix E.10).
+#[tokio::test]
+async fn floor_sessions_begun_before_the_floor_are_ended() {
+    use coven_foundation::clock::{Clock, FixedClock};
+    let clock =
+        Arc::new(FixedClock::new(std::time::UNIX_EPOCH + std::time::Duration::from_secs(100)));
+    let storage = MemoryStorage::builder().clock(clock.clone()).build().unwrap();
+    let floor = ObjectPath::floor(STORE_ID);
+    storage.begin_upload(&floor, 4).await.unwrap();
+    clock.set(clock.now() + std::time::Duration::from_secs(10));
+    storage.create(&floor, b"floor").await.unwrap();
+    let current = storage.status(&floor).await.unwrap().unwrap();
+    storage.begin_replace(&current, 4).await.unwrap();
+    storage.end_superseded_floor_sessions(STORE_ID).await.unwrap();
+    assert_eq!(storage.unfinished_uploads().await.len(), 1);
+    storage.end_superseded_floor_sessions(STORE_ID).await.unwrap();
+    assert_eq!(storage.unfinished_uploads().await.len(), 1);
+}

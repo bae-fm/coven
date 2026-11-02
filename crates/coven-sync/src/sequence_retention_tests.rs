@@ -865,3 +865,22 @@ async fn a_floor_write_ends_the_sessions_left_at_applied_slots() {
     assert_eq!(left, [slot(through + 5)]);
     ana.database().close().await.unwrap();
 }
+
+/// Another device began writing the floor and stopped before it finished.
+/// Once Ana's floor is published, that session observed an older floor and
+/// can never publish, so the pass that wrote Ana's floor ends it (§17.10).
+#[tokio::test]
+async fn a_floor_write_ends_the_floor_sessions_it_superseded() {
+    use coven_merge::Audience;
+    let group = Group::new();
+    let ana = group.device(1).await;
+    group.create(&ana).await;
+    let other = group.storage.with_device(coven_foundation::id_source::DeviceId(99));
+    other.begin_upload(&ObjectPath::floor(group.store), 4).await.unwrap();
+    group.clock.set(std::time::UNIX_EPOCH + std::time::Duration::from_secs(10));
+    ana.sync.snapshot(Audience::Store).await.unwrap();
+    ana.sync.pass().await.unwrap();
+    assert!(group.storage.status(&ObjectPath::floor(group.store)).await.unwrap().is_some());
+    assert!(group.storage.unfinished_uploads().await.is_empty());
+    ana.database().close().await.unwrap();
+}

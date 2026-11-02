@@ -82,7 +82,7 @@ impl S3Storage {
         listing: S3Listing,
     ) -> Result<EmptiedS3Prefix, StorageError> {
         let uploads = self.unfinished_uploads(prefix).await?;
-        for (key, id) in &uploads {
+        for (key, id, _) in &uploads {
             match self
                 .client
                 .abort_multipart_upload()

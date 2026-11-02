@@ -8,7 +8,10 @@ pub(super) fn list_uploads(state: &Remote, q: &BTreeMap<String, String>) -> Resp
         .iter()
         .filter(|(_, upload)| upload.key.starts_with(&prefix))
         .map(|(id, upload)| {
-            format!("<Upload><Key>{}</Key><UploadId>{id}</UploadId></Upload>", upload.key)
+            format!(
+                "<Upload><Key>{}</Key><UploadId>{id}</UploadId><Initiated>{}</Initiated></Upload>",
+                upload.key, upload.initiated
+            )
         })
         .collect();
     response(

@@ -3,6 +3,8 @@ use super::*;
 
 pub(super) struct Pending {
     device: coven_foundation::id_source::DeviceId,
+    /// When the session began, by the provider's clock.
+    begun: coven_format::value::StorageTime,
     target: UploadTarget,
     total: u64,
     pub(super) bytes: Vec<u8>,
@@ -111,6 +113,25 @@ impl MemoryProvider {
             .map(|(id, _)| LeftUpload(crate::left_upload::Left::Memory(*id)))
             .collect())
     }
+    /// The sessions at `floor`'s path begun in an earlier second than its
+    /// publication: the deterministic provider dates each session's start,
+    /// as a certified S3 profile does.
+    pub(super) async fn memory_superseded_floor_uploads(
+        &self,
+        floor: &StoredObject,
+    ) -> Result<Vec<LeftUpload>, StorageError> {
+        self.before(MemoryRequest::Other("superseded_floor_uploads")).await?;
+        let state = self.state.lock().await;
+        Ok(state
+            .uploads
+            .iter()
+            .filter(|(_, pending)| {
+                pending.target.path() == &floor.path
+                    && pending.begun.seconds() < floor.stored_at.seconds()
+            })
+            .map(|(id, _)| LeftUpload(crate::left_upload::Left::Memory(*id)))
+            .collect())
+    }
     /// End one session another device left; one already ended succeeds.
     pub(super) async fn memory_end_left_upload(
         &self,
@@ -139,6 +160,7 @@ impl MemoryProvider {
             id,
             Pending {
                 device,
+                begun: self.storage_time()?,
                 target: target.clone(),
                 total,
                 bytes: Vec::new(),
