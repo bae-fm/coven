@@ -15,7 +15,7 @@ const CAROL: &str = "carol@example.org";
 async fn household(group: &Group) -> (Device, Device, Device) {
     let phone = group.device(1).await;
     let ben = group.device(2).await;
-    group.create_with_access(&phone, MemberAccess::ProviderAccount("ana@example.org".into())).await;
+    group.create(&phone).await;
     phone
         .sync
         .administer(StoreChange::AddMember {

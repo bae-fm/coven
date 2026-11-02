@@ -2,15 +2,14 @@ use crate::sequence_sync::tests::*;
 use crate::*;
 use coven_format::admin::{MemberRole, StoreChange};
 use coven_foundation::id_source::{IdSource, KeyId};
-use coven_storage::{test_utils::MemoryStorage, ObjectPath, Storage};
+use coven_storage::{ObjectPath, Storage};
 
 #[tokio::test]
 async fn the_provider_owner_cannot_be_removed_or_claim_a_removal() {
     let group = Group::shared();
     let ana = group.device(1).await;
     let ben = group.device(2).await;
-    let owner = coven_format::MemberAccess::ProviderAccount("ana@example.org".into());
-    group.create_with_access(&ana, owner).await;
+    group.create(&ana).await;
     ana.sync
         .administer(StoreChange::AddMember {
             member: ben.identity.member(),
@@ -167,21 +166,11 @@ async fn replaced_and_removed_s3_keys_leave_no_work_behind() {
 
 #[tokio::test]
 async fn provider_access_stays_until_the_last_member_using_the_account_is_removed() {
-    let mut group = Group::new();
-    group.storage = MemoryStorage::builder()
-        .provider(coven_storage::CloudProvider::Dropbox)
-        .clock(group.clock.clone())
-        .build()
-        .unwrap();
+    let group = Group::shared();
     let ana = group.device(1).await;
     let ben = group.device(2).await;
     let carol = group.device(3).await;
-    group
-        .create_with_access(
-            &ana,
-            coven_format::MemberAccess::ProviderAccount("ana@example.org".into()),
-        )
-        .await;
+    group.create(&ana).await;
     group.storage.grant_access("shared@example.org").await.unwrap();
     for member in [&ben, &carol] {
         ana.sync

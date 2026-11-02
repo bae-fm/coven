@@ -555,6 +555,50 @@ fn an_s3_store_creator_replaces_her_key() {
     assert!(household.check(1, ana, change).unwrap().is_some());
 }
 
+/// Every member reaches a store the way its creation does: from a provider
+/// account where an account holds it, with an S3 key on S3. An entry giving
+/// a member the other kind of access is refused. Without the rule, an admin
+/// recorded with an S3 key on Household's Dropbox folder would count as the
+/// store's owner (§10.3, format.md D6).
+#[test]
+fn a_member_reaches_the_store_with_the_access_kind_it_was_created_with() {
+    let carol = member(3);
+    let add = |access| StoreChange::AddMember {
+        member: carol,
+        keys: coven_format::test_utils::keys_from_seed(3).public_keys(),
+        role: MemberRole::Admin,
+        access,
+    };
+    let s3 = crate::sequence_sync::tests::access;
+    let shared = Household::shared();
+    let (ana, ben) = (shared.ana, shared.ben);
+    for (device, author, change) in [
+        (1, ana, add(s3("carol"))),
+        (2, ben, StoreChange::SetAccess { member: ben, access: s3("ben") }),
+    ] {
+        assert_eq!(
+            shared.check(device, author, change.clone()).err(),
+            Some(OperationRejection::NotAllowed),
+            "{change:?}"
+        );
+    }
+    let household = Household::new();
+    let (ana, ben) = (household.ana, household.ben);
+    for (device, author, change) in [
+        (1, ana, add(account("carol@example.org"))),
+        (1, ana, StoreChange::SetAccess { member: ana, access: account("ana@example.org") }),
+        (2, ben, StoreChange::SetAccess { member: ben, access: account("ben@example.org") }),
+    ] {
+        assert_eq!(
+            household.check(device, author, change.clone()).err(),
+            Some(OperationRejection::NotAllowed),
+            "{change:?}"
+        );
+    }
+    assert!(shared.check(1, shared.ana, add(account("carol@example.org"))).unwrap().is_some());
+    assert!(household.check(1, household.ana, add(s3("carol"))).unwrap().is_some());
+}
+
 fn invite(n: u128) -> coven_foundation::id_source::InviteId {
     coven_foundation::id_source::InviteId(uuid::Uuid::from_u128(n))
 }

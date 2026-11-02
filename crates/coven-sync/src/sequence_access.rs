@@ -13,16 +13,33 @@ use coven_foundation::id_source::MemberId;
 use std::collections::BTreeSet;
 
 impl History {
+    /// The access the store was created with (slot 1). Its kind is the
+    /// store's: an account holds the store, or each member has an S3 key
+    /// (§10.3).
+    pub(crate) fn store_access(&self) -> Option<&MemberAccess> {
+        self.recorded_access().find_map(|(_, at, access)| (at == 1).then_some(access))
+    }
+
+    /// Whether `member` administers the storage: on a store an account
+    /// holds, the member whose account it is; on S3, any admin (§14.2).
     pub(crate) fn owns_storage(&self, member: MemberId) -> bool {
-        let Some(current) = self.state.members.get(&member).filter(|value| !value.removed) else {
+        match self.store_access() {
+            Some(MemberAccess::ProviderAccount(_)) => self.holds_store(member),
+            Some(MemberAccess::S3AccessKey { .. }) => crate::effects::member(&self.state, &member)
+                .is_some_and(|current| current.role == MemberRole::Admin),
+            None => false,
+        }
+    }
+
+    /// Whether `member` is active and reaches storage through the account
+    /// the store was created in, the account that holds it (§20.9). No
+    /// account holds an S3 store.
+    pub(crate) fn holds_store(&self, member: MemberId) -> bool {
+        let Some(created @ MemberAccess::ProviderAccount(_)) = self.store_access() else {
             return false;
         };
-        match &current.access {
-            MemberAccess::S3AccessKey { .. } => current.role == MemberRole::Admin,
-            access => self
-                .recorded_access()
-                .any(|(_, at, recorded)| at == 1 && recorded.same_credential(access)),
-        }
+        crate::effects::member(&self.state, &member)
+            .is_some_and(|current| created.same_credential(&current.access))
     }
 
     /// Intentions after this state: an account stays shared while an active

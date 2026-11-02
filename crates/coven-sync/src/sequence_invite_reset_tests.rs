@@ -25,7 +25,7 @@ async fn carry(old: &Device, new: &Device) {
 async fn carried_account_revocation_reports_failure_and_survives_reopening() {
     let group = Group::shared();
     let ana = group.device(1).await;
-    group.create_with_access(&ana, MemberAccess::ProviderAccount("ana@example.org".into())).await;
+    group.create(&ana).await;
     ana.sync
         .create_invite(
             InviteTarget::NewMember { role: MemberRole::Member, name: "Carol".into() },
@@ -79,7 +79,7 @@ async fn carried_account_revocation_reports_failure_and_survives_reopening() {
 async fn reset_carries_account_work_after_the_invite_journal_has_finished() {
     let group = Group::shared();
     let ana = group.device(1).await;
-    group.create_with_access(&ana, MemberAccess::ProviderAccount("ana@example.org".into())).await;
+    group.create(&ana).await;
     let invite = ana
         .sync
         .create_invite(
@@ -105,7 +105,7 @@ async fn reset_carries_account_work_after_the_invite_journal_has_finished() {
 async fn reset_preserves_an_active_members_account() {
     let group = Group::shared();
     let ana = group.device(1).await;
-    group.create_with_access(&ana, MemberAccess::ProviderAccount("ana@example.org".into())).await;
+    group.create(&ana).await;
     let target = MemberId(group.ids.new_id());
     ana.sync
         .administer(StoreChange::AddMember {
@@ -267,7 +267,7 @@ async fn a_carried_invite_ends_its_request_under_the_device_that_made_it() {
     use coven_storage::Storage;
     let group = Group::shared();
     let ana = group.device(1).await;
-    group.create_with_access(&ana, MemberAccess::ProviderAccount("ana@example.org".into())).await;
+    group.create(&ana).await;
     let invite = ana
         .sync
         .create_invite(

@@ -2934,6 +2934,15 @@ Slot 1 creates the store and registers its first device and its first admin.
 Since nobody is a member yet, slot 1 carries its author's public key, and that key
 verifies its signature. The store id in slot 1 must match its path.
 
+Slot 1 also records how its author reaches storage, and that fixes how every
+member does. Ana creates Household from her Dropbox account, so every member
+reaches Household from a provider account, and Ana's is the account that holds
+it (§20.9). On S3, slot 1 records Ana's key, and every member reaches the store
+with an S3 key (§14.3). An entry giving a member the other kind of access is
+refused. Without that, an admin recorded with an S3 key on Household's folder
+would count as one who changes its sharing, which only the account holding
+the folder can do.
+
 Ana sets up Household on Dropbox:
 
 1. Her phone sets up her member keys in custody (OS keychain by default, §12.4).

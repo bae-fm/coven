@@ -53,9 +53,7 @@ impl Case {
         let group = Group::shared();
         let ana = group.device(1).await;
         let ben = group.device(2).await;
-        group
-            .create_with_access(&ana, MemberAccess::ProviderAccount("ana@example.org".into()))
-            .await;
+        group.create(&ana).await;
         ana.sync
             .administer(StoreChange::AddMember {
                 member: ben.identity.member(),

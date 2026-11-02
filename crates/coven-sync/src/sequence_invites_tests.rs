@@ -14,7 +14,7 @@ pub(super) async fn requests(device: &Device) -> Vec<JoinRequest> {
 async fn an_approved_request_binds_its_pair_after_copies_and_the_joiner_registers() {
     let group = Group::shared();
     let ana = group.device(1).await;
-    group.create_with_access(&ana, MemberAccess::ProviderAccount("ana@example.org".into())).await;
+    group.create(&ana).await;
     insert(&ana.sync.database, "a", "before the invite").await;
     ana.sync.pass().await.unwrap();
     let invite = invite(&ana).await;
@@ -73,7 +73,7 @@ async fn an_approved_request_binds_its_pair_after_copies_and_the_joiner_register
 async fn cancelling_an_invite_with_a_waiting_request_ends_the_join_as_declined() {
     let group = Group::shared();
     let ana = group.device(1).await;
-    group.create_with_access(&ana, MemberAccess::ProviderAccount("ana@example.org".into())).await;
+    group.create(&ana).await;
     let invite = invite(&ana).await;
     let mut carol = join(&group, invite.shown_code(), "Carol's phone").await;
     ana.sync.pass().await.unwrap();
@@ -98,7 +98,7 @@ async fn cancelling_an_invite_with_a_waiting_request_ends_the_join_as_declined()
 async fn a_decline_ends_the_invite_in_its_write_and_a_pass_deletes_the_request() {
     let group = Group::shared();
     let ana = group.device(1).await;
-    group.create_with_access(&ana, MemberAccess::ProviderAccount("ana@example.org".into())).await;
+    group.create(&ana).await;
     let invite = invite(&ana).await;
     let mut carol = join(&group, invite.shown_code(), "Carol's phone").await;
     ana.sync.pass().await.unwrap();
@@ -134,7 +134,7 @@ async fn a_decline_ends_the_invite_in_its_write_and_a_pass_deletes_the_request()
 async fn a_declined_request_takes_back_the_share_and_the_joiner_sees_the_decline() {
     let group = Group::shared();
     let ana = group.device(1).await;
-    group.create_with_access(&ana, MemberAccess::ProviderAccount("ana@example.org".into())).await;
+    group.create(&ana).await;
     let invite = invite(&ana).await;
     let mut carol = join(&group, invite.shown_code(), "Carol's phone").await;
     ana.sync.pass().await.unwrap();
@@ -212,7 +212,7 @@ async fn opening_writes_the_expiry_of_an_invite_that_ended_while_closed() {
     use std::time::Duration;
     let group = Group::shared();
     let ana = group.device(1).await;
-    group.create_with_access(&ana, MemberAccess::ProviderAccount("ana@example.org".into())).await;
+    group.create(&ana).await;
     let invite = invite(&ana).await;
     let opened = |at| InviteExpiry::opened(&ana.sync.database, at);
     opened(invite.expires_at - Duration::from_secs(1)).await.unwrap();
@@ -228,7 +228,7 @@ async fn opening_writes_the_expiry_of_an_invite_that_ended_while_closed() {
 async fn an_invite_for_a_new_person_refuses_an_empty_name() {
     let group = Group::shared();
     let ana = group.device(1).await;
-    group.create_with_access(&ana, MemberAccess::ProviderAccount("ana@example.org".into())).await;
+    group.create(&ana).await;
     let count = ana.storage.request_count();
     let result = ana
         .sync
@@ -248,7 +248,7 @@ async fn an_invite_for_a_new_person_refuses_an_empty_name() {
 async fn an_invite_expires_a_day_later_on_the_inviting_device() {
     let group = Group::shared();
     let ana = group.device(1).await;
-    group.create_with_access(&ana, MemberAccess::ProviderAccount("ana@example.org".into())).await;
+    group.create(&ana).await;
     invite(&ana).await;
     group.clock.set(std::time::UNIX_EPOCH + std::time::Duration::from_secs(86_400));
     ana.sync.pass().await.unwrap();
@@ -266,7 +266,7 @@ async fn an_invite_expires_a_day_later_on_the_inviting_device() {
 async fn a_replacement_invite_rebinds_an_existing_member_on_a_new_device() {
     let group = Group::shared();
     let ana = group.device(1).await;
-    group.create_with_access(&ana, MemberAccess::ProviderAccount("ana@example.org".into())).await;
+    group.create(&ana).await;
     let carol_id = coven_crypto::MemberIdentity::new(
         coven_foundation::id_source::MemberId(uuid::Uuid::from_u128(91)),
         coven_format::test_utils::keys_from_seed(3),
@@ -322,7 +322,7 @@ async fn a_replacement_invite_rebinds_an_existing_member_on_a_new_device() {
 async fn an_explicit_retry_reads_a_request_before_its_backoff_is_due() {
     let group = Group::shared();
     let ana = group.device(1).await;
-    group.create_with_access(&ana, MemberAccess::ProviderAccount("ana@example.org".into())).await;
+    group.create(&ana).await;
     let invite = invite(&ana).await;
     ana.sync.pass().await.unwrap();
     let operation = ana
@@ -358,7 +358,7 @@ async fn an_explicit_retry_reads_a_request_before_its_backoff_is_due() {
 async fn a_refused_grant_is_the_invites_pending_record_until_cancelled() {
     let group = Group::shared();
     let ana = group.device(1).await;
-    group.create_with_access(&ana, MemberAccess::ProviderAccount("ana@example.org".into())).await;
+    group.create(&ana).await;
     let result = ana
         .sync
         .create_invite(
@@ -404,7 +404,7 @@ async fn an_invite_its_maker_can_no_longer_make_is_refused_before_any_grant() {
     let group = Group::shared();
     let ana = group.device(1).await;
     let ben = group.device(2).await;
-    group.create_with_access(&ana, MemberAccess::ProviderAccount("ana@example.org".into())).await;
+    group.create(&ana).await;
     group.admit(&ana, &ben).await;
     ben.sync.pass().await.unwrap();
     ben.sync
@@ -451,7 +451,7 @@ async fn a_live_query_follows_each_open_invite_in_order() {
     use coven_format::admin::StoreChange;
     let group = Group::shared();
     let ana = group.device(1).await;
-    group.create_with_access(&ana, MemberAccess::ProviderAccount("ana@example.org".into())).await;
+    group.create(&ana).await;
     let mut invites = Invite::follow(&ana.sync.database);
     assert!(invites.next().await.is_empty());
     let invite = invite(&ana).await;
@@ -487,7 +487,7 @@ async fn a_live_query_follows_each_open_invite_in_order() {
 async fn a_decision_after_the_lifetime_fails_and_leaves_the_expiry() {
     let group = Group::shared();
     let ana = group.device(1).await;
-    group.create_with_access(&ana, MemberAccess::ProviderAccount("ana@example.org".into())).await;
+    group.create(&ana).await;
     let invite = invite(&ana).await;
     let carol = join(&group, invite.shown_code(), "Carol's phone").await;
     ana.sync.pass().await.unwrap();
@@ -521,7 +521,7 @@ async fn a_decision_after_the_lifetime_fails_and_leaves_the_expiry() {
 async fn a_pass_under_way_records_nothing_over_a_cancel() {
     let group = Group::shared();
     let ana = group.device(1).await;
-    group.create_with_access(&ana, MemberAccess::ProviderAccount("ana@example.org".into())).await;
+    group.create(&ana).await;
     let invite = invite(&ana).await;
     let operation = ana.database().first_operation("invite").await.unwrap().unwrap().id;
     let (observed, read) = tokio::sync::oneshot::channel();
@@ -562,7 +562,7 @@ async fn a_pass_under_way_records_nothing_over_a_cancel() {
 async fn an_invite_waiting_for_a_decision_still_expires() {
     let group = Group::shared();
     let ana = group.device(1).await;
-    group.create_with_access(&ana, MemberAccess::ProviderAccount("ana@example.org".into())).await;
+    group.create(&ana).await;
     let invite = invite(&ana).await;
     let carol = join(&group, invite.shown_code(), "Carol's phone").await;
     ana.sync.pass().await.unwrap();
@@ -590,7 +590,7 @@ async fn an_invite_waiting_for_a_decision_still_expires() {
 async fn a_network_report_ends_an_offline_invite_wait() {
     let group = Group::shared();
     let ana = group.device(1).await;
-    group.create_with_access(&ana, MemberAccess::ProviderAccount("ana@example.org".into())).await;
+    group.create(&ana).await;
     let invite = invite(&ana).await;
     let request = request_path(&invite);
     ana.storage
@@ -667,7 +667,7 @@ async fn a_cancelled_s3_invite_leaves_no_work_behind() {
 async fn a_second_invite_to_an_account_already_shared_is_made() {
     let group = Group::shared();
     let ana = group.device(1).await;
-    group.create_with_access(&ana, MemberAccess::ProviderAccount("ana@example.org".into())).await;
+    group.create(&ana).await;
     let sent = invite(&ana).await;
     let in_person = ana
         .sync
@@ -708,7 +708,7 @@ async fn a_stop_for_good_ends_this_devices_invites() {
     let group = Group::shared();
     let ana = group.device(1).await;
     let ben = group.device(2).await;
-    group.create_with_access(&ana, MemberAccess::ProviderAccount("ana@example.org".into())).await;
+    group.create(&ana).await;
     group.admit(&ana, &ben).await;
     let approving = invite(&ana).await;
     let waiting = ana

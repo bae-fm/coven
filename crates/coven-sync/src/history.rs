@@ -234,14 +234,6 @@ impl History {
         Ok(signer)
     }
 
-    /// Whether `member`'s provider account holds the store (§20.9). An S3
-    /// store is held by no account.
-    fn holds_store(&self, member: MemberId) -> bool {
-        self.state.members.get(&member).is_some_and(|current| {
-            matches!(current.access, coven_format::MemberAccess::ProviderAccount(_))
-        }) && self.owns_storage(member)
-    }
-
     pub(crate) fn validate(
         &self,
         header: &SlotHeader,
@@ -262,6 +254,13 @@ impl History {
             &self.boundaries,
         )?;
         match change {
+            // A member reaches the store with the kind of access its
+            // creation records: a provider account, or an S3 key (§10.3).
+            StoreChange::AddMember { access, .. } | StoreChange::SetAccess { access, .. }
+                if !self.store_access().is_some_and(|created| created.same_kind(access)) =>
+            {
+                return Err(OperationRejection::NotAllowed);
+            }
             // The owner's access stays on the account that holds the store:
             // moved to another, no member would reach storage through it,
             // and nobody could share the store or take sharing back (§20.9).

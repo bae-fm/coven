@@ -32,6 +32,16 @@ impl MemberAccess {
             _ => false,
         }
     }
+
+    /// Whether both are the same kind of access: provider accounts, or S3
+    /// keys.
+    pub fn same_kind(&self, other: &Self) -> bool {
+        matches!(
+            (self, other),
+            (Self::ProviderAccount(_), Self::ProviderAccount(_))
+                | (Self::S3AccessKey { .. }, Self::S3AccessKey { .. })
+        )
+    }
 }
 
 fn get_text(input: &mut Decoder<'_>) -> Result<String, Error> {

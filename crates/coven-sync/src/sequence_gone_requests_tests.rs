@@ -1,6 +1,6 @@
 use crate::sequence_sync::tests::*;
 use crate::*;
-use coven_format::{admin::StoreChange, device_gone::DeviceGone, MemberAccess};
+use coven_format::{admin::StoreChange, device_gone::DeviceGone};
 use coven_foundation::id_source::DeviceId;
 use coven_storage::{ObjectPath, ObjectPrefix, Storage, StorageFailure};
 
@@ -61,7 +61,7 @@ async fn an_admin_ends_the_requests_of_a_device_gone_for_good() {
     let group = Group::new();
     let ana = group.device(1).await;
     let ben = group.device(2).await;
-    group.create_with_access(&ana, MemberAccess::S3AccessKey { access_key_id: "ana".into() }).await;
+    group.create(&ana).await;
     group.admit(&ana, &ben).await;
     let carols = s3_invite(&ana, "Carol").await;
     let dans = s3_invite(&ana, "Dan").await;
@@ -119,7 +119,7 @@ async fn a_joiner_that_finds_the_gone_marker_deletes_its_waiting_request() {
     let group = Group::new();
     let ana = group.device(1).await;
     let ben = group.device(2).await;
-    group.create_with_access(&ana, MemberAccess::S3AccessKey { access_key_id: "ana".into() }).await;
+    group.create(&ana).await;
     group.admit(&ana, &ben).await;
     let carols = s3_invite(&ana, "Carol").await;
     let mut carol = s3_joiner(&group, &carols, "Carol's phone").await;
@@ -155,7 +155,7 @@ async fn only_an_admins_device_that_applied_the_stop_ends_the_requests() {
     let ana = group.device(1).await;
     let ben = group.device(2).await;
     let dan = group.device(4).await;
-    group.create_with_access(&ana, MemberAccess::S3AccessKey { access_key_id: "ana".into() }).await;
+    group.create(&ana).await;
     group.admit(&ana, &ben).await;
     ana.sync
         .administer(StoreChange::AddMember {

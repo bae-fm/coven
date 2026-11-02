@@ -99,12 +99,7 @@ async fn an_app_commit_wakes_a_pass_and_a_requested_pass_reads_it_elsewhere() {
 async fn an_ended_operation_wait_does_not_starve_a_requested_pass() {
     let group = Group::shared();
     let ana = group.device(1).await;
-    group
-        .create_with_access(
-            &ana,
-            coven_format::MemberAccess::ProviderAccount("ana@example.org".into()),
-        )
-        .await;
+    group.create(&ana).await;
     ana.sync
         .create_invite(
             InviteTarget::NewMember {

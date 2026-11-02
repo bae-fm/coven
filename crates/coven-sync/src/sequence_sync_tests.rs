@@ -295,18 +295,21 @@ impl Group {
         );
         Device { _temp: temp, sync, storage, identity, work, keychain }
     }
+    /// Ana makes the store: from her provider account where the provider
+    /// shares stores with accounts, with her S3 key on S3.
     pub(crate) async fn create(&self, ana: &Device) {
-        self.create_with_access(ana, access("ana")).await;
+        self.create_as(ana, self.access("ana")).await.unwrap();
     }
-    pub(crate) async fn create_with_access(
-        &self,
-        ana: &Device,
-        access: coven_format::MemberAccess,
-    ) {
-        self.create_as(ana, access).await.unwrap();
+    /// How `name` reaches this group's storage: an account where the
+    /// provider shares stores with accounts, an S3 key on S3.
+    pub(crate) fn access(&self, name: &str) -> coven_format::MemberAccess {
+        match self.storage.config().provider() {
+            coven_storage::CloudProvider::S3 => access(name),
+            _ => coven_format::MemberAccess::ProviderAccount(format!("{name}@example.org")),
+        }
     }
     pub(crate) async fn create_result(&self, ana: &Device) -> Result<(), SyncError> {
-        self.create_as(ana, access("ana")).await
+        self.create_as(ana, self.access("ana")).await
     }
     async fn create_as(
         &self,
@@ -326,13 +329,20 @@ impl Group {
             })
             .await
     }
+    /// Ana admits `ben` as an admin, with access of the store's kind: on S3
+    /// the key "ben", elsewhere an account named for his member id, so each
+    /// admitted member's account is their own.
     pub(crate) async fn admit(&self, ana: &Device, ben: &Device) {
+        let name = match self.storage.config().provider() {
+            coven_storage::CloudProvider::S3 => "ben".to_owned(),
+            _ => ben.identity.member().to_string(),
+        };
         ana.sync
             .administer(StoreChange::AddMember {
                 member: ben.identity.member(),
                 keys: ben.identity.keys().public_keys(),
                 role: MemberRole::Admin,
-                access: access("ben"),
+                access: self.access(&name),
             })
             .await
             .unwrap();

@@ -23,7 +23,7 @@ async fn in_person_invite(ana: &Device) -> Invite {
 async fn an_in_person_request_is_approved_in_the_pass_that_reads_it() {
     let group = Group::shared();
     let ana = group.device(1).await;
-    group.create_with_access(&ana, MemberAccess::ProviderAccount("ana@example.org".into())).await;
+    group.create(&ana).await;
     let invite = in_person_invite(&ana).await;
     let mut carol = join(&group, invite.shown_code(), "Carol's phone").await;
     ana.sync.pass().await.unwrap();
@@ -46,7 +46,7 @@ async fn an_in_person_approval_under_way_refuses_the_apps_decisions() {
     use coven_storage::test_utils::Faults;
     let group = Group::shared();
     let ana = group.device(1).await;
-    group.create_with_access(&ana, MemberAccess::ProviderAccount("ana@example.org".into())).await;
+    group.create(&ana).await;
     let invite = in_person_invite(&ana).await;
     let mut carol = join(&group, invite.shown_code(), "Carol's phone").await;
     let next = ana.sync.database.applied_slot().await.unwrap() + 1;
@@ -103,7 +103,7 @@ async fn a_check_between_the_copies_and_the_entry_finds_the_approval_begun() {
     use coven_storage::test_utils::Faults;
     let group = Group::shared();
     let ana = group.device(1).await;
-    group.create_with_access(&ana, MemberAccess::ProviderAccount("ana@example.org".into())).await;
+    group.create(&ana).await;
     let invite = in_person_invite(&ana).await;
     let mut carol = join(&group, invite.shown_code(), "Carol's phone").await;
     assert_eq!(
@@ -161,7 +161,7 @@ async fn a_demoted_approvers_approval_is_refused_by_its_pass() {
     let group = Group::shared();
     let ana = group.device(1).await;
     let ben = group.device(2).await;
-    group.create_with_access(&ana, MemberAccess::ProviderAccount("ana@example.org".into())).await;
+    group.create(&ana).await;
     group.admit(&ana, &ben).await;
     let invite = invite(&ana).await;
     let mut carol = join(&group, invite.shown_code(), "Carol's phone").await;
@@ -247,9 +247,7 @@ async fn a_replacement_invite_keeps_its_expected_pair_across_approval_and_retry(
         let group = Group::shared();
         let ana = group.device(1).await;
         let ben = group.device(2).await;
-        group
-            .create_with_access(&ana, MemberAccess::ProviderAccount("ana@example.org".into()))
-            .await;
+        group.create(&ana).await;
         group.admit(&ana, &ben).await;
         let target = coven_foundation::id_source::MemberId(uuid::Uuid::from_u128(91));
         ana.sync
@@ -428,7 +426,7 @@ async fn a_refused_access_record_ends_its_invite() {
 async fn a_crash_between_any_two_commits_leaves_the_approval_and_its_binding_agreeing() {
     let group = Group::shared();
     let ana = group.device(1).await;
-    group.create_with_access(&ana, MemberAccess::ProviderAccount("ana@example.org".into())).await;
+    group.create(&ana).await;
     let invite = invite(&ana).await;
     let carol = join(&group, invite.shown_code(), "Carol's phone").await;
     ana.sync.pass().await.unwrap();

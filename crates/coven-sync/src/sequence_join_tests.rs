@@ -1,6 +1,6 @@
 use crate::sequence_sync::tests::*;
 use crate::{floor_object::FloorObject, JoinOutcome};
-use coven_format::{admin::StoreChange, sealed_slot::SlotKind, MemberAccess};
+use coven_format::{admin::StoreChange, sealed_slot::SlotKind};
 use coven_foundation::clock::FixedClock;
 use coven_merge::Audience;
 use coven_storage::{test_utils::MemoryStorage, CloudProvider, ObjectPath, Storage};
@@ -22,7 +22,7 @@ fn clocks(provider: SystemTime, deleting: SystemTime) -> Group {
 
 async fn waiting(group: &Group) -> (Device, Joiner) {
     let ana = group.device(1).await;
-    group.create_with_access(&ana, MemberAccess::ProviderAccount("ana@example.org".into())).await;
+    group.create(&ana).await;
     let invitation = invite(&ana).await;
     let mut carol = join(group, invitation.shown_code(), "Carol's phone").await;
     assert_eq!(
@@ -369,7 +369,7 @@ async fn check_now_ends_the_joins_wait_but_not_a_provider_cooldown() {
 async fn only_a_sent_invites_join_has_a_confirmation_number() {
     let group = Group::shared();
     let ana = group.device(1).await;
-    group.create_with_access(&ana, MemberAccess::ProviderAccount("ana@example.org".into())).await;
+    group.create(&ana).await;
     let sent = invite(&ana).await;
     let in_person = ana
         .sync

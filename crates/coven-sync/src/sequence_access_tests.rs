@@ -14,7 +14,7 @@ async fn only_the_owners_device_records_the_work_a_removal_needs() {
     let ana = group.device(1).await;
     let ben = group.device(2).await;
     let dan = group.device(3).await;
-    group.create_with_access(&ana, MemberAccess::ProviderAccount("ana@example.org".into())).await;
+    group.create(&ana).await;
     for (device, account) in [(&ben, "ben@example.org"), (&dan, "dan@example.org")] {
         ana.sync
             .administer(StoreChange::AddMember {
