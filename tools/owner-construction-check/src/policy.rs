@@ -136,6 +136,12 @@ pub(crate) struct Policy {
     /// module of the crate.
     #[serde(default)]
     pub(crate) closed_session_types: BTreeSet<String>,
+    /// Names the type rows use for types that dependencies outside the
+    /// workspace declare, such as a runtime handle or a lock. The rules match
+    /// types by name, so each must be named by a crate source and declared by
+    /// none.
+    #[serde(default)]
+    pub(crate) external_types: BTreeSet<String>,
 }
 
 /// `(source file, type, method)`: a callable allowed to construct owners or

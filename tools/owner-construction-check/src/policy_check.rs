@@ -12,7 +12,9 @@ use crate::capability_construction::construction_only_types;
 use crate::database_boundary::schema_table_macros;
 use crate::policy::Policy;
 use crate::sources::Workspace;
-use crate::syntax::{collect_declared_types, is_test_only, type_name, type_names, RustFile};
+use crate::syntax::{
+    collect_declared_types, is_test_only, type_name, type_names, RustFile, TypeNames,
+};
 
 /// Each policy row that names something the workspace does not hold.
 pub(crate) fn stale_rows(workspace: &Workspace, policy: &Policy) -> Vec<String> {
@@ -197,14 +199,32 @@ fn invalid_capability_factories(files: &[RustFile], policy: &Policy) -> Vec<Stri
         .collect()
 }
 
+/// A type the policy names is declared by a crate, or is one of its external
+/// types: named by a crate's production source and declared by none.
 fn undeclared_types(crate_files: &[RustFile], policy: &Policy) -> Vec<String> {
     let declared = collect_declared_types(crate_files);
-    policy
-        .named_types()
-        .into_iter()
-        .filter(|(_, name)| !declared.contains_key(*name))
+    let mut mentioned = TypeNames::default();
+    for file in crate_files.iter().filter(|file| !file.is_test_source()) {
+        mentioned.visit_file(&file.syntax);
+    }
+    let named = policy.named_types();
+    let mut stale = named
+        .iter()
+        .filter(|(_, name)| !policy.external_types.contains(*name) && !declared.contains_key(*name))
         .map(|(row, name)| format!("{row}: no crate declares {name}"))
-        .collect()
+        .collect::<Vec<_>>();
+    for name in &policy.external_types {
+        if declared.contains_key(name) {
+            stale.push(format!("external_types: a crate declares {name}"));
+        }
+        if !mentioned.names.contains(name) {
+            stale.push(format!("external_types: no crate names {name}"));
+        }
+        if !named.iter().any(|(_, named)| named == name) {
+            stale.push(format!("external_types: no type row names {name}"));
+        }
+    }
+    stale
 }
 
 fn missing_capability_traits(crate_files: &[RustFile], policy: &Policy) -> Vec<String> {

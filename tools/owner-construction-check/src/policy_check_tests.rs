@@ -271,3 +271,29 @@ fn the_database_schema_module_declares_exactly_its_table_macros() {
         ]
     );
 }
+
+#[test]
+fn external_types_are_named_by_a_crate_and_declared_by_none() {
+    let files = vec![
+        RustFile::fixture(
+            "crates/app/src/lib.rs",
+            "struct Worker { runtime: tokio::runtime::Runtime, lock: Mutex<()> } struct Local;",
+        ),
+        RustFile::fixture("crates/app/src/lib_tests.rs", "struct Fixture { handle: Handle }"),
+    ];
+    let rows = r#"
+        capability_types = ["Runtime", "Mutex", "Local", "Handle", "Gone"]
+        external_types = ["Runtime", "Mutex", "Local", "Handle", "Gone", "Unused"]
+    "#;
+    assert_eq!(
+        stale(files, rows),
+        [
+            "external_types: no crate names Gone",
+            "external_types: no crate names Handle",
+            "external_types: a crate declares Local",
+            "external_types: no crate names Local",
+            "external_types: no crate names Unused",
+            "external_types: no type row names Unused",
+        ]
+    );
+}
