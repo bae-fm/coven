@@ -236,6 +236,18 @@ pub(crate) async fn acquire_for_open(
     Ok(StoreLock { store: LockedStore { _file: file, directory, id } })
 }
 
+/// Wait until no instance of the store at `directory` in this process is
+/// closing. An absent directory has none.
+pub(crate) async fn closed(directory: &Path, id: StoreId) -> Result<(), FileError> {
+    let directory = match std::fs::canonicalize(directory) {
+        Ok(directory) => directory,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(source) => return Err(FileError::at("resolve store directory", directory, source)),
+    };
+    registry::closed(&directory, id).await;
+    Ok(())
+}
+
 pub(super) async fn acquire_bootstrap(
     directory: &Path,
     id: StoreId,

@@ -442,3 +442,53 @@ async fn discarding_a_store_whose_replacement_stopped_after_its_swap_removes_bot
         network.close().await;
     }
 }
+
+/// Discarding a store whose last handle was dropped, or whose close has
+/// begun, while blocking work still holds its lock waits for that close to
+/// finish instead of refusing the store as open, as reopening does.
+#[tokio::test]
+async fn discarding_waits_after_the_last_handle_drops_or_close_starts() {
+    use std::{
+        future::{poll_fn, Future},
+        task::Poll,
+    };
+    for close in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let layout = StoreLayout::new(root.path().into());
+        let app = TestCoven::new();
+        let directory =
+            app.create_closed_store(&layout, "Discard", Arc::new(UuidIds)).await.unwrap();
+        let handle = builder(&app, layout.clone()).open(directory.id(), |_| ()).await.unwrap();
+        let (entered, entry) = tokio::sync::oneshot::channel();
+        let (release, released) = std::sync::mpsc::channel();
+        let mut read = Box::pin(handle.read(move |_| {
+            entered.send(()).unwrap();
+            released.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
+            Ok(())
+        }));
+        tokio::select! {
+            result = &mut read => panic!("held read returned: {result:?}"),
+            result = entry => result.unwrap(),
+        }
+        drop(read);
+        if close {
+            let mut closing = Box::pin(handle.close());
+            poll_fn(|cx| {
+                assert!(closing.as_mut().poll(cx).is_pending());
+                Poll::Ready(())
+            })
+            .await;
+            drop(closing);
+        }
+        drop(handle);
+        let mut discard = Box::pin(app.discard_store(&directory));
+        poll_fn(|cx| {
+            assert!(discard.as_mut().poll(cx).is_pending(), "discarding refused a closing store");
+            Poll::Ready(())
+        })
+        .await;
+        release.send(()).unwrap();
+        discard.await.unwrap();
+        assert!(layout.stores().await.unwrap().is_empty());
+    }
+}

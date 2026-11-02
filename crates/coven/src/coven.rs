@@ -1,7 +1,7 @@
 //! The calls that create, locate, open and remove device-local stores.
 
 use crate::{CovenBuilder, StoreDeletionError, StoreDir, StoreLayout};
-use coven_crypto::custody::{Keychain, StoreKeychain};
+use coven_crypto::custody::{KeyError, Keychain, StoreKeychain};
 use coven_foundation::files::StoreDirAccess;
 
 /// Creating, opening and deleting stores on this device (E1).
@@ -47,15 +47,25 @@ impl Coven {
     /// whole: both installations, the replacement's directory and record,
     /// and this device's entries, which by then may name either device.
     /// Refused while a writer, read-only handle, file stream or a running
-    /// replacement remains; storage is untouched. Retrying finishes a
-    /// deletion that failed partway.
+    /// replacement remains; storage is untouched. A handle of it in this
+    /// process that is closing, or whose last clone was dropped, is waited
+    /// for. Retrying finishes a deletion that failed partway.
     pub async fn discard_store(store_dir: &StoreDir) -> Result<(), StoreDeletionError> {
-        let directory = store_dir.clone();
-        blocking("discard the store", move || {
-            delete(&directory, &StoreKeychain::new(Keychain::registered()?, directory.id()))
-        })
-        .await?
+        let store = store_dir.id();
+        discard(store_dir, move || Ok(StoreKeychain::new(Keychain::registered()?, store))).await
     }
+}
+
+/// Wait for any closing instance of the store in this process, then delete
+/// it with this device's entries in the keychain `keys` makes, made on the
+/// blocking pool as the deletion runs.
+pub(crate) async fn discard(
+    store_dir: &StoreDir,
+    keys: impl FnOnce() -> Result<StoreKeychain, KeyError> + Send + 'static,
+) -> Result<(), StoreDeletionError> {
+    store_dir.closed().await?;
+    let directory = store_dir.clone();
+    blocking("discard the store", move || delete(&directory, &keys()?)).await?
 }
 
 pub(crate) fn delete(directory: &StoreDir, keys: &StoreKeychain) -> Result<(), StoreDeletionError> {

@@ -1598,9 +1598,10 @@ pub enum SettingsError {
 /// The requested writer, reader or deletion lock could not be taken (E1).
 pub enum StoreLockError {
     /// Another live instance in this process, or another process, holds the
-    /// lock: opening or bootstrapping returns this error immediately. If this
-    /// process's instance is closing, opening or bootstrapping the same store
-    /// waits until its last blocking work finishes and its lock handles close,
+    /// lock: opening, bootstrapping or discarding returns this error
+    /// immediately. If this process's instance is closing, opening,
+    /// bootstrapping or discarding the same store waits until its last
+    /// blocking work finishes and its lock handles close,
     /// then tries to take the lock. The wait uses release notifications, with
     /// no timeout or polling, keyed by canonical directory and store id.
     AlreadyOpen(StoreId),
@@ -1890,8 +1891,10 @@ impl Coven {
     /// is deleted whole: both installations, the replacement's directory and
     /// record, and this device's entries, whichever device they name by then.
     /// Refused while a writer, read-only handle, file stream, file I/O or a
-    /// running replacement holds its lock; storage is untouched. Retrying
-    /// finishes a deletion that failed partway.
+    /// running replacement holds its lock; storage is untouched. A handle in
+    /// this process that is closing, or whose last clone was dropped, is
+    /// waited for first, as opening waits for it. Retrying finishes a
+    /// deletion that failed partway.
     pub async fn discard_store(store_dir: &StoreDir) -> Result<(), StoreDeletionError>;
 }
 

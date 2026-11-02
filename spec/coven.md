@@ -9718,6 +9718,10 @@ used to pass collaborators; they are passed by name.
   when the lock handles close. There are no timeouts or polling sleeps. A live
   instance in this process, or a lock held by another process, still returns
   `AlreadyOpen` at once (api.md E1).
+- **Discarding in the same process** waits the same way. An app that drops its
+  handle and then discards the store, as one removing a store it could not
+  finish opening does, would otherwise be refused while blocking work of the
+  dropped handle still holds the writer lock.
 - **Opening** leaves configured storage `Stopped`, or `Disconnected` when none is
   set up. `start_sync` starts the loop, whose first pass builds the storage
   client from custody credentials (api.md E5). Starting again keeps the running

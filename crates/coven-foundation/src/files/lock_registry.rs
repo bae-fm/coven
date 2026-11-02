@@ -209,6 +209,28 @@ pub(super) async fn acquire_registered(
     }
 }
 
+/// Wait until no instance of the store at `directory` in this process is
+/// closing. A live instance is not waited for: whatever lock the caller takes
+/// next refuses it.
+pub(super) async fn closed(directory: &Path, id: StoreId) {
+    let store = (directory.to_owned(), id);
+    loop {
+        let mut released = {
+            let stores = STORES.lock().expect("store registry lock poisoned");
+            match stores.get(&store).and_then(|locks| {
+                locks.values().find(|entry| *entry.phase.borrow() == LockPhase::Closing)
+            }) {
+                Some(entry) => entry.phase.subscribe(),
+                None => return,
+            }
+        };
+        released
+            .wait_for(|phase| *phase == LockPhase::Released)
+            .await
+            .expect("registered lock publishes release before dropping its sender");
+    }
+}
+
 #[cfg(test)]
 #[path = "lock_registry_tests.rs"]
 mod tests;

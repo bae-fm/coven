@@ -199,6 +199,10 @@ pub trait StoreDirAccess: Sized {
     /// installation is refused with `StoreLockError::BootstrapPending`.
     /// No directory is created by this call.
     fn lock_for_deletion(&self) -> Result<Option<StoreDeletionLock>, StoreLockError>;
+    /// Wait until no instance of this store in this process is closing, as
+    /// `lock_for_open` does, so a deletion that follows is not refused by an
+    /// instance only finishing its close. A live instance is not waited for.
+    fn closed(&self) -> impl std::future::Future<Output = Result<(), FileError>> + Send;
     /// Check that a supplied lock protects this exact store directory.
     fn verify_lock(&self, lock: &StoreLock) -> Result<(), StoreLockError>;
     /// Give every folder and file of the store `lock` holds for writing the
@@ -265,6 +269,9 @@ impl StoreDirAccess for StoreDir {
             return Err(StoreLockError::BootstrapPending(self.id));
         }
         locked
+    }
+    async fn closed(&self) -> Result<(), FileError> {
+        lock::closed(&self.path, self.id).await
     }
     fn verify_lock(&self, lock: &StoreLock) -> Result<(), StoreLockError> {
         lock.verify(&self.path, self.id)

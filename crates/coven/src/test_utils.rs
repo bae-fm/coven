@@ -107,12 +107,8 @@ impl TestCoven {
 
     /// Discard through the same locked directory and keychain path as `Coven`.
     pub async fn discard_store(&self, directory: &StoreDir) -> Result<(), StoreDeletionError> {
-        let directory = directory.clone();
-        let keychain = self.keychain.clone();
-        crate::coven::blocking("discard the store", move || {
-            crate::coven::delete(&directory, &StoreKeychain::new(keychain, directory.id()))
-        })
-        .await?
+        let keys = StoreKeychain::new(self.keychain.clone(), directory.id());
+        crate::coven::discard(directory, move || Ok(keys)).await
     }
 
     /// Seed the simulated OS custody as if this installation had opened keys.
