@@ -1,9 +1,9 @@
 use super::*;
-use crate::test_code::production_code;
+use crate::crate_code::checked;
 
 /// The rule as the checker runs it: on the files' production code.
 fn find_unique_type_name_violations(files: &[RustFile], policy: &Policy) -> Vec<Finding> {
-    let files = production_code(files);
+    let files = checked(files);
     super::find_unique_type_name_violations(&files, policy, &OwnerGraph::collect(&files, policy))
 }
 

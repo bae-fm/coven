@@ -4,6 +4,7 @@ use crate::capability_boundaries::find_capability_boundary_violations;
 use crate::capability_construction::find_capability_construction_violations;
 use crate::component_bundles::find_component_bundle_violations;
 use crate::conventions::find_convention_violations;
+use crate::crate_code::CrateCode;
 use crate::crate_dependencies::find_crate_dependency_violations;
 use crate::database_boundary::find_database_boundary_violations;
 use crate::finding::Finding;
@@ -26,6 +27,7 @@ pub(crate) struct UnknownPackage(String);
 /// names and ownership. An empty selection checks the whole workspace.
 pub(crate) fn check_packages(
     workspace: &Workspace,
+    code: &CrateCode,
     policy: &Policy,
     packages: &[String],
 ) -> Result<Report, UnknownPackage> {
@@ -47,40 +49,44 @@ pub(crate) fn check_packages(
                 .ok_or_else(|| UnknownPackage(package.clone()))
         })
         .collect::<Result<Vec<_>, _>>()?;
-    Ok(check_paths(workspace, policy, &roots))
+    Ok(check_paths(workspace, code, policy, &roots))
 }
 
-/// The policy's selected rules. The dependency, capability and owner rules
-/// read the crates' production code; conventions read every file, tools and
-/// tests included.
-fn check_paths(workspace: &Workspace, policy: &Policy, roots: &[&str]) -> Report {
-    let files = workspace.crate_code(policy);
-    let graph = OwnerGraph::collect(&files, policy);
+/// The policy's selected rules. The capability and owner rules read the
+/// crates' code (`crate_code.rs`); conventions read every file as written,
+/// tools and tests included. An invocation the checker could not expand is a
+/// finding whenever a rule reads the crates' code.
+fn check_paths(workspace: &Workspace, code: &CrateCode, policy: &Policy, roots: &[&str]) -> Report {
+    let files = &code.expanded;
+    let graph = OwnerGraph::collect(files, policy);
     let mut findings = Vec::new();
+    if policy.rules.iter().any(|rule| rule.reads_crate_code()) {
+        findings.extend(code.unexpanded.iter().cloned());
+    }
     if policy.selects(Rule::CrateDependencies) {
         findings.extend(find_crate_dependency_violations(workspace, policy));
     }
     if policy.selects(Rule::DatabaseBoundary) {
-        findings.extend(find_database_boundary_violations(&files, policy));
+        findings.extend(find_database_boundary_violations(files, &code.written, policy));
     }
     if policy.selects(Rule::OwnerDependencies) {
-        findings.extend(find_owner_dependency_leaks(&files, policy, &graph));
+        findings.extend(find_owner_dependency_leaks(files, policy, &graph));
     }
     if policy.selects(Rule::RetainedCapabilityParameters) {
         findings.extend(find_retained_capability_parameter_violations(
-            &files,
+            files,
             &graph.owners,
             policy,
         ));
     }
     if policy.selects(Rule::ComponentBundles) {
-        findings.extend(find_component_bundle_violations(&files, policy));
+        findings.extend(find_component_bundle_violations(files, policy));
     }
     if policy.selects(Rule::CapabilityBoundaries) {
-        findings.extend(find_capability_boundary_violations(&files, policy));
+        findings.extend(find_capability_boundary_violations(files, policy));
     }
     if policy.selects(Rule::CapabilityConstruction) {
-        findings.extend(find_capability_construction_violations(&files, policy, &graph));
+        findings.extend(find_capability_construction_violations(files, policy, &graph));
     }
     if policy.selects(Rule::Conventions) {
         findings.extend(find_convention_violations(&workspace.files, policy.api_crate.as_deref()));
@@ -93,7 +99,7 @@ fn check_paths(workspace: &Workspace, policy: &Policy, roots: &[&str]) -> Report
     // Ambiguous names invalidate the workspace graph, even when the first
     // declaration (where the diagnostic points) is outside selected packages.
     if policy.rules.iter().any(|rule| rule.reads_owner_graph()) {
-        findings.extend(find_unique_type_name_violations(&files, policy, &graph));
+        findings.extend(find_unique_type_name_violations(files, policy, &graph));
     }
     findings.sort();
     findings.dedup();

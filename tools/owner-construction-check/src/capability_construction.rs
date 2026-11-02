@@ -18,7 +18,7 @@ use syn::visit::{self, Visit};
 
 use crate::factories::Factories;
 use crate::finding::Finding;
-use crate::macros::{parse_macro_body, token_paths};
+use crate::macros::{parse_macro_body, token_paths, unparsed_tokens, MacroBody};
 use crate::name_resolution::{qualified_path, NameResolver};
 use crate::owner_graph::OwnerGraph;
 use crate::policy::Policy;
@@ -667,14 +667,21 @@ impl<'ast> Visit<'ast> for ConstructionVisitor<'_> {
     }
 
     fn visit_macro(&mut self, node: &'ast syn::Macro) {
-        if let Some(expanded) = self.resolver.expanded_macro(self.path, node) {
-            self.visit_file(expanded);
-            return;
-        }
         match parse_macro_body(node) {
+            // The pattern's bindings are in scope in the guard, as in a match arm.
+            Some(MacroBody::Match { value, pattern, guard }) => {
+                self.visit_expr(&value);
+                let bindings = self.bindings.clone();
+                self.bind_pattern(&pattern);
+                self.visit_pat(&pattern);
+                if let Some(guard) = &guard {
+                    self.visit_expr(guard);
+                }
+                self.bindings = bindings;
+            }
             Some(body) => body.visit(self),
             None => {
-                for path in token_paths(node.tokens.clone()) {
+                for path in token_paths(unparsed_tokens(node)) {
                     if path.after_dot
                         && path.receiver.as_deref() == Some("self")
                         && path.followed_by == Some(proc_macro2::Delimiter::Parenthesis)

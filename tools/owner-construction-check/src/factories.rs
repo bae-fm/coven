@@ -262,9 +262,7 @@ impl<'ast> Visit<'ast> for Collector<'_> {
     }
 
     fn visit_macro(&mut self, node: &'ast syn::Macro) {
-        if let Some(expanded) = self.resolver.expanded_macro(self.path, node) {
-            self.visit_file(expanded);
-        } else if let Some(body) = parse_macro_body(node) {
+        if let Some(body) = parse_macro_body(node) {
             body.visit(self);
         }
     }
@@ -294,9 +292,7 @@ impl<'ast> Visit<'ast> for TraitCollector<'_> {
     }
 
     fn visit_macro(&mut self, node: &'ast syn::Macro) {
-        if let Some(expanded) = self.resolver.expanded_macro(self.path, node) {
-            self.visit_file(expanded);
-        } else if let Some(body) = parse_macro_body(node) {
+        if let Some(body) = parse_macro_body(node) {
             body.visit(self);
         }
     }

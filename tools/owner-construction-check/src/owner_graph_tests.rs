@@ -1,7 +1,7 @@
 use super::*;
 use crate::capability_construction::find_capability_construction_violations;
+use crate::crate_code::checked;
 use crate::finding::Finding;
-use crate::test_code::production_code;
 
 const PATH: &str = "crates/app-sync/src/fixture.rs";
 fn policy() -> Policy {
@@ -15,7 +15,7 @@ fn policy() -> Policy {
     ))
 }
 fn constructions(source: &str, policy: &Policy) -> Vec<Finding> {
-    let files = production_code(&[RustFile::fixture(PATH, source)]);
+    let files = checked(&[RustFile::fixture(PATH, source)]);
     find_capability_construction_violations(&files, policy, &OwnerGraph::collect(&files, policy))
 }
 const WORKER: &str = "struct Worker { clock: Clock } impl Worker { fn new(clock: Clock) -> Self { Self { clock } } }";
@@ -123,7 +123,7 @@ fn tests_do_not_make_production_values_into_owners() {
         RustFile::fixture(PATH, "struct Value; #[cfg(test)] struct Hidden { clock: Clock }"),
         RustFile::fixture("crates/app-sync/src/fixture_tests.rs", "struct Value { clock: Clock }"),
     ];
-    assert!(OwnerGraph::collect(&production_code(&files), &policy()).owners.is_empty());
+    assert!(OwnerGraph::collect(&checked(&files), &policy()).owners.is_empty());
 }
 
 #[test]

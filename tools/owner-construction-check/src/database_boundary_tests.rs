@@ -17,15 +17,15 @@ fn policy() -> Policy {
 }
 
 fn kinds(path: &str, source: &str) -> BTreeSet<String> {
-    find_database_boundary_violations(&[RustFile::fixture(path, source)], &policy())
-        .into_iter()
-        .map(|violation| {
-            violation
-                .message
-                .trim_end_matches(" is confined to crates/app-database/src/")
-                .to_string()
-        })
-        .collect()
+    {
+        let files = [RustFile::fixture(path, source)];
+        find_database_boundary_violations(&files, &files, &policy())
+    }
+    .into_iter()
+    .map(|violation| {
+        violation.message.trim_end_matches(" is confined to crates/app-database/src/").to_string()
+    })
+    .collect()
 }
 
 #[test]
@@ -136,7 +136,7 @@ fn sql_on_the_databases_own_tables_is_rejected_outside_its_homes() {
         ),
     ];
 
-    let kinds = find_database_boundary_violations(&files, &policy())
+    let kinds = find_database_boundary_violations(&files, &files, &policy())
         .into_iter()
         .map(|violation| {
             violation
@@ -202,7 +202,7 @@ fn table_macros_are_read_from_every_file_of_the_schema_module() {
         ),
     ];
 
-    let violations = find_database_boundary_violations(&files, &policy())
+    let violations = find_database_boundary_violations(&files, &files, &policy())
         .into_iter()
         .map(|violation| (violation.path, violation.line, violation.message))
         .collect::<Vec<_>>();
@@ -244,7 +244,7 @@ fn raw_handles_and_own_table_sql_inside_macro_calls_are_rejected() {
         ),
     ];
 
-    let violations = find_database_boundary_violations(&files, &policy())
+    let violations = find_database_boundary_violations(&files, &files, &policy())
         .into_iter()
         .map(|violation| {
             (

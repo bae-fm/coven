@@ -1,6 +1,6 @@
 use super::*;
+use crate::crate_code::checked;
 use crate::owner_graph::OwnerGraph;
-use crate::test_code::production_code;
 
 #[test]
 fn callbacks_consume_the_retained_capability_but_factories_supply_one() {
@@ -25,7 +25,7 @@ fn callbacks_consume_the_retained_capability_but_factories_supply_one() {
         }
         "#,
     )];
-    let files = production_code(&files);
+    let files = checked(&files);
     let graph = OwnerGraph::collect(&files, &policy);
     let violations = find_retained_capability_parameter_violations(&files, &graph.owners, &policy);
     let methods: BTreeSet<_> = violations
@@ -59,7 +59,7 @@ fn retained_owner_runtime_method_cannot_accept_the_store_directory() {
         }
         "#,
     )];
-    let files = production_code(&files);
+    let files = checked(&files);
     let graph = OwnerGraph::collect(&files, &policy);
     let violations = find_retained_capability_parameter_violations(&files, &graph.owners, &policy);
 
@@ -105,7 +105,7 @@ fn trait_implementations_have_the_same_parameter_boundary_as_explicit_capabiliti
         "#,
         ),
     ];
-    let files = production_code(&files);
+    let files = checked(&files);
     let graph = OwnerGraph::collect(&files, &policy);
     let violations = find_retained_capability_parameter_violations(&files, &graph.owners, &policy);
     assert_eq!(

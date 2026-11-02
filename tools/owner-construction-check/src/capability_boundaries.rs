@@ -15,7 +15,7 @@ use syn::spanned::Spanned;
 use syn::visit::{self, Visit};
 
 use crate::finding::Finding;
-use crate::macros::{parse_macro_body, token_paths};
+use crate::macros::{parse_macro_body, token_paths, unparsed_tokens};
 use crate::policy::{describe_homes, Capability, Gate, Policy};
 use crate::syntax::{flatten_use_tree, type_name, RustFile};
 
@@ -220,7 +220,7 @@ impl<'ast> Visit<'ast> for CapabilityBoundaryVisitor<'_, '_> {
         match parse_macro_body(node) {
             Some(body) => body.visit(self),
             None => {
-                for path in token_paths(node.tokens.clone()) {
+                for path in token_paths(unparsed_tokens(node)) {
                     if path.after_dot {
                         self.check_method(&path.segments[0], path.span);
                     } else {

@@ -13,11 +13,13 @@ mod capability_boundaries;
 mod capability_construction;
 mod component_bundles;
 mod conventions;
+mod crate_code;
 mod crate_dependencies;
 mod database_boundary;
 mod factories;
 mod finding;
 mod macro_expansion;
+mod macro_rules;
 mod macros;
 mod module_sources;
 mod name_resolution;
@@ -63,7 +65,8 @@ fn main() {
             std::process::exit(2);
         }
     };
-    let stale = policy_check::stale_rows(&workspace, &policy);
+    let code = crate_code::CrateCode::read(&workspace, &policy);
+    let stale = policy_check::stale_rows(&workspace, &code, &policy);
     if !stale.is_empty() {
         eprintln!(
             "owner-construction-check: {} names what the workspace does not hold:",
@@ -74,7 +77,7 @@ fn main() {
         }
         std::process::exit(2);
     }
-    let report = match report::check_packages(&workspace, &policy, &packages) {
+    let report = match report::check_packages(&workspace, &code, &policy, &packages) {
         Ok(report) => report,
         Err(error) => {
             eprintln!("owner-construction-check: {error}");

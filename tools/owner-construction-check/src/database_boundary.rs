@@ -14,7 +14,7 @@ use proc_macro2::Span;
 use syn::spanned::Spanned;
 use syn::visit::{self, Visit};
 
-use crate::macros::{parse_macro_body, token_paths, token_strings};
+use crate::macros::{parse_macro_body, token_paths, token_strings, unparsed_tokens};
 use crate::module_sources::module_sources;
 use crate::policy::{describe_homes, Policy};
 use crate::syntax::RustFile;
@@ -26,14 +26,17 @@ pub(crate) const RAW_SQLITE_HANDLES: &[(&str, &str)] = &[
     ("Transaction", "raw SQLite transaction"),
 ];
 
+/// `written`: the crates' code as written, whose schema module's
+/// `macro_rules!` declare the tables.
 pub(crate) fn find_database_boundary_violations(
     files: &[RustFile],
+    written: &[RustFile],
     policy: &Policy,
 ) -> Vec<Finding> {
     let mut violations = BTreeSet::new();
     let homes = policy.database_homes();
     let confined_to = describe_homes(homes);
-    let tables = collect_schema_table_names(files, policy);
+    let tables = collect_schema_table_names(written, policy);
     let reexporting_crate = policy
         .database
         .as_ref()
@@ -122,12 +125,12 @@ impl<'ast> Visit<'ast> for DatabaseBoundaryVisitor<'_> {
         match parse_macro_body(node) {
             Some(body) => body.visit(self),
             None => {
-                for path in token_paths(node.tokens.clone()) {
+                for path in token_paths(unparsed_tokens(node)) {
                     if let Some(capability) = forbidden_sqlite_segments(&path.segments) {
                         self.record(capability, path.span);
                     }
                 }
-                for string in token_strings(node.tokens.clone()) {
+                for string in token_strings(unparsed_tokens(node)) {
                     self.check_sql(&string);
                 }
             }

@@ -19,6 +19,7 @@ type Position = (usize, usize);
 enum Namespace {
     Type,
     Value,
+    Macro,
 }
 
 #[derive(Clone)]
@@ -33,7 +34,9 @@ struct Scope {
     parent: Option<usize>,
     names: BTreeMap<String, Vec<Binding>>,
     globs: Vec<ItemPath>,
-    macros: BTreeMap<String, syn::Macro>,
+    /// The `macro_rules!` this scope defines, by name: indexes into
+    /// `NameResolver::macros`.
+    macros: BTreeMap<String, Vec<usize>>,
 }
 
 struct Region {
@@ -47,12 +50,44 @@ pub(crate) struct NameResolver {
     modules: BTreeMap<ItemPath, usize>,
     module_parents: BTreeMap<ItemPath, ItemPath>,
     regions: BTreeMap<String, Vec<Region>>,
-    definitions: BTreeMap<(String, Position), ItemPath>,
+    /// Keyed by file, position and name: an expansion's items share the
+    /// invocation's position.
+    definitions: BTreeMap<(String, Position, String), ItemPath>,
     pub(crate) types: BTreeSet<ItemPath>,
     enum_members: BTreeMap<ItemPath, BTreeSet<String>>,
     extern_crates: BTreeMap<String, BTreeMap<String, String>>,
     prelude: usize,
-    expanded: BTreeMap<(String, Position, ItemPath, String), syn::File>,
+    /// Every `macro_rules!` definition.
+    macros: Vec<MacroDefinition>,
+    /// The definitions a path names: `#[macro_export]` ones at their crate's
+    /// root, module-level ones in their module for a `use` to re-export.
+    macro_paths: BTreeMap<ItemPath, Vec<usize>>,
+    /// Modules declared `#[macro_use] mod child;`, whose definitions stay in
+    /// scope in the module that declares them.
+    macro_use_modules: BTreeMap<ItemPath, Vec<ItemPath>>,
+    /// Each crate's `#[macro_use] extern crate` names, whose exported
+    /// definitions are in scope everywhere in it.
+    macro_use_crates: BTreeMap<String, Vec<String>>,
+}
+
+/// A `macro_rules!` definition and where it is.
+pub(crate) struct MacroDefinition {
+    pub(crate) name: String,
+    pub(crate) file: String,
+    position: Position,
+    /// The crate the definition is in, which its `$crate` names.
+    pub(crate) crate_name: String,
+    pub(crate) definition: syn::Macro,
+}
+
+/// What a macro invocation's path names.
+pub(crate) enum MacroLookup {
+    /// A `macro_rules!` of the workspace, by its index (`macro_definition`).
+    Workspace(usize),
+    /// A macro of a dependency or the standard library.
+    External,
+    /// A name a workspace macro has, which no definition in scope answers.
+    Unresolved(ResolutionError),
 }
 
 #[derive(Debug)]
@@ -91,7 +126,10 @@ impl NameResolver {
             enum_members: BTreeMap::new(),
             extern_crates: BTreeMap::new(),
             prelude: 0,
-            expanded: BTreeMap::new(),
+            macros: Vec::new(),
+            macro_paths: BTreeMap::new(),
+            macro_use_modules: BTreeMap::new(),
+            macro_use_crates: BTreeMap::new(),
         };
         let prelude = resolver.module(&["<prelude>".into()]);
         resolver.prelude = prelude;
@@ -122,10 +160,6 @@ impl NameResolver {
                 .visit_file(&file.syntax);
         }
         resolver
-    }
-
-    pub(crate) fn expanded_macro(&self, file: &str, node: &syn::Macro) -> Option<&syn::File> {
-        self.expanded.get(&macro_key(file, node))
     }
 
     /// A trait can be brought into scope under an alias, through a glob, or
@@ -239,7 +273,126 @@ impl NameResolver {
     }
 
     pub(crate) fn definition(&self, file: &str, ident: &syn::Ident) -> ItemPath {
-        self.definitions[&(file.to_string(), position(ident.span().start()))].clone()
+        self.definitions[&(file.to_string(), position(ident.span().start()), ident.to_string())]
+            .clone()
+    }
+
+    /// The crate a position in a file is in.
+    pub(crate) fn crate_at(&self, file: &str, span: Span) -> &str {
+        &self.scopes[self.scope_at(file, span)].module[0]
+    }
+
+    /// The definition a macro invocation's path names. A single name is
+    /// looked up first in textual scope, as rustc does: definitions earlier
+    /// in the scopes around the invocation, in its ancestor modules, and in
+    /// modules declared `#[macro_use]`; then as a path, through imports and
+    /// `#[macro_export]`; then among the exports of `#[macro_use]` crates.
+    pub(crate) fn resolve_macro(&self, file: &str, path: &syn::Path) -> MacroLookup {
+        let span = path.segments.last().map_or_else(|| path.span(), |segment| segment.ident.span());
+        let names = qualified_path(path);
+        let single = match names.as_slice() {
+            [name] => Some(name.as_str()),
+            _ => None,
+        };
+        if let Some(found) = single.and_then(|name| self.textual_macro(file, span, name)) {
+            return MacroLookup::Workspace(found);
+        }
+        let scope = self.scope_at(file, span);
+        let resolved = self.resolve_in(scope, &names, Namespace::Macro, &mut BTreeSet::new());
+        if let Ok(resolved) = &resolved {
+            if let Some(found) = self.latest(self.macro_paths.get(resolved)) {
+                return MacroLookup::Workspace(found);
+            }
+        }
+        if let Some(name) = single {
+            let crate_name = &self.scopes[scope].module[0];
+            for used in self.macro_use_crates.get(crate_name).into_iter().flatten() {
+                let target = self
+                    .extern_crates
+                    .get(crate_name)
+                    .and_then(|names| names.get(used))
+                    .unwrap_or(used);
+                let exported = vec![target.clone(), name.to_string()];
+                if let Some(found) = self.latest(self.macro_paths.get(&exported)) {
+                    return MacroLookup::Workspace(found);
+                }
+            }
+        }
+        let named_like_ours = names.last().is_some_and(|last| self.names_a_macro(last));
+        match resolved {
+            Ok(_) if !named_like_ours => MacroLookup::External,
+            Err(_) if !named_like_ours => MacroLookup::External,
+            Ok(_) => MacroLookup::Unresolved(ResolutionError::Missing),
+            Err(error) => MacroLookup::Unresolved(error),
+        }
+    }
+
+    pub(crate) fn macro_definition(&self, index: usize) -> &MacroDefinition {
+        &self.macros[index]
+    }
+
+    /// Whether a workspace `macro_rules!` has this name.
+    pub(crate) fn names_a_macro(&self, name: &str) -> bool {
+        self.macros.iter().any(|definition| definition.name == name)
+    }
+
+    /// The definition among `found` that comes last in its file.
+    fn latest(&self, found: Option<&Vec<usize>>) -> Option<usize> {
+        found?.iter().copied().max_by_key(|index| self.macros[*index].position)
+    }
+
+    fn textual_macro(&self, file: &str, span: Span, name: &str) -> Option<usize> {
+        let position = position(span.start());
+        let mut scope = self.scope_at(file, span);
+        loop {
+            if let Some(found) = self.visible_macro(scope, name, file, position) {
+                return Some(found);
+            }
+            match self.scopes[scope].parent {
+                Some(parent) => scope = parent,
+                None => break,
+            }
+        }
+        let mut module = self.scopes[scope].module.clone();
+        while let Some(parent) = self.module_parents.get(&module) {
+            if let Some(found) = self.visible_macro(self.modules[parent], name, file, position) {
+                return Some(found);
+            }
+            module = parent.clone();
+        }
+        None
+    }
+
+    /// A definition of `name` in `scope`, or in a module it declares
+    /// `#[macro_use]`, that comes before `position` when it is in `file`.
+    fn visible_macro(
+        &self,
+        scope: usize,
+        name: &str,
+        file: &str,
+        position: Position,
+    ) -> Option<usize> {
+        let mut candidates = self.scopes[scope].macros.get(name).cloned().unwrap_or_default();
+        let mut pending =
+            self.macro_use_modules.get(&self.scopes[scope].identity).cloned().unwrap_or_default();
+        while let Some(child) = pending.pop() {
+            if let Some(child_scope) = self.modules.get(&child) {
+                candidates.extend(
+                    self.scopes[*child_scope].macros.get(name).into_iter().flatten().copied(),
+                );
+            }
+            pending.extend(self.macro_use_modules.get(&child).into_iter().flatten().cloned());
+        }
+        candidates
+            .into_iter()
+            .filter(|index| {
+                let definition = &self.macros[*index];
+                definition.file != file || definition.position < position
+            })
+            .max_by_key(|index| {
+                let definition = &self.macros[*index];
+                (definition.file == file, definition.position)
+            })
     }
 
     pub(crate) fn resolve(
@@ -470,17 +623,6 @@ fn position(location: proc_macro2::LineColumn) -> Position {
     (location.line, location.column)
 }
 
-fn macro_key(file: &str, node: &syn::Macro) -> (String, Position, ItemPath, String) {
-    // Expanded tokens can share the invocation's span. Their paths and
-    // arguments distinguish nested calls from the invocation itself.
-    (
-        file.to_string(),
-        position(node.path.span().start()),
-        qualified_path(&node.path),
-        node.tokens.to_string(),
-    )
-}
-
 struct Collector<'a> {
     resolver: &'a mut NameResolver,
     file: &'a str,
@@ -520,9 +662,10 @@ impl Collector<'_> {
             .entry(ident.to_string())
             .or_default()
             .push(Binding::Definition(path.clone(), namespace));
-        self.resolver
-            .definitions
-            .insert((self.file.to_string(), position(ident.span().start())), path.clone());
+        self.resolver.definitions.insert(
+            (self.file.to_string(), position(ident.span().start()), ident.to_string()),
+            path.clone(),
+        );
         path
     }
 
@@ -620,6 +763,14 @@ impl<'ast> Visit<'ast> for Collector<'_> {
     }
 
     fn visit_item_extern_crate(&mut self, node: &'ast syn::ItemExternCrate) {
+        if has_attribute(&node.attrs, "macro_use") {
+            let crate_name = self.resolver.scopes[self.scope].module[0].clone();
+            self.resolver
+                .macro_use_crates
+                .entry(crate_name)
+                .or_default()
+                .push(node.ident.to_string());
+        }
         let name = node.rename.as_ref().map_or(&node.ident, |(_, name)| name).to_string();
         let target = if node.ident == "self" {
             self.resolver.scopes[self.scope].module[0].clone()
@@ -635,6 +786,11 @@ impl<'ast> Visit<'ast> for Collector<'_> {
 
     fn visit_item_mod(&mut self, node: &'ast syn::ItemMod) {
         let scope = self.resolver.local_module(self.scope, &node.ident.to_string());
+        if has_attribute(&node.attrs, "macro_use") {
+            let parent = self.resolver.scopes[self.scope].identity.clone();
+            let child = self.resolver.scopes[scope].identity.clone();
+            self.resolver.macro_use_modules.entry(parent).or_default().push(child);
+        }
         if node.content.is_some() {
             let previous = std::mem::replace(&mut self.scope, scope);
             self.resolver.regions.entry(self.file.to_string()).or_default().push(Region {
@@ -691,32 +847,42 @@ impl<'ast> Visit<'ast> for Collector<'_> {
         self.declare(&node.sig.ident, Namespace::Value);
     }
 
+    /// A `macro_rules!` is in textual scope where it is defined. One with
+    /// `#[macro_export]` is also a path at its crate's root, and one at a
+    /// module's top level is a path in that module, for a `use` to re-export.
     fn visit_item_macro(&mut self, node: &'ast syn::ItemMacro) {
-        if let Some(name) = &node.ident {
-            if node.mac.path.is_ident("macro_rules") {
-                self.resolver.scopes[self.scope].macros.insert(name.to_string(), node.mac.clone());
-                return;
-            }
+        let Some(name) = node.ident.as_ref().filter(|_| node.mac.path.is_ident("macro_rules"))
+        else {
+            visit::visit_item_macro(self, node);
+            return;
+        };
+        let crate_name = self.resolver.scopes[self.scope].module[0].clone();
+        let index = self.resolver.macros.len();
+        self.resolver.macros.push(MacroDefinition {
+            name: name.to_string(),
+            file: self.file.to_string(),
+            position: position(name.span().start()),
+            crate_name: crate_name.clone(),
+            definition: node.mac.clone(),
+        });
+        self.resolver.scopes[self.scope].macros.entry(name.to_string()).or_default().push(index);
+        let path = if has_attribute(&node.attrs, "macro_export") {
+            let root = self.resolver.module(std::slice::from_ref(&crate_name));
+            let path = vec![crate_name, name.to_string()];
+            self.resolver.scopes[root]
+                .names
+                .entry(name.to_string())
+                .or_default()
+                .push(Binding::Definition(path.clone(), Namespace::Macro));
+            Some(path)
+        } else if self.resolver.scopes[self.scope].parent.is_none() {
+            Some(self.declare(name, Namespace::Macro))
+        } else {
+            None
+        };
+        if let Some(path) = path {
+            self.resolver.macro_paths.entry(path).or_default().push(index);
         }
-        if let Some(name) = node.mac.path.get_ident() {
-            let mut scope = Some(self.scope);
-            while let Some(current) = scope {
-                if let Some(definition) =
-                    self.resolver.scopes[current].macros.get(&name.to_string())
-                {
-                    if let Some(expanded) = crate::macro_expansion::expand(definition, &node.mac) {
-                        self.resolver
-                            .expanded
-                            .insert(macro_key(self.file, &node.mac), expanded.clone());
-                        self.visit_file(&expanded);
-                        return;
-                    }
-                    break;
-                }
-                scope = self.resolver.scopes[current].parent;
-            }
-        }
-        visit::visit_item_macro(self, node);
     }
 
     fn visit_macro(&mut self, node: &'ast syn::Macro) {
@@ -724,6 +890,10 @@ impl<'ast> Visit<'ast> for Collector<'_> {
             body.visit(self);
         }
     }
+}
+
+fn has_attribute(attrs: &[syn::Attribute], name: &str) -> bool {
+    attrs.iter().any(|attribute| attribute.path().is_ident(name))
 }
 
 pub(crate) fn qualified_path(path: &syn::Path) -> ItemPath {

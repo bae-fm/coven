@@ -2353,6 +2353,7 @@ name = "owner-construction-check"
 version = "0.1.0"
 dependencies = [
  "proc-macro2",
+ "quote",
  "serde",
  "syn 3.0.6",
  "thiserror 2.0.21",

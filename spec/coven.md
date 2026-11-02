@@ -9781,6 +9781,11 @@ Lean proofs once, on Linux, since a proof checks the same on any platform.
    `tests/` directory, files only test modules declare, and every item that
    compiles only into tests. A test may assemble its own graph (F.3) from raw
    material, and nothing outside tests can reach what it builds.
+   The checker expands each of coven's own `macro_rules!` where it is invoked,
+   as rustc does, and checks the code it writes there, in the function the
+   invocation is in. A definition is no code until it is used. An invocation
+   the checker cannot expand fails the check, since what it writes would
+   otherwise go unchecked.
 4. The checker's check of the policy, before any rule: every member, file,
    type and composition root the policy names must exist, so the policy can't
    go stale.

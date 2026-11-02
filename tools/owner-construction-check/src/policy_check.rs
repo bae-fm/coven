@@ -9,27 +9,31 @@ use std::collections::{BTreeMap, BTreeSet};
 use syn::visit::{self, Visit};
 
 use crate::capability_construction::construction_only_types;
+use crate::crate_code::CrateCode;
 use crate::crate_dependencies::{dependency_entries, dependency_package};
 use crate::database_boundary::schema_table_macros;
 use crate::policy::Policy;
 use crate::sources::Workspace;
 use crate::syntax::{collect_declared_types, type_name, type_names, RustFile, TypeNames};
 
-/// Each policy row that names something the workspace does not hold.
-pub(crate) fn stale_rows(workspace: &Workspace, policy: &Policy) -> Vec<String> {
-    let crate_files = workspace.crate_code(policy);
+/// Each policy row that names something the workspace does not hold. Rows
+/// naming code are held against the crates' code with their macros
+/// expanded, so a method a macro writes can be a composition root; the
+/// schema's table macros are read as written.
+pub(crate) fn stale_rows(workspace: &Workspace, code: &CrateCode, policy: &Policy) -> Vec<String> {
+    let crate_files = &code.expanded;
     let mut stale = Vec::new();
     if policy.rules.is_empty() {
         stale.push("rules: the policy selects no rules".to_string());
     }
     stale.extend(unknown_members(workspace, policy));
     stale.extend(unknown_libraries(workspace, policy));
-    stale.extend(missing_homes(&crate_files, policy));
-    stale.extend(missing_composition_roots(&crate_files, policy));
-    stale.extend(invalid_capability_factories(&crate_files, policy));
-    stale.extend(undeclared_types(&crate_files, policy));
-    stale.extend(missing_capability_traits(&crate_files, policy));
-    stale.extend(invalid_database(&crate_files, workspace, policy));
+    stale.extend(missing_homes(&code.written, policy));
+    stale.extend(missing_composition_roots(crate_files, policy));
+    stale.extend(invalid_capability_factories(crate_files, policy));
+    stale.extend(undeclared_types(crate_files, policy));
+    stale.extend(missing_capability_traits(crate_files, policy));
+    stale.extend(invalid_database(&code.written, workspace, policy));
     stale
 }
 

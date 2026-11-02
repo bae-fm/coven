@@ -48,6 +48,13 @@ pub(crate) enum Rule {
 }
 
 impl Rule {
+    /// Whether the rule reads the crates' code (`crate_code.rs`): every rule
+    /// but the crate dependencies, which read manifests, and the conventions,
+    /// which read every file as written.
+    pub(crate) fn reads_crate_code(self) -> bool {
+        !matches!(self, Rule::CrateDependencies | Rule::Conventions)
+    }
+
     /// Whether the rule infers owners and matches types by name, so it needs
     /// every name it reasons about declared once (`unique_type_names.rs`).
     pub(crate) fn reads_owner_graph(self) -> bool {

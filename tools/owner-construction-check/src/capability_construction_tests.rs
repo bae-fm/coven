@@ -1,9 +1,9 @@
 use super::*;
-use crate::test_code::production_code;
+use crate::crate_code::checked;
 
 /// The rule as the checker runs it: on the files' production code.
 fn find_capability_construction_violations(files: &[RustFile], policy: &Policy) -> Vec<Finding> {
-    let files = production_code(files);
+    let files = checked(files);
     super::find_capability_construction_violations(
         &files,
         policy,
@@ -352,9 +352,17 @@ fn self_does_not_hide_construction_in_a_runtime_method() {
 fn macro_arguments_and_bodies_are_checked() {
     for (caller, capability, source) in [
         ("<free>::acquire", "SystemClock", "fn acquire() { let _ = wrap!(SystemClock.now()); }"),
-        ("<free>::<item>", "SystemClock", "macro_rules! acquire { () => { SystemClock.now() }; }"),
+        (
+            "<free>::run",
+            "SystemClock",
+            "macro_rules! acquire { () => { SystemClock.now() }; } fn run() { acquire!(); }",
+        ),
         ("<free>::acquire", "UuidIds", "fn acquire() { let _ = wrap!(UuidIds.new_id()); }"),
-        ("<free>::<item>", "UuidIds", "macro_rules! acquire { () => { UuidIds.new_id() }; }"),
+        (
+            "<free>::run",
+            "UuidIds",
+            "macro_rules! acquire { () => { UuidIds.new_id() }; } fn run() { acquire!(); }",
+        ),
     ] {
         let violations = check("crates/app/src/runtime.rs", source);
         assert_eq!(

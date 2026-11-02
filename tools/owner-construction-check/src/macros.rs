@@ -1,13 +1,16 @@
 //! Macro calls (Appendix F.6: the checker reads the syntax tree "including inside
-//! macro calls"). A macro's arguments reach `syn` as unparsed tokens, so a
-//! visitor never enters them on its own.
+//! macro calls"). The workspace's own macros are expanded before the rules
+//! run (`macro_expansion.rs`); what remains is other crates' macros, and any
+//! invocation the checker could not expand. Their arguments reach `syn` as
+//! unparsed tokens, so a visitor never enters them on its own.
 //!
 //! When the arguments parse as comma-separated expressions or as statements —
 //! the shape of nearly every call: `format!`, `vec!`, `assert!`, `write!` —
 //! a rule visits them as code, with every rule it applies elsewhere. A
 //! `matches!` call is an expression and a pattern, visited as each. When they
-//! don't, as in a `macro_rules!` body, the rule reads the tokens: the paths,
-//! the calls and the string literals in them.
+//! don't, as in `tokio::select!`, the rule reads the tokens: the paths, the
+//! calls and the string literals in them. `cfg!` and `stringify!` take no
+//! code, and are read as neither.
 
 use proc_macro2::{Delimiter, Span, TokenStream, TokenTree};
 use syn::parse::Parser;
@@ -26,10 +29,25 @@ pub(crate) enum MacroBody {
     },
 }
 
+/// Whether a macro's arguments are no code: `cfg!` reads a configuration
+/// predicate, whose `any(...)` and `all(...)` are no function calls, and
+/// `stringify!` turns its tokens into text.
+fn reads_no_code(node: &syn::Macro) -> bool {
+    node.path.is_ident("cfg") || node.path.is_ident("stringify")
+}
+
+/// The tokens a rule reads when a macro's arguments do not parse as code:
+/// none for a macro whose arguments are no code.
+pub(crate) fn unparsed_tokens(node: &syn::Macro) -> TokenStream {
+    if reads_no_code(node) {
+        TokenStream::new()
+    } else {
+        node.tokens.clone()
+    }
+}
+
 pub(crate) fn parse_macro_body(node: &syn::Macro) -> Option<MacroBody> {
-    // cfg! consumes a configuration predicate, whose `any(...)` and `all(...)`
-    // nodes are metadata rather than Rust function calls.
-    if node.path.is_ident("cfg") {
+    if reads_no_code(node) {
         return None;
     }
     if node.path.segments.last().is_some_and(|segment| segment.ident == "matches") {

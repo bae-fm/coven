@@ -7,9 +7,7 @@ use std::path::{Path, PathBuf};
 
 use crate::crate_dependencies::{dependency_entries, dependency_package};
 use crate::module_sources::test_module_files;
-use crate::policy::Policy;
 use crate::syntax::RustFile;
-use crate::test_code::production_code;
 
 pub(crate) struct Workspace {
     pub(crate) files: Vec<RustFile>,
@@ -193,20 +191,6 @@ pub(crate) fn load(
         file.test_module = test_modules.contains(&file.relative_path);
     }
     Ok(workspace)
-}
-
-impl Workspace {
-    /// What the rules of Appendix F.1 to F.3 read: the files of the members
-    /// that are not tools, without their test code (`test_code.rs`).
-    pub(crate) fn crate_code(&self, policy: &Policy) -> Vec<RustFile> {
-        let crates = self
-            .files
-            .iter()
-            .filter(|file| !policy.is_tool(&file.package))
-            .cloned()
-            .collect::<Vec<_>>();
-        production_code(&crates)
-    }
 }
 
 impl Manifest {

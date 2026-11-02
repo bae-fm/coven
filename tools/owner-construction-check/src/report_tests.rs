@@ -1,4 +1,5 @@
 use super::*;
+use crate::crate_code::CrateCode;
 use crate::policy::CompositionRoot;
 
 /// A policy running every rule, with the given rows.
@@ -16,7 +17,7 @@ fn root(path: &str, owner: &str, method: &str) -> CompositionRoot {
 }
 
 fn check(workspace: &Workspace, policy: &Policy) -> Report {
-    check_packages(workspace, policy, &[]).unwrap()
+    check_packages(workspace, &CrateCode::read(workspace, policy), policy, &[]).unwrap()
 }
 
 fn workspace(files: Vec<RustFile>) -> Workspace {
@@ -309,12 +310,22 @@ fn package_selection_uses_manifest_names_and_directory_boundaries() {
     let policy = policy(r#"tools = ["selected-package", "other-package"]"#);
     let all = check(&workspace, &policy);
     assert_eq!(all.0.len(), 2);
-    let selected = check_packages(&workspace, &policy, &["selected-package".into()]).unwrap();
+    let selected = check_packages(
+        &workspace,
+        &CrateCode::read(&workspace, &policy),
+        &policy,
+        &["selected-package".into()],
+    )
+    .unwrap();
     assert_eq!(selected.0.len(), 1);
     assert_eq!(selected.0[0].path, "tools/selected/src/main.rs");
-    let both =
-        check_packages(&workspace, &policy, &["selected-package".into(), "other-package".into()])
-            .unwrap();
+    let both = check_packages(
+        &workspace,
+        &CrateCode::read(&workspace, &policy),
+        &policy,
+        &["selected-package".into(), "other-package".into()],
+    )
+    .unwrap();
     assert_eq!(both.0, all.0);
 }
 
@@ -329,7 +340,13 @@ fn package_selection_keeps_dependency_definitions_for_owner_analysis() {
     ]);
     workspace.manifests =
         vec![member("crates/app-foundation", "app-foundation"), member("crates/app", "app")];
-    let selected = check_packages(&workspace, &Policy::gated_fixture(), &["app".into()]).unwrap();
+    let selected = check_packages(
+        &workspace,
+        &CrateCode::read(&workspace, &Policy::gated_fixture()),
+        &Policy::gated_fixture(),
+        &["app".into()],
+    )
+    .unwrap();
     assert!(selected.lines().iter().any(|line| line.contains("outside a composition root")));
     assert!(!selected.lines().iter().any(|line| line.contains("cannot resolve")));
 }
@@ -342,14 +359,26 @@ fn package_selection_cannot_hide_an_ambiguous_workspace_graph() {
         RustFile::fixture("crates/second/src/lib.rs", "struct Clock;"),
     ]);
     workspace.manifests = vec![member("crates/second", "second")];
-    let selected = check_packages(&workspace, &policy, &["second".into()]).unwrap();
+    let selected = check_packages(
+        &workspace,
+        &CrateCode::read(&workspace, &policy),
+        &policy,
+        &["second".into()],
+    )
+    .unwrap();
     assert!(selected.0.iter().any(|finding| finding.path == "crates/first/src/lib.rs"
         && finding.message.contains("declared more than once")));
 }
 
 #[test]
 fn an_unknown_package_is_an_error() {
-    let result = check_packages(&workspace(Vec::new()), &policy(""), &["missing".into()]);
+    let (workspace, policy) = (workspace(Vec::new()), policy(""));
+    let result = check_packages(
+        &workspace,
+        &CrateCode::read(&workspace, &policy),
+        &policy,
+        &["missing".into()],
+    );
     assert!(matches!(result, Err(UnknownPackage(package)) if package == "missing"));
 }
 

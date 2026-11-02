@@ -1,4 +1,5 @@
 use super::*;
+use crate::crate_code::CrateCode;
 use crate::sources::Manifest;
 
 fn workspace(files: Vec<RustFile>, members: &[(&str, &str)]) -> Workspace {
@@ -17,10 +18,9 @@ fn workspace(files: Vec<RustFile>, members: &[(&str, &str)]) -> Workspace {
 
 fn stale(files: Vec<RustFile>, rows: &str) -> Vec<String> {
     let members = [("crates/app-foundation", "app-foundation"), ("crates/app", "app")];
-    stale_rows(
-        &workspace(files, &members),
-        &Policy::fixture(&format!("rules = [\"conventions\"]\n{rows}")),
-    )
+    let workspace = workspace(files, &members);
+    let policy = Policy::fixture(&format!("rules = [\"conventions\"]\n{rows}"));
+    stale_rows(&workspace, &CrateCode::read(&workspace, &policy), &policy)
 }
 
 #[test]
@@ -50,7 +50,8 @@ fn a_policy_naming_only_what_exists_is_current() {
 
 #[test]
 fn a_policy_must_select_rules() {
-    let rows = stale_rows(&workspace(Vec::new(), &[]), &Policy::fixture(""));
+    let (workspace, policy) = (workspace(Vec::new(), &[]), Policy::fixture(""));
+    let rows = stale_rows(&workspace, &CrateCode::read(&workspace, &policy), &policy);
     assert_eq!(rows, ["rules: the policy selects no rules"]);
 }
 
@@ -86,7 +87,10 @@ fn library_names_name_a_dependency() {
         r#"rules = ["conventions"]
         library_names = { "coreaudio-rs" = "coreaudio", "objc2-rs" = "objc2" }"#,
     );
-    assert_eq!(stale_rows(&workspace, &policy), ["library_names: no member depends on objc2-rs"]);
+    assert_eq!(
+        stale_rows(&workspace, &CrateCode::read(&workspace, &policy), &policy),
+        ["library_names: no member depends on objc2-rs"]
+    );
 }
 
 #[test]
@@ -213,7 +217,10 @@ fn every_type_the_policy_names_is_declared_by_a_crate() {
         "#,
     );
     assert_eq!(
-        stale_rows(&workspace(files, &members), &policy),
+        {
+            let workspace = workspace(files, &members);
+            stale_rows(&workspace, &CrateCode::read(&workspace, &policy), &policy)
+        },
         [
             "capability_types: no crate declares Fixture",
             "task_types: no crate declares Tested",
