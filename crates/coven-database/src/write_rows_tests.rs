@@ -345,3 +345,66 @@ mod typed_bindings {
         db.close().await.unwrap();
     }
 }
+
+fn foreign_key_failure(error: &DbError) -> bool {
+    matches!(
+        error,
+        DbError::Sqlite(rusqlite::Error::SqliteFailure(failure, _))
+            if failure.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_FOREIGNKEY
+    )
+}
+
+const DEFERRED_ALBUMS: &str = "CREATE TABLE artists(id TEXT NOT NULL PRIMARY KEY);
+     CREATE TABLE albums(id TEXT NOT NULL PRIMARY KEY,
+       artist TEXT REFERENCES artists(id) DEFERRABLE INITIALLY DEFERRED)";
+
+fn artists_and_albums() -> Vec<SyncedTable> {
+    ["artists", "albums"].map(|t| SyncedTable::new(t, RowIdentity::SharedKey)).into()
+}
+
+/// SQLite checks a deferred foreign key only at commit. A write that leaves
+/// Ana's album naming an artist no row holds fails as that commit would,
+/// with SQLite's foreign-key failure, and writes nothing.
+#[tokio::test]
+async fn a_dangling_deferred_reference_fails_the_write_as_its_commit_would() {
+    let store = TestStore::new();
+    let db = store.schema(artists_and_albums(), DEFERRED_ALBUMS).await.unwrap();
+    let error = sql(&db, "INSERT INTO albums VALUES('first','gone')").await.unwrap_err();
+    assert!(foreign_key_failure(&error), "{error:?}");
+    assert_eq!(count(&db, "albums"), 0);
+    assert!(records(&db).is_empty());
+    // A parent the same write inserts later is found.
+    sql(&db, "INSERT INTO albums VALUES('first','ana'); INSERT INTO artists VALUES('ana')")
+        .await
+        .unwrap();
+    assert_eq!(count(&db, "albums"), 1);
+    db.close().await.unwrap();
+}
+
+/// A breaking migration that adds a deferred foreign key to albums while
+/// one album's artist is gone fails as its commit would, with SQLite's
+/// foreign-key failure, and leaves the schema as it was.
+#[tokio::test]
+async fn a_migration_adding_a_deferred_key_over_a_dangling_row_fails_as_its_commit_would() {
+    use crate::{Migration, OldWrites};
+    const BEFORE: &str = "CREATE TABLE artists(id TEXT NOT NULL PRIMARY KEY);
+         CREATE TABLE albums(id TEXT NOT NULL PRIMARY KEY, artist TEXT)";
+    const REFERENCE: &str = "CREATE TABLE albums_new(id TEXT NOT NULL PRIMARY KEY,
+           artist TEXT REFERENCES artists(id) DEFERRABLE INITIALLY DEFERRED);
+         INSERT INTO albums_new SELECT id,artist FROM albums;
+         DROP TABLE albums;
+         ALTER TABLE albums_new RENAME TO albums";
+    let store = TestStore::new();
+    let initial = || vec![Migration::addition(1, "schema", BEFORE)];
+    let db = store.builder(artists_and_albums(), initial()).open().await.unwrap();
+    sql(&db, "INSERT INTO albums VALUES('first','gone')").await.unwrap();
+    db.close().await.unwrap();
+    let mut migrations = initial();
+    migrations.push(Migration::breaking(2, "reference", REFERENCE, OldWrites::Drop));
+    let error = store.builder(artists_and_albums(), migrations).open().await.err().unwrap();
+    let error = crate::tests::database_error(error);
+    assert!(foreign_key_failure(&error), "{error:?}");
+    let db = store.builder(artists_and_albums(), initial()).open().await.unwrap();
+    assert_eq!(db.schema_version().await.unwrap(), 1);
+    db.close().await.unwrap();
+}

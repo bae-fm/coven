@@ -2304,6 +2304,12 @@ is a new insert; any children the app wants back, it inserts in the same write.
   from `(A,3)` to `(B,3)` and to `(A,5)` give `(B,3)` or `(A,5)`, never `(B,5)`.
   References whose columns overlap grow together until every touched reference is
   complete.
+- **A deferred foreign key.** SQLite checks a key declared `DEFERRABLE
+  INITIALLY DEFERRED` only when the transaction commits, so one write may
+  insert Ana's album before her artist. Coven reads each changed row's parents
+  once the write's SQL has run. A parent still missing then fails the write
+  with SQLite's foreign-key failure, as its commit would have, and so does a
+  migration that adds such a key while a row's parent is gone.
 - **How coven takes rows out.** It runs with SQLite's foreign keys enforced and
   takes children out first, so SQLite's own actions reach only local children:
   rows in tables that don't sync.

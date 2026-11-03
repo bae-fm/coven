@@ -119,11 +119,13 @@ impl<'a> AppView<'a> {
             // SQLite enforces every key but a file reference, which can name
             // a file whose record this device no longer shows: a write checks
             // its own references (§17.2), and merging takes out a row whose
-            // file is gone, as restrict does.
+            // file is gone, as restrict does. A key SQLite defers it checks
+            // only at commit, so a reference still dangling here fails as
+            // that commit would.
             let parent = match parent {
                 Some(parent) => parent,
                 None if foreign_key.is_file() => continue,
-                None => return Err(rusqlite::Error::QueryReturnedNoRows.into()),
+                None => return Err(dangling_reference()),
             };
             parents.insert(
                 self.schema.foreign_key(table, foreign_key),
@@ -170,11 +172,15 @@ impl<'a> AppView<'a> {
                 let parameters: Vec<_> =
                     fk.columns.iter().map(|c| values[column_name(table, c)].clone()).collect();
                 let target = self.schema.table(&fk.target);
-                let parent = self
-                    .find(target, &target_columns(target, fk), &parameters)?
-                    .into_iter()
-                    .next()
-                    .ok_or_else(|| reference_error(table, values, column))?;
+                let parent = self.find(target, &target_columns(target, fk), &parameters)?;
+                let parent = match parent.into_iter().next() {
+                    Some(parent) => parent,
+                    None if parameters.iter().any(|v| matches!(v, Value::Null)) => {
+                        return Err(reference_error(table, values, column))
+                    }
+                    // A deferred key's parent, still missing (as in `row`).
+                    None => return Err(dangling_reference()),
+                };
                 self.audience_of(target, &parent)
             }
             AudienceSource::Both { .. } => unreachable!("validated declaration"),
@@ -417,6 +423,16 @@ pub(crate) fn column_audience(
                 .into())
         }
     }
+}
+
+/// The failure SQLite reports when it commits a transaction whose deferred
+/// foreign key names no parent: a write coven finds leaving one fails with
+/// it before its commit could.
+fn dangling_reference() -> DbError {
+    DbError::Sqlite(rusqlite::Error::SqliteFailure(
+        rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_CONSTRAINT_FOREIGNKEY),
+        Some("FOREIGN KEY constraint failed".into()),
+    ))
 }
 
 pub(crate) fn reference_error(table: &TableSchema, values: &AppValues, column: &str) -> DbError {
