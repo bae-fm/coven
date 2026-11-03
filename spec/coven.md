@@ -503,13 +503,13 @@ so the table is as true in every transaction as a view. Keeping it adds about
 waiting in the upload queue, by its id and place, as `coven_uploads` does,
 without what each waits for. Ben imports 20,000 tracks, 10 to an album,
 and his outbox shows each album's tracks still to send, the first one's place
-and their bytes. Grouping `coven_uploads` by album took 9 ms, and counting the
-whole queue through it 1.8 ms, since the view joins the pause, retries and
+and their bytes. Grouping `coven_uploads` by album took 5.5 ms, and counting
+the whole queue through it 1.6 ms, since the view joins the pause, retries and
 pending records for every file. Instead, local triggers on `coven_upload_queue`
-keep each album's count in a device-local table, which the app reads in 0.1
-ms; counting the table itself took 0.13 ms. Coven's triggers on the files each
+keep each album's count in a device-local table, which the app reads in 0.09
+ms; counting the table itself took 0.11 ms. Coven's triggers on the files each
 upload stores change its row in the same statement as the queue, and keeping
-it, with the app's count, added about 6 µs to each queued file. A file whose
+it, with the app's count, added about 1.5 µs to each queued file. A file whose
 record is deleted leaves the table in the same write.
 
 Some of what the views show lasts only as long as the process does. Whether a
