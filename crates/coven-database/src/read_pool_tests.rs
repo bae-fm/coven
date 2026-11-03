@@ -4,7 +4,7 @@ impl ReadPool {
     /// Visit each reader in turn, under its own lock.
     pub(crate) fn each(
         &self,
-        mut visit: impl FnMut(&DatabaseConnection) -> Result<(), DbError>,
+        mut visit: impl FnMut(&mut DatabaseConnection) -> Result<(), DbError>,
     ) -> Result<(), DbError> {
         self.readers
             .iter()
@@ -29,7 +29,7 @@ impl ReadPool {
         }
     }
 
-    pub(crate) fn inspect_each(&self, inspect: impl Fn(&DatabaseConnection)) {
+    pub(crate) fn inspect_each(&self, inspect: impl Fn(&mut DatabaseConnection)) {
         self.each(|reader| {
             inspect(reader);
             Ok(())

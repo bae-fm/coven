@@ -280,7 +280,7 @@ async fn hold_the_checkpoint_lock(store: &TestStore) -> std::thread::JoinHandle<
     loop {
         let path = store.database_path();
         let holder = std::thread::spawn(move || {
-            let connection = rusqlite::Connection::open(path).unwrap();
+            let mut connection = rusqlite::Connection::open(path).unwrap();
             connection.busy_handler(Some(wait_for_release)).unwrap();
             connection.query_row("PRAGMA wal_checkpoint(RESTART)", [], |r| r.get(0)).unwrap()
         });

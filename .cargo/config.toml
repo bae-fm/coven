@@ -23,5 +23,10 @@
 # layer writes less than 128 KiB a call, so a larger limit fails the
 # statement with SQLITE_FULL.
 #
+# Every connection's unused cached pages sit in one pool, so a release on
+# one connection gives back all of them (§4). libsqlite3-sys built SQLite
+# that way itself until 0.39; without it each connection keeps a pool of its
+# own, and only the releasing one's empties.
+#
 # An app's workspace that builds libsqlite3-sys sets the same.
-LIBSQLITE3_FLAGS = { value = "SQLITE_DEFAULT_MEMSTATUS=0 -USQLITE_TEMP_STORE -DSQLITE_TEMP_STORE=1 -DSQLITE_STMTJRNL_SPILL=126976", force = true }
+LIBSQLITE3_FLAGS = { value = "SQLITE_DEFAULT_MEMSTATUS=0 -USQLITE_TEMP_STORE -DSQLITE_TEMP_STORE=1 -DSQLITE_STMTJRNL_SPILL=126976 -DSQLITE_ENABLE_MEMORY_MANAGEMENT", force = true }

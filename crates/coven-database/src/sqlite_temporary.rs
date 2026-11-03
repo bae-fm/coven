@@ -76,8 +76,18 @@ pub fn set_temporary_directory(directory: &Path) -> Result<(), TemporaryDirector
 /// connection asks for files (`SQLITE_TEMP_STORE=2`) or whatever it asks
 /// (`=3`, libsqlite3-sys's Android default): coven's own temporary tables,
 /// such as a streamed write's staged rows, would then hold all of it in
-/// memory.
+/// memory. It refuses one built without `SQLITE_ENABLE_MEMORY_MANAGEMENT`
+/// too: each connection would keep its unused pages apart, and releasing
+/// memory on one connection would leave every other's (§4).
 pub(crate) fn opening() -> Result<(), crate::DbError> {
+    // SAFETY: the option is a NUL-terminated string that outlives the call.
+    if unsafe { rusqlite::ffi::sqlite3_compileoption_used(c"ENABLE_MEMORY_MANAGEMENT".as_ptr()) }
+        == 0
+    {
+        return Err(crate::DbError::Invariant {
+            what: "SQLite keeps every connection's unused pages in one pool (SQLITE_ENABLE_MEMORY_MANAGEMENT)",
+        });
+    }
     for option in [c"TEMP_STORE=2", c"TEMP_STORE=3"] {
         // SAFETY: the option is a NUL-terminated string that outlives the call.
         if unsafe { rusqlite::ffi::sqlite3_compileoption_used(option.as_ptr()) } != 0 {

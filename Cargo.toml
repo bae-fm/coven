@@ -19,7 +19,7 @@ coven-format = { path = "crates/coven-format" }
 coven-database = { path = "crates/coven-database" }
 coven-storage = { path = "crates/coven-storage" }
 coven-sync = { path = "crates/coven-sync" }
-rusqlite = "0.40.2"
+rusqlite = "0.41.1"
 sqlite3-parser = "0.17.0"
 async-trait = "0.1.92"
 futures-util = "0.3.34"

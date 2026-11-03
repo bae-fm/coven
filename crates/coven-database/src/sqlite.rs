@@ -77,7 +77,7 @@ pub(crate) struct DatabaseConnection {
     #[cfg(any(test, feature = "test-utils"))]
     write_checkpoint: std::cell::RefCell<Option<crate::test_utils::WriteCheckpointObserver>>,
     #[cfg(test)]
-    scans: std::sync::Mutex<Vec<tests::ProfiledStatement>>,
+    scans: Arc<std::sync::Mutex<Vec<tests::ProfiledStatement>>>,
     /// How many profiles are open: a profile inside another, as a
     /// migration's inside the open's, leaves the outer one tracing.
     #[cfg(test)]
@@ -141,7 +141,7 @@ impl DatabaseConnection {
         // never a caller-selected SQLite URI or in-memory database.
         crate::sqlite_temporary::opening()?;
         let path = crate::sqlite_path::sqlite_path(path)?;
-        let connection =
+        let mut connection =
             Connection::open_with_flags(&path, flags | OpenFlags::SQLITE_OPEN_NO_MUTEX)?;
         connection.set_prepared_statement_cache_capacity(STATEMENT_CACHE);
         connection.set_db_config(rusqlite::config::DbConfig::SQLITE_DBCONFIG_DQS_DML, false)?;
@@ -153,7 +153,7 @@ impl DatabaseConnection {
         crate::coven_functions::register(&connection, &authorization)?;
         functions.register(&connection)?;
         connection.authorizer(Some(authorization.callback()))?;
-        let lookups = live_judging::LookupLimit::install(&connection)?;
+        let lookups = live_judging::LookupLimit::install(&mut connection)?;
         let db = Self {
             #[cfg(any(test, feature = "test-utils"))]
             work: std::cell::RefCell::new(None),
@@ -169,7 +169,7 @@ impl DatabaseConnection {
             #[cfg(any(test, feature = "test-utils"))]
             write_checkpoint: std::cell::RefCell::new(None),
             #[cfg(test)]
-            scans: std::sync::Mutex::new(Vec::new()),
+            scans: Arc::new(std::sync::Mutex::new(Vec::new())),
             #[cfg(test)]
             profiles: std::cell::Cell::new(0),
             #[cfg(test)]

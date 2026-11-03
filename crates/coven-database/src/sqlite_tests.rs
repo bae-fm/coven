@@ -4,10 +4,7 @@ use crate::{
     tests::TestStore,
 };
 use coven_foundation::id_source::CircleId;
-
-thread_local! {
-    static SCANS: std::cell::RefCell<Vec<ProfiledStatement>> = const { std::cell::RefCell::new(Vec::new()) };
-}
+use std::sync::Arc;
 
 /// One statement execution the profile saw.
 #[derive(Clone, Debug)]
@@ -53,45 +50,51 @@ impl DatabaseConnection {
         if open > 0 {
             return;
         }
-        SCANS.with(|scans| scans.borrow_mut().clear());
-        self.connection.trace_v2(
-            rusqlite::trace::TraceEventCodes::SQLITE_TRACE_PROFILE,
-            Some(|event| {
-                if let rusqlite::trace::TraceEvent::Profile(statement, _) = event {
-                    SCANS.with(|scans| {
-                        scans.borrow_mut().push(ProfiledStatement {
+        self.scans.lock().unwrap().clear();
+        let scans = Arc::clone(&self.scans);
+        self.connection
+            .trace_v2(
+                rusqlite::trace::TraceEventCodes::SQLITE_TRACE_PROFILE,
+                Some(move |event: rusqlite::trace::TraceEvent<'_>| {
+                    if let rusqlite::trace::TraceEvent::Profile(statement, _) = event {
+                        scans.lock().unwrap().push(ProfiledStatement {
                             sql: statement.sql().into_owned(),
                             fullscan_steps: statement
                                 .get_status(rusqlite::StatementStatus::FullscanStep),
                             runs: statement.get_status(rusqlite::StatementStatus::Run),
                             vm_steps: statement.get_status(rusqlite::StatementStatus::VmStep),
-                        })
-                    });
-                }
-            }),
-        );
+                        });
+                    }
+                }),
+            )
+            .unwrap();
     }
 
-    /// End a profile, publishing what the outermost one has traced so far;
-    /// only the outermost stops tracing.
+    /// End a profile; only the outermost stops tracing.
     pub(super) fn end_profile(&mut self) {
         let open = self.profiles.get() - 1;
         self.profiles.set(open);
         if open == 0 {
-            self.connection.trace_v2(rusqlite::trace::TraceEventCodes::empty(), None);
+            self.connection
+                .trace_v2(
+                    rusqlite::trace::TraceEventCodes::empty(),
+                    None::<fn(rusqlite::trace::TraceEvent<'_>)>,
+                )
+                .unwrap();
         }
-        *self.scans.lock().unwrap() = SCANS.with(|scans| scans.borrow().clone());
     }
 
     pub(crate) fn profiled_statements(&self) -> Vec<ProfiledStatement> {
         self.scans.lock().unwrap().clone()
     }
 
-    pub(crate) fn crash_after_next_commit(&self) {
-        self.connection.wal_hook(Some(|_, _| std::process::exit(86)));
+    pub(crate) fn crash_after_next_commit(&mut self) {
+        self.connection
+            .wal_hook(Some(|_: &mut rusqlite::hooks::Wal, _| std::process::exit(86)))
+            .unwrap();
     }
 
-    pub(crate) fn refuse_transaction_end(&self, refuse: bool) {
+    pub(crate) fn refuse_transaction_end(&mut self, refuse: bool) {
         use rusqlite::hooks::{AuthAction, AuthContext, Authorization, TransactionOperation};
         let mut authorize = self.authorization.callback();
         self.connection
@@ -518,16 +521,25 @@ async fn changeset_failure_rolls_back_and_reaches_the_writer_without_ending_quer
         .subscribe(|sql| Ok(sql.query("SELECT value FROM items", [], |r| r.get::<_, String>(0))?));
     assert!(next(&mut query).await.is_empty());
     db.inspect_writer(|writer| {
-        let result = writer.transaction(|writer| {
-            writer.internal_execute("INSERT INTO items VALUES(1,'rolled back')", [])?;
-            // Fail SQLite's own session lookup while taking its changeset.
-            writer.connection.authorizer(Some(|context: AuthContext<'_>| {
-                if matches!(context.action, AuthAction::Read { table_name: "items", .. }) {
+        // Fail SQLite's own session lookup while taking its changeset, once
+        // the transaction's own statements have run.
+        let refusing = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let refuses = Arc::clone(&refusing);
+        writer
+            .connection
+            .authorizer(Some(move |context: AuthContext<'_>| {
+                if refuses.load(std::sync::atomic::Ordering::Relaxed)
+                    && matches!(context.action, AuthAction::Read { table_name: "items", .. })
+                {
                     Authorization::Deny
                 } else {
                     Authorization::Allow
                 }
-            }))?;
+            }))
+            .unwrap();
+        let result = writer.transaction(|writer| {
+            writer.internal_execute("INSERT INTO items VALUES(1,'rolled back')", [])?;
+            refusing.store(true, std::sync::atomic::Ordering::Relaxed);
             Ok(())
         });
         writer.connection.authorizer(Some(writer.authorization.callback())).unwrap();

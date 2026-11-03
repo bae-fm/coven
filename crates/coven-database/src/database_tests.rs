@@ -33,7 +33,7 @@ impl Database {
         inspect(&mut writer)
     }
 
-    pub(crate) fn inspect_readers(&self, inspect: impl Fn(&DatabaseConnection)) {
+    pub(crate) fn inspect_readers(&self, inspect: impl Fn(&mut DatabaseConnection)) {
         let inner = self.inner.read().unwrap();
         inner.as_ref().unwrap().access.readers.inspect_each(inspect);
     }
@@ -48,7 +48,7 @@ impl Database {
             inspect(connection);
             Ok(())
         };
-        inner.access.readers.each(&mut visit).unwrap();
+        inner.access.readers.each(|reader| visit(reader)).unwrap();
         inner.inputs.each_connection(&mut visit).unwrap();
         for checkpoints in &inner.checkpoints {
             checkpoints.with_connection(&mut visit).unwrap();
@@ -79,7 +79,7 @@ impl Database {
 }
 
 impl DatabaseReadHandle {
-    pub(crate) fn inspect_readers(&self, inspect: impl Fn(&DatabaseConnection)) {
+    pub(crate) fn inspect_readers(&self, inspect: impl Fn(&mut DatabaseConnection)) {
         let inner = self.inner.read().unwrap();
         inner.as_ref().unwrap().readers.inspect_each(inspect);
     }

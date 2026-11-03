@@ -468,7 +468,10 @@ async fn rowid_policy_refreshes_for_migrations_and_reopening() {
                     error,
                     DbError::StatementForbidden { operation: "changing a hidden rowid" }
                 ));
-                sql.execute_batch("ALTER TABLE items ADD COLUMN oid INTEGER; UPDATE items SET oid=4; ALTER TABLE items RENAME COLUMN oid TO saved_oid")?;
+                // SQLite refuses to add, rename or drop a column a rowid
+                // table's address goes by, so the table is rebuilt with an
+                // `oid` column, then again with it renamed.
+                sql.execute_batch("CREATE TABLE items_oid(id TEXT NOT NULL PRIMARY KEY, oid INTEGER); INSERT INTO items_oid(_rowid_,id) SELECT rowid,id FROM items; DROP TABLE items; ALTER TABLE items_oid RENAME TO items; UPDATE items SET oid=4; CREATE TABLE items_saved(id TEXT NOT NULL PRIMARY KEY, saved_oid INTEGER); INSERT INTO items_saved(rowid,id,saved_oid) SELECT _rowid_,id,oid FROM items; DROP TABLE items; ALTER TABLE items_saved RENAME TO items")?;
                 let error = DbError::from(sql.execute("UPDATE items SET rowid=8", []).unwrap_err());
                 assert!(matches!(
                     error,
@@ -572,7 +575,10 @@ async fn rowid_policy_allows_declared_alias_columns_without_exposing_hidden_addr
 async fn shadowed_rowid_guards_follow_schema_changes_nested_triggers_and_reopening() {
     fn migrations() -> Vec<Migration> {
         vec![Migration::addition_with(1, "shadowed addresses", |sql| {
-            sql.execute_batch("CREATE TABLE items(id TEXT NOT NULL PRIMARY KEY, rowid INTEGER); INSERT INTO items VALUES('a',1); ALTER TABLE items ADD COLUMN _rowid_ INTEGER; UPDATE items SET rowid=2,_rowid_=3; CREATE TABLE source(id INTEGER PRIMARY KEY); CREATE TABLE middle(id INTEGER PRIMARY KEY); INSERT INTO middle VALUES(1); CREATE TRIGGER parent AFTER INSERT ON source BEGIN UPDATE middle SET id=2; END; CREATE TRIGGER child AFTER UPDATE ON middle BEGIN UPDATE items SET oid=8; END;")?;
+            // SQLite refuses to add, rename or drop a column a rowid
+            // table's address goes by, so `items` declares both from the
+            // start, and renaming one rebuilds the table.
+            sql.execute_batch("CREATE TABLE items(id TEXT NOT NULL PRIMARY KEY, rowid INTEGER, _rowid_ INTEGER); INSERT INTO items(oid,id) VALUES(1,'a'); UPDATE items SET rowid=2,_rowid_=3; CREATE TABLE source(id INTEGER PRIMARY KEY); CREATE TABLE middle(id INTEGER PRIMARY KEY); INSERT INTO middle VALUES(1); CREATE TRIGGER parent AFTER INSERT ON source BEGIN UPDATE middle SET id=2; END; CREATE TRIGGER child AFTER UPDATE ON middle BEGIN UPDATE items SET oid=8; END;")?;
             let error = DbError::from(sql.execute("INSERT INTO source VALUES(1)", []).unwrap_err());
             assert!(matches!(
                 error,
@@ -583,13 +589,17 @@ async fn shadowed_rowid_guards_follow_schema_changes_nested_triggers_and_reopeni
                 0
             );
             assert_eq!(sql.query_row("SELECT id FROM middle", [], |r| r.get::<_, i64>(0))?, 1);
-            sql.execute_batch("ALTER TABLE items RENAME COLUMN rowid TO saved_rowid")?;
+            // Renaming a table checks every trigger that names it, so the
+            // trigger naming `items` goes while `items` is rebuilt.
+            const CHILD: &str =
+                "CREATE TRIGGER child AFTER UPDATE ON middle BEGIN UPDATE items SET oid=8; END;";
+            sql.execute_batch(&format!("DROP TRIGGER child; CREATE TABLE items_saved(id TEXT NOT NULL PRIMARY KEY, saved_rowid INTEGER, _rowid_ INTEGER); INSERT INTO items_saved(oid,id,saved_rowid,_rowid_) SELECT oid,id,rowid,_rowid_ FROM items; DROP TABLE items; ALTER TABLE items_saved RENAME TO items; {CHILD}"))?;
             let error = DbError::from(sql.execute("UPDATE items SET rowid=8", []).unwrap_err());
             assert!(matches!(
                 error,
                 DbError::StatementForbidden { operation: "changing a hidden rowid" }
             ));
-            sql.execute_batch("ALTER TABLE items RENAME COLUMN saved_rowid TO rowid")?;
+            sql.execute_batch(&format!("DROP TRIGGER child; CREATE TABLE items_back(id TEXT NOT NULL PRIMARY KEY, rowid INTEGER, _rowid_ INTEGER); INSERT INTO items_back(oid,id,rowid,_rowid_) SELECT oid,id,saved_rowid,_rowid_ FROM items; DROP TABLE items; ALTER TABLE items_back RENAME TO items; {CHILD}"))?;
             Ok(())
         })]
     }

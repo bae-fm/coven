@@ -106,7 +106,7 @@ struct LookupState {
 }
 
 impl LookupLimit {
-    pub(super) fn install(connection: &rusqlite::Connection) -> rusqlite::Result<Self> {
+    pub(super) fn install(connection: &mut rusqlite::Connection) -> rusqlite::Result<Self> {
         let state = Arc::new(LookupState {
             armed: AtomicBool::new(false),
             stopped: AtomicBool::new(false),

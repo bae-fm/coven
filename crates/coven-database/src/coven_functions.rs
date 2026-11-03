@@ -48,23 +48,6 @@ pub(crate) fn register(
     // A row's key as coven encodes it (format.md D3), so app SQL can join
     // its rows to coven's views and migrations can compare keys.
     connection.create_scalar_function("coven_key", -1, PURE, coven_key)?;
-    // The call with no values matches this overload before the variadic one.
-    // It exists because SQLite evaluates a deterministic function of no
-    // arguments while it plans a statement against an analyzed index, with a
-    // null argument array, and rusqlite's call_boxed_closure (0.40.2, and
-    // still 0.41.0) builds a slice from that pointer, which aborts the
-    // process. Not deterministic, this one is called only as the statement
-    // runs, and refuses it.
-    connection.create_scalar_function(
-        "coven_key",
-        0,
-        FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_INNOCUOUS,
-        |_| -> rusqlite::Result<Vec<u8>> {
-            Err(rusqlite::Error::UserFunctionError(
-                "coven_key takes a row's key: one value or more".into(),
-            ))
-        },
-    )?;
     // The device a device-only file is on, as `coven_devices.device` holds
     // device ids, or NULL for a file in storage (§17.2).
     connection.create_scalar_function("coven_file_device", 1, PURE, |ctx| {
@@ -155,7 +138,15 @@ fn stored(ctx: &rusqlite::functions::Context<'_>) -> rusqlite::Result<Option<cra
     }
 }
 
+/// A row's key from its key values; no values name no row, so the call is
+/// refused. SQLite may call it while it plans a statement, as well as when
+/// the statement runs.
 fn coven_key(ctx: &rusqlite::functions::Context<'_>) -> rusqlite::Result<Vec<u8>> {
+    if ctx.is_empty() {
+        return Err(rusqlite::Error::UserFunctionError(
+            "coven_key takes a row's key: one value or more".into(),
+        ));
+    }
     let values = (0..ctx.len())
         .map(|i| crate::write_encoding::value(ctx.get_raw(i)))
         .collect::<rusqlite::Result<Vec<_>>>()?;
