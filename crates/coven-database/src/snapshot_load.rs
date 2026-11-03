@@ -38,7 +38,7 @@ pub(crate) fn load<P: crate::PendingValue>(
             return Err(invalid("reload target precedes committed applied slot"));
         }
         crate::store_state_tables::replace(database, &state)?;
-        provider.record::<P>(database)?;
+        crate::provider_access::adopt::<P>(database, &provider.accounts)?;
         database.internal_execute("DELETE FROM _coven_cutoffs", [])?;
         for (slot, change) in cutoffs {
             if slot.0 > target {

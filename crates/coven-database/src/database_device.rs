@@ -22,7 +22,7 @@ impl Database {
                     for operation in &operations {
                         crate::operation::insert(db, operation)?;
                     }
-                    provider.record::<P>(db)?;
+                    crate::provider_access::adopt::<P>(db, &provider.accounts)?;
                     crate::device_reset::record(db, &reset)
                 })
             })

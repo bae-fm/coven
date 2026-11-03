@@ -105,7 +105,7 @@ pub(crate) fn apply<P: crate::PendingValue>(
                     let old = crate::store_state_tables::deleted_circles(db)?;
                     crate::sequence::cutoff(db, incoming.slot, &effect.change)?;
                     crate::store_state_tables::replace(db, &effect.state)?;
-                    effect.provider.record::<P>(db)?;
+                    crate::provider_access::adopt::<P>(db, &effect.provider.accounts)?;
                     for circle in effect.state.circle_deletions.keys().filter(|circle| !old.contains_key(circle)) {
                         touched.extend(db.query(
                             "SELECT DISTINCT table_name,key,audience FROM _coven_rows WHERE audience=?1",
