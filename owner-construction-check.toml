@@ -576,8 +576,7 @@ tables = [
 ]
 "crates/coven-foundation/src/files/bootstrap.rs" = [
     "reserve_bootstrap_directory",
-    # One bootstrap's hold on its lock, shared by its unpublished directory's
-    # clones.
+    # One bootstrap's hold on its lock, which only that bootstrap keeps.
     "BootstrapLease::new",
 ]
 # Both store listings read the directory on a blocking task.
@@ -902,6 +901,7 @@ tables = [
 
 [capability_factories."crates/coven-foundation/src/files/bootstrap.rs"]
 "BootstrapStore::directory" = "StoreDir"
+"BootstrapStore::lock_for_deletion" = "StoreDeletionLock"
 
 [capability_factories."crates/coven-foundation/src/files/replacement.rs"]
 "ReplacementStore::directory" = "StoreDir"

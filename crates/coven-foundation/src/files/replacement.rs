@@ -22,20 +22,21 @@ use crate::id_source::{IdSource, StoreId};
 use std::{
     fs, io,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
+    sync::Mutex,
 };
 
 /// A replacement of the installation in a published store's directory. It
 /// holds the store's bootstrap lease, and its writer lock until the new
 /// installation is in place. Dropping it keeps its work for the next call.
 pub struct ReplacementStore {
-    // Drops before the lease so surviving directory clones are closing.
+    // Drops before the lease: the store's locks are closing before the
+    // bootstrap lock is released.
     _closing: lock::StoreClosingGuard,
     path: PathBuf,
     id: StoreId,
     reset: DeviceReset,
     by: ReplacedBy,
-    lease: Arc<BootstrapLease>,
+    lease: BootstrapLease,
     /// Keeps every handle out while the new installation loads and swaps in.
     writer: Mutex<Option<StoreLock>>,
     /// The new installation's own bootstrap while it loads in the hidden
@@ -63,7 +64,7 @@ impl ReplacementStore {
             None => StoreDir::bootstrapping(
                 self.path.clone(),
                 self.id,
-                self.lease.clone(),
+                self.lease.instance(),
                 self.protection,
             ),
         }
@@ -188,7 +189,7 @@ pub(super) async fn begin(
     let path = root.join(id.to_string());
     let lock = lock::acquire_bootstrap(&path, id).await?;
     let closing = lock.closing_guard();
-    let lease = Arc::new(BootstrapLease::new(lock));
+    let lease = BootstrapLease::new(lock);
     // A live handle, in this process or another, refuses the replacement.
     let writer = lock::acquire_for_open(&path, id).await?;
     let current = settings::read(&path, id).map_err(DirectoryCreationError::Settings)?;

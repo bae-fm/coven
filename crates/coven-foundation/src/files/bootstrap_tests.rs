@@ -154,6 +154,28 @@ async fn finished_bootstrap_releases_its_lease_even_when_directory_clones_remain
     }
 }
 
+/// The bootstrap lock is the bootstrap's own: dropping the bootstrap
+/// unfinished releases it, though a directory it gave out lives on. That
+/// directory no longer opens the unpublished store, nor one a later call
+/// resumes; the resuming call's own directories do.
+#[tokio::test]
+async fn a_dropped_bootstrap_releases_its_lock_while_its_directories_live() {
+    let temp = tempfile::tempdir().unwrap();
+    let layout = StoreDirectories::new(temp.path().into());
+    let id = StoreId(UuidIds.new_id());
+    let pending = layout.begin_bootstrap(id, &UuidIds).await.unwrap();
+    let directory = pending.directory();
+    let path = directory.database_path().parent().unwrap().to_owned();
+    drop(directory.lock_exclusive().unwrap());
+    drop(pending);
+    drop(lock::lock_bootstrap(&path, id).unwrap());
+    assert!(matches!(directory.lock_exclusive(), Err(StoreLockError::BootstrapPending(_))));
+    let resumed = layout.begin_bootstrap(id, &UuidIds).await.unwrap();
+    assert!(matches!(directory.lock_exclusive(), Err(StoreLockError::BootstrapPending(_))));
+    drop(resumed.directory().lock_exclusive().unwrap());
+    resumed.cancel().unwrap();
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn resumed_bootstrap_refuses_a_symlink_to_another_installation() {

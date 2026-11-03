@@ -6313,6 +6313,10 @@ pub enum ProviderSignOut {
     `.coven-bootstrap` marker. Listings hide it and ordinary opens refuse it.
     Bootstrap holds its own directory capability and opens the database once;
     publication removes the marker without moving open database or custody files.
+    The bootstrap lock is the call's alone: the directories it gives out open
+    the unfinished store only while it runs, and once it publishes, cancels or
+    is dropped they don't, even when an owner still holds one; dropping it
+    releases the lock at once.
   - Keys and credentials enter final custody only after the store loads, except
     a join's kept provider sign-in. Custody or publication failures roll back
     final custody, restoring exactly the entries the commit changed, so a join

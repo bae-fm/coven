@@ -2,17 +2,15 @@
 
 use std::fs::{File, OpenOptions, TryLockError};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
-use crate::files::bootstrap::BootstrapLease;
 use crate::files::file_lock::{FileLock, LockMode};
 use crate::files::{atomic_file, settings, FileError, SettingsError, StoreSettings};
 use crate::id_source::StoreId;
 
 use super::lock_registry as registry;
 use registry::LockKind;
-pub(super) use registry::RegisteredLock;
 pub use registry::StoreClosingGuard;
+pub(super) use registry::{bootstrap_running, LockInstance, RegisteredLock};
 
 /// An exclusive writer lock. Dropping it unlocks and closes the OS handle.
 /// Readers use a separate shared lock so they can coexist with the writer.
@@ -99,15 +97,15 @@ pub struct StoreDeletionLock {
 enum HeldBootstrap {
     /// Taken by the deletion itself.
     Locked(FileLock),
-    /// The lease of a bootstrap cancelling its own unpublished store.
-    Leased(Arc<BootstrapLease>),
+    /// Handed over by a bootstrap cancelling its own unpublished store.
+    Leased(RegisteredLock),
 }
 
 impl HeldBootstrap {
     fn release(self) {
         match self {
             Self::Locked(file) => drop(file),
-            Self::Leased(lease) => lease.release(),
+            Self::Leased(lock) => drop(lock),
         }
     }
 }
@@ -339,12 +337,13 @@ fn inspect_directory(directory: &Path) -> Result<bool, FileError> {
 }
 
 /// Lock a store, or what an interrupted deletion left of it, for deletion.
-/// `lease` is the bootstrap lock of a bootstrap deleting its own store;
-/// otherwise deletion takes that lock itself.
+/// `lease` holds the bootstrap lock of a bootstrap deleting its own store,
+/// which the deletion lock takes from it once it holds the store's other
+/// locks; otherwise deletion takes that lock itself.
 pub(super) fn for_deletion(
     directory: &Path,
     id: StoreId,
-    lease: Option<Arc<BootstrapLease>>,
+    lease: Option<&mut Option<RegisteredLock>>,
 ) -> Result<Option<StoreDeletionLock>, StoreLockError> {
     let root = directory.parent().expect("store parent");
     let root = match std::fs::canonicalize(root) {
@@ -375,15 +374,22 @@ pub(super) fn for_deletion(
         }
     }
     let [bootstrap, writer, readers] = paths;
-    // First, so a bootstrap that has not yet made the directory is refused
-    // before any other lock file is created for its id.
-    let bootstrap = match lease {
-        Some(lease) => HeldBootstrap::Leased(lease),
-        None => HeldBootstrap::Locked(try_lock(&bootstrap, id, false)?),
+    let others =
+        || Ok::<_, StoreLockError>((try_lock(&writer, id, false)?, try_lock(&readers, id, false)?));
+    let (bootstrap, (writer, readers)) = match lease {
+        // First, so a bootstrap that has not yet made the directory is
+        // refused before any other lock file is created for its id.
+        None => (HeldBootstrap::Locked(try_lock(&bootstrap, id, false)?), others()?),
+        // Last, so a refusal leaves the bootstrap holding its lock.
+        Some(lease) => {
+            let others = others()?;
+            let held = lease.take().expect("a bootstrap hands over the bootstrap lock it holds");
+            (HeldBootstrap::Leased(held), others)
+        }
     };
     Ok(Some(StoreDeletionLock {
-        store: LockedStore { _file: try_lock(&writer, id, false)?, directory, id },
-        _readers: try_lock(&readers, id, false)?,
+        store: LockedStore { _file: writer, directory, id },
+        _readers: readers,
         bootstrap,
     }))
 }

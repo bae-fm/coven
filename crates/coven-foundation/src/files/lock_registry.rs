@@ -24,17 +24,30 @@ enum LockPhase {
 }
 
 type StoreKey = (PathBuf, StoreId);
-type Registry = BTreeMap<StoreKey, BTreeMap<LockKind, Arc<LockEntry>>>;
+
+#[derive(Debug)]
+struct Registry {
+    stores: BTreeMap<StoreKey, BTreeMap<LockKind, Arc<LockEntry>>>,
+    /// How many locks were reserved: each reservation is the next instance.
+    reserved: u64,
+}
 
 // Independently constructed layouts must see the same closing instance. The
 // registry mutex serializes classification and reservation. A reservation stays
 // registered until its acquisition worker finishes and its OS handle closes.
-static STORES: LazyLock<Mutex<Registry>> = LazyLock::new(|| Mutex::new(BTreeMap::new()));
+static STORES: LazyLock<Mutex<Registry>> =
+    LazyLock::new(|| Mutex::new(Registry { stores: BTreeMap::new(), reserved: 0 }));
+
+/// One reservation of a lock: no other reservation in the process, of any
+/// store, has the same instance.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct LockInstance(u64);
 
 #[derive(Debug)]
 struct LockEntry {
     store: StoreKey,
     kind: LockKind,
+    instance: LockInstance,
     phase: watch::Sender<LockPhase>,
 }
 
@@ -54,11 +67,11 @@ impl StoreClosingGuard {
     /// A guard from a released instance never changes a replacement instance.
     pub fn begin_close(&self) {
         let Some(entry) = &self.0 else { return };
-        let stores = STORES.lock().expect("store registry lock poisoned");
+        let registry = STORES.lock().expect("store registry lock poisoned");
         if *entry.phase.borrow() == LockPhase::Released {
             return;
         }
-        let locks = stores.get(&entry.store).expect("held lock is registered");
+        let locks = registry.stores.get(&entry.store).expect("held lock is registered");
         // A dropped bootstrap owns the installation, including a writer that
         // may still be opening or running blocking work on its behalf.
         for (kind, held) in locks {
@@ -97,6 +110,10 @@ impl RegisteredLock {
         self.registration.closing_guard()
     }
 
+    pub(super) fn instance(&self) -> LockInstance {
+        self.registration.entry.instance
+    }
+
     #[cfg(test)]
     pub(super) fn inherited_file(&self) -> std::fs::File {
         self._file.inherited_file()
@@ -130,24 +147,26 @@ impl LockRegistration {
 
 impl Drop for LockRegistration {
     fn drop(&mut self) {
-        let mut stores = STORES.lock().expect("store registry lock poisoned");
-        let locks = stores.get_mut(&self.entry.store).expect("held lock is registered");
+        let mut registry = STORES.lock().expect("store registry lock poisoned");
+        let locks = registry.stores.get_mut(&self.entry.store).expect("held lock is registered");
         let removed = locks.remove(&self.entry.kind).expect("held lock kind");
         assert!(Arc::ptr_eq(&removed, &self.entry));
         if locks.is_empty() {
-            stores.remove(&self.entry.store);
+            registry.stores.remove(&self.entry.store);
         }
         self.entry.phase.send_replace(LockPhase::Released);
     }
 }
 
-fn reserve(stores: &mut Registry, store: StoreKey, kind: LockKind) -> LockRegistration {
+fn reserve(registry: &mut Registry, store: StoreKey, kind: LockKind) -> LockRegistration {
+    registry.reserved += 1;
     let entry = Arc::new(LockEntry {
         store: store.clone(),
         kind,
+        instance: LockInstance(registry.reserved),
         phase: watch::channel(LockPhase::Live).0,
     });
-    assert!(stores.entry(store).or_default().insert(kind, entry.clone()).is_none());
+    assert!(registry.stores.entry(store).or_default().insert(kind, entry.clone()).is_none());
     LockRegistration { entry }
 }
 
@@ -158,12 +177,12 @@ pub(super) fn try_acquire(
     kind: LockKind,
 ) -> Result<RegisteredLock, StoreLockError> {
     let registration = {
-        let mut stores = STORES.lock().expect("store registry lock poisoned");
+        let mut registry = STORES.lock().expect("store registry lock poisoned");
         let store = (directory.to_owned(), id);
-        if stores.get(&store).is_some_and(|locks| locks.contains_key(&kind)) {
+        if registry.stores.get(&store).is_some_and(|locks| locks.contains_key(&kind)) {
             return Err(StoreLockError::AlreadyOpen(id));
         }
-        reserve(&mut stores, store, kind)
+        reserve(&mut registry, store, kind)
     };
     registration.acquire_file()
 }
@@ -181,8 +200,8 @@ pub(super) async fn acquire_registered(
     let store = (directory.to_owned(), id);
     loop {
         let acquisition = {
-            let mut stores = STORES.lock().expect("store registry lock poisoned");
-            let locks = stores.get(&store);
+            let mut registry = STORES.lock().expect("store registry lock poisoned");
+            let locks = registry.stores.get(&store);
             // A live holder of the requested lock always refuses immediately,
             // even if a different lock on this directory is closing.
             if locks
@@ -195,7 +214,7 @@ pub(super) async fn acquire_registered(
                 locks.values().find(|entry| *entry.phase.borrow() == LockPhase::Closing)
             }) {
                 Some(entry) => Acquisition::Waiting(entry.phase.subscribe()),
-                None => Acquisition::Reserved(reserve(&mut stores, store.clone(), kind)),
+                None => Acquisition::Reserved(reserve(&mut registry, store.clone(), kind)),
             }
         };
         let mut released = match acquisition {
@@ -216,8 +235,8 @@ pub(super) async fn closed(directory: &Path, id: StoreId) {
     let store = (directory.to_owned(), id);
     loop {
         let mut released = {
-            let stores = STORES.lock().expect("store registry lock poisoned");
-            match stores.get(&store).and_then(|locks| {
+            let registry = STORES.lock().expect("store registry lock poisoned");
+            match registry.stores.get(&store).and_then(|locks| {
                 locks.values().find(|entry| *entry.phase.borrow() == LockPhase::Closing)
             }) {
                 Some(entry) => entry.phase.subscribe(),
@@ -229,6 +248,17 @@ pub(super) async fn closed(directory: &Path, id: StoreId) {
             .await
             .expect("registered lock publishes release before dropping its sender");
     }
+}
+
+/// Whether `instance` of the store's bootstrap lock is held, and its holder
+/// not closing: the bootstrap that took it is running.
+pub(super) fn bootstrap_running(directory: &Path, id: StoreId, instance: LockInstance) -> bool {
+    let registry = STORES.lock().expect("store registry lock poisoned");
+    registry
+        .stores
+        .get(&(directory.to_owned(), id))
+        .and_then(|locks| locks.get(&LockKind::Bootstrap))
+        .is_some_and(|entry| entry.instance == instance && *entry.phase.borrow() == LockPhase::Live)
 }
 
 #[cfg(test)]

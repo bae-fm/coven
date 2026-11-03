@@ -9,7 +9,7 @@ use crate::id_source::{IdSource, StoreId};
 use std::{
     fs, io,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
+    sync::Mutex,
 };
 
 /// Filesystem failures while reserving, publishing or cancelling a new device.
@@ -30,36 +30,44 @@ pub enum BootstrapDirectoryError {
 /// Dropping preserves resumable work; `cancel` removes it after its database
 /// closes. Publication removes the marker without moving any open files.
 pub struct BootstrapStore {
-    // Drops before the lease so surviving directory clones are closing.
+    // Drops before the lease: the store's locks are closing before the
+    // bootstrap lock is released, so a call resuming the store waits for a
+    // writer the bootstrap's database may still hold.
     _closing: lock::StoreClosingGuard,
     path: PathBuf,
     id: StoreId,
-    lease: Arc<BootstrapLease>,
+    lease: BootstrapLease,
     protection: Protection,
 }
 
-/// Unpublished directory clones keep the lease until publication or cancellation.
+/// The bootstrap lock, which the bootstrap or replacement that took it holds
+/// alone until it publishes, cancels or is dropped. Its directories name the
+/// lock's instance and open the unpublished store only while it holds it.
 #[derive(Debug)]
-pub(super) struct BootstrapLease(Mutex<Option<lock::RegisteredLock>>);
+pub(super) struct BootstrapLease {
+    held: Mutex<Option<lock::RegisteredLock>>,
+    instance: lock::LockInstance,
+}
 
 impl BootstrapLease {
     pub(super) fn new(lock: lock::RegisteredLock) -> Self {
-        Self(Mutex::new(Some(lock)))
+        Self { instance: lock.instance(), held: Mutex::new(Some(lock)) }
     }
 
-    pub(super) fn is_held(&self) -> bool {
-        self.0.lock().expect("bootstrap lease lock poisoned").is_some()
+    pub(super) fn instance(&self) -> lock::LockInstance {
+        self.instance
     }
 
     pub(super) fn release(&self) {
-        self.0.lock().expect("bootstrap lease lock poisoned").take();
+        self.held.lock().expect("bootstrap lease lock poisoned").take();
     }
 }
 
 impl BootstrapStore {
-    /// The unpublished directory; its capability retains the bootstrap lease.
+    /// The unpublished directory, which opens the store while this bootstrap
+    /// holds its lock.
     pub fn directory(&self) -> StoreDir {
-        StoreDir::bootstrapping(self.path.clone(), self.id, self.lease.clone(), self.protection)
+        StoreDir::bootstrapping(self.path.clone(), self.id, self.lease.instance(), self.protection)
     }
 
     /// Publish the loaded, open store by removing its durable marker.
@@ -77,15 +85,30 @@ impl BootstrapStore {
     /// Remove unpublished data and locks after all database work has closed.
     /// An absent directory succeeds; a published store cannot be cancelled.
     pub fn cancel(&self) -> Result<(), BootstrapDirectoryError> {
-        let guard = self.directory().lock_for_deletion()?;
+        let mut held = self.lease.held.lock().expect("bootstrap lease lock poisoned");
+        let guard = self.lock_for_deletion(&mut held)?;
         if exists("inspect bootstrap path", &self.path)? && !is_pending(&self.path)? {
             return Err(DirectoryCreationError::AlreadyExists(self.id).into());
         }
         if let Some(guard) = guard {
             guard.remove_directory()?;
         }
-        self.lease.release();
+        held.take();
         Ok(())
+    }
+
+    /// Lock the store for deletion, handing the deletion the bootstrap lock
+    /// `held` while this bootstrap holds it. Once it has published, the
+    /// deletion takes the lock itself, as any deletion does.
+    fn lock_for_deletion(
+        &self,
+        held: &mut Option<lock::RegisteredLock>,
+    ) -> Result<Option<super::StoreDeletionLock>, StoreLockError> {
+        if held.is_some() {
+            lock::for_deletion(&self.path, self.id, Some(held))
+        } else {
+            self.directory().lock_for_deletion()
+        }
     }
 }
 
@@ -129,7 +152,7 @@ pub(super) async fn reserve_bootstrap_directory(
     let path = root.join(id.to_string());
     let lock = lock::acquire_bootstrap(&path, id).await?;
     let closing = lock.closing_guard();
-    let lease = Arc::new(BootstrapLease::new(lock));
+    let lease = BootstrapLease::new(lock);
     if !exists("inspect bootstrap path", &path)? {
         creation::create(&root, id, ids, true, protection)?;
     }

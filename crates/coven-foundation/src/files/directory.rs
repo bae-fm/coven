@@ -95,7 +95,9 @@ impl FileName {
 pub struct StoreDir {
     path: PathBuf,
     id: StoreId,
-    bootstrap: Option<std::sync::Arc<super::bootstrap::BootstrapLease>>,
+    /// The bootstrap lock of the bootstrap that gave the directory out, which
+    /// opens the unpublished store while that bootstrap holds it.
+    bootstrap: Option<lock::LockInstance>,
     /// The class its layout gives the store's files (E1).
     protection: Protection,
 }
@@ -108,14 +110,15 @@ impl StoreDir {
     pub(super) fn bootstrapping(
         path: PathBuf,
         id: StoreId,
-        lease: std::sync::Arc<super::bootstrap::BootstrapLease>,
+        bootstrap: lock::LockInstance,
         protection: Protection,
     ) -> Self {
-        Self { path, id, bootstrap: Some(lease), protection }
+        Self { path, id, bootstrap: Some(bootstrap), protection }
     }
 
     fn is_bootstrapping(&self) -> bool {
-        self.bootstrap.as_ref().is_some_and(|lease| lease.is_held())
+        self.bootstrap
+            .is_some_and(|instance| lock::bootstrap_running(&self.path, self.id, instance))
     }
 
     /// A marker beside a replacement record belongs to a swap under way;
@@ -260,9 +263,8 @@ impl StoreDirAccess for StoreDir {
         lock::cache_writes(&self.path, false)
     }
     fn lock_for_deletion(&self) -> Result<Option<StoreDeletionLock>, StoreLockError> {
-        let lease = self.bootstrap.clone().filter(|lease| lease.is_held());
-        let bootstrapping = lease.is_some();
-        let locked = lock::for_deletion(&self.path, self.id, lease);
+        let bootstrapping = self.is_bootstrapping();
+        let locked = lock::for_deletion(&self.path, self.id, None);
         // A marker beside a replacement record belongs to a swap under way,
         // which deletion removes whole: both installations, the record and
         // the replacement's directory. Alone, it belongs to a first
