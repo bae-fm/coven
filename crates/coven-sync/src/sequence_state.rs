@@ -185,6 +185,16 @@ impl From<PassFailure> for SyncStatus {
     }
 }
 
+/// Hears each change of this installation's sync activity (`SyncState::watch`).
+pub(crate) struct SyncStatusWatch(watch::Receiver<SequenceStatus>);
+
+impl SyncStatusWatch {
+    /// Resolves at the next change; an error once the sync state is gone.
+    pub(crate) async fn changed(&mut self) -> Result<(), watch::error::RecvError> {
+        self.0.changed().await
+    }
+}
+
 /// Shared state of this open installation. It carries no time-based permission.
 pub struct SyncState {
     status: watch::Sender<SequenceStatus>,
@@ -205,8 +215,18 @@ impl SyncState {
             often: crate::sync_often::SyncOften::new(),
         }
     }
-    /// Observe progress and blocked causes.
-    pub fn subscribe(&self) -> watch::Receiver<SequenceStatus> {
+    /// The sync activity now: progress, or what blocks or stopped it.
+    pub(crate) fn status(&self) -> SequenceStatus {
+        self.status.borrow().clone()
+    }
+    /// Hear each change of the sync activity, for work that waits until sync
+    /// allows it.
+    pub(crate) fn watch(&self) -> SyncStatusWatch {
+        SyncStatusWatch(self.status.subscribe())
+    }
+    /// Observe progress and blocked causes, for a test to wait on.
+    #[cfg(test)]
+    pub(crate) fn subscribe(&self) -> watch::Receiver<SequenceStatus> {
         self.status.subscribe()
     }
     /// Ask the running loop for a pass, retained until it waits.

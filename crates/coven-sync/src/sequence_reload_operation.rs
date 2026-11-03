@@ -38,7 +38,7 @@ impl SequenceSync {
     /// preserving waiting writes. Repeated calls resume the same journal (§16.5).
     pub async fn reload_from_snapshot(&self) -> Result<(), SyncError> {
         let mut session = self.session.lock().await;
-        if let crate::SequenceStatus::Stopped(_) = &*self.state.subscribe().borrow() {
+        if let crate::SequenceStatus::Stopped(_) = self.state.status() {
             return self.state.check();
         }
         let member = self.member.read()?.ok_or(coven_storage::StorageFailure::MemberKeysMissing)?;

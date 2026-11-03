@@ -282,7 +282,7 @@ async fn upload_worker(
     let wake = first.upload_wake.clone();
     // Pins coven keeps resume as the store opens (§17.8).
     wake.notify_one();
-    let mut sending = first.send.subscribe();
+    let mut sending = first.send.watch();
     let mut reports = first.waits.network_reports();
     drop(first);
     // The earliest due upload retry, armed after each run (§6.7).

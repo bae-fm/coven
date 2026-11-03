@@ -62,7 +62,7 @@ impl SequenceSync {
         member: &MemberIdentity,
         mut progress: Option<&mut ProgressReport<LoadStep>>,
     ) -> Result<(), SyncError> {
-        if let SequenceStatus::Stopped(_) = &*self.state.subscribe().borrow() {
+        if let SequenceStatus::Stopped(_) = self.state.status() {
             return self.state.check();
         }
         self.resume_reload(session, ring, member).await?;

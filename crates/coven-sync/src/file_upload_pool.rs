@@ -258,7 +258,7 @@ impl FilesInner {
         // Observe before reading the queue, so nothing that happens while it
         // is read is missed.
         let mut changes = self.database.queued_work_changes();
-        let mut sending = self.send.subscribe();
+        let mut sending = self.send.watch();
         let mut reports = self.waits.network_reports();
         let mut rearmed = self.waits.rearmed();
         if let Some(blocked @ Blocked::Closed) = self.blocked() {

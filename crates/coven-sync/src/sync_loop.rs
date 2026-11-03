@@ -113,8 +113,8 @@ async fn pass(
 /// keeps, an attempt that received no provider response, or the failure
 /// itself (E5).
 fn failed(sync: &SequenceSync, error: SyncError) -> PassFailure {
-    let blocked = match &*sync.state.subscribe().borrow() {
-        SequenceStatus::Blocked(record) => Some(record.as_ref().clone()),
+    let blocked = match sync.state.status() {
+        SequenceStatus::Blocked(record) => Some(*record),
         SequenceStatus::Opening | SequenceStatus::Synced { .. } | SequenceStatus::Stopped(_) => {
             None
         }

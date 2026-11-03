@@ -327,6 +327,13 @@ closed_session_types = [
 # Replaces a live query's request from another task while the query waits
 # for its next result (api.md E4).
 LiveQueryRequests = "ReconfigurableLiveQuery"
+# An app's request for idle passes at most its interval apart, held until it
+# drops (api.md E5), and the sync loop's view of the shortest one held.
+SyncOftenGuard = "SyncOften"
+IdleInterval = "SyncOften"
+# Each change of the sync activity, for the file workers waiting until sync
+# allows their transfers.
+SyncStatusWatch = "SyncState"
 
 # The raw handles and coven's own SQL are the database boundary's subject;
 # the SQLite capability's row names the database's home and the SQLite
@@ -625,6 +632,8 @@ tables = [
 # One sync state per opened installation, which the store's bootstrap or
 # builder makes and gives to its sequence and storage owners.
 "crates/coven-sync/src/sequence_state.rs" = ["SyncState::new"]
+# The intervals apps hold for idle passes, one per sync state, made with it.
+"crates/coven-sync/src/sync_often.rs" = ["SyncOften::new"]
 # One invite expiry per writer handle, connected or not; the handle's
 # storage owner keeps it and stops it as it closes.
 "crates/coven-sync/src/invite_expiry.rs" = ["InviteExpiry::start"]
