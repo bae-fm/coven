@@ -87,7 +87,14 @@ async fn compare(
         TestStore::register(&db, DeviceId(d), d as u8);
     }
     db.inspect_writer(|db| {
-        db.internal_execute("UPDATE _coven_members SET role='admin'", []).unwrap()
+        db.transaction(|db| {
+            let mut state = crate::store_state_tables::read(db)?;
+            for member in state.members.values_mut() {
+                member.role = coven_format::admin::MemberRole::Admin;
+            }
+            crate::store_state_tables::replace(db, &state)
+        })
+        .unwrap()
     });
     let mut slots = Vec::new();
     let mut rust = Vec::new();

@@ -30,7 +30,9 @@ pub(crate) enum Rule {
     CapabilityBoundaries,
     /// Appendix F.2: raw SQLite handles and SQL on the database's internal
     /// tables stay in the database's homes, and each domain's tables are
-    /// written only in its homes (`database_boundary.rs`).
+    /// written and created, and tested, only in its homes
+    /// (`database_boundary.rs`); no type only passes its calls on to a
+    /// domain's owner (`domain_owners.rs`).
     DatabaseBoundary,
     /// Appendix F.3: an owner never hands out what it holds, only its owner
     /// and what holds that owner hand out a handle, and shared state leaves
@@ -249,7 +251,9 @@ pub(crate) struct Gate {
 
 /// The SQLite capability and the database's own tables: outside the named
 /// capability's homes, nothing names a raw rusqlite handle or writes SQL on
-/// one of the schema's tables.
+/// one of the schema module's tables. The schema's tables, which the domains
+/// place, are the schema module's and those a `CREATE TABLE` in the crates'
+/// `.sql` files makes.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Database {
@@ -273,18 +277,34 @@ pub(crate) struct Database {
     pub(crate) domains: Vec<Domain>,
 }
 
-/// A domain: tables that only its homes write. SQL elsewhere may read them;
-/// writing one — `INSERT`, `UPDATE`, `DELETE` or `REPLACE`, in a statement or
-/// in a trigger's body — is the domain's own work (`sql_writes.rs`).
+/// A domain: tables whose schema and writes only its homes hold. SQL
+/// elsewhere may read them; writing one — `INSERT`, `UPDATE`, `DELETE` or
+/// `REPLACE`, in a statement or in a trigger's body — is the domain's own
+/// work, and so are their `CREATE` statements and the tests that write them
+/// (`database_boundary.rs`).
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Domain {
     pub(crate) name: String,
-    /// Path prefixes, relative to the workspace root, where SQL writes the
-    /// domain's tables. A prefix ending in `/` names a directory.
+    /// Path prefixes, relative to the workspace root, where SQL writes and
+    /// creates the domain's tables. A prefix ending in `/` names a directory.
     pub(crate) homes: Vec<String>,
     /// Table names, as SQL writes them; they compare without case.
     pub(crate) tables: Vec<String>,
+    /// The owner that does the domain's work: the type holding what the
+    /// domain's writes go through (`domain_owners.rs`).
+    pub(crate) owner: String,
+}
+
+impl Domain {
+    /// Whether a file is in one of the domain's homes. A home file's tests,
+    /// `<name>_tests.rs` beside it, are in its home.
+    pub(crate) fn holds(&self, path: &str) -> bool {
+        let tested = path.strip_suffix("_tests.rs").map(|source| format!("{source}.rs"));
+        self.homes
+            .iter()
+            .any(|home| path.starts_with(home.as_str()) || tested.as_deref() == Some(home.as_str()))
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -384,6 +404,9 @@ impl Policy {
         for (handle, owner) in &self.handles {
             named.push(("handles", handle.as_str()));
             named.push(("handles", owner.as_str()));
+        }
+        for domain in self.database.iter().flat_map(|database| &database.domains) {
+            named.push(("database.domains", domain.owner.as_str()));
         }
         for factory in &self.capability_factories {
             named.push(("capability_factories", factory.owner.as_str()));

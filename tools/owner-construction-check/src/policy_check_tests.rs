@@ -1,10 +1,11 @@
 use super::*;
 use crate::crate_code::CrateCode;
-use crate::sources::Manifest;
+use crate::sources::{Manifest, SqlFile};
 
 fn workspace(files: Vec<RustFile>, members: &[(&str, &str)]) -> Workspace {
     Workspace {
         files,
+        sql_files: Vec::new(),
         manifests: members
             .iter()
             .map(|(directory, package)| Manifest {
@@ -308,16 +309,21 @@ fn the_database_schema_module_declares_exactly_its_table_macros() {
     );
 }
 
-/// Domains place each schema table once, in homes that hold a source.
+/// Domains place each schema table once, in homes that hold a source, and
+/// each names an owner the checker infers.
 #[test]
 fn domains_place_each_schema_table_once() {
     let schema = RustFile::fixture(
         "crates/app-foundation/src/schema.rs",
         r#"macro_rules! app_tables {
             ($visit:ident) => { $visit!(_app_writes, "key TEXT"); $visit!(_app_rows, "key TEXT"); };
-        }"#,
+        }
+        struct Store { connection: Connection }
+        struct Rows;"#,
     );
     let rows = r#"
+        capability_types = ["Connection"]
+        external_types = ["Connection"]
         [database]
         capability = "SQLite"
         schema = "crates/app-foundation/src/schema.rs"
@@ -326,10 +332,12 @@ fn domains_place_each_schema_table_once() {
         name = "writes"
         homes = ["crates/app-foundation/src/schema.rs", "crates/app-foundation/src/moved/"]
         tables = ["_app_writes", "_app_gone"]
+        owner = "Store"
         [[database.domains]]
         name = "writes"
         homes = ["crates/app-foundation/src/"]
         tables = ["_APP_WRITES"]
+        owner = "Rows"
         [[capabilities]]
         name = "SQLite"
         homes = ["crates/app-foundation/src/"]
@@ -339,9 +347,63 @@ fn domains_place_each_schema_table_once() {
         [
             "database: domain writes has home crates/app-foundation/src/moved/, which holds no source",
             "database: domain writes is named twice",
+            "database: domain writes names owner Rows, which holds no capability, shared state or owner",
             "database: table _APP_WRITES is in domains writes and writes",
             "database: schema table _app_rows is in no domain",
             "database: domain table _app_gone is not a schema table",
+        ]
+    );
+}
+
+/// Without a schema module, the schema's tables are what the crates' SQL
+/// files create: a domain may have a SQL file as its home, and temporary
+/// tables and tests' SQL make no table of the schema.
+#[test]
+fn sql_files_create_the_schemas_tables() {
+    let mut workspace = workspace(
+        vec![RustFile::fixture(
+            "crates/app-foundation/src/listing.rs",
+            "struct Listing { connection: Connection }",
+        )],
+        &[("crates/app-foundation", "app-foundation")],
+    );
+    workspace.sql_files = [
+        (
+            "crates/app-foundation/src/listing.sql",
+            "CREATE TABLE IF NOT EXISTS listing (id TEXT);
+             CREATE TEMP TABLE staged (id TEXT);
+             CREATE VIRTUAL TABLE listing_search USING fts5(id);",
+        ),
+        ("crates/app-foundation/tests/fixture.sql", "CREATE TABLE fixture (id TEXT);"),
+    ]
+    .map(|(path, text)| SqlFile {
+        relative_path: path.into(),
+        package_root: "crates/app-foundation/".into(),
+        package: "app-foundation".into(),
+        text: text.into(),
+    })
+    .into();
+    let policy = Policy::fixture(
+        r#"rules = ["database-boundary"]
+        capability_types = ["Connection"]
+        external_types = ["Connection"]
+        [database]
+        capability = "SQLite"
+        [[database.domains]]
+        name = "listing"
+        homes = ["crates/app-foundation/src/listing.sql"]
+        tables = ["listing", "gone"]
+        owner = "Listing"
+        [[capabilities]]
+        name = "SQLite"
+        homes = ["crates/app-foundation/src/"]
+        "#,
+    );
+    assert_eq!(
+        stale_rows(&workspace, &CrateCode::read(&workspace, &policy), &policy),
+        [
+            "database: schema table listing_search is in no domain",
+            "database: domain table gone is not a schema table",
         ]
     );
 }

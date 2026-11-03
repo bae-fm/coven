@@ -64,29 +64,24 @@ impl TestStore {
         device: coven_foundation::id_source::DeviceId,
         seed: u8,
     ) {
-        let keys = crate::tests::keys(seed);
         let member = crate::tests::member(seed);
         database.inspect_writer(|db| {
             db.transaction(|db| {
-                db.internal_execute(
-                    "INSERT INTO _coven_members(member,signing,sealing,role,removed,access)
-                     VALUES(?1,?2,?3,'member',0,?4) ON CONFLICT(member) DO NOTHING",
-                    (
-                        member.0.as_bytes(),
-                        keys.signing.as_bytes(),
-                        keys.sealing.as_bytes(),
-                        serde_json::to_vec(&coven_format::MemberAccess::S3AccessKey {
-                            access_key_id: format!("fixture-key-{seed}"),
-                        })
-                        .unwrap(),
-                    ),
-                )?;
-                db.internal_execute(
-                    "INSERT INTO _coven_devices(device,member,name,state)
-                     VALUES(?1,?2,'Device','active') ON CONFLICT(device) DO NOTHING",
-                    (device.0.to_be_bytes(), member.0.as_bytes()),
-                )?;
-                Ok(())
+                let mut state = crate::store_state_tables::read(db)?;
+                state.members.entry(member).or_insert(crate::store_state::StoreMember {
+                    keys: crate::tests::keys(seed),
+                    access: coven_format::MemberAccess::S3AccessKey {
+                        access_key_id: format!("fixture-key-{seed}"),
+                    },
+                    role: coven_format::admin::MemberRole::Member,
+                    removed: false,
+                });
+                state.devices.entry(device).or_insert(crate::store_state::StoreDevice {
+                    member,
+                    name: "Device".into(),
+                    state: crate::store_state::DeviceState::Active,
+                });
+                crate::store_state_tables::replace(db, &state)
             })
             .unwrap();
         });
@@ -99,40 +94,35 @@ impl TestStore {
         circle: coven_foundation::id_source::CircleId,
     ) {
         let device = self.directory.settings().unwrap().device_id;
-        let keys = crate::tests::keys(1);
         let member = crate::tests::member(1);
         database.inspect_writer(|db| {
             db.transaction(|db| {
-                db.internal_execute(
-                    "INSERT INTO _coven_members(member,signing,sealing,role,removed,access)
-                     VALUES(?1,?2,?3,'admin',0,?4) ON CONFLICT(member) DO NOTHING",
-                    (
-                        member.0.as_bytes(),
-                        keys.signing.as_bytes(),
-                        keys.sealing.as_bytes(),
-                        serde_json::to_vec(&coven_format::MemberAccess::S3AccessKey {
-                            access_key_id: "fixture-access-key".into(),
-                        })
-                        .unwrap(),
-                    ),
-                )?;
-                db.internal_execute(
-                    "INSERT INTO _coven_devices(device,member,name,state)
-                     VALUES(?1,?2,'Local device','active') ON CONFLICT(device) DO NOTHING",
-                    (device.0.to_be_bytes(), member.0.as_bytes()),
-                )?;
-                db.internal_execute(
-                    "INSERT INTO _coven_circles(circle,name)
-                     VALUES(?1,'Circle') ON CONFLICT(circle) DO NOTHING",
-                    [circle.to_string()],
-                )?;
-                db.internal_execute(
-                    "INSERT INTO _coven_circle_members(circle,member)
-                     SELECT ?1,member FROM _coven_devices WHERE device=?2
-                     ON CONFLICT(circle,member) DO NOTHING",
-                    (circle.to_string(), device.0.to_be_bytes()),
-                )?;
-                Ok(())
+                let mut state = crate::store_state_tables::read(db)?;
+                state.members.entry(member).or_insert(crate::store_state::StoreMember {
+                    keys: crate::tests::keys(1),
+                    access: coven_format::MemberAccess::S3AccessKey {
+                        access_key_id: "fixture-access-key".into(),
+                    },
+                    role: coven_format::admin::MemberRole::Admin,
+                    removed: false,
+                });
+                let device =
+                    state.devices.entry(device).or_insert(crate::store_state::StoreDevice {
+                        member,
+                        name: "Local device".into(),
+                        state: crate::store_state::DeviceState::Active,
+                    });
+                let member = device.member;
+                state
+                    .circles
+                    .entry(circle)
+                    .or_insert(crate::store_state::StoreCircle {
+                        name: "Circle".into(),
+                        members: std::collections::BTreeSet::new(),
+                    })
+                    .members
+                    .insert(member);
+                crate::store_state_tables::replace(db, &state)
             })
             .unwrap();
         });

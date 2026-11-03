@@ -40,6 +40,16 @@ mod ownership;
 #[macro_use]
 #[path = "internal_schema_sequence.rs"]
 mod sequence;
+// Each domain's tables, beside the domain that writes them.
+#[macro_use]
+#[path = "claim_schema.rs"]
+mod claim_schema;
+#[macro_use]
+#[path = "published_schema.rs"]
+mod published_schema;
+#[macro_use]
+#[path = "store_state_schema.rs"]
+mod store_state_schema;
 
 macro_rules! coven_tables {
     ($visit:ident) => {
@@ -170,53 +180,7 @@ macro_rules! coven_tables {
             ) STRICT;
             INSERT INTO _coven_snapshot_reservation VALUES(1,0);
         ");
-        $visit!(_coven_members, "
-            CREATE TABLE _coven_members (
-                member BLOB PRIMARY KEY NOT NULL CHECK(length(member)=16),
-                signing BLOB NOT NULL CHECK(length(signing)=32),
-                sealing BLOB NOT NULL CHECK(length(sealing)=32),
-                access BLOB NOT NULL,
-                role TEXT NOT NULL CHECK(role IN ('admin','member')),
-                removed INTEGER NOT NULL CHECK(removed IN (0,1))
-            ) STRICT, WITHOUT ROWID;
-        ");
-        // Every public key pair bound by a counted administrative slot (§10).
-        $visit!(_coven_bound_keys, "
-            CREATE TABLE _coven_bound_keys (
-                signing BLOB NOT NULL CHECK(length(signing)=32),
-                sealing BLOB NOT NULL CHECK(length(sealing)=32),
-                PRIMARY KEY(signing,sealing)
-            ) STRICT, WITHOUT ROWID;
-        ");
-        $visit!(_coven_devices, "
-            CREATE TABLE _coven_devices (
-                device BLOB PRIMARY KEY NOT NULL CHECK(length(device)=8),
-                member BLOB NOT NULL REFERENCES _coven_members(member),
-                name TEXT NOT NULL,
-                state TEXT NOT NULL CHECK(state IN ('active','removed','replaced'))
-            ) STRICT, WITHOUT ROWID;
-            CREATE INDEX _coven_devices_member ON _coven_devices(member);
-        ");
-        $visit!(_coven_circles, "
-            CREATE TABLE _coven_circles (
-                circle TEXT PRIMARY KEY NOT NULL,
-                name TEXT NOT NULL
-            ) STRICT, WITHOUT ROWID;
-        ");
-        $visit!(_coven_circle_deletions, "
-            CREATE TABLE _coven_circle_deletions (
-                circle TEXT PRIMARY KEY NOT NULL,
-                slot BLOB NOT NULL CHECK(length(slot)=8 AND slot>x'0000000000000000')
-            ) STRICT, WITHOUT ROWID;
-        ");
-        $visit!(_coven_circle_members, "
-            CREATE TABLE _coven_circle_members (
-                circle TEXT NOT NULL REFERENCES _coven_circles(circle),
-                member BLOB NOT NULL REFERENCES _coven_members(member),
-                PRIMARY KEY(circle,member)
-            ) STRICT, WITHOUT ROWID;
-            CREATE INDEX _coven_circle_members_member ON _coven_circle_members(member);
-        ");
+        coven_store_state_tables!($visit);
         $visit!(_coven_boundaries, "
             CREATE TABLE _coven_boundaries (
                 slot BLOB NOT NULL CHECK(length(slot)=8 AND slot>x'0000000000000000'),
@@ -304,7 +268,9 @@ macro_rules! coven_tables {
             ) STRICT, WITHOUT ROWID;
         ");
         coven_ownership_tables!($visit);
+        coven_published_tables!($visit);
         coven_sequence_tables!($visit);
+        coven_claim_tables!($visit);
         $visit!(_coven_conversion_schemas, "
             CREATE TABLE _coven_conversion_schemas (
                 version INTEGER PRIMARY KEY,
@@ -458,16 +424,6 @@ macro_rules! coven_tables {
                 PRIMARY KEY(device, number),
                 FOREIGN KEY(device,number) REFERENCES _coven_uploads(device,number) ON DELETE CASCADE
             ) STRICT, WITHOUT ROWID;
-        ");
-        $visit!(_coven_upload_claims, "
-            CREATE TABLE _coven_upload_claims (
-                device BLOB NOT NULL,
-                number BLOB NOT NULL,
-                claim BLOB NOT NULL CHECK(length(claim)=8),
-                PRIMARY KEY(device, number),
-                FOREIGN KEY(device,number) REFERENCES _coven_uploads(device,number) ON DELETE CASCADE
-            ) STRICT, WITHOUT ROWID;
-            CREATE INDEX _coven_upload_claims_claim ON _coven_upload_claims(device,claim);
         ");
         $visit!(_coven_queued_file_refs, "
             CREATE TABLE _coven_queued_file_refs (
@@ -954,7 +910,7 @@ pub(crate) fn followed(name: &str) -> bool {
 mod views;
 pub(crate) use views::app_readable;
 
-#[path = "internal_schema_input.rs"]
+#[path = "input_database_schema.rs"]
 mod input;
 pub(crate) use input::initial_input_schema;
 

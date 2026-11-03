@@ -241,3 +241,17 @@ async fn pinned_last_claims_settle_lost_replies_for_every_slot_kind() {
         database.close().await.unwrap();
     }
 }
+
+/// Fill the claims' tables, thousands of rows each but one journal entry,
+/// from the rows of the plan audit's `fixture` table, inside its transaction
+/// (`internal_schema_scan_reasons_tests.rs`).
+pub(crate) fn fill_for_plans(db: &rusqlite::Connection) {
+    db.execute_batch(
+        "INSERT INTO _coven_upload_claims SELECT device,n,counter(1) FROM fixture;
+         INSERT INTO _coven_claim_counters SELECT n,n FROM fixture;
+         INSERT INTO _coven_claim_journal SELECT device,n,NULL,i,'landed',1 FROM fixture WHERE i=1;
+         INSERT INTO _coven_claim_attempts SELECT counter(1),counter(1),i,'store/seq/' || i,key,counter(32),NULL FROM fixture;
+         INSERT INTO _coven_claim_chunks SELECT counter(1),counter(1),i,0,key FROM fixture;",
+    )
+    .unwrap();
+}

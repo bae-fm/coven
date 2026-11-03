@@ -7,7 +7,8 @@
 //! The rules of F.1 to F.3 read the code that remains: test code may assemble
 //! its own graphs from raw material, and nothing outside it can reach what it
 //! declares. The conventions of F.5 read every file, tests included, since
-//! where tests live is their subject.
+//! where tests live is their subject, and the database's domains read the SQL
+//! in test code, since a domain's tests live with it.
 
 use syn::punctuated::Punctuated;
 use syn::visit_mut::{self, VisitMut};
@@ -23,6 +24,57 @@ pub(crate) fn production_code(files: &[RustFile]) -> Vec<RustFile> {
             let mut file = file.clone();
             TestCode.visit_file_mut(&mut file.syntax);
             file
+        })
+        .collect()
+}
+
+/// The crates' test code: each test file whole, and from every other file
+/// its test-only items, impl items among them.
+pub(crate) fn test_code(files: &[RustFile]) -> Vec<RustFile> {
+    files
+        .iter()
+        .map(|file| {
+            let mut file = file.clone();
+            if !file.is_test_source() && !is_test_only(&file.syntax.attrs) {
+                file.syntax.items = test_items(&file.syntax.items);
+            }
+            file
+        })
+        .collect()
+}
+
+/// The test-only items among `items`, with those of inline modules and impls
+/// that are not test-only themselves.
+fn test_items(items: &[syn::Item]) -> Vec<syn::Item> {
+    items
+        .iter()
+        .filter_map(|item| {
+            if is_test_only(item_attrs(item)) {
+                return Some(item.clone());
+            }
+            match item {
+                syn::Item::Mod(module) => {
+                    let (brace, items) = module.content.as_ref()?;
+                    let items = test_items(items);
+                    (!items.is_empty()).then(|| {
+                        syn::Item::Mod(syn::ItemMod {
+                            content: Some((*brace, items)),
+                            ..module.clone()
+                        })
+                    })
+                }
+                syn::Item::Impl(implementation) => {
+                    let items = implementation
+                        .items
+                        .iter()
+                        .filter(|item| is_test_only(impl_item_attrs(item)))
+                        .cloned()
+                        .collect::<Vec<_>>();
+                    (!items.is_empty())
+                        .then(|| syn::Item::Impl(syn::ItemImpl { items, ..implementation.clone() }))
+                }
+                _ => None,
+            }
         })
         .collect()
 }

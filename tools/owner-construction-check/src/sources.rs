@@ -1,6 +1,6 @@
 //! Reading the workspace: every member the workspace manifest lists, each
-//! Rust file under it parsed and tagged with its package, every member
-//! manifest, and the workspace manifest's dependency table.
+//! Rust file under it parsed and tagged with its package, each SQL file under
+//! it, every member manifest, and the workspace manifest's dependency table.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -11,9 +11,34 @@ use crate::syntax::RustFile;
 
 pub(crate) struct Workspace {
     pub(crate) files: Vec<RustFile>,
+    pub(crate) sql_files: Vec<SqlFile>,
     pub(crate) manifests: Vec<Manifest>,
     /// The workspace manifest's `[workspace.dependencies]`.
     pub(crate) workspace_dependencies: toml::Table,
+}
+
+/// A `.sql` file under a member, such as the tables and triggers a domain
+/// keeps beside its code, which the member's code includes as text.
+#[derive(Clone)]
+pub(crate) struct SqlFile {
+    /// Relative to the workspace root, with `/` separators.
+    pub(crate) relative_path: String,
+    /// The directory of the workspace member that holds the file, relative to
+    /// the workspace root and ending in `/`.
+    pub(crate) package_root: String,
+    /// That member's package name.
+    pub(crate) package: String,
+    pub(crate) text: String,
+}
+
+impl SqlFile {
+    /// A file under its member's own `tests/` directory, as an integration
+    /// test's Rust file is (`RustFile::is_integration_test_source`).
+    pub(crate) fn is_test_source(&self) -> bool {
+        self.relative_path
+            .strip_prefix(self.package_root.as_str())
+            .is_some_and(|path| path.starts_with("tests/"))
+    }
 }
 
 pub(crate) struct Manifest {
@@ -116,12 +141,13 @@ pub(crate) fn load(
         Some(toml::Value::Table(dependencies)) => dependencies,
         _ => toml::Table::new(),
     };
-    let mut rust_paths = Vec::new();
-    let mut manifest_paths = Vec::new();
+    let mut paths = Paths::default();
     for member in &members {
-        collect_paths(&root.join(member), &mut rust_paths, &mut manifest_paths)?;
+        collect_paths(&root.join(member), &mut paths)?;
     }
+    let Paths { rust: mut rust_paths, sql: mut sql_paths, manifests: mut manifest_paths } = paths;
     rust_paths.sort();
+    sql_paths.sort();
     manifest_paths.sort();
     if let Some(path) = manifest_paths
         .iter()
@@ -135,7 +161,8 @@ pub(crate) fn load(
             Ok(Manifest { relative_path: relative(root, &path)?, table: parse_manifest(&path)? })
         })
         .collect::<Result<Vec<_>, LoadError>>()?;
-    let mut workspace = Workspace { files: Vec::new(), manifests, workspace_dependencies };
+    let mut workspace =
+        Workspace { files: Vec::new(), sql_files: Vec::new(), manifests, workspace_dependencies };
     // Each member's root directory, package name and dependency names.
     let mut packages = Vec::new();
     for member in &members {
@@ -186,6 +213,22 @@ pub(crate) fn load(
             })
         })
         .collect::<Result<Vec<_>, LoadError>>()?;
+    workspace.sql_files = sql_paths
+        .into_iter()
+        .map(|path| {
+            let relative_path = relative(root, &path)?;
+            let (package_root, package, _) = packages
+                .iter()
+                .find(|(package_root, _, _)| relative_path.starts_with(package_root.as_str()))
+                .expect("every source lies under the member it was collected from");
+            Ok(SqlFile {
+                relative_path,
+                package_root: package_root.clone(),
+                package: package.clone(),
+                text: read(&path)?,
+            })
+        })
+        .collect::<Result<Vec<_>, LoadError>>()?;
     let test_modules = test_module_files(&workspace.files);
     for file in &mut workspace.files {
         file.test_module = test_modules.contains(&file.relative_path);
@@ -228,11 +271,15 @@ fn relative(root: &Path, path: &Path) -> Result<String, LoadError> {
         .replace('\\', "/"))
 }
 
-fn collect_paths(
-    directory: &Path,
-    rust_paths: &mut Vec<PathBuf>,
-    manifest_paths: &mut Vec<PathBuf>,
-) -> Result<(), LoadError> {
+/// The files of the members, by kind.
+#[derive(Default)]
+struct Paths {
+    rust: Vec<PathBuf>,
+    sql: Vec<PathBuf>,
+    manifests: Vec<PathBuf>,
+}
+
+fn collect_paths(directory: &Path, paths: &mut Paths) -> Result<(), LoadError> {
     let entries = std::fs::read_dir(directory)
         .map_err(|source| LoadError::ReadDirectory { path: directory.to_path_buf(), source })?;
     for entry in entries {
@@ -246,11 +293,13 @@ fn collect_paths(
             {
                 continue;
             }
-            collect_paths(&path, rust_paths, manifest_paths)?;
+            collect_paths(&path, paths)?;
         } else if path.extension().is_some_and(|extension| extension == "rs") {
-            rust_paths.push(path);
+            paths.rust.push(path);
+        } else if path.extension().is_some_and(|extension| extension == "sql") {
+            paths.sql.push(path);
         } else if path.file_name().is_some_and(|name| name == "Cargo.toml") {
-            manifest_paths.push(path);
+            paths.manifests.push(path);
         }
     }
     Ok(())

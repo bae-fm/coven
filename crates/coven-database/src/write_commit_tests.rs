@@ -30,28 +30,24 @@ fn circle_tables() -> Vec<SyncedTable> {
 }
 
 fn leave_circle(db: &Database) {
-    let other = crate::tests::keys(2);
     let member = crate::tests::member(2);
     db.inspect_writer(|db| {
         db.transaction(|db| {
-            db.internal_execute(
-                "INSERT INTO _coven_members(member,signing,sealing,role,removed,access)
-                 VALUES(?1,?2,?3,'member',0,?4)",
-                (
-                    member.0.as_bytes(),
-                    other.signing.as_bytes(),
-                    other.sealing.as_bytes(),
-                    serde_json::to_vec(&coven_format::MemberAccess::S3AccessKey {
+            let mut state = crate::store_state_tables::read(db)?;
+            state.members.insert(
+                member,
+                crate::store_state::StoreMember {
+                    keys: crate::tests::keys(2),
+                    access: coven_format::MemberAccess::S3AccessKey {
                         access_key_id: "other-access-key".into(),
-                    })
-                    .unwrap(),
-                ),
-            )?;
-            db.internal_execute(
-                "UPDATE _coven_circle_members SET member=?1 WHERE circle=?2",
-                (member.0.as_bytes(), CIRCLE),
-            )?;
-            Ok(())
+                    },
+                    role: coven_format::admin::MemberRole::Member,
+                    removed: false,
+                },
+            );
+            let circle = state.circles.get_mut(&circle()).expect("the circle exists");
+            circle.members = std::collections::BTreeSet::from([member]);
+            crate::store_state_tables::replace(db, &state)
         })
         .unwrap();
     });

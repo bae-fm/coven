@@ -1,0 +1,71 @@
+//! The tables of committed membership and audience state (§10, §15).
+
+macro_rules! coven_store_state_tables {
+    ($visit:ident) => {
+        $visit!(
+            _coven_members,
+            "
+            CREATE TABLE _coven_members (
+                member BLOB PRIMARY KEY NOT NULL CHECK(length(member)=16),
+                signing BLOB NOT NULL CHECK(length(signing)=32),
+                sealing BLOB NOT NULL CHECK(length(sealing)=32),
+                access BLOB NOT NULL,
+                role TEXT NOT NULL CHECK(role IN ('admin','member')),
+                removed INTEGER NOT NULL CHECK(removed IN (0,1))
+            ) STRICT, WITHOUT ROWID;
+        "
+        );
+        // Every public key pair bound by a counted administrative slot (§10).
+        $visit!(
+            _coven_bound_keys,
+            "
+            CREATE TABLE _coven_bound_keys (
+                signing BLOB NOT NULL CHECK(length(signing)=32),
+                sealing BLOB NOT NULL CHECK(length(sealing)=32),
+                PRIMARY KEY(signing,sealing)
+            ) STRICT, WITHOUT ROWID;
+        "
+        );
+        $visit!(
+            _coven_devices,
+            "
+            CREATE TABLE _coven_devices (
+                device BLOB PRIMARY KEY NOT NULL CHECK(length(device)=8),
+                member BLOB NOT NULL REFERENCES _coven_members(member),
+                name TEXT NOT NULL,
+                state TEXT NOT NULL CHECK(state IN ('active','removed','replaced'))
+            ) STRICT, WITHOUT ROWID;
+            CREATE INDEX _coven_devices_member ON _coven_devices(member);
+        "
+        );
+        $visit!(
+            _coven_circles,
+            "
+            CREATE TABLE _coven_circles (
+                circle TEXT PRIMARY KEY NOT NULL,
+                name TEXT NOT NULL
+            ) STRICT, WITHOUT ROWID;
+        "
+        );
+        $visit!(
+            _coven_circle_deletions,
+            "
+            CREATE TABLE _coven_circle_deletions (
+                circle TEXT PRIMARY KEY NOT NULL,
+                slot BLOB NOT NULL CHECK(length(slot)=8 AND slot>x'0000000000000000')
+            ) STRICT, WITHOUT ROWID;
+        "
+        );
+        $visit!(
+            _coven_circle_members,
+            "
+            CREATE TABLE _coven_circle_members (
+                circle TEXT NOT NULL REFERENCES _coven_circles(circle),
+                member BLOB NOT NULL REFERENCES _coven_members(member),
+                PRIMARY KEY(circle,member)
+            ) STRICT, WITHOUT ROWID;
+            CREATE INDEX _coven_circle_members_member ON _coven_circle_members(member);
+        "
+        );
+    };
+}

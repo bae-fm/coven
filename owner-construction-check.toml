@@ -460,19 +460,30 @@ InputRead = "InputDatabase"
 [database]
 capability = "SQLite"
 schema = "crates/coven-database/src/internal_schema.rs"
-table_macros = ["coven_tables", "coven_ownership_tables", "coven_input_tables", "coven_sequence_tables"]
+table_macros = [
+    "coven_tables",
+    "coven_ownership_tables",
+    "coven_input_tables",
+    "coven_sequence_tables",
+    "coven_claim_tables",
+    "coven_published_tables",
+    "coven_store_state_tables",
+]
 # The API re-exports the database crate's `rusqlite` so a host can name the
 # types its own SQL uses.
 rusqlite_reexport = "coven-database"
 
 # Appendix F.2: the database's tables by the module that writes them. SQL
 # anywhere may read a table; only its domain's homes write it, in a statement
-# or a trigger's body. The tables no one module writes form the database's own
-# domain, which every module of coven-database writes.
+# or a trigger's body, create it and its indexes, and hold the tests that
+# write it. Each domain names the owner that does its work. The tables no one
+# module writes form the database's own domain, which every module of
+# coven-database writes.
 
 [[database.domains]]
 name = "sequence claims"
-homes = ["crates/coven-database/src/claim.rs"]
+owner = "Database"
+homes = ["crates/coven-database/src/claim.rs", "crates/coven-database/src/claim_schema.rs"]
 tables = [
     "_coven_claim_attempts",
     "_coven_claim_chunks",
@@ -483,7 +494,11 @@ tables = [
 
 [[database.domains]]
 name = "remote observations"
-homes = ["crates/coven-database/src/input_database.rs", "crates/coven-database/src/internal_schema_input.rs"]
+owner = "InputDatabase"
+homes = [
+    "crates/coven-database/src/input_database.rs",
+    "crates/coven-database/src/input_database_schema.rs",
+]
 tables = [
     "_coven_input_budget",
     "_coven_input_files",
@@ -494,7 +509,12 @@ tables = [
 
 [[database.domains]]
 name = "published merge state"
-homes = ["crates/coven-database/src/published.rs", "crates/coven-database/src/published_migration.rs"]
+owner = "Database"
+homes = [
+    "crates/coven-database/src/published.rs",
+    "crates/coven-database/src/published_migration.rs",
+    "crates/coven-database/src/published_schema.rs",
+]
 tables = [
     "_coven_published",
     "_coven_published_creations",
@@ -505,7 +525,11 @@ tables = [
 
 [[database.domains]]
 name = "membership and audiences"
-homes = ["crates/coven-database/src/store_state_tables.rs"]
+owner = "Database"
+homes = [
+    "crates/coven-database/src/store_state_tables.rs",
+    "crates/coven-database/src/store_state_schema.rs",
+]
 tables = [
     "_coven_bound_keys",
     "_coven_circle_deletions",
@@ -517,6 +541,7 @@ tables = [
 
 [[database.domains]]
 name = "database"
+owner = "Database"
 homes = ["crates/coven-database/src/"]
 tables = [
     "_coven_absent_snapshots",

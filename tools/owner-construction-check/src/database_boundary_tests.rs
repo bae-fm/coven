@@ -1,5 +1,6 @@
 use super::*;
-use crate::crate_code::checked;
+use crate::crate_code::CrateCode;
+use crate::sources::SqlFile;
 
 fn policy() -> Policy {
     Policy::fixture(
@@ -18,10 +19,10 @@ fn policy() -> Policy {
 }
 
 fn kinds(path: &str, source: &str) -> BTreeSet<String> {
-    {
-        let files = [RustFile::fixture(path, source)];
-        find_database_boundary_violations(&checked(&files), &files, &policy())
-    }
+    find_database_boundary_violations(
+        &CrateCode::of(&[RustFile::fixture(path, source)], &[]),
+        &policy(),
+    )
     .into_iter()
     .map(|violation| {
         violation.message.trim_end_matches(" is confined to crates/app-database/src/").to_string()
@@ -137,7 +138,7 @@ fn sql_on_the_databases_own_tables_is_rejected_outside_its_homes() {
         ),
     ];
 
-    let kinds = find_database_boundary_violations(&checked(&files), &files, &policy())
+    let kinds = find_database_boundary_violations(&CrateCode::of(&files, &[]), &policy())
         .into_iter()
         .map(|violation| {
             violation
@@ -203,7 +204,7 @@ fn table_macros_are_read_from_every_file_of_the_schema_module() {
         ),
     ];
 
-    let violations = find_database_boundary_violations(&checked(&files), &files, &policy())
+    let violations = find_database_boundary_violations(&CrateCode::of(&files, &[]), &policy())
         .into_iter()
         .map(|violation| (violation.path, violation.line, violation.message))
         .collect::<Vec<_>>();
@@ -246,7 +247,7 @@ fn raw_handles_and_own_table_sql_inside_macro_calls_are_rejected() {
         ),
     ];
 
-    let violations = find_database_boundary_violations(&checked(&files), &files, &policy())
+    let violations = find_database_boundary_violations(&CrateCode::of(&files, &[]), &policy())
         .into_iter()
         .map(|violation| {
             (
@@ -278,11 +279,13 @@ fn domain_policy() -> Policy {
         name = "listing"
         homes = ["crates/app-core/src/listing/", "crates/app-core/src/listing.rs"]
         tables = ["Note_Listing", "note_search"]
+        owner = "Listing"
 
         [[database.domains]]
         name = "records"
         homes = ["crates/app-database/src/"]
         tables = ["notes"]
+        owner = "Database"
 
         [[capabilities]]
         name = "SQLite"
@@ -320,10 +323,11 @@ fn a_table_is_written_only_in_its_domain_s_homes() {
             "#,
         ),
     ];
-    let violations = find_database_boundary_violations(&checked(&files), &files, &domain_policy())
-        .into_iter()
-        .map(|violation| (violation.path, violation.line, violation.message))
-        .collect::<Vec<_>>();
+    let violations =
+        find_database_boundary_violations(&CrateCode::of(&files, &[]), &domain_policy())
+            .into_iter()
+            .map(|violation| (violation.path, violation.line, violation.message))
+            .collect::<Vec<_>>();
     assert_eq!(
         violations,
         [
@@ -336,6 +340,167 @@ fn a_table_is_written_only_in_its_domain_s_homes() {
                 "crates/app-sync/src/apply.rs".to_string(),
                 3,
                 "SQL writes notes, which only the records domain writes, in crates/app-database/src/".to_string()
+            ),
+        ]
+    );
+}
+
+fn sql(path: &str, text: &str) -> SqlFile {
+    let package = path.split('/').nth(1).expect("fixture path names a member");
+    SqlFile {
+        relative_path: path.into(),
+        package_root: format!("crates/{package}/"),
+        package: package.into(),
+        text: text.into(),
+    }
+}
+
+fn domain_violations(files: &[RustFile], sql: &[SqlFile]) -> Vec<(String, usize, String)> {
+    find_database_boundary_violations(&CrateCode::of(files, sql), &domain_policy())
+        .into_iter()
+        .map(|violation| (violation.path, violation.line, violation.message))
+        .collect()
+}
+
+/// A SQL file's writes answer to the domains as a string literal's do, each
+/// at its own line.
+#[test]
+fn sql_files_write_only_their_domains_tables() {
+    let files = [
+        sql(
+            "crates/app-core/src/listing/refresh.sql",
+            "INSERT INTO note_listing SELECT id FROM notes;\nDELETE FROM note_search;",
+        ),
+        sql(
+            "crates/app-sync/src/apply.sql",
+            "SELECT 1;\n\nUPDATE notes\n   SET body = NULL;\nDELETE FROM note_search WHERE id IN (SELECT id FROM notes);",
+        ),
+    ];
+    let violations = domain_violations(&[], &files);
+    let message = |table: &str, domain: &str, homes: &str| {
+        format!("SQL writes {table}, which only the {domain} domain writes, in {homes}")
+    };
+    assert_eq!(
+        violations,
+        [
+            (
+                "crates/app-sync/src/apply.sql".to_string(),
+                3,
+                message("notes", "records", "crates/app-database/src/")
+            ),
+            (
+                "crates/app-sync/src/apply.sql".to_string(),
+                5,
+                message(
+                    "note_search",
+                    "listing",
+                    "crates/app-core/src/listing/, crates/app-core/src/listing.rs"
+                )
+            ),
+        ]
+    );
+}
+
+/// A table's schema is read where its text is written: a SQL file, or a
+/// string literal, a macro's definition included, whatever invokes it.
+#[test]
+fn a_tables_schema_lives_in_its_domains_homes() {
+    let files = [
+        RustFile::fixture(
+            "crates/app-core/src/listing.rs",
+            r#"
+            macro_rules! listing_tables {
+                () => { "CREATE TABLE note_listing (id TEXT); CREATE INDEX listed ON note_listing(id);" };
+            }
+            "#,
+        ),
+        RustFile::fixture(
+            "crates/app-database/src/schema.rs",
+            r#"
+            fn schema() -> String {
+                [listing_tables!(), "CREATE TABLE notes (id TEXT)"].concat()
+            }
+            const SEARCH: &str = "CREATE TABLE IF NOT EXISTS note_search (id TEXT)";
+            const STAGED: &str = "CREATE TEMP TABLE note_listing (id TEXT)";
+            "#,
+        ),
+    ];
+    let schema = [sql(
+        "crates/app-core/src/listing/schema.sql",
+        "CREATE TABLE note_listing (id TEXT);
+CREATE INDEX notes_body ON notes(body);
+CREATE TRIGGER notes_checked BEFORE INSERT ON notes BEGIN SELECT RAISE(ABORT, 'no'); END;
+CREATE TRIGGER notes_listed AFTER INSERT ON notes BEGIN INSERT INTO note_listing VALUES (new.id); END;",
+    )];
+    let homes = "crates/app-database/src/";
+    assert_eq!(
+        domain_violations(&files, &schema),
+        [
+            (
+                "crates/app-core/src/listing/schema.sql".to_string(),
+                2,
+                format!("SQL indexes notes, whose schema the records domain keeps in {homes}")
+            ),
+            (
+                "crates/app-core/src/listing/schema.sql".to_string(),
+                3,
+                format!("SQL creates a trigger, writing no domain's table, on notes, whose schema the records domain keeps in {homes}")
+            ),
+            (
+                "crates/app-database/src/schema.rs".to_string(),
+                5,
+                "SQL creates table note_search, whose schema the listing domain keeps in crates/app-core/src/listing/, crates/app-core/src/listing.rs".to_string()
+            ),
+        ]
+    );
+}
+
+/// A domain's tests live in its homes: a home file's `<name>_tests.rs`, and
+/// its directory's test files, may write its tables; test code elsewhere,
+/// a test-only item of another file or a SQL file under `tests/`, may not.
+#[test]
+fn test_code_writing_a_domains_tables_lives_in_its_homes() {
+    let files = [
+        RustFile::fixture(
+            "crates/app-core/src/listing_tests.rs",
+            r#"fn fill(sql: Sql) { sql.run("INSERT INTO note_listing VALUES (1)"); }"#,
+        ),
+        RustFile::fixture(
+            "crates/app-core/src/listing/tests/fill.rs",
+            r#"fn fill(sql: Sql) { sql.run("INSERT INTO note_search VALUES (1)"); }"#,
+        ),
+        RustFile::fixture(
+            "crates/app-sync/src/apply_tests.rs",
+            r#"fn fill(sql: Sql) { sql.run("INSERT INTO note_listing VALUES (1)"); }"#,
+        ),
+        RustFile::fixture(
+            "crates/app-sync/src/apply.rs",
+            r#"
+            fn apply(sql: Sql) { sql.run("SELECT * FROM note_listing"); }
+            #[cfg(test)]
+            fn fill(sql: Sql) { sql.run("CREATE TABLE note_search (id TEXT)"); }
+            "#,
+        ),
+    ];
+    let fixture = [sql("crates/app-core/tests/listing.sql", "DELETE FROM note_listing;")];
+    let homes = "crates/app-core/src/listing/, crates/app-core/src/listing.rs";
+    assert_eq!(
+        domain_violations(&files, &fixture),
+        [
+            (
+                "crates/app-core/tests/listing.sql".to_string(),
+                1,
+                format!("SQL writes note_listing, which only the listing domain writes, in {homes}")
+            ),
+            (
+                "crates/app-sync/src/apply.rs".to_string(),
+                4,
+                format!("SQL creates table note_search, whose schema the listing domain keeps in {homes}")
+            ),
+            (
+                "crates/app-sync/src/apply_tests.rs".to_string(),
+                1,
+                format!("SQL writes note_listing, which only the listing domain writes, in {homes}")
             ),
         ]
     );

@@ -190,14 +190,7 @@ async fn read_failures_reach_callers_and_subscribers() {
     fixture(&db).await;
     let mut members = db.subscribe_members();
     assert_eq!(members.next().await.expect("the live query answers").unwrap().len(), 2);
-    db.inspect_writer(|sql| {
-        sql.batch(
-            "PRAGMA ignore_check_constraints=ON;
-             UPDATE _coven_members SET role='owner' WHERE role='member';
-             PRAGMA ignore_check_constraints=OFF;",
-        )
-        .unwrap()
-    });
+    db.inspect_writer(crate::store_state_tables::tests::damage_roles);
     assert!(db.members().await.is_err());
     assert!(db.subscribe_members().next().await.expect("the live query answers").is_err());
     db.close().await.unwrap();

@@ -70,3 +70,31 @@ fn test_only_parts_are_removed_and_the_rest_kept() {
         assert!(identifiers.contains(present), "removed {present}");
     }
 }
+
+/// Test code is each test file whole, and the test-only items of every
+/// other file, inside inline modules and impls too.
+#[test]
+fn test_code_is_test_files_and_test_only_items() {
+    let files = [
+        RustFile::fixture(
+            "crates/app/src/lib.rs",
+            r#"
+            fn kept() {}
+            #[cfg(test)] fn fixture() {}
+            #[cfg(any(test, feature = "test-utils"))] fn shared_fake() {}
+            mod work { #[test] fn case() {} fn run() {} }
+            impl Worker { #[cfg(test)] fn probe(&self) {} fn run(&self) {} }
+            "#,
+        ),
+        RustFile::fixture("crates/app/src/lib_tests.rs", "fn whole() {}"),
+    ];
+    let code = test_code(&files);
+    let production = identifiers(&code[0]);
+    for absent in ["kept", "shared_fake", "run"] {
+        assert!(!production.contains(absent), "kept {absent}");
+    }
+    for present in ["fixture", "case", "probe", "Worker"] {
+        assert!(production.contains(present), "removed {present}");
+    }
+    assert!(identifiers(&code[1]).contains("whole"));
+}

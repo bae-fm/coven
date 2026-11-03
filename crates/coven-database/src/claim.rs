@@ -472,4 +472,4 @@ pub(crate) fn range(
 
 #[cfg(test)]
 #[path = "claim_tests.rs"]
-mod tests;
+pub(crate) mod tests;

@@ -1,8 +1,9 @@
-//! The structural checker of Appendix F.6. It reads the syntax tree of every Rust
-//! file and every member manifest in the workspace and holds them to the
-//! dependency rules of Appendix F.1, the capability and owner rules of F.2 and F.3,
-//! and the conventions of F.5 — the ones the workspace's policy file,
-//! `owner-construction-check.toml` at its root, selects, against that policy.
+//! The structural checker of Appendix F.6. It reads the syntax tree of every
+//! Rust file, every SQL file and every member manifest in the workspace and
+//! holds them to the dependency rules of Appendix F.1, the capability and owner
+//! rules of F.2 and F.3, and the conventions of F.5 — the ones the workspace's
+//! policy file, `owner-construction-check.toml` at its root, selects, against
+//! that policy.
 //!
 //! `owner-construction-check [workspace root] [package ...]` checks the policy,
 //! then runs its rules. Package names limit diagnostics while keeping the
@@ -16,6 +17,7 @@ mod conventions;
 mod crate_code;
 mod crate_dependencies;
 mod database_boundary;
+mod domain_owners;
 mod factories;
 mod finding;
 mod macro_expansion;
@@ -31,7 +33,7 @@ mod report;
 mod retained_capability_parameters;
 mod rust_prelude;
 mod sources;
-mod sql_writes;
+mod sql_statements;
 mod syntax;
 mod task_state;
 mod test_code;

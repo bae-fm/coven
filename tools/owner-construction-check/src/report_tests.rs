@@ -21,7 +21,12 @@ fn check(workspace: &Workspace, policy: &Policy) -> Report {
 }
 
 fn workspace(files: Vec<RustFile>) -> Workspace {
-    Workspace { files, manifests: Vec::new(), workspace_dependencies: toml::Table::new() }
+    Workspace {
+        files,
+        sql_files: Vec::new(),
+        manifests: Vec::new(),
+        workspace_dependencies: toml::Table::new(),
+    }
 }
 
 fn capability_implementations() -> RustFile {

@@ -8,8 +8,16 @@ pub(super) struct Statement {
     pub sql: String,
 }
 /// Exceptions name the exact source statement and scanned relation. A nested
-/// lookup in a whole-table enumeration still has to use its own index.
+/// lookup in a whole-table enumeration still has to use its own index. Each
+/// domain with its own tables names its statements' scans in its tests.
 pub(super) fn reason(statement: &Statement, relation: &str) -> Option<&'static str> {
+    let (file, template, sql) = (&statement.file, &statement.template, &statement.sql);
+    database_reason(statement, relation)
+        .or_else(|| crate::store_state_tables::tests::scan_reason(file, template, sql, relation))
+        .or_else(|| crate::published::tests::scan_reason(file, template, sql, relation))
+}
+
+fn database_reason(statement: &Statement, relation: &str) -> Option<&'static str> {
     let file = statement.file.as_str();
     let sql = statement.template.as_str();
     match (file, sql, relation) {
@@ -130,21 +138,6 @@ pub(super) fn reason(statement: &Statement, relation: &str) -> Option<&'static s
     Some("installing checks and writes every source record of the snapshot once; each lookup of the device's own is indexed"),
 ("sqlite.rs", "{} ORDER BY l.id", "l") =>
     Some("the public losses reader returns all losses"),
-("store_state_tables.rs", "SELECT member,signing,sealing,role,removed,access FROM _coven_members", "_coven_members") =>
-    Some("store_state() returns the complete member map"),
-("store_state_tables.rs", "SELECT signing,sealing FROM _coven_bound_keys", "_coven_bound_keys") =>
-    Some("store_state() returns every registered key pair"),
-("store_state_tables.rs", "SELECT device,member,name,state FROM _coven_devices", "_coven_devices") =>
-    Some("store_state() returns the complete device map"),
-("store_state_tables.rs", "SELECT circle,name FROM _coven_circles", "_coven_circles") =>
-    Some("store_state() returns the complete circle map"),
-("store_state_tables.rs", "SELECT circle,member FROM _coven_circle_members", "_coven_circle_members") =>
-    Some("store_state() returns every circle membership"),
-("store_state_tables.rs", "SELECT circle,slot FROM _coven_circle_deletions", "_coven_circle_deletions") =>
-    Some("store_state() returns every circle deletion and its cause"),
-("store_state_tables.rs", "DELETE FROM {table}", table)
-    if statement.sql == format!("DELETE FROM {table}") =>
-    Some("applying a slot replaces the entire derived table; foreign-key lookups must be indexed"),
 ("upload.rs", "SELECT u.rowid,u.device,u.number,k.sealing_keys FROM _coven_uploads u LEFT JOIN _coven_upload_keys k ON k.device=u.device AND k.number=u.number ORDER BY u.rowid LIMIT 1", "u") =>
     Some("rowid order with LIMIT 1 reads only the oldest queued write"),
 ("upload.rs", "SELECT rowid,device,number FROM _coven_uploads ORDER BY rowid", "_coven_uploads") =>
@@ -188,22 +181,6 @@ pub(super) fn reason(statement: &Statement, relation: &str) -> Option<&'static s
     Some("once per open: every record's cause names an error an earlier run met"),
 ("pending.rs", "DELETE FROM _coven_pending AS p WHERE NOT EXISTS(SELECT 1 FROM _coven_provider_access a WHERE a.operation=p.operation)", "p") =>
     Some("reset visits every condition; provider-obligation lookups remain indexed"),
-("published.rs", "SELECT EXISTS(SELECT 1 FROM _coven_published)", "_coven_published") =>
-    Some("the counted projection marker has at most one row"),
-("published.rs", "SELECT table_name,key,audience FROM _coven_rows UNION SELECT table_name,key,audience FROM _coven_lost", "_coven_rows" | "_coven_lost") =>
-    Some("preserving the counted projection visits all current row identities"),
-("published.rs", "DELETE FROM {table}", table) if statement.sql == format!("DELETE FROM {table}") =>
-    Some("releasing the counted projection clears all of its retained records"),
-("published.rs", "SELECT table_name,key,audience FROM _coven_published_rows UNION SELECT table_name,key,audience FROM _coven_published_losses", "_coven_published_rows" | "_coven_published_losses") =>
-    Some("restoration visits every saved row identity"),
-("published.rs", "SELECT record FROM _coven_published_rows ORDER BY audience,table_name,key", "_coven_published_rows") =>
-    Some("restoration reads every preserved row"),
-("published.rs", "SELECT record FROM _coven_published_losses ORDER BY id", "_coven_published_losses") =>
-    Some("restoration reads every preserved loss"),
-("published.rs", "INSERT INTO _coven_creations SELECT * FROM _coven_published_creations", "_coven_published_creations") =>
-    Some("restoration installs every preserved creation"),
-("published_migration.rs", "CREATE TEMP TABLE _coven_carried_rows AS SELECT * FROM _coven_published_rows; DELETE FROM _coven_published_rows", "_coven_published_rows") =>
-    Some("a migration carries every preserved row through schema changes"),
 ("raise_capture.rs", "UPDATE _coven_raise_captures SET version=?1,through=?2,covers=?3", "_coven_raise_captures") =>
     Some("the new migration prefix replaces every audience capture"),
 ("raise_capture.rs", "SELECT max(through) FROM _coven_raise_captures", "database") =>

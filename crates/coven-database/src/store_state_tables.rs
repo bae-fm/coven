@@ -224,3 +224,7 @@ pub(crate) fn replace(database: &DatabaseConnection, state: &StoreState) -> Resu
     }
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "store_state_tables_tests.rs"]
+pub(crate) mod tests;

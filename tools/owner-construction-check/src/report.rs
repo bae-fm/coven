@@ -7,6 +7,7 @@ use crate::conventions::find_convention_violations;
 use crate::crate_code::CrateCode;
 use crate::crate_dependencies::find_crate_dependency_violations;
 use crate::database_boundary::find_database_boundary_violations;
+use crate::domain_owners::find_domain_owner_forwarding;
 use crate::finding::Finding;
 use crate::owner_dependency_boundary::find_owner_dependency_leaks;
 use crate::owner_graph::OwnerGraph;
@@ -68,7 +69,8 @@ fn check_paths(workspace: &Workspace, code: &CrateCode, policy: &Policy, roots: 
         findings.extend(find_crate_dependency_violations(workspace, policy));
     }
     if policy.selects(Rule::DatabaseBoundary) {
-        findings.extend(find_database_boundary_violations(files, &code.written, policy));
+        findings.extend(find_database_boundary_violations(code, policy));
+        findings.extend(find_domain_owner_forwarding(files, policy));
     }
     if policy.selects(Rule::OwnerDependencies) {
         findings.extend(find_owner_dependency_leaks(files, policy, &graph));

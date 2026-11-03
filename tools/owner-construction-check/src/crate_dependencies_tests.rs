@@ -32,6 +32,7 @@ fn manifest(directory: &str, package: &str, dependencies: &str) -> Manifest {
 fn workspace(manifests: Vec<Manifest>) -> Workspace {
     Workspace {
         files: Vec::new(),
+        sql_files: Vec::new(),
         manifests,
         workspace_dependencies: r#"
             syn = "3"

@@ -31,9 +31,9 @@ impl Drop for Fixture {
 }
 
 /// Members at the workspace root, as in a workspace without a `crates/`
-/// directory: each file knows its member; its member's `tests/` holds
-/// integration tests, and a file only `#[cfg(test)]` declarations reach is
-/// test code too.
+/// directory: each file, Rust or SQL, knows its member; its member's `tests/`
+/// holds integration tests, and a file only `#[cfg(test)]` declarations reach
+/// is test code too.
 #[test]
 fn members_anywhere_give_their_files_a_package() {
     let fixture = Fixture::new("members");
@@ -51,6 +51,9 @@ fn members_anywhere_give_their_files_a_package() {
     fixture.write("app-core/tests/flow.rs", "");
     fixture.write("app-util/Cargo.toml", "[package]\nname = \"app-util\"\n");
     fixture.write("app-util/build.rs", "fn main() {}");
+    fixture.write("app-core/src/db/schema.sql", "CREATE TABLE notes (id TEXT);");
+    fixture.write("app-core/tests/fixture.sql", "");
+    fixture.write("app-ignored/src/schema.sql", "");
     fixture.write("app-ignored/src/lib.rs", "");
     let workspace = load(&fixture.0, &BTreeMap::new()).expect("load the fixture workspace");
     let files = workspace
@@ -86,6 +89,25 @@ fn members_anywhere_give_their_files_a_package() {
             .map(|manifest| manifest.relative_path.as_str())
             .collect::<Vec<_>>(),
         ["app-core/Cargo.toml", "app-util/Cargo.toml"]
+    );
+    let sql_files = workspace
+        .sql_files
+        .iter()
+        .map(|file| {
+            (
+                file.relative_path.as_str(),
+                file.package.as_str(),
+                file.text.as_str(),
+                file.is_test_source(),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        sql_files,
+        [
+            ("app-core/src/db/schema.sql", "app-core", "CREATE TABLE notes (id TEXT);", false),
+            ("app-core/tests/fixture.sql", "app-core", "", true),
+        ]
     );
 }
 

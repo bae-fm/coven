@@ -9826,15 +9826,20 @@ shared state.
   only `test-utils` allows replacing their source (api.md E1).
 - A method never takes a raw capability as a parameter, such as a store directory
   or a database connection; it calls the capability's owner instead.
-- Inside `coven-database`, a table that one module writes is that module's:
-  SQL elsewhere may read it, but writes it only by calling that module. The
-  sequence claims (§5.1) belong to the claim module, the remote observations
-  committed beside app writes to the input database, the published merge
-  state to its own module, and membership and audiences (§10, §15) to the
-  store's state tables. Every other table of Appendix C is written across the crate. The
-  checker finds a write in SQL text, a statement or a trigger's body; SQL
-  built while the program runs names its table nowhere in the source, so the
-  checker can't see it.
+- Inside `coven-database`, a table that one module writes is that module's
+  domain: SQL elsewhere may read it, but writes it only by calling that
+  module, and the table's schema and the tests that write it live with the
+  module, its `CREATE TABLE` and indexes in a file beside it. The sequence
+  claims (§5.1) belong to the claim module, the remote observations committed
+  beside app writes to the input database, the published merge state to its
+  own module, and membership and audiences (§10, §15) to the store's state
+  tables. Every other table of Appendix C is written across the crate. Each
+  domain names the owner that does its work: the input database's owner for
+  the remote observations, the database owner for the rest. A type whose
+  every method only passes its call on to that owner would be a second name
+  for it. The checker finds a write in SQL text, a statement or a trigger's
+  body, in string literals and in `.sql` files; SQL built while the program
+  runs names its table nowhere in the source, so the checker can't see it.
 
 ### F.3 Owners and tasks
 
@@ -10006,16 +10011,19 @@ Lean proofs once, on Linux, since a proof checks the same on any platform.
 2. The dependency rules of F.1, with `cargo deny check bans` for the crates
    `deny.toml` refuses.
 3. The rules of F.2 and F.3, by a checker that reads the syntax tree of every
-   crate, including inside macro calls, against the policy file,
+   crate, including inside macro calls, and the crates' `.sql` files, against
+   the policy file,
    `owner-construction-check.toml` at the workspace root. The policy holds
    everything the rules know about coven: the rules it runs, the crate order,
    the capabilities and their homes, the tables each part of the database
    writes, the composition roots and the types the rules name. The checker's
-   own source names none of it. Test code answers to none of these rules, only
-   to F.5's: the `<name>_tests.rs` files, each crate's `tests/` directory,
-   files only test modules declare, and every item that compiles only into
-   tests. A test may assemble its own graph (F.3) from raw material, and
-   nothing outside tests can reach what it builds.
+   own source names none of it. Test code answers to none of these rules but
+   one of F.2's, that a domain's tests live with it, a file's
+   `<name>_tests.rs` beside the file; and to F.5's. Test code is the
+   `<name>_tests.rs` files, each crate's `tests/` directory, files only test
+   modules declare, and every item that compiles only into tests. A test may
+   assemble its own graph (F.3) from raw material, and nothing outside tests
+   can reach what it builds.
    The checker expands each of coven's own `macro_rules!` where it is invoked,
    as rustc does, and checks the code it writes there, in the function the
    invocation is in. A definition is no code until it is used. An invocation
@@ -10023,7 +10031,8 @@ Lean proofs once, on Linux, since a proof checks the same on any platform.
    otherwise go unchecked.
 4. The checker's check of the policy, before any rule: every member, file,
    type and composition root the policy names must exist, so the policy can't
-   go stale.
+   go stale. Each table the schema creates is in one domain, and each
+   domain's owner holds a capability, shared state or another owner.
 5. The visibility and file-size rules of F.5.
 6. `cargo doc` with broken links denied.
 7. Every crate built without test code, so an item only tests use shows up as

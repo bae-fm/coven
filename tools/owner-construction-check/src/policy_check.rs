@@ -12,8 +12,10 @@ use crate::capability_construction::construction_only_types;
 use crate::crate_code::CrateCode;
 use crate::crate_dependencies::{dependency_entries, dependency_package};
 use crate::database_boundary::schema_table_macros;
+use crate::owner_graph::OwnerGraph;
 use crate::policy::{Database, Policy};
 use crate::sources::Workspace;
+use crate::sql_statements::{statements, Creation};
 use crate::syntax::{collect_declared_types, type_name, type_names, RustFile, TypeNames};
 
 /// Each policy row that names something the workspace does not hold. Rows
@@ -35,7 +37,7 @@ pub(crate) fn stale_rows(workspace: &Workspace, code: &CrateCode, policy: &Polic
     stale.extend(overlapping_state_rows(policy));
     stale.extend(undeclared_types(crate_files, policy));
     stale.extend(missing_capability_traits(crate_files, policy));
-    stale.extend(invalid_database(&code.written, workspace, policy));
+    stale.extend(invalid_database(code, workspace, policy));
     stale
 }
 
@@ -91,13 +93,15 @@ fn unknown_libraries(workspace: &Workspace, policy: &Policy) -> Vec<String> {
 
 /// A home is a source file, or a directory (ending in `/`) holding one.
 fn holds_source(files: &[RustFile], home: &str) -> bool {
-    files.iter().any(|file| {
-        if home.ends_with('/') {
-            file.relative_path.starts_with(home)
-        } else {
-            file.relative_path == home
-        }
-    })
+    files.iter().any(|file| home_holds(home, &file.relative_path))
+}
+
+fn home_holds(home: &str, path: &str) -> bool {
+    if home.ends_with('/') {
+        path.starts_with(home)
+    } else {
+        path == home
+    }
 }
 
 fn missing_homes(files: &[RustFile], policy: &Policy) -> Vec<String> {
@@ -366,11 +370,12 @@ fn missing_capability_traits(crate_files: &[RustFile], policy: &Policy) -> Vec<S
 /// exists and declares exactly its table macros, each once. A table list
 /// declared outside the module, or one the policy omits, would leave its
 /// tables unguarded by the database boundary.
-fn invalid_database(
-    crate_files: &[RustFile],
-    workspace: &Workspace,
-    policy: &Policy,
-) -> Vec<String> {
+///
+/// With domains, each table of the schema is in one, and each of their tables
+/// is the schema's, so a new table is placed when it lands and none goes
+/// unguarded. The schema's tables are those its table macros declare and those
+/// a `CREATE TABLE` in the crates' SQL files makes.
+fn invalid_database(code: &CrateCode, workspace: &Workspace, policy: &Policy) -> Vec<String> {
     let Some(database) = &policy.database else {
         return Vec::new();
     };
@@ -383,42 +388,55 @@ fn invalid_database(
             stale.push(format!("database: rusqlite_reexport {package} is not a workspace member"));
         }
     }
-    stale.extend(invalid_domains(crate_files, database));
-    let Some(schema_root) = &database.schema else {
-        if !database.table_macros.is_empty() {
+    stale.extend(invalid_domains(code, database, policy));
+    let mut schema = code
+        .sql
+        .iter()
+        .flat_map(|file| statements(&file.text))
+        .filter_map(|statement| match statement.creation {
+            Some(Creation::Table(table)) => Some(table),
+            _ => None,
+        })
+        .collect::<BTreeSet<_>>();
+    match &database.schema {
+        None if !database.table_macros.is_empty() => {
             stale.push("database: table_macros without a schema module".to_string());
         }
-        return stale;
-    };
-    if !crate_files.iter().any(|file| file.relative_path == *schema_root) {
-        stale.push(format!("database: schema module root {schema_root} does not exist"));
-        return stale;
-    }
-    let macros = schema_table_macros(crate_files, schema_root);
-    for table_macro in &database.table_macros {
-        let declared = macros.iter().filter(|declared| declared.name == *table_macro).count();
-        if declared != 1 {
-            stale.push(format!(
-                "database: the schema module under {schema_root} declares macro_rules! {table_macro} {declared} times, not once"
-            ));
+        None => {}
+        Some(schema_root)
+            if !code.written.iter().any(|file| file.relative_path == *schema_root) =>
+        {
+            stale.push(format!("database: schema module root {schema_root} does not exist"));
+            return stale;
+        }
+        Some(schema_root) => {
+            let macros = schema_table_macros(&code.written, schema_root);
+            for table_macro in &database.table_macros {
+                let declared =
+                    macros.iter().filter(|declared| declared.name == *table_macro).count();
+                if declared != 1 {
+                    stale.push(format!(
+                        "database: the schema module under {schema_root} declares macro_rules! {table_macro} {declared} times, not once"
+                    ));
+                }
+            }
+            for declared in &macros {
+                if !declared.tables.is_empty() && !database.table_macros.contains(&declared.name) {
+                    stale.push(format!(
+                        "database: schema table macro {} is missing from table_macros",
+                        declared.name
+                    ));
+                }
+            }
+            schema.extend(
+                macros
+                    .iter()
+                    .filter(|declared| database.table_macros.contains(&declared.name))
+                    .flat_map(|declared| declared.tables.iter().map(|table| table.to_lowercase())),
+            );
         }
     }
-    for declared in &macros {
-        if !declared.tables.is_empty() && !database.table_macros.contains(&declared.name) {
-            stale.push(format!(
-                "database: schema table macro {} is missing from table_macros",
-                declared.name
-            ));
-        }
-    }
-    // With a schema module, the domains place each of its tables once, so a
-    // new table is placed when it lands and none goes unguarded.
     if !database.domains.is_empty() {
-        let schema = macros
-            .iter()
-            .filter(|declared| database.table_macros.contains(&declared.name))
-            .flat_map(|declared| declared.tables.iter().map(|table| table.to_lowercase()))
-            .collect::<BTreeSet<_>>();
         let placed = database
             .domains
             .iter()
@@ -434,9 +452,10 @@ fn invalid_database(
     stale
 }
 
-/// Each domain has a unique name and homes that hold a source, and no table
-/// is in two domains.
-fn invalid_domains(crate_files: &[RustFile], database: &Database) -> Vec<String> {
+/// Each domain has a unique name, homes that hold a source, Rust or SQL, and
+/// an owner the checker infers as one; no table is in two domains.
+fn invalid_domains(code: &CrateCode, database: &Database, policy: &Policy) -> Vec<String> {
+    let inferred = OwnerGraph::collect(&code.expanded, policy).owners;
     let mut stale = Vec::new();
     let mut names = BTreeSet::new();
     let mut owners = BTreeMap::new();
@@ -445,12 +464,20 @@ fn invalid_domains(crate_files: &[RustFile], database: &Database) -> Vec<String>
             stale.push(format!("database: domain {} is named twice", domain.name));
         }
         for home in &domain.homes {
-            if !holds_source(crate_files, home) {
+            if !holds_source(&code.written, home)
+                && !code.sql.iter().any(|file| home_holds(home, &file.relative_path))
+            {
                 stale.push(format!(
                     "database: domain {} has home {home}, which holds no source",
                     domain.name
                 ));
             }
+        }
+        if !inferred.contains(&domain.owner) {
+            stale.push(format!(
+                "database: domain {} names owner {}, which holds no capability, shared state or owner",
+                domain.name, domain.owner
+            ));
         }
         for table in &domain.tables {
             if let Some(other) = owners.insert(table.to_lowercase(), domain.name.as_str()) {

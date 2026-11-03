@@ -153,3 +153,7 @@ pub(crate) fn restore(
     clear(db)?;
     Ok(touched)
 }
+
+#[cfg(test)]
+#[path = "published_tests.rs"]
+pub(crate) mod tests;
