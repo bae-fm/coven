@@ -363,6 +363,13 @@ task_types = [
     "MigrationCapture",
     "MigrationSnapshot",
     "Hidden",
+    # The judging of one write: the schema it was authored under, one child
+    # row through its steps, the owners of the rows it changes, and where its
+    # original records are read, on the connection that judges it (§9.6).
+    "Authoring",
+    "ChildView",
+    "Owners",
+    "Originals",
 ]
 # The shared in-memory state the runtime and the standard library declare.
 external_types = [

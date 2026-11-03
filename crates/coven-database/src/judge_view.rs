@@ -27,8 +27,10 @@ use coven_merge::{Audience, ColumnValue, ForeignKey, Operation, Parent, RowId};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// The schema a write was authored under: the current one, unless a
-/// breaking migration since then retained the earlier one (§18.6).
+/// breaking migration since then retained the earlier one (§18.6), and the
+/// connection judging the write reads its history from.
 pub(crate) struct Authoring<'a> {
+    database: &'a DatabaseConnection,
     schema: &'a Schema,
     /// SQLite's column affinities of the current schema.
     current: Option<&'a BTreeMap<String, TableRules>>,
@@ -36,16 +38,16 @@ pub(crate) struct Authoring<'a> {
 
 impl<'a> Authoring<'a> {
     pub(crate) fn new(
-        db: &DatabaseConnection,
+        db: &'a DatabaseConnection,
         schema: &'a WriteSchema,
         version: u32,
     ) -> Result<Self, DbError> {
         if version < db.schema_version()? {
             if let Some(before) = crate::migration_receive::authored(&schema.conversions, version) {
-                return Ok(Self { schema: before, current: None });
+                return Ok(Self { database: db, schema: before, current: None });
             }
         }
-        Ok(Self { schema: &schema.schema, current: Some(&schema.rules) })
+        Ok(Self { database: db, schema: &schema.schema, current: Some(&schema.rules) })
     }
 
     pub(crate) fn table(&self, name: &str) -> Option<&TableSchema> {
@@ -56,13 +58,12 @@ impl<'a> Authoring<'a> {
     /// SQLite tables to apply affinity with; an earlier one compares as written.
     fn stored(
         &self,
-        db: &DatabaseConnection,
         table: &TableSchema,
         columns: &[String],
         values: &[Value],
     ) -> Result<Vec<Value>, DbError> {
         match self.current {
-            Some(_) => crate::removal_sql::reference_values(db, table, columns, values),
+            Some(_) => crate::removal_sql::reference_values(self.database, table, columns, values),
             None => Ok(values.to_vec()),
         }
     }
@@ -126,11 +127,8 @@ impl<'a> ChildView<'a> {
     }
 
     /// The cell's value at this moment, or none when it was never set.
-    fn value(
-        &self,
-        db: &DatabaseConnection,
-        column: &str,
-    ) -> Result<Option<ColumnValue<Value>>, DbError> {
+    fn value(&self, column: &str) -> Result<Option<ColumnValue<Value>>, DbError> {
+        let db = self.authoring.database;
         if let Some(cell) = self.cells.get(column) {
             return Ok(Some(cell.clone()));
         }
@@ -178,11 +176,7 @@ impl<'a> ChildView<'a> {
     /// Whether `old` holds exactly the cells this row held when the write
     /// began: every cell its replaced setters wrote, with the value each
     /// wrote (D5). Asked before any step applies.
-    pub(crate) fn began_with(
-        &self,
-        db: &DatabaseConnection,
-        old: &BTreeMap<String, Value>,
-    ) -> Result<bool, DbError> {
+    pub(crate) fn began_with(&self, old: &BTreeMap<String, Value>) -> Result<bool, DbError> {
         let OriginalRow::Change(change) = self.record else {
             return Ok(true);
         };
@@ -190,7 +184,7 @@ impl<'a> ChildView<'a> {
             return Ok(false);
         }
         for column in change.sources.setters.keys() {
-            match (old.get(column), self.value(db, column)?) {
+            match (old.get(column), self.value(column)?) {
                 (Some(value), Some(cell)) if *value == cell.value => {}
                 _ => return Ok(false),
             }
@@ -202,18 +196,17 @@ impl<'a> ChildView<'a> {
     /// of several, the nearest (Lean `Classification.cause` with `heldRule`).
     pub(crate) fn action(
         &self,
-        db: &DatabaseConnection,
         index: &StepIndex,
         step: &Step,
     ) -> Result<Option<(RowId, u32)>, DbError> {
         let mut best: Option<(RowId, u32)> = None;
-        for held in self.held(db, index, step)? {
+        for held in self.held(index, step)? {
             for parent_step in index.before(&held.parent, step.sequence) {
                 if best.as_ref().is_some_and(|(_, s)| *s >= parent_step.sequence) {
                     break;
                 }
                 if self
-                    .consequence(db, index, &held, parent_step)?
+                    .consequence(index, &held, parent_step)?
                     .is_some_and(|expected| expected == step.change.operation)
                 {
                     best = Some((held.parent.clone(), parent_step.sequence));
@@ -233,7 +226,6 @@ impl<'a> ChildView<'a> {
     /// incarnation the write's earlier steps leave it.
     pub(crate) fn held(
         &self,
-        db: &DatabaseConnection,
         index: &StepIndex,
         step: &Step,
     ) -> Result<Vec<HeldReference>, DbError> {
@@ -259,7 +251,7 @@ impl<'a> ChildView<'a> {
             }
             let mut values = Vec::new();
             for column in &columns {
-                match self.value(db, column)? {
+                match self.value(column)? {
                     Some(cell) if cell.value != Value::Null => values.push(cell),
                     _ => break,
                 }
@@ -275,7 +267,7 @@ impl<'a> ChildView<'a> {
                 })
             });
             let raw: Vec<Value> = values.iter().map(|cell| cell.value.clone()).collect();
-            let stored = self.authoring.stored(db, parent_table, &targets, &raw)?;
+            let stored = self.authoring.stored(parent_table, &targets, &raw)?;
             let written = parent_key(parent_table, &targets, &stored)?;
             let parents: Vec<(RowId, u64)> = match link {
                 // The parent a reference names must hold its written key.
@@ -304,7 +296,7 @@ impl<'a> ChildView<'a> {
             };
             let (carried, others) = match &step.change.operation {
                 Operation::Update(recorded) => {
-                    self.recorded(db, index, table, key, &columns, recorded, step)?
+                    self.recorded(index, table, key, &columns, recorded, step)?
                 }
                 _ => (BTreeMap::new(), Some(BTreeMap::new())),
             };
@@ -332,7 +324,6 @@ impl<'a> ChildView<'a> {
     #[allow(clippy::type_complexity)]
     fn recorded(
         &self,
-        db: &DatabaseConnection,
         index: &StepIndex,
         table: &TableSchema,
         key: &SchemaForeignKey,
@@ -343,7 +334,7 @@ impl<'a> ChildView<'a> {
         let names = self.authoring.closure(table, columns);
         let mut current = BTreeMap::new();
         for name in &names {
-            current.insert(name.clone(), self.value(db, name)?);
+            current.insert(name.clone(), self.value(name)?);
         }
         let carried: BTreeMap<String, Value> = current
             .iter()
@@ -391,7 +382,7 @@ impl<'a> ChildView<'a> {
                         None => Some(parent),
                     })
             } else {
-                match self.retargeted(db, index, other, &values, step)? {
+                match self.retargeted(index, other, &values, step)? {
                     Some(parent) => parent,
                     None => return Ok((carried, None)),
                 }
@@ -412,7 +403,6 @@ impl<'a> ChildView<'a> {
     /// incarnation is the authoring view's, which no step carries.
     fn retargeted(
         &self,
-        db: &DatabaseConnection,
         index: &StepIndex,
         key: &SchemaForeignKey,
         values: &[Value],
@@ -422,7 +412,7 @@ impl<'a> ChildView<'a> {
             return Ok(None);
         };
         let targets = target_columns(parent_table, key);
-        let stored = self.authoring.stored(db, parent_table, &targets, values)?;
+        let stored = self.authoring.stored(parent_table, &targets, values)?;
         let written = parent_key(parent_table, &targets, &stored)?;
         let mut untouched = false;
         for audience in [self.row.audience.clone(), Audience::Store] {
@@ -445,7 +435,6 @@ impl<'a> ChildView<'a> {
     /// parents every recorded reference names.
     fn consequence(
         &self,
-        db: &DatabaseConnection,
         index: &StepIndex,
         held: &HeldReference,
         parent_step: &Indexed,
@@ -477,7 +466,7 @@ impl<'a> ChildView<'a> {
                     return Ok(None);
                 }
                 Some((
-                    self.authoring.stored(db, table, &columns, &new)?,
+                    self.authoring.stored(table, &columns, &new)?,
                     Parent { row: new_row.clone(), generation: new_step.after() },
                 ))
             }

@@ -81,9 +81,9 @@ pub(crate) struct StepIndex {
 
 impl StepIndex {
     /// Every step of the write's parts.
-    pub(crate) fn of(db: &DatabaseConnection, originals: &Originals<'_>) -> Result<Self, DbError> {
+    pub(crate) fn of(originals: &Originals<'_>) -> Result<Self, DbError> {
         let mut index = Self::default();
-        originals.visit(db, |record| {
+        originals.visit(|record| {
             let row = record.row().clone();
             let steps: Vec<_> = record.execution().steps.iter().map(Indexed::of).collect();
             for step in &steps {
@@ -187,7 +187,7 @@ pub(crate) enum Originals<'a> {
     /// `_coven_authored_changes`, which holds every record of the write's
     /// parts this device opened: a received write, streamed, is never held
     /// whole.
-    Retained(&'a WriteHeader),
+    Retained { database: &'a DatabaseConnection, header: &'a WriteHeader },
     /// The author's own write, held whole as it is queued, its records
     /// retained from it a moment before.
     Held(&'a WriteRecord),
@@ -196,7 +196,7 @@ pub(crate) enum Originals<'a> {
 impl Originals<'_> {
     fn header(&self) -> &WriteHeader {
         match self {
-            Self::Retained(header) => header,
+            Self::Retained { header, .. } => header,
             Self::Held(record) => &record.header,
         }
     }
@@ -204,11 +204,10 @@ impl Originals<'_> {
     /// Visit each original record, in any order.
     fn visit(
         &self,
-        db: &DatabaseConnection,
         mut visit: impl FnMut(OriginalRow) -> Result<(), DbError>,
     ) -> Result<(), DbError> {
         match self {
-            Self::Retained(header) => visit_write(db, header, visit),
+            Self::Retained { database, header } => visit_write(database, header, visit),
             Self::Held(record) => {
                 for record in record.parts.iter().flat_map(|part| part.records()) {
                     visit(match record {
@@ -232,23 +231,23 @@ pub(crate) fn judge(
 ) -> Result<Judgement, DbError> {
     let header = originals.header();
     let authoring = Authoring::new(db, schema, header.schema_version)?;
-    let index = StepIndex::of(db, &originals)?;
+    let index = StepIndex::of(&originals)?;
     let mut actions = BTreeMap::new();
     let mut shapes = BTreeMap::new();
-    originals.visit(db, |record| {
+    originals.visit(|record| {
         let row = record.row().clone();
         let execution = record.execution();
         let mut view = ChildView::new(&authoring, &row, &record, header.schema_version);
         // A delete's old values are the cells it replaced (D5).
         let began = match &record {
             OriginalRow::Change(change) if change.change.operation == Operation::Delete => {
-                view.began_with(db, &change.old)?
+                view.began_with(&change.old)?
             }
             _ => true,
         };
         let mut derived = 0;
         for step in &execution.steps {
-            if let Some(cause) = view.action(db, &index, step)? {
+            if let Some(cause) = view.action(&index, step)? {
                 actions.insert((row.clone(), step.sequence), cause);
                 derived += 1;
             }
@@ -306,7 +305,7 @@ pub(crate) fn judge(
             .filter(|sequence| actions.contains_key(&(row.clone(), *sequence)))
             .collect();
         let direct = shape.normalized || derived.len() < shape.steps.len();
-        let owner = owners.foreign_owner(db, row)?;
+        let owner = owners.foreign_owner(row)?;
         let refuse = || match owner {
             Some(owner) => AuthorizationFailure::NotOwner { owner },
             None => AuthorizationFailure::InvalidForeignKeyEffect,
@@ -325,7 +324,7 @@ pub(crate) fn judge(
         for sequence in derived {
             let chain = chain(row, sequence);
             // Every action reaches an authorized direct root (`derived_roots_authorized`).
-            if check.is_ok() && owners.foreign_owner(db, &chain[0].0)?.is_some() {
+            if check.is_ok() && owners.foreign_owner(&chain[0].0)?.is_some() {
                 check = Err(refuse());
             }
             chains.push((sequence, chain));
@@ -420,8 +419,10 @@ fn combined(steps: &[Step]) -> Option<Change<Value>> {
     Some(effect)
 }
 
-/// Each row's owner, as the selected creations and the counted membership name them.
+/// Each row's owner, as the selected creations and the counted membership
+/// name them, for one check of a write's rows.
 pub(crate) struct Owners<'a> {
+    database: &'a DatabaseConnection,
     schema: &'a WriteSchema,
     version: u32,
     current: u32,
@@ -432,12 +433,13 @@ pub(crate) struct Owners<'a> {
 
 impl<'a> Owners<'a> {
     pub(crate) fn new(
-        db: &DatabaseConnection,
+        db: &'a DatabaseConnection,
         schema: &'a WriteSchema,
         device: DeviceId,
         version: u32,
     ) -> Result<Self, DbError> {
         Ok(Self {
+            database: db,
             schema,
             version,
             current: db.schema_version()?,
@@ -450,20 +452,17 @@ impl<'a> Owners<'a> {
     /// The member who owns this row when it is not the author (Lean
     /// `!allowed`): an owner table's row another member created. A row no
     /// write has created yet is new, and its creation is the author's.
-    pub(crate) fn foreign_owner(
-        &mut self,
-        db: &DatabaseConnection,
-        row: &RowId,
-    ) -> Result<Option<MemberId>, DbError> {
+    pub(crate) fn foreign_owner(&mut self, row: &RowId) -> Result<Option<MemberId>, DbError> {
         if let Some(owner) = self.known.get(row) {
             return Ok(*owner);
         }
-        let owner = self.lookup(db, row)?;
+        let owner = self.lookup(row)?;
         self.known.insert(row.clone(), owner);
         Ok(owner)
     }
 
-    fn lookup(&self, db: &DatabaseConnection, row: &RowId) -> Result<Option<MemberId>, DbError> {
+    fn lookup(&self, row: &RowId) -> Result<Option<MemberId>, DbError> {
+        let db = self.database;
         let Some(table) = crate::source_names::table(db, self.version, &row.table, self.current)?
         else {
             return Ok(None);

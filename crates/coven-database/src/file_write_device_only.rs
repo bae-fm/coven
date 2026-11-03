@@ -63,7 +63,7 @@ pub(crate) fn permitted(
         |r| Ok((r.get::<_, String>(0)?, r.get::<_, Vec<u8>>(1)?)),
     )? {
         let row = RowId { table, key, audience: record.audience.clone() };
-        if let Some(owner) = owners.foreign_owner(db, &row)? {
+        if let Some(owner) = owners.foreign_owner(&row)? {
             return Err(DbError::NotOwner {
                 key: crate::RowKey::decode(&row.key)?,
                 table: row.table,

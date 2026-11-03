@@ -181,7 +181,7 @@ fn cascade_deletes(
         crate::judge::Owners::new(database, schema, device, database.schema_version()?)?;
     let mut roots = Vec::new();
     for row in changes.keys() {
-        roots.push((owners.foreign_owner(database, row)?.is_some(), row.clone()));
+        roots.push((owners.foreign_owner(row)?.is_some(), row.clone()));
     }
     // Selecting a child as well must not turn an authorized cascade into a
     // direct delete of someone else's row. Start every permitted root first.
