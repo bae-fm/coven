@@ -5,7 +5,7 @@
 //! caught-up state refuses is undone and rejected (§11.2).
 
 use crate::sequence_sync::sequence_operations::SequenceOperation;
-use crate::{effects, OperationRejection, SyncError, SyncState};
+use crate::{effects, OperationRejection, SequenceState, SyncError};
 use coven_crypto::MemberIdentity;
 use coven_database::{Journal, NewOperation, OperationId, SqlContext, StoreState};
 use coven_format::{admin::StoreChange, sequence::SlotHeader};
@@ -24,7 +24,7 @@ pub fn administer(
     sql: &SqlContext<'_, '_>,
     device: DeviceId,
     held: &MemberIdentity,
-    state: Arc<SyncState>,
+    state: Arc<SequenceState>,
     change: StoreChange,
 ) -> Result<Option<OperationId>, SyncError> {
     journal_change(sql, device, held, state, |_, _| Ok(change))
@@ -40,7 +40,7 @@ pub fn replace_member_keys_for(
     sql: &SqlContext<'_, '_>,
     device: DeviceId,
     held: &MemberIdentity,
-    state: Arc<SyncState>,
+    state: Arc<SequenceState>,
     member: MemberId,
     keys: coven_crypto::MemberPublicKeys,
 ) -> Result<Option<OperationId>, SyncError> {
@@ -68,7 +68,7 @@ pub fn create_circle(
     device: DeviceId,
     held: &MemberIdentity,
     ids: &dyn IdSource,
-    state: Arc<SyncState>,
+    state: Arc<SequenceState>,
     name: String,
 ) -> Result<(CircleId, OperationId), SyncError> {
     coven_format::value::name(&name)?;
@@ -134,7 +134,7 @@ fn journal_change(
     sql: &SqlContext<'_, '_>,
     device: DeviceId,
     held: &MemberIdentity,
-    state: Arc<SyncState>,
+    state: Arc<SequenceState>,
     change: impl FnOnce(&StoreState, MemberId) -> Result<StoreChange, SyncError>,
 ) -> Result<Option<OperationId>, SyncError> {
     let journaled = sql.journal_step(|journal| {

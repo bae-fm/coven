@@ -446,7 +446,7 @@ impl CovenBuilder {
             coven_database::FileDatabase::read_only(database.clone()),
             directory,
             storage,
-            Arc::new(coven_sync::SyncState::new()),
+            Arc::new(coven_sync::SequenceState::new()),
             waits,
             ids,
             transfers,
@@ -553,7 +553,7 @@ impl CovenBuilder {
         let keys = Self::make_keys(self.keys, &directory, settings.id, keychain.clone())?;
         let identity =
             Self::make_identity(self.identity, &directory, settings.id, keychain.clone())?;
-        let state = Arc::new(coven_sync::SyncState::new());
+        let state = Arc::new(coven_sync::SequenceState::new());
         Ok(OpeningOwners {
             directory,
             custody: StoreCustody::new(keys.clone(), identity.clone(), keychain.clone()),
@@ -673,8 +673,8 @@ struct OpeningOwners {
     custody: StoreCustody,
     keys: Arc<KeySession<StoreKeyring>>,
     identity: Arc<KeySession<MemberIdentity>>,
-    /// This installation's sync state, shared by the handle's transfers.
-    state: Arc<coven_sync::SyncState>,
+    /// This installation's sequence state, shared by the handle's transfers.
+    state: Arc<coven_sync::SequenceState>,
     /// The gate of every connection this handle makes, around `state`.
     publications: Arc<crate::storage::Publications>,
     clock: ClockRef,

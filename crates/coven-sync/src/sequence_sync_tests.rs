@@ -255,7 +255,7 @@ impl Group {
             member_keys.persist(&identity).unwrap();
         }
         let device = directory.settings().unwrap().device_id;
-        let state = Arc::new(SyncState::new());
+        let state = Arc::new(SequenceState::new());
         let waits = Arc::new(RetryWaits::open(database.clone(), clock.clone()).await.unwrap());
         let transfers = Arc::new(coven_storage::TransferBudget::new(TransferLimits::default()));
         let storage = storage

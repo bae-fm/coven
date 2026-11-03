@@ -230,7 +230,7 @@ async fn completed_catch_up_wakes_a_worker_blocked_between_file_sends() {
 }
 
 /// The upload worker's storage, traced: each call first moves the clock
-/// `step` seconds, then records its time and whether the shared sync state let
+/// `step` seconds, then records its time and whether the shared sequence state let
 /// it through. A create can also lose its reply after publishing.
 struct StepStorage {
     storage: Arc<MemoryStorage>,
@@ -263,7 +263,7 @@ impl StepStorage {
         self.trace.lock().unwrap().push((event, true));
     }
     /// A completed catch-up: its phase begins now and completes a second later.
-    fn catch_up(&self, send: &crate::SyncState) {
+    fn catch_up(&self, send: &crate::SequenceState) {
         send.set(crate::SequenceStatus::Opening);
         self.note(serde_json::json!({"op":"begin","time":self.seconds()}));
         self.clock.set(self.clock.now() + Duration::from_secs(1));

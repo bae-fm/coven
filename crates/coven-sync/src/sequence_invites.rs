@@ -7,7 +7,7 @@ use crate::sequence_sync::OperationState;
 use crate::{
     Invite, InviteAccess, InviteDelivery, InviteTarget, JoinRequest, OperationKind,
     OperationOutcome, OperationRejection, PendingReason, PendingRecord, PendingSubject,
-    ProviderAccessAction, RetryWaits, SyncError, SyncState,
+    ProviderAccessAction, RetryWaits, SequenceState, SyncError,
 };
 use coven_crypto::{
     ConfirmationNumber, InviteSecret, MemberIdentity, ObjectHasher, SecretText, StoreKeyring,

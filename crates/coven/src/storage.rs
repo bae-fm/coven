@@ -12,7 +12,7 @@ use coven_storage::{
     StorageCredentials,
 };
 use coven_sync::{
-    DeviceCredentials, RestoreCodes, SequenceSync, SessionSignIn, SyncLoop, SyncState,
+    DeviceCredentials, RestoreCodes, SequenceState, SequenceSync, SessionSignIn, SyncLoop,
 };
 use std::{
     collections::BTreeSet,
@@ -71,12 +71,12 @@ pub(crate) async fn record_opened(
 /// What a connection may publish: the sequence owner's gate, and the fresh
 /// objects of a provider check setup is running (§20.8, E5).
 pub(crate) struct Publications {
-    state: Arc<SyncState>,
+    state: Arc<SequenceState>,
     checks: std::sync::Mutex<BTreeSet<ObjectPath>>,
 }
 
 impl Publications {
-    pub(crate) fn new(state: Arc<SyncState>) -> Self {
+    pub(crate) fn new(state: Arc<SequenceState>) -> Self {
         Self { state, checks: std::sync::Mutex::new(BTreeSet::new()) }
     }
     /// Permit the provider check's own object while `scope` runs.

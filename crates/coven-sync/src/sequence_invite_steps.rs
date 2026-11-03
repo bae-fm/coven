@@ -34,7 +34,7 @@ pub struct NewInvite {
 #[expect(
     clippy::too_many_arguments,
     reason = "a step takes the device's identity, its id source, clock and \
-              location, and the sync state its commit wakes, beside the invite"
+              location, and the sequence state its commit wakes, beside the invite"
 )]
 pub fn create_invite(
     sql: &SqlContext<'_, '_>,
@@ -43,7 +43,7 @@ pub fn create_invite(
     ids: &dyn IdSource,
     now: SystemTime,
     location: &coven_storage::StorageConfig,
-    state: Arc<SyncState>,
+    state: Arc<SequenceState>,
     invite: NewInvite,
 ) -> Result<(InviteId, MemberId, OperationId), SyncError> {
     let NewInvite { target, access, delivery } = invite;
@@ -184,7 +184,7 @@ pub fn approve_join_request(
     sql: &SqlContext<'_, '_>,
     now: SystemTime,
     waits: Arc<RetryWaits>,
-    state: Arc<SyncState>,
+    state: Arc<SequenceState>,
     request: &JoinRequest,
 ) -> Result<OperationId, SyncError> {
     let (invite, binding) = sql.journal_step(|journal| {
@@ -224,7 +224,7 @@ pub fn decline_join_request(
     sql: &SqlContext<'_, '_>,
     now: SystemTime,
     waits: Arc<RetryWaits>,
-    state: Arc<SyncState>,
+    state: Arc<SequenceState>,
     request: &JoinRequest,
 ) -> Result<(), SyncError> {
     end_invite(sql, now, waits, state, request.invite, Some(request))
@@ -242,7 +242,7 @@ pub fn cancel_invite(
     sql: &SqlContext<'_, '_>,
     now: SystemTime,
     waits: Arc<RetryWaits>,
-    state: Arc<SyncState>,
+    state: Arc<SequenceState>,
     invite: InviteId,
 ) -> Result<(), SyncError> {
     end_invite(sql, now, waits, state, invite, None)
@@ -256,7 +256,7 @@ fn end_invite(
     sql: &SqlContext<'_, '_>,
     now: SystemTime,
     waits: Arc<RetryWaits>,
-    state: Arc<SyncState>,
+    state: Arc<SequenceState>,
     invite: InviteId,
     request: Option<&JoinRequest>,
 ) -> Result<(), SyncError> {

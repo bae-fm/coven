@@ -68,7 +68,7 @@ struct FilesInner {
     database: FileDatabase,
     directory: StoreDir,
     storage: std::sync::RwLock<Option<Arc<dyn Storage>>>,
-    send: Arc<crate::SyncState>,
+    send: Arc<crate::SequenceState>,
     waits: Arc<crate::RetryWaits>,
     /// Failures observed on this connection that require a new connection.
     /// Reopening creates a new connection and permits one attempt again.
@@ -124,7 +124,7 @@ impl Files {
         database: FileDatabase,
         directory: StoreDir,
         storage: Option<Arc<dyn Storage>>,
-        send: Arc<crate::SyncState>,
+        send: Arc<crate::SequenceState>,
         waits: Arc<crate::RetryWaits>,
         ids: IdSourceRef,
         transfers: Arc<TransferBudget>,

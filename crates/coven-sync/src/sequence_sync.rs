@@ -6,8 +6,8 @@ use crate::{
     history::{History, KeyCopy},
     object_input::ObjectInput,
     slot_object::{self, ReceivedSlot, SlotBody},
-    snapshot_object, PendingReason, PendingRecord, PendingSubject, Prerequisite, SequenceStatus,
-    SyncError, SyncState,
+    snapshot_object, PendingReason, PendingRecord, PendingSubject, Prerequisite, SequenceState,
+    SequenceStatus, SyncError,
 };
 use coven_crypto::{
     custody::{KeySession, PersonEntries},
@@ -56,7 +56,7 @@ pub struct SequenceSync {
     settings: Arc<coven_storage::StorageSettings>,
     directory: StoreDir,
     device: DeviceId,
-    state: Arc<SyncState>,
+    state: Arc<SequenceState>,
     clock: coven_foundation::clock::ClockRef,
     ids: coven_foundation::id_source::IdSourceRef,
     waits: Arc<crate::RetryWaits>,
@@ -78,7 +78,7 @@ impl SequenceSync {
         member: Arc<KeySession<MemberIdentity>>,
         person: Arc<PersonEntries>,
         settings: Arc<coven_storage::StorageSettings>,
-        state: Arc<SyncState>,
+        state: Arc<SequenceState>,
         clock: coven_foundation::clock::ClockRef,
         ids: coven_foundation::id_source::IdSourceRef,
         waits: Arc<crate::RetryWaits>,

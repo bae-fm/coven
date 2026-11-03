@@ -17,7 +17,7 @@ struct Fixture {
     directory: StoreDir,
     ids: IdSourceRef,
     clock: ClockRef,
-    send: Arc<crate::SyncState>,
+    send: Arc<crate::SequenceState>,
     database: Database,
     files: Files,
     storage: Arc<MemoryStorage>,
@@ -769,7 +769,7 @@ async fn paused_files(
     database: &Database,
     directory: &StoreDir,
     storage: Arc<dyn Storage>,
-    send: Arc<crate::SyncState>,
+    send: Arc<crate::SequenceState>,
     waits: Arc<crate::RetryWaits>,
     ids: IdSourceRef,
     transfers: Arc<coven_storage::TransferBudget>,
@@ -791,8 +791,8 @@ async fn paused_files(
     files
 }
 
-fn ready_state() -> Arc<crate::SyncState> {
-    let state = Arc::new(crate::SyncState::new());
+fn ready_state() -> Arc<crate::SequenceState> {
+    let state = Arc::new(crate::SequenceState::new());
     state.registered(true);
     state.set(crate::SequenceStatus::Synced { through: 0 });
     state

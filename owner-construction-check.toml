@@ -385,7 +385,7 @@ SyncOftenGuard = "SyncOften"
 IdleInterval = "SyncOften"
 # Each change of the sync activity, for the file workers waiting until sync
 # allows their transfers.
-SyncStatusWatch = "SyncState"
+SequenceStatusWatch = "SequenceState"
 # A test's count of the requests the in-memory provider's connections
 # attempt, to wait on without polling.
 RequestWatch = "MemoryStorage"
@@ -759,10 +759,10 @@ tables = [
 # The network and retry reports that schedule's owners act on (§6.7).
 "crates/coven-sync/src/network_report.rs" = ["Reports::new"]
 "crates/coven-sync/src/sync_loop.rs" = ["SyncLoop::new"]
-# One sync state per opened installation, which the store's bootstrap or
+# One sequence state per opened installation, which the store's bootstrap or
 # builder makes and gives to its sequence and storage owners.
-"crates/coven-sync/src/sequence_state.rs" = ["SyncState::new"]
-# The intervals apps hold for idle passes, one per sync state, made with it.
+"crates/coven-sync/src/sequence_state.rs" = ["SequenceState::new"]
+# The intervals apps hold for idle passes, one per sequence state, made with it.
 "crates/coven-sync/src/sync_often.rs" = ["SyncOften::new"]
 # One invite expiry per writer handle, connected or not; the handle's
 # storage owner keeps it and stops it as it closes.
@@ -861,7 +861,7 @@ tables = [
 "crates/coven/src/handle.rs" = ["CovenHandle::close", "CovenHandle::new"]
 "crates/coven/src/read_handle.rs" = ["CovenReadHandle::close", "CovenReadHandle::new"]
 "crates/coven/src/storage.rs" = [
-    # Made once per opened installation, beside its sync state.
+    # Made once per opened installation, beside its sequence state.
     "Publications::new",
     # A completed sign-in becomes this session's custody.
     "StorageConnections::authenticate",

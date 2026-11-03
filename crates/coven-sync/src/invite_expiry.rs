@@ -8,7 +8,7 @@
 //! storage is connected, as for an invite ended any other way.
 
 use super::{InviteState, InviteWork, INVITE};
-use crate::{RetryWaits, SyncState};
+use crate::{RetryWaits, SequenceState};
 use coven_database::{Database, DbError, OperationId, OperationUpdate};
 use coven_foundation::clock::ClockRef;
 use std::{sync::Arc, time::SystemTime};
@@ -35,7 +35,7 @@ impl InviteExpiry {
         database: Database,
         clock: ClockRef,
         waits: Arc<RetryWaits>,
-        state: Arc<SyncState>,
+        state: Arc<SequenceState>,
     ) -> Self {
         let (stop, stopping) = watch::channel(false);
         let task = tokio::spawn(run(database, clock, waits, state, stopping));
@@ -55,7 +55,7 @@ async fn run(
     database: Database,
     clock: ClockRef,
     waits: Arc<RetryWaits>,
-    state: Arc<SyncState>,
+    state: Arc<SequenceState>,
     mut stopping: watch::Receiver<bool>,
 ) {
     let mut journal = database.started_operations();
@@ -91,7 +91,7 @@ pub(crate) async fn expire(
     database: &Database,
     now: SystemTime,
     waits: &RetryWaits,
-    state: &SyncState,
+    state: &SequenceState,
 ) -> Result<Option<SystemTime>, DbError> {
     let (ended, next) = write(database, now).await?;
     for id in &ended {

@@ -1,7 +1,7 @@
 //! When queued uploads retry (§17.9, E7): each failure is the file's pending
 //! record. Recoverable source, disk and provider failures wait their persisted
 //! delay; sign-in and access failures wait for a new connection. A catch-up
-//! wait is woken by the sync state; a provider cooldown holds the whole queue.
+//! wait is woken by the sequence state; a provider cooldown holds the whole queue.
 
 use crate::{files::FilesInner, PendingReason, PendingRecord, Retry};
 use coven_database::{FileUpload, RetrySubject};

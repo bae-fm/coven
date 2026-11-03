@@ -11,7 +11,7 @@ impl FilesInner {
     /// wait, persisting T and W before the upload waits: a user's original
     /// that went missing on its move's record, one that changed by failing
     /// the move. A catch-up wait is
-    /// woken by the sync state; connection waits and permanent failures keep no timer.
+    /// woken by the sequence state; connection waits and permanent failures keep no timer.
     /// A wait that cannot be persisted holds the upload until the app retries.
     pub(super) async fn record_failure(
         &self,

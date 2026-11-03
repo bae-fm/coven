@@ -36,7 +36,7 @@ impl IdleInterval {
             .next()
             .map_or(IDLE_INTERVAL, |shortest| (*shortest).min(IDLE_INTERVAL))
     }
-    /// Resolves when a guard is taken or dropped. Without the sync state no
+    /// Resolves when a guard is taken or dropped. Without the sequence state no
     /// guard can be taken, and every guard keeps it, so the wait then never
     /// ends.
     pub(crate) async fn changed(&mut self) {

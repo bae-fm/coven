@@ -67,7 +67,7 @@ pub use restore_codes::{read_connection, RestoreCodes};
 pub use saved_code::{
     follow_name, read_saved_code, replacement_code, SavedName, UnreadableSavedCode,
 };
-pub use sequence_state::{PassFailure, SequenceStatus, StatusFailure, SyncState, SyncStatus};
+pub use sequence_state::{PassFailure, SequenceState, SequenceStatus, StatusFailure, SyncStatus};
 pub use sequence_sync::sequence_invites::expiry::InviteExpiry;
 pub use sequence_sync::sequence_invites::{
     approve_join_request, cancel_invite, create_invite, decline_join_request, NewInvite,

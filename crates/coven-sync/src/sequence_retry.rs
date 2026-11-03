@@ -1,7 +1,7 @@
 //! Operation waits use their own prerequisites and persisted retry deadlines.
 use crate::{
     sequence_sync::SequenceSync, PendingReason, PendingRecord, PendingSubject, Retry, RetryWaits,
-    SyncError, SyncState,
+    SequenceState, SyncError,
 };
 use coven_crypto::StoreKeyring;
 use coven_database::{Journal, OperationId, OperationRecord, RetrySubject};
@@ -27,7 +27,7 @@ pub(crate) enum OperationFailure<'a> {
 pub fn retry_pending_operation(
     sql: &coven_database::SqlContext<'_, '_>,
     waits: Arc<RetryWaits>,
-    state: Arc<SyncState>,
+    state: Arc<SequenceState>,
     id: OperationId,
 ) -> Result<(), SyncError> {
     sql.journal_step(|journal| clear_for_retry(journal, id))?;

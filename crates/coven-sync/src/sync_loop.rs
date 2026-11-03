@@ -9,7 +9,7 @@ use tokio::sync::{mpsc, oneshot};
 
 #[derive(Clone)]
 /// Control of one serialized pass loop. Commands survive caller cancellation.
-/// It publishes its activity to the owner's `SyncState`.
+/// It publishes its activity to the owner's `SequenceState`.
 pub struct SyncLoop {
     commands: mpsc::UnboundedSender<Command>,
     /// Where the person's retry requests wait for this loop's passes.

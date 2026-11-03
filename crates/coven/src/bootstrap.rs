@@ -561,8 +561,8 @@ struct Loaded {
     ring: StoreKeyring,
     database: Database,
     storage: Arc<coven_storage::StorageConnection>,
-    /// The sync state the handle continues, and the connection's gate around it.
-    state: Arc<coven_sync::SyncState>,
+    /// The sequence state the handle continues, and the connection's gate around it.
+    state: Arc<coven_sync::SequenceState>,
     publications: Arc<crate::storage::Publications>,
     waits: Arc<coven_sync::RetryWaits>,
 }
@@ -598,7 +598,7 @@ async fn prepare_and_load(
     admission.cancellable(check_cancel(cancel))?;
     let provider = data.location.provider();
     let settings = directory.settings().map_err(CovenError::from)?;
-    let state = Arc::new(coven_sync::SyncState::new());
+    let state = Arc::new(coven_sync::SequenceState::new());
     let publications = Arc::new(crate::storage::Publications::new(state.clone()));
     let ring = Arc::new(KeySession::store(Arc::new(InMemoryCustody::<StoreKeyring>::empty()))?);
     let identity = Arc::new(KeySession::member(Arc::new(InMemoryCustody::new(member.clone())))?);

@@ -185,18 +185,18 @@ impl From<PassFailure> for SyncStatus {
     }
 }
 
-/// Hears each change of this installation's sync activity (`SyncState::watch`).
-pub(crate) struct SyncStatusWatch(watch::Receiver<SequenceStatus>);
+/// Hears each change of this installation's sync activity (`SequenceState::watch`).
+pub(crate) struct SequenceStatusWatch(watch::Receiver<SequenceStatus>);
 
-impl SyncStatusWatch {
-    /// Resolves at the next change; an error once the sync state is gone.
+impl SequenceStatusWatch {
+    /// Resolves at the next change; an error once the sequence state is gone.
     pub(crate) async fn changed(&mut self) -> Result<(), watch::error::RecvError> {
         self.0.changed().await
     }
 }
 
 /// Shared state of this open installation. It carries no time-based permission.
-pub struct SyncState {
+pub struct SequenceState {
     status: watch::Sender<SequenceStatus>,
     registered: Mutex<bool>,
     /// App work outside the database that the next pass serves.
@@ -205,7 +205,7 @@ pub struct SyncState {
     often: crate::sync_often::SyncOften,
 }
 
-impl SyncState {
+impl SequenceState {
     /// Start before a read pass has established the local binding.
     pub fn new() -> Self {
         Self {
@@ -221,8 +221,8 @@ impl SyncState {
     }
     /// Hear each change of the sync activity, for work that waits until sync
     /// allows it.
-    pub(crate) fn watch(&self) -> SyncStatusWatch {
-        SyncStatusWatch(self.status.subscribe())
+    pub(crate) fn watch(&self) -> SequenceStatusWatch {
+        SequenceStatusWatch(self.status.subscribe())
     }
     /// Observe progress and blocked causes, for a test to wait on.
     #[cfg(test)]
@@ -251,11 +251,11 @@ impl SyncState {
         self.status.send_replace(status);
     }
     pub(crate) fn registered(&self, registered: bool) {
-        *self.registered.lock().expect("sync state poisoned") = registered;
+        *self.registered.lock().expect("sequence state poisoned") = registered;
     }
     pub(crate) fn files_allowed(&self) -> bool {
         matches!(&*self.status.borrow(), SequenceStatus::Synced { .. })
-            && *self.registered.lock().expect("sync state poisoned")
+            && *self.registered.lock().expect("sequence state poisoned")
     }
     pub(crate) fn check(&self) -> Result<(), SyncError> {
         match &*self.status.borrow() {
@@ -277,7 +277,7 @@ impl SyncState {
         SyncError::DeviceIdInUse(evidence)
     }
 }
-impl PublicationGate for SyncState {
+impl PublicationGate for SequenceState {
     fn check(&self, path: &ObjectPath) -> Result<(), StorageError> {
         // A join request is the bootstrap step before any sequence state
         // exists; the stuck-device rule governs only sequence-derived sends.
@@ -285,7 +285,8 @@ impl PublicationGate for SyncState {
             return Ok(());
         }
         if self.check().is_err()
-            || (path.file_id().is_some() && !*self.registered.lock().expect("sync state poisoned"))
+            || (path.file_id().is_some()
+                && !*self.registered.lock().expect("sequence state poisoned"))
         {
             Err(StorageFailure::CatchUpRequired.into())
         } else {
