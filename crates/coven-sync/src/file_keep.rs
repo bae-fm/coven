@@ -170,7 +170,7 @@ impl FilesInner {
         let subject = RetrySubject::Pin(file.id());
         self.waits.forget(subject);
         self.forget_connection_wait(subject);
-        self.waits.failures().cleared(&PendingSubject::Keep { file: file.id() }, |_| true);
+        self.waits.failure_cleared(&PendingSubject::Keep { file: file.id() }, |_| true);
     }
 
     /// Record a failed attempt as the pin's record, with its next wait when

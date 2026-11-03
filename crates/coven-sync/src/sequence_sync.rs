@@ -489,7 +489,7 @@ impl SequenceSync {
             | SyncError::Shutdown(_) => PendingReason::Failed(error.local_failure()),
         };
         let subject = PendingSubject::Slot(slot);
-        self.waits.failures().failed(&subject, &reason, error.cause());
+        self.waits.log_failure(&subject, &reason, error.cause());
         let cause = blocked_cause(session, &subject, &error);
         let record = PendingRecord { subject, reason, cause };
         session.blocked = Some(record.clone());

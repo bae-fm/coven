@@ -777,6 +777,9 @@ tables = [
 # Creates a reserved cache file for a pin or an upload's own copy.
 "crates/coven-sync/src/file_cache.rs" = ["FilesInner::create_cache_file"]
 "crates/coven-sync/src/files.rs" = ["Files::new"]
+# The reason last logged for each subject's failure, which the store's retry
+# waits keep.
+"crates/coven-sync/src/failure_log.rs" = ["FailureLog::new"]
 # One retry schedule per opened installation, injected into every worker and
 # connection; a read-only handle keeps its own in memory.
 "crates/coven-sync/src/retry_waits.rs" = ["RetryWaits::open", "RetryWaits::in_memory"]

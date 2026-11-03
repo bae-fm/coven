@@ -103,7 +103,7 @@ impl FilesInner {
         failure: &FileFailure<'_>,
     ) -> PendingRecord {
         let (error, cause) = failure.error();
-        self.waits.failures().failed(&subject, &reason, error);
+        self.waits.log_failure(&subject, &reason, error);
         PendingRecord { subject, reason, cause }
     }
 

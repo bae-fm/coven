@@ -44,7 +44,7 @@ impl FilesInner {
                         ends(&record.reason)
                     })
                     .await?;
-                self.waits.failures().cleared(&subject, ends);
+                self.waits.failure_cleared(&subject, ends);
                 Ok(())
             }
         }
@@ -193,7 +193,7 @@ impl FilesInner {
                 source_failure(&record.reason)
             })
             .await?;
-        self.waits.failures().cleared(&subject, source_failure);
+        self.waits.failure_cleared(&subject, source_failure);
         if let Some(retry) = retry {
             self.waits.forget(retry);
         }
@@ -206,7 +206,7 @@ impl FilesInner {
             .await?
         {
             self.waits.forget(coven_database::RetrySubject::Upload(upload));
-            self.waits.failures().cleared(&moving, move |reason| original_missing(reason, &path));
+            self.waits.failure_cleared(&moving, move |reason| original_missing(reason, &path));
         }
         Ok(())
     }

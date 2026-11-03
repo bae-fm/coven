@@ -12,14 +12,17 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
 use std::sync::Mutex;
 
-/// The reason last logged for each subject. One shared owner per open
-/// store.
-#[derive(Default)]
+/// The reason last logged for each subject. The store's retry waits keep
+/// one for the open store.
 pub(crate) struct FailureLog {
     logged: Mutex<BTreeMap<PendingSubject, PendingReason>>,
 }
 
 impl FailureLog {
+    pub(crate) fn new() -> Self {
+        Self { logged: Mutex::new(BTreeMap::new()) }
+    }
+
     fn lock(&self) -> std::sync::MutexGuard<'_, BTreeMap<PendingSubject, PendingReason>> {
         self.logged.lock().expect("failure log poisoned")
     }

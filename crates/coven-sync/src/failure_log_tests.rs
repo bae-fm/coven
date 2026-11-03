@@ -13,7 +13,7 @@ const DATABASE: PendingReason = PendingReason::Failed(LocalFailure::Database);
 /// failure is new.
 #[test]
 fn a_failure_logs_once_per_change_of_its_subjects_reason() {
-    let log = FailureLog::default();
+    let log = FailureLog::new();
     let subject = PendingSubject::Connection;
     assert!(log.failed(&subject, &DISK, &error("first")));
     assert!(!log.failed(&subject, &DISK, &error("again")));
@@ -28,7 +28,7 @@ fn a_failure_logs_once_per_change_of_its_subjects_reason() {
 #[test]
 fn an_operations_failure_ends_when_it_advances_or_ends() {
     use coven_database::OperationId;
-    let log = FailureLog::default();
+    let log = FailureLog::new();
     let operation = |id| PendingSubject::Operation {
         id: OperationId(id),
         kind: crate::OperationKind::RetainFiles,

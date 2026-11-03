@@ -10,7 +10,7 @@
 //! subject is due while it lasts, whatever its own wait, and an app retry
 //! overrides only the subject's ordinary wait.
 
-use crate::SyncError;
+use crate::{PendingReason, PendingSubject, SyncError};
 use coven_database::{Database, DbError, RetrySubject, RetryWait};
 use coven_foundation::clock::ClockRef;
 use coven_storage::{retry_delay, StorageError, StorageFailure};
@@ -110,7 +110,7 @@ impl RetryWaits {
             rearmed: tokio::sync::watch::channel(0).0,
             network: network_report::Reports::new(),
             requests: Mutex::new(retry_answer::RetryRequests::new()),
-            failures: crate::failure_log::FailureLog::default(),
+            failures: crate::failure_log::FailureLog::new(),
         };
         for (subject, wait) in waits {
             owner.arm_for(subject, wait.not_before, restart_wait(wait.not_before, now, wait.wait));
@@ -129,13 +129,30 @@ impl RetryWaits {
             rearmed: tokio::sync::watch::channel(0).0,
             network: network_report::Reports::new(),
             requests: Mutex::new(retry_answer::RetryRequests::new()),
-            failures: crate::failure_log::FailureLog::default(),
+            failures: crate::failure_log::FailureLog::new(),
         }
     }
 
-    /// The reason last logged for each subject's failure.
-    pub(crate) fn failures(&self) -> &crate::failure_log::FailureLog {
-        &self.failures
+    /// Log that `subject` failed with `reason` because of `error`, when its
+    /// reason appears or changes (`FailureLog::failed`). Returns whether it
+    /// was logged.
+    pub(crate) fn log_failure(
+        &self,
+        subject: &PendingSubject,
+        reason: &PendingReason,
+        error: &(dyn std::error::Error + 'static),
+    ) -> bool {
+        self.failures.failed(subject, reason, error)
+    }
+
+    /// The subject's work advanced past a failure `ended` accepts: a later
+    /// failure is new and logs again.
+    pub(crate) fn failure_cleared(
+        &self,
+        subject: &PendingSubject,
+        ended: impl Fn(&PendingReason) -> bool,
+    ) {
+        self.failures.cleared(subject, ended);
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, WaitSchedule> {

@@ -150,7 +150,7 @@ impl SequenceSync {
                 OperationFailure::Returned(error) => (self.error_reason(error), *error, None),
             };
         // Logged before any wait: the error is the attempt's, borrowed.
-        self.waits.failures().failed(&subject, &reason, error_source);
+        self.waits.log_failure(&subject, &reason, error_source);
         let save = |pending, wait| async move {
             match step {
                 Some(step) => self.database.record_operation_retry_at(pending, wait, step).await,
