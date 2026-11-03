@@ -73,9 +73,9 @@ async fn listed(
         .unwrap()
 }
 
-async fn stopped(handle: &CovenHandle) {
-    handle.stop_sync().await.unwrap();
-    handle.test_sync_status().wait_for(|s| matches!(s, SyncStatus::Stopped)).await;
+/// Stop the device's sync, so no pass runs until it starts again.
+async fn stopped(device: &crate::tests::Device) {
+    device.stop_sync().await;
 }
 
 /// Ana renames Gifts with sync stopped. Her write journals the rename beside
@@ -87,7 +87,7 @@ async fn an_admin_change_journals_beside_the_apps_row_and_lands_once_sync_runs()
     let network = Network::new(1).await;
     let ana = &network.devices[0].handle;
     let gifts = crate::tests::circle(ana, "Gifts").await;
-    stopped(ana).await;
+    stopped(&network.devices[0]).await;
     let rename = ana
         .write(move |sql| {
             let rename = sql.rename_circle(gifts, "Presents")?.expect("Gifts has another name");
@@ -164,7 +164,7 @@ async fn a_rejection_met_in_a_pass_stays_listed_until_acknowledged() {
     let bens = ben.members().await.unwrap().into_iter().find(|m| m.is_self).unwrap().id;
     crate::tests::landed(ana, ana.circles().add_member(gifts, &bens).await.unwrap()).await;
     network.sync(1).await;
-    stopped(ana).await;
+    stopped(&network.devices[0]).await;
     let rename = ana.circles().rename(gifts, "Presents").await.unwrap();
     crate::tests::landed(ben, ben.circles().delete(gifts).await.unwrap()).await;
     let device = network.devices.remove(0);
@@ -191,7 +191,7 @@ async fn a_rejection_met_in_a_pass_stays_listed_until_acknowledged() {
 async fn a_new_circle_takes_rows_once_its_slot_applies() {
     let network = Network::new(1).await;
     let ana = &network.devices[0].handle;
-    stopped(ana).await;
+    stopped(&network.devices[0]).await;
     let note = |audience: String| {
         move |sql: CovenWrite<'_>| {
             sql.execute(
@@ -230,7 +230,7 @@ async fn invites_are_made_and_ended_in_the_apps_writes_with_sync_stopped() {
     // The expiry wakes by the fixed clock, not after a day.
     network.polling.hold_waits();
     let ana = &network.devices[0].handle;
-    stopped(ana).await;
+    stopped(&network.devices[0]).await;
     let invite = |key: &str| {
         (
             InviteTarget::NewMember { role: MemberRole::Member, name: "Carol".into() },

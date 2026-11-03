@@ -39,6 +39,8 @@ struct Fixture {
     ids: IdSourceRef,
     clock: Arc<FixedClock>,
     storage: Arc<MemoryStorage>,
+    /// The connector over `storage` every handle opens with.
+    connector: Arc<crate::tests::Connector>,
     keys: Arc<KeyringCustody<StoreKeyring>>,
     member: MemberIdentity,
     _root: tempfile::TempDir,
@@ -80,6 +82,7 @@ impl Fixture {
             layout,
             ids,
             clock,
+            connector: crate::tests::Connector::new(storage.clone()),
             storage,
             keys,
             member: member(17),
@@ -97,9 +100,8 @@ impl Fixture {
             .await
             .unwrap();
         person(&handle).await;
-        stop(&handle).await;
         // Keep a connection for explicit member/file operations, with the loop stopped.
-        handle.unlock_store_key().await.unwrap();
+        stop_connected(&f, &handle).await;
         (f, handle)
     }
 
@@ -111,7 +113,7 @@ impl Fixture {
             .migrations(vec![Migration::addition(1, "records", SCHEMA)])
             .clock(self.clock.clone())
             .id_source(self.ids.clone())
-            .storage_connector(self.storage.clone())
+            .storage_connector(self.connector.clone())
             .key_custody(KeyCustody::Custom(self.keys.clone()))
             .identity_custody(IdentityCustody::Custom(Arc::new(InMemoryCustody::new(
                 self.member.clone(),
@@ -125,30 +127,26 @@ impl Fixture {
         self.clock.set(self.clock.now() + Duration::from_secs(1));
         handle.start_sync().await.unwrap();
         person(handle).await;
-        stop(handle).await;
-        handle.unlock_store_key().await.unwrap();
+        stop_connected(self, handle).await;
     }
 }
 
+/// Wait for the first pass that begins after the request, and check it
+/// ended synced.
 async fn person(handle: &CovenHandle) {
-    let mut status = handle.test_sync_status();
-    let state = status
-        .wait_for(|s| {
-            matches!(
-                s,
-                SyncStatus::Synced { .. } | SyncStatus::Failed { .. } | SyncStatus::Offline { .. }
-            )
-        })
-        .await;
-    assert!(matches!(state, SyncStatus::Synced { .. }), "{state:?}");
+    match handle.retry_now().await.unwrap().await {
+        RetryOutcome::Synced { .. } => {}
+        outcome => panic!("{outcome:?}"),
+    }
 }
 
-async fn stop(handle: &CovenHandle) {
-    handle.stop_sync().await.unwrap();
-    let mut status = handle.test_sync_status();
-    let state =
-        status.wait_for(|s| matches!(s, SyncStatus::Stopped | SyncStatus::Failed { .. })).await;
-    assert!(matches!(state, SyncStatus::Stopped), "{state:?}");
+/// Stop the loop and wait for its release, which records a failure as the
+/// last pass's: the pass ended synced, and nothing has failed since. Then
+/// connect without syncing.
+async fn stop_connected(f: &Fixture, handle: &CovenHandle) {
+    f.connector.stop(handle).await;
+    assert_eq!(handle.test_last_pass().latest().await, Some(LastPass::Synced));
+    handle.unlock_store_key().await.unwrap();
 }
 
 async fn note(handle: &CovenHandle, body: String) {
@@ -314,23 +312,32 @@ fn crashing_local_write() {
     });
 }
 
-/// Each status sync writes reaches an app's live query on
-/// `coven_sync_status`, in the order it was written (E5).
+/// Each fact sync writes reaches an app's live query on the sync state, in
+/// the order it was written (E5): a pass that claims a slot shows syncing
+/// while it runs, then synced with the time it ended.
 #[tokio::test]
 async fn a_live_query_follows_each_sync_status_in_order() {
     let (f, handle) = Fixture::new().await;
     let mut status = handle.test_sync_status();
-    assert_eq!(status.next().await, SyncStatus::Stopped);
+    let before = status.next().await;
+    assert_eq!(before.state, SyncState::Synced);
+    note(&handle, "claimed".into()).await;
     let (entered, entering) = tokio::sync::oneshot::channel();
     let (release, released) = tokio::sync::oneshot::channel();
-    f.storage.hold_next_read(ObjectPath::floor(f.directory.id()), entered, released).await;
+    f.storage.hold_next_creation(ObjectPrefix::all(f.directory.id()), entered, released).await;
+    f.clock.set(f.clock.now() + Duration::from_secs(1));
     handle.start_sync().await.unwrap();
     entering.await.unwrap();
-    assert_eq!(status.next().await, SyncStatus::Syncing);
+    assert_eq!(
+        status.next().await,
+        SyncStatus { state: SyncState::Syncing, last_synced: before.last_synced }
+    );
     release.send(()).unwrap();
-    assert!(matches!(status.next().await, SyncStatus::Synced { .. }));
+    assert_eq!(
+        status.next().await,
+        SyncStatus { state: SyncState::Synced, last_synced: Some(f.clock.now()) }
+    );
     handle.stop_sync().await.unwrap();
-    assert_eq!(status.next().await, SyncStatus::Stopped);
     handle.close().await.unwrap();
 }
 
@@ -340,18 +347,21 @@ async fn app_reads_and_writes_finish_while_a_sync_pass_is_held() {
     note(&handle, "before sync".into()).await;
     let (entered, entering) = tokio::sync::oneshot::channel();
     let (release, released) = tokio::sync::oneshot::channel();
-    f.storage.hold_next_read(ObjectPath::floor(f.directory.id()), entered, released).await;
+    // Held as it claims the slot for the write before it: the pass has
+    // moved, so the state shows it syncing.
+    f.storage.hold_next_creation(ObjectPrefix::all(f.directory.id()), entered, released).await;
     handle.start_sync().await.unwrap();
     entering.await.unwrap();
-    assert!(matches!(handle.test_sync_status().latest().await, SyncStatus::Syncing));
+    let mut status = handle.test_sync_status();
+    status.wait_for(|status| status.state == SyncState::Syncing).await;
     assert_eq!(read_note(&handle).await, "before sync");
     note(&handle, "during sync".into()).await;
     assert_eq!(read_note(&handle).await, "during sync");
-    assert!(matches!(handle.test_sync_status().latest().await, SyncStatus::Syncing));
+    assert_eq!(handle.test_sync_status().latest().await.state, SyncState::Syncing);
     let queued = handle.test_queued_writes().await.unwrap();
     release.send(()).unwrap();
     person(&handle).await;
-    stop(&handle).await;
+    handle.stop_sync().await.unwrap();
     assert_uploaded(&f, &handle, &queued).await;
     handle.close().await.unwrap();
 }

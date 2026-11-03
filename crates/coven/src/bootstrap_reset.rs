@@ -190,7 +190,15 @@ async fn reset_unconnected(
     if let Err(error) = keychain.set_device_id(reset.new_device) {
         return replace::undo(error.into(), database, swapping.then_some(replacement)).await;
     }
-    replace::publish(&replacement, owners, database, waits, false).await
+    replace::publish(
+        &replacement,
+        owners,
+        database,
+        waits,
+        coven_database::RecordedLocation::None,
+        None,
+    )
+    .await
 }
 
 #[cfg(test)]

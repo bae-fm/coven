@@ -58,6 +58,15 @@ impl DeviceCredentials {
         self.keychains.connection(settings)
     }
 
+    /// Whether a location is recorded, and this device's credentials for it
+    /// held, as the sync state reads it (§19.1).
+    pub fn location(
+        &self,
+        settings: &StorageSettings,
+    ) -> Result<coven_database::RecordedLocation<coven_storage::CloudProvider>, SyncError> {
+        self.keychains.location(settings)
+    }
+
     /// The OAuth tokens committed here, which a new connection starts with.
     /// Refuses when no OAuth sign-in is committed.
     pub fn tokens(&self) -> Result<OAuthTokens, SyncError> {

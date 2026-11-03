@@ -1,7 +1,7 @@
 //! Event-driven sequence passes with durable backoff and retained app wakes.
 use crate::{
-    PassFailure, RetryOutcome, RetryWaits, SequenceStatus, SequenceSync, SyncError, SyncFailure,
-    SyncStatus,
+    LastPass, PassFailure, RetryOutcome, RetryWaits, SequenceStatus, SequenceSync, SyncError,
+    SyncFailure,
 };
 use coven_database::{DbError, RetrySubject};
 use std::{sync::Arc, time::Duration};
@@ -52,7 +52,8 @@ impl SyncLoop {
         self.commands.send(Command::Now).map_err(|_| DbError::StoreClosed.into())
     }
     /// Queue stopping after the active pass and this connection's transfers.
-    /// Completion publishes `Stopped`; a release failure publishes `Failed`.
+    /// Stopping writes nothing the sync state reads; a release failure is
+    /// recorded as the last pass's failure.
     /// Retry requests no pass has taken are answered `NotSyncing` now. The
     /// loop stops even when writing that fails, which has failed the handle.
     pub async fn stop(&self) -> Result<(), SyncError> {
@@ -81,7 +82,7 @@ impl SyncLoop {
 }
 /// Coven's own operation whose last attempt failed, if any, with the cause
 /// its record keeps: it retries under its own backoff, but the pass that
-/// left it is not `Synced` (E5).
+/// left it did not end synced (E5).
 async fn failing(sync: &SequenceSync) -> Result<Option<crate::PendingRecord>, SyncError> {
     let records = sync.database.pending::<crate::PendingRecord>().await?;
     Ok(records.into_iter().find(|record| {
@@ -109,7 +110,7 @@ async fn pass(
     failing(sync).await
 }
 
-/// What a failed pass shows: a blocked slot, with the cause its record
+/// How a failed pass ended: a blocked slot, with the cause its record
 /// keeps, an attempt that received no provider response, or the failure
 /// itself (E5).
 fn failed(sync: &SequenceSync, error: SyncError) -> PassFailure {
@@ -128,11 +129,39 @@ fn failed(sync: &SequenceSync, error: SyncError) -> PassFailure {
     PassFailure::Blocked { slot, reason: record.reason, error: record.cause }
 }
 
-/// Write `status` for the app, in the step that changes it. A failed write
-/// has failed the store's handle, which every call and live query now
-/// report, so the loop ends on it.
-async fn show(sync: &SequenceSync, status: SyncStatus) -> Result<(), DbError> {
-    status.record(&sync.database).await
+/// Write how sync last failed outside a pass's end, in the step that fails.
+/// A failed write has failed the store's handle, which every call and live
+/// query now report, so the loop ends on it.
+async fn show(sync: &SequenceSync, failure: LastPass) -> Result<(), DbError> {
+    failure.record(&sync.database).await
+}
+
+/// Write how the pass ended, `now` by the store's clock, and that it moves
+/// no more. A failed write has failed the store's handle, as `show`'s does.
+async fn ended(sync: &SequenceSync, last: LastPass) -> Result<(), DbError> {
+    last.record_end(&sync.database, sync.clock.now()).await
+}
+
+/// Run the pass, writing that it moved as it first reads a slot it hadn't,
+/// or claims one: until then the sync state shows what it did before, so a
+/// pass that finds nothing shows nothing (§19.1). A failed write has failed
+/// the store's handle; the pass still finishes, and the failure comes back
+/// beside its result.
+async fn moving_pass(
+    sync: &SequenceSync,
+    codes: &crate::RestoreCodes,
+) -> (Result<Option<crate::PendingRecord>, SyncError>, Result<(), DbError>) {
+    let mut moves = sync.state.pass_begins();
+    let passing = pass(sync, codes);
+    tokio::pin!(passing);
+    tokio::select! {
+        biased;
+        passed = &mut passing => (passed, Ok(())),
+        () = moves.moved() => {
+            let written = sync.database.record_moving().await;
+            (passing.await, written)
+        }
+    }
 }
 
 /// Sync stopped as the loop ends or gives up: the waiting retries hear so.
@@ -196,7 +225,7 @@ async fn run(
                         clippy::let_underscore_must_use,
                         reason = "the loop ends either way; a failed write has failed the handle, which reports it"
                     )]
-                    let _ = show(&sync, SyncStatus::failed(error)).await;
+                    let _ = show(&sync, LastPass::failed(error)).await;
                     break;
                 }
             }
@@ -233,7 +262,7 @@ async fn run(
                     clippy::let_underscore_must_use,
                     reason = "the loop ends either way; a failed write has failed the handle, which reports it"
                 )]
-                let _ = show(&sync, SyncStatus::failed(SyncError::from(error))).await;
+                let _ = show(&sync, LastPass::failed(SyncError::from(error))).await;
                 break;
             }
         };
@@ -252,11 +281,10 @@ async fn run(
                                 started = true;
                                 pending = true;
                                 sync.waits.connection_changed();
-                                if retry.held(&sync.waits).is_none() && show(&sync, SyncStatus::Syncing).await.is_err() { break; }
                             }
                             Err(error) => {
                                 stopped(&sync.waits).await;
-                                if show(&sync, SyncStatus::failed(error)).await.is_err() { break; }
+                                if show(&sync, LastPass::failed(error)).await.is_err() { break; }
                             }
                         }
                     }
@@ -274,12 +302,11 @@ async fn run(
                 Some(Command::Stop) => {
                     started = false;
                     pending = false;
-                    // No caller waits for stopping; the status carries a failure.
-                    let stopped = match sync.files.set_storage(None, std::future::ready(Ok(()))).await {
-                        Ok(()) => SyncStatus::Stopped,
-                        Err(error) => SyncStatus::failed(error),
-                    };
-                    if show(&sync, stopped).await.is_err() { break; }
+                    // No caller waits for stopping; a failure is recorded
+                    // as the last pass's.
+                    if let Err(error) = sync.files.set_storage(None, std::future::ready(Ok(()))).await {
+                        if show(&sync, LastPass::failed(error)).await.is_err() { break; }
+                    }
                 }
                 // Transfers outlive this connection's loop; the store's
                 // owner closes them. This connection's transfers finish first.
@@ -310,7 +337,7 @@ async fn run(
                 Err(error) => {
                     started = false;
                     stopped(&sync.waits).await;
-                    if show(&sync, SyncStatus::failed(SyncError::from(error))).await.is_err() { break; }
+                    if show(&sync, LastPass::failed(SyncError::from(error))).await.is_err() { break; }
                 }
             },
             () = interval.changed() => idle = idle_wait(&sync, idle_from, interval.current()),
@@ -329,7 +356,7 @@ async fn run(
                 pending = false;
                 if let Err(error) = changes.take_changed() {
                     #[expect(clippy::let_underscore_must_use, reason = "the loop ends either way; a failed write has failed the handle, which reports it")]
-                    let _ = show(&sync, SyncStatus::failed(SyncError::from(error))).await;
+                    let _ = show(&sync, LastPass::failed(SyncError::from(error))).await;
                     break;
                 }
                 // The pass answers the retries acted on before it began
@@ -345,12 +372,12 @@ async fn run(
                     }
                     Err(_) => break,
                 };
-                if let Err(error) = show(&sync, SyncStatus::Syncing).await {
+                let connection_version = sync.waits.connection_version();
+                let (passed, moving) = moving_pass(&sync, &codes).await;
+                if let Err(error) = moving {
                     requests.answer(&PassFailure::Failed { error: SyncError::from(error).into() }.into());
                     break;
                 }
-                let connection_version = sync.waits.connection_version();
-                let passed = pass(&sync, &codes).await;
                 // The idle interval counts from the pass's end, before the
                 // steps that record how it ended.
                 idle_from = sync.clock.elapsed();
@@ -359,7 +386,7 @@ async fn run(
                         Ok(()) => match failing {
                             None => {
                                 let finished_at = sync.clock.now();
-                                if let Err(error) = show(&sync, SyncStatus::Synced { finished_at }).await {
+                                if let Err(error) = LastPass::Synced.record_end(&sync.database, finished_at).await {
                                     requests.answer(&PassFailure::Failed { error: SyncError::from(error).into() }.into());
                                     break;
                                 }
@@ -393,7 +420,7 @@ async fn run(
                     }
                 };
                 // What a retry would do changes with the pass's failure, or
-                // with sync stopping, before the status shows it or the
+                // with sync stopping, before the row records it or the
                 // person hears it.
                 if let Err(error) = sync.waits.holds(retry.held(&sync.waits)).await {
                     requests.answer(&PassFailure::Failed { error: SyncError::from(error).into() }.into());
@@ -403,7 +430,7 @@ async fn run(
                     stopped(&sync.waits).await;
                 }
                 if let RetryOutcome::Failed(failure) = &outcome {
-                    if let Err(error) = show(&sync, failure.clone().into()).await {
+                    if let Err(error) = ended(&sync, failure.clone().into()).await {
                         requests.answer(&PassFailure::Failed { error: SyncError::from(error).into() }.into());
                         break;
                     }

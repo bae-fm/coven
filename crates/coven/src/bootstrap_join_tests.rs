@@ -128,7 +128,7 @@ async fn a_recovery_invite_rebinds_a_lost_member_through_the_public_calls() {
     // Its pass applies the replacement and stops; its admin writes refuse
     // from then on.
     lost.start_sync().await.unwrap();
-    lost.test_sync_status().wait_for(|s| matches!(s, SyncStatus::Blocked { .. })).await;
+    lost.test_last_pass().wait_for(|last| matches!(last, Some(LastPass::Blocked { .. }))).await;
     let stopped = lost.circles().create("Garden").await;
     assert!(
         matches!(&stopped, Err(SyncError::MemberKeysReplaced { member }) if *member == carol),
@@ -391,8 +391,7 @@ async fn an_approval_journals_beside_the_apps_row_and_lands_once_sync_runs() {
     );
     let approve = async {
         let request = next_join_request(&owner.handle).await;
-        owner.handle.stop_sync().await.unwrap();
-        owner.handle.test_sync_status().wait_for(|s| matches!(s, SyncStatus::Stopped)).await;
+        owner.stop_sync().await;
         let binding = owner
             .handle
             .write(move |sql| {
@@ -802,9 +801,7 @@ async fn a_removed_members_retained_grant_stays_pending_until_a_retry_revokes_it
     let finished = owner.clock.now() + std::time::Duration::from_secs(1);
     owner.clock.set(finished);
     owner.handle.write(move |sql| Ok(sql.retry_pending_operation(operation)?)).await.unwrap();
-    status
-        .wait_for(|s| matches!(s, SyncStatus::Synced { finished_at } if *finished_at == finished))
-        .await;
+    status.wait_for(|s| s.last_synced == Some(finished)).await;
     assert_eq!(retained_grant(&owner.handle.pending().await.unwrap()), None);
     // `sync` checks the pass leaves no operation pending.
     owner.sync().await;

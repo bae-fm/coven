@@ -10,6 +10,8 @@ struct Fixture {
     app: TestCoven,
     handle: CovenHandle,
     storage: Arc<MemoryStorage>,
+    /// The connector over `storage` every handle opens with.
+    connector: Arc<crate::tests::Connector>,
     clock: Arc<FixedClock>,
     directory: StoreDir,
     _root: tempfile::TempDir,
@@ -31,10 +33,11 @@ impl Fixture {
             .create_closed_store(&StoreLayout::new(root.path().into()), "Reset", Arc::new(UuidIds))
             .await
             .unwrap();
+        let connector = crate::tests::Connector::new(storage.clone());
         let handle =
-            builder(&app, &root, &clock, &storage).open(directory.id(), |_| ()).await.unwrap();
+            builder(&app, &root, &clock, &connector).open(directory.id(), |_| ()).await.unwrap();
 
-        Self { app, handle, storage, clock, directory, _root: root }
+        Self { app, handle, storage, connector, clock, directory, _root: root }
     }
 
     async fn setup(&self) -> Result<StorageSetup, StorageSetupError> {
@@ -54,11 +57,11 @@ fn builder(
     app: &TestCoven,
     root: &tempfile::TempDir,
     clock: &Arc<FixedClock>,
-    storage: &Arc<MemoryStorage>,
+    connector: &Arc<crate::tests::Connector>,
 ) -> CovenBuilder {
     app.builder(StoreLayout::new(root.path().into()))
         .clock(clock.clone())
-        .storage_connector(storage.clone())
+        .storage_connector(connector.clone())
         .synced_tables(vec![SyncedTable::new("notes", RowIdentity::SharedKey)])
         .migrations(vec![Migration::addition(
             1,
@@ -67,8 +70,18 @@ fn builder(
         )])
 }
 
-async fn status(handle: &CovenHandle, expected: impl Fn(&SyncStatus) -> bool) {
-    handle.test_sync_status().wait_for(expected).await;
+/// Wait until the last pass, as the app's SQL reads it, is one `expected`
+/// accepts.
+async fn last_pass(
+    handle: &CovenHandle,
+    expected: impl FnMut(&Option<LastPass>) -> bool,
+) -> Option<LastPass> {
+    handle.test_last_pass().wait_for(expected).await
+}
+
+/// Wait for the first pass after setup to end synced.
+async fn synced(handle: &CovenHandle) {
+    last_pass(handle, |last| *last == Some(LastPass::Synced)).await;
 }
 
 async fn uploaded(f: &Fixture, id: &'static str) {
@@ -90,7 +103,7 @@ async fn notes(handle: &CovenHandle) -> Vec<String> {
 }
 
 fn reopen(f: &Fixture) -> CovenBuilder {
-    builder(&f.app, &f._root, &f.clock, &f.storage)
+    builder(&f.app, &f._root, &f.clock, &f.connector)
 }
 
 /// The hidden directory a replacement loads in, inside the store's (§19.3).
@@ -109,7 +122,7 @@ async fn reset_keeps_passphrase_sessions_until_the_replacement_handle_closes() {
     use coven_crypto::custody::{KeyringCustody, PassphraseCustody};
     let f = Fixture::new().await;
     f.setup().await.unwrap();
-    status(&f.handle, |s| matches!(s, SyncStatus::Synced { .. })).await;
+    synced(&f.handle).await;
     uploaded(&f, "kept").await;
     f.handle.close().await.unwrap();
     let keychain = Arc::new(custody(&f));
@@ -149,10 +162,9 @@ async fn reset_keeps_passphrase_sessions_until_the_replacement_handle_closes() {
 async fn missing_custody_resets_as_a_new_device_and_keeps_the_notice() {
     let f = Fixture::new().await;
     f.setup().await.unwrap();
-    status(&f.handle, |s| matches!(s, SyncStatus::Synced { .. })).await;
+    synced(&f.handle).await;
     uploaded(&f, "kept").await;
-    f.handle.stop_sync().await.unwrap();
-    status(&f.handle, |s| matches!(s, SyncStatus::Stopped)).await;
+    f.connector.stop(&f.handle).await;
     f.handle
         .write(|sql| {
             sql.execute("INSERT INTO notes VALUES('unsent','local')", [])?;
@@ -255,7 +267,7 @@ fn sends(f: &Fixture) -> usize {
 async fn a_restored_copy_behind_storage_stops_until_the_app_resets_it() {
     let f = Fixture::new().await;
     f.setup().await.unwrap();
-    status(&f.handle, |s| matches!(s, SyncStatus::Synced { .. })).await;
+    synced(&f.handle).await;
     uploaded(&f, "kept").await;
     f.handle.close().await.unwrap();
     let store = f.directory.database_path().parent().unwrap().to_owned();
@@ -287,16 +299,20 @@ async fn a_restored_copy_behind_storage_stops_until_the_app_resets_it() {
     for opening in 0..2 {
         let handle = reopen(&f).open(f.directory.id(), |_| ()).await.unwrap();
         handle.start_sync().await.unwrap();
-        status(&handle, |s| {
+        last_pass(&handle, |last| {
             matches!(
-                s,
-                SyncStatus::Failed {
+                last,
+                Some(LastPass::Failed {
                     failure: StatusFailure::DeviceIdInUse(DeviceIdEvidence::UnattemptedSlot { .. }),
                     ..
-                }
+                })
             )
         })
         .await;
+        // Opening keeps how the last pass ended: the app shows the device
+        // needs a reset, on the second opening from before it.
+        let shown = handle.test_sync_status().latest().await;
+        assert!(matches!(shown.state, SyncState::NeedsReset(SyncCause::Pass(_))), "{shown:?}");
         // Reads and local writes still work; nothing is recorded.
         assert_eq!(notes(&handle).await, ["kept"]);
         assert_eq!(handle.device_reset().await.unwrap(), None);
@@ -332,7 +348,7 @@ async fn a_restored_copy_behind_storage_stops_until_the_app_resets_it() {
 async fn a_reset_interrupted_after_its_swap_is_finished_by_the_next_reset() {
     let f = Fixture::new().await;
     f.setup().await.unwrap();
-    status(&f.handle, |s| matches!(s, SyncStatus::Synced { .. })).await;
+    synced(&f.handle).await;
     uploaded(&f, "kept").await;
     let code = f.handle.restore_code().await.unwrap();
     f.handle.close().await.unwrap();
@@ -400,7 +416,7 @@ async fn a_reset_interrupted_after_its_swap_is_finished_by_the_next_reset() {
 async fn a_reset_failing_while_it_loads_leaves_the_store_as_it_was() {
     let f = Fixture::new().await;
     f.setup().await.unwrap();
-    status(&f.handle, |s| matches!(s, SyncStatus::Synced { .. })).await;
+    synced(&f.handle).await;
     uploaded(&f, "kept").await;
     f.handle.close().await.unwrap();
     let old = f.directory.settings().unwrap().device_id;
@@ -462,14 +478,14 @@ async fn an_intact_unconnected_store_resets_to_an_empty_database_with_a_fresh_id
 async fn a_keychain_without_the_store_refuses_and_names_the_missing_member_keys() {
     let f = Fixture::new().await;
     f.setup().await.unwrap();
-    status(&f.handle, |s| matches!(s, SyncStatus::Synced { .. })).await;
+    synced(&f.handle).await;
     f.handle.close().await.unwrap();
     let old = f.directory.settings().unwrap().device_id;
     // Another keychain, as after the app changes its service name: neither the
     // device entry nor the member keys are there, so only a restore continues.
     let renamed = TestCoven::new();
     assert!(matches!(
-        builder(&renamed, &f._root, &f.clock, &f.storage)
+        builder(&renamed, &f._root, &f.clock, &f.connector)
             .open(f.directory.id(), |_| ())
             .await,
         Err(CovenError::MemberKeysMissing { store }) if store == f.directory.id()
@@ -559,7 +575,7 @@ async fn a_reset_replaces_a_database_a_call_found_damaged() {
     use std::io::{Read, Seek, SeekFrom, Write};
     let f = Fixture::new().await;
     f.setup().await.unwrap();
-    status(&f.handle, |s| matches!(s, SyncStatus::Synced { .. })).await;
+    synced(&f.handle).await;
     uploaded(&f, "kept").await;
     f.handle.close().await.unwrap();
     let with_drafts = || {

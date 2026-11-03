@@ -84,7 +84,14 @@ async fn prepare(
         Ok(owners) => owners,
         Err(error) => return Err(close_failed(&database, error).await),
     };
-    if let Err(error) = crate::storage::record_opened(&database, &owners.clock, false).await {
+    if let Err(error) = crate::storage::record_opened(
+        &database,
+        &owners.clock,
+        coven_database::RecordedLocation::None,
+        None,
+    )
+    .await
+    {
         return Err(close_failed(&database, error.into()).await);
     }
     let handle = owners.into_handle(database, waits, false);

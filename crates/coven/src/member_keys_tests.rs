@@ -109,7 +109,7 @@ async fn member_keys_are_replaced_through_the_public_calls() {
     // Its pass applies the replacement and stops; its admin writes refuse
     // from then on.
     handle.start_sync().await.unwrap();
-    handle.test_sync_status().wait_for(|s| matches!(s, SyncStatus::Blocked { .. })).await;
+    handle.test_last_pass().wait_for(|last| matches!(last, Some(LastPass::Blocked { .. }))).await;
     let stopped = handle.circles().create("Garden").await;
     assert!(
         matches!(&stopped, Err(SyncError::MemberKeysReplaced { member }) if *member == carol),

@@ -4,16 +4,14 @@ use super::*;
 async fn repeated_start_preserves_the_connector_waiting_in_backoff() {
     let f = Fixture::new().await;
     f.setup().await.unwrap();
-    status(&f.handle, |s| matches!(s, SyncStatus::Synced { .. })).await;
-    f.handle.stop_sync().await.unwrap();
-    status(&f.handle, |s| matches!(s, SyncStatus::Stopped)).await;
+    synced(&f.handle).await;
+    stop(&f).await;
     *f.connector.failure.lock().unwrap() = Some(StorageFailure::Network.into());
     f.handle.start_sync().await.unwrap();
-    status(&f.handle, |s| matches!(s, SyncStatus::Failed { .. } | SyncStatus::Offline { .. }))
-        .await;
+    last_pass(&f.handle, failed).await;
     f.handle.start_sync().await.unwrap();
     f.advance(Duration::from_secs(30));
-    status(&f.handle, |s| matches!(s, SyncStatus::Synced { .. })).await;
+    synced(&f.handle).await;
     assert_eq!(f.connector.clients.lock().unwrap().len(), 2);
     f.handle.close().await.unwrap();
 }
@@ -22,17 +20,15 @@ async fn repeated_start_preserves_the_connector_waiting_in_backoff() {
 async fn start_after_stop_during_backoff_owns_a_replacement_connector() {
     let f = Fixture::new().await;
     f.setup().await.unwrap();
-    status(&f.handle, |s| matches!(s, SyncStatus::Synced { .. })).await;
-    f.handle.stop_sync().await.unwrap();
-    status(&f.handle, |s| matches!(s, SyncStatus::Stopped)).await;
+    synced(&f.handle).await;
+    stop(&f).await;
     *f.connector.failure.lock().unwrap() = Some(StorageFailure::Network.into());
     f.handle.start_sync().await.unwrap();
-    status(&f.handle, |s| matches!(s, SyncStatus::Failed { .. } | SyncStatus::Offline { .. }))
-        .await;
+    last_pass(&f.handle, failed).await;
     f.handle.stop_sync().await.unwrap();
     f.handle.start_sync().await.unwrap();
     f.advance(Duration::from_secs(30));
-    status(&f.handle, |s| matches!(s, SyncStatus::Synced { .. })).await;
+    synced(&f.handle).await;
     f.handle.close().await.unwrap();
 }
 
@@ -40,9 +36,8 @@ async fn start_after_stop_during_backoff_owns_a_replacement_connector() {
 async fn stopping_a_failing_connector_does_not_wait_for_its_backoff() {
     let f = Fixture::new().await;
     f.setup().await.unwrap();
-    status(&f.handle, |s| matches!(s, SyncStatus::Synced { .. })).await;
-    f.handle.stop_sync().await.unwrap();
-    status(&f.handle, |s| matches!(s, SyncStatus::Stopped)).await;
+    synced(&f.handle).await;
+    stop(&f).await;
     let (entered, entering) = tokio::sync::oneshot::channel();
     let (resume, resumed) = tokio::sync::oneshot::channel();
     *f.connector.held.lock().await = Some((entered, resumed));
@@ -60,35 +55,46 @@ async fn stopping_a_failing_connector_does_not_wait_for_its_backoff() {
 async fn stopped_fixture() -> Fixture {
     let f = Fixture::new().await;
     f.setup().await.unwrap();
-    status(&f.handle, |s| matches!(s, SyncStatus::Synced { .. })).await;
-    f.handle.stop_sync().await.unwrap();
-    status(&f.handle, |s| matches!(s, SyncStatus::Stopped)).await;
+    synced(&f.handle).await;
+    stop(&f).await;
     f
 }
 
-fn failed(status: &SyncStatus) -> bool {
-    matches!(status, SyncStatus::Failed { .. } | SyncStatus::Offline { .. })
+fn failed(last: &Option<LastPass>) -> bool {
+    matches!(last, Some(LastPass::Failed { .. } | LastPass::Offline { .. }))
+}
+
+/// A connector failure whose text names its attempt, so the last pass each
+/// attempt leaves differs from the one before.
+fn attempt_failure(attempt: u32) -> StorageError {
+    StorageFailure::Network.with_source(format!("attempt {attempt}"))
+}
+
+/// Wait until the last pass is attempt `attempt`'s failure.
+async fn attempt_failed(handle: &CovenHandle, attempt: u32) {
+    let text = format!("attempt {attempt}");
+    last_pass(handle, |last| {
+        matches!(last, Some(LastPass::Offline { error, .. } | LastPass::Failed { error, .. }) if error.contains(&text))
+    })
+    .await;
 }
 
 #[tokio::test]
 async fn connection_backoff_keeps_its_deadline_and_exponent_across_reopening() {
     let f = stopped_fixture().await;
-    *f.connector.failure.lock().unwrap() = Some(StorageFailure::Network.into());
+    *f.connector.failure.lock().unwrap() = Some(attempt_failure(1));
     f.handle.start_sync().await.unwrap();
-    status(&f.handle, failed).await;
+    attempt_failed(&f.handle, 1).await;
     for failures in 1..=4 {
         let wait = f.handle.test_connection_retry_wait().await.expect("persisted connection wait");
         assert_eq!(wait.failures, failures);
         assert_eq!(wait.wait, Duration::from_secs(1 << (failures - 1)));
         if failures < 4 {
-            *f.connector.failure.lock().unwrap() = Some(StorageFailure::Network.into());
-            // The attempt shows `Syncing` before it calls the connector, so
-            // the failure shown after that call is its own.
-            let mut attempts = f.connector.attempts.subscribe();
-            let before = *attempts.borrow();
+            // Each attempt's failure names it, so the one shown is its own;
+            // the attempt records its wait before it.
+            *f.connector.failure.lock().unwrap() = Some(attempt_failure(failures + 1));
             f.advance(wait.wait);
-            attempts.wait_for(|n| *n > before).await.unwrap();
-            status(&f.handle, failed).await;
+            attempt_failed(&f.handle, failures + 1).await;
         }
     }
     let persisted = f.handle.test_connection_retry_wait().await.unwrap();
@@ -105,13 +111,13 @@ async fn connection_backoff_keeps_its_deadline_and_exponent_across_reopening() {
     .unwrap();
     assert_eq!(reopened.test_connection_retry_wait().await, Some(persisted));
     let attempts = *f.connector.attempts.borrow();
-    *f.connector.failure.lock().unwrap() = Some(StorageFailure::Network.into());
+    *f.connector.failure.lock().unwrap() = Some(attempt_failure(5));
     reopened.start_sync().await.unwrap();
     f.advance(Duration::from_secs(3));
     tokio::time::sleep(Duration::from_millis(50)).await;
     assert_eq!(*f.connector.attempts.borrow(), attempts, "four seconds remain after reopening");
     f.advance(Duration::from_secs(1));
-    status(&reopened, failed).await;
+    attempt_failed(&reopened, 5).await;
     let next = reopened.test_connection_retry_wait().await.unwrap();
     assert_eq!(next.failures, 5);
     assert_eq!(next.wait, Duration::from_secs(16));
@@ -126,10 +132,9 @@ async fn an_unanswered_connector_failure_is_offline() {
             .with_source(std::io::Error::new(std::io::ErrorKind::NotConnected, "offline")),
     );
     f.handle.start_sync().await.unwrap();
-    status(&f.handle, failed).await;
-    let shown = f.handle.test_sync_status().latest().await;
+    let shown = last_pass(&f.handle, failed).await;
     assert!(
-        matches!(shown, SyncStatus::Offline { failure: StorageFailure::Network, .. }),
+        matches!(shown, Some(LastPass::Offline { failure: StorageFailure::Network, .. })),
         "{shown:?}"
     );
     f.handle.close().await.unwrap();
@@ -141,7 +146,7 @@ async fn connector_failures_wait_for_new_credentials_without_timers() {
         let f = stopped_fixture().await;
         *f.connector.failure.lock().unwrap() = Some(failure.into());
         f.handle.start_sync().await.unwrap();
-        status(&f.handle, failed).await;
+        last_pass(&f.handle, failed).await;
         assert!(f.handle.test_connection_retry_wait().await.is_none());
         let attempts = *f.connector.attempts.borrow();
         f.advance(Duration::from_secs(600));
@@ -157,7 +162,7 @@ async fn connector_failures_wait_for_new_credentials_without_timers() {
             .update_credentials("replacement".into(), SecretText::new("secret".into()))
             .await
             .unwrap();
-        status(&f.handle, |s| matches!(s, SyncStatus::Synced { .. })).await;
+        synced(&f.handle).await;
         f.handle.close().await.unwrap();
     }
 }
@@ -166,7 +171,7 @@ async fn connector_failures_wait_for_new_credentials_without_timers() {
 async fn a_connected_pass_waits_for_new_credentials_after_authentication_failure() {
     let f = Fixture::new().await;
     f.setup().await.unwrap();
-    status(&f.handle, |s| matches!(s, SyncStatus::Synced { .. })).await;
+    synced(&f.handle).await;
     f.storage
         .set_faults(Faults {
             read_failures: [(ObjectPath::floor(f.directory.id()), StorageFailure::Authentication)]
@@ -175,7 +180,7 @@ async fn a_connected_pass_waits_for_new_credentials_after_authentication_failure
         })
         .await;
     f.handle.sync_now();
-    status(&f.handle, failed).await;
+    last_pass(&f.handle, failed).await;
     assert!(f.handle.test_connection_retry_wait().await.is_none());
     let requests = f.storage.request_count();
     f.advance(Duration::from_secs(600));
@@ -187,7 +192,7 @@ async fn a_connected_pass_waits_for_new_credentials_after_authentication_failure
         .update_credentials("replacement".into(), SecretText::new("secret".into()))
         .await
         .unwrap();
-    status(&f.handle, |s| matches!(s, SyncStatus::Synced { .. })).await;
+    synced(&f.handle).await;
     f.handle.close().await.unwrap();
 }
 
@@ -205,7 +210,7 @@ async fn stopping_an_inflight_failure_preserves_its_delay_for_the_next_start() {
     f.handle.start_sync().await.unwrap();
     assert_eq!(f.handle.test_connection_retry_wait().await.unwrap().wait, Duration::from_secs(1));
     f.advance(Duration::from_secs(1));
-    status(&f.handle, |s| matches!(s, SyncStatus::Synced { .. })).await;
+    synced_since(&f.handle, f.clock.now()).await;
     f.handle.close().await.unwrap();
 }
 
@@ -213,7 +218,7 @@ async fn stopping_an_inflight_failure_preserves_its_delay_for_the_next_start() {
 async fn credentials_changed_during_a_failed_pass_are_evidence_for_its_retry() {
     let f = Fixture::new().await;
     f.setup().await.unwrap();
-    status(&f.handle, |s| matches!(s, SyncStatus::Synced { .. })).await;
+    synced(&f.handle).await;
     let floor = ObjectPath::floor(f.directory.id());
     f.storage
         .set_faults(Faults {
@@ -231,8 +236,11 @@ async fn credentials_changed_during_a_failed_pass_are_evidence_for_its_retry() {
         .await
         .unwrap();
     f.storage.set_faults(Faults::none()).await;
+    // The clock moves, so the end of the pass after the failed one moves the
+    // last synced time; an authentication failure waits for no timer.
+    f.advance(Duration::from_secs(1));
     resume.send(()).unwrap();
-    status(&f.handle, |s| matches!(s, SyncStatus::Synced { .. })).await;
+    synced_since(&f.handle, f.clock.now()).await;
     f.handle.close().await.unwrap();
 }
 
@@ -246,7 +254,7 @@ async fn answer(answer: RetryAnswer) -> RetryOutcome {
 async fn a_retry_is_answered_by_the_pass_it_runs() {
     let f = Fixture::new().await;
     f.setup().await.unwrap();
-    status(&f.handle, |s| matches!(s, SyncStatus::Synced { .. })).await;
+    synced(&f.handle).await;
     let outcome = answer(f.handle.retry_now().await.unwrap()).await;
     assert!(
         matches!(outcome, RetryOutcome::Synced { finished_at } if finished_at == f.clock.now()),
@@ -263,7 +271,7 @@ async fn a_retry_is_answered_by_the_pass_it_runs() {
 async fn a_retry_during_a_pass_is_answered_by_the_next_pass() {
     let f = Fixture::new().await;
     f.setup().await.unwrap();
-    status(&f.handle, |s| matches!(s, SyncStatus::Synced { .. })).await;
+    synced(&f.handle).await;
     let floor = ObjectPath::floor(f.directory.id());
     let (entered, entering) = tokio::sync::oneshot::channel();
     let (resume, resumed) = tokio::sync::oneshot::channel();
@@ -321,7 +329,7 @@ async fn retries_during_a_connection_attempt_share_the_next_pass() {
 async fn a_retry_during_a_cooldown_says_when_it_ends() {
     let f = Fixture::new().await;
     f.setup().await.unwrap();
-    status(&f.handle, |s| matches!(s, SyncStatus::Synced { .. })).await;
+    synced(&f.handle).await;
     f.storage
         .set_faults(Faults {
             fail_next: 1,
@@ -331,7 +339,7 @@ async fn a_retry_during_a_cooldown_says_when_it_ends() {
         })
         .await;
     f.handle.sync_now();
-    status(&f.handle, failed).await;
+    last_pass(&f.handle, failed).await;
     let requests = f.storage.request_count();
     let outcome = answer(f.handle.retry_now().await.unwrap()).await;
     assert!(
@@ -353,7 +361,7 @@ async fn failed_and_held_attempts_answer_failed_with_their_cause() {
             .with_source(std::io::Error::new(std::io::ErrorKind::NotConnected, "offline")),
     );
     f.handle.start_sync().await.unwrap();
-    status(&f.handle, failed).await;
+    last_pass(&f.handle, failed).await;
     *f.connector.failure.lock().unwrap() = Some(
         StorageFailure::Network
             .with_source(std::io::Error::new(std::io::ErrorKind::NotConnected, "offline")),
@@ -391,7 +399,7 @@ async fn stopping_answers_waiting_retries_not_syncing() {
     assert!(matches!(outcome, RetryOutcome::NotSyncing), "{outcome:?}");
     *f.connector.failure.lock().unwrap() = Some(StorageFailure::Network.into());
     f.handle.start_sync().await.unwrap();
-    status(&f.handle, failed).await;
+    last_pass(&f.handle, failed).await;
     let (entered, entering) = tokio::sync::oneshot::channel();
     let (resume, resumed) = tokio::sync::oneshot::channel();
     *f.connector.held.lock().await = Some((entered, resumed));
@@ -431,7 +439,7 @@ async fn effect_becomes(f: &Fixture, expected: RetryEffect) {
 async fn a_cooldown_is_published_as_the_retry_answers_it() {
     let f = Fixture::new().await;
     f.setup().await.unwrap();
-    status(&f.handle, |s| matches!(s, SyncStatus::Synced { .. })).await;
+    synced(&f.handle).await;
     assert_eq!(effect(&f).await, RetryEffect::Pass);
     let outcome = answer(f.handle.retry_now().await.unwrap()).await;
     assert!(matches!(outcome, RetryOutcome::Synced { .. }), "{outcome:?}");
@@ -444,7 +452,7 @@ async fn a_cooldown_is_published_as_the_retry_answers_it() {
         })
         .await;
     f.handle.sync_now();
-    status(&f.handle, failed).await;
+    last_pass(&f.handle, failed).await;
     let until = f.clock.now() + Duration::from_secs(200);
     assert_eq!(effect(&f).await, RetryEffect::CoolingDown { until });
     let requests = f.storage.request_count();
@@ -469,7 +477,7 @@ async fn a_cooldown_is_published_as_the_retry_answers_it() {
 async fn a_failure_only_new_credentials_clear_is_published_as_the_retry_answers_it() {
     let f = Fixture::new().await;
     f.setup().await.unwrap();
-    status(&f.handle, |s| matches!(s, SyncStatus::Synced { .. })).await;
+    synced(&f.handle).await;
     f.storage
         .set_faults(Faults {
             read_failures: [(ObjectPath::floor(f.directory.id()), StorageFailure::Authentication)]
@@ -478,7 +486,7 @@ async fn a_failure_only_new_credentials_clear_is_published_as_the_retry_answers_
         })
         .await;
     f.handle.sync_now();
-    status(&f.handle, failed).await;
+    last_pass(&f.handle, failed).await;
     assert_eq!(effect(&f).await, RetryEffect::Failed);
     let requests = f.storage.request_count();
     let outcome = answer(f.handle.retry_now().await.unwrap()).await;
@@ -516,7 +524,7 @@ async fn the_first_attempt_publishes_what_its_retries_get() {
             .with_source(std::io::Error::new(std::io::ErrorKind::NotConnected, "offline")),
     );
     f.handle.start_sync().await.unwrap();
-    status(&f.handle, failed).await;
+    last_pass(&f.handle, failed).await;
     assert_eq!(effect(&f).await, RetryEffect::Pass);
     *f.connector.failure.lock().unwrap() = Some(StorageFailure::Authentication.into());
     let outcome = answer(f.handle.retry_now().await.unwrap()).await;
@@ -552,7 +560,7 @@ async fn the_first_attempt_publishes_what_its_retries_get() {
 async fn the_first_attempt_publishes_a_cooldowns_end_within_its_backoff() {
     let f = Fixture::new().await;
     f.setup().await.unwrap();
-    status(&f.handle, |s| matches!(s, SyncStatus::Synced { .. })).await;
+    synced(&f.handle).await;
     f.storage
         .set_faults(Faults {
             fail_next: 2,
@@ -562,18 +570,15 @@ async fn the_first_attempt_publishes_a_cooldowns_end_within_its_backoff() {
         })
         .await;
     f.handle.sync_now();
-    status(&f.handle, failed).await;
-    // The pass shows `Syncing` before its first request, so the failure
-    // shown after that request is its own.
-    let mut requests = f.storage.subscribe_requests();
-    let before = f.storage.request_count();
+    last_pass(&f.handle, failed).await;
+    // The second pass's 429 begins a cooldown from the moved clock. Its
+    // pass then records the backoff, and stopping waits for that pass.
     f.advance(Duration::from_secs(1));
-    requests.wait_for(|n| *n > before).await.unwrap();
-    status(&f.handle, failed).await;
+    let cooling = RetryEffect::CoolingDown { until: f.clock.now() + Duration::from_secs(1) };
+    effect_becomes(&f, cooling).await;
+    stop(&f).await;
     let backoff = f.handle.test_connection_retry_wait().await.unwrap();
     assert_eq!((backoff.failures, backoff.wait), (2, Duration::from_secs(2)));
-    f.handle.stop_sync().await.unwrap();
-    status(&f.handle, |s| matches!(s, SyncStatus::Stopped)).await;
     assert_eq!(effect(&f).await, RetryEffect::NotSyncing);
     f.handle.start_sync().await.unwrap();
     let until = f.clock.now() + Duration::from_secs(1);
@@ -637,7 +642,7 @@ async fn an_uploads_cooldown_is_published_until_it_ends() {
 async fn a_failed_pass_publishes_its_effect_before_its_status() {
     let f = Fixture::new().await;
     f.setup().await.unwrap();
-    status(&f.handle, |s| matches!(s, SyncStatus::Synced { .. })).await;
+    synced(&f.handle).await;
     let floor = ObjectPath::floor(f.directory.id());
     f.storage
         .set_faults(Faults {
@@ -651,8 +656,9 @@ async fn a_failed_pass_publishes_its_effect_before_its_status() {
     f.handle.sync_now();
     entering.await.unwrap();
     f.handle.network_changed();
-    // The held pass shows `Syncing`, so the failure after it is its own.
-    let mut shown = f.handle.test_sync_status();
+    // The pass before the held one ended synced, so the failure is the held
+    // pass's own.
+    let mut shown = f.handle.test_last_pass();
     resume.send(()).unwrap();
     shown.wait_for(failed).await;
     assert_eq!(effect(&f).await, RetryEffect::Failed);

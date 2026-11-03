@@ -368,6 +368,7 @@ async fn bootstrap_device(
     match result {
         Ok(Some(Loaded {
             code,
+            provider,
             credentials,
             sign_in,
             ring,
@@ -382,10 +383,15 @@ async fn bootstrap_device(
             // await separates; so is the status the published store opens
             // with (E5).
             let name = match commit::loaded_name(&database).await {
-                Ok(name) => crate::storage::record_opened(&database, &clock, true)
-                    .await
-                    .map(|()| name)
-                    .map_err(BootstrapError::from),
+                Ok(name) => crate::storage::record_opened(
+                    &database,
+                    &clock,
+                    coven_database::RecordedLocation::Connected(provider),
+                    Some(clock.now()),
+                )
+                .await
+                .map(|()| name)
+                .map_err(BootstrapError::from),
                 Err(error) => Err(error),
             };
             let result = match name.and_then(|name| {
@@ -556,6 +562,8 @@ impl Admission {
 /// A loaded store awaiting publication, with what reaches its storage.
 struct Loaded {
     code: RestoreCode,
+    /// The provider of the location loaded from.
+    provider: CloudProvider,
     credentials: StorageCredentials,
     sign_in: SignInCustody,
     ring: StoreKeyring,
@@ -787,6 +795,7 @@ async fn prepare_and_load(
     match result {
         Ok(Some((code, credentials, ring))) => Ok(Some(Loaded {
             code,
+            provider,
             credentials,
             sign_in,
             ring,

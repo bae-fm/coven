@@ -224,29 +224,110 @@ impl Database {
         self.subscribe(|sql| sql.unsent())
     }
 
+    /// What the sync state is computed from, in one committed snapshot
+    /// (§19.1): `coven_sync_status`'s row, `coven_retry_effect`'s, the send
+    /// and upload queues, the files moving and the pending records, decoded
+    /// as the sync owner's typed values, given to `compute` in the read.
+    pub async fn sync_facts<P, T>(
+        &self,
+        compute: impl FnOnce(crate::SyncFacts<P>) -> CovenResult<T> + Send + 'static,
+    ) -> CovenResult<T>
+    where
+        P: crate::PendingValue + Clone,
+        T: Send + 'static,
+    {
+        self.read(move |sql| compute(sql.sync_facts()?)).await
+    }
+
+    /// The same pre-built query, live: it runs again on each committed
+    /// change of what it reads, and as a file starts or ends a transfer.
+    pub fn subscribe_sync_facts<P, T>(
+        &self,
+        compute: impl Fn(crate::SyncFacts<P>) -> CovenResult<T> + Send + Sync + 'static,
+    ) -> crate::LiveQuery<T>
+    where
+        P: crate::PendingValue + Clone,
+        T: Send + 'static,
+    {
+        self.subscribe(move |sql| compute(sql.sync_facts()?))
+    }
+
     /// The upload queue, its pause setting and each file's recorded provider
     /// session in one committed snapshot, available while disconnected (E7).
     pub async fn upload_queue(&self) -> CovenResult<crate::UploadQueueState> {
         self.read(|sql| sql.upload_queue()).await
     }
 
-    /// Write this installation's sync status, as `state` names it and
-    /// `status` holds it (api.md E5), in the step that changes it. A failure
-    /// fails this handle with its cause, as losing a pending record does, so
-    /// no app goes on reading a status sync has moved past.
-    pub async fn record_sync_status(
+    /// Record, as the store opens, whether a storage location is recorded
+    /// here and its credentials held, and that no pass moves, keeping how the
+    /// last pass ended and when sync last finished; `finished`, for a store
+    /// joining or restoring read to its end, is when (api.md E5). The
+    /// provider is as sync names it. A failure fails this handle with its
+    /// cause, as losing a pending record does.
+    pub async fn record_opened(
         &self,
-        state: &'static str,
-        status: Vec<u8>,
+        location: crate::RecordedLocation<String>,
+        finished: Option<std::time::SystemTime>,
     ) -> Result<(), DbError> {
-        self.call(move |inner| {
-            inner.access.with_writer(|writer| {
-                writer.state_transaction(|db| {
-                    crate::internal_schema::sync_status::save(db, state, &status)
-                })
-            })
+        self.save_sync_status(move |db| {
+            crate::internal_schema::sync_status::save_location(db, &location, finished, true)
         })
         .await
+    }
+
+    /// Record whether a storage location is recorded here and its
+    /// credentials held, as setup, a change of credentials or releasing a
+    /// connection finds it; `finished`, for setup, is when it read the store
+    /// to its end. A failure fails this handle, as `record_opened`'s does.
+    pub async fn record_location(
+        &self,
+        location: crate::RecordedLocation<String>,
+        finished: Option<std::time::SystemTime>,
+    ) -> Result<(), DbError> {
+        self.save_sync_status(move |db| {
+            crate::internal_schema::sync_status::save_location(db, &location, finished, false)
+        })
+        .await
+    }
+
+    /// Record that the running pass read a slot it hadn't, or claimed one.
+    /// A failure fails this handle, as `record_opened`'s does.
+    pub async fn record_moving(&self) -> Result<(), DbError> {
+        self.save_sync_status(crate::internal_schema::sync_status::save_moving).await
+    }
+
+    /// Record how the last pass ended, as sync encodes it, when sync failed
+    /// outside a pass: starting, stopping or a local failure of the loop's.
+    /// A failure fails this handle, as `record_opened`'s does.
+    pub async fn record_last_pass(&self, last_pass: Vec<u8>) -> Result<(), DbError> {
+        self.save_sync_status(move |db| {
+            crate::internal_schema::sync_status::save_last_pass(db, &last_pass)
+        })
+        .await
+    }
+
+    /// Record how the running pass ended, as sync encodes it, and that it
+    /// moves no more; `finished`, for a pass that reached the end of the
+    /// sequence, is when, which becomes the last synced time unless that is
+    /// later. A failure fails this handle, as `record_opened`'s does.
+    pub async fn record_pass_end(
+        &self,
+        last_pass: Vec<u8>,
+        finished: Option<std::time::SystemTime>,
+    ) -> Result<(), DbError> {
+        self.save_sync_status(move |db| {
+            crate::internal_schema::sync_status::save_pass_end(db, &last_pass, finished)
+        })
+        .await
+    }
+
+    /// Write `coven_sync_status` in the step that changes it, on the writer.
+    async fn save_sync_status(
+        &self,
+        save: impl FnOnce(&crate::sqlite::DatabaseConnection) -> Result<(), DbError> + Send + 'static,
+    ) -> Result<(), DbError> {
+        self.call(move |inner| inner.access.with_writer(|writer| writer.state_transaction(save)))
+            .await
     }
 
     /// Change what decides the person's retry, `coven_retry_effect`'s row,

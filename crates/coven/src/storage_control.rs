@@ -34,15 +34,15 @@ impl StorageConnections {
             self.epoch.fetch_add(1, Ordering::SeqCst);
             return connected.sync_loop.start().await;
         }
-        // Credentials may have been entered since the store opened without them.
-        if !self.configured.load(Ordering::SeqCst) && self.codes.connection().await?.is_some() {
-            self.configured.store(true, Ordering::SeqCst);
+        // Credentials may have been entered since the store opened without
+        // them: record what custody holds now.
+        if !self.configured.load(Ordering::SeqCst) {
+            self.record_custody().await?;
         }
         if !self.configured.load(Ordering::SeqCst) {
             return Ok(());
         }
         let epoch = self.epoch.fetch_add(1, Ordering::SeqCst) + 1;
-        self.show(SyncStatus::Syncing).await?;
         // The attempt is the start of the first pass: retries wait for it.
         self.waits.sync_started().await?;
         let owner = self.clone();
@@ -128,11 +128,6 @@ impl StorageConnections {
                 Ok(None) => continue,
                 Err(_) => return,
             };
-            if let Err(error) = self.show(SyncStatus::Syncing).await {
-                self.stopped().await;
-                return requests
-                    .answer(&coven_sync::PassFailure::Failed { error: error.into() }.into());
-            }
             // Location identifies the provider even if decoding or reading its
             // credentials fails. A location read itself is a local disk failure.
             let connection_version = self.waits.connection_version();
@@ -152,7 +147,7 @@ impl StorageConnections {
                     let released = self.release(&mut live).await;
                     #[expect(
                         clippy::let_underscore_must_use,
-                        reason = "a failed release is published to the status, which carries it"
+                        reason = "a failed release is recorded as the last pass's failure"
                     )]
                     let _ = self.publish_released(released).await;
                     requests.answer(&coven_sync::RetryOutcome::NotSyncing);
@@ -192,8 +187,8 @@ impl StorageConnections {
                     match failed {
                         Ok(failure) => {
                             // What a retry would do changes with the failure
-                            // before the person hears it or the status
-                            // shows it.
+                            // before the person hears it or the row records
+                            // it.
                             if let Err(error) = self.waits.holds(retry.held(&self.waits)).await {
                                 let error = SyncError::from(error);
                                 return requests.answer(
@@ -219,7 +214,7 @@ impl StorageConnections {
         }
         #[expect(
             clippy::let_underscore_must_use,
-            reason = "a failed release is published to the status, which carries it"
+            reason = "a failed release is recorded as the last pass's failure"
         )]
         let _ = self.publish_released(Ok(())).await;
         self.stopped().await;
@@ -264,7 +259,7 @@ impl StorageConnections {
             let released = owner.release(&mut live).await;
             #[expect(
                 clippy::let_underscore_must_use,
-                reason = "no caller waits for stopping; the status carries a failure"
+                reason = "no caller waits for stopping; a failure is recorded as the last pass's"
             )]
             let _ = owner.publish_released(released).await;
         });
@@ -276,7 +271,7 @@ impl StorageConnections {
         if let Some(control) = self.control.lock().expect("loop control poisoned").as_ref() {
             #[expect(
                 clippy::let_underscore_must_use,
-                reason = "a closed loop has nothing to sync; the status reports why"
+                reason = "a closed loop has nothing to sync; the sync state says why"
             )]
             let _ = control.sync_now();
         }
@@ -300,24 +295,19 @@ impl StorageConnections {
         self.publications.state.sync_often(interval)
     }
 
-    /// Stopped with storage set up, Disconnected without; a release failure
-    /// is Failed with its cause.
+    /// Once the connection is released, record whether storage is set up
+    /// here as custody holds it now; a release failure, or a failure reading
+    /// custody, is recorded as the last pass's failure with its cause.
     pub(super) async fn publish_released(
         &self,
         result: Result<(), SyncError>,
     ) -> Result<(), SyncError> {
-        let result = result
-            .and_then(|()| self.credentials.connection(&self.settings).map(|data| data.is_some()));
+        let result = result.and_then(|()| self.credentials.location(&self.settings));
         match result {
-            Ok(configured) => {
-                self.configured.store(configured, Ordering::SeqCst);
-                self.show(if configured { SyncStatus::Stopped } else { SyncStatus::Disconnected })
-                    .await
-            }
+            Ok(location) => self.record_location(location, None).await,
             Err(error) => {
                 let (failure, source) = error.into_shared();
-                self.show(SyncStatus::failed(coven_sync::SyncFailure::Other(source.clone())))
-                    .await?;
+                self.show(LastPass::failed(coven_sync::SyncFailure::Other(source.clone()))).await?;
                 Err(SyncError::Failed { failure, source })
             }
         }

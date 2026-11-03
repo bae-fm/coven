@@ -111,7 +111,12 @@ impl SequenceSync {
                     let fetched = reads.next().await;
                     timing.fetched(self.clock.elapsed() - fetching, &fetched);
                     let input = match fetched {
-                        Ok(Some(input)) => input,
+                        // A slot read moves data: the sync state shows the
+                        // pass syncing (§19.1).
+                        Ok(Some(input)) => {
+                            self.state.moved();
+                            input
+                        }
                         Ok(None) => {
                             if next <= known_end {
                                 failure = Some((

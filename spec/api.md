@@ -3007,7 +3007,7 @@ let moved = handle
 | | `position` | its place in the queue, as in `coven_uploads` |
 | `coven_pins`: each file this device keeps pinned, whole on this device (E8); a table, which local triggers can follow | `file` | the file's id |
 | `coven_sync_status`: what this installation's sync state is computed from, in one row from the store's creation on, with no storage set up too (E5); a table, which local triggers can follow; not readable on a read-only handle; read the state with `sync_status` | `storage` | `none` with no location recorded, `signed_out` with a location whose credentials this device doesn't hold, `connected` with both |
-| | `provider` | the recorded location's provider, read as `CloudProvider`; NULL with none |
+| | `provider` | the recorded location's provider by its `CloudProvider` name: `S3`, `Dropbox`, `OneDrive` or `CloudKit`; NULL with none |
 | | `last_pass` | how the last pass ended, read as `LastPass`; NULL until a pass ends on this device, which counts as synced, since setup, joining and restoring read the store to its end |
 | | `moving` | 1 while a running pass has read a slot it hadn't, or claimed one; opening writes 0 |
 | | `last_synced` | when a pass last reached the end of the sequence, or setup, joining or restoring finished, in milliseconds since the Unix epoch by the store's clock; never earlier than before; NULL until then |
@@ -3763,9 +3763,10 @@ while let Some(Ok(values)) = lost.next().await {
   holds the store's writer lock. A read-only handle can't tell whether the
   writer that last wrote it still runs: one that ended mid-pass left its move
   behind, and no write marks its end. So app SQL on a read-only handle may
-  not read either row, directly or through the app's own view, and
-  `sync_status` fails there: `StatementForbidden`. The app's trigger on
-  them still lets a read-only handle open, since it never runs there.
+  not read either row, directly or through the app's own view:
+  `StatementForbidden`; and `CovenReadHandle` has no `sync_status`. The
+  app's trigger on them still lets a read-only handle open, since it never
+  runs there.
 - An offline pass describes the last failed attempt, not the connection's
   history. A failed pass: storage refused the whole pass, or coven's own
   operation failed; one that never clears stops sync until a reset.
@@ -4825,7 +4826,7 @@ impl CovenHandle {
     /// The sync state and when sync last finished, computed from
     /// `coven_sync_status`, `coven_retry_effect`, the send queue, the upload
     /// queue, the files moving and the pending records in one committed
-    /// snapshot (§19.1). A read-only handle has none: `StatementForbidden`.
+    /// snapshot (§19.1). `CovenReadHandle` has none.
     pub async fn sync_status(&self) -> CovenResult<SyncStatus>;
 
     /// The same pre-built query, live (E4): its first value is the current

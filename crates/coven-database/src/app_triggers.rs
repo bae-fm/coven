@@ -7,12 +7,12 @@
 use super::DatabaseConnection;
 use crate::DbError;
 
-/// Each change coven makes to the sync status and the retry effect:
+/// Each change coven makes to the sync status row and the retry effect:
 /// rewriting the one row the store's creation made, as opening and the sync
 /// loop do. The retry effect's generated `effect` changes with the columns
 /// it is computed from.
 const STATUS_CHANGES: [&str; 2] = [
-    "UPDATE coven_sync_status SET state=state,status=status",
+    "UPDATE coven_sync_status SET storage=storage,provider=provider,last_pass=last_pass,moving=moving,last_synced=last_synced",
     "UPDATE coven_retry_effect SET syncing=syncing,held=held,cooling_until=cooling_until",
 ];
 

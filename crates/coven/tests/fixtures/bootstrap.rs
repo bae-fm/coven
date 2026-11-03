@@ -70,6 +70,12 @@ impl Owner {
         self.network.sync(0).await;
     }
 
+    /// Stop sync and wait for its release: no pass runs until sync starts
+    /// again (E5).
+    pub(super) async fn stop_sync(&self) {
+        self.network.devices[0].stop_sync().await;
+    }
+
     /// One pass, which may leave operations pending.
     pub(super) async fn pass(&self) {
         self.handle.start_sync().await.unwrap();

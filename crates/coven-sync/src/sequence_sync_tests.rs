@@ -217,7 +217,13 @@ impl Group {
     ) -> Device {
         let directory = StoreDirectories::new(temp.path().into()).store_dir(&self.store);
         // As coven's opening does with storage set up, before any loop runs.
-        SyncStatus::Stopped.record(&database).await.unwrap();
+        crate::record_opened(
+            &database,
+            coven_database::RecordedLocation::Connected(coven_storage::CloudProvider::S3),
+            None,
+        )
+        .await
+        .unwrap();
         let work = coven_database::test_utils::WorkCounter::default();
         database.test_track_work(work.clone()).await.unwrap();
         let keychain = Keychain::in_memory("sequence-test").unwrap();

@@ -85,6 +85,7 @@ mod removal_sql;
 mod removal_view;
 mod retry;
 pub use internal_schema::retry_effect::{retry_effect_time, RetryState, RetrySync};
+pub use internal_schema::sync_status::{RecordedLocation, SyncStatusRow};
 pub use retry::{RetrySubject, RetryWait};
 mod row_key;
 mod row_queries;
@@ -113,12 +114,14 @@ mod sqlite;
 mod sqlite_path;
 mod sqlite_settings;
 mod sqlite_temporary;
+mod sync_facts;
 pub use sqlite_settings::{
     AnalysisLimit, AutoVacuum, CacheSize, CacheSpill, CheckpointMode, IncrementalVacuum,
     JournalSizeLimit, PageSize, SecureDelete, SqliteSettings, SqliteSettingsInEffect, TempStore,
     WalAutocheckpoint, WalCheckpoint,
 };
 pub use sqlite_temporary::{set_temporary_directory, TemporaryDirectoryError};
+pub use sync_facts::{SyncFacts, UploadFacts};
 mod written_values;
 pub use file_hashes::{FileHasher, FileHashes};
 pub use file_moves::MoveId;

@@ -22,9 +22,10 @@ async fn paused_store(
     );
     let layout = StoreLayout::new(root.path().into());
     let directory = app.create_closed_store(&layout, "Transfers", Arc::new(UuidIds)).await.unwrap();
+    let connector = crate::tests::Connector::new(memory.clone());
     let handle =
         app.builder(layout)
-            .storage_connector(memory.clone())
+            .storage_connector(connector.clone())
             .synced_tables(vec![SyncedTable::new("photos", RowIdentity::SharedKey)
                 .file_column(FileColumn::new("file"))])
             .namespaces(vec![Namespace::new("photos", Provenance::AppProvided, 1 << 30)])
@@ -46,10 +47,9 @@ async fn paused_store(
         )
         .await
         .unwrap();
-    let mut status = handle.test_sync_status();
-    status.wait_for(|s| matches!(s, SyncStatus::Synced { .. })).await;
-    handle.stop_sync().await.unwrap();
-    status.wait_for(|s| matches!(s, SyncStatus::Stopped)).await;
+    // The first pass after setup ends synced.
+    handle.test_last_pass().wait_for(|last| *last == Some(LastPass::Synced)).await;
+    connector.stop(&handle).await;
     handle.unlock_store_key().await.unwrap();
     handle.set_uploads_paused(true).await.unwrap();
     (root, memory, handle)

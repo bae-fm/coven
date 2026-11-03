@@ -408,6 +408,31 @@ pub fn read_connection(
     let Some(location) = settings.read()? else {
         return Ok(None);
     };
+    connection_at(location, keychain)
+}
+
+/// Whether a storage location is recorded on this installation and custody
+/// holds credentials for it, as the sync state reads it (§19.1).
+pub(crate) fn read_location(
+    settings: &StorageSettings,
+    keychain: &StoreKeychain,
+) -> Result<coven_database::RecordedLocation<coven_storage::CloudProvider>, SyncError> {
+    let Some(location) = settings.read()? else {
+        return Ok(coven_database::RecordedLocation::None);
+    };
+    let provider = location.provider();
+    Ok(match connection_at(location, keychain)? {
+        Some(_) => coven_database::RecordedLocation::Connected(provider),
+        None => coven_database::RecordedLocation::SignedOut(provider),
+    })
+}
+
+/// The recorded `location` with custody's credentials for it, if custody
+/// holds them.
+fn connection_at(
+    location: coven_storage::StorageConfig,
+    keychain: &StoreKeychain,
+) -> Result<Option<ConnectionCredentials>, SyncError> {
     let Some(bytes) = keychain.storage_credentials()? else {
         return Ok(None);
     };

@@ -12,7 +12,7 @@ use coven_storage::{
     StorageCredentials,
 };
 use coven_sync::{
-    DeviceCredentials, RestoreCodes, SequenceState, SequenceSync, SessionSignIn, SyncLoop,
+    DeviceCredentials, LastPass, RestoreCodes, SequenceState, SequenceSync, SessionSignIn, SyncLoop,
 };
 use std::{
     collections::BTreeSet,
@@ -53,18 +53,20 @@ pub struct StorageSetup {
 /// Where a setup call reports its steps, for the handle to forward to the app.
 pub(crate) type SetupProgress = tokio::sync::watch::Sender<Option<Progress<StorageSetupStep>>>;
 
-/// Write the status an opened store starts with: `Stopped` with storage set
-/// up, `Disconnected` without (E5), and end each invite whose lifetime ended
-/// while it was closed (§13.2). Opening writes them before the handle
-/// exists, so no app reads the status a process that closed left behind, or
-/// an invite that has expired.
+/// Write what the sync state starts from as a store opens: whether a
+/// storage location is recorded here and its credentials held, that no pass
+/// moves, and, for a store joining or restoring read to its end, when sync
+/// finished (E5); then end each invite whose lifetime ended while it was
+/// closed (§13.2). Opening writes them before the handle exists, so no app
+/// reads a move a process that closed left behind, or an invite that has
+/// expired.
 pub(crate) async fn record_opened(
     database: &coven_database::Database,
     clock: &ClockRef,
-    configured: bool,
+    location: coven_database::RecordedLocation<CloudProvider>,
+    finished: Option<std::time::SystemTime>,
 ) -> Result<(), SyncError> {
-    let status = if configured { SyncStatus::Stopped } else { SyncStatus::Disconnected };
-    status.record(database).await.map_err(SyncError::from)?;
+    coven_sync::record_opened(database, location, finished).await.map_err(SyncError::from)?;
     coven_sync::InviteExpiry::opened(database, clock.now()).await.map_err(SyncError::from)
 }
 
@@ -145,7 +147,8 @@ pub(crate) struct StorageConnections {
     credentials: Arc<DeviceCredentials>,
     publications: Arc<Publications>,
     directory: StoreDir,
-    /// The recorded location, whose credentials decide `Stopped` or `Disconnected`.
+    /// The recorded location, which with custody's credentials decides
+    /// whether storage is set up here.
     settings: coven_storage::StorageSettings,
     waits: Arc<coven_sync::RetryWaits>,
     transfers: Arc<coven_storage::TransferBudget>,
@@ -162,7 +165,7 @@ pub(crate) struct StorageConnections {
     expiry: coven_sync::InviteExpiry,
     /// The connection's loop, for requests that return at once.
     control: std::sync::Mutex<Option<SyncLoop>>,
-    /// Whether custody held storage credentials when last observed: start
+    /// Whether custody held storage credentials when last recorded: start
     /// connects only then, without reading custody before the first attempt.
     configured: AtomicBool,
     /// Changed by a new start, stop or close: a connection attempt or a
@@ -261,11 +264,37 @@ impl StorageConnections {
         self.directory.id()
     }
 
-    /// Write `status` for the app, in the step that changes it (E5). A
-    /// failed write has failed the store's handle with its cause, which the
-    /// caller returns.
-    pub(crate) async fn show(&self, status: SyncStatus) -> Result<(), SyncError> {
-        status.record(&self.database).await.map_err(SyncError::from)
+    /// Write how sync failed outside a pass's end, starting or stopping, as
+    /// the last pass's failure, in the step that fails (E5). A failed write
+    /// has failed the store's handle with its cause, which the caller
+    /// returns.
+    pub(crate) async fn show(&self, failure: LastPass) -> Result<(), SyncError> {
+        failure.record(&self.database).await.map_err(SyncError::from)
+    }
+
+    /// Write whether a storage location is recorded here and custody holds
+    /// its credentials, and keep whether starting connects (E5). `finished`,
+    /// for setup, is when it read the store to its end. A failed write has
+    /// failed the store's handle with its cause, which the caller returns.
+    pub(crate) async fn record_location(
+        &self,
+        location: coven_database::RecordedLocation<CloudProvider>,
+        finished: Option<std::time::SystemTime>,
+    ) -> Result<(), SyncError> {
+        self.configured.store(
+            matches!(location, coven_database::RecordedLocation::Connected(_)),
+            Ordering::SeqCst,
+        );
+        coven_sync::record_location(&self.database, location, finished)
+            .await
+            .map_err(SyncError::from)
+    }
+
+    /// Record the location as custody holds it now, as `record_location`
+    /// does: after credentials change, or a connection is released.
+    pub(crate) async fn record_custody(&self) -> Result<(), SyncError> {
+        let location = self.credentials.location(&self.settings)?;
+        self.record_location(location, None).await
     }
 
     /// Make an operation due now, as a step of an app's write: once the
@@ -687,9 +716,15 @@ impl StorageConnections {
             _ => Ok(()),
         };
         let started = self.activate(&mut live, sync, true).await;
-        self.configured.store(true, Ordering::SeqCst);
-        // Custody and provider are committed. Worker failures now belong to
-        // sync status; setup must return the connection it published.
+        // Custody and provider are committed, and setup read the store to its
+        // end. Worker failures now belong to the sync state; setup must
+        // return the connection it published. A row that can't be written
+        // has failed the handle, which every later call reports; what it
+        // would have recorded goes to the log.
+        let location = coven_database::RecordedLocation::Connected(config.provider());
+        if let Err(written) = self.record_location(location, Some(self.clock.now())).await {
+            tracing::warn!("storage set up after setup can't be recorded: {written}");
+        }
         let result = match (released, started) {
             (Ok(()), result) | (result, Ok(())) => result,
             (Err(operation), Err(cleanup)) => Err(SyncError::Cleanup {
@@ -697,15 +732,12 @@ impl StorageConnections {
                 cleanup: Box::new(cleanup),
             }),
         };
-        // A status that can't be written has failed the handle, which every
-        // later call reports; the worker's failure it would have shown goes
-        // to the log.
         if let Err(error) = result {
-            let status = SyncStatus::failed(error);
-            if let Err(written) = self.show(status.clone()).await {
+            let failure = LastPass::failed(error);
+            if let Err(written) = self.show(failure.clone()).await {
                 tracing::warn!(
-                    ?status,
-                    "the status of sync after setup can't be written: {written}"
+                    ?failure,
+                    "how sync failed after setup can't be recorded: {written}"
                 );
             }
         }
@@ -865,16 +897,13 @@ impl StorageConnections {
                     ConnectionState::Active(previous) => previous.close().await,
                     _ => Ok(()),
                 };
-                // Forgetting succeeded. A worker release failure belongs to
-                // status; no later custody read can turn removal into an error.
-                // A failed write of the retry effect has failed the handle.
-                owner
-                    .show(match released {
-                        Err(error) => SyncStatus::failed(error),
-                        Ok(()) if owner.configured.load(Ordering::SeqCst) => SyncStatus::Stopped,
-                        Ok(()) => SyncStatus::Disconnected,
-                    })
-                    .await?;
+                // Forgetting succeeded. A worker release failure is recorded
+                // as the last pass's failure; no later custody read can turn
+                // removal into an error. Stopping writes nothing else the
+                // sync state reads. A failed write has failed the handle.
+                if let Err(error) = released {
+                    owner.show(LastPass::failed(error)).await?;
+                }
                 Ok(stopped?)
             }
             .await;

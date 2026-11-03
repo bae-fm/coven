@@ -107,7 +107,19 @@ pub(crate) struct Device {
     pub(crate) store: StoreId,
     pub(crate) handle: CovenHandle,
     pub(crate) storage: Arc<MemoryStorage>,
+    /// The device's connector over `storage`, across reopening.
+    pub(crate) connector: Arc<Connector>,
 }
+
+impl Device {
+    /// Stop sync and wait for its release, which finishes the active pass
+    /// and this connection's transfers: stopping returns before it (E5).
+    /// Then no pass or upload runs until sync starts again.
+    pub(crate) async fn stop_sync(&self) {
+        self.connector.stop(&self.handle).await;
+    }
+}
+
 #[cfg(test)]
 pub(crate) struct Network {
     root: tempfile::TempDir,
@@ -139,7 +151,7 @@ fn builder(
     layout: StoreLayout,
     clock: Arc<PollingClock>,
     ids: IdSourceRef,
-    storage: Arc<MemoryStorage>,
+    connector: Arc<Connector>,
 ) -> CovenBuilder {
     app.builder(layout)
         .synced_tables(tables())
@@ -147,7 +159,7 @@ fn builder(
         .migrations(migrations())
         .clock(clock)
         .id_source(ids)
-        .storage_connector(storage)
+        .storage_connector(connector)
 }
 #[path = "../tests/fixtures/polling_clock.rs"]
 mod polling_clock;
@@ -155,6 +167,9 @@ pub(crate) use polling_clock::PollingClock;
 #[path = "../tests/fixtures/file_network.rs"]
 mod file_network;
 pub(crate) use file_network::*;
+#[path = "../tests/fixtures/connector.rs"]
+mod connector;
+pub(crate) use connector::{Clients, Connector};
 
 impl Network {
     pub(crate) async fn new(count: usize) -> Self {
@@ -190,12 +205,13 @@ impl Network {
                 .build()
                 .unwrap(),
         );
+        let connector = Connector::new(storage.clone());
         let builder = builder(
             &app,
             StoreLayout::new(app_dir.clone()),
             polling.clone(),
             ids.clone(),
-            storage.clone(),
+            connector.clone(),
         )
         .synced_tables(tables.clone())
         .migrations(migrations.clone());
@@ -240,6 +256,7 @@ impl Network {
                 store: directory.id(),
                 handle,
                 storage,
+                connector,
             }],
         };
         network.sync(0).await;
@@ -270,12 +287,19 @@ impl Network {
         std::fs::create_dir(&app_dir).unwrap();
         let layout = StoreLayout::new(app_dir);
         let storage = Arc::new(self.devices[0].storage.for_device());
+        let connector = Connector::new(storage.clone());
         let control = JoinControl::new();
         let name = format!("Device {index}");
         let joining = join_with_invite(
-            builder(&app, layout.clone(), self.polling.clone(), self.ids.clone(), storage.clone())
-                .synced_tables(self.schema.0.clone())
-                .migrations(self.schema.1.clone()),
+            builder(
+                &app,
+                layout.clone(),
+                self.polling.clone(),
+                self.ids.clone(),
+                connector.clone(),
+            )
+            .synced_tables(self.schema.0.clone())
+            .migrations(self.schema.1.clone()),
             invite.shown_code(),
             &name,
             |_| {},
@@ -285,7 +309,7 @@ impl Network {
         let handle = handle.unwrap().unwrap();
         let store = decode_code_info(invite.shown_code()).unwrap().metadata().store_id;
         handle.start_sync().await.unwrap();
-        self.devices.push(Device { app, layout, store, handle, storage });
+        self.devices.push(Device { app, layout, store, handle, storage, connector });
         self.sync(index).await;
     }
     pub(crate) async fn sync(&self, index: usize) {
@@ -357,7 +381,7 @@ impl Network {
                 device.layout.clone(),
                 self.polling.clone(),
                 self.ids.clone(),
-                device.storage.clone(),
+                device.connector.clone(),
             )
             .migrations(changed.clone())
             .open(device.store, |_| ())
@@ -376,7 +400,7 @@ impl Network {
             assert_eq!(device.handle.applied_slot().await, applied, "device {i} slot");
             assert_eq!(device.handle.store_state().await.schema, schema, "device {i} schema");
             let value = device.handle.test_sync_status().latest().await;
-            let SyncStatus::Synced { .. } = value else { panic!("{value:?}") };
+            assert_eq!(value.state, SyncState::Synced, "device {i}: {value:?}");
         }
     }
     /// A builder for a device's directory, as the app would reopen it.
@@ -386,7 +410,7 @@ impl Network {
             device.layout.clone(),
             self.polling.clone(),
             self.ids.clone(),
-            device.storage.clone(),
+            device.connector.clone(),
         )
         .synced_tables(self.schema.0.clone())
         .migrations(self.schema.1.clone())
@@ -720,9 +744,8 @@ async fn removing_a_member_after_a_replacement_key_leaves_no_key_work() {
         .unwrap();
     network.quiet().await;
     network.devices[0].handle.remove_member(&member).await.unwrap();
+    network.devices[0].stop_sync().await;
     let owner = &network.devices[0].handle;
-    owner.stop_sync().await.unwrap();
-    owner.test_sync_status().wait_for(|s| matches!(s, SyncStatus::Stopped)).await;
     // The person deletes both keys in the console; coven records nothing (§14.3).
     assert!(owner.pending().await.unwrap().is_empty());
     network.close().await;
@@ -731,9 +754,7 @@ async fn removing_a_member_after_a_replacement_key_leaves_no_key_work() {
 #[tokio::test]
 async fn a_returning_device_loads_snapshots_covering_deleted_writes_and_keeps_its_queue() {
     let network = Network::new(2).await;
-    network.devices[1].handle.stop_sync().await.unwrap();
-    let mut status = network.devices[1].handle.test_sync_status();
-    status.wait_for(|state| matches!(state, SyncStatus::Stopped)).await;
+    network.devices[1].stop_sync().await;
     network.devices[1]
         .handle
         .write(|sql| {
@@ -770,8 +791,7 @@ async fn a_returning_device_loads_snapshots_covering_deleted_writes_and_keeps_it
 async fn a_missing_reset_body_blocks_its_slot_and_applies_once_it_arrives() {
     let network = Network::new(2).await;
     let reader = &network.devices[1].handle;
-    reader.stop_sync().await.unwrap();
-    reader.test_sync_status().wait_for(|s| matches!(s, SyncStatus::Stopped)).await;
+    network.devices[1].stop_sync().await;
     let before = reader.applied_slot().await;
     network.devices[0].handle.reset_store().await.unwrap();
     network.sync(0).await;
@@ -782,9 +802,9 @@ async fn a_missing_reset_body_blocks_its_slot_and_applies_once_it_arrives() {
     let bytes = storage.read(path).await.unwrap();
     storage.delete(path).await.unwrap();
     reader.start_sync().await.unwrap();
-    let mut status = reader.test_sync_status();
-    let blocked = status.wait_for(|s| matches!(s, SyncStatus::Blocked { .. })).await;
-    let SyncStatus::Blocked { slot, reason, .. } = blocked else { unreachable!() };
+    let mut last = reader.test_last_pass();
+    let blocked = last.wait_for(|last| matches!(last, Some(LastPass::Blocked { .. }))).await;
+    let Some(LastPass::Blocked { slot, reason, .. }) = blocked else { unreachable!() };
     assert!(matches!(
         reason,
         PendingReason::Storage { failure: coven_storage::StorageFailure::NotFound, .. }
@@ -812,8 +832,7 @@ mod pending_records {
     async fn a_damaged_slot_blocks_the_reader_once_without_reading_it_again() {
         let network = Network::new(2).await;
         let reader = &network.devices[1].handle;
-        reader.stop_sync().await.unwrap();
-        reader.test_sync_status().wait_for(|s| matches!(s, SyncStatus::Stopped)).await;
+        network.devices[1].stop_sync().await;
         let mut received = reader.subscribe(|sql| {
             Ok(sql.query("SELECT record FROM coven_pending ORDER BY position", [], |r| {
                 r.get::<_, PendingRecord>(0)
@@ -836,8 +855,8 @@ mod pending_records {
         storage.corrupt_byte(&path, size as usize - 1).await.unwrap();
         reader.start_sync().await.unwrap();
         reader.sync_now();
-        let mut status = reader.test_sync_status();
-        status.wait_for(|s| matches!(s, SyncStatus::Blocked { .. })).await;
+        let mut last = reader.test_last_pass();
+        last.wait_for(|last| matches!(last, Some(LastPass::Blocked { .. }))).await;
         let record = PendingRecord::new(
             PendingSubject::Slot(Slot(slot)),
             PendingReason::Refused(Refusal::Signature { cause: None }),

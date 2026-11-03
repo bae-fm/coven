@@ -386,6 +386,8 @@ IdleInterval = "SyncOften"
 # Each change of the sync activity, for the file workers waiting until sync
 # allows their transfers.
 SequenceStatusWatch = "SequenceState"
+# The running pass's first move, for the sync loop to write that it moves.
+PassMoves = "SequenceState"
 # A test's count of the requests the in-memory provider's connections
 # attempt, to wait on without polling.
 RequestWatch = "MemoryStorage"

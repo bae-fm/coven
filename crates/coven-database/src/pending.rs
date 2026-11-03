@@ -60,9 +60,11 @@ pub trait PendingValue: Serialize + DeserializeOwned + Send + 'static {
 }
 
 const SELECT: &str =
-    "SELECT subject,value,operation,object,work,device,file,coven_version,move,pin,cause FROM _coven_pending";
+    "SELECT subject,value,operation,object,work,device,file,coven_version,move,pin,cause,id FROM _coven_pending";
 
 struct StoredRecord {
+    /// Its place in the order the records arose.
+    position: i64,
     subject: Vec<u8>,
     value: Vec<u8>,
     operation: Option<i64>,
@@ -93,6 +95,7 @@ impl StoredRecord {
             moved: row.get(8)?,
             pin: row.get(9)?,
             cause: row.get(10)?,
+            position: row.get(11)?,
         })
     }
     fn decode<P: PendingValue>(&self) -> Result<P, DbError> {
@@ -117,9 +120,17 @@ impl StoredRecord {
 /// Every record, in the order the records arose, as `coven_pending` lists
 /// them by position.
 pub(crate) fn read<P: PendingValue>(db: &DatabaseConnection) -> Result<Vec<P>, DbError> {
+    Ok(positioned(db)?.into_iter().map(|(_, record)| record).collect())
+}
+
+/// Every record with its place, in the order the records arose, as
+/// `coven_pending.position` names it.
+pub(crate) fn positioned<P: PendingValue>(
+    db: &DatabaseConnection,
+) -> Result<Vec<(i64, P)>, DbError> {
     db.query(&format!("{SELECT} ORDER BY id"), [], StoredRecord::read)?
         .iter()
-        .map(StoredRecord::decode::<P>)
+        .map(|stored| Ok((stored.position, stored.decode::<P>()?)))
         .collect()
 }
 

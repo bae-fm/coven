@@ -99,7 +99,7 @@ pub(super) async fn replace_installation(
         cancel,
     )
     .await;
-    let Loaded { code, credentials, sign_in, ring, database, waits, .. } = match loaded {
+    let Loaded { code, provider, credentials, sign_in, ring, database, waits, .. } = match loaded {
         Ok(Some(loaded)) => loaded,
         Ok(None) => unreachable!("only a join waits for approval"),
         Err(error) if swapping && abandons(&error) => {
@@ -161,19 +161,26 @@ pub(super) async fn replace_installation(
             return combine(Err(error.into()), close(database).await);
         }
     }
-    publish(&replacement, owners, database, waits, true).await
+    let finished = owners.clock.now();
+    let location = coven_database::RecordedLocation::Connected(provider);
+    publish(&replacement, owners, database, waits, location, Some(finished)).await
 }
 
-/// Publish the committed replacement and hand back its open store. A failure
-/// before publication leaves the swap for the next call to finish.
+/// Publish the committed replacement and hand back its open store, with
+/// `location` recorded and, for one loaded from storage, when it finished. A
+/// failure before publication leaves the swap for the next call to finish.
 pub(super) async fn publish(
     replacement: &ReplacementStore,
     owners: OpeningOwners,
     database: Database,
     waits: Arc<coven_sync::RetryWaits>,
-    configured: bool,
+    location: coven_database::RecordedLocation<CloudProvider>,
+    finished: Option<std::time::SystemTime>,
 ) -> Result<CovenHandle, BootstrapError> {
-    if let Err(error) = crate::storage::record_opened(&database, &owners.clock, configured).await {
+    let configured = matches!(location, coven_database::RecordedLocation::Connected(_));
+    if let Err(error) =
+        crate::storage::record_opened(&database, &owners.clock, location, finished).await
+    {
         return combine(Err(error.into()), close(database).await);
     }
     match replacement.publish() {

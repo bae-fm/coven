@@ -583,7 +583,7 @@ impl AuthorizationState {
         }
         // The status and retry rows say what their writer last saw, which a
         // read-only handle can't tell is still so: a writer that ended
-        // without writing `Stopped` left `Syncing` behind (§19.1). The app's
+        // mid-pass left its move behind (§19.1). The app's
         // triggers, judged as coven compiles them, never run on a read-only
         // handle, which changes no row.
         if let Read { table_name, .. } = context.action {

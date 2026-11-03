@@ -9,18 +9,20 @@ async fn own_member(handle: &CovenHandle) -> MemberId {
     handle.members().await.unwrap().into_iter().find(|member| member.is_self).unwrap().id
 }
 
-async fn wait_for(handle: &CovenHandle, reached: impl Fn(&SyncStatus) -> bool) {
-    let mut status = handle.test_sync_status();
-    status.wait_for(reached).await;
+/// Wait until the last pass, as the app's SQL reads it, is one `reached`
+/// accepts.
+async fn wait_for(handle: &CovenHandle, reached: impl FnMut(&Option<LastPass>) -> bool) {
+    handle.test_last_pass().wait_for(reached).await;
 }
 
-async fn stop(handle: &CovenHandle) {
-    handle.stop_sync().await.unwrap();
-    wait_for(handle, |status| matches!(status, SyncStatus::Stopped)).await;
-}
-
-fn removed(status: &SyncStatus) -> bool {
-    matches!(status, SyncStatus::Failed { failure: StatusFailure::Removed, .. })
+/// Wait until a pass ends with this device removed, and the state shows it.
+async fn removed(handle: &CovenHandle) {
+    wait_for(handle, |last| {
+        matches!(last, Some(LastPass::Failed { failure: StatusFailure::Removed, .. }))
+    })
+    .await;
+    let status = handle.test_sync_status().latest().await;
+    assert!(matches!(status.state, SyncState::Removed(_)), "{status:?}");
 }
 
 /// Ana removes Ben. Ben's phone deletes his restore code and S3 key when it
@@ -35,14 +37,14 @@ async fn a_members_removal_deletes_their_synced_entries_before_it_applies() {
     let saved = crate::tests::readable(laptop.saved_restore_codes().await.unwrap());
     assert_eq!(saved.len(), 1);
     assert!(saved[0].has_s3_credentials);
-    stop(&ben.handle).await;
+    ben.stop_sync().await;
     let applied = ben.handle.applied_slot().await;
     let removal = ana.handle.remove_member(&own_member(&ben.handle).await).await.unwrap();
     crate::tests::landed(&ana.handle, removal).await;
     ben.app.refuse_person_entry_operations(true);
     ben.handle.start_sync().await.unwrap();
-    wait_for(&ben.handle, |status| {
-        matches!(status, SyncStatus::Failed { failure: StatusFailure::Other, .. })
+    wait_for(&ben.handle, |last| {
+        matches!(last, Some(LastPass::Failed { failure: StatusFailure::Other, .. }))
     })
     .await;
     assert_eq!(ben.handle.applied_slot().await, applied);
@@ -50,7 +52,7 @@ async fn a_members_removal_deletes_their_synced_entries_before_it_applies() {
     // Sync retries a custody failure on its own, under the shared backoff,
     // and applies the removal once the keychain answers (E5).
     ben.app.refuse_person_entry_operations(false);
-    wait_for(&ben.handle, removed).await;
+    removed(&ben.handle).await;
     assert!(ben.handle.applied_slot().await > applied);
     assert!(crate::tests::readable(laptop.saved_restore_codes().await.unwrap()).is_empty());
     assert!(ben.app.person_entries(ben.store).s3_credentials().unwrap().is_none());
@@ -71,13 +73,13 @@ async fn a_rename_rewrites_the_saved_name_before_it_applies() {
     let ana = &network.devices[0];
     let ben = &network.devices[1];
     let laptop = ben.app.another_device();
-    stop(&ben.handle).await;
+    ben.stop_sync().await;
     let applied = ben.handle.applied_slot().await;
     crate::tests::landed(&ana.handle, ana.handle.rename_store("Family").await.unwrap()).await;
     ben.app.refuse_person_entry_operations(true);
     ben.handle.start_sync().await.unwrap();
-    wait_for(&ben.handle, |status| {
-        matches!(status, SyncStatus::Failed { failure: StatusFailure::Other, .. })
+    wait_for(&ben.handle, |last| {
+        matches!(last, Some(LastPass::Failed { failure: StatusFailure::Other, .. }))
     })
     .await;
     assert_eq!(ben.handle.applied_slot().await, applied);
@@ -87,7 +89,7 @@ async fn a_rename_rewrites_the_saved_name_before_it_applies() {
         "Household"
     );
     ben.app.refuse_person_entry_operations(false);
-    wait_for(&ben.handle, |status| matches!(status, SyncStatus::Synced { .. })).await;
+    wait_for(&ben.handle, |last| *last == Some(LastPass::Synced)).await;
     assert_eq!(ben.handle.store_name().await.unwrap(), "Family");
     assert_eq!(
         crate::tests::readable(laptop.saved_restore_codes().await.unwrap())[0].name,
@@ -108,7 +110,7 @@ async fn a_removed_member_cannot_save_storage_credentials() {
     let removal = ana.handle.remove_member(&own_member(&ben.handle).await).await.unwrap();
     crate::tests::landed(&ana.handle, removal).await;
     ben.handle.sync_now();
-    wait_for(&ben.handle, removed).await;
+    removed(&ben.handle).await;
     let held = |app: &TestCoven| {
         app.store_keychain(ben.store)
             .storage_credentials()
@@ -168,8 +170,8 @@ async fn leave(refused: bool) {
         // The removal is claimed, but this device applies it only once the
         // deletion succeeds: the pass fails with the refusal, and sync tries
         // again under the shared backoff.
-        wait_for(&ben.handle, |status| {
-            matches!(status, SyncStatus::Failed { failure: StatusFailure::Other, .. })
+        wait_for(&ben.handle, |last| {
+            matches!(last, Some(LastPass::Failed { failure: StatusFailure::Other, .. }))
         })
         .await;
         assert_eq!(crate::tests::readable(laptop.saved_restore_codes().await.unwrap()).len(), 1);
@@ -180,7 +182,7 @@ async fn leave(refused: bool) {
     crate::tests::landed(&ben.handle, removal).await;
     assert!(crate::tests::readable(laptop.saved_restore_codes().await.unwrap()).is_empty());
     assert!(ben.app.person_entries(ben.store).s3_credentials().unwrap().is_none());
-    wait_for(&ben.handle, removed).await;
+    removed(&ben.handle).await;
     assert_eq!(crate::tests::readable(ana.app.saved_restore_codes().await.unwrap()).len(), 1);
     network.close().await;
 }
@@ -217,7 +219,7 @@ async fn removing_one_device_keeps_the_person_entries() {
     assert_eq!(sign_out, None);
     crate::tests::landed(&restored, removal).await;
     phone.handle.sync_now();
-    wait_for(&phone.handle, removed).await;
+    removed(&phone.handle).await;
     assert_eq!(crate::tests::readable(laptop.saved_restore_codes().await.unwrap()), saved);
     assert_eq!(crate::tests::readable(phone.app.saved_restore_codes().await.unwrap()), saved);
     restored.close().await.unwrap();

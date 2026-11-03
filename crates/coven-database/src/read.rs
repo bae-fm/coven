@@ -90,6 +90,18 @@ impl<'connection> SqlReadContext<'connection> {
         Ok(crate::file_queue::unsent(self.database)?)
     }
 
+    pub(crate) fn sync_facts<P: crate::PendingValue + Clone>(
+        &self,
+    ) -> CovenResult<crate::SyncFacts<P>> {
+        Ok(crate::sync_facts::read(self.database)?)
+    }
+
+    /// `coven_sync_status`'s row, as coven reads it.
+    #[cfg(test)]
+    pub(crate) fn sync_status_row(&self) -> CovenResult<crate::SyncStatusRow> {
+        Ok(crate::internal_schema::sync_status::read(self.database)?)
+    }
+
     pub(crate) fn upload_queue(&self) -> CovenResult<crate::UploadQueueState> {
         Ok(crate::file_queue::state(self.database)?)
     }

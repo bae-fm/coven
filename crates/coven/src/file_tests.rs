@@ -50,6 +50,24 @@ async fn stage_rows(
         .unwrap()
 }
 
+/// Once the first pass after setup ends synced, stop sync, wait for its
+/// release, which drops the provider's client after `stop_sync` returns,
+/// and connect without syncing.
+async fn stop_connected(handle: &CovenHandle, connector: &crate::tests::Connector) {
+    handle.test_last_pass().wait_for(|last| *last == Some(LastPass::Synced)).await;
+    connector.stop(handle).await;
+    handle.unlock_store_key().await.unwrap();
+}
+
+/// Wait for the first pass that begins after the request, and check it
+/// ended synced.
+async fn passed(handle: &CovenHandle) {
+    match handle.retry_now().await.unwrap().await {
+        RetryOutcome::Synced { .. } => {}
+        outcome => panic!("{outcome:?}"),
+    }
+}
+
 #[tokio::test]
 async fn uncached_file_bodies_and_sequence_reads_share_the_download_limit() {
     use coven_storage::{test_utils::MemoryStorage, Storage};
@@ -60,21 +78,18 @@ async fn uncached_file_bodies_and_sequence_reads_share_the_download_limit() {
         let memory = Arc::new(MemoryStorage::builder().clock(Arc::new(SystemClock)).build().unwrap());
         let layout = StoreLayout::new(root.path().into());
         let directory = app.create_closed_store(&layout, "Downloads", Arc::new(UuidIds)).await.unwrap();
-        let handle = app.builder(layout).storage_connector(memory.clone())
+        let connector = crate::tests::Connector::new(memory.clone());
+        let handle = app.builder(layout).storage_connector(connector.clone())
             .synced_tables(files_table())
             .namespaces(files_namespace())
             .migrations(vec![Migration::addition(1, "files", FILES)])
             .open(directory.id(), |_| ()).await.unwrap();
         handle.setup_s3_storage(memory.config(), "Device", "key".into(), SecretText::new("secret".into()), |_| {}).await.unwrap();
-        let mut status = handle.test_sync_status();
-        status.wait_for(|s| matches!(s, SyncStatus::Synced { .. })).await;
-        handle.stop_sync().await.unwrap();
-        status.wait_for(|s| matches!(s, SyncStatus::Stopped)).await;
-        handle.unlock_store_key().await.unwrap();
+        stop_connected(&handle, &connector).await;
         let ids = stage_rows(&handle, 2, |id| vec![id; 2048].into()).await;
         handle.retry_uploads_now().await.unwrap();
         handle.start_sync().await.unwrap();
-        status.wait_for(|s| matches!(s, SyncStatus::Synced { .. })).await;
+        passed(&handle).await;
         let first_file = handle.file_ref(ids[0]).await.unwrap();
         let second_file = handle.file_ref(ids[1]).await.unwrap();
         let (entered, entering) = tokio::sync::oneshot::channel();
@@ -99,8 +114,9 @@ async fn uncached_file_bodies_and_sequence_reads_share_the_download_limit() {
         let (first, second) = tokio::join!(first, second);
         assert_eq!(first.unwrap(), vec![0; 2048]);
         assert_eq!(second.unwrap(), vec![1; 2048]);
-        // The pass `sync_now` asked for may still run: follow the current status.
-        handle.test_sync_status().wait_for(|s| matches!(s, SyncStatus::Synced { .. })).await;
+        // The pass `sync_now` asked for may still run; the one after it ends
+        // synced.
+        passed(&handle).await;
         handle.close().await.unwrap();
     }).await.expect("shared downloads finished");
 }
@@ -130,10 +146,11 @@ async fn transfer_limits_bound_requests_and_a_changed_limit_applies_to_the_next_
         );
         let layout = StoreLayout::new(root.path().into());
         let directory = app.create_closed_store(&layout, "Files", Arc::new(UuidIds)).await.unwrap();
+        let connector = crate::tests::Connector::new(memory.clone());
         let handle = app
             .builder(layout)
             .clock(clock)
-            .storage_connector(memory.clone())
+            .storage_connector(connector.clone())
             .max_concurrent_uploads(NonZeroUsize::new(2).unwrap())
             .max_concurrent_downloads(NonZeroUsize::new(2).unwrap())
             .synced_tables(files_table())
@@ -153,11 +170,7 @@ async fn transfer_limits_bound_requests_and_a_changed_limit_applies_to_the_next_
             )
             .await
             .unwrap();
-        let mut status = handle.test_sync_status();
-        status.wait_for(|s| matches!(s, SyncStatus::Synced { .. })).await;
-        handle.stop_sync().await.unwrap();
-        status.wait_for(|s| matches!(s, SyncStatus::Stopped)).await;
-        handle.unlock_store_key().await.unwrap();
+        stop_connected(&handle, &connector).await;
         handle.set_uploads_paused(true).await.unwrap();
         let ids = stage_rows(&handle, 4, |id| {
             FileSource::Stream(Box::pin(std::io::Cursor::new(vec![id; 2048])))
@@ -200,30 +213,25 @@ async fn transfer_limits_bound_requests_and_a_changed_limit_applies_to_the_next_
         memory.reset_request_peak();
         handle.pin(&uploaded).await.unwrap();
         assert_eq!(memory.peak_requests(), 1, "the subsequent pin captures the changed limit");
-        handle.stop_sync().await.unwrap();
-        status.wait_for(|s| matches!(s, SyncStatus::Stopped)).await;
+        connector.stop(&handle).await;
         memory.set_faults(Faults::none()).await;
         memory.set_online(false);
         handle.start_sync().await.unwrap();
-        status.wait_for(|s| matches!(s, SyncStatus::Offline { .. })).await;
+        let mut last = handle.test_last_pass();
+        last.wait_for(|last| matches!(last, Some(LastPass::Offline { .. }))).await;
         memory.set_online(true);
         handle.evict_file(uploaded[0].id()).await.unwrap();
         assert_eq!(handle.read_file(&uploaded[0]).await.unwrap(), vec![0; 2048]);
         memory.set_online(false);
-        let before = memory.request_count();
-        handle.sync_now();
-        requests.wait_for(|n| *n > before).await.unwrap();
-        // The earlier Offline is stale; wait for this attempt's outcome. The
-        // attempt showed `Syncing` before its request, so the current status
-        // is its own.
-        let outcome = handle
-            .test_sync_status()
-            .wait_for(|s| matches!(s, SyncStatus::Offline { .. } | SyncStatus::Failed { .. }))
-            .await;
+        // The earlier Offline is stale: the person's retry is answered by the
+        // attempt that begins after it, which ends the backoff the first
+        // left.
+        let outcome = handle.retry_now().await.unwrap().await;
         assert!(
-            matches!(outcome, SyncStatus::Offline { .. }),
+            matches!(outcome, RetryOutcome::Failed(PassFailure::Offline { .. })),
             "the failed attempt decides, not the file read that reached storage before it: {outcome:?}"
         );
+        assert!(matches!(handle.test_last_pass().latest().await, Some(LastPass::Offline { .. })));
         handle.close().await.unwrap();
     })
     .await
@@ -455,8 +463,9 @@ async fn uploaded_files_pins_and_read_only_ranges_use_the_composed_owner() {
             .build()
             .unwrap(),
     );
+    let connector = crate::tests::Connector::new(storage.clone());
     let handle = builder(&app, layout.clone(), ids.clone())
-        .storage_connector(storage.clone())
+        .storage_connector(connector.clone())
         .open(directory.id(), |_| ())
         .await
         .unwrap();
@@ -472,11 +481,7 @@ async fn uploaded_files_pins_and_read_only_ranges_use_the_composed_owner() {
         )
         .await
         .unwrap();
-    let mut status = handle.test_sync_status();
-    status.wait_for(|s| matches!(s, SyncStatus::Synced { .. })).await;
-    handle.stop_sync().await.unwrap();
-    status.wait_for(|s| matches!(s, SyncStatus::Stopped)).await;
-    handle.unlock_store_key().await.unwrap();
+    stop_connected(&handle, &connector).await;
     handle.set_uploads_paused(true).await.unwrap();
     let note = ids.new_id().to_string();
     let row = ids.new_id().to_string();
@@ -613,8 +618,9 @@ async fn the_apps_sql_reads_uploads_pins_and_pending_records() {
             .build()
             .unwrap(),
     );
+    let connector = crate::tests::Connector::new(storage.clone());
     let handle = builder(&app, layout.clone(), ids.clone())
-        .storage_connector(storage.clone())
+        .storage_connector(connector.clone())
         .open(directory.id(), |_| ())
         .await
         .unwrap();
@@ -629,11 +635,7 @@ async fn the_apps_sql_reads_uploads_pins_and_pending_records() {
         )
         .await
         .unwrap();
-    let mut status = handle.test_sync_status();
-    status.wait_for(|s| matches!(s, SyncStatus::Synced { .. })).await;
-    handle.stop_sync().await.unwrap();
-    status.wait_for(|s| matches!(s, SyncStatus::Stopped)).await;
-    handle.unlock_store_key().await.unwrap();
+    stop_connected(&handle, &connector).await;
     handle.set_uploads_paused(true).await.unwrap();
 
     let note = ids.new_id().to_string();

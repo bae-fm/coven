@@ -52,8 +52,7 @@ async fn reset_revokes_open_account_invites_and_deletes_their_requests() {
     .unwrap();
     carol.join(owner.store, &invitation).await.unwrap();
     let request = crate::tests::request_path(&invite);
-    owner.handle.stop_sync().await.unwrap();
-    owner.handle.test_sync_status().wait_for(|state| matches!(state, SyncStatus::Stopped)).await;
+    owner.stop_sync().await;
     carol.create(&request, b"unapproved request").await.unwrap();
     reset_owner(&mut network).await;
     network.devices[0].handle.start_sync().await.unwrap();

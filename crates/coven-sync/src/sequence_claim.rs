@@ -154,6 +154,8 @@ impl SequenceSync {
         member: &MemberIdentity,
     ) -> Result<ClaimSettlement, SyncError> {
         self.state.check()?;
+        // Claiming moves data: the sync state shows the pass syncing (§19.1).
+        self.state.moved();
         let claim = self.database.current_claim().await?.ok_or(coven_database::DbError::NoClaim)?;
         let path = claim.attempts.last().expect("claim has an attempt");
         let upload = self.database.claim_upload().await?;

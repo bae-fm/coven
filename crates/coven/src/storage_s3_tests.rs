@@ -412,7 +412,7 @@ async fn setup_sends_rate_limited_requests_again() {
     let started = f.clock.now();
     setup_through_waits(&f).await.unwrap();
     assert!(f.clock.now() >= started + Duration::from_secs(1 + 2 + 4));
-    status(&f.handle, |s| matches!(s, SyncStatus::Synced { .. })).await;
+    synced(&f.handle).await;
     f.handle.close().await.unwrap();
 }
 

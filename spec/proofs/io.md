@@ -217,6 +217,11 @@ ended and whether it moved a slot, that opening records whether storage is
 set up, and that the live query reads them together in one transaction.
 The `sync_state` case of `ioRunner` takes a set of facts as JSON and
 answers the state's name and, for waiting to sync, its wait.
+`sync_status::tests::io_differential_sync_state` compares the state coven
+computes with the runner's for each pending reason, each provider failure
+answered or not, each local failure, each way a pass ends, blocked on or
+failed with each reason, and queued uploads under each wait, alone and
+behind a stored one.
 
 ## Work notifications
 

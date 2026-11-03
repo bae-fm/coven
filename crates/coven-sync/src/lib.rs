@@ -9,6 +9,7 @@ mod floor_object;
 mod history;
 mod identity;
 mod joining_identity;
+mod last_pass;
 mod object_input;
 mod operation_outcome;
 mod operation_types;
@@ -36,6 +37,7 @@ mod files;
 mod retry_waits;
 mod sequence_state;
 mod sync_often;
+mod sync_status;
 pub use files::{
     DeviceOnlyError, DeviceOnlyStep, DrainOutcome, FileRangeStream, FileReadError, FileStatus,
     FileStream, Files, PinProgress, QueuedUpload, ReadProgress, TransferLimits, UploadPhase,
@@ -57,6 +59,7 @@ pub use credential_custody::{commit_credentials, CredentialKeychains, Credential
 pub use error::{DamagedObject, SyncError, SyncFailure};
 pub use identity::DeviceIdEvidence;
 pub use joining_identity::JoiningIdentity;
+pub use last_pass::{LastPass, PassFailure, StatusFailure};
 pub use operation_types::*;
 pub use pending::{
     FileMissingReason, FileSourceFailure, LocalFailure, PendingReason, PendingRecord,
@@ -67,7 +70,7 @@ pub use restore_codes::{read_connection, RestoreCodes};
 pub use saved_code::{
     follow_name, read_saved_code, replacement_code, SavedName, UnreadableSavedCode,
 };
-pub use sequence_state::{PassFailure, SequenceState, SequenceStatus, StatusFailure, SyncStatus};
+pub use sequence_state::{SequenceState, SequenceStatus};
 pub use sequence_sync::sequence_invites::expiry::InviteExpiry;
 pub use sequence_sync::sequence_invites::{
     approve_join_request, cancel_invite, create_invite, decline_join_request, NewInvite,
@@ -75,6 +78,10 @@ pub use sequence_sync::sequence_invites::{
 pub use sequence_sync::sequence_join::{JoinOutcome, NextCheck};
 pub use sequence_sync::{retry_pending_operation, SequenceSync};
 pub use sign_in::{DeviceCredentials, SessionSignIn};
+pub use sync_status::{
+    record_location, record_opened, subscribe_sync_status, sync_status, SyncCause, SyncState,
+    SyncStatus, UploadWait,
+};
 
 #[cfg(test)]
 #[path = "lib_tests.rs"]

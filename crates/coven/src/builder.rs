@@ -724,14 +724,14 @@ impl OpeningStore {
             Ok::<_, CovenError>(owners)
         })
         .await??;
-        let configured = owners
+        let location = owners
             .credentials
-            .connection(&coven_storage::StorageSettings::new(owners.directory.clone()))
-            .map_err(sync_error)?
-            .is_some();
+            .location(&coven_storage::StorageSettings::new(owners.directory.clone()))
+            .map_err(sync_error)?;
+        let configured = matches!(location, coven_database::RecordedLocation::Connected(_));
         // Boxed, so `open`'s future stays as small as an app's stack needs
         // (`application_api_tests.rs`).
-        Box::pin(crate::storage::record_opened(&database, &owners.clock, configured))
+        Box::pin(crate::storage::record_opened(&database, &owners.clock, location, None))
             .await
             .map_err(sync_error)?;
         Ok(owners.into_handle(database, waits, configured))

@@ -15,10 +15,7 @@ async fn assert_original_connection_uploads(f: &Fixture) {
         })
         .await
         .unwrap();
-    status(&f.handle, |state| {
-        matches!(state, SyncStatus::Synced { finished_at } if *finished_at >= f.clock.now())
-    })
-    .await;
+    synced_since(&f.handle, f.clock.now()).await;
     assert!(f.handle.test_queued_writes().await.unwrap().is_empty());
 }
 
@@ -26,7 +23,7 @@ async fn assert_original_connection_uploads(f: &Fixture) {
 async fn failed_key_forgetting_keeps_the_running_connection() {
     let f = Fixture::new().await;
     f.setup().await.unwrap();
-    status(&f.handle, |s| matches!(s, SyncStatus::Synced { .. })).await;
+    synced(&f.handle).await;
     f.app.fail_next_keychain_operation();
     assert!(f.handle.forget_store_keys().await.is_err());
     assert_eq!(f.handle.store_key_state().unwrap(), StoreKeyState::Available);
@@ -38,11 +35,12 @@ async fn failed_key_forgetting_keeps_the_running_connection() {
 async fn key_forgetting_performs_no_fallible_custody_reads_after_removal() {
     let f = Fixture::new().await;
     f.setup().await.unwrap();
-    status(&f.handle, |s| matches!(s, SyncStatus::Synced { .. })).await;
+    synced(&f.handle).await;
     f.app.fail_keychain_operations_after(&[1]);
     f.handle.forget_store_keys().await.unwrap();
     assert_eq!(f.handle.store_key_state().unwrap(), StoreKeyState::Locked);
-    assert!(matches!(&f.handle.test_sync_status().latest().await, SyncStatus::Stopped));
+    // Releasing the connection recorded no failure.
+    assert_eq!(f.handle.test_last_pass().latest().await, Some(LastPass::Synced));
     f.app.fail_keychain_operations_after(&[]);
     f.handle.close().await.unwrap();
 }
@@ -51,7 +49,7 @@ async fn key_forgetting_performs_no_fallible_custody_reads_after_removal() {
 async fn failed_setup_claim_keeps_the_running_connection() {
     let f = Fixture::new().await;
     f.setup().await.unwrap();
-    status(&f.handle, |s| matches!(s, SyncStatus::Synced { .. })).await;
+    synced(&f.handle).await;
     let before = f.handle.restore_code().await.unwrap();
     f.storage
         .set_faults(Faults {
@@ -74,7 +72,7 @@ async fn failed_setup_claim_keeps_the_running_connection() {
 async fn failed_setup_custody_commit_keeps_the_running_connection() {
     let f = Fixture::new().await;
     f.setup().await.unwrap();
-    status(&f.handle, |s| matches!(s, SyncStatus::Synced { .. })).await;
+    synced(&f.handle).await;
     let before = f.handle.restore_code().await.unwrap();
     let (entered, entering) = tokio::sync::oneshot::channel();
     let (resume, resumed) = tokio::sync::oneshot::channel();
@@ -156,7 +154,7 @@ async fn assert_connected_key(f: &Fixture, id: &str, secret: &str) {
 async fn connected_and_signed_out_updates_install_the_supplied_key_without_changing_the_code() {
     let f = Fixture::new().await;
     f.setup().await.unwrap();
-    status(&f.handle, |s| matches!(s, SyncStatus::Synced { .. })).await;
+    synced(&f.handle).await;
     let before = f.handle.restore_code().await.unwrap();
     let member = coven_sync::read_restore_code(&before).unwrap().member_keys.to_secret_bytes();
     let settings = StorageSettings::new(f.directory.clone());
@@ -186,14 +184,18 @@ async fn connected_and_signed_out_updates_install_the_supplied_key_without_chang
         .open(f.directory.id(), |_| ())
     };
     let handle = reopen().await.unwrap();
-    assert!(matches!(&handle.test_sync_status().latest().await, SyncStatus::Disconnected));
+    assert_eq!(
+        handle.test_sync_status().latest().await.state,
+        SyncState::SignedOut { provider: CloudProvider::S3, cause: None }
+    );
     assert_eq!(handle.restore_code().await.unwrap(), before);
     handle
         .update_credentials("signed-out".into(), SecretText::new("signed-out-secret".into()))
         .await
         .unwrap();
+    f.advance(Duration::from_secs(1));
     handle.start_sync().await.unwrap();
-    status(&handle, |s| matches!(s, SyncStatus::Synced { .. })).await;
+    synced_since(&handle, f.clock.now()).await;
     assert_connected_key(&f, "signed-out", "signed-out-secret").await;
     assert_eq!(handle.restore_code().await.unwrap(), before);
     assert_eq!(settings.read().unwrap(), location);
@@ -203,8 +205,9 @@ async fn connected_and_signed_out_updates_install_the_supplied_key_without_chang
     );
     handle.close().await.unwrap();
     let handle = reopen().await.unwrap();
+    f.advance(Duration::from_secs(1));
     handle.start_sync().await.unwrap();
-    status(&handle, |s| matches!(s, SyncStatus::Synced { .. })).await;
+    synced_since(&handle, f.clock.now()).await;
     assert_connected_key(&f, "signed-out", "signed-out-secret").await;
     assert_eq!(handle.restore_code().await.unwrap(), before);
     handle.close().await.unwrap();
@@ -214,9 +217,8 @@ async fn connected_and_signed_out_updates_install_the_supplied_key_without_chang
 async fn dropping_a_replacement_waiter_does_not_interrupt_key_installation_or_publication() {
     let f = Fixture::new().await;
     f.setup().await.unwrap();
-    status(&f.handle, |s| matches!(s, SyncStatus::Synced { .. })).await;
-    f.handle.stop_sync().await.unwrap();
-    status(&f.handle, |s| matches!(s, SyncStatus::Stopped)).await;
+    synced(&f.handle).await;
+    stop(&f).await;
     f.handle.unlock_store_key().await.unwrap();
     let before = f.handle.restore_code().await.unwrap();
     let (entered, entering) = tokio::sync::oneshot::channel();
@@ -244,8 +246,9 @@ async fn dropping_a_replacement_waiter_does_not_interrupt_key_installation_or_pu
     .open(f.directory.id(), |_| ())
     .await
     .unwrap();
+    f.advance(Duration::from_secs(1));
     handle.start_sync().await.unwrap();
-    status(&handle, |s| matches!(s, SyncStatus::Synced { .. })).await;
+    synced_since(&handle, f.clock.now()).await;
     assert_connected_key(&f, "retained", "retained-secret").await;
     assert_eq!(handle.restore_code().await.unwrap(), before);
     handle.close().await.unwrap();
@@ -280,7 +283,7 @@ async fn custody_failure_rolls_back_credentials_before_claiming_the_creation() {
     assert!(setup("original").await.is_err());
     assert_eq!(handle.store_key_state().unwrap(), StoreKeyState::Locked);
     assert!(handle.restore_code().await.is_err());
-    assert!(matches!(&handle.test_sync_status().latest().await, SyncStatus::Disconnected));
+    assert_eq!(handle.test_sync_status().latest().await.state, SyncState::NotSynced);
     let first = ObjectPath::slot(f.directory.id(), 1.try_into().unwrap());
     assert!(f.storage.status(&first).await.unwrap().is_none());
     // Nothing was claimed, so another key sets the store up.

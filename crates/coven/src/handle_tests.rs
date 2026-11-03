@@ -399,12 +399,13 @@ async fn workers_share_keys_across_stop_forget_and_reacquisition_until_close() {
     let layout = StoreLayout::new(root.path().into());
     let app = TestCoven::new();
     let storage = Arc::new(MemoryStorage::builder().build().unwrap());
+    let connector = crate::tests::Connector::new(storage.clone());
     let keys = Arc::new(Keys::default());
     let identity = Arc::new(Identity::default());
     let handle = builder(&app, layout.clone())
         .key_custody(KeyCustody::Custom(keys.clone()))
         .identity_custody(IdentityCustody::Custom(identity.clone()))
-        .storage_connector(storage.clone())
+        .storage_connector(connector.clone())
         .create_store("session")
         .await
         .unwrap();
@@ -424,9 +425,8 @@ async fn workers_share_keys_across_stop_forget_and_reacquisition_until_close() {
     assert!(keys.keys.lock().unwrap().as_ref().unwrap().circle_key_ids(circle).next().is_some());
     let code = handle.restore_code().await.unwrap();
     for _ in 0..2 {
-        let mut status = handle.test_sync_status();
-        handle.stop_sync().await.unwrap();
-        status.wait_for(|s| matches!(s, SyncStatus::Stopped)).await;
+        // Stopping releases the provider's client; the keys stay.
+        connector.stop(&handle).await;
         assert_eq!(clone.store_key_state().unwrap(), StoreKeyState::Available);
         assert_eq!(handle.restore_code().await.unwrap(), code);
         handle.start_sync().await.unwrap();
@@ -780,6 +780,9 @@ mod store_rename {
             network.reopen(&network.devices[0]).open_read_only(owner.store_id()).await.unwrap();
         assert_eq!(reader.store_name().await.unwrap(), "家庭 recipes");
         reader.close().await.unwrap();
+        // Its storage client goes with the handle, before the owner's
+        // release is awaited below.
+        drop(reader);
 
         let member_id = member.members().await.unwrap().into_iter().find(|m| m.is_self).unwrap().id;
         landed(owner, owner.set_member_role(&member_id, MemberRole::Admin).await.unwrap()).await;
@@ -794,8 +797,7 @@ mod store_rename {
             Err(SyncError::Rejected(OperationRejection::NotAllowed))
         ));
         assert_eq!(owner.store_name().await.unwrap(), "Latest name");
-        owner.stop_sync().await.unwrap();
-        owner.test_sync_status().wait_for(|s| matches!(s, SyncStatus::Stopped)).await;
+        network.devices[0].stop_sync().await;
         owner.unlock_store_key().await.unwrap();
         // A name the store already has journals nothing.
         let through = owner.applied_slot().await;

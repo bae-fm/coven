@@ -50,6 +50,15 @@ impl CredentialKeychains {
     ) -> Result<Option<coven_storage::ConnectionCredentials>, SyncError> {
         crate::read_connection(settings, &self.device)
     }
+
+    /// Whether a location is recorded, and this device's credentials for it
+    /// held, as the sync state reads it (§19.1).
+    pub fn location(
+        &self,
+        settings: &coven_storage::StorageSettings,
+    ) -> Result<coven_database::RecordedLocation<coven_storage::CloudProvider>, SyncError> {
+        crate::restore_codes::read_location(settings, &self.device)
+    }
 }
 
 #[derive(Clone, Copy)]

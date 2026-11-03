@@ -18,10 +18,9 @@ async fn insert(handle: &CovenHandle, id: &str) {
         .unwrap();
 }
 
-async fn stopped(handle: &CovenHandle) {
-    let mut status = handle.test_sync_status();
-    handle.stop_sync().await.unwrap();
-    status.wait_for(|s| matches!(s, SyncStatus::Stopped)).await;
+/// Stop the device's sync, so no pass runs until it starts again.
+async fn stopped(device: &crate::tests::Device) {
+    device.stop_sync().await;
 }
 
 #[tokio::test]
@@ -30,7 +29,7 @@ async fn deleting_refuses_unsent_writes_then_retires_this_device() {
     let phone = &network.devices[1];
     let directory = phone.layout.store_dir(&phone.store);
     let device = directory.settings().unwrap().device_id;
-    stopped(&phone.handle).await;
+    stopped(phone).await;
     insert(&phone.handle, "unsent").await;
     assert!(matches!(
         phone.handle.delete_store(IfUnsent::Refuse).await,
@@ -69,7 +68,7 @@ async fn discarding_still_retires_this_device() {
     let mut network = Network::new(2).await;
     let phone = &network.devices[1];
     let device = phone.layout.store_dir(&phone.store).settings().unwrap().device_id;
-    stopped(&phone.handle).await;
+    stopped(phone).await;
     insert(&phone.handle, "discarded").await;
     phone.handle.delete_store(IfUnsent::Discard).await.unwrap();
     assert!(phone.layout.stores().await.unwrap().is_empty());
@@ -123,9 +122,10 @@ async fn stopped_store_with_files() -> (tempfile::TempDir, TestCoven, CovenHandl
             .build()
             .unwrap(),
     );
+    let connector = crate::tests::Connector::new(memory.clone());
     let handle = app
         .builder(layout)
-        .storage_connector(memory.clone())
+        .storage_connector(connector.clone())
         .synced_tables(vec![
             SyncedTable::new("parents", RowIdentity::SharedKey),
             SyncedTable::new("files", RowIdentity::SharedKey).file_column(FileColumn::new("file")),
@@ -150,9 +150,9 @@ async fn stopped_store_with_files() -> (tempfile::TempDir, TestCoven, CovenHandl
         )
         .await
         .unwrap();
-    let mut status = handle.test_sync_status();
-    status.wait_for(|s| matches!(s, SyncStatus::Synced { .. })).await;
-    stopped(&handle).await;
+    // The first pass after setup ends synced.
+    handle.test_last_pass().wait_for(|last| *last == Some(LastPass::Synced)).await;
+    connector.stop(&handle).await;
     handle.unlock_store_key().await.unwrap();
     handle.set_uploads_paused(true).await.unwrap();
     (root, app, handle)

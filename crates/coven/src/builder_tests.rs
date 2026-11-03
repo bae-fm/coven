@@ -154,10 +154,12 @@ async fn app_reopening_resumes_operations_and_files_using_one_storage_capability
         handle.retry_pending_operation(OperationId(-1)).await,
         Err(OperationError::NotPending(OperationId(-1)))
     ));
-    // A pass resumes the interrupted circle's journaled operation.
+    // A pass resumes the interrupted circle's journaled operation. The
+    // clock moves, so that pass's end moves the last synced time.
+    clock.set(clock.now() + std::time::Duration::from_secs(1));
     let mut status = handle.test_sync_status();
     handle.start_sync().await.unwrap();
-    status.wait_for(|s| matches!(s, SyncStatus::Synced { .. })).await;
+    status.wait_for(|s| s.last_synced >= Some(clock.now())).await;
     let circle = handle.circles().list().await.unwrap().remove(0);
     assert_eq!((circle.id, circle.name.as_str()), (interrupted, "Interrupted"));
     crate::tests::landed(&handle, handle.circles().rename(circle.id, "Family").await.unwrap())
@@ -301,13 +303,14 @@ mod recovery {
                     .build()
                     .unwrap(),
             );
+            let connector = crate::tests::Connector::new(storage.clone());
             let builder = || {
                 sign_in.configure(
                     app.builder(layout.clone())
                         .synced_tables(recovery_tables())
                         .migrations(recovery_migrations())
                         .clock(clock.clone())
-                        .storage_connector(storage.clone()),
+                        .storage_connector(connector.clone()),
                 )
             };
             let handle = builder().open(directory.id(), |_| ()).await.unwrap();
@@ -338,9 +341,7 @@ mod recovery {
                 coven_storage::RestoreStorage::decode(code.storage.as_bytes()).unwrap().location,
                 setup.connection.storage
             );
-            let mut status = handle.test_sync_status();
-            handle.stop_sync().await.unwrap();
-            status.wait_for(|s| matches!(s, SyncStatus::Stopped)).await;
+            connector.stop(&handle).await;
             handle
                 .write(|sql| {
                     sql.execute("INSERT INTO notes VALUES('saved','from storage')", [])?;
@@ -348,10 +349,13 @@ mod recovery {
                 })
                 .await
                 .unwrap();
+            // The clock moves, so the end of the pass that sends the write
+            // moves the last synced time.
+            clock.set(clock.now() + std::time::Duration::from_secs(1));
             handle.start_sync().await.unwrap();
-            status.wait_for(|s| matches!(s, SyncStatus::Synced { .. })).await;
-            handle.stop_sync().await.unwrap();
-            status.wait_for(|s| matches!(s, SyncStatus::Stopped)).await;
+            let mut status = handle.test_sync_status();
+            status.wait_for(|s| s.last_synced >= Some(clock.now())).await;
+            connector.stop(&handle).await;
             handle
                 .write(|sql| {
                     sql.execute("INSERT INTO notes VALUES('unsent','local only')", [])?;
@@ -455,7 +459,9 @@ mod recovery {
                 };
                 assert_eq!(tokens.access_token.as_str(), "access-1");
             }
-            assert!(matches!(recovered.test_sync_status().latest().await, SyncStatus::Stopped));
+            // Storage is set up and sync isn't running.
+            assert_eq!(recovered.test_sync_status().latest().await.state, SyncState::Synced);
+            assert_eq!(recovered.test_retry_effect().latest().await, RetryEffect::NotSyncing);
             recovered.close().await.unwrap();
             let database = DatabaseBuilder::new(directory.clone())
                 .synced_tables(recovery_tables())
