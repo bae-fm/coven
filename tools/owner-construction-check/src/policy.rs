@@ -34,7 +34,9 @@ pub(crate) enum Rule {
     DatabaseBoundary,
     /// Appendix F.3: an owner never hands out what it holds, only its owner
     /// and what holds that owner hand out a handle, and shared state leaves
-    /// its owner only inside one (`owner_dependency_boundary.rs`).
+    /// its owner only inside one (`owner_dependency_boundary.rs`); what a
+    /// task makes shared for its operation stays with tasks
+    /// (`task_state.rs`).
     OwnerDependencies,
     /// Appendix F.2 and F.3: an owner's method never takes a
     /// construction-only capability, and no method but a constructor takes

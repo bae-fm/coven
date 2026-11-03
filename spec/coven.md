@@ -9770,7 +9770,12 @@ snapshot load's staged records, has one holder for the operation's whole
 lifetime: the operation. Its steps are phases of that holder, each taking it
 from the last, not holders that share it; nothing outlives the operation, and
 no other task or owner holds it. Work that needs the state again runs inside
-the same operation or makes it afresh.
+the same operation or makes it afresh. A bootstrap's lock is the bootstrap's:
+the directories it gives out name the lock's instance, a plain value, and
+open the unpublished store only while the registry shows it held. The checker
+finds a task built with a new `Arc`, `Rc` or `Weak` of one of coven's types
+that is state, an owner or a type holding shared state, and refuses any type
+but a task, or a handle that task makes, holding that type through one.
 
 **Owners don't hand out what they hold,** by returning it or through a public
 field; callers ask the owner to do the work. Nothing outside `coven-database`

@@ -33,6 +33,7 @@ mod rust_prelude;
 mod sources;
 mod sql_writes;
 mod syntax;
+mod task_state;
 mod test_code;
 mod test_layout;
 mod unique_type_names;

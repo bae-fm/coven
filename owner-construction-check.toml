@@ -90,6 +90,8 @@ shared_state_types = [
     "Receiver",
     "UnboundedReceiver",
 ]
+# Every holder of one of these shares what it points at with the others.
+shared_pointer_types = ["Arc", "Rc", "Weak"]
 capability_traits = [
     "Clock",
     "IdSource",
@@ -197,6 +199,10 @@ borrowed_facade_types = [
     "PreWrite",
 ]
 task_types = [
+    # A first installation's, and a replacement's, unpublished store and
+    # its bootstrap lock, for that one call.
+    "BootstrapStore",
+    "ReplacementStore",
     "OpenFile",
     "LocalFileReader",
     "LockedWriter",
@@ -342,6 +348,9 @@ external_types = [
     "UnboundedSender",
     "Receiver",
     "UnboundedReceiver",
+    "Arc",
+    "Rc",
+    "Weak",
 ]
 internal_dependency_types = ["DatabaseConnection"]
 closed_session_types = [
