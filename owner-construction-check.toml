@@ -199,6 +199,16 @@ borrowed_facade_types = [
     "PreWrite",
 ]
 task_types = [
+    # How the authorizer judges the SQL of one scope: coven's own, an
+    # applied write's, a write's, a bulk write's, one step's or one read's,
+    # and the reads one statement makes while it is prepared.
+    "InternalSql",
+    "ApplyingSql",
+    "WriteSql",
+    "BulkSql",
+    "StepSql",
+    "ReadingSql",
+    "ObservedReads",
     # A first installation's, and a replacement's, unpublished store and
     # its bootstrap lock, for that one call.
     "BootstrapStore",
@@ -647,6 +657,13 @@ tables = [
     "Keychain::restore_new_device_from_cloud",
 ]
 
+# A connection's authorizer, whose state its SQLite hooks share: one judging
+# for the handle that holds the writer lock, one for a read-only handle.
+"crates/coven-database/src/authorization.rs" = [
+    "SqlAuthorization::new",
+    "SqlAuthorization::read_only",
+    "SqlAuthorization::judging",
+]
 "crates/coven-database/src/database.rs" = [
     "process",
     "start_call",
