@@ -208,11 +208,22 @@ Names, values, key commitments and operation contents stay encrypted.
 
 #### 2.4 Authorization
 
-Signatures identify who wrote each slot. An admin entry is judged against the
-state just before its slot. A write is judged against the history its author had
-seen (its `read_through`, §7.1) and against the removal cut-off (§14.1). So only
-authorized members change membership, and at least one admin always remains
-(§10). The Lean models assume the cryptography is secure; they don't prove it.
+Signatures identify who wrote each slot. A write is judged by what its author
+had seen (its `read_through`, §7.1), unless it changes who counts: those changes
+are decided in sequence order, so every device agrees and the store's invariants
+hold.
+
+- **Changes to data** are judged against the history their author had seen, and
+  against the removal cut-off (§14.1). Ben's week of offline edits isn't
+  refused over slots he couldn't have read; edits that disagree are merged (§9).
+- **Changes to who counts** (an admin entry: membership, roles, keys, removals)
+  are judged against the state just before their slot, and of two competing
+  ones the lower slot wins. Judged by what each author had seen, Ana and Ben
+  removing each other offline would both pass and leave no admin; in slot order
+  the first removal counts and the second is refused.
+
+So only authorized members change membership, and at least one admin always
+remains (§10). The Lean models assume the cryptography is secure; they don't prove it.
 
 #### 2.5 Revocation
 
