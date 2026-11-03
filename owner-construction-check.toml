@@ -319,7 +319,8 @@ closed_session_types = [
 ]
 
 # Handles (F.3): what an owner makes from its own state to be shared. Only
-# the owner makes and returns one; a holder receives it when it is built.
+# the owner makes one; it, and the owners holding it, return a fresh one; a
+# holder receives it when it is built.
 [handles]
 # Replaces a live query's request from another task while the query waits
 # for its next result (api.md E4).

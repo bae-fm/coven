@@ -197,10 +197,11 @@ fn associated_returns_and_outputs_alongside_self_obey_the_hand_out_rule() {
     }
 }
 
-/// A handle's owner hands it out, and the handle clones itself; a holder it
-/// was given to, or anything else, hands out none.
+/// A handle's owner hands it out, and the handle clones itself. An owner
+/// holding that owner, at any depth, passes up a fresh one it asked for; what
+/// holds the handle itself, or holds no owner of it, hands out none.
 #[test]
-fn only_a_handles_owner_hands_it_out() {
+fn only_a_handles_owner_and_what_holds_it_hand_it_out() {
     let mut policy = policy();
     policy.handles.insert("Requests".into(), "Query".into());
     let source = "struct State { clock: Clock } \
@@ -208,22 +209,28 @@ fn only_a_handles_owner_hands_it_out() {
         impl Requests { fn clone(&self) -> Self { todo!() } } \
         struct Query { state: State } \
         impl Query { pub fn requests(&self) -> Requests { todo!() } } \
-        struct Holder { requests: Requests } \
-        impl Holder { pub fn requests(&self) -> Requests { todo!() } } \
         struct Wrapper { query: Query } \
         impl Wrapper { pub fn requests(&self) -> Requests { todo!() } } \
+        struct Outer { wrapper: std::sync::Arc<Wrapper> } \
+        impl Outer { pub fn requests(&self) -> Requests { todo!() } } \
+        struct Holder { requests: Requests } \
+        impl Holder { pub fn requests(&self) -> Requests { todo!() } } \
+        struct Keeper { query: Query, kept: Holder } \
+        impl Keeper { pub fn requests(&self) -> Requests { todo!() } } \
         struct Owner { clock: Clock } \
-        impl Owner { pub fn open(&self) -> Requests { todo!() } }";
+        impl Owner { pub fn share(&self) -> Requests { todo!() } }";
     let files = [RustFile::fixture(PATH, source)];
     let found = find_owner_dependency_leaks(&files, &policy, &OwnerGraph::collect(&files, &policy));
+    let finding = |message: &str| Finding::new(PATH, 1, message, HANDLE_REMEDY);
     assert_eq!(
         found,
-        ["Holder", "Wrapper"].map(|holder| Finding::new(
-            PATH,
-            1,
-            format!("{holder}::requests hands out handle Requests, which only Query hands out"),
-            HANDLE_REMEDY
-        ))
+        [
+            finding("Holder::requests hands out handle Requests, which it holds; only Query makes one"),
+            finding("Keeper::requests hands out handle Requests, which it holds; only Query makes one"),
+            finding(
+                "Owner::share hands out handle Requests, which only Query and what holds it hand out"
+            ),
+        ]
     );
 }
 

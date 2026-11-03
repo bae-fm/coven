@@ -9747,13 +9747,18 @@ request from another. The query's `requests()` returns a `LiveQueryRequests`,
 which shares the query's pending request and the signal that wakes it. Such a
 value is an owner's *handle*, not to be confused with the store's handle the app
 opens (api.md E1): its owner makes it from its own state to be shared. Only its
-owner makes and returns one, and a clone is one more share of the same state.
+owner makes one, and a clone is one more share of the same state. The handle
+passes up through the owners that hold its owner, at any depth: the store's
+handle answers an app asking for more frequent sync with a guard its sync
+state's intervals make, each layer asking the one below for a fresh one. No
+owner returns a handle it holds.
 Like any capability, a handle flows only into what is being built: a
 holder receives it when it is built, or a free function as an argument, never
 another method, and no holder passes it on. So each holder of a handle was
 chosen where it was built, as each holder of any shared state is (F.2). The
-checker's policy names each handle with its owner. Anything else that shares an
-owner's state is no handle, and answers to the rules above.
+checker's policy names each handle with the owner that makes it, and only that
+one. Anything else that shares an owner's state is no handle, and answers to
+the rules above.
 
 ### F.4 Opening, closing and sync
 

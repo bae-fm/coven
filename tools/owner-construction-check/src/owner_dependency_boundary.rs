@@ -3,7 +3,9 @@
 //! capability, such as a database connection, as a parameter.
 //!
 //! A handle is the one thing an owner hands out on purpose: its owner returns
-//! it, and nothing else does, not even a holder it was given to.
+//! it, and so does an owner holding that owner, at any depth, passing up a
+//! fresh one it asked for. Nothing that holds the handle itself returns it,
+//! not even a holder it was given to.
 //!
 //! The rules here read the declared types transitively: what an owner
 //! retains is every type its fields reach. A method that returns a retained
@@ -64,15 +66,27 @@ pub(crate) fn find_owner_dependency_leaks(
             let held = &retained[&method.owner];
             let rooted = policy.is_composition_root(&method.path, &method.owner, &method.method);
             for output in &method.output {
-                if let Some(owner) = policy.handles.get(output) {
-                    if !rooted && !policy.makes_handle(&method.owner, output) {
+                if let Some(maker) = policy.handles.get(output) {
+                    let message = if rooted || policy.makes_handle(&method.owner, output) {
+                        None
+                    } else if held.contains(output) {
+                        Some(format!(
+                            "{}::{} hands out handle {output}, which it holds; only {maker} makes one",
+                            method.owner, method.method
+                        ))
+                    } else if !held.contains(maker) {
+                        Some(format!(
+                            "{}::{} hands out handle {output}, which only {maker} and what holds it hand out",
+                            method.owner, method.method
+                        ))
+                    } else {
+                        None
+                    };
+                    if let Some(message) = message {
                         leaks.insert(Finding::new(
                             &method.path,
                             method.line,
-                            format!(
-                                "{}::{} hands out handle {output}, which only {owner} hands out",
-                                method.owner, method.method
-                            ),
+                            message,
                             HANDLE_REMEDY,
                         ));
                     }
@@ -140,7 +154,7 @@ pub(crate) fn find_owner_dependency_leaks(
 const REMEDY: &str = "an owner never hands out what it holds; callers ask it to do the work";
 
 const HANDLE_REMEDY: &str =
-    "a handle's owner hands it out; a holder receives it when it is built and keeps it";
+    "a handle's owner makes it, and what holds that owner asks it for a fresh one; a holder receives one when it is built and keeps it";
 
 /// A consumed task can hand its owned permit or prepared result to the next
 /// task. Borrowed getters and wrappers exposing raw dependencies

@@ -122,8 +122,10 @@ pub(crate) struct Policy {
     /// Handles (Appendix F.3), each with the type that makes it:
     /// `LiveQueryRequests = "LiveQuery"`. A handle is a capability its owner
     /// makes from its own state to hand out: only that owner (or the handle,
-    /// cloning itself) makes one, only that owner returns one, and a holder
-    /// receives one only when it is built or as a free function's argument.
+    /// cloning itself) makes one; that owner returns one, and so does an
+    /// owner holding it, at any depth, passing up a fresh one, but nothing
+    /// holding the handle itself; and a holder receives one only when it is
+    /// built or as a free function's argument.
     #[serde(default)]
     pub(crate) handles: BTreeMap<String, String>,
     /// Raw capabilities fixed when the owner graph is built, which have no
