@@ -2011,8 +2011,8 @@ impl CovenBuilder {
     /// then resumes unfinished operations and committed file work. Empty
     /// custody is allowed; malformed or inaccessible custody fails opening.
     /// Local database calls need no store key. Opening does not start
-    /// the sync loop; `start_sync` starts it. A store with storage set up
-    /// opens as `Stopped`; otherwise its status is `Disconnected`.
+    /// the sync loop; `start_sync` starts it. Opening records whether
+    /// storage is set up, so the sync state is ready once it returns (E5).
     /// `on_progress` hears each step the open runs, on this task (§4).
     pub async fn open(
         self,
@@ -2906,9 +2906,10 @@ let moved = handle
   far a transfer in flight has got, bytes handed over or received included,
   is on the transfer watches (E7, E8): memory only, keyed by file, with no
   table or live query.
-- This device's open invites are the view `coven_invites` (E10), the sync
-  status and what the person's retry would do the tables `coven_sync_status`
-  and `coven_retry_effect` (E5), which a live query follows like any other.
+- This device's open invites are the view `coven_invites` (E10), what the
+  sync state is computed from and what the person's retry would do the tables
+  `coven_sync_status` and `coven_retry_effect` (E5), which a live query
+  follows like any other.
 - E.g. Ana's app reads `members()` to draw its first list, or subscribes with
   `subscribe_members()` to receive that same list and later committed changes.
 - Subscriptions show current results, as slots apply. Their callback
@@ -3005,8 +3006,11 @@ let moved = handle
 | `coven_upload_queue`: each file waiting in this device's upload queue, as `coven_uploads` lists it; a table, which local triggers can follow | `file` | the file's id, as in `coven_uploads` |
 | | `position` | its place in the queue, as in `coven_uploads` |
 | `coven_pins`: each file this device keeps pinned, whole on this device (E8); a table, which local triggers can follow | `file` | the file's id |
-| `coven_sync_status`: this installation's sync status, in one row from the store's creation on, with no storage set up too (E5); a table, which local triggers can follow; not readable on a read-only handle | `state` | `disconnected`, `stopped`, `offline`, `syncing`, `synced`, `blocked` or `failed` |
-| | `status` | the status with its details, read as `SyncStatus` |
+| `coven_sync_status`: what this installation's sync state is computed from, in one row from the store's creation on, with no storage set up too (E5); a table, which local triggers can follow; not readable on a read-only handle; read the state with `SyncStatus::read` | `storage` | `none` with no location recorded, `signed_out` with a location whose credentials this device doesn't hold, `connected` with both |
+| | `provider` | the recorded location's provider, read as `CloudProvider`; NULL with none |
+| | `last_pass` | how the last pass ended, read as `LastPass`; NULL until a pass ends on this device, which counts as synced, since setup, joining and restoring read the store to its end |
+| | `moving` | 1 while a running pass has read a slot it hadn't, or claimed one; opening writes 0 |
+| | `last_synced` | when a pass last reached the end of the sequence, or setup, joining or restoring finished, in milliseconds since the Unix epoch by the store's clock; never earlier than before; NULL until then |
 | `coven_retry_effect`: what the person's retry would do if made now, in one row from the store's creation on (E5); a table, which local triggers can follow; not readable on a read-only handle | `effect` | `pass`, `cooling_down`, `failed` or `not_syncing`, computed from the columns below, read as `RetryEffect` with `RetryEffect::read` |
 | | `syncing` | 1 while a started connection will plan |
 | | `held` | 1 while a failure only new credentials, an update or a reset can clear holds every pass |
@@ -3040,8 +3044,8 @@ let moved = handle
 ```rust
 /// Reads the `pending` and `record` columns of coven's views.
 impl types::FromSql for PendingRecord;
-/// Reads `coven_sync_status.status`.
-impl types::FromSql for SyncStatus;
+/// Reads `coven_sync_status.last_pass`.
+impl types::FromSql for LastPass;
 /// Reads `coven_operations.kind`.
 impl types::FromSql for OperationKind;
 /// Reads `coven_operations.outcome` once it is not NULL.
@@ -3644,7 +3648,7 @@ while let Some(Ok(values)) = lost.next().await {
     quiet one. The request outlives stopping and starting sync, and runs no
     pass while sync is stopped ([§6.7](coven.md#67-waiting-and-retrying)).
   - `sync_now` never shortens a backoff. `network_changed` ends every backoff
-    whose last attempt got no provider response: the connection's, which status
+    whose last attempt got no provider response: the connection's, which the sync state
     shows as `Offline`, and those of coven's operations and queued uploads,
     whose pending records say `answered: false`. Call it when
     the platform reports that the network became available or changed, and
@@ -3690,7 +3694,7 @@ while let Some(Ok(values)) = lost.next().await {
     from them. Each change writes the row in the step that makes it, on the
     store's writer, and the retry's answer is decided there from the same row,
     so an app that offers Retry Now only while the effect is `pass` offers it
-    only when pressing it runs a pass; the status says why it is not. A
+    only when pressing it runs a pass; the sync state says why it is not. A
     cooldown's end is fixed by the store's clock when it is recorded and kept
     to the millisecond, rounded up, so the row and the answer name one
     instant. Its end is a write too: the connection's owner wakes when the
@@ -3712,50 +3716,75 @@ while let Some(Ok(values)) = lost.next().await {
     local reads and eligible app writes continue.
   - File transfers run outside the pass. Their failures appear in `pending()`
     without blocking sequence application.
-  - `Synced` means the pass reached its read end. Files, provider effects or
-    retention may still be pending, but an unapplied discovered slot prevents this status.
+  - A synced pass reached its read end. Files, provider effects or
+    retention may still be pending, but an unapplied discovered slot prevents it.
   - Each pending record names this device's first unmet condition for that subject. Cut-off writes
     record `WritesRefused`; [§19.1](coven.md#191-what-the-app-sees) specifies retries.
 
-- The sync status is the one row of `coven_sync_status` (E4), which the app
-  follows with a live query, joins with its own tables, or follows with a
-  local trigger. Opening writes `Stopped` with storage set up and
-  `Disconnected` without, before the handle exists, and the sync loop writes
-  each later status in the step that changes it: a pass writes `Syncing`
-  before it reads, and `Synced` before its retries hear the answer. A status
-  that can't be written fails the handle, as a pending record does (below),
-  and the loop ends. Each error is kept as its text, with its typed category
-  beside it (`StatusFailure`), so a status read after its process ended still
-  says why. The row is there from the store's creation on, saying no storage
-  is set up until the first open writes over it, so a read always finds one.
+- The sync state is what a status screen shows: one of the states of
+  [§19.1](coven.md#191-what-the-app-sees), its cause where it has one, and
+  when sync last finished. `SyncStatus::read` reads it, and
+  `handle.subscribe(SyncStatus::read)` follows it: its first value is the
+  current state, read at once from what opening wrote, so the app shows no
+  placeholder before it. Coven names the states; the app picks the words.
+  - The state is computed in the read from the row of `coven_sync_status`
+    (E4), the send queue, the files being sent or downloaded and the pending
+    records, so the live query runs again whenever one of them changes: a
+    write committed while offline makes it offline with unsent changes in
+    that transaction. With several candidates, the first in §19.1's order
+    shows; Appendix H.3 of coven.md lists which state each pass failure and
+    pending reason names.
+  - Syncing shows only while a pass has read or claimed a slot, or a file is
+    moving while the last pass was synced. A pass that finds nothing writes
+    nothing the state reads until it ends, and then only the last synced
+    time when it ends synced again, so an idle store's state doesn't flicker
+    every 30 seconds.
+  - The cause is the last pass, as `LastPass` keeps it, or the first pending
+    record, in the order they arose, that names the state, with the cause
+    `coven_pending` keeps beside it. Signed out with no credentials has none.
+  - The last synced time is kept across every state and every reopen, and
+    never goes backward.
+- The row holds what the loop knows. Opening writes whether storage is set
+  up there, and that no pass is moving, before the handle exists, and keeps
+  the last pass and the last synced time. Setup, joining and restoring write
+  storage set up and their finish as the last synced time. The loop writes
+  that the pass moved a slot as it first does, and how the pass ended as it
+  ends, before its retries hear the answer. A row that can't be written fails
+  the handle, as a pending record does (below), and the loop ends. Each error
+  is kept as its text, with its typed category beside it (`StatusFailure`),
+  so a state read after its process ended still says why. The row is there
+  from the store's creation on, saying no storage is set up until the first
+  open writes over it, so a read always finds one.
 - The row, like `coven_retry_effect`'s, describes the sync of the handle that
   holds the store's writer lock. A read-only handle can't tell whether the
-  writer that last wrote it still runs: one that ended without writing
-  `Stopped` left `Syncing` behind, and no write marks its end. So app SQL on a
-  read-only handle may not read either row, directly or through the app's own
-  view: `StatementForbidden`. The app's trigger on them still lets a
-  read-only handle open, since it never runs there.
-- `Offline` describes the last failed attempt, not the connection's history.
-  `Failed`: storage refused the whole pass, or coven's own operation failed;
-  one that never clears stops sync until a reset.
+  writer that last wrote it still runs: one that ended mid-pass left its move
+  behind, and no write marks its end. So app SQL on a read-only handle may
+  not read either row, directly or through the app's own view, and
+  `SyncStatus::read` fails there: `StatementForbidden`. The app's trigger on
+  them still lets a read-only handle open, since it never runs there.
+- An offline pass describes the last failed attempt, not the connection's
+  history. A failed pass: storage refused the whole pass, or coven's own
+  operation failed; one that never clears stops sync until a reset.
   - Keep whether the provider answered; `StorageFailure::Network` alone
     cannot decide this. A server error response is not an offline device.
   - A denied required read can fail the pass. A slot’s unavailable key, schema
-    or damaged bytes gives `Blocked`. A local failure applying it, such as a
-    locked keychain, gives `Failed` and retries under backoff (§19.1). A failed
+    or damaged bytes blocks it. A local failure applying it, such as a
+    locked keychain, fails it and retries under backoff (§19.1). A failed
     file or retention wait stays with its subject.
   - Removal records a `Connection` block with `Removed`, and stops the loop
     for good. Another copy using this device's id fails the pass with
-    `DeviceIdInUse` and stops the loop, recording nothing (§19.3). Local
-    failures also name their pending subject and preserve their typed cause
-    for a waiting caller.
-  - If the database cannot save a pending record or the sync status, stop the
-    loop and fail database calls and live queries with that cause, as
+    `DeviceIdInUse` and stops the loop, recording no pending record (§19.3).
+    Local failures also name their pending subject and preserve their typed
+    cause for a waiting caller.
+  - If the database cannot save a pending record or the sync status row, stop
+    the loop and fail database calls and live queries with that cause, as
     `DbError::StatePersistence`, until the store is reopened.
     Never expose an apparently empty pending list after losing its update.
-- E.g. Ana syncs successfully, then loses Wi-Fi. The next attempt is
-  `Offline`. A later provider error denying the required read is `Failed`.
-  One bad photo while the rest syncs leaves `Synced` with a pending file record.
+- E.g. Ana syncs successfully, then loses Wi-Fi. The next attempt is offline,
+  and her state too. A later provider error denying the required read fails
+  the pass: no access to storage. One bad photo while the rest syncs leaves
+  the last pass synced; its upload's pending record makes the state failed,
+  with that record as the cause.
 - A device that isn't connected still reads and writes
   ([§2.1](coven.md#21-local-writes)); its writes wait in `_coven_uploads`.
 - `start_sync` starts the loop; its first pass builds the provider client from
@@ -3763,11 +3792,11 @@ while let Some(Ok(values)) = lost.next().await {
   on provider rejection (§20.2).
 - `stop_sync` returns once `coven_retry_effect` says sync isn't running and
   the waiting retries are answered, releasing providers after the active pass
-  and transfers. Keys, credentials and location remain. Status reports
-  completion or `Failed` with its cause; no pending connection record is
-  written.
+  and transfers. Keys, credentials and location remain. Stopping changes
+  nothing the sync state reads; a failure releasing the providers is
+  recorded as the last pass's failure, with no pending connection record.
 
-Storage failures retain the same `StorageFailure` through setup, sync status,
+Storage failures retain the same `StorageFailure` through setup, sync state,
 uploads, reads and operations. Their `StorageError` carries the native cause
 where one exists; setup adds the failed check or its distinct local failure
 without reclassifying storage failures. Missing member keys are always
@@ -4741,10 +4770,10 @@ impl CovenHandle {
 
     /// Queues stopping after the active pass and transfers, retaining keys,
     /// credentials and location, once `coven_retry_effect` says sync isn't
-    /// running and the waiting retries are answered `NotSyncing`. Completion
-    /// publishes Stopped or Disconnected; release failures publish Failed
-    /// with their cause, without a pending record. A failed write of the row
-    /// has failed the handle; stopping goes on and the failure is returned.
+    /// running and the waiting retries are answered `NotSyncing`. A release
+    /// failure is recorded as the last pass's failure, without a pending
+    /// record. A failed write of either row has failed the handle; stopping
+    /// goes on and the failure is returned.
     pub async fn stop_sync(&self) -> Result<(), SyncError>;
 
     /// Syncs now instead of at the next idle tick. While idle, coven syncs
@@ -4754,7 +4783,7 @@ impl CovenHandle {
 
     /// The device's network changed: it became available, or moved to
     /// another network. Ends every backoff whose last attempt got no provider
-    /// response: the connection's (`Offline`), operations' and uploads'.
+    /// response: the connection's (offline), operations' and uploads'.
     /// Syncs now, as `sync_now` does. Backoffs after a
     /// provider's answer, and provider cooldowns, hold. Reports coalesce as
     /// `sync_now` requests do (§6.7).
@@ -4821,21 +4850,71 @@ pub enum SyncFailure {
     Other(Arc<dyn std::error::Error + Send + Sync>),
 }
 
-/// The sync status, as `coven_sync_status.status` holds it (E4). Each
-/// error is kept as its text, which names every cause below it with secrets
-/// and URLs already cut.
-pub enum SyncStatus {
-    /// No storage is set up on this device.
-    Disconnected,
-    /// Storage is set up and syncing is stopped; no provider client is required.
-    Stopped,
-    /// The last attempt could not reach storage, regardless of earlier success.
+/// What a status screen shows (E5, §19.1): the sync state and when sync
+/// last finished. Read it with `SyncStatus::read`, or follow it with
+/// `handle.subscribe(SyncStatus::read)`.
+pub struct SyncStatus {
+    pub state: SyncState,
+    /// When a pass last reached the end of the sequence, by the store's
+    /// clock; kept across every state and never earlier than before.
+    pub last_synced: Option<SystemTime>,
+}
+
+impl SyncStatus {
+    /// Computes the state from `coven_sync_status`, the send queue, the
+    /// files moving and the pending records, in one read.
+    pub fn read(sql: SqlReadContext<'_>) -> CovenResult<SyncStatus>;
+}
+
+/// The sync state (§19.1). With several candidates, the first of `Removed`,
+/// `NeedsReset`, `UpdateNeeded`, `SignedOut`, `NoAccess`, `FolderMissing`,
+/// `ClockWrong`, `StorageFull`, `OfflineWithUnsentChanges`, `Offline`,
+/// `Failed`, `Syncing`, `Synced` shows; `NotSynced` comes before them all.
+pub enum SyncState {
+    /// No storage location is recorded on this device.
+    NotSynced,
+    /// A running pass has read or claimed a slot, or a file is moving while
+    /// the last pass was synced.
+    Syncing,
+    /// The last pass reached storage, and nothing below holds.
+    Synced,
+    /// The last pass got no provider response.
+    Offline(SyncCause),
+    /// Offline, and the send queue holds a write.
+    OfflineWithUnsentChanges(SyncCause),
+    /// A location is recorded, but this device holds no credentials for it
+    /// (no cause), or storage refused them.
+    SignedOut { provider: CloudProvider, cause: Option<SyncCause> },
+    /// Signed in, but the account isn't allowed.
+    NoAccess(SyncCause),
+    StorageFull(SyncCause),
+    FolderMissing(SyncCause),
+    ClockWrong(SyncCause),
+    /// A newer app or coven is needed.
+    UpdateNeeded(SyncCause),
+    /// This device or its member was removed.
+    Removed(SyncCause),
+    /// Another copy uses this device's id, or its member keys were replaced.
+    NeedsReset(SyncCause),
+    /// Any other failure.
+    Failed(SyncCause),
+}
+
+/// What names a state: the last pass, or the first pending record, in the
+/// order they arose, that names it, with the cause `coven_pending` keeps.
+pub enum SyncCause {
+    Pass(LastPass),
+    Pending(PendingRecord),
+}
+
+/// How the last pass ended, as `coven_sync_status.last_pass` holds it (E4).
+/// Each error is kept as its text, which names every cause below it with
+/// secrets and URLs already cut.
+pub enum LastPass {
+    /// The pass reached its observed end; other subjects may still be pending.
+    Synced,
     /// The request preventing the pass received no usable provider response.
     Offline { failure: StorageFailure, error: String },
-    /// The initial sync is queued or a sync is running.
-    Syncing,
-    /// The pass reached its observed end; other subjects may still be pending.
-    Synced { finished_at: SystemTime },
     /// This slot invokes §5.4's stuck-device rule.
     /// `error` is the text of the error that blocked the slot: the cause
     /// the slot's pending record keeps. A device that opens already blocked
@@ -4846,8 +4925,8 @@ pub enum SyncStatus {
     Failed { failure: StatusFailure, error: String },
 }
 
-/// What stopped a pass as a whole, as the status keeps it: a `SyncFailure`
-/// without its error objects, whose text the status holds beside it.
+/// What stopped a pass as a whole, as `LastPass` keeps it: a `SyncFailure`
+/// without its error objects, whose text it holds beside it.
 pub enum StatusFailure {
     UpdateRequired(RequiredUpdate),
     Removed,
@@ -4857,13 +4936,13 @@ pub enum StatusFailure {
     Other,
 }
 
-impl SyncStatus {
-    /// The status a whole-pass failure leaves.
+impl LastPass {
+    /// How a pass that failed as a whole ended.
     pub fn failed(failure: impl Into<SyncFailure>) -> Self;
 }
 
-/// Why a pass, or the connection attempt that begins one, failed: the
-/// status it leaves.
+/// Why a pass, or the connection attempt that begins one, failed: how it
+/// ended (`LastPass`).
 pub enum PassFailure {
     Offline { error: Arc<StorageError> },
     /// `error` is the cause the slot's pending record keeps.
@@ -4904,7 +4983,7 @@ pub enum RetryEffect {
     CoolingDown { until: SystemTime },
     /// A failure only new credentials, an update or a reset can clear holds
     /// every pass: the retry is answered `Failed` with it at once. The
-    /// status shows the failure.
+    /// sync state shows the failure.
     Failed,
     /// Sync is stopped or the handle closed: the retry is answered
     /// `NotSyncing` at once.
@@ -4979,17 +5058,12 @@ match handle.setup_s3_storage(storage, device_name, access_key_id, secret, show_
     Err(error) => return show_setup_error(error),
 }
 
-// The status, as a live query follows its row.
-let mut status = handle.subscribe(|sql| {
-    Ok(sql.query_row("SELECT status FROM coven_sync_status", [], |row| {
-        row.get::<_, SyncStatus>(0)
-    })?)
-});
+// The sync state, as a live query follows it; the first value is the
+// current state.
+let mut status = handle.subscribe(SyncStatus::read);
 while let Some(result) = status.next().await {
-    match result? {
-        SyncStatus::Failed { error, .. } => show_sync_error(&error),
-        other => show_status(&other),
-    }
+    let SyncStatus { state, last_synced } = result?;
+    show_sync_line(&state, last_synced);
 }
 ```
 

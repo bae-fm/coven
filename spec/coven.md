@@ -1502,10 +1502,9 @@ After applying and claiming, the device does the work the new state calls for:
   good (§14.1), the device responsible for its cleanup lists its whole file
   folder for deletion.
 
-At the end, the device's status says how the pass went
-([api.md E5](api.md#e5-storage-and-sync)). `Blocked` names the slot that stopped
-the pass. `Synced` means the pass reached the end of the sequence; files or
-provider work may still be pending.
+At the end, the device records how the pass went, and the sync state follows
+(§19.1). A blocked pass names the slot that stopped it. A synced pass reached
+the end of the sequence; files or provider work may still be pending.
 
 #### 6.5 Reading an object
 
@@ -2635,7 +2634,7 @@ doesn't, when the database opens and after migrating.
   time runs before.
 - **A trigger on `coven_files`, `coven_pins`, `coven_upload_queue`,
   `coven_sync_status` or `coven_retry_effect` writes only local tables,** and
-  so do the triggers it fires in turn: a pin, a queued file, the sync status,
+  so do the triggers it fires in turn: a pin, a queued file, the sync facts,
   the retry effect and what a trigger keeps of a record are this device's
   alone. As a migration ends and as the store opens, coven prepares each
   change to the five tables, which compiles every
@@ -7049,20 +7048,85 @@ The app reads the list with `pending()`, or as a live query over the
   Journals and source evidence remain, and work still unresolved still reports its
   cause.
 
-Sync status is one of: no storage set up, stopped, offline, syncing, synced,
-blocked at a slot with a reason, or failed. It is the one row of
-`coven_sync_status`, which the app's live queries and local triggers follow
-like any table ([api.md E5](api.md#e5-storage-and-sync)). Opening writes
-"stopped", or "no storage set up", and the sync loop writes each later status
-in the step that changes it, so the row never shows a status sync has left. A
-failure keeps its error as text, which names every cause, so the status still
-says why after the process that wrote it has ended. If the row can't be
-written, the store's handle fails, as it does when a pending record can't be
-saved (below). The row describes the sync of the handle that holds the store's
-writer lock, so a read-only handle may not read it: that handle can't tell
-whether the writer that last wrote the row still runs, and a writer that ended
-without writing "stopped" left "syncing" behind. The same holds for
-`coven_retry_effect`, what the person's retry would do (§6.7).
+**The sync state.** An app shows the person one word or two about sync, such
+as "Synced" or "Storage full", and the time sync last finished. Coven gives it
+one *sync state*, so every app draws that line the same way and none has to
+weigh the status, the retry and the pending list against each other. Coven
+names the states; the app picks the words.
+
+Say Ben's phone loses its network on a train. His next pass gets no answer, and
+the state is offline. He edits a note: the write commits to the send queue,
+and in the same transaction the state becomes offline with unsent changes; no
+pass runs for it. The network comes back, the next pass reads Ana's new slot
+and claims one for Ben's write, and while it does the state is syncing. It
+ends synced, and the time it finished is the last synced time. Thirty seconds
+later an idle pass finds nothing: the state stays synced the whole time, so
+the line doesn't flicker, and only the last synced time moves.
+
+The state is one of, in the order an app lists them:
+
+- **Not synced:** no storage location is recorded on this device.
+- **Syncing:** a pass has read a slot it hadn't, or claimed one, and is still
+  running; or a file is being sent or downloaded while the last pass was
+  synced. A pass that finds nothing never shows it.
+- **Synced:** the last pass reached storage and nothing below holds.
+- **Offline:** the last pass got no answer from storage.
+- **Offline with unsent changes:** offline, and the send queue holds a write.
+  Coven gives no count.
+- **Signed out:** a location is recorded but this device holds no credentials
+  for it, or storage refused them (`Authentication`). It names the provider.
+  It is never "not synced": the location is still there to sign in to.
+- **No access to storage:** signed in, but the account isn't allowed
+  (`PermissionDenied`, `AccessNotGranted`).
+- **Storage full** (`QuotaExceeded`), **storage folder missing**
+  (`ContainerNotFound`) and **clock wrong** (`ClockSkew`).
+- **Update needed:** a slot, a write or a stored object needs a newer app or
+  coven.
+- **Removed:** this device or its member was removed from the store.
+- **Device needs reset:** another copy uses this device's id (§19.3), or its
+  member keys were replaced elsewhere.
+- **Failed:** any other failure, with no named cause.
+
+The state is computed each time it is read, never stored, from facts that are
+each true on their own: whether a location is recorded and its credentials
+held, how the last pass ended, whether the running pass has read or claimed a
+slot, whether a file is moving, whether the send queue holds a write, and the
+pending records. Each fact names one candidate state or none, and when
+several hold, the one shown is the first of: removed, needs reset, update
+needed, signed out, no access, folder missing, clock wrong, storage full,
+offline with unsent changes, offline, failed, syncing, synced. The device's
+own standing comes first, since no other fix helps until it is dealt with.
+Appendix H.3 lists which state each pass failure and each pending reason
+names.
+
+- **A wait names no state.** A slot waiting on another device's key, a
+  provider's cooldown, a pending invite, a snapshot not yet taken: none is a
+  failure, and none needs the person, so none shows. A pass held on one
+  reached storage and counts as synced, without moving the last synced time.
+- **So does a failure that clears by itself on a subject's own retry,** such as
+  an upload's server error: the subject retries, and the pass says whether
+  storage is reachable. The pending list still shows it.
+- **Each state carries its cause where it has one:** the pass's failure, with
+  its error's text, or the first pending record, in the order they arose, that
+  names the state. Signed out with no credentials has none.
+- **The last synced time** is when a pass last reached the end of the
+  sequence, by the store's clock. It is kept across every state and every
+  reopen, and never goes backward: a clock set back doesn't move it back.
+
+The facts the loop knows are the one row of `coven_sync_status`, which the
+app's live queries and local triggers follow like any table
+([api.md E5](api.md#e5-storage-and-sync)). Opening writes whether storage is
+set up there, before the handle exists, so the state is ready the moment the
+store opens and no app shows a placeholder. The loop writes the rest in the
+step that changes it: that the pass moved a slot, as it first does, and how
+the pass ended, as it ends. A failure keeps its error as text, which names
+every cause, so the state still says why after the process that wrote it has
+ended. If the row can't be written, the store's handle fails, as it does when
+a pending record can't be saved (below). The row describes the sync of the
+handle that holds the store's writer lock, so a read-only handle may not read
+it: that handle can't tell whether the writer that last wrote the row still
+runs, and a writer that ended mid-pass left the pass's move behind. The same
+holds for `coven_retry_effect`, what the person's retry would do (§6.7).
 
 **Refusals and failures.** A *refusal* is permanent: coven downloaded an
 immutable object completely, or a complete independently authenticated file
@@ -8540,7 +8604,8 @@ device consistent with the database.
   reads. `coven_pins` and `coven_upload_queue` have the same prefix: tables
   coven's triggers keep, from the internal view `_coven_pin_source` and from
   the files each upload stores (§4). So do `coven_sync_status`, the one row
-  coven writes as the sync status changes (§19.1), and `coven_retry_effect`,
+  coven writes as what the sync state is computed from changes (§19.1), and
+  `coven_retry_effect`,
   the one row coven writes as what the person's retry would do changes
   (§6.7). They are coven's objects: the app's
   schema, which migrations compare and breaking migrations keep, doesn't hold
@@ -9821,10 +9886,11 @@ the rules above.
   handle and then discards the store, as one removing a store it could not
   finish opening does, would otherwise be refused while blocking work of the
   dropped handle still holds the writer lock.
-- **Opening** leaves configured storage `Stopped`, or `Disconnected` when none
-  is set up on this device: no recorded location, or one whose credentials
-  custody no longer holds, as after a keychain entry deleted by hand. Setup
-  then reconnects at the recorded location. `start_sync` starts the loop, whose
+- **Opening** records whether storage is set up on this device: no recorded
+  location, a location whose credentials custody no longer holds, as after a
+  keychain entry deleted by hand, or both. It keeps how the last pass ended
+  and when sync last finished (§19.1). Setup then reconnects at the recorded
+  location. `start_sync` starts the loop, whose
   first pass builds the storage client from custody credentials (api.md E5).
   Starting again keeps the running loop.
 - **`stop_sync`** returns once the waiting retries hear that sync isn't
@@ -9845,8 +9911,8 @@ the rules above.
 - **Errors** are typed enums per crate. An error is never turned into text to be
   passed on, and nothing returns `Result<_, String>`.
 - **Failures keep their causes.** Failed app calls and whole-pass sync failures
-  keep typed causes. `Offline` means the last attempt couldn't reach storage;
-  `Failed` means a provider refusal or a local failure prevents the whole pass
+  keep typed causes. An offline pass couldn't reach storage; a failed pass
+  means a provider refusal or a local failure prevents the whole pass
   (api.md E5). A local database or file failure remains a failure even when no
   provider request ran. Every object or operation that can't advance has a typed pending
   record, including maintenance and prerequisites (§19.1, api.md E5). A
@@ -10138,6 +10204,7 @@ Write-ups explain each model and state its assumptions:
 | Ben's mixed write 10: its note edit stays frozen and its playlist rename converts; a device's own reads don't exclude | `mixed_write`, `own_reads_do_not_exclude` | `proofs/queue/CovenQueue/DataExamples.lean` | §18.6 |
 | The setter actually replaced decides; partial chains of writes | `actual_setter_decides`, `partial_write_chain` | `proofs/queue/CovenQueue/DataExamples.lean` | §18.6 |
 | Conversion of old writes (queue model overview) | (write-up) | `proofs/queue.md` | §18.6 |
+| A status screen's sync state is the one candidate no other outranks; not synced means no location is recorded, and a location without credentials is signed out; between offline and offline with unsent changes the send queue decides, and a write committed while offline changes one into the other with no pass; syncing shows only while a slot or a file moves, and a pass that moves nothing leaves the state as it was; the last synced time never goes backward, and only a pass reaching the read end changes it; each pending reason names one state or none, and a wait names none | `one_state`, `not_synced_iff`, `signed_out_without_credentials`, `offline_unsent_iff`, `offline_iff`, `write_while_offline`, `syncing_only_moving`, `quiet_pass_keeps`, `last_synced_never_back`, `last_synced_kept`, `waits_name_no_state`, `waiting_pass_synced` | `proofs/io/CovenIO/SyncState.lean` | §19.1 |
 | Store-reset authority is checked in the state before the slot (circle-reset authority is left to the model's supplied audience policy) | `store_reset_authorized` | `proofs/sequence/CovenSequence/Authority.lean` | §19.4 |
 | An applied reset loads its chosen rows without replaying the slots before it | `reset_replaces` | `proofs/sequence/CovenSequence/Preparations.lean` | §19.4 |
 | From empty storage, with every create recorded and the journal kept, a slot signed by this device's id that it never attempted means another copy | `foreign_slot_means_copy` | `proofs/sequence/CovenSequence/Settle.lean` | §19.3 |
@@ -10244,10 +10311,8 @@ the constraint or foreign key (§9, §15.1, §15.2, Appendix A).
 
 | Name | Meaning | Section |
 |---|---|---|
-| sync status | no storage set up, stopped, offline, syncing, synced, blocked at a slot with a reason, or failed | §19.1 |
-| `Stopped`, `Disconnected` | opening leaves configured storage stopped, or disconnected when none is set up | F.4 |
-| `Blocked`, `Synced` | a pass stopped at a slot; a pass reached the end of the sequence | §6.4 |
-| `Offline`, `Failed` | the last attempt couldn't reach storage; a provider refusal or local failure prevents the whole pass | F.5 |
+| sync state | not synced, syncing, synced, offline, offline with unsent changes, signed out, no access to storage, storage full, storage folder missing, update needed, removed, device needs reset, clock wrong, or failed; the first of them by the order below when several hold | §19.1 |
+| `LastPass` | how the last pass ended: synced, offline, blocked at a slot with a reason, or failed | §6.4, F.5 |
 | `NoStorage` | no storage is connected | §17.6, §17.7 |
 | `Storage` | a network or provider failure, kept with the provider's category | §17.7 |
 | `FileUnavailable(FileMissingReason)` | storage confirms nothing at the path a file's record names (`Lost`), or the source of a file this device uploads failed (`Source`) | §17.6, §17.7, §17.9 |
@@ -10261,6 +10326,40 @@ the constraint or foreign key (§9, §15.1, §15.2, Appendix A).
 | `Waiting` | an upload sent in one request, until confirmed completion removes it | §17.9 |
 | `Automatic`, `AppAction`, `Never` | how a storage failure retries: under backoff, when credentials or the connection change, or not at all | §17.9 |
 | `SessionIdentityUnknown` | an S3 upload session's native id can't be recovered | E.10 |
+
+Which sync state each fact names (§19.1). With several, the state is the first
+of removed, device needs reset, update needed, signed out, no access, folder
+missing, clock wrong, storage full, offline with unsent changes, offline,
+failed, syncing, synced. Not synced, with no location recorded, comes before
+them all.
+
+| Fact | State it names |
+|---|---|
+| no location recorded | not synced |
+| a location without credentials | signed out |
+| a running pass read or claimed a slot | syncing |
+| a file being sent or downloaded, the last pass synced | syncing |
+| the last pass synced, or held on a wait | synced |
+| the last pass got no provider response | offline; offline with unsent changes while the send queue holds a write |
+| the last pass, or a record, failed with `Authentication` | signed out |
+| ... with `PermissionDenied` or `AccessNotGranted` | no access to storage |
+| ... with `QuotaExceeded` | storage full |
+| ... with `ContainerNotFound` | storage folder missing |
+| ... with `ClockSkew` | clock wrong |
+| ... with `RateLimited` (the pass), or a failure that clears by itself (a record) | none |
+| ... with any other `StorageFailure` | failed |
+| the last pass `UpdateRequired`; a record's `UpdateRequired` | update needed |
+| the last pass `Removed`; a record's `Removed` | removed |
+| the last pass `DeviceIdInUse`; a record's `MemberKeysReplaced` | device needs reset |
+| the last pass blocked at a slot | what the slot's reason names |
+| the last pass failed on coven's own operation | what its record's reason names, else failed |
+| any other failed pass | failed |
+| a record's `Refused`, `FileUnavailable`, `Original { Changed }` or `Failed` other than `Shutdown` | failed |
+| a record's `Cleanup` | what its cleanup's reason names |
+| a record's `Missing`, `Waits`, `KeyUnavailable`, `NoStorage`, `ProviderPending`, `AccountInUse`, `AccessRemains`, `Original { Missing }`, `Rejected`, `WritesRefused`, `Paused` or `Failed(Shutdown)` | none |
+
+The `Connection` subject's record names nothing of its own: it is the last
+pass's failure, kept for its retry.
 
 ### H.4 Storage and setup
 
