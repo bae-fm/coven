@@ -15,9 +15,15 @@ impl DatabaseConnection {
         E: crate::WriteFailure,
         F: FnOnce(crate::BulkSqlContext<'_>) -> Result<R, E>,
     {
-        #[cfg(test)]
-        self.start_profile();
-        let written = self.write_transaction(false, || {
+        self.with_profile(|db| db.bulk_transaction(sql))
+    }
+
+    fn bulk_transaction<F, R, E>(&self, sql: F) -> Result<R, E>
+    where
+        E: crate::WriteFailure,
+        F: FnOnce(crate::BulkSqlContext<'_>) -> Result<R, E>,
+    {
+        self.write_transaction(false, || {
             let scope = self.authorization.bulk();
             let result = sql(crate::BulkSqlContext::new(self))?;
             self.require_transaction()?;
@@ -25,10 +31,7 @@ impl DatabaseConnection {
             drop(scope);
             let changes = crate::change_capture::table_changes(self, changed)?;
             Ok(((), result, changes))
-        });
-        #[cfg(test)]
-        self.end_profile();
-        written
+        })
     }
 }
 

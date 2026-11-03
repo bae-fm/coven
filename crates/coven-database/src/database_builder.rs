@@ -165,94 +165,96 @@ impl DatabaseBuilder {
         writer.identify_device(settings.device_id)?;
         // Before the app's migrations, which may read coven's views.
         writer.serve_transfers(&transfers)?;
-        // A failed open drops the writer with its profile.
-        #[cfg(test)]
-        writer.start_profile();
-        writer.enable_wal()?;
-        let mut progress = ProgressReport::of(&self.progress, clock.clone());
-        let migrating = clock.elapsed();
-        let outcomes = writer.prepare_schema(
-            &tables,
-            &migrations,
-            &self.functions.versions(),
-            Some(crate::migration_run::MigrationOrigin(settings.device_id, clock.now())),
-            self.migration_operation.as_deref(),
-            &mut progress,
-        )?;
-        crate::database::file_database::declare_budgets(&mut writer, &self.namespaces)?;
-        crate::file_removals::finish_at_open(&mut writer, &self.directory)?;
-        crate::pending::forget_causes(&writer)?;
-        // No connection plans until sync starts in this process.
-        crate::internal_schema::retry_effect::save(
-            &writer,
-            crate::internal_schema::retry_effect::RetryState::OPENED,
-        )?;
-        let mut write_schema = crate::write_schema::WriteSchema::read(&writer, tables.clone())?;
-        write_schema.conversions = crate::migration_receive::read(&writer, &migrations)?;
-        write_schema.namespaces = self.namespaces;
-        crate::write_schema::prepare_evaluators(&writer, &write_schema)?;
-        let migrated = clock.elapsed();
-        // After migrating, and before the writer captures commits, on a
-        // connection of its own: one that analyzes a small table loads its
-        // count, and forgetting the statistics afterwards doesn't unload it.
-        // The writer then reads what that connection kept.
-        DatabaseConnection::open(
-            &path,
-            false,
-            SqlAuthorization::new(&tables),
-            &self.sqlite,
-            &self.functions,
-        )?
-        .gather_statistics()?;
-        // SQLite reads its statistics again only when told to.
-        writer.batch("ANALYZE sqlite_schema")?;
-        let optimized = clock.elapsed();
-        // The input database holds only coven's tables, which no app setting
-        // or function reaches.
-        let input_path = self.directory.input_database_path();
-        let mut input_writer = DatabaseConnection::open(
-            &input_path,
-            false,
-            SqlAuthorization::new(&[]),
-            &crate::SqliteSettings::default(),
-            &crate::SqlFunctions::default(),
-        )?;
-        input_writer.enable_wal()?;
-        let version: u32 = input_writer.query_row("PRAGMA application_id", [], |r| r.get(0))?;
-        match version {
-            0 => input_writer
-                .transaction(|db| db.batch(&crate::internal_schema::initial_input_schema()))?,
-            1 => (),
-            _ => return Err(DbError::DamagedDatabase.into()),
-        }
-        let mut input_reader = DatabaseConnection::open(
-            &input_path,
-            true,
-            SqlAuthorization::new(&[]),
-            &crate::SqliteSettings::default(),
-            &crate::SqlFunctions::default(),
-        )?;
-        input_writer.serve(observer.clone());
-        input_reader.serve(observer.clone());
-        let input_writer = Arc::new(Mutex::new(input_writer));
-        // Coven checkpoints both databases off the commit path from here on,
-        // each on a connection of its own (§4); opening, with no reader yet,
-        // checkpointed as it committed.
-        let mut checkpoints = vec![crate::wal_checkpoints::WalCheckpointer::start(
-            DatabaseConnection::open(
-                &input_path,
-                false,
-                SqlAuthorization::new(&[]),
-                &crate::SqliteSettings::default(),
-                &crate::SqlFunctions::default(),
-            )?,
-            &input_writer,
-            crate::sqlite_settings::CHECKPOINT_PAGES,
-            observer.clone(),
-        )?];
-        let inputs = input_database::InputDatabase::new(input_reader, input_writer)?;
-        #[cfg(test)]
-        writer.end_profile();
+        let (outcomes, write_schema, inputs, mut checkpoints, migrating, migrated, optimized) =
+            writer.with_profile(|writer| -> CovenResult<_> {
+                writer.enable_wal()?;
+                let mut progress = ProgressReport::of(&self.progress, clock.clone());
+                let migrating = clock.elapsed();
+                let outcomes = writer.prepare_schema(
+                    &tables,
+                    &migrations,
+                    &self.functions.versions(),
+                    Some(crate::migration_run::MigrationOrigin(settings.device_id, clock.now())),
+                    self.migration_operation.as_deref(),
+                    &mut progress,
+                )?;
+                crate::database::file_database::declare_budgets(writer, &self.namespaces)?;
+                crate::file_removals::finish_at_open(writer, &self.directory)?;
+                crate::pending::forget_causes(writer)?;
+                // No connection plans until sync starts in this process.
+                crate::internal_schema::retry_effect::save(
+                    writer,
+                    crate::internal_schema::retry_effect::RetryState::OPENED,
+                )?;
+                let mut write_schema =
+                    crate::write_schema::WriteSchema::read(writer, tables.clone())?;
+                write_schema.conversions = crate::migration_receive::read(writer, &migrations)?;
+                write_schema.namespaces = self.namespaces;
+                crate::write_schema::prepare_evaluators(writer, &write_schema)?;
+                let migrated = clock.elapsed();
+                // After migrating, and before the writer captures commits, on a
+                // connection of its own: one that analyzes a small table loads its
+                // count, and forgetting the statistics afterwards doesn't unload it.
+                // The writer then reads what that connection kept.
+                DatabaseConnection::open(
+                    &path,
+                    false,
+                    SqlAuthorization::new(&tables),
+                    &self.sqlite,
+                    &self.functions,
+                )?
+                .gather_statistics()?;
+                // SQLite reads its statistics again only when told to.
+                writer.batch("ANALYZE sqlite_schema")?;
+                let optimized = clock.elapsed();
+                // The input database holds only coven's tables, which no app setting
+                // or function reaches.
+                let input_path = self.directory.input_database_path();
+                let mut input_writer = DatabaseConnection::open(
+                    &input_path,
+                    false,
+                    SqlAuthorization::new(&[]),
+                    &crate::SqliteSettings::default(),
+                    &crate::SqlFunctions::default(),
+                )?;
+                input_writer.enable_wal()?;
+                let version: u32 =
+                    input_writer.query_row("PRAGMA application_id", [], |r| r.get(0))?;
+                match version {
+                    0 => input_writer.transaction(|db| {
+                        db.batch(&crate::internal_schema::initial_input_schema())
+                    })?,
+                    1 => (),
+                    _ => return Err(DbError::DamagedDatabase.into()),
+                }
+                let mut input_reader = DatabaseConnection::open(
+                    &input_path,
+                    true,
+                    SqlAuthorization::new(&[]),
+                    &crate::SqliteSettings::default(),
+                    &crate::SqlFunctions::default(),
+                )?;
+                input_writer.serve(observer.clone());
+                input_reader.serve(observer.clone());
+                let input_writer = Arc::new(Mutex::new(input_writer));
+                // Coven checkpoints both databases off the commit path from here on,
+                // each on a connection of its own (§4); opening, with no reader yet,
+                // checkpointed as it committed.
+                let checkpoints = vec![crate::wal_checkpoints::WalCheckpointer::start(
+                    DatabaseConnection::open(
+                        &input_path,
+                        false,
+                        SqlAuthorization::new(&[]),
+                        &crate::SqliteSettings::default(),
+                        &crate::SqlFunctions::default(),
+                    )?,
+                    &input_writer,
+                    crate::sqlite_settings::CHECKPOINT_PAGES,
+                    observer.clone(),
+                )?];
+                let inputs = input_database::InputDatabase::new(input_reader, input_writer)?;
+                Ok((outcomes, write_schema, inputs, checkpoints, migrating, migrated, optimized))
+            })?;
         writer.observe_commits(observer.clone(), settings.device_id, &tables)?;
         let writer = Arc::new(Mutex::new(writer));
         if let Some(pages) = self.sqlite.checkpoint_pages() {

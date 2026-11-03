@@ -100,9 +100,7 @@ async fn checking_a_snapshots_writes_takes_steps_in_proportion_to_them() {
         .map(|slot| write(slot % 10 + 1, slot / 10 + 1, slot, slot - 1, 1_000 + slot))
         .collect();
     let steps = staged(&writes, |db| {
-        db.start_profile();
-        SnapshotMetadata::staged(db, 1).validate(WRITES).unwrap();
-        db.end_profile();
+        db.with_profile(|db| SnapshotMetadata::staged(db, 1).validate(WRITES)).unwrap();
         // Each statement's count is its total so far, so its last one counts.
         let mut steps: BTreeMap<String, i32> = BTreeMap::new();
         for statement in db.profiled_statements() {

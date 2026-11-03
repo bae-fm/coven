@@ -13,9 +13,7 @@ async fn reading_steps(tables: usize) -> i64 {
         .collect();
     let steps = db.inspect_writer(|writer| {
         writer.batch("BEGIN").unwrap();
-        writer.start_profile();
-        writer.app_batch(&sql).unwrap();
-        writer.end_profile();
+        writer.with_profile(|writer| writer.app_batch(&sql)).unwrap();
         writer.batch("ROLLBACK").unwrap();
         writer
             .profiled_statements()

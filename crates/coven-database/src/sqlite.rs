@@ -260,15 +260,13 @@ impl DatabaseConnection {
             return Ok(Vec::new());
         }
         let mut at = migrations.iter().find(|m| m.version > current).expect("pending migration");
-        #[cfg(test)]
-        self.start_profile();
         let publishes = author.is_some();
         let device = author.as_ref().map(|origin| origin.0);
         progress.begin(
             crate::OpenStep::Migrating,
             migrations.iter().filter(|m| m.version > current).count() as u64,
         );
-        let result = self.transaction(|db| {
+        let result = self.with_profile(|db| db.transaction(|db| {
             let crate::migration_run::MigrationRun { outcomes, marker } =
                 crate::migration_run::run(
                     db,
@@ -337,9 +335,7 @@ impl DatabaseConnection {
             )?;
             db.refresh_hidden_rowids()?;
             Ok(outcomes)
-        });
-        #[cfg(test)]
-        self.end_profile();
+        }));
         result.map_err(|source| {
             MigrationError::Failed { version: at.version, name: at.name, source: Box::new(source) }
                 .into()
@@ -374,6 +370,26 @@ impl DatabaseConnection {
             rowid,
             true,
         )?))
+    }
+
+    /// Run `run` on this connection. Tests trace its statements, ending the
+    /// profile on every path out of `run`, a panic's included, so a profile
+    /// is never left open; one inside another nests (sqlite_tests.rs).
+    pub(crate) fn with_profile<T>(&mut self, run: impl FnOnce(&mut Self) -> T) -> T {
+        #[cfg(not(test))]
+        return run(self);
+        #[cfg(test)]
+        {
+            struct Profiled<'a>(&'a mut DatabaseConnection);
+            impl Drop for Profiled<'_> {
+                fn drop(&mut self) {
+                    self.0.end_profile();
+                }
+            }
+            self.start_profile();
+            let profiled = Profiled(self);
+            run(&mut *profiled.0)
+        }
     }
 
     pub(crate) fn state_transaction<T>(

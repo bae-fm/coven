@@ -47,7 +47,7 @@ impl DatabaseConnection {
     /// Trace this connection's statements until the matching
     /// [`Self::end_profile`]. A profile inside another, as a migration's
     /// inside the open's, leaves the outer one tracing.
-    pub(crate) fn start_profile(&mut self) {
+    pub(super) fn start_profile(&mut self) {
         let open = self.profiles.get();
         self.profiles.set(open + 1);
         if open > 0 {
@@ -74,7 +74,7 @@ impl DatabaseConnection {
 
     /// End a profile, publishing what the outermost one has traced so far;
     /// only the outermost stops tracing.
-    pub(crate) fn end_profile(&mut self) {
+    pub(super) fn end_profile(&mut self) {
         let open = self.profiles.get() - 1;
         self.profiles.set(open);
         if open == 0 {
@@ -472,14 +472,12 @@ async fn audience_validation_looks_up_children_only_when_the_parent_moves() {
             let events=recording.events();
             drop(recording);
             let captured=crate::write_capture::capture(schema,&events).unwrap();
-            writer.start_profile();
-            let changes={
+            let changes=writer.with_profile(|writer| {
                 let before=crate::write_rows::AppView::before(writer,schema,&captured).unwrap();
                 let after=crate::write_rows::AppView::after(writer,schema);
                 let stored=crate::merge_store::MergeStore::new(writer,&before);
                 crate::write_record::changes(writer,schema,&before,&after,&stored,&before.changes(&after, captured.keys().cloned()).unwrap(),&BTreeMap::new(),&Default::default())
-            };
-            writer.end_profile();
+            });
             let lookups=writer.profiled_statements().into_iter().filter(|s| s.sql.starts_with("SELECT DISTINCT r.table_name,r.key,r.audience FROM _coven_references v")).count();
             if moving {
                 assert!(matches!(changes,Err(DbError::ReferenceAudience{..})));
@@ -761,19 +759,19 @@ async fn rowid_authorization_does_not_query_metadata_for_each_write_or_trigger()
     // whatever the commit reads once.
     let metadata_reads = |updates: u8| {
         db.inspect_writer(|writer| {
-            writer.start_profile();
             writer
-                .transaction(|writer| {
-                    for value in 0..updates {
-                        writer.app_execute(
-                            "UPDATE items SET value=?1 WHERE id='a'",
-                            [vec![value; 4096]],
-                        )?;
-                    }
-                    Ok(())
+                .with_profile(|writer| {
+                    writer.transaction(|writer| {
+                        for value in 0..updates {
+                            writer.app_execute(
+                                "UPDATE items SET value=?1 WHERE id='a'",
+                                [vec![value; 4096]],
+                            )?;
+                        }
+                        Ok(())
+                    })
                 })
                 .unwrap();
-            writer.end_profile();
             writer
                 .profiled_statements()
                 .into_iter()
@@ -878,5 +876,32 @@ async fn a_profile_inside_another_leaves_the_outer_tracing() {
         .collect();
     assert!(statements.iter().any(|sql| sql.starts_with("CREATE TABLE notes")), "{statements:#?}");
     assert!(statements.iter().any(|sql| sql == "ANALYZE sqlite_schema"), "{statements:#?}");
+    db.close().await.unwrap();
+}
+
+/// A profile ends however its run ends, an error or a panic included: what
+/// the connection runs afterwards is never traced.
+#[tokio::test]
+async fn a_profile_ends_on_every_path_out_of_its_run() {
+    let store = TestStore::new();
+    let db = store.builder(notes_tables(), notes_migrations()).open().await.unwrap();
+    db.inspect_writer(|writer| {
+        let failed = writer.with_profile(|writer| -> Result<(), DbError> {
+            writer.batch("SELECT 'traced'")?;
+            Err(DbError::StoreClosed)
+        });
+        assert!(failed.is_err());
+        let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            writer.with_profile(|writer| {
+                writer.batch("SELECT 'traced too'").unwrap();
+                panic!("the run fails");
+            })
+        }));
+        assert!(panicked.is_err());
+        writer.batch("SELECT 'after'").unwrap();
+        let traced: Vec<String> =
+            writer.profiled_statements().into_iter().map(|statement| statement.sql).collect();
+        assert_eq!(traced, ["SELECT 'traced too'"]);
+    });
     db.close().await.unwrap();
 }

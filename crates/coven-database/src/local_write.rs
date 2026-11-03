@@ -22,60 +22,67 @@ impl DatabaseConnection {
         E: crate::WriteFailure,
         F: FnOnce(crate::SqlContext<'_, '_>) -> Result<R, E>,
     {
-        #[cfg(test)]
-        self.start_profile();
-        let written = self.local_transaction(
-            |database, recording| {
-                let files = &crate::file_write::FileWrite::new(database, files);
-                let deleted_circles = crate::store_state_tables::deleted_circles(database)?;
-                let _scope = database.authorization.write();
-                let result = sql(crate::SqlContext::new(files))?;
-                files.check_steps()?;
-                files.finish_app(|| recording.events())?;
-                Ok((result, deleted_circles))
-            },
-            |database, events, (result, deleted_circles)| {
-                let files = &crate::file_write::FileWrite::new(database, files);
-                let captured = crate::write_capture::capture(schema, events)?;
-                let before = crate::write_rows::AppView::before(database, schema, &captured)?;
-                let after = crate::write_rows::AppView::after(database, schema);
-                let store = crate::merge_store::MergeStore::new(database, &before);
-                let mut steps =
-                    crate::execution_capture::capture(database, schema, &before, &after, events)?;
-                let changed = before.changes(&after, captured.keys().cloned())?;
-                // The write's own moves already named their shown rows' new
-                // files; only a taken-out row's insert names one (§17.2).
-                let mut changes = crate::write_record::changes(
-                    database,
-                    schema,
-                    &before,
-                    &after,
-                    &store,
-                    &changed,
-                    &deleted_circles,
-                    &files.taken_out_copies(),
-                )?;
-                // The write's dismissals follow the app's changes (§8.4).
-                let acknowledgements = crate::dismissal::merge(
-                    database,
-                    schema,
-                    &store,
-                    device,
-                    &files.take_dismissals(),
-                    &mut changes,
-                    &mut steps,
-                )?;
-                let record =
-                    files.delete_unreferenced(&store, changes, steps, |changes, steps| {
-                        crate::dismissal::recorded(
-                            crate::write_record::record(
-                                database, device, now, changes, steps, &store,
-                            )?,
-                            &acknowledgements,
-                            || crate::write_record::changed(database, device, now, BTreeMap::new()),
-                        )
-                    })?;
-                let affected = crate::write_apply::WriteApply::new(
+        self.with_profile(|db| {
+            db.local_transaction(
+                |database, recording| {
+                    let files = &crate::file_write::FileWrite::new(database, files);
+                    let deleted_circles = crate::store_state_tables::deleted_circles(database)?;
+                    let _scope = database.authorization.write();
+                    let result = sql(crate::SqlContext::new(files))?;
+                    files.check_steps()?;
+                    files.finish_app(|| recording.events())?;
+                    Ok((result, deleted_circles))
+                },
+                |database, events, (result, deleted_circles)| {
+                    let files = &crate::file_write::FileWrite::new(database, files);
+                    let captured = crate::write_capture::capture(schema, events)?;
+                    let before = crate::write_rows::AppView::before(database, schema, &captured)?;
+                    let after = crate::write_rows::AppView::after(database, schema);
+                    let store = crate::merge_store::MergeStore::new(database, &before);
+                    let mut steps = crate::execution_capture::capture(
+                        database, schema, &before, &after, events,
+                    )?;
+                    let changed = before.changes(&after, captured.keys().cloned())?;
+                    // The write's own moves already named their shown rows' new
+                    // files; only a taken-out row's insert names one (§17.2).
+                    let mut changes = crate::write_record::changes(
+                        database,
+                        schema,
+                        &before,
+                        &after,
+                        &store,
+                        &changed,
+                        &deleted_circles,
+                        &files.taken_out_copies(),
+                    )?;
+                    // The write's dismissals follow the app's changes (§8.4).
+                    let acknowledgements = crate::dismissal::merge(
+                        database,
+                        schema,
+                        &store,
+                        device,
+                        &files.take_dismissals(),
+                        &mut changes,
+                        &mut steps,
+                    )?;
+                    let record =
+                        files.delete_unreferenced(&store, changes, steps, |changes, steps| {
+                            crate::dismissal::recorded(
+                                crate::write_record::record(
+                                    database, device, now, changes, steps, &store,
+                                )?,
+                                &acknowledgements,
+                                || {
+                                    crate::write_record::changed(
+                                        database,
+                                        device,
+                                        now,
+                                        BTreeMap::new(),
+                                    )
+                                },
+                            )
+                        })?;
+                    let affected = crate::write_apply::WriteApply::new(
                     database,
                     schema,
                     &store,
@@ -92,23 +99,21 @@ impl DatabaseConnection {
                     }
                     error => error,
                 })?;
-                files.retain_rows(affected)?;
-                if let Some(record) = &record {
-                    // The write completing a bound upload frees the write it
-                    // holds, which a self-replacement waits to send (§17.4).
-                    if !files.completes_bound() {
-                        crate::operation::check_write_pause(database)?;
+                    files.retain_rows(affected)?;
+                    if let Some(record) = &record {
+                        // The write completing a bound upload frees the write it
+                        // holds, which a self-replacement waits to send (§17.4).
+                        if !files.completes_bound() {
+                            crate::operation::check_write_pause(database)?;
+                        }
+                        crate::write_commit::queue(database, schema, record)?;
                     }
-                    crate::write_commit::queue(database, schema, record)?;
-                }
-                files.queue_uploads(now, record.map(|record| record.header.position.number))?;
-                files.before_commit()?;
-                Ok(result)
-            },
-        );
-        #[cfg(test)]
-        self.end_profile();
-        written
+                    files.queue_uploads(now, record.map(|record| record.header.position.number))?;
+                    files.before_commit()?;
+                    Ok(result)
+                },
+            )
+        })
     }
 
     /// A local write's transaction, in two phases with a borrow of the
