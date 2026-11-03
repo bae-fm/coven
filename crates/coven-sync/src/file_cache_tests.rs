@@ -631,7 +631,7 @@ async fn a_fetch_reads_the_cached_chunk_it_stops_at_once() {
     let file = f.uploaded("stops", bytes.clone()).await;
     let stream = f.files.open_file_stream(&file).await.unwrap();
     stream.read_at(2 * CHUNK as u64, 1).await.unwrap();
-    let counter = coven_foundation::test_work::Counter::default();
+    let counter = coven_foundation::test_work::Counter::new();
     assert_eq!(counter.run(stream.read_at(0, 3 * CHUNK as u64)).await.unwrap(), bytes);
     assert_eq!(counter.take().file_range_reads, 1);
     f.close().await;
@@ -673,7 +673,7 @@ async fn a_pin_publishes_its_whole_file_without_reading_it_back() {
     let f = Fixture::new(Provenance::AppProvided).await;
     let bytes: Vec<u8> = (0..CHUNK * 2 + 7).map(|i| (i % 233) as u8).collect();
     let file = f.uploaded("pinned", bytes.clone()).await;
-    let counter = coven_foundation::test_work::Counter::default();
+    let counter = coven_foundation::test_work::Counter::new();
     counter.run(f.files.pin(std::slice::from_ref(&file))).await.unwrap();
     assert_eq!(counter.take().file_range_reads, 0);
     let progress = f.database.pin_progress(vec![file.clone()]).await.unwrap();

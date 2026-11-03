@@ -2,8 +2,8 @@ use super::*;
 
 #[tokio::test]
 async fn concurrent_measurements_follow_bound_work_and_restore_the_callers_scope() {
-    let first = Counter::default();
-    let second = Counter::default();
+    let first = Counter::new();
+    let second = Counter::new();
     let run = |counter: Counter, count: usize| async move {
         counter
             .run(async move {

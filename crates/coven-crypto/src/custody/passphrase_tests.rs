@@ -63,7 +63,7 @@ fn wrong_passphrase_and_wrong_store_or_material_kind_fail_authentication() {
 
 #[test]
 fn a_session_holds_its_material_and_saves_without_rereading_the_file() {
-    let counter = coven_foundation::test_work::Counter::default();
+    let counter = coven_foundation::test_work::Counter::new();
     counter.scope(|| {
         let (_temp, file, id) = file();
         let custody = Arc::new(PassphraseCustody::<StoreKeyring>::new(
@@ -168,7 +168,7 @@ fn file_failures_are_not_absence_or_success() {
 
 #[test]
 fn saving_additions_reuses_the_unlocked_passphrase_key() {
-    let counter = coven_foundation::test_work::Counter::default();
+    let counter = coven_foundation::test_work::Counter::new();
     counter.scope(|| {
         let ids = SequentialIds::new();
         let (_temp, file, id) = file();
@@ -196,7 +196,7 @@ fn saving_additions_reuses_the_unlocked_passphrase_key() {
 
 #[test]
 fn failed_save_and_forget_preserve_held_keys_and_reuse_the_sealing_capability() {
-    let counter = coven_foundation::test_work::Counter::default();
+    let counter = coven_foundation::test_work::Counter::new();
     counter.scope(|| {
         let (temp, file, id) = file();
         let custody = Arc::new(PassphraseCustody::<StoreKeyring>::new(

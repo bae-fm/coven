@@ -103,7 +103,7 @@ fn each_decoded_record_reads_back_from_its_frame() {
     let mut input = bytes.as_slice();
     let mut records = 0;
     while let Some(record) = decoder.next_record(&mut input, &oracle).unwrap() {
-        let counter = coven_foundation::test_work::Counter::default();
+        let counter = coven_foundation::test_work::Counter::new();
         let read = counter.scope(|| SnapshotRecord::decode_checked(decoder.frame(), &oracle));
         assert_eq!(read.unwrap(), record);
         assert_eq!(counter.take().snapshot_decodes, 0);

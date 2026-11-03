@@ -319,7 +319,7 @@ async fn app_tests_count_the_steps_a_read_runs() {
         .create_store("Steps")
         .await
         .unwrap();
-    let counter = WorkCounter::default();
+    let counter = WorkCounter::new();
     handle.test_track_work(counter.clone()).await.unwrap();
     let cost = |sql: &'static str| {
         let (handle, counter) = (handle.clone(), counter.clone());

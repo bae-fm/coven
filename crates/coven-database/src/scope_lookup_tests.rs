@@ -468,7 +468,7 @@ const ALBUM_X: &str =
 async fn a_run_reads_nothing_for_its_joins_and_a_write_looks_its_values_up() {
     let store = TestStore::new();
     let db = store.schema(vec![], MUSIC).await.unwrap();
-    let counter = crate::test_utils::WorkCounter::default();
+    let counter = crate::test_utils::WorkCounter::new();
     db.test_track_work(counter.clone()).await.unwrap();
     let mut query = db.subscribe(|sql| Ok(sql.query(ALBUM_X, [], |r| r.get::<_, String>(0))?));
     assert_eq!(next(&mut query).await, ["one", "two", "three"]);
@@ -499,7 +499,7 @@ async fn a_run_reads_nothing_for_its_joins_and_a_write_looks_its_values_up() {
 async fn a_live_run_runs_the_steps_of_a_one_shot_read() {
     let store = TestStore::new();
     let db = store.schema(vec![], MUSIC).await.unwrap();
-    let counter = crate::test_utils::WorkCounter::default();
+    let counter = crate::test_utils::WorkCounter::new();
     db.test_track_work(counter.clone()).await.unwrap();
     let titles =
         db.read(|sql| Ok(sql.query(ALBUM_X, [], |r| r.get::<_, String>(0))?)).await.unwrap();
@@ -569,7 +569,7 @@ async fn a_write_past_the_row_bound_looks_nothing_up() {
     let store = TestStore::new();
     let db = store.schema(vec![], MUSIC).await.unwrap();
     let bound = crate::sqlite::ROWS_PER_TABLE;
-    let counter = crate::test_utils::WorkCounter::default();
+    let counter = crate::test_utils::WorkCounter::new();
     db.test_track_work(counter.clone()).await.unwrap();
     let insert = |from: usize, rows: usize| {
         format!("WITH RECURSIVE n(i) AS (VALUES({from}) UNION ALL SELECT i+1 FROM n WHERE i<{}) INSERT INTO tracks SELECT i, 'r3', 9, 'many' FROM n", from + rows - 1)

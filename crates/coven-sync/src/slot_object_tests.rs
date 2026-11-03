@@ -102,7 +102,7 @@ async fn a_bounded_slot_is_hashed_once() {
     let (ben, _, _, _) = written(&group).await;
     let path = ObjectPath::slot(group.store, NonZeroU64::new(1).unwrap());
     let bytes = coven_storage::Storage::read(&group.storage, &path).await.unwrap();
-    let counter = coven_foundation::test_work::Counter::default();
+    let counter = coven_foundation::test_work::Counter::new();
     counter.scope(|| open_bounded(bytes.clone(), &path, &group.ring, &History::default())).unwrap();
     assert_eq!(counter.take().object_bytes_hashed, bytes.len());
     ben.database().close().await.unwrap();
@@ -124,7 +124,7 @@ async fn a_writes_slot_is_read_once() {
         .unwrap();
     input.keep_range(0, bytes).await.unwrap();
     let retained = input.local_bytes(size).await.unwrap();
-    let counter = coven_foundation::test_work::Counter::default();
+    let counter = coven_foundation::test_work::Counter::new();
     let received = counter
         .scope(|| {
             open(retained, &path, &group.ring, &history, |audience| {

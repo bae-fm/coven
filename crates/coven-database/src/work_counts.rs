@@ -28,10 +28,15 @@ pub struct WorkCounts {
 }
 
 /// Injected counter; clones observe the same database, never other test databases.
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct WorkCounter(Arc<Mutex<WorkCounts>>);
 
 impl WorkCounter {
+    /// A counter no database has counted on yet, for a test to give one.
+    pub fn new() -> Self {
+        Self(Arc::new(Mutex::new(WorkCounts::default())))
+    }
+
     /// Start another measurement after the preceding work has completed.
     pub fn take(&self) -> WorkCounts {
         std::mem::take(&mut *self.0.lock().expect("work counter poisoned"))

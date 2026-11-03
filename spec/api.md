@@ -3341,11 +3341,13 @@ impl LiveQueryRuns {
 /// Counts the work a store's connections run; clones count into the same
 /// counts, and no other store's.
 #[cfg(feature = "test-utils")]
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct WorkCounter { /* private fields */ }
 
 #[cfg(feature = "test-utils")]
 impl WorkCounter {
+    /// A counter nothing has counted on yet, for a test to give a store.
+    pub fn new() -> Self;
     /// The work counted since the last take, starting the next count.
     pub fn take(&self) -> WorkCounts;
 }

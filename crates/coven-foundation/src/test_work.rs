@@ -26,7 +26,7 @@ pub struct Counts {
 }
 
 /// The measurements shared by a task and its explicitly bound blocking calls.
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct Counter(Arc<Mutex<Counts>>);
 
 #[derive(Clone)]
@@ -51,6 +51,11 @@ fn enter<R>(active: Option<Active>, run: impl FnOnce() -> R) -> R {
 }
 
 impl Counter {
+    /// A counter with nothing measured yet, for one test.
+    pub fn new() -> Self {
+        Self(Arc::new(Mutex::new(Counts::default())))
+    }
+
     /// Take the counts after all measured calls have finished.
     pub fn take(&self) -> Counts {
         std::mem::take(&mut *self.0.lock().expect("work counter poisoned"))

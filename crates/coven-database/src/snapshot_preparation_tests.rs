@@ -10,7 +10,7 @@ async fn snapshot_installation_does_not_decode_prepared_records_under_the_writer
     let db = store.schema(notes(), NOTES).await.unwrap();
     sql(&db, "INSERT INTO notes VALUES('n','before','')").await.unwrap();
     let snapshot = frames(&db, Audience::Store).await;
-    let counter = coven_foundation::test_work::Counter::default();
+    let counter = coven_foundation::test_work::Counter::new();
     let bytes = snapshot.concat();
     counter
         .run(load_one(&db, id(Audience::Store), snapshot.prefix, Cursor::new(bytes)))

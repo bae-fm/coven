@@ -224,7 +224,7 @@ impl Group {
         )
         .await
         .unwrap();
-        let work = coven_database::test_utils::WorkCounter::default();
+        let work = coven_database::test_utils::WorkCounter::new();
         database.test_track_work(work.clone()).await.unwrap();
         let keychain = Keychain::in_memory("sequence-test").unwrap();
         let (store_keys, member_keys) = match self.custody {
@@ -542,7 +542,7 @@ pub(crate) async fn assert_idle_work(device: &Device) {
     let received: usize = device.storage.received_buffers().await.iter().sum();
     let transferred = device.storage.transferred().await;
     device.work.take();
-    let counter = coven_foundation::test_work::Counter::default();
+    let counter = coven_foundation::test_work::Counter::new();
     assert!(matches!(
         counter.run(device.sync.pass()).await.unwrap(),
         SequenceStatus::Synced { .. }
@@ -558,7 +558,7 @@ pub(crate) async fn assert_idle_work(device: &Device) {
 async fn idle_pass_reads_only_the_next_slot_and_floor() {
     let mut group = Group::new();
     group.custody = Custody::Passphrase;
-    let counter = coven_foundation::test_work::Counter::default();
+    let counter = coven_foundation::test_work::Counter::new();
     let ana = counter.run(group.device(1)).await;
     assert_eq!(counter.take().custody_derivations, 2);
     group.create(&ana).await;

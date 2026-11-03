@@ -115,7 +115,7 @@ async fn prepared_authorship_is_not_decoded_during_installation() {
     let db = source(&store, &[insert(0, 0), overwrite()]).await;
     let snapshot = frames(&db, Audience::Store).await;
     assert!(!evidence(&snapshot).is_empty());
-    let counter = coven_foundation::test_work::Counter::default();
+    let counter = coven_foundation::test_work::Counter::new();
     counter.run(load(&snapshot, snapshot.concat())).await.unwrap();
     let counts = counter.take();
     assert!(counts.snapshot_decodes > 0);

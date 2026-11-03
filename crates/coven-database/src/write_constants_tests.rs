@@ -109,7 +109,7 @@ async fn applying_a_write_reads_its_constants_once() {
     )
     .await
     .unwrap();
-    let counter = crate::test_utils::WorkCounter::default();
+    let counter = crate::test_utils::WorkCounter::new();
     b.test_track_work(counter.clone()).await.unwrap();
     crate::author_judgement::tests::deliver(&a, &b).await;
     // The schema version as the write arrives and again in the transaction

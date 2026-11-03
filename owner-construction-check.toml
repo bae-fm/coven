@@ -199,6 +199,10 @@ borrowed_facade_types = [
     "PreWrite",
 ]
 task_types = [
+    # The measurement in effect on a thread for one scope of a test, and the
+    # one it replaced, put back when the scope ends.
+    "Active",
+    "PreviousActive",
     # What one storage setup call has spent waiting to resend refused
     # requests, which its steps draw on and then the connection it makes for
     # its own requests (§20.8).
@@ -596,6 +600,9 @@ tables = [
 "crates/coven-foundation/src/task.rs" = ["blocking"]
 # A test clock that keeps time by the clock it is given and records what one
 # progress watch holds at each reading.
+# The work one test measures, shared by its task and the blocking calls it
+# binds; the measurement in effect, and the one it replaced, are tasks.
+"crates/coven-foundation/src/test_work.rs" = ["Counter::new"]
 "crates/coven-foundation/src/progress.rs" = [
     "RecordingClock::new",
     # Where an owner reports each run of one kind of operation, made with
@@ -664,6 +671,8 @@ tables = [
     "Keychain::restore_new_device_from_cloud",
 ]
 
+# The work a test counts on a database, shared by its writer and readers.
+"crates/coven-database/src/work_counts.rs" = ["WorkCounter::new"]
 # A connection's authorizer, whose state its SQLite hooks share: one judging
 # for the handle that holds the writer lock, one for a read-only handle.
 "crates/coven-database/src/authorization.rs" = [

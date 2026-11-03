@@ -110,7 +110,7 @@ async fn unchanged_observations_and_facts_take_no_writer_or_transaction() {
     saved.keep_range(0, vec![1, 2]).await.unwrap();
     let unsupported = FileEvidence::Unproven(UnprovenFiles::Schema(9));
     saved.keep_files(unsupported.clone()).await.unwrap();
-    let work = crate::test_utils::WorkCounter::default();
+    let work = crate::test_utils::WorkCounter::new();
     db.test_track_work(work.clone()).await.unwrap();
     for _ in 0..3 {
         let saved = input(&db, "write", 1, false).await;
