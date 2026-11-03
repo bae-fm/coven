@@ -151,7 +151,7 @@ impl FileWrite<'_> {
             }
             _ => {}
         }
-        Record { id, audience, ..record.clone() }.insert(db)?;
+        file_table::insert(db, &Record { id, audience, ..record.clone() })?;
         let bytes = self.staged_bytes(record.id);
         if self.staged.borrow().iter().any(|file| file.id == bytes) {
             self.copies.borrow_mut().entry(bytes).or_default().push(id);

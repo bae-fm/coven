@@ -404,15 +404,17 @@ impl<'a> FileWrite<'a> {
                 });
             };
             crate::write_commit::check_membership(db, self.device, &audience)?;
-            Record {
-                id: file.id,
-                audience,
-                size: file.size,
-                hash: None,
-                place: Place::DeviceOnly(self.device),
-                namespace: file.namespace.clone(),
-            }
-            .insert(db)?;
+            file_table::insert(
+                db,
+                &Record {
+                    id: file.id,
+                    audience,
+                    size: file.size,
+                    hash: None,
+                    place: Place::DeviceOnly(self.device),
+                    namespace: file.namespace.clone(),
+                },
+            )?;
             self.made.borrow_mut().insert(file.id);
         }
         Ok(())

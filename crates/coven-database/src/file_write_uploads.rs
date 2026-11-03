@@ -261,7 +261,7 @@ impl FileWrite<'_> {
                 )? {
                     let shown = Record::read(db, file)?;
                     if shown.is_some_and(|record| record.place == Place::DeviceOnly(self.device)) {
-                        Record::store(db, file, &location, hash)?;
+                        crate::file_table::store(db, file, &location, hash)?;
                     }
                 }
                 switched.push(upload);
@@ -297,7 +297,7 @@ impl FileWrite<'_> {
                 |r| r.get(0),
             )?;
             if !referenced && !crate::reload_gate::reloading(db, &record.audience)? {
-                Record::delete(db, file)?;
+                crate::file_table::delete(db, file)?;
             }
         }
         Ok(())

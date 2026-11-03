@@ -300,64 +300,64 @@ impl Record {
         }
         Ok(Self { id, audience, size, hash, place, namespace })
     }
+}
 
-    /// Show this new record in `coven_files`, as coven's own statement in
-    /// the write that makes it.
-    #[expect(
-        clippy::map_err_ignore,
-        reason = "a size past the target integer is TooLarge, which names the field and size"
-    )]
-    pub(crate) fn insert(&self, db: &DatabaseConnection) -> Result<(), DbError> {
-        let size = i64::try_from(self.size).map_err(|_| DbError::TooLarge {
-            field: "file size",
-            actual: self.size,
-            maximum: i64::MAX as u64,
-        })?;
-        db.internal_execute(
-            "INSERT INTO main.coven_files(id,audience,size,hash,coordinates,namespace)
-             VALUES(?1,?2,?3,?4,?5,?6)",
-            params![
-                self.id,
-                audience_text(&self.audience),
-                size,
-                self.hash.map(|hash| hash.as_bytes().to_vec()),
-                sql_value(&self.place.value()),
-                self.namespace
-            ],
-        )?;
-        Ok(())
-    }
+/// Show a new record in `coven_files`, as coven's own statement in the write
+/// that makes it.
+#[expect(
+    clippy::map_err_ignore,
+    reason = "a size past the target integer is TooLarge, which names the field and size"
+)]
+pub(crate) fn insert(db: &DatabaseConnection, record: &Record) -> Result<(), DbError> {
+    let size = i64::try_from(record.size).map_err(|_| DbError::TooLarge {
+        field: "file size",
+        actual: record.size,
+        maximum: i64::MAX as u64,
+    })?;
+    db.internal_execute(
+        "INSERT INTO main.coven_files(id,audience,size,hash,coordinates,namespace)
+         VALUES(?1,?2,?3,?4,?5,?6)",
+        params![
+            record.id,
+            audience_text(&record.audience),
+            size,
+            record.hash.map(|hash| hash.as_bytes().to_vec()),
+            sql_value(&record.place.value()),
+            record.namespace
+        ],
+    )?;
+    Ok(())
+}
 
-    /// Switch this record to its stored bytes (§17.9).
-    pub(crate) fn store(
-        db: &DatabaseConnection,
-        file: FileId,
-        location: &crate::FileLocation,
-        hash: ContentHash,
-    ) -> Result<(), DbError> {
-        changed_once(db.internal_execute(
-            "UPDATE main.coven_files SET coordinates=?2,hash=?3 WHERE id=?1",
-            params![file, location.text(), hash.as_bytes().as_slice()],
-        )?)
-    }
+/// Switch a file's record to its stored bytes (§17.9).
+pub(crate) fn store(
+    db: &DatabaseConnection,
+    file: FileId,
+    location: &crate::FileLocation,
+    hash: ContentHash,
+) -> Result<(), DbError> {
+    changed_once(db.internal_execute(
+        "UPDATE main.coven_files SET coordinates=?2,hash=?3 WHERE id=?1",
+        params![file, location.text(), hash.as_bytes().as_slice()],
+    )?)
+}
 
-    /// Switch this record off its stored bytes, to `device` only (§17.3).
-    pub(crate) fn device_only(
-        db: &DatabaseConnection,
-        file: FileId,
-        device: coven_foundation::id_source::DeviceId,
-    ) -> Result<(), DbError> {
-        changed_once(db.internal_execute(
-            "UPDATE main.coven_files SET coordinates=?2,hash=NULL WHERE id=?1",
-            params![file, sql_value(&Place::DeviceOnly(device).value())],
-        )?)
-    }
+/// Switch a file's record off its stored bytes, to `device` only (§17.3).
+pub(crate) fn device_only(
+    db: &DatabaseConnection,
+    file: FileId,
+    device: coven_foundation::id_source::DeviceId,
+) -> Result<(), DbError> {
+    changed_once(db.internal_execute(
+        "UPDATE main.coven_files SET coordinates=?2,hash=NULL WHERE id=?1",
+        params![file, sql_value(&Place::DeviceOnly(device).value())],
+    )?)
+}
 
-    /// Delete a file's record, as coven's own statement in the write that
-    /// removes its last reference (§17.2).
-    pub(crate) fn delete(db: &DatabaseConnection, file: FileId) -> Result<(), DbError> {
-        changed_once(db.internal_execute("DELETE FROM main.coven_files WHERE id=?1", [file])?)
-    }
+/// Delete a file's record, as coven's own statement in the write that
+/// removes its last reference (§17.2).
+pub(crate) fn delete(db: &DatabaseConnection, file: FileId) -> Result<(), DbError> {
+    changed_once(db.internal_execute("DELETE FROM main.coven_files WHERE id=?1", [file])?)
 }
 
 fn changed_once(count: usize) -> Result<(), DbError> {

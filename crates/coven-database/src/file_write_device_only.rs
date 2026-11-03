@@ -104,7 +104,7 @@ impl FileWrite<'_> {
             if record.place != Place::Cloud(copy.location.clone()) {
                 return Err(DbError::NotInCloud { file: copy.file });
             }
-            Record::device_only(db, copy.file, self.device)?;
+            crate::file_table::device_only(db, copy.file, self.device)?;
             self.local.borrow_mut().push(copy);
         }
         Ok(())
