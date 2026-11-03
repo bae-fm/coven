@@ -23,6 +23,18 @@ pub(super) use record::NativeError;
 use record::{Record, PART_SIZE};
 pub(super) use zone::prepare;
 
+/// Read a fetched record's asset while still in the fetch callback, through
+/// the storage's asset files. Memory is bounded even if the server's asset
+/// disagrees with its declared size.
+fn asset_bytes(
+    files: &coven_foundation::files::AssetFiles,
+    record: &Record,
+) -> Result<Vec<u8>, StorageError> {
+    files
+        .read(&record.asset_path()?, PART_SIZE)
+        .map_err(|error| StorageFailure::File.with_source(error))
+}
+
 pub(crate) struct CloudKitStorage {
     container_id: String,
     container: Retained<CKContainer>,
@@ -95,6 +107,22 @@ impl CloudKitStorage {
     fn fetch(&self, name: &str, keys: &[&str]) -> native::CloudKitRequest<Record> {
         native::fetch(&self.database, &self.record_id(name), keys, Ok, None)
     }
+    /// Stage `bytes` as `record`'s asset in this storage's asset files, kept
+    /// while the returned file lives: until the operation saving the record
+    /// ends.
+    fn stage_asset(
+        &self,
+        record: &mut Record,
+        bytes: &[u8],
+    ) -> Result<coven_foundation::files::AssetFile, StorageError> {
+        if bytes.len() > PART_SIZE {
+            return Err(StorageFailure::InvalidPart.into());
+        }
+        let file =
+            self.files.stage(bytes).map_err(|error| StorageFailure::File.with_source(error))?;
+        record.set_asset(file.path())?;
+        Ok(file)
+    }
     fn object(&self, path: &ObjectPath, size: u64) -> Record {
         let mut record = Record::new("CovenObject", &self.record_id(record::record_name(path)));
         record.set_object_fields(path, size);
@@ -108,7 +136,7 @@ impl CloudKitStorage {
         sent: &ByteProgress,
     ) -> Result<StoredObject, StorageError> {
         let mut record = self.object(path, bytes.len() as u64);
-        let asset = record.set_asset(&self.files, bytes)?;
+        let asset = self.stage_asset(&mut record, bytes)?;
         publication.check()?;
         native::conditional_object(
             |operation| unsafe { self.database.addOperation(operation) },
@@ -201,7 +229,7 @@ impl ProviderOps for CloudKitStorage {
         _device: coven_foundation::id_source::DeviceId,
     ) -> Result<(), StorageError> {
         let (mut record, obsolete) = self.replacement_object(previous, bytes.len() as u64).await?;
-        let asset = record.set_asset(&self.files, bytes)?;
+        let asset = self.stage_asset(&mut record, bytes)?;
         publication.check()?;
         native::modify(
             &self.database,

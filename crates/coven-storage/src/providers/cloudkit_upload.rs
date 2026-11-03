@@ -130,7 +130,7 @@ impl CloudKitStorage {
                 &self.database,
                 &self.record_id(&record::part_name(&root, session.confirmed)),
                 &["data"],
-                move |record| record.asset_bytes(&files),
+                move |record| super::asset_bytes(&files, &record),
                 None,
             );
             if request.wait().await? != bytes {
@@ -149,7 +149,7 @@ impl CloudKitStorage {
             record::part_name(&root, confirmed - PART_SIZE as u64)
         };
         part.set_reference("owner", &self.record_id(&previous));
-        let asset = part.set_asset(&self.files, bytes)?;
+        let asset = self.stage_asset(&mut part, bytes)?;
         upload.set_number("confirmed", end);
         publication.check()?;
         native::modify(

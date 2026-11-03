@@ -34,7 +34,7 @@ impl AssetParts for CloudKitStorage {
             &self.database,
             &self.record_id(&name),
             &["data"],
-            move |record| record.asset_bytes(&files),
+            move |record| asset_bytes(&files, &record),
             Some(progress),
         )
         .wait()
@@ -106,7 +106,7 @@ impl CloudKitStorage {
                 let metadata = record.metadata()?;
                 let body = match record.optional_text("upload")? {
                     Some(root) => Body::Parts(root),
-                    None => Body::Inline(record.asset_bytes(&files)?),
+                    None => Body::Inline(asset_bytes(&files, &record)?),
                 };
                 Ok((metadata, body))
             },

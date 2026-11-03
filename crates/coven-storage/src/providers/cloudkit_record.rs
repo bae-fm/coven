@@ -2,7 +2,6 @@
 
 use crate::{CloudProvider, ObjectPath, ObjectPrefix, StorageError, StorageFailure, StoredObject};
 use coven_format::value::StorageTime;
-use coven_foundation::files::{AssetFile, AssetFiles};
 use objc2::{rc::Retained, runtime::ProtocolObject, AnyThread, Message};
 use objc2_cloud_kit::{
     CKAsset, CKErrorCode, CKErrorDomain, CKErrorRetryAfterKey, CKPartialErrorsByItemIDKey,
@@ -12,6 +11,7 @@ use objc2_cloud_kit::{
 use objc2_foundation::{
     NSCopying, NSDictionary, NSError, NSNumber, NSString, NSUnderlyingErrorKey, NSURL,
 };
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 pub(super) use crate::session::CLOUDKIT_PART_SIZE as PART_SIZE;
@@ -139,18 +139,11 @@ impl Record {
     ) -> Result<Option<StoredObject>, StorageError> {
         self.metadata_fields()?.listed(prefix)
     }
-    pub(super) fn set_asset(
-        &mut self,
-        files: &AssetFiles,
-        bytes: &[u8],
-    ) -> Result<AssetFile, StorageError> {
+    /// Make the staged file at `path` this record's asset, which CloudKit
+    /// uploads with the record.
+    pub(super) fn set_asset(&mut self, path: &Path) -> Result<(), StorageError> {
         objc2::rc::autoreleasepool(|_| {
-            if bytes.len() > PART_SIZE {
-                return Err(StorageFailure::InvalidPart.into());
-            }
-            let file =
-                files.stage(bytes).map_err(|error| StorageFailure::File.with_source(error))?;
-            let url = NSURL::from_file_path(file.path()).ok_or(StorageFailure::InvalidPath)?;
+            let url = NSURL::from_file_path(path).ok_or(StorageFailure::InvalidPath)?;
             unsafe {
                 let asset = CKAsset::initWithFileURL(CKAsset::alloc(), &url);
                 self.0.setObject_forKey(
@@ -158,23 +151,22 @@ impl Record {
                     &NSString::from_str("data"),
                 );
             }
-            Ok(file)
+            Ok(())
         })
     }
-    /// Read the staged file while still in the fetch callback. Memory is bounded
-    /// even if the server's asset disagrees with its declared size.
+    /// Where CloudKit put a fetched record's asset, readable only while the
+    /// fetch callback runs.
     #[expect(
         clippy::map_err_ignore,
         reason = "an object of another class is a protocol failure; it is provider data"
     )]
-    pub(super) fn asset_bytes(&self, files: &AssetFiles) -> Result<Vec<u8>, StorageError> {
+    pub(super) fn asset_path(&self) -> Result<PathBuf, StorageError> {
         objc2::rc::autoreleasepool(|_| {
             let value = unsafe { self.0.objectForKey(&NSString::from_str("data")) }
                 .ok_or(StorageFailure::Protocol)?;
             let asset = value.downcast::<CKAsset>().map_err(|_| StorageFailure::Protocol)?;
             let url = unsafe { asset.fileURL() }.ok_or(StorageFailure::Protocol)?;
-            let path = url.to_file_path().ok_or(StorageFailure::InvalidPath)?;
-            files.read(&path, PART_SIZE).map_err(|error| StorageFailure::File.with_source(error))
+            Ok(url.to_file_path().ok_or(StorageFailure::InvalidPath)?)
         })
     }
 }

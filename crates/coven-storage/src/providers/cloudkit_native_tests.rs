@@ -25,7 +25,8 @@ async fn object_publications_use_atomic_change_tag_conditions_and_retain_the_fet
                 let mut record = Record::new("CovenObject", &id);
                 record.set_object_fields(&path, bytes.len() as u64);
                 let files = coven_foundation::files::AssetFiles::new().unwrap();
-                let asset = record.set_asset(&files, bytes).unwrap();
+                let asset = files.stage(bytes).unwrap();
+                record.set_asset(asset.path()).unwrap();
                 // Retaining the same record is what preserves CloudKit's opaque system fields.
                 let pointer = record.raw() as *const CKRecord;
                 let request = conditional_object(
@@ -41,7 +42,11 @@ async fn object_publications_use_atomic_change_tag_conditions_and_retain_the_fet
                         assert_eq!(&*saved as *const CKRecord, pointer);
                         assert_eq!(saved.recordID().recordName().to_string(), path.as_str());
                         assert_eq!(
-                            Record::from_callback(&saved).asset_bytes(&files).unwrap(),
+                            crate::providers::cloudkit::asset_bytes(
+                                &files,
+                                &Record::from_callback(&saved)
+                            )
+                            .unwrap(),
                             bytes
                         );
                         let completion = operation.modifyRecordsCompletionBlock().as_ref().unwrap();
@@ -104,7 +109,8 @@ async fn multipart_floor_publication_replaces_its_asset_chain_in_one_conditional
     let mut floor = Record::new("CovenObject", &id(path.as_str()));
     floor.set_object_fields(&path, 12);
     let files = coven_foundation::files::AssetFiles::new().unwrap();
-    let asset = floor.set_asset(&files, b"former asset").unwrap();
+    let asset = files.stage(b"former asset").unwrap();
+    floor.set_asset(asset.path()).unwrap();
     floor.remove_field("data");
     floor.set_text("upload", "new-upload");
     let pointer = floor.raw() as *const CKRecord;
@@ -154,7 +160,8 @@ async fn a_save_hears_its_assets_progress_as_bytes() {
     };
     let files = coven_foundation::files::AssetFiles::new().unwrap();
     let mut part = Record::new("CovenAsset", &id("upload/0"));
-    let asset = part.set_asset(&files, &[1; 1000]).unwrap();
+    let asset = files.stage(&[1; 1000]).unwrap();
+    part.set_asset(asset.path()).unwrap();
     let upload = Record::new("CovenUpload", &id("upload"));
     let heard = Arc::new(Mutex::new(Vec::new()));
     let sent = crate::ByteProgress::new({
