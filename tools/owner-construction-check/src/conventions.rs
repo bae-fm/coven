@@ -7,6 +7,9 @@
 //!   module private.
 //! - A source file holds at most 1,000 lines.
 //! - A source's tests live beside it in `<name>_tests.rs` (`test_layout.rs`).
+//! - Every Rust file is a module of its own: no `include!` pastes one file's
+//!   code into another, where formatting and the file rules would read it as
+//!   part of the file that includes it, tests and integration tests included.
 
 use std::collections::BTreeSet;
 
@@ -39,6 +42,8 @@ pub(crate) enum Convention {
     /// A test-only module declaration other than
     /// `#[cfg(test)] #[path = "<name>_tests.rs"] mod tests;`.
     MisplacedTestModule,
+    /// An `include!` of a file named by a string literal.
+    IncludedSource,
 }
 
 impl Convention {
@@ -55,6 +60,9 @@ impl Convention {
             | Convention::InlineTestModule
             | Convention::MisplacedTestModule => {
                 "a source's tests live beside it in <name>_tests.rs, declared `#[cfg(test)] #[path = \"<name>_tests.rs\"] mod tests;`"
+            }
+            Convention::IncludedSource => {
+                "declare the included file as a module, `mod name;`, with tests in the <name>_tests.rs beside their source, so formatting and the file rules read it as its own file"
             }
         }
     }
@@ -90,6 +98,10 @@ impl Convention {
                 "a test module is declared `#[cfg(test)] #[path = \"{}\"] mod tests;`",
                 file.replace(".rs", "_tests.rs")
             ),
+            Convention::IncludedSource => {
+                "include! pastes another file's code into this one; a Rust file is a module of its own"
+                    .to_string()
+            }
         }
     }
 }
@@ -198,6 +210,13 @@ impl<'ast> Visit<'ast> for ConventionVisitor<'_> {
     /// tokens directly.
     fn visit_macro(&mut self, node: &'ast syn::Macro) {
         self.check_tokens(node.tokens.clone());
+        // A generated file, as `include!(concat!(env!("OUT_DIR"), …))` names
+        // one, is the build's; one a literal names is a source of the crate.
+        if node.path.segments.last().is_some_and(|segment| segment.ident == "include")
+            && node.parse_body::<syn::LitStr>().is_ok()
+        {
+            self.record(Convention::IncludedSource, node.span());
+        }
         visit::visit_macro(self, node);
     }
 

@@ -9997,7 +9997,10 @@ the rules above.
   row: the write fails with `NotThisDevice` (§17.2), and Ana makes it from her
   laptop, rather than coven fetching the bytes between devices.
 - **Files.** A source file holds at most 1,000 lines, and its tests live beside it
-  in `<name>_tests.rs`.
+  in `<name>_tests.rs`. Each Rust file is a module of its own: no `include!`
+  pastes one into another, where formatting and the file rules would read it
+  as part of the file that includes it. A file the build writes may be
+  included.
 - **Fakes.** Crates offer shared fakes through `test-utils` where needed, such as
   an in-memory provider and a fixed clock. Test-only implementations stay behind
   injected dependencies; tests build the same object graph production does.

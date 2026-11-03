@@ -28,6 +28,21 @@ fn forbidden_syntax_has_a_finding_and_a_remedy() {
             "fn run() { assert!(super::super::ready()); }",
             Convention::DeepParentPath,
         ),
+        (
+            "crates/app-sync/src/cases.rs",
+            r#"include!("cases/listing.rs");"#,
+            Convention::IncludedSource,
+        ),
+        (
+            "crates/app-sync/tests/flow.rs",
+            r#"std::include!("flow/steps.rs");"#,
+            Convention::IncludedSource,
+        ),
+        (
+            "crates/app-sync/src/fixture.rs",
+            r#"fn cases() -> Vec<Case> { include!("cases.in") }"#,
+            Convention::IncludedSource,
+        ),
     ] {
         assert_eq!(
             find_convention_violations(&[RustFile::fixture(path, source)], Some("app")),
@@ -88,4 +103,16 @@ fn file_length_applies_to_crates_tools_and_tests() {
         assert_eq!(found, [Convention::LongFile { lines: 1001 }.finding(path, 1001)]);
         assert_eq!(found[0].message, "holds 1001 lines; a source file holds at most 1000");
     }
+}
+
+/// A file the build writes, which `include!` names through `concat!` and
+/// `env!`, is no source of the crate.
+#[test]
+fn a_generated_file_may_be_included() {
+    let source = r#"include!(concat!(env!("OUT_DIR"), "/bindings.rs"));"#;
+    assert!(find_convention_violations(
+        &[RustFile::fixture("crates/app-sync/src/lib.rs", source)],
+        None
+    )
+    .is_empty());
 }
