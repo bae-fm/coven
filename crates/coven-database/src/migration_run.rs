@@ -187,7 +187,7 @@ pub(crate) fn run<'a>(
             .map(|declaration| declaration.name.clone())
             .collect();
         if !refresh.is_empty() {
-            schema.with_evaluators(database, || {
+            crate::write_schema::with_evaluators(database, &schema, || {
                 crate::migration_state::refresh(database, &schema, &refresh)
             })?;
         }
@@ -216,9 +216,9 @@ fn finish(
     (device, now): (DeviceId, SystemTime),
 ) -> Result<coven_merge::WriteId, DbError> {
     let schema = crate::write_schema::WriteSchema::read(database, tables.to_vec())?;
-    schema.with_evaluators(database, || {
+    crate::write_schema::with_evaluators(database, &schema, || {
         database.batch("CREATE TEMP TABLE _coven_migration_frozen(audience TEXT NOT NULL,record BLOB NOT NULL)")?;
-        crate::published_migration::carry(database,names,&schema)?;
+        crate::published_migration::carry(database, names, &schema)?;
         let hidden = crate::migration_hidden::Hidden::before(database, initial_schema, names)?;
         let refresh = crate::migration_state::carry(database, initial_schema, names, &schema)?;
         crate::migration_files::carry(database, names)?;
@@ -297,7 +297,11 @@ fn finish(
         record.parts.clear();
         crate::write_commit::queue(database, &schema, &record)?;
         crate::migration_state::refresh(database, &schema, &refresh)?;
-        crate::captured_changes::capture(database,record.header.position,record.header.schema_version)?;
+        crate::captured_changes::capture(
+            database,
+            record.header.position,
+            record.header.schema_version,
+        )?;
         database.internal_execute("INSERT INTO _coven_migration_losses(write_id,audience,record) SELECT ?1,audience,record FROM temp._coven_migration_frozen",[coven_format::merge_fields::encode_write_id(&record.header.position)?])?;
         database.batch("DROP TABLE temp._coven_migration_frozen")?;
         snapshot.drop()?;

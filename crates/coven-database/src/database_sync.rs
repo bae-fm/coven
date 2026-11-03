@@ -116,7 +116,10 @@ impl Database {
                 let applied = inner.with_files(|writer, files| {
                     reader.with_reader(|reader| {
                         reader.read_transaction(|| {
-                            inner.access.write_schema.prepare(reader)?;
+                            crate::write_schema::prepare_evaluators(
+                                reader,
+                                &inner.access.write_schema,
+                            )?;
                             reader.schema_version()?;
                             crate::sequence_apply::apply::<P>(
                                 writer,

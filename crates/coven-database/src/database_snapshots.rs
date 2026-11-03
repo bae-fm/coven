@@ -137,7 +137,7 @@ impl Database {
             let reader = inner.access.readers.acquire_reader();
             reader.with_reader(|reader| {
                 reader.read_transaction(|| {
-                    inner.access.write_schema.prepare(reader)?;
+                    crate::write_schema::prepare_evaluators(reader, &inner.access.write_schema)?;
                     crate::snapshot_write::write(
                         reader,
                         &inner.access.write_schema,
@@ -221,7 +221,7 @@ impl Database {
             let reader = inner.access.readers.acquire_reader();
             reader.with_reader(|reader| {
                 reader.read_transaction(|| {
-                    inner.access.write_schema.prepare(reader)?;
+                    crate::write_schema::prepare_evaluators(reader, &inner.access.write_schema)?;
                     crate::raise_capture::write(
                         reader,
                         &inner.access.write_schema,
@@ -346,7 +346,10 @@ impl Database {
                 let loaded = inner.with_files(|writer, files| {
                     reader.with_reader(|reader| {
                         reader.read_transaction(|| {
-                            inner.access.write_schema.prepare(reader)?;
+                            crate::write_schema::prepare_evaluators(
+                                reader,
+                                &inner.access.write_schema,
+                            )?;
                             crate::snapshot_load::load::<P>(
                                 writer,
                                 reader,

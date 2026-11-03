@@ -189,7 +189,7 @@ impl DatabaseBuilder {
         let mut write_schema = crate::write_schema::WriteSchema::read(&writer, tables.clone())?;
         write_schema.conversions = crate::migration_receive::read(&writer, &migrations)?;
         write_schema.namespaces = self.namespaces;
-        write_schema.prepare(&writer)?;
+        crate::write_schema::prepare_evaluators(&writer, &write_schema)?;
         let migrated = clock.elapsed();
         // After migrating, and before the writer captures commits, on a
         // connection of its own: one that analyzes a small table loads its

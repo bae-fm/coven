@@ -280,51 +280,57 @@ impl WriteSchema {
     pub(crate) fn foreign_key(&self, table: &TableSchema, key: &SchemaForeignKey) -> ForeignKey {
         self.schema.foreign_key(table, key)
     }
+}
 
-    /// Run within the caller's transaction. Failure rolls back its temporary
-    /// tables with that transaction; success removes them before returning.
-    pub(crate) fn with_evaluators<R>(
-        &self,
-        db: &DatabaseConnection,
-        run: impl FnOnce() -> Result<R, DbError>,
-    ) -> Result<R, DbError> {
-        self.prepare(db)?;
-        let result = run()?;
-        for declaration in &self.declarations {
-            let table = self.table(&declaration.name);
-            db.batch(&format!(
-                "DROP TABLE temp.{}; DROP TABLE temp.{}",
-                identifier(&evaluation_name(table)),
-                identifier(&affinity_name(table))
-            ))?;
-        }
-        Ok(result)
+/// Run `run` with `schema`'s evaluators on `db`, within the caller's
+/// transaction. Failure rolls back their temporary tables with that
+/// transaction; success removes them before returning.
+pub(crate) fn with_evaluators<R>(
+    db: &DatabaseConnection,
+    schema: &WriteSchema,
+    run: impl FnOnce() -> Result<R, DbError>,
+) -> Result<R, DbError> {
+    prepare_evaluators(db, schema)?;
+    let result = run()?;
+    for declaration in &schema.declarations {
+        let table = schema.table(&declaration.name);
+        db.batch(&format!(
+            "DROP TABLE temp.{}; DROP TABLE temp.{}",
+            identifier(&evaluation_name(table)),
+            identifier(&affinity_name(table))
+        ))?;
     }
+    Ok(result)
+}
 
-    pub(crate) fn prepare(&self, db: &DatabaseConnection) -> Result<(), DbError> {
-        for declaration in &self.declarations {
-            let table = self.table(&declaration.name);
-            let rules = &self.rules[&table.name];
-            db.batch(&format!(
-                "CREATE TEMP TABLE {} ({} INTEGER PRIMARY KEY, {})",
-                identifier(&evaluation_name(table)),
-                identifier(&ordinal(table)),
-                rules.columns.join(",")
-            ))?;
-            db.batch(&format!(
-                "CREATE TEMP TABLE {} ({} INTEGER PRIMARY KEY, {})",
-                identifier(&affinity_name(table)),
-                identifier(&ordinal(table)),
-                table
-                    .columns
-                    .iter()
-                    .map(|c| format!("{} {}", identifier(&c.name), identifier(&c.kind)))
-                    .collect::<Vec<_>>()
-                    .join(",")
-            ))?;
-        }
-        Ok(())
+/// Create the one-row tables in which `db` evaluates each synced table's
+/// removal rules and column affinities under `schema`.
+pub(crate) fn prepare_evaluators(
+    db: &DatabaseConnection,
+    schema: &WriteSchema,
+) -> Result<(), DbError> {
+    for declaration in &schema.declarations {
+        let table = schema.table(&declaration.name);
+        let rules = &schema.rules[&table.name];
+        db.batch(&format!(
+            "CREATE TEMP TABLE {} ({} INTEGER PRIMARY KEY, {})",
+            identifier(&evaluation_name(table)),
+            identifier(&ordinal(table)),
+            rules.columns.join(",")
+        ))?;
+        db.batch(&format!(
+            "CREATE TEMP TABLE {} ({} INTEGER PRIMARY KEY, {})",
+            identifier(&affinity_name(table)),
+            identifier(&ordinal(table)),
+            table
+                .columns
+                .iter()
+                .map(|c| format!("{} {}", identifier(&c.name), identifier(&c.kind)))
+                .collect::<Vec<_>>()
+                .join(",")
+        ))?;
     }
+    Ok(())
 }
 
 pub(crate) fn evaluation_name(table: &TableSchema) -> String {
