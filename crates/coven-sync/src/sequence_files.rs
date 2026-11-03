@@ -427,22 +427,13 @@ impl SequenceSync {
                     crate::Refusal::WrongIdentity { cause: None },
                 ));
             }
-            let mut staging = self
+            let staging = self
                 .database
                 .stage_snapshot(announcement.snapshot.clone(), object.prefix().clone())
                 .await?;
-            match self.snapshot_references(&object, announcement, history, ring, &mut staging).await
-            {
-                Ok(files) => FileEvidence::Complete(files),
-                Err(error) => {
-                    return Err(match staging.discard().await {
-                        Ok(()) => error,
-                        Err(cleanup) => {
-                            crate::credential_custody::cleanup_error(error, cleanup.into())
-                        }
-                    })
-                }
-            }
+            FileEvidence::Complete(
+                self.snapshot_references(&object, announcement, history, ring, staging).await?,
+            )
         };
         object.keep_files(evidence.clone()).await?;
         object.release().await?;
@@ -452,42 +443,56 @@ impl SequenceSync {
 
 impl SequenceSync {
     /// The files a snapshot's rows and losses name, from its body read once
-    /// and staged for the loader's checks, which then remove what it staged.
+    /// into `staging` for the loader's checks. The check is the staging's
+    /// last phase, and a failure before it removes what it staged (§16.2).
     async fn snapshot_references(
         &self,
         object: &SnapshotObject,
         announcement: &SnapshotAnnouncement,
         history: &History,
         ring: &StoreKeyring,
-        staging: &mut coven_database::SnapshotStaging,
+        mut staging: coven_database::SnapshotStaging,
     ) -> Result<BTreeSet<(DeviceId, FileId)>, SyncError> {
         let path = object.path();
-        let body = object
-            .read_body(self.storage.as_ref(), ring, &announcement.digest, Some(&mut *staging), None)
-            .await?;
-        if body.header.id != announcement.snapshot {
-            return Err(crate::write_object::damaged(
-                path,
-                crate::Refusal::WrongIdentity { cause: None },
-            ));
+        let read = async {
+            let body = object
+                .read_body(
+                    self.storage.as_ref(),
+                    ring,
+                    &announcement.digest,
+                    Some(&mut staging),
+                    None,
+                )
+                .await?;
+            if body.header.id != announcement.snapshot {
+                return Err(crate::write_object::damaged(
+                    path,
+                    crate::Refusal::WrongIdentity { cause: None },
+                ));
+            }
+            staging
+                .finish()
+                .await
+                .map_err(|error| crate::write_object::database_failure(path, error))?;
+            object.authenticate(history, &announcement.snapshot, &body.digest, &announcement.digest)
         }
-        let staged = staging
-            .finish()
-            .await
-            .map_err(|error| crate::write_object::database_failure(path, error))?;
-        let author = object.authenticate(
-            history,
-            &announcement.snapshot,
-            &body.digest,
-            &announcement.digest,
-        )?;
+        .await;
+        let author = match read {
+            Ok(author) => author,
+            Err(error) => {
+                return Err(match staging.discard().await {
+                    Ok(()) => error,
+                    Err(cleanup) => crate::credential_custody::cleanup_error(error, cleanup.into()),
+                })
+            }
+        };
         let authorship = Arc::new(SnapshotAuthorship {
             store: self.store(),
             history: history.clone(),
             ring: ring.clone(),
         });
         self.database
-            .validate_snapshot(announcement.snapshot.clone(), staged.records(), author, authorship)
+            .validate_snapshot(announcement.snapshot.clone(), staging, author, authorship)
             .await
             .map_err(|error| crate::write_object::database_failure(path, error))
     }

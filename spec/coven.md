@@ -4844,8 +4844,11 @@ back one at a time and writing each row's merge records through the merge took
   or whose records fail their checks, is still read to its end. If its hash
   differs from the announced one, that is the refusal; storage changed it.
 - **A failed or interrupted read removes what it staged** before the failure is
-  reported, and the next attempt reads the body again from its start. Staged
-  records belong to the connection, so a restart finds none.
+  reported, and the next attempt reads the body again from its start. So does a
+  failed load: staging a snapshot and loading it are one operation, which ends
+  with the load whether it commits or fails, and a reload that needs the
+  snapshot again stages it afresh. Staged records belong to the connection, so a
+  restart finds none.
 - **Reading only the history.** A device that needs only a store snapshot's
   original slots and claims, to authenticate the floor (§16.4) or settle a claim
   (§5.3), reads the body the same way and stages nothing.
@@ -9719,6 +9722,13 @@ construction, owner constructors and task starts.
 it, including when that owner is dropped. Its start sites are on the same list;
 there is no separate list of lifetime authorities. Only the sync owner starts the
 sync loop, so closing the store stops it, and nothing else can leave one running.
+
+**One operation owns its state.** State made for one operation, such as a
+snapshot load's staged records, has one holder for the operation's whole
+lifetime: the operation. Its steps are phases of that holder, each taking it
+from the last, not holders that share it; nothing outlives the operation, and
+no other task or owner holds it. Work that needs the state again runs inside
+the same operation or makes it afresh.
 
 **Owners don't hand out what they hold,** by returning it or through a public
 field; callers ask the owner to do the work. Nothing outside `coven-database`

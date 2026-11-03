@@ -219,12 +219,9 @@ task_types = [
     "SnapshotObject",
     "ReadSnapshot",
     "SelectedSnapshot",
-    # One snapshot's records, staged while its body streams until the
-    # load or file check that reads them.
+    # One snapshot's staging: its records, from the first batch of its
+    # body to the load or file check that reads them.
     "SnapshotStaging",
-    "StagedRows",
-    "StagedSnapshot",
-    "StagedRecords",
     "ReloadStart",
     # One reload's selected streams and installation target.
     "ReloadInputs",
@@ -500,9 +497,9 @@ tables = [
 "crates/coven-database/src/local_file.rs" = ["LocalFileStream::read_at"]
 "crates/coven-database/src/read_pool.rs" = ["ReadPool::new"]
 "crates/coven-database/src/input_database.rs" = ["InputDatabase::new"]
-# Removes an abandoned snapshot staging's records on a blocking task once
-# its last owner drops; closing the store waits for it (§16.2).
-"crates/coven-database/src/snapshot_staging.rs" = ["StagedRows::drop"]
+# Removes an abandoned snapshot staging's records on a blocking task as it
+# drops; closing the store waits for it (§16.2).
+"crates/coven-database/src/snapshot_staging.rs" = ["SnapshotStaging::drop"]
 # Starts a database's checkpointer task, which the store stops as it closes
 # (§4).
 "crates/coven-database/src/wal_checkpoints.rs" = ["WalCheckpointer::start"]

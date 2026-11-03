@@ -164,7 +164,7 @@ pub(crate) async fn validate_one<R: std::io::Read + Send + 'static>(
 > {
     let staged =
         crate::test_utils::stage_plaintext(database, id.clone(), prefix, plaintext).await?;
-    database.validate_snapshot(id, staged.records(), author, authorship).await
+    database.validate_snapshot(id, staged, author, authorship).await
 }
 
 /// Stage and load one snapshot. A failure of its body is returned as the
@@ -185,7 +185,7 @@ pub(crate) async fn load_one<R: std::io::Read + Send + 'static>(
                 target,
                 snapshots: vec![crate::SnapshotSource::Stored {
                     id: expected.clone(),
-                    input: staged.records(),
+                    input: staged,
                     author: author(),
                 }],
                 slots: vec![],

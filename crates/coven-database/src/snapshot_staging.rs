@@ -25,8 +25,7 @@ use coven_format::{
 };
 use rusqlite::{params, params_from_iter};
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 /// Created with the input connection, in its temporary storage, so staged
 /// records go with the connection: no restart finds them. That storage spills
@@ -37,12 +36,10 @@ pub(super) fn create_tables(db: &DatabaseConnection) -> Result<(), DbError> {
     SnapshotMetadata::create_table(db)
 }
 
-/// One staging's number, whether its records are still on the input
-/// connection, and the tables that hold them. It changes only while the
-/// input writer is held.
-pub(crate) struct Staging {
-    pub(crate) id: i64,
-    held: AtomicBool,
+/// One staging's number and the tables that hold its records on the input
+/// connection.
+struct StagedTables {
+    id: i64,
     tables: Vec<String>,
 }
 
@@ -84,22 +81,21 @@ fn create_staged(
     Ok(tables)
 }
 
-impl Staging {
-    pub(crate) fn held(&self) -> bool {
-        self.held.load(Ordering::SeqCst)
-    }
-    /// A load or file check read these records and removed them.
-    pub(crate) fn taken(&self) {
-        self.held.store(false, Ordering::SeqCst);
-    }
-}
-
 /// Drop a staging's tables whole.
-pub(crate) fn remove(db: &DatabaseConnection, staging: &Staging) -> Result<(), DbError> {
+fn remove(db: &DatabaseConnection, staging: &StagedTables) -> Result<(), DbError> {
     for table in &staging.tables {
         db.batch(&format!("DROP TABLE {table}"))?;
     }
     SnapshotMetadata::remove(db, staging.id)
+}
+
+/// Drop the tables of each of `stagings` that still holds its records, in
+/// the transaction of the operation that ends them.
+fn remove_all(db: &DatabaseConnection, stagings: &[SnapshotStaging]) -> Result<(), DbError> {
+    stagings
+        .iter()
+        .filter_map(|staging| staging.tables.as_ref())
+        .try_for_each(|tables| remove(db, tables))
 }
 
 /// The statements staging one snapshot runs for its records, written once
@@ -163,76 +159,93 @@ impl Inserts {
 }
 
 impl InputDatabase {
-    fn begin_staging(&self, schema: &WriteSchema) -> Result<(Arc<Staging>, Inserts), DbError> {
-        let id = self.stagings.fetch_add(1, Ordering::SeqCst);
+    fn begin_staging(&self, schema: &WriteSchema) -> Result<(StagedTables, Inserts), DbError> {
+        let id = self.stagings.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let layout = SnapshotLayout::new(schema);
         let tables = self.write(|db| create_staged(db, &layout, id))?;
-        Ok((
-            Arc::new(Staging { id, held: AtomicBool::new(true), tables }),
-            Inserts::new(layout, id),
-        ))
+        Ok((StagedTables { id, tables }, Inserts::new(layout, id)))
     }
 
-    /// Remove a staging's records, if a load or file check hasn't taken them.
-    fn remove_staging(&self, staging: &Staging) -> Result<(), DbError> {
+    /// Remove a staging's records.
+    fn remove_staging(&self, staging: &StagedTables) -> Result<(), DbError> {
+        super::with_locked(&self.writer, |writer| writer.transaction(|db| remove(db, staging)))
+    }
+
+    /// Run one load or file check over `stagings`, the last phase of each:
+    /// `consume` reads their records in one input transaction, which removes
+    /// them as it commits. When it fails, the records are removed before the
+    /// failure is reported, so nothing staged outlives its operation (§16.2).
+    pub(crate) fn read_staged<T, S: AsMut<[SnapshotStaging]>>(
+        &self,
+        stagings: &mut S,
+        consume: impl FnOnce(
+            &crate::input_preparation::PreparedInputs<'_>,
+            &mut S,
+        ) -> Result<T, DbError>,
+    ) -> Result<T, DbError> {
         super::with_locked(&self.writer, |writer| {
-            if !staging.held() {
-                return Ok(());
-            }
-            writer.transaction(|db| remove(db, staging))?;
-            staging.taken();
-            Ok(())
+            let read = writer.transaction(|db| {
+                let result = crate::input_preparation::PreparedInputs::with(db, |inputs| {
+                    consume(inputs, stagings)
+                })?;
+                remove_all(db, stagings.as_mut())?;
+                Ok(result)
+            });
+            let result = match read {
+                Ok(result) => Ok(result),
+                Err(error) => {
+                    let removed = writer.transaction(|db| remove_all(db, stagings.as_mut()));
+                    match removed {
+                        Ok(()) => Err(error),
+                        // The stagings keep their tables, which dropping
+                        // them removes.
+                        Err(removal) => {
+                            return Err(DbError::StagingCleanup {
+                                operation: Box::new(error),
+                                cleanup: Box::new(removal),
+                            })
+                        }
+                    }
+                }
+            };
+            stagings.as_mut().iter_mut().for_each(SnapshotStaging::taken);
+            result
         })
     }
 }
 
-/// The records of one staged snapshot. The last owner to drop removes them
-/// unless a load or file check took them, or `discard` already did.
-struct StagedRows {
-    database: Database,
-    staging: Arc<Staging>,
-    /// The first record that failed the loader's checks as it staged, and
-    /// its section: the load or file check that reads the records refuses
-    /// the body with it where it reaches that section.
-    refusal: Mutex<Option<(u8, DbError)>>,
-}
-
-impl Drop for StagedRows {
-    fn drop(&mut self) {
-        if !self.staging.held() {
-            return;
-        }
-        // Only an abandoned staging gets here: a cancelled or panicking
-        // caller. Its connection's temporary storage goes when the store
-        // closes, which waits for this removal.
-        let staging = self.staging.clone();
-        let remove = move |inner: &DatabaseInner| {
-            if let Err(error) = inner.call(|inner| inner.inputs.remove_staging(&staging)) {
-                tracing::error!(%error, "removing an abandoned snapshot staging failed");
-            }
-            Ok::<_, DbError>(())
-        };
-        if tokio::runtime::Handle::try_current().is_ok() {
-            drop(start_call(self.database.inner.clone(), remove));
-        } else if let Some(inner) =
-            self.database.inner.read().expect("database lock poisoned").as_ref()
-        {
-            let _removed = remove(inner);
-        }
-    }
-}
-
-/// A snapshot being staged: sync hands it each batch of opened plaintext
-/// as the body streams. Each batch is decoded, checked and committed in one
-/// input transaction, outside the application writer (§21.2).
+/// One snapshot's staging, from its first batch to the load or file check
+/// that reads its records, or the discard that removes them (§16.2). It is
+/// the one holder of what it stages for that whole operation: its steps are
+/// its phases, and the load takes it whole. Dropped while still holding
+/// records, as by a cancelled or panicking caller, it removes them.
 pub struct SnapshotStaging {
-    rows: Arc<StagedRows>,
+    database: Database,
     expected: SnapshotId,
-    /// Absent after a failed batch: a staging that failed is discarded.
-    state: Option<StagingState>,
+    /// Absent once the load or file check that read them removed them.
+    tables: Option<StagedTables>,
+    phase: Phase,
     /// The batches staged so far, and the time staging them took.
     batches: usize,
     time: std::time::Duration,
+}
+
+/// Where a staging is in its operation.
+enum Phase {
+    /// The body streams in: sync hands it each batch of opened plaintext,
+    /// decoded, checked and committed in one input transaction, outside
+    /// the application writer (§21.2).
+    Streaming(StagingState),
+    /// The stream checked out to its end marker.
+    Staged {
+        header: SnapshotHeader,
+        /// The first record that failed the loader's checks as it staged,
+        /// and its section: the load or file check refuses the body with it
+        /// where it reaches that section.
+        refusal: Option<(u8, DbError)>,
+    },
+    /// A batch or the end of the stream failed; only discarding is left.
+    Failed,
 }
 
 /// What staging keeps between batches beside its tables: the decoder, the
@@ -248,42 +261,27 @@ struct StagingState {
     refusal: Option<(u8, DbError)>,
 }
 
-/// A staged snapshot whose stream checked out to its end marker: its header,
-/// and its records on the input connection.
-pub struct StagedSnapshot {
-    rows: Arc<StagedRows>,
-    header: SnapshotHeader,
-}
-
-/// What a load or file check reads a staged snapshot from. It keeps the
-/// records until then; reading them removes them.
-#[derive(Clone)]
-pub struct StagedRecords {
-    rows: Arc<StagedRows>,
-    header: SnapshotHeader,
-}
-
-impl StagedRecords {
-    /// The staging, when `database` staged it: records on another store's
-    /// input connection are not there to read.
-    pub(crate) fn staging(&self, database: &Database) -> Result<&Arc<Staging>, DbError> {
-        if !Arc::ptr_eq(&self.rows.database.inner, &database.inner) {
-            return Err(DbError::Invariant {
-                what: "a snapshot is loaded by the store that staged it",
-            });
+impl Drop for SnapshotStaging {
+    fn drop(&mut self) {
+        let Some(tables) = self.tables.take() else {
+            return;
+        };
+        // Only an abandoned staging gets here: a cancelled or panicking
+        // caller. Its connection's temporary storage goes when the store
+        // closes, which waits for this removal.
+        let remove = move |inner: &DatabaseInner| {
+            if let Err(error) = inner.call(|inner| inner.inputs.remove_staging(&tables)) {
+                tracing::error!(%error, "removing an abandoned snapshot staging failed");
+            }
+            Ok::<_, DbError>(())
+        };
+        if tokio::runtime::Handle::try_current().is_ok() {
+            drop(start_call(self.database.inner.clone(), remove));
+        } else if let Some(inner) =
+            self.database.inner.read().expect("database lock poisoned").as_ref()
+        {
+            let _removed = remove(inner);
         }
-        Ok(&self.rows.staging)
-    }
-    pub(crate) fn id(&self) -> i64 {
-        self.rows.staging.id
-    }
-    pub(crate) fn header(&self) -> &SnapshotHeader {
-        &self.header
-    }
-    /// The first record staging found failing the loader's checks, and its
-    /// section.
-    pub(crate) fn refusal(&self) -> Option<(u8, DbError)> {
-        self.rows.refusal.lock().expect("staging refusal lock poisoned").take()
     }
 }
 
@@ -295,16 +293,13 @@ impl Database {
         id: SnapshotId,
         prefix: SnapshotObjectPrefix,
     ) -> Result<SnapshotStaging, DbError> {
-        let (staging, inserts) =
+        let (tables, inserts) =
             self.call(|inner| inner.inputs.begin_staging(&inner.access.write_schema)).await?;
         Ok(SnapshotStaging {
-            rows: Arc::new(StagedRows {
-                database: self.clone(),
-                staging,
-                refusal: Mutex::new(None),
-            }),
+            database: self.clone(),
             expected: id,
-            state: Some(StagingState {
+            tables: Some(tables),
+            phase: Phase::Streaming(StagingState {
                 decoder: SnapshotChunkDecoder::new(prefix),
                 inserts,
                 records: 0,
@@ -360,18 +355,38 @@ impl Database {
     }
 }
 
+/// The failure that ends `stagings` before their load or file check runs,
+/// reported once each has removed its records, beside any removal that
+/// failed (§16.2).
+pub(crate) async fn refuse(stagings: Vec<SnapshotStaging>, error: DbError) -> DbError {
+    let mut error = error;
+    for staging in stagings {
+        if let Err(cleanup) = staging.discard().await {
+            error =
+                DbError::StagingCleanup { operation: Box::new(error), cleanup: Box::new(cleanup) };
+        }
+    }
+    error
+}
+
 impl SnapshotStaging {
+    fn id(&self) -> Result<i64, DbError> {
+        self.tables.as_ref().map(|tables| tables.id).ok_or(DbError::Invariant {
+            what: "a staged snapshot is read once, before it is discarded",
+        })
+    }
+
     /// Decode one batch of opened plaintext and commit its records together.
     /// After a failure, discard this staging.
     pub async fn stage(&mut self, plaintext: Vec<u8>) -> Result<(), DbError> {
-        let mut state = self
-            .state
-            .take()
-            .ok_or(DbError::Invariant { what: "a snapshot staging that failed is discarded" })?;
-        let staging = self.rows.staging.clone();
+        let staging = self.id()?;
+        let Phase::Streaming(mut state) = std::mem::replace(&mut self.phase, Phase::Failed) else {
+            return Err(DbError::Invariant {
+                what: "a snapshot stages only until its stream ends or fails",
+            });
+        };
         let expected = self.expected.clone();
         let (state, time) = self
-            .rows
             .database
             .call(move |inner| {
                 let started = inner.clock.elapsed();
@@ -380,7 +395,7 @@ impl SnapshotStaging {
                         db,
                         &inner.access.write_schema,
                         &expected,
-                        &staging,
+                        staging,
                         &mut state,
                         &plaintext,
                     )
@@ -388,7 +403,7 @@ impl SnapshotStaging {
                 Ok::<_, DbError>((state, inner.clock.elapsed() - started))
             })
             .await?;
-        self.state = Some(state);
+        self.phase = Phase::Streaming(state);
         self.batches += 1;
         self.time += time;
         Ok(())
@@ -397,16 +412,16 @@ impl SnapshotStaging {
     /// Refuse a stream without its header, declared records and end marker,
     /// then check its applied writes. Nothing more stages after this; after a
     /// failure, discard this staging.
-    pub async fn finish(&mut self) -> Result<StagedSnapshot, DbError> {
-        let state = self
-            .state
-            .take()
-            .ok_or(DbError::Invariant { what: "a snapshot staging that failed is discarded" })?;
-        let staging = self.rows.staging.clone();
+    pub async fn finish(&mut self) -> Result<(), DbError> {
+        let staging = self.id()?;
+        let Phase::Streaming(state) = std::mem::replace(&mut self.phase, Phase::Failed) else {
+            return Err(DbError::Invariant {
+                what: "a snapshot stages only until its stream ends or fails",
+            });
+        };
         let expected = self.expected.clone();
         let records = state.records;
-        let header = self
-            .rows
+        let (header, refusal) = self
             .database
             .call(move |inner| {
                 inner.inputs.write(|db| {
@@ -417,13 +432,11 @@ impl SnapshotStaging {
                         .ok_or_else(|| invalid("snapshot has no header"))?
                         .clone();
                     check_header(&inner.access.write_schema, &expected, &header)?;
-                    SnapshotMetadata::staged(db, staging.id).validate(header.covers)?;
+                    SnapshotMetadata::staged(db, staging).validate(header.covers)?;
                     Ok((header, state.refusal))
                 })
             })
             .await?;
-        let (header, refusal) = header;
-        *self.rows.refusal.lock().expect("staging refusal lock poisoned") = refusal;
         tracing::info!(
             audience = ?header.id.audience,
             records,
@@ -431,58 +444,65 @@ impl SnapshotStaging {
             time = ?self.time,
             "staged snapshot"
         );
-        Ok(StagedSnapshot { rows: self.rows.clone(), header })
+        self.phase = Phase::Staged { header, refusal };
+        Ok(())
     }
 
     /// Remove everything staged so far (§16.2).
-    pub async fn discard(self) -> Result<(), DbError> {
-        discard(&self.rows).await
+    pub async fn discard(mut self) -> Result<(), DbError> {
+        let Some(tables) = self.tables.take() else {
+            return Ok(());
+        };
+        self.database.call(move |inner| inner.inputs.remove_staging(&tables)).await
     }
-}
 
-impl StagedSnapshot {
-    /// The snapshot's identity, schema version, coverage and counts.
-    pub fn header(&self) -> &SnapshotHeader {
-        &self.header
+    /// Whether `database` staged it: records on another store's input
+    /// connection are not there to read.
+    pub(crate) fn staged_by(&self, database: &Database) -> bool {
+        Arc::ptr_eq(&self.database.inner, &database.inner)
     }
-    /// What a load or file check reads; reading removes the records.
-    pub fn records(&self) -> StagedRecords {
-        StagedRecords { rows: self.rows.clone(), header: self.header.clone() }
-    }
-    /// Remove the records unless a load or file check already took them.
-    pub async fn discard(self) -> Result<(), DbError> {
-        discard(&self.rows).await
-    }
-}
 
-async fn discard(rows: &StagedRows) -> Result<(), DbError> {
-    // Only the input writer changes this, and nothing holding this staging
-    // is reading it now.
-    if !rows.staging.held() {
-        return Ok(());
+    /// Authenticate its staged write evidence for the load or file check
+    /// reading it, in that operation's input transaction (D7.5).
+    pub(crate) fn prepare<'a>(
+        &mut self,
+        inputs: &crate::input_preparation::PreparedInputs<'a>,
+        authorship: &dyn crate::Authorship,
+    ) -> Result<crate::snapshot_preparation::PreparedSnapshot<'a>, DbError> {
+        let staging = self.id()?;
+        let Phase::Staged { header, refusal } = &mut self.phase else {
+            return Err(DbError::Invariant {
+                what: "a snapshot is read once its stream checked out to its end",
+            });
+        };
+        crate::snapshot_preparation::prepare(
+            inputs,
+            staging,
+            header.clone(),
+            refusal.take(),
+            authorship,
+        )
     }
-    let staging = rows.staging.clone();
-    rows.database.call(move |inner| inner.inputs.remove_staging(&staging)).await
+
+    /// Its records are gone, with the transaction that removed them.
+    fn taken(&mut self) {
+        self.tables = None;
+    }
 }
 
 fn stage(
     db: &DatabaseConnection,
     schema: &WriteSchema,
     expected: &SnapshotId,
-    staging: &Staging,
+    staging: i64,
     state: &mut StagingState,
     mut bytes: &[u8],
 ) -> Result<(), DbError> {
-    if !staging.held() {
-        return Err(DbError::Invariant {
-            what: "a snapshot is staged only until it is read or discarded",
-        });
-    }
     #[cfg(any(test, feature = "test-utils"))]
     if state.records == 0 {
         db.record_work(|work| work.snapshot_reads += 1);
     }
-    let metadata = SnapshotMetadata::staged(db, staging.id);
+    let metadata = SnapshotMetadata::staged(db, staging);
     let StagingState { decoder, inserts, records, columns, parts, refusal } = state;
     loop {
         let headed = decoder.header().is_some();

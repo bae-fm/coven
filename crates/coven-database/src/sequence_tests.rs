@@ -300,13 +300,13 @@ pub(crate) async fn reload<R: std::io::Read, W>(
     )>,
     writes: Vec<DownloadedWriteStream<W>>,
     authorship: std::sync::Arc<dyn crate::Authorship>,
-) -> crate::SnapshotReload<crate::StagedRecords, DownloadedWriteStream<W>> {
+) -> crate::SnapshotReload<crate::SnapshotStaging, DownloadedWriteStream<W>> {
     let mut staged = Vec::new();
     for (id, prefix, input, author) in snapshots {
         let covers = prefix.covers;
         let snapshot =
             crate::test_utils::stage_plaintext(db, id.clone(), prefix, input).await.unwrap();
-        staged.push((id, covers, snapshot.records(), author));
+        staged.push((id, covers, snapshot, author));
     }
     let (applied, state, boundaries) = db.inspect_writer(|db| {
         (

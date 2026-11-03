@@ -664,6 +664,15 @@ pub enum DbError {
         /// Each failed byte removal or pending-record update.
         failures: Vec<DbError>,
     },
+    /// A snapshot load or file check failed, and so did removing the records
+    /// it staged, which its failure ends (§16.2); both failures are kept.
+    #[error("removing staged snapshot records failed: {cleanup}; after: {operation}")]
+    StagingCleanup {
+        /// The load's or check's own failure.
+        operation: Box<DbError>,
+        /// Removing the staged records' tables.
+        cleanup: Box<DbError>,
+    },
     /// An operation no longer has the state expected by its caller.
     #[error("operation {0:?} changed or is absent")]
     OperationChanged(crate::OperationId),

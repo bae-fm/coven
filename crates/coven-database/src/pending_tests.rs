@@ -304,7 +304,7 @@ async fn judgments_clear_only_with_a_committed_changed_reset() {
     .unwrap();
     let state = db.store_state().await.unwrap();
     let reload = |snapshots| crate::SnapshotReload::<
-        crate::StagedRecords,
+        crate::SnapshotStaging,
         crate::DownloadedWriteStream<std::io::Empty>,
     > {
         provider: Default::default(),

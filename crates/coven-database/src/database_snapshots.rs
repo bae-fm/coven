@@ -69,12 +69,13 @@ impl Database {
     /// snapshot in a transaction that always rolls back, returning the uploaded
     /// files it names. File retention uses this for a snapshot no reload has
     /// read; a damaged snapshot cannot leave rows, metadata or observations
-    /// behind. Supply the records of a body that authenticated; reading them
-    /// removes them (§16.2).
+    /// behind. Supply the staging of a body that authenticated: the check is
+    /// its last phase, and removes its records whether it passes or fails
+    /// (§16.2).
     pub async fn validate_snapshot(
         &self,
         id: coven_format::admin::SnapshotId,
-        input: crate::StagedRecords,
+        staging: crate::SnapshotStaging,
         author: coven_foundation::id_source::MemberId,
         authorship: std::sync::Arc<dyn crate::Authorship>,
     ) -> Result<
@@ -84,11 +85,15 @@ impl Database {
         )>,
         DbError,
     > {
-        let staged = [input.staging(self)?.clone()];
+        if !staging.staged_by(self) {
+            return Err(
+                super::input_database::staging::refuse(vec![staging], STAGED_ELSEWHERE).await
+            );
+        }
+        let mut stagings = [staging];
         self.call(move |inner| {
-            inner.inputs.prepare(&staged, |inputs| {
-                let prepared =
-                    crate::snapshot_preparation::prepare(inputs, &input, authorship.as_ref())?;
+            inner.inputs.read_staged(&mut stagings, |inputs, [staging]| {
+                let prepared = staging.prepare(inputs, authorship.as_ref())?;
                 inner.access.with_writer(|writer| {
                     writer.discarded_transaction(|writer| {
                         let schema = &inner.access.write_schema;
@@ -247,18 +252,18 @@ impl Database {
     }
 
     /// Load authenticated snapshots and gap writes supplied by sync. Each stored
-    /// snapshot supplies its identity and the records staged from its body;
-    /// their write evidence is authenticated, and write parts are staged on the
-    /// input connection, before taking the application writer. Inputs name a
-    /// fixed target and consecutive retained slots.
+    /// snapshot supplies its identity and its staging, of a body whose stream
+    /// checked out to its end; their write evidence is authenticated, and write
+    /// parts are staged on the input connection, before taking the application
+    /// writer. Inputs name a fixed target and consecutive retained slots.
     ///
     /// Replaces the selected audiences and replays uncovered parts and waiting
-    /// uploads in one transaction, reading each staged snapshot once and then
-    /// removing its records. Every audience finishes at the common target slot;
+    /// uploads in one transaction. The load is each staging's last phase: it
+    /// reads each staged snapshot once and removes its records, whether it
+    /// commits or fails. Every audience finishes at the common target slot;
     /// missing history, read errors and failed checks roll the whole load back,
-    /// a body's failure as `SnapshotError::Body` naming that snapshot, and leave
-    /// the staged records for their owner to discard. Returns the uploaded files
-    /// each stored snapshot names.
+    /// a body's failure as `SnapshotError::Body` naming that snapshot. Returns
+    /// the uploaded files each stored snapshot names.
     /// Supply each readable audience's parts, including those needed by waiting
     /// writes and the device's own earlier writes. Other audiences retain their
     /// merge history. Upload records, numbers and sealing key ids stay unchanged.
@@ -266,52 +271,59 @@ impl Database {
     /// steps as they run (§13.4).
     pub async fn load_snapshots<P: crate::PendingValue, W>(
         &self,
-        reload: crate::SnapshotReload<crate::StagedRecords, crate::DownloadedWriteStream<W>>,
+        reload: crate::SnapshotReload<crate::SnapshotStaging, crate::DownloadedWriteStream<W>>,
         progress: Option<ProgressReport<crate::LoadStep>>,
     ) -> Result<Vec<crate::LoadedSnapshot>, DbError>
     where
         W: std::io::Read + Send + 'static,
     {
-        let staged = reload
+        // Each stored source names its staging by its place among them.
+        let mut stagings = Vec::new();
+        let sources: Vec<crate::SnapshotSource<usize>> = reload
             .snapshots
-            .iter()
-            .filter_map(|source| match source {
-                crate::SnapshotSource::Stored { input, .. } => Some(input.staging(self).cloned()),
-                _ => None,
+            .into_iter()
+            .map(|source| match source {
+                crate::SnapshotSource::Stored { id, input, author } => {
+                    stagings.push(input);
+                    crate::SnapshotSource::Stored { id, input: stagings.len() - 1, author }
+                }
+                crate::SnapshotSource::Empty(audience) => crate::SnapshotSource::Empty(audience),
+                crate::SnapshotSource::Current(audience) => {
+                    crate::SnapshotSource::Current(audience)
+                }
             })
-            .collect::<Result<Vec<_>, _>>()?;
+            .collect();
+        if !stagings.iter().all(|staging| staging.staged_by(self)) {
+            return Err(super::input_database::staging::refuse(stagings, STAGED_ELSEWHERE).await);
+        }
+        let authorship = reload.authorship;
         self.call(move |inner| {
             let started = inner.clock.elapsed();
             let mut progress =
                 progress.unwrap_or_else(|| ProgressReport::unwatched(inner.clock.clone()));
-            inner.inputs.prepare(&staged, |inputs| {
-                let snapshots =
-                    reload
-                        .snapshots
-                        .into_iter()
-                        .map(|source| {
-                            Ok(match source {
-                                crate::SnapshotSource::Stored { id, input, author } => {
-                                    let input = crate::snapshot_preparation::prepare(
-                                        inputs,
-                                        &input,
-                                        reload.authorship.as_ref(),
-                                    )
+            inner.inputs.read_staged(&mut stagings, |inputs, stagings| {
+                let snapshots = sources
+                    .into_iter()
+                    .map(|source| {
+                        Ok(match source {
+                            crate::SnapshotSource::Stored { id, input, author } => {
+                                let input = stagings[input]
+                                    .prepare(inputs, authorship.as_ref())
                                     .map_err(|error| crate::SnapshotError::Body {
                                         snapshot: id.clone(),
                                         error: Box::new(error),
                                     })?;
-                                    crate::SnapshotSource::Stored { id, input, author }
-                                }
-                                crate::SnapshotSource::Empty(audience) => {
-                                    crate::SnapshotSource::Empty(audience)
-                                }
-                                crate::SnapshotSource::Current(audience) => {
-                                    crate::SnapshotSource::Current(audience)
-                                }
-                            })
+                                crate::SnapshotSource::Stored { id, input, author }
+                            }
+                            crate::SnapshotSource::Empty(audience) => {
+                                crate::SnapshotSource::Empty(audience)
+                            }
+                            crate::SnapshotSource::Current(audience) => {
+                                crate::SnapshotSource::Current(audience)
+                            }
                         })
-                        .collect::<Result<_, DbError>>()?;
+                    })
+                    .collect::<Result<_, DbError>>()?;
                 let reload = crate::SnapshotReload {
                     slots: reload
                         .slots
@@ -325,7 +337,7 @@ impl Database {
                     cutoffs: reload.cutoffs,
                     boundaries: reload.boundaries,
                     operation: reload.operation,
-                    authorship: reload.authorship,
+                    authorship,
                 };
                 let prepared = inner.clock.elapsed();
                 // Reserve a reader before locking the writer: snapshot consumers
@@ -357,3 +369,8 @@ impl Database {
         .await
     }
 }
+
+/// A staging another store made: its records are on that store's input
+/// connection, not this one's.
+const STAGED_ELSEWHERE: DbError =
+    DbError::Invariant { what: "a snapshot is loaded by the store that staged it" };

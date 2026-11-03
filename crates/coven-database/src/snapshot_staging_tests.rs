@@ -1,7 +1,7 @@
 use crate::snapshot_write::tests::{frames, id, SnapshotFrames};
 use crate::tests::TestStore;
 use crate::write::tests::{notes, sql, NOTES};
-use crate::{Database, DbError, StagedSnapshot};
+use crate::{Database, DbError, SnapshotStaging};
 use coven_merge::Audience;
 use std::io::Cursor;
 
@@ -12,7 +12,7 @@ async fn fixture(store: &TestStore) -> (Database, SnapshotFrames) {
     (db, snapshot)
 }
 
-async fn staged(db: &Database, snapshot: &SnapshotFrames) -> StagedSnapshot {
+async fn staged(db: &Database, snapshot: &SnapshotFrames) -> SnapshotStaging {
     crate::test_utils::stage_plaintext(
         db,
         id(Audience::Store),
@@ -25,15 +25,16 @@ async fn staged(db: &Database, snapshot: &SnapshotFrames) -> StagedSnapshot {
 
 fn reload(
     db: &Database,
-    snapshots: &[&StagedSnapshot],
-) -> crate::SnapshotReload<crate::StagedRecords, crate::DownloadedWriteStream<std::io::Empty>> {
+    covers: u64,
+    snapshots: Vec<SnapshotStaging>,
+) -> crate::SnapshotReload<SnapshotStaging, crate::DownloadedWriteStream<std::io::Empty>> {
     crate::SnapshotReload {
-        target: snapshots[0].header().covers,
+        target: covers,
         snapshots: snapshots
-            .iter()
+            .into_iter()
             .map(|snapshot| crate::SnapshotSource::Stored {
                 id: id(Audience::Store),
-                input: snapshot.records(),
+                input: snapshot,
                 author: crate::snapshot_write::tests::author(),
             })
             .collect(),
@@ -55,37 +56,57 @@ async fn a_load_removes_the_records_it_staged() {
     let (db, snapshot) = fixture(&store).await;
     let staged = staged(&db, &snapshot).await;
     assert!(db.staged_snapshot_records().await.unwrap() > 0);
-    db.load_snapshots::<crate::pending::tests::Record, _>(reload(&db, &[&staged]), None)
-        .await
-        .unwrap();
+    db.load_snapshots::<crate::pending::tests::Record, _>(
+        reload(&db, snapshot.prefix.covers, vec![staged]),
+        None,
+    )
+    .await
+    .unwrap();
     assert_eq!(db.staged_snapshot_records().await.unwrap(), 0);
-    assert!(matches!(
-        db.load_snapshots::<crate::pending::tests::Record, _>(reload(&db, &[&staged]), None).await,
-        Err(DbError::Invariant { .. })
-    ));
-    staged.discard().await.unwrap();
     db.close().await.unwrap();
 }
 
-/// A failed load leaves the records for their owner, which discards them.
+/// A failed load ends the operations that staged its snapshots: it removes
+/// their records before it reports the failure.
 #[tokio::test]
-async fn a_failed_load_leaves_the_records_for_their_owner_to_discard() {
+async fn a_failed_load_removes_the_records_it_staged() {
     let store = TestStore::new();
     let (db, snapshot) = fixture(&store).await;
     let first = staged(&db, &snapshot).await;
     let second = staged(&db, &snapshot).await;
-    let staged_records = db.staged_snapshot_records().await.unwrap();
+    assert!(db.staged_snapshot_records().await.unwrap() > 0);
     assert!(matches!(
         db.load_snapshots::<crate::pending::tests::Record, _>(
-            reload(&db, &[&first, &second]),
+            reload(&db, snapshot.prefix.covers, vec![first, second]),
             None
         )
         .await,
         Err(DbError::Snapshot(crate::SnapshotError::Inconsistent("reload repeats an audience")))
     ));
-    assert_eq!(db.staged_snapshot_records().await.unwrap(), staged_records);
-    first.discard().await.unwrap();
-    second.discard().await.unwrap();
+    assert_eq!(db.staged_snapshot_records().await.unwrap(), 0);
+    db.close().await.unwrap();
+}
+
+/// A staging whose stream hasn't reached its end can't be loaded; the load
+/// that refuses it removes its records.
+#[tokio::test]
+async fn an_unfinished_staging_does_not_load() {
+    let store = TestStore::new();
+    let (db, snapshot) = fixture(&store).await;
+    let bytes = snapshot.concat();
+    let mut staging =
+        db.stage_snapshot(id(Audience::Store), snapshot.prefix.clone()).await.unwrap();
+    staging.stage(bytes[..bytes.len() / 2].to_vec()).await.unwrap();
+    assert!(db.staged_snapshot_records().await.unwrap() > 0);
+    assert!(matches!(
+        db.load_snapshots::<crate::pending::tests::Record, _>(
+            reload(&db, snapshot.prefix.covers, vec![staging]),
+            None
+        )
+        .await,
+        Err(DbError::Snapshot(crate::SnapshotError::Body { error, .. }))
+            if matches!(*error, DbError::Invariant { .. })
+    ));
     assert_eq!(db.staged_snapshot_records().await.unwrap(), 0);
     db.close().await.unwrap();
 }
@@ -112,16 +133,14 @@ async fn a_failed_batch_ends_its_staging() {
 }
 
 /// A staging its caller abandoned, as a cancelled restore does, removes its
-/// records once its last owner drops.
+/// records as it drops.
 #[tokio::test]
 async fn an_abandoned_staging_removes_its_records() {
     let store = TestStore::new();
     let (db, snapshot) = fixture(&store).await;
     let staged = staged(&db, &snapshot).await;
-    let records = staged.records();
-    drop(staged);
     assert!(db.staged_snapshot_records().await.unwrap() > 0);
-    drop(records);
+    drop(staged);
     tokio::time::timeout(std::time::Duration::from_secs(10), async {
         while db.staged_snapshot_records().await.unwrap() > 0 {
             tokio::time::sleep(std::time::Duration::from_millis(5)).await;
@@ -132,7 +151,8 @@ async fn an_abandoned_staging_removes_its_records() {
     db.close().await.unwrap();
 }
 
-/// Records staged on one store's input connection aren't another's to load.
+/// Records staged on one store's input connection aren't another's to load;
+/// the load that refuses them has their own store remove them.
 #[tokio::test]
 async fn another_store_cannot_load_a_staged_snapshot() {
     let store = TestStore::new();
@@ -143,13 +163,12 @@ async fn another_store_cannot_load_a_staged_snapshot() {
     assert!(matches!(
         elsewhere
             .load_snapshots::<crate::pending::tests::Record, _>(
-                reload(&elsewhere, &[&staged]),
+                reload(&elsewhere, snapshot.prefix.covers, vec![staged]),
                 None
             )
             .await,
         Err(DbError::Invariant { .. })
     ));
-    staged.discard().await.unwrap();
     assert_eq!(db.staged_snapshot_records().await.unwrap(), 0);
     db.close().await.unwrap();
     elsewhere.close().await.unwrap();

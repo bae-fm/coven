@@ -11,7 +11,7 @@ mod bytes;
 pub use bytes::RetainedBytes;
 #[path = "snapshot_staging.rs"]
 pub(crate) mod staging;
-pub use staging::{SnapshotStaging, StagedRecords, StagedSnapshot};
+pub use staging::SnapshotStaging;
 
 type InputConnection = Arc<Mutex<Option<DatabaseConnection>>>;
 
@@ -102,30 +102,13 @@ fn copy_claim(inputs: &InputDatabase, source: &DatabaseConnection, id: i64) -> R
 }
 
 impl InputDatabase {
-    /// Prepare inputs for one load or file check, which reads the `staged`
-    /// snapshots and removes their records when it succeeds (§16.2).
+    /// Prepare inputs for one slot's application, in one input transaction.
     pub(crate) fn prepare<T>(
         &self,
-        staged: &[Arc<staging::Staging>],
         consume: impl FnOnce(&crate::input_preparation::PreparedInputs<'_>) -> Result<T, DbError>,
     ) -> Result<T, DbError> {
         with_locked(&self.writer, |writer| {
-            if staged.iter().any(|staging| !staging.held()) {
-                return Err(DbError::Invariant {
-                    what: "a staged snapshot is read once, before it is discarded",
-                });
-            }
-            let result = writer.transaction(|db| {
-                let result = crate::input_preparation::PreparedInputs::with(db, consume)?;
-                for staging in staged {
-                    staging::remove(db, staging)?;
-                }
-                Ok(result)
-            })?;
-            for staging in staged {
-                staging.taken();
-            }
-            Ok(result)
+            writer.transaction(|db| crate::input_preparation::PreparedInputs::with(db, consume))
         })
     }
     pub(crate) fn prepare_claim<T>(

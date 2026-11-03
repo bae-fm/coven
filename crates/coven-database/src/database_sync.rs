@@ -78,7 +78,7 @@ impl Database {
         F: FnOnce() -> Result<(), DbError> + Send + 'static,
     {
         self.call(move |inner| {
-            inner.inputs.prepare(&[], |inputs| {
+            inner.inputs.prepare(|inputs| {
                 let write = write.prepare(inputs)?;
                 authenticate()?;
                 inner
@@ -108,7 +108,7 @@ impl Database {
                 }
             }
             let started = inner.clock.elapsed();
-            inner.inputs.prepare(&[], |inputs| {
+            inner.inputs.prepare(|inputs| {
                 let slot = incoming.slot;
                 let incoming = incoming.prepare(inputs)?;
                 let prepared = inner.clock.elapsed();

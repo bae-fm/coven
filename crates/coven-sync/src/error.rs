@@ -163,6 +163,10 @@ impl From<DbError> for SyncError {
             }
             // The process is ending the call; the database did not fail.
             DbError::Shutdown(shutdown) => Self::Shutdown(shutdown),
+            DbError::StagingCleanup { operation, cleanup } => Self::Cleanup {
+                operation: Box::new((*operation).into()),
+                cleanup: Box::new((*cleanup).into()),
+            },
             // Sync's own failure inside a database call comes back as itself.
             DbError::SyncStream(error) => match error.downcast::<SyncError>() {
                 Ok(error) => *error,

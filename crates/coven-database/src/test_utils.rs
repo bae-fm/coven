@@ -84,7 +84,7 @@ pub async fn stage_plaintext(
     id: coven_format::admin::SnapshotId,
     prefix: coven_format::sealed_snapshot::SnapshotObjectPrefix,
     mut input: impl std::io::Read,
-) -> Result<crate::StagedSnapshot, crate::DbError> {
+) -> Result<crate::SnapshotStaging, crate::DbError> {
     let mut staging = database.stage_snapshot(id, prefix).await?;
     loop {
         let mut chunk = vec![0; coven_format::chunks::CHUNK_SIZE];
@@ -97,7 +97,8 @@ pub async fn stage_plaintext(
         chunk.truncate(length);
         staging.stage(chunk).await?;
     }
-    staging.finish().await
+    staging.finish().await?;
+    Ok(staging)
 }
 
 /// Declarations for a UUID-keyed notes table in the store audience.

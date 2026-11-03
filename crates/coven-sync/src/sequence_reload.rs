@@ -15,7 +15,7 @@ use crate::{
 use coven_crypto::{MemberIdentity, StoreKeyring};
 use coven_database::{
     IncomingSlot, LoadStep, OperationUpdate, SlotContent, SnapshotReload, SnapshotSource,
-    SnapshotStaging, StagedRecords, StagedSnapshot,
+    SnapshotStaging,
 };
 use coven_format::sequence::{Purpose, SlotFrame, SnapshotAnnouncement};
 use coven_foundation::progress::ProgressReport;
@@ -54,10 +54,12 @@ impl ReadSnapshot {
 }
 
 /// A selected snapshot read once, with its records staged for the one load
-/// that installs it after it authenticates (§16.2).
+/// that installs it after it authenticates (§16.2). It holds the staging
+/// until that load takes it, or until the reload ends without loading and
+/// discards it.
 pub(crate) struct SelectedSnapshot {
     read: ReadSnapshot,
-    staged: StagedSnapshot,
+    staging: SnapshotStaging,
 }
 
 impl SelectedSnapshot {
@@ -73,24 +75,22 @@ impl SelectedSnapshot {
     ) -> Result<coven_foundation::id_source::MemberId, SyncError> {
         self.read.authenticate(history)
     }
-    fn source(
-        &self,
+    /// What the load reads: the snapshot's identity, its staging and the
+    /// member `author` whose key signed it.
+    fn into_source(
+        self,
         author: coven_foundation::id_source::MemberId,
-    ) -> SnapshotSource<StagedRecords> {
-        SnapshotSource::Stored {
-            id: self.announcement().snapshot.clone(),
-            input: self.staged.records(),
-            author,
-        }
+    ) -> SnapshotSource<SnapshotStaging> {
+        SnapshotSource::Stored { id: self.read.announcement.snapshot, input: self.staging, author }
     }
-    /// Remove its staged records, unless the load that installed it took them.
+    /// Remove its staged records.
     async fn discard(self) -> Result<(), SyncError> {
-        Ok(self.staged.discard().await?)
+        Ok(self.staging.discard().await?)
     }
 }
 
-/// End a reload with `result`: remove the staged records of every selected
-/// start the reload did not install. A failure to remove them is reported,
+/// End a reload that ends before its load with `result`: remove the staged
+/// records of every selected start. A failure to remove them is reported,
 /// beside the reload's own failure if it failed too (§16.2).
 async fn release<T>(
     starts: Vec<ReloadStart>,
@@ -294,16 +294,16 @@ impl SequenceSync {
             .await?;
         let read =
             self.read_snapshot(announcement, object, ring, Some(&mut staging), progress).await;
-        let staged = match read {
+        let failed = match read {
             Ok(read) => match staging.finish().await {
-                Ok(staged) => return Ok(SelectedSnapshot { read, staged }),
+                Ok(()) => return Ok(SelectedSnapshot { read, staging }),
                 Err(error) => database_failure(&path, error),
             },
             Err(error) => error,
         };
         Err(match staging.discard().await {
-            Ok(()) => staged,
-            Err(cleanup) => cleanup_error(staged, cleanup.into()),
+            Ok(()) => failed,
+            Err(cleanup) => cleanup_error(failed, cleanup.into()),
         })
     }
 
@@ -655,11 +655,11 @@ impl SequenceSync {
     /// Returns a newer floor if retention removed a required suffix. No local
     /// state has changed in that case; the fixed target's data is selected again.
     /// Every selected start's staged records are gone when this returns:
-    /// installing took them, or they were removed (§16.2).
+    /// the load took them, or the reload removed them (§16.2).
     async fn install_selected(
         &self,
         session: &mut Session,
-        starts: Vec<ReloadStart>,
+        mut starts: Vec<ReloadStart>,
         inputs: ReloadInputs,
         ring: &mut StoreKeyring,
         member: &MemberIdentity,
@@ -667,7 +667,7 @@ impl SequenceSync {
         reporting: bool,
     ) -> Result<Option<FloorObject>, SyncError> {
         let installed = self
-            .install_starts(session, &starts, inputs, ring, member, previous_floor, reporting)
+            .install_starts(session, &mut starts, inputs, ring, member, previous_floor, reporting)
             .await;
         release(starts, installed).await
     }
@@ -675,11 +675,12 @@ impl SequenceSync {
     /// Read the slots the starts need, then install them and the starts in
     /// one transaction. When `reporting`, the install reports its steps on
     /// the database's writer thread, into the same watch as the steps
-    /// before it (§13.4).
+    /// before it (§13.4). The load takes the starts, leaving none, as the
+    /// last phase of their stagings; a return before it leaves them all.
     async fn install_starts(
         &self,
         session: &mut Session,
-        starts: &[ReloadStart],
+        starts: &mut Vec<ReloadStart>,
         inputs: ReloadInputs,
         ring: &mut StoreKeyring,
         member: &MemberIdentity,
@@ -763,19 +764,28 @@ impl SequenceSync {
         let fetched = slots.len();
         let reading = self.clock.elapsed() - started;
         let authenticating = self.clock.elapsed();
-        let mut sources = Vec::new();
-        for start in starts {
-            sources.push(match start {
-                ReloadStart::Current(audience) => SnapshotSource::Current(audience.clone()),
-                ReloadStart::Empty(audience) => SnapshotSource::Empty(audience.clone()),
-                ReloadStart::Stored(selected) => {
-                    let author = selected.authenticate(&history)?;
-                    selected.source(author)
-                }
-            });
-        }
+        // Each start's signer, in the starts' order; only stored starts have one.
+        let authors = starts
+            .iter()
+            .map(|start| match start {
+                ReloadStart::Stored(selected) => selected.authenticate(&history).map(Some),
+                ReloadStart::Current(_) | ReloadStart::Empty(_) => Ok(None),
+            })
+            .collect::<Result<Vec<_>, SyncError>>()?;
         self.follow_person_entries(&session.history, &at_target, member)?;
         self.keys.persist(ring)?;
+        let sources = std::mem::take(starts)
+            .into_iter()
+            .zip(authors)
+            .map(|(start, author)| match (start, author) {
+                (ReloadStart::Current(audience), _) => SnapshotSource::Current(audience),
+                (ReloadStart::Empty(audience), _) => SnapshotSource::Empty(audience),
+                (ReloadStart::Stored(selected), Some(author)) => selected.into_source(author),
+                (ReloadStart::Stored(_), None) => {
+                    unreachable!("every stored start authenticated above")
+                }
+            })
+            .collect();
         let authenticating = self.clock.elapsed() - authenticating;
         let loading = self.clock.elapsed();
         let authorship = Arc::new(SnapshotAuthorship {

@@ -158,7 +158,7 @@ pub use database::file_database::{
 pub use database::file_retention::FileCandidate;
 pub use database::input_database::{
     FileEvidence, InputBudget, RetainedBytes, RetainedInput, RetainedRange, SnapshotStaging,
-    StagedRecords, StagedSnapshot, UnprovenFiles,
+    UnprovenFiles,
 };
 pub use database::{
     discarded_operations, discarded_store_name, read_store_name, Database, DatabaseBuilder,

@@ -6,7 +6,7 @@ use crate::{
     snapshot_error::{invalid, SnapshotError},
     snapshot_metadata::SnapshotMetadata,
     sqlite::DatabaseConnection,
-    DbError, StagedRecords,
+    DbError,
 };
 use coven_format::snapshot::{SnapshotHeader, SnapshotRecord};
 use coven_merge::WriteOracle;
@@ -29,16 +29,16 @@ pub(crate) struct PreparedSnapshot<'a> {
     refusal: Option<(u8, DbError)>,
 }
 
-/// Authenticate each staged write evidence once the snapshot's history is
-/// known (D7.5). Staging checked every record but this one.
+/// Authenticate each staged write evidence of the staging `staging`, whose
+/// stream carried `header`, once the snapshot's history is known (D7.5).
+/// Staging checked every record but this one, and found `refusal`.
 pub(crate) fn prepare<'a>(
     inputs: &PreparedInputs<'a>,
-    records: &StagedRecords,
+    staging: i64,
+    header: SnapshotHeader,
+    refusal: Option<(u8, DbError)>,
     authorship: &dyn Authorship,
 ) -> Result<PreparedSnapshot<'a>, DbError> {
-    let staging = records.id();
-    let header = records.header().clone();
-    let refusal = records.refusal();
     inputs.run(|db| {
         let oracle = SnapshotMetadata::staged(db, staging);
         let mut evidence = VecDeque::new();
