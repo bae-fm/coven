@@ -5,7 +5,7 @@
 
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 
 use crate::row_scope::{RowScope, Scopes};
 use crate::scope_plan::{PartnerValue, Sources};
@@ -46,15 +46,14 @@ pub(crate) fn scopes(sources: &Sources, parameters: &[Value]) -> Scopes {
             }
             scope = scope.and(RowScope::Joined {
                 column: membership.column.clone(),
-                lookup: Arc::new(Lookup {
-                    from: partner.from.clone().expect("an edge's partner reads alone"),
-                    qualifier: partner.qualifier.clone(),
-                    value: membership.value.clone(),
-                    affinity: membership.affinity,
-                    scope: partner_scope.clone(),
-                    parameters: Arc::clone(&parameters),
-                    sql: OnceLock::new(),
-                }),
+                lookup: Arc::new(Lookup::new(
+                    partner.from.clone().expect("an edge's partner reads alone"),
+                    partner.qualifier.clone(),
+                    membership.value.clone(),
+                    membership.affinity,
+                    partner_scope.clone(),
+                    &parameters,
+                )),
             });
         }
         bound[position] = Some(scope);
@@ -87,12 +86,10 @@ pub(crate) struct Lookup {
     affinity: Affinity,
     /// The partner's rows in this run.
     scope: RowScope,
-    /// The run's parameters, which the FROM item and an expression can name.
-    parameters: Arc<[Value]>,
-    sql: OnceLock<LookupSql>,
+    sql: LookupSql,
 }
 
-/// A lookup's SQL, made the first time a write runs it.
+/// A lookup's SQL, made with the lookup.
 #[derive(Debug)]
 struct LookupSql {
     /// The value bound as it is, its parameter last.
@@ -105,9 +102,24 @@ struct LookupSql {
 }
 
 impl Lookup {
+    /// The lookup of the partner `from` as `qualifier` names it, in its
+    /// `scope` for a run bound to `parameters`, which the FROM item and an
+    /// expression can name.
+    fn new(
+        from: String,
+        qualifier: String,
+        value: PartnerValue,
+        affinity: Affinity,
+        scope: RowScope,
+        parameters: &[Value],
+    ) -> Self {
+        let sql = render(&from, &qualifier, &value, affinity, &scope, parameters);
+        Self { from, qualifier, value, affinity, scope, sql }
+    }
+
     /// The SQL that looks up `value`, and its parameters with `value` last.
     pub(crate) fn sql(&self, value: &Value) -> (&str, Vec<Value>) {
-        let sql = self.sql.get_or_init(|| self.render());
+        let sql = &self.sql;
         let typed = match (self.affinity, value) {
             (Affinity::Text, Value::Text(_))
             | (Affinity::Numeric, Value::Integer(_) | Value::Real(_)) => sql.typed.as_deref(),
@@ -117,34 +129,41 @@ impl Lookup {
         parameters.push(value.clone());
         (typed.unwrap_or(&sql.plain), parameters)
     }
+}
 
-    fn render(&self) -> LookupSql {
-        let mut parameters = self.parameters.to_vec();
-        let condition = condition(&self.scope, &self.qualifier, &mut parameters);
-        let value = format!("?{}", parameters.len() + 1);
-        let found = |compared: &str| {
-            format!(
-                "SELECT 1 FROM {} WHERE {} = {compared} COLLATE BINARY AND {condition} LIMIT 1",
-                self.from,
-                partner_value(&self.qualifier, &self.value)
-            )
-        };
-        // An expression has no affinity, so SQLite applies the joined
-        // column's to its values. A value of that affinity's own type, cast
-        // to it, carries the affinity into the lookup's comparison; a cast
-        // would change a value of any other type, and no conversion makes
-        // such a value equal to the expression's.
-        let typed = match (&self.value, self.affinity) {
-            (PartnerValue::Expression(_), Affinity::Text) => {
-                Some(found(&format!("CAST({value} AS TEXT)")))
-            }
-            (PartnerValue::Expression(_), Affinity::Numeric) => {
-                Some(found(&format!("CAST({value} AS NUMERIC)")))
-            }
-            _ => None,
-        };
-        LookupSql { plain: found(&value), typed, parameters }
-    }
+/// A lookup's SQL: the partner's rows in `scope` holding the looked-up value.
+fn render(
+    from: &str,
+    qualifier: &str,
+    partner: &PartnerValue,
+    affinity: Affinity,
+    scope: &RowScope,
+    parameters: &[Value],
+) -> LookupSql {
+    let mut parameters = parameters.to_vec();
+    let condition = condition(scope, qualifier, &mut parameters);
+    let value = format!("?{}", parameters.len() + 1);
+    let found = |compared: &str| {
+        format!(
+            "SELECT 1 FROM {from} WHERE {} = {compared} COLLATE BINARY AND {condition} LIMIT 1",
+            partner_value(qualifier, partner)
+        )
+    };
+    // An expression has no affinity, so SQLite applies the joined
+    // column's to its values. A value of that affinity's own type, cast
+    // to it, carries the affinity into the lookup's comparison; a cast
+    // would change a value of any other type, and no conversion makes
+    // such a value equal to the expression's.
+    let typed = match (partner, affinity) {
+        (PartnerValue::Expression(_), Affinity::Text) => {
+            Some(found(&format!("CAST({value} AS TEXT)")))
+        }
+        (PartnerValue::Expression(_), Affinity::Numeric) => {
+            Some(found(&format!("CAST({value} AS NUMERIC)")))
+        }
+        _ => None,
+    };
+    LookupSql { plain: found(&value), typed, parameters }
 }
 
 /// The value a partner's rows give, as SQL over the rows `qualifier` names.

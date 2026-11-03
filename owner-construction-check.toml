@@ -80,6 +80,8 @@ capability_types = [
     "AtomicI64",
     "AtomicU64",
     "AtomicUsize",
+    "OnceLock",
+    "LazyLock",
 ]
 capability_traits = [
     "Clock",
@@ -282,6 +284,8 @@ external_types = [
     "AtomicI64",
     "AtomicU64",
     "AtomicUsize",
+    "OnceLock",
+    "LazyLock",
 ]
 internal_dependency_types = ["DatabaseConnection"]
 closed_session_types = [
