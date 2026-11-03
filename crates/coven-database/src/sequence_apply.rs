@@ -180,9 +180,14 @@ pub(crate) fn stage_writes<P: crate::PendingValue>(
                 }
             }
         }
-        write.stage_selected(db, schema, slot, cutoff.is_some(), |audience| {
-            coverage.is_none_or(|coverage| coverage.needs(audience, slot))
-        })?;
+        crate::download_stream::stage_selected(
+            db,
+            schema,
+            write,
+            slot,
+            cutoff.is_some(),
+            |audience| coverage.is_none_or(|coverage| coverage.needs(audience, slot)),
+        )?;
     }
     Ok(())
 }

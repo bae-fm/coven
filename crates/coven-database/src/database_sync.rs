@@ -81,9 +81,10 @@ impl Database {
             inner.inputs.prepare(|inputs| {
                 let write = write.prepare(inputs)?;
                 authenticate()?;
-                inner
-                    .access
-                    .with_writer(|writer| writer.stream_transaction(|db| write.retain_sources(db)))
+                inner.access.with_writer(|writer| {
+                    writer
+                        .stream_transaction(|db| crate::download_stream::retain_sources(db, write))
+                })
             })
         })
         .await

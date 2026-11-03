@@ -119,135 +119,142 @@ impl PreparedWrite<'_> {
             .filter(|(_, part)| part.is_none())
             .map(|(header, _)| &header.audience)
     }
-    /// Stage one original inside its containing slot's transaction. The caller
-    /// materializes the complete batch only after all parts authenticate.
-    pub(crate) fn stage_selected(
-        self,
-        database: &crate::sqlite::DatabaseConnection,
-        schema: &crate::write_schema::WriteSchema,
-        slot: coven_merge::Slot,
-        refused: bool,
-        selected: impl Fn(&coven_merge::Audience) -> bool,
-    ) -> Result<(), crate::DbError> {
-        let opened: Vec<_> = self
-            .header
-            .parts
-            .iter()
-            .zip(&self.parts)
-            .filter(|(part, stream)| selected(&part.audience) && stream.is_some())
-            .map(|(part, _)| part.audience.clone())
-            .collect();
-        if !refused {
-            if let Some(wait) =
-                crate::download::prerequisite(database, &self.header.header, &opened)?
-            {
-                return Err(crate::DbError::WriteWaiting(wait));
-            }
+}
+
+/// Stage one prepared original into the store's connection, inside its
+/// containing slot's transaction. The caller materializes the complete batch
+/// only after all parts authenticate.
+pub(crate) fn stage_selected(
+    database: &crate::sqlite::DatabaseConnection,
+    schema: &crate::write_schema::WriteSchema,
+    write: PreparedWrite<'_>,
+    slot: coven_merge::Slot,
+    refused: bool,
+    selected: impl Fn(&coven_merge::Audience) -> bool,
+) -> Result<(), crate::DbError> {
+    let opened: Vec<_> = write
+        .header
+        .parts
+        .iter()
+        .zip(&write.parts)
+        .filter(|(part, stream)| selected(&part.audience) && stream.is_some())
+        .map(|(part, _)| part.audience.clone())
+        .collect();
+    if !refused {
+        if let Some(wait) = crate::download::prerequisite(database, &write.header.header, &opened)?
+        {
+            return Err(crate::DbError::WriteWaiting(wait));
         }
-        if !refused {
-            crate::merge_store::MergeStore::from_staged(database, &schema.schema).apply(
-                &coven_format::write::WriteRecord {
-                    header: self.header.header.clone(),
-                    parts: vec![],
-                },
-            )?;
-        }
-        crate::write_commit::retain_original(database, &self.header.header, Some(slot))?;
-        let original_header = self.header.clone();
-        let boundaries = crate::write_boundary::WriteBoundary::judging(database)?;
-        self.read_authenticated(
-            database,
-            |header, audience, frame| {
-                if !selected(audience) {
-                    return Ok(());
-                }
-                if refused {
-                    if let Some(record) = source_record(&frame) {
-                        crate::write_sources::retain(database, header, record)?;
-                        crate::write_sources::admit(
-                            database,
-                            header,
-                            record.row(),
-                            &coven_format::snapshot_rows::ChangeVerdict::Refused,
-                        )?;
-                    }
-                    return Ok(());
-                }
-                let ignored = matches!(
-                    crate::write_boundary::WriteBoundary::part_verdict(
-                        &boundaries,
-                        header,
-                        audience,
-                        Some(slot)
-                    ),
-                    Some(coven_format::snapshot_rows::ChangeVerdict::Ignored(_))
-                );
-                crate::download_stage::frame(database, header, ignored, frame)
-            },
-            |header, audience| {
-                if selected(audience) {
-                    crate::write_sources::complete(database, header, audience)?;
-                }
-                Ok(())
+    }
+    if !refused {
+        crate::merge_store::MergeStore::from_staged(database, &schema.schema).apply(
+            &coven_format::write::WriteRecord {
+                header: write.header.header.clone(),
+                parts: vec![],
             },
         )?;
-        if !refused {
-            crate::download_stage::stage(
-                database,
-                schema,
-                &original_header.header,
-                &opened,
-                |audience| Ok(selected(audience)),
-            )?;
-        }
-        Ok(())
     }
-
-    /// Retain authenticated source evidence without changing rows or admission.
-    #[cfg(test)]
-    pub(crate) fn retain_sources(
-        self,
-        db: &crate::sqlite::DatabaseConnection,
-    ) -> Result<(), crate::DbError> {
-        self.read_authenticated(
-            db,
-            |header, _, frame| {
+    crate::write_commit::retain_original(database, &write.header.header, Some(slot))?;
+    let original_header = write.header.clone();
+    let boundaries = crate::write_boundary::WriteBoundary::judging(database)?;
+    read_authenticated(
+        database,
+        write,
+        |header, audience, frame| {
+            if !selected(audience) {
+                return Ok(());
+            }
+            if refused {
                 if let Some(record) = source_record(&frame) {
-                    crate::write_sources::retain(db, header, record)?;
+                    crate::write_sources::retain(database, header, record)?;
+                    crate::write_sources::admit(
+                        database,
+                        header,
+                        record.row(),
+                        &coven_format::snapshot_rows::ChangeVerdict::Refused,
+                    )?;
                 }
-                Ok(())
-            },
-            |header, audience| crate::write_sources::complete(db, header, audience),
-        )
+                return Ok(());
+            }
+            let ignored = matches!(
+                crate::write_boundary::WriteBoundary::part_verdict(
+                    &boundaries,
+                    header,
+                    audience,
+                    Some(slot)
+                ),
+                Some(coven_format::snapshot_rows::ChangeVerdict::Ignored(_))
+            );
+            crate::download_stage::frame(database, header, ignored, frame)
+        },
+        |header, audience| {
+            if selected(audience) {
+                crate::write_sources::complete(database, header, audience)?;
+            }
+            Ok(())
+        },
+    )?;
+    if !refused {
+        crate::download_stage::stage(
+            database,
+            schema,
+            &original_header.header,
+            &opened,
+            |audience| Ok(selected(audience)),
+        )?;
     }
+    Ok(())
+}
 
-    fn read_authenticated(
-        self,
-        database: &crate::sqlite::DatabaseConnection,
-        mut consume: impl FnMut(
-            &coven_format::write::WriteHeader,
-            &coven_merge::Audience,
-            WriteFrame,
-        ) -> Result<(), crate::DbError>,
-        mut complete: impl FnMut(
-            &coven_format::write::WriteHeader,
-            &coven_merge::Audience,
-        ) -> Result<(), crate::DbError>,
-    ) -> Result<(), crate::DbError> {
-        let write = self.header.header.position;
-        for (header, part) in self.header.parts.iter().zip(self.parts) {
-            let Some(part) = part else {
-                continue;
-            };
-            part.records.each(|bytes| {
-                consume(&self.header.header, &header.audience, WriteFrame::decode(&bytes)?)
-            })?;
-            crate::authorship::retain_leaves(database, write, &header.audience, &part.hashes)?;
-            complete(&self.header.header, &header.audience)?;
-        }
-        crate::write_headers::retain(database, &self.header)?;
-        crate::authorship::retain_header(database, write, &self.evidence)
+/// Retain a prepared write's authenticated source evidence in the store's
+/// connection without changing rows or admission.
+#[cfg(test)]
+pub(crate) fn retain_sources(
+    db: &crate::sqlite::DatabaseConnection,
+    write: PreparedWrite<'_>,
+) -> Result<(), crate::DbError> {
+    read_authenticated(
+        db,
+        write,
+        |header, _, frame| {
+            if let Some(record) = source_record(&frame) {
+                crate::write_sources::retain(db, header, record)?;
+            }
+            Ok(())
+        },
+        |header, audience| crate::write_sources::complete(db, header, audience),
+    )
+}
+
+/// Hand each opened part's prepared records to `consume`, then keep the
+/// part's leaf hashes and the write's header evidence in the store's
+/// connection.
+fn read_authenticated(
+    database: &crate::sqlite::DatabaseConnection,
+    write: PreparedWrite<'_>,
+    mut consume: impl FnMut(
+        &coven_format::write::WriteHeader,
+        &coven_merge::Audience,
+        WriteFrame,
+    ) -> Result<(), crate::DbError>,
+    mut complete: impl FnMut(
+        &coven_format::write::WriteHeader,
+        &coven_merge::Audience,
+    ) -> Result<(), crate::DbError>,
+) -> Result<(), crate::DbError> {
+    let position = write.header.header.position;
+    for (header, part) in write.header.parts.iter().zip(write.parts) {
+        let Some(part) = part else {
+            continue;
+        };
+        part.records.each(|bytes| {
+            consume(&write.header.header, &header.audience, WriteFrame::decode(&bytes)?)
+        })?;
+        crate::authorship::retain_leaves(database, position, &header.audience, &part.hashes)?;
+        complete(&write.header.header, &header.audience)?;
     }
+    crate::write_headers::retain(database, &write.header)?;
+    crate::authorship::retain_header(database, position, &write.evidence)
 }
 
 fn source_record(frame: &WriteFrame) -> Option<PartRecord<'_>> {
