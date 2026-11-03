@@ -301,6 +301,12 @@ task_types = [
     "AppRetry",
     # One operation's wait, and the commits it watches for.
     "Wait",
+    # One attempt's commits, from its start until it names the rows its wait
+    # depends on (§6.7).
+    "AttemptCommits",
+    # One write's changes, and each live query's verdict on them, until it
+    # commits (§4).
+    "Judged",
 ]
 # The shared in-memory state the runtime and the standard library declare.
 external_types = [
@@ -366,6 +372,13 @@ NetworkReportWatch = "RetryWaits"
 RearmWatch = "RetryWaits"
 # The answer to an app's early retry of its uploads (§17.9).
 UploadRetryAnswer = "FilesInner"
+# One observation of the store's commits, shared by the observer that
+# tells it of each and what it watches for (§4).
+CommitSubscription = "CommitObserver"
+# Commits to the rows a worker waits on, coalesced (§4).
+DatabaseChanges = "CommitObserver"
+# How far each file in flight one way has got (api.md E7, E8).
+TransferWatch = "InFlight"
 
 # The raw handles and coven's own SQL are the database boundary's subject;
 # the SQLite capability's row names the database's home and the SQLite
@@ -599,6 +612,13 @@ tables = [
 # Starts a database's checkpointer task, which the store stops as it closes
 # (§4).
 "crates/coven-database/src/wal_checkpoints.rs" = ["WalCheckpointer::start"]
+# One per open store, which every connection tells of its commits (§4).
+"crates/coven-database/src/observation.rs" = [
+    "CommitObserver::new",
+    # Makes each subscription's state, which its observer reaches by a weak
+    # reference.
+    "CommitSubscription::new",
+]
 
 "crates/coven-storage/src/providers/connector.rs" = [
     "ProviderConnector::with_folders",

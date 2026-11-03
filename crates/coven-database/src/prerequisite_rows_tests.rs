@@ -88,7 +88,7 @@ async fn a_wait_observes_its_rows_outside_its_attempt() {
     let attempt = CommitScope::new();
     let commits = db.attempt_commits(attempt);
     attempt.run(observe(7)).await;
-    let mut wait = commits.watch(&seven);
+    let mut wait = db.watch_attempt(commits, &seven);
     assert!(!wait.take_changed().unwrap());
     // Another row: no evidence. Its row, by other work: evidence, and the
     // wake resolves.
@@ -103,14 +103,14 @@ async fn a_wait_observes_its_rows_outside_its_attempt() {
     // spawned does: the wait is due at once. Another row changing is none.
     let commits = db.attempt_commits(CommitScope::new());
     observe(7).await;
-    assert!(commits.watch(&seven).take_changed().unwrap());
+    assert!(db.watch_attempt(commits, &seven).take_changed().unwrap());
     let attempt = CommitScope::new();
     let commits = db.attempt_commits(attempt);
     attempt.run(async { tokio::spawn(observe(7)).await.unwrap() }).await;
-    assert!(commits.watch(&seven).take_changed().unwrap());
+    assert!(db.watch_attempt(commits, &seven).take_changed().unwrap());
     let commits = db.attempt_commits(CommitScope::new());
     observe(8).await;
-    assert!(!commits.watch(&seven).take_changed().unwrap());
+    assert!(!db.watch_attempt(commits, &seven).take_changed().unwrap());
     db.close().await.unwrap();
 }
 
@@ -118,7 +118,8 @@ async fn a_wait_observes_its_rows_outside_its_attempt() {
 async fn a_slot_wait_counts_each_prefix_advance() {
     let store = TestStore::new();
     let db = store.builder(vec![], vec![]).open().await.unwrap();
-    let mut wait = db.attempt_commits(CommitScope::new()).watch(&[PrerequisiteRows::Slot]);
+    let mut wait =
+        db.watch_attempt(db.attempt_commits(CommitScope::new()), &[PrerequisiteRows::Slot]);
     let state = db.store_state().await.unwrap();
     db.admin_fixture(
         coven_format::admin::StoreChange::DeleteCircle {

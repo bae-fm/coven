@@ -353,6 +353,12 @@ impl Judged {
     }
 }
 
+/// Every commit made outside one attempt since it began, kept until the
+/// attempt names the rows its wait depends on.
+pub struct AttemptCommits {
+    commits: CommitSubscription,
+}
+
 struct ObserverState {
     subscriptions: Vec<Weak<SubscriptionState>>,
     closed: bool,
@@ -398,13 +404,50 @@ impl CommitObserver {
         self.subscribe_outside(None)
     }
 
-    /// Observe every commit except those made within `outside`.
+    /// Observe every commit except those made within `outside`. Once the
+    /// store has closed, a new subscription reports that it closed, as a
+    /// call to the store does, not the failure it may have closed with.
     pub(crate) fn subscribe_outside(&self, outside: Option<CommitScope>) -> CommitSubscription {
         let mut state = self.state.lock().expect("observer lock poisoned");
-        let subscription = CommitSubscription::new(state.closed, state.failure.clone(), outside);
+        let failure = if state.closed { None } else { state.failure.clone() };
+        let subscription = CommitSubscription::new(state.closed, failure, outside);
         state.subscriptions.retain(|subscription| subscription.strong_count() != 0);
         state.subscriptions.push(Arc::downgrade(&subscription.shared));
         subscription
+    }
+
+    /// Watch `reads` from now on; `first` reports the state now as their
+    /// first change.
+    pub(crate) fn changes(&self, reads: ReadSet, first: bool) -> crate::DatabaseChanges {
+        let commits = self.subscribe();
+        commits.begin();
+        commits.finish(reads.clone());
+        crate::DatabaseChanges::new(commits, reads, first)
+    }
+
+    /// A watch that has already closed, for a handle that queues no work.
+    pub(crate) fn closed_changes(&self) -> crate::DatabaseChanges {
+        crate::DatabaseChanges::new(CommitSubscription::closed(), Vec::new(), true)
+    }
+
+    /// Keep every commit made from now on outside `attempt`, until the
+    /// attempt names the rows it waits on (`watch_attempt`).
+    pub(crate) fn attempt(&self, attempt: CommitScope) -> AttemptCommits {
+        let commits = self.subscribe_outside(Some(attempt));
+        commits.begin();
+        AttemptCommits { commits }
+    }
+
+    /// Watch `rows` after `attempt`: a commit since it began that changed
+    /// one is reported at once, as evidence against the wait it ended in.
+    pub(crate) fn watch_attempt(
+        &self,
+        attempt: AttemptCommits,
+        rows: &[crate::PrerequisiteRows],
+    ) -> crate::DatabaseChanges {
+        let reads: ReadSet = rows.iter().flat_map(crate::PrerequisiteRows::reads).collect();
+        attempt.commits.finish(reads.clone());
+        crate::DatabaseChanges::new(attempt.commits, reads, false)
     }
 
     /// Judge a write's `changes`, made within `scope`, for every live query

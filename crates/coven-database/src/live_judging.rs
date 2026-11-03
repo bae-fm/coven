@@ -4,16 +4,17 @@
 //! transaction.
 
 use super::DatabaseConnection;
-use crate::observation::{CommitObserver, CommitSubscription, ReadSet};
+use crate::observation::{CommitObserver, ReadSet};
+use crate::scope_lookup::Lookups;
 use crate::{DbError, SqlReadContext};
 
 impl DatabaseConnection {
     /// A live query's run on one snapshot. What its statements read goes
-    /// to `subscription` before the snapshot ends, which judges the writes
-    /// that committed during the run by lookups in that snapshot (§4).
+    /// to `judge` before the snapshot ends, which judges the writes that
+    /// committed during the run by lookups in that snapshot (§4).
     pub(crate) fn live_read<F, R, E>(
         &self,
-        subscription: &CommitSubscription,
+        judge: &mut dyn FnMut(ReadSet, &mut Lookups<'_>) -> rusqlite::Result<()>,
         read: F,
     ) -> Result<R, E>
     where
@@ -26,7 +27,7 @@ impl DatabaseConnection {
             let result = read(SqlReadContext::new(self));
             let reads = self.authorization.reads();
             finished = true;
-            let judged = subscription.finish_judging(reads, &mut |lookup, value| {
+            let judged = judge(reads, &mut |lookup, value| {
                 self.authorization.judged_unrecorded(|| self.lookup(lookup, value))
             });
             let value = result?;
@@ -35,7 +36,10 @@ impl DatabaseConnection {
         });
         // A run that never began read nothing.
         if !finished {
-            subscription.finish(ReadSet::new());
+            judge(ReadSet::new(), &mut |_, _| {
+                unreachable!("a run that read nothing reads no join")
+            })
+            .expect("judging without lookups can't fail");
         }
         result
     }

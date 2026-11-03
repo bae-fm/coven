@@ -588,20 +588,8 @@ impl FileDatabase {
     /// prevents missed commits.
     pub fn queued_work_changes(&self) -> DatabaseChanges {
         match &self.access {
-            FileDatabaseAccess::Reader(_) => DatabaseChanges {
-                commits: crate::observation::CommitSubscription::closed(),
-                reads: Vec::new(),
-                first: true,
-            },
+            FileDatabaseAccess::Reader(database) => database.observer.closed_changes(),
             FileDatabaseAccess::Writer(database) => {
-                let slot = database.inner.read().expect("database lock poisoned");
-                let Some(inner) = slot.as_ref() else {
-                    return DatabaseChanges {
-                        commits: crate::observation::CommitSubscription::closed(),
-                        reads: Vec::new(),
-                        first: true,
-                    };
-                };
                 // A newly queued upload, and an upload a file stopped
                 // waiting for, which the worker then retires (§17.9).
                 let reads = vec![
@@ -618,10 +606,7 @@ impl FileDatabase {
                         inserted_only: false,
                     },
                 ];
-                let commits = inner.access.observer.subscribe();
-                commits.begin();
-                commits.finish(reads.clone());
-                DatabaseChanges { commits, reads, first: true }
+                database.observer.changes(reads, true)
             }
         }
     }

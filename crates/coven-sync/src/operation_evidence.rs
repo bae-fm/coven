@@ -171,7 +171,7 @@ impl RetryWaits {
         evidence.waits.insert(
             id,
             Wait::Waiting {
-                rows: commits.watch(&needs.rows),
+                rows: database.watch_attempt(commits, &needs.rows),
                 key: needs.key.map(|(audience, key)| (audience, key, held)),
                 connection,
                 woken: false,

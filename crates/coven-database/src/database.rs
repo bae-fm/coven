@@ -38,7 +38,7 @@ use coven_foundation::id_source::FileId;
 use coven_foundation::id_source::{DeviceId, IdSourceRef, UuidIds};
 
 use crate::authorization::SqlAuthorization;
-use crate::observation::{CommitObserver, CommitSubscription};
+use crate::observation::CommitObserver;
 use crate::read::RunningRead;
 use crate::sqlite::DatabaseConnection;
 use crate::{CovenError, CovenResult, DbError, Migration, MigrationOutcome, SyncedTable};
@@ -58,6 +58,9 @@ pub use builder::{discarded_operations, discarded_store_name, read_store_name, D
 /// Shared ownership of the database. Closing any clone closes them all.
 #[derive(Clone)]
 pub struct Database {
+    /// Where every connection reports its commits (§4); it outlives them, and
+    /// once they close makes only closed subscriptions.
+    observer: CommitObserver,
     /// The files this process is sending now, which coven's views read (§4).
     transfers: crate::transfers_in_flight::TransfersInFlight,
     closing: Arc<coven_foundation::files::StoreClosingGuard>,
@@ -421,7 +424,6 @@ impl Database {
         first: bool,
         inserted_only: bool,
     ) -> crate::DatabaseChanges {
-        let slot = self.inner.read().expect("database lock poisoned");
         let reads: Vec<_> = tables
             .iter()
             .map(|table| crate::observation::TableRead {
@@ -431,26 +433,26 @@ impl Database {
                 inserted_only,
             })
             .collect();
-        let commits = match slot.as_ref() {
-            Some(inner) => inner.access.observer.subscribe(),
-            None => CommitSubscription::closed(),
-        };
-        commits.begin();
-        commits.finish(reads.clone());
-        crate::DatabaseChanges { commits, reads, first }
+        self.observer.changes(reads, first)
     }
 
     /// Observe, from now, every commit made outside `attempt`: an operation
     /// attempt's own commits are no evidence against the wait it ends in,
     /// and which rows matter is known only when it ends (§6.7).
     pub fn attempt_commits(&self, attempt: crate::CommitScope) -> crate::AttemptCommits {
-        let slot = self.inner.read().expect("database lock poisoned");
-        let commits = match slot.as_ref() {
-            Some(inner) => inner.access.observer.subscribe_outside(Some(attempt)),
-            None => CommitSubscription::closed(),
-        };
-        commits.begin();
-        crate::AttemptCommits { commits }
+        self.observer.attempt(attempt)
+    }
+
+    /// Observe `rows` from here on, after `attempt`. The result first reports
+    /// whether a commit since the attempt began changed one of them: such a
+    /// commit is evidence against the wait the attempt ends in (IO
+    /// `racing_commit_wakes`).
+    pub fn watch_attempt(
+        &self,
+        attempt: crate::AttemptCommits,
+        rows: &[crate::PrerequisiteRows],
+    ) -> crate::DatabaseChanges {
+        self.observer.watch_attempt(attempt, rows)
     }
 
     /// Open the local source of a file still on this device only. No storage
@@ -518,11 +520,7 @@ impl Database {
         F: Fn(&Q, SqlReadContext<'_>) -> CovenResult<R> + Send + Sync + 'static,
         R: Send + 'static,
     {
-        let inner = self.inner.read().expect("database lock poisoned");
-        let commits = match inner.as_ref() {
-            Some(inner) => inner.access.observer.subscribe(),
-            None => CommitSubscription::closed(),
-        };
+        let commits = self.observer.subscribe();
         // A subscription retains a database only for its active blocking read.
         // Idle queries and undelivered results cannot keep a closing lock held.
         let database = Arc::downgrade(&self.inner);
@@ -540,11 +538,10 @@ impl Database {
                         "live query",
                         start_call(database, move |inner| {
                             inner.call(|inner| {
-                                inner
-                                    .access
-                                    .readers
-                                    .acquire_reader()
-                                    .live_read(&completion, move |sql| query(&request, sql))
+                                inner.access.readers.acquire_reader().live_read(
+                                    &mut |reads, lookups| completion.finish_judging(reads, lookups),
+                                    move |sql| query(&request, sql),
+                                )
                             })
                         })
                         .await,
@@ -828,6 +825,8 @@ impl Database {
 /// ```
 #[derive(Clone)]
 pub struct DatabaseReadHandle {
+    /// Where its connections report their commits (§4).
+    observer: CommitObserver,
     /// Never started: this handle transfers nothing (§4).
     transfers: crate::transfers_in_flight::TransfersInFlight,
     inner: Arc<RwLock<Option<DatabaseAccess<StoreReadLock>>>>,

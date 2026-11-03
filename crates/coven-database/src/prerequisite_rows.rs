@@ -3,7 +3,7 @@
 //! is evidence for that wait; no other commit is. The rows are exactly what
 //! the waiting work reads, including advancement of the shared prefix.
 
-use crate::observation::{CommitSubscription, TableRead};
+use crate::observation::TableRead;
 use crate::row_scope::RowScope;
 use crate::sql_value::SqlValue;
 use crate::WriteId;
@@ -29,23 +29,6 @@ pub enum PrerequisiteRows {
     ProviderAccess(String),
     /// Another operation's journal row: it advances or finishes.
     Operation(crate::OperationId),
-}
-
-/// Every commit made outside one attempt since it began, kept until the
-/// attempt names the rows its wait depends on.
-pub struct AttemptCommits {
-    pub(crate) commits: CommitSubscription,
-}
-
-impl AttemptCommits {
-    /// Observe `rows` from here on. The result first reports whether a commit
-    /// since the attempt began changed one of them: such a commit is evidence
-    /// against the wait the attempt ends in (IO `racing_commit_wakes`).
-    pub fn watch(self, rows: &[PrerequisiteRows]) -> crate::DatabaseChanges {
-        let reads: Vec<_> = rows.iter().flat_map(PrerequisiteRows::reads).collect();
-        self.commits.finish(reads.clone());
-        crate::DatabaseChanges { commits: self.commits, reads, first: false }
-    }
 }
 
 fn blob(value: impl Into<Vec<u8>>) -> SqlValue {

@@ -3,11 +3,21 @@ use crate::DbError;
 
 /// A live commit observation; coalesces changes and ends when the writer closes.
 pub struct DatabaseChanges {
-    pub(crate) commits: crate::observation::CommitSubscription,
-    pub(crate) reads: crate::observation::ReadSet,
-    pub(crate) first: bool,
+    commits: crate::observation::CommitSubscription,
+    reads: crate::observation::ReadSet,
+    first: bool,
 }
 impl DatabaseChanges {
+    /// What `commits`, waiting on `reads`, reports; `first` reports the
+    /// state now as their first change.
+    pub(crate) fn new(
+        commits: crate::observation::CommitSubscription,
+        reads: crate::observation::ReadSet,
+        first: bool,
+    ) -> Self {
+        Self { commits, reads, first }
+    }
+
     /// Whether a relevant commit happened since the previous observation,
     /// without waiting; the first call reports the initial state.
     pub fn take_changed(&mut self) -> Result<bool, DbError> {

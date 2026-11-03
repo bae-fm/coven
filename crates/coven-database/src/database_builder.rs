@@ -291,6 +291,7 @@ impl DatabaseBuilder {
             readers.push(Mutex::new(reader));
         }
         Ok(Database {
+            observer: observer.clone(),
             transfers,
             closing: Arc::new(lock.closing_guard()),
             file_tasks: Arc::new(tokio::sync::RwLock::new(())),
@@ -382,6 +383,7 @@ impl DatabaseBuilder {
         writer.serve_transfers(&transfers)?;
         writer.serve(observer.clone());
         Ok(DatabaseReadHandle {
+            observer: observer.clone(),
             transfers,
             inner: Arc::new(RwLock::new(Some(DatabaseAccess {
                 writer: Arc::new(Mutex::new(writer)),

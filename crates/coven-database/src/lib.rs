@@ -223,7 +223,8 @@ pub use operation_outcome::{DeviceStop, EntryTarget, OperationOutcome, Operation
 mod commit_scope;
 pub use commit_scope::CommitScope;
 mod prerequisite_rows;
-pub use prerequisite_rows::{AttemptCommits, PrerequisiteRows};
+pub use observation::AttemptCommits;
+pub use prerequisite_rows::PrerequisiteRows;
 mod database_changes;
 pub use database_changes::DatabaseChanges;
 
