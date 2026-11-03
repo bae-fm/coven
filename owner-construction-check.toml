@@ -276,6 +276,12 @@ task_types = [
     # completion sends.
     "CloudKitRequest",
     "CloudKitReply",
+    # A test's hold on one request of the in-memory provider, until the
+    # test releases it.
+    "HeldRead",
+    "HeldBody",
+    "HeldRequest",
+    "HeldAccess",
     "SqlTransaction",
     "ReaderLease",
     "AppView",
@@ -338,6 +344,9 @@ IdleInterval = "SyncOften"
 # Each change of the sync activity, for the file workers waiting until sync
 # allows their transfers.
 SyncStatusWatch = "SyncState"
+# A test's count of the requests the in-memory provider's connections
+# attempt, to wait on without polling.
+RequestWatch = "MemoryStorage"
 
 # The raw handles and coven's own SQL are the database boundary's subject;
 # the SQLite capability's row names the database's home and the SQLite

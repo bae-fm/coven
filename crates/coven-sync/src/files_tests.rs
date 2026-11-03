@@ -529,7 +529,7 @@ async fn cancelling_a_pin_releases_partial_budget_exemptions() {
         })
         .await;
     let mut requests = f.storage.subscribe_requests();
-    let before = *requests.borrow_and_update();
+    let before = requests.current();
     let files = f.files.clone();
     let reference = file.clone();
     let task = tokio::spawn(async move { files.pin(&[reference]).await });

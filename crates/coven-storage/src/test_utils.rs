@@ -115,6 +115,33 @@ impl MemoryState {
     }
 }
 
+/// Hears each request this provider's connections attempt, counted from the
+/// first, failed ones included (`MemoryStorage::subscribe_requests`).
+pub struct RequestWatch(tokio::sync::watch::Receiver<u64>);
+
+impl RequestWatch {
+    /// How many requests have been attempted, which later waits count on
+    /// from.
+    pub fn current(&mut self) -> u64 {
+        *self.0.borrow_and_update()
+    }
+
+    /// Resolves once another request is attempted; an error once the
+    /// provider is gone.
+    pub async fn changed(&mut self) -> Result<(), tokio::sync::watch::error::RecvError> {
+        self.0.changed().await
+    }
+
+    /// Resolves once `reached` holds of the count of requests attempted; an
+    /// error once the provider is gone first.
+    pub async fn wait_for(
+        &mut self,
+        reached: impl FnMut(&u64) -> bool,
+    ) -> Result<(), tokio::sync::watch::error::RecvError> {
+        self.0.wait_for(reached).await.map(drop)
+    }
+}
+
 struct HeldRequest {
     prefix: ObjectPrefix,
     listed: tokio::sync::oneshot::Sender<()>,
@@ -282,8 +309,8 @@ impl MemoryStorage {
         self.provider.online.store(online, std::sync::atomic::Ordering::SeqCst);
     }
     /// Request notifications include failed attempts, so tests can wait without polling.
-    pub fn subscribe_requests(&self) -> tokio::sync::watch::Receiver<u64> {
-        self.provider.requests.subscribe()
+    pub fn subscribe_requests(&self) -> RequestWatch {
+        RequestWatch(self.provider.requests.subscribe())
     }
     /// Greatest number of requests overlapping an injected delay or barrier.
     pub fn peak_requests(&self) -> usize {
