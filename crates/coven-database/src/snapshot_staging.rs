@@ -34,7 +34,7 @@ use std::sync::Arc;
 /// to keep it in memory. Only the snapshot loader names these tables.
 pub(super) fn create_tables(db: &DatabaseConnection) -> Result<(), DbError> {
     db.batch("PRAGMA temp_store=FILE;")?;
-    SnapshotMetadata::create_table(db)
+    crate::snapshot_metadata::create_table(db)
 }
 
 /// One staging's number and the tables that hold its records on the input
@@ -87,7 +87,7 @@ fn remove(db: &DatabaseConnection, staging: &StagedTables) -> Result<(), DbError
     for table in &staging.tables {
         db.batch(&format!("DROP TABLE {table}"))?;
     }
-    SnapshotMetadata::remove(db, staging.id)
+    crate::snapshot_metadata::remove(db, staging.id)
 }
 
 /// Drop the tables of each of `stagings` that still holds its records, in

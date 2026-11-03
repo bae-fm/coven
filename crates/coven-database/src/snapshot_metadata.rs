@@ -30,6 +30,18 @@ pub(crate) struct SnapshotMetadata<'a> {
 /// The source of the snapshot a loading transaction is installing.
 const INSTALLING: i64 = 0;
 
+/// Create the table of staged snapshots' applied writes, in the connection's
+/// temporary storage.
+pub(crate) fn create_table(db: &DatabaseConnection) -> Result<(), DbError> {
+    db.batch("CREATE TEMP TABLE _coven_snapshot_writes(source INTEGER NOT NULL,device BLOB NOT NULL,number BLOB NOT NULL,timestamp BLOB NOT NULL,read_through BLOB NOT NULL,slot BLOB NOT NULL,PRIMARY KEY(source,device,number)) WITHOUT ROWID")
+}
+
+/// Forget the applied writes of the snapshot staged as `source`.
+pub(crate) fn remove(db: &DatabaseConnection, source: i64) -> Result<(), DbError> {
+    db.internal_execute("DELETE FROM temp._coven_snapshot_writes WHERE source=?1", [source])?;
+    Ok(())
+}
+
 impl<'a> SnapshotMetadata<'a> {
     pub(crate) fn new(database: &'a DatabaseConnection) -> Self {
         Self::staged(database, INSTALLING)
@@ -40,15 +52,6 @@ impl<'a> SnapshotMetadata<'a> {
         Self { database, source, read: RefCell::new(BTreeMap::new()) }
     }
 
-    pub(crate) fn create_table(db: &DatabaseConnection) -> Result<(), DbError> {
-        db.batch("CREATE TEMP TABLE _coven_snapshot_writes(source INTEGER NOT NULL,device BLOB NOT NULL,number BLOB NOT NULL,timestamp BLOB NOT NULL,read_through BLOB NOT NULL,slot BLOB NOT NULL,PRIMARY KEY(source,device,number)) WITHOUT ROWID")
-    }
-
-    /// Forget the applied writes of the snapshot staged as `source`.
-    pub(crate) fn remove(db: &DatabaseConnection, source: i64) -> Result<(), DbError> {
-        db.internal_execute("DELETE FROM temp._coven_snapshot_writes WHERE source=?1", [source])?;
-        Ok(())
-    }
     pub(crate) fn put(&self, write: &AppliedWrite) -> Result<(), DbError> {
         self.stage(write)?;
         crate::write_commit::retain_metadata(self.database, write)?;

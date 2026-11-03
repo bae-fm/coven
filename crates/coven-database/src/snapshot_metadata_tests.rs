@@ -19,7 +19,7 @@ async fn staged<T>(writes: &[AppliedWrite], check: impl FnOnce(&mut DatabaseConn
     let store = TestStore::new();
     let database = store.builder(notes_tables(), notes_migrations()).open().await.unwrap();
     let checked = database.inspect_writer(|db| {
-        SnapshotMetadata::create_table(db).unwrap();
+        super::create_table(db).unwrap();
         let metadata = SnapshotMetadata::staged(db, 1);
         for write in writes {
             metadata.stage(write).unwrap();
@@ -133,7 +133,7 @@ async fn a_failed_read_of_a_staged_write_keeps_its_error() {
             }
         }
         drop(metadata);
-        SnapshotMetadata::create_table(db).unwrap();
+        super::create_table(db).unwrap();
     })
     .await;
 }

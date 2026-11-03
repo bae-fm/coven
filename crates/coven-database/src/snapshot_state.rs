@@ -47,7 +47,7 @@ pub(crate) fn begin(database: &DatabaseConnection, audience: &Audience) -> Resul
 
 pub(crate) fn create_tables(database: &DatabaseConnection) -> Result<(), DbError> {
     database.batch("CREATE TEMP TABLE _coven_snapshot_columns(table_name TEXT NOT NULL,column_name TEXT NOT NULL,PRIMARY KEY(table_name,column_name)) WITHOUT ROWID;")?;
-    crate::snapshot_metadata::SnapshotMetadata::create_table(database)
+    crate::snapshot_metadata::create_table(database)
 }
 
 /// Validate live losses against the merged row before storing the common record.
