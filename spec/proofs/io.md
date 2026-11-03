@@ -159,18 +159,19 @@ how its retries are answered. No differential runner compares them.
 ## The sync state
 
 [SyncState.lean](io/CovenIO/SyncState.lean) models the one state a status
-screen shows (§19.1): not synced, syncing, synced, offline, offline with
-unsent changes, signed out, no access to storage, storage full, storage
-folder missing, update needed, removed from the store, device needs reset,
-clock wrong, or failed with no named cause. It is computed from facts, never
-stored: whether a location is recorded and this device holds its
-credentials, how the last pass that reached storage ended, whether the
-running pass has read or claimed a slot, whether a file is moving, whether
-the send queue holds a write, and the pending records. Each fact names a
-candidate state or none, and the state is the candidate of highest rank:
-the device's own standing first (removed, needs reset, update needed), then
-signing in, then what storage said of the account or location, then
-reachability, then the catch-all failure, then activity.
+screen shows (§19.1): not synced, syncing, waiting to sync, synced, offline,
+offline with unsent changes, signed out, no access to storage, storage full,
+storage folder missing, update needed, removed from the store, device needs
+reset, clock wrong, or failed with no named cause. It is computed from
+facts, never stored: whether a location is recorded and this device holds
+its credentials, how the last pass that reached storage ended, whether the
+running pass has read or claimed a slot, whether a download is moving, each
+upload in this device's queue, whether the send queue holds a write, and the
+pending records. Each fact names a candidate state or none, and the state is
+the candidate of highest rank: the device's own standing first (removed,
+needs reset, update needed), then signing in, then what storage said of the
+account or location, then reachability, then the catch-all failure, then
+activity, moving before waiting.
 
 `one_state` proves the state is a candidate no other outranks, and the only
 one, since no two states share a rank. `not_synced_iff` proves not synced
@@ -178,30 +179,44 @@ means no location is recorded, and `signed_out_without_credentials` that a
 recorded location without credentials is signed out unless the device's own
 standing outranks it, so the two are never confused.
 `offline_unsent_iff` and `offline_iff` prove that between offline and
-offline with unsent changes, the send queue decides, and
-`write_while_offline` that a write committed while offline changes one into
-the other in its own step, with no pass. `syncing_only_moving` proves
-syncing shows only while a slot or a file moves; `quiet_pass_keeps` that a
-pass moving nothing leaves the state as it was while it runs, and after it
-when it ends as the last pass did. `last_synced_never_back` proves the time
-of the last finished sync never goes backward, even when the clock does,
-and `last_synced_kept` that only a pass reaching the read end changes it:
-every other event, reopening included, keeps it.
+offline with unsent changes, whether a write or an upload is queued
+decides, and `write_while_offline` that a write committed while offline
+changes one into the other in its own step, with no pass.
+`syncing_only_moving` proves syncing shows only while a slot or a file
+moves; `quiet_pass_keeps` that a pass moving nothing leaves the state as it
+was while it runs, and after it when it ends as the last pass did.
+`last_synced_never_back` proves the time of the last finished sync never
+goes backward, even when the clock does, and `last_synced_kept` that only a
+pass reaching the read end changes it: every other event, reopening
+included, keeps it.
+
+Synced means this device's data and files are in storage.
+`synced_files_stored` proves synced shows only while every upload in the
+queue has its bytes stored: none moving, queued or failed. An upload queued
+with nothing moving names waiting to sync, and `waiting_not_moving` proves
+that state shows only while no slot and no file moves, with a wait to name:
+what the first waiting upload waits for, by `Facts.uploadWait`, which takes
+what holds every upload first (sync not running, a provider's cooldown, a
+blocked pass), then what holds this one (the pause, for a trailing upload,
+then its backoff), else its turn.
 
 `Reason.state` maps each pending reason to one state or none, as a
 function. A wait names none (`waits_name_no_state`), and so does a verdict
 on an admin operation or on another member's writes, and a provider failure
 that clears by itself, whose subject retries while the pass reports
-reachability. A pass held on a wait, such as a slot waiting on another
-device's key or a provider's cooldown, reached storage, so it counts as
-synced without moving the time of the last finished sync
-(`waiting_pass_synced`).
+reachability. A file that can't be uploaded or read names failed
+(`file_failures_name_failed`): an original missing or changed, coven's copy
+failing its check, stored bytes lost or refused. `bad_file_fails` proves
+such a record keeps the state at failed or what outranks it. A pass held
+on a wait, such as a slot waiting on another device's key or a provider's
+cooldown, reached storage, so it counts as synced without moving the time
+of the last finished sync (`waiting_pass_synced`).
 
 The model takes the facts as given: that the loop records how each pass
 ended and whether it moved a slot, that opening records whether storage is
 set up, and that the live query reads them together in one transaction.
 The `sync_state` case of `ioRunner` takes a set of facts as JSON and
-answers the state's name.
+answers the state's name and, for waiting to sync, its wait.
 
 ## Work notifications
 

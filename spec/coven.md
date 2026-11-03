@@ -1504,7 +1504,8 @@ After applying and claiming, the device does the work the new state calls for:
 
 At the end, the device records how the pass went, and the sync state follows
 (§19.1). A blocked pass names the slot that stopped it. A synced pass reached
-the end of the sequence; files or provider work may still be pending.
+the end of the sequence; files or provider work may still be pending, and a
+file still to upload keeps the sync state from synced.
 
 #### 6.5 Reading an object
 
@@ -5566,7 +5567,9 @@ upload: the same copy, or the same original as one staging recorded it.
 - **A missing original waits.** If a move's original is missing when its upload
   opens it, as on an unplugged drive, the move's record names the original and
   says it is missing, and its upload retries under the shared backoff (§6.7).
-  Once it is back, the upload's chunk checks catch any change.
+  Once it is back, the upload's chunk checks catch any change. Meanwhile the
+  sync state is failed, naming it (§19.1): rows naming the file may already
+  have gone out, and no device can read it.
 - **A changed original fails the move.** An original changed since its staging,
   in its size, its modification time or any chunk's bytes, fails its upload
   before that chunk is encrypted or sent. None of the move's files switches:
@@ -7063,16 +7066,31 @@ ends synced, and the time it finished is the last synced time. Thirty seconds
 later an idle pass finds nothing: the state stays synced the whole time, so
 the line doesn't flicker, and only the last synced time moves.
 
+**Synced means data and files.** Carol imports 40 photos with uploads paused
+for her trip. Her write goes out at the next pass, with each photo on her
+phone only (§17.3), but no photo is in storage, so her state is waiting to
+sync, and it says why: uploads are paused. She resumes them, and while the
+photos go up the state is syncing. Once the last is stored, it is synced.
+Had Dan unplugged the drive holding a track his move uploads, his state
+would be failed, naming the track, until the drive is back and the track
+uploads.
+
 The state is one of, in the order an app lists them:
 
 - **Not synced:** no storage location is recorded on this device.
 - **Syncing:** a pass has read a slot it hadn't, or claimed one, and is still
-  running; or a file is being sent or downloaded while the last pass was
-  synced. A pass that finds nothing never shows it.
-- **Synced:** the last pass reached storage and nothing below holds.
+  running; or a file is being sent or downloaded. A pass that finds nothing
+  never shows it.
+- **Waiting to sync:** a file waits in this device's upload queue and nothing
+  moves. It names what the first such file waits for: sync isn't running, a
+  provider's cooldown (§6.7), a pass blocked at a slot (§5.4), the app's pause
+  of trailing uploads (§17.4), its own backoff after a failed attempt, or its
+  turn.
+- **Synced:** the last pass reached storage, every file this device uploads
+  is stored, and nothing below holds.
 - **Offline:** the last pass got no answer from storage.
-- **Offline with unsent changes:** offline, and the send queue holds a write.
-  Coven gives no count.
+- **Offline with unsent changes:** offline, and the send queue holds a write
+  or the upload queue a file. Coven gives no count.
 - **Signed out:** a location is recorded but this device holds no credentials
   for it, or storage refused them (`Authentication`). It names the provider.
   It is never "not synced": the location is still there to sign in to.
@@ -7085,27 +7103,43 @@ The state is one of, in the order an app lists them:
 - **Removed:** this device or its member was removed from the store.
 - **Device needs reset:** another copy uses this device's id (§19.3), or its
   member keys were replaced elsewhere.
-- **Failed:** any other failure, with no named cause.
+- **Failed:** any other failure, with no named cause, or a file that can't be
+  uploaded or read, naming it.
 
 The state is computed each time it is read, never stored, from facts that are
 each true on their own: whether a location is recorded and its credentials
 held, how the last pass ended, whether the running pass has read or claimed a
-slot, whether a file is moving, whether the send queue holds a write, and the
-pending records. Each fact names one candidate state or none, and when
-several hold, the one shown is the first of: removed, needs reset, update
-needed, signed out, no access, folder missing, clock wrong, storage full,
-offline with unsent changes, offline, failed, syncing, synced. The device's
-own standing comes first, since no other fix helps until it is dealt with.
-Appendix H.3 lists which state each pass failure and each pending reason
-names.
+slot, whether a file is downloading, each file in the upload queue, whether
+the send queue holds a write, and the pending records. Each fact names one
+candidate state or none, and when several hold, the one shown is the first
+of: removed, needs reset, update needed, signed out, no access, folder
+missing, clock wrong, storage full, offline with unsent changes, offline,
+failed, syncing, waiting to sync, synced. The device's own standing comes
+first, since no other fix helps until it is dealt with. Appendix H.3 lists
+which state each fact names.
 
-- **A wait names no state.** A slot waiting on another device's key, a
-  provider's cooldown, a pending invite, a snapshot not yet taken: none is a
-  failure, and none needs the person, so none shows. A pass held on one
-  reached storage and counts as synced, without moving the last synced time.
-- **So does a failure that clears by itself on a subject's own retry,** such as
-  an upload's server error: the subject retries, and the pass says whether
-  storage is reachable. The pending list still shows it.
+- **A wait for data names no state.** A slot waiting on another device's
+  key, a provider's cooldown, a pending invite, a snapshot not yet taken:
+  none is a failure, and none needs the person, so none shows. A pass held
+  on one reached storage and counts as synced, without moving the last
+  synced time.
+- **A wait for a file names waiting to sync.** The same cooldown or blocked
+  slot holds the upload queue too, and there a file isn't in storage yet, so
+  the state can't be synced. Which wait it names follows the order above:
+  what holds every upload first, then what holds the first waiting file.
+- **So does a failure that clears by itself on an upload's own retry,** such
+  as a server error: the upload waits out its backoff and retries. On any
+  other subject such a failure names nothing: the subject retries, and the
+  pass says whether storage is reachable. The pending list still shows it.
+- **One bad file holds the state at failed.** A file this device can't
+  upload, because its original is missing or changed, or coven's copy fails
+  its check, or one it can't read, because storage refused or lost its
+  bytes, names failed, with the file's pending record as the cause. Coven
+  never skips the write that names such a file, and never sends it with the
+  file marked lost: other devices would hold a row naming bytes nobody has.
+  The state stays failed until the file uploads, on its own retries or the
+  person's (§6.7), the app cancels its move (§17.3), or the person resets the
+  device (§19.3).
 - **Each state carries its cause where it has one:** the pass's failure, with
   its error's text, or the first pending record, in the order they arose, that
   names the state. Signed out with no credentials has none.
@@ -10204,7 +10238,7 @@ Write-ups explain each model and state its assumptions:
 | Ben's mixed write 10: its note edit stays frozen and its playlist rename converts; a device's own reads don't exclude | `mixed_write`, `own_reads_do_not_exclude` | `proofs/queue/CovenQueue/DataExamples.lean` | §18.6 |
 | The setter actually replaced decides; partial chains of writes | `actual_setter_decides`, `partial_write_chain` | `proofs/queue/CovenQueue/DataExamples.lean` | §18.6 |
 | Conversion of old writes (queue model overview) | (write-up) | `proofs/queue.md` | §18.6 |
-| A status screen's sync state is the one candidate no other outranks; not synced means no location is recorded, and a location without credentials is signed out; between offline and offline with unsent changes the send queue decides, and a write committed while offline changes one into the other with no pass; syncing shows only while a slot or a file moves, and a pass that moves nothing leaves the state as it was; the last synced time never goes backward, and only a pass reaching the read end changes it; each pending reason names one state or none, and a wait names none | `one_state`, `not_synced_iff`, `signed_out_without_credentials`, `offline_unsent_iff`, `offline_iff`, `write_while_offline`, `syncing_only_moving`, `quiet_pass_keeps`, `last_synced_never_back`, `last_synced_kept`, `waits_name_no_state`, `waiting_pass_synced` | `proofs/io/CovenIO/SyncState.lean` | §19.1 |
+| A status screen's sync state is the one candidate no other outranks; not synced means no location is recorded, and a location without credentials is signed out; between offline and offline with unsent changes whether a write or a file is queued decides, and a write committed while offline changes one into the other with no pass; syncing shows only while a slot or a file moves, waiting to sync only while nothing moves and a queued file names its wait, and synced only once every file this device uploads is stored; a pass that moves nothing leaves the state as it was; the last synced time never goes backward, and only a pass reaching the read end changes it; each pending reason names one state or none, a wait for data names none, and a file that can't be uploaded or read names failed | `one_state`, `not_synced_iff`, `signed_out_without_credentials`, `offline_unsent_iff`, `offline_iff`, `write_while_offline`, `syncing_only_moving`, `waiting_not_moving`, `synced_files_stored`, `bad_file_fails`, `quiet_pass_keeps`, `last_synced_never_back`, `last_synced_kept`, `waits_name_no_state`, `file_failures_name_failed`, `waiting_pass_synced` | `proofs/io/CovenIO/SyncState.lean` | §19.1 |
 | Store-reset authority is checked in the state before the slot (circle-reset authority is left to the model's supplied audience policy) | `store_reset_authorized` | `proofs/sequence/CovenSequence/Authority.lean` | §19.4 |
 | An applied reset loads its chosen rows without replaying the slots before it | `reset_replaces` | `proofs/sequence/CovenSequence/Preparations.lean` | §19.4 |
 | From empty storage, with every create recorded and the journal kept, a slot signed by this device's id that it never attempted means another copy | `foreign_slot_means_copy` | `proofs/sequence/CovenSequence/Settle.lean` | §19.3 |
@@ -10311,7 +10345,7 @@ the constraint or foreign key (§9, §15.1, §15.2, Appendix A).
 
 | Name | Meaning | Section |
 |---|---|---|
-| sync state | not synced, syncing, synced, offline, offline with unsent changes, signed out, no access to storage, storage full, storage folder missing, update needed, removed, device needs reset, clock wrong, or failed; the first of them by the order below when several hold | §19.1 |
+| sync state | not synced, syncing, waiting to sync, synced, offline, offline with unsent changes, signed out, no access to storage, storage full, storage folder missing, update needed, removed, device needs reset, clock wrong, or failed; the first of them by the order below when several hold | §19.1 |
 | `LastPass` | how the last pass ended: synced, offline, blocked at a slot with a reason, or failed | §6.4, F.5 |
 | `NoStorage` | no storage is connected | §17.6, §17.7 |
 | `Storage` | a network or provider failure, kept with the provider's category | §17.7 |
@@ -10330,17 +10364,19 @@ the constraint or foreign key (§9, §15.1, §15.2, Appendix A).
 Which sync state each fact names (§19.1). With several, the state is the first
 of removed, device needs reset, update needed, signed out, no access, folder
 missing, clock wrong, storage full, offline with unsent changes, offline,
-failed, syncing, synced. Not synced, with no location recorded, comes before
-them all.
+failed, syncing, waiting to sync, synced. Not synced, with no location
+recorded, comes before them all.
 
 | Fact | State it names |
 |---|---|
 | no location recorded | not synced |
 | a location without credentials | signed out |
 | a running pass read or claimed a slot | syncing |
-| a file being sent or downloaded, the last pass synced | syncing |
+| a file being sent or downloaded | syncing |
+| a file in the upload queue, not being sent, whose record names nothing | waiting to sync |
+| a file in the upload queue whose bytes are stored, waiting for the rest of its move | none |
 | the last pass synced, or held on a wait | synced |
-| the last pass got no provider response | offline; offline with unsent changes while the send queue holds a write |
+| the last pass got no provider response | offline; offline with unsent changes while the send queue holds a write or the upload queue a file |
 | the last pass, or a record, failed with `Authentication` | signed out |
 | ... with `PermissionDenied` or `AccessNotGranted` | no access to storage |
 | ... with `QuotaExceeded` | storage full |
@@ -10354,9 +10390,16 @@ them all.
 | the last pass blocked at a slot | what the slot's reason names |
 | the last pass failed on coven's own operation | what its record's reason names, else failed |
 | any other failed pass | failed |
-| a record's `Refused`, `FileUnavailable`, `Original { Changed }` or `Failed` other than `Shutdown` | failed |
+| a record's `Refused`, `FileUnavailable`, `Original` or `Failed` other than `Shutdown` | failed |
 | a record's `Cleanup` | what its cleanup's reason names |
-| a record's `Missing`, `Waits`, `KeyUnavailable`, `NoStorage`, `ProviderPending`, `AccountInUse`, `AccessRemains`, `Original { Missing }`, `Rejected`, `WritesRefused`, `Paused` or `Failed(Shutdown)` | none |
+| a record's `Missing`, `Waits`, `KeyUnavailable`, `NoStorage`, `ProviderPending`, `AccountInUse`, `AccessRemains`, `Rejected`, `WritesRefused`, `Paused` or `Failed(Shutdown)` | none |
+
+What waiting to sync names, the first that holds for the first waiting file
+in the queue: sync isn't running (`NotSyncing`); a provider's cooldown holds
+every request (`CoolingDown`); the last pass is blocked at a slot
+(`Blocked`); the app paused uploads and the file's reference trails
+(`Paused`); its last attempt failed and it waits out its backoff
+(`Retrying`); else its turn hasn't come (`Queued`).
 
 The `Connection` subject's record names nothing of its own: it is the last
 pass's failure, kept for its retry.

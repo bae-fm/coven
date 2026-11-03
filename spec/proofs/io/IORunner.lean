@@ -303,6 +303,7 @@ private def passFailure (j : Json) : Except String PassFailure := do
 def stateName : State → String
   | .notSynced => "notSynced"
   | .syncing => "syncing"
+  | .waitingToSync => "waitingToSync"
   | .synced => "synced"
   | .offline => "offline"
   | .offlineUnsent => "offlineUnsent"
@@ -316,10 +317,30 @@ def stateName : State → String
   | .clockWrong => "clockWrong"
   | .failed => "failed"
 
+def waitName : UploadWait → String
+  | .notSyncing => "notSyncing"
+  | .coolingDown => "coolingDown"
+  | .blocked => "blocked"
+  | .paused => "paused"
+  | .retrying => "retrying"
+  | .queued => "queued"
+
+/-- An upload: `{"progress": "moving" | "stored" | "queued", "bound": bool,
+"retrying": bool, "record": reason or null}`. -/
+private def upload (j : Json) : Except String Upload := do
+  let progress ← named [("moving", Progress.moving), ("stored", .stored), ("queued", .queued)]
+    "progress" (← j.getObjValAs? String "progress")
+  let recordJson ← j.getObjVal? "record"
+  let record ← if recordJson.isNull then pure none else some <$> reason recordJson
+  return { progress, record
+           bound := ← j.getObjValAs? Bool "bound"
+           retrying := ← j.getObjValAs? Bool "retrying" }
+
 /-- `SyncState.state` of one set of facts: `storage` (`none`, `signedOut`,
 `connected`), `last` (`synced` or `{"failed": pass failure}`), `moving`,
-`transferring`, `unsent` and the pending `records`' reasons. Reports the
-state's name. -/
+`downloading`, `uploads`, `unsent`, `running`, `cooling`, `paused` and the
+pending `records`' reasons. Reports the state's name as `state`, and, for
+waiting to sync, what the first waiting upload waits for as `wait`. -/
 def run (j : Json) : Except String Json := do
   let storage ← named [("none", Storage.none), ("signedOut", .signedOut), ("connected", .connected)]
     "storage" (← j.getObjValAs? String "storage")
@@ -328,13 +349,20 @@ def run (j : Json) : Except String Json := do
     | .ok "synced" => pure LastPass.synced
     | _ => pure (LastPass.failed (← passFailure (← lastJson.getObjVal? "failed")))
   let records ← (← j.getObjValAs? (Array Json) "records").toList.mapM reason
+  let uploads ← (← j.getObjValAs? (Array Json) "uploads").toList.mapM upload
   let facts : Facts := {
-    storage, last, passing := false
+    storage, last, passing := false, uploads, records, lastSynced := none
     moving := ← j.getObjValAs? Bool "moving"
-    transferring := ← j.getObjValAs? Bool "transferring"
+    downloading := ← j.getObjValAs? Bool "downloading"
     unsent := ← j.getObjValAs? Bool "unsent"
-    records, lastSynced := none }
-  return toJson (stateName (state facts))
+    running := ← j.getObjValAs? Bool "running"
+    cooling := ← j.getObjValAs? Bool "cooling"
+    paused := ← j.getObjValAs? Bool "paused" }
+  let shown := state facts
+  let wait := match shown, facts.waits with
+    | .waitingToSync, w :: _ => toJson (waitName w)
+    | _, _ => Json.null
+  return Json.mkObj [("state", toJson (stateName shown)), ("wait", wait)]
 
 end SyncStateCase
 

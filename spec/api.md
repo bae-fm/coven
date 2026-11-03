@@ -3727,18 +3727,22 @@ while let Some(Ok(values)) = lost.next().await {
   `subscribe_sync_status()` follows it: its first value is the
   current state, read at once from what opening wrote, so the app shows no
   placeholder before it. Coven names the states; the app picks the words.
-  - The state is computed in the read from the row of `coven_sync_status`
-    (E4), the send queue, the files being sent or downloaded and the pending
-    records, so the live query runs again whenever one of them changes: a
-    write committed while offline makes it offline with unsent changes in
-    that transaction. With several candidates, the first in §19.1's order
-    shows; Appendix H.3 of coven.md lists which state each pass failure and
-    pending reason names.
+  - The state is computed in the read from the rows of `coven_sync_status`
+    and `coven_retry_effect` (E4), the send queue, the upload queue with its
+    pause and retry waits, the files being sent or downloaded and the
+    pending records, so the live query runs again whenever one of them
+    changes: a write committed while offline makes it offline with unsent
+    changes in that transaction. With several candidates, the first in
+    §19.1's order shows; Appendix H.3 of coven.md lists which state each
+    fact names.
+  - Synced means data and files: while a file waits in the upload queue the
+    state is syncing as files move, waiting to sync while none does, with
+    what the first waiting file waits for (`UploadWait`), or failed when its
+    source failed, naming it.
   - Syncing shows only while a pass has read or claimed a slot, or a file is
-    moving while the last pass was synced. A pass that finds nothing writes
-    nothing the state reads until it ends, and then only the last synced
-    time when it ends synced again, so an idle store's state doesn't flicker
-    every 30 seconds.
+    moving. A pass that finds nothing writes nothing the state reads until it
+    ends, and then only the last synced time when it ends synced again, so
+    an idle store's state doesn't flicker every 30 seconds.
   - The cause is the last pass, as `LastPass` keeps it, or the first pending
     record, in the order they arose, that names the state, with the cause
     `coven_pending` keeps beside it. Signed out with no credentials has none.
@@ -3784,7 +3788,8 @@ while let Some(Ok(values)) = lost.next().await {
   and her state too. A later provider error denying the required read fails
   the pass: no access to storage. One bad photo while the rest syncs leaves
   the last pass synced; its upload's pending record makes the state failed,
-  with that record as the cause.
+  with that record as the cause. Paused uploads with photos queued make it
+  `WaitingToSync(UploadWait::Paused)`.
 - A device that isn't connected still reads and writes
   ([§2.1](coven.md#21-local-writes)); its writes wait in `_coven_uploads`.
 - `start_sync` starts the loop; its first pass builds the provider client from
@@ -4818,9 +4823,9 @@ impl CovenHandle {
     pub async fn pending(&self) -> CovenResult<Vec<PendingRecord>>;
 
     /// The sync state and when sync last finished, computed from
-    /// `coven_sync_status`, the send queue, the files moving and the pending
-    /// records in one committed snapshot (§19.1). A read-only handle has
-    /// none: `StatementForbidden`.
+    /// `coven_sync_status`, `coven_retry_effect`, the send queue, the upload
+    /// queue, the files moving and the pending records in one committed
+    /// snapshot (§19.1). A read-only handle has none: `StatementForbidden`.
     pub async fn sync_status(&self) -> CovenResult<SyncStatus>;
 
     /// The same pre-built query, live (E4): its first value is the current
@@ -4873,18 +4878,23 @@ pub struct SyncStatus {
 /// The sync state (§19.1). With several candidates, the first of `Removed`,
 /// `NeedsReset`, `UpdateNeeded`, `SignedOut`, `NoAccess`, `FolderMissing`,
 /// `ClockWrong`, `StorageFull`, `OfflineWithUnsentChanges`, `Offline`,
-/// `Failed`, `Syncing`, `Synced` shows; `NotSynced` comes before them all.
+/// `Failed`, `Syncing`, `WaitingToSync`, `Synced` shows; `NotSynced` comes
+/// before them all.
 pub enum SyncState {
     /// No storage location is recorded on this device.
     NotSynced,
-    /// A running pass has read or claimed a slot, or a file is moving while
-    /// the last pass was synced.
+    /// A running pass has read or claimed a slot, or a file is being sent
+    /// or downloaded.
     Syncing,
-    /// The last pass reached storage, and nothing below holds.
+    /// A file waits in the upload queue and nothing moves: what the first
+    /// such file waits for.
+    WaitingToSync(UploadWait),
+    /// The last pass reached storage, every file this device uploads is
+    /// stored, and nothing below holds.
     Synced,
     /// The last pass got no provider response.
     Offline(SyncCause),
-    /// Offline, and the send queue holds a write.
+    /// Offline, and the send queue holds a write or the upload queue a file.
     OfflineWithUnsentChanges(SyncCause),
     /// A location is recorded, but this device holds no credentials for it
     /// (no cause), or storage refused them.
@@ -4900,8 +4910,30 @@ pub enum SyncState {
     Removed(SyncCause),
     /// Another copy uses this device's id, or its member keys were replaced.
     NeedsReset(SyncCause),
-    /// Any other failure.
+    /// Any other failure, or a file that can't be uploaded or read, whose
+    /// pending record is the cause.
     Failed(SyncCause),
+}
+
+/// What a file waiting in the upload queue waits for, as `WaitingToSync`
+/// names it for the first such file: what holds every upload first, then
+/// what holds that file (§19.1).
+pub enum UploadWait {
+    /// Sync isn't running (`start_sync`, `stop_sync`).
+    NotSyncing,
+    /// The provider asked every request to wait until then (§6.7).
+    CoolingDown { until: SystemTime },
+    /// The last pass is blocked at a slot, and no file goes out until it
+    /// applies (§5.4).
+    Blocked,
+    /// The app paused uploads, and the file's reference trails
+    /// (`set_uploads_paused`, §17.4).
+    Paused,
+    /// Its last attempt failed, and it retries then, or at the person's
+    /// retry (§6.7); `coven_uploads.pending` says why.
+    Retrying { at: SystemTime },
+    /// Its turn hasn't come.
+    Queued,
 }
 
 /// What names a state: the last pass, or the first pending record, in the
