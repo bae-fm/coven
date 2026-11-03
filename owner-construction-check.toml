@@ -430,6 +430,9 @@ StoreClosingGuard = "LockRegistration"
 # The person's iCloud Keychain entries, shared by each in-memory keychain of
 # the person: a keychain makes the share for another of the person's devices.
 SyncedEntries = "Keychain"
+# One input object's reading: every retained input of that object shares it,
+# and the input database keeps its bytes while any does.
+InputRead = "InputDatabase"
 
 # The raw handles and coven's own SQL are the database boundary's subject;
 # the SQLite capability's row names the database's home and the SQLite
