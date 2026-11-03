@@ -26,6 +26,65 @@ pub(crate) struct SqlAuthorization {
     state: Arc<Mutex<AuthorizationState>>,
 }
 
+impl ChangedTables {
+    fn include(&mut self, change: Option<TableChange>) {
+        match change {
+            None => {}
+            Some(TableChange::All) => *self = Self::All,
+            Some(TableChange::Named(table)) => match self {
+                Self::None => *self = Self::Named(BTreeSet::from([table])),
+                Self::Named(tables) => {
+                    tables.insert(table);
+                }
+                Self::All => {}
+            },
+        }
+    }
+}
+
+enum TableChange {
+    Named((String, String)),
+    All,
+}
+
+/// How a statement being prepared changes which app tables exist. Coven's
+/// internal staging tables can't be named by app SQL, and SQLite's own,
+/// such as the statistics ANALYZE makes, hold no app rows: their creation
+/// does not change which app rowids need protection.
+fn changed_table(context: &AuthContext<'_>) -> Option<TableChange> {
+    let named = |schema: &str, table: &str| {
+        TableChange::Named((schema.to_ascii_lowercase(), table.to_ascii_lowercase()))
+    };
+    let (table_name, change) = match context.action {
+        AuthAction::CreateTable { table_name } | AuthAction::DropTable { table_name } => {
+            (table_name, named(context.database_name.unwrap_or("main"), table_name))
+        }
+        AuthAction::CreateTempTable { table_name } | AuthAction::DropTempTable { table_name } => {
+            (table_name, named("temp", table_name))
+        }
+        // A virtual table makes shadow tables the authorizer never sees,
+        // and a renamed table's new name never reaches it either.
+        AuthAction::CreateVtable { table_name, .. }
+        | AuthAction::DropVtable { table_name, .. }
+        | AuthAction::AlterTable { table_name, .. } => (table_name, TableChange::All),
+        _ => return None,
+    };
+    (!crate::internal_schema::reserved_name(table_name) && !table_name.starts_with("sqlite_"))
+        .then_some(change)
+}
+
+/// The tables whose hidden rowids may have changed since coven last read
+/// them: the ones statements created or dropped, by schema and name in
+/// lowercase, or every table after one that altered a table, since a
+/// renamed table's new name never reaches the authorizer.
+#[derive(Debug, Default)]
+pub(crate) enum ChangedTables {
+    #[default]
+    None,
+    Named(BTreeSet<(String, String)>),
+    All,
+}
+
 struct AuthorizationState {
     internal: bool,
     writing: bool,
@@ -46,7 +105,7 @@ struct AuthorizationState {
     synced: BTreeSet<String>,
     shared: BTreeSet<String>,
     hidden_rowids: BTreeSet<(String, String)>,
-    tables_changed: bool,
+    changed_tables: ChangedTables,
     /// Coven's tables the app statement being prepared reads through one of
     /// coven's views.
     through_views: BTreeSet<String>,
@@ -91,7 +150,7 @@ impl SqlAuthorization {
                     .flat_map(|t| t.shared_triggers.iter().map(|s| s.to_ascii_lowercase()))
                     .collect(),
                 hidden_rowids: BTreeSet::new(),
-                tables_changed: false,
+                changed_tables: ChangedTables::None,
                 through_views: BTreeSet::new(),
                 writer_state,
             })),
@@ -148,28 +207,13 @@ impl SqlAuthorization {
                     observed.functions.insert(function_name.to_ascii_lowercase());
                 }
             }
-            // Internal staging tables cannot be named by app SQL, and SQLite's
-            // own, such as the statistics ANALYZE makes, hold no app rows.
-            // Their creation does not change which app rowids need protection.
-            let changes_tables = match context.action {
-                AuthAction::CreateTable { table_name }
-                | AuthAction::CreateTempTable { table_name }
-                | AuthAction::DropTable { table_name }
-                | AuthAction::DropTempTable { table_name }
-                | AuthAction::CreateVtable { table_name, .. }
-                | AuthAction::DropVtable { table_name, .. }
-                | AuthAction::AlterTable { table_name, .. } => {
-                    !crate::internal_schema::reserved_name(table_name)
-                        && !table_name.starts_with("sqlite_")
-                }
-                _ => false,
-            };
+            let changed = changed_table(&context);
             if state.internal {
                 if let Some(error) = state.app_trigger_refusal(context) {
                     state.denied = Some(error);
                     return Authorization::Deny;
                 }
-                state.tables_changed |= changes_tables;
+                state.changed_tables.include(changed);
                 return Authorization::Allow;
             }
             match state.refusal(context) {
@@ -178,7 +222,7 @@ impl SqlAuthorization {
                     Authorization::Deny
                 }
                 None => {
-                    state.tables_changed |= changes_tables;
+                    state.changed_tables.include(changed);
                     Authorization::Allow
                 }
             }
@@ -259,14 +303,32 @@ impl SqlAuthorization {
         state.through_views.clear();
     }
 
-    pub(crate) fn tables_changed(&self) -> bool {
-        self.state.lock().expect("SQL authorization lock poisoned").tables_changed
+    /// The tables whose hidden rowids may have changed since this was last
+    /// asked, which the caller now reads again.
+    pub(crate) fn take_changed_tables(&self) -> ChangedTables {
+        std::mem::take(
+            &mut self.state.lock().expect("SQL authorization lock poisoned").changed_tables,
+        )
     }
 
-    pub(crate) fn set_hidden_rowids(&self, tables: BTreeSet<(String, String)>) {
+    /// Of the tables `read`, or every table when `None`, those whose hidden
+    /// rowid is `unambiguous`: app SQL can't change it.
+    pub(crate) fn set_hidden_rowids(
+        &self,
+        read: Option<&BTreeSet<(String, String)>>,
+        unambiguous: BTreeSet<(String, String)>,
+    ) {
         let mut state = self.state.lock().expect("SQL authorization lock poisoned");
-        state.hidden_rowids = tables;
-        state.tables_changed = false;
+        match read {
+            Some(read) => {
+                state.hidden_rowids.retain(|table| !read.contains(table));
+                state.hidden_rowids.extend(unambiguous);
+            }
+            None => {
+                state.hidden_rowids = unambiguous;
+                state.changed_tables = ChangedTables::None;
+            }
+        }
     }
 
     /// A one-shot read's SQL: it may only read, and records nothing of

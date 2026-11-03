@@ -250,9 +250,7 @@ impl DatabaseConnection {
             if !read_only {
                 self.transaction(|db| crate::row_queries::register_schema(db, &schema, tables))?;
             }
-            if self.authorization.tables_changed() {
-                self.refresh_hidden_rowids()?;
-            }
+            self.refresh_changed_rowids()?;
             return Ok(Vec::new());
         }
         let mut at = migrations.iter().find(|m| m.version > current).expect("pending migration");
@@ -794,9 +792,7 @@ impl DatabaseConnection {
             .map_err(|error| rusqlite::Error::UserFunctionError(Box::new(error)))?;
         // Migrations may create, rename or rebuild tables between app statements.
         // Ordinary writes reuse the set without querying SQLite's schema.
-        if self.authorization.tables_changed() {
-            self.refresh_hidden_rowids()?;
-        }
+        self.refresh_changed_rowids()?;
         self.authorization.begin_app_call();
         Ok(())
     }
