@@ -5,7 +5,10 @@ The current proof packages are [sequence](sequence.md), [merge](merge.md),
 imports its retained modules; its `Axioms.lean` names results for the audit.
 `scripts/check.sh` builds them and permits only Lean's `propext`,
 `Classical.choice` and `Quot.sound`. It rejects `sorry`, `admit` and custom
-axioms in the proof libraries.
+axioms in the proof libraries. Each theorem a write-up or Appendix G cites
+needs its own `#print axioms` line in its package's `Axioms.lean`: a cited
+theorem that an audited result only imports or uses along the way is not
+audited by name.
 
 The sequence package models the shared store sequence: ordered application,
 claim settlement, device-copy detection, authority, cut-off, first-slot claims,
