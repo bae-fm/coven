@@ -139,22 +139,19 @@ impl LocalFileReader {
     }
 }
 
-/// Open the bytes of a file on this device only, as its record here keeps
-/// them: the user's original, or coven's copy. Any other file, including one
-/// this device has finished uploading, returns `None`: its bytes are read
-/// from the cache or storage (§17.1).
-pub(crate) fn open(
+/// Where the bytes of a file on this device only are, as its record here
+/// keeps them: the user's original, or coven's copy. Any other file,
+/// including one this device has finished uploading, returns `None`: its
+/// bytes are read from the cache or storage (§17.1). Reads only the database.
+pub(crate) fn device_only_source(
     db: &DatabaseConnection,
-    directory: &StoreDir,
     device: DeviceId,
     reference: &FileRef,
-) -> Result<Option<LocalFileStream>, LocalFileError> {
+) -> Result<Option<LocalSource>, DbError> {
     if reference.place() != (crate::FilePlace::DeviceOnly { device }) {
         return Ok(None);
     }
-    file_source(db, reference.id())?
-        .map(|source| open_source(directory, &reference.id().to_string(), reference.size(), source))
-        .transpose()
+    file_source(db, reference.id())
 }
 
 /// Where a file's bytes are on this device: the user's original, as

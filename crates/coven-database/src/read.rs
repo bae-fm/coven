@@ -40,13 +40,13 @@ impl<'connection> SqlReadContext<'connection> {
         self.database.app_query(sql, params, map)
     }
 
-    pub(crate) fn open_local_file(
+    /// Where this device keeps the bytes of a file on this device only.
+    pub(crate) fn device_only_source(
         &self,
-        directory: &coven_foundation::files::StoreDir,
         device: coven_foundation::id_source::DeviceId,
         reference: &crate::FileRef,
-    ) -> Result<Option<crate::LocalFileStream>, crate::LocalFileError> {
-        crate::file_ref::open_local(self.database, directory, device, reference)
+    ) -> Result<Option<crate::file_ref::LocalSource>, crate::DbError> {
+        crate::file_ref::device_only_source(self.database, device, reference)
     }
 
     pub(crate) fn file_ref(

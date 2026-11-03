@@ -183,7 +183,19 @@ impl<L> DatabaseAccess<L> {
         &self,
         reference: &crate::FileRef,
     ) -> Result<Option<crate::LocalFileStream>, crate::LocalFileError> {
-        self.readers.acquire_reader().local_file(&self.directory, self.device, reference)
+        // The bytes open inside the read that found them.
+        self.readers.acquire_reader().read_snapshot(|sql| {
+            sql.device_only_source(self.device, reference)?
+                .map(|source| {
+                    crate::file_ref::open_source(
+                        &self.directory,
+                        &reference.id().to_string(),
+                        reference.size(),
+                        source,
+                    )
+                })
+                .transpose()
+        })
     }
 
     fn file_ref(&self, file: FileId) -> Result<crate::FileRef, DbError> {

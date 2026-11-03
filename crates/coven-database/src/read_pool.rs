@@ -67,15 +67,6 @@ pub(super) struct ReaderLease<'a> {
 }
 
 impl ReaderLease<'_> {
-    pub(super) fn local_file(
-        &self,
-        directory: &coven_foundation::files::StoreDir,
-        device: coven_foundation::id_source::DeviceId,
-        reference: &crate::FileRef,
-    ) -> Result<Option<crate::LocalFileStream>, crate::LocalFileError> {
-        self.read_snapshot(|sql| sql.open_local_file(directory, device, reference))
-    }
-
     pub(super) fn read_snapshot<F, R, E>(&self, read: F) -> Result<R, E>
     where
         F: FnOnce(SqlReadContext<'_>) -> Result<R, E>,
