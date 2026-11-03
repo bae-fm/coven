@@ -132,6 +132,13 @@ impl std::error::Error for Error {
     }
 }
 
+/// A merge check that failed while decoding is `Merge`.
+impl From<coven_merge::MergeError> for Error {
+    fn from(error: coven_merge::MergeError) -> Self {
+        Self::Merge(error)
+    }
+}
+
 /// A failed reservation is `Allocation`. Its layout is not kept: the request
 /// is within the format's own bounds, so only the memory itself was missing.
 impl From<std::collections::TryReserveError> for Error {

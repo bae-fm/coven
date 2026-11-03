@@ -56,34 +56,34 @@ impl<V> RowState<V> {
     /// their generation sequence, cell presence, reference metadata and lost
     /// replacers without replaying write bodies. As with `apply`, the oracle
     /// is the causally closed applied set; it supplies timestamps and past.
-    pub fn from_parts(
+    pub fn from_parts<O: WriteOracle>(
         row: RowId,
         generations: BTreeMap<u64, WriteId>,
         cells: BTreeMap<String, Cell<V>>,
         lost: BTreeMap<LostKey, LostValue<V>>,
-        oracle: &impl WriteOracle,
-    ) -> Result<Self, MergeError> {
+        oracle: &O,
+    ) -> Result<Self, O::Error> {
         let mut generation: u64 = 0;
         let mut previous_stamp = None;
         for (g, write) in &generations {
             let expected = generation.checked_add(1).ok_or(MergeError::GenerationExhausted)?;
             if *g != expected {
-                return Err(MergeError::GenerationGap(expected));
+                return Err(MergeError::GenerationGap(expected).into());
             }
             let stamp = timestamp(oracle, *write)?;
             if previous_stamp.is_some_and(|previous| previous >= stamp) {
-                return Err(MergeError::GenerationTimestamp(*g));
+                return Err(MergeError::GenerationTimestamp(*g).into());
             }
             previous_stamp = Some(stamp);
             generation = *g;
         }
         if generation.is_multiple_of(2) && !cells.is_empty() {
-            return Err(MergeError::DeletedRowHasCells);
+            return Err(MergeError::DeletedRowHasCells.into());
         }
         for (column, cell) in &cells {
             let stamp = timestamp(oracle, cell.write)?;
             if previous_stamp.is_some_and(|start| stamp < start) {
-                return Err(MergeError::CellBeforeIncarnation(column.clone()));
+                return Err(MergeError::CellBeforeIncarnation(column.clone()).into());
             }
             for parent in cell.value.parents.values() {
                 parent.validate_written(&row)?;
@@ -99,21 +99,21 @@ impl<V> RowState<V> {
     /// Validate an independently decoded cell loss against this row's validated
     /// generations and winning cells. The oracle is the causally closed applied
     /// set, as for `from_parts`; existing losses do not affect this check.
-    pub fn validate_loss(
+    pub fn validate_loss<O: WriteOracle>(
         &self,
         key: &LostKey,
         value: &LostValue<V>,
-        oracle: &impl WriteOracle,
-    ) -> Result<(), MergeError> {
+        oracle: &O,
+    ) -> Result<(), O::Error> {
         let invalid = || MergeError::InvalidLostValue(key.clone());
         let inc = value.incarnation;
         if inc.is_multiple_of(2) || inc > self.generation {
-            return Err(invalid());
+            return Err(invalid().into());
         }
         let start = self.generations.get(&inc).ok_or_else(invalid)?;
         let setter_stamp = timestamp(oracle, key.write)?;
         if setter_stamp < timestamp(oracle, *start)? {
-            return Err(invalid());
+            return Err(invalid().into());
         }
         let canonical = if inc < self.generation {
             let delete = inc.checked_add(1).ok_or(MergeError::GenerationExhausted)?;
@@ -121,12 +121,12 @@ impl<V> RowState<V> {
         } else {
             let cell = self.cells.get(&key.column).ok_or_else(invalid)?;
             if timestamp(oracle, cell.write)? <= setter_stamp {
-                return Err(invalid());
+                return Err(invalid().into());
             }
             cell.write
         };
         if value.replaced_by != canonical || oracle.had_read(canonical, key.write)? {
-            return Err(invalid());
+            return Err(invalid().into());
         }
         for parent in value.value.parents.values() {
             parent.validate_written(&self.row)?;
@@ -229,8 +229,8 @@ pub struct RowUpdate<V> {
     pub lost_changes: Vec<LostChange<V>>,
 }
 
-pub(crate) fn timestamp(oracle: &impl WriteOracle, id: WriteId) -> Result<Timestamp, MergeError> {
-    oracle.timestamp(id).ok_or(MergeError::MissingWrite(id))
+pub(crate) fn timestamp<O: WriteOracle>(oracle: &O, id: WriteId) -> Result<Timestamp, O::Error> {
+    oracle.timestamp(id)?.ok_or_else(|| MergeError::MissingWrite(id).into())
 }
 
 /// Apply one write to one row (proofs/merge.md B5; Lean `step`). It touches only
@@ -244,11 +244,11 @@ pub(crate) fn timestamp(oracle: &impl WriteOracle, id: WriteId) -> Result<Timest
 /// the generation. The authoring database establishes the full witness when
 /// producing a change; test histories validate it explicitly. The input
 /// state is unchanged on every error path.
-pub fn apply<V: Clone + Eq, P: crate::WritePast>(
+pub fn apply<V: Clone + Eq, P: crate::WritePast, O: WriteOracle>(
     state: &RowState<V>,
     write: &Write<V, P>,
-    oracle: &impl WriteOracle,
-) -> Result<RowUpdate<V>, MergeError> {
+    oracle: &O,
+) -> Result<RowUpdate<V>, O::Error> {
     write.validate_metadata(oracle)?;
     let change = write
         .changes
@@ -256,7 +256,7 @@ pub fn apply<V: Clone + Eq, P: crate::WritePast>(
         .ok_or_else(|| MergeError::MissingChange(state.row.clone()))?;
     change.validate(&state.row)?;
     if change.generation > state.generation {
-        return Err(MergeError::GenerationAhead { row: state.row.clone() });
+        return Err(MergeError::GenerationAhead { row: state.row.clone() }.into());
     }
     if change.generation != 0 {
         let first = state.generations.get(&change.generation).ok_or_else(|| {
@@ -271,7 +271,8 @@ pub fn apply<V: Clone + Eq, P: crate::WritePast>(
             return Err(MergeError::GenerationNotSeen {
                 row: state.row.clone(),
                 generation: change.generation,
-            });
+            }
+            .into());
         }
     }
     let incarnation = change.incarnation()?;

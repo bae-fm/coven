@@ -3,6 +3,7 @@
 use crate::snapshot_error::{invalid, SnapshotError};
 use crate::sqlite::DatabaseConnection;
 use crate::write_encoding::{counter, decoded, encoded};
+use crate::write_metadata::MetadataFailure;
 use crate::DbError;
 use coven_format::{merge_fields, snapshot::WriteSlots, snapshot_rows::AppliedWrite};
 use coven_foundation::id_source::DeviceId;
@@ -19,7 +20,6 @@ pub(crate) struct SnapshotMetadata<'a> {
     /// The snapshot staged under this number on the input connection, or 0
     /// for the one snapshot a loading transaction installs at a time.
     source: i64,
-    failure: RefCell<Option<DbError>>,
     /// The applied writes read so far, so a decoder naming the same writes
     /// in many records reads each once. A staged write never changes. This
     /// holds at most the snapshot's writes, a few counters each; staging
@@ -37,7 +37,7 @@ impl<'a> SnapshotMetadata<'a> {
 
     /// The applied writes of the snapshot staged as `source` (§16.2).
     pub(crate) fn staged(database: &'a DatabaseConnection, source: i64) -> Self {
-        Self { database, source, failure: RefCell::new(None), read: RefCell::new(BTreeMap::new()) }
+        Self { database, source, read: RefCell::new(BTreeMap::new()) }
     }
 
     pub(crate) fn create_table(db: &DatabaseConnection) -> Result<(), DbError> {
@@ -59,13 +59,6 @@ impl<'a> SnapshotMetadata<'a> {
         Ok(())
     }
 
-    pub(crate) fn check(&self) -> Result<(), DbError> {
-        match self.failure.borrow_mut().take() {
-            Some(error) => Err(error),
-            None => Ok(()),
-        }
-    }
-
     fn read(&self, id: WriteId) -> Result<Option<AppliedWrite>, DbError> {
         if let Some(write) = self.read.borrow().get(&id) {
             return Ok(Some(write.clone()));
@@ -76,16 +69,6 @@ impl<'a> SnapshotMetadata<'a> {
             self.read.borrow_mut().insert(id, write.clone());
         }
         Ok(write)
-    }
-
-    fn observed(&self, id: WriteId) -> Option<AppliedWrite> {
-        match self.read(id) {
-            Ok(write) => write,
-            Err(error) => {
-                *self.failure.borrow_mut() = Some(error);
-                None
-            }
-        }
     }
 
     /// Refuse an applied write outside the snapshot's coverage, or one not
@@ -153,18 +136,19 @@ pub(crate) fn applied(r: &rusqlite::Row<'_>) -> rusqlite::Result<AppliedWrite> {
 }
 
 impl WriteOracle for SnapshotMetadata<'_> {
-    fn timestamp(&self, id: WriteId) -> Option<Timestamp> {
-        self.observed(id).map(|w| w.timestamp)
+    type Error = MetadataFailure;
+    fn timestamp(&self, id: WriteId) -> Result<Option<Timestamp>, MetadataFailure> {
+        Ok(self.read(id)?.map(|w| w.timestamp))
     }
-    fn had_read(&self, reader: WriteId, earlier: WriteId) -> Result<bool, MergeError> {
-        let write = self.observed(reader).ok_or(MergeError::MissingWrite(reader))?;
-        Ok(coven_merge::had_read(reader, write.read_through, earlier, self.slot(earlier)))
+    fn had_read(&self, reader: WriteId, earlier: WriteId) -> Result<bool, MetadataFailure> {
+        let write = self.read(reader)?.ok_or(MergeError::MissingWrite(reader))?;
+        Ok(coven_merge::had_read(reader, write.read_through, earlier, self.slot(earlier)?))
     }
 }
 
 impl WriteSlots for SnapshotMetadata<'_> {
-    fn slot(&self, id: WriteId) -> Option<coven_merge::Slot> {
-        self.observed(id).map(|w| w.slot)
+    fn slot(&self, id: WriteId) -> Result<Option<coven_merge::Slot>, MetadataFailure> {
+        Ok(self.read(id)?.map(|w| w.slot))
     }
 }
 

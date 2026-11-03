@@ -21,8 +21,7 @@ pub(crate) fn rows<E: From<DbError>>(
         let id=RowId {table:r.get(0).map_err(DbError::from)?,key:r.get(1).map_err(DbError::from)?,audience:audience.clone()};
         let kept=db.query("SELECT record,visible FROM _coven_published_rows WHERE table_name=?1 AND key=?2 AND audience=?3",rusqlite::params![id.table,id.key,audience_text(audience)],|r|Ok((r.get::<_,Vec<u8>>(0)?,r.get::<_,bool>(1)?)))?.pop();
         let (row,visible)=if let Some((bytes,visible))=kept {
-            let row=merge_fields::decode_merge_row(&bytes,&oracle).map_err(DbError::from)?;
-            oracle.check()?;
+            let row=merge_fields::decode_merge_row(&bytes,&oracle).map_err(crate::write_metadata::MetadataFailure::stored)?;
             (row,visible)
         } else {
             let stored=store.row_without_losses(&id)?;

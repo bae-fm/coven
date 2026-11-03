@@ -9956,6 +9956,12 @@ the rules above.
   a send to a receiver that is gone, says why in its `expect` attribute. The
   functions that turn errors into pending reasons name every variant, so a new
   variant can't fall into a catch-all.
+- **A trait that can fail says so.** When a trait's implementations read the
+  database, as the merge's `WriteOracle` and `RemovalView` do, each method
+  returns the implementation's own error type. An implementation never answers
+  "absent" for a failed read and keeps the error aside for the caller to fetch
+  later: the caller acts on the wrong answer first. A failed read of a write's
+  timestamp once came back as `MergeError::MissingWrite`, its SQLite error lost.
 - **A choice coven needs from the app is a required argument.** The app
   can't forget it, because the call or type doesn't exist without it: a
   namespace takes its cache budget (`Namespace::new(name, kind,

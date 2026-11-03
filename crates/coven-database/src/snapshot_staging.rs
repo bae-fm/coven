@@ -11,6 +11,7 @@ use crate::snapshot_layout::{SnapshotLayout, Staged, TableLayout};
 use crate::snapshot_metadata::SnapshotMetadata;
 use crate::sqlite::DatabaseConnection;
 use crate::write_encoding::{audience_text, encoded, sql_value};
+use crate::write_metadata::MetadataFailure;
 use crate::write_schema::WriteSchema;
 use crate::DbError;
 use coven_format::{
@@ -508,9 +509,8 @@ fn stage(
     let StagingState { decoder, inserts, records, columns, parts, refusal } = state;
     loop {
         let headed = decoder.header().is_some();
-        let record = decoder.next_record(&mut bytes, &metadata);
-        metadata.check()?;
-        let record = record.map_err(SnapshotError::Format)?;
+        let record =
+            decoder.next_record(&mut bytes, &metadata).map_err(MetadataFailure::snapshot)?;
         if !headed {
             if let Some(header) = decoder.header() {
                 check_header(schema, expected, header)?;

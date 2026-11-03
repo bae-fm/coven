@@ -14,10 +14,11 @@ use std::time::Duration;
 #[derive(Default)]
 struct Oracle(BTreeMap<WriteId, AppliedWrite>);
 impl WriteOracle for Oracle {
-    fn timestamp(&self, id: WriteId) -> Option<Timestamp> {
-        self.0.get(&id).map(|write| write.timestamp)
+    type Error = coven_format::Error;
+    fn timestamp(&self, id: WriteId) -> Result<Option<Timestamp>, coven_format::Error> {
+        Ok(self.0.get(&id).map(|write| write.timestamp))
     }
-    fn had_read(&self, reader: WriteId, earlier: WriteId) -> Result<bool, MergeError> {
+    fn had_read(&self, reader: WriteId, earlier: WriteId) -> Result<bool, coven_format::Error> {
         let write = self.0.get(&reader).ok_or(MergeError::MissingWrite(reader))?;
         Ok(if reader.device == earlier.device {
             earlier.number < reader.number
@@ -28,8 +29,8 @@ impl WriteOracle for Oracle {
 }
 
 impl coven_format::snapshot::WriteSlots for Oracle {
-    fn slot(&self, id: WriteId) -> Option<coven_merge::Slot> {
-        self.0.get(&id).map(|w| w.slot)
+    fn slot(&self, id: WriteId) -> Result<Option<coven_merge::Slot>, coven_format::Error> {
+        Ok(self.0.get(&id).map(|w| w.slot))
     }
 }
 

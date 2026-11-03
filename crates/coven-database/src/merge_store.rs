@@ -77,8 +77,9 @@ impl<'a> WriteMetadata<'a> {
 }
 
 impl WriteOracle for WriteMetadata<'_> {
-    fn timestamp(&self, id: WriteId) -> Option<Timestamp> {
-        self.writes.borrow().get(&id).map(|w| w.timestamp)
+    type Error = MergeError;
+    fn timestamp(&self, id: WriteId) -> Result<Option<Timestamp>, MergeError> {
+        Ok(self.writes.borrow().get(&id).map(|w| w.timestamp))
     }
     fn had_read(&self, reader: WriteId, earlier: WriteId) -> Result<bool, MergeError> {
         let writes = self.writes.borrow();

@@ -1,15 +1,11 @@
 //! A staged snapshot's write evidence authenticated before installation, and
 //! its staged tables read back without decoding the snapshot again.
 use crate::{
-    authorship::Authorship,
-    input_preparation::PreparedInputs,
-    snapshot_error::{invalid, SnapshotError},
-    snapshot_metadata::SnapshotMetadata,
-    sqlite::DatabaseConnection,
-    DbError,
+    authorship::Authorship, input_preparation::PreparedInputs, snapshot_error::invalid,
+    snapshot_metadata::SnapshotMetadata, sqlite::DatabaseConnection,
+    write_metadata::MetadataFailure, DbError,
 };
 use coven_format::snapshot::{SnapshotHeader, SnapshotRecord};
-use coven_merge::WriteOracle;
 use std::collections::VecDeque;
 
 pub(crate) struct PreparedEvidence {
@@ -50,7 +46,7 @@ pub(crate) fn prepare<'a>(
             [],
             |row| {
                 let record = SnapshotRecord::decode_checked(&row.get::<_, Vec<u8>>(0)?, &oracle)
-                    .map_err(SnapshotError::Format)?;
+                    .map_err(MetadataFailure::snapshot)?;
                 let SnapshotRecord::Evidence(original) = record else {
                     return Err(invalid("staged evidence is another record"));
                 };
@@ -99,7 +95,7 @@ impl PreparedSnapshot<'_> {
     pub(crate) fn frames(
         &mut self,
         sections: std::ops::RangeInclusive<u8>,
-        oracle: &impl WriteOracle,
+        oracle: &SnapshotMetadata<'_>,
         mut consume: impl FnMut(SnapshotRecord<PreparedEvidence>) -> Result<(), DbError>,
     ) -> Result<(), DbError> {
         let evidence = &mut self.evidence;
@@ -117,7 +113,7 @@ impl PreparedSnapshot<'_> {
                     return consume(SnapshotRecord::Evidence(prepared));
                 }
                 let record = SnapshotRecord::decode_checked(&row.get::<_, Vec<u8>>(1)?, oracle)
-                    .map_err(SnapshotError::Format)?;
+                    .map_err(MetadataFailure::snapshot)?;
                 consume(record.try_map_evidence(|_| Err(invalid("staged evidence is unmarked")))?)
             },
         )

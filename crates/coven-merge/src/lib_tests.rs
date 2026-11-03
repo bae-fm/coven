@@ -42,7 +42,7 @@ pub(crate) fn claim_order(timestamp: Timestamp) -> ClaimOrder {
 pub(crate) fn claim_oracle(
     history: &History<String>,
 ) -> impl Fn(WriteId) -> Result<ClaimOrder, MergeError> + '_ {
-    |id| history.timestamp(id).map(claim_order).ok_or(MergeError::MissingWrite(id))
+    |id| history.timestamp(id)?.map(claim_order).ok_or(MergeError::MissingWrite(id))
 }
 pub(crate) fn columns(values: &[(&str, &str)]) -> BTreeMap<String, ColumnValue<String>> {
     values
@@ -187,7 +187,7 @@ impl MemoryView {
                 view.present(
                     r.clone(),
                     s.generation(),
-                    history.timestamp(s.generations()[&s.generation()]).unwrap(),
+                    history.timestamp(s.generations()[&s.generation()]).unwrap().unwrap(),
                 );
             } else {
                 view.data.insert(r.clone(), RemovalRow::Absent { generation: s.generation() });

@@ -20,10 +20,10 @@ fn decode<T: Wire>(bytes: &[u8]) -> Result<T, Error> {
     decode_with(bytes, T::get)
 }
 
-fn decode_with<T>(
+fn decode_with<T, E: From<Error>>(
     bytes: &[u8],
-    get: impl FnOnce(&mut Decoder<'_>) -> Result<T, Error>,
-) -> Result<T, Error> {
+    get: impl FnOnce(&mut Decoder<'_>) -> Result<T, E>,
+) -> Result<T, E> {
     let mut input = Decoder::new(bytes)?;
     let value = get(&mut input)?;
     input.finish()?;
@@ -170,7 +170,7 @@ pub fn encode_exclusion(write: WriteId, version: u32) -> Result<Vec<u8>, Error> 
 /// Decode an excluded write's identity and breaking version from its loss record.
 pub fn decode_exclusion(bytes: &[u8]) -> Result<(WriteId, u32), Error> {
     let (write, version): (WriteId, u32) =
-        decode_with(bytes, |input| Ok((Wire::get(input)?, Wire::get(input)?)))?;
+        decode_with(bytes, |input| Ok::<_, Error>((Wire::get(input)?, Wire::get(input)?)))?;
     crate::value::positive(write.number)?;
     crate::error::require(version > 0, "breaking schema version", crate::error::Rule::Required)?;
     Ok((write, version))
@@ -192,7 +192,7 @@ pub fn decode_dependency(
     bytes: &[u8],
 ) -> Result<(WriteId, Vec<crate::write_sources::ChangeId>), Error> {
     let (write, sources): (WriteId, Vec<crate::write_sources::ChangeId>) =
-        decode_with(bytes, |input| Ok((Wire::get(input)?, Wire::get(input)?)))?;
+        decode_with(bytes, |input| Ok::<_, Error>((Wire::get(input)?, Wire::get(input)?)))?;
     crate::value::positive(write.number)?;
     Ok((write, sources))
 }
@@ -214,7 +214,7 @@ pub fn decode_unauthorized(
     bytes: &[u8],
 ) -> Result<(WriteId, crate::loss::AuthorizationFailure), Error> {
     let (write, reason): (WriteId, crate::loss::AuthorizationFailure) =
-        decode_with(bytes, |input| Ok((Wire::get(input)?, Wire::get(input)?)))?;
+        decode_with(bytes, |input| Ok::<_, Error>((Wire::get(input)?, Wire::get(input)?)))?;
     crate::value::positive(write.number)?;
     Ok((write, reason))
 }
@@ -256,10 +256,13 @@ pub fn encode_merge_row(value: &crate::snapshot_rows::MergeRow) -> Result<Vec<u8
 }
 
 /// Decode a retained merge row against its original checked write metadata.
-pub fn decode_merge_row(
+pub fn decode_merge_row<O: coven_merge::WriteOracle>(
     bytes: &[u8],
-    oracle: &impl coven_merge::WriteOracle,
-) -> Result<crate::snapshot_rows::MergeRow, Error> {
+    oracle: &O,
+) -> Result<crate::snapshot_rows::MergeRow, O::Error>
+where
+    O::Error: From<Error>,
+{
     let value = decode_with(bytes, |input| crate::snapshot_rows::MergeRow::get(input, oracle))?;
     value.validate()?;
     Ok(value)

@@ -76,15 +76,17 @@ impl MergeRow {
         self.state.generations().put(out)?;
         self.state.cells().put(out)
     }
-    pub(crate) fn get(input: &mut Decoder<'_>, oracle: &impl WriteOracle) -> Result<Self, Error> {
+    pub(crate) fn get<O: WriteOracle>(input: &mut Decoder<'_>, oracle: &O) -> Result<Self, O::Error>
+    where
+        O::Error: From<Error>,
+    {
         let state = RowState::from_parts(
             Wire::get(input)?,
             Wire::get(input)?,
             crate::wire::get_name_map(input)?,
             BTreeMap::new(),
             oracle,
-        )
-        .map_err(Error::Merge)?;
+        )?;
         Ok(Self { state })
     }
     pub(crate) fn validate(&self) -> Result<(), Error> {

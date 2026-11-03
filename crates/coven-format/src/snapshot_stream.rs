@@ -4,7 +4,6 @@ use crate::chunks::FrameDecoder;
 use crate::error::Error;
 use crate::sealed_snapshot::SnapshotObjectPrefix;
 use crate::snapshot::{SnapshotDecoder, SnapshotHeader, SnapshotRecord, WriteSlots};
-use coven_merge::WriteOracle;
 
 /// Incrementally reconstruct frames and check the snapshot's end marker.
 /// Call [`Self::next_record`] repeatedly on each opened chunk, updating the
@@ -29,11 +28,14 @@ impl SnapshotChunkDecoder {
     /// Consume bytes through the next complete record, or all available bytes
     /// if its frame is unfinished. `None` means this input has no further record.
     /// Discard the decoder after an error; commit staged rows only after `finish`.
-    pub fn next_record(
+    pub fn next_record<O: WriteSlots>(
         &mut self,
         bytes: &mut &[u8],
-        oracle: &(impl WriteOracle + WriteSlots),
-    ) -> Result<Option<SnapshotRecord>, Error> {
+        oracle: &O,
+    ) -> Result<Option<SnapshotRecord>, O::Error>
+    where
+        O::Error: From<Error>,
+    {
         while let Some(frame) = self.frames.next(bytes)? {
             if let Some(snapshot) = &mut self.snapshot {
                 if let Some(record) = snapshot.frame(&frame, oracle)? {

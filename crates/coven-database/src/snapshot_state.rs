@@ -55,7 +55,7 @@ pub(crate) fn loss(
     database: &DatabaseConnection,
     schema: &WriteSchema,
     loss: coven_format::loss::Loss,
-    metadata: &impl coven_merge::WriteOracle,
+    metadata: &crate::snapshot_metadata::SnapshotMetadata<'_>,
     cached: &mut Option<RowState<coven_format::value::Value>>,
 ) -> Result<(), DbError> {
     use coven_format::loss::{LossCause, LossValues};
@@ -90,9 +90,7 @@ pub(crate) fn loss(
                         },
                         metadata,
                     )
-                    .map_err(|error| {
-                        crate::SnapshotError::Format(coven_format::Error::Merge(error))
-                    })?;
+                    .map_err(crate::write_metadata::MetadataFailure::snapshot)?;
             }
             (LossValues::Row(cells), LossCause::Rules(_))
                 if state.present()

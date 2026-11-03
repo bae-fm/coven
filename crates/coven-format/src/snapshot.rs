@@ -95,9 +95,9 @@ pub struct LastClaim {
 crate::wire::wire_struct!(LastClaim, device, number, digest);
 
 /// Published-write locations from the snapshot's staged metadata and history.
-pub trait WriteSlots {
+pub trait WriteSlots: WriteOracle {
     /// Containing slot, or absence when no authenticated metadata establishes it.
-    fn slot(&self, write: WriteId) -> Option<Slot>;
+    fn slot(&self, write: WriteId) -> Result<Option<Slot>, Self::Error>;
 }
 impl SnapshotRecord {
     /// Retain decoded records while replacing wire evidence with its checked form.
@@ -136,7 +136,10 @@ impl SnapshotRecord {
             Self::Claim(v) => v.put(out),
         }
     }
-    pub(crate) fn get(input: &mut Decoder<'_>, oracle: &impl WriteOracle) -> Result<Self, Error> {
+    pub(crate) fn get<O: WriteOracle>(input: &mut Decoder<'_>, oracle: &O) -> Result<Self, O::Error>
+    where
+        O::Error: From<Error>,
+    {
         #[cfg(any(test, feature = "test-utils"))]
         coven_foundation::test_work::snapshot_record_decode();
         Self::read(input, oracle)
@@ -146,7 +149,10 @@ impl SnapshotRecord {
     /// checked, as a loader staged it. Only the record's own fields are read;
     /// its order, coverage and the stream it came from are not checked again.
     /// A merge row rebuilds its state with `oracle`, as stored rows do.
-    pub fn decode_checked(frame: &[u8], oracle: &impl WriteOracle) -> Result<Self, Error> {
+    pub fn decode_checked<O: WriteOracle>(frame: &[u8], oracle: &O) -> Result<Self, O::Error>
+    where
+        O::Error: From<Error>,
+    {
         let (kind, mut input) = decode_frame(frame)?;
         require(kind == 6, "snapshot record kind", Rule::Kind)?;
         let record = Self::read(&mut input, oracle)?;
@@ -154,7 +160,10 @@ impl SnapshotRecord {
         Ok(record)
     }
 
-    fn read(input: &mut Decoder<'_>, oracle: &impl WriteOracle) -> Result<Self, Error> {
+    fn read<O: WriteOracle>(input: &mut Decoder<'_>, oracle: &O) -> Result<Self, O::Error>
+    where
+        O::Error: From<Error>,
+    {
         match u8::get(input)? {
             0 => Ok(Self::Synced(Wire::get(input)?)),
             1 => Ok(Self::Write(Wire::get(input)?)),
@@ -168,7 +177,7 @@ impl SnapshotRecord {
             9 => Ok(Self::KeyCopy(Wire::get(input)?)),
             10 => Ok(Self::Announcement(Wire::get(input)?)),
             11 => Ok(Self::Claim(Wire::get(input)?)),
-            tag => Err(Error::UnknownTag { field: "snapshot section", tag }),
+            tag => Err(Error::UnknownTag { field: "snapshot section", tag }.into()),
         }
     }
     pub(crate) fn validate(&self) -> Result<(), Error> {
@@ -272,35 +281,50 @@ impl SnapshotRecord {
 
     /// Check references against authenticated published-write locations. Callers
     /// populate these from section 1; unknown evidence cannot establish coverage.
-    pub fn validate_coverage(&self, covers: u64, slots: &impl WriteSlots) -> Result<(), Error> {
-        let covered = |write| slots.slot(write).is_some_and(|slot| slot.0 > 0 && slot.0 <= covers);
-        let valid = match self {
+    pub fn validate_coverage<S: WriteSlots>(&self, covers: u64, slots: &S) -> Result<(), S::Error>
+    where
+        S::Error: From<Error>,
+    {
+        for write in self.named_writes() {
+            let covered = slots.slot(write)?.is_some_and(|slot| slot.0 > 0 && slot.0 <= covers);
+            require(covered, "snapshot write coverage", Rule::Coverage)?;
+        }
+        Ok(())
+    }
+
+    /// The writes this record names, each of which the snapshot must cover.
+    fn named_writes(&self) -> Vec<WriteId> {
+        match self {
             Self::Synced(_)
             | Self::Column(_)
             | Self::Write(_)
             | Self::Admin(_)
             | Self::KeyCopy(_)
             | Self::Announcement(_)
-            | Self::Claim(_) => true,
-            Self::Loss(v) => v.covered(covered),
-            Self::Merge(v) => {
-                v.state.generations().values().all(|write| covered(*write))
-                    && v.state.cells().values().all(|cell| covered(cell.write))
-            }
-            Self::Creation(v) => covered(v.write) && covered(v.creator.write),
-            Self::Evidence(v) => covered(v.write),
+            | Self::Claim(_) => Vec::new(),
+            Self::Loss(v) => v.named_writes(),
+            Self::Merge(v) => v
+                .state
+                .generations()
+                .values()
+                .copied()
+                .chain(v.state.cells().values().map(|cell| cell.write))
+                .collect(),
+            Self::Creation(v) => vec![v.write, v.creator.write],
+            Self::Evidence(v) => vec![v.write],
             Self::Authored(v) => {
-                covered(v.header.position)
-                    && v.change.sources().all(|source| covered(source.write))
-                    && match &v.verdict {
-                        ChangeVerdict::Dependent(sources) | ChangeVerdict::Derived(sources) => {
-                            sources.iter().all(|source| covered(source.write))
-                        }
-                        _ => true,
+                let verdict = match &v.verdict {
+                    ChangeVerdict::Dependent(sources) | ChangeVerdict::Derived(sources) => {
+                        sources.as_slice()
                     }
+                    _ => &[],
+                };
+                std::iter::once(v.header.position)
+                    .chain(v.change.sources().map(|source| source.write))
+                    .chain(verdict.iter().map(|source| source.write))
+                    .collect()
             }
-        };
-        require(valid, "snapshot write coverage", Rule::Coverage)
+        }
     }
 }
 
@@ -465,11 +489,14 @@ impl SnapshotDecoder {
     }
     /// Decode a record or end marker. Merge checks row invariants using the
     /// supplied oracle. Every error leaves counts and order unchanged.
-    pub fn frame(
+    pub fn frame<O: WriteSlots>(
         &mut self,
         bytes: &[u8],
-        oracle: &(impl WriteOracle + WriteSlots),
-    ) -> Result<Option<SnapshotRecord>, Error> {
+        oracle: &O,
+    ) -> Result<Option<SnapshotRecord>, O::Error>
+    where
+        O::Error: From<Error>,
+    {
         let (kind, mut input) = decode_frame(bytes)?;
         if kind == 7 {
             input.finish()?;

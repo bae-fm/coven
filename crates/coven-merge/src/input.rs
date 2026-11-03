@@ -206,16 +206,16 @@ pub struct Write<V, P = BTreeSet<WriteId>> {
 impl<V, P: WritePast> Write<V, P> {
     /// Check the write's identity and causal timestamp against the applied set.
     /// This also validates writes with no row changes available to the receiver.
-    pub fn validate_metadata(&self, oracle: &impl WriteOracle) -> Result<(), MergeError> {
-        if oracle.timestamp(self.id).is_some() {
-            return Err(MergeError::DuplicateWrite(self.id));
+    pub fn validate_metadata<O: WriteOracle>(&self, oracle: &O) -> Result<(), O::Error> {
+        if oracle.timestamp(self.id)?.is_some() {
+            return Err(MergeError::DuplicateWrite(self.id).into());
         }
         if self.timestamp.device() != self.id.device {
-            return Err(MergeError::TimestampDevice(self.id));
+            return Err(MergeError::TimestampDevice(self.id).into());
         }
         for past in self.had_read.frontier() {
             if crate::state::timestamp(oracle, *past)? >= self.timestamp {
-                return Err(MergeError::CausalTimestamp(self.id));
+                return Err(MergeError::CausalTimestamp(self.id).into());
             }
         }
         Ok(())
@@ -240,14 +240,17 @@ impl WritePast for BTreeSet<WriteId> {
     }
 }
 
-/// Pure access to applied write metadata. The arriving write is not yet in
-/// this view. Implementations must report missing metadata, never invent it.
+/// Access to applied write metadata. The arriving write is not yet in this
+/// view. Implementations must report missing metadata, never invent it, and
+/// a failure to read it is their own error, never a missing write.
 /// No applied row-change history is required by the incremental step.
 pub trait WriteOracle {
+    /// Reading the metadata failed, or a merge check on it did.
+    type Error: From<MergeError>;
     /// The timestamp of an applied write, or `None` if it is not applied.
-    fn timestamp(&self, write: WriteId) -> Option<Timestamp>;
+    fn timestamp(&self, write: WriteId) -> Result<Option<Timestamp>, Self::Error>;
     /// Whether an applied write had read another write.
-    fn had_read(&self, reader: WriteId, earlier: WriteId) -> Result<bool, MergeError>;
+    fn had_read(&self, reader: WriteId, earlier: WriteId) -> Result<bool, Self::Error>;
 }
 
 pub(crate) fn validate_audience(row: &RowId, parent: &RowId) -> Result<(), MergeError> {

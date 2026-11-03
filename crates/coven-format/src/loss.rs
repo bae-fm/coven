@@ -356,21 +356,23 @@ impl Loss {
         }
     }
 
-    pub(crate) fn covered(&self, covered: impl Fn(WriteId) -> bool) -> bool {
-        let values = match &self.values {
-            LossValues::Cell { cell, .. } => covered(cell.write),
-            LossValues::Row(cells) => cells.values().all(|cell| covered(cell.write)),
+    /// The writes this loss names, which a snapshot carrying it must cover.
+    pub(crate) fn named_writes(&self) -> Vec<WriteId> {
+        let mut writes: Vec<WriteId> = match &self.values {
+            LossValues::Cell { cell, .. } => vec![cell.write],
+            LossValues::Row(cells) => cells.values().map(|cell| cell.write).collect(),
         };
-        values
-            && match self.cause {
-                LossCause::Write(write)
-                | LossCause::Excluded { write, .. }
-                | LossCause::NotAuthorized { write, .. } => covered(write),
-                LossCause::Dependency { write, ref sources } => {
-                    covered(write) && sources.iter().all(|s| covered(s.write))
-                }
-                _ => true,
+        match self.cause {
+            LossCause::Write(write)
+            | LossCause::Excluded { write, .. }
+            | LossCause::NotAuthorized { write, .. } => writes.push(write),
+            LossCause::Dependency { write, ref sources } => {
+                writes.push(write);
+                writes.extend(sources.iter().map(|s| s.write));
             }
+            _ => {}
+        }
+        writes
     }
 }
 

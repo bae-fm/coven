@@ -38,7 +38,11 @@ impl<V> History<V> {
         let history = Self { writes: by_id };
         for write in history.writes.values() {
             for past in &write.had_read {
-                let stamp = history.timestamp(*past).ok_or(MergeError::MissingWrite(*past))?;
+                let stamp = history
+                    .writes
+                    .get(past)
+                    .map(|w| w.timestamp)
+                    .ok_or(MergeError::MissingWrite(*past))?;
                 if stamp >= write.timestamp {
                     return Err(MergeError::CausalTimestamp(write.id));
                 }
@@ -78,8 +82,9 @@ impl<V> History<V> {
 }
 
 impl<V> WriteOracle for History<V> {
-    fn timestamp(&self, write: WriteId) -> Option<Timestamp> {
-        self.writes.get(&write).map(|w| w.timestamp)
+    type Error = MergeError;
+    fn timestamp(&self, write: WriteId) -> Result<Option<Timestamp>, MergeError> {
+        Ok(self.writes.get(&write).map(|w| w.timestamp))
     }
     fn had_read(&self, reader: WriteId, earlier: WriteId) -> Result<bool, MergeError> {
         let write = self.writes.get(&reader).ok_or(MergeError::MissingWrite(reader))?;

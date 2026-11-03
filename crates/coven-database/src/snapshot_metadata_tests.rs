@@ -111,3 +111,25 @@ async fn checking_a_snapshots_writes_takes_steps_in_proportion_to_them() {
     .await;
     assert!(steps < 50 * WRITES as i64, "{steps} steps checking {WRITES} writes");
 }
+
+/// A staged write whose metadata cannot be read fails with SQLite's error,
+/// not as a write the snapshot lacks.
+#[tokio::test]
+async fn a_failed_read_of_a_staged_write_keeps_its_error() {
+    let writes = [write(1, 1, 1, 0, 1_000)];
+    staged(&writes, |db, metadata| {
+        db.batch("DROP TABLE temp._coven_snapshot_writes").unwrap();
+        for result in [
+            metadata.timestamp(writes[0].id).map(drop),
+            metadata.slot(writes[0].id).map(drop),
+            metadata.had_read(writes[0].id, writes[0].id).map(drop),
+        ] {
+            match result.map_err(MetadataFailure::snapshot) {
+                Err(DbError::Sqlite(rusqlite::Error::SqliteFailure(..))) => {}
+                other => panic!("expected SQLite's error, got {other:?}"),
+            }
+        }
+        SnapshotMetadata::create_table(db).unwrap();
+    })
+    .await;
+}

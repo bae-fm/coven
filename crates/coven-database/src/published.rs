@@ -112,9 +112,8 @@ pub(crate) fn restore(
         [],
         |r| {
             let bytes: Vec<u8> = r.get(0)?;
-            let merged = merge_fields::decode_merge_row(&bytes, &oracle);
-            oracle.check()?;
-            let merged = merged?;
+            let merged = merge_fields::decode_merge_row(&bytes, &oracle)
+                .map_err(crate::write_metadata::MetadataFailure::stored)?;
             let row = merged.state.row().clone();
             if !schema.schema.tables.contains_key(&row.table.to_ascii_lowercase()) {
                 return Ok::<_, DbError>(());

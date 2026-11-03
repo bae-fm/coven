@@ -260,21 +260,22 @@ pub struct TestOracle {
     pub writes: BTreeMap<WriteId, AppliedWrite>,
 }
 impl WriteOracle for TestOracle {
-    fn timestamp(&self, id: WriteId) -> Option<Timestamp> {
-        self.writes.get(&id).map(|w| w.timestamp)
+    type Error = crate::Error;
+    fn timestamp(&self, id: WriteId) -> Result<Option<Timestamp>, crate::Error> {
+        Ok(self.writes.get(&id).map(|w| w.timestamp))
     }
-    fn had_read(&self, reader: WriteId, earlier: WriteId) -> Result<bool, MergeError> {
+    fn had_read(&self, reader: WriteId, earlier: WriteId) -> Result<bool, crate::Error> {
         let write = self.writes.get(&reader).ok_or(MergeError::MissingWrite(reader))?;
         if !self.writes.contains_key(&earlier) {
-            return Err(MergeError::MissingWrite(earlier));
+            return Err(MergeError::MissingWrite(earlier).into());
         }
         Ok((reader.device == earlier.device && earlier.number < reader.number)
             || self.writes[&earlier].slot.0 <= write.read_through)
     }
 }
 impl crate::snapshot::WriteSlots for TestOracle {
-    fn slot(&self, write: WriteId) -> Option<Slot> {
-        self.writes.get(&write).map(|write| write.slot)
+    fn slot(&self, write: WriteId) -> Result<Option<Slot>, crate::Error> {
+        Ok(self.writes.get(&write).map(|write| write.slot))
     }
 }
 /// Three applied writes, including two concurrent setters of the fixture row.

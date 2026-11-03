@@ -51,7 +51,7 @@ pub(crate) fn carry(
     db.batch("CREATE TEMP TABLE _coven_carried_rows AS SELECT * FROM _coven_published_rows; DELETE FROM _coven_published_rows")?;
     let oracle = crate::write_metadata::DatabaseMetadata::new(db);
     db.for_each("SELECT record,visible FROM temp._coven_carried_rows",[],|r| {
-        let merged=merge_fields::decode_merge_row(&r.get::<_,Vec<u8>>(0)?,&oracle)?;oracle.check()?;
+        let merged=merge_fields::decode_merge_row(&r.get::<_,Vec<u8>>(0)?,&oracle).map_err(crate::write_metadata::MetadataFailure::stored)?;
         let old=merged.state.row().clone();
         let Some(table)=names.tables.get(&old.table) else {return Ok::<_,DbError>(());};
         let row=RowId {table:table.clone(),..old.clone()};
