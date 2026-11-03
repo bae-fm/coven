@@ -3722,7 +3722,8 @@ while let Some(Ok(values)) = lost.next().await {
     ([§6.7](coven.md#67-waiting-and-retrying)).
   - A write of the row that fails fails the handle, as a pending record does
     (below), and the requests waiting then are answered `Failed` with that
-    failure. `retry_now` and `stop_sync` return it.
+    failure, the `DbError` every later call reports, inside
+    `SyncFailure::Other`. `retry_now` and `stop_sync` return it.
   - [A sync pass (§6)](coven.md#6-a-sync-pass) gives the read, apply, claim and effects order.
     An idle pass reads the next slot and the floor: two requests.
   - A missing slot below the floor reloads its snapshots. Returning devices retain eligible queued

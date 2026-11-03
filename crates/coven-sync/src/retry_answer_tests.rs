@@ -299,3 +299,27 @@ async fn a_step_that_cant_write_answers_the_waiting_retries_with_its_failure() {
     );
     assert!(waits.retry_requested().await.is_err(), "a failed handle took a retry");
 }
+
+/// The retries waiting when a step fails hear its failure as the typed
+/// error the handle reports, never its text (F.5): a failed checkpoint
+/// keeps its cause, and a runtime shutting down says how far it got.
+#[test]
+fn a_failed_steps_answer_keeps_its_typed_error() {
+    let typed = |error: DbError| match failed(&error) {
+        RetryOutcome::Failed(PassFailure::Failed { error: crate::SyncFailure::Other(cause) }) => {
+            cause.downcast_ref::<DbError>().map(|cause| format!("{cause:?}"))
+        }
+        outcome => panic!("{outcome:?}"),
+    };
+    let checkpoint = DbError::CheckpointFailed(Arc::new(DbError::DamagedDatabase));
+    assert_eq!(typed(checkpoint).as_deref(), Some("CheckpointFailed(DamagedDatabase)"));
+    let shutdown = coven_foundation::task::Shutdown {
+        operation: "database call",
+        outcome: coven_foundation::task::ShutdownOutcome::NotRun,
+    };
+    assert!(
+        typed(DbError::Shutdown(shutdown)).is_some_and(|cause| cause.starts_with("Shutdown(")),
+        "the shutdown keeps its type"
+    );
+    assert!(matches!(failed(&DbError::StoreClosed), RetryOutcome::NotSyncing));
+}

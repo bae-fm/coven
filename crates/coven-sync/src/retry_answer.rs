@@ -224,16 +224,21 @@ fn cooldown_until(schedule: &Mutex<super::WaitSchedule>, clock: &ClockRef) -> Op
         .ends
 }
 
-/// The answer to the requests waiting when a step fails: the failure that
-/// failed the handle, or `NotSyncing` once the store closed.
+/// The answer to the requests waiting when a step fails, carrying the typed
+/// error the step's caller gets, never its text (F.5), or `NotSyncing` once
+/// the store closed. A step fails only as its handle does, whose failure
+/// every later call reports from one shared cause, so the answer carries that
+/// same failure; or as its runtime shuts down, saying how far it got.
 fn failed(error: &DbError) -> RetryOutcome {
-    let failure: Arc<dyn std::error::Error + Send + Sync> = match error {
+    let failure = match error {
         DbError::StoreClosed => return RetryOutcome::NotSyncing,
-        DbError::StatePersistence(cause) => cause.clone(),
-        DbError::RollbackFailed => Arc::new(DbError::RollbackFailed),
-        error => Arc::new(std::io::Error::other(error.to_string())),
+        DbError::StatePersistence(cause) => DbError::StatePersistence(cause.clone()),
+        DbError::RollbackFailed => DbError::RollbackFailed,
+        DbError::CheckpointFailed(cause) => DbError::CheckpointFailed(cause.clone()),
+        DbError::Shutdown(shutdown) => DbError::Shutdown(*shutdown),
+        _ => DbError::Invariant { what: "a retry step fails only as its handle or runtime does" },
     };
-    PassFailure::Failed { error: SyncFailure::Other(failure) }.into()
+    PassFailure::Failed { error: SyncFailure::Other(Arc::new(failure)) }.into()
 }
 
 impl RetryWaits {
