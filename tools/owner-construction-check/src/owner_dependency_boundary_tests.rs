@@ -275,6 +275,33 @@ fn shared_state_leaves_an_owner_only_inside_a_handle() {
     );
 }
 
+/// A lock an owner may keep to itself leaves it when a method returns it
+/// through a shared pointer or a reference; a new lock returned by value is
+/// shared with no one.
+#[test]
+fn private_state_leaves_an_owner_when_returned_shared() {
+    let mut policy = policy();
+    policy.private_state_types.insert("Mutex".into());
+    policy.shared_pointer_types.insert("Arc".into());
+    let source = "struct Keychain { entries: Mutex<u8> } \
+        impl Keychain { \
+            pub fn backend(&self) -> &Mutex<u8> { todo!() } \
+            pub fn counts(&self) -> Arc<Mutex<u8>> { todo!() } \
+            pub fn fresh() -> Mutex<u8> { todo!() } \
+            fn inner(&self) -> &Mutex<u8> { todo!() } \
+        }";
+    let files = [RustFile::fixture(PATH, source)];
+    let found = find_owner_dependency_leaks(&files, &policy, &OwnerGraph::collect(&files, &policy));
+    let finding = |message: &str| Finding::new(PATH, 1, message, SHARED_STATE_REMEDY);
+    assert_eq!(
+        found,
+        [
+            finding("Keychain::backend hands out shared state Mutex"),
+            finding("Keychain::counts hands out shared state Mutex"),
+        ]
+    );
+}
+
 /// What shares an owner's state without being declared its handle is no
 /// handle: returning it hands out what the owner holds.
 #[test]

@@ -509,3 +509,71 @@ fn a_handles_holder_is_an_owner() {
     let graph = OwnerGraph::collect(&files, &policy);
     assert_eq!(graph.owners, ["View".to_string()].into());
 }
+
+fn private_state_policy() -> Policy {
+    let mut policy = policy();
+    policy.private_state_types = ["Mutex".to_string(), "Condvar".to_string()].into();
+    policy.shared_pointer_types = ["Arc".to_string(), "Weak".to_string()].into();
+    policy
+}
+
+/// A lock its holder keeps to itself is that holder's private state: holding
+/// one by value, never pointed at, makes no owner.
+#[test]
+fn a_lock_held_by_value_and_never_shared_is_private() {
+    let source = "struct Budget { state: Mutex<u8>, ready: Condvar } \
+        struct Pool { budgets: Vec<Budget>, idle: Mutex<Vec<usize>> } \
+        struct Run { pool: Pool }";
+    let graph = OwnerGraph::collect(&[RustFile::fixture(PATH, source)], &private_state_policy());
+    assert!(graph.owners.is_empty(), "{:?}", graph.owners);
+}
+
+/// A lock held through a shared pointer or a reference is shared with
+/// whatever else points at it: its holder is an owner, and so is what
+/// holds that holder.
+#[test]
+fn a_lock_held_through_a_pointer_or_a_reference_is_shared() {
+    let source = "struct Counter(Arc<Mutex<u8>>); \
+        struct Watcher { counts: Weak<Mutex<u8>> } \
+        struct Borrowing<'a> { reserved: &'a Mutex<u8> } \
+        type Entries = Arc<Mutex<Vec<u8>>>; \
+        struct Keychain { entries: Entries } \
+        struct Work { counter: Counter }";
+    let graph = OwnerGraph::collect(&[RustFile::fixture(PATH, source)], &private_state_policy());
+    assert_eq!(
+        graph.owners,
+        ["Borrowing", "Counter", "Entries", "Keychain", "Watcher", "Work"]
+            .map(str::to_string)
+            .into()
+    );
+}
+
+/// A type holding a lock by value shares it once the type itself is held
+/// through a shared pointer or a reference, directly or inside what is:
+/// every holder of the pointer reaches the one lock.
+#[test]
+fn a_lock_inside_a_shared_value_is_shared() {
+    let source = "struct Lease(Mutex<Option<u8>>); \
+        struct Directory { lease: Arc<Lease> } \
+        struct Log { logged: Mutex<u8> } \
+        struct Waits { failures: Log, state: Option<Log> } \
+        struct Sync { waits: Arc<Waits> } \
+        struct Gate { opened: Mutex<bool> } \
+        struct Kept { gate: Gate } \
+        struct Lone { gate: Mutex<bool> }";
+    let graph = OwnerGraph::collect(&[RustFile::fixture(PATH, source)], &private_state_policy());
+    assert_eq!(
+        graph.owners,
+        ["Directory", "Lease", "Log", "Sync", "Waits"].map(str::to_string).into()
+    );
+}
+
+/// Without shared pointers named, only a reference shares a lock.
+#[test]
+fn only_the_policys_pointers_share() {
+    let mut policy = private_state_policy();
+    policy.shared_pointer_types.clear();
+    let source = "struct Counter(Arc<Mutex<u8>>); struct Borrowing<'a>(&'a Mutex<u8>);";
+    let graph = OwnerGraph::collect(&[RustFile::fixture(PATH, source)], &policy);
+    assert_eq!(graph.owners, ["Borrowing".to_string()].into());
+}

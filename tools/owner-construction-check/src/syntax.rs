@@ -151,23 +151,83 @@ pub(crate) fn supplied_type_names(ty: &syn::Type, phantoms: &BTreeSet<String>) -
     names.names
 }
 
+/// The types a type holds through a shared pointer, such as `Arc`, or a
+/// reference: values its holder shares with whatever else points at them.
+/// `Arc<Mutex<State>>` holds `Mutex` and `State` so; `Mutex<State>` holds
+/// neither. Names reach the result as `supplied_type_names` finds them.
+pub(crate) fn shared_type_names(
+    ty: &syn::Type,
+    pointers: &BTreeSet<String>,
+    phantoms: &BTreeSet<String>,
+) -> BTreeSet<String> {
+    let mut names = SharedTypeNames { pointers, phantoms, names: BTreeSet::new() };
+    names.visit_type(ty);
+    names.names
+}
+
+struct SharedTypeNames<'p> {
+    pointers: &'p BTreeSet<String>,
+    phantoms: &'p BTreeSet<String>,
+    names: BTreeSet<String>,
+}
+
+impl<'ast> Visit<'ast> for SharedTypeNames<'_> {
+    fn visit_type_path(&mut self, node: &'ast syn::TypePath) {
+        let Some(segment) = node.path.segments.last() else {
+            return;
+        };
+        let name = segment.ident.to_string();
+        if self.pointers.contains(&name) {
+            if let syn::PathArguments::AngleBracketed(arguments) = &segment.arguments {
+                for argument in &arguments.args {
+                    if let syn::GenericArgument::Type(ty) = argument {
+                        self.names.extend(supplied_type_names(ty, self.phantoms));
+                    }
+                }
+            }
+        } else if !self.phantoms.contains(&name) {
+            visit::visit_type_path(self, node);
+        }
+    }
+
+    fn visit_type_reference(&mut self, node: &'ast syn::TypeReference) {
+        self.names.extend(supplied_type_names(&node.elem, self.phantoms));
+    }
+
+    // A callback holds none of its arguments (`supplied_type_names`).
+    fn visit_parenthesized_generic_arguments(
+        &mut self,
+        node: &'ast syn::ParenthesizedGenericArguments,
+    ) {
+        self.visit_return_type(&node.output);
+    }
+
+    fn visit_type_fn_ptr(&mut self, node: &'ast syn::TypeFnPtr) {
+        self.visit_return_type(&node.output);
+    }
+}
+
 /// The type names a declared type's fields (or variants' fields, or alias
-/// target) mention.
+/// target) mention, and those among them it holds through a shared pointer
+/// or a reference (`shared_type_names`).
 #[derive(Clone)]
 pub(crate) struct StructInfo {
     pub(crate) field_types: BTreeSet<String>,
+    pub(crate) shared_field_types: BTreeSet<String>,
     pub(crate) declarations: Vec<(String, usize)>,
 }
 
 /// Structs, enums, aliases, traits and unions, with the type names their
-/// fields hold values of.
+/// fields hold values of, and those they hold through one of `pointers` or
+/// a reference.
 pub(crate) fn collect_declared_types(
     files: &[RustFile],
+    pointers: &BTreeSet<String>,
     phantoms: &BTreeSet<String>,
 ) -> BTreeMap<String, StructInfo> {
     let mut types = BTreeMap::new();
     for file in files {
-        DeclarationCollector { path: &file.relative_path, phantoms, types: &mut types }
+        DeclarationCollector { path: &file.relative_path, pointers, phantoms, types: &mut types }
             .visit_file(&file.syntax);
     }
     types
@@ -175,6 +235,7 @@ pub(crate) fn collect_declared_types(
 
 struct DeclarationCollector<'a> {
     path: &'a str,
+    pointers: &'a BTreeSet<String>,
     phantoms: &'a BTreeSet<String>,
     types: &'a mut BTreeMap<String, StructInfo>,
 }
@@ -190,36 +251,26 @@ impl<'ast> Visit<'ast> for DeclarationCollector<'_> {
             _ => None,
         };
         if let Some(name) = name {
-            let fields = match node {
-                syn::Item::Struct(item) => item
-                    .fields
-                    .iter()
-                    .flat_map(|field| supplied_type_names(&field.ty, self.phantoms))
-                    .collect(),
+            let fields: Vec<&syn::Type> = match node {
+                syn::Item::Struct(item) => item.fields.iter().map(|field| &field.ty).collect(),
                 syn::Item::Enum(item) => item
                     .variants
                     .iter()
-                    .flat_map(|variant| {
-                        variant
-                            .fields
-                            .iter()
-                            .flat_map(|field| supplied_type_names(&field.ty, self.phantoms))
-                    })
+                    .flat_map(|variant| variant.fields.iter().map(|field| &field.ty))
                     .collect(),
-                syn::Item::Union(item) => item
-                    .fields
-                    .named
-                    .iter()
-                    .flat_map(|field| supplied_type_names(&field.ty, self.phantoms))
-                    .collect(),
-                syn::Item::Type(item) => supplied_type_names(&item.ty, self.phantoms),
-                _ => BTreeSet::new(),
+                syn::Item::Union(item) => item.fields.named.iter().map(|field| &field.ty).collect(),
+                syn::Item::Type(item) => vec![item.ty.as_ref()],
+                _ => Vec::new(),
             };
             let info = self.types.entry(name.to_string()).or_insert_with(|| StructInfo {
                 field_types: BTreeSet::new(),
+                shared_field_types: BTreeSet::new(),
                 declarations: Vec::new(),
             });
-            info.field_types.extend(fields);
+            for ty in fields {
+                info.field_types.extend(supplied_type_names(ty, self.phantoms));
+                info.shared_field_types.extend(shared_type_names(ty, self.pointers, self.phantoms));
+            }
             info.declarations.push((self.path.to_string(), name.span().start().line));
         }
         visit::visit_item(self, node);

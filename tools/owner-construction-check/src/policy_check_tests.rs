@@ -401,3 +401,30 @@ fn a_handle_names_an_owner_that_returns_it() {
         ]
     );
 }
+
+/// Private state is held one way: no capability, shared state or handle row
+/// names it too.
+#[test]
+fn private_state_is_no_other_row() {
+    let files = vec![RustFile::fixture(
+        "crates/app/src/lib.rs",
+        "struct Worker { lock: Mutex<()>, ready: Condvar, gate: Gate, shared: Arc<()> } \
+        struct Gate; struct Query; impl Query { fn gate(&self) -> Gate { todo!() } }",
+    )];
+    let rows = r#"
+        capability_types = ["Mutex"]
+        shared_state_types = ["Condvar"]
+        private_state_types = ["Mutex", "Condvar", "Gate"]
+        shared_pointer_types = ["Arc"]
+        handles = { Gate = "Query" }
+        external_types = ["Mutex", "Condvar", "Arc"]
+    "#;
+    assert_eq!(
+        stale(files, rows),
+        [
+            "private_state_types: Condvar is also in shared_state_types",
+            "private_state_types: Gate is also a handle",
+            "private_state_types: Mutex is also in capability_types",
+        ]
+    );
+}

@@ -32,6 +32,7 @@ pub(crate) fn stale_rows(workspace: &Workspace, code: &CrateCode, policy: &Polic
     stale.extend(missing_composition_roots(crate_files, policy));
     stale.extend(invalid_capability_factories(crate_files, policy));
     stale.extend(invalid_handles(crate_files, policy));
+    stale.extend(overlapping_state_rows(policy));
     stale.extend(undeclared_types(crate_files, policy));
     stale.extend(missing_capability_traits(crate_files, policy));
     stale.extend(invalid_database(&code.written, workspace, policy));
@@ -254,7 +255,7 @@ fn invalid_capability_factories(files: &[RustFile], policy: &Policy) -> Vec<Stri
 
 /// A handle is no capability or shared state row of its own, and its owner,
 /// another type, has a method returning it: a row whose owner makes none
-/// covers nothing. Shared state is no capability row too.
+/// covers nothing.
 fn invalid_handles(files: &[RustFile], policy: &Policy) -> Vec<String> {
     let methods = declared_methods(files);
     let mut stale = Vec::new();
@@ -279,8 +280,28 @@ fn invalid_handles(files: &[RustFile], policy: &Policy) -> Vec<String> {
             stale.push(format!("handles: {handle} is also in shared_state_types"));
         }
     }
+    stale
+}
+
+/// Shared state is no capability row, and private state neither of the two
+/// nor a handle: a type is held one way.
+fn overlapping_state_rows(policy: &Policy) -> Vec<String> {
+    let mut stale = Vec::new();
     for name in policy.shared_state_types.intersection(&policy.capability_types) {
         stale.push(format!("shared_state_types: {name} is also in capability_types"));
+    }
+    for name in &policy.private_state_types {
+        for (row, names) in [
+            ("capability_types", &policy.capability_types),
+            ("shared_state_types", &policy.shared_state_types),
+        ] {
+            if names.contains(name) {
+                stale.push(format!("private_state_types: {name} is also in {row}"));
+            }
+        }
+        if policy.handles.contains_key(name) {
+            stale.push(format!("private_state_types: {name} is also a handle"));
+        }
     }
     stale
 }
@@ -288,7 +309,11 @@ fn invalid_handles(files: &[RustFile], policy: &Policy) -> Vec<String> {
 /// A type the policy names is declared by a crate, or is one of its external
 /// types: named by a crate's production source and declared by none.
 fn undeclared_types(crate_files: &[RustFile], policy: &Policy) -> Vec<String> {
-    let declared = collect_declared_types(crate_files, &policy.phantom_type_arguments);
+    let declared = collect_declared_types(
+        crate_files,
+        &policy.shared_pointer_types,
+        &policy.phantom_type_arguments,
+    );
     // Every name, type arguments of phantom generics included.
     let every_argument = BTreeSet::new();
     let mut mentioned = TypeNames::new(&every_argument);

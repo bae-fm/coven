@@ -8,7 +8,9 @@
 //! not even a holder it was given to; what the owner keeps of its own
 //! handles is the owner's, not its holder's. Shared state leaves a type only inside
 //! a handle: no method that crosses its module returns a bare receiver or
-//! lock, whether it holds that one or just made it.
+//! lock, whether it holds that one or just made it. A lock an owner may keep
+//! to itself (`Policy::private_state_types`) leaves it when a method returns
+//! it through a shared pointer or a reference.
 //!
 //! The rules here read the declared types transitively: what an owner
 //! retains is every type its fields reach. A method that returns a retained
@@ -26,7 +28,8 @@ use crate::finding::Finding;
 use crate::owner_graph::OwnerGraph;
 use crate::policy::Policy;
 use crate::syntax::{
-    supplied_type_names, type_name, type_names, visibility_crosses_owner, RustFile,
+    shared_type_names, supplied_type_names, type_name, type_names, visibility_crosses_owner,
+    RustFile,
 };
 
 struct OwnerMethod {
@@ -35,6 +38,8 @@ struct OwnerMethod {
     owner: String,
     method: String,
     output: BTreeSet<String>,
+    /// What the output holds through a shared pointer or a reference.
+    shared_output: BTreeSet<String>,
     parameters: BTreeSet<String>,
     mutates_owner: bool,
     consumes_owner: bool,
@@ -48,7 +53,7 @@ pub(crate) fn find_owner_dependency_leaks(
     graph: &OwnerGraph,
 ) -> Vec<Finding> {
     let phantoms = &policy.phantom_type_arguments;
-    let methods = collect_owner_methods(files, phantoms);
+    let methods = collect_owner_methods(files, &policy.shared_pointer_types, phantoms);
     let raw = RAW_SQLITE_HANDLES.iter().map(|(name, _)| name.to_string()).collect::<BTreeSet<_>>();
     let capabilities = policy.held_capabilities();
     let services = graph.owners.union(&capabilities).cloned().collect::<BTreeSet<_>>();
@@ -95,7 +100,10 @@ pub(crate) fn find_owner_dependency_leaks(
                     }
                     continue;
                 }
-                if policy.shared_state_types.contains(output) {
+                let shared_state = policy.shared_state_types.contains(output)
+                    || (policy.private_state_types.contains(output)
+                        && method.shared_output.contains(output));
+                if shared_state {
                     if method.public && !rooted {
                         leaks.insert(Finding::new(
                             &method.path,
@@ -426,12 +434,17 @@ fn collect_crate_root_session_fields(
     }
 }
 
-fn collect_owner_methods(files: &[RustFile], phantoms: &BTreeSet<String>) -> Vec<OwnerMethod> {
+fn collect_owner_methods(
+    files: &[RustFile],
+    pointers: &BTreeSet<String>,
+    phantoms: &BTreeSet<String>,
+) -> Vec<OwnerMethod> {
     let mut methods = Vec::new();
     for file in files {
         collect_owner_methods_in_items(
             &file.relative_path,
             &file.syntax.items,
+            pointers,
             phantoms,
             &mut methods,
         );
@@ -442,6 +455,7 @@ fn collect_owner_methods(files: &[RustFile], phantoms: &BTreeSet<String>) -> Vec
 fn collect_owner_methods_in_items(
     path: &str,
     items: &[syn::Item],
+    pointers: &BTreeSet<String>,
     phantoms: &BTreeSet<String>,
     methods: &mut Vec<OwnerMethod>,
 ) {
@@ -460,6 +474,7 @@ fn collect_owner_methods_in_items(
                         &owner,
                         &method.sig,
                         visibility_crosses_owner(&method.vis),
+                        pointers,
                         phantoms,
                     ));
                 }
@@ -470,12 +485,12 @@ fn collect_owner_methods_in_items(
                     let syn::TraitItem::Fn(method) = item else {
                         continue;
                     };
-                    methods.push(owner_method(path, &owner, &method.sig, true, phantoms));
+                    methods.push(owner_method(path, &owner, &method.sig, true, pointers, phantoms));
                 }
             }
             syn::Item::Mod(item) => {
                 if let Some((_, items)) = &item.content {
-                    collect_owner_methods_in_items(path, items, phantoms, methods);
+                    collect_owner_methods_in_items(path, items, pointers, phantoms, methods);
                 }
             }
             _ => {}
@@ -488,11 +503,14 @@ fn owner_method(
     owner: &str,
     signature: &syn::Signature,
     public: bool,
+    pointers: &BTreeSet<String>,
     phantoms: &BTreeSet<String>,
 ) -> OwnerMethod {
-    let mut output = match &signature.output {
-        syn::ReturnType::Default => BTreeSet::new(),
-        syn::ReturnType::Type(_, output) => type_names(output, phantoms),
+    let (mut output, shared_output) = match &signature.output {
+        syn::ReturnType::Default => (BTreeSet::new(), BTreeSet::new()),
+        syn::ReturnType::Type(_, output) => {
+            (type_names(output, phantoms), shared_type_names(output, pointers, phantoms))
+        }
     };
     output.remove("Self");
     output.remove(owner);
@@ -525,6 +543,7 @@ fn owner_method(
             borrowed.0
         },
         output,
+        shared_output,
         parameters,
     }
 }

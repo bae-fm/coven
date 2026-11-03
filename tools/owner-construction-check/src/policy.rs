@@ -124,6 +124,18 @@ pub(crate) struct Policy {
     /// handle: no method crossing its module returns one, held or new.
     #[serde(default)]
     pub(crate) shared_state_types: BTreeSet<String>,
+    /// In-memory state its holder keeps to itself while it holds it by
+    /// value, as an owner keeps a lock no one else reaches. Held through one
+    /// of `shared_pointer_types` or a reference, by itself or inside a type
+    /// that holds it by value, it is shared state, as `shared_state_types`
+    /// are: `Arc<Mutex<State>>`, or `Arc<Inner>` where `Inner` holds a
+    /// `Mutex`.
+    #[serde(default)]
+    pub(crate) private_state_types: BTreeSet<String>,
+    /// Pointers whose every holder shares the value they point at, such as
+    /// `Arc`: what one holds through them is shared with the others.
+    #[serde(default)]
+    pub(crate) shared_pointer_types: BTreeSet<String>,
     /// Capability interfaces. Every workspace implementation is construction-only,
     /// including generic implementations and feature-gated test support.
     #[serde(default)]
@@ -344,9 +356,11 @@ impl Policy {
 
     /// Every type name the policy holds, with the row it came from.
     pub(crate) fn named_types(&self) -> Vec<(&'static str, &str)> {
-        let lists: [(&str, &BTreeSet<String>); 10] = [
+        let lists: [(&str, &BTreeSet<String>); 12] = [
             ("capability_types", &self.capability_types),
             ("shared_state_types", &self.shared_state_types),
+            ("private_state_types", &self.private_state_types),
+            ("shared_pointer_types", &self.shared_pointer_types),
             ("capability_traits", &self.capability_traits),
             ("construction_only_capability_types", &self.construction_only_capability_types),
             ("non_owner_types", &self.non_owner_types),
