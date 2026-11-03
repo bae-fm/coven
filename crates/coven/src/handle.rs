@@ -45,7 +45,9 @@ use std::sync::{Arc, Mutex};
 /// typed target.
 #[derive(Clone)]
 pub struct CovenHandle {
-    closing: Arc<coven_foundation::files::StoreClosingGuard>,
+    // Drops first, so the store is closing before this clone of the
+    // database goes.
+    _scope: Arc<HandleScope>,
     database: Database,
     files: coven_sync::Files,
     storage: Arc<crate::storage::StorageConnections>,
@@ -53,6 +55,17 @@ pub struct CovenHandle {
     directory: StoreDir,
     keychain: Arc<StoreKeychain>,
     device: DeviceId,
+}
+
+/// The app's hold on the store: ending it, as the last clone of the handle
+/// drops, marks the store closing though workers still hold the database
+/// (F.4).
+struct HandleScope(Database);
+
+impl Drop for HandleScope {
+    fn drop(&mut self) {
+        self.0.begin_close();
+    }
 }
 
 impl std::fmt::Debug for CovenHandle {
@@ -72,7 +85,7 @@ impl CovenHandle {
         device: DeviceId,
     ) -> Self {
         Self {
-            closing: Arc::new(database.closing_guard()),
+            _scope: Arc::new(HandleScope(database.clone())),
             database,
             files,
             storage,
@@ -517,7 +530,7 @@ impl CovenHandle {
     /// calls fail with `KeyError::StoreClosed`. Closing reports every failure:
     /// one alone as itself, several chained as `SyncError::Cleanup`.
     pub async fn close(&self) -> Result<(), SyncError> {
-        self.closing.begin_close();
+        self.database.begin_close();
         let handle = self.clone();
         let closing = tokio::spawn(async move {
             let storage = handle.storage.close().await;

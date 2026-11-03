@@ -95,8 +95,11 @@ fn only_the_matching_lock_can_authorize_open() {
     let first = layout.create_store_dir(StoreId(Uuid::from_u128(1)), &UuidIds).unwrap();
     let second = layout.create_store_dir(StoreId(Uuid::from_u128(2)), &UuidIds).unwrap();
     let lock = first.lock_exclusive().unwrap();
-    first.verify_lock(&lock).unwrap();
-    assert!(matches!(second.verify_lock(&lock), Err(StoreLockError::WrongDirectory(_))));
+    crate::files::verify_lock(&first, &lock).unwrap();
+    assert!(matches!(
+        crate::files::verify_lock(&second, &lock),
+        Err(StoreLockError::WrongDirectory(_))
+    ));
 }
 
 #[test]

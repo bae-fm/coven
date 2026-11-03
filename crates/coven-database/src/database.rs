@@ -383,10 +383,10 @@ impl Database {
 }
 
 impl Database {
-    /// Track a facade's owning scope independently of database clones held by
-    /// workers. Ending that scope marks this instance as closing for reopen.
-    pub fn closing_guard(&self) -> coven_foundation::files::StoreClosingGuard {
-        self.closing.closing_guard()
+    /// Mark this instance as closing for a reopen to wait on, though workers
+    /// still hold clones of it: the facade's owning scope ended (F.4).
+    pub fn begin_close(&self) {
+        self.closing.begin_close();
     }
 
     async fn call<R, E>(

@@ -139,7 +139,7 @@ impl DatabaseBuilder {
         let migrations =
             self.migrations.ok_or(CovenError::MissingConfiguration { field: "migrations" })?;
         // Refuse a directory that is not a store before creating its database.
-        self.directory.verify_lock(&lock)?;
+        coven_foundation::files::verify_lock(&self.directory, &lock)?;
         let settings = lock.settings()?;
         let clock = match self.clock {
             Some(clock) => clock,

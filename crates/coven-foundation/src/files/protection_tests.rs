@@ -109,7 +109,7 @@ fn classed_store_with_files(
 fn open(layout: &StoreDirectories, id: StoreId) -> Result<(), FileError> {
     let directory = layout.store_dir(&id);
     let lock = directory.lock_exclusive().unwrap();
-    directory.protect_files(&lock)
+    crate::files::protect_files(&directory, &lock)
 }
 
 #[test]

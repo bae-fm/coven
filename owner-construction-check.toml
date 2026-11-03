@@ -317,6 +317,9 @@ task_types = [
     # sends them, and where that reader sends them.
     "StreamInput",
     "StreamSender",
+    # One try at a store's lock: the closing holder it waits for, or the
+    # registration it reserved.
+    "Acquisition",
 ]
 # The shared in-memory state the runtime and the standard library declare.
 external_types = [
@@ -392,6 +395,9 @@ TransferWatch = "InFlight"
 # The files in flight one way, which the worker moving them marks as each
 # attempt starts and ends (§17.8, §17.9).
 InFlight = "TransfersInFlight"
+# Marks a store closing when its owner's scope ends, without holding its
+# lock, so a reopen in this process waits for its release (F.4).
+StoreClosingGuard = "LockRegistration"
 
 # The raw handles and coven's own SQL are the database boundary's subject;
 # the SQLite capability's row names the database's home and the SQLite
@@ -560,7 +566,12 @@ tables = [
     # times exists.
     "RecordingClock::watch_progress",
 ]
-"crates/coven-foundation/src/files/bootstrap.rs" = ["reserve_bootstrap_directory"]
+"crates/coven-foundation/src/files/bootstrap.rs" = [
+    "reserve_bootstrap_directory",
+    # One bootstrap's hold on its lock, shared by its unpublished directory's
+    # clones.
+    "BootstrapLease::new",
+]
 # Both store listings read the directory on a blocking task.
 "crates/coven-foundation/src/files/layout.rs" = ["StoreDirectories::listed"]
 "crates/coven-foundation/src/files/lock_registry.rs" = [
@@ -568,6 +579,15 @@ tables = [
     # process, like the OS file locks it tracks (F.4).
     "STORES",
     "LockRegistration::open_on_worker",
+    # Makes each lock's entry in the registry, which its closing guards share,
+    # and the registration that keeps it until the lock's file closes.
+    "reserve",
+    # Waits out a closing holder, then reserves the lock and takes its file.
+    "acquire_registered",
+    # Takes a lock at once or refuses, for a test.
+    "try_acquire",
+    # The reserved lock's file, kept with its registration.
+    "LockRegistration::acquire_file",
 ]
 # A replacement composes the new installation beside the old one, holding
 # the store's writer lock until it is in place.
@@ -576,6 +596,15 @@ tables = [
 "crates/coven-foundation/src/id_source.rs" = ["SequentialIds::new"]
 # A test's clock, which a test hands the builder as it would the system's.
 "crates/coven-foundation/src/clock.rs" = ["FixedClock::new"]
+# A store's writer or bootstrap lock, taken through the registry.
+"crates/coven-foundation/src/files/lock.rs" = [
+    "acquire",
+    "acquire_for_open",
+    "acquire_bootstrap",
+    # A deletion's locks, with the bootstrap lock it takes or a bootstrap's
+    # lease.
+    "for_deletion",
+]
 
 "crates/coven-crypto/src/custody/key_session.rs" = [
     "KeySession::open",
