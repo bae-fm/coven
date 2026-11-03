@@ -7322,7 +7322,7 @@ policy a member key needs.
 
 A store lives on exactly one provider: an S3-compatible service, Dropbox,
 OneDrive, or iCloud through CloudKit. Every member reaches it with their own
-provider account, or on S3 their own access key. Coven needs seven things from
+provider account, or on S3 their own access key. Coven needs eight things from
 it.
 
 **Create once.** Create an object only if its path is empty, and refuse an
@@ -7386,6 +7386,17 @@ checks, and S3's check that a bucket exists (§20.5).
 Dropbox, OneDrive and iCloud share with an account. S3 has no sharing that
 works the same on every service, so coven shares nothing there; each member has
 their own access key instead (§20.10).
+
+**Usage on the member's own account.** What a member's device asks of the
+provider counts against that member's own account, or on S3 the bucket
+owner's, never against a pool every user of the app shares. Otherwise one
+person, or anyone who pulled the app's client id out of it, could use up the
+limit for every household or run up a bill for the app's maker. Google Drive
+fails this: Google counts every Drive request against the app's Cloud project,
+so coven has no Drive provider. GCS through its S3 interface meets it, since
+the bucket and its bill are the person's own. On iCloud coven uses only
+CloudKit's private and shared databases, which count against their owner's
+iCloud storage; the public database counts against the app's container.
 
 #### 20.2 The providers and signing in
 
@@ -7955,6 +7966,14 @@ provider's: §13.2 names what Dropbox and CloudKit would also allow. So:
   with her work account, which Household was shared with too. Setup fails
   with `StorageSetupError::StoreOwner` and changes nothing; she signs in with
   the account that holds Household (§10.1).
+
+Whose storage a shared store fills depends on the provider. On Dropbox each
+member mounts the shared folder in their own account, and Dropbox counts the
+folder's full size against every member's account: Household's 40 GB counts
+40 GB against Ana's, Ben's and Carol's each. On OneDrive it counts against the
+owner's account only, on iCloud against the owner of the store's zone, and on
+S3 against the bucket owner. These are the providers' rules, which coven
+neither sets nor checks.
 
 Coven promises the access the applied sequence intends. Provider requests take
 time and can fail, so actual access need not match that intent at every instant.
