@@ -9670,7 +9670,7 @@ by holders nobody chose, and lives as long as the last of them. So it is shared
 on purpose: an object holding it is an owner (F.3), built at a composition root
 and never handing it out. A value made for one piece of work that shares its
 owner's state, such as one read's response body, is a task. Tests may use real
-ones. The checker counts tokio's `Barrier` and `Semaphore` as shared state.
+ones. The checker counts `Barrier`, `Semaphore` and `RwLock` as shared state.
 
 - The builder configures the clock, custody and OAuth. Ids use OS randomness;
   only `test-utils` allows replacing their source (api.md E1).

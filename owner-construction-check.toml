@@ -74,6 +74,7 @@ capability_types = [
     # handed out.
     "Barrier",
     "Semaphore",
+    "RwLock",
 ]
 capability_traits = [
     "Clock",
@@ -262,6 +263,7 @@ task_types = [
 external_types = [
     "Barrier",
     "Semaphore",
+    "RwLock",
 ]
 internal_dependency_types = ["DatabaseConnection"]
 closed_session_types = [
@@ -513,6 +515,9 @@ tables = [
     "MemoryStorage::with_device",
 ]
 "crates/coven-storage/src/test_utils.rs" = [
+    # A test gives a fake connection its first tokens, which a real one
+    # has from its sign-in.
+    "MemoryProvider::set_oauth_tokens",
     "MemoryStorage::builder",
     "MemoryStorage::from_memory",
     "MemoryStorage::clone",
@@ -528,6 +533,9 @@ tables = [
 "crates/coven-storage/src/providers/cloudkit.rs" = ["CloudKitStorage::new"]
 "crates/coven-storage/src/providers/dropbox.rs" = ["DropboxStorage::new"]
 "crates/coven-storage/src/providers/oauth.rs" = ["OAuthFlow::new"]
+# An OAuth connection composes the tokens it sends, which it alone replaces.
+"crates/coven-storage/src/providers/http.rs" = ["OAuthSession::new"]
+"crates/coven-storage/src/token_custody.rs" = ["HeldTokens::new"]
 "crates/coven-storage/src/providers/onedrive.rs" = ["OneDriveStorage::new"]
 "crates/coven-storage/src/providers/s3.rs" = ["S3Storage::new", "S3Storage::with_settings"]
 # The S3 client's signing clock and its refusal handling (§20.7).
