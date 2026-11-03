@@ -44,12 +44,14 @@ async fn stopping_a_failing_connector_does_not_wait_for_its_backoff() {
     *f.connector.failure.lock().unwrap() = Some(StorageFailure::Network.into());
     f.handle.start_sync().await.unwrap();
     entering.await.unwrap();
-    f.handle.stop_sync().await.unwrap();
+    let stopping = crate::tests::stopping(&f.handle);
     resume.send(()).unwrap();
-    tokio::time::timeout(Duration::from_secs(10), f.handle.close())
+    tokio::time::timeout(Duration::from_secs(10), stopping)
         .await
         .expect("stopping must wake a connector even while its request is in flight")
+        .unwrap()
         .unwrap();
+    f.handle.close().await.unwrap();
 }
 
 async fn stopped_fixture() -> Fixture {
@@ -205,8 +207,9 @@ async fn stopping_an_inflight_failure_preserves_its_delay_for_the_next_start() {
     *f.connector.failure.lock().unwrap() = Some(StorageFailure::Network.into());
     f.handle.start_sync().await.unwrap();
     entering.await.unwrap();
-    f.handle.stop_sync().await.unwrap();
+    let stopping = crate::tests::stopping(&f.handle);
     resume.send(()).unwrap();
+    stopping.await.unwrap().unwrap();
     f.handle.start_sync().await.unwrap();
     assert_eq!(f.handle.test_connection_retry_wait().await.unwrap().wait, Duration::from_secs(1));
     f.advance(Duration::from_secs(1));
@@ -408,12 +411,15 @@ async fn stopping_answers_waiting_retries_not_syncing() {
     let taken = f.handle.retry_now().await.unwrap();
     entering.await.unwrap();
     let waiting = f.handle.retry_now().await.unwrap();
-    f.handle.stop_sync().await.unwrap();
+    // Stopping answers the waiting retry before the attempt it waits for
+    // ends.
+    let stopping = crate::tests::stopping(&f.handle);
     let outcome = answer(waiting).await;
     assert!(matches!(outcome, RetryOutcome::NotSyncing), "{outcome:?}");
     resume.send(()).unwrap();
     let outcome = answer(taken).await;
     assert!(matches!(outcome, RetryOutcome::Failed(_)), "{outcome:?}");
+    stopping.await.unwrap().unwrap();
     f.handle.close().await.unwrap();
     let outcome = answer(f.handle.retry_now().await.unwrap()).await;
     assert!(matches!(outcome, RetryOutcome::NotSyncing), "{outcome:?}");
@@ -662,5 +668,46 @@ async fn a_failed_pass_publishes_its_effect_before_its_status() {
     resume.send(()).unwrap();
     shown.wait_for(failed).await;
     assert_eq!(effect(&f).await, RetryEffect::Failed);
+    f.handle.close().await.unwrap();
+}
+
+/// Stopping returns once the pass running as it was asked has ended and the
+/// provider's client is released; it finishes without its caller (E5).
+#[tokio::test]
+async fn stopping_returns_after_the_running_pass_and_the_release() {
+    let f = Fixture::new().await;
+    f.setup().await.unwrap();
+    synced(&f.handle).await;
+    let (entered, entering) = tokio::sync::oneshot::channel();
+    let (resume, resumed) = tokio::sync::oneshot::channel();
+    f.storage.hold_next_read(ObjectPath::floor(f.directory.id()), entered, resumed).await;
+    f.handle.sync_now();
+    entering.await.unwrap();
+    let stopping = crate::tests::stopping(&f.handle);
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(!stopping.is_finished(), "stopping returned while its pass ran");
+    // A caller that stops waiting leaves stopping to finish.
+    stopping.abort();
+    resume.send(()).unwrap();
+    f.connector.counted.released().await;
+    // Stopping has recorded the location too, under the call lock.
+    f.handle.storage_config().await.unwrap();
+    f.handle.close().await.unwrap();
+}
+
+/// A start right after a stop connects again: the stop it follows has
+/// released the client, whatever the order the two calls ran in.
+#[tokio::test]
+async fn a_start_right_after_a_stop_connects_a_new_client() {
+    let f = Fixture::new().await;
+    f.setup().await.unwrap();
+    synced(&f.handle).await;
+    f.handle.stop_sync().await.unwrap();
+    f.advance(Duration::from_secs(1));
+    f.handle.start_sync().await.unwrap();
+    synced_since(&f.handle, f.clock.now()).await;
+    let clients: Vec<bool> =
+        f.connector.clients.lock().unwrap().iter().map(|c| c.upgrade().is_some()).collect();
+    assert_eq!(clients, [false, true]);
     f.handle.close().await.unwrap();
 }

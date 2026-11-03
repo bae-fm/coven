@@ -143,13 +143,9 @@ impl StorageConnections {
                 }
             };
             match result {
+                // The stop or close that superseded the attempt waits for
+                // it, then releases what it connected.
                 Ok(()) if superseded() => {
-                    let released = self.release(&mut live).await;
-                    #[expect(
-                        clippy::let_underscore_must_use,
-                        reason = "a failed release is recorded as the last pass's failure"
-                    )]
-                    let _ = self.publish_released(released).await;
                     requests.answer(&coven_sync::RetryOutcome::NotSyncing);
                     return;
                 }
@@ -212,12 +208,8 @@ impl StorageConnections {
                 }
             }
         }
-        #[expect(
-            clippy::let_underscore_must_use,
-            reason = "a failed release is recorded as the last pass's failure"
-        )]
-        let _ = self.publish_released(Ok(())).await;
-        self.stopped().await;
+        // Superseded: the stop or close that did so says sync isn't
+        // running, and stopping records the location, once this ends.
     }
 
     /// An attempt that cannot go on shows why; no pass follows it.
@@ -239,31 +231,30 @@ impl StorageConnections {
         }
     }
 
-    /// Stop after the active pass and transfers, then release the provider
-    /// client; keys, credentials and location remain (E5).
-    /// Retry requests no pass has taken are answered `NotSyncing` before it
-    /// returns. Stopping goes on even when writing that fails, which has
-    /// failed the handle; the failure is returned.
+    /// Stop after the active pass and transfers, release the provider
+    /// client, then record the location as custody holds it; keys,
+    /// credentials and location remain (E5). Retry requests no pass has
+    /// taken are answered `NotSyncing` first. Stopping holds the call lock
+    /// throughout, so a start asked meanwhile begins after it, and it
+    /// finishes even if the caller stops waiting. A failed write has failed
+    /// the handle, and a failed release is recorded as the last pass's
+    /// failure; stopping goes on, and the failure is returned.
     pub(crate) async fn stop(self: &Arc<Self>) -> Result<(), SyncError> {
-        let epoch = self.epoch.fetch_add(1, Ordering::SeqCst) + 1;
-        let stopped = self.waits.sync_stopped().await;
-        self.stopped.notify_waiters();
         let owner = self.clone();
-        tokio::spawn(async move {
+        let stopping = tokio::spawn(async move {
             let _call = owner.calls.lock().await;
-            let mut live = owner.live.lock().await;
-            // A later start or stop decides instead.
-            if owner.epoch.load(Ordering::SeqCst) != epoch {
-                return;
+            owner.epoch.fetch_add(1, Ordering::SeqCst);
+            let stopped = owner.waits.sync_stopped().await;
+            owner.stopped.notify_waiters();
+            let attempt = owner.attempts.lock().expect("connection attempts poisoned").take();
+            if let Some(attempt) = attempt {
+                attempt_ended(attempt.task).await;
             }
-            let released = owner.release(&mut live).await;
-            #[expect(
-                clippy::let_underscore_must_use,
-                reason = "no caller waits for stopping; a failure is recorded as the last pass's"
-            )]
-            let _ = owner.publish_released(released).await;
+            let released = owner.release(&mut *owner.live.lock().await).await;
+            let published = owner.publish_released(released).await;
+            stopped.map_err(SyncError::from).and(published)
         });
-        Ok(stopped?)
+        crate::coven::completion("stop sync", stopping).await?
     }
 
     /// Request a pass while started.

@@ -9,6 +9,9 @@ mod credentials;
 #[path = "handle_sync.rs"]
 mod sync_control;
 
+#[path = "handle_sync_status.rs"]
+mod sync_status;
+
 #[path = "member_keys.rs"]
 mod member_keys;
 

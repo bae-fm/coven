@@ -1,8 +1,8 @@
 //! A storage connector over in-memory storage that counts the clients it
-//! makes and those dropped. Stopping sync returns before its release, which
+//! makes and those dropped. Stopping sync returns after its release, which
 //! finishes the active pass and the connection's transfers, drops the
 //! provider's client, then records the location as custody holds it (E5);
-//! a test waits for that release through the drop.
+//! a test checks that release through the drop.
 use crate::*;
 use coven_storage::{test_utils::MemoryStorage, PublicationGate, StorageError};
 use std::{
@@ -47,14 +47,15 @@ impl Clients {
         self.dropped(self.made.load(Ordering::SeqCst)).await;
     }
 
-    /// Stop `handle`'s sync, whose connection is one of these clients, and
-    /// wait for the whole release. The release holds the store's call lock
-    /// from before it drops the client until it has recorded the location,
-    /// so a storage call made once the client is dropped returns after it.
+    /// Stop `handle`'s sync, whose connection is one of these clients: it
+    /// returns once the whole release is done, every client dropped.
     pub(crate) async fn stop(&self, handle: &CovenHandle) {
         handle.stop_sync().await.unwrap();
-        self.released().await;
-        handle.storage_config().await.unwrap();
+        assert_eq!(
+            *self.dropped.borrow(),
+            self.made.load(Ordering::SeqCst),
+            "stopping returned before its release"
+        );
     }
 }
 
@@ -86,7 +87,7 @@ impl Connector {
         Arc::new(Self { storage, clients: Clients::new() })
     }
 
-    /// Stop `handle`'s sync and wait for the whole release.
+    /// Stop `handle`'s sync, which returns after the whole release.
     pub(crate) async fn stop(&self, handle: &CovenHandle) {
         self.clients.stop(handle).await;
     }

@@ -3813,11 +3813,15 @@ while let Some(Ok(values)) = lost.next().await {
 - `start_sync` starts the loop; its first pass builds the provider client from
   custody credentials, failing and backing off like any pass. Tokens refresh
   on provider rejection (§20.2).
-- `stop_sync` returns once `coven_retry_effect` says sync isn't running and
-  the waiting retries are answered, releasing providers after the active pass
-  and transfers. Keys, credentials and location remain. Stopping changes
-  nothing the sync state reads; a failure releasing the providers is
-  recorded as the last pass's failure, with no pending connection record.
+- `stop_sync` first writes `coven_retry_effect` as not running and answers
+  the waiting retries; then the active pass and transfers finish, the
+  providers are released and the location recorded, and it returns. Once it
+  has, no pass runs until sync starts again. It holds the store's call lock
+  throughout, so a `start_sync` asked meanwhile starts after it, and it
+  finishes even if the app drops its future. Keys, credentials and location
+  remain. Stopping changes nothing the sync state reads; a failure releasing
+  the providers is recorded as the last pass's failure, with no pending
+  connection record, and returned.
 
 Storage failures retain the same `StorageFailure` through setup, sync state,
 uploads, reads and operations. Their `StorageError` carries the native cause
@@ -4791,12 +4795,14 @@ impl CovenHandle {
     /// connects. Does nothing if already running or no storage is set up.
     pub async fn start_sync(&self) -> Result<(), SyncError>;
 
-    /// Queues stopping after the active pass and transfers, retaining keys,
-    /// credentials and location, once `coven_retry_effect` says sync isn't
-    /// running and the waiting retries are answered `NotSyncing`. A release
-    /// failure is recorded as the last pass's failure, without a pending
-    /// record. A failed write of either row has failed the handle; stopping
-    /// goes on and the failure is returned.
+    /// Stops syncing, retaining keys, credentials and location: once
+    /// `coven_retry_effect` says sync isn't running and the waiting retries
+    /// are answered `NotSyncing`, the active pass and transfers finish, the
+    /// providers are released, and it returns. A `start_sync` asked
+    /// meanwhile starts after it; dropping the future leaves it to finish.
+    /// A release failure is recorded as the last pass's failure, without a
+    /// pending record, and returned. A failed write of either row has failed
+    /// the handle; stopping goes on and the failure is returned.
     pub async fn stop_sync(&self) -> Result<(), SyncError>;
 
     /// Syncs now instead of at the next idle tick. While idle, coven syncs

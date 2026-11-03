@@ -227,9 +227,10 @@ it says `pass` offers it only when pressing it runs a pass.
 
 `handle.start_sync()` starts the loop; its first pass builds the provider client
 from the credentials in custody. Setting up storage starts it too.
-`handle.stop_sync().await?` returns once waiting retries hear that sync isn't
-running, and stops after the active pass and file transfers, keeping keys,
-credentials and the storage location.
+`handle.stop_sync().await?` tells waiting retries that sync isn't running,
+then returns once the active pass and file transfers have finished and the
+provider client is released, keeping keys, credentials and the storage
+location. A `start_sync` asked meanwhile starts after it.
 Neither touches what's in storage.
 
 The sync status is the one row of the `coven_sync_status` table, which coven

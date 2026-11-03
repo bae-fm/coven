@@ -112,12 +112,19 @@ pub(crate) struct Device {
 }
 
 impl Device {
-    /// Stop sync and wait for its release, which finishes the active pass
-    /// and this connection's transfers: stopping returns before it (E5).
+    /// Stop sync, which returns once the active pass and this connection's
+    /// transfers have finished and the provider's client is released (E5).
     /// Then no pass or upload runs until sync starts again.
     pub(crate) async fn stop_sync(&self) {
         self.connector.stop(&self.handle).await;
     }
+}
+
+/// Stop `handle`'s sync in a task of its own, for a test that lets the pass
+/// or transfer stopping waits for go on meanwhile.
+pub(crate) fn stopping(handle: &CovenHandle) -> tokio::task::JoinHandle<Result<(), SyncError>> {
+    let handle = handle.clone();
+    tokio::spawn(async move { handle.stop_sync().await })
 }
 
 #[cfg(test)]

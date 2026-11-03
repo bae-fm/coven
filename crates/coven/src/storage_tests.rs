@@ -165,9 +165,7 @@ impl StorageConnector for TrackingConnector {
     }
 }
 
-/// Stop sync and wait for the stop's release: stopping returns once the
-/// retry effect says sync isn't running, and releases the provider's client
-/// after (E5).
+/// Stop sync, which returns once the provider's client is released (E5).
 async fn stop(f: &Fixture) {
     f.connector.counted.stop(&f.handle).await;
 }
@@ -239,10 +237,10 @@ async fn stop_queued_while_the_first_pass_connects_releases_the_new_client() {
     *f.connector.held.lock().await = Some((entered, resumed));
     f.handle.start_sync().await.unwrap();
     entering.await.unwrap();
-    f.handle.stop_sync().await.unwrap();
+    let stopping = crate::tests::stopping(&f.handle);
     resume.send(()).unwrap();
-    // The queued stop releases the client the attempt made.
-    f.connector.counted.dropped(2).await;
+    // The stop waits for the attempt, then releases the client it made.
+    stopping.await.unwrap().unwrap();
     assert_eq!(f.connector.clients.lock().unwrap().len(), 2);
     assert!(f.connector.clients.lock().unwrap().iter().all(|client| client.upgrade().is_none()));
     f.advance(Duration::from_secs(1));
@@ -555,10 +553,11 @@ async fn reconnecting_without_network_is_offline_and_stop_and_close_finish_the_a
             resume.send(()).unwrap();
             close.await.unwrap();
         } else {
-            f.handle.stop_sync().await.unwrap();
+            let stopping = crate::tests::stopping(&f.handle);
             tokio::task::yield_now().await;
             assert_eq!(f.handle.sync_status().await.unwrap().state, SyncState::Syncing);
             resume.send(()).unwrap();
+            stopping.await.unwrap().unwrap();
             f.connector.counted.released().await;
             f.advance(Duration::from_secs(1));
             f.handle.start_sync().await.unwrap();

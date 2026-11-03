@@ -10007,8 +10007,9 @@ the rules above.
   location. `start_sync` starts the loop, whose
   first pass builds the storage client from custody credentials (api.md E5).
   Starting again keeps the running loop.
-- **`stop_sync`** returns once the waiting retries hear that sync isn't
-  running; release follows the active pass and transfers.
+- **`stop_sync`** answers the waiting retries that sync isn't running, then
+  releases the providers after the active pass and transfers, and returns.
+  It holds the call lock throughout, so a start can't overtake its release.
   It keeps session keys, location and credentials. Status reports completion, or
   `Failed` with its cause, without a pending connection record (api.md E5).
 - **Custody.** A closed custody owner is represented by the absence of its held

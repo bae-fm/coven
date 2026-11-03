@@ -8,13 +8,16 @@ impl CovenHandle {
     pub async fn start_sync(&self) -> Result<(), SyncError> {
         self.storage.start().await
     }
-    /// Finish the active pass and transfers, then release the provider client.
-    /// Keys remain unlocked for the handle session. Stopping changes nothing
-    /// the sync state reads; a release failure is recorded as the last
-    /// pass's failure. Returns once `coven_retry_effect` says sync isn't running and the
-    /// waiting retries are answered `NotSyncing`; the release goes on after.
-    /// A failure writing that row has failed the handle; stopping goes on and
-    /// the failure is returned.
+    /// Stop syncing: `coven_retry_effect` says sync isn't running and the
+    /// waiting retries are answered `NotSyncing` first; then the active pass
+    /// and transfers finish, the provider client is released and the
+    /// location recorded as custody holds it, and this returns. Once it has,
+    /// no pass runs until sync starts again. Keys remain unlocked for the
+    /// handle session. A `start_sync` asked meanwhile starts after it, and
+    /// dropping this future leaves stopping to finish. Stopping changes
+    /// nothing the sync state reads; a release failure is recorded as the
+    /// last pass's failure and returned. A failure writing either row has
+    /// failed the handle; stopping goes on and the failure is returned.
     pub async fn stop_sync(&self) -> Result<(), SyncError> {
         self.storage.stop().await
     }
@@ -67,29 +70,6 @@ impl CovenHandle {
     /// stopping and starting sync, and does nothing while sync is stopped.
     pub fn sync_often(&self, interval: std::time::Duration) -> SyncOftenGuard {
         self.storage.sync_often(interval)
-    }
-    /// The sync state and when sync last finished, computed from
-    /// `coven_sync_status`, `coven_retry_effect`, the send queue, the upload
-    /// queue, the files moving and the pending records in one committed
-    /// snapshot (§19.1).
-    pub async fn sync_status(&self) -> CovenResult<SyncStatus> {
-        coven_sync::sync_status(&self.database).await
-    }
-    /// The same pre-built query, live (E4): its first value is the current
-    /// state.
-    pub fn subscribe_sync_status(&self) -> LiveQuery<SyncStatus> {
-        coven_sync::subscribe_sync_status(&self.database)
-    }
-    /// Follow the sync state with `subscribe_sync_status`, as an app does (E5).
-    #[cfg(any(test, feature = "test-utils"))]
-    pub fn test_sync_status(&self) -> coven_database::test_utils::Followed<SyncStatus> {
-        coven_database::test_utils::Followed::new(self.subscribe_sync_status())
-    }
-    /// Follow `coven_sync_status.last_pass` with a live query, as an app's
-    /// SQL does (E4): `None` until a pass ends on this device.
-    #[cfg(any(test, feature = "test-utils"))]
-    pub fn test_last_pass(&self) -> coven_database::test_utils::Followed<Option<LastPass>> {
-        LastPass::follow(&self.database)
     }
 }
 
