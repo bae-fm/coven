@@ -305,7 +305,7 @@ async fn withdrawn_publication_authority_still_allows_session_cancellation() {
     ))
     .await;
     let mut storage = provider(&server.url);
-    storage.publications = gate;
+    storage.set_publications(gate);
     let path = ObjectPath::floor(STORE_ID);
     storage.create(&path, b"original").await.unwrap();
     let previous = storage.status(&path).await.unwrap().unwrap();

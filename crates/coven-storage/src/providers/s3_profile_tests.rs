@@ -77,7 +77,7 @@ async fn listing_profile_selects_v1_and_follows_key_markers() {
         }
     })).await;
     let mut storage = provider(&server.url);
-    Arc::get_mut(&mut storage.provider).unwrap().settings.listing = S3Listing::V1;
+    Arc::get_mut(storage.provider_mut()).unwrap().settings.listing = S3Listing::V1;
     assert_eq!(storage.list(&ObjectPrefix::all(STORE_ID)).await.unwrap().len(), 2);
 }
 
@@ -272,7 +272,7 @@ async fn explicit_gcs_name_drives_the_adapter_at_an_uncatalogued_endpoint() {
         )
         .unwrap(),
     ));
-    assert_eq!(storage.provider.settings, CataloguedProfile::named(S3ProfileName::Gcs).settings);
+    assert_eq!(storage.provider().settings, CataloguedProfile::named(S3ProfileName::Gcs).settings);
     let path = ObjectPath::slot(STORE_ID, std::num::NonZeroU64::MIN);
     storage.create(&path, b"original").await.unwrap();
     assert_eq!(

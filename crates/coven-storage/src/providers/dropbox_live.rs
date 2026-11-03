@@ -252,7 +252,7 @@ async fn listed(storage: &StorageConnection<DropboxStorage>, path: &ObjectPath) 
 }
 
 async fn metadata(storage: &StorageConnection<DropboxStorage>, path: &ObjectPath) -> Value {
-    storage.provider.rpc("files/get_metadata", json!({"path":path.absolute()})).await.unwrap()
+    storage.provider().rpc("files/get_metadata", json!({"path":path.absolute()})).await.unwrap()
 }
 
 async fn marker(storage: &StorageConnection<DropboxStorage>, path: &ObjectPath) -> StorageTime {

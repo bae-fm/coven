@@ -7,18 +7,18 @@ use std::sync::Arc;
 /// Applies the storage contract around native provider calls (E5). Every
 /// consumer uses this capability and waits for the same provider cooldown.
 pub struct StorageConnection<P: ?Sized = dyn ProviderOps> {
-    pub(crate) provider: Arc<P>,
+    provider: Arc<P>,
     /// The device this connection writes for: what it stages sits in that
     /// device's reserved folder (D10).
-    pub(crate) device: DeviceId,
-    pub(crate) publications: Arc<dyn PublicationGate>,
-    pub(crate) cooldown: Arc<dyn Cooldown>,
-    pub(crate) transfers: Arc<TransferBudget>,
+    device: DeviceId,
+    publications: Arc<dyn PublicationGate>,
+    cooldown: Arc<dyn Cooldown>,
+    transfers: Arc<TransferBudget>,
     /// Every request this connection sent, timed by the store's clock.
     requests: crate::request_tally::RequestTally,
     /// The setup call that made this connection, while it runs: rate-limited
     /// requests are sent again in place (§20.8).
-    pub(crate) setup: Option<Arc<SetupWaits>>,
+    setup: Option<Arc<SetupWaits>>,
 }
 
 impl<P: ProviderOps + ?Sized> StorageConnection<P> {
@@ -69,16 +69,11 @@ impl<P: ProviderOps + ?Sized> StorageConnection<P> {
         self.requests.counts()
     }
 
-    /// The store's clock, which times this connection's requests.
-    pub(crate) fn clock(&self) -> &dyn coven_foundation::clock::Clock {
-        self.requests.clock().as_ref()
-    }
-
     /// Whether to send the request that failed with `error` again, having
     /// waited: only while the setup call that made this connection runs.
     pub(crate) async fn resend_after(&self, error: &StorageError) -> bool {
         match &self.setup {
-            Some(waits) => waits.wait_to_resend(self.clock(), error).await,
+            Some(waits) => waits.wait_to_resend(self.requests.clock().as_ref(), error).await,
             None => false,
         }
     }
@@ -91,7 +86,7 @@ impl<P: ProviderOps + ?Sized> StorageConnection<P> {
         mut request: impl FnMut() -> F,
     ) -> Result<T, StorageError> {
         match &self.setup {
-            Some(waits) => waits.resend(self.clock(), request).await,
+            Some(waits) => waits.resend(self.requests.clock().as_ref(), request).await,
             None => request().await,
         }
     }
@@ -597,6 +592,35 @@ impl<P: ProviderOps + ?Sized> Storage for StorageConnection<P> {
         self.observed(self.abort_upload_checked(session).await).await
     }
 }
+
+/// What a provider's tests reach beneath a connection: the provider itself,
+/// and the device and gate it writes for.
+#[cfg(test)]
+impl<P: ?Sized> StorageConnection<P> {
+    pub(crate) fn provider(&self) -> &Arc<P> {
+        &self.provider
+    }
+
+    pub(crate) fn provider_mut(&mut self) -> &mut Arc<P> {
+        &mut self.provider
+    }
+
+    pub(crate) fn set_device(&mut self, device: DeviceId) {
+        self.device = device;
+    }
+
+    pub(crate) fn set_publications(&mut self, publications: Arc<dyn PublicationGate>) {
+        self.publications = publications;
+    }
+}
+
+// The connection's bucket claim requests and the in-memory connection's own
+// calls read its private parts, so they live beneath it.
+#[path = "bucket_claim.rs"]
+pub(crate) mod bucket_claim;
+#[cfg(any(test, feature = "test-utils"))]
+#[path = "test_utils.rs"]
+pub mod test_utils;
 
 #[cfg(test)]
 #[path = "connection_tests.rs"]

@@ -286,7 +286,7 @@ async fn lean_differential_onedrive_create() {
         let server =
             TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
         let mut storage = provider(&server.url);
-        Arc::get_mut(&mut storage.provider).unwrap().single_request_limit = limit;
+        Arc::get_mut(storage.provider_mut()).unwrap().single_request_limit = limit;
         crate::providers::tests::compare_create_model(&storage, false).await;
         assert!(state.lock().unwrap().uploads.is_empty());
         assert_eq!(state.lock().unwrap().files.len(), 4);
@@ -298,7 +298,7 @@ async fn copy_waits_for_monitor_completion_without_sending_bearer_tokens() {
     let state = remote();
     let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
     let mut storage = provider(&server.url);
-    Arc::get_mut(&mut storage.provider).unwrap().session =
+    Arc::get_mut(storage.provider_mut()).unwrap().session =
         crate::providers::tests::session_with_clock(
             PROVIDER,
             Arc::new(coven_foundation::clock::ClosureClock(|| std::time::SystemTime::UNIX_EPOCH)),
@@ -528,7 +528,7 @@ async fn created_bytes_are_heard_in_one_request_and_in_fragments() {
     let path = ObjectPath::slot(STORE_ID, std::num::NonZeroU64::MIN);
     storage.create_reporting(&path, &vec![1; 100 * 1024], &sent).await.unwrap();
     assert_eq!(std::mem::take(&mut *heard.lock().unwrap()), [64 * 1024, 100 * 1024]);
-    Arc::get_mut(&mut storage.provider).unwrap().single_request_limit = 4;
+    Arc::get_mut(storage.provider_mut()).unwrap().single_request_limit = 4;
     let path = ObjectPath::slot(STORE_ID, std::num::NonZeroU64::MIN.saturating_add(1));
     storage.create_reporting(&path, &[2; 5], &sent).await.unwrap();
     assert_eq!(*heard.lock().unwrap(), [5]);
@@ -549,7 +549,7 @@ async fn another_device_deletes_a_devices_folder_of_temporaries() {
     let temporary = temporary_path(&finished);
     assert!(state.lock().unwrap().files.contains_key(&temporary));
     let mut laptop = provider(&server.url);
-    laptop.device = coven_foundation::id_source::DeviceId(9);
+    laptop.set_device(coven_foundation::id_source::DeviceId(9));
     let mut own = laptop
         .begin_upload(&ObjectPath::slot(STORE_ID, std::num::NonZeroU64::new(2).unwrap()), 4)
         .await

@@ -42,7 +42,7 @@ async fn cleanup_removes_every_version_and_marker_across_pages_in_both_xml_diale
             profile::PLAIN
         };
         let storage = profile_provider(&server.url, settings);
-        cleanup_versions(&storage.provider, "run/").await.unwrap();
+        cleanup_versions(storage.provider(), "run/").await.unwrap();
     }
 }
 
@@ -54,7 +54,7 @@ async fn cleanup_refuses_to_delete_a_version_outside_its_namespace() {
     })).await;
     let storage = profile_provider(&server.url, profile::PLAIN);
     assert_eq!(
-        cleanup_versions(&storage.provider, "run/").await.unwrap_err().failure(),
+        cleanup_versions(storage.provider(), "run/").await.unwrap_err().failure(),
         StorageFailure::Protocol
     );
 }

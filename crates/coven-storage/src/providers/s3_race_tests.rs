@@ -18,9 +18,9 @@ async fn gcs_race_prepares_temporaries_then_sends_conditional_publication_copies
             .contains_key(&crate::S3Prefix::parse("store").unwrap().key(&target)));
         assert_eq!(state.copies, 0);
     }
-    fire(&s.provider, &target, b"first".to_vec(), first).await.unwrap();
+    fire(s.provider(), &target, b"first".to_vec(), first).await.unwrap();
     assert_eq!(
-        fire(&s.provider, &target, b"other".to_vec(), other).await.unwrap_err().failure(),
+        fire(s.provider(), &target, b"other".to_vec(), other).await.unwrap_err().failure(),
         StorageFailure::AlreadyExists
     );
     assert_eq!(state.lock().unwrap().copies, 2);
@@ -37,21 +37,21 @@ async fn every_object_race_stages_single_requests_and_races_only_copies() {
     let s =
         profile_provider(&server.url, CataloguedProfile::named(S3ProfileName::SeaweedFs).settings);
     let target = path(STORE_ID, 1);
-    let staged = single(&s.provider, &target, b"single").await.unwrap();
+    let staged = single(s.provider(), &target, b"single").await.unwrap();
     let assembled = prepare(&s, &target, b"multipart").await.unwrap();
     assert!(matches!(staged, Write::Copy { .. }) && matches!(assembled, Write::Copy { .. }));
     assert_eq!(state.lock().unwrap().copies, 0);
     assert!(s.status(&target).await.unwrap().is_none());
-    fire(&s.provider, &target, b"single".to_vec(), staged).await.unwrap();
+    fire(s.provider(), &target, b"single".to_vec(), staged).await.unwrap();
     assert_eq!(
-        fire(&s.provider, &target, b"multipart".to_vec(), assembled).await.unwrap_err().failure(),
+        fire(s.provider(), &target, b"multipart".to_vec(), assembled).await.unwrap_err().failure(),
         StorageFailure::AlreadyExists
     );
     assert_eq!(state.lock().unwrap().copies, 2);
     assert_eq!(s.read(&target).await.unwrap(), b"single");
     let plain = profile_provider(&server.url, profile::PLAIN);
     assert!(matches!(
-        single(&plain.provider, &path(STORE_ID, 2), b"put").await.unwrap(),
+        single(plain.provider(), &path(STORE_ID, 2), b"put").await.unwrap(),
         Write::Put { header: "if-none-match", .. }
     ));
 }

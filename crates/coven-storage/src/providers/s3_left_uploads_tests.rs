@@ -6,7 +6,7 @@ use std::num::NonZeroU64;
 
 /// A connection to the same bucket that writes for Ben's laptop.
 fn laptop(mut storage: StorageConnection<S3Storage>) -> StorageConnection<S3Storage> {
-    storage.device = DeviceId(9);
+    storage.set_device(DeviceId(9));
     storage
 }
 
@@ -113,7 +113,7 @@ async fn floor_sessions_begun_before_the_floor_are_ended_where_certified() {
             TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
         let settings = profile::CataloguedProfile::named(S3ProfileName::R2).settings;
         let mut storage = profile_provider(&server.url, settings);
-        Arc::get_mut(&mut storage.provider).unwrap().floor_sessions_dated = certified;
+        Arc::get_mut(storage.provider_mut()).unwrap().floor_sessions_dated = certified;
         let floor = ObjectPath::floor(STORE_ID);
         storage.create(&floor, b"floor").await.unwrap();
         let previous = storage.status(&floor).await.unwrap().unwrap();

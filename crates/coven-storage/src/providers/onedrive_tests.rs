@@ -588,7 +588,7 @@ async fn create_switches_to_a_session_above_the_content_limit() {
     let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
     let mut storage = provider(&server.url);
     assert_eq!(storage.single_request_limit(), 250_000_000);
-    Arc::get_mut(&mut storage.provider).unwrap().single_request_limit = 4;
+    Arc::get_mut(storage.provider_mut()).unwrap().single_request_limit = 4;
     let path = ObjectPath::slot(STORE_ID, std::num::NonZeroU64::MIN);
     let mut bytes = vec![7; storage.single_request_limit() as usize];
     storage.create(&path, &bytes).await.unwrap();

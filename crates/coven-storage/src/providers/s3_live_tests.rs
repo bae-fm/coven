@@ -45,7 +45,7 @@ async fn s3_live_sequence() {
     );
     let connected = settings.connect(Some(selected.settings));
     let before = connected
-        .provider
+        .provider()
         .bucket_versioning()
         .await
         .expect("read bucket versioning before sequence writes");
@@ -97,7 +97,7 @@ async fn s3_live_sequence() {
         .is_some(),
         "sequence floor or reply settlement failed"
     );
-    let after = connected.provider.bucket_versioning().await.unwrap();
+    let after = connected.provider().bucket_versioning().await.unwrap();
     assert_eq!(before, after, "bucket versioning changed during the run");
     println!("sequence S3 PASS cleanup=PASS");
 }
@@ -227,7 +227,7 @@ async fn s3_bucket_versioning() {
         .expect("valid live location")
         .unwrap_or(profile::PLAIN);
     let s = settings.connect(Some(selected));
-    let versioning = s.provider.bucket_versioning().await.map_err(Arc::new);
+    let versioning = s.provider().bucket_versioning().await.map_err(Arc::new);
     match &versioning {
         Ok(state) => println!("bucket versioning={state:?}"),
         Err(error) => println!(
@@ -282,7 +282,7 @@ where
     let storage = Arc::new(settings.connect(Some(profile)));
     use futures_util::FutureExt;
     let result = std::panic::AssertUnwindSafe(work(storage.clone(), store)).catch_unwind().await;
-    let cleanup = live_cleanup::cleanup(&storage.provider, store).await;
+    let cleanup = live_cleanup::cleanup(storage.provider(), store).await;
     let value = match result {
         Ok(Ok(value)) => Some(value),
         Ok(Err(error)) => {
@@ -371,7 +371,8 @@ async fn listing_lag(
         );
         s.create(&target, b"listing visibility").await?;
         let replied = Instant::now();
-        let stored_at = detect::time(&head(&s.provider, &s.provider.prefix.key(&target)).await?)?;
+        let stored_at =
+            detect::time(&head(s.provider(), &s.provider().prefix.key(&target)).await?)?;
         let all = ObjectPrefix::files(store);
         let object = observe("S3_object", trial, replied, stored_at, || async {
             Ok(s.list(&all).await?.iter().any(|object| object.path == target))
@@ -447,7 +448,7 @@ async fn run_race_round(
     for (writer, bytes) in payloads.iter().enumerate() {
         prepared.push(match &previous {
             Some(previous) => Write::Put {
-                header: match s.provider.settings.revision {
+                header: match s.provider().settings.revision {
                     S3Revision::ETag => "if-match",
                     S3Revision::Generation => "x-goog-if-generation-match",
                 },
@@ -458,7 +459,7 @@ async fn run_race_round(
             {
                 prepare(&s, &target, bytes).await?
             }
-            None => single(&s.provider, &target, bytes).await?,
+            None => single(s.provider(), &target, bytes).await?,
         });
     }
     let barrier = Arc::new(Barrier::new(width + 1));
@@ -472,7 +473,7 @@ async fn run_race_round(
         tasks.spawn(async move {
             barrier.wait().await;
             let start = origin.elapsed();
-            let result = fire(&s.provider, &target, bytes, write).await;
+            let result = fire(s.provider(), &target, bytes, write).await;
             Reply { writer, start, end: origin.elapsed(), result }
         });
     }
@@ -604,7 +605,7 @@ async fn s3_certification() {
     copy_reply::report(&settings, profile).await;
     // Separate evidence: it certifies only ending superseded floor sessions.
     let initiation = initiation::report(&settings, profile).await;
-    let after = settings.connect(Some(profile)).provider.bucket_versioning().await;
+    let after = settings.connect(Some(profile)).provider().bucket_versioning().await;
     match after {
         Ok(state) => {
             let stable = detection.versioning.as_ref().is_ok_and(|before| *before == state);
@@ -712,7 +713,7 @@ pub(super) async fn multipart(connected: Arc<StorageConnection<S3Storage>>, stor
     );
     assert_eq!(connected.read(&path).await.unwrap_err().failure(), StorageFailure::NotFound);
     let mut resumed = UploadSession::decode(recording.as_bytes()).unwrap();
-    let copy = connected.provider.settings.copy_publication.multipart().is_some();
+    let copy = connected.provider().settings.copy_publication.multipart().is_some();
     if copy {
         // A private staging name identifies the initiation this journal owns.
         connected.resume_upload(&mut resumed).await.unwrap();
@@ -736,12 +737,12 @@ pub(super) async fn multipart(connected: Arc<StorageConnection<S3Storage>>, stor
         let SessionState::S3 { id, parts, .. } = &resumed.state else {
             panic!("S3 session");
         };
-        let temporary = connected.provider.session_key(&resumed).unwrap();
+        let temporary = connected.provider().session_key(&resumed).unwrap();
         connected
-            .provider
+            .provider()
             .client
             .complete_multipart_upload()
-            .bucket(&connected.provider.bucket)
+            .bucket(&connected.provider().bucket)
             .key(&temporary)
             .upload_id(id.as_str())
             .multipart_upload(
@@ -764,10 +765,10 @@ pub(super) async fn multipart(connected: Arc<StorageConnection<S3Storage>>, stor
             .map_err(s3_error)
             .unwrap();
         let before = connected
-            .provider
+            .provider()
             .client
             .head_object()
-            .bucket(&connected.provider.bucket)
+            .bucket(&connected.provider().bucket)
             .key(&temporary)
             .send()
             .await
@@ -788,10 +789,10 @@ pub(super) async fn multipart(connected: Arc<StorageConnection<S3Storage>>, stor
         assert_eq!(connected.read(&path).await.unwrap(), bytes);
         assert_eq!(
             connected
-                .provider
+                .provider()
                 .client
                 .head_object()
-                .bucket(&connected.provider.bucket)
+                .bucket(&connected.provider().bucket)
                 .key(&temporary)
                 .send()
                 .await

@@ -69,18 +69,18 @@ async fn observe(
     store: StoreId,
 ) -> Result<Verdict, StorageError> {
     let mut verdict = Verdict { time: true, metadata: true, fractional: 0, upper_half: 0 };
-    let settings = s.provider.settings;
+    let settings = s.provider().settings;
     let clock = coven_foundation::clock::SystemClock;
     if let Some(condition) = settings.copy_publication.single_request() {
         for trial in 1..=SINGLE_TRIALS {
             let target = path(store, trial);
             let bytes = format!("copy reply trial={trial}").into_bytes();
-            let observed = single(&s.provider, &target, &bytes, condition).await?;
+            let observed = single(s.provider(), &target, &bytes, condition).await?;
             verdict.add(compare("single", trial, &observed));
             clock.sleep(SPACING).await;
         }
         let floor = ObjectPath::floor(store);
-        let observed = single(&s.provider, &floor, b"copy reply floor", condition).await?;
+        let observed = single(s.provider(), &floor, b"copy reply floor", condition).await?;
         verdict.add(compare("floor", 1, &observed));
     }
     if let Some(condition) = settings.copy_publication.multipart() {
@@ -155,10 +155,10 @@ async fn multipart(
     let SessionState::S3 { token, .. } = &session.state else {
         return Err(StorageFailure::SessionMismatch.into());
     };
-    let temporary = s.provider.session_key(&session)?;
-    races::multipart_request(&s.provider, &session)?.send().await.map_err(s3_error)?;
+    let temporary = s.provider().session_key(&session)?;
+    races::multipart_request(s.provider(), &session)?.send().await.map_err(s3_error)?;
     // Initiation stores the session token as both markers.
-    publish(&s.provider, &temporary, target, condition, token.clone(), true).await
+    publish(s.provider(), &temporary, target, condition, token.clone(), true).await
 }
 
 /// The publishing copy, the HEAD right after it, then the temporary's deletion.

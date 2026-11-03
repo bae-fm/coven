@@ -216,7 +216,7 @@ fn publication_time(pause: Duration) {
         live.storage.finish_upload(&mut upload).await.unwrap();
         let completed = live.clock.now();
         let complete_after = live.marker(5).await;
-        let native = live.storage.provider.metadata(&path).await.unwrap();
+        let native = live.storage.provider().metadata(&path).await.unwrap();
         let raw = http::string(&native, "lastModifiedDateTime").unwrap();
         let observed = live.observed(&path).await;
         println!("onedrive_live publication pause={}s elapsed={elapsed:?}: start_before={} start_after={} complete_before={} lastModifiedDateTime={raw} complete_after={} observed={:?}; local_session_start={session_started:?} local_session_return={session_returned:?} local_completion_start={completion_started:?} local_completed={completed:?}", pause.as_secs(), start_before.0, start_after.0, complete_before.0, complete_after.0, observed.stored_at);
@@ -305,7 +305,7 @@ fn onedrive_live_replacement_revision() {
                     .await
                     .unwrap();
             }
-            let native = live.storage.provider.metadata(&path).await.unwrap();
+            let native = live.storage.provider().metadata(&path).await.unwrap();
             let etag = http::string(&native, "eTag").unwrap().to_owned();
             let ctag = http::string(&native, "cTag").unwrap().to_owned();
             let modified = http::string(&native, "lastModifiedDateTime").unwrap();
@@ -341,12 +341,12 @@ fn onedrive_live_immutable_time_is_stable() {
         let path = live.path(1);
         live.storage.create(&path, b"immutable").await.unwrap();
         let first = live.observed(&path).await;
-        let before = live.storage.provider.metadata(&path).await.unwrap();
+        let before = live.storage.provider().metadata(&path).await.unwrap();
         live.clock.sleep(Duration::from_secs(3)).await;
         live.marker(2).await;
         assert_eq!(live.storage.read(&path).await.unwrap(), b"immutable");
         let second = live.observed(&path).await;
-        let after = live.storage.provider.metadata(&path).await.unwrap();
+        let after = live.storage.provider().metadata(&path).await.unwrap();
         println!(
             "onedrive_live immutable time: before={} after={} observed_before={:?} observed_after={:?}",
             http::string(&before, "lastModifiedDateTime").unwrap(),
@@ -381,7 +381,7 @@ async fn created(live: &Live<'_>, path: &ObjectPath) -> (Monotonic, Value) {
     live.storage.create(path, b"listing visibility").await.unwrap();
     let replied = Monotonic::now();
     let wall = live.clock.now();
-    let native = live.storage.provider.metadata(path).await.unwrap();
+    let native = live.storage.provider().metadata(path).await.unwrap();
     println!(
         "listing_lag OneDrive create_reply={wall:?} stored_at={}",
         http::string(&native, "lastModifiedDateTime").unwrap()
@@ -468,7 +468,7 @@ async fn monitor(provider: &OneDriveStorage, response: reqwest::Response) {
 #[ignore = "requires COVEN_LIVE_ONEDRIVE_ENV; transfers over 250 MB and observes for ten minutes"]
 fn onedrive_live_conditional_copy() {
     run(async |live| {
-        let provider = &live.storage.provider;
+        let provider = &live.storage.provider();
         let path = live.path(1);
         let session_before = live.marker(2).await;
         provider
@@ -671,9 +671,9 @@ fn onedrive_live_cached_folders_and_scoped_listing() {
         let listed = live.storage.list(&prefix).await.unwrap();
         assert!(listed.iter().all(|object| prefix.contains(&object.path)));
         assert_eq!(live.storage.read(&second).await.unwrap(), b"second");
-        let native = live.storage.provider.metadata(&first).await.unwrap();
+        let native = live.storage.provider().metadata(&first).await.unwrap();
         let parent = http::string(&native["parentReference"], "id").unwrap();
-        let provider = &live.storage.provider;
+        let provider = &live.storage.provider();
         http::checked(
             PROVIDER,
             provider

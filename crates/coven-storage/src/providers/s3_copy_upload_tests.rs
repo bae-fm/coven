@@ -32,7 +32,7 @@ async fn lean_differential_s3_create() {
             let server =
                 TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
             let mut storage = profile_provider(&server.url, profile.settings);
-            Arc::get_mut(&mut storage.provider).unwrap().single_request_limit = limit;
+            Arc::get_mut(storage.provider_mut()).unwrap().single_request_limit = limit;
             // Multipart creates below the limit publish by copy on copy
             // profiles; an every-object profile copies every create.
             let publication = profile.settings.copy_publication;
@@ -163,7 +163,7 @@ async fn gcs_multipart_copy_preserves_occupied_bytes_and_removes_temporaries() {
     let state = Arc::new(Mutex::new(Remote { gcs: true, ..Remote::default() }));
     let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
     let mut storage = gcs_provider(&server.url);
-    Arc::get_mut(&mut storage.provider).unwrap().single_request_limit = 3;
+    Arc::get_mut(storage.provider_mut()).unwrap().single_request_limit = 3;
     let path = ObjectPath::slot(STORE_ID, std::num::NonZeroU64::MIN);
     storage.create(&path, b"original").await.unwrap();
     let result = storage.create(&path, b"replacement").await;
@@ -189,7 +189,7 @@ async fn gcs_resume_reuses_its_temporary_after_assembly_copy_or_delete_reply_los
         let path = ObjectPath::slot(STORE_ID, std::num::NonZeroU64::MIN);
         let mut session = storage.begin_upload(&path, 4).await.unwrap();
         let recorded = session.encode().unwrap();
-        let temporary = storage.provider.session_key(&session).unwrap();
+        let temporary = storage.provider().session_key(&session).unwrap();
         assert!(temporary.starts_with(&format!(
             "store/{STORE_ID}/.coven-uploads/{}/",
             crate::test_utils::DEVICE.0
@@ -212,7 +212,7 @@ async fn gcs_resume_reuses_its_temporary_after_assembly_copy_or_delete_reply_los
         assert_eq!(listed.len(), usize::from(lost != "assembly"));
         state.lock().unwrap().refuse_temporary_delete = false;
         let mut resumed = UploadSession::decode(recorded.as_bytes()).unwrap();
-        assert_eq!(storage.provider.session_key(&resumed).unwrap(), temporary);
+        assert_eq!(storage.provider().session_key(&resumed).unwrap(), temporary);
         storage.resume_upload(&mut resumed).await.unwrap();
         assert!(resumed.is_complete());
         assert_eq!(resumed.confirmed_bytes(), 4);
@@ -300,7 +300,7 @@ async fn an_occupied_create_does_not_hide_failed_temporary_cleanup() {
     let state = Arc::new(Mutex::new(Remote { gcs: true, ..Remote::default() }));
     let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
     let mut storage = gcs_provider(&server.url);
-    Arc::get_mut(&mut storage.provider).unwrap().single_request_limit = 3;
+    Arc::get_mut(storage.provider_mut()).unwrap().single_request_limit = 3;
     let path = ObjectPath::slot(STORE_ID, std::num::NonZeroU64::MIN);
     storage.create(&path, b"original").await.unwrap();
     state.lock().unwrap().refuse_temporary_delete = true;
@@ -418,8 +418,10 @@ async fn every_object_copy_settles_a_lost_copy_reply_by_its_marker() {
 async fn every_object_copy_retry_after_a_failed_deletion_removes_the_temporary() {
     let (_server, state, storage) = every_object_provider().await;
     let path = ObjectPath::slot(STORE_ID, std::num::NonZeroU64::MIN);
-    let temporary =
-        storage.provider.create_temporary_key(&path, b"bytes", crate::test_utils::DEVICE).unwrap();
+    let temporary = storage
+        .provider()
+        .create_temporary_key(&path, b"bytes", crate::test_utils::DEVICE)
+        .unwrap();
     state.lock().unwrap().refuse_temporary_delete = true;
     assert_eq!(
         storage.create(&path, b"bytes").await.unwrap_err().failure(),
@@ -443,11 +445,16 @@ async fn every_object_copy_retry_after_a_failed_deletion_removes_the_temporary()
 async fn every_object_copy_retry_after_a_crash_removes_the_staged_temporary() {
     let (_server, state, storage) = every_object_provider().await;
     let path = ObjectPath::slot(STORE_ID, std::num::NonZeroU64::MIN);
-    let temporary =
-        storage.provider.create_temporary_key(&path, b"bytes", crate::test_utils::DEVICE).unwrap();
+    let temporary = storage
+        .provider()
+        .create_temporary_key(&path, b"bytes", crate::test_utils::DEVICE)
+        .unwrap();
     assert_ne!(
         temporary,
-        storage.provider.create_temporary_key(&path, b"other", crate::test_utils::DEVICE).unwrap()
+        storage
+            .provider()
+            .create_temporary_key(&path, b"other", crate::test_utils::DEVICE)
+            .unwrap()
     );
     // The crashed attempt staged its bytes and stopped before its copy.
     state.lock().unwrap().objects.insert(temporary.clone(), b"bytes".to_vec());

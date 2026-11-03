@@ -40,7 +40,7 @@ async fn concurrent_bucket_claims_choose_one_store_and_accept_its_retry() {
         }))
         .await;
         let first = profile_provider(&server.url, settings);
-        let second = StorageConnection::from_provider(first.provider.clone());
+        let second = StorageConnection::from_provider(first.provider().clone());
         let (a, b) = tokio::join!(first.claim_bucket(STORE_ID), second.claim_bucket(OTHER));
         let winner = match (a, b) {
             (Ok(()), Err(error)) => {

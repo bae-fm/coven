@@ -7,8 +7,8 @@
 mod config;
 mod provider_access;
 pub use provider_access::*;
-mod bucket_claim;
 mod connection;
+use connection::bucket_claim;
 mod connection_credentials;
 mod cooldown;
 pub use cooldown::{
@@ -73,7 +73,7 @@ pub use settings::StorageSettings;
 pub use storage::*;
 
 #[cfg(any(test, feature = "test-utils"))]
-pub mod test_utils;
+pub use connection::test_utils;
 
 mod invite_storage;
 pub use invite_storage::InviteStorage;

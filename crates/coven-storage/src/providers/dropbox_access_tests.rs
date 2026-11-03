@@ -397,7 +397,7 @@ async fn asynchronous_removal_waits_for_publication_and_retries_after_completion
     let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
     let clock = Arc::new(RemovalClock::default());
     let mut storage = provider(&server.url);
-    Arc::get_mut(&mut storage.provider).unwrap().session =
+    Arc::get_mut(storage.provider_mut()).unwrap().session =
         crate::providers::tests::session_with_clock(PROVIDER, clock.clone());
     storage.grant_access("member").await.unwrap();
     state.lock().unwrap().removal_job = Some(RemovalJob {
@@ -417,7 +417,7 @@ async fn asynchronous_removal_times_out_without_hiding_remaining_access() {
     let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
     let clock = Arc::new(RemovalClock::default());
     let mut storage = provider(&server.url);
-    Arc::get_mut(&mut storage.provider).unwrap().session =
+    Arc::get_mut(storage.provider_mut()).unwrap().session =
         crate::providers::tests::session_with_clock(PROVIDER, clock.clone());
     storage.grant_access("member").await.unwrap();
     state.lock().unwrap().removal_job = Some(RemovalJob {

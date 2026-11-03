@@ -42,7 +42,7 @@ async fn observe(
     store: StoreId,
 ) -> Result<bool, StorageError> {
     let floor = ObjectPath::floor(store);
-    let key = s.provider.prefix.key(&floor);
+    let key = s.provider().prefix.key(&floor);
     s.create(&floor, b"upload initiation trial=0").await?;
     let clock = coven_foundation::clock::SystemClock;
     let mut held = true;
@@ -51,7 +51,7 @@ async fn observe(
         let mut session = s.begin_replace(&current, 4).await?;
         s.upload_part(&mut session, b"data").await?;
         let listed: Vec<_> = s
-            .provider
+            .provider()
             .unfinished_uploads(&key)
             .await?
             .into_iter()

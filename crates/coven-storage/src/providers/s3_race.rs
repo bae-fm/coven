@@ -65,10 +65,10 @@ pub(super) async fn prepare(
 ) -> Result<Write, StorageError> {
     let mut session = s.begin_upload(target, bytes.len() as u64).await?;
     s.upload_part(&mut session, bytes).await?;
-    if let Some(condition) = s.provider.settings.copy_publication.multipart() {
+    if let Some(condition) = s.provider().settings.copy_publication.multipart() {
         // The profile's publication request is the copy, not temporary assembly.
-        multipart_request(&s.provider, &session)?.send().await.map_err(s3_error)?;
-        Ok(Write::Copy { temporary: s.provider.session_key(&session)?, condition })
+        multipart_request(s.provider(), &session)?.send().await.map_err(s3_error)?;
+        Ok(Write::Copy { temporary: s.provider().session_key(&session)?, condition })
     } else {
         Ok(Write::Complete(session))
     }

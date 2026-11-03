@@ -161,7 +161,7 @@ async fn sdk_response_error_is_protocol_failure_unless_its_status_answers() {
         .await;
         let storage = provider(&server.url);
         let SdkError::ServiceError(native) =
-            storage.provider.client.list_objects_v2().bucket("bucket").send().await.unwrap_err()
+            storage.provider().client.list_objects_v2().bucket("bucket").send().await.unwrap_err()
         else {
             panic!("expected the native service error");
         };
@@ -192,7 +192,7 @@ async fn sdk_request_construction_is_invalid_configuration() {
     }))
     .await;
     let storage = provider(&server.url);
-    let native = storage.provider.client.list_objects_v2().send().await.unwrap_err();
+    let native = storage.provider().client.list_objects_v2().send().await.unwrap_err();
     assert!(matches!(native, SdkError::ConstructionFailure(_)));
     assert_eq!(requests.load(Ordering::SeqCst), 0);
     let error = s3_error(native);

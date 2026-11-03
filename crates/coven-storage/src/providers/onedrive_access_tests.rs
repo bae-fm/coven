@@ -233,7 +233,7 @@ async fn invitation_uses_encoded_sharing_url_when_permission_id_is_not_a_shares_
         panic!()
     };
     let invitation = StorageInvitation::decode(invitation.encode().unwrap().as_bytes()).unwrap();
-    storage.provider.join(&invitation).await.unwrap();
+    storage.provider().join(&invitation).await.unwrap();
     let requests = requests.lock().unwrap();
     let redemption: Vec<_> = requests
         .iter()

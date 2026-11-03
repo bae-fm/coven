@@ -501,7 +501,7 @@ async fn abort_retries_a_lost_close_and_accepts_an_expired_session() {
     let upload = storage.begin_upload(&path, 4).await.unwrap();
     state.lock().unwrap().fail_reply = true;
     assert_eq!(storage.abort_upload(&upload).await.unwrap_err().failure(), StorageFailure::Network);
-    assert!(state.lock().unwrap().uploads[storage.provider.id(&upload).unwrap()].closed);
+    assert!(state.lock().unwrap().uploads[storage.provider().id(&upload).unwrap()].closed);
     storage.abort_upload(&upload).await.unwrap();
     state.lock().unwrap().uploads.clear();
     storage.abort_upload(&upload).await.unwrap();
@@ -523,7 +523,7 @@ async fn abort_uses_the_remote_offset_after_a_lost_part_reply() {
     assert_eq!(upload.confirmed_bytes(), 0);
     storage.abort_upload(&upload).await.unwrap();
     assert_eq!(state.lock().unwrap().close_requests, [0, 4]);
-    assert!(state.lock().unwrap().uploads[storage.provider.id(&upload).unwrap()].closed);
+    assert!(state.lock().unwrap().uploads[storage.provider().id(&upload).unwrap()].closed);
     storage.abort_upload(&upload).await.unwrap();
     assert!(state.lock().unwrap().objects.is_empty());
 }
@@ -549,7 +549,7 @@ async fn create_uploads_an_oversized_write_in_parts() {
     let mut storage = provider(&server.url);
     let path = ObjectPath::slot(STORE_ID, std::num::NonZeroU64::MIN);
     assert_eq!(storage.single_request_limit(), 150 * 1024 * 1024);
-    Arc::get_mut(&mut storage.provider).unwrap().single_request_limit = 4;
+    Arc::get_mut(storage.provider_mut()).unwrap().single_request_limit = 4;
     let mut bytes = vec![0x7b; storage.single_request_limit() as usize];
     storage.create(&path, &bytes).await.unwrap();
     assert!(state.lock().unwrap().uploads.is_empty());
@@ -578,7 +578,7 @@ async fn created_bytes_are_heard_in_one_request_and_in_parts() {
     let path = ObjectPath::slot(STORE_ID, std::num::NonZeroU64::MIN);
     storage.create_reporting(&path, &vec![1; 100 * 1024], &sent).await.unwrap();
     assert_eq!(std::mem::take(&mut *heard.lock().unwrap()), [64 * 1024, 100 * 1024]);
-    Arc::get_mut(&mut storage.provider).unwrap().single_request_limit = 4;
+    Arc::get_mut(storage.provider_mut()).unwrap().single_request_limit = 4;
     let path = ObjectPath::slot(STORE_ID, std::num::NonZeroU64::MIN.saturating_add(1));
     storage.create_reporting(&path, &[2; 5], &sent).await.unwrap();
     assert_eq!(*heard.lock().unwrap(), [5]);
@@ -747,7 +747,7 @@ async fn stale_abort_cannot_close_another_native_session() {
     let second = ObjectPath::slot(STORE_ID, 2.try_into().unwrap());
     let mut old = storage.begin_upload(&first, 4).await.unwrap();
     let mut next = storage.begin_upload(&second, 4).await.unwrap();
-    assert_ne!(storage.provider.id(&old).unwrap(), storage.provider.id(&next).unwrap());
+    assert_ne!(storage.provider().id(&old).unwrap(), storage.provider().id(&next).unwrap());
     storage.upload_part(&mut old, b"old!").await.unwrap();
     storage.upload_part(&mut next, b"next").await.unwrap();
     storage.abort_upload(&old).await.unwrap();
@@ -771,7 +771,7 @@ async fn throttling_is_one_request_then_a_cooldown_for_the_whole_connection() {
     let cooldown = Arc::new(crate::cooldown::tests::RecordingCooldown::default());
     let publications = Arc::new(crate::test_utils::UnrestrictedPublications);
     let storage = StorageConnection::with_gate(
-        provider(&server.url).provider,
+        provider(&server.url).provider().clone(),
         crate::test_utils::DEVICE,
         publications,
         cooldown.clone(),

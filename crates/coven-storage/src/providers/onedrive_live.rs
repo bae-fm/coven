@@ -106,7 +106,7 @@ impl Live<'_> {
     async fn marker(&self, number: u64) -> (String, StorageTime) {
         let path = self.path(number);
         self.storage.create(&path, b"publication marker").await.unwrap();
-        let native = self.storage.provider.metadata(&path).await.unwrap();
+        let native = self.storage.provider().metadata(&path).await.unwrap();
         let raw = http::string(&native, "lastModifiedDateTime").unwrap().to_owned();
         let time = http::timestamp(&native, "lastModifiedDateTime").unwrap();
         assert_eq!(self.observed(&path).await.stored_at, time);
@@ -123,7 +123,7 @@ impl Live<'_> {
         upload
     }
     async fn assert_temporaries_deleted(&self) {
-        let provider = &self.storage.provider;
+        let provider = &self.storage.provider();
         let root = provider.item(&provider.folder, &[]).unwrap();
         assert!(!self.uploads.is_empty());
         for (_, recorded) in self.uploads.iter() {

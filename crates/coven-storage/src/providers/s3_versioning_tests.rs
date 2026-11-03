@@ -31,7 +31,7 @@ async fn xml_versioning_states_are_read_with_each_signer() {
             ))
             .await;
             let s = profile_provider(&server.url, S3Settings { signing, ..profile::PLAIN });
-            assert_eq!(s.provider.bucket_versioning().await.unwrap(), expected);
+            assert_eq!(s.provider().bucket_versioning().await.unwrap(), expected);
         }
     }
 }
@@ -53,7 +53,7 @@ async fn refused_unknown_and_malformed_reads_never_mean_disabled() {
             TestServer::new(Router::new().fallback(move || async move { response(status, body) }))
                 .await;
         let s = profile_provider(&server.url, profile::PLAIN);
-        let error = s.provider.bucket_versioning().await.unwrap_err();
+        let error = s.provider().bucket_versioning().await.unwrap_err();
         assert_eq!(error.failure(), failure);
         if failure == StorageFailure::Protocol {
             assert!(!unknown(&error), "malformed replies fail detection");
@@ -76,7 +76,7 @@ async fn only_a_hosted_r2_refusal_establishes_that_versioning_is_unavailable() {
                 &server.url,
                 profile::CataloguedProfile::named(S3ProfileName::R2).settings,
             );
-            let storage = Arc::get_mut(&mut connection.provider).unwrap();
+            let storage = Arc::get_mut(connection.provider_mut()).unwrap();
             if let StorageConfig::S3 { endpoint: recorded, profile, .. } = &mut storage.config {
                 *recorded = Some(endpoint.parse().unwrap());
                 *profile = Some(S3Profile::Named(S3ProfileName::R2));
