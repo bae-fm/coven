@@ -7,10 +7,15 @@
 # scripts/cargo.sh, which records each build copy cargo uses, rebuilt or up to
 # date.
 #
-# Caps are about twice a fresh build of each.
+# Caps are about twice a fresh build of each. target-ra is rust-analyzer's own:
+# the Claude Code session's rust-analyzer (agent-instructions' rust-analyzer
+# plugin) builds build scripts and proc macros there with
+# `cargo check --workspace`. Its cap is a guess until a first build there is
+# measured.
 #
 # path                     cap
 target                     20G
+target-ra                  6G
 spec/proofs/io/.lake       1G
 spec/proofs/merge/.lake    1G
 spec/proofs/queue/.lake    1G
