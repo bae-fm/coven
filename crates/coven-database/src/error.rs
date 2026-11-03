@@ -712,6 +712,15 @@ pub enum DbError {
     },
 }
 
+impl From<coven_foundation::files::WriterError> for DbError {
+    fn from(error: coven_foundation::files::WriterError) -> Self {
+        match error {
+            coven_foundation::files::WriterError::Lock(error) => Self::Lock(error),
+            coven_foundation::files::WriterError::File(error) => Self::Disk(error),
+        }
+    }
+}
+
 impl From<coven_format::Error> for DbError {
     fn from(error: coven_format::Error) -> Self {
         match error {

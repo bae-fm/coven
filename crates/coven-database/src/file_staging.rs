@@ -168,12 +168,7 @@ impl FileStaging {
                 let writer = (|| -> Result<_, DbError> {
                     let slot = self.database.read().expect("database lock poisoned");
                     let inner = slot.as_ref().expect("staging holds close guard");
-                    let lock = inner.access.directory.lock_read_only()?;
-                    Ok(inner
-                        .access
-                        .directory
-                        .file(FileArea::AppProvided, &file_name)
-                        .create_writer(lock)?)
+                    Ok(inner.access.directory.create_writer(FileArea::AppProvided, &file_name)?)
                 })();
                 (self, writer)
             }))

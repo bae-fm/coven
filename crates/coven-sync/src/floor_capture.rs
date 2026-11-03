@@ -5,7 +5,7 @@ use coven_format::{
     floor::{FloorFrames, FloorHeader, OriginalSlot},
     sealed_floor::FloorPrefixEncoder,
 };
-use coven_foundation::{files::StoreDirAccess, id_source::KeyId};
+use coven_foundation::id_source::KeyId;
 use std::{
     collections::BTreeMap,
     io::{Cursor, Read},
@@ -69,11 +69,10 @@ impl SequenceSync {
         ring: &StoreKeyring,
         member: &MemberIdentity,
     ) -> Result<FloorArtifact, SyncError> {
-        let file = self.artifact_file(&capture.name)?;
         // The capture is journaled before creating its file; this phase has sent
         // no provider request, so retry may replace an interrupted local capture.
-        file.remove()?;
-        let mut writer = file.create_writer(self.directory.lock_read_only()?)?;
+        self.artifact_file(&capture.name)?.remove()?;
+        let mut writer = self.artifact_writer(&capture.name)?;
         let mut originals: BTreeMap<_, _> = self
             .database
             .original_slots()

@@ -86,15 +86,12 @@ impl FilesInner {
     ) -> Result<(CacheReservation, FileWriter), FileReadError> {
         let name = FileName::new(self.ids.new_id().to_string()).expect("UUID cache name");
         let reservation = self.database.reserve_cache_file(file, name.clone()).await?;
-        let target = self.directory.file(FileArea::Cache, &name);
         let directory = self.directory.clone();
         // Cleanup cannot release the name while creation still runs after a
         // cancelled await; the blocking task retains its reservation.
         let joined = tokio::task::spawn_blocking(move || {
-            let writer = (|| -> Result<_, FileReadError> {
-                let lock = directory.lock_read_only()?;
-                Ok(target.create_writer(lock)?)
-            })();
+            let writer =
+                directory.create_writer(FileArea::Cache, &name).map_err(FileReadError::from);
             (reservation, writer)
         })
         .await;

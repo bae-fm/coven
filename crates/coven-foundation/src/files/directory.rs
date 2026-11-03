@@ -4,8 +4,8 @@ use std::path::PathBuf;
 
 use crate::files::protection::Protection;
 use crate::files::{
-    lock, settings, AtomicFile, CacheWriteLock, FileError, SettingsError, StoreDeletionLock,
-    StoreLock, StoreLockError, StoreReadLock, StoreSettings,
+    lock, settings, AtomicFile, CacheWriteLock, FileError, FileWriter, SettingsError,
+    StoreDeletionLock, StoreLock, StoreLockError, StoreReadLock, StoreSettings,
 };
 use crate::id_source::StoreId;
 
@@ -158,6 +158,18 @@ pub(crate) fn initialize(
     settings::write(path, settings)
 }
 
+/// Why a store's file could not be created for writing: the store's read
+/// lock, which the writer holds, or the file itself.
+#[derive(Debug, thiserror::Error)]
+pub enum WriterError {
+    /// The store could not be held for the write.
+    #[error(transparent)]
+    Lock(#[from] StoreLockError),
+    /// Creating the file failed.
+    #[error(transparent)]
+    File(#[from] FileError),
+}
+
 /// Crate-to-crate operations for coven's owners; not re-exported by the app API.
 pub trait StoreDirAccess: Sized {
     /// The database file's exact path for coven-database to open with SQLite.
@@ -212,6 +224,12 @@ pub trait StoreDirAccess: Sized {
     /// The capability for one app-provided copy or cache entry. All path
     /// construction stays here; the name cannot traverse directories.
     fn file(&self, area: FileArea, name: &FileName) -> AtomicFile;
+    /// Create a named file in `area` for asynchronous streaming without
+    /// replacing anything. The writer holds the store's read lock until its
+    /// handle and any cancelled I/O finish, so the store can't be deleted
+    /// under it. The caller records the name first and removes partial bytes
+    /// after a failure.
+    fn create_writer(&self, area: FileArea, name: &FileName) -> Result<FileWriter, WriterError>;
 }
 
 /// Check that `lock` protects exactly the store at `directory`.
@@ -297,6 +315,10 @@ impl StoreDirAccess for StoreDir {
             FileArea::Cache => CACHE,
         };
         AtomicFile::new(self.path.join(area).join(&name.0))
+    }
+    fn create_writer(&self, area: FileArea, name: &FileName) -> Result<FileWriter, WriterError> {
+        let lock = self.lock_read_only()?;
+        Ok(FileWriter::create(&self.file(area, name), lock)?)
     }
 }
 

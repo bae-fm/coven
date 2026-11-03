@@ -12,8 +12,7 @@ fn store(root: &tempfile::TempDir) -> crate::files::StoreDir {
 /// Write `bytes` as `name` in `area`, finished into `batch`.
 async fn write(store: &crate::files::StoreDir, area: FileArea, name: &str, batch: &mut FlushBatch) {
     store
-        .file(area, &FileName::new(name).unwrap())
-        .create_writer(store.lock_read_only().unwrap())
+        .create_writer(area, &FileName::new(name).unwrap())
         .unwrap()
         .write_from(&mut b"bytes".as_slice(), |_| {}, batch)
         .await

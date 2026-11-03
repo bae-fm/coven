@@ -36,7 +36,7 @@ pub use creation::DirectoryCreationError;
 pub use device_reset::{DeviceReset, ReplacedBy, ReplacementRecord};
 pub use directory::{
     is_folder, protect_files, verify_lock, FileArea, FileName, FileNameError, StoreDir,
-    StoreDirAccess, StoreFile,
+    StoreDirAccess, StoreFile, WriterError,
 };
 pub use file_lock::{FileLock, LockMode};
 pub use file_reader::FileReader;

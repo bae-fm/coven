@@ -1044,9 +1044,7 @@ tables = [
 "StoreDir::lock_for_open" = "StoreLock"
 "StoreDir::owned_file" = "AtomicFile"
 "StoreDir::file" = "AtomicFile"
-
-[capability_factories."crates/coven-foundation/src/files/atomic_file.rs"]
-"AtomicFile::create_writer" = "FileWriter"
+"StoreDir::create_writer" = "FileWriter"
 
 [[task_starts]]
 kind = "runtime construction"

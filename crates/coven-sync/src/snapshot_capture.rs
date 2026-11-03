@@ -69,19 +69,30 @@ pub(crate) mod purpose {
     }
 }
 
+/// A capture artifact's file name: a recorded name that is not one is damage.
+#[expect(
+    clippy::map_err_ignore,
+    reason = "a stored value that won't convert or decode is DamagedDatabase"
+)]
+fn artifact_name(name: &str) -> Result<FileName, SyncError> {
+    Ok(FileName::new(name).map_err(|_| coven_database::DbError::DamagedDatabase)?)
+}
+
 impl SequenceSync {
-    #[expect(
-        clippy::map_err_ignore,
-        reason = "a stored value that won't convert or decode is DamagedDatabase"
-    )]
     pub(crate) fn artifact_file(
         &self,
         name: &str,
     ) -> Result<coven_foundation::files::AtomicFile, SyncError> {
-        Ok(self.directory.file(
-            FileArea::AppProvided,
-            &FileName::new(name).map_err(|_| coven_database::DbError::DamagedDatabase)?,
-        ))
+        Ok(self.directory.file(FileArea::AppProvided, &artifact_name(name)?))
+    }
+
+    /// Create a capture's artifact for writing, holding the store until the
+    /// writer ends.
+    pub(crate) fn artifact_writer(
+        &self,
+        name: &str,
+    ) -> Result<coven_foundation::files::FileWriter, SyncError> {
+        Ok(self.directory.create_writer(FileArea::AppProvided, &artifact_name(name)?)?)
     }
 
     #[expect(
@@ -94,11 +105,10 @@ impl SequenceSync {
         ring: &StoreKeyring,
         member: &MemberIdentity,
     ) -> Result<SnapshotArtifact, SyncError> {
-        let file = self.artifact_file(&capture.name)?;
         // Capturing precedes any provider request. A partial local file from
         // this journal step has no remote identity and can be replaced.
-        file.remove()?;
-        let writer = file.create_writer(self.directory.lock_read_only()?)?;
+        self.artifact_file(&capture.name)?.remove()?;
+        let writer = self.artifact_writer(&capture.name)?;
         let path = crate::snapshot_object::path(self.store(), &capture.id)?;
         let key = crate::write_seal::derive(ring, &capture.id.audience, capture.key)?;
         let (sender, receiver) = tokio::sync::mpsc::channel(1);

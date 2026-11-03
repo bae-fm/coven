@@ -102,19 +102,6 @@ impl AtomicFile {
         replace(&self.path, bytes)
     }
 
-    /// Create a named file for asynchronous streaming without replacing anything.
-    /// The caller records its name first and removes partial bytes after failure.
-    /// Supply this file's store read lock; every outstanding write retains it.
-    pub fn create_writer(&self, lock: StoreReadLock) -> Result<FileWriter, FileError> {
-        let path = self.resolved()?;
-        let file = create_new(&path)
-            .map_err(|source| FileError::at("create owned file", &path, source))?;
-        Ok(FileWriter {
-            file: Arc::new(tokio::sync::Mutex::new(LockedWriter { file, lock: Some(lock) })),
-            path,
-        })
-    }
-
     /// Write and sync complete bytes at this name, then flush its directory
     /// and the drive's cache, as a batch of this one file, with no temporary
     /// sibling. The caller records the name as its own
@@ -186,6 +173,19 @@ struct LockedWriter {
 }
 
 impl FileWriter {
+    /// Create `file` for asynchronous streaming without replacing anything,
+    /// holding `lock`, its store's read lock, until the handle and any
+    /// cancelled I/O finish, or a batch it finishes into flushes.
+    pub(super) fn create(file: &AtomicFile, lock: StoreReadLock) -> Result<Self, FileError> {
+        let path = file.resolved()?;
+        let file = create_new(&path)
+            .map_err(|source| FileError::at("create owned file", &path, source))?;
+        Ok(Self {
+            file: Arc::new(tokio::sync::Mutex::new(LockedWriter { file, lock: Some(lock) })),
+            path,
+        })
+    }
+
     /// Read once in 64 KiB chunks, reporting each chunk after its disk write,
     /// then finish the file into `batch`.
     pub async fn write_from<R: tokio::io::AsyncRead + Unpin>(

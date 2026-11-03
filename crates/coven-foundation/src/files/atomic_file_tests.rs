@@ -214,12 +214,13 @@ async fn streamed_creation_syncs_bytes_and_refuses_to_overwrite_a_kept_file() {
             &crate::id_source::UuidIds,
         )
         .unwrap();
-    let file =
-        store.file(crate::files::FileArea::Cache, &crate::files::FileName::new("kept").unwrap());
+    let name = crate::files::FileName::new("kept").unwrap();
+    let file = store.file(crate::files::FileArea::Cache, &name);
     let bytes = vec![1; 40960];
     let mut count = 0;
     let mut batch = crate::files::FlushBatch::new();
-    file.create_writer(store.lock_read_only().unwrap())
+    store
+        .create_writer(crate::files::FileArea::Cache, &name)
         .unwrap()
         .write_from(&mut bytes.as_slice(), |chunk| count += chunk.len(), &mut batch)
         .await
@@ -227,9 +228,9 @@ async fn streamed_creation_syncs_bytes_and_refuses_to_overwrite_a_kept_file() {
     let _flushed = batch.flush().await.unwrap();
     assert_eq!(count, bytes.len());
     assert_eq!(file.read_optional().unwrap().unwrap(), bytes);
-    let error = file.create_writer(store.lock_read_only().unwrap()).err().unwrap();
+    let error = store.create_writer(crate::files::FileArea::Cache, &name).err().unwrap();
     assert!(
-        matches!(error, FileError::Io {source, ..} if source.downcast_ref::<std::io::Error>().unwrap().kind() == io::ErrorKind::AlreadyExists)
+        matches!(error, crate::files::WriterError::File(FileError::Io {source, ..}) if source.downcast_ref::<std::io::Error>().unwrap().kind() == io::ErrorKind::AlreadyExists)
     );
     assert_eq!(file.read_optional().unwrap().unwrap(), bytes);
 }
@@ -243,9 +244,9 @@ async fn a_dropped_writer_leaves_its_name_for_recorded_cleanup() {
             &crate::id_source::UuidIds,
         )
         .unwrap();
-    let file =
-        store.file(crate::files::FileArea::Cache, &crate::files::FileName::new("partial").unwrap());
-    drop(file.create_writer(store.lock_read_only().unwrap()).unwrap());
+    let name = crate::files::FileName::new("partial").unwrap();
+    let file = store.file(crate::files::FileArea::Cache, &name);
+    drop(store.create_writer(crate::files::FileArea::Cache, &name).unwrap());
     assert_eq!(file.read_optional().unwrap().unwrap(), b"");
     file.remove().unwrap();
     assert!(file.read_optional().unwrap().is_none());

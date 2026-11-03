@@ -308,6 +308,15 @@ impl From<ObservationError> for SyncError {
     }
 }
 
+impl From<coven_foundation::files::WriterError> for SyncError {
+    fn from(error: coven_foundation::files::WriterError) -> Self {
+        match error {
+            coven_foundation::files::WriterError::Lock(error) => error.into(),
+            coven_foundation::files::WriterError::File(error) => error.into(),
+        }
+    }
+}
+
 impl From<StoreLockError> for SyncError {
     fn from(error: StoreLockError) -> Self {
         Self::disk(error)

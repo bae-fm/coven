@@ -14,10 +14,7 @@ fn cancelled_writes_retain_the_store_until_blocking_io_finishes() {
             let layout = StoreDirectories::new(root.path().to_owned());
             let store = layout.create_store_dir(StoreId(Uuid::from_u128(123)), &UuidIds).unwrap();
             let name = FileName::new("cancelled").unwrap();
-            let mut writer = store
-                .file(FileArea::Cache, &name)
-                .create_writer(store.lock_read_only().unwrap())
-                .unwrap();
+            let mut writer = store.create_writer(FileArea::Cache, &name).unwrap();
             if finish {
                 writer.append(b"queued bytes").await.unwrap();
             }
@@ -64,8 +61,7 @@ async fn a_streaming_writer_prevents_store_deletion_until_it_closes() {
         let id = StoreId(Uuid::from_u128(123));
         let store = layout.create_store_dir(id, &UuidIds).unwrap();
         let name = FileName::new("streamed").unwrap();
-        let mut writer =
-            store.file(area, &name).create_writer(store.lock_read_only().unwrap()).unwrap();
+        let mut writer = store.create_writer(area, &name).unwrap();
         assert!(matches!(store.lock_for_deletion(), Err(StoreLockError::AlreadyOpen(_))));
         writer.append(b"kept bytes").await.unwrap();
         writer.finish().await.unwrap();
