@@ -109,6 +109,9 @@ struct AuthorizationState {
     /// Coven's tables the app statement being prepared reads through one of
     /// coven's views.
     through_views: BTreeSet<String>,
+    /// The tables, lowercase, the app statement being prepared drops: their
+    /// rowid guards go with them (`rowid_policy.rs`).
+    dropping: BTreeSet<String>,
     /// Whether app SQL may read `coven_sync_status` and
     /// `coven_retry_effect`: only on the handle that holds the writer lock,
     /// whose own sync their rows describe. A read-only handle can't tell
@@ -152,6 +155,7 @@ impl SqlAuthorization {
                 hidden_rowids: BTreeSet::new(),
                 changed_tables: ChangedTables::None,
                 through_views: BTreeSet::new(),
+                dropping: BTreeSet::new(),
                 writer_state,
             })),
         }
@@ -301,6 +305,7 @@ impl SqlAuthorization {
         state.denied = None;
         state.altering = false;
         state.through_views.clear();
+        state.dropping.clear();
     }
 
     /// The tables whose hidden rowids may have changed since this was last
@@ -631,6 +636,9 @@ impl AuthorizationState {
             crate::internal_schema::reserved_name(name)
                 .then(|| DbError::InternalTable { table: name.into() })
         };
+        if let DropTable { table_name } | DropTempTable { table_name } = context.action {
+            self.dropping.insert(table_name.to_ascii_lowercase());
+        }
         // Materializing merged rows writes coven's files table as it writes
         // every synced table; nothing else written there comes from app SQL.
         if self.applying
@@ -709,6 +717,14 @@ impl AuthorizationState {
                 if crate::internal_schema::followed(table_name) =>
             {
                 return reserved(trigger_name);
+            }
+            // SQLite drops a table's triggers with it, coven's rowid guard
+            // among them; the app can't drop a guard alone.
+            DropTempTrigger { trigger_name, table_name }
+                if crate::sqlite::rowid_guard(trigger_name)
+                    && self.dropping.contains(&table_name.to_ascii_lowercase()) =>
+            {
+                Some(table_name)
             }
             CreateTrigger { trigger_name, table_name }
             | CreateTempTrigger { trigger_name, table_name }

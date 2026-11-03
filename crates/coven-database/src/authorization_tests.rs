@@ -627,3 +627,45 @@ async fn shadowed_rowid_guards_follow_schema_changes_nested_triggers_and_reopeni
         db.close().await.unwrap();
     }
 }
+
+/// A table that declares a column named `rowid` keeps a guard on its hidden
+/// address (rowid_policy.rs). The app's migration can still drop the table,
+/// and its guard goes with it; it still can't drop the guard alone.
+#[tokio::test]
+async fn dropping_a_table_with_a_guarded_rowid_drops_its_guard() {
+    let store = TestStore::new();
+    let db = store
+        .builder(
+            vec![],
+            vec![
+                Migration::addition(
+                    1,
+                    "shadowed",
+                    "CREATE TABLE items(id TEXT NOT NULL PRIMARY KEY, rowid INTEGER)",
+                ),
+                Migration::breaking(2, "dropped", "DROP TABLE items", crate::OldWrites::Drop),
+            ],
+        )
+        .open()
+        .await
+        .unwrap();
+    db.close().await.unwrap();
+    let store = TestStore::new();
+    let error = store
+        .builder(
+            vec![],
+            vec![Migration::addition(
+                1,
+                "unguarded",
+                "CREATE TABLE items(id TEXT NOT NULL PRIMARY KEY, rowid INTEGER);
+                 DROP TRIGGER temp._coven_rowid_guard_main_items",
+            )],
+        )
+        .open()
+        .await
+        .err()
+        .expect("dropping the guard alone is refused");
+    assert!(
+        matches!(crate::tests::database_error(error), DbError::InternalTable { table } if table == "_coven_rowid_guard_main_items")
+    );
+}

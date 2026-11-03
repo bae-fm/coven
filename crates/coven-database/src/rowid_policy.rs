@@ -113,7 +113,14 @@ impl DatabaseConnection {
 
 /// The guard trigger of a table whose declared column shadows `rowid`.
 fn guard(schema: &str, table: &str) -> String {
-    format!("_coven_rowid_guard_{schema}_{table}")
+    format!("{GUARD}{schema}_{table}")
+}
+
+const GUARD: &str = "_coven_rowid_guard_";
+
+/// Whether `trigger` is one of the guards on a hidden rowid.
+pub(crate) fn rowid_guard(trigger: &str) -> bool {
+    trigger.to_ascii_lowercase().starts_with(GUARD)
 }
 
 #[cfg(test)]

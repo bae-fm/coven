@@ -17,6 +17,7 @@ mod page_cache;
 #[path = "pre_update_changes.rs"]
 mod pre_update_changes;
 pub(crate) use pre_update_changes::ROWS_PER_TABLE;
+pub(crate) use rowid_policy::rowid_guard;
 #[path = "rowid_policy.rs"]
 mod rowid_policy;
 #[path = "stream_capture.rs"]
