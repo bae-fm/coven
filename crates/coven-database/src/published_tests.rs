@@ -7,7 +7,7 @@
 pub(crate) fn fill_for_plans(db: &rusqlite::Connection) {
     db.execute_batch(
         "INSERT INTO _coven_published VALUES(1);
-         INSERT INTO _coven_published_rows SELECT tab,key,audience,x'00',i%2 FROM fixture;
+         INSERT INTO _coven_published_rows SELECT tab,key,audience,x'00' FROM fixture;
          INSERT INTO _coven_published_losses SELECT i,tab,key,audience,x'00' FROM fixture;
          INSERT INTO _coven_published_creations SELECT tab,key,audience,CAST(device || n AS BLOB),x'00' FROM fixture;
          INSERT INTO _coven_published_file_refs SELECT device,substr(key,17,16) FROM fixture;",
@@ -32,6 +32,10 @@ pub(crate) fn scan_reason(
     Some("releasing the counted projection clears all of its retained records"),
 ("published.rs", "SELECT table_name,key,audience FROM _coven_published_rows UNION SELECT table_name,key,audience FROM _coven_published_losses", "_coven_published_rows" | "_coven_published_losses") =>
     Some("restoration visits every saved row identity"),
+("published.rs", "SELECT table_name,key,audience FROM _coven_published_rows", "_coven_published_rows") =>
+    Some("the counted removal view touches every kept row"),
+("published.rs", "SELECT DISTINCT lower(table_name) FROM _coven_columns", "_coven_columns") =>
+    Some("once per migration while rows are kept: discover every synced table to read its rules"),
 ("published.rs", "SELECT record FROM _coven_published_rows ORDER BY audience,table_name,key", "_coven_published_rows") =>
     Some("restoration reads every preserved row"),
 ("published.rs", "SELECT record FROM _coven_published_losses ORDER BY id", "_coven_published_losses") =>
@@ -114,7 +118,8 @@ fn counted_visible(database: &crate::Database, id: &str) -> bool {
     let key = coven_format::key::encode_key(&[Value::Text(id.into())]).unwrap();
     database.inspect_writer_schema(|db, schema| {
         let mut visible = None;
-        crate::snapshot_view::rows(db, schema, &Audience::Store, |row, synced| {
+        let removed = crate::published::removals(db, &schema.schema, &schema.rules).unwrap();
+        crate::snapshot_view::rows(db, schema, &removed, &Audience::Store, |row, synced| {
             if row.state.row().table == "albums" && row.state.row().key == key {
                 visible = Some(synced.is_some());
             }
@@ -175,7 +180,8 @@ fn counted_artist(database: &crate::Database, id: &str) -> Option<Value> {
     let key = coven_format::key::encode_key(&[Value::Text(id.into())]).unwrap();
     database.inspect_writer_schema(|db, schema| {
         let mut shown = None;
-        crate::snapshot_view::rows(db, schema, &Audience::Store, |row, synced| {
+        let removed = crate::published::removals(db, &schema.schema, &schema.rules).unwrap();
+        crate::snapshot_view::rows(db, schema, &removed, &Audience::Store, |row, synced| {
             if row.state.row().table == "albums" && row.state.row().key == key {
                 shown = Some(synced.map(|synced| synced.columns["artist"].value.clone()));
             }
@@ -271,5 +277,117 @@ async fn a_migrations_dropped_parent_keeps_the_childrens_counted_state() {
         db.query_row("SELECT artist FROM albums WHERE id='first'", [], |r| r.get(0)).unwrap()
     });
     assert_eq!(artist, None, "the migration's write sets the reference to NULL again");
+    db.close().await.unwrap();
+}
+
+/// Ana's counted album `first` holds a count another device set below the
+/// CHECK that version 1 declares, so the slots take it out (§9.3), while her
+/// own edit of its title waits in the queue and keeps its counted state
+/// aside. Version 2 drops that CHECK. The counted projection is the slots'
+/// state under the schema the database has now, so a snapshot shows the
+/// album again: whether a kept row shows is worked out under the current
+/// rules, never kept from the rules it was captured under.
+#[tokio::test]
+async fn a_kept_row_shows_under_the_rules_a_migration_leaves() {
+    const SCHEMA: &str = "CREATE TABLE albums(id TEXT NOT NULL PRIMARY KEY, title TEXT,
+           count INTEGER CHECK(count > 0))";
+    const UNCHECKED: &str =
+        "CREATE TABLE albums_new(id TEXT NOT NULL PRIMARY KEY, title TEXT, count INTEGER);
+         INSERT INTO albums_new SELECT id,title,count FROM albums;
+         DROP TABLE albums;
+         ALTER TABLE albums_new RENAME TO albums";
+    let store = TestStore::new();
+    let initial = || vec![Migration::addition(1, "schema", SCHEMA)];
+    let tables = || synced(&["albums"]);
+    let db = store.builder(tables(), initial()).open().await.unwrap();
+    sql(&db, "INSERT INTO albums VALUES('first','First',1)").await.unwrap();
+    count_own(&db).await;
+    sql(&db, "UPDATE albums SET title='Queued' WHERE id='first'").await.unwrap();
+    crate::tests::remote_update_beside_queue(
+        &db,
+        "albums",
+        "first",
+        &[("count", Value::Integer(-1))],
+    )
+    .await;
+    assert!(!counted_visible(&db, "first"), "the CHECK takes the counted album out");
+    db.close().await.unwrap();
+    let mut migrations = initial();
+    migrations.push(Migration::breaking(2, "unchecked", UNCHECKED, OldWrites::Drop));
+    let db = store.builder(tables(), migrations).open().await.unwrap();
+    assert_eq!(published(&db, "albums"), 1, "the album is still kept aside");
+    assert!(counted_visible(&db, "first"), "no rule takes the counted album out now");
+    db.close().await.unwrap();
+}
+
+/// The counted losses a snapshot of the store reads.
+fn counted_losses(database: &crate::Database) -> Vec<coven_format::loss::Loss> {
+    database.inspect_writer_schema(|db, schema| {
+        let removed = crate::published::removals(db, &schema.schema, &schema.rules).unwrap();
+        let mut losses = Vec::new();
+        crate::snapshot_view::losses(db, &removed, &Audience::Store, |loss| {
+            losses.push(loss);
+            Ok::<_, DbError>(())
+        })
+        .unwrap();
+        losses
+    })
+}
+
+/// The `title` a whole-row loss holds.
+fn lost_title(loss: &coven_format::loss::Loss) -> &Value {
+    match &loss.values {
+        coven_format::loss::LossValues::Row(cells) => &cells["title"].value.value,
+        values => panic!("a whole-row loss, not {values:?}"),
+    }
+}
+
+/// Ana's counted album `first` is taken out by its CHECK while her queued
+/// title edit keeps it aside, and a slot shows it as the counted removal it
+/// is. Then version 2 drops `albums`. A dropped table keeps its rows'
+/// removal losses frozen (§18.7), the counted projection's as well as the
+/// app's: the counted album's, worked out under the rules the run started
+/// from, holds the counted title, and the app's holds her queued one.
+#[tokio::test]
+async fn a_dropped_table_freezes_a_kept_rows_counted_removal() {
+    const SCHEMA: &str = "CREATE TABLE albums(id TEXT NOT NULL PRIMARY KEY, title TEXT,
+           count INTEGER CHECK(count > 0)); CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY)";
+    let store = TestStore::new();
+    let initial = || vec![Migration::addition(1, "schema", SCHEMA)];
+    let db = store.builder(synced(&["albums", "notes"]), initial()).open().await.unwrap();
+    sql(&db, "INSERT INTO albums VALUES('first','First',1)").await.unwrap();
+    count_own(&db).await;
+    sql(&db, "UPDATE albums SET title='Queued' WHERE id='first'").await.unwrap();
+    crate::tests::remote_update_beside_queue(
+        &db,
+        "albums",
+        "first",
+        &[("count", Value::Integer(-1))],
+    )
+    .await;
+    let [counted] = &counted_losses(&db)[..] else { panic!("one counted removal loss") };
+    assert!(!counted.frozen);
+    assert_eq!(lost_title(counted), &Value::Text("First".into()));
+    db.close().await.unwrap();
+    let mut migrations = initial();
+    migrations.push(Migration::breaking(2, "drop", "DROP TABLE albums", OldWrites::Drop));
+    let db = store.builder(synced(&["notes"]), migrations).open().await.unwrap();
+    let [counted] = &counted_losses(&db)[..] else { panic!("one counted frozen loss") };
+    assert!(counted.frozen);
+    assert!(matches!(&counted.cause, coven_format::loss::LossCause::Rules(rules)
+        if *rules == [coven_merge::Rule::Check("count > 0".into())].into()));
+    assert_eq!(lost_title(counted), &Value::Text("First".into()));
+    let live = db.inspect_writer(|db| {
+        let mut losses = Vec::new();
+        crate::loss_record::visit(db, &Audience::Store, |loss| {
+            losses.push(loss);
+            Ok::<_, DbError>(())
+        })
+        .unwrap();
+        losses
+    });
+    let [live] = &live[..] else { panic!("one live frozen loss") };
+    assert!(live.frozen);
+    assert_eq!(lost_title(live), &Value::Text("Queued".into()));
     db.close().await.unwrap();
 }

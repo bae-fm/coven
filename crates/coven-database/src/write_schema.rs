@@ -290,10 +290,22 @@ pub(crate) fn with_evaluators<R>(
     schema: &WriteSchema,
     run: impl FnOnce() -> Result<R, DbError>,
 ) -> Result<R, DbError> {
-    prepare_evaluators(db, schema)?;
+    with_rule_evaluators(db, &schema.schema, &schema.rules, run)
+}
+
+/// [`with_evaluators`] for the synced tables of `schema` that `rules`
+/// holds, by table name: a schema no open declares, such as the one a
+/// migration run starts from.
+pub(crate) fn with_rule_evaluators<R>(
+    db: &DatabaseConnection,
+    schema: &Schema,
+    rules: &BTreeMap<String, TableRules>,
+    run: impl FnOnce() -> Result<R, DbError>,
+) -> Result<R, DbError> {
+    prepare_rule_evaluators(db, schema, rules)?;
     let result = run()?;
-    for declaration in &schema.declarations {
-        let table = schema.table(&declaration.name);
+    for name in rules.keys() {
+        let table = &schema.tables[&name.to_ascii_lowercase()];
         db.batch(&format!(
             "DROP TABLE temp.{}; DROP TABLE temp.{}",
             identifier(&evaluation_name(table)),
@@ -309,9 +321,16 @@ pub(crate) fn prepare_evaluators(
     db: &DatabaseConnection,
     schema: &WriteSchema,
 ) -> Result<(), DbError> {
-    for declaration in &schema.declarations {
-        let table = schema.table(&declaration.name);
-        let rules = &schema.rules[&table.name];
+    prepare_rule_evaluators(db, &schema.schema, &schema.rules)
+}
+
+fn prepare_rule_evaluators(
+    db: &DatabaseConnection,
+    schema: &Schema,
+    rules: &BTreeMap<String, TableRules>,
+) -> Result<(), DbError> {
+    for (name, rules) in rules {
+        let table = &schema.tables[&name.to_ascii_lowercase()];
         db.batch(&format!(
             "CREATE TEMP TABLE {} ({} INTEGER PRIMARY KEY, {})",
             identifier(&evaluation_name(table)),

@@ -173,6 +173,15 @@ impl<'a> MergeStore<'a> {
     pub(crate) fn stamp(&self, id: WriteId) -> Timestamp {
         self.metadata.stamp(id)
     }
+
+    /// Load the writes that started `state`'s generations, read from a
+    /// record outside this store, so their stamps can be read.
+    pub(crate) fn know(&self, state: &RowState<Value>) -> Result<(), DbError> {
+        for write in state.generations().values() {
+            self.metadata.load(*write)?;
+        }
+        Ok(())
+    }
     pub(crate) fn from_snapshot(
         database: &'a DatabaseConnection,
         schema: &'a crate::schema::Schema,

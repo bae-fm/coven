@@ -39,10 +39,15 @@ fn column(
     Some((name, value))
 }
 
+/// Carry the kept records through the run's identities. `removed` holds the
+/// removal losses of the kept rows the counted projection took out under the
+/// schema the run started with (`published::removal_losses`): a table the run
+/// drops keeps those losses frozen, as it keeps its rows' own (§18.7).
 pub(crate) fn carry(
     db: &DatabaseConnection,
     names: &MigrationMatch,
     schema: &WriteSchema,
+    removed: &[Loss],
 ) -> Result<(), DbError> {
     if !crate::published::exists(db)? {
         return Ok(());
@@ -50,76 +55,80 @@ pub(crate) fn carry(
     // Staging makes table-name swaps independent of update order.
     db.batch("CREATE TEMP TABLE _coven_carried_rows AS SELECT * FROM _coven_published_rows; DELETE FROM _coven_published_rows")?;
     let oracle = crate::write_metadata::DatabaseMetadata::new(db);
-    db.for_each("SELECT record,visible FROM temp._coven_carried_rows",[],|r| {
-        let merged=merge_fields::decode_merge_row(&r.get::<_,Vec<u8>>(0)?,&oracle).map_err(crate::write_metadata::MetadataFailure::stored)?;
-        let old=merged.state.row().clone();
-        let Some(table)=names.tables.get(&old.table) else {return Ok::<_,DbError>(());};
-        let row=RowId {table:table.clone(),..old.clone()};
-        let state=merged.state.map_schema(row.clone(),|name,value|column(names,schema,&old.table,name,value));
-        let visible:bool=r.get(1)?;
-        db.internal_execute("INSERT INTO _coven_published_rows(table_name,key,audience,record,visible) VALUES(?1,?2,?3,?4,?5)",params![row.table,row.key,crate::write_encoding::audience_text(&row.audience),encoded(merge_fields::encode_merge_row(&MergeRow{state}))?,visible])?;
-        Ok::<_,DbError>(())
+    db.for_each("SELECT record FROM temp._coven_carried_rows", [], |r| {
+        let merged = merge_fields::decode_merge_row(&r.get::<_, Vec<u8>>(0)?, &oracle)
+            .map_err(crate::write_metadata::MetadataFailure::stored)?;
+        let old = merged.state.row().clone();
+        let Some(table) = names.tables.get(&old.table) else {
+            return Ok::<_, DbError>(());
+        };
+        let row = RowId { table: table.clone(), ..old.clone() };
+        let state = merged
+            .state
+            .map_schema(row.clone(), |name, value| column(names, schema, &old.table, name, value));
+        db.internal_execute(
+            "INSERT INTO _coven_published_rows(table_name,key,audience,record) VALUES(?1,?2,?3,?4)",
+            params![
+                row.table,
+                row.key,
+                crate::write_encoding::audience_text(&row.audience),
+                encoded(merge_fields::encode_merge_row(&MergeRow { state }))?
+            ],
+        )?;
+        Ok::<_, DbError>(())
     })?;
     db.batch("DROP TABLE temp._coven_carried_rows; CREATE TEMP TABLE _coven_carried_creations AS SELECT * FROM _coven_published_creations; CREATE INDEX temp._coven_carried_creations_table ON _coven_carried_creations(table_name); DELETE FROM _coven_published_creations")?;
     for (old, new) in &names.tables {
         db.internal_execute("INSERT INTO _coven_published_creations SELECT ?2,key,audience,write_id,creator FROM temp._coven_carried_creations WHERE table_name=?1",params![old,new])?;
     }
     db.batch("DROP TABLE temp._coven_carried_creations; CREATE TEMP TABLE _coven_carried_losses AS SELECT record FROM _coven_published_losses; DELETE FROM _coven_published_losses")?;
-    db.for_each("SELECT record FROM temp._coven_carried_losses",[],|r| {
-        let loss=decoded(merge_fields::decode_loss(&r.get::<_,Vec<u8>>(0)?))?;
-        let losses=carry_loss(names,schema,loss);
-        for loss in losses {
-            db.internal_execute("INSERT INTO _coven_published_losses(table_name,key,audience,record) VALUES(?1,?2,?3,?4)",params![loss.row.table,loss.row.key,crate::write_encoding::audience_text(&loss.row.audience),encoded(merge_fields::encode_loss(&loss))?])?;
-        }
-        Ok::<_,DbError>(())
+    db.for_each("SELECT record FROM temp._coven_carried_losses", [], |r| {
+        let loss = decoded(merge_fields::decode_loss(&r.get::<_, Vec<u8>>(0)?))?;
+        put(db, &carry_loss(names, schema, loss)?)
     })?;
-    db.batch("DROP TABLE temp._coven_carried_losses")
+    db.batch("DROP TABLE temp._coven_carried_losses")?;
+    for loss in removed.iter().filter(|loss| !names.tables.contains_key(&loss.row.table)) {
+        put(db, &crate::migration_state::frozen(loss.clone()))?;
+    }
+    Ok(())
 }
 
-fn carry_loss(names: &MigrationMatch, schema: &WriteSchema, mut loss: Loss) -> Vec<Loss> {
+fn put(db: &DatabaseConnection, loss: &Loss) -> Result<(), DbError> {
+    db.internal_execute(
+        "INSERT INTO _coven_published_losses(table_name,key,audience,record) VALUES(?1,?2,?3,?4)",
+        params![
+            loss.row.table,
+            loss.row.key,
+            crate::write_encoding::audience_text(&loss.row.audience),
+            encoded(merge_fields::encode_loss(loss))?
+        ],
+    )?;
+    Ok(())
+}
+
+/// A kept loss under the run's names. The kept losses are frozen ones and
+/// the cells concurrent writes displaced (`published::capture_rows`): a frozen
+/// loss keeps its old names, and a cell loss whose table or column goes is
+/// frozen under them, as the live losses are (§18.7).
+fn carry_loss(
+    names: &MigrationMatch,
+    schema: &WriteSchema,
+    mut loss: Loss,
+) -> Result<Loss, DbError> {
     if loss.frozen {
-        return vec![loss];
+        return Ok(loss);
     }
     let old = loss.row.table.clone();
-    if !names.tables.contains_key(&old) {
-        return vec![crate::migration_state::frozen(loss)];
-    }
-    let dropped = match &loss.values {
-        LossValues::Cell { column, .. } => {
-            !names.columns.contains_key(&(old.clone(), column.clone()))
-        }
-        LossValues::Row(cells) => {
-            cells.keys().any(|c| !names.columns.contains_key(&(old.clone(), c.clone())))
-        }
+    let LossValues::Cell { column: name, mut cell } = loss.values else {
+        return Err(DbError::Invariant { what: "a kept active loss is a displaced cell" });
     };
-    let mut kept = Vec::new();
-    if dropped {
-        kept.push(crate::migration_state::frozen(loss.clone()));
-        if matches!(loss.values, LossValues::Cell { .. }) {
-            return kept;
-        }
+    if !names.columns.contains_key(&(old.clone(), name.clone())) {
+        loss.values = LossValues::Cell { column: name, cell };
+        return Ok(crate::migration_state::frozen(loss));
     }
     loss.row.table = names.tables[&old].clone();
-    loss.values = match loss.values {
-        LossValues::Cell { column: name, mut cell } => {
-            let (name, value) =
-                column(names, schema, &old, name, cell.value).expect("surviving column");
-            cell.value = value;
-            LossValues::Cell { column: name, cell }
-        }
-        LossValues::Row(cells) => LossValues::Row(
-            cells
-                .into_iter()
-                .filter_map(|(name, mut cell)| {
-                    let (name, value) = column(names, schema, &old, name, cell.value)?;
-                    cell.value = value;
-                    Some((name, cell))
-                })
-                .collect(),
-        ),
-    };
-    // Active removal losses are recomputed under the new constraints. Their
-    // retained values are needed until the counted fold materializes them.
-    kept.push(loss);
-    kept
+    let (name, value) = column(names, schema, &old, name, cell.value).expect("surviving column");
+    cell.value = value;
+    loss.values = LossValues::Cell { column: name, cell };
+    Ok(loss)
 }

@@ -7,22 +7,25 @@ use coven_format::{
     merge_fields,
     snapshot_rows::{MergeRow, SyncedRow},
 };
-use coven_merge::{Audience, RowId};
+use coven_merge::{Audience, RowId, Rule};
+use std::collections::{BTreeMap, BTreeSet};
 
+/// Each counted row of `audience`, and its synced values while it shows.
+/// `removed` holds the rules that take kept rows out under `schema`
+/// (`published::removals`); every other row's stored state records its own.
 pub(crate) fn rows<E: From<DbError>>(
     db: &DatabaseConnection,
     schema: &WriteSchema,
+    removed: &BTreeMap<RowId, BTreeSet<Rule>>,
     audience: &Audience,
     mut visit: impl FnMut(MergeRow, Option<SyncedRow>) -> Result<(), E>,
 ) -> Result<(), E> {
-    let oracle = crate::write_metadata::DatabaseMetadata::new(db);
     let store = crate::merge_store::MergeStore::from_schema(db, &schema.schema).without_row_cache();
     db.for_each("SELECT table_name,key FROM _coven_rows WHERE audience=?1 UNION SELECT table_name,key FROM _coven_published_rows WHERE audience=?1 ORDER BY table_name,key",[audience_text(audience)],|r| {
         let id=RowId {table:r.get(0).map_err(DbError::from)?,key:r.get(1).map_err(DbError::from)?,audience:audience.clone()};
-        let kept=db.query("SELECT record,visible FROM _coven_published_rows WHERE table_name=?1 AND key=?2 AND audience=?3",rusqlite::params![id.table,id.key,audience_text(audience)],|r|Ok((r.get::<_,Vec<u8>>(0)?,r.get::<_,bool>(1)?)))?.pop();
-        let (row,visible)=if let Some((bytes,visible))=kept {
-            let row=merge_fields::decode_merge_row(&bytes,&oracle).map_err(crate::write_metadata::MetadataFailure::stored)?;
-            (row,visible)
+        let (row,visible)=if let Some(state)=crate::published::kept_state(db,&id)? {
+            let visible=state.present() && !removed.contains_key(&id);
+            (MergeRow {state},visible)
         } else {
             let stored=store.row_without_losses(&id)?;
             let visible=stored.state.present() && stored.loss.is_none();
@@ -44,8 +47,11 @@ pub(crate) fn rows<E: From<DbError>>(
     })
 }
 
+/// Each counted loss of `audience`: the stored ones, and the removal losses
+/// of the kept rows `removed` takes out (`published::removals`).
 pub(crate) fn losses<E: From<DbError>>(
     db: &DatabaseConnection,
+    removed: &BTreeMap<RowId, BTreeSet<Rule>>,
     audience: &Audience,
     mut visit: impl FnMut(Loss) -> Result<(), E>,
 ) -> Result<(), E> {
@@ -64,6 +70,12 @@ pub(crate) fn losses<E: From<DbError>>(
             crate::loss_record::put_table(db, &loss, None, "temp._coven_snapshot_losses")
         },
     )?;
+    for (row, rules) in removed.iter().filter(|(row, _)| row.audience == *audience) {
+        let state = crate::published::kept_state(db, row)?
+            .ok_or(DbError::Invariant { what: "a kept row's removal names a kept record" })?;
+        let loss = crate::published::removal_loss(&state, rules.clone());
+        crate::loss_record::put_table(db, &loss, None, "temp._coven_snapshot_losses")?;
+    }
     crate::loss_record::visit_table(db, audience, "temp._coven_snapshot_losses", &mut visit)?;
     db.batch("DROP TABLE temp._coven_snapshot_losses")?;
     Ok(())

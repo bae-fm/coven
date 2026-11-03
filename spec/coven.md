@@ -1443,6 +1443,17 @@ write's removal reaches (§9), such as a note in a folder Ben deleted, keeps the
 records the slots give: the removal changes only its app row, which coven
 derives from those records again whenever a slot reaches the row.
 
+A kept row holds only what no removal rule decides: its merge records, its
+creation, its frozen lost values and the cells concurrent writes displaced.
+Whether it shows, and the taken-out record that holds it out, are worked out
+again from those records under the schema the device has now, whenever a
+snapshot reads the kept rows or a slot puts them back. Ana's album `first` is
+taken out by its CHECK `count > 0` once Ben sets its count to −1, while her
+title edit waits unsent and keeps the album aside. Her next migration drops
+that CHECK. A snapshot her device writes while her writes wait shows the album:
+under the new rules the slots alone no longer take it out. A result kept from
+the old rules would still hide it.
+
 Keeping aside every row instead made each slot applied beside an unsent write
 rebuild the whole store: over 8 s for each of Ben's slots once his library held
 81,000 rows, so an import that took 29 s with nothing waiting took over an hour.
@@ -7005,6 +7016,11 @@ discard it.
 
 - Each affected lost value is frozen as old-shape data before its schema records
   are removed. One holding a whole row keeps the whole captured row.
+- A row kept aside beside unsent writes (§6.2) has a taken-out record only as
+  the current rules work it out. So a migration works out the kept rows'
+  taken-out records under the schema it starts from, before any of its
+  statements runs, and freezes those of a table it drops with the table's other
+  lost values. Once the table is gone, nothing could work them out again.
 - It keeps its table and column names, key, audience, plain values, the writes
   that set them and its original cause. Live parent links are stripped; the old
   schema need not exist.

@@ -3,13 +3,25 @@
 //! While originals await slots, preserve the published merge state separately.
 //! Incoming slots rebuild from it, then fold the current queue once. App rows
 //! are materialized only after both folds, in the enclosing transaction.
+//!
+//! The kept state holds only what no removal rule decides. Whether a kept row
+//! shows, and its removal loss, are worked out under the schema that reads
+//! them (`removals`); a breaking migration can change those rules (§6.2).
 
+use crate::removal_schema::TableRules;
+use crate::removal_view::DatabaseRemovalView;
+use crate::schema::Schema;
 use crate::write_encoding::{audience_text, decoded, encoded};
 use crate::{
     merge_store::MergeStore, sqlite::DatabaseConnection, write_schema::WriteSchema, DbError,
 };
-use coven_format::{merge_fields, snapshot_rows::MergeRow};
-use coven_merge::{RowId, RowState, RowUpdate};
+use coven_format::{
+    loss::{Loss, LossCause, LossValues},
+    merge_fields,
+    snapshot_rows::MergeRow,
+    value::Value,
+};
+use coven_merge::{RowId, RowState, RowUpdate, Rule};
 use rusqlite::params;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -36,9 +48,21 @@ pub(crate) fn capture_rows<'a>(
         #[cfg(any(test, feature = "test-utils"))]
         db.record_work(|work| work.published_rows += 1);
         let stored = store.row_without_losses(row)?;
-        let visible = stored.state.present() && stored.loss.is_none();
-        db.internal_execute("INSERT INTO _coven_published_rows(table_name,key,audience,record,visible) VALUES(?1,?2,?3,?4,?5)",params![row.table,row.key,audience,encoded(merge_fields::encode_merge_row(&MergeRow{state:stored.state}))?,visible])?;
-        db.for_each(&format!("{} WHERE l.table_name=?1 AND l.key=?2 AND l.audience=?3",crate::loss_record::SELECT),params![row.table,row.key,audience],|r| {
+        db.internal_execute(
+            "INSERT INTO _coven_published_rows(table_name,key,audience,record) VALUES(?1,?2,?3,?4)",
+            params![
+                row.table,
+                row.key,
+                audience,
+                encoded(merge_fields::encode_merge_row(&MergeRow { state: stored.state }))?
+            ],
+        )?;
+        // Whether the row shows, and the removal loss that holds it out, are
+        // the current rules' outcome: the counted removal view works them
+        // out again under whatever schema reads them (`removals`). Only what
+        // no rule decides is kept: frozen losses, and the cells concurrent
+        // writes displaced.
+        db.for_each(&format!("{} WHERE l.table_name=?1 AND l.key=?2 AND l.audience=?3 AND NOT (l.replacement_kind='rules' AND l.frozen=0)",crate::loss_record::SELECT),params![row.table,row.key,audience],|r| {
             let loss=crate::loss_record::read(r)?;
             db.internal_execute("INSERT INTO _coven_published_losses(table_name,key,audience,record) VALUES(?1,?2,?3,?4)",params![row.table,row.key,audience,encoded(merge_fields::encode_loss(&loss))?])?;
             Ok::<_,DbError>(())
@@ -71,6 +95,110 @@ pub(crate) fn before_migrating(
     Ok(())
 }
 
+/// The counted state kept aside for `row`, if the queue reached it.
+pub(crate) fn kept_state(
+    db: &DatabaseConnection,
+    row: &RowId,
+) -> Result<Option<RowState<Value>>, DbError> {
+    let Some(bytes) = db
+        .query(
+            "SELECT record FROM _coven_published_rows WHERE table_name=?1 AND key=?2 AND audience=?3",
+            params![row.table, row.key, audience_text(&row.audience)],
+            |r| r.get::<_, Vec<u8>>(0),
+        )?
+        .pop()
+    else {
+        return Ok(None);
+    };
+    let oracle = crate::write_metadata::DatabaseMetadata::new(db);
+    let merged = merge_fields::decode_merge_row(&bytes, &oracle)
+        .map_err(crate::write_metadata::MetadataFailure::stored)?;
+    Ok(Some(merged.state))
+}
+
+/// The removal rules that take each kept row out of the counted projection
+/// under `schema`, whose synced tables have `rules`: the rows the queue
+/// reached, as the slots alone leave them (§6.2). Every other row's removal
+/// is the one its stored state records.
+pub(crate) fn removals(
+    db: &DatabaseConnection,
+    schema: &Schema,
+    rules: &BTreeMap<String, TableRules>,
+) -> Result<BTreeMap<RowId, BTreeSet<Rule>>, DbError> {
+    if !exists(db)? {
+        return Ok(BTreeMap::new());
+    }
+    let kept: BTreeSet<RowId> = db
+        .query(
+            "SELECT table_name,key,audience FROM _coven_published_rows",
+            [],
+            crate::row_queries::read_identity,
+        )?
+        .into_iter()
+        .collect();
+    let store = MergeStore::from_schema(db, schema).with_recent_rows();
+    let deleted = crate::store_state_tables::deleted_circles(db)?;
+    let view = DatabaseRemovalView::counted(db, &store, schema, rules, &deleted);
+    view.prime(kept.iter().cloned())?;
+    let mut result =
+        coven_merge::recompute(&view, &view, kept.clone()).map_err(|e| e.into_db_error(None))?;
+    result.removed.retain(|row, _| kept.contains(row));
+    Ok(result.removed)
+}
+
+/// The removal loss of a present row `rules` take out: its cells as merged,
+/// held until the rules let it back (§9).
+pub(crate) fn removal_loss(state: &RowState<Value>, rules: BTreeSet<Rule>) -> Loss {
+    Loss {
+        row: state.row().clone(),
+        generation: state.generation(),
+        frozen: false,
+        values: LossValues::Row(state.cells().clone()),
+        cause: LossCause::Rules(rules),
+    }
+}
+
+/// The removal losses of the kept rows the counted projection takes out
+/// under `schema` and its synced tables' `rules`.
+pub(crate) fn removal_losses(
+    db: &DatabaseConnection,
+    schema: &Schema,
+    rules: &BTreeMap<String, TableRules>,
+) -> Result<Vec<Loss>, DbError> {
+    let mut losses = Vec::new();
+    for (row, rules) in removals(db, schema, rules)? {
+        let state = kept_state(db, &row)?
+            .ok_or(DbError::Invariant { what: "a kept row's removal names a kept record" })?;
+        losses.push(removal_loss(&state, rules));
+    }
+    Ok(losses)
+}
+
+/// The removal losses of the kept rows under `before`, the schema a
+/// migration run starts from, read before any of its statements runs. A
+/// table the run drops keeps them frozen (`published_migration::carry`):
+/// once its rules are gone, nothing could work them out again.
+pub(crate) fn removal_losses_before_migrating(
+    db: &DatabaseConnection,
+    before: &Schema,
+) -> Result<Vec<Loss>, DbError> {
+    if !exists(db)? {
+        return Ok(Vec::new());
+    }
+    // Every synced table has its columns registered (§18.1).
+    let mut rules = BTreeMap::new();
+    for name in db.query("SELECT DISTINCT lower(table_name) FROM _coven_columns", [], |r| {
+        r.get::<_, String>(0)
+    })? {
+        if let Some(table) = before.tables.get(&name) {
+            rules.insert(table.name.clone(), TableRules::read(db, table)?);
+        }
+    }
+    crate::write_schema::with_rule_evaluators(db, before, &rules, || {
+        removal_losses(db, before, &rules)
+    })
+}
+
 pub(crate) fn clear(db: &DatabaseConnection) -> Result<(), DbError> {
     for table in [
         "_coven_published_rows",
@@ -84,8 +212,10 @@ pub(crate) fn clear(db: &DatabaseConnection) -> Result<(), DbError> {
     Ok(())
 }
 
-/// Restore only merge metadata and staged values; the previously visible app
-/// tables remain untouched until the final materialization.
+/// Restore only merge metadata, staged values and the kept losses; the
+/// previously visible app tables remain untouched until the final
+/// materialization, which works out each restored row's removal under the
+/// current schema and records its removal loss.
 pub(crate) fn restore(
     db: &DatabaseConnection,
     schema: &WriteSchema,

@@ -14,7 +14,6 @@ macro_rules! coven_published_tables {
                 key BLOB NOT NULL,
                 audience TEXT NOT NULL,
                 record BLOB NOT NULL,
-                visible INTEGER NOT NULL CHECK(visible IN (0,1)),
                 PRIMARY KEY(table_name,key,audience)
             ) STRICT, WITHOUT ROWID;
             CREATE INDEX _coven_published_rows_audience ON _coven_published_rows(audience,table_name,key);

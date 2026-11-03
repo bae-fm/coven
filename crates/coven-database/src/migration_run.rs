@@ -43,6 +43,7 @@ pub(crate) fn run<'a>(
     // each step's renames, then the final declarations (§18.1).
     let mut files = crate::file_table::registered_columns(database)?;
     let mut before = Schema::read(database, &files)?;
+    let removed = crate::published::removal_losses_before_migrating(database, &before)?;
     let mut capture = MigrationCapture::new(database, tables)?;
     // Changing an existing table's owner declaration or file references is
     // breaking (§18.1): the raise captures the state before any statement
@@ -174,6 +175,7 @@ pub(crate) fn run<'a>(
             &steps[first].before,
             &baseline_names,
             capture.into_snapshot().expect("breaking statement captured its before state"),
+            &removed,
             author,
         )?);
     }
@@ -214,12 +216,13 @@ fn finish(
     baseline_schema: &Schema,
     baseline_names: &MigrationMatch,
     mut snapshot: crate::migration_snapshot::MigrationSnapshot<'_>,
+    removed: &[coven_format::loss::Loss],
     (device, now): (DeviceId, SystemTime),
 ) -> Result<coven_merge::WriteId, DbError> {
     let schema = crate::write_schema::WriteSchema::read(database, tables.to_vec())?;
     crate::write_schema::with_evaluators(database, &schema, || {
         database.batch("CREATE TEMP TABLE _coven_migration_frozen(audience TEXT NOT NULL,record BLOB NOT NULL)")?;
-        crate::published_migration::carry(database, names, &schema)?;
+        crate::published_migration::carry(database, names, &schema, removed)?;
         let hidden = crate::migration_hidden::Hidden::before(database, initial_schema, names)?;
         let refresh = crate::migration_state::carry(database, initial_schema, names, &schema)?;
         crate::migration_files::carry(database, names)?;

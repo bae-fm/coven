@@ -1,6 +1,8 @@
 //! Lazy indexed removal views before and after the merge's row updates.
 use crate::merge_store::MergeStore;
+use crate::removal_schema::TableRules;
 use crate::row_cache::{value_weight, RowCache, Weight};
+use crate::schema::{Schema, TableSchema};
 use crate::sql::identifier;
 use crate::write_encoding::{decoded, sql_value};
 use crate::write_rows::{column_list, column_name, read_row, row_id, row_key, AppValues, AppView};
@@ -61,14 +63,25 @@ impl Weight for EvaluatedRow {
 pub(crate) struct DatabaseRemovalView<'a> {
     database: &'a crate::sqlite::DatabaseConnection,
     store: &'a MergeStore<'a>,
-    schema: &'a WriteSchema,
-    app: &'a AppView<'a>,
-    updates: &'a BTreeMap<RowId, RowUpdate<Value>>,
+    schema: &'a Schema,
+    /// Each synced table's removal rules, by table name.
+    rules: &'a BTreeMap<String, TableRules>,
+    states: States<'a>,
     deleted: &'a BTreeMap<CircleId, crate::Slot>,
     arriving: Option<(WriteId, Timestamp)>,
     rows: RowCache<RowId, EvaluatedRow>,
     edges: BTreeMap<RowId, BTreeSet<RowId>>,
     extra_groups: RefCell<BTreeMap<Group, BTreeSet<RowId>>>,
+}
+
+/// Where a view reads each row's merged state.
+enum States<'a> {
+    /// The store's, with a write's or a recompute's updates over it. The
+    /// rows the app shows are `app`'s.
+    Updated { app: &'a AppView<'a>, updates: &'a BTreeMap<RowId, RowUpdate<Value>> },
+    /// The counted projection: the store's, but each row kept aside beside
+    /// the queue reads as its counted state (§6.2).
+    Counted,
 }
 
 impl<'a> DatabaseRemovalView<'a> {
@@ -92,9 +105,9 @@ impl<'a> DatabaseRemovalView<'a> {
         Ok(Self {
             database,
             store,
-            schema,
-            app,
-            updates,
+            schema: &schema.schema,
+            rules: &schema.rules,
+            states: States::Updated { app, updates },
             deleted,
             arriving,
             rows: store.row_cache_like(),
@@ -103,15 +116,55 @@ impl<'a> DatabaseRemovalView<'a> {
         })
     }
 
+    /// The counted projection under `schema` and its synced tables'
+    /// `rules`: every row as the slots alone leave it. A row the queue
+    /// doesn't reach holds that state in `store` already; a kept row
+    /// reads its kept record. A reference only a kept record holds is no
+    /// edge here, so a recompute touches every kept row.
+    pub(crate) fn counted(
+        database: &'a crate::sqlite::DatabaseConnection,
+        store: &'a MergeStore<'a>,
+        schema: &'a Schema,
+        rules: &'a BTreeMap<String, TableRules>,
+        deleted: &'a BTreeMap<CircleId, crate::Slot>,
+    ) -> Self {
+        Self {
+            database,
+            store,
+            schema,
+            rules,
+            states: States::Counted,
+            deleted,
+            arriving: None,
+            rows: store.row_cache_like(),
+            edges: BTreeMap::new(),
+            extra_groups: RefCell::new(BTreeMap::new()),
+        }
+    }
+
+    fn table(&self, name: &str) -> &'a TableSchema {
+        &self.schema.tables[&name.to_ascii_lowercase()]
+    }
+
     pub(crate) fn prior(&self, id: &RowId) -> Result<crate::merge_store::StoredRow, DbError> {
         self.store.row(id)
     }
 
     pub(crate) fn state(&self, id: &RowId) -> Result<RowState<Value>, DbError> {
-        match self.updates.get(id) {
-            Some(update) => Ok(update.state.clone()),
-            None => Ok(self.store.row(id)?.state),
+        match &self.states {
+            States::Updated { updates, .. } => {
+                if let Some(update) = updates.get(id) {
+                    return Ok(update.state.clone());
+                }
+            }
+            States::Counted => {
+                if let Some(state) = crate::published::kept_state(self.database, id)? {
+                    self.store.know(&state)?;
+                    return Ok(state);
+                }
+            }
         }
+        Ok(self.store.row(id)?.state)
     }
 
     pub(crate) fn prime(&self, changed: impl IntoIterator<Item = RowId>) -> Result<(), DbError> {
@@ -154,8 +207,8 @@ impl<'a> DatabaseRemovalView<'a> {
             };
             return Ok(self.remember(id, row));
         }
-        let table = self.schema.table(&id.table);
-        let rules = &self.schema.rules[&table.name];
+        let table = self.table(&id.table);
+        let rules = &self.rules[&table.name];
         let mut values: AppValues =
             state.cells().iter().map(|(n, c)| (n.clone(), c.value.value.clone())).collect();
         let mut references = BTreeMap::new();
@@ -254,13 +307,8 @@ impl<'a> DatabaseRemovalView<'a> {
         if let Some(Some(unique)) = shown {
             return Ok(unique);
         }
-        let table = self.schema.table(&id.table);
-        crate::removal_sql::unique_values(
-            self.database,
-            table,
-            &self.schema.rules[&table.name],
-            values,
-        )
+        let table = self.table(&id.table);
+        crate::removal_sql::unique_values(self.database, table, &self.rules[&table.name], values)
     }
 }
 
@@ -281,8 +329,8 @@ impl RemovalView for DatabaseRemovalView<'_> {
     }
     fn children(&self, id: &RowId) -> Result<BTreeSet<RowId>, Self::Error> {
         let mut children = self.edges.get(id).cloned().unwrap_or_default();
-        for declaration in &self.schema.declarations {
-            let table = self.schema.table(&declaration.name);
+        for name in self.rules.keys() {
+            let table = self.table(name);
             for fk in
                 table.foreign_keys.iter().filter(|fk| fk.target.eq_ignore_ascii_case(&id.table))
             {
@@ -318,8 +366,8 @@ impl RemovalView for DatabaseRemovalView<'_> {
                 members.extend(self.store.key_rows(table, key)?);
             }
             Group::Claim { table, audience, constraint, value } => {
-                let table = self.schema.table(table);
-                let unique = self.schema.rules[&table.name]
+                let table = self.table(table);
+                let unique = self.rules[&table.name]
                     .unique
                     .iter()
                     .find(|c| c.identity == *constraint)
@@ -343,10 +391,23 @@ impl RemovalView for DatabaseRemovalView<'_> {
                     |r| read_row(table, r),
                 )? {
                     let key = (table.name.clone(), row_key(table, &values)?);
-                    if let Some(app) = self.app.row(&key)? {
-                        if &app.audience == audience {
-                            members.insert(row_id(&key, &app));
+                    match &self.states {
+                        States::Updated { app, .. } => {
+                            if let Some(app) = app.row(&key)? {
+                                if &app.audience == audience {
+                                    members.insert(row_id(&key, &app));
+                                }
+                            }
                         }
+                        // The app row may show the queue's state, so every
+                        // merge row of its key in the audience competes; each
+                        // claims what its counted state claims.
+                        States::Counted => members.extend(
+                            self.store
+                                .key_rows(&table.name, &key.1)?
+                                .into_iter()
+                                .filter(|row| &row.audience == audience),
+                        ),
                     }
                 }
                 members.extend(crate::row_queries::claimants(
@@ -362,7 +423,7 @@ impl RemovalView for DatabaseRemovalView<'_> {
                 {
                     members.extend(crate::snapshot_install::claim_holders(
                         self.database,
-                        &self.schema.schema,
+                        self.schema,
                         table,
                         unique,
                         audience,

@@ -41,8 +41,10 @@ fn is_sqlite_failure(error: &DbError) -> bool {
 async fn reading_the_snapshot_view_fails_with_the_metadata_read_error() {
     unreadable_metadata(|db, schema| {
         let error =
-            crate::snapshot_view::rows(db, schema, &Audience::Store, |_, _| Ok::<_, DbError>(()))
-                .unwrap_err();
+            crate::snapshot_view::rows(db, schema, &BTreeMap::new(), &Audience::Store, |_, _| {
+                Ok::<_, DbError>(())
+            })
+            .unwrap_err();
         assert!(is_sqlite_failure(&error), "{error:?}");
     })
     .await;
@@ -58,7 +60,7 @@ async fn carrying_published_rows_fails_with_the_metadata_read_error() {
                 .map(|c| (("notes".to_owned(), c.to_owned()), c.to_owned()))
                 .collect(),
         };
-        let error = crate::published_migration::carry(db, &names, schema).unwrap_err();
+        let error = crate::published_migration::carry(db, &names, schema, &[]).unwrap_err();
         assert!(is_sqlite_failure(&error), "{error:?}");
     })
     .await;

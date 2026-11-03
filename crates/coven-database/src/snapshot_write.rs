@@ -34,9 +34,10 @@ pub(crate) fn write<E>(
 ) -> Result<(), SnapshotWriteError<E>> {
     let covers = crate::sequence::applied(db)?;
     let audience = id.audience.clone();
+    let removed = crate::published::removals(db, &schema.schema, &schema.rules)?;
     let mut counts = [0; SECTIONS];
     let mut columns = BTreeSet::new();
-    crate::snapshot_view::rows(db, schema, &audience, |row, synced| {
+    crate::snapshot_view::rows(db, schema, &removed, &audience, |row, synced| {
         counts[3] += 1;
         counts[0] += u64::from(synced.is_some());
         columns.extend(
@@ -44,7 +45,7 @@ pub(crate) fn write<E>(
         );
         Ok::<_, DbError>(())
     })?;
-    crate::snapshot_view::losses(db, &audience, |loss| {
+    crate::snapshot_view::losses(db, &removed, &audience, |loss| {
         counts[4] += 1;
         if let coven_format::loss::LossValues::Cell { column, .. } = &loss.values {
             columns.insert((loss.row.table.clone(), column.clone()));
@@ -68,6 +69,7 @@ pub(crate) fn write<E>(
     let evidence = crate::authorship::evidence(
         db,
         schema,
+        &removed,
         &audience,
         crate::authorship::Author {
             device: id.device,
@@ -95,7 +97,7 @@ pub(crate) fn write<E>(
     begin(encoder.header()).map_err(SnapshotWriteError::Output)?;
     emit(header).map_err(SnapshotWriteError::Output)?;
     let mut record = |record| emit(encoder.record(record)?).map_err(SnapshotWriteError::Output);
-    crate::snapshot_view::rows(db, schema, &audience, |_, synced| {
+    crate::snapshot_view::rows(db, schema, &removed, &audience, |_, synced| {
         if let Some(row) = synced {
             record(SnapshotRecord::Synced(row))?;
         }
@@ -105,8 +107,12 @@ pub(crate) fn write<E>(
     for (table, column) in columns {
         record(SnapshotRecord::Column(SyncedColumn { table, column }))?;
     }
-    crate::snapshot_view::rows(db, schema, &audience, |row, _| record(SnapshotRecord::Merge(row)))?;
-    crate::snapshot_view::losses(db, &audience, |loss| record(SnapshotRecord::Loss(loss)))?;
+    crate::snapshot_view::rows(db, schema, &removed, &audience, |row, _| {
+        record(SnapshotRecord::Merge(row))
+    })?;
+    crate::snapshot_view::losses(db, &removed, &audience, |loss| {
+        record(SnapshotRecord::Loss(loss))
+    })?;
     crate::write_sources::visit_evidence(db, &audience, covers, |authored| {
         record(SnapshotRecord::Authored(authored))
     })?;
