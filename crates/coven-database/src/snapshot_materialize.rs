@@ -35,7 +35,7 @@ pub(crate) fn materialize(
     let layout = SnapshotLayout::new(schema);
     let order = crate::snapshot_conflicts::parents_first(schema);
     db.materialize(|db| {
-        let mut deferred = Deferral::default();
+        let mut deferred = Deferral::new(db);
         for name in &order {
             insert(db, schema, layout.table(name), &mut deferred)?;
         }
@@ -80,7 +80,7 @@ fn insert(
     db: &DatabaseConnection,
     schema: &WriteSchema,
     table: &TableLayout,
-    deferred: &mut Deferral,
+    deferred: &mut Deferral<'_>,
 ) -> Result<(), DbError> {
     let schema_table = format!("main.{}", identifier(&table.table));
     let new = format!(
@@ -101,7 +101,7 @@ fn insert(
         ),
         [&table.table],
     )?;
-    deferred.before_change(db)?;
+    deferred.before_change()?;
     let columns = written_columns(table);
     let inserted = db.internal_execute(
         &format!(
@@ -124,7 +124,7 @@ fn update(
     db: &DatabaseConnection,
     schema: &WriteSchema,
     table: &TableLayout,
-    deferred: &mut Deferral,
+    deferred: &mut Deferral<'_>,
 ) -> Result<(), DbError> {
     let schema_table = schema.table(&table.table);
     let app = format!("main.{}", identifier(&table.table));
@@ -178,7 +178,7 @@ fn update(
             let before = read(names.len())?;
             let changed: Vec<_> =
                 names.iter().filter(|name| before[*name] != values[*name]).collect();
-            deferred.before_change(db)?;
+            deferred.before_change()?;
             let parameters = changed
                 .iter()
                 .map(|name| sql_value(&values[*name]))
@@ -209,7 +209,7 @@ fn delete(
     db: &DatabaseConnection,
     schema: &WriteSchema,
     table: &TableLayout,
-    deferred: &mut Deferral,
+    deferred: &mut Deferral<'_>,
 ) -> Result<(), DbError> {
     let schema_table = schema.table(&table.table);
     db.internal_execute(
@@ -233,7 +233,7 @@ fn delete(
             if crate::write_rows::read_values(db, schema_table, &key)?.is_none() {
                 return Ok(());
             }
-            deferred.before_change(db)?;
+            deferred.before_change()?;
             let changed = db.internal_execute(
                 &format!(
                     "DELETE FROM main.{} WHERE {}",

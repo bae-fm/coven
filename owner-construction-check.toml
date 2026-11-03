@@ -373,6 +373,9 @@ task_types = [
     # One received write's interpretation, admitting its parts on the
     # connection that stages it (§9.5, §9.6).
     "Interpreter",
+    # Whether one transaction's materialization has deferred foreign keys on
+    # its connection.
+    "Deferral",
 ]
 # The shared in-memory state the runtime and the standard library declare.
 external_types = [

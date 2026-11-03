@@ -97,14 +97,14 @@ pub(crate) fn materialize(
     }
     let ordered = dependency_order(actions, &dependencies, &parents);
     database.materialize(|database| {
-        let mut deferred = Deferral::default();
+        let mut deferred = Deferral::new(database);
         for id in ordered {
             let table = schema.table(&id.table);
             if removed_visible.contains(&id) {
                 // A native CASCADE may have already deleted another member of
                 // a removal cycle. No surviving synced child remains attached.
                 if let Some(values) = crate::write_rows::read_values(database, table, &id.key)? {
-                    deferred.before_change(database)?;
+                    deferred.before_change()?;
                     changed_once(database.app_execute(
                         &format!(
                             "DELETE FROM main.{} WHERE {}",
@@ -130,17 +130,23 @@ pub(crate) fn materialize(
 /// Setting a flag PRAGMA expires every statement prepared on the connection,
 /// the app's included, so it is set only before materialization changes an
 /// app row, and once per transaction: SQLite clears it at COMMIT and ROLLBACK.
-#[derive(Default)]
-pub(crate) struct Deferral {
+/// One transaction's materialization holds it, on that transaction's
+/// connection.
+pub(crate) struct Deferral<'a> {
+    database: &'a DatabaseConnection,
     deferred: bool,
 }
 
-impl Deferral {
-    pub(crate) fn before_change(&mut self, database: &DatabaseConnection) -> Result<(), DbError> {
+impl<'a> Deferral<'a> {
+    pub(crate) fn new(database: &'a DatabaseConnection) -> Self {
+        Self { database, deferred: false }
+    }
+
+    pub(crate) fn before_change(&mut self) -> Result<(), DbError> {
         if !self.deferred
-            && !database.query_row("PRAGMA defer_foreign_keys", [], |r| r.get::<_, bool>(0))?
+            && !self.database.query_row("PRAGMA defer_foreign_keys", [], |r| r.get::<_, bool>(0))?
         {
-            database.batch("PRAGMA defer_foreign_keys=ON")?;
+            self.database.batch("PRAGMA defer_foreign_keys=ON")?;
         }
         self.deferred = true;
         Ok(())
@@ -295,7 +301,7 @@ fn put(
     id: &RowId,
     values: &AppValues,
     visible: &AppView<'_>,
-    deferred: &mut Deferral,
+    deferred: &mut Deferral<'_>,
 ) -> Result<bool, DbError> {
     let before =
         visible.row(&(id.table.clone(), id.key.clone()))?.filter(|app| app.audience == id.audience);
@@ -307,7 +313,7 @@ fn put(
                 .filter(|c| !c.generated && before.values[&c.name] != values[&c.name])
                 .collect();
             if !changed.is_empty() {
-                deferred.before_change(database)?;
+                deferred.before_change()?;
                 let parameters = changed
                     .iter()
                     .map(|c| sql_value(&values[&c.name]))
@@ -329,7 +335,7 @@ fn put(
             }
         }
         None => {
-            deferred.before_change(database)?;
+            deferred.before_change()?;
             let columns: Vec<_> = table.columns.iter().filter(|c| !c.generated).collect();
             changed_once(database.app_execute(
                 &format!(
