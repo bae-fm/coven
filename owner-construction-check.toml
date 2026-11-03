@@ -82,6 +82,7 @@ capability_types = [
     "AtomicUsize",
     "OnceLock",
     "LazyLock",
+    "Notify",
 ]
 capability_traits = [
     "Clock",
@@ -260,6 +261,15 @@ task_types = [
     "StreamCapture",
     "LiveQuery",
     "ReconfigurableLiveQuery",
+    # A test's follow of one live query's results, while it follows them.
+    "Followed",
+    # One read's response body, holding that read's place under the
+    # store's download limit until it ends (api.md E5).
+    "ObjectStream",
+    "StreamState",
+    "DownloadLease",
+    # One snapshot body read, hashing the stream it reads.
+    "HashedBody",
     "SqlTransaction",
     "ReaderLease",
     "AppView",
@@ -286,6 +296,7 @@ external_types = [
     "AtomicUsize",
     "OnceLock",
     "LazyLock",
+    "Notify",
 ]
 internal_dependency_types = ["DatabaseConnection"]
 closed_session_types = [
@@ -524,6 +535,9 @@ tables = [
 "crates/coven-database/src/local_file.rs" = ["LocalFileStream::read_at"]
 "crates/coven-database/src/read_pool.rs" = ["ReadPool::new"]
 "crates/coven-database/src/input_database.rs" = ["InputDatabase::new"]
+# A reconfigurable live query makes the request state its handles share;
+# dropping the query closes it (api.md E4).
+"crates/coven-database/src/live_query.rs" = ["ReconfigurableLiveQuery::new"]
 # Removes an abandoned snapshot staging's records on a blocking task as it
 # drops; closing the store waits for it (§16.2).
 "crates/coven-database/src/snapshot_staging.rs" = ["SnapshotStaging::drop"]
@@ -535,9 +549,19 @@ tables = [
     "ProviderConnector::with_folders",
     "ProviderConnector::connect",
     "ProviderConnector::new",
+    # A connector makes each connection, in every connector.
+    "StorageConnector::connect",
 ]
+# One provider's connection, composed once when connecting.
+"crates/coven-storage/src/connection.rs" = ["StorageConnection::with_gate"]
+# Made once per opened installation and given to every connection and file
+# owner.
+"crates/coven-storage/src/transfer_budget.rs" = ["TransferBudget::new"]
 "crates/coven-storage/src/providers/oauth_folders.rs" = ["OAuthFolders::new"]
 "crates/coven-storage/src/memory_connector.rs" = [
+    # Reads the account label through a connection of its own, as the
+    # provider connector does through its folders.
+    "MemoryStorage::account_label",
     "MemoryStorage::with_transfers",
     "MemoryStorage::connect",
     "MemoryStorage::shared_connection",
@@ -590,6 +614,9 @@ tables = [
 # The network and retry reports that schedule's owners act on (§6.7).
 "crates/coven-sync/src/network_report.rs" = ["Reports::new"]
 "crates/coven-sync/src/sync_loop.rs" = ["SyncLoop::new"]
+# One sync state per opened installation, which the store's bootstrap or
+# builder makes and gives to its sequence and storage owners.
+"crates/coven-sync/src/sequence_state.rs" = ["SyncState::new"]
 # One invite expiry per writer handle, connected or not; the handle's
 # storage owner keeps it and stops it as it closes.
 "crates/coven-sync/src/invite_expiry.rs" = ["InviteExpiry::start"]
@@ -685,6 +712,8 @@ tables = [
 "crates/coven/src/handle.rs" = ["CovenHandle::close", "CovenHandle::new"]
 "crates/coven/src/read_handle.rs" = ["CovenReadHandle::close", "CovenReadHandle::new"]
 "crates/coven/src/storage.rs" = [
+    # Made once per opened installation, beside its sync state.
+    "Publications::new",
     # A completed sign-in becomes this session's custody.
     "StorageConnections::authenticate",
     "StorageConnections::call",

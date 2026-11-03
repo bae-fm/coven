@@ -9676,8 +9676,8 @@ of work that shares its owner's state, such as one read's response body, is a
 task. Tests may use real ones. The checker counts as shared state `Barrier`,
 `Semaphore`, `RwLock`, the atomics (`AtomicBool`, `AtomicI64`, `AtomicU64`,
 `AtomicUsize`), `OnceLock` and `LazyLock`, which the first of their holders to
-reach them sets for all the others, and a task's `JoinHandle`, which can abort
-or await the task.
+reach them sets for all the others, `Notify`, which wakes whichever holder
+waits on it, and a task's `JoinHandle`, which can abort or await the task.
 
 - The builder configures the clock, custody and OAuth. Ids use OS randomness;
   only `test-utils` allows replacing their source (api.md E1).

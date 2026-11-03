@@ -257,11 +257,6 @@ impl SyncState {
         SyncError::DeviceIdInUse(evidence)
     }
 }
-impl Default for SyncState {
-    fn default() -> Self {
-        Self::new()
-    }
-}
 impl PublicationGate for SyncState {
     fn check(&self, path: &ObjectPath) -> Result<(), StorageError> {
         // A join request is the bootstrap step before any sequence state
