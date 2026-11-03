@@ -114,7 +114,7 @@ pub(crate) fn apply<P: crate::PendingValue>(
                         )?);
                     }
                     if let Some(boundary) = effect.boundary {
-                        boundary.record(db)?;
+                        crate::write_boundary::record(db, &boundary)?;
                     }
                 }
             }

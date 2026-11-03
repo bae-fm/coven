@@ -88,7 +88,7 @@ impl crate::Database {
             db.transaction(|db| {
                 let boundary =
                     Boundary::load_selected(db)?.into_iter().find(|b| b.entry() == entry).unwrap();
-                let changed = BoundaryCoverage { boundary, included }.record_inside(db)?;
+                let changed = super::record_coverage(db, &BoundaryCoverage { boundary, included })?;
                 crate::reload_gate::clear_reload(db, &audience)?;
                 Ok(changed)
             })

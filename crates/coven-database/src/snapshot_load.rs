@@ -46,7 +46,7 @@ pub(crate) fn load<P: crate::PendingValue>(
             }
             crate::sequence::cutoff(database, slot, &change)?;
         }
-        let resets = crate::BoundaryCoverage::replace(database, boundaries)?;
+        let resets = crate::write_boundary::replace(database, boundaries)?;
         if !resets.is_empty() {
             crate::pending::reset(database)?;
         }

@@ -74,23 +74,6 @@ impl Boundary {
         }
     }
 
-    pub(crate) fn record(&self, database: &DatabaseConnection) -> Result<(), DbError> {
-        let (kind, version) = match self {
-            Self::SchemaChange(version) => ("schema", Some(version.number)),
-            Self::Reset { .. } => ("reset", None),
-        };
-        let entry = self.entry();
-        let snapshot = self.snapshot();
-        database.internal_execute(
-            "INSERT INTO _coven_boundaries(slot,kind,version,audience,snapshot_device,snapshot_number)
-             VALUES(?1,?2,?3,?4,?5,?6) ON CONFLICT(slot) DO NOTHING",
-            params![entry.0.to_be_bytes().as_slice(),
-                kind, version, audience_text(&snapshot.audience),
-                snapshot.device.0.to_be_bytes().as_slice(), snapshot.number.to_be_bytes().as_slice()],
-        )?;
-        Ok(())
-    }
-
     pub(crate) fn load_selected(database: &DatabaseConnection) -> Result<Vec<Self>, DbError> {
         Ok(retained(database)?.into_iter().map(|row| row.boundary).collect())
     }
@@ -105,68 +88,91 @@ pub struct BoundaryCoverage {
     pub included: u64,
 }
 
-impl BoundaryCoverage {
-    pub(crate) fn record_inside(&self, database: &DatabaseConnection) -> Result<bool, DbError> {
-        self.boundary.record(database)?;
-        let previous: (Option<Vec<u8>>, bool) = database.query_row(
-            "SELECT included,applied FROM _coven_boundaries WHERE slot=?1",
-            [self.boundary.entry().0.to_be_bytes().as_slice()],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )?;
-        let included = self.included.to_be_bytes().to_vec();
-        if let Some(checked) = previous.0 {
-            if checked != included {
-                return Err(crate::snapshot_error::invalid("checked boundary coverage changed"));
-            }
-        }
-        if previous.1 {
-            return Ok(false);
-        }
-        database.internal_execute(
-            "UPDATE _coven_boundaries SET included=?2,applied=1 WHERE slot=?1",
-            params![self.boundary.entry().0.to_be_bytes().as_slice(), included],
-        )?;
-        Ok(true)
-    }
+/// Keep a checked boundary, once, at its entry's slot.
+pub(crate) fn record(database: &DatabaseConnection, boundary: &Boundary) -> Result<(), DbError> {
+    let (kind, version) = match boundary {
+        Boundary::SchemaChange(version) => ("schema", Some(version.number)),
+        Boundary::Reset { .. } => ("reset", None),
+    };
+    let entry = boundary.entry();
+    let snapshot = boundary.snapshot();
+    database.internal_execute(
+        "INSERT INTO _coven_boundaries(slot,kind,version,audience,snapshot_device,snapshot_number)
+         VALUES(?1,?2,?3,?4,?5,?6) ON CONFLICT(slot) DO NOTHING",
+        params![
+            entry.0.to_be_bytes().as_slice(),
+            kind,
+            version,
+            audience_text(&snapshot.audience),
+            snapshot.device.0.to_be_bytes().as_slice(),
+            snapshot.number.to_be_bytes().as_slice()
+        ],
+    )?;
+    Ok(())
+}
 
-    /// Install the reload's effective readable boundaries, retaining every
-    /// checked coverage fact. The applied bit records the committed data view,
-    /// not slot selection. It also distinguishes a repeated reset reload.
-    pub(crate) fn replace(
-        database: &DatabaseConnection,
-        boundaries: Vec<Self>,
-    ) -> Result<Vec<Slot>, DbError> {
-        let mut ids = BTreeSet::new();
-        for boundary in &boundaries {
-            if !ids.insert(boundary.boundary.entry()) {
-                return Err(crate::snapshot_error::invalid("reload repeats a boundary slot"));
-            }
+/// Keep a boundary with its authenticated coverage and realize it in the
+/// data view: whether this applied it, which a boundary already applied
+/// does not. Coverage once checked never changes.
+pub(crate) fn record_coverage(
+    database: &DatabaseConnection,
+    coverage: &BoundaryCoverage,
+) -> Result<bool, DbError> {
+    record(database, &coverage.boundary)?;
+    let previous: (Option<Vec<u8>>, bool) = database.query_row(
+        "SELECT included,applied FROM _coven_boundaries WHERE slot=?1",
+        [coverage.boundary.entry().0.to_be_bytes().as_slice()],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    let included = coverage.included.to_be_bytes().to_vec();
+    if let Some(checked) = previous.0 {
+        if checked != included {
+            return Err(crate::snapshot_error::invalid("checked boundary coverage changed"));
         }
-        let previous: BTreeSet<_> = database
-            .query(
-                "SELECT slot FROM _coven_boundaries WHERE applied=1 AND kind='reset'",
-                [],
-                |row| crate::store_state_tables::slot(row, 0),
-            )?
-            .into_iter()
-            .collect();
-        let changed_resets = boundaries
-            .iter()
-            .filter_map(|coverage| match &coverage.boundary {
-                Boundary::Reset { entry, .. }
-                    if ids.contains(entry) && !previous.contains(entry) =>
-                {
-                    Some(*entry)
-                }
-                _ => None,
-            })
-            .collect();
-        database.internal_execute("DELETE FROM _coven_boundaries", [])?;
-        for boundary in boundaries {
-            boundary.record_inside(database)?;
-        }
-        Ok(changed_resets)
     }
+    if previous.1 {
+        return Ok(false);
+    }
+    database.internal_execute(
+        "UPDATE _coven_boundaries SET included=?2,applied=1 WHERE slot=?1",
+        params![coverage.boundary.entry().0.to_be_bytes().as_slice(), included],
+    )?;
+    Ok(true)
+}
+
+/// Install the reload's effective readable boundaries, retaining every
+/// checked coverage fact. The applied bit records the committed data view,
+/// not slot selection. It also distinguishes a repeated reset reload.
+pub(crate) fn replace(
+    database: &DatabaseConnection,
+    boundaries: Vec<BoundaryCoverage>,
+) -> Result<Vec<Slot>, DbError> {
+    let mut ids = BTreeSet::new();
+    for boundary in &boundaries {
+        if !ids.insert(boundary.boundary.entry()) {
+            return Err(crate::snapshot_error::invalid("reload repeats a boundary slot"));
+        }
+    }
+    let previous: BTreeSet<_> = database
+        .query("SELECT slot FROM _coven_boundaries WHERE applied=1 AND kind='reset'", [], |row| {
+            crate::store_state_tables::slot(row, 0)
+        })?
+        .into_iter()
+        .collect();
+    let changed_resets = boundaries
+        .iter()
+        .filter_map(|coverage| match &coverage.boundary {
+            Boundary::Reset { entry, .. } if ids.contains(entry) && !previous.contains(entry) => {
+                Some(*entry)
+            }
+            _ => None,
+        })
+        .collect();
+    database.internal_execute("DELETE FROM _coven_boundaries", [])?;
+    for boundary in &boundaries {
+        record_coverage(database, boundary)?;
+    }
+    Ok(changed_resets)
 }
 
 struct RetainedBoundary {
