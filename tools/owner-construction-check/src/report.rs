@@ -70,21 +70,17 @@ fn check_paths(workspace: &Workspace, code: &CrateCode, policy: &Policy, roots: 
     }
     if policy.selects(Rule::DatabaseBoundary) {
         findings.extend(find_database_boundary_violations(code, policy));
-        findings.extend(find_domain_owner_forwarding(files, policy));
+        findings.extend(find_domain_owner_forwarding(files, policy, &graph));
     }
     if policy.selects(Rule::OwnerDependencies) {
         findings.extend(find_owner_dependency_leaks(files, policy, &graph));
         findings.extend(find_task_state_leaks(files, policy, &graph));
     }
     if policy.selects(Rule::RetainedCapabilityParameters) {
-        findings.extend(find_retained_capability_parameter_violations(
-            files,
-            &graph.owners,
-            policy,
-        ));
+        findings.extend(find_retained_capability_parameter_violations(files, &graph, policy));
     }
     if policy.selects(Rule::ComponentBundles) {
-        findings.extend(find_component_bundle_violations(files, policy));
+        findings.extend(find_component_bundle_violations(files, &graph.identity));
     }
     if policy.selects(Rule::CapabilityBoundaries) {
         findings.extend(find_capability_boundary_violations(files, policy));

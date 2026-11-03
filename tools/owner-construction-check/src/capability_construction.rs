@@ -26,6 +26,7 @@ use crate::name_resolution::{qualified_path, NameResolver};
 use crate::owner_graph::OwnerGraph;
 use crate::policy::Policy;
 use crate::syntax::{type_name, type_names, RustFile};
+use crate::type_identity::FileTypes;
 
 #[derive(Debug, Eq, PartialEq, Ord, PartialOrd)]
 pub(crate) enum ConstructionKind {
@@ -92,16 +93,12 @@ pub(crate) fn find_capability_construction_violations(
     let constructed = capabilities.union(&owners).cloned().collect();
     let resolver = NameResolver::collect(files);
     let mut violations = BTreeSet::new();
-    let factories = Factories::collect(
-        files,
-        &constructed,
-        &policy.phantom_type_arguments,
-        &resolver,
-        &mut violations,
-    );
+    let factories =
+        Factories::collect(files, &constructed, &graph.identity, &resolver, &mut violations);
     for file in files {
         let mut visitor = ConstructionVisitor {
             path: &file.relative_path,
+            types: graph.identity.in_file(&file.relative_path),
             policy,
             capabilities: &capabilities,
             owners: &owners,
@@ -150,6 +147,7 @@ impl TypeContext {
 
 struct ConstructionVisitor<'a> {
     path: &'a str,
+    types: FileTypes<'a>,
     policy: &'a Policy,
     capabilities: &'a BTreeSet<String>,
     owners: &'a BTreeSet<String>,
@@ -381,7 +379,7 @@ impl ConstructionVisitor<'_> {
     }
 
     fn check_item_type(&mut self, ty: &syn::Type, span: Span) {
-        for name in type_names(ty, &self.policy.phantom_type_arguments) {
+        for name in type_names(ty, self.types) {
             self.record(&name, span, ConstructionKind::Value);
         }
     }
@@ -390,7 +388,7 @@ impl ConstructionVisitor<'_> {
         let syn::ReturnType::Type(_, output) = &signature.output else {
             return BTreeSet::new();
         };
-        type_names(output, &self.policy.phantom_type_arguments)
+        type_names(output, self.types)
             .iter()
             .map(|name| self.resolve_self(name).to_string())
             .filter(|name| self.capabilities.contains(name))

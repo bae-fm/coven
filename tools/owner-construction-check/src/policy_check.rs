@@ -17,6 +17,7 @@ use crate::policy::{Database, Policy};
 use crate::sources::Workspace;
 use crate::sql_statements::{statements, Creation};
 use crate::syntax::{collect_declared_types, type_name, type_names, RustFile, TypeNames};
+use crate::type_identity::TypeIdentity;
 
 /// Each policy row that names something the workspace does not hold. Rows
 /// naming code are held against the crates' code with their macros
@@ -24,6 +25,7 @@ use crate::syntax::{collect_declared_types, type_name, type_names, RustFile, Typ
 /// schema's table macros are read as written.
 pub(crate) fn stale_rows(workspace: &Workspace, code: &CrateCode, policy: &Policy) -> Vec<String> {
     let crate_files = &code.expanded;
+    let identity = TypeIdentity::of(crate_files, &policy.phantom_type_arguments);
     let mut stale = Vec::new();
     if policy.rules.is_empty() {
         stale.push("rules: the policy selects no rules".to_string());
@@ -32,10 +34,10 @@ pub(crate) fn stale_rows(workspace: &Workspace, code: &CrateCode, policy: &Polic
     stale.extend(unknown_libraries(workspace, policy));
     stale.extend(missing_homes(&code.written, policy));
     stale.extend(missing_composition_roots(crate_files, policy));
-    stale.extend(invalid_capability_factories(crate_files, policy));
-    stale.extend(invalid_handles(crate_files, policy));
+    stale.extend(invalid_capability_factories(crate_files, &identity, policy));
+    stale.extend(invalid_handles(crate_files, &identity, policy));
     stale.extend(overlapping_state_rows(policy));
-    stale.extend(undeclared_types(crate_files, policy));
+    stale.extend(undeclared_types(crate_files, &identity, policy));
     stale.extend(missing_capability_traits(crate_files, policy));
     stale.extend(invalid_database(code, workspace, policy));
     stale
@@ -223,7 +225,11 @@ fn missing_composition_roots(files: &[RustFile], policy: &Policy) -> Vec<String>
 
 /// A factory names a receiver method of a capability type, declared in its
 /// file, returning a construction-only capability.
-fn invalid_capability_factories(files: &[RustFile], policy: &Policy) -> Vec<String> {
+fn invalid_capability_factories(
+    files: &[RustFile],
+    identity: &TypeIdentity,
+    policy: &Policy,
+) -> Vec<String> {
     let methods = declared_methods(files);
     let capabilities = construction_only_types(files, policy);
     policy
@@ -241,7 +247,7 @@ fn invalid_capability_factories(files: &[RustFile], policy: &Policy) -> Vec<Stri
                     signature.receiver().is_some()
                         && match &signature.output {
                             syn::ReturnType::Type(_, output) => {
-                                type_names(output, &policy.phantom_type_arguments)
+                                type_names(output, identity.in_file(&factory.path))
                                     .contains(&factory.product)
                             }
                             syn::ReturnType::Default => false,
@@ -260,17 +266,17 @@ fn invalid_capability_factories(files: &[RustFile], policy: &Policy) -> Vec<Stri
 /// A handle is no capability or shared state row of its own, and its owner,
 /// another type, has a method returning it: a row whose owner makes none
 /// covers nothing.
-fn invalid_handles(files: &[RustFile], policy: &Policy) -> Vec<String> {
+fn invalid_handles(files: &[RustFile], identity: &TypeIdentity, policy: &Policy) -> Vec<String> {
     let methods = declared_methods(files);
     let mut stale = Vec::new();
     for (handle, owner) in &policy.handles {
         if handle == owner {
             stale.push(format!("handles: {handle} names itself as its owner"));
-        } else if !methods.iter().any(|((_, maker, _), signature)| {
+        } else if !methods.iter().any(|((path, maker, _), signature)| {
             maker == owner
                 && match &signature.output {
                     syn::ReturnType::Type(_, output) => {
-                        type_names(output, &policy.phantom_type_arguments).contains(handle)
+                        type_names(output, identity.in_file(path)).contains(handle)
                     }
                     syn::ReturnType::Default => false,
                 }
@@ -312,17 +318,20 @@ fn overlapping_state_rows(policy: &Policy) -> Vec<String> {
 
 /// A type the policy names is declared by a crate, or is one of its external
 /// types: named by a crate's production source and declared by none.
-fn undeclared_types(crate_files: &[RustFile], policy: &Policy) -> Vec<String> {
-    let declared = collect_declared_types(
-        crate_files,
-        &policy.shared_pointer_types,
-        &policy.phantom_type_arguments,
-    );
+fn undeclared_types(
+    crate_files: &[RustFile],
+    identity: &TypeIdentity,
+    policy: &Policy,
+) -> Vec<String> {
+    let declared = collect_declared_types(crate_files, &policy.shared_pointer_types, identity);
     // Every name, type arguments of phantom generics included.
     let every_argument = BTreeSet::new();
-    let mut mentioned = TypeNames::new(&every_argument);
+    let mut mentioned = BTreeSet::new();
     for file in crate_files {
-        mentioned.visit_file(&file.syntax);
+        let names = identity.in_file(&file.relative_path).with_phantoms(&every_argument);
+        let mut names = TypeNames::new(names);
+        names.visit_file(&file.syntax);
+        mentioned.extend(names.names);
     }
     let named = policy.named_types();
     let mut stale = named
@@ -334,7 +343,7 @@ fn undeclared_types(crate_files: &[RustFile], policy: &Policy) -> Vec<String> {
         if declared.contains_key(name) {
             stale.push(format!("external_types: a crate declares {name}"));
         }
-        if !mentioned.names.contains(name) {
+        if !mentioned.contains(name) {
             stale.push(format!("external_types: no crate names {name}"));
         }
         if !named.iter().any(|(_, named)| named == name) {

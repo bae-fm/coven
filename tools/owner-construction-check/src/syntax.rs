@@ -6,6 +6,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::macros::parse_macro_body;
+use crate::type_identity::{FileTypes, TypeIdentity};
 use syn::visit::{self, Visit};
 
 #[derive(Clone)]
@@ -70,18 +71,19 @@ impl RustFile {
     }
 }
 
-/// The last segment of every type path and trait bound a type mentions. The
-/// type arguments of a generic type in `phantoms` are left out: the type holds
-/// no value of them (`Policy::phantom_type_arguments`).
+/// The name of every type path and trait bound a type mentions, as `types`
+/// knows it (`type_identity.rs`). The type arguments of a generic type in the
+/// policy's phantoms are left out: the type holds no value of them
+/// (`Policy::phantom_type_arguments`).
 pub(crate) struct TypeNames<'p> {
     pub(crate) names: BTreeSet<String>,
     callback_outputs_only: bool,
-    phantoms: &'p BTreeSet<String>,
+    types: FileTypes<'p>,
 }
 
 impl<'p> TypeNames<'p> {
-    pub(crate) fn new(phantoms: &'p BTreeSet<String>) -> Self {
-        Self { names: BTreeSet::new(), callback_outputs_only: false, phantoms }
+    pub(crate) fn new(types: FileTypes<'p>) -> Self {
+        Self { names: BTreeSet::new(), callback_outputs_only: false, types }
     }
 }
 
@@ -106,9 +108,8 @@ impl<'ast> Visit<'ast> for TypeNames<'_> {
     }
 
     fn visit_type_path(&mut self, node: &'ast syn::TypePath) {
-        if let Some(segment) = node.path.segments.last() {
-            let name = segment.ident.to_string();
-            if self.phantoms.contains(&name) {
+        if let Some(name) = self.types.name(&node.path) {
+            if self.types.phantoms.contains(&name) {
                 if let Some(qself) = &node.qself {
                     self.visit_qself(qself);
                 }
@@ -126,17 +127,15 @@ impl<'ast> Visit<'ast> for TypeNames<'_> {
     fn visit_type_trait_object(&mut self, node: &'ast syn::TypeTraitObject) {
         for bound in &node.bounds {
             if let syn::TypeParamBound::Trait(bound) = bound {
-                if let Some(segment) = bound.path.segments.last() {
-                    self.names.insert(segment.ident.to_string());
-                }
+                self.names.extend(self.types.name(&bound.path));
             }
         }
         visit::visit_type_trait_object(self, node);
     }
 }
 
-pub(crate) fn type_names(ty: &syn::Type, phantoms: &BTreeSet<String>) -> BTreeSet<String> {
-    let mut names = TypeNames::new(phantoms);
+pub(crate) fn type_names(ty: &syn::Type, types: FileTypes<'_>) -> BTreeSet<String> {
+    let mut names = TypeNames::new(types);
     names.visit_type(ty);
     names.names
 }
@@ -145,8 +144,8 @@ pub(crate) fn type_names(ty: &syn::Type, phantoms: &BTreeSet<String>) -> BTreeSe
 /// arguments from its caller; only its return value can supply a capability.
 /// So a field holding a function pointer retains none of its argument types:
 /// `fn(&AdminRequest)` holds no request.
-pub(crate) fn supplied_type_names(ty: &syn::Type, phantoms: &BTreeSet<String>) -> BTreeSet<String> {
-    let mut names = TypeNames { callback_outputs_only: true, ..TypeNames::new(phantoms) };
+pub(crate) fn supplied_type_names(ty: &syn::Type, types: FileTypes<'_>) -> BTreeSet<String> {
+    let mut names = TypeNames { callback_outputs_only: true, ..TypeNames::new(types) };
     names.visit_type(ty);
     names.names
 }
@@ -158,40 +157,40 @@ pub(crate) fn supplied_type_names(ty: &syn::Type, phantoms: &BTreeSet<String>) -
 pub(crate) fn shared_type_names(
     ty: &syn::Type,
     pointers: &BTreeSet<String>,
-    phantoms: &BTreeSet<String>,
+    types: FileTypes<'_>,
 ) -> BTreeSet<String> {
-    let mut names = SharedTypeNames { pointers, phantoms, names: BTreeSet::new() };
+    let mut names = SharedTypeNames { pointers, types, names: BTreeSet::new() };
     names.visit_type(ty);
     names.names
 }
 
 struct SharedTypeNames<'p> {
     pointers: &'p BTreeSet<String>,
-    phantoms: &'p BTreeSet<String>,
+    types: FileTypes<'p>,
     names: BTreeSet<String>,
 }
 
 impl<'ast> Visit<'ast> for SharedTypeNames<'_> {
     fn visit_type_path(&mut self, node: &'ast syn::TypePath) {
-        let Some(segment) = node.path.segments.last() else {
+        let (Some(segment), Some(name)) = (node.path.segments.last(), self.types.name(&node.path))
+        else {
             return;
         };
-        let name = segment.ident.to_string();
         if self.pointers.contains(&name) {
             if let syn::PathArguments::AngleBracketed(arguments) = &segment.arguments {
                 for argument in &arguments.args {
                     if let syn::GenericArgument::Type(ty) = argument {
-                        self.names.extend(supplied_type_names(ty, self.phantoms));
+                        self.names.extend(supplied_type_names(ty, self.types));
                     }
                 }
             }
-        } else if !self.phantoms.contains(&name) {
+        } else if !self.types.phantoms.contains(&name) {
             visit::visit_type_path(self, node);
         }
     }
 
     fn visit_type_reference(&mut self, node: &'ast syn::TypeReference) {
-        self.names.extend(supplied_type_names(&node.elem, self.phantoms));
+        self.names.extend(supplied_type_names(&node.elem, self.types));
     }
 
     // A callback holds none of its arguments (`supplied_type_names`).
@@ -214,21 +213,29 @@ impl<'ast> Visit<'ast> for SharedTypeNames<'_> {
 pub(crate) struct StructInfo {
     pub(crate) field_types: BTreeSet<String>,
     pub(crate) shared_field_types: BTreeSet<String>,
+    /// A struct's named fields, each with the type names it holds values of.
+    pub(crate) named_fields: BTreeMap<String, BTreeSet<String>>,
+    /// Where each declaration is, by file and line.
     pub(crate) declarations: Vec<(String, usize)>,
 }
 
 /// Structs, enums, aliases, traits and unions, with the type names their
 /// fields hold values of, and those they hold through one of `pointers` or
-/// a reference.
+/// a reference, as `identity` names them.
 pub(crate) fn collect_declared_types(
     files: &[RustFile],
     pointers: &BTreeSet<String>,
-    phantoms: &BTreeSet<String>,
+    identity: &TypeIdentity,
 ) -> BTreeMap<String, StructInfo> {
     let mut types = BTreeMap::new();
     for file in files {
-        DeclarationCollector { path: &file.relative_path, pointers, phantoms, types: &mut types }
-            .visit_file(&file.syntax);
+        DeclarationCollector {
+            path: &file.relative_path,
+            pointers,
+            names: identity.in_file(&file.relative_path),
+            types: &mut types,
+        }
+        .visit_file(&file.syntax);
     }
     types
 }
@@ -236,7 +243,7 @@ pub(crate) fn collect_declared_types(
 struct DeclarationCollector<'a> {
     path: &'a str,
     pointers: &'a BTreeSet<String>,
-    phantoms: &'a BTreeSet<String>,
+    names: FileTypes<'a>,
     types: &'a mut BTreeMap<String, StructInfo>,
 }
 
@@ -265,11 +272,22 @@ impl<'ast> Visit<'ast> for DeclarationCollector<'_> {
             let info = self.types.entry(name.to_string()).or_insert_with(|| StructInfo {
                 field_types: BTreeSet::new(),
                 shared_field_types: BTreeSet::new(),
+                named_fields: BTreeMap::new(),
                 declarations: Vec::new(),
             });
             for ty in fields {
-                info.field_types.extend(supplied_type_names(ty, self.phantoms));
-                info.shared_field_types.extend(shared_type_names(ty, self.pointers, self.phantoms));
+                info.field_types.extend(supplied_type_names(ty, self.names));
+                info.shared_field_types.extend(shared_type_names(ty, self.pointers, self.names));
+            }
+            if let syn::Item::Struct(item) = node {
+                for field in &item.fields {
+                    if let Some(field_name) = &field.ident {
+                        info.named_fields
+                            .entry(field_name.to_string())
+                            .or_default()
+                            .extend(supplied_type_names(&field.ty, self.names));
+                    }
+                }
             }
             info.declarations.push((self.path.to_string(), name.span().start().line));
         }
@@ -293,12 +311,12 @@ pub(crate) fn type_name(ty: &syn::Type) -> Option<String> {
 pub(crate) fn output_contains_owner(
     output: &syn::ReturnType,
     owner: &str,
-    phantoms: &BTreeSet<String>,
+    types: FileTypes<'_>,
 ) -> bool {
     let syn::ReturnType::Type(_, output) = output else {
         return false;
     };
-    let names = type_names(output, phantoms);
+    let names = type_names(output, types);
     names.contains("Self") || names.contains(owner)
 }
 

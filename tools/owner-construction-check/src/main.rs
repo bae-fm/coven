@@ -38,6 +38,7 @@ mod syntax;
 mod task_state;
 mod test_code;
 mod test_layout;
+mod type_identity;
 mod unique_type_names;
 
 use std::path::PathBuf;

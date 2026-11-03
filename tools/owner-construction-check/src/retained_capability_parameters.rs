@@ -13,12 +13,13 @@ use syn::spanned::Spanned;
 
 use crate::capability_construction::construction_only_types;
 use crate::finding::Finding;
+use crate::owner_graph::OwnerGraph;
 use crate::policy::Policy;
 use crate::syntax::{output_contains_owner, supplied_type_names, type_name, RustFile};
 
 pub(crate) fn find_retained_capability_parameter_violations(
     files: &[RustFile],
-    owners: &BTreeSet<String>,
+    graph: &OwnerGraph,
     policy: &Policy,
 ) -> Vec<Finding> {
     let capabilities = construction_only_types(files, policy);
@@ -27,7 +28,7 @@ pub(crate) fn find_retained_capability_parameter_violations(
         find_in_items(
             &file.relative_path,
             &file.syntax.items,
-            owners,
+            graph,
             policy,
             &capabilities,
             &mut violations,
@@ -39,7 +40,7 @@ pub(crate) fn find_retained_capability_parameter_violations(
 fn find_in_items(
     path: &str,
     items: &[syn::Item],
-    owners: &BTreeSet<String>,
+    graph: &OwnerGraph,
     policy: &Policy,
     capabilities: &BTreeSet<String>,
     violations: &mut BTreeSet<Finding>,
@@ -57,7 +58,7 @@ fn find_in_items(
                     if output_contains_owner(
                         &method.sig.output,
                         &owner,
-                        &policy.phantom_type_arguments,
+                        graph.identity.in_file(path),
                     ) || policy.is_composition_root(path, &owner, &method.sig.ident.to_string())
                     {
                         continue;
@@ -66,7 +67,7 @@ fn find_in_items(
                         let syn::FnArg::Typed(input) = input else {
                             continue;
                         };
-                        let names = supplied_type_names(&input.ty, &policy.phantom_type_arguments);
+                        let names = supplied_type_names(&input.ty, graph.identity.in_file(path));
                         for handle in policy.handles.keys().filter(|handle| names.contains(*handle))
                         {
                             violations.insert(Finding::new(
@@ -79,7 +80,7 @@ fn find_in_items(
                                 "a holder receives a handle when it is built, or a free function as its argument",
                             ));
                         }
-                        if !owners.contains(&owner) {
+                        if !graph.owners.contains(&owner) {
                             continue;
                         }
                         for capability in capabilities {
@@ -94,7 +95,7 @@ fn find_in_items(
             }
             syn::Item::Mod(item) => {
                 if let Some((_, items)) = &item.content {
-                    find_in_items(path, items, owners, policy, capabilities, violations);
+                    find_in_items(path, items, graph, policy, capabilities, violations);
                 }
             }
             _ => {}

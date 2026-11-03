@@ -14,16 +14,20 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::finding::Finding;
+use crate::owner_graph::OwnerGraph;
 use crate::policy::Policy;
-use crate::syntax::{supplied_type_names, type_name, RustFile};
+use crate::syntax::{type_name, RustFile};
 
-pub(crate) fn find_domain_owner_forwarding(files: &[RustFile], policy: &Policy) -> Vec<Finding> {
+pub(crate) fn find_domain_owner_forwarding(
+    files: &[RustFile],
+    policy: &Policy,
+    graph: &OwnerGraph,
+) -> Vec<Finding> {
     // Each owner and the domains it owns.
     let mut owners = BTreeMap::<&str, Vec<&str>>::new();
     for domain in policy.database.iter().flat_map(|database| &database.domains) {
         owners.entry(domain.owner.as_str()).or_default().push(domain.name.as_str());
     }
-    let structs = structs(files, &policy.phantom_type_arguments);
     // Each type's methods, with the owners each passes its call on to.
     let mut methods = BTreeMap::<String, Vec<BTreeSet<&str>>>::new();
     for file in files {
@@ -31,7 +35,7 @@ pub(crate) fn find_domain_owner_forwarding(files: &[RustFile], policy: &Policy) 
             let Some(holder) = type_name(&implementation.self_ty) else {
                 continue;
             };
-            let Some(declared) = structs.get(&holder) else {
+            let Some(declared) = graph.types.get(&holder) else {
                 continue;
             };
             for method in &implementation.items {
@@ -42,7 +46,7 @@ pub(crate) fn find_domain_owner_forwarding(files: &[RustFile], policy: &Policy) 
                     continue;
                 }
                 let held = forwarded_field(method)
-                    .and_then(|field| declared.fields.get(&field))
+                    .and_then(|field| declared.named_fields.get(&field))
                     .map(|held| {
                         owners
                             .keys()
@@ -65,11 +69,11 @@ pub(crate) fn find_domain_owner_forwarding(files: &[RustFile], policy: &Policy) 
             })
         });
         for owner in forwarded.into_iter().flatten() {
-            let declared = &structs[&holder];
+            let (path, line) = &graph.types[&holder].declarations[0];
             let domains = &owners[owner];
             findings.push(Finding::new(
-                &declared.path,
-                declared.line,
+                path,
+                *line,
                 format!(
                     "every method of {holder} only passes its call on to {owner}, which owns the {} domain{}",
                     domains.join(", "),
@@ -99,54 +103,6 @@ fn impls(items: &[syn::Item]) -> Vec<&syn::ItemImpl> {
         }
     }
     found
-}
-
-/// A struct: where it is declared, and its named fields with the types each
-/// holds a value of.
-struct Struct {
-    path: String,
-    line: usize,
-    fields: BTreeMap<String, BTreeSet<String>>,
-}
-
-fn structs(files: &[RustFile], phantoms: &BTreeSet<String>) -> BTreeMap<String, Struct> {
-    fn collect(
-        path: &str,
-        items: &[syn::Item],
-        phantoms: &BTreeSet<String>,
-        structs: &mut BTreeMap<String, Struct>,
-    ) {
-        for item in items {
-            match item {
-                syn::Item::Struct(item) => {
-                    let fields = item
-                        .fields
-                        .iter()
-                        .filter_map(|field| {
-                            let name = field.ident.as_ref()?.to_string();
-                            Some((name, supplied_type_names(&field.ty, phantoms)))
-                        })
-                        .collect();
-                    structs.entry(item.ident.to_string()).or_insert(Struct {
-                        path: path.to_string(),
-                        line: item.ident.span().start().line,
-                        fields,
-                    });
-                }
-                syn::Item::Mod(module) => {
-                    if let Some((_, items)) = &module.content {
-                        collect(path, items, phantoms, structs);
-                    }
-                }
-                _ => {}
-            }
-        }
-    }
-    let mut structs = BTreeMap::new();
-    for file in files {
-        collect(&file.relative_path, &file.syntax.items, phantoms, &mut structs);
-    }
-    structs
 }
 
 /// The field a method's whole body passes its call on to, when it does.

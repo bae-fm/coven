@@ -10029,6 +10029,11 @@ Lean proofs once, on Linux, since a proof checks the same on any platform.
    invocation is in. A definition is no code until it is used. An invocation
    the checker cannot expand fails the check, since what it writes would
    otherwise go unchecked.
+   The rules match types by name, and the policy names them so: coven's own
+   types each have one declaration, and a dependency's type goes by its name
+   unless one of coven's has it. A path to such a type, as
+   `rusqlite::Connection` would be beside a `Connection` of coven's, names
+   it by the path it resolves to, so it never stands for coven's type.
 4. The checker's check of the policy, before any rule: every member, file,
    type and composition root the policy names must exist, so the policy can't
    go stale. Each table the schema creates is in one domain, and each

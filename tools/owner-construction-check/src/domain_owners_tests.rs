@@ -1,5 +1,6 @@
 use super::*;
 use crate::crate_code::checked;
+use crate::owner_graph::OwnerGraph;
 
 fn policy() -> Policy {
     Policy::fixture(
@@ -23,8 +24,9 @@ fn policy() -> Policy {
 }
 
 fn findings(source: &str) -> Vec<(usize, String)> {
-    let files = [RustFile::fixture("crates/app-core/src/lib.rs", source)];
-    find_domain_owner_forwarding(&checked(&files), &policy())
+    let files = checked(&[RustFile::fixture("crates/app-core/src/lib.rs", source)]);
+    let policy = policy();
+    find_domain_owner_forwarding(&files, &policy, &OwnerGraph::collect(&files, &policy))
         .into_iter()
         .map(|finding| (finding.line, finding.message))
         .collect()

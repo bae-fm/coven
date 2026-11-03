@@ -13,8 +13,8 @@ use syn::spanned::Spanned;
 use syn::visit::{self, Visit};
 
 use crate::macros::parse_macro_body;
-use crate::policy::Policy;
 use crate::syntax::{output_contains_owner, type_name, visibility_crosses_owner, RustFile};
+use crate::type_identity::{FileTypes, TypeIdentity};
 
 #[derive(Default)]
 struct BundleTypeInfo {
@@ -26,9 +26,9 @@ struct BundleTypeInfo {
 
 pub(crate) fn find_component_bundle_violations(
     files: &[RustFile],
-    policy: &Policy,
+    identity: &TypeIdentity,
 ) -> Vec<Finding> {
-    let bundle_types = collect_bundle_types(files, &policy.phantom_type_arguments);
+    let bundle_types = collect_bundle_types(files, identity);
     let mut violations = BTreeSet::new();
     for file in files {
         let mut visitor = ComponentBundleVisitor {
@@ -41,10 +41,11 @@ pub(crate) fn find_component_bundle_violations(
     violations.into_iter().collect()
 }
 
-fn collect_bundle_types(files: &[RustFile], phantoms: &BTreeSet<String>) -> BTreeSet<String> {
+fn collect_bundle_types(files: &[RustFile], identity: &TypeIdentity) -> BTreeSet<String> {
     let mut types = BTreeMap::new();
     for file in files {
-        collect_bundle_type_info(&file.syntax.items, phantoms, &mut types);
+        let names = identity.in_file(&file.relative_path);
+        collect_bundle_type_info(&file.syntax.items, names, &mut types);
     }
     types
         .into_iter()
@@ -59,7 +60,7 @@ fn collect_bundle_types(files: &[RustFile], phantoms: &BTreeSet<String>) -> BTre
 
 fn collect_bundle_type_info(
     items: &[syn::Item],
-    phantoms: &BTreeSet<String>,
+    names: FileTypes<'_>,
     types: &mut BTreeMap<String, BundleTypeInfo>,
 ) {
     for item in items {
@@ -81,14 +82,14 @@ fn collect_bundle_type_info(
                     };
                     info.inherent_methods.push((
                         method.sig.ident.to_string(),
-                        output_contains_owner(&method.sig.output, &name, phantoms),
+                        output_contains_owner(&method.sig.output, &name, names),
                         method.sig.receiver().is_some(),
                     ));
                 }
             }
             syn::Item::Mod(item) => {
                 if let Some((_, items)) = &item.content {
-                    collect_bundle_type_info(items, phantoms, types);
+                    collect_bundle_type_info(items, names, types);
                 }
             }
             _ => {}

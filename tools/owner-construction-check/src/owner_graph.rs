@@ -1,23 +1,23 @@
-//! The single field graph and owner inference shared by every owner rule.
+//! The single field graph and owner inference shared by every owner rule,
+//! and the names its types go by (`type_identity.rs`).
 
 use crate::policy::Policy;
 use crate::syntax::{collect_declared_types, RustFile, StructInfo};
+use crate::type_identity::TypeIdentity;
 use std::collections::{BTreeMap, BTreeSet};
 
 pub(crate) struct OwnerGraph {
+    pub(crate) identity: TypeIdentity,
     pub(crate) types: BTreeMap<String, StructInfo>,
     pub(crate) owners: BTreeSet<String>,
 }
 
 impl OwnerGraph {
     pub(crate) fn collect(files: &[RustFile], policy: &Policy) -> Self {
-        let types = collect_declared_types(
-            files,
-            &policy.shared_pointer_types,
-            &policy.phantom_type_arguments,
-        );
+        let identity = TypeIdentity::of(files, &policy.phantom_type_arguments);
+        let types = collect_declared_types(files, &policy.shared_pointer_types, &identity);
         let owners = infer_owners(&types, policy);
-        Self { types, owners }
+        Self { identity, types, owners }
     }
 
     pub(crate) fn retained(&self, owner: &str) -> BTreeSet<String> {

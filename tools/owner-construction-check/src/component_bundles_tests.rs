@@ -21,7 +21,8 @@ fn component_bundle_constructed_only_to_be_destructured_is_rejected() {
         "#,
     )];
 
-    let violations = find_component_bundle_violations(&files, &Policy::fixture(""));
+    let violations =
+        find_component_bundle_violations(&files, &TypeIdentity::of(&files, &BTreeSet::new()));
     assert_eq!(
         violations,
         [Finding::new(
@@ -50,7 +51,8 @@ fn component_value_with_behavior_is_allowed() {
         "#,
     )];
 
-    assert!(find_component_bundle_violations(&files, &Policy::fixture("")).is_empty());
+    assert!(find_component_bundle_violations(&files, &TypeIdentity::of(&files, &BTreeSet::new()))
+        .is_empty());
 }
 
 #[test]
@@ -77,7 +79,7 @@ fn a_bundle_destructured_inside_a_macro_call_is_rejected() {
     )];
 
     assert_eq!(
-        find_component_bundle_violations(&files, &Policy::fixture("")),
+        find_component_bundle_violations(&files, &TypeIdentity::of(&files, &BTreeSet::new())),
         [Finding::new(
             "crates/app/src/handle.rs",
             13,
