@@ -9829,7 +9829,10 @@ shared state.
 - The builder configures the clock, custody and OAuth. Ids use OS randomness;
   only `test-utils` allows replacing their source (api.md E1).
 - A method never takes a raw capability as a parameter, such as a store directory
-  or a database connection; it calls the capability's owner instead.
+  or a database connection, whatever type it belongs to. An owner, or a task made
+  for one operation, is built with the capability it uses; a plain value's work
+  with one is a function taking the capability and the value; anything else calls
+  the capability's owner.
 - Inside `coven-database`, a table that one module writes is that module's
   domain: SQL elsewhere may read it, but writes it only by calling that
   module, and the table's schema and the tests that write it live with the

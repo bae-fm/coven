@@ -69,7 +69,7 @@ fn retained_owner_runtime_method_cannot_accept_the_store_directory() {
             "crates/app/src/rows.rs",
             11,
             "Rows::execute accepts construction-only capability StoreDir at runtime",
-            "a method never takes a raw capability; it uses the one its owner was built with"
+            "a method never takes a raw capability; its value is built with the one it uses, or a free function takes it"
         )]
     );
 }
@@ -114,7 +114,7 @@ fn trait_implementations_have_the_same_parameter_boundary_as_explicit_capabiliti
             "crates/app/src/runtime.rs",
             6,
             "Runtime::run accepts construction-only capability SuppliedClock at runtime",
-            "a method never takes a raw capability; it uses the one its owner was built with"
+            "a method never takes a raw capability; its value is built with the one it uses, or a free function takes it"
         )]
     );
 }
@@ -160,5 +160,46 @@ fn a_handle_is_received_only_by_constructors_roots_and_free_functions() {
                 "a holder receives a handle when it is built, or a free function as its argument",
             )
         })
+    );
+}
+
+/// A value that holds no capability takes none in its methods either: the
+/// work is a task's, built with the capability, or a free function's.
+#[test]
+fn a_value_method_cannot_accept_a_construction_only_capability() {
+    let policy = Policy::fixture(
+        r#"
+        capability_types = ["DatabaseConnection"]
+        construction_only_capability_types = ["DatabaseConnection"]
+        "#,
+    );
+    let files = vec![RustFile::fixture(
+        "crates/app/src/record.rs",
+        r#"
+        struct DatabaseConnection;
+        struct Record { id: u64 }
+        struct Insert<'a> { database: &'a DatabaseConnection }
+        impl Record {
+            fn read(database: &DatabaseConnection, id: u64) -> Self { todo!() }
+            fn insert(&self, database: &DatabaseConnection) {}
+        }
+        impl<'a> Insert<'a> {
+            fn new(database: &'a DatabaseConnection) -> Self { Self { database } }
+            fn record(&self, record: &Record) {}
+        }
+        fn insert(database: &DatabaseConnection, record: &Record) {}
+        "#,
+    )];
+    let files = checked(&files);
+    let graph = OwnerGraph::collect(&files, &policy);
+    let violations = find_retained_capability_parameter_violations(&files, &graph, &policy);
+    assert_eq!(
+        violations,
+        [Finding::new(
+            "crates/app/src/record.rs",
+            7,
+            "Record::insert accepts construction-only capability DatabaseConnection at runtime",
+            "a method never takes a raw capability; its value is built with the one it uses, or a free function takes it"
+        )]
     );
 }

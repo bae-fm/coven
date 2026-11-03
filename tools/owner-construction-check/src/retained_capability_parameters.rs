@@ -1,11 +1,13 @@
 //! A method never takes a raw capability as a parameter (Appendix F.2), such as a
-//! store directory: it is fixed when the owner graph is built, and the owner
-//! uses the one it retains. Only an owner's constructors and the composition
-//! roots accept the policy's construction-only capabilities.
+//! store directory, whichever type the method belongs to: a capability is
+//! fixed when what uses it is built, an owner for the store's life or a task
+//! for one operation, and the method uses the one its value holds. Only
+//! constructors and the composition roots accept the policy's
+//! construction-only capabilities. A free function may take one.
 //!
 //! A handle (Appendix F.3) flows the same way, into whatever holds it: no
-//! method but a constructor or a composition root takes one, whichever type
-//! the method belongs to. A free function may take one.
+//! method but a constructor or a composition root takes one. A free function
+//! may take one.
 
 use std::collections::BTreeSet;
 
@@ -80,14 +82,11 @@ fn find_in_items(
                                 "a holder receives a handle when it is built, or a free function as its argument",
                             ));
                         }
-                        if !graph.owners.contains(&owner) {
-                            continue;
-                        }
                         for capability in capabilities {
                             if names.contains(capability) {
                                 violations.insert(Finding::new(path, input.span().start().line,
                                     format!("{owner}::{} accepts construction-only capability {capability} at runtime", method.sig.ident),
-                                    "a method never takes a raw capability; it uses the one its owner was built with"));
+                                    "a method never takes a raw capability; its value is built with the one it uses, or a free function takes it"));
                             }
                         }
                     }
