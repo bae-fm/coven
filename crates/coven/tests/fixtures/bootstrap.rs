@@ -176,8 +176,15 @@ impl Installation {
         cancel: &watch::Receiver<bool>,
         status: impl Fn(BootstrapStatus),
     ) -> Result<Option<CovenHandle>, BootstrapError> {
-        bootstrap_device(self.authenticated_builder(owner, storage).await, request, status, cancel)
-            .await
+        // Boxed, as the API's calls box it: its tens of KiB would otherwise
+        // ride in the test's own future on the test thread's stack.
+        Box::pin(bootstrap_device(
+            self.authenticated_builder(owner, storage).await,
+            request,
+            status,
+            cancel,
+        ))
+        .await
     }
 
     /// A bootstrap, as [`Self::run`], whose loading reports `recorder`
@@ -192,7 +199,13 @@ impl Installation {
         recorder: &Arc<RecordingClock<LoadStep>>,
     ) -> Result<Option<CovenHandle>, BootstrapError> {
         let builder = self.authenticated_builder(owner, storage).await;
-        bootstrap_device(builder.record_loading(recorder.clone()), request, status, cancel).await
+        Box::pin(bootstrap_device(
+            builder.record_loading(recorder.clone()),
+            request,
+            status,
+            cancel,
+        ))
+        .await
     }
 
     pub(super) async fn restore(&self, owner: &Owner) -> CovenHandle {

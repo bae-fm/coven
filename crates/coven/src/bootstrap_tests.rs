@@ -465,12 +465,12 @@ async fn a_member_removed_while_joining_receives_the_provider_refusal() {
     // Approval claims the store key's copy and then the binding.
     let after = owner.applied().await + 3;
     let joining = async {
-        bootstrap_device(
+        Box::pin(bootstrap_device(
             install.authenticated_builder(&owner, owner.recipient()).await.clock(clock),
             Installation::join_request(&invite),
             |_| {},
             &cancel,
-        )
+        ))
         .await
     };
     let remove = async {

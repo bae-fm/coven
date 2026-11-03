@@ -177,8 +177,8 @@ fn app_tests_can_find_open_files_and_assert_they_are_released() {
 /// coven's operations stays small: the work under it reaches tens of KiB, and
 /// each such call holds that on the heap. An app's own future embeds these
 /// calls' futures, and a runtime polls them on 2 MiB worker threads. The bound
-/// is 8 KiB, over twice the largest of them (`open`, 3 KiB) and under half of
-/// any unboxed operation (16–25 KiB).
+/// is 8 KiB, over twice the largest of them (`open_read_only`, 3 KiB) and under
+/// half of any unboxed operation (16–25 KiB).
 #[test]
 fn bootstrap_and_operation_futures_stay_small() {
     use crate::{

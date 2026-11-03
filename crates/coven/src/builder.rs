@@ -286,9 +286,14 @@ impl CovenBuilder {
         store: StoreId,
         on_progress: impl Fn(Progress<OpenStep>),
     ) -> CovenResult<CovenHandle> {
-        let opening = self.open_graph(store).await?;
-        let progress = opening.database.subscribe_progress();
-        progress.forward(opening.open(), on_progress).await
+        // Its work rides on the heap, as every bootstrap's does, so an app's
+        // future holding this call stays small.
+        Box::pin(async move {
+            let opening = self.open_graph(store).await?;
+            let progress = opening.database.subscribe_progress();
+            progress.forward(opening.open(), on_progress).await
+        })
+        .await
     }
 
     /// Replace this installation with a new device loaded from storage
