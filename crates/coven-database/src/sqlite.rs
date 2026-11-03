@@ -876,7 +876,12 @@ impl DatabaseConnection {
                 database.require_transaction()?;
                 let changes = match (&mut session, &stream) {
                     (Some(session), _) => session.take_changes()?,
-                    (None, Some(stream)) => stream.changes(database)?,
+                    (None, Some(stream)) => match stream.changes() {
+                        stream_capture::StreamChanges::Rows(rows) => rows,
+                        stream_capture::StreamChanges::Tables(tables) => {
+                            crate::change_capture::table_changes(database, tables)?
+                        }
+                    },
                     (None, None) => Vec::new(),
                 };
                 Ok((result, changes))

@@ -18,6 +18,15 @@ enum Recorded {
     Tables(BTreeSet<String>),
 }
 
+/// What a streamed transaction changed, as its capture saw it.
+pub(super) enum StreamChanges {
+    /// The changed rows, as live queries read them.
+    Rows(Vec<RowChange>),
+    /// The tables changed, on a connection that knows no table's shape:
+    /// the connection reads their changes (`change_capture::table_changes`).
+    Tables(BTreeSet<String>),
+}
+
 pub(super) struct StreamCapture {
     recorded: Arc<Mutex<Recorded>>,
 }
@@ -60,15 +69,15 @@ impl StreamCapture {
         Ok(Self { recorded })
     }
 
-    /// What the transaction on `database` changed, as live queries read it.
-    pub(super) fn changes(&self, database: &DatabaseConnection) -> Result<Vec<RowChange>, DbError> {
+    /// What the transaction changed, as the capture recorded it.
+    pub(super) fn changes(&self) -> StreamChanges {
         let recorded = std::mem::replace(
             &mut *self.recorded.lock().expect("stream observation lock poisoned"),
             Recorded::Tables(BTreeSet::new()),
         );
         match recorded {
-            Recorded::Rows { shapes, changes } => Ok(changes.finish(&shapes)),
-            Recorded::Tables(tables) => crate::change_capture::table_changes(database, tables),
+            Recorded::Rows { shapes, changes } => StreamChanges::Rows(changes.finish(&shapes)),
+            Recorded::Tables(tables) => StreamChanges::Tables(tables),
         }
     }
 }
