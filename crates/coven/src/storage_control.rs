@@ -30,7 +30,7 @@ impl StorageConnections {
             attempt_ended(previous.task).await;
         }
         let live = self.live.lock().await;
-        if let Connection::Active(connected) = &*live {
+        if let ConnectionState::Active(connected) = &*live {
             self.epoch.fetch_add(1, Ordering::SeqCst);
             return connected.sync_loop.start().await;
         }
@@ -162,7 +162,7 @@ impl StorageConnections {
                     if self.waits.return_requests(requests).await.is_err() {
                         return;
                     }
-                    if let Connection::Active(connected) = &*live {
+                    if let ConnectionState::Active(connected) = &*live {
                         if let Err(error) = connected.sync_loop.start().await {
                             #[expect(
                                 clippy::let_underscore_must_use,

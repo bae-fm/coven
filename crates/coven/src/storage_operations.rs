@@ -5,7 +5,7 @@
 //! credential reads and disconnected credential changes use the store's own
 //! credential owner.
 
-use super::{Connection, StorageConnections};
+use super::{ConnectionState, StorageConnections};
 use crate::*;
 use coven_format::admin::StoreChange;
 
@@ -69,7 +69,7 @@ impl StorageConnections {
     pub(crate) async fn retire(&self) -> Result<(), SyncError> {
         let mut live = self.live.lock().await;
         self.ready(&mut live).await?;
-        let Connection::Active(live) = &*live else {
+        let ConnectionState::Active(live) = &*live else {
             return Err(SyncError::NoStorage);
         };
         match live.sync.administer(StoreChange::RemoveDevice { device: self.device }).await {
@@ -98,7 +98,7 @@ impl StorageConnections {
     pub(crate) async fn reset(&self, audience: Audience) -> Result<(), SyncError> {
         let mut live = self.live.lock().await;
         self.ready(&mut live).await?;
-        let Connection::Active(live) = &*live else {
+        let ConnectionState::Active(live) = &*live else {
             return Err(SyncError::NoStorage);
         };
         live.sync.reset(audience).await
@@ -107,7 +107,7 @@ impl StorageConnections {
     pub(crate) async fn reload_from_snapshot(&self) -> Result<(), SyncError> {
         let mut live = self.live.lock().await;
         self.ready(&mut live).await?;
-        let Connection::Active(live) = &*live else {
+        let ConnectionState::Active(live) = &*live else {
             return Err(SyncError::NoStorage);
         };
         live.sync.reload_from_snapshot().await
@@ -116,7 +116,7 @@ impl StorageConnections {
     pub(crate) async fn clean_up_gone_devices_files(&self) -> Result<(), SyncError> {
         let mut live = self.live.lock().await;
         self.ready(&mut live).await?;
-        let Connection::Active(live) = &*live else {
+        let ConnectionState::Active(live) = &*live else {
             return Err(SyncError::NoStorage);
         };
         live.sync.clean_up_gone_devices_files().await
@@ -215,7 +215,7 @@ impl StorageConnections {
     ) -> Result<(), SyncError> {
         let mut live = self.live.lock().await;
         self.ready(&mut live).await?;
-        let Connection::Active(live) = &*live else {
+        let ConnectionState::Active(live) = &*live else {
             return Err(SyncError::NoStorage);
         };
         live.codes.replace_access_key(access_key_id, secret_access_key).await
@@ -230,7 +230,7 @@ impl StorageConnections {
         let mut live = self.live.lock().await;
         self.ready(&mut live).await?;
         match &*live {
-            Connection::Active(live) => {
+            ConnectionState::Active(live) => {
                 live.codes.update_credentials(access_key_id, secret_access_key).await
             }
             _ => {
@@ -260,7 +260,7 @@ impl StorageConnections {
     pub(crate) async fn replace_member_keys(&self) -> Result<SecretText, SyncError> {
         let mut live = self.live.lock().await;
         self.ready(&mut live).await?;
-        let Connection::Active(live) = &*live else {
+        let ConnectionState::Active(live) = &*live else {
             return Err(SyncError::NoStorage);
         };
         live.codes.replace_member_keys().await
