@@ -288,6 +288,18 @@ pub(crate) async fn remote_write(database: &crate::Database, row: coven_format::
     );
 }
 
+/// Deliver `row` as another device's write in the next slot while this
+/// device's writes still wait in its queue (§6.2).
+pub(crate) async fn remote_write_beside_queue(
+    database: &crate::Database,
+    row: coven_format::write::RowChange,
+) {
+    assert_eq!(
+        try_remote_write(database, row, None, false).await.unwrap(),
+        crate::ApplyOutcome::Applied
+    );
+}
+
 /// Deliver `row` as another device's write in the next slot, after first
 /// counting every write this device has made when `count_queue` is set.
 async fn try_remote_write(

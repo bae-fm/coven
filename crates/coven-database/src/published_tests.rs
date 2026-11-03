@@ -435,3 +435,76 @@ async fn a_dropped_table_keeps_a_kept_row_without_the_queues_losses() {
     assert!(counted_losses(&db).is_empty(), "{:?}", counted_losses(&db));
     db.close().await.unwrap();
 }
+
+/// Another device's insert of `albums` row `id`, titled `title`, at
+/// generation 1.
+fn album_insert(id: &str, title: &str) -> coven_format::write::RowChange {
+    use coven_merge::{Change, ColumnValue, Operation, RowId};
+    let value =
+        |value: &str| ColumnValue { value: Value::Text(value.into()), parents: Default::default() };
+    coven_format::write::RowChange {
+        row: RowId {
+            table: "albums".into(),
+            key: coven_format::key::encode_key(&[Value::Text(id.into())]).unwrap(),
+            audience: Audience::Store,
+        },
+        change: Change {
+            generation: 0,
+            operation: Operation::Insert(
+                [("id".to_owned(), value(id)), ("title".to_owned(), value(title))].into(),
+            ),
+        },
+        old: Default::default(),
+        sources: Default::default(),
+        creator: None,
+        execution: Default::default(),
+    }
+}
+
+/// Ana's queued rename of `first`, folded over Ben's concurrent one, keeps
+/// it aside with her title as a lost value when version 2 drops `albums`;
+/// version 3 makes a new `albums`, and Ben's device inserts its own `first`
+/// there while her writes still wait. Kept rows go by table name and key, so
+/// her dropped row's frozen lost value names Ben's new row too, and folding
+/// her queue keeps that row aside: what is kept is the state the slots gave
+/// it, so the next slot puts Ben's row back as it was, and the counted state
+/// holds no lost value of it.
+#[tokio::test]
+async fn a_recreated_tables_row_keeps_its_counted_state_under_a_dropped_rows_name() {
+    const SCHEMA: &str = "CREATE TABLE albums(id TEXT NOT NULL PRIMARY KEY, title TEXT);
+         CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY, title TEXT)";
+    let store = TestStore::new();
+    let mut migrations = vec![Migration::addition(1, "schema", SCHEMA)];
+    let db = store.builder(synced(&["albums", "notes"]), migrations.clone()).open().await.unwrap();
+    sql(&db, "INSERT INTO albums VALUES('first','First'); INSERT INTO notes VALUES('n','Note')")
+        .await
+        .unwrap();
+    count_own(&db).await;
+    sql(&db, "UPDATE albums SET title='Queued' WHERE id='first'").await.unwrap();
+    let rename = [("title", Value::Text("Ben".into()))];
+    crate::tests::remote_update_concurrent_with_queue(&db, "albums", "first", &rename).await;
+    db.close().await.unwrap();
+    migrations.push(Migration::breaking(2, "drop", "DROP TABLE albums", OldWrites::Drop));
+    let db = store.builder(synced(&["notes"]), migrations.clone()).open().await.unwrap();
+    db.close().await.unwrap();
+    migrations.push(Migration::addition(
+        3,
+        "albums again",
+        "CREATE TABLE albums(id TEXT NOT NULL PRIMARY KEY, title TEXT)",
+    ));
+    let db = store.builder(synced(&["albums", "notes"]), migrations).open().await.unwrap();
+    crate::tests::remote_write_beside_queue(&db, album_insert("first", "Ben's")).await;
+    let shown = |db: &crate::Database| -> Vec<(String, String)> {
+        db.inspect_writer(|db| {
+            db.query("SELECT id,title FROM albums", [], |r| Ok((r.get(0)?, r.get(1)?))).unwrap()
+        })
+    };
+    assert_eq!(shown(&db), [("first".to_owned(), "Ben's".to_owned())]);
+    let note = [("title", Value::Text("Ben's note".into()))];
+    crate::tests::remote_update_beside_queue(&db, "notes", "n", &note).await;
+    assert_eq!(shown(&db), [("first".to_owned(), "Ben's".to_owned())]);
+    assert!(counted_visible(&db, "first"));
+    assert!(counted_losses(&db).is_empty(), "{:?}", counted_losses(&db));
+    assert_eq!(db.lost_values().await.unwrap().len(), 1, "the app keeps Ana's title frozen");
+    db.close().await.unwrap();
+}
