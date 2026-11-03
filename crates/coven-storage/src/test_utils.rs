@@ -72,6 +72,11 @@ struct MemoryState {
     accounts: BTreeMap<String, AccountAccess>,
     retained_access: BTreeMap<String, Vec<RetainedAccess>>,
     faults: Faults,
+    /// The test's barrier and gate each create waits at, and the gate each
+    /// part waits at (`MemoryStorage::hold_creations` and the gates).
+    creation_barrier: Option<Arc<tokio::sync::Barrier>>,
+    creation_gate: Option<Arc<tokio::sync::Semaphore>>,
+    part_gate: Option<Arc<tokio::sync::Semaphore>>,
     ranges: Vec<ByteRange>,
     reads: Vec<(ObjectPath, u64, u64)>,
     received_buffers: Vec<usize>,
@@ -343,6 +348,21 @@ impl MemoryStorage {
     pub async fn set_faults(&self, faults: Faults) {
         self.provider.state.lock().await.faults = faults;
     }
+    /// Hold each create, including injected failures, until all writers
+    /// arrive at the test's `barrier`.
+    pub async fn hold_creations(&self, barrier: Arc<tokio::sync::Barrier>) {
+        self.provider.state.lock().await.creation_barrier = Some(barrier);
+    }
+    /// Hold each create until the test adds a permit to `gate`; each create
+    /// takes one, oldest first, so a test releases held creates one at a time.
+    pub async fn gate_creations(&self, gate: Arc<tokio::sync::Semaphore>) {
+        self.provider.state.lock().await.creation_gate = Some(gate);
+    }
+    /// Hold each part, its bytes taken, until the test adds a permit to
+    /// `gate`; each part takes one, oldest first.
+    pub async fn gate_parts(&self, gate: Arc<tokio::sync::Semaphore>) {
+        self.provider.state.lock().await.part_gate = Some(gate);
+    }
     /// Whether the store is shared with `account`: granted and not since
     /// revoked.
     pub async fn shared_with(&self, account: &str) -> bool {
@@ -384,7 +404,7 @@ impl MemoryProvider {
             };
             let (barrier, gate) = match &request {
                 MemoryRequest::Create(_) => {
-                    (state.faults.creation_barrier.clone(), state.faults.creation_gate.clone())
+                    (state.creation_barrier.clone(), state.creation_gate.clone())
                 }
                 _ => (None, None),
             };

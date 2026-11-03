@@ -1,5 +1,5 @@
 use crate::*;
-use coven_storage::test_utils::{Faults, MemoryStorage};
+use coven_storage::test_utils::MemoryStorage;
 use coven_storage::Storage;
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -117,7 +117,7 @@ async fn a_file_sent_in_one_request_shows_its_bytes_going() {
     let mut watch = handle.subscribe_upload_transfers();
     assert_eq!(watch.next().await, Some(vec![TransferChange::Reset(BTreeMap::new())]));
     let gate = Arc::new(tokio::sync::Semaphore::new(0));
-    memory.set_faults(Faults { creation_gate: Some(gate.clone()), ..Faults::none() }).await;
+    memory.gate_creations(gate.clone()).await;
     handle.set_uploads_paused(false).await.unwrap();
     let mut heard = Vec::new();
     hear_until(&mut watch, file.id(), &mut heard, |now| {
@@ -153,7 +153,7 @@ async fn a_file_sent_in_parts_shows_each_parts_bytes() {
     let mut watch = handle.subscribe_upload_transfers();
     watch.next().await.unwrap();
     let gate = Arc::new(tokio::sync::Semaphore::new(0));
-    memory.set_faults(Faults { part_gate: Some(gate.clone()), ..Faults::none() }).await;
+    memory.gate_parts(gate.clone()).await;
     handle.set_uploads_paused(false).await.unwrap();
     let mut heard = Vec::new();
     // Each part is heard once its bytes are handed over, before the

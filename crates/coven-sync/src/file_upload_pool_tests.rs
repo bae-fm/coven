@@ -3,14 +3,14 @@
 //! (§17.9, E7).
 
 use super::*;
-use coven_storage::test_utils::{Faults, MemoryRequest};
+use coven_storage::test_utils::MemoryRequest;
 use std::num::NonZeroUsize;
 use tokio::sync::Semaphore;
 
 /// Every create held at the gate until the test adds a permit.
 async fn gated(f: &Fixture, uploads: usize) -> Arc<Semaphore> {
     let gate = Arc::new(Semaphore::new(0));
-    f.storage.set_faults(Faults { creation_gate: Some(gate.clone()), ..Faults::none() }).await;
+    f.storage.gate_creations(gate.clone()).await;
     f.files.set_transfer_limits(TransferLimits {
         uploads: NonZeroUsize::new(uploads).unwrap(),
         downloads: NonZeroUsize::MIN,

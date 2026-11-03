@@ -583,6 +583,8 @@ impl TestCoven {
 /// Clones retain objects; for_device gives another connection to those objects.
 /// Faults and BodyFailure inject request and response-body failures, and
 /// MemoryRequest records the attempted calls. Storage supplies reads and listings.
+/// hold_creations, gate_creations and gate_parts take the test's barrier or
+/// semaphore, which holds each create or part until the test releases it.
 #[cfg(feature = "test-utils")]
 pub use coven_storage::test_utils::{
     BodyFailure, Faults, MemoryProvider, MemoryRequest, MemoryStorage,

@@ -69,6 +69,11 @@ capability_types = [
     "OAuthPresenter",
     "OAuthSession",
     "DatabaseConnection",
+    # Shared in-memory state (F.2): whoever holds one shares it with the
+    # others that do, so it is shared on purpose, by an owner, and never
+    # handed out.
+    "Barrier",
+    "Semaphore",
 ]
 capability_traits = [
     "Clock",
@@ -198,6 +203,9 @@ task_types = [
     "PreparedDeviceOnly",
     # The copies one call making files device-only is writing (§17.3).
     "CopyReservation",
+    # One read's body from the in-memory provider, which shares the
+    # provider's state to answer the holds a test placed on it.
+    "MemoryBody",
     "UploadedFile",
     "RetainedInput",
     "ObjectInput",
@@ -249,6 +257,11 @@ task_types = [
     "LocalPhase",
     "Tracker",
     "PreWrite",
+]
+# The shared in-memory state the runtime and the standard library declare.
+external_types = [
+    "Barrier",
+    "Semaphore",
 ]
 internal_dependency_types = ["DatabaseConnection"]
 closed_session_types = [

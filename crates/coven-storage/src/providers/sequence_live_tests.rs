@@ -80,8 +80,8 @@ async fn throttled_slot_round_is_retried_without_counting_it() {
         faults.fail_next = 1;
         faults.failure = StorageFailure::RateLimited;
         faults.retry_after = Some(7);
-        faults.creation_barrier = Some(Arc::new(Barrier::new(width)));
         storage.set_faults(faults).await;
+        storage.hold_creations(Arc::new(Barrier::new(width))).await;
         let writers: Vec<Arc<dyn Storage>> =
             (0..width).map(|_| storage.clone() as Arc<dyn Storage>).collect();
         let started = tokio::time::Instant::now();

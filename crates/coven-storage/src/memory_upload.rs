@@ -207,7 +207,7 @@ impl MemoryProvider {
         // The whole part is taken as the call starts, as for a create.
         sent.moved(bytes.len() as u64);
         self.before(MemoryRequest::Other("upload_part")).await?;
-        let gate = self.state.lock().await.faults.part_gate.clone();
+        let gate = self.state.lock().await.part_gate.clone();
         if let Some(gate) = gate {
             gate.acquire()
                 .await

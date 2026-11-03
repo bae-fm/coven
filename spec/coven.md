@@ -9663,6 +9663,15 @@ Everything else reaches a capability through the object that owns it, given to
 it when it is built. The snapshot writer never calls the system clock; it asks
 the clock it was given, and a test gives it a fixed one.
 
+Shared in-memory state is a capability too. A barrier that holds each create
+until several writers arrive is changed by every one of them: whoever holds it
+shares it with the others. Passed from hand to hand, such state ends up shared
+by holders nobody chose, and lives as long as the last of them. So it is shared
+on purpose: an object holding it is an owner (F.3), built at a composition root
+and never handing it out. A value made for one piece of work that shares its
+owner's state, such as one read's response body, is a task. Tests may use real
+ones. The checker counts tokio's `Barrier` and `Semaphore` as shared state.
+
 - The builder configures the clock, custody and OAuth. Ids use OS randomness;
   only `test-utils` allows replacing their source (api.md E1).
 - A method never takes a raw capability as a parameter, such as a store directory
