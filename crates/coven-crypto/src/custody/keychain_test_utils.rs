@@ -5,8 +5,18 @@ use crate::custody::person_entries::restore_code_store;
 use crate::custody::KeychainError;
 use std::collections::BTreeMap;
 
-/// The synced entries iCloud Keychain carries to every device of one person.
-type SyncedEntries = Arc<Mutex<SyncedGroups>>;
+/// The synced entries iCloud Keychain carries to every device of one person:
+/// each in-memory keychain of the person holds a share, which only a keychain
+/// makes, its first device's for itself and each other device's from one it
+/// already has.
+#[derive(Clone)]
+pub(super) struct SyncedEntries(Arc<Mutex<SyncedGroups>>);
+
+impl SyncedEntries {
+    fn groups(&self) -> std::sync::MutexGuard<'_, SyncedGroups> {
+        self.0.lock().expect("in-memory synced keychain entries lock is poisoned")
+    }
+}
 
 /// The keychain groups an app can read. Apple keeps one copy of an entry per
 /// group: a write naming no group adds to the default group, or, when that
@@ -74,12 +84,12 @@ pub(super) enum MemoryPerson {
 
 pub(super) struct MemoryEntries {
     /// This device's own entries.
-    pub(super) device: BTreeMap<String, SecretBytes>,
+    device: BTreeMap<String, SecretBytes>,
     /// The person's entries.
-    pub(super) person: MemoryPerson,
-    pub(super) fail_after: std::collections::VecDeque<usize>,
+    person: MemoryPerson,
+    fail_after: std::collections::VecDeque<usize>,
     /// Refuse this device's calls on the person's entries while set.
-    pub(super) refuse_person: bool,
+    refuse_person: bool,
 }
 
 impl MemoryEntries {
@@ -126,10 +136,6 @@ impl MemoryEntries {
     }
 }
 
-fn synced(entries: &SyncedEntries) -> std::sync::MutexGuard<'_, SyncedGroups> {
-    entries.lock().expect("in-memory synced keychain entries lock is poisoned")
-}
-
 impl KeychainBackend for Mutex<MemoryEntries> {
     fn supports_person_entries(&self) -> bool {
         true
@@ -161,7 +167,7 @@ impl KeychainBackend for Mutex<MemoryEntries> {
             scope,
             |entries| entries.get(account).map(|bytes| SecretBytes::new(bytes.as_bytes().to_vec())),
             |person| match person {
-                MemoryPerson::ICloud(entries) => Ok(synced(entries).read(account)),
+                MemoryPerson::ICloud(entries) => Ok(entries.groups().read(account)),
                 MemoryPerson::BlockStore(store) => store.read(service, account),
             },
         )
@@ -181,7 +187,7 @@ impl KeychainBackend for Mutex<MemoryEntries> {
             },
             |person| match person {
                 MemoryPerson::ICloud(entries) => {
-                    synced(entries).write(account, bytes);
+                    entries.groups().write(account, bytes);
                     Ok(())
                 }
                 MemoryPerson::BlockStore(store) => store.write(service, account, bytes),
@@ -197,7 +203,7 @@ impl KeychainBackend for Mutex<MemoryEntries> {
             },
             |person| match person {
                 MemoryPerson::ICloud(entries) => {
-                    synced(entries).delete(account);
+                    entries.groups().delete(account);
                     Ok(())
                 }
                 MemoryPerson::BlockStore(store) => store.delete(service, account),
@@ -210,7 +216,7 @@ impl KeychainBackend for Mutex<MemoryEntries> {
             match person {
                 MemoryPerson::ICloud(entries) => {
                     let mut codes = Vec::new();
-                    for (account, bytes) in synced(entries).all() {
+                    for (account, bytes) in entries.groups().all() {
                         if let Some(store) = restore_code_store(&account)? {
                             codes.push((store, bytes));
                         }
@@ -225,7 +231,7 @@ impl KeychainBackend for Mutex<MemoryEntries> {
     fn person_copies(&self, service: &str, account: &str) -> Result<Vec<SecretBytes>, KeyError> {
         self.lock().expect("in-memory keychain entries lock is poisoned").person(|person| {
             match person {
-                MemoryPerson::ICloud(entries) => Ok(synced(entries).copies(account)),
+                MemoryPerson::ICloud(entries) => Ok(entries.groups().copies(account)),
                 MemoryPerson::BlockStore(store) => {
                     Ok(store.read(service, account)?.into_iter().collect())
                 }
@@ -242,7 +248,7 @@ impl KeychainBackend for Mutex<MemoryEntries> {
         self.lock().expect("in-memory keychain entries lock is poisoned").person(|person| {
             match person {
                 MemoryPerson::ICloud(entries) => {
-                    synced(entries).replace(account, bytes);
+                    entries.groups().replace(account, bytes);
                     Ok(())
                 }
                 MemoryPerson::BlockStore(store) => store.write(service, account, bytes),
@@ -256,7 +262,8 @@ impl Keychain {
     /// person entries. The person's entries behave as iCloud Keychain keeps
     /// them, on every test platform, without touching the OS.
     pub fn in_memory(name: impl Into<String>) -> Result<Arc<Self>, KeyError> {
-        Self::memory(name.into(), MemoryPerson::ICloud(SyncedEntries::default()))
+        let entries = SyncedEntries(Arc::new(Mutex::new(SyncedGroups::default())));
+        Self::memory(name.into(), MemoryPerson::ICloud(entries))
     }
 
     /// An isolated in-memory keychain whose person entries behave as Block
@@ -275,13 +282,21 @@ impl Keychain {
     /// its own, empty. Failures injected into either keychain refuse only its
     /// own calls. Panics if this is a native keychain.
     pub fn another_device(&self) -> Arc<Self> {
-        let person = match &self.memory_entries().person {
-            MemoryPerson::ICloud(entries) => MemoryPerson::ICloud(entries.clone()),
-            MemoryPerson::BlockStore(_) => {
-                MemoryPerson::BlockStore(BlockStore::new(MemoryBlockStore::new()))
-            }
+        let person = match self.synced_entries() {
+            Some(entries) => MemoryPerson::ICloud(entries),
+            None => MemoryPerson::BlockStore(BlockStore::new(MemoryBlockStore::new())),
         };
         Self::memory(self.name.clone(), person).expect("registered service name is valid")
+    }
+
+    /// A share of the person's iCloud Keychain entries, for another of the
+    /// person's devices; none with Block Store, whose entries are each
+    /// phone's own.
+    fn synced_entries(&self) -> Option<SyncedEntries> {
+        self.with_memory(|memory| match &memory.person {
+            MemoryPerson::ICloud(entries) => Some(entries.clone()),
+            MemoryPerson::BlockStore(_) => None,
+        })
     }
 
     /// A new phone set up from this one by direct transfer: no device-only
@@ -315,10 +330,10 @@ impl Keychain {
     }
 
     fn memory_block_store<T>(&self, f: impl FnOnce(&MemoryBlockStore) -> T) -> T {
-        match &self.memory_entries().person {
+        self.with_memory(|memory| match &memory.person {
             MemoryPerson::BlockStore(store) => f(store.api()),
             MemoryPerson::ICloud(_) => panic!("this in-memory keychain keeps no Block Store"),
-        }
+        })
     }
 
     fn memory(name: String, person: MemoryPerson) -> Result<Arc<Self>, KeyError> {
@@ -335,13 +350,23 @@ impl Keychain {
         }))
     }
 
-    pub(super) fn memory_backend(&self) -> &Mutex<MemoryEntries> {
+    /// Run `change` on the in-memory keychain's entries. Panics if this is
+    /// a native keychain.
+    fn with_memory<T>(&self, change: impl FnOnce(&mut MemoryEntries) -> T) -> T {
         let backend: &dyn std::any::Any = self.backend.as_ref();
-        backend.downcast_ref().expect("failure injection requires an in-memory keychain")
+        let memory: &Mutex<MemoryEntries> =
+            backend.downcast_ref().expect("failure injection requires an in-memory keychain");
+        change(&mut memory.lock().expect("in-memory keychain entries lock is poisoned"))
     }
 
-    fn memory_entries(&self) -> std::sync::MutexGuard<'_, MemoryEntries> {
-        self.memory_backend().lock().expect("in-memory keychain entries lock is poisoned")
+    /// Run `change` on this device's own entries, as a test inspects or
+    /// moves them.
+    #[cfg(test)]
+    pub(super) fn with_device_entries<T>(
+        &self,
+        change: impl FnOnce(&mut BTreeMap<String, SecretBytes>) -> T,
+    ) -> T {
+        self.with_memory(|memory| change(&mut memory.device))
     }
 
     /// Make the fake refuse the next read, write, delete or list before changing state.
@@ -354,27 +379,28 @@ impl Keychain {
     /// For example `[2, 0]` refuses the third call and its immediate rollback.
     /// Replaces any existing failure schedule; requires an in-memory keychain.
     pub fn fail_operations_after(&self, successes: &[usize]) {
-        self.memory_entries().fail_after = successes.iter().copied().collect();
+        self.with_memory(|memory| memory.fail_after = successes.iter().copied().collect());
     }
 
     /// Save a person entry's copy in a second keychain group, as an app that
     /// moved to a new group can find its old copy beside the new one.
     /// Requires an in-memory iCloud keychain.
     pub(crate) fn write_in_another_group(&self, account: &str, bytes: &[u8]) {
-        match &self.memory_entries().person {
+        self.with_memory(|memory| match &memory.person {
             MemoryPerson::ICloud(entries) => {
-                synced(entries)
+                entries
+                    .groups()
                     .another
                     .insert(account.to_owned(), SecretBytes::new(bytes.to_vec()));
             }
             MemoryPerson::BlockStore(_) => panic!("Block Store has no keychain groups"),
-        }
+        });
     }
 
     /// While `refuse` holds, refuse every call this device makes on a person
     /// entry before changing state, letting its device-only calls through.
     /// Requires an in-memory keychain.
     pub fn refuse_person_entry_operations(&self, refuse: bool) {
-        self.memory_entries().refuse_person = refuse;
+        self.with_memory(|memory| memory.refuse_person = refuse);
     }
 }

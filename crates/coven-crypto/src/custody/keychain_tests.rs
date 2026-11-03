@@ -21,11 +21,9 @@ fn registration_propagates_a_poisoned_service_lock() {
 #[should_panic(expected = "in-memory keychain entries lock is poisoned")]
 fn discovery_propagates_a_poisoned_entries_lock() {
     let fake = Keychain::in_memory("poisoned").unwrap();
-    let memory = fake.memory_backend();
-    let poisoned = std::panic::catch_unwind(|| {
-        let _guard = memory.lock().unwrap();
-        panic!("poison keychain entries");
-    });
+    let poisoned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        fake.with_device_entries(|_| panic!("poison keychain entries"));
+    }));
     assert!(poisoned.is_err());
     let _codes = fake.person_restore_codes();
 }
@@ -311,18 +309,18 @@ fn each_host_value_keeps_the_native_entry_size_limit() {
         store.set_host_secret(name, value).unwrap();
         assert_eq!(store.host_secret(name).unwrap().as_ref(), Some(value));
     }
-    let memory = fake.memory_backend();
-    let memory = memory.lock().unwrap();
-    for bytes in memory.device.values() {
-        assert!(bytes.as_bytes().len() <= 2560, "native entry exceeds 2,560 bytes");
-    }
-    assert_eq!(memory.device.len(), 3);
-    for value in &values {
-        assert_eq!(
-            memory.device.values().filter(|bytes| bytes.as_bytes() == value.as_bytes()).count(),
-            1
-        );
-    }
+    fake.with_device_entries(|device| {
+        for bytes in device.values() {
+            assert!(bytes.as_bytes().len() <= 2560, "native entry exceeds 2,560 bytes");
+        }
+        assert_eq!(device.len(), 3);
+        for value in &values {
+            assert_eq!(
+                device.values().filter(|bytes| bytes.as_bytes() == value.as_bytes()).count(),
+                1
+            );
+        }
+    });
 }
 
 #[test]
@@ -398,23 +396,21 @@ fn crash_between_host_updates_leaves_only_a_harmless_extra_name() {
         };
         assert!(matches!(result, Err(KeyError::KeychainTemporarilyUnavailable(_))));
         drop(store);
-        let entries = std::mem::take(&mut fake.memory_backend().lock().unwrap().device);
+        let entries = fake.with_device_entries(std::mem::take);
         drop(fake);
         let reopened = Keychain::in_memory("interrupted-host-update").unwrap();
-        let memory = reopened.memory_backend();
-        memory.lock().unwrap().device = entries;
+        reopened.with_device_entries(|device| *device = entries);
         let store = StoreKeychain::new(reopened.clone(), id);
         assert_eq!(recorded_names(&store), BTreeSet::from(["other".into(), "token".into()]));
         assert_eq!(store.host_secret("token").unwrap(), None);
         assert_eq!(store.host_secret("other").unwrap().as_deref(), Some("preserved"));
         store.delete_device_entries().unwrap();
-        assert!(memory.lock().unwrap().device.is_empty());
+        assert!(reopened.with_device_entries(|device| device.is_empty()));
     }
 }
 
 fn fail_operation(fake: &Keychain, after: usize) {
-    let memory = fake.memory_backend();
-    memory.lock().unwrap().fail_after = [after].into();
+    fake.fail_operations_after(&[after]);
 }
 
 fn recorded_names(store: &StoreKeychain) -> BTreeSet<String> {
@@ -483,8 +479,7 @@ fn malformed_host_values_do_not_prevent_deletion() {
     assert!(matches!(store.host_secret("token"), Err(KeyError::Material(MaterialError::Encoding))));
     assert_eq!(store.host_secret("other").unwrap().as_deref(), Some("preserved"));
     store.delete_device_entries().unwrap();
-    let memory = fake.memory_backend();
-    assert!(memory.lock().unwrap().device.is_empty());
+    assert!(fake.with_device_entries(|device| device.is_empty()));
 }
 
 #[test]
@@ -508,8 +503,7 @@ fn concurrent_host_secret_updates_keep_every_name() {
         assert_eq!(store.host_secret(&index.to_string()).unwrap().as_deref(), Some("value"));
     }
     store.delete_device_entries().unwrap();
-    let memory = fake.memory_backend();
-    assert!(memory.lock().unwrap().device.is_empty());
+    assert!(fake.with_device_entries(|device| device.is_empty()));
 }
 
 #[test]
@@ -534,8 +528,7 @@ fn deletion_can_retry_after_each_keychain_failure() {
             assert!(store.read(STORE_KEYS_ENTRY).unwrap().is_some());
         }
         store.delete_device_entries().unwrap();
-        let memory = fake.memory_backend();
-        assert!(memory.lock().unwrap().device.is_empty());
+        assert!(fake.with_device_entries(|device| device.is_empty()));
     }
 }
 

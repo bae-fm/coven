@@ -417,6 +417,9 @@ InFlight = "TransfersInFlight"
 # Marks a store closing when its owner's scope ends, without holding its
 # lock, so a reopen in this process waits for its release (F.4).
 StoreClosingGuard = "LockRegistration"
+# The person's iCloud Keychain entries, shared by each in-memory keychain of
+# the person: a keychain makes the share for another of the person's devices.
+SyncedEntries = "Keychain"
 
 # The raw handles and coven's own SQL are the database boundary's subject;
 # the SQLite capability's row names the database's home and the SQLite
@@ -632,6 +635,9 @@ tables = [
 "crates/coven-crypto/src/custody/passphrase.rs" = ["PassphraseCustody::new"]
 "crates/coven-crypto/src/custody/store_custody.rs" = ["StoreCustody::new"]
 "crates/coven-crypto/src/custody/keychain_test_utils.rs" = [
+    # The in-memory keychain's entries, and the person's in iCloud Keychain.
+    "Keychain::memory",
+    "Keychain::in_memory",
     # Another of the person's devices shares only the person entries.
     "Keychain::another_device",
     # An Android phone keeps the person entries in Block Store, and a new
