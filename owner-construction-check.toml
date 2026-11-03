@@ -149,6 +149,10 @@ non_owner_types = [
     # One long operation's progress reports. It holds the operation's
     # clock only to pace them, and lives for that operation.
     "ProgressReport",
+    # What stops a connection's lookups that run too long, shared with
+    # that connection's progress handler; it lives with the connection.
+    "LookupLimit",
+    "LookupState",
 ]
 # Writes borrow the database's retained connection and id source; app
 # SQL receives none of those dependencies.
@@ -182,6 +186,8 @@ borrowed_facade_types = [
     "ReadOwner",
     "ChangeCapture",
     "StreamCapture",
+    "SupplementalChanges",
+    "Observing",
     "MigrationContext",
     "SqlContext",
     # An app's write borrows the store's operation owner, whose steps
@@ -191,6 +197,9 @@ borrowed_facade_types = [
     # transaction, as a write's does.
     "BulkSqlContext",
     "SqlTransaction",
+    # A write transaction holds the writer from BEGIN to its end and sets
+    # and removes the hooks that observe it.
+    "WriteTransaction",
     "ReaderLease",
     "AppView",
     "MergeStore",
@@ -301,6 +310,8 @@ task_types = [
     "RunningRead",
     "ChangeCapture",
     "StreamCapture",
+    "SupplementalChanges",
+    "Observing",
     "LiveQuery",
     "ReconfigurableLiveQuery",
     # A test's follow of one live query's results, while it follows them.
@@ -323,6 +334,9 @@ task_types = [
     "HeldRequest",
     "HeldAccess",
     "SqlTransaction",
+    # A write transaction holds the writer from BEGIN to its end and sets
+    # and removes the hooks that observe it.
+    "WriteTransaction",
     "ReaderLease",
     "AppView",
     "MergeStore",

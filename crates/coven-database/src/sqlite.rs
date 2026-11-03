@@ -25,9 +25,12 @@ mod stream_capture;
 mod transaction_capture;
 #[path = "write_constants.rs"]
 mod write_constants;
+#[path = "write_transaction.rs"]
+mod write_transaction;
 use app_statements::ReadSteps;
 pub(crate) use event_capture::Event;
 use transaction_capture::ChangeCapture;
+use write_transaction::WriteTransaction;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -58,6 +61,8 @@ pub(crate) struct DatabaseConnection {
     work: std::cell::RefCell<Option<crate::test_utils::WorkCounter>>,
     connection: Connection,
     authorization: SqlAuthorization,
+    /// Stops a lookup that runs too long (`live_judging.rs`).
+    lookups: live_judging::LookupLimit,
     app_statements: app_statements::AppStatements,
     constants: write_constants::WriteConstants,
     /// The open handle this connection serves: it receives the commits and
@@ -147,11 +152,13 @@ impl DatabaseConnection {
         crate::coven_functions::register(&connection, &authorization)?;
         functions.register(&connection)?;
         connection.authorizer(Some(authorization.callback()))?;
+        let lookups = live_judging::LookupLimit::install(&connection)?;
         let db = Self {
             #[cfg(any(test, feature = "test-utils"))]
             work: std::cell::RefCell::new(None),
             connection,
             authorization,
+            lookups,
             app_statements: app_statements::AppStatements::default(),
             constants: write_constants::WriteConstants::default(),
             handle: None,
@@ -842,70 +849,40 @@ impl DatabaseConnection {
         streaming: bool,
         run: impl FnOnce(&Self) -> Result<T, E>,
     ) -> Result<T, E> {
-        self.write_transaction(streaming, || {
-            // The write-record session ends before materialization; this session
-            // covers app SQL, merge metadata, materialization and local tables.
-            let mut capture = match &self.observation {
-                Some(_) if streaming => None,
-                Some(observation) => Some(ChangeCapture::begin(self, observation)?),
-                None => None,
-            };
-            let tables =
-                if streaming { Some(stream_capture::StreamCapture::begin(self)?) } else { None };
-            let result = run(self)?;
-            self.require_transaction()?;
-            let changes = match &mut capture {
-                Some(capture) => capture.take_changes()?,
-                None => match &tables {
-                    Some(tables) => tables.changes()?,
-                    None => Vec::new(),
-                },
-            };
-            // Keep both captures through commit, then drop the stream hook first.
-            Ok(((tables, capture), result, changes))
-        })
-    }
-
-    fn write_transaction<T, E: crate::WriteFailure, C>(
-        &self,
-        streaming: bool,
-        run: impl FnOnce() -> Result<(C, T, Vec<crate::observation::RowChange>), E>,
-    ) -> Result<T, E> {
-        self.batch("BEGIN IMMEDIATE")?;
-        self.streaming.set(streaming);
-        let mut guard = SqlTransaction { database: self, active: true };
-        let result = (|| {
-            // Capture drops after commit/notification, or after the result on failure.
-            let (_capture, result, changes) = run()?;
-            let judged = match &self.handle {
-                Some(handle) => Some(self.judge(handle, changes)?),
-                None => None,
-            };
-            #[cfg(any(test, feature = "test-utils"))]
-            self.checkpoint(crate::test_utils::WriteCheckpoint::Judged);
-            self.batch("COMMIT")?;
-            if let Some(checkpoints) = &self.checkpoints {
-                checkpoints.committed();
-            }
-            #[cfg(any(test, feature = "test-utils"))]
-            self.record_work(|work| work.commits += 1);
-            #[cfg(any(test, feature = "test-utils"))]
-            self.checkpoint(crate::test_utils::WriteCheckpoint::Committed);
-            if let (Some(handle), Some(judged)) = (&self.handle, judged) {
-                handle.commit(judged, crate::commit_scope::committing());
-            }
-            #[cfg(any(test, feature = "test-utils"))]
-            self.checkpoint(crate::test_utils::WriteCheckpoint::Observed);
-            Ok(result)
-        })();
-        guard.active = false;
-        match result {
-            Ok(result) => Ok(result),
-            Err(operation) => match self.roll_back() {
-                Ok(()) => Err(operation),
-                Err(rollback) => Err(operation.with_rollback(rollback)),
-            },
-        }
+        let mut transaction = WriteTransaction::begin(self, streaming)?;
+        // A streamed transaction is observed by its operations; any other,
+        // on a serving writer, by a session. The write-record session ends
+        // before materialization; this one covers app SQL, merge metadata,
+        // materialization and local tables.
+        let observing = if streaming {
+            stream_capture::StreamCapture::begin(&mut transaction).map(Observing::Stream)
+        } else if transaction.within(|database| database.observation.is_some()) {
+            transaction_capture::SupplementalChanges::observe(&mut transaction)
+                .map(Observing::Session)
+        } else {
+            Ok(Observing::Nothing)
+        };
+        let outcome = observing.map_err(E::from).and_then(|observing| {
+            transaction.within(|database| {
+                let (stream, mut session) = match observing {
+                    Observing::Stream(stream) => (Some(stream), None),
+                    Observing::Session(supplemental) => {
+                        let observation = database.observation.as_ref().expect("observed above");
+                        (None, Some(ChangeCapture::begin(database, observation, supplemental)?))
+                    }
+                    Observing::Nothing => (None, None),
+                };
+                let result = run(database)?;
+                database.require_transaction()?;
+                let changes = match (&mut session, &stream) {
+                    (Some(session), _) => session.take_changes()?,
+                    (None, Some(stream)) => stream.changes(database)?,
+                    (None, None) => Vec::new(),
+                };
+                Ok((result, changes))
+            })
+        });
+        transaction.commit(outcome)
     }
 
     pub(crate) fn close(self) -> Result<(), DbError> {
@@ -928,6 +905,7 @@ impl DatabaseConnection {
     }
 }
 
+/// A read or a discarded transaction, rolled back if its callback panics.
 struct SqlTransaction<'a> {
     database: &'a DatabaseConnection,
     active: bool,
@@ -938,13 +916,19 @@ struct SqlTransaction<'a> {
 // and fails the handle, so every later call reports it.
 impl Drop for SqlTransaction<'_> {
     fn drop(&mut self) {
-        self.database.streaming.set(false);
         if self.active {
             if let Err(rollback) = self.database.roll_back() {
                 tracing::error!(%rollback, "rolling back a panicking transaction failed");
             }
         }
     }
+}
+
+/// How a write transaction's changes are observed for live queries.
+enum Observing {
+    Stream(stream_capture::StreamCapture),
+    Session(transaction_capture::SupplementalChanges),
+    Nothing,
 }
 
 #[cfg(test)]

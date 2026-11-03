@@ -1,4 +1,5 @@
 use super::*;
+use crate::sqlite::write_transaction::WriteTransaction;
 use crate::tests::TestStore;
 use crate::{RowIdentity, SyncedTable};
 
@@ -32,13 +33,14 @@ async fn operations_keep_their_order() {
     .await
     .unwrap();
     let events = db.inspect_writer(|c| {
-        c.batch("BEGIN").unwrap();
-        let capture = EventCapture::begin(c).unwrap();
-        c.batch("UPDATE child SET id='d' WHERE id='c'; DELETE FROM parent WHERE id='p'").unwrap();
-        let events = capture.events();
-        drop(capture);
-        c.batch("ROLLBACK").unwrap();
-        events
+        let mut transaction = WriteTransaction::begin(c, false).unwrap();
+        let capture = EventCapture::begin(&mut transaction).unwrap();
+        transaction
+            .within(|db| {
+                db.batch("UPDATE child SET id='d' WHERE id='c'; DELETE FROM parent WHERE id='p'")
+            })
+            .unwrap();
+        capture.events()
     });
     assert_eq!(
         summary(&events),
@@ -55,10 +57,11 @@ async fn operations_keep_their_order() {
     assert_eq!(events[2].old, [text("d"), text("p")]);
     // Removing the hook leaves later statements unobserved.
     db.inspect_writer(|c| {
-        c.batch("BEGIN").unwrap();
-        let capture = EventCapture::begin(c).unwrap();
-        drop(capture);
-        c.batch("DELETE FROM parent; ROLLBACK").unwrap();
+        let mut transaction = WriteTransaction::begin(c, false).unwrap();
+        let capture = EventCapture::begin(&mut transaction).unwrap();
+        transaction.stop_observing_operations().unwrap();
+        transaction.within(|db| db.batch("DELETE FROM parent")).unwrap();
+        assert!(capture.events().is_empty());
     });
     db.close().await.unwrap();
 }
@@ -70,13 +73,14 @@ async fn a_local_tables_rows_are_not_copied() {
     let store = TestStore::new();
     let db = store.schema(tables(), SCHEMA).await.unwrap();
     let events = db.inspect_writer(|c| {
-        c.batch("BEGIN").unwrap();
-        let capture = EventCapture::begin(c).unwrap();
-        c.batch("INSERT INTO parent VALUES('p'); INSERT INTO log(note) VALUES('a'),('b')").unwrap();
-        let events = capture.events();
-        drop(capture);
-        c.batch("ROLLBACK").unwrap();
-        events
+        let mut transaction = WriteTransaction::begin(c, false).unwrap();
+        let capture = EventCapture::begin(&mut transaction).unwrap();
+        transaction
+            .within(|db| {
+                db.batch("INSERT INTO parent VALUES('p'); INSERT INTO log(note) VALUES('a'),('b')")
+            })
+            .unwrap();
+        capture.events()
     });
     assert_eq!(summary(&events), [("parent", Action::SQLITE_INSERT)]);
     db.close().await.unwrap();

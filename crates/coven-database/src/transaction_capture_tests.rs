@@ -1,4 +1,5 @@
 use super::*;
+use crate::sqlite::write_transaction::WriteTransaction;
 use crate::tests::TestStore;
 use crate::{Migration, RowIdentity, SyncedTable};
 use rusqlite::fallible_streaming_iterator::FallibleStreamingIterator;
@@ -45,16 +46,17 @@ async fn a_captured_transaction_records_analyzes_statistics() {
     // More rows, so analyzing again changes the statistics.
     crate::write::tests::sql(&db, "INSERT INTO notes VALUES ('3','c'),('4','c')").await.unwrap();
     let recorded = db.inspect_writer(|writer| {
-        writer.batch("BEGIN IMMEDIATE").unwrap();
-        let mut capture =
-            ChangeCapture::begin(writer, writer.observation.as_ref().unwrap()).unwrap();
-        let changeset = {
+        let mut transaction = WriteTransaction::begin(writer, false).unwrap();
+        let supplemental = SupplementalChanges::observe(&mut transaction).unwrap();
+        let changeset = transaction.within(|writer| {
+            let mut capture =
+                ChangeCapture::begin(writer, writer.observation.as_ref().unwrap(), supplemental)
+                    .unwrap();
             let _internal = writer.authorization.internal();
             writer.batch("ANALYZE notes").unwrap();
             capture.changeset().unwrap()
-        };
-        drop(capture);
-        writer.batch("ROLLBACK").unwrap();
+        });
+        drop(transaction);
         tables(&changeset)
     });
     assert_eq!(recorded, ["sqlite_stat1"]);
@@ -80,10 +82,12 @@ async fn a_captured_transaction_skips_tables_no_live_query_reads() {
         .await
         .unwrap();
     let recorded = db.inspect_writer(|writer| {
-        writer.batch("BEGIN IMMEDIATE").unwrap();
-        let mut capture =
-            ChangeCapture::begin(writer, writer.observation.as_ref().unwrap()).unwrap();
-        let changeset = {
+        let mut transaction = WriteTransaction::begin(writer, false).unwrap();
+        let supplemental = SupplementalChanges::observe(&mut transaction).unwrap();
+        let changeset = transaction.within(|writer| {
+            let mut capture =
+                ChangeCapture::begin(writer, writer.observation.as_ref().unwrap(), supplemental)
+                    .unwrap();
             let _internal = writer.authorization.internal();
             writer
                 .batch(
@@ -93,9 +97,8 @@ async fn a_captured_transaction_skips_tables_no_live_query_reads() {
                 )
                 .unwrap();
             capture.changeset().unwrap()
-        };
-        drop(capture);
-        writer.batch("ROLLBACK").unwrap();
+        });
+        drop(transaction);
         tables(&changeset)
     });
     assert_eq!(recorded, ["_coven_upload_pause", "notes"]);

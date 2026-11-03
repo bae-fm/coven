@@ -18,20 +18,22 @@ impl DatabaseConnection {
         self.with_profile(|db| db.bulk_transaction(sql))
     }
 
-    fn bulk_transaction<F, R, E>(&self, sql: F) -> Result<R, E>
+    fn bulk_transaction<F, R, E>(&mut self, sql: F) -> Result<R, E>
     where
         E: crate::WriteFailure,
         F: FnOnce(crate::BulkSqlContext<'_>) -> Result<R, E>,
     {
-        self.write_transaction(false, || {
-            let scope = self.authorization.bulk();
-            let result = sql(crate::BulkSqlContext::new(self))?;
-            self.require_transaction()?;
+        let transaction = super::write_transaction::WriteTransaction::begin(self, false)?;
+        let outcome = transaction.within(|database| {
+            let scope = database.authorization.bulk();
+            let result = sql(crate::BulkSqlContext::new(database))?;
+            database.require_transaction()?;
             let changed = scope.changed();
             drop(scope);
-            let changes = crate::change_capture::table_changes(self, changed)?;
-            Ok(((), result, changes))
-        })
+            let changes = crate::change_capture::table_changes(database, changed)?;
+            Ok((result, changes))
+        });
+        transaction.commit(outcome)
     }
 }
 

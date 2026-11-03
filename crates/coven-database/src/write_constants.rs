@@ -32,12 +32,23 @@ pub(crate) struct ConstantScope<'a>(&'a WriteConstants);
 
 impl Drop for ConstantScope<'_> {
     fn drop(&mut self) {
-        self.0.active.set(false);
-        self.0.schema_version.set(None);
-        self.0.schema_cookie.set(None);
-        self.0.columns.borrow_mut().clear();
-        self.0.foreign_keys.borrow_mut().clear();
-        self.0.parts.borrow_mut().clear();
+        self.0.forget();
+    }
+}
+
+impl WriteConstants {
+    /// Keep each constant once read, until [`Self::forget`].
+    pub(super) fn keep(&self) {
+        self.active.set(true);
+    }
+
+    pub(super) fn forget(&self) {
+        self.active.set(false);
+        self.schema_version.set(None);
+        self.schema_cookie.set(None);
+        self.columns.borrow_mut().clear();
+        self.foreign_keys.borrow_mut().clear();
+        self.parts.borrow_mut().clear();
     }
 }
 
@@ -45,7 +56,7 @@ impl DatabaseConnection {
     /// Read each constant once until the returned scope drops. The caller's
     /// transaction runs no migration and no DDL.
     pub(crate) fn write_constants(&self) -> ConstantScope<'_> {
-        self.constants.active.set(true);
+        self.constants.keep();
         ConstantScope(&self.constants)
     }
 

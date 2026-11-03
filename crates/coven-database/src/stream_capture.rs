@@ -3,6 +3,7 @@
 //! upload and claim bookkeeping.
 
 use super::pre_update_changes::{PreUpdateChanges, TableShapes};
+use super::write_transaction::WriteTransaction;
 use super::DatabaseConnection;
 use crate::{observation::RowChange, DbError};
 use std::collections::BTreeSet;
@@ -17,30 +18,30 @@ enum Recorded {
     Tables(BTreeSet<String>),
 }
 
-pub(super) struct StreamCapture<'a> {
-    database: &'a DatabaseConnection,
+pub(super) struct StreamCapture {
     recorded: Arc<Mutex<Recorded>>,
 }
 
-impl<'a> StreamCapture<'a> {
-    /// Observe `database`'s streamed transaction. A writer that serves live
-    /// queries knows its tables' shapes and the columns waiting live queries
-    /// narrow by; it keeps those values of each changed row, up to a bound
-    /// per table, as a local write does.
-    pub(super) fn begin(database: &'a DatabaseConnection) -> Result<Self, DbError> {
-        let recorded = Arc::new(Mutex::new(match &database.observation {
-            Some(observation) => {
-                let shapes = Arc::clone(&observation.tables);
-                let scoped = match &database.handle {
-                    Some(handle) => shapes.scoped(&handle.scoped_columns()),
-                    None => std::collections::HashMap::new(),
-                };
-                Recorded::Rows { shapes, changes: PreUpdateChanges::new(scoped) }
-            }
-            None => Recorded::Tables(BTreeSet::new()),
-        }));
+impl StreamCapture {
+    /// Observe a streamed transaction. A writer that serves live queries
+    /// knows its tables' shapes and the columns waiting live queries narrow
+    /// by; it keeps those values of each changed row, up to a bound per
+    /// table, as a local write does.
+    pub(super) fn begin(transaction: &mut WriteTransaction<'_>) -> Result<Self, DbError> {
+        let recorded =
+            Arc::new(Mutex::new(transaction.within(|database| match &database.observation {
+                Some(observation) => {
+                    let shapes = Arc::clone(&observation.tables);
+                    let scoped = match &database.handle {
+                        Some(handle) => shapes.scoped(&handle.scoped_columns()),
+                        None => std::collections::HashMap::new(),
+                    };
+                    Recorded::Rows { shapes, changes: PreUpdateChanges::new(scoped) }
+                }
+                None => Recorded::Tables(BTreeSet::new()),
+            })));
         let observed = Arc::clone(&recorded);
-        database.connection.preupdate_hook(Some(
+        transaction.observe_operations(
             move |_, schema: &str, table: &str, case: &rusqlite::hooks::PreUpdateCase| {
                 if schema != "main" {
                     return;
@@ -55,30 +56,20 @@ impl<'a> StreamCapture<'a> {
                     }
                 }
             },
-        ))?;
-        Ok(Self { database, recorded })
+        )?;
+        Ok(Self { recorded })
     }
 
-    /// What the transaction changed, as live queries read it.
-    pub(super) fn changes(&self) -> Result<Vec<RowChange>, DbError> {
+    /// What the transaction on `database` changed, as live queries read it.
+    pub(super) fn changes(&self, database: &DatabaseConnection) -> Result<Vec<RowChange>, DbError> {
         let recorded = std::mem::replace(
             &mut *self.recorded.lock().expect("stream observation lock poisoned"),
             Recorded::Tables(BTreeSet::new()),
         );
         match recorded {
             Recorded::Rows { shapes, changes } => Ok(changes.finish(&shapes)),
-            Recorded::Tables(tables) => crate::change_capture::table_changes(self.database, tables),
+            Recorded::Tables(tables) => crate::change_capture::table_changes(database, tables),
         }
-    }
-}
-impl Drop for StreamCapture<'_> {
-    fn drop(&mut self) {
-        self.database
-            .connection
-            .preupdate_hook(
-                None::<fn(rusqlite::hooks::Action, &str, &str, &rusqlite::hooks::PreUpdateCase)>,
-            )
-            .expect("remove stream observation hook");
     }
 }
 

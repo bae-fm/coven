@@ -6,7 +6,7 @@
 //! session runs until it ends. Only a synced table's operations are kept
 //! whole; a device-local table's are kept as live queries need them.
 
-use super::DatabaseConnection;
+use super::write_transaction::WriteTransaction;
 use crate::sql_value::SqlValue;
 use crate::DbError;
 use rusqlite::hooks::{Action, PreUpdateCase};
@@ -33,30 +33,35 @@ struct CapturedEvents {
     local: super::pre_update_changes::PreUpdateChanges,
 }
 
-pub(super) struct EventCapture<'a> {
-    database: &'a DatabaseConnection,
+pub(super) struct EventCapture {
+    shapes: Arc<super::pre_update_changes::TableShapes>,
     events: Arc<Mutex<CapturedEvents>>,
 }
 
-impl<'a> EventCapture<'a> {
-    pub(super) fn begin(database: &'a DatabaseConnection) -> Result<Self, DbError> {
-        let tables = Arc::clone(
-            &database
-                .observation
-                .as_ref()
-                .ok_or(DbError::Invariant { what: "a local write's writer serves its handle" })?
-                .tables,
-        );
-        let scoped = match &database.handle {
-            Some(handle) => tables.scoped(&handle.scoped_columns()),
-            None => std::collections::HashMap::new(),
-        };
+impl EventCapture {
+    /// Record `transaction`'s row operations until it stops observing them.
+    pub(super) fn begin(transaction: &mut WriteTransaction<'_>) -> Result<Self, DbError> {
+        let (tables, scoped) = transaction.within(|database| {
+            let tables = Arc::clone(
+                &database
+                    .observation
+                    .as_ref()
+                    .ok_or(DbError::Invariant { what: "a local write's writer serves its handle" })?
+                    .tables,
+            );
+            let scoped = match &database.handle {
+                Some(handle) => tables.scoped(&handle.scoped_columns()),
+                None => std::collections::HashMap::new(),
+            };
+            Ok::<_, DbError>((tables, scoped))
+        })?;
         let events = Arc::new(Mutex::new(CapturedEvents {
             operations: Vec::new(),
             local: super::pre_update_changes::PreUpdateChanges::new(scoped),
         }));
         let recorded = Arc::clone(&events);
-        database.connection.preupdate_hook(Some(
+        let shapes = Arc::clone(&tables);
+        transaction.observe_operations(
             move |action: Action, schema: &str, table: &str, case: &PreUpdateCase| {
                 if schema != "main" {
                     return;
@@ -127,20 +132,14 @@ impl<'a> EventCapture<'a> {
                     .operations
                     .push((depth, event));
             },
-        ))?;
-        Ok(Self { database, events })
+        )?;
+        Ok(Self { shapes, events })
     }
 
     /// The device-local tables' changes, as live queries read them.
     pub(super) fn local_changes(&self) -> Vec<crate::observation::RowChange> {
-        let tables = &self
-            .database
-            .observation
-            .as_ref()
-            .expect("the capture began on a serving writer")
-            .tables;
         std::mem::take(&mut self.events.lock().expect("event capture lock poisoned").local)
-            .finish(tables)
+            .finish(&self.shapes)
     }
 
     /// The synced tables' operations so far, in order.
@@ -152,15 +151,6 @@ impl<'a> EventCapture<'a> {
             .iter()
             .map(|(_, event)| event.clone())
             .collect()
-    }
-}
-
-impl Drop for EventCapture<'_> {
-    fn drop(&mut self) {
-        self.database
-            .connection
-            .preupdate_hook(None::<fn(Action, &str, &str, &PreUpdateCase)>)
-            .expect("remove event capture hook");
     }
 }
 

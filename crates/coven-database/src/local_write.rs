@@ -2,7 +2,8 @@
 //! coven's capture, merge and queueing in the same transaction (§4, §9.6).
 
 use super::event_capture::{Event, EventCapture};
-use super::transaction_capture::ChangeCapture;
+use super::transaction_capture::{ChangeCapture, SupplementalChanges};
+use super::write_transaction::WriteTransaction;
 use super::DatabaseConnection;
 use crate::DbError;
 use coven_foundation::id_source::DeviceId;
@@ -121,46 +122,64 @@ impl DatabaseConnection {
     /// time (§9.6); a session observes the coven phase after it, as for
     /// every other transaction. `app` gives what `coven` goes on from.
     fn local_transaction<A, T, E: crate::WriteFailure>(
-        &self,
-        app: impl FnOnce(&Self, &EventCapture<'_>) -> Result<A, E>,
+        &mut self,
+        app: impl FnOnce(&Self, &EventCapture) -> Result<A, E>,
         coven: impl FnOnce(&Self, &[Event], A) -> Result<T, E>,
     ) -> Result<T, E> {
-        self.write_transaction(false, || {
-            let _constants = self.write_constants();
-            let recording = EventCapture::begin(self)?;
-            let begun = app(self, &recording)?;
-            self.require_transaction()?;
-            let events = recording.events();
-            let mut changes = recording.local_changes();
-            drop(recording);
-            let mut capture = match &self.observation {
-                Some(observation) => Some(ChangeCapture::begin(self, observation)?),
-                None => None,
-            };
-            let result = coven(self, &events, begun)?;
-            self.require_transaction()?;
-            if let Some(observation) = &self.observation {
-                let scoped = self
-                    .handle
-                    .as_ref()
-                    .map(crate::observation::CommitObserver::scoped_columns)
-                    .unwrap_or_default();
-                let mut app = crate::change_capture::event_changes(
-                    self,
-                    &events,
-                    &observation.supplemental,
-                    &scoped,
-                )?;
-                app.append(&mut changes);
-                changes = app;
-            } else {
-                changes.clear();
-            }
-            if let Some(capture) = &mut capture {
-                changes.extend(capture.take_changes()?);
-            }
-            drop(capture);
-            Ok(((), result, changes))
-        })
+        let mut transaction = WriteTransaction::begin(self, false)?;
+        transaction.keep_constants();
+        let recording = EventCapture::begin(&mut transaction);
+        let begun = recording.map_err(E::from).and_then(|recording| {
+            transaction.within(|database| {
+                let begun = app(database, &recording)?;
+                database.require_transaction()?;
+                Ok((begun, recording))
+            })
+        });
+        // The app phase ends: a session observes the rest of the transaction.
+        let switched = match begun {
+            Ok(begun) => transaction
+                .stop_observing_operations()
+                .and_then(|()| SupplementalChanges::observe(&mut transaction))
+                .map(|supplemental| (begun, supplemental))
+                .map_err(E::from),
+            Err(error) => Err(error),
+        };
+        let outcome = switched.and_then(|((begun, recording), supplemental)| {
+            transaction.within(|database| {
+                let events = recording.events();
+                let mut changes = recording.local_changes();
+                let mut capture = match &database.observation {
+                    Some(observation) => {
+                        Some(ChangeCapture::begin(database, observation, supplemental)?)
+                    }
+                    None => None,
+                };
+                let result = coven(database, &events, begun)?;
+                database.require_transaction()?;
+                if let Some(observation) = &database.observation {
+                    let scoped = database
+                        .handle
+                        .as_ref()
+                        .map(crate::observation::CommitObserver::scoped_columns)
+                        .unwrap_or_default();
+                    let mut app = crate::change_capture::event_changes(
+                        database,
+                        &events,
+                        &observation.supplemental,
+                        &scoped,
+                    )?;
+                    app.append(&mut changes);
+                    changes = app;
+                } else {
+                    changes.clear();
+                }
+                if let Some(capture) = &mut capture {
+                    changes.extend(capture.take_changes()?);
+                }
+                Ok((result, changes))
+            })
+        });
+        transaction.commit(outcome)
     }
 }

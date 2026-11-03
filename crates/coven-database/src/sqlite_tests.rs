@@ -466,17 +466,21 @@ async fn audience_validation_looks_up_children_only_when_the_parent_moves() {
     .unwrap();
     for moving in [false, true] {
         db.inspect_writer_schema(|writer,schema| {
-            writer.batch("BEGIN IMMEDIATE").unwrap();
-            let recording=super::event_capture::EventCapture::begin(writer).unwrap();
-            writer.internal_execute(if moving { "UPDATE albums SET audience='00000000-0000-4000-8000-00000000000a' WHERE id='00000000-0000-4000-8000-000000000001'" } else { "UPDATE albums SET title='After' WHERE id='00000000-0000-4000-8000-000000000001'" },[]).unwrap();
-            let events=recording.events();
-            drop(recording);
-            let captured=crate::write_capture::capture(schema,&events).unwrap();
+            // The profile holds the update and its recording too, which run
+            // none of the statements counted below.
             let changes=writer.with_profile(|writer| {
-                let before=crate::write_rows::AppView::before(writer,schema,&captured).unwrap();
-                let after=crate::write_rows::AppView::after(writer,schema);
-                let stored=crate::merge_store::MergeStore::new(writer,&before);
-                crate::write_record::changes(writer,schema,&before,&after,&stored,&before.changes(&after, captured.keys().cloned()).unwrap(),&BTreeMap::new(),&Default::default())
+                let mut transaction=super::write_transaction::WriteTransaction::begin(writer,false).unwrap();
+                let recording=super::event_capture::EventCapture::begin(&mut transaction).unwrap();
+                transaction.within(|db| db.internal_execute(if moving { "UPDATE albums SET audience='00000000-0000-4000-8000-00000000000a' WHERE id='00000000-0000-4000-8000-000000000001'" } else { "UPDATE albums SET title='After' WHERE id='00000000-0000-4000-8000-000000000001'" },[])).unwrap();
+                transaction.stop_observing_operations().unwrap();
+                let events=recording.events();
+                let captured=crate::write_capture::capture(schema,&events).unwrap();
+                transaction.within(|writer| {
+                    let before=crate::write_rows::AppView::before(writer,schema,&captured).unwrap();
+                    let after=crate::write_rows::AppView::after(writer,schema);
+                    let stored=crate::merge_store::MergeStore::new(writer,&before);
+                    crate::write_record::changes(writer,schema,&before,&after,&stored,&before.changes(&after, captured.keys().cloned()).unwrap(),&BTreeMap::new(),&Default::default())
+                })
             });
             let lookups=writer.profiled_statements().into_iter().filter(|s| s.sql.starts_with("SELECT DISTINCT r.table_name,r.key,r.audience FROM _coven_references v")).count();
             if moving {
@@ -486,7 +490,6 @@ async fn audience_validation_looks_up_children_only_when_the_parent_moves() {
                 assert_eq!(changes.unwrap().len(),1);
                 assert_eq!(lookups,0,"a title change must not visit tracks");
             }
-            writer.batch("ROLLBACK").unwrap();
         });
     }
     db.close().await.unwrap();

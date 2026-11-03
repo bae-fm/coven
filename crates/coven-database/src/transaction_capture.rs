@@ -1,5 +1,6 @@
 //! Transaction observation through SQLite sessions.
 
+use super::write_transaction::WriteTransaction;
 use super::{DatabaseConnection, WriterObservation};
 use crate::{observation::RowChange, DbError};
 use std::collections::{BTreeMap, BTreeSet};
@@ -14,10 +15,44 @@ pub(super) struct ChangeCapture<'a> {
     hook_changes: Arc<Mutex<BTreeSet<String>>>,
 }
 
+/// The supplemental tables a transaction's update hook saw change: those
+/// whose rows a session can't key (`change_capture::supplemental_tables`).
+pub(super) struct SupplementalChanges(Arc<Mutex<BTreeSet<String>>>);
+
+impl SupplementalChanges {
+    /// Watch `transaction`'s supplemental tables, which only a serving
+    /// writer knows; none are watched where there are none.
+    pub(super) fn observe(transaction: &mut WriteTransaction<'_>) -> Result<Self, DbError> {
+        let changes = Arc::new(Mutex::new(BTreeSet::new()));
+        let tables = transaction.within(|database| match &database.observation {
+            Some(observation) if !observation.supplemental.is_empty() => {
+                Some(Arc::clone(&observation.supplemental))
+            }
+            _ => None,
+        });
+        let Some(tables) = tables else {
+            return Ok(Self(changes));
+        };
+        // A session's pre-update hook disables SQLite's truncate-delete
+        // optimization, so even DELETE without WHERE reaches this hook.
+        let seen = Arc::clone(&changes);
+        transaction.observe_rows(move |_, schema: &str, table: &str, _| {
+            if schema == "main" {
+                let table = table.to_ascii_lowercase();
+                if tables.contains_key(&table) {
+                    seen.lock().expect("update hook capture lock poisoned").insert(table);
+                }
+            }
+        })?;
+        Ok(Self(changes))
+    }
+}
+
 impl<'a> ChangeCapture<'a> {
     pub(super) fn begin(
         database: &'a DatabaseConnection,
         observation: &'a WriterObservation,
+        supplemental: SupplementalChanges,
     ) -> Result<Self, DbError> {
         let mut session = std::ptr::null_mut();
         // SAFETY: the borrowed owner retains its connection until this guard drops.
@@ -32,7 +67,7 @@ impl<'a> ChangeCapture<'a> {
             session,
             database,
             supplemental: &observation.supplemental,
-            hook_changes: Arc::new(Mutex::new(BTreeSet::new())),
+            hook_changes: supplemental.0,
         };
         let mut rowid: std::ffi::c_int = 1;
         // SAFETY: the live session has no attached tables yet and rowid is an int.
@@ -54,20 +89,6 @@ impl<'a> ChangeCapture<'a> {
             );
         }
         sqlite_ok(unsafe { rusqlite::ffi::sqlite3session_attach(session, std::ptr::null()) })?;
-        if !observation.supplemental.is_empty() {
-            // A session's pre-update hook disables SQLite's truncate-delete
-            // optimization, so even DELETE without WHERE reaches this hook.
-            let tables = Arc::clone(&observation.supplemental);
-            let changes = Arc::clone(&capture.hook_changes);
-            database.connection.update_hook(Some(move |_, schema: &str, table: &str, _| {
-                if schema == "main" {
-                    let table = table.to_ascii_lowercase();
-                    if tables.contains_key(&table) {
-                        changes.lock().expect("update hook capture lock poisoned").insert(table);
-                    }
-                }
-            }))?;
-        }
         Ok(capture)
     }
 
@@ -123,10 +144,6 @@ impl ChangeCapture<'_> {
 
 impl Drop for ChangeCapture<'_> {
     fn drop(&mut self) {
-        self.database
-            .connection
-            .update_hook(None::<fn(rusqlite::hooks::Action, &str, &str, i64)>)
-            .expect("remove transaction update hook");
         // SAFETY: the guard owns this session and still borrows its live connection.
         unsafe { rusqlite::ffi::sqlite3session_delete(self.session) };
     }

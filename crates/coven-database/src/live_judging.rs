@@ -7,6 +7,8 @@ use super::DatabaseConnection;
 use crate::observation::{CommitObserver, ReadSet};
 use crate::scope_lookup::Lookups;
 use crate::{DbError, SqlReadContext};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 impl DatabaseConnection {
     /// A live query's run on one snapshot. What its statements read goes
@@ -69,8 +71,6 @@ impl DatabaseConnection {
         lookup: &crate::scope_lookup::Lookup,
         value: &crate::sql_value::SqlValue,
     ) -> rusqlite::Result<bool> {
-        use std::sync::atomic::{AtomicBool, Ordering};
-        use std::sync::Arc;
         let (sql, parameters) = lookup.sql(value);
         let mut statement = self.connection.prepare_cached(sql)?;
         for (index, value) in parameters.iter().enumerate() {
@@ -79,27 +79,60 @@ impl DatabaseConnection {
         // SQLite calls the handler as a statement's count of steps passes
         // each multiple of the limit, so the count starts at zero.
         statement.reset_status(rusqlite::StatementStatus::VmStep);
-        let stopped = Arc::new(AtomicBool::new(false));
-        let stop = Arc::clone(&stopped);
-        self.connection.progress_handler(
-            crate::scope_lookup::LOOKUP_STEPS,
-            Some(move || {
-                stop.store(true, Ordering::Relaxed);
-                true
-            }),
-        )?;
+        self.lookups.arm();
         let found = self.counting_steps(&mut statement, super::ReadSteps::Lookup, |statement| {
             statement.raw_query().next().map(|row| row.is_some())
         });
-        self.connection.progress_handler(0, None::<fn() -> bool>)?;
+        let stopped = self.lookups.disarm();
         match found {
             Err(rusqlite::Error::SqliteFailure(error, _))
-                if error.code == rusqlite::ErrorCode::OperationInterrupted
-                    && stopped.load(Ordering::Relaxed) =>
+                if error.code == rusqlite::ErrorCode::OperationInterrupted && stopped =>
             {
                 Ok(true)
             }
             found => found,
         }
+    }
+}
+
+/// What stops a lookup that runs past `LOOKUP_STEPS`. The connection's
+/// progress handler, set once as it opens, runs every `LOOKUP_STEPS` steps
+/// of any statement and interrupts one only while a lookup has armed it.
+pub(super) struct LookupLimit(Arc<LookupState>);
+
+struct LookupState {
+    armed: AtomicBool,
+    stopped: AtomicBool,
+}
+
+impl LookupLimit {
+    pub(super) fn install(connection: &rusqlite::Connection) -> rusqlite::Result<Self> {
+        let state = Arc::new(LookupState {
+            armed: AtomicBool::new(false),
+            stopped: AtomicBool::new(false),
+        });
+        let handler = Arc::clone(&state);
+        connection.progress_handler(
+            crate::scope_lookup::LOOKUP_STEPS,
+            Some(move || {
+                let stop = handler.armed.load(Ordering::Relaxed);
+                if stop {
+                    handler.stopped.store(true, Ordering::Relaxed);
+                }
+                stop
+            }),
+        )?;
+        Ok(Self(state))
+    }
+
+    fn arm(&self) {
+        self.0.stopped.store(false, Ordering::Relaxed);
+        self.0.armed.store(true, Ordering::Relaxed);
+    }
+
+    /// Whether the lookup armed since was stopped.
+    fn disarm(&self) -> bool {
+        self.0.armed.store(false, Ordering::Relaxed);
+        self.0.stopped.load(Ordering::Relaxed)
     }
 }
