@@ -94,8 +94,11 @@ pub(crate) fn unknown(
     }
 }
 
-pub(crate) struct FileWrite<'a> {
-    database: &'a DatabaseConnection,
+/// What one write does with files, kept for the whole call that runs it:
+/// the files it stages, the records it makes, changes and deletes for them,
+/// and what runs once it commits. Its transaction works on them through a
+/// [`FileWrite`], which also holds the transaction's connection.
+pub(crate) struct WriteFiles<'a> {
     schema: &'a WriteSchema,
     device: DeviceId,
     ids: &'a dyn IdSource,
@@ -146,9 +149,21 @@ pub(crate) struct FileWrite<'a> {
     committed: RefCell<Vec<Box<dyn FnOnce()>>>,
 }
 
-impl<'a> FileWrite<'a> {
+/// A write's files on the connection its transaction runs on.
+pub(crate) struct FileWrite<'a> {
+    database: &'a DatabaseConnection,
+    files: &'a WriteFiles<'a>,
+}
+
+impl<'a> std::ops::Deref for FileWrite<'a> {
+    type Target = WriteFiles<'a>;
+    fn deref(&self) -> &WriteFiles<'a> {
+        self.files
+    }
+}
+
+impl<'a> WriteFiles<'a> {
     pub(crate) fn new(
-        database: &'a DatabaseConnection,
         schema: &'a WriteSchema,
         device: DeviceId,
         ids: &'a dyn IdSource,
@@ -156,7 +171,6 @@ impl<'a> FileWrite<'a> {
         copying: &'a std::sync::Mutex<BTreeSet<String>>,
     ) -> Self {
         Self {
-            database,
             schema,
             device,
             ids,
@@ -181,6 +195,29 @@ impl<'a> FileWrite<'a> {
         }
     }
 
+    /// What runs now that this write has committed.
+    pub(crate) fn take_committed(&self) -> Vec<Box<dyn FnOnce()>> {
+        std::mem::take(&mut self.committed.borrow_mut())
+    }
+
+    /// The reserved names this write brought in, which go free once its
+    /// transaction has decided.
+    pub(crate) fn take_brought(&self) -> Vec<FileName> {
+        std::mem::take(&mut self.brought.borrow_mut())
+    }
+
+    /// The copies a prepared switch brought into this write, which no
+    /// removal skips once its transaction has decided.
+    pub(crate) fn take_held_copies(&self) -> Vec<String> {
+        std::mem::take(&mut self.held_copies.borrow_mut())
+    }
+}
+
+impl<'a> FileWrite<'a> {
+    /// `files` on the connection of the transaction that writes them.
+    pub(crate) fn new(database: &'a DatabaseConnection, files: &'a WriteFiles<'a>) -> Self {
+        Self { database, files }
+    }
     /// Dismiss these lost values in this write (§8.4).
     pub(crate) fn dismiss(&self, values: &[crate::LostValue]) {
         self.dismissing.borrow_mut().extend_from_slice(values);
@@ -212,11 +249,6 @@ impl<'a> FileWrite<'a> {
     /// Run `effect` once this write has committed.
     pub(crate) fn after_commit(&self, effect: Box<dyn FnOnce()>) {
         self.committed.borrow_mut().push(effect);
-    }
-
-    /// What runs now that this write has committed.
-    pub(crate) fn take_committed(&self) -> Vec<Box<dyn FnOnce()>> {
-        std::mem::take(&mut self.committed.borrow_mut())
     }
 
     pub(crate) fn execute<P: rusqlite::Params>(

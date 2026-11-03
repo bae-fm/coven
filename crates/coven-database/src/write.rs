@@ -14,6 +14,12 @@ impl<'connection, 'write> SqlContext<'connection, 'write> {
         Self { files }
     }
 
+    /// The write's files on its transaction's connection, for coven's own
+    /// steps run as a write's.
+    pub(crate) fn files(&self) -> &'write crate::file_write::FileWrite<'connection> {
+        self.files
+    }
+
     /// Record a move of these files of this device, on it only, to the
     /// cloud (§17.3). It survives restarts; once every file is stored, one
     /// write switches them all to the cloud, changing no app row.

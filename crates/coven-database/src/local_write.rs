@@ -15,7 +15,7 @@ impl DatabaseConnection {
         schema: &crate::write_schema::WriteSchema,
         device: DeviceId,
         now: SystemTime,
-        files: &crate::file_write::FileWrite<'_>,
+        files: &crate::file_write::WriteFiles<'_>,
         sql: F,
     ) -> Result<R, E>
     where
@@ -25,6 +25,7 @@ impl DatabaseConnection {
         #[cfg(test)]
         let _profile = self.profile_statements();
         self.local_transaction(|database, phase| {
+            let files = &crate::file_write::FileWrite::new(database, files);
             let deleted_circles = crate::store_state_tables::deleted_circles(database)?;
             let result = {
                 let _scope = database.authorization.write();

@@ -4,7 +4,7 @@
 
 use super::{FileWrite, StagedFile, StagedSource};
 use crate::{write_batch::ExistingFile, DbError, Place, PreparedUserFile, Provenance};
-use coven_foundation::{files::FileName, id_source::FileId};
+use coven_foundation::id_source::FileId;
 
 impl FileWrite<'_> {
     /// Bring files `stage_files` staged in this store into this write, and
@@ -23,12 +23,6 @@ impl FileWrite<'_> {
         self.brought.borrow_mut().extend(names);
         self.staged.borrow_mut().extend(files);
         Ok(value)
-    }
-
-    /// The reserved names this write brought in, which go free once its
-    /// transaction has decided.
-    pub(crate) fn take_brought(&self) -> Vec<FileName> {
-        std::mem::take(&mut self.brought.borrow_mut())
     }
 
     /// Stage a user's original, read whole once already, as a new file in a

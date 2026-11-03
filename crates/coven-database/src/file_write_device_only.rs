@@ -93,12 +93,6 @@ impl FileWrite<'_> {
         self.make_device_only(copies)
     }
 
-    /// The copies a prepared switch brought into this write, which no
-    /// removal skips once its transaction has decided.
-    pub(crate) fn take_held_copies(&self) -> Vec<String> {
-        std::mem::take(&mut self.held_copies.borrow_mut())
-    }
-
     /// Switch each file to this device only, off the stored bytes its copy
     /// was downloaded from, in this write (§17.3). Each must still be
     /// permitted, and still stored there: a file another device's switch

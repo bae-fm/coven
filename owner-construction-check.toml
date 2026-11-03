@@ -171,6 +171,9 @@ borrowed_facade_types = [
     "ClaimBytes",
     "Circles",
     "FileWrite",
+    # One write call's files borrow the store's id source and its
+    # reservations; each transaction of the call works on them.
+    "WriteFiles",
     # A write's batch borrows the store's id source while the app
     # stages its files, giving each a new id.
     "WriteBatch",
@@ -290,6 +293,7 @@ task_types = [
     "FileStreamState",
     "FileStaging",
     "FileWrite",
+    "WriteFiles",
     "CovenWrite",
     "SqlReadContext",
     "Read",

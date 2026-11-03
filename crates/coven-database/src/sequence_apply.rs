@@ -69,10 +69,11 @@ pub(crate) fn apply<P: crate::PendingValue>(
     before: &DatabaseConnection,
     schema: &WriteSchema,
     incoming: IncomingSlot<PreparedWrite<'_>>,
-    files: &crate::file_write::FileWrite<'_>,
+    files: &crate::file_write::WriteFiles<'_>,
     authenticate: impl FnOnce() -> Result<(), DbError>,
 ) -> Result<crate::ApplyOutcome, DbError> {
     crate::download::source_wait(db.stream_transaction(|db| {
+        let files = &crate::file_write::FileWrite::new(db, files);
         // Applying a slot runs no migration and no DDL.
         let _constants = db.write_constants();
         let applied = crate::sequence::applied(db)?;

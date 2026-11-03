@@ -17,10 +17,11 @@ pub(crate) fn load<P: crate::PendingValue>(
     before: &DatabaseConnection,
     schema: &WriteSchema,
     reload: crate::SnapshotReload<PreparedSnapshot<'_>, crate::download_stream::PreparedWrite<'_>>,
-    files: &crate::file_write::FileWrite<'_>,
+    files: &crate::file_write::WriteFiles<'_>,
     progress: &mut ProgressReport<LoadStep>,
 ) -> Result<Vec<crate::LoadedSnapshot>, DbError> {
     database.stream_transaction(|database| {
+        let files = &crate::file_write::FileWrite::new(database, files);
         let crate::SnapshotReload {
             snapshots,
             slots,

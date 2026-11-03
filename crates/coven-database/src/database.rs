@@ -263,11 +263,10 @@ impl DatabaseInner {
     /// follow its commit.
     fn with_files<R, E: crate::WriteFailure>(
         &self,
-        run: impl FnOnce(&DatabaseConnection, &crate::file_write::FileWrite<'_>) -> Result<R, E>,
+        run: impl FnOnce(&DatabaseConnection, &crate::file_write::WriteFiles<'_>) -> Result<R, E>,
     ) -> Result<R, E> {
         let (outcome, chosen, committed) = self.access.with_writer(|writer| {
-            let files = crate::file_write::FileWrite::new(
-                writer,
+            let files = crate::file_write::WriteFiles::new(
                 &self.access.write_schema,
                 self.access.device,
                 self.ids.as_ref(),

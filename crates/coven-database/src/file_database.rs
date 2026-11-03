@@ -272,7 +272,7 @@ impl FileDatabase {
                         inner.access.device,
                         inner.clock.now(),
                         files,
-                        |_sql| files.retire_unlinked(&in_flight, subject),
+                        |sql| sql.files().retire_unlinked(&in_flight, subject),
                     )
                 })
             })
@@ -738,8 +738,8 @@ fn complete(inner: &DatabaseInner, id: i64, subject: Vec<u8>) -> Result<(), DbEr
             inner.access.device,
             inner.clock.now(),
             files,
-            |_sql| {
-                files.complete_upload(
+            |sql| {
+                sql.files().complete_upload(
                     id,
                     Box::new(move |db| crate::pending::clear_encoded(db, subject)),
                 )
@@ -785,7 +785,7 @@ impl Database {
                     inner.access.device,
                     inner.clock.now(),
                     files,
-                    |_sql| files.settle(),
+                    |sql| sql.files().settle(),
                 )
             })
         })
