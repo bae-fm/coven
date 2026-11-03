@@ -343,20 +343,48 @@ fn lost_title(loss: &coven_format::loss::Loss) -> &Value {
     }
 }
 
+/// The losses the app shows.
+fn app_losses(database: &crate::Database) -> Vec<coven_format::loss::Loss> {
+    database.inspect_writer(|db| {
+        let mut losses = Vec::new();
+        crate::loss_record::visit(db, &Audience::Store, |loss| {
+            losses.push(loss);
+            Ok::<_, DbError>(())
+        })
+        .unwrap();
+        losses
+    })
+}
+
+/// The `title` of the one frozen whole-row loss `losses` holds, taken out by
+/// the CHECK `count > 0`.
+fn frozen_title(losses: &[coven_format::loss::Loss]) -> &Value {
+    let [loss] = losses else { panic!("one frozen loss, not {losses:?}") };
+    assert!(loss.frozen);
+    assert!(matches!(&loss.cause, coven_format::loss::LossCause::Rules(rules)
+        if *rules == [coven_merge::Rule::Check("count > 0".into())].into()));
+    lost_title(loss)
+}
+
 /// Ana's counted album `first` is taken out by its CHECK while her queued
 /// title edit keeps it aside, and a slot shows it as the counted removal it
 /// is. Then version 2 drops `albums`. A dropped table keeps its rows'
-/// removal losses frozen (§18.7), the counted projection's as well as the
-/// app's: the counted album's, worked out under the rules the run started
-/// from, holds the counted title, and the app's holds her queued one.
+/// removal losses frozen (§18.7). The counted state's is the migration over
+/// the slots so far: the counted title. The app's is the migration over her
+/// whole queue, which her migration write records: her queued title. Each
+/// state holds one, and once her edit and her migration write count, the
+/// counted state holds the migration write's, as the raise's snapshot does
+/// (§18.5).
 #[tokio::test]
 async fn a_dropped_table_freezes_a_kept_rows_counted_removal() {
     const SCHEMA: &str = "CREATE TABLE albums(id TEXT NOT NULL PRIMARY KEY, title TEXT,
-           count INTEGER CHECK(count > 0)); CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY)";
+           count INTEGER CHECK(count > 0)); CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY, title TEXT)";
     let store = TestStore::new();
     let initial = || vec![Migration::addition(1, "schema", SCHEMA)];
     let db = store.builder(synced(&["albums", "notes"]), initial()).open().await.unwrap();
-    sql(&db, "INSERT INTO albums VALUES('first','First',1)").await.unwrap();
+    sql(&db, "INSERT INTO albums VALUES('first','First',1); INSERT INTO notes VALUES('n','Note')")
+        .await
+        .unwrap();
     count_own(&db).await;
     sql(&db, "UPDATE albums SET title='Queued' WHERE id='first'").await.unwrap();
     crate::tests::remote_update_beside_queue(
@@ -373,23 +401,20 @@ async fn a_dropped_table_freezes_a_kept_rows_counted_removal() {
     let mut migrations = initial();
     migrations.push(Migration::breaking(2, "drop", "DROP TABLE albums", OldWrites::Drop));
     let db = store.builder(synced(&["notes"]), migrations).open().await.unwrap();
-    let [counted] = &counted_losses(&db)[..] else { panic!("one counted frozen loss") };
-    assert!(counted.frozen);
-    assert!(matches!(&counted.cause, coven_format::loss::LossCause::Rules(rules)
-        if *rules == [coven_merge::Rule::Check("count > 0".into())].into()));
-    assert_eq!(lost_title(counted), &Value::Text("First".into()));
-    let live = db.inspect_writer(|db| {
-        let mut losses = Vec::new();
-        crate::loss_record::visit(db, &Audience::Store, |loss| {
-            losses.push(loss);
-            Ok::<_, DbError>(())
-        })
-        .unwrap();
-        losses
-    });
-    let [live] = &live[..] else { panic!("one live frozen loss") };
-    assert!(live.frozen);
-    assert_eq!(lost_title(live), &Value::Text("Queued".into()));
+    let first = Value::Text("First".into());
+    let queued = Value::Text("Queued".into());
+    assert_eq!(frozen_title(&counted_losses(&db)), &first);
+    assert_eq!(frozen_title(&app_losses(&db)), &queued);
+    // The next slot puts the counted state back and folds the queue again:
+    // the migration write's freeze replaces the counted one in the app.
+    let note = [("title", Value::Text("Ben's note".into()))];
+    crate::tests::remote_update_beside_queue(&db, "notes", "n", &note).await;
+    assert_eq!(frozen_title(&counted_losses(&db)), &first);
+    assert_eq!(frozen_title(&app_losses(&db)), &queued);
+    // Her edit and her migration write count.
+    count_own(&db).await;
+    assert_eq!(frozen_title(&counted_losses(&db)), &queued);
+    assert_eq!(frozen_title(&app_losses(&db)), &queued);
     db.close().await.unwrap();
 }
 

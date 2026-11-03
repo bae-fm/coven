@@ -222,7 +222,7 @@ fn finish(
     let schema = crate::write_schema::WriteSchema::read(database, tables.to_vec())?;
     crate::write_schema::with_evaluators(database, &schema, || {
         database.batch("CREATE TEMP TABLE _coven_migration_frozen(audience TEXT NOT NULL,record BLOB NOT NULL)")?;
-        crate::published_migration::carry(database, names, &schema, removed)?;
+        let counted_frozen = crate::published_migration::carry(database, names, &schema, removed)?;
         let hidden = crate::migration_hidden::Hidden::before(database, initial_schema, names)?;
         let refresh = crate::migration_state::carry(database, initial_schema, names, &schema)?;
         crate::migration_files::carry(database, names)?;
@@ -307,6 +307,19 @@ fn finish(
             record.header.schema_version,
         )?;
         database.internal_execute("INSERT INTO _coven_migration_losses(write_id,audience,record) SELECT ?1,audience,record FROM temp._coven_migration_frozen",[coven_format::merge_fields::encode_write_id(&record.header.position)?])?;
+        // What this run froze of the kept state, over the counted prefix:
+        // the migration write's own freezes, over the whole prefix, replace
+        // them wherever its losses are put (§18.5).
+        for loss in &counted_frozen {
+            database.internal_execute(
+                "INSERT INTO _coven_migration_counted_losses(write_id,audience,record) VALUES(?1,?2,?3) ON CONFLICT DO NOTHING",
+                rusqlite::params![
+                    coven_format::merge_fields::encode_write_id(&record.header.position)?,
+                    crate::write_encoding::audience_text(&loss.row.audience),
+                    coven_format::merge_fields::encode_loss(loss)?
+                ],
+            )?;
+        }
         database.batch("DROP TABLE temp._coven_migration_frozen")?;
         snapshot.drop()?;
         Ok(record.header.position)

@@ -43,14 +43,17 @@ fn column(
 /// removal losses of the kept rows the counted projection took out under the
 /// schema the run started with (`published::removal_losses`): a table the run
 /// drops keeps those losses frozen, as it keeps its rows' own (§18.7).
+/// Returns the losses this freezes: the migration over the counted prefix,
+/// which the migration write's own freezes replace once they are put.
 pub(crate) fn carry(
     db: &DatabaseConnection,
     names: &MigrationMatch,
     schema: &WriteSchema,
     removed: &[Loss],
-) -> Result<(), DbError> {
+) -> Result<Vec<Loss>, DbError> {
+    let mut frozen = Vec::new();
     if !crate::published::exists(db)? {
-        return Ok(());
+        return Ok(frozen);
     }
     // Staging makes table-name swaps independent of update order.
     db.batch("CREATE TEMP TABLE _coven_carried_rows AS SELECT * FROM _coven_published_rows; DELETE FROM _coven_published_rows")?;
@@ -91,13 +94,20 @@ pub(crate) fn carry(
     db.batch("DROP TABLE temp._coven_carried_creations; CREATE TEMP TABLE _coven_carried_losses AS SELECT record FROM _coven_published_losses; DELETE FROM _coven_published_losses")?;
     db.for_each("SELECT record FROM temp._coven_carried_losses", [], |r| {
         let loss = decoded(merge_fields::decode_loss(&r.get::<_, Vec<u8>>(0)?))?;
-        put(db, &carry_loss(names, schema, loss)?)
+        let was_frozen = loss.frozen;
+        let loss = carry_loss(names, schema, loss)?;
+        if loss.frozen && !was_frozen {
+            frozen.push(loss.clone());
+        }
+        put(db, &loss)
     })?;
     db.batch("DROP TABLE temp._coven_carried_losses")?;
     for loss in removed.iter().filter(|loss| !names.tables.contains_key(&loss.row.table)) {
-        put(db, &crate::migration_state::frozen(loss.clone()))?;
+        let loss = crate::migration_state::frozen(loss.clone());
+        put(db, &loss)?;
+        frozen.push(loss);
     }
-    Ok(())
+    Ok(frozen)
 }
 
 fn put(db: &DatabaseConnection, loss: &Loss) -> Result<(), DbError> {

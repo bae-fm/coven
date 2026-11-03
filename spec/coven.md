@@ -6863,7 +6863,9 @@ it are new-version writes and wait behind it.
   a later local breaking migration captures them (below).
 - **Before uploading the raise snapshot,** the device confirms the captured
   writes and the marker have landed. The snapshot leaves out app writes without a
-  slot and includes the migration's effects over the slots it covers. Then the
+  slot and includes the migration's effects over the slots it covers. Those are
+  the migration write's own, made over every captured write, and they replace
+  what migrating did to the state kept aside beside them (§18.7). Then the
   device announces the snapshot and claims the raise.
 - **Until they have landed, the raise doesn't start.** It waits for the pass
   that sends them, with no record of its own: whatever keeps them unsent, such
@@ -7031,6 +7033,15 @@ discard it.
   over Ben's concurrent one, leaves her title as a lost value; the slots
   alone leave none. Dropping `albums` freezes her title for the app, and the
   kept state still holds no lost value of the album.
+- Freezing the kept state covers the slots counted so far, and the migration
+  write freezes the same rows as the app had them, over every write before its
+  marker. Its lost values replace the kept state's wherever they're put: in
+  the app's state from the start, and in the counted state once the migration
+  write counts, so each holds one. Ana's album `first` is taken out by its
+  CHECK while her unsent title edit waits, and her migration drops `albums`.
+  Until her edit and her migration write count, the kept state's frozen
+  album holds the counted title and the app's holds hers; after, both hold
+  hers, as the raise's snapshot does.
 - It keeps its table and column names, key, audience, plain values, the writes
   that set them and its original cause. Live parent links are stripped; the old
   schema need not exist.

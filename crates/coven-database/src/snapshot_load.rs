@@ -89,10 +89,12 @@ pub(crate) fn load<P: crate::PendingValue>(
                             header.schema_version
                         ],
                     )?;
-                    database.internal_execute(
-                        "DELETE FROM _coven_migration_losses WHERE audience=?1",
-                        [crate::write_encoding::audience_text(&id.audience)],
-                    )?;
+                    for table in ["_coven_migration_losses", "_coven_migration_counted_losses"] {
+                        database.internal_execute(
+                            &format!("DELETE FROM {table} WHERE audience=?1"),
+                            [crate::write_encoding::audience_text(&id.audience)],
+                        )?;
+                    }
                     loaded.push(crate::LoadedSnapshot { id, files });
                 }
                 crate::SnapshotSource::Empty(audience) => {

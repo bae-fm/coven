@@ -164,6 +164,7 @@ mod fixture {
      INSERT INTO _coven_store VALUES(1,zeroblob(16),'fixture',x'0000000000000001',1);
      INSERT INTO _coven_migration_prefix VALUES(1,counter(1),counter(4096),2);
      INSERT INTO _coven_migration_losses SELECT CAST(device || n AS BLOB),audience,key FROM fixture;
+     INSERT INTO _coven_migration_counted_losses SELECT CAST(device || n AS BLOB),audience,key FROM fixture;
      INSERT INTO _coven_last_claims SELECT n,n,key,n FROM fixture;
      INSERT INTO _coven_absent_snapshots SELECT audience,device,n FROM fixture;
      INSERT INTO _coven_slot_records SELECT n,CASE i%3 WHEN 0 THEN 'admin' WHEN 1 THEN 'key' ELSE 'announcement' END,key FROM fixture;

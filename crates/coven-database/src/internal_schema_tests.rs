@@ -149,6 +149,7 @@ async fn only_the_spec_tables_are_created() {
                 "_coven_last_claims",
                 "_coven_lost",
                 "_coven_members",
+                "_coven_migration_counted_losses",
                 "_coven_migration_losses",
                 "_coven_migration_prefix",
                 "_coven_moves",

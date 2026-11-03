@@ -2,7 +2,7 @@
 use crate::{sqlite::DatabaseConnection, write_schema::WriteSchema, DbError};
 use coven_format::write::{WriteHeader, WritePart};
 use coven_merge::{Audience, ColumnValue, ConstraintColumns, ForeignKey, Operation};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// All local originals through the migration marker follow the migrated schema,
 /// whether this installation has joined a store yet or not.
@@ -163,16 +163,36 @@ pub(crate) fn losses(
     if header.disposition != coven_format::write::WriteDisposition::Migration {
         return Ok(());
     }
+    if !includes(db, header)? {
+        return Ok(());
+    }
+    // The freezes the migration made of the kept state covered the counted
+    // prefix alone; this write's own cover the whole prefix and replace them
+    // (§18.5). Those go first: one equal to its replacement is the same
+    // stored loss.
+    let mut released = BTreeSet::new();
     db.for_each(
-        "SELECT audience,record FROM _coven_migration_losses WHERE write_id=?1",
+        "SELECT record FROM _coven_migration_counted_losses WHERE write_id=?1",
         [coven_format::merge_fields::encode_write_id(&header.position)?],
         |r| {
-            if includes(db, header)? {
-                let loss = coven_format::merge_fields::decode_loss(&r.get::<_, Vec<u8>>(1)?)?;
-                crate::loss_record::put(db, &loss, None)?;
-                crate::file_protection::retain_loss(db, schema, &loss)?;
+            let loss = coven_format::merge_fields::decode_loss(&r.get::<_, Vec<u8>>(0)?)?;
+            if crate::loss_record::remove(db, &loss)? {
+                released.insert((loss.row.table, loss.row.key));
             }
             Ok::<_, DbError>(())
         },
-    )
+    )?;
+    db.for_each(
+        "SELECT record FROM _coven_migration_losses WHERE write_id=?1",
+        [coven_format::merge_fields::encode_write_id(&header.position)?],
+        |r| {
+            let loss = coven_format::merge_fields::decode_loss(&r.get::<_, Vec<u8>>(0)?)?;
+            crate::loss_record::put(db, &loss, None)?;
+            crate::file_protection::retain_loss(db, schema, &loss)
+        },
+    )?;
+    for key in &released {
+        crate::file_protection::refresh_received(db, schema, key)?;
+    }
+    Ok(())
 }

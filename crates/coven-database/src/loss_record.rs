@@ -163,6 +163,23 @@ pub(crate) fn put_table(
     Ok(())
 }
 
+/// Delete the stored loss equal to `loss`, a frozen one; whether there was one.
+pub(crate) fn remove(database: &DatabaseConnection, loss: &Loss) -> Result<bool, DbError> {
+    let ids = database.query(
+        "SELECT id FROM _coven_lost WHERE table_name=?1 AND key=?2 AND audience=?3 AND frozen=1",
+        params![loss.row.table, loss.row.key, audience_text(&loss.row.audience)],
+        |r| r.get::<_, i64>(0),
+    )?;
+    for id in ids {
+        let stored = database.query_row(&format!("{SELECT} WHERE l.id=?1"), [id], read)?;
+        if stored == *loss {
+            database.internal_execute("DELETE FROM _coven_lost WHERE id=?1", [id])?;
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 /// SQLite sorts without collecting a row's potentially unbounded loss history.
 /// Escape names so their byte order matches the format's logical key order.
 pub(crate) fn sort_key(column: Option<String>, setter: &[u8]) -> rusqlite::Result<Vec<u8>> {

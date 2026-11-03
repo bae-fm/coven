@@ -616,6 +616,7 @@ tables = [
     "_coven_held_keys",
     "_coven_last_claims",
     "_coven_lost",
+    "_coven_migration_counted_losses",
     "_coven_migration_losses",
     "_coven_migration_prefix",
     "_coven_moves",
