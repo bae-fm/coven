@@ -16,9 +16,10 @@ pub struct StorageConnection<P: ?Sized = dyn ProviderOps> {
     transfers: Arc<TransferBudget>,
     /// Every request this connection sent, timed by the store's clock.
     requests: crate::request_tally::RequestTally,
-    /// The setup call that made this connection, while it runs: rate-limited
-    /// requests are sent again in place (§20.8).
-    setup: Option<Arc<SetupWaits>>,
+    /// For the connection a setup call makes for its own requests, what the
+    /// call has left of its minute: rate-limited requests are sent again in
+    /// place (§20.8).
+    setup: Option<SetupWaits>,
 }
 
 impl<P: ProviderOps + ?Sized> StorageConnection<P> {
@@ -54,14 +55,24 @@ impl<P: ProviderOps + ?Sized> StorageConnection<P> {
         }
     }
 
-    /// Make this connection for the setup call spending `waits`: its reads,
-    /// listings, deletions, creates and replacements refused for rate
-    /// limiting are sent again until the call ends or its minute is spent.
-    /// Upload session steps and sharing requests are not: a session's owner
-    /// settles its steps through the recorded session (§20.6).
-    pub fn during_setup(mut self, waits: Arc<SetupWaits>) -> Self {
-        self.setup = Some(waits);
-        self
+    /// A connection beside this one for the setup call spending `waits`,
+    /// and only for that call's own requests: one client to the provider
+    /// with this one, through the same provider, cooldown, publications and
+    /// transfer limits, but its reads, listings, deletions, creates and
+    /// replacements refused for rate limiting are sent again until the
+    /// call's minute is spent. Upload session steps and sharing requests are
+    /// not: a session's owner settles its steps through the recorded session
+    /// (§20.6). The call drops it, and its waits, when it ends.
+    pub fn during_setup(&self, waits: SetupWaits) -> Self {
+        Self {
+            provider: self.provider.clone(),
+            device: self.device,
+            publications: self.publications.clone(),
+            cooldown: self.cooldown.clone(),
+            transfers: self.transfers.clone(),
+            requests: crate::request_tally::RequestTally::new(self.requests.clock().clone()),
+            setup: Some(waits),
+        }
     }
 
     /// Every request this connection has sent so far, by kind.
@@ -70,7 +81,7 @@ impl<P: ProviderOps + ?Sized> StorageConnection<P> {
     }
 
     /// Whether to send the request that failed with `error` again, having
-    /// waited: only while the setup call that made this connection runs.
+    /// waited: only on a setup call's own connection.
     pub(crate) async fn resend_after(&self, error: &StorageError) -> bool {
         match &self.setup {
             Some(waits) => waits.wait_to_resend(self.requests.clock().as_ref(), error).await,

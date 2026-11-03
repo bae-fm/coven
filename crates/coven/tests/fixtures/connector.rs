@@ -116,10 +116,9 @@ impl coven_storage::providers::StorageConnector for Connector {
         publications: Arc<dyn PublicationGate>,
         cooldown: Arc<dyn coven_storage::Cooldown>,
         transfers: Arc<coven_storage::TransferBudget>,
-        setup: Option<Arc<coven_storage::SetupWaits>>,
     ) -> Result<Arc<coven_storage::StorageConnection>, StorageError> {
         let gate = self.clients.gate(publications);
-        self.storage.connect(config, auth, device, gate, cooldown, transfers, setup).await
+        self.storage.connect(config, auth, device, gate, cooldown, transfers).await
     }
     async fn detect_s3(
         &self,

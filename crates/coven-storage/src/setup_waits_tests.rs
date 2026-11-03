@@ -50,7 +50,7 @@ async fn one_minute_bounds_every_step_of_a_setup_call() {
 }
 
 #[tokio::test]
-async fn only_a_running_call_resends_and_never_after_a_failed_cleanup() {
+async fn nothing_resends_after_a_failed_cleanup_or_another_failure() {
     let clock = Waits::default();
     let waits = SetupWaits::default();
     let failed_cleanup = StorageError::Cleanup {
@@ -59,7 +59,5 @@ async fn only_a_running_call_resends_and_never_after_a_failed_cleanup() {
     };
     assert!(!waits.wait_to_resend(&clock, &failed_cleanup).await);
     assert!(!waits.wait_to_resend(&clock, &StorageFailure::Network.into()).await);
-    waits.end();
-    assert!(!waits.wait_to_resend(&clock, &limited()).await);
     assert!(clock.0.lock().unwrap().is_empty());
 }

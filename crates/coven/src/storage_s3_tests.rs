@@ -39,9 +39,8 @@ impl StorageConnector for Overwrites {
         publications: Arc<dyn coven_storage::PublicationGate>,
         cooldown: Arc<dyn coven_storage::Cooldown>,
         transfers: Arc<coven_storage::TransferBudget>,
-        setup: Option<Arc<coven_storage::SetupWaits>>,
     ) -> Result<Arc<StorageConnection>, StorageError> {
-        self.0.connect(config, auth, device, publications, cooldown, transfers, setup).await
+        self.0.connect(config, auth, device, publications, cooldown, transfers).await
     }
     async fn detect_s3(
         &self,
@@ -87,9 +86,8 @@ impl StorageConnector for BucketState {
         publications: Arc<dyn coven_storage::PublicationGate>,
         cooldown: Arc<dyn coven_storage::Cooldown>,
         transfers: Arc<coven_storage::TransferBudget>,
-        setup: Option<Arc<coven_storage::SetupWaits>>,
     ) -> Result<Arc<StorageConnection>, StorageError> {
-        self.storage.connect(config, auth, device, publications, cooldown, transfers, setup).await
+        self.storage.connect(config, auth, device, publications, cooldown, transfers).await
     }
     async fn detect_s3(
         &self,
@@ -261,9 +259,8 @@ impl StorageConnector for ConcurrentSetup {
         publications: Arc<dyn coven_storage::PublicationGate>,
         cooldown: Arc<dyn coven_storage::Cooldown>,
         transfers: Arc<coven_storage::TransferBudget>,
-        setup: Option<Arc<coven_storage::SetupWaits>>,
     ) -> Result<Arc<StorageConnection>, StorageError> {
-        self.storage.connect(config, auth, device, publications, cooldown, transfers, setup).await
+        self.storage.connect(config, auth, device, publications, cooldown, transfers).await
     }
     async fn detect_s3(
         &self,

@@ -76,7 +76,7 @@ async fn rate_limited(refusals: usize, retry_after: Option<u64>) -> (MemoryStora
         .clock(waits.clone())
         .build()
         .unwrap()
-        .during_setup(Arc::new(crate::SetupWaits::default()));
+        .during_setup(crate::SetupWaits::default());
     storage
         .set_faults(Faults {
             fail_next: refusals,
@@ -147,6 +147,33 @@ async fn a_connection_outside_setup_never_resends() {
         })
         .await;
     let path = ObjectPath::file(STORE_ID, DeviceId(1), FileId(uuid::Uuid::from_u128(5)));
+    assert!(matches!(
+        check_provider(&storage, &path, b"sealed test bytes").await,
+        Err(StorageSetupError::ProviderCheck { check: StorageCheck::Create, source })
+            if source.failure() == StorageFailure::RateLimited
+    ));
+}
+
+/// A setup call's own connection resends while the store's beside it, on
+/// the same provider, does not: once the call drops its connection, nothing
+/// of its minute is left (§20.8).
+#[tokio::test]
+async fn only_a_setup_calls_own_connection_resends() {
+    let clock = Arc::new(Waits::default());
+    let storage = MemoryStorage::builder().clock(clock.clone()).build().unwrap();
+    let limit = || Faults {
+        fail_next: 1,
+        failure: StorageFailure::RateLimited,
+        response: Some(429),
+        ..Faults::none()
+    };
+    let setup = storage.during_setup(crate::SetupWaits::default());
+    let path = ObjectPath::file(STORE_ID, DeviceId(1), FileId(uuid::Uuid::from_u128(6)));
+    storage.set_faults(limit()).await;
+    check_provider(&setup, &path, b"sealed test bytes").await.unwrap();
+    assert_eq!(*clock.0.lock().unwrap(), [Duration::from_secs(1)]);
+    drop(setup);
+    storage.set_faults(limit()).await;
     assert!(matches!(
         check_provider(&storage, &path, b"sealed test bytes").await,
         Err(StorageSetupError::ProviderCheck { check: StorageCheck::Create, source })

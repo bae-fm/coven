@@ -8036,8 +8036,11 @@ cooldown (§6.7) counts as one.
   the sealed bytes sent, that settles it as done; anything else is the refusal
   it looks like. An upload session's steps aren't sent again: the session's
   owner resumes it from its record.
-- **It ends with the call.** Once setup returns, its connection, now the
-  store's, waits out a rate limit as every connection does (§6.7).
+- **Only setup's own requests draw on it.** Setup sends them on a connection
+  of its own beside the store's, one client to the provider with it: the same
+  provider, cooldown and transfer limits. The store's connection, which the
+  sync loop setup starts uses, waits out a rate limit as every connection does
+  (§6.7), during the call and after; the minute ends with the call.
 
 **Setup says how far it has come.** With rate limits waited out, and a
 reconnect loading what other devices published, setup can run long enough that

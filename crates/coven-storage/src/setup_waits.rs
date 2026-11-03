@@ -14,8 +14,10 @@ use std::{future::Future, sync::Mutex, time::Duration};
 pub const SETUP_RATE_LIMIT_WAIT: Duration = Duration::from_secs(60);
 
 /// What one setup call has spent waiting to send refused requests again.
-/// Its steps and the connection it makes share one; once the call returns,
-/// [`Self::end`] stops the connection, now the store's, from resending.
+/// The call's steps draw on it until it connects; then the connection the
+/// call makes beside the store's for its own requests
+/// ([`crate::StorageConnection::during_setup`]) takes it, and both go when
+/// the call and its requests end. The store's connection never resends.
 #[derive(Default)]
 pub struct SetupWaits(Mutex<Spent>);
 
@@ -23,19 +25,12 @@ pub struct SetupWaits(Mutex<Spent>);
 struct Spent {
     resends: u32,
     waited: Duration,
-    ended: bool,
 }
 
 impl SetupWaits {
-    /// The setup call has returned. Its connection's later requests fail on a
-    /// rate limit as any connection's do, and sync retries them (§6.7).
-    pub fn end(&self) {
-        self.0.lock().expect("setup waits poisoned").ended = true;
-    }
-
     /// Whether to send the request that failed with `error` again, after
     /// waiting by `clock`: a rate-limited refusal whose cleanup did not also
-    /// fail, while the call runs and the wait fits in what is left of
+    /// fail, while the wait fits in what is left of
     /// [`SETUP_RATE_LIMIT_WAIT`]. The wait is the provider's request or what
     /// is left of the cooldown that refused it, and never less than the
     /// ordinary delay (§6.7).
@@ -49,7 +44,7 @@ impl SetupWaits {
             let mut spent = self.0.lock().expect("setup waits poisoned");
             let wait = throttled_wait(error, spent.resends);
             let waited = spent.waited.saturating_add(wait);
-            if spent.ended || waited > SETUP_RATE_LIMIT_WAIT {
+            if waited > SETUP_RATE_LIMIT_WAIT {
                 return false;
             }
             spent.waited = waited;

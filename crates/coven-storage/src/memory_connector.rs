@@ -59,9 +59,9 @@ impl MemoryStorage {
     }
 
     /// Erase the provider type while retaining this exact connection's
-    /// credentials and the setup call it was made for.
+    /// credentials.
     pub fn shared_connection(&self) -> Arc<StorageConnection> {
-        let mut connection = StorageConnection::with_gate(
+        let connection = StorageConnection::with_gate(
             self.provider.clone() as Arc<dyn ProviderOps>,
             self.device,
             self.publications.clone(),
@@ -69,7 +69,6 @@ impl MemoryStorage {
             self.transfers.clone(),
             self.provider.clock.clone(),
         );
-        connection.setup = self.setup.clone();
         Arc::new(connection)
     }
 }
@@ -88,7 +87,6 @@ impl crate::providers::StorageConnector for MemoryStorage {
             self.publications.clone(),
             cooldown,
             self.transfers.clone(),
-            None,
         )
         .await?
         .account()
@@ -116,7 +114,6 @@ impl crate::providers::StorageConnector for MemoryStorage {
         publications: Arc<dyn crate::PublicationGate>,
         cooldown: Arc<dyn crate::Cooldown>,
         transfers: Arc<crate::TransferBudget>,
-        setup: Option<Arc<crate::SetupWaits>>,
     ) -> Result<Arc<StorageConnection>, StorageError> {
         let connection = self
             .connect_device(config, auth)
@@ -125,11 +122,7 @@ impl crate::providers::StorageConnector for MemoryStorage {
             .with_publication_gate(publications)
             .with_cooldown(cooldown)
             .with_transfers(transfers);
-        Ok(match setup {
-            Some(waits) => connection.during_setup(waits),
-            None => connection,
-        }
-        .shared_connection())
+        Ok(connection.shared_connection())
     }
     /// Memory behaves as any settings demand: the detection conforms to the
     /// location's own settings, or to plain S3 settings for detection.

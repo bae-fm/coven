@@ -78,8 +78,9 @@ pub trait StorageConnector: Send + Sync {
     /// Validate settings and wrap the selected native provider once. The caller
     /// verifies the connection before publication. Every request waits for
     /// the store's shared `cooldown`; a rejected OAuth token is refreshed in
-    /// the sign-in's custody (§20.2). A connection made for a setup call
-    /// sends rate-limited requests again while its `setup` waits allow (§20.8).
+    /// the sign-in's custody (§20.2). A setup call makes its own
+    /// connection beside it (`StorageConnection::during_setup`) for its
+    /// requests to draw on its waits (§20.8).
     /// The connection writes for `device`: what it stages sits in that
     /// device's reserved folder (D10).
     async fn connect(
@@ -90,7 +91,6 @@ pub trait StorageConnector: Send + Sync {
         publications: Arc<dyn crate::PublicationGate>,
         cooldown: Arc<dyn crate::Cooldown>,
         transfers: Arc<crate::TransferBudget>,
-        setup: Option<Arc<crate::SetupWaits>>,
     ) -> Result<Arc<StorageConnection>, StorageError>;
     /// Probe an S3 location's service (§20.7), writing only fresh objects under
     /// the store's `.coven-check` prefix and deleting them, also on failure.
@@ -287,7 +287,6 @@ impl StorageConnector for ProviderConnector {
         publications: Arc<dyn crate::PublicationGate>,
         cooldown: Arc<dyn crate::Cooldown>,
         transfers: Arc<crate::TransferBudget>,
-        setup: Option<Arc<crate::SetupWaits>>,
     ) -> Result<Arc<StorageConnection>, StorageError> {
         crate::ConnectionCredentials { location: config.clone(), credentials: auth.credentials() }
             .validate()?;
@@ -336,10 +335,7 @@ impl StorageConnector for ProviderConnector {
             transfers,
             self.clock.clone(),
         );
-        Ok(Arc::new(match setup {
-            Some(waits) => connection.during_setup(waits),
-            None => connection,
-        }))
+        Ok(Arc::new(connection))
     }
     async fn detect_s3(
         &self,

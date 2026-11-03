@@ -466,7 +466,6 @@ impl StorageConnections {
                 self.publications.clone(),
                 self.waits.clone(),
                 self.transfers.clone(),
-                None,
             )
             .await?;
         storage.check_bucket(self.store()).await?;
@@ -504,58 +503,53 @@ impl StorageConnections {
         let device_name = device_name.to_owned();
         self.call(move |owner| async move {
             let mut progress = ProgressReport::new(progress, owner.clock.clone());
-            let waits = Arc::new(SetupWaits::default());
-            let outcome = async {
-                let provider = storage.provider();
-                if !matches!(provider, CloudProvider::Dropbox | CloudProvider::OneDrive) {
-                    return Err(OAuthError::Unavailable(provider).into());
-                }
-                owner.check_location(&storage).await?;
-                let mut held = owner.authentication.lock().await;
-                let (auth, sign_in) = match held.as_ref() {
-                    Some(sign_in) => {
-                        crate::authentication::check_provider(sign_in, provider)?;
-                        let auth = ProviderAuth::OAuth {
-                            tokens: sign_in.tokens().map_err(setup_error)?,
-                            custody: sign_in.clone(),
-                        };
-                        (auth, Some(sign_in.clone()))
-                    }
-                    None => {
-                        let data = owner
-                            .codes
-                            .connection()
-                            .await
-                            .map_err(setup_error)?
-                            .ok_or(OAuthError::Reauthorize(provider))?;
-                        if data.location.provider() != provider {
-                            return Err(OAuthError::Reauthorize(provider).into());
-                        }
-                        (owner.codes.provider_auth(data.credentials), None)
-                    }
-                };
-                let (connector, cooldown) = (owner.connector.as_ref(), &owner.waits);
-                let (location, signed_in) = (&storage, &auth);
-                let reading = waits.resend(owner.clock.as_ref(), move || {
-                    crate::authentication::label_location(
-                        connector,
-                        location.clone(),
-                        signed_in.clone(),
-                        cooldown.clone(),
-                    )
-                });
-                let storage =
-                    setup_step::single(&mut progress, StorageSetupStep::ReadingAccount, reading)
-                        .await?;
-                let result = owner
-                    .setup_connection(storage, &device_name, auth, sign_in, &waits, &mut progress)
-                    .await?;
-                held.take();
-                Ok(result)
+            let waits = SetupWaits::default();
+            let provider = storage.provider();
+            if !matches!(provider, CloudProvider::Dropbox | CloudProvider::OneDrive) {
+                return Err(OAuthError::Unavailable(provider).into());
             }
-            .await;
-            waits.end();
-            outcome
+            owner.check_location(&storage).await?;
+            let mut held = owner.authentication.lock().await;
+            let (auth, sign_in) = match held.as_ref() {
+                Some(sign_in) => {
+                    crate::authentication::check_provider(sign_in, provider)?;
+                    let auth = ProviderAuth::OAuth {
+                        tokens: sign_in.tokens().map_err(setup_error)?,
+                        custody: sign_in.clone(),
+                    };
+                    (auth, Some(sign_in.clone()))
+                }
+                None => {
+                    let data = owner
+                        .codes
+                        .connection()
+                        .await
+                        .map_err(setup_error)?
+                        .ok_or(OAuthError::Reauthorize(provider))?;
+                    if data.location.provider() != provider {
+                        return Err(OAuthError::Reauthorize(provider).into());
+                    }
+                    (owner.codes.provider_auth(data.credentials), None)
+                }
+            };
+            let (connector, cooldown) = (owner.connector.as_ref(), &owner.waits);
+            let (location, signed_in) = (&storage, &auth);
+            let reading = waits.resend(owner.clock.as_ref(), move || {
+                crate::authentication::label_location(
+                    connector,
+                    location.clone(),
+                    signed_in.clone(),
+                    cooldown.clone(),
+                )
+            });
+            let storage =
+                setup_step::single(&mut progress, StorageSetupStep::ReadingAccount, reading)
+                    .await?;
+            let result = owner
+                .setup_connection(storage, &device_name, auth, sign_in, waits, &mut progress)
+                .await?;
+            held.take();
+            Ok(result)
         })
         .await
     }
@@ -570,8 +564,7 @@ impl StorageConnections {
         let device_name = device_name.to_owned();
         self.call(move |owner| async move {
             let mut progress = ProgressReport::new(progress, owner.clock.clone());
-            let waits = Arc::new(SetupWaits::default());
-            let outcome = async {
+            let waits = SetupWaits::default();
                 let storage = match owner.codes.location().await.map_err(setup_error)? {
                     Some(storage) => {
                         if !matches!(&storage, StorageConfig::CloudKit { container: recorded, .. } if *recorded == container) {
@@ -598,14 +591,10 @@ impl StorageConnections {
                         &device_name,
                         ProviderAuth::CloudKit,
                         None,
-                        &waits,
+                        waits,
                         &mut progress,
                     )
                     .await
-            }
-            .await;
-            waits.end();
-            outcome
         }).await
     }
 
@@ -626,8 +615,11 @@ impl StorageConnections {
     /// sign-in is `sign_in`, the session custody `auth` refreshes in until
     /// setup commits it to device custody. Custody, location and code commit
     /// only after the candidate connection has claimed what setup needs.
-    /// The connection sends rate-limited requests again while the setup
-    /// call's `waits` allow (§20.8); the caller ends them when it returns.
+    /// The setup call's own requests, its checks and its claim, go through a
+    /// connection made beside the store's that takes the call's `waits` and
+    /// sends rate-limited requests again while they allow; the store's
+    /// connection, which the sequence, the files and the sync loop keep,
+    /// never does (§20.8).
     /// Its steps go to `progress`, from `Connecting` on.
     async fn setup_connection(
         &self,
@@ -635,7 +627,7 @@ impl StorageConnections {
         device_name: &str,
         auth: ProviderAuth,
         sign_in: Option<Arc<SessionSignIn>>,
-        waits: &Arc<SetupWaits>,
+        waits: SetupWaits,
         progress: &mut ProgressReport<StorageSetupStep>,
     ) -> Result<StorageSetup, StorageSetupError> {
         progress.begin(StorageSetupStep::Connecting, 1);
@@ -649,12 +641,12 @@ impl StorageConnections {
                 self.publications.clone(),
                 self.waits.clone(),
                 self.transfers.clone(),
-                Some(waits.clone()),
             )
             .await?;
+        let setup = Arc::new(storage.during_setup(waits));
         let new_store = self.codes.location().await.map_err(setup_error)?.is_none();
         if !new_store {
-            storage.check_bucket(self.store()).await?;
+            setup.check_bucket(self.store()).await?;
         }
         let path = ObjectPath::file(self.store(), self.device, FileId(self.ids.new_id()));
         let plaintext = b"coven storage check";
@@ -668,12 +660,12 @@ impl StorageConnections {
                 .map_err(|error| StorageSetupError::Internal(Box::new(error)))?,
         );
         self.publications
-            .check(&path, coven_storage::check_provider(storage.as_ref(), &path, &bytes))
+            .check(&path, coven_storage::check_provider(setup.as_ref(), &path, &bytes))
             .await?;
         if new_store {
-            storage.claim_bucket(self.store()).await?;
+            setup.claim_bucket(self.store()).await?;
         }
-        let access = member_access(&credentials, &storage).await?;
+        let access = member_access(&credentials, &setup).await?;
         progress.done(1);
         let mut live = self.live.lock().await;
         // The old provider remains installed until every fallible setup step
@@ -690,7 +682,10 @@ impl StorageConnections {
                 )
                 .await?;
             let sync = self.sequence(storage.clone(), &live).await?;
-            self.claim_setup(&sync, access, device_name, progress).await?;
+            // The claim, and the catch-up an existing store needs, are the
+            // setup call's own requests, sent on its connection.
+            let claiming = Arc::new(sync.reconnect(setup.clone()));
+            self.claim_setup(&claiming, access, device_name, progress).await?;
             // Claims may use file transfers; only the custody commit runs
             // inside the transfer exclusion needed to replace their provider.
             self.files.set_storage(Some(storage), async { commit().map(drop) }).await?;

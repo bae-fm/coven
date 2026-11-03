@@ -693,11 +693,14 @@ pub trait StorageConnector: Send + Sync {
     /// Validate settings and wrap the selected native provider once. The caller
     /// verifies the connection before publication. Every request waits for
     /// the store's shared `cooldown`; a rejected OAuth token is refreshed in
-    /// the sign-in's custody (§20.2).
+    /// the sign-in's custody (§20.2). The connection writes for `device`. A
+    /// setup call makes a connection of its own beside it for its requests
+    /// (§20.8).
     async fn connect(
         &self,
         config: StorageConfig,
         auth: coven_storage::ProviderAuth,
+        device: DeviceId,
         publications: Arc<dyn coven_storage::PublicationGate>,
         cooldown: Arc<dyn coven_storage::Cooldown>,
         transfers: Arc<coven_storage::TransferBudget>,

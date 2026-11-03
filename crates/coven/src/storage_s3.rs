@@ -23,52 +23,44 @@ impl StorageConnections {
         let device_name = device_name.to_owned();
         self.call(move |owner| async move {
             let mut progress = ProgressReport::new(progress, owner.clock.clone());
-            let waits = Arc::new(SetupWaits::default());
-            let outcome = async {
-                let recorded = owner.codes.location().await.map_err(setup_error)?;
-                let config = recorded_s3(storage, recorded.as_ref());
-                owner.check_location(&config).await?;
-                if recorded.is_none() {
-                    // Creating the store: where member keys reach the whole
-                    // bucket, the bucket must hold nothing but this store (§20.7).
-                    let checking = owner.connector.check_new_s3_store(
-                        config.clone(),
-                        credentials.clone(),
-                        owner.store(),
-                        &waits,
-                    );
-                    setup_step::single(&mut progress, StorageSetupStep::CheckingBucket, checking)
-                        .await?;
-                }
-                // §20.8's safety check: the effective settings must agree with what
-                // the service does, before the provider check and any commitment.
-                let detecting = async {
-                    let detection = owner
-                        .connector
-                        .detect_s3(config.clone(), credentials.clone(), owner.store(), &waits)
-                        .await?;
-                    detection.resolve(config)
-                };
-                let config = setup_step::single(
-                    &mut progress,
-                    StorageSetupStep::DetectingSettings,
-                    detecting,
-                )
-                .await?;
-                owner
-                    .setup_connection(
-                        config,
-                        &device_name,
-                        ProviderAuth::S3(credentials),
-                        None,
-                        &waits,
-                        &mut progress,
-                    )
-                    .await
+            let waits = SetupWaits::default();
+            let recorded = owner.codes.location().await.map_err(setup_error)?;
+            let config = recorded_s3(storage, recorded.as_ref());
+            owner.check_location(&config).await?;
+            if recorded.is_none() {
+                // Creating the store: where member keys reach the whole
+                // bucket, the bucket must hold nothing but this store (§20.7).
+                let checking = owner.connector.check_new_s3_store(
+                    config.clone(),
+                    credentials.clone(),
+                    owner.store(),
+                    &waits,
+                );
+                setup_step::single(&mut progress, StorageSetupStep::CheckingBucket, checking)
+                    .await?;
             }
-            .await;
-            waits.end();
-            outcome
+            // §20.8's safety check: the effective settings must agree with what
+            // the service does, before the provider check and any commitment.
+            let detecting = async {
+                let detection = owner
+                    .connector
+                    .detect_s3(config.clone(), credentials.clone(), owner.store(), &waits)
+                    .await?;
+                detection.resolve(config)
+            };
+            let config =
+                setup_step::single(&mut progress, StorageSetupStep::DetectingSettings, detecting)
+                    .await?;
+            owner
+                .setup_connection(
+                    config,
+                    &device_name,
+                    ProviderAuth::S3(credentials),
+                    None,
+                    waits,
+                    &mut progress,
+                )
+                .await
         })
         .await
     }

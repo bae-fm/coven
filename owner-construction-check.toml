@@ -199,6 +199,10 @@ borrowed_facade_types = [
     "PreWrite",
 ]
 task_types = [
+    # What one storage setup call has spent waiting to resend refused
+    # requests, which its steps draw on and then the connection it makes for
+    # its own requests (§20.8).
+    "SetupWaits",
     # How the authorizer judges the SQL of one scope: coven's own, an
     # applied write's, a write's, a bulk write's, one step's or one read's,
     # and the reads one statement makes while it is prepared.
@@ -722,7 +726,12 @@ tables = [
     "StorageConnector::connect",
 ]
 # One provider's connection, composed once when connecting.
-"crates/coven-storage/src/connection.rs" = ["StorageConnection::with_gate"]
+"crates/coven-storage/src/connection.rs" = [
+    "StorageConnection::with_gate",
+    # A setup call's own connection beside the store's, one client to the
+    # provider with it, for that call's requests (§20.8).
+    "StorageConnection::during_setup",
+]
 # Made once per opened installation and given to every connection and file
 # owner.
 "crates/coven-storage/src/transfer_budget.rs" = ["TransferBudget::new"]
