@@ -160,14 +160,16 @@ pub(crate) struct Author {
     pub(crate) member: Option<MemberId>,
 }
 
-impl Author {
-    /// Whether another member's write made this change: the snapshot needs
-    /// that write's evidence for it.
-    fn other(&self, db: &DatabaseConnection, write: WriteId) -> Result<bool, DbError> {
-        Ok(write.device != self.device
-            && (self.member.is_none()
-                || crate::ownership::member(db, write.device)? != self.member))
-    }
+/// Whether a member other than the snapshot's author made a change in
+/// `write`: the snapshot needs that write's evidence for it.
+fn by_another_member(
+    db: &DatabaseConnection,
+    author: Author,
+    write: WriteId,
+) -> Result<bool, DbError> {
+    Ok(write.device != author.device
+        && (author.member.is_none()
+            || crate::ownership::member(db, write.device)? != author.member))
 }
 
 /// Whether a leaf names this row, read through the write's schema version.
@@ -246,7 +248,7 @@ pub(crate) fn evidence(
 ) -> Result<Vec<WriteEvidence>, DbError> {
     let mut needs = BTreeMap::<WriteId, Needs>::new();
     let mut creators = BTreeMap::new();
-    let other = |write: WriteId| author.other(db, write);
+    let other = |write: WriteId| by_another_member(db, author, write);
     crate::snapshot_view::creations::<DbError>(db, audience, |creation| {
         let row = creation.row.clone();
         if crate::ownership::owner_table(schema, &row.table) && other(creation.write)? {
@@ -449,7 +451,7 @@ pub(crate) fn check(
             "snapshot names another member's authorship without its write's evidence",
         )
     };
-    let other = |write: WriteId| author.other(db, write);
+    let other = |write: WriteId| by_another_member(db, author, write);
     let mut needs = BTreeMap::<WriteId, Needs>::new();
     let mut creators = BTreeMap::new();
     crate::ownership::visit::<DbError>(db, audience, |row, creation| {
