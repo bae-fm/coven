@@ -9,9 +9,29 @@ pub(crate) struct StreamInput {
     chunk: io::Cursor<Vec<u8>>,
 }
 impl StreamInput {
-    pub(crate) fn channel() -> (mpsc::Sender<Result<Vec<u8>, SyncError>>, Self) {
+    /// A stream and where its reader sends the bytes, one chunk at a time.
+    pub(crate) fn channel() -> (StreamSender, Self) {
         let (sender, receiver) = mpsc::channel(1);
-        (sender, Self { receiver, chunk: io::Cursor::new(Vec::new()) })
+        (StreamSender(sender), Self { receiver, chunk: io::Cursor::new(Vec::new()) })
+    }
+}
+
+/// Where the reader of a stream sends its bytes, or the error that ends it.
+#[derive(Clone)]
+pub(crate) struct StreamSender(mpsc::Sender<Result<Vec<u8>, SyncError>>);
+
+type Sent = Result<(), mpsc::error::SendError<Result<Vec<u8>, SyncError>>>;
+
+impl StreamSender {
+    /// Send the next chunk, or the error, from a blocking task; refused once
+    /// the stream is dropped.
+    pub(crate) fn blocking_send(&self, next: Result<Vec<u8>, SyncError>) -> Sent {
+        self.0.blocking_send(next)
+    }
+
+    /// Send the next chunk, or the error; refused once the stream is dropped.
+    pub(crate) async fn send(&self, next: Result<Vec<u8>, SyncError>) -> Sent {
+        self.0.send(next).await
     }
 }
 impl Read for StreamInput {

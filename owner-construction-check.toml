@@ -313,6 +313,10 @@ task_types = [
     "TransferMeter",
     # Where one run of a file's chunks goes: the cache, or a pin's whole file.
     "ChunkDestination",
+    # One journal stream's bytes, from the committed reader to the claim that
+    # sends them, and where that reader sends them.
+    "StreamInput",
+    "StreamSender",
 ]
 # The shared in-memory state the runtime and the standard library declare.
 external_types = [
