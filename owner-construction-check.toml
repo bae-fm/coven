@@ -76,7 +76,6 @@ capability_types = [
 shared_state_types = [
     "Barrier",
     "Semaphore",
-    "RwLock",
     "JoinHandle",
     "AtomicBool",
     "AtomicI64",
@@ -93,7 +92,7 @@ shared_state_types = [
 # A lock is its holder's private state while one owner holds it by value;
 # held through a shared pointer or a reference, by itself or inside what is,
 # it is shared state.
-private_state_types = ["Mutex", "Condvar"]
+private_state_types = ["Mutex", "RwLock", "Condvar"]
 # Every holder of one of these shares what it points at with the others.
 shared_pointer_types = ["Arc", "Rc", "Weak"]
 capability_traits = [

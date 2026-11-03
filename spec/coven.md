@@ -9809,13 +9809,13 @@ new receiving end is: an owner gives out a handle of its own type, which the
 checker's policy names with it. A value made for one piece of work that
 shares its owner's state, such as one read's response body, is a task. Tests
 may use real ones. The checker's policy lists as shared state `Barrier`,
-`Semaphore`, `RwLock`, the atomics (`AtomicBool`, `AtomicI64`, `AtomicU64`,
+`Semaphore`, the atomics (`AtomicBool`, `AtomicI64`, `AtomicU64`,
 `AtomicUsize`), `OnceLock` and `LazyLock`, which the first of their holders to
 reach them sets for all the others, `Notify`, which wakes whichever holder
 waits on it, a task's `JoinHandle`, which can abort or await the task, and
 the ends of a channel, `Sender`, `UnboundedSender`, `Receiver` and
 `UnboundedReceiver`, each of which shares the channel with the other. A lock,
-`Mutex` and its `Condvar`, is shared state once it is shared: held through an
+`Mutex`, its `Condvar` or `RwLock`, is shared state once it is shared: held through an
 `Arc`, `Rc` or `Weak` or by reference, by itself or inside a type that holds
 it, as a store's authorizer shares its state with the hooks it gives SQLite.
 One an owner holds by value and lets no one point at is that owner's private
