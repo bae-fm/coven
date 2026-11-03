@@ -168,3 +168,108 @@ async fn a_migrations_recomputed_rows_keep_their_counted_state() {
     assert_eq!(shown, ["first"]);
     db.close().await.unwrap();
 }
+
+/// The counted projection a snapshot reads of `albums` row `id`: its
+/// `artist`, or `None` while it shows no such row.
+fn counted_artist(database: &crate::Database, id: &str) -> Option<Value> {
+    let key = coven_format::key::encode_key(&[Value::Text(id.into())]).unwrap();
+    database.inspect_writer_schema(|db, schema| {
+        let mut shown = None;
+        crate::snapshot_view::rows(db, schema, &Audience::Store, |row, synced| {
+            if row.state.row().table == "albums" && row.state.row().key == key {
+                shown = Some(synced.map(|synced| synced.columns["artist"].value.clone()));
+            }
+            Ok::<_, DbError>(())
+        })
+        .unwrap();
+        shown.expect("the album has merge state")
+    })
+}
+
+/// Open a store whose counted album `first` is by counted artist Ana, then
+/// run `migration` as version 2 over it.
+async fn migrate_counted_album(
+    schema: &'static str,
+    migration: &'static str,
+) -> (TestStore, crate::Database) {
+    let store = TestStore::new();
+    let initial = || vec![Migration::addition(1, "schema", schema)];
+    let tables = || synced(&["artists", "albums"]);
+    let db = store.builder(tables(), initial()).open().await.unwrap();
+    sql(&db, "INSERT INTO artists VALUES('ana','Ana'); INSERT INTO albums VALUES('first','ana')")
+        .await
+        .unwrap();
+    count_own(&db).await;
+    db.close().await.unwrap();
+    let mut migrations = initial();
+    migrations.push(Migration::breaking(2, "parents", migration, OldWrites::Drop));
+    let db = store.builder(tables(), migrations).open().await.unwrap();
+    assert_eq!(published(&db, "albums"), 1, "the migration kept the album aside");
+    (store, db)
+}
+
+/// Apply a slot from another device that renames counted artist Ana, ahead
+/// of the migration's write still in the queue.
+async fn rename_ana(database: &crate::Database) {
+    let name = [("name", Value::Text("Ana B".into()))];
+    crate::tests::remote_update_beside_queue(database, "artists", "ana", &name).await;
+    let waiting = database.inspect_writer(|db| crate::queued_writes::present(db).unwrap());
+    assert!(waiting, "the migration's write still waits for its slot");
+}
+
+/// A migration that deletes a parent row deletes its children too, through
+/// their foreign key's ON DELETE CASCADE. Those children keep their counted
+/// state beside the queue as the parent does: until the migration's write is
+/// counted, a snapshot shows Ana's album as the slots left it (§18.1).
+#[tokio::test]
+async fn a_migrations_cascading_delete_keeps_the_childrens_counted_state() {
+    let (_store, db) = migrate_counted_album(
+        "CREATE TABLE artists(id TEXT NOT NULL PRIMARY KEY, name TEXT);
+         CREATE TABLE albums(id TEXT NOT NULL PRIMARY KEY,
+           artist TEXT REFERENCES artists(id) ON DELETE CASCADE)",
+        "DELETE FROM artists WHERE id='ana'",
+    )
+    .await;
+    let shown: Vec<String> =
+        db.inspect_writer(|db| db.query("SELECT id FROM albums", [], |r| r.get(0)).unwrap());
+    assert!(shown.is_empty(), "the cascade deleted the album");
+    assert_eq!(counted_artist(&db, "first"), Some(Value::Text("ana".into())));
+    // A slot puts the counted state back, applies over it, and folds the
+    // migration's write over the result again.
+    rename_ana(&db).await;
+    assert_eq!(counted_artist(&db, "first"), Some(Value::Text("ana".into())));
+    let shown: Vec<String> =
+        db.inspect_writer(|db| db.query("SELECT id FROM albums", [], |r| r.get(0)).unwrap());
+    assert!(shown.is_empty(), "the migration's write deletes the album again");
+    db.close().await.unwrap();
+}
+
+/// A migration that rebuilds a parent table drops the old one, and SQLite
+/// deletes its rows first, setting each child's reference to NULL through
+/// ON DELETE SET NULL. The children keep their counted state as the parent
+/// does (§18.1).
+#[tokio::test]
+async fn a_migrations_dropped_parent_keeps_the_childrens_counted_state() {
+    let (_store, db) = migrate_counted_album(
+        "CREATE TABLE artists(id TEXT NOT NULL PRIMARY KEY, name TEXT);
+         CREATE TABLE albums(id TEXT NOT NULL PRIMARY KEY,
+           artist TEXT REFERENCES artists(id) ON DELETE SET NULL)",
+        "CREATE TABLE artists_new(id TEXT NOT NULL PRIMARY KEY, name TEXT, born INTEGER);
+         INSERT INTO artists_new SELECT id,name,NULL FROM artists;
+         DROP TABLE artists;
+         ALTER TABLE artists_new RENAME TO artists",
+    )
+    .await;
+    let artist: Option<String> = db.inspect_writer(|db| {
+        db.query_row("SELECT artist FROM albums WHERE id='first'", [], |r| r.get(0)).unwrap()
+    });
+    assert_eq!(artist, None, "dropping the parent table set the reference to NULL");
+    assert_eq!(counted_artist(&db, "first"), Some(Value::Text("ana".into())));
+    rename_ana(&db).await;
+    assert_eq!(counted_artist(&db, "first"), Some(Value::Text("ana".into())));
+    let artist: Option<String> = db.inspect_writer(|db| {
+        db.query_row("SELECT artist FROM albums WHERE id='first'", [], |r| r.get(0)).unwrap()
+    });
+    assert_eq!(artist, None, "the migration's write sets the reference to NULL again");
+    db.close().await.unwrap();
+}

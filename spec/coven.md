@@ -1440,7 +1440,13 @@ state it loaded (§16.5).
 A migration keeps aside the rows it changes: each synced table's rows just
 before its first statement that changes that table, and the rows its new rules
 recompute (§18.1). A row it doesn't touch is kept aside already if an unsent
-write reached it, and otherwise holds the state the slots give.
+write reached it, and otherwise holds the state the slots give. Rows a foreign
+key's action changes count as changed too. A migration that deletes Ana from
+`artists` deletes her albums through their ON DELETE CASCADE, and the albums
+are kept aside with her row before that statement runs. One that drops
+`artists` to rebuild it sets her albums' `artist` to NULL through ON DELETE
+SET NULL; the migration's write changes those albums, and keeps them aside as
+it does any row it changes.
 
 A slot that can't apply stops the device (§5.4): a missing key reports
 `KeyUnavailable`, a newer schema or format reports `UpdateRequired`, and a damaged

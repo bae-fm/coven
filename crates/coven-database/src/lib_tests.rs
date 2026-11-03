@@ -210,6 +210,34 @@ pub(crate) async fn try_remote_update_at(
     changes: &[(&str, coven_format::value::Value)],
     schema_version: Option<u32>,
 ) -> Result<crate::ApplyOutcome, DbError> {
+    let row = remote_change(database, table, id, changes);
+    try_remote_write(database, row, schema_version, true).await
+}
+
+/// Deliver another device's edit as the next slot while this device's
+/// writes still wait in its queue: the slot comes before any of them, and
+/// coven folds the queue over it again (§6.2).
+pub(crate) async fn remote_update_beside_queue(
+    database: &crate::Database,
+    table: &str,
+    id: &str,
+    changes: &[(&str, coven_format::value::Value)],
+) {
+    let row = remote_change(database, table, id, changes);
+    assert_eq!(
+        try_remote_write(database, row, None, false).await.unwrap(),
+        crate::ApplyOutcome::Applied
+    );
+}
+
+/// Another device's update of `table` row `id`, read from what this device
+/// wrote of the row.
+fn remote_change(
+    database: &crate::Database,
+    table: &str,
+    id: &str,
+    changes: &[(&str, coven_format::value::Value)],
+) -> coven_format::write::RowChange {
     use coven_merge::Operation;
     let records = crate::write::tests::records(database);
     let key =
@@ -240,17 +268,23 @@ pub(crate) async fn try_remote_update_at(
         columns.insert((*name).into(), column);
     }
     row.change.operation = Operation::Update(columns);
-    try_remote_write(database, row, schema_version).await
+    row
 }
 
 pub(crate) async fn remote_write(database: &crate::Database, row: coven_format::write::RowChange) {
-    assert_eq!(try_remote_write(database, row, None).await.unwrap(), crate::ApplyOutcome::Applied);
+    assert_eq!(
+        try_remote_write(database, row, None, true).await.unwrap(),
+        crate::ApplyOutcome::Applied
+    );
 }
 
+/// Deliver `row` as another device's write in the next slot, after first
+/// counting every write this device has made when `count_queue` is set.
 async fn try_remote_write(
     database: &crate::Database,
     row: coven_format::write::RowChange,
     schema_version: Option<u32>,
+    count_queue: bool,
 ) -> Result<crate::ApplyOutcome, DbError> {
     use coven_format::write::{WriteHeader, WritePart, WriteRecord};
     let row = database.inspect_writer_schema(|db, schema| {
@@ -259,8 +293,10 @@ async fn try_remote_write(
         crate::write_sources::authored(db, &store, row.row, row.change, row.old).unwrap()
     });
     let previous = crate::write::tests::records(database).pop().expect("local seed write").header;
-    for original in crate::write::tests::records(database) {
-        database.receive(original.into()).await?;
+    if count_queue {
+        for original in crate::write::tests::records(database) {
+            database.receive(original.into()).await?;
+        }
     }
     let applied = database.applied_slot().await?;
     let device = coven_foundation::id_source::DeviceId(10_000 + applied);
