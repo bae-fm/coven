@@ -72,6 +72,10 @@ pub(crate) struct DatabaseConnection {
     write_checkpoint: std::cell::RefCell<Option<crate::test_utils::WriteCheckpointObserver>>,
     #[cfg(test)]
     scans: std::sync::Mutex<Vec<tests::ProfiledStatement>>,
+    /// How many profiles are open: a profile inside another, as a
+    /// migration's inside the open's, leaves the outer one tracing.
+    #[cfg(test)]
+    profiles: std::cell::Cell<usize>,
     #[cfg(test)]
     merge_loads: std::sync::Mutex<BTreeMap<String, usize>>,
     /// Each queued write's record and judgement, also of a refused one, for
@@ -158,6 +162,8 @@ impl DatabaseConnection {
             write_checkpoint: std::cell::RefCell::new(None),
             #[cfg(test)]
             scans: std::sync::Mutex::new(Vec::new()),
+            #[cfg(test)]
+            profiles: std::cell::Cell::new(0),
             #[cfg(test)]
             merge_loads: std::sync::Mutex::new(BTreeMap::new()),
             #[cfg(test)]

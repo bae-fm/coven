@@ -24,11 +24,16 @@ pub(crate) struct ProfiledStatement {
 
 pub(crate) struct StatementProfile<'a>(&'a DatabaseConnection);
 
+/// Each profile that ends publishes what the outermost one has traced so
+/// far; only the outermost stops tracing.
 impl Drop for StatementProfile<'_> {
     fn drop(&mut self) {
-        self.0.connection.trace_v2(rusqlite::trace::TraceEventCodes::empty(), None);
-        *self.0.scans.lock().unwrap() =
-            SCANS.with(|scans| std::mem::take(&mut *scans.borrow_mut()));
+        let open = self.0.profiles.get() - 1;
+        self.0.profiles.set(open);
+        if open == 0 {
+            self.0.connection.trace_v2(rusqlite::trace::TraceEventCodes::empty(), None);
+        }
+        *self.0.scans.lock().unwrap() = SCANS.with(|scans| scans.borrow().clone());
     }
 }
 
@@ -55,6 +60,11 @@ impl DatabaseConnection {
     }
 
     pub(crate) fn profile_statements(&self) -> StatementProfile<'_> {
+        let open = self.profiles.get();
+        self.profiles.set(open + 1);
+        if open > 0 {
+            return StatementProfile(self);
+        }
         SCANS.with(|scans| scans.borrow_mut().clear());
         self.connection.trace_v2(
             rusqlite::trace::TraceEventCodes::SQLITE_TRACE_PROFILE,
@@ -844,4 +854,20 @@ async fn a_failed_rollback_fails_every_later_call_until_reopen() {
         assert!(db.current_claim().await.unwrap().is_none());
         db.close().await.unwrap();
     }
+}
+
+/// The open's profile holds every statement it traced: a migration's, which
+/// runs under a profile of its own, and those after it.
+#[tokio::test]
+async fn a_profile_inside_another_leaves_the_outer_tracing() {
+    let store = TestStore::new();
+    let db = store.builder(notes_tables(), notes_migrations()).open().await.unwrap();
+    let statements: Vec<String> = db
+        .inspect_writer(|writer| writer.profiled_statements())
+        .into_iter()
+        .map(|s| s.sql)
+        .collect();
+    assert!(statements.iter().any(|sql| sql.starts_with("CREATE TABLE notes")), "{statements:#?}");
+    assert!(statements.iter().any(|sql| sql == "ANALYZE sqlite_schema"), "{statements:#?}");
+    db.close().await.unwrap();
 }
