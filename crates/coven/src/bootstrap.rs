@@ -301,12 +301,6 @@ impl JoinControl {
     }
 }
 
-impl Default for JoinControl {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 #[expect(
     clippy::map_err_ignore,
     reason = "read_saved_code logs why a saved code is unreadable; restoring sees Invalid"

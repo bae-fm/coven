@@ -574,6 +574,8 @@ tables = [
 "crates/coven-foundation/src/files/replacement.rs" = ["begin"]
 # A test's id source, which a test hands the builder as it would random ids.
 "crates/coven-foundation/src/id_source.rs" = ["SequentialIds::new"]
+# A test's clock, which a test hands the builder as it would the system's.
+"crates/coven-foundation/src/clock.rs" = ["FixedClock::new"]
 
 "crates/coven-crypto/src/custody/key_session.rs" = [
     "KeySession::open",
@@ -751,6 +753,8 @@ tables = [
     "prepare_and_load",
     "restore_from_code",
     "restore_from_saved_code",
+    # An app makes one for each join it may cancel or check now (api.md E10).
+    "JoinControl::new",
 ]
 "crates/coven/src/bootstrap_commit.rs" = [
     "publish_bootstrap",
