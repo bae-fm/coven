@@ -5,7 +5,8 @@
 //! A handle is the one thing an owner hands out on purpose: its owner returns
 //! it, and so does an owner holding that owner, at any depth, passing up a
 //! fresh one it asked for. Nothing that holds the handle itself returns it,
-//! not even a holder it was given to. Shared state leaves a type only inside
+//! not even a holder it was given to; what the owner keeps of its own
+//! handles is the owner's, not its holder's. Shared state leaves a type only inside
 //! a handle: no method that crosses its module returns a bare receiver or
 //! lock, whether it holds that one or just made it.
 //!
@@ -71,7 +72,7 @@ pub(crate) fn find_owner_dependency_leaks(
                 if let Some(maker) = policy.handles.get(output) {
                     let message = if rooted || policy.makes_handle(&method.owner, output) {
                         None
-                    } else if held.contains(output) {
+                    } else if graph.retained_around(&method.owner, Some(maker)).contains(output) {
                         Some(format!(
                             "{}::{} hands out handle {output}, which it holds; only {maker} makes one",
                             method.owner, method.method

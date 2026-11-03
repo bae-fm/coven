@@ -17,12 +17,18 @@ impl OwnerGraph {
     }
 
     pub(crate) fn retained(&self, owner: &str) -> BTreeSet<String> {
+        self.retained_around(owner, None)
+    }
+
+    /// What `owner` retains other than through `around`: the types its
+    /// fields reach without looking inside an `around` they hold.
+    pub(crate) fn retained_around(&self, owner: &str, around: Option<&str>) -> BTreeSet<String> {
         let mut fields = BTreeSet::new();
         let mut pending = vec![owner.to_string()];
         while let Some(current) = pending.pop() {
             if let Some(info) = self.types.get(&current) {
                 for field in &info.field_types {
-                    if fields.insert(field.clone()) {
+                    if fields.insert(field.clone()) && around != Some(field.as_str()) {
                         pending.push(field.clone());
                     }
                 }
