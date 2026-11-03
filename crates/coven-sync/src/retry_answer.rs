@@ -175,13 +175,17 @@ impl PassRequests {
 /// every pass: the error objects a `Failed` answer carries, which the row
 /// can't hold. Both change only in a step on the writer, once the row they
 /// go with commits.
-#[derive(Default)]
 pub(crate) struct RetryRequests {
     held: Option<PassFailure>,
     waiting: Vec<(u64, oneshot::Sender<RetryOutcome>)>,
 }
 
 impl RetryRequests {
+    /// No request waiting, and no failure held.
+    pub(crate) fn new() -> Self {
+        Self { held: None, waiting: Vec::new() }
+    }
+
     /// The answer a request gets at once in `state`, none when a pass
     /// answers it: the effect's.
     fn at_once(&self, state: RetryState) -> Option<RetryOutcome> {
@@ -233,10 +237,6 @@ fn failed(error: &DbError) -> RetryOutcome {
 }
 
 impl RetryWaits {
-    fn requests(&self) -> std::sync::MutexGuard<'_, RetryRequests> {
-        self.requests.lock().expect("retry requests poisoned")
-    }
-
     /// The row with the cooldown live as the step that writes it commits,
     /// while sync is started; while it is stopped, none.
     pub(super) fn live_cooldown(&self) -> impl FnOnce(RetryState) -> RetryState + Send + 'static {
@@ -266,11 +266,19 @@ impl RetryWaits {
         let result = database
             .change_retry_state(
                 move |state| cooling(change(state)),
-                move |state| then(&waits, &mut waits.requests(), state),
+                move |state| {
+                    then(
+                        &waits,
+                        &mut waits.requests.lock().expect("retry requests poisoned"),
+                        state,
+                    )
+                },
             )
             .await;
         if let Err(error) = &result {
-            PassRequests(std::mem::take(&mut self.requests().waiting)).answer(&failed(error));
+            let waiting =
+                std::mem::take(&mut self.requests.lock().expect("retry requests poisoned").waiting);
+            PassRequests(waiting).answer(&failed(error));
         }
         result
     }

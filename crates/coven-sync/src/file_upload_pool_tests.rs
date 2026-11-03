@@ -169,7 +169,7 @@ async fn an_app_retry_joins_the_run_in_progress() {
     until_creates(&f, 3).await;
     gate.add_permits(2);
     assert_eq!(
-        tokio::time::timeout(Duration::from_secs(10), answer).await.unwrap().unwrap().unwrap(),
+        tokio::time::timeout(Duration::from_secs(10), answer.answered()).await.unwrap().unwrap(),
         DrainOutcome::Drained { uploaded: 2 }
     );
     until_queued(&f, 0).await;
@@ -249,10 +249,9 @@ async fn a_retry_after_resuming_as_a_paused_run_ends_is_not_answered_paused() {
     proceed.send(()).unwrap();
     gate.add_permits(1);
     assert_eq!(
-        tokio::time::timeout(Duration::from_secs(10), answer)
+        tokio::time::timeout(Duration::from_secs(10), answer.answered())
             .await
             .expect("the retry is answered")
-            .unwrap()
             .unwrap(),
         DrainOutcome::Drained { uploaded: 1 }
     );

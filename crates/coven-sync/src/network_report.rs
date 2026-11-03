@@ -64,6 +64,18 @@ pub(crate) enum Ending {
 /// Reports so far, the latest retry report among them, and the count each
 /// owner has acted on; an owner acts on a report only once the waits it
 /// ends have ended.
+/// Hears each network or retry report the app makes, for an owner that
+/// waits on its own timers (`RetryWaits::network_reports`).
+pub struct NetworkReportWatch(tokio::sync::watch::Receiver<u64>);
+
+impl NetworkReportWatch {
+    /// Resolves once another report arrives; an error once the schedule is
+    /// gone.
+    pub async fn changed(&mut self) -> Result<(), tokio::sync::watch::error::RecvError> {
+        self.0.changed().await
+    }
+}
+
 pub(crate) struct Reports {
     reported: tokio::sync::watch::Sender<u64>,
     /// The number of the latest retry report; zero before any.
@@ -152,8 +164,8 @@ impl RetryWaits {
     }
 
     /// Changes with every report, for an owner that waits on its own timers.
-    pub fn network_reports(&self) -> tokio::sync::watch::Receiver<u64> {
-        self.network.reported.subscribe()
+    pub fn network_reports(&self) -> NetworkReportWatch {
+        NetworkReportWatch(self.network.reported.subscribe())
     }
 
     /// End the waits the reports since `owner` last acted end (§6.7): its

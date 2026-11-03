@@ -50,6 +50,23 @@ pub(super) struct AppRetry {
     reply: oneshot::Sender<Result<DrainOutcome, SyncError>>,
 }
 
+/// The answer to an app's early retry: how its covered uploads' attempts
+/// ended, or nothing if the worker stopped with the store first.
+pub(super) struct UploadRetryAnswer(oneshot::Receiver<Result<DrainOutcome, SyncError>>);
+
+impl UploadRetryAnswer {
+    /// Wait for the answer; the store closed if the worker stopped first.
+    pub(super) async fn answered(self) -> Result<DrainOutcome, SyncError> {
+        self.0.await.unwrap_or_else(|_| Err(DbError::StoreClosed.into()))
+    }
+
+    /// The answer if the run already gave it; `None` when it did not.
+    #[cfg(test)]
+    pub(super) fn try_answered(&mut self) -> Option<Result<DrainOutcome, SyncError>> {
+        self.0.try_recv().ok()
+    }
+}
+
 /// The lane an upload runs in (§17.4): a bound upload's write and every
 /// later one wait for it, so neither the pause nor trailing uploads hold it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -154,29 +171,23 @@ impl Run<'_> {
 
 impl FilesInner {
     /// Queue an app retry for the upload worker, and wake it.
-    pub(super) fn ask_retry(
-        &self,
-    ) -> Result<oneshot::Receiver<Result<DrainOutcome, SyncError>>, DbError> {
+    pub(super) fn ask_retry(&self) -> Result<UploadRetryAnswer, DbError> {
         let (reply, answer) = oneshot::channel();
         {
             // Closing sets the flag before clearing this list under its lock,
             // so a retry queued here is either cleared or refused.
-            let mut retries = self.retries();
+            let mut retries = self.app_retries.lock().expect("app retries poisoned");
             self.check_open()?;
             retries.push(AppRetry { covers: None, uploaded: 0, reply });
         }
         self.upload_wake.notify_one();
-        Ok(answer)
-    }
-
-    fn retries(&self) -> std::sync::MutexGuard<'_, Vec<AppRetry>> {
-        self.app_retries.lock().expect("app retries poisoned")
+        Ok(UploadRetryAnswer(answer))
     }
 
     /// Answer every queued app retry with this; `None` keeps them all, as
     /// they are, for the next run.
     fn answer_retries(&self, answer: impl Fn() -> Option<Result<DrainOutcome, SyncError>>) {
-        let mut retries = self.retries();
+        let mut retries = self.app_retries.lock().expect("app retries poisoned");
         if answer().is_none() {
             return;
         }
@@ -198,12 +209,9 @@ impl FilesInner {
     pub(crate) async fn drain_uploads_retrying(&self) -> Result<DrainOutcome, SyncError> {
         let mut own = self.ask_retry()?;
         let run = self.drain_uploads().await;
-        match own.try_recv() {
-            Ok(answer) => answer,
-            // Unanswered, its covered uploads were not all attempted: the run
-            // failed, or a connection change stopped it.
-            Err(_) => run,
-        }
+        // Unanswered, its covered uploads were not all attempted: the run
+        // failed, or a connection change stopped it.
+        own.try_answered().unwrap_or(run)
     }
 
     /// One run of the upload worker: start uploads while they can run,
@@ -214,7 +222,9 @@ impl FilesInner {
         let result = self.serve_uploads().await;
         match result {
             Ok(outcome) => Ok(outcome),
-            Err(error) if self.retries().is_empty() => Err(error),
+            Err(error) if self.app_retries.lock().expect("app retries poisoned").is_empty() => {
+                Err(error)
+            }
             // Every waiting app retry learns the failure that ended the run.
             Err(error) => {
                 let (failure, source) = error.into_shared();
@@ -329,9 +339,18 @@ impl FilesInner {
                         run.stale = true;
                         continue;
                     }
-                    if !run.stale && self.retries().iter().all(|retry| retry.covers.is_some()) {
+                    if !run.stale
+                        && self
+                            .app_retries
+                            .lock()
+                            .expect("app retries poisoned")
+                            .iter()
+                            .all(|retry| retry.covers.is_some())
+                    {
                         // Nothing a taken retry covers is left to start.
-                        for retry in self.retries().drain(..) {
+                        for retry in
+                            self.app_retries.lock().expect("app retries poisoned").drain(..)
+                        {
                             #[expect(
                                 clippy::let_underscore_must_use,
                                 reason = "a retry whose caller stopped waiting needs no answer"
@@ -415,7 +434,7 @@ impl FilesInner {
             .map(|(item, _)| item.id)
             .collect();
         let forced: BTreeSet<i64> = {
-            let mut retries = self.retries();
+            let mut retries = self.app_retries.lock().expect("app retries poisoned");
             // A retry whose caller stopped waiting is dropped.
             retries.retain(|retry| !retry.reply.is_closed());
             for retry in retries.iter_mut() {
@@ -491,7 +510,7 @@ impl FilesInner {
         } else if let Some(ending) = started.and_then(|seen| self.waits.reports_since(seen)) {
             run.crossed.insert(RetrySubject::Upload(id), ending);
         }
-        for retry in self.retries().iter_mut() {
+        for retry in self.app_retries.lock().expect("app retries poisoned").iter_mut() {
             if let Some(covers) = &mut retry.covers {
                 if covers.remove(&id) && stored {
                     retry.uploaded += 1;
@@ -503,7 +522,7 @@ impl FilesInner {
 
     /// Answer each taken app retry whose covered uploads were all attempted.
     fn answer_covered(&self) {
-        let mut retries = self.retries();
+        let mut retries = self.app_retries.lock().expect("app retries poisoned");
         let mut kept = Vec::new();
         for retry in retries.drain(..) {
             match &retry.covers {

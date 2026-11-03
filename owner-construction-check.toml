@@ -295,6 +295,12 @@ task_types = [
     "LocalPhase",
     "Tracker",
     "PreWrite",
+    # The retry requests one pass took, answered when it ends.
+    "PassRequests",
+    # An app's early retry of its uploads, waiting for its answer.
+    "AppRetry",
+    # One operation's wait, and the commits it watches for.
+    "Wait",
 ]
 # The shared in-memory state the runtime and the standard library declare.
 external_types = [
@@ -350,6 +356,16 @@ RequestWatch = "MemoryStorage"
 # The progress one kind of operation reports, such as a store's open or a
 # load from storage, for the host drawing it (api.md E1).
 ProgressWatch = "ProgressChannel"
+# The answer to the person's retry: how the first pass after it ended
+# (api.md E5).
+RetryAnswer = "RetryWaits"
+# Each network or retry report, for an owner waiting on its own timers
+# (§6.7).
+NetworkReportWatch = "RetryWaits"
+# Each wait a failed attempt arms, so an owner plans again (§6.7).
+RearmWatch = "RetryWaits"
+# The answer to an app's early retry of its uploads (§17.9).
+UploadRetryAnswer = "FilesInner"
 
 # The raw handles and coven's own SQL are the database boundary's subject;
 # the SQLite capability's row names the database's home and the SQLite
@@ -650,6 +666,10 @@ tables = [
 # One retry schedule per opened installation, injected into every worker and
 # connection; a read-only handle keeps its own in memory.
 "crates/coven-sync/src/retry_waits.rs" = ["RetryWaits::open", "RetryWaits::in_memory"]
+# What each waiting operation's wait names, one per retry schedule.
+"crates/coven-sync/src/operation_evidence.rs" = ["OperationEvidence::new"]
+# The person's waiting retries, one per retry schedule.
+"crates/coven-sync/src/retry_answer.rs" = ["RetryRequests::new"]
 # The network and retry reports that schedule's owners act on (§6.7).
 "crates/coven-sync/src/network_report.rs" = ["Reports::new"]
 "crates/coven-sync/src/sync_loop.rs" = ["SyncLoop::new"]

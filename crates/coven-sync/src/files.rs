@@ -196,9 +196,8 @@ impl Files {
     /// clear still hold (§17.9), and while uploads are paused only bound ones
     /// are tried (§17.4).
     pub async fn retry_uploads_now(&self) -> Result<DrainOutcome, SyncError> {
-        let answer = self.inner.ask_retry()?;
         // The worker stopping with the store drops the retry unanswered.
-        answer.await.unwrap_or_else(|_| Err(DbError::StoreClosed.into()))
+        self.inner.ask_retry()?.answered().await
     }
     /// Persist the pause setting, as a step of `sql`'s write; a running
     /// trailing upload stops between confirmed parts, preserving its

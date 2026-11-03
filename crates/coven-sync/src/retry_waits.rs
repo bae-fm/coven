@@ -56,6 +56,18 @@ pub struct RetryWaits {
     failures: crate::failure_log::FailureLog,
 }
 
+/// Hears each wait a failed attempt arms, so an owner waiting on the
+/// earlier schedule plans again (`RetryWaits::rearmed`).
+pub struct RearmWatch(tokio::sync::watch::Receiver<u64>);
+
+impl RearmWatch {
+    /// Resolves once another wait is armed; an error once the schedule is
+    /// gone.
+    pub async fn changed(&mut self) -> Result<(), tokio::sync::watch::error::RecvError> {
+        self.0.changed().await
+    }
+}
+
 #[derive(Default)]
 struct WaitSchedule {
     armed: BTreeMap<RetrySubject, Armed>,
@@ -94,10 +106,10 @@ impl RetryWaits {
             clock,
             database: Some(database),
             state: Arc::default(),
-            evidence: Mutex::default(),
+            evidence: Mutex::new(operation_evidence::OperationEvidence::new()),
             rearmed: tokio::sync::watch::channel(0).0,
             network: network_report::Reports::new(),
-            requests: Mutex::default(),
+            requests: Mutex::new(retry_answer::RetryRequests::new()),
             failures: crate::failure_log::FailureLog::default(),
         };
         for (subject, wait) in waits {
@@ -113,10 +125,10 @@ impl RetryWaits {
             clock,
             database: None,
             state: Arc::default(),
-            evidence: Mutex::default(),
+            evidence: Mutex::new(operation_evidence::OperationEvidence::new()),
             rearmed: tokio::sync::watch::channel(0).0,
             network: network_report::Reports::new(),
-            requests: Mutex::default(),
+            requests: Mutex::new(retry_answer::RetryRequests::new()),
             failures: crate::failure_log::FailureLog::default(),
         }
     }
@@ -161,8 +173,8 @@ impl RetryWaits {
     }
 
     /// Changes whenever a failed attempt arms a new wait.
-    pub fn rearmed(&self) -> tokio::sync::watch::Receiver<u64> {
-        self.rearmed.subscribe()
+    pub fn rearmed(&self) -> RearmWatch {
+        RearmWatch(self.rearmed.subscribe())
     }
 
     /// A wait that could not be persisted holds until the app retries; it is
