@@ -197,10 +197,9 @@ borrowed_facade_types = [
     "WriteMetadata",
     "DatabaseRemovalView",
     "WriteApply",
-    # A local write's operation hook, its phases and their capture borrow
+    # A local write's operation hook and its capture borrow
     # the writer connection for one transaction.
     "EventCapture",
-    "LocalPhase",
     "Tracker",
     "PreWrite",
 ]
@@ -330,10 +329,9 @@ task_types = [
     "WriteMetadata",
     "DatabaseRemovalView",
     "WriteApply",
-    # A local write's operation hook, its phases and their capture borrow
+    # A local write's operation hook and its capture borrow
     # the writer connection for one transaction.
     "EventCapture",
-    "LocalPhase",
     "Tracker",
     "PreWrite",
     # The retry requests one pass took, answered when it ends.
@@ -416,10 +414,9 @@ closed_session_types = [
     "WriteMetadata",
     "DatabaseRemovalView",
     "WriteApply",
-    # A local write's operation hook, its phases and their capture borrow
+    # A local write's operation hook and its capture borrow
     # the writer connection for one transaction.
     "EventCapture",
-    "LocalPhase",
     "Tracker",
     "PreWrite",
 ]
