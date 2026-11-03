@@ -39,6 +39,7 @@ use coven_foundation::id_source::{DeviceId, IdSourceRef, UuidIds};
 
 use crate::authorization::SqlAuthorization;
 use crate::observation::{CommitObserver, CommitSubscription};
+use crate::read::RunningRead;
 use crate::sqlite::DatabaseConnection;
 use crate::{CovenError, CovenResult, DbError, Migration, MigrationOutcome, SyncedTable};
 use crate::{LiveQuery, LostValue, Read, ReconfigurableLiveQuery, SqlReadContext};
@@ -564,12 +565,14 @@ impl Database {
         self.subscribe(|sql| sql.lost_values())
     }
 
-    pub(crate) fn start_read<F, R>(&self, read: F) -> tokio::task::JoinHandle<CovenResult<R>>
+    pub(crate) fn start_read<F, R>(&self, read: F) -> RunningRead<R>
     where
         F: FnOnce(SqlReadContext<'_>) -> CovenResult<R> + Send + 'static,
         R: Send + 'static,
     {
-        start_call(self.inner.clone(), move |inner| inner.call(|inner| inner.access.read(read)))
+        RunningRead::new(start_call(self.inner.clone(), move |inner| {
+            inner.call(|inner| inner.access.read(read))
+        }))
     }
 
     /// Run app SQL and coven's steps, and commit its unsigned write record
@@ -890,12 +893,14 @@ impl DatabaseReadHandle {
         self.read(|sql| sql.lost_values()).await
     }
 
-    pub(crate) fn start_read<F, R>(&self, read: F) -> tokio::task::JoinHandle<CovenResult<R>>
+    pub(crate) fn start_read<F, R>(&self, read: F) -> RunningRead<R>
     where
         F: FnOnce(SqlReadContext<'_>) -> CovenResult<R> + Send + 'static,
         R: Send + 'static,
     {
-        start_call(self.inner.clone(), move |inner| inner.call(|| inner.read(read)))
+        RunningRead::new(start_call(self.inner.clone(), move |inner| {
+            inner.call(|| inner.read(read))
+        }))
     }
 
     /// The committed app schema version.

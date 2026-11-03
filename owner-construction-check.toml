@@ -75,6 +75,7 @@ capability_types = [
     "Barrier",
     "Semaphore",
     "RwLock",
+    "JoinHandle",
 ]
 capability_traits = [
     "Clock",
@@ -235,12 +236,17 @@ task_types = [
     "FileWorker",
     "LocalFileStream",
     "FileStream",
+    # An open file's read position and the read ahead it started, which
+    # its stream aborts when dropped.
+    "FileStreamState",
     "FileStaging",
     "FileWrite",
     "CovenWrite",
     "SqlReadContext",
     "Read",
     "ReadOwner",
+    # A read's call on the blocking pool, awaited by its read.
+    "RunningRead",
     "ChangeCapture",
     "StreamCapture",
     "LiveQuery",
@@ -264,6 +270,7 @@ external_types = [
     "Barrier",
     "Semaphore",
     "RwLock",
+    "JoinHandle",
 ]
 internal_dependency_types = ["DatabaseConnection"]
 closed_session_types = [

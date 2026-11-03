@@ -153,7 +153,7 @@ impl DatabaseReadHandle {
 }
 
 // The public type names the closure, rather than its result. Only poll creates
-// the running slot, as JoinHandle<CovenResult<R>> for that closure.
+// the running slot, as RunningRead<R> for that closure.
 enum ReadState<F> {
     Pending(F),
     Running(Box<dyn Any + Send>),
@@ -201,16 +201,37 @@ where
                 ReadState::Running(task) => task,
                 ReadState::Finished => panic!("read polled after completion"),
             };
-        let handle = task
-            .downcast_mut::<tokio::task::JoinHandle<CovenResult<R>>>()
-            .expect("read task matches its closure result");
-        match Pin::new(handle).poll(cx) {
+        let running =
+            task.downcast_mut::<RunningRead<R>>().expect("read task matches its closure result");
+        match Pin::new(running).poll(cx) {
             Poll::Pending => {
                 this.state = ReadState::Running(task);
                 Poll::Pending
             }
-            Poll::Ready(result) => Poll::Ready(database::finish_blocking("read", result)),
+            Poll::Ready(result) => Poll::Ready(result),
         }
+    }
+}
+
+/// One read's call on the blocking pool, which its database started for the
+/// `Read` that awaits it.
+pub(crate) struct RunningRead<R> {
+    call: tokio::task::JoinHandle<CovenResult<R>>,
+}
+
+impl<R> RunningRead<R> {
+    pub(crate) fn new(call: tokio::task::JoinHandle<CovenResult<R>>) -> Self {
+        Self { call }
+    }
+}
+
+impl<R> Future for RunningRead<R> {
+    type Output = CovenResult<R>;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        Pin::new(&mut self.get_mut().call)
+            .poll(cx)
+            .map(|joined| database::finish_blocking("read", joined))
     }
 }
 

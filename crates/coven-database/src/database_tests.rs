@@ -355,7 +355,7 @@ async fn reopening_a_dropped_or_closing_database_waits_for_its_active_read() {
         .await;
         assert_other_process_refuses_writer(&store);
         release.send(()).unwrap();
-        read.await.unwrap().unwrap();
+        read.await.unwrap();
         let reopened = reopen.await.unwrap();
         assert_eq!(reopened.schema_version().await.unwrap(), 1);
         reopened.close().await.unwrap();
