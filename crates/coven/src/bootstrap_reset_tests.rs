@@ -298,7 +298,13 @@ async fn a_restored_copy_behind_storage_stops_until_the_app_resets_it() {
     let before = sends(&f);
     for opening in 0..2 {
         let handle = reopen(&f).open(f.directory.id(), |_| ()).await.unwrap();
+        // Nothing recorded holds a pass as the store opens, so the start's
+        // own pass looks again; the kept last pass below can't show that.
+        let mut effect = handle.test_retry_effect();
+        assert_eq!(effect.latest().await, RetryEffect::NotSyncing);
         handle.start_sync().await.unwrap();
+        // The evidence that pass finds holds every later one.
+        effect.wait_for(|effect| *effect == RetryEffect::Failed).await;
         last_pass(&handle, |last| {
             matches!(
                 last,
@@ -309,10 +315,12 @@ async fn a_restored_copy_behind_storage_stops_until_the_app_resets_it() {
             )
         })
         .await;
-        // Opening keeps how the last pass ended: the app shows the device
-        // needs a reset, on the second opening from before it.
-        let shown = handle.test_sync_status().latest().await;
-        assert!(matches!(shown.state, SyncState::NeedsReset(SyncCause::Pass(_))), "{shown:?}");
+        // The app shows the device needs a reset once that pass has written
+        // how it ended; the effect is written before it.
+        handle
+            .test_sync_status()
+            .wait_for(|shown| matches!(shown.state, SyncState::NeedsReset(SyncCause::Pass(_))))
+            .await;
         // Reads and local writes still work; nothing is recorded.
         assert_eq!(notes(&handle).await, ["kept"]);
         assert_eq!(handle.device_reset().await.unwrap(), None);
