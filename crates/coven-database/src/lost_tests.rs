@@ -110,6 +110,11 @@ async fn losses_preserve_storage_classes_each_setter_and_every_replacement() {
     );
     let losses = db.lost_values().await.unwrap();
     assert_eq!(losses.len(), 4);
+    // Excluded and dependent losses keep old-shape values, frozen (§18.7).
+    assert_eq!(
+        losses.iter().map(|loss| loss.frozen).collect::<Vec<_>>(),
+        [false, false, true, true]
+    );
     assert_eq!(
         losses[0].key.values(),
         [Value::Text("id\0é".into()), Value::Integer(i64::MIN), Value::Blob(vec![0, 255])]

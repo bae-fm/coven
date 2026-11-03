@@ -16,6 +16,9 @@ pub struct LostValue {
     pub lost: Lost,
     /// What replaced these values.
     pub replaced_by: Replacement,
+    /// Old-shape values kept independently of the current schema (§18.7).
+    /// Their table or columns may no longer exist; dismissal still works.
+    pub frozen: bool,
     pub(crate) target: LossTarget,
 }
 
@@ -201,7 +204,8 @@ impl LostValue {
             },
         };
         let row = record.row;
-        let target = if matches!(replaced_by, Replacement::Rules(_)) && !record.frozen {
+        let frozen = record.frozen;
+        let target = if matches!(replaced_by, Replacement::Rules(_)) && !frozen {
             LossTarget::Removed { row: row.clone(), generation: record.generation }
         } else {
             let cells = match &lost {
@@ -225,7 +229,7 @@ impl LostValue {
                     .collect()
             })
         };
-        Ok(LostValue { table: row.table, key, lost, replaced_by, target })
+        Ok(LostValue { table: row.table, key, lost, replaced_by, frozen, target })
     }
 }
 
