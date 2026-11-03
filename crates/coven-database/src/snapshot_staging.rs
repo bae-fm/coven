@@ -234,8 +234,10 @@ pub struct SnapshotStaging {
 enum Phase {
     /// The body streams in: sync hands it each batch of opened plaintext,
     /// decoded, checked and committed in one input transaction, outside
-    /// the application writer (§21.2).
-    Streaming(StagingState),
+    /// the application writer (§21.2). The state, near a kilobyte with its
+    /// decoder, lives on the heap: each batch moves it to the blocking pool
+    /// and back, and every future holding the staging carries what is inline.
+    Streaming(Box<StagingState>),
     /// The stream checked out to its end marker.
     Staged {
         header: SnapshotHeader,
@@ -299,14 +301,14 @@ impl Database {
             database: self.clone(),
             expected: id,
             tables: Some(tables),
-            phase: Phase::Streaming(StagingState {
+            phase: Phase::Streaming(Box::new(StagingState {
                 decoder: SnapshotChunkDecoder::new(prefix),
                 inserts,
                 records: 0,
                 columns: BTreeSet::new(),
                 parts: BTreeMap::new(),
                 refusal: None,
-            }),
+            })),
             batches: 0,
             time: std::time::Duration::ZERO,
         })
