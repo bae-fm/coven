@@ -238,3 +238,32 @@ async fn dismissing_a_files_last_lost_reference_deletes_its_record() {
     a.close().await.unwrap();
     b.close().await.unwrap();
 }
+
+/// Ana merges two rows into one: a single write deletes the row naming her
+/// photo and inserts another naming the same photo. Whichever row's key
+/// sorts first, the photo is referenced once the write is done, so its
+/// record stays (§17.2).
+#[tokio::test]
+async fn a_write_moving_a_files_last_reference_to_another_row_keeps_its_record() {
+    for (removed, added) in [("7", "8"), ("7", "6")] {
+        let store = TestStore::new();
+        let db = open(&store, Provenance::AppProvided).await;
+        let file = stage(&db, b"photo".to_vec(), true).await.unwrap();
+        assert!(has_record(&db, file));
+        db.write(move |sql| {
+            sql.execute("DELETE FROM files WHERE id=?1", [removed])?;
+            sql.execute(
+                "INSERT INTO files(id,file) VALUES(?1,?2)",
+                rusqlite::params![added, file],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap_or_else(|error| {
+            panic!("moving the reference from {removed} to {added}: {error:?}")
+        });
+        assert_eq!(rows(&db), [added]);
+        assert!(has_record(&db, file), "moving the reference from {removed} to {added}");
+        db.close().await.unwrap();
+    }
+}

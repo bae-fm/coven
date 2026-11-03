@@ -543,21 +543,22 @@ impl<'a> FileWrite<'a> {
             }
             return settle_unreferenced(db);
         };
+        // A file one row stops naming can be named by another row of the
+        // same write, whichever key comes first: only the whole write's
+        // references say whether it removed a file's last one.
+        let mut released = BTreeSet::new();
         for key in &keys {
-            for file in crate::file_protection::refresh(db, self.schema, key)? {
-                if Record::read(db, file)?.is_some() {
-                    return Err(DbError::Invariant {
-                        what: "a write removing a file's last reference deletes its record",
-                    });
-                }
+            released.extend(crate::file_protection::refresh(db, self.schema, key)?);
+        }
+        for file in released {
+            if !referenced(db, file)? && Record::read(db, file)?.is_some() {
+                return Err(DbError::Invariant {
+                    what: "a write removing a file's last reference deletes its record",
+                });
             }
         }
         for file in deleted {
-            if db.query_row(
-                "SELECT EXISTS(SELECT 1 FROM _coven_file_references WHERE file=?1)",
-                [file],
-                |r| r.get::<_, bool>(0),
-            )? {
+            if referenced(db, *file)? {
                 return Err(DbError::Invariant {
                     what: "a write deletes only a record nothing references",
                 });
@@ -674,6 +675,13 @@ impl<'a> FileWrite<'a> {
         }
         Ok(())
     }
+}
+
+/// Whether any row names `file`.
+fn referenced(db: &DatabaseConnection, file: FileId) -> Result<bool, DbError> {
+    db.query_row("SELECT EXISTS(SELECT 1 FROM _coven_file_references WHERE file=?1)", [file], |r| {
+        r.get::<_, bool>(0)
+    })
 }
 
 /// A file referenced again, or whose record is gone, no longer waits for

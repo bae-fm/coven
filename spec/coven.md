@@ -5427,6 +5427,10 @@ merging the write gives its rows, read before the delete joins the write, so
 the record goes exactly when the merged state the write leaves names the file
 nowhere.
 
+- **A reference that moves to another row.** Ana merges two artists in her
+  music app: one write deletes the absorbed artist's row and points the
+  survivor's `image` at its photo. The photo is still named once the write is
+  done, so its record stays, whichever of the two rows the write reaches first.
 - **A late reference loses.** A write naming the file that arrives after the
   record's delete is judged against the history, as every late write is
   (§16.5). Every device sees the delete first and takes the row's change out
