@@ -3,16 +3,13 @@
 
 use super::*;
 use coven_crypto::ConfirmationNumber;
-use coven_foundation::files::StoreDirAccess;
-use coven_foundation::files::{AtomicFile, StoreDir, StoreFile};
+use coven_foundation::files::StoreDir;
 use coven_sync::{JoinOutcome, JoiningIdentity, NextCheck};
 
 /// A prepared join request with the provider access its invite grants.
 pub(super) struct Joining {
     identity: JoiningIdentity,
     invitation: coven_storage::StorageInvitation,
-    // The encrypted local copy of the request, outside final custody.
-    file: AtomicFile,
     /// Changes each time the app asks for a check for approval now.
     check: tokio::sync::watch::Receiver<u64>,
 }
@@ -57,11 +54,7 @@ pub(super) fn prepare_request(
     let data = ConnectionCredentials { location: invitation.location().clone(), credentials };
     // Validation refuses a sign-in without the location's access.
     data.validate().map_err(SyncError::from)?;
-    Ok((
-        Joining { identity, invitation, file: directory.owned_file(StoreFile::Bootstrap), check },
-        data,
-        custody,
-    ))
+    Ok((Joining { identity, invitation, check }, data, custody))
 }
 
 impl Joining {
@@ -96,7 +89,7 @@ impl Joining {
         status(BootstrapStatus::Connecting);
         sync.accept_join(&self.invitation).await?;
         if !self.identity.attempted() {
-            self.identity.record_attempt(&self.file)?;
+            self.identity.record_attempt()?;
             match sync.submit_join(&self.identity).await {
                 Ok(true) => (),
                 // The invite ended first; its marker holds the path.
@@ -104,7 +97,7 @@ impl Joining {
                 Err(error) => {
                     // Only a request that may be stored makes its absence final.
                     if matches!(&error, SyncError::Storage(error) if error.refused()) {
-                        self.identity.record_refusal(&self.file)?;
+                        self.identity.record_refusal()?;
                     }
                     return Err(error.into());
                 }

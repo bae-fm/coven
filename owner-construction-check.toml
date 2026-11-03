@@ -378,6 +378,9 @@ task_types = [
     # Whether one transaction's materialization has deferred foreign keys on
     # its connection.
     "Deferral",
+    # One join's request and the bootstrap file that keeps it, from preparing
+    # or resuming the request until the join ends (§13.2).
+    "JoiningIdentity",
 ]
 # The shared in-memory state the runtime and the standard library declare.
 external_types = [

@@ -20,8 +20,12 @@ use zeroize::Zeroizing;
 /// is the one the invite fixes; the keys are this device's fresh pair. The
 /// only durable local copy is encrypted with the invite secret, bound to the
 /// complete code. No member keys or provider credentials enter final custody
-/// while waiting.
+/// while waiting. One join holds it, from preparing or resuming the request
+/// until the join ends.
 pub struct JoiningIdentity {
+    /// The store's bootstrap file, which keeps the sealed request and how far
+    /// the join has come.
+    file: AtomicFile,
     identity: MemberIdentity,
     request: Vec<u8>,
     path: ObjectPath,
@@ -164,6 +168,7 @@ impl JoiningIdentity {
             return Err(SyncError::InvitationChanged);
         }
         Ok(Some(Self {
+            file,
             confirmation: confirmation(code, &keys),
             identity,
             request,
@@ -209,6 +214,7 @@ impl JoiningIdentity {
         }
         .encode()?;
         let identity = Self {
+            file: directory.owned_file(StoreFile::Bootstrap),
             confirmation: confirmation(code, &identity.keys().public_keys()),
             identity,
             request,
@@ -220,7 +226,7 @@ impl JoiningIdentity {
             read_through: code.read_through,
             expires_at: code.expires_at,
         };
-        identity.save(&directory.owned_file(StoreFile::Bootstrap))?;
+        identity.save()?;
         Ok(identity)
     }
 
@@ -272,29 +278,29 @@ impl JoiningIdentity {
 
     /// Record possible publication before issuing it. On restart an absent
     /// request is terminal: re-creating it could resurrect a declined invite.
-    pub fn record_attempt(&mut self, file: &AtomicFile) -> Result<(), SyncError> {
-        self.record(JoinStage::Sent, file)
+    pub fn record_attempt(&mut self) -> Result<(), SyncError> {
+        self.record(JoinStage::Sent)
     }
 
     /// The provider refused the request, so it was never published: a
     /// retry sends it again (§13.2).
-    pub fn record_refusal(&mut self, file: &AtomicFile) -> Result<(), SyncError> {
-        self.record(JoinStage::Unsent, file)
+    pub fn record_refusal(&mut self) -> Result<(), SyncError> {
+        self.record(JoinStage::Unsent)
     }
 
     /// This member's copies opened its keys. Recorded before the join
     /// reports loading, so a resumed join knows approval has begun before
     /// its first check (§13.2, E10).
-    pub(crate) fn record_opened(&mut self, file: &AtomicFile) -> Result<(), SyncError> {
-        self.record(JoinStage::Opened, file)
+    pub(crate) fn record_opened(&mut self) -> Result<(), SyncError> {
+        self.record(JoinStage::Opened)
     }
 
-    fn record(&mut self, state: JoinStage, file: &AtomicFile) -> Result<(), SyncError> {
+    fn record(&mut self, state: JoinStage) -> Result<(), SyncError> {
         self.state = state;
-        self.save(file)
+        self.save()
     }
 
-    fn save(&self, file: &AtomicFile) -> Result<(), SyncError> {
+    fn save(&self) -> Result<(), SyncError> {
         let keys = self.identity.keys().to_secret_bytes();
         let mut plain =
             Zeroizing::new(Vec::with_capacity(5 + keys.as_bytes().len() + self.request.len()));
@@ -309,7 +315,7 @@ impl JoiningIdentity {
             0,
             &plain,
         )?;
-        file.replace(&sealed)?;
+        self.file.replace(&sealed)?;
         Ok(())
     }
 

@@ -5,7 +5,6 @@ use super::{
     SequenceSync,
 };
 use crate::{JoiningIdentity, SyncError};
-use coven_foundation::files::{StoreDirAccess, StoreFile};
 use coven_foundation::progress::ProgressReport;
 use coven_storage::{StorageFailure, StorageInvitation};
 use std::time::{Duration, SystemTime};
@@ -112,7 +111,7 @@ impl SequenceSync {
         // so it never reports waiting for approval again, even resumed
         // (E10).
         if !request.opened() {
-            request.record_opened(&self.directory.owned_file(StoreFile::Bootstrap))?;
+            request.record_opened()?;
         }
         // The scan that found the copies is loading's first step, reported
         // whole now that it has opened them.

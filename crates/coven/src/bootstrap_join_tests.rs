@@ -31,7 +31,7 @@ async fn resuming_join_authenticates_the_initial_key_and_writer_cursor() {
     let code = coven_sync::read_invite_code(invite.shown_code()).unwrap();
     let mut identity = JoiningIdentity::prepare(&directory, &code, "New phone").unwrap();
     let file = directory.owned_file(StoreFile::Bootstrap);
-    identity.record_attempt(&file).unwrap();
+    identity.record_attempt().unwrap();
     let saved = file.read_optional().unwrap().unwrap();
     // A live directory clone keeps the bootstrap lease, and the join below
     // would wait for it. The file handle names only the path.
