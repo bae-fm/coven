@@ -28,13 +28,13 @@ struct Facts {
 /// Reads each response after transmission, before the adapter's own header
 /// translation or unscoped-checksum removal can change it.
 #[derive(Debug, Clone, Default)]
-struct Capture(Arc<Mutex<Facts>>);
-impl Capture {
+struct HeaderCapture(Arc<Mutex<Facts>>);
+impl HeaderCapture {
     fn facts(&self) -> Facts {
         *self.0.lock().expect("header facts lock")
     }
 }
-impl Intercept for Capture {
+impl Intercept for HeaderCapture {
     fn name(&self) -> &'static str {
         "DetectionHeaderFacts"
     }
@@ -59,7 +59,7 @@ impl Intercept for Capture {
 /// every key, requesting checksums only where the service accepts that mode.
 pub(super) async fn observe(probes: &mut Probes<'_>, keys: &[String]) -> Result<(), StorageError> {
     let s = probes.s;
-    let capture = Capture::default();
+    let capture = HeaderCapture::default();
     let head = |key: &str, mode: bool| {
         s.client
             .head_object()

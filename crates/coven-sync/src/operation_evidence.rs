@@ -16,7 +16,7 @@ use coven_storage::ObjectPath;
 use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Default)]
-pub(crate) struct Evidence {
+pub(crate) struct OperationEvidence {
     /// Counts storage connection changes.
     connection: u64,
     waits: BTreeMap<OperationId, Wait>,
@@ -90,7 +90,7 @@ fn needs(reason: &PendingReason, reload: Option<OperationId>) -> Needs {
 }
 
 impl RetryWaits {
-    fn evidence(&self) -> std::sync::MutexGuard<'_, Evidence> {
+    fn evidence(&self) -> std::sync::MutexGuard<'_, OperationEvidence> {
         self.evidence.lock().expect("operation evidence poisoned")
     }
 

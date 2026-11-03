@@ -3,7 +3,9 @@
 use crate::sequence_sync::OperationState;
 use crate::{
     recorded_upload::{self, UploadSource, Uploaded},
-    sequence_sync::sequence_operations::{Progress, Request, SequenceOperation, Step},
+    sequence_sync::sequence_operations::{
+        OperationProgress, OperationStep, Request, SequenceOperation,
+    },
     sequence_sync::snapshot_capture::SnapshotArtifact,
     sequence_sync::SequenceSync,
     SyncError,
@@ -29,7 +31,7 @@ impl UploadSource for SnapshotUploadSource<'_> {
         self.artifact.session = Some(session);
         let work = SequenceOperation {
             request: self.request.clone(),
-            progress: Progress::Running(Step::Uploading(self.artifact.clone())),
+            progress: OperationProgress::Running(OperationStep::Uploading(self.artifact.clone())),
         };
         let update = work.update(&self.record)?;
         let next = update.last_step;
@@ -96,7 +98,9 @@ impl SequenceSync {
             .advance_operation(
                 SequenceOperation {
                     request: source.request,
-                    progress: Progress::Running(Step::Announcing(source.artifact)),
+                    progress: OperationProgress::Running(OperationStep::Announcing(
+                        source.artifact,
+                    )),
                 }
                 .update(&source.record)?,
             )

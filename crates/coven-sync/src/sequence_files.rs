@@ -3,7 +3,7 @@ use super::snapshot_file_scan::{Listing, UploaderScan};
 use crate::{
     history::History,
     object_input::ObjectInput,
-    sequence_sync::sequence_operations::{Progress, SequenceOperation, Step},
+    sequence_sync::sequence_operations::{OperationProgress, OperationStep, SequenceOperation},
     sequence_sync::{SequenceSync, Session},
     slot_object::{self, SlotBody},
     snapshot_authorship::SnapshotAuthorship,
@@ -42,15 +42,15 @@ impl SequenceSync {
         for record in records.iter().filter(|record| record.kind == "sequence") {
             let work: SequenceOperation = serde_json::from_slice(&record.data)?;
             let step = match work.progress {
-                Progress::Running(step) | Progress::Undo { step, .. } => step,
+                OperationProgress::Running(step) | OperationProgress::Undo { step, .. } => step,
             };
             if matches!(
                 step,
-                Step::Capturing(_)
-                    | Step::Uploading(_)
-                    | Step::Announcing(_)
-                    | Step::Activating { .. }
-                    | Step::SnapshotApplied { .. }
+                OperationStep::Capturing(_)
+                    | OperationStep::Uploading(_)
+                    | OperationStep::Announcing(_)
+                    | OperationStep::Activating { .. }
+                    | OperationStep::SnapshotApplied { .. }
             ) {
                 return Ok(Some(record.id));
             }

@@ -42,22 +42,22 @@ pub struct RetryWaits {
     database: Option<Database>,
     /// Shared with the writer's steps that write `coven_retry_effect`,
     /// which read the live cooldown as they commit (`retry_answer.rs`).
-    state: Arc<Mutex<State>>,
+    state: Arc<Mutex<WaitSchedule>>,
     /// What each waiting operation's wait names, and whether it changed.
-    evidence: Mutex<operation_evidence::Evidence>,
+    evidence: Mutex<operation_evidence::OperationEvidence>,
     /// Bumped whenever a failed attempt arms a new wait, so an owner waiting
     /// on the earlier schedule plans again.
     rearmed: tokio::sync::watch::Sender<u64>,
     /// The app's network reports, and how far each owner acted on them.
     network: network_report::Reports,
     /// The person's retry requests waiting for a pass (`retry_answer.rs`).
-    requests: Mutex<retry_answer::Requests>,
+    requests: Mutex<retry_answer::RetryRequests>,
     /// The reason last logged for each subject's failure.
     failures: crate::failure_log::FailureLog,
 }
 
 #[derive(Default)]
-struct State {
+struct WaitSchedule {
     armed: BTreeMap<RetrySubject, Armed>,
 }
 
@@ -126,11 +126,11 @@ impl RetryWaits {
         &self.failures
     }
 
-    fn lock(&self) -> std::sync::MutexGuard<'_, State> {
+    fn lock(&self) -> std::sync::MutexGuard<'_, WaitSchedule> {
         self.state.lock().expect("retry waits poisoned")
     }
 
-    fn cooling(state: &State, elapsed: Duration) -> bool {
+    fn cooling(state: &WaitSchedule, elapsed: Duration) -> bool {
         state.armed.get(&RetrySubject::Provider).is_some_and(|armed| !armed.over(elapsed))
     }
 

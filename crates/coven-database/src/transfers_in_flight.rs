@@ -85,12 +85,12 @@ impl TransfersInFlight {
 /// ends, cancelled included. Clones share it.
 #[derive(Clone)]
 pub struct InFlight {
-    shared: Arc<Shared>,
+    shared: Arc<InFlightShared>,
 }
 
-struct Shared {
+struct InFlightShared {
     direction: &'static Direction,
-    state: Mutex<State>,
+    state: Mutex<InFlightState>,
     /// Told of each start and end, as of a commit that changed what the
     /// live queries reading the direction's views read.
     observer: CommitObserver,
@@ -101,7 +101,7 @@ struct Shared {
 }
 
 #[derive(Default)]
-struct State {
+struct InFlightState {
     /// Each object in flight, with its uploader and its attempts.
     files: BTreeMap<FileId, Entry>,
     /// The next attempt's number, so an ended attempt is never taken for a
@@ -118,7 +118,7 @@ struct Entry {
     attempts: Vec<(u64, Vec<FileId>, TransferProgress)>,
 }
 
-impl State {
+impl InFlightState {
     /// Each file in flight with the progress its object's newest attempt
     /// shows.
     fn progress(&self) -> BTreeMap<FileId, TransferProgress> {
@@ -137,16 +137,16 @@ impl State {
 impl InFlight {
     fn new(direction: &'static Direction, observer: CommitObserver) -> Self {
         Self {
-            shared: Arc::new(Shared {
+            shared: Arc::new(InFlightShared {
                 direction,
-                state: Mutex::new(State::default()),
+                state: Mutex::new(InFlightState::default()),
                 observer,
                 progress: watch::channel(BTreeMap::new()).0,
             }),
         }
     }
 
-    fn state(&self) -> std::sync::MutexGuard<'_, State> {
+    fn state(&self) -> std::sync::MutexGuard<'_, InFlightState> {
         self.shared.state.lock().expect("transfers in flight poisoned")
     }
 

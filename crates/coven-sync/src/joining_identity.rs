@@ -25,7 +25,7 @@ pub struct JoiningIdentity {
     identity: MemberIdentity,
     request: Vec<u8>,
     path: ObjectPath,
-    state: RequestState,
+    state: JoinStage,
     /// What seals the saved request for the code it was made for.
     sealing: Sealing,
     /// The name the device gave itself in its request.
@@ -41,7 +41,7 @@ pub struct JoiningIdentity {
 
 /// How far the join has come, as its saved request records it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum RequestState {
+enum JoinStage {
     /// Not sent: a retry sends it.
     Unsent,
     /// It may have been sent: on restart an absent request is final.
@@ -50,7 +50,7 @@ enum RequestState {
     Opened,
 }
 
-impl RequestState {
+impl JoinStage {
     fn byte(self) -> u8 {
         match self {
             Self::Unsent => 0,
@@ -132,7 +132,7 @@ impl JoiningIdentity {
         let state = bytes
             .first()
             .copied()
-            .and_then(RequestState::from_byte)
+            .and_then(JoinStage::from_byte)
             .ok_or(coven_database::DbError::DamagedDatabase)?;
         let key_length = bytes.get(1..5).ok_or(coven_database::DbError::DamagedDatabase)?;
         let key_length = u32::from_be_bytes(key_length.try_into().expect("four bytes")) as usize;
@@ -213,7 +213,7 @@ impl JoiningIdentity {
             identity,
             request,
             path,
-            state: RequestState::Unsent,
+            state: JoinStage::Unsent,
             sealing: Sealing::new(code)?,
             device_name: device_name.into(),
             inviting_writer: code.inviting_writer,
@@ -260,36 +260,36 @@ impl JoiningIdentity {
 
     /// Whether publication may already have happened before an interruption.
     pub fn attempted(&self) -> bool {
-        self.state != RequestState::Unsent
+        self.state != JoinStage::Unsent
     }
 
     /// Whether this member's keys have opened, in this call or an earlier
     /// one: approval has begun, and the join never reports waiting for it
     /// again (§13.2, E10).
     pub fn opened(&self) -> bool {
-        self.state == RequestState::Opened
+        self.state == JoinStage::Opened
     }
 
     /// Record possible publication before issuing it. On restart an absent
     /// request is terminal: re-creating it could resurrect a declined invite.
     pub fn record_attempt(&mut self, file: &AtomicFile) -> Result<(), SyncError> {
-        self.record(RequestState::Sent, file)
+        self.record(JoinStage::Sent, file)
     }
 
     /// The provider refused the request, so it was never published: a
     /// retry sends it again (§13.2).
     pub fn record_refusal(&mut self, file: &AtomicFile) -> Result<(), SyncError> {
-        self.record(RequestState::Unsent, file)
+        self.record(JoinStage::Unsent, file)
     }
 
     /// This member's copies opened its keys. Recorded before the join
     /// reports loading, so a resumed join knows approval has begun before
     /// its first check (§13.2, E10).
     pub(crate) fn record_opened(&mut self, file: &AtomicFile) -> Result<(), SyncError> {
-        self.record(RequestState::Opened, file)
+        self.record(JoinStage::Opened, file)
     }
 
-    fn record(&mut self, state: RequestState, file: &AtomicFile) -> Result<(), SyncError> {
+    fn record(&mut self, state: JoinStage, file: &AtomicFile) -> Result<(), SyncError> {
         self.state = state;
         self.save(file)
     }

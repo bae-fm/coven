@@ -227,7 +227,7 @@ async fn resume_key_generation(saved: bool) -> serde_json::Value {
             kind: "sequence".into(),
             data: serde_json::to_vec(&SequenceOperation {
                 request: Request::Key(KeyPreparation::Circle { circle, key, name: "Gifts".into() }),
-                progress: Progress::Running(Step::Preparing),
+                progress: OperationProgress::Running(OperationStep::Preparing),
             })
             .unwrap(),
             started_by: "key".into(),

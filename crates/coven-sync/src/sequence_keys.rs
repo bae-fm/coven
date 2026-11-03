@@ -1,7 +1,9 @@
 //! Fresh audience keys enter custody only after their operation records them.
 use crate::sequence_sync::OperationState;
 use crate::{
-    sequence_sync::sequence_operations::{Progress, Request, SequenceOperation, Step},
+    sequence_sync::sequence_operations::{
+        OperationProgress, OperationStep, Request, SequenceOperation,
+    },
     sequence_sync::{SequenceSync, Session},
     SyncError,
 };
@@ -43,7 +45,7 @@ impl SequenceOperation {
     pub(crate) fn circle(circle: CircleId, name: String, key: KeyId) -> Self {
         Self {
             request: Request::Key(KeyPreparation::Circle { circle, name, key }),
-            progress: Progress::Running(Step::Preparing),
+            progress: OperationProgress::Running(OperationStep::Preparing),
         }
     }
 }
@@ -75,7 +77,7 @@ impl SequenceSync {
         let target = KeyPreparation::Rotation { audience, key: KeyId(self.ids.new_id()) };
         let work = SequenceOperation {
             request: Request::Key(target),
-            progress: Progress::Running(Step::Preparing),
+            progress: OperationProgress::Running(OperationStep::Preparing),
         };
         let id = self
             .database
@@ -142,9 +144,9 @@ impl SequenceSync {
             Ok(_) => {
                 self.keys.persist(&prepared)?;
                 *ring = prepared;
-                Progress::Running(Step::Preparing)
+                OperationProgress::Running(OperationStep::Preparing)
             }
-            Err(reason) => Progress::Undo { step: Step::Preparing, reason },
+            Err(reason) => OperationProgress::Undo { step: OperationStep::Preparing, reason },
         };
         self.database
             .advance_operation(

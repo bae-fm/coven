@@ -176,12 +176,12 @@ impl PassRequests {
 /// can't hold. Both change only in a step on the writer, once the row they
 /// go with commits.
 #[derive(Default)]
-pub(crate) struct Requests {
+pub(crate) struct RetryRequests {
     held: Option<PassFailure>,
     waiting: Vec<(u64, oneshot::Sender<RetryOutcome>)>,
 }
 
-impl Requests {
+impl RetryRequests {
     /// The answer a request gets at once in `state`, none when a pass
     /// answers it: the effect's.
     fn at_once(&self, state: RetryState) -> Option<RetryOutcome> {
@@ -209,7 +209,7 @@ impl Requests {
 /// armed, so writing one cooldown again names the same instant. `None` also
 /// when the clock cannot represent that time; the pass then answers its
 /// requests once the cooldown ends.
-fn cooldown_until(schedule: &Mutex<super::State>, clock: &ClockRef) -> Option<SystemTime> {
+fn cooldown_until(schedule: &Mutex<super::WaitSchedule>, clock: &ClockRef) -> Option<SystemTime> {
     let elapsed = clock.elapsed();
     schedule
         .lock()
@@ -233,7 +233,7 @@ fn failed(error: &DbError) -> RetryOutcome {
 }
 
 impl RetryWaits {
-    fn requests(&self) -> std::sync::MutexGuard<'_, Requests> {
+    fn requests(&self) -> std::sync::MutexGuard<'_, RetryRequests> {
         self.requests.lock().expect("retry requests poisoned")
     }
 
@@ -256,7 +256,7 @@ impl RetryWaits {
     async fn step<T: Send + 'static>(
         self: &Arc<Self>,
         change: impl FnOnce(RetryState) -> RetryState + Send + 'static,
-        then: impl FnOnce(&RetryWaits, &mut Requests, RetryState) -> T + Send + 'static,
+        then: impl FnOnce(&RetryWaits, &mut RetryRequests, RetryState) -> T + Send + 'static,
     ) -> Result<T, DbError> {
         let Some(database) = &self.database else {
             return Err(DbError::Invariant { what: "only a handle that writes the store syncs" });

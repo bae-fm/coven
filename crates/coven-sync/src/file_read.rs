@@ -30,7 +30,7 @@ const REQUEST_BYTES: u64 = 1024 * 1024;
 pub struct FileStream {
     id: String,
     source: OpenFile,
-    state: tokio::sync::Mutex<ReadState>,
+    state: tokio::sync::Mutex<FileStreamState>,
 }
 enum OpenFile {
     Local {
@@ -44,12 +44,12 @@ enum OpenFile {
     },
     Uploaded(Arc<UploadedFile>),
 }
-struct ReadState {
+struct FileStreamState {
     end: Option<u64>,
     hash: Option<ContentHasher>,
     ahead: Option<tokio::task::JoinHandle<()>>,
 }
-impl Drop for ReadState {
+impl Drop for FileStreamState {
     fn drop(&mut self) {
         if let Some(task) = &self.ahead {
             task.abort();
@@ -164,7 +164,7 @@ impl FileStream {
         Self {
             id: file.id().to_string(),
             source,
-            state: tokio::sync::Mutex::new(ReadState {
+            state: tokio::sync::Mutex::new(FileStreamState {
                 end: Some(0),
                 hash: Some(ContentHasher::new()),
                 ahead: None,

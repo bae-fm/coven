@@ -28,7 +28,7 @@ pub(crate) enum Request {
     Key(super::sequence_keys::KeyPreparation),
 }
 #[derive(Serialize, Deserialize)]
-pub(crate) enum Step {
+pub(crate) enum OperationStep {
     Preparing,
     Copy(#[serde(with = "route")] KeyCopyPrefix),
     Claiming,
@@ -42,21 +42,24 @@ pub(crate) enum Step {
     Satisfied,
 }
 #[derive(Serialize, Deserialize)]
-pub(crate) enum Progress {
-    Running(Step),
-    Undo { step: Step, reason: OperationRejection },
+pub(crate) enum OperationProgress {
+    Running(OperationStep),
+    Undo { step: OperationStep, reason: OperationRejection },
 }
 #[derive(Serialize, Deserialize)]
 pub(crate) struct SequenceOperation {
     pub(crate) request: Request,
-    pub(crate) progress: Progress,
+    pub(crate) progress: OperationProgress,
 }
 impl OperationState for SequenceOperation {}
 
 impl SequenceOperation {
     /// An administrative change, before its first step.
     pub(crate) fn change(change: StoreChange) -> Self {
-        Self { request: Request::Change(change), progress: Progress::Running(Step::Preparing) }
+        Self {
+            request: Request::Change(change),
+            progress: OperationProgress::Running(OperationStep::Preparing),
+        }
     }
 
     pub(crate) fn kind(&self) -> crate::OperationKind {
@@ -170,7 +173,10 @@ impl SequenceSync {
         if !self.validate_request(session, member, &request)? {
             return Ok(OperationOutcome::Satisfied);
         }
-        let work = SequenceOperation { request, progress: Progress::Running(Step::Preparing) };
+        let work = SequenceOperation {
+            request,
+            progress: OperationProgress::Running(OperationStep::Preparing),
+        };
         let id = self
             .database
             .start_operation(NewOperation {
@@ -364,7 +370,7 @@ impl SequenceSync {
             let work: SequenceOperation = serde_json::from_slice(&record.data)?;
             let SequenceOperation { request, progress } = work;
             let mut step = match progress {
-                Progress::Undo { step, reason } => {
+                OperationProgress::Undo { step, reason } => {
                     self.abandon_settled_claim(id).await?;
                     if let Err(cleanup) = self.undo_step(&step).await {
                         return Err(SyncError::Cleanup {
@@ -374,14 +380,16 @@ impl SequenceSync {
                     }
                     return self.finish(&record, OperationOutcome::Rejected(reason)).await;
                 }
-                Progress::Running(step) => step,
+                OperationProgress::Running(step) => step,
             };
             match &step {
-                Step::Applied(slot) => {
+                OperationStep::Applied(slot) => {
                     return self.finish(&record, OperationOutcome::Landed(Slot(*slot))).await
                 }
-                Step::Satisfied => return self.finish(&record, OperationOutcome::Satisfied).await,
-                Step::SnapshotApplied { artifact, slot } => {
+                OperationStep::Satisfied => {
+                    return self.finish(&record, OperationOutcome::Satisfied).await
+                }
+                OperationStep::SnapshotApplied { artifact, slot } => {
                     self.artifact_file(&artifact.capture.name)?.remove()?;
                     return self.finish(&record, OperationOutcome::Landed(Slot(*slot))).await;
                 }
@@ -416,34 +424,39 @@ impl SequenceSync {
                             .expect("slot")
                             .0;
                         step = match step {
-                            Step::Copy(_) => Step::Preparing,
-                            Step::Claiming
+                            OperationStep::Copy(_) => OperationStep::Preparing,
+                            OperationStep::Claiming
                                 if matches!(
                                     request,
                                     Request::Change(StoreChange::CreateStore { .. })
                                 ) =>
                             {
-                                Step::CreatorCopy(slot)
+                                OperationStep::CreatorCopy(slot)
                             }
-                            Step::Claiming => Step::Applied(slot),
-                            Step::CreatorCopy(creation) => Step::Applied(creation),
-                            Step::Announcing(artifact)
+                            OperationStep::Claiming => OperationStep::Applied(slot),
+                            OperationStep::CreatorCopy(creation) => {
+                                OperationStep::Applied(creation)
+                            }
+                            OperationStep::Announcing(artifact)
                                 if artifact.capture.purpose == Purpose::Ordinary =>
                             {
-                                Step::SnapshotApplied { artifact, slot }
+                                OperationStep::SnapshotApplied { artifact, slot }
                             }
-                            Step::Announcing(artifact) => {
-                                Step::Activating { artifact, announcement: slot }
+                            OperationStep::Announcing(artifact) => {
+                                OperationStep::Activating { artifact, announcement: slot }
                             }
-                            Step::Activating { artifact, .. } => {
-                                Step::SnapshotApplied { artifact, slot }
+                            OperationStep::Activating { artifact, .. } => {
+                                OperationStep::SnapshotApplied { artifact, slot }
                             }
                             _ => unreachable!("a publication step owns each claim"),
                         };
                         self.database
                             .finish_claim(Some(
-                                SequenceOperation { request, progress: Progress::Running(step) }
-                                    .update(&record)?,
+                                SequenceOperation {
+                                    request,
+                                    progress: OperationProgress::Running(step),
+                                }
+                                .update(&record)?,
                             ))
                             .await?;
                         continue;
@@ -458,8 +471,8 @@ impl SequenceSync {
                                 }
                                 Err(error) => return Err(error),
                             }
-                            if matches!(step, Step::Copy(_) | Step::Claiming) {
-                                step = Step::Preparing;
+                            if matches!(step, OperationStep::Copy(_) | OperationStep::Claiming) {
+                                step = OperationStep::Preparing;
                             }
                         }
                     }
@@ -478,7 +491,7 @@ impl SequenceSync {
                     _ => unreachable!("settled create"),
                 }
             }
-            let validation = if matches!(step, Step::CreatorCopy(_)) {
+            let validation = if matches!(step, OperationStep::CreatorCopy(_)) {
                 self.check_binding(session, member)?;
                 Ok(true)
             } else {
@@ -492,7 +505,7 @@ impl SequenceSync {
                         .advance_operation(
                             SequenceOperation {
                                 request,
-                                progress: Progress::Running(Step::Satisfied),
+                                progress: OperationProgress::Running(OperationStep::Satisfied),
                             }
                             .update(&record)?,
                         )
@@ -504,7 +517,7 @@ impl SequenceSync {
                         .advance_operation(
                             SequenceOperation {
                                 request,
-                                progress: Progress::Undo { step, reason },
+                                progress: OperationProgress::Undo { step, reason },
                             }
                             .update(&record)?,
                         )
@@ -513,12 +526,12 @@ impl SequenceSync {
                 }
                 Ok(true) => (),
             }
-            if matches!(step, Step::Preparing) {
+            if matches!(step, OperationStep::Preparing) {
                 step = match &request {
                     Request::Key(_) => unreachable!("key preparation has advanced"),
                     Request::Change(change) => match required_copies(&session.history, ring, change, member.member()).into_iter().find(|route|
                         !session.history.copies.iter().any(|copy| matches!(&copy.prefix.kind, SlotKind::KeyCopy(copy) if &copy.routing == route))) {
-                        Some(route) => Step::Copy(route), None => Step::Claiming,
+                        Some(route) => OperationStep::Copy(route), None => OperationStep::Claiming,
                     },
                     Request::Snapshot(request) => {
                         if let Purpose::Raise(version) = request.purpose {
@@ -526,35 +539,38 @@ impl SequenceSync {
                                 .ok_or(SyncError::Rejected(OperationRejection::NotAllowed))?;
                         }
                         let number = self.database.reserve_snapshot_number().await?.get();
-                        Step::Capturing(Capture {id: coven_format::admin::SnapshotId {audience: request.audience.clone(),device: self.device,number},
+                        OperationStep::Capturing(Capture {id: coven_format::admin::SnapshotId {audience: request.audience.clone(),device: self.device,number},
                             purpose: request.purpose, key: session.history.sending_key(ring, member.member(), &request.audience)?, name: format!("snapshot-{number}.sealed")})
                     },
                 };
                 self.database
                     .advance_operation(
-                        SequenceOperation { request, progress: Progress::Running(step) }
+                        SequenceOperation { request, progress: OperationProgress::Running(step) }
                             .update(&record)?,
                     )
                     .await?;
                 continue;
             }
             match step {
-                Step::Capturing(capture) => {
+                OperationStep::Capturing(capture) => {
                     let artifact = self.capture_snapshot(&capture, ring, member).await?;
                     self.database
                         .advance_operation(
                             SequenceOperation {
                                 request,
-                                progress: Progress::Running(Step::Uploading(artifact)),
+                                progress: OperationProgress::Running(OperationStep::Uploading(
+                                    artifact,
+                                )),
                             }
                             .update(&record)?,
                         )
                         .await?;
                 }
-                Step::Uploading(artifact) => {
+                OperationStep::Uploading(artifact) => {
                     self.upload_snapshot(record, request, artifact).await?;
                 }
-                Step::Announcing(ref artifact) | Step::Activating { ref artifact, .. }
+                OperationStep::Announcing(ref artifact)
+                | OperationStep::Activating { ref artifact, .. }
                     if !session.history.preparation_current(&artifact.announcement()) =>
                 {
                     // No activation has landed. Its counted announcement
@@ -564,7 +580,7 @@ impl SequenceSync {
                         .advance_operation(
                             SequenceOperation {
                                 request,
-                                progress: Progress::Running(Step::Preparing),
+                                progress: OperationProgress::Running(OperationStep::Preparing),
                             }
                             .update(&record)?,
                         )
@@ -609,7 +625,10 @@ impl SequenceSync {
             Ok(false) => return Ok((None, OperationOutcome::Satisfied)),
             Ok(true) => (),
         }
-        let work = SequenceOperation { request, progress: Progress::Running(Step::Preparing) };
+        let work = SequenceOperation {
+            request,
+            progress: OperationProgress::Running(OperationStep::Preparing),
+        };
         let id = self
             .database
             .start_operation(NewOperation {
@@ -629,7 +648,7 @@ impl SequenceSync {
         member: &MemberIdentity,
         record: &OperationRecord,
         request: &Request,
-        step: &Step,
+        step: &OperationStep,
     ) -> Result<(), SyncError> {
         let path =
             self.path(session.through.checked_add(1).ok_or(SyncError::SequenceExhausted)?)?;
@@ -638,10 +657,10 @@ impl SequenceSync {
             _ => session.history.metadata_key(ring)?,
         };
         let (frame, kind) = match step {
-            Step::Copy(_) | Step::CreatorCopy(_) => {
+            OperationStep::Copy(_) | OperationStep::CreatorCopy(_) => {
                 let route = match step {
-                    Step::Copy(route) => route.clone(),
-                    Step::CreatorCopy(_) => {
+                    OperationStep::Copy(route) => route.clone(),
+                    OperationStep::CreatorCopy(_) => {
                         let Request::Change(StoreChange::CreateStore { key, admin, .. }) = request
                         else {
                             unreachable!("creation owns its first key copy");
@@ -676,14 +695,14 @@ impl SequenceSync {
                 };
                 (SlotFrame::KeyCopy, SlotKind::KeyCopy(CopyBox { routing: route, sealed }))
             }
-            Step::Claiming => {
+            OperationStep::Claiming => {
                 let Request::Change(change) = request else { unreachable!("plain admin claim") };
                 (SlotFrame::Admin(change.clone()), SlotKind::Admin)
             }
-            Step::Announcing(artifact) => {
+            OperationStep::Announcing(artifact) => {
                 (SlotFrame::Announcement(artifact.announcement()), SlotKind::Announcement)
             }
-            Step::Activating { artifact, announcement } => {
+            OperationStep::Activating { artifact, announcement } => {
                 let change = match artifact.capture.purpose {
                     Purpose::Raise(version) => {
                         StoreChange::RaiseSchema { version, announcement: Slot(*announcement) }
@@ -729,15 +748,15 @@ impl SequenceSync {
         Ok(())
     }
 
-    async fn undo_step(&self, step: &Step) -> Result<(), SyncError> {
+    async fn undo_step(&self, step: &OperationStep) -> Result<(), SyncError> {
         let artifact = match step {
-            Step::Capturing(capture) => {
+            OperationStep::Capturing(capture) => {
                 self.artifact_file(&capture.name)?.remove()?;
                 return Ok(());
             }
-            Step::Uploading(artifact)
-            | Step::Announcing(artifact)
-            | Step::Activating { artifact, .. } => artifact,
+            OperationStep::Uploading(artifact)
+            | OperationStep::Announcing(artifact)
+            | OperationStep::Activating { artifact, .. } => artifact,
             _ => return Ok(()),
         };
         if let Some(session) = &artifact.session {

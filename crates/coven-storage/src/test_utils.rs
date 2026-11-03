@@ -64,7 +64,7 @@ enum AccountAccess {
     Invited,
     Joined,
 }
-struct State {
+struct MemoryState {
     bucket_claim: Option<Vec<u8>>,
     objects: BTreeMap<ObjectPath, Object>,
     uploads: BTreeMap<u64, Pending>,
@@ -85,7 +85,7 @@ struct State {
     rejected_tokens: std::collections::BTreeSet<String>,
 }
 
-impl State {
+impl MemoryState {
     fn next_id(&mut self) -> Result<u64, StorageError> {
         let id = self.next;
         self.next = id
@@ -151,7 +151,7 @@ pub struct MemoryProvider {
     time_resolution: Duration,
     tokens: Arc<Mutex<Option<Arc<crate::HeldTokens>>>>,
     s3_key: Arc<Mutex<Option<S3Credentials>>>,
-    state: Arc<Mutex<State>>,
+    state: Arc<Mutex<MemoryState>>,
 }
 impl Clone for MemoryStorage {
     fn clone(&self) -> Self {

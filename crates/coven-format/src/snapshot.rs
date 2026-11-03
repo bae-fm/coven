@@ -314,13 +314,13 @@ enum RecordKey {
     Slot(Slot),
     Device(coven_foundation::id_source::DeviceId),
 }
-struct StreamState {
+struct SnapshotStreamState {
     header: SnapshotHeader,
     remaining: [u64; SECTIONS],
     previous: Option<(u8, RecordKey)>,
     ended: bool,
 }
-impl StreamState {
+impl SnapshotStreamState {
     fn new(header: SnapshotHeader) -> Self {
         Self { remaining: header.counts, header, previous: None, ended: false }
     }
@@ -356,7 +356,7 @@ impl StreamState {
 }
 
 /// Encodes bounded frames, retaining only the header, counts and previous identity.
-pub struct SnapshotEncoder(StreamState);
+pub struct SnapshotEncoder(SnapshotStreamState);
 impl SnapshotEncoder {
     /// Metadata used to construct the sealed prefix before emitting frames.
     pub fn header(&self) -> &SnapshotHeader {
@@ -370,7 +370,7 @@ impl SnapshotEncoder {
             header.schema_version.put(out)?;
             header.counts.put(out)
         })?;
-        Ok((Self(StreamState::new(header)), bytes))
+        Ok((Self(SnapshotStreamState::new(header)), bytes))
     }
     /// Validate and encode a record. Failure leaves the cursor unchanged.
     pub fn record(&mut self, record: SnapshotRecord) -> Result<Vec<u8>, Error> {
@@ -395,7 +395,7 @@ impl SnapshotEncoder {
 /// previous record identities are retained between frames. The database consumer
 /// checks cross-section completeness, SQL schema rules and app-row visibility;
 /// merge's removal computation checks which removal rules actually hold.
-pub struct SnapshotDecoder(StreamState);
+pub struct SnapshotDecoder(SnapshotStreamState);
 impl SnapshotDecoder {
     /// Extract original slots and claim settlement evidence before the store's
     /// historical signing keys are known. Other sections are counted and skipped;
@@ -457,7 +457,7 @@ impl SnapshotDecoder {
         )?;
         input.finish()?;
         header.validate()?;
-        Ok(Self(StreamState::new(header)))
+        Ok(Self(SnapshotStreamState::new(header)))
     }
     /// Identity, schema and coverage of this snapshot.
     pub fn header(&self) -> &SnapshotHeader {

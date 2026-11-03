@@ -66,7 +66,7 @@ struct MemoryBody {
     chunk_size: usize,
     failure: Option<BodyFailure>,
     hold: Option<HeldBody>,
-    state: Arc<Mutex<State>>,
+    state: Arc<Mutex<MemoryState>>,
 }
 
 #[async_trait]

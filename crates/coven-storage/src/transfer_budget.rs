@@ -24,17 +24,17 @@ impl Default for TransferLimits {
 /// Compose once at the handle's root and pass to every connection and file
 /// owner. Existing response bodies retain their leases when a limit changes.
 pub struct TransferBudget {
-    state: Mutex<State>,
+    state: Mutex<BudgetState>,
     changed: Notify,
 }
-struct State {
+struct BudgetState {
     limits: TransferLimits,
     downloads: usize,
 }
 impl TransferBudget {
     /// An unused budget with the app's configured limits.
     pub fn new(limits: TransferLimits) -> Self {
-        Self { state: Mutex::new(State { limits, downloads: 0 }), changed: Notify::new() }
+        Self { state: Mutex::new(BudgetState { limits, downloads: 0 }), changed: Notify::new() }
     }
     /// The current limits; the next upload to start checks the upload limit.
     pub fn limits(&self) -> TransferLimits {

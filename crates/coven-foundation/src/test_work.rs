@@ -40,13 +40,13 @@ thread_local! {
 }
 
 fn enter<R>(active: Option<Active>, run: impl FnOnce() -> R) -> R {
-    struct Restore(Option<Active>);
-    impl Drop for Restore {
+    struct PreviousActive(Option<Active>);
+    impl Drop for PreviousActive {
         fn drop(&mut self) {
             ACTIVE.with(|active| *active.borrow_mut() = self.0.take());
         }
     }
-    let _restore = Restore(ACTIVE.with(|current| current.replace(active)));
+    let _restore = PreviousActive(ACTIVE.with(|current| current.replace(active)));
     run()
 }
 

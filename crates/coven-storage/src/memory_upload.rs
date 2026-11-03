@@ -27,7 +27,7 @@ impl Pending {
     }
 }
 fn confirm_published(
-    state: &State,
+    state: &MemoryState,
     session: &mut UploadSession,
     id: u64,
 ) -> Result<(), StorageError> {
@@ -40,7 +40,7 @@ fn confirm_published(
     Ok(())
 }
 
-fn check_target(state: &State, target: &UploadTarget) -> Result<(), StorageError> {
+fn check_target(state: &MemoryState, target: &UploadTarget) -> Result<(), StorageError> {
     match target {
         UploadTarget::Create(path) => {
             if state.objects.contains_key(path) && !state.faults.overwrite_create {
