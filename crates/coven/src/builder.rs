@@ -8,9 +8,9 @@ use coven_crypto::custody::{
 use coven_database::{DatabaseBuilder, OpenStep};
 use coven_foundation::files::StoreDirAccess;
 use coven_foundation::files::StoreFile;
+use coven_foundation::progress::Progress;
 #[cfg(test)]
 use coven_foundation::progress::RecordingClock;
-use coven_foundation::progress::{forward, Progress};
 use coven_storage::{
     providers::{OAuthFlow, StorageConnector},
     Storage,
@@ -288,7 +288,7 @@ impl CovenBuilder {
     ) -> CovenResult<CovenHandle> {
         let opening = self.open_graph(store).await?;
         let progress = opening.database.subscribe_progress();
-        forward(progress, opening.open(), on_progress).await
+        progress.forward(opening.open(), on_progress).await
     }
 
     /// Replace this installation with a new device loaded from storage

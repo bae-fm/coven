@@ -40,10 +40,7 @@ pub(super) async fn open_installation(
     status: &impl Fn(BootstrapStatus),
 ) -> CovenResult<Database> {
     let progress = database.subscribe_progress();
-    coven_foundation::progress::forward(progress, database.open(), |progress| {
-        status(BootstrapStatus::Opening(progress))
-    })
-    .await
+    progress.forward(database.open(), |progress| status(BootstrapStatus::Opening(progress))).await
 }
 
 /// Run `work`, in which `sync` may load the store into the new installation,
@@ -54,8 +51,7 @@ pub(super) async fn loading<T>(
     work: impl std::future::Future<Output = T>,
     status: &impl Fn(BootstrapStatus),
 ) -> T {
-    coven_foundation::progress::forward(sync.subscribe_progress(), work, |progress| {
-        status(BootstrapStatus::Loading(progress))
-    })
-    .await
+    sync.subscribe_progress()
+        .forward(work, |progress| status(BootstrapStatus::Loading(progress)))
+        .await
 }

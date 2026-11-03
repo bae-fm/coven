@@ -122,7 +122,7 @@ impl SequenceSync {
     pub async fn unlock(&self) -> Result<(), SyncError> {
         let mut session = self.session.lock().await;
         let member = self.member.read()?.ok_or(StorageFailure::MemberKeysMissing)?;
-        let mut progress = ProgressReport::new(self.progress.clone(), self.clock.clone());
+        let mut progress = ProgressReport::of(&self.progress, self.clock.clone());
         let mut ring = self.ring_reporting(&mut session, &member, Some(&mut progress)).await?;
         self.read_forward_reporting(&mut session, &mut ring, &member, Some(&mut progress)).await?;
         self.keys.persist(&ring)?;

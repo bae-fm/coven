@@ -84,8 +84,7 @@ impl SequenceSync {
         // Such a check scans for this member's copies, and once they open
         // the store, loads it, or the rest of it, reporting each step as
         // `unlock` does (§13.4). The scan counts aside until then.
-        let mut progress =
-            opening.then(|| ProgressReport::new(self.progress.clone(), self.clock.clone()));
+        let mut progress = opening.then(|| ProgressReport::of(&self.progress, self.clock.clone()));
         let (counted, scanned) = watch::channel(None);
         let mut counting = ProgressReport::new(counted, self.clock.clone());
         let mut scan = KeyScan::new(&mut counting);

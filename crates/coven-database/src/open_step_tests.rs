@@ -3,7 +3,7 @@ use crate::tests::TestStore;
 use crate::write::tests::sql;
 use crate::{Migration, RowIdentity, SqlFunctions, SyncedTable};
 use coven_foundation::clock::FixedClock;
-use coven_foundation::progress::{forward, Progress};
+use coven_foundation::progress::Progress;
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, SystemTime};
 
@@ -113,7 +113,7 @@ async fn opening_reports_its_steps_in_order() {
     let builder = store.builder(notes(), migrations).sql_functions(ordered(2, &seen)).clock(clock);
     let progress = builder.subscribe_progress();
     let host = seen.clone();
-    let database = forward(progress, builder.open(), |progress| host.push(progress)).await.unwrap();
+    let database = progress.forward(builder.open(), |progress| host.push(progress)).await.unwrap();
     database.close().await.unwrap();
 
     let seen = seen.all();
@@ -136,7 +136,7 @@ async fn an_open_with_nothing_to_do_reports_nothing() {
         let progress = builder.subscribe_progress();
         let host = seen.clone();
         let database =
-            forward(progress, builder.open(), |progress| host.push(progress)).await.unwrap();
+            progress.forward(builder.open(), |progress| host.push(progress)).await.unwrap();
         database.close().await.unwrap();
         seen.all()
     };

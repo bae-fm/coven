@@ -539,7 +539,7 @@ async fn recorded_newcomer(group: &Group, ana: &Device) -> (Device, Arc<Recordin
     let laptop = group
         .newcomer_with_clock(ana.identity.clone(), group.storage.for_device(), clock.clone())
         .await;
-    clock.watch(laptop.sync.subscribe_progress());
+    clock.watch_progress(laptop.sync.subscribe_progress());
     (laptop, clock)
 }
 

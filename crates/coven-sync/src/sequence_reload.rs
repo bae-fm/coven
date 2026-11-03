@@ -810,7 +810,7 @@ impl SequenceSync {
                     operation,
                     authorship,
                 },
-                reporting.then(|| ProgressReport::new(self.progress.clone(), self.clock.clone())),
+                reporting.then(|| ProgressReport::of(&self.progress, self.clock.clone())),
             )
             .await?;
         tracing::info!(

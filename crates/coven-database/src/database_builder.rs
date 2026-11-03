@@ -4,8 +4,7 @@ use super::*;
 use coven_foundation::files::StoreDirAccess;
 
 use crate::{migration::MigrationOperation, NewOperation, OpenStep};
-use coven_foundation::progress::{Progress, ProgressReport};
-use tokio::sync::watch;
+use coven_foundation::progress::{ProgressChannel, ProgressReport, ProgressWatch};
 
 /// Choices needed to open the database part of a store.
 pub struct DatabaseBuilder {
@@ -18,7 +17,7 @@ pub struct DatabaseBuilder {
     ids: Option<IdSourceRef>,
     sqlite: crate::SqliteSettings,
     functions: crate::SqlFunctions,
-    progress: watch::Sender<Option<Progress<OpenStep>>>,
+    progress: ProgressChannel<OpenStep>,
 }
 
 impl DatabaseBuilder {
@@ -34,14 +33,14 @@ impl DatabaseBuilder {
             ids: None,
             sqlite: crate::SqliteSettings::default(),
             functions: crate::SqlFunctions::default(),
-            progress: watch::channel(None).0,
+            progress: ProgressChannel::new(),
         }
     }
 
     /// The steps a writable open reports as it runs them, each with how
     /// much of it is done (§4). A read-only open runs none.
-    pub fn subscribe_progress(&self) -> watch::Receiver<Option<Progress<OpenStep>>> {
-        self.progress.subscribe()
+    pub fn subscribe_progress(&self) -> ProgressWatch<OpenStep> {
+        self.progress.watch()
     }
 
     /// The tables that sync, described at the newest app schema version.
@@ -169,7 +168,7 @@ impl DatabaseBuilder {
         #[cfg(test)]
         let profile = writer.profile_statements();
         writer.enable_wal()?;
-        let mut progress = ProgressReport::new(self.progress, clock.clone());
+        let mut progress = ProgressReport::of(&self.progress, clock.clone());
         let migrating = clock.elapsed();
         let outcomes = writer.prepare_schema(
             &tables,
@@ -353,7 +352,7 @@ impl DatabaseBuilder {
             &self.functions.versions(),
             None,
             None,
-            &mut ProgressReport::new(self.progress, clock),
+            &mut ProgressReport::of(&self.progress, clock),
         )?;
         let mut schema = crate::write_schema::WriteSchema::read(&first, tables.clone())?;
         schema.namespaces = self.namespaces;

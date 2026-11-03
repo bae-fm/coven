@@ -766,10 +766,11 @@ impl StorageConnections {
             return Ok(());
         }
         let relayed = std::sync::Mutex::new(&mut *progress);
-        coven_foundation::progress::forward(sync.subscribe_progress(), sync.unlock(), |load| {
-            relayed.lock().expect("setup progress poisoned").relay(setup_step::loading(load))
-        })
-        .await?;
+        sync.subscribe_progress()
+            .forward(sync.unlock(), |load| {
+                relayed.lock().expect("setup progress poisoned").relay(setup_step::loading(load))
+            })
+            .await?;
         let state = self.database.store_state().await?;
         if let Some(change) = access_change(&state, member.member(), access)? {
             let recording = sync.administer(change);

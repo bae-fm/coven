@@ -15,7 +15,6 @@ use coven_crypto::{
 };
 use coven_database::{Database, IncomingSlot, LoadStep, SlotContent};
 use coven_format::{floor::OriginalSlot, sequence::SlotFrame};
-use coven_foundation::progress::Progress;
 use coven_foundation::{
     files::StoreDir,
     id_source::{DeviceId, StoreId},
@@ -23,7 +22,7 @@ use coven_foundation::{
 use coven_merge::{Audience, Slot};
 use coven_storage::{ObjectPath, Storage, StorageFailure};
 use std::{num::NonZeroU64, sync::Arc};
-use tokio::sync::{watch, Mutex};
+use tokio::sync::Mutex;
 
 pub(crate) struct Session {
     history: History,
@@ -63,7 +62,7 @@ pub struct SequenceSync {
     waits: Arc<crate::RetryWaits>,
     files: crate::Files,
     /// The steps `unlock` reports as it loads the store (§13.4).
-    progress: watch::Sender<Option<Progress<LoadStep>>>,
+    progress: coven_foundation::progress::ProgressChannel<LoadStep>,
     session: Arc<Mutex<Session>>,
 }
 
@@ -128,7 +127,7 @@ impl SequenceSync {
             ids,
             waits,
             files,
-            progress: watch::channel(None).0,
+            progress: coven_foundation::progress::ProgressChannel::new(),
             session: Arc::new(Mutex::new(Session {
                 history,
                 through,
@@ -150,8 +149,8 @@ impl SequenceSync {
 
     /// The steps `unlock` reports as it loads the store from storage, each
     /// with how much of it is done (§13.4). Passes report none.
-    pub fn subscribe_progress(&self) -> watch::Receiver<Option<Progress<LoadStep>>> {
-        self.progress.subscribe()
+    pub fn subscribe_progress(&self) -> coven_foundation::progress::ProgressWatch<LoadStep> {
+        self.progress.watch()
     }
 
     pub(crate) fn store(&self) -> StoreId {

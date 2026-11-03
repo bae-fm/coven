@@ -45,6 +45,12 @@ impl<S: Clone + PartialEq> ProgressReport<S> {
         Self { sender, clock, current: None, sent }
     }
 
+    /// Report one run of the operation `channel` carries, pacing reports
+    /// by `clock`.
+    pub fn of(channel: &ProgressChannel<S>, clock: ClockRef) -> Self {
+        Self::new(channel.0.clone(), clock)
+    }
+
     /// Report into a watch nobody holds, for work that runs the same steps
     /// where no host draws them.
     pub fn unwatched(clock: ClockRef) -> Self {
@@ -122,6 +128,40 @@ impl<S: Clone + PartialEq> ProgressReport<S> {
         self.sent = self.clock.elapsed();
         // Nobody may be watching: the newest value is kept either way.
         self.sender.send_replace(Some(progress));
+    }
+}
+
+/// Where an owner reports each run of one kind of operation, such as a
+/// store's open, for the host watching it. Each run reports into it afresh.
+#[derive(Clone)]
+pub struct ProgressChannel<S>(watch::Sender<Option<Progress<S>>>);
+
+impl<S: Clone + PartialEq> ProgressChannel<S> {
+    /// A channel no operation has reported into.
+    pub fn new() -> Self {
+        Self(watch::channel(None).0)
+    }
+
+    /// Hear the runs reported from now on.
+    pub fn watch(&self) -> ProgressWatch<S> {
+        ProgressWatch(self.0.subscribe())
+    }
+}
+
+/// Hears the progress an owner's operation reports into its
+/// [`ProgressChannel`], for a host that draws it.
+pub struct ProgressWatch<S>(watch::Receiver<Option<Progress<S>>>);
+
+impl<S: Clone + PartialEq> ProgressWatch<S> {
+    /// Run `work` to its end, calling `report` on this task with each
+    /// progress it reports, as [`forward`] does. The future is `forward`'s
+    /// own, so an opening's future grows by nothing.
+    pub fn forward<T>(
+        self,
+        work: impl Future<Output = T>,
+        report: impl Fn(Progress<S>),
+    ) -> impl Future<Output = T> {
+        forward(self.0, work, report)
     }
 }
 
@@ -205,6 +245,12 @@ impl<S: Clone + PartialEq> RecordingClock<S> {
     /// Record the values reported into `watch`, from now on.
     pub fn watch(&self, watch: watch::Receiver<Option<Progress<S>>>) {
         assert!(self.watch.set(watch).is_ok(), "a recording clock records one watch");
+    }
+
+    /// Record the values an owner's operation reports into `progress`,
+    /// from now on.
+    pub fn watch_progress(&self, progress: ProgressWatch<S>) {
+        self.watch(progress.0);
     }
 
     /// Call `hook` with each value as it is recorded, on the thread that
