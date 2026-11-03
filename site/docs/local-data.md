@@ -318,7 +318,9 @@ A write is one SQLite transaction through `handle.write`. Its closure gets a
 `execute_batch`, `query_row` and `query`, and coven's own steps, such as
 retrying an operation, which commit or roll back with the app's statements. If
 the closure returns an error, or a statement or a step fails, the whole
-transaction rolls back.
+transaction rolls back, even when the closure drops the error and returns
+success (`DbError::StatementFailed`, `DbError::StepFailed`). A conflict the app
+expects belongs in its SQL, with `ON CONFLICT` or `INSERT OR IGNORE`.
 
 When a write commits, coven records in the same transaction:
 

@@ -2557,6 +2557,11 @@ fn tables() -> Vec<SyncedTable> {
   write even if the closure goes on and returns success (`StepFailed`). A
   step's refusal passed on with `?` keeps its own error inside the
   `CovenError`, and `SyncError::from` returns it ([§4](coven.md#4-writing-locally)).
+- A statement SQLite fails fails the write too, even if the closure drops
+  the error and returns success (`StatementFailed`): SQLite may have kept
+  part of its change, or undone rows coven saw it change. A closure that
+  returns its own error keeps it. `QueryReturnedNoRows`, and the closure's
+  own mapping errors, fail nothing ([§4](coven.md#4-writing-locally)).
 - A bulk write runs SQL on device-local tables alone, as plain SQLite: no
   row change is recorded, a table empties in one step, and after commit each
   live query that read a table it changed runs again, whatever rows it read

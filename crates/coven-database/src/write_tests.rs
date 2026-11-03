@@ -365,6 +365,45 @@ async fn a_swallowed_sqlite_rollback_cannot_commit_a_write_record() {
     database.close().await.unwrap();
 }
 
+/// A statement SQLite fails fails the whole write, even when the closure
+/// drops the error and returns success (§4). Ana's app inserts two notes,
+/// then updates both in one statement whose second row breaks `title`'s NOT
+/// NULL: SQLite undoes the first row's update too, though coven saw it. Had
+/// the write committed, its record would list that update; it rolls back.
+#[tokio::test]
+async fn a_failed_statement_the_closure_ignores_fails_the_write() {
+    let store = TestStore::new();
+    let database = store.schema(notes(), NOTES).await.unwrap();
+    let result = database
+        .write(|context| {
+            context.execute(
+                "INSERT INTO notes(id,title) VALUES('a','Groceries'),('b','Errands')",
+                [],
+            )?;
+            let failed = context
+                .execute("UPDATE notes SET title=CASE id WHEN 'a' THEN 'Undone' ELSE NULL END", []);
+            assert!(failed.is_err(), "the second note's NULL title fails the statement");
+            Ok(())
+        })
+        .await;
+    assert!(matches!(result, Err(DbError::StatementFailed)), "{result:?}");
+    assert_eq!(count(&database, "notes"), 0);
+    assert!(records(&database).is_empty());
+    // A query that finds no row is no failed statement.
+    database
+        .write(|context| {
+            let found = context
+                .query_row("SELECT title FROM notes WHERE id='a'", [], |r| r.get::<_, String>(0));
+            assert!(matches!(found, Err(rusqlite::Error::QueryReturnedNoRows)));
+            context.execute("INSERT INTO notes(id,title) VALUES('a','Groceries')", [])?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    assert_eq!(count(&database, "notes"), 1);
+    database.close().await.unwrap();
+}
+
 #[tokio::test]
 async fn a_null_key_is_refused_by_sqlite_before_capture() {
     let store = TestStore::new();
@@ -657,14 +696,16 @@ async fn a_write_reuses_the_statements_earlier_writes_prepared() {
 async fn an_immediate_foreign_key_fails_at_the_app_statement() {
     let fixture = TestStore::new();
     let db = fixture.schema(vec![SyncedTable::new("parents",RowIdentity::SharedKey),SyncedTable::new("children",RowIdentity::SharedKey)],"CREATE TABLE parents(id TEXT NOT NULL PRIMARY KEY); CREATE TABLE children(id TEXT NOT NULL PRIMARY KEY,parent TEXT REFERENCES parents(id))").await.unwrap();
-    db.write(|context| {
+    let result = db.write(|context| {
         let error = context.execute("INSERT INTO children VALUES('c','missing')",[]).expect_err("immediate foreign key must fail before the next statement");
         assert!(matches!(error,rusqlite::Error::SqliteFailure(e,_) if e.extended_code==rusqlite::ffi::SQLITE_CONSTRAINT_FOREIGNKEY));
         context.execute("INSERT INTO parents VALUES('p')",[])?;
         Ok(())
-    }).await.unwrap();
+    }).await;
+    // The failed statement fails the write the closure went on with.
+    assert!(matches!(result, Err(DbError::StatementFailed)), "{result:?}");
     assert_eq!(count(&db, "children"), 0);
-    assert_eq!(count(&db, "parents"), 1);
+    assert_eq!(count(&db, "parents"), 0);
     db.close().await.unwrap();
 }
 

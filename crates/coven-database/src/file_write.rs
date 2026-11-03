@@ -142,11 +142,20 @@ pub(crate) struct WriteFiles<'a> {
     /// The lost values this write dismisses, which its record carries after
     /// the app's changes (§8.4).
     dismissing: RefCell<Vec<crate::LostValue>>,
-    /// Whether one of coven's steps in this write failed (§4).
-    failed_step: Cell<bool>,
+    /// The first of this write's statements or coven's steps that failed,
+    /// which fails the write however its closure goes on (§4).
+    failed: Cell<Option<FailedPart>>,
     /// What runs once this write has committed, in the order its steps
     /// asked; nothing runs for a write that rolls back.
     committed: RefCell<Vec<Box<dyn FnOnce()>>>,
+}
+
+/// Which part of a write failed: one of the app's statements or one of
+/// coven's steps (§4).
+#[derive(Clone, Copy)]
+enum FailedPart {
+    Statement,
+    Step,
 }
 
 /// A write's files on the connection its transaction runs on.
@@ -190,7 +199,7 @@ impl<'a> WriteFiles<'a> {
             local: RefCell::new(Vec::new()),
             obsolete: RefCell::new(BTreeSet::new()),
             dismissing: RefCell::new(Vec::new()),
-            failed_step: Cell::new(false),
+            failed: Cell::new(None),
             committed: RefCell::new(Vec::new()),
         }
     }
@@ -233,17 +242,37 @@ impl<'a> FileWrite<'a> {
     pub(crate) fn step<T, E>(&self, run: impl FnOnce() -> Result<T, E>) -> Result<T, E> {
         let result = run();
         if result.is_err() {
-            self.failed_step.set(true);
+            self.fail(FailedPart::Step);
         }
         result
     }
 
-    /// Refuse to commit a write one of whose steps failed (§4).
-    pub(crate) fn check_steps(&self) -> Result<(), DbError> {
-        if self.failed_step.get() {
-            return Err(DbError::StepFailed);
+    /// Run one of the app's statements (§4). One SQLite fails may have kept
+    /// part of its change, as under `ON CONFLICT FAIL`, or undone rows coven
+    /// saw it change, so it fails the write even if the app goes on. An
+    /// answer with no row, or the app's own mapping of a row, is no failure
+    /// of the statement.
+    fn statement<T>(&self, run: impl FnOnce() -> rusqlite::Result<T>) -> rusqlite::Result<T> {
+        let result = run();
+        if matches!(result, Err(rusqlite::Error::SqliteFailure(..))) {
+            self.fail(FailedPart::Statement);
         }
-        Ok(())
+        result
+    }
+
+    fn fail(&self, part: FailedPart) {
+        if self.failed.get().is_none() {
+            self.failed.set(Some(part));
+        }
+    }
+
+    /// Refuse to commit a write one of whose statements or steps failed (§4).
+    pub(crate) fn check_parts(&self) -> Result<(), DbError> {
+        match self.failed.get() {
+            None => Ok(()),
+            Some(FailedPart::Step) => Err(DbError::StepFailed),
+            Some(FailedPart::Statement) => Err(DbError::StatementFailed),
+        }
     }
 
     /// Run `effect` once this write has committed.
@@ -256,11 +285,11 @@ impl<'a> FileWrite<'a> {
         sql: &str,
         params: P,
     ) -> rusqlite::Result<usize> {
-        self.database.app_execute(sql, params)
+        self.statement(|| self.database.app_execute(sql, params))
     }
 
     pub(crate) fn execute_batch(&self, sql: &str) -> rusqlite::Result<()> {
-        self.database.app_batch(sql)
+        self.statement(|| self.database.app_batch(sql))
     }
 
     pub(crate) fn query_row<T, P: rusqlite::Params>(
@@ -269,7 +298,7 @@ impl<'a> FileWrite<'a> {
         params: P,
         map: impl FnOnce(&rusqlite::Row<'_>) -> rusqlite::Result<T>,
     ) -> rusqlite::Result<T> {
-        self.database.app_query_row(sql, params, map)
+        self.statement(|| self.database.app_query_row(sql, params, map))
     }
 
     pub(crate) fn query<T, P: rusqlite::Params>(
@@ -278,7 +307,7 @@ impl<'a> FileWrite<'a> {
         params: P,
         map: impl FnMut(&rusqlite::Row<'_>) -> rusqlite::Result<T>,
     ) -> rusqlite::Result<Vec<T>> {
-        self.database.app_query(sql, params, map)
+        self.statement(|| self.database.app_query(sql, params, map))
     }
 
     /// The new files the write's moves made for rows removal rules took out,

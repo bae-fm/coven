@@ -439,9 +439,20 @@ operation, which a pass then finishes (§11.1). A step runs
 where the app calls it, so the write's later SQL sees what it changed, and it
 commits or rolls back with the app's statements. A step that fails fails the
 whole write, even if the app's code goes on and returns success
-(`StepFailed`): unlike one SQL statement, a step can fail after making part of
-its change. What a step changes outside the database, such as asking the sync
-loop for a pass, happens only once the write has committed.
+(`StepFailed`), since a step can fail after making part of its change. What a
+step changes outside the database, such as asking the sync loop for a pass,
+happens only once the write has committed.
+
+A statement of the app's that SQLite fails fails the whole write the same way
+(`StatementFailed`). Ana's app updates two notes in one statement, and the
+second note's title breaks its `NOT NULL`. SQLite undoes the first note's
+update too, but the pre-update hook had already told coven of it; had the app
+dropped the error and the write committed, its record would list an update no
+table holds. Under `ON CONFLICT FAIL` SQLite keeps the rows changed before the
+failure instead, so what a failed statement left can't be known from its
+error. An app that expects a conflict says so in its SQL, with `ON CONFLICT`
+or `INSERT OR IGNORE`. A query that finds no row is no failure, nor is an
+error the app's own mapping of a row returns: the statement ran.
 
 Coven keeps its own bookkeeping in tables inside the same database, which the app
 can't read or write. The app reads its own tables normally, on several read-only
@@ -10337,6 +10348,7 @@ maps them are with each provider in Appendix E.
 | `DbError::ClockOutOfRange` | no timestamp fits in 48 bits of milliseconds | §7.2 |
 | `RollbackFailed` | a rollback failed; every later call on that handle fails until the store is reopened | §4 |
 | `DbError::StepFailed` | one of coven's steps in a write failed and the write's closure still returned success | §4 |
+| `DbError::StatementFailed` | one of the app's statements in a write failed and the write's closure still returned success | §4 |
 | `DbError::OperationRunning`, `DbError::OperationUnknown` | a write acknowledges an operation that is still running, or one `coven_operations` doesn't list | §11.4 |
 | `DbError::CheckpointFailed` | one of coven's WAL checkpoints failed, other than on a busy or locked database; every later call on that handle fails until the store is reopened | §4 |
 | `DbError::CheckpointerThread` | the system refused the thread that checkpoints the store's WAL, so the store did not open | §4 |

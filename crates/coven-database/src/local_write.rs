@@ -30,7 +30,10 @@ impl DatabaseConnection {
                     let deleted_circles = crate::store_state_tables::deleted_circles(database)?;
                     let _scope = database.authorization.write();
                     let result = sql(crate::SqlContext::new(files))?;
-                    files.check_steps()?;
+                    // SQLite ending the transaction says more than the
+                    // statement that ended it.
+                    database.require_transaction()?;
+                    files.check_parts()?;
                     files.finish_app(|| recording.events())?;
                     Ok((result, deleted_circles))
                 },
