@@ -112,7 +112,9 @@ fn missing_homes(files: &[RustFile], policy: &Policy) -> Vec<String> {
 }
 
 /// Every free function and method of the crates' production code, keyed by
-/// its file, its type (`<free>` for a free function) and its name.
+/// its file, its type or trait (`<free>` for a free function) and its name.
+/// A trait's method is the one its declaration names, as a connector's
+/// `connect` is each implementation's.
 fn declared_methods(files: &[RustFile]) -> BTreeMap<(String, String, String), syn::Signature> {
     struct MethodCollector<'a> {
         path: &'a str,
@@ -126,6 +128,22 @@ fn declared_methods(files: &[RustFile]) -> BTreeMap<(String, String, String), sy
                 node.sig.clone(),
             );
             visit::visit_item_fn(self, node);
+        }
+
+        fn visit_item_trait(&mut self, node: &syn::ItemTrait) {
+            for item in &node.items {
+                if let syn::TraitItem::Fn(method) = item {
+                    self.methods.insert(
+                        (
+                            self.path.to_string(),
+                            node.ident.to_string(),
+                            method.sig.ident.to_string(),
+                        ),
+                        method.sig.clone(),
+                    );
+                }
+            }
+            visit::visit_item_trait(self, node);
         }
 
         fn visit_item_impl(&mut self, node: &syn::ItemImpl) {

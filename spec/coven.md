@@ -9706,8 +9706,10 @@ the database owner and the storage owner as arguments and opens neither itself.
 **Composition roots.** One authoritative list in the checker's policy names every
 place allowed to construct owners or start long-lived work. Each entry names an
 exact source file, type and method (or free function), not a whole file or a
-type-name suffix. The roots include opening and bootstrap, provider connection
-construction, owner constructors and task starts.
+type-name suffix. A trait's method is named where the trait declares it: the
+storage connector's `connect` makes each connection, in every connector. The
+roots include opening and bootstrap, provider connection construction, owner
+constructors and task starts.
 
 - The checker infers owners from retained capabilities and other owners.
 - Any owner construction outside a listed root fails the check, including

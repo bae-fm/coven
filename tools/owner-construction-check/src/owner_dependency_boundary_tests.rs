@@ -242,3 +242,27 @@ fn undeclared_shares_of_an_owners_state_are_still_handed_out() {
     let found = find_owner_dependency_leaks(&files, &policy, &OwnerGraph::collect(&files, &policy));
     assert_eq!(found, findings(PATH, &["Query::watch returns retained dependency Watch"]));
 }
+
+/// A trait's method that makes owners, as a connector's `connect` makes a
+/// connection, returns one when its declaration is a listed root.
+#[test]
+fn a_listed_trait_method_can_return_the_owner_it_makes() {
+    let source =
+        "struct Remote { clock: Clock } pub trait Connector { fn connect(&self) -> Remote; }";
+    for (roots, expected) in [
+        (
+            r#"[composition_roots]
+            "crates/app-storage/src/connector.rs" = ["Connector::connect"]"#,
+            vec![],
+        ),
+        ("", findings(PATH, &["Connector::connect returns retained dependency Remote"])),
+    ] {
+        let policy =
+            Policy::fixture(&format!("capability_types = [\"Clock\", \"Connector\"]\n{roots}"));
+        let path = if roots.is_empty() { PATH } else { "crates/app-storage/src/connector.rs" };
+        let files = [RustFile::fixture(path, source)];
+        let found =
+            find_owner_dependency_leaks(&files, &policy, &OwnerGraph::collect(&files, &policy));
+        assert_eq!(found, expected, "{roots}");
+    }
+}

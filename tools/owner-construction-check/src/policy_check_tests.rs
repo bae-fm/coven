@@ -115,19 +115,19 @@ fn every_capability_home_holds_a_source() {
 }
 
 #[test]
-fn composition_roots_resolve_methods_and_free_functions_outside_tests() {
+fn composition_roots_resolve_methods_trait_methods_and_free_functions_outside_tests() {
     let path = "crates/app/src/bootstrap.rs";
     let files = vec![
         RustFile::fixture(
             path,
-            "struct Builder; impl Builder { fn open() {} } fn restore() {} #[cfg(test)] fn fixture() {}",
+            "struct Builder; impl Builder { fn open() {} } fn restore() {} #[cfg(test)] fn fixture() {} trait Connector { fn connect(&self) -> Builder; }",
         ),
         RustFile::fixture("crates/app/src/bootstrap_tests.rs", "fn helper() {}"),
     ];
     let rows = format!(
         r#"
         [composition_roots]
-        "{path}" = ["Builder::open", "restore", "fixture", "Builder::close", "Other::open"]
+        "{path}" = ["Builder::open", "restore", "fixture", "Builder::close", "Other::open", "Connector::connect"]
         "crates/app/src/bootstrap_tests.rs" = ["helper"]
         "#
     );
