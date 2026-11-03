@@ -115,29 +115,30 @@ fn every_capability_home_holds_a_source() {
 }
 
 #[test]
-fn composition_roots_resolve_methods_trait_methods_and_free_functions_outside_tests() {
+fn composition_roots_resolve_methods_trait_methods_free_functions_and_statics_outside_tests() {
     let path = "crates/app/src/bootstrap.rs";
     let files = vec![
         RustFile::fixture(
             path,
-            "struct Builder; impl Builder { fn open() {} } fn restore() {} #[cfg(test)] fn fixture() {} trait Connector { fn connect(&self) -> Builder; }",
+            "struct Builder; impl Builder { fn open() {} } fn restore() {} #[cfg(test)] fn fixture() {} trait Connector { fn connect(&self) -> Builder; } static REGISTRY: u8 = 0; #[cfg(test)] static FIXTURE: u8 = 0;",
         ),
         RustFile::fixture("crates/app/src/bootstrap_tests.rs", "fn helper() {}"),
     ];
     let rows = format!(
         r#"
         [composition_roots]
-        "{path}" = ["Builder::open", "restore", "fixture", "Builder::close", "Other::open", "Connector::connect"]
+        "{path}" = ["Builder::open", "restore", "fixture", "Builder::close", "Other::open", "Connector::connect", "REGISTRY", "FIXTURE"]
         "crates/app/src/bootstrap_tests.rs" = ["helper"]
         "#
     );
     assert_eq!(
         stale(files, &rows),
         [
-            "composition_roots: crates/app/src/bootstrap.rs: <free>::fixture names no function there",
-            "composition_roots: crates/app/src/bootstrap.rs: Builder::close names no function there",
-            "composition_roots: crates/app/src/bootstrap.rs: Other::open names no function there",
-            "composition_roots: crates/app/src/bootstrap_tests.rs: <free>::helper names no function there",
+            "composition_roots: crates/app/src/bootstrap.rs: <free>::fixture names no function or static there",
+            "composition_roots: crates/app/src/bootstrap.rs: Builder::close names no function or static there",
+            "composition_roots: crates/app/src/bootstrap.rs: Other::open names no function or static there",
+            "composition_roots: crates/app/src/bootstrap.rs: <free>::FIXTURE names no function or static there",
+            "composition_roots: crates/app/src/bootstrap_tests.rs: <free>::helper names no function or static there",
             "composition_roots: no crate declares Other",
         ]
     );

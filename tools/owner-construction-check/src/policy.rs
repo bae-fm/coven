@@ -99,7 +99,8 @@ pub(crate) struct Policy {
     pub(crate) database: Option<Database>,
     /// Every callable allowed to construct owners or start tasks (Appendix F.3),
     /// including owner constructors and feature-gated fixtures. The file lists
-    /// them by source file: `Type::method`, or a free function's name.
+    /// them by source file: `Type::method`, or a free function's or a
+    /// static's name; a static's value is built at the root it names.
     #[serde(default, deserialize_with = "composition_roots")]
     pub(crate) composition_roots: Vec<CompositionRoot>,
     /// Runtime acquisition and task starts require an entry in
@@ -175,7 +176,7 @@ pub(crate) struct Policy {
 }
 
 /// `(source file, type, method)`: a callable allowed to construct owners or
-/// start tasks. A free function has `<free>` in the type position.
+/// start tasks. A free function or a static has `<free>` in the type position.
 #[derive(Debug, Clone, Eq, PartialEq, Ord, PartialOrd)]
 pub(crate) struct CompositionRoot {
     pub(crate) path: String,
@@ -385,7 +386,7 @@ pub(crate) fn describe_homes(homes: &[String]) -> String {
 }
 
 /// `[composition_roots]`: each source file's callables, `Type::method` or a
-/// free function's name.
+/// free function's or static's name.
 fn composition_roots<'de, D: Deserializer<'de>>(
     deserializer: D,
 ) -> Result<Vec<CompositionRoot>, D::Error> {

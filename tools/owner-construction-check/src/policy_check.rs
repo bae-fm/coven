@@ -170,17 +170,46 @@ fn declared_methods(files: &[RustFile]) -> BTreeMap<(String, String, String), sy
     methods
 }
 
+/// Every `static` of the crates' production code, keyed by its file and its
+/// name: a root may name one whose value is an owner, such as a process-wide
+/// registry.
+fn declared_statics(files: &[RustFile]) -> BTreeSet<(String, String)> {
+    struct StaticCollector<'a> {
+        path: &'a str,
+        statics: &'a mut BTreeSet<(String, String)>,
+    }
+
+    impl Visit<'_> for StaticCollector<'_> {
+        fn visit_item_static(&mut self, node: &syn::ItemStatic) {
+            self.statics.insert((self.path.to_string(), node.ident.to_string()));
+            visit::visit_item_static(self, node);
+        }
+    }
+
+    let mut statics = BTreeSet::new();
+    for file in files {
+        StaticCollector { path: &file.relative_path, statics: &mut statics }
+            .visit_file(&file.syntax);
+    }
+    statics
+}
+
 fn missing_composition_roots(files: &[RustFile], policy: &Policy) -> Vec<String> {
     let methods = declared_methods(files);
+    let statics = declared_statics(files);
     policy
         .composition_roots
         .iter()
         .filter(|root| {
-            !methods.contains_key(&(root.path.clone(), root.owner.clone(), root.method.clone()))
+            let function =
+                methods.contains_key(&(root.path.clone(), root.owner.clone(), root.method.clone()));
+            let static_item = root.owner == "<free>"
+                && statics.contains(&(root.path.clone(), root.method.clone()));
+            !function && !static_item
         })
         .map(|root| {
             format!(
-                "composition_roots: {}: {}::{} names no function there",
+                "composition_roots: {}: {}::{} names no function or static there",
                 root.path, root.owner, root.method
             )
         })

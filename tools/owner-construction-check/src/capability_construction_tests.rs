@@ -486,6 +486,30 @@ fn static_and_const_items_require_a_composition_root() {
     }
 }
 
+/// A static listed as a root holds an owner the process shares, built
+/// there; any other static holding one constructs it outside a root.
+#[test]
+fn a_static_listed_as_a_root_constructs_the_owner_it_holds() {
+    let path = "crates/app/src/registry.rs";
+    let source = "struct Sender; struct Registry { entry: Sender } \
+        static STORES: Registry = Registry { entry: Sender }; \
+        static OTHER: Registry = Registry { entry: Sender };";
+    let policy = Policy::fixture(&format!(
+        "capability_types = [\"Sender\"]\n[composition_roots]\n\"{path}\" = [\"STORES\"]"
+    ));
+    let found =
+        find_capability_construction_violations(&[RustFile::fixture(path, source)], &policy);
+    assert_eq!(
+        found,
+        [Finding::new(
+            path,
+            1,
+            "<free>::<item> constructs owner Registry outside a composition root",
+            REMEDY
+        )]
+    );
+}
+
 #[test]
 fn arbitrary_associated_factories_are_checked_at_the_use_site() {
     let definitions = r#"

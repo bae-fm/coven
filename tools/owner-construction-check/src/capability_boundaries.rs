@@ -187,6 +187,13 @@ impl<'ast> Visit<'ast> for CapabilityBoundaryVisitor<'_, '_> {
         self.rooted = previous;
     }
 
+    fn visit_item_static(&mut self, node: &'ast syn::ItemStatic) {
+        let previous = self.rooted;
+        self.rooted = self.policy.is_composition_root(self.path, "<free>", &node.ident.to_string());
+        visit::visit_item_static(self, node);
+        self.rooted = previous;
+    }
+
     fn visit_impl_item_fn(&mut self, node: &'ast syn::ImplItemFn) {
         let previous = self.rooted;
         self.rooted = self.policy.is_composition_root(

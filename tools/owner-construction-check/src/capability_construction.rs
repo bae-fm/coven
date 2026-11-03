@@ -519,9 +519,18 @@ impl<'ast> Visit<'ast> for ConstructionVisitor<'_> {
         visit::visit_item_const(self, node);
     }
 
+    // A static listed as a root holds an owner the process shares, such as a
+    // registry of what every store in it has locked; its value is built there.
     fn visit_item_static(&mut self, node: &'ast syn::ItemStatic) {
+        let previous = self
+            .policy
+            .is_composition_root(self.path, "<free>", &node.ident.to_string())
+            .then(|| std::mem::replace(&mut self.scope, ConstructionScope::CompositionRoot));
         self.check_item_type(&node.ty, node.span());
         visit::visit_item_static(self, node);
+        if let Some(previous) = previous {
+            self.scope = previous;
+        }
     }
 
     fn visit_impl_item_const(&mut self, node: &'ast syn::ImplItemConst) {

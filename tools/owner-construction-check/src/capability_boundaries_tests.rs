@@ -203,6 +203,27 @@ fn a_lifetime_authority_starts_its_work() {
     );
 }
 
+/// A static listed as a root builds its value there, a runtime included.
+#[test]
+fn a_static_listed_as_a_root_may_start_its_work() {
+    let mut authority = Policy::gated_fixture();
+    authority.composition_roots.push(crate::policy::CompositionRoot {
+        path: "crates/app-sync/src/runtime.rs".into(),
+        owner: "<free>".into(),
+        method: "RUNTIME".into(),
+    });
+    let source = "static RUNTIME: LazyLock<Runtime> = \
+        LazyLock::new(|| tokio::runtime::Builder::new_multi_thread().build().unwrap()); \
+        static OTHER: LazyLock<Runtime> = \
+        LazyLock::new(|| tokio::runtime::Builder::new_multi_thread().build().unwrap());";
+    let found = find_capability_boundary_violations(
+        &[RustFile::fixture("crates/app-sync/src/runtime.rs", source)],
+        &authority,
+    );
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert_eq!(kind(&found[0]), "runtime construction");
+}
+
 #[test]
 fn spawning_work_is_rejected_outside_composition_roots() {
     let violations = violations(

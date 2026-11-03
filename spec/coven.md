@@ -9707,11 +9707,13 @@ the database owner and the storage owner as arguments and opens neither itself.
 
 **Composition roots.** One authoritative list in the checker's policy names every
 place allowed to construct owners or start long-lived work. Each entry names an
-exact source file, type and method (or free function), not a whole file or a
-type-name suffix. A trait's method is named where the trait declares it: the
-storage connector's `connect` makes each connection, in every connector. The
-roots include opening and bootstrap, provider connection construction, owner
-constructors and task starts.
+exact source file, type and method (or free function, or static), not a whole
+file or a type-name suffix. A static is listed when what it holds is shared by
+the whole process, as the registry of the stores' locks is (F.4). A trait's
+method is named where the trait declares it: the storage connector's `connect`
+makes each connection, in every connector. The roots include opening and
+bootstrap, provider connection construction, owner constructors and task
+starts.
 
 - The checker infers owners from retained capabilities and other owners.
 - Any owner construction outside a listed root fails the check, including
@@ -9770,7 +9772,10 @@ the rules above.
   registry keyed by the store's canonical directory and id, and a notification
   when the lock handles close. There are no timeouts or polling sleeps. A live
   instance in this process, or a lock held by another process, still returns
-  `AlreadyOpen` at once (api.md E1).
+  `AlreadyOpen` at once (api.md E1). The registry is a static: its scope is
+  the process, like the OS file locks it tracks, so every store layout built
+  in the process sees the same one. It is an owner like any other, and the
+  static is its composition root (F.3).
 - **Discarding in the same process** waits the same way. An app that drops its
   handle and then discards the store, as one removing a store it could not
   finish opening does, would otherwise be refused while blocking work of the

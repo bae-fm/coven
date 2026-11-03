@@ -488,7 +488,12 @@ tables = [
 "crates/coven-foundation/src/files/bootstrap.rs" = ["reserve_bootstrap_directory"]
 # Both store listings read the directory on a blocking task.
 "crates/coven-foundation/src/files/layout.rs" = ["StoreDirectories::listed"]
-"crates/coven-foundation/src/files/lock_registry.rs" = ["LockRegistration::open_on_worker"]
+"crates/coven-foundation/src/files/lock_registry.rs" = [
+    # The process's registry of every store's locks: its scope is the
+    # process, like the OS file locks it tracks (F.4).
+    "STORES",
+    "LockRegistration::open_on_worker",
+]
 # A replacement composes the new installation beside the old one, holding
 # the store's writer lock until it is in place.
 "crates/coven-foundation/src/files/replacement.rs" = ["begin"]
