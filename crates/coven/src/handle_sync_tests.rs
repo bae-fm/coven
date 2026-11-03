@@ -105,12 +105,14 @@ async fn a_retry_after_holds_passes_and_sync_now_coalesces() {
     let network = Network::new(1).await;
     let device = &network.devices[0];
     let mut last = device.handle.test_last_pass();
+    // The cooldown and the pass's backoff end only as the test moves the
+    // clock, whatever the machine's load.
+    network.polling.hold_waits();
     device
         .storage
         .set_faults(Faults {
             fail_next: 1,
             failure: StorageFailure::RateLimited,
-            // Two hundred seconds pass in two hundred milliseconds here.
             retry_after: Some(200),
             ..Faults::none()
         })
@@ -118,6 +120,7 @@ async fn a_retry_after_holds_passes_and_sync_now_coalesces() {
     device.handle.sync_now();
     last.wait_for(|last| matches!(last, Some(LastPass::Failed { .. }))).await;
     let requests = device.storage.request_trace().len();
+    let before = passes(device);
     for _ in 0..3 {
         device.handle.sync_now();
     }
@@ -127,7 +130,11 @@ async fn a_retry_after_holds_passes_and_sync_now_coalesces() {
         requests,
         "a pass ran inside the provider cooldown"
     );
+    network.clock.set(network.clock.now() + Duration::from_secs(200));
     last.wait_for(|last| *last == Some(LastPass::Synced)).await;
+    // The three requests ran one pass once the cooldown ended.
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(passes(device) - before, 1);
     network.close().await;
 }
 
@@ -221,12 +228,13 @@ async fn an_uploads_retry_after_holds_the_next_pass() {
     device.handle.set_uploads_paused(true).await.unwrap();
     let photo = attach(&device.handle, "photo", vec![3; 2048]).await;
     network.sync(0).await;
+    // The cooldown ends only as the test moves the clock.
+    network.polling.hold_waits();
     device
         .storage
         .set_faults(Faults {
             fail_next: 1,
             failure: StorageFailure::RateLimited,
-            // Two hundred seconds pass in two hundred milliseconds here.
             retry_after: Some(200),
             ..Faults::none()
         })
@@ -250,6 +258,7 @@ async fn an_uploads_retry_after_holds_the_next_pass() {
         requests,
         "a pass ran inside the upload's provider cooldown"
     );
+    network.clock.set(network.clock.now() + Duration::from_secs(200));
     wait_for_empty_queue(&device.handle).await;
     assert!(file_stored(device, photo).await);
     network.close().await;
