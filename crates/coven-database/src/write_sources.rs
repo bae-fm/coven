@@ -101,7 +101,15 @@ impl<'a> PreWrite<'a> {
         store: &MergeStore<'_>,
         row: RowId,
     ) -> Result<Self, DbError> {
-        Ok(Self { state: store.row(&row)?.state, version: db.schema_version()?, db, row })
+        Self::over(db, store.row(&row)?.state)
+    }
+
+    /// The pre-write merge state `state`, of its own row.
+    fn over(
+        db: &'a DatabaseConnection,
+        state: coven_merge::RowState<Value>,
+    ) -> Result<Self, DbError> {
+        Ok(Self { row: state.row().clone(), state, version: db.schema_version()?, db })
     }
 
     fn source(&self, write: WriteId) -> Result<(ChangeId, u32), DbError> {
@@ -166,7 +174,18 @@ pub(crate) fn authored(
     change: Change<Value>,
     old: BTreeMap<String, Value>,
 ) -> Result<RowChange, DbError> {
-    let pre = PreWrite::new(db, store, row.clone())?;
+    authored_over(db, store.row(&row)?.state, change, old)
+}
+
+/// [`authored`] over the pre-write merge state `state`, of its own row.
+pub(crate) fn authored_over(
+    db: &DatabaseConnection,
+    state: coven_merge::RowState<Value>,
+    change: Change<Value>,
+    old: BTreeMap<String, Value>,
+) -> Result<RowChange, DbError> {
+    let row = state.row().clone();
+    let pre = PreWrite::over(db, state)?;
     let mut setters = BTreeMap::new();
     for column in pre.cells() {
         let replaces = match &change.operation {

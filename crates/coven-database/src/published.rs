@@ -57,18 +57,54 @@ pub(crate) fn capture_rows<'a>(
                 encoded(merge_fields::encode_merge_row(&MergeRow { state: stored.state }))?
             ],
         )?;
-        // Whether the row shows, and the removal loss that holds it out, are
-        // the current rules' outcome: the counted removal view works them
-        // out again under whatever schema reads them (`removals`). Only what
-        // no rule decides is kept: frozen losses, and the cells concurrent
-        // writes displaced.
-        db.for_each(&format!("{} WHERE l.table_name=?1 AND l.key=?2 AND l.audience=?3 AND NOT (l.replacement_kind='rules' AND l.frozen=0)",crate::loss_record::SELECT),params![row.table,row.key,audience],|r| {
-            let loss=crate::loss_record::read(r)?;
-            db.internal_execute("INSERT INTO _coven_published_losses(table_name,key,audience,record) VALUES(?1,?2,?3,?4)",params![row.table,row.key,audience,encoded(merge_fields::encode_loss(&loss))?])?;
-            Ok::<_,DbError>(())
-        })?;
+        keep_losses(db, row)?;
         db.internal_execute("INSERT INTO _coven_published_creations SELECT * FROM _coven_creations WHERE table_name=?1 AND key=?2 AND audience=?3",params![row.table,row.key,audience])?;
         db.internal_execute("INSERT INTO _coven_published_file_refs SELECT device,file FROM _coven_row_file_refs WHERE table_name=?1 AND key=?2 ON CONFLICT DO NOTHING",params![row.table,row.key])?;
+    }
+    Ok(())
+}
+
+/// Keep `row`'s losses beside its record. Whether the row shows, and the
+/// removal loss that holds it out, are the current rules' outcome: the
+/// counted removal view works them out again under whatever schema reads
+/// them (`removals`). Only what no rule decides is kept: frozen losses, and
+/// the cells concurrent writes displaced.
+fn keep_losses(db: &DatabaseConnection, row: &RowId) -> Result<(), DbError> {
+    let audience = audience_text(&row.audience);
+    db.for_each(&format!("{} WHERE l.table_name=?1 AND l.key=?2 AND l.audience=?3 AND NOT (l.replacement_kind='rules' AND l.frozen=0)",crate::loss_record::SELECT),params![row.table,row.key,audience],|r| {
+        let loss=crate::loss_record::read(r)?;
+        db.internal_execute("INSERT INTO _coven_published_losses(table_name,key,audience,record) VALUES(?1,?2,?3,?4)",params![row.table,row.key,audience,encoded(merge_fields::encode_loss(&loss))?])?;
+        Ok::<_,DbError>(())
+    })
+}
+
+/// Preserve once, before a queued migration write's losses reach them, the
+/// losses of `rows` whose table that migration dropped: the counted state
+/// holds nothing else of them (§18.7).
+pub(crate) fn capture_dropped<'a>(
+    db: &DatabaseConnection,
+    rows: impl IntoIterator<Item = &'a RowId>,
+) -> Result<(), DbError> {
+    db.internal_execute(
+        "INSERT INTO _coven_published(singleton) VALUES(1) ON CONFLICT DO NOTHING",
+        [],
+    )?;
+    for row in rows {
+        let audience = audience_text(&row.audience);
+        let kept: bool = db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM _coven_published_dropped WHERE table_name=?1 AND key=?2 AND audience=?3)
+             OR EXISTS(SELECT 1 FROM _coven_published_losses WHERE table_name=?1 AND key=?2 AND audience=?3)",
+            params![row.table, row.key, audience],
+            |r| r.get(0),
+        )?;
+        if kept {
+            continue;
+        }
+        db.internal_execute(
+            "INSERT INTO _coven_published_dropped(table_name,key,audience) VALUES(?1,?2,?3)",
+            params![row.table, row.key, audience],
+        )?;
+        keep_losses(db, row)?;
     }
     Ok(())
 }
@@ -204,6 +240,7 @@ pub(crate) fn clear(db: &DatabaseConnection) -> Result<(), DbError> {
         "_coven_published_rows",
         "_coven_published_losses",
         "_coven_published_creations",
+        "_coven_published_dropped",
         "_coven_published_file_refs",
         "_coven_published",
     ] {
@@ -223,7 +260,7 @@ pub(crate) fn restore(
     if !exists(db)? {
         return Ok(BTreeSet::new());
     }
-    let rows=db.query("SELECT table_name,key,audience FROM _coven_published_rows UNION SELECT table_name,key,audience FROM _coven_published_losses",[],crate::row_queries::read_identity)?;
+    let rows=db.query("SELECT table_name,key,audience FROM _coven_published_rows UNION SELECT table_name,key,audience FROM _coven_published_losses UNION SELECT table_name,key,audience FROM _coven_published_dropped",[],crate::row_queries::read_identity)?;
     let mut touched = BTreeSet::new();
     #[cfg(any(test, feature = "test-utils"))]
     db.record_work(|work| work.published_rows += rows.len());

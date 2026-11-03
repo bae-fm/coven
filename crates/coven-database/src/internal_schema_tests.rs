@@ -162,6 +162,7 @@ async fn only_the_spec_tables_are_created() {
                 "_coven_provider_access",
                 "_coven_published",
                 "_coven_published_creations",
+                "_coven_published_dropped",
                 "_coven_published_file_refs",
                 "_coven_published_losses",
                 "_coven_published_rows",

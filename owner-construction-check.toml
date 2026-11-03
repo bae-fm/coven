@@ -554,6 +554,7 @@ homes = [
 tables = [
     "_coven_published",
     "_coven_published_creations",
+    "_coven_published_dropped",
     "_coven_published_file_refs",
     "_coven_published_losses",
     "_coven_published_rows",

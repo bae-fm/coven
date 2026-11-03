@@ -238,8 +238,18 @@ fn remote_change(
     id: &str,
     changes: &[(&str, coven_format::value::Value)],
 ) -> coven_format::write::RowChange {
+    change_from(&crate::write::tests::records(database), table, id, changes)
+}
+
+/// Another device's update of `table` row `id`, read from what `records`,
+/// this device's writes, wrote of the row.
+fn change_from(
+    records: &[coven_format::write::WriteRecord],
+    table: &str,
+    id: &str,
+    changes: &[(&str, coven_format::value::Value)],
+) -> coven_format::write::RowChange {
     use coven_merge::Operation;
-    let records = crate::write::tests::records(database);
     let key =
         coven_format::key::encode_key(&[coven_format::value::Value::Text(id.into())]).unwrap();
     let rows: Vec<_> = records
@@ -286,12 +296,55 @@ async fn try_remote_write(
     schema_version: Option<u32>,
     count_queue: bool,
 ) -> Result<crate::ApplyOutcome, DbError> {
-    use coven_format::write::{WriteHeader, WritePart, WriteRecord};
     let row = database.inspect_writer_schema(|db, schema| {
         let app = crate::write_rows::AppView::after(db, schema);
         let store = crate::merge_store::MergeStore::new(db, &app);
         crate::write_sources::authored(db, &store, row.row, row.change, row.old).unwrap()
     });
+    deliver(database, row, schema_version, count_queue).await
+}
+
+/// Deliver another device's edit of `table` row `id` as the next slot, made
+/// without seeing this device's queued writes: it replaces the counted
+/// setters, so it is concurrent with a queued write to the same cell (§8).
+pub(crate) async fn remote_update_concurrent_with_queue(
+    database: &crate::Database,
+    table: &str,
+    id: &str,
+    changes: &[(&str, coven_format::value::Value)],
+) {
+    let counted: Vec<_> = crate::write::tests::records(database)
+        .into_iter()
+        .filter(|record| {
+            database.inspect_writer(|db| {
+                crate::sequence::write_slot(db, record.header.position).unwrap().is_some()
+            })
+        })
+        .collect();
+    let row = change_from(&counted, table, id, changes);
+    let row = database.inspect_writer_schema(|db, schema| {
+        let state = match crate::published::kept_state(db, &row.row).unwrap() {
+            Some(state) => state,
+            None => {
+                let app = crate::write_rows::AppView::after(db, schema);
+                crate::merge_store::MergeStore::new(db, &app).row(&row.row).unwrap().state
+            }
+        };
+        crate::write_sources::authored_over(db, state, row.change, row.old).unwrap()
+    });
+    assert_eq!(deliver(database, row, None, false).await.unwrap(), crate::ApplyOutcome::Applied);
+}
+
+/// Deliver the authored `row` as another device's write in the next slot,
+/// after first counting every write this device has made when
+/// `count_queue` is set.
+async fn deliver(
+    database: &crate::Database,
+    row: coven_format::write::RowChange,
+    schema_version: Option<u32>,
+    count_queue: bool,
+) -> Result<crate::ApplyOutcome, DbError> {
+    use coven_format::write::{WriteHeader, WritePart, WriteRecord};
     let previous = crate::write::tests::records(database).pop().expect("local seed write").header;
     if count_queue {
         for original in crate::write::tests::records(database) {

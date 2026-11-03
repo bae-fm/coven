@@ -46,11 +46,23 @@ pub(crate) fn stage(db: &DatabaseConnection, schema: &WriteSchema) -> Result<(),
             }
             Ok(())
         })?;
+        // A migration write puts losses too, beside its rows: those of a row
+        // it doesn't change, or whose table it dropped, keep their counted
+        // state first as well.
+        let mut dropped = Vec::new();
+        for row in crate::captured_changes::loss_rows(db, &header.header)? {
+            if schema.schema.tables.contains_key(&row.table.to_ascii_lowercase()) {
+                rows.push(row);
+            } else {
+                dropped.push(row);
+            }
+        }
         crate::published::capture_rows(
             db,
             &crate::merge_store::MergeStore::from_staged(db, &schema.schema),
             &rows,
         )?;
+        crate::published::capture_dropped(db, &dropped)?;
         crate::download_stage::stage(db, schema, &header.header, &opened, |audience| {
             Ok(!crate::reload_gate::reloading(db, audience)?)
         })

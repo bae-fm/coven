@@ -133,6 +133,28 @@ pub(crate) fn project(
     Ok(())
 }
 
+/// The rows whose losses `losses` puts for the write `header` names.
+pub(crate) fn loss_rows(
+    db: &DatabaseConnection,
+    header: &WriteHeader,
+) -> Result<Vec<coven_merge::RowId>, DbError> {
+    if header.disposition != coven_format::write::WriteDisposition::Migration
+        || !includes(db, header)?
+    {
+        return Ok(Vec::new());
+    }
+    db.query(
+        "SELECT record FROM _coven_migration_losses WHERE write_id=?1",
+        [coven_format::merge_fields::encode_write_id(&header.position)?],
+        |r| {
+            Ok(crate::write_encoding::decoded(coven_format::merge_fields::decode_loss(
+                &r.get::<_, Vec<u8>>(0)?,
+            ))?
+            .row)
+        },
+    )
+}
+
 pub(crate) fn losses(
     db: &DatabaseConnection,
     schema: &WriteSchema,

@@ -61,7 +61,7 @@ pub(crate) fn losses<E: From<DbError>>(
         generation BLOB NOT NULL,column_id INTEGER,value BLOB NOT NULL,set_by BLOB NOT NULL,
         frozen INTEGER NOT NULL,replacement_kind TEXT NOT NULL,replaced_by BLOB NOT NULL);",
     )?;
-    db.internal_execute("INSERT INTO temp._coven_snapshot_losses SELECT * FROM _coven_lost l WHERE l.audience=?1 AND NOT EXISTS(SELECT 1 FROM _coven_published_rows p WHERE p.table_name=l.table_name AND p.key=l.key AND p.audience=l.audience) AND NOT EXISTS(SELECT 1 FROM _coven_published_losses p WHERE p.table_name=l.table_name AND p.key=l.key AND p.audience=l.audience)",[audience_text(audience)])?;
+    db.internal_execute("INSERT INTO temp._coven_snapshot_losses SELECT * FROM _coven_lost l WHERE l.audience=?1 AND NOT EXISTS(SELECT 1 FROM _coven_published_rows p WHERE p.table_name=l.table_name AND p.key=l.key AND p.audience=l.audience) AND NOT EXISTS(SELECT 1 FROM _coven_published_losses p WHERE p.table_name=l.table_name AND p.key=l.key AND p.audience=l.audience) AND NOT EXISTS(SELECT 1 FROM _coven_published_dropped p WHERE p.table_name=l.table_name AND p.key=l.key AND p.audience=l.audience)",[audience_text(audience)])?;
     db.for_each(
         "SELECT record FROM _coven_published_losses WHERE audience=?1 ORDER BY id",
         [audience_text(audience)],

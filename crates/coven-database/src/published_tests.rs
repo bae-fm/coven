@@ -10,6 +10,7 @@ pub(crate) fn fill_for_plans(db: &rusqlite::Connection) {
          INSERT INTO _coven_published_rows SELECT tab,key,audience,x'00' FROM fixture;
          INSERT INTO _coven_published_losses SELECT i,tab,key,audience,x'00' FROM fixture;
          INSERT INTO _coven_published_creations SELECT tab,key,audience,CAST(device || n AS BLOB),x'00' FROM fixture;
+         INSERT INTO _coven_published_dropped SELECT tab,key,audience FROM fixture;
          INSERT INTO _coven_published_file_refs SELECT device,substr(key,17,16) FROM fixture;",
     )
     .unwrap();
@@ -30,7 +31,7 @@ pub(crate) fn scan_reason(
     Some("the counted projection marker has at most one row"),
 ("published.rs", "DELETE FROM {table}", table) if sql == format!("DELETE FROM {table}") =>
     Some("releasing the counted projection clears all of its retained records"),
-("published.rs", "SELECT table_name,key,audience FROM _coven_published_rows UNION SELECT table_name,key,audience FROM _coven_published_losses", "_coven_published_rows" | "_coven_published_losses") =>
+("published.rs", "SELECT table_name,key,audience FROM _coven_published_rows UNION SELECT table_name,key,audience FROM _coven_published_losses UNION SELECT table_name,key,audience FROM _coven_published_dropped", "_coven_published_rows" | "_coven_published_losses" | "_coven_published_dropped") =>
     Some("restoration visits every saved row identity"),
 ("published.rs", "SELECT table_name,key,audience FROM _coven_published_rows", "_coven_published_rows") =>
     Some("the counted removal view touches every kept row"),
@@ -389,5 +390,48 @@ async fn a_dropped_table_freezes_a_kept_rows_counted_removal() {
     let [live] = &live[..] else { panic!("one live frozen loss") };
     assert!(live.frozen);
     assert_eq!(lost_title(live), &Value::Text("Queued".into()));
+    db.close().await.unwrap();
+}
+
+/// Ana renames her counted album `first` on this device while Ben, who
+/// hasn't seen that, renames it too. Folding her unsent rename over Ben's
+/// leaves her title as a lost value the app shows, but the slots alone hold
+/// only Ben's rename, so the counted projection has no loss. Version 2 drops
+/// `albums`, freezing the app's lost value with the table (§18.7); the
+/// counted projection still has none, before the next slot and after it.
+#[tokio::test]
+async fn a_dropped_table_keeps_a_kept_row_without_the_queues_losses() {
+    const SCHEMA: &str = "CREATE TABLE albums(id TEXT NOT NULL PRIMARY KEY, title TEXT);
+         CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY, title TEXT)";
+    let store = TestStore::new();
+    let initial = || vec![Migration::addition(1, "schema", SCHEMA)];
+    let db = store.builder(synced(&["albums", "notes"]), initial()).open().await.unwrap();
+    sql(&db, "INSERT INTO albums VALUES('first','First'); INSERT INTO notes VALUES('n','Note')")
+        .await
+        .unwrap();
+    count_own(&db).await;
+    sql(&db, "UPDATE albums SET title='Queued' WHERE id='first'").await.unwrap();
+    crate::tests::remote_update_concurrent_with_queue(
+        &db,
+        "albums",
+        "first",
+        &[("title", Value::Text("Ben".into()))],
+    )
+    .await;
+    assert_eq!(db.lost_values().await.unwrap().len(), 1, "the app shows Ana's title as lost");
+    assert!(counted_losses(&db).is_empty());
+    db.close().await.unwrap();
+    let mut migrations = initial();
+    migrations.push(Migration::breaking(2, "drop", "DROP TABLE albums", OldWrites::Drop));
+    let db = store.builder(synced(&["notes"]), migrations).open().await.unwrap();
+    assert_eq!(db.lost_values().await.unwrap().len(), 1, "the app keeps it frozen");
+    assert!(counted_losses(&db).is_empty(), "{:?}", counted_losses(&db));
+    // The next slot puts the counted state back and folds the queue again,
+    // its migration's frozen loss included; the counted state still keeps
+    // none.
+    let note = [("title", Value::Text("Ben's note".into()))];
+    crate::tests::remote_update_beside_queue(&db, "notes", "n", &note).await;
+    assert_eq!(db.lost_values().await.unwrap().len(), 1);
+    assert!(counted_losses(&db).is_empty(), "{:?}", counted_losses(&db));
     db.close().await.unwrap();
 }

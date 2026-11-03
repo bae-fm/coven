@@ -60,6 +60,13 @@ pub(crate) fn carry(
             .map_err(crate::write_metadata::MetadataFailure::stored)?;
         let old = merged.state.row().clone();
         let Some(table) = names.tables.get(&old.table) else {
+            // Its table goes, and the app's row with it, but this device's
+            // queue still reached it: the counted state keeps only its kept
+            // losses, never the ones the app's row leaves frozen (§18.7).
+            db.internal_execute(
+                "INSERT INTO _coven_published_dropped(table_name,key,audience) VALUES(?1,?2,?3) ON CONFLICT DO NOTHING",
+                params![old.table, old.key, crate::write_encoding::audience_text(&old.audience)],
+            )?;
             return Ok::<_, DbError>(());
         };
         let row = RowId { table: table.clone(), ..old.clone() };

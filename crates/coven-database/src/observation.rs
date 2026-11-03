@@ -18,7 +18,7 @@ pub(crate) type ReadSet = Vec<TableRead>;
 /// publication and claim records each write keeps beside its rows. A write records no
 /// change to them, and recording one costs as much as an app row's (§4); a
 /// live query that read one would be a bug coven refuses at once.
-const UNOBSERVED: [&str; 20] = [
+const UNOBSERVED: [&str; 21] = [
     "_coven_authored_admissions",
     "_coven_authored_changes",
     "_coven_authored_parts",
@@ -30,6 +30,7 @@ const UNOBSERVED: [&str; 20] = [
     "_coven_part_proofs",
     "_coven_published",
     "_coven_published_creations",
+    "_coven_published_dropped",
     "_coven_published_file_refs",
     "_coven_published_losses",
     "_coven_published_rows",

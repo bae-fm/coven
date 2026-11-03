@@ -7025,6 +7025,12 @@ discard it.
   taken-out records under the schema it starts from, before any of its
   statements runs, and freezes those of a table it drops with the table's other
   lost values. Once the table is gone, nothing could work them out again.
+- A kept row whose table a migration drops stays kept: its kept state is
+  then only its lost values, frozen. The app's row may leave others frozen
+  that only the unsent writes made. Ana's unsent rename of `first`, folded
+  over Ben's concurrent one, leaves her title as a lost value; the slots
+  alone leave none. Dropping `albums` freezes her title for the app, and the
+  kept state still holds no lost value of the album.
 - It keeps its table and column names, key, audience, plain values, the writes
   that set them and its original cause. Live parent links are stripped; the old
   schema need not exist.

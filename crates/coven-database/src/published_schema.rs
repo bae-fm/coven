@@ -28,6 +28,16 @@ macro_rules! coven_published_tables {
             ) STRICT;
             CREATE INDEX _coven_published_losses_audience ON _coven_published_losses(audience,table_name,key,id);
         ");
+        // A kept row whose table a migration dropped: the counted state holds
+        // nothing of it but its kept losses, whatever the app's row left.
+        $visit!(_coven_published_dropped, "
+            CREATE TABLE _coven_published_dropped (
+                table_name TEXT NOT NULL,
+                key BLOB NOT NULL,
+                audience TEXT NOT NULL,
+                PRIMARY KEY(table_name,key,audience)
+            ) STRICT, WITHOUT ROWID;
+        ");
         $visit!(_coven_published_file_refs, "
             CREATE TABLE _coven_published_file_refs (
                 device BLOB NOT NULL CHECK(length(device)=8),
