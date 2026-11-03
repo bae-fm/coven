@@ -2,21 +2,23 @@
 use crate::{sqlite::DatabaseConnection, DbError};
 use std::cell::Cell;
 
-/// A transaction-local catalog on the input connection. Its SQLite temporary
-/// storage spills to disk; each cursor materializes only one bounded record.
+/// A transaction-local catalog on the input connection, for one input
+/// transaction. Its SQLite temporary storage spills to disk; each cursor
+/// materializes only one bounded record.
 pub(crate) struct PreparedInputs<'a> {
     db: &'a DatabaseConnection,
     next: Cell<i64>,
 }
 impl<'a> PreparedInputs<'a> {
-    pub(crate) fn with<T>(
-        db: &'a DatabaseConnection,
-        consume: impl FnOnce(&Self) -> Result<T, DbError>,
-    ) -> Result<T, DbError> {
+    /// Create the catalog in the transaction `db` has open. A failed
+    /// transaction rolls it back; `finish` drops it once its records are read.
+    pub(crate) fn new(db: &'a DatabaseConnection) -> Result<Self, DbError> {
         db.batch("CREATE TEMP TABLE _coven_prepared_records(source INTEGER NOT NULL,ordinal INTEGER NOT NULL,record BLOB NOT NULL,PRIMARY KEY(source,ordinal)) WITHOUT ROWID")?;
-        let result = consume(&Self { db, next: Cell::new(0) })?;
-        db.batch("DROP TABLE temp._coven_prepared_records")?;
-        Ok(result)
+        Ok(Self { db, next: Cell::new(0) })
+    }
+    /// Drop the catalog and every record prepared in it.
+    pub(crate) fn finish(self) -> Result<(), DbError> {
+        self.db.batch("DROP TABLE temp._coven_prepared_records")
     }
     /// Run transaction-local work on the catalog's connection.
     pub(crate) fn run<T>(&self, work: impl FnOnce(&'a DatabaseConnection) -> T) -> T {

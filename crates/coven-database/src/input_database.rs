@@ -108,7 +108,12 @@ impl InputDatabase {
         consume: impl FnOnce(&crate::input_preparation::PreparedInputs<'_>) -> Result<T, DbError>,
     ) -> Result<T, DbError> {
         with_locked(&self.writer, |writer| {
-            writer.transaction(|db| crate::input_preparation::PreparedInputs::with(db, consume))
+            writer.transaction(|db| {
+                let inputs = crate::input_preparation::PreparedInputs::new(db)?;
+                let result = consume(&inputs)?;
+                inputs.finish()?;
+                Ok(result)
+            })
         })
     }
     pub(crate) fn prepare_claim<T>(

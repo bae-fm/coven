@@ -186,9 +186,9 @@ impl InputDatabase {
     ) -> Result<T, DbError> {
         super::with_locked(&self.writer, |writer| {
             let read = writer.transaction(|db| {
-                let result = crate::input_preparation::PreparedInputs::with(db, |inputs| {
-                    consume(inputs, stagings)
-                })?;
+                let inputs = crate::input_preparation::PreparedInputs::new(db)?;
+                let result = consume(&inputs, stagings)?;
+                inputs.finish()?;
                 remove_all(db, stagings.as_mut())?;
                 Ok(result)
             });
