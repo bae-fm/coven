@@ -9814,7 +9814,13 @@ may use real ones. The checker's policy lists as shared state `Barrier`,
 reach them sets for all the others, `Notify`, which wakes whichever holder
 waits on it, a task's `JoinHandle`, which can abort or await the task, and
 the ends of a channel, `Sender`, `UnboundedSender`, `Receiver` and
-`UnboundedReceiver`, each of which shares the channel with the other.
+`UnboundedReceiver`, each of which shares the channel with the other. A lock,
+`Mutex` and its `Condvar`, is shared state once it is shared: held through an
+`Arc`, `Rc` or `Weak` or by reference, by itself or inside a type that holds
+it, as a store's authorizer shares its state with the hooks it gives SQLite.
+One an owner holds by value and lets no one point at is that owner's private
+state. A method handing out a lock through a pointer or a reference hands out
+shared state.
 
 - The builder configures the clock, custody and OAuth. Ids use OS randomness;
   only `test-utils` allows replacing their source (api.md E1).
