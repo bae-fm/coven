@@ -153,10 +153,10 @@ where
         }
     }
 
-    /// A handle that counts this query's runs, its processed form's too.
+    /// How often this query has run so far, its processed form's runs too.
     #[cfg(any(test, feature = "test-utils"))]
     pub fn runs(&self) -> LiveQueryRuns {
-        self.runs.clone()
+        self.runs
     }
 
     /// Obtain a cloneable handle for replacing this query's request.
@@ -316,7 +316,7 @@ impl<T: Send + 'static> LiveQuery<T> {
         Some(self.inner.next().await?.result)
     }
 
-    /// A handle that counts this query's runs.
+    /// How often this query has run so far.
     #[cfg(any(test, feature = "test-utils"))]
     pub fn runs(&self) -> LiveQueryRuns {
         self.inner.runs()

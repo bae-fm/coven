@@ -3128,9 +3128,10 @@ pub struct ReconfigurableLiveQuery<Q, T> { /* private fields */ }
 /// Shared access to replacing a live query's request (E4).
 pub struct LiveQueryRequests<Q> { /* private fields */ }
 
-/// How often a live query has run, for tests and benchmarks that count the
-/// runs writes caused and those that found nothing new (E4).
+/// How often a live query had run when asked, for tests and benchmarks that
+/// count the runs writes caused and those that found nothing new (E4).
 #[cfg(feature = "test-utils")]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct LiveQueryRuns { /* private fields */ }
 
 /// A request revision assigned by one live query (E4).
@@ -3278,7 +3279,7 @@ impl<T: Send + 'static> LiveQuery<T> {
         P: Fn(T) -> CovenResult<U> + Send + Sync + 'static,
         U: Send + 'static;
 
-    /// A handle that counts this query's runs, its processed form's too.
+    /// How often this query has run so far, its processed form's runs too.
     #[cfg(feature = "test-utils")]
     pub fn runs(&self) -> LiveQueryRuns;
 }
@@ -3300,7 +3301,7 @@ where
     /// A handle that replaces the request.
     pub fn requests(&self) -> LiveQueryRequests<Q>;
 
-    /// A handle that counts this query's runs, its processed form's too.
+    /// How often this query has run so far, its processed form's runs too.
     #[cfg(feature = "test-utils")]
     pub fn runs(&self) -> LiveQueryRuns;
 

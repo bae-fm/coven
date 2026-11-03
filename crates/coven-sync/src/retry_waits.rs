@@ -96,7 +96,7 @@ impl RetryWaits {
             state: Arc::default(),
             evidence: Mutex::default(),
             rearmed: tokio::sync::watch::channel(0).0,
-            network: network_report::Reports::default(),
+            network: network_report::Reports::new(),
             requests: Mutex::default(),
             failures: crate::failure_log::FailureLog::default(),
         };
@@ -115,7 +115,7 @@ impl RetryWaits {
             state: Arc::default(),
             evidence: Mutex::default(),
             rearmed: tokio::sync::watch::channel(0).0,
-            network: network_report::Reports::default(),
+            network: network_report::Reports::new(),
             requests: Mutex::default(),
             failures: crate::failure_log::FailureLog::default(),
         }

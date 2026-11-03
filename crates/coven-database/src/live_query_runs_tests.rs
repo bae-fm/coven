@@ -28,7 +28,6 @@ async fn counts_runs_writes_and_equal_results() {
             })?)
         })
         .process(Ok);
-    let runs = query.runs();
     assert!(!next(&mut query).await);
     write(&db, "UPDATE items SET value = 1 WHERE id = 2");
     write(&db, "UPDATE items SET value = 2 WHERE id = 1");
@@ -38,6 +37,7 @@ async fn counts_runs_writes_and_equal_results() {
     assert!(tokio::time::timeout(Duration::from_millis(300), query.next()).await.is_err());
     write(&db, "UPDATE items SET value = 0 WHERE id = 1");
     assert!(!next(&mut query).await);
+    let runs = query.runs();
     assert_eq!((runs.runs(), runs.writes(), runs.equal()), (4, 3, 1));
     db.close().await.unwrap();
 }

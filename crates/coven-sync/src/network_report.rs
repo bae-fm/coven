@@ -71,17 +71,16 @@ pub(crate) struct Reports {
     handled: [AtomicU64; 2],
 }
 
-impl Default for Reports {
-    fn default() -> Self {
+impl Reports {
+    /// No reports yet, and none acted on.
+    pub(crate) fn new() -> Self {
         Self {
             reported: tokio::sync::watch::channel(0).0,
             retried: AtomicU64::new(0),
             handled: [AtomicU64::new(0), AtomicU64::new(0)],
         }
     }
-}
 
-impl Reports {
     /// Reports so far, and which waits those after `seen` end; `None` when
     /// none arrived since.
     fn since(&self, seen: u64) -> (u64, Option<Ending>) {

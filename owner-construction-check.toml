@@ -76,6 +76,10 @@ capability_types = [
     "Semaphore",
     "RwLock",
     "JoinHandle",
+    "AtomicBool",
+    "AtomicI64",
+    "AtomicU64",
+    "AtomicUsize",
 ]
 capability_traits = [
     "Clock",
@@ -208,6 +212,12 @@ task_types = [
     # One read's body from the in-memory provider, which shares the
     # provider's state to answer the holds a test placed on it.
     "MemoryBody",
+    # One request to the in-memory provider, counted among those running
+    # until it ends.
+    "ActiveMemoryRequest",
+    # One change of the files owner's connection, which holds its upload
+    # runs until it ends.
+    "ConnectionChange",
     "UploadedFile",
     "RetainedInput",
     "ObjectInput",
@@ -268,6 +278,10 @@ external_types = [
     "Semaphore",
     "RwLock",
     "JoinHandle",
+    "AtomicBool",
+    "AtomicI64",
+    "AtomicU64",
+    "AtomicUsize",
 ]
 internal_dependency_types = ["DatabaseConnection"]
 closed_session_types = [
@@ -455,6 +469,8 @@ tables = [
 # A replacement composes the new installation beside the old one, holding
 # the store's writer lock until it is in place.
 "crates/coven-foundation/src/files/replacement.rs" = ["begin"]
+# A test's id source, which a test hands the builder as it would random ids.
+"crates/coven-foundation/src/id_source.rs" = ["SequentialIds::new"]
 
 "crates/coven-crypto/src/custody/key_session.rs" = [
     "KeySession::open",
@@ -560,6 +576,8 @@ tables = [
 # One retry schedule per opened installation, injected into every worker and
 # connection; a read-only handle keeps its own in memory.
 "crates/coven-sync/src/retry_waits.rs" = ["RetryWaits::open", "RetryWaits::in_memory"]
+# The network and retry reports that schedule's owners act on (§6.7).
+"crates/coven-sync/src/network_report.rs" = ["Reports::new"]
 "crates/coven-sync/src/sync_loop.rs" = ["SyncLoop::new"]
 # One invite expiry per writer handle, connected or not; the handle's
 # storage owner keeps it and stops it as it closes.
