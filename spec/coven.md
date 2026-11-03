@@ -9851,6 +9851,26 @@ the rules above.
   a send to a receiver that is gone, says why in its `expect` attribute. The
   functions that turn errors into pending reasons name every variant, so a new
   variant can't fall into a catch-all.
+- **A choice coven needs from the app is a required argument.** The app
+  can't forget it, because the call or type doesn't exist without it: a
+  namespace takes its cache budget (`Namespace::new(name, kind,
+  cache_budget)`, §17.8), and a breaking migration takes what to do with late
+  writes in the old shape (`Migration::breaking(.., old_writes)`, §18.6). A
+  default would make the choice for the app without its knowing.
+- **No runtime checks of coven's own work.** Coven never reads back what it
+  just wrote to compare it, and never computes a result a second way to
+  compare the two. Runtime checks are for inputs coven doesn't control: what
+  storage holds, other devices' objects, the app's values, providers'
+  replies. Coven's own correctness comes from its tests, the Lean proofs, and
+  the tests that compare the Rust with the Lean models (§22).
+- **A rare case takes a general mechanism.** A case rare in real use is
+  handled by one coven already has: its value becomes a lost value, its
+  change is dropped with its dropped source (§9.5), the call is refused to
+  whoever made it, or the work is retried. Only a case common in real use gets
+  a path of its own, since every path is code, spec text and proofs to keep
+  correct. Ben's phone can't put a file kept only on Ana's laptop into a Gifts
+  row: the write fails with `NotThisDevice` (§17.2), and Ana makes it from her
+  laptop, rather than coven fetching the bytes between devices.
 - **Files.** A source file holds at most 1,000 lines, and its tests live beside it
   in `<name>_tests.rs`.
 - **Fakes.** Crates offer shared fakes through `test-utils` where needed, such as
