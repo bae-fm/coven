@@ -118,3 +118,47 @@ fn trait_implementations_have_the_same_parameter_boundary_as_explicit_capabiliti
         )]
     );
 }
+
+/// A handle reaches its holder when the holder is built, or a free function
+/// as its argument; no other method of any type takes one.
+#[test]
+fn a_handle_is_received_only_by_constructors_roots_and_free_functions() {
+    let policy = Policy::fixture(
+        r#"
+        handles = { Requests = "Query" }
+        [composition_roots]
+        "crates/app/src/view.rs" = ["View::assemble"]
+        "#,
+    );
+    let files = vec![RustFile::fixture(
+        "crates/app/src/view.rs",
+        r#"
+        struct Requests;
+        struct Query;
+        struct View { requests: Requests }
+        struct Value;
+        impl View {
+            fn new(requests: Requests) -> Self { todo!() }
+            fn assemble(requests: Requests) {}
+            fn replace(&mut self, requests: Requests) {}
+        }
+        impl Value { fn send(&self, requests: &Requests) {} }
+        impl Query { fn accept(&self, requests: Requests) {} }
+        fn send(requests: &Requests) {}
+        "#,
+    )];
+    let files = checked(&files);
+    let graph = OwnerGraph::collect(&files, &policy);
+    let violations = find_retained_capability_parameter_violations(&files, &graph.owners, &policy);
+    assert_eq!(
+        violations,
+        [(9, "View::replace"), (11, "Value::send"), (12, "Query::accept")].map(|(line, method)| {
+            Finding::new(
+                "crates/app/src/view.rs",
+                line,
+                format!("{method} takes handle Requests outside a constructor"),
+                "a holder receives a handle when it is built, or a free function as its argument",
+            )
+        })
+    );
+}

@@ -2,6 +2,9 @@
 //! public field; callers ask it to do the work. And a method never takes a raw
 //! capability, such as a database connection, as a parameter.
 //!
+//! A handle is the one thing an owner hands out on purpose: its owner returns
+//! it, and nothing else does, not even a holder it was given to.
+//!
 //! The rules here read the declared types transitively: what an owner
 //! retains is every type its fields reach. A method that returns a retained
 //! internal dependency, a wrapper that itself exposes one, or a service the
@@ -42,8 +45,8 @@ pub(crate) fn find_owner_dependency_leaks(
     let phantoms = &policy.phantom_type_arguments;
     let methods = collect_owner_methods(files, phantoms);
     let raw = RAW_SQLITE_HANDLES.iter().map(|(name, _)| name.to_string()).collect::<BTreeSet<_>>();
-    let capabilities = &policy.capability_types;
-    let services = graph.owners.union(capabilities).cloned().collect::<BTreeSet<_>>();
+    let capabilities = policy.held_capabilities();
+    let services = graph.owners.union(&capabilities).cloned().collect::<BTreeSet<_>>();
     let internal = policy.internal_dependency_types.union(&raw).cloned().collect::<BTreeSet<_>>();
     let retained = methods
         .iter()
@@ -61,6 +64,20 @@ pub(crate) fn find_owner_dependency_leaks(
             let held = &retained[&method.owner];
             let rooted = policy.is_composition_root(&method.path, &method.owner, &method.method);
             for output in &method.output {
+                if let Some(owner) = policy.handles.get(output) {
+                    if !rooted && !policy.makes_handle(&method.owner, output) {
+                        leaks.insert(Finding::new(
+                            &method.path,
+                            method.line,
+                            format!(
+                                "{}::{} hands out handle {output}, which only {owner} hands out",
+                                method.owner, method.method
+                            ),
+                            HANDLE_REMEDY,
+                        ));
+                    }
+                    continue;
+                }
                 let retained_service = services.contains(output)
                     && held.contains(output)
                     && !transfers_task(method, output, policy);
@@ -121,6 +138,9 @@ pub(crate) fn find_owner_dependency_leaks(
 }
 
 const REMEDY: &str = "an owner never hands out what it holds; callers ask it to do the work";
+
+const HANDLE_REMEDY: &str =
+    "a handle's owner hands it out; a holder receives it when it is built and keeps it";
 
 /// A consumed task can hand its owned permit or prepared result to the next
 /// task. Borrowed getters and wrappers exposing raw dependencies

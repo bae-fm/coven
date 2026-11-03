@@ -2,6 +2,10 @@
 //! store directory: it is fixed when the owner graph is built, and the owner
 //! uses the one it retains. Only an owner's constructors and the composition
 //! roots accept the policy's construction-only capabilities.
+//!
+//! A handle (Appendix F.3) flows the same way, into whatever holds it: no
+//! method but a constructor or a composition root takes one, whichever type
+//! the method belongs to. A free function may take one.
 
 use std::collections::BTreeSet;
 
@@ -46,9 +50,6 @@ fn find_in_items(
                 let Some(owner) = type_name(&item.self_ty) else {
                     continue;
                 };
-                if !owners.contains(&owner) {
-                    continue;
-                }
                 for impl_item in &item.items {
                     let syn::ImplItem::Fn(method) = impl_item else {
                         continue;
@@ -66,6 +67,21 @@ fn find_in_items(
                             continue;
                         };
                         let names = supplied_type_names(&input.ty, &policy.phantom_type_arguments);
+                        for handle in policy.handles.keys().filter(|handle| names.contains(*handle))
+                        {
+                            violations.insert(Finding::new(
+                                path,
+                                input.span().start().line,
+                                format!(
+                                    "{owner}::{} takes handle {handle} outside a constructor",
+                                    method.sig.ident
+                                ),
+                                "a holder receives a handle when it is built, or a free function as its argument",
+                            ));
+                        }
+                        if !owners.contains(&owner) {
+                            continue;
+                        }
                         for capability in capabilities {
                             if names.contains(capability) {
                                 violations.insert(Finding::new(path, input.span().start().line,

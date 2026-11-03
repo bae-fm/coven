@@ -37,6 +37,8 @@ fn every_type_bearing_policy_row_requires_unique_names() {
         r#"task_types = ["Subject"]"#.to_string(),
         r#"internal_dependency_types = ["Subject"]"#.to_string(),
         r#"closed_session_types = ["Subject"]"#.to_string(),
+        r#"handles = { Subject = "Query" }"#.to_string(),
+        r#"handles = { Requests = "Subject" }"#.to_string(),
         format!("[composition_roots]\n{FIRST:?} = [\"Subject::open\"]"),
         format!("[capability_factories.{FIRST:?}]\n\"Subject::build\" = \"Product\""),
         format!("[capability_factories.{FIRST:?}]\n\"Factory::build\" = \"Subject\""),

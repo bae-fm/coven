@@ -740,3 +740,50 @@ fn named_free_roots_construct_capabilities_without_authorizing_other_functions()
         findings("crates/app/src/bootstrap.rs", &[(3, "<free>::unrelated", "Keychain")])
     );
 }
+
+/// A handle is made by its owner, in any of its methods, or by itself as a
+/// clone; anything else makes one only at a composition root. A holder of a
+/// handle is an owner.
+#[test]
+fn a_handle_is_made_by_its_owner() {
+    let policy = Policy::fixture(
+        r#"
+        handles = { Requests = "Query" }
+        [composition_roots]
+        "crates/app/src/query.rs" = ["Builder::open"]
+        "#,
+    );
+    let source = r#"
+        struct State;
+        struct Requests { state: State }
+        impl Requests { fn clone(&self) -> Self { Self { state: State } } }
+        struct Query { state: State }
+        impl Query { fn requests(&self) -> Requests { Requests { state: State } } }
+        struct Holder { requests: Requests }
+        impl Holder { fn forge(&self) -> Requests { Requests { state: State } } }
+        struct Builder;
+        impl Builder { fn open() { let _ = Requests { state: State }; } }
+        fn view(requests: Requests) { let _ = Holder { requests }; }
+    "#;
+    let violations = find_capability_construction_violations(
+        &[RustFile::fixture("crates/app/src/query.rs", source)],
+        &policy,
+    );
+    assert_eq!(
+        violations,
+        [
+            Finding::new(
+                "crates/app/src/query.rs",
+                8,
+                "Holder::forge constructs handle Requests outside a composition root",
+                REMEDY
+            ),
+            Finding::new(
+                "crates/app/src/query.rs",
+                11,
+                "<free>::view constructs owner Holder outside a composition root",
+                REMEDY
+            ),
+        ]
+    );
+}

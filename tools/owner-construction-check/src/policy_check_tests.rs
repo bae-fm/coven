@@ -370,3 +370,29 @@ fn external_types_are_named_by_a_crate_and_declared_by_none() {
         ]
     );
 }
+
+/// A handle's owner is another declared type with a method returning it, and
+/// the handle is no capability row besides.
+#[test]
+fn a_handle_names_an_owner_that_returns_it() {
+    let files = vec![RustFile::fixture(
+        "crates/app/src/query.rs",
+        "struct Requests; struct Query; struct Other; \
+        impl Query { fn requests(&self) -> Option<Requests> { todo!() } } \
+        impl Other { fn other(&self) {} }",
+    )];
+    let rows = r#"
+        capability_types = ["Requests"]
+        handles = { Requests = "Query", Other = "Other", Query = "Other", Missing = "Query" }
+    "#;
+    assert_eq!(
+        stale(files, rows),
+        [
+            "handles: Query has no method returning Missing",
+            "handles: Other names itself as its owner",
+            "handles: Other has no method returning Query",
+            "handles: Requests is also in capability_types",
+            "handles: no crate declares Missing",
+        ]
+    );
+}

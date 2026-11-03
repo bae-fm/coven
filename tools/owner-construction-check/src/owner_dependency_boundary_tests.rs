@@ -196,3 +196,49 @@ fn associated_returns_and_outputs_alongside_self_obey_the_hand_out_rule() {
         assert_eq!(found, findings(PATH, &[message]), "{method}");
     }
 }
+
+/// A handle's owner hands it out, and the handle clones itself; a holder it
+/// was given to, or anything else, hands out none.
+#[test]
+fn only_a_handles_owner_hands_it_out() {
+    let mut policy = policy();
+    policy.handles.insert("Requests".into(), "Query".into());
+    let source = "struct State { clock: Clock } \
+        struct Requests { state: State } \
+        impl Requests { fn clone(&self) -> Self { todo!() } } \
+        struct Query { state: State } \
+        impl Query { pub fn requests(&self) -> Requests { todo!() } } \
+        struct Holder { requests: Requests } \
+        impl Holder { pub fn requests(&self) -> Requests { todo!() } } \
+        struct Wrapper { query: Query } \
+        impl Wrapper { pub fn requests(&self) -> Requests { todo!() } } \
+        struct Owner { clock: Clock } \
+        impl Owner { pub fn open(&self) -> Requests { todo!() } }";
+    let files = [RustFile::fixture(PATH, source)];
+    let found = find_owner_dependency_leaks(&files, &policy, &OwnerGraph::collect(&files, &policy));
+    assert_eq!(
+        found,
+        ["Holder", "Wrapper"].map(|holder| Finding::new(
+            PATH,
+            1,
+            format!("{holder}::requests hands out handle Requests, which only Query hands out"),
+            HANDLE_REMEDY
+        ))
+    );
+}
+
+/// What shares an owner's state without being declared its handle is no
+/// handle: returning it hands out what the owner holds.
+#[test]
+fn undeclared_shares_of_an_owners_state_are_still_handed_out() {
+    let mut policy = policy();
+    policy.handles.insert("Requests".into(), "Query".into());
+    let source = "struct State { clock: Clock } \
+        struct Requests { state: State } \
+        struct Watch { state: State } \
+        struct Query { state: State } \
+        impl Query { pub fn requests(&self) -> Requests { todo!() } pub fn watch(&self) -> Watch { todo!() } }";
+    let files = [RustFile::fixture(PATH, source)];
+    let found = find_owner_dependency_leaks(&files, &policy, &OwnerGraph::collect(&files, &policy));
+    assert_eq!(found, findings(PATH, &["Query::watch returns retained dependency Watch"]));
+}

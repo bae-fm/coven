@@ -31,6 +31,7 @@ pub(crate) fn stale_rows(workspace: &Workspace, code: &CrateCode, policy: &Polic
     stale.extend(missing_homes(&code.written, policy));
     stale.extend(missing_composition_roots(crate_files, policy));
     stale.extend(invalid_capability_factories(crate_files, policy));
+    stale.extend(invalid_handles(crate_files, policy));
     stale.extend(undeclared_types(crate_files, policy));
     stale.extend(missing_capability_traits(crate_files, policy));
     stale.extend(invalid_database(&code.written, workspace, policy));
@@ -202,6 +203,32 @@ fn invalid_capability_factories(files: &[RustFile], policy: &Policy) -> Vec<Stri
             )
         })
         .collect()
+}
+
+/// A handle is no capability row of its own, and its owner, another type,
+/// has a method returning it: a row whose owner makes none covers nothing.
+fn invalid_handles(files: &[RustFile], policy: &Policy) -> Vec<String> {
+    let methods = declared_methods(files);
+    let mut stale = Vec::new();
+    for (handle, owner) in &policy.handles {
+        if handle == owner {
+            stale.push(format!("handles: {handle} names itself as its owner"));
+        } else if !methods.iter().any(|((_, maker, _), signature)| {
+            maker == owner
+                && match &signature.output {
+                    syn::ReturnType::Type(_, output) => {
+                        type_names(output, &policy.phantom_type_arguments).contains(handle)
+                    }
+                    syn::ReturnType::Default => false,
+                }
+        }) {
+            stale.push(format!("handles: {owner} has no method returning {handle}"));
+        }
+        if policy.capability_types.contains(handle) {
+            stale.push(format!("handles: {handle} is also in capability_types"));
+        }
+    }
+    stale
 }
 
 /// A type the policy names is declared by a crate, or is one of its external

@@ -499,3 +499,13 @@ fn phantom_type_arguments_are_neither_products_nor_retained() {
     phantom.phantom_type_arguments.insert("Router".into());
     assert!(constructions(source, &phantom).is_empty());
 }
+
+/// A handle is a capability: whatever holds one is an owner.
+#[test]
+fn a_handles_holder_is_an_owner() {
+    let mut policy = policy();
+    policy.handles.insert("Requests".into(), "Query".into());
+    let files = [RustFile::fixture(PATH, "struct Requests; struct View { requests: Requests }")];
+    let graph = OwnerGraph::collect(&files, &policy);
+    assert_eq!(graph.owners, ["View".to_string()].into());
+}

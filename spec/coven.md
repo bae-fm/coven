@@ -9671,11 +9671,11 @@ until several writers arrive is changed by every one of them: whoever holds it
 shares it with the others. Passed from hand to hand, such state ends up shared
 by holders nobody chose, and lives as long as the last of them. So it is shared
 on purpose: an object holding it is an owner (F.3), built at a composition root
-and never handing it out. A value made for one piece of work that shares its
-owner's state, such as one read's response body, is a task. Tests may use real
-ones. The checker counts as shared state `Barrier`, `Semaphore`, `RwLock`, the
-atomics (`AtomicBool`, `AtomicI64`, `AtomicU64`, `AtomicUsize`), and a task's
-`JoinHandle`, which can abort or await the task.
+and never handing it out except as a handle (F.3). A value made for one piece
+of work that shares its owner's state, such as one read's response body, is a
+task. Tests may use real ones. The checker counts as shared state `Barrier`,
+`Semaphore`, `RwLock`, the atomics (`AtomicBool`, `AtomicI64`, `AtomicU64`,
+`AtomicUsize`), and a task's `JoinHandle`, which can abort or await the task.
 
 - The builder configures the clock, custody and OAuth. Ids use OS randomness;
   only `test-utils` allows replacing their source (api.md E1).
@@ -9736,6 +9736,20 @@ field; callers ask the owner to do the work. Nothing outside `coven-database`
 gets the SQLite connection; it asks the database owner to run a write. A struct
 built only to be taken apart again, with every field public and no methods, isn't
 used to pass collaborators; they are passed by name.
+
+**A handle is what an owner hands out on purpose.** A reconfigurable live query
+(api.md E4) waits for its next result on one task while the app replaces its
+request from another. The query's `requests()` returns a `LiveQueryRequests`,
+which shares the query's pending request and the signal that wakes it. Such a
+value is an owner's *handle*, not to be confused with the store's handle the app
+opens (api.md E1): its owner makes it from its own state to be shared. Only its
+owner makes and returns one, and a clone is one more share of the same state.
+Like any capability, a handle flows only into what is being built: a
+holder receives it when it is built, or a free function as an argument, never
+another method, and no holder passes it on. So each holder of a handle was
+chosen where it was built, as each holder of any shared state is (F.2). The
+checker's policy names each handle with its owner. Anything else that shares an
+owner's state is no handle, and answers to the rules above.
 
 ### F.4 Opening, closing and sync
 

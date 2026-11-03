@@ -2,8 +2,8 @@
 //! itself. The workspace keeps it at its root as `owner-construction-check.toml`:
 //! the rules it runs, its crates in dependency order, where each capability
 //! lives, the construction and task-start roots, and the types that are
-//! capabilities, owners, tasks or plain values. The checker's source names
-//! none of them; each workspace that runs it supplies its own.
+//! capabilities, handles, owners, tasks or plain values. The checker's source
+//! names none of them; each workspace that runs it supplies its own.
 //!
 //! `policy_check.rs` holds every row against the workspace before any rule
 //! runs, so a row naming something that moved fails instead of covering nothing.
@@ -32,11 +32,12 @@ pub(crate) enum Rule {
     /// tables stay in the database's homes, and each domain's tables are
     /// written only in its homes (`database_boundary.rs`).
     DatabaseBoundary,
-    /// Appendix F.3: an owner never hands out what it holds
-    /// (`owner_dependency_boundary.rs`).
+    /// Appendix F.3: an owner never hands out what it holds, and only its
+    /// owner hands out a handle (`owner_dependency_boundary.rs`).
     OwnerDependencies,
-    /// Appendix F.2: a method never takes a construction-only capability
-    /// (`retained_capability_parameters.rs`).
+    /// Appendix F.2 and F.3: an owner's method never takes a
+    /// construction-only capability, and no method but a constructor takes
+    /// a handle (`retained_capability_parameters.rs`).
     RetainedCapabilityParameters,
     /// Appendix F.3: no struct built only to be destructured
     /// (`component_bundles.rs`).
@@ -118,6 +119,13 @@ pub(crate) struct Policy {
     /// including generic implementations and feature-gated test support.
     #[serde(default)]
     pub(crate) capability_traits: BTreeSet<String>,
+    /// Handles (Appendix F.3), each with the type that makes it:
+    /// `LiveQueryRequests = "LiveQuery"`. A handle is a capability its owner
+    /// makes from its own state to hand out: only that owner (or the handle,
+    /// cloning itself) makes one, only that owner returns one, and a holder
+    /// receives one only when it is built or as a free function's argument.
+    #[serde(default)]
+    pub(crate) handles: BTreeMap<String, String>,
     /// Raw capabilities fixed when the owner graph is built, which have no
     /// capability trait. These and the implementations of `capability_traits`
     /// may be acquired only at composition roots, and accepted as parameters
@@ -306,6 +314,18 @@ impl Policy {
             .map_or(&[], |capability| capability.homes.as_slice())
     }
 
+    /// The types whose holder is an owner: the capability types and the
+    /// handles.
+    pub(crate) fn held_capabilities(&self) -> BTreeSet<String> {
+        self.capability_types.iter().chain(self.handles.keys()).cloned().collect()
+    }
+
+    /// Whether `handle` is a handle and `maker` may make and return it: its
+    /// owner, or the handle itself, as a clone does.
+    pub(crate) fn makes_handle(&self, maker: &str, handle: &str) -> bool {
+        self.handles.get(handle).is_some_and(|owner| owner == maker || handle == maker)
+    }
+
     /// Every type name the policy holds, with the row it came from.
     pub(crate) fn named_types(&self) -> Vec<(&'static str, &str)> {
         let lists: [(&str, &BTreeSet<String>); 9] = [
@@ -327,6 +347,10 @@ impl Policy {
             if root.owner != "<free>" {
                 named.push(("composition_roots", root.owner.as_str()));
             }
+        }
+        for (handle, owner) in &self.handles {
+            named.push(("handles", handle.as_str()));
+            named.push(("handles", owner.as_str()));
         }
         for factory in &self.capability_factories {
             named.push(("capability_factories", factory.owner.as_str()));

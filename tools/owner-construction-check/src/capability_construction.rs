@@ -7,6 +7,9 @@
 //! Only the policy's named receiver factories may derive capabilities
 //! from an injected owner. Test code may assemble capabilities; the rule reads
 //! none (`test_code.rs`).
+//! A handle (Appendix F.3) is made by its owner, in any of the owner's
+//! methods, or by the handle itself, as a clone; anywhere else only at a
+//! composition root.
 //! `Default` is forbidden on capability types: inferred `Default::default()`
 //! cannot be resolved by a syntax checker.
 
@@ -77,13 +80,13 @@ pub(crate) fn find_capability_construction_violations(
     policy: &Policy,
     graph: &OwnerGraph,
 ) -> Vec<Finding> {
-    let capabilities = construction_only_types(files, policy);
+    let mut capabilities = construction_only_types(files, policy);
+    capabilities.extend(policy.handles.keys().cloned());
+    let held = policy.held_capabilities();
     let owners = graph
         .owners
         .iter()
-        .filter(|name| {
-            !policy.task_types.contains(*name) && !policy.capability_types.contains(*name)
-        })
+        .filter(|name| !policy.task_types.contains(*name) && !held.contains(*name))
         .cloned()
         .collect::<BTreeSet<_>>();
     let constructed = capabilities.union(&owners).cloned().collect();
@@ -215,6 +218,13 @@ impl ConstructionVisitor<'_> {
             return;
         }
         if kind == ConstructionKind::Value {
+            if self
+                .current_type
+                .as_ref()
+                .is_some_and(|maker| self.policy.makes_handle(&maker.name, name))
+            {
+                return;
+            }
             match &self.scope {
                 ConstructionScope::CompositionRoot => return,
                 ConstructionScope::Factory(results)
@@ -225,7 +235,13 @@ impl ConstructionVisitor<'_> {
                 _ => {}
             }
         }
-        let subject = if self.owners.contains(name) { "owner" } else { "capability" };
+        let subject = if self.owners.contains(name) {
+            "owner"
+        } else if self.policy.handles.contains_key(name) {
+            "handle"
+        } else {
+            "capability"
+        };
         let message = match kind {
             ConstructionKind::Value => format!("{}::{} constructs {subject} {name} outside a composition root", self.current_type.as_ref().map(|ty| ty.name.as_str()).unwrap_or("<free>"), self.current_method.as_deref().unwrap_or("<item>")),
             ConstructionKind::DefaultImplementation => format!("implements Default for {subject} {name}, which permits implicit construction through Default::default()"),
