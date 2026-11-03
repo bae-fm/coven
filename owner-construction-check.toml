@@ -783,8 +783,8 @@ tables = [
 # Removes an abandoned snapshot staging's records on a blocking task as it
 # drops; closing the store waits for it (§16.2).
 "crates/coven-database/src/snapshot_staging.rs" = ["SnapshotStaging::drop"]
-# Starts a database's checkpointer task, which the store stops as it closes
-# (§4).
+# Starts a database's checkpointer thread, which the store stops and joins as
+# it closes (§4).
 "crates/coven-database/src/wal_checkpoints.rs" = ["WalCheckpointer::start"]
 # One per open store, which every connection tells of its commits (§4).
 "crates/coven-database/src/observation.rs" = [

@@ -9,18 +9,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 impl super::WalCheckpointer {
-    /// Visit the checkpointer's connection, after any checkpoint in progress,
-    /// unless it has stopped.
+    /// Visit the checkpointer's connection, after any checkpoint in progress.
     pub(crate) fn with_connection(
         &self,
         visit: impl FnOnce(&crate::sqlite::DatabaseConnection) -> Result<(), crate::DbError>,
     ) -> Result<(), crate::DbError> {
-        self.shared
-            .connection
-            .lock()
-            .expect("checkpointer lock poisoned")
-            .as_ref()
-            .map_or(Ok(()), visit)
+        visit(&self.shared.connection.lock().expect("checkpointer lock poisoned"))
     }
 
     /// Run one wake's checkpoint now, on the calling thread.
@@ -35,15 +29,20 @@ impl super::WalCheckpointer {
 }
 
 fn blobs(store: &TestStore, settings: SqliteSettings) -> crate::DatabaseBuilder {
-    store
-        .builder(
-            Vec::new(),
-            vec![Migration::addition(
-                1,
-                "blobs",
-                "CREATE TABLE blobs(id INTEGER PRIMARY KEY, body BLOB NOT NULL)",
-            )],
-        )
+    blobs_in(store.directory(), settings)
+}
+
+fn blobs_in(
+    directory: coven_foundation::files::StoreDir,
+    settings: SqliteSettings,
+) -> crate::DatabaseBuilder {
+    crate::DatabaseBuilder::new(directory)
+        .synced_tables(Vec::new())
+        .migrations(vec![Migration::addition(
+            1,
+            "blobs",
+            "CREATE TABLE blobs(id INTEGER PRIMARY KEY, body BLOB NOT NULL)",
+        )])
         .sqlite_settings(settings)
 }
 
@@ -189,27 +188,53 @@ async fn checkpointer_failure(db: &crate::Database) -> CovenError {
     failure
 }
 
-/// A panic in a checkpoint is a bug in coven, and its checkpointing stops:
-/// the handle fails with it rather than stay open while the WAL grows
-/// without bound. The panic leaves the writer it held unpoisoned, so later
-/// calls report the failure and closing still closes every connection (§4).
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_panicking_checkpoint_fails_the_handle() {
-    let store = TestStore::new();
-    let db = blobs(&store, checkpointed_at_100_pages()).open().await.unwrap();
-    db.fault_checkpoints(|| panic!("the checkpoint broke"));
-    let failure = checkpointer_failure(&db).await;
-    assert!(
-        matches!(
-            &failure,
-            CovenError::Database(DbError::CheckpointPanicked { message })
-                if message == "the checkpoint broke"
-        ),
-        "{failure:?}"
+/// The child process of the test below: a store whose checkpoint panics.
+#[test]
+fn panicking_checkpoint_store() {
+    let Ok(path) = std::env::var("COVEN_CHECKPOINT_PANIC_FILE") else {
+        return;
+    };
+    let path = std::path::Path::new(&path);
+    let layout = coven_foundation::files::StoreDirectories::new(
+        path.parent().unwrap().parent().unwrap().parent().unwrap().to_owned(),
     );
-    let read = db.read(|sql| Ok(sql.query_row("SELECT 1", [], |r| r.get::<_, i64>(0))?)).await;
-    assert!(matches!(read, Err(CovenError::Database(DbError::CheckpointPanicked { .. }))));
-    db.close().await.unwrap();
+    let store = coven_foundation::id_source::StoreId(
+        uuid::Uuid::parse_str(&std::env::var("COVEN_CHECKPOINT_PANIC_STORE").unwrap()).unwrap(),
+    );
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    runtime.block_on(async {
+        let db =
+            blobs_in(layout.store_dir(&store), checkpointed_at_100_pages()).open().await.unwrap();
+        db.fault_checkpoints(|| panic!("the checkpoint broke"));
+        for _ in 0..1000 {
+            add(&db).await;
+        }
+        panic!("the store stayed open with no checkpointer");
+    });
+}
+
+/// A panic in a checkpoint is a bug in coven. Rather than leave the store
+/// open with no checkpointer while its WAL grows without bound, it ends the
+/// process (§4).
+#[test]
+fn a_panicking_checkpoint_ends_the_process() {
+    let store = TestStore::new();
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "wal_checkpoints::tests::panicking_checkpoint_store", "--nocapture"])
+        .env("COVEN_CHECKPOINT_PANIC_FILE", store.database_path())
+        .env("COVEN_CHECKPOINT_PANIC_STORE", store.id().to_string())
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("the checkpoint broke"), "{stderr}");
+    assert!(!stderr.contains("the store stayed open"), "{stderr}");
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        assert_eq!(output.status.signal(), Some(6), "SIGABRT: {stderr}");
+    }
+    #[cfg(not(unix))]
+    assert!(!output.status.success(), "{stderr}");
 }
 
 /// A checkpoint SQLite fails other than on a busy or locked database stops
@@ -332,30 +357,25 @@ async fn a_checkpoint_another_connection_holds_off_is_tried_again() {
     db.close().await.unwrap();
 }
 
-/// A runtime shutting down drops the checkpoint's blocking work unstarted.
-/// That is the process ending the store, not a bug: checkpointing stops
-/// and the handle is left as it was.
+/// The checkpointer lives as long as the store: a store opened on a runtime
+/// that then shuts down, and kept open and written on another, still has
+/// its WAL checkpointed (§4).
 #[test]
-fn a_checkpoint_its_runtime_dropped_leaves_the_handle_as_it_was() {
-    let runtime = tokio::runtime::Builder::new_current_thread().build().unwrap();
-    let handle = runtime.handle().clone();
-    drop(runtime);
-    let observer = crate::observation::CommitObserver::new();
-    let serving = super::Serving {
-        shared: Arc::new(super::Checkpoints {
-            wake: tokio::sync::Notify::new(),
-            closing: std::sync::atomic::AtomicBool::new(false),
-            connection: std::sync::Mutex::new(None),
-            writer: std::sync::Weak::new(),
-            threshold: NonZeroU32::new(100).unwrap(),
-            fault: std::sync::Mutex::new(None),
-        }),
-        handle: observer.clone(),
-    };
-    let flow = tokio::runtime::Builder::new_current_thread().build().unwrap().block_on(async {
-        let _entered = handle.enter();
-        serving.checkpoint().await
+fn a_store_outliving_its_opening_runtime_still_checkpoints() {
+    let store = TestStore::new();
+    let opening = tokio::runtime::Runtime::new().unwrap();
+    let db = opening.block_on(blobs(&store, checkpointed_at_100_pages()).open()).unwrap();
+    drop(opening);
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    runtime.block_on(async {
+        let mut writes = 0;
+        // Past the threshold the WAL holds over 100 frames; a checkpoint
+        // starts it over.
+        while writes < 40 || frames(&db).await >= 100 {
+            add(&db).await;
+            writes += 1;
+            assert!(writes < 300, "the WAL grew to {} frames unchecked", frames(&db).await);
+        }
+        db.close().await.unwrap();
     });
-    assert!(flow.is_break(), "checkpointing stops");
-    assert!(observer.error().is_none(), "the handle is left as it was");
 }

@@ -5,30 +5,32 @@
 //! query keeps a reader's snapshot open nearly all the time, that checkpoint
 //! can't finish, so every later commit runs another and the WAL never starts
 //! over. So the writer never checkpoints as it commits. Each commit only
-//! wakes a task of the store's own, which reads how many frames the WAL
+//! wakes a thread of the store's own, which reads how many frames the WAL
 //! holds past what was checkpointed and, past the threshold, checkpoints on a
 //! connection of its own: first copying what it can while writes go on, then,
 //! holding coven's writer so no write starts, copying the rest and waiting
 //! briefly for the readers to leave the WAL, so the next commit writes it
 //! from its start.
 //!
+//! The thread starts as the store opens and is stopped and joined as it
+//! closes, so it lives exactly as long as the store: no runtime shutting
+//! down while the store stays open can stop it.
+//!
 //! A checkpoint that finds the database busy or locked waited out its busy
 //! timeout; the next wake tries again. So does one SQLite couldn't start,
 //! reading nothing of the WAL, because another connection was checkpointing
-//! it or committing to it right then. Any other failure, or a panic in a
-//! checkpoint, stops checkpointing for good, so the task fails the handle
-//! with it: every later call and live query reports it until the store is
-//! reopened, rather than the store staying open while its WAL grows without
-//! bound. A runtime shutting down ends the task quietly, as the store goes
-//! with it.
+//! it or committing to it right then. Any other failure stops checkpointing
+//! for good, so the thread fails the handle with it: every later call and
+//! live query reports it until the store is reopened, rather than the store
+//! staying open while its WAL grows without bound. A panic in a checkpoint
+//! is a bug in coven, and ends the process.
 
 use crate::database::with_locked;
 use crate::observation::{CommitObserver, HandleFailure};
 use crate::sqlite::DatabaseConnection;
 use crate::{CheckpointMode, DbError, WalCheckpoint};
-use coven_foundation::task::TaskFailed;
 use std::num::NonZeroU32;
-use std::ops::ControlFlow;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 
@@ -39,18 +41,23 @@ use std::time::Duration;
 const READER_WAIT: Duration = Duration::from_millis(100);
 
 /// Wakes the checkpointer after each of the writer's commits. Waking only
-/// leaves a permit, which wakes after many commits coalesce into; it never
-/// waits for the checkpointer.
+/// leaves the thread's permit, which wakes after many commits coalesce
+/// into; it never waits for the checkpointer.
 pub(crate) struct CommitSignal {
-    shared: Arc<Checkpoints>,
+    thread: std::thread::Thread,
+}
+
+impl CommitSignal {
+    pub(crate) fn committed(&self) {
+        self.thread.unpark();
+    }
 }
 
 struct Checkpoints {
-    wake: tokio::sync::Notify,
-    closing: std::sync::atomic::AtomicBool,
-    /// The checkpointer's own connection, held through each checkpoint and
-    /// taken as the store closes.
-    connection: Mutex<Option<DatabaseConnection>>,
+    /// Set as the store closes, before the thread is woken to see it.
+    closing: AtomicBool,
+    /// The checkpointer's own connection, held through each checkpoint.
+    connection: Mutex<DatabaseConnection>,
     /// The writer, held only during a checkpoint, so the store's close can
     /// take it back once the checkpointer stops.
     writer: Weak<Mutex<DatabaseConnection>>,
@@ -64,24 +71,14 @@ struct Checkpoints {
 #[cfg(test)]
 type Fault = Box<dyn FnMut() -> Result<(), DbError> + Send>;
 
-impl CommitSignal {
-    pub(crate) fn committed(&self) {
-        self.shared.wake.notify_one();
-    }
-}
-
-impl Checkpoints {
-    fn close(&self) {
-        self.closing.store(true, std::sync::atomic::Ordering::Release);
-        self.wake.notify_one();
-    }
-}
-
-/// A database's checkpointer: a task woken by the writer's commits, which
-/// runs each checkpoint as blocking work on its own connection. It holds no
-/// thread while it waits, and stops as the store closes, before the writer.
+/// A database's checkpointer: a thread of the store's own, woken by the
+/// writer's commits, which runs each checkpoint on its own connection. It
+/// stops as the store closes, before the writer.
 pub(crate) struct WalCheckpointer {
     shared: Arc<Checkpoints>,
+    /// Taken as the checkpointer stops: when the store closes, or as it
+    /// drops when the open failed.
+    thread: Option<std::thread::JoinHandle<()>>,
 }
 
 impl WalCheckpointer {
@@ -98,28 +95,57 @@ impl WalCheckpointer {
     ) -> Result<Self, DbError> {
         connection.batch(&format!("PRAGMA busy_timeout = {}", READER_WAIT.as_millis()))?;
         let shared = Arc::new(Checkpoints {
-            wake: tokio::sync::Notify::new(),
-            closing: std::sync::atomic::AtomicBool::new(false),
-            connection: Mutex::new(Some(connection)),
+            closing: AtomicBool::new(false),
+            connection: Mutex::new(connection),
             writer: Arc::downgrade(writer),
             threshold,
             #[cfg(test)]
             fault: Mutex::new(None),
         });
+        let serving = Serving { shared: shared.clone(), handle };
+        let thread = std::thread::Builder::new()
+            .name("coven WAL checkpoint".into())
+            .spawn(move || serving.serve())
+            .map_err(DbError::CheckpointerThread)?;
+        // Made before the writer's steps, so a step that fails stops the
+        // thread as this drops.
+        let checkpointer = Self { shared, thread: Some(thread) };
+        let signal = CommitSignal { thread: checkpointer.running().thread().clone() };
         {
             let mut writer = writer.lock().expect("database connection lock poisoned");
             writer.batch("PRAGMA wal_autocheckpoint = 0")?;
-            writer.signal_commits(CommitSignal { shared: shared.clone() });
+            writer.signal_commits(signal);
         }
-        drop(tokio::spawn(Serving { shared: shared.clone(), handle }.serve()));
-        Ok(Self { shared })
+        Ok(checkpointer)
     }
 
     /// Stop, after any checkpoint in progress, and close the connection.
-    pub(crate) fn stop(self) -> Result<(), DbError> {
-        self.shared.close();
-        let connection = self.shared.connection.lock().expect("checkpointer lock poisoned").take();
-        connection.map_or(Ok(()), DatabaseConnection::close)
+    pub(crate) fn stop(mut self) -> Result<(), DbError> {
+        self.halt();
+        let shared = self.shared.clone();
+        drop(self);
+        Arc::into_inner(shared)
+            .expect("only the checkpointer holds its state once its thread ends")
+            .connection
+            .into_inner()
+            .expect("checkpointer lock poisoned")
+            .close()
+    }
+
+    fn running(&self) -> &std::thread::JoinHandle<()> {
+        self.thread.as_ref().expect("the checkpointer's thread runs until it stops")
+    }
+
+    /// Tell the thread to stop, and wait for it to end, after any checkpoint
+    /// in progress.
+    fn halt(&mut self) {
+        let Some(thread) = self.thread.take() else {
+            return;
+        };
+        self.shared.closing.store(true, Ordering::Release);
+        thread.thread().unpark();
+        // A panic on the thread ends the process, so it always returns.
+        thread.join().expect("the checkpointer's thread returns");
     }
 }
 
@@ -127,11 +153,11 @@ impl WalCheckpointer {
 /// its connection closes as the last of the checkpointer goes.
 impl Drop for WalCheckpointer {
     fn drop(&mut self) {
-        self.shared.close();
+        self.halt();
     }
 }
 
-/// The checkpointer's task: the database it checkpoints, and the handle it
+/// The checkpointer's thread: the database it checkpoints, and the handle it
 /// fails once it can't.
 struct Serving {
     shared: Arc<Checkpoints>,
@@ -139,41 +165,43 @@ struct Serving {
 }
 
 impl Serving {
-    async fn serve(self) {
-        loop {
-            self.shared.wake.notified().await;
-            if self.shared.closing.load(std::sync::atomic::Ordering::Acquire) {
+    /// Checkpoint at each wake until the store closes or a checkpoint
+    /// fails. The thread's permit may also wake it with no commit, and that
+    /// wake only reads how large the WAL is. A panic is a bug in coven:
+    /// rather than leave the store open with no checkpointer while its WAL
+    /// grows without bound, it ends the process, whose crash report carries
+    /// the panic.
+    fn serve(self) {
+        let served = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| loop {
+            std::thread::park();
+            if self.shared.closing.load(Ordering::Acquire) {
                 return;
             }
-            if self.checkpoint().await.is_break() {
+            if let Err(error) = self.checkpoint() {
+                self.handle.fail(HandleFailure::Checkpoint(Arc::new(error)));
                 return;
             }
+        }));
+        if let Err(panic) = served {
+            let message = coven_foundation::task::panic_message(panic.as_ref());
+            tracing::error!(%message, "coven's WAL checkpoint panicked, a bug; ending the process");
+            std::process::abort()
         }
     }
 
-    /// One wake's checkpoint, on the blocking pool. A database busy or
-    /// locked past the busy timeout is tried again at the next wake. Any
-    /// other failure, or a panic, a bug, fails the handle and stops
-    /// checkpointing; a runtime shutting down stops it without one.
-    async fn checkpoint(&self) -> ControlFlow<()> {
-        let shared = self.shared.clone();
-        let ran = coven_foundation::task::blocking("WAL checkpoint", move || shared.run()).await;
-        let failure = match ran {
-            Ok(Ok(())) => return ControlFlow::Continue(()),
-            Ok(Err(error)) if busy(&error) => {
+    /// One wake's checkpoint. A database busy or locked past the busy
+    /// timeout is tried again at the next wake; any other failure stops
+    /// checkpointing.
+    fn checkpoint(&self) -> Result<(), DbError> {
+        match self.shared.run() {
+            Err(error) if busy(&error) => {
                 // The data stays whole; only the WAL stays as large as it
                 // grew until the next commit's wake.
                 tracing::debug!(?error, "WAL checkpoint found the database busy");
-                return ControlFlow::Continue(());
+                Ok(())
             }
-            Ok(Err(error)) => HandleFailure::Checkpoint(Arc::new(error)),
-            Err(TaskFailed::Panicked { message, .. }) => HandleFailure::CheckpointPanicked(message),
-            // Not a bug: the process is ending the runtime, and the store
-            // with it.
-            Err(TaskFailed::Shutdown(_)) => return ControlFlow::Break(()),
-        };
-        self.handle.fail(failure);
-        ControlFlow::Break(())
+            ran => ran,
+        }
     }
 }
 
@@ -191,21 +219,14 @@ fn busy(error: &DbError) -> bool {
 }
 
 impl Checkpoints {
-    /// One wake's checkpoint, on the checkpointer's connection while it is
-    /// still open, once the WAL holds `threshold` frames not yet in the
-    /// database file. A checkpoint the readers held up leaves the WAL copied
-    /// but not started over; it is tried again once the WAL grows by the
-    /// threshold.
-    ///
-    /// The writer is dropped before the connection is let go, so a close
-    /// that took the connection finds the writer free. A panic lets go of
-    /// both unpoisoned: the handle it fails still closes them, and its later
-    /// calls report the failure rather than a poisoned lock.
+    /// One wake's checkpoint, on the checkpointer's connection, once the WAL
+    /// holds `threshold` frames not yet in the database file. A checkpoint
+    /// the readers held up leaves the WAL copied but not started over; it is
+    /// tried again once the WAL grows by the threshold. A store whose open
+    /// failed may let its writer go before its checkpointer stops; there is
+    /// then nothing to checkpoint.
     fn run(&self) -> Result<(), DbError> {
         with_locked(&self.connection, |connection| {
-            let Some(connection) = connection.as_ref() else {
-                return Ok(());
-            };
             let Some(writer) = self.writer.upgrade() else {
                 return Ok(());
             };

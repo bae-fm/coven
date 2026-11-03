@@ -285,15 +285,17 @@ pub enum Audience {
   own checkpoints and `journal_size_limit`.
 - Coven checkpoints the WAL itself, off the commit path
   ([§4](coven.md#4-writing-locally)): the writer's own `wal_autocheckpoint` is
-  always 0, and a task with its own connection checkpoints once the WAL holds
-  `wal_autocheckpoint` pages not yet copied, 1,000 when unset. It waits up to
-  100 ms for readers, while coven's writes wait. `WalAutocheckpoint::Off`
+  always 0, and a thread of the store's own, with its own connection,
+  checkpoints once the WAL holds `wal_autocheckpoint` pages not yet copied,
+  1,000 when unset. It waits up to 100 ms for readers, while coven's writes
+  wait. `WalAutocheckpoint::Off`
   leaves checkpoints to the app. A checkpoint that finds the database busy or
   locked, or that SQLite couldn't start because another connection was
   checkpointing or committing, is tried again at the next commit; any other
-  failure, or a panic,
-  fails the handle with `DbError::CheckpointFailed` or
-  `DbError::CheckpointPanicked` until the store is reopened.
+  failure fails the handle with `DbError::CheckpointFailed` until the store is
+  reopened. The thread starts as the store opens and closing stops and joins
+  it, so no runtime's shutdown ends it; a checkpoint that panics ends the
+  process.
 - `sqlite_settings()` on either handle reads back the settings SQLite has in
   effect, which every connection shares. SQLite lowers `mmap_size` and
   `threads` to the limits it was built with, and the readback shows the lowered
@@ -1333,10 +1335,9 @@ pub enum DbError {
     /// Rather than stay open while its WAL grows without bound, this handle
     /// and every live query fail with this same cause until reopened (§4).
     CheckpointFailed(Arc<DbError>),
-    /// One of coven's own WAL checkpoints panicked: a bug in coven. The
-    /// store's checkpointing stopped, so this handle and every live query
-    /// fail with it until reopened (§4).
-    CheckpointPanicked { message: String },
+    /// The system refused the thread that checkpoints the store's WAL, so
+    /// the store did not open (§4).
+    CheckpointerThread(std::io::Error),
     /// A pending record, its subject or the sync status could not be
     /// encoded, or a stored pending record could not be decoded as the
     /// requested record type (E5).
@@ -3277,7 +3278,7 @@ impl<T: Send + 'static> LiveQuery<T> {
     /// the result and returns the new one. An error is a result too, and
     /// doesn't end the query, except the one saying the store closed or the
     /// handle fails every call (`RollbackFailed`, `StatePersistence`,
-    /// `CheckpointFailed`, `CheckpointPanicked`): after it, `None`, so a loop
+    /// `CheckpointFailed`): after it, `None`, so a loop
     /// over the query ends.
     pub async fn next(&mut self) -> Option<CovenResult<T>>
     where

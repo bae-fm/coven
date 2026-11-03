@@ -103,9 +103,6 @@ pub(crate) enum HandleFailure {
     /// A WAL checkpoint failed with this cause, other than on a busy or
     /// locked database, and the store's checkpointing stopped.
     Checkpoint(Arc<DbError>),
-    /// A WAL checkpoint panicked with this message, a bug, and the store's
-    /// checkpointing stopped.
-    CheckpointPanicked(String),
 }
 
 impl HandleFailure {
@@ -114,9 +111,6 @@ impl HandleFailure {
             Self::State(cause) => DbError::StatePersistence(cause.clone()),
             Self::Rollback => DbError::RollbackFailed,
             Self::Checkpoint(cause) => DbError::CheckpointFailed(cause.clone()),
-            Self::CheckpointPanicked(message) => {
-                DbError::CheckpointPanicked { message: message.clone() }
-            }
         }
     }
 }

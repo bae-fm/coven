@@ -73,8 +73,8 @@ database file; commits keep their plain `fsync`, so a power loss can still
 take the latest few commits.
 
 Coven checkpoints the WAL itself, never inside a commit: once the WAL holds
-1,000 pages not yet copied, or `wal_autocheckpoint`, a task of coven's copies
-it on a connection of its own and lets the next commit start the WAL over. A
+1,000 pages not yet copied, or `wal_autocheckpoint`, a thread of the store's own
+copies it on a connection of its own and lets the next commit start the WAL over. A
 live query rerunning after every commit no longer makes each commit wait for a
 checkpoint it can't finish. `WalAutocheckpoint::Off` leaves checkpoints to the
 app.
