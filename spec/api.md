@@ -1484,7 +1484,8 @@ pub enum SchemaError {
     MissingTrigger { table: String, trigger: String },
     /// A synced table has no primary key (§9.2).
     NoPrimaryKey { table: String },
-    /// A primary key column allows NULL (§9.2).
+    /// A primary key column of a synced or device-local table allows NULL
+    /// (§9.2).
     NullableKey { table: String, column: String },
     /// A foreign key includes a generated column (§9.1).
     GeneratedForeignKey { table: String, column: String },

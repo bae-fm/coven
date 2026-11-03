@@ -34,7 +34,7 @@ pub(crate) fn count(database: &Database, table: &str) -> i64 {
     })
 }
 
-pub(crate) const NOTES: &str = "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY, title TEXT NOT NULL, body TEXT NOT NULL DEFAULT ''); CREATE TABLE local_rows(id TEXT PRIMARY KEY);";
+pub(crate) const NOTES: &str = "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY, title TEXT NOT NULL, body TEXT NOT NULL DEFAULT ''); CREATE TABLE local_rows(id TEXT NOT NULL PRIMARY KEY);";
 
 pub(crate) fn notes() -> Vec<SyncedTable> {
     vec![SyncedTable::new("notes", RowIdentity::SharedKey)]
@@ -45,7 +45,7 @@ async fn an_unknown_circle_refuses_the_whole_local_write() {
     let store = TestStore::new();
     let db = store.schema(
         vec![SyncedTable::new("notes", RowIdentity::IndependentUuid).audience_column("audience")],
-        "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY,audience TEXT NOT NULL); CREATE TABLE local_rows(id TEXT PRIMARY KEY)",
+        "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY,audience TEXT NOT NULL); CREATE TABLE local_rows(id TEXT NOT NULL PRIMARY KEY)",
     ).await.unwrap();
     let before = crate::tests::contents(&db);
     let circle = coven_foundation::id_source::CircleId(uuid::Uuid::from_u128(10));
@@ -79,7 +79,7 @@ async fn grocery_title_and_errands_tag_are_one_unsigned_write() {
     let database = store.schema(vec![
         SyncedTable::new("notes", RowIdentity::SharedKey),
         SyncedTable::new("tags", RowIdentity::SharedKey),
-    ], "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY, title TEXT, body TEXT); CREATE TABLE tags(id TEXT NOT NULL PRIMARY KEY); CREATE TABLE local_rows(id TEXT PRIMARY KEY);").await.unwrap();
+    ], "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY, title TEXT, body TEXT); CREATE TABLE tags(id TEXT NOT NULL PRIMARY KEY); CREATE TABLE local_rows(id TEXT NOT NULL PRIMARY KEY);").await.unwrap();
     sql(&database, "INSERT INTO notes VALUES('42','Grocry list','milk, eggs')").await.unwrap();
     sql(&database, "INSERT INTO tags VALUES('errands')").await.unwrap();
     let returned = database
@@ -260,7 +260,7 @@ async fn body_edit_records_shared_edited_at_but_keeps_the_search_index_local() {
     let store = TestStore::new();
     let database = store.schema(vec![SyncedTable::new("notes", RowIdentity::SharedKey).shared_trigger("notes_edited_at")], "
         CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY,title TEXT,body TEXT,edited_at TEXT);
-        CREATE TABLE title_index(note_id TEXT PRIMARY KEY,title TEXT);
+        CREATE TABLE title_index(note_id TEXT NOT NULL PRIMARY KEY,title TEXT);
         CREATE TRIGGER notes_title_index AFTER UPDATE OF title ON notes BEGIN UPDATE title_index SET title=new.title WHERE note_id=new.id; END;
         CREATE TRIGGER notes_edited_at AFTER UPDATE OF body ON notes WHEN NOT coven_applying() BEGIN UPDATE notes SET edited_at='2026-10-02 15:00' WHERE id=new.id; END;
     ").await.unwrap();

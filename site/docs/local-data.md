@@ -302,7 +302,7 @@ can't mean the same thing on every device. The error names the table:
 | --- | --- | --- |
 | An integer rowid key, or any key SQLite picks | two devices would pick the same number for different rows | `SchemaError::GeneratedPrimaryKey` |
 | A synced table without a primary key | coven can't tell which row a change belongs to | `SchemaError::NoPrimaryKey` |
-| A key column that allows NULL | a key with a NULL in it names no row | `SchemaError::NullableKey` |
+| A key column that allows NULL, in a synced or a device-local table | a key with a NULL in it names no row, and live queries learn which local rows a write changed by their keys | `SchemaError::NullableKey` |
 | An independent key with no text column for its UUID | | `SchemaError::IndependentKeyNotUuid` |
 | A collation other than `BINARY` on a key, unique or foreign-key column | under `COLLATE NOCASE`, SQLite would hold "Urgent" and "urgent" as one row that coven treats as two | `SchemaError::KeyCollation` |
 | Declared key columns that don't match the table's primary key | | `SchemaError::KeyColumns` |

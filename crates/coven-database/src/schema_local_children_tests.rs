@@ -15,7 +15,7 @@ const PARENTS: &str = "CREATE TABLE parents(id TEXT NOT NULL PRIMARY KEY,code TE
 /// the update; key columns change by delete and insert (§9.1).
 #[tokio::test]
 async fn local_keys_into_values_coven_updates_must_follow_them() {
-    let pins = "CREATE TABLE pins(id TEXT PRIMARY KEY,code TEXT UNIQUE REFERENCES parents(code) ON DELETE CASCADE";
+    let pins = "CREATE TABLE pins(id TEXT NOT NULL PRIMARY KEY,code TEXT UNIQUE REFERENCES parents(code) ON DELETE CASCADE";
     for (local, refused) in [
         (format!("{pins})"), Some("pins")),
         (format!("{pins} ON UPDATE NO ACTION)"), Some("pins")),
@@ -152,7 +152,7 @@ async fn an_applied_rename_reaches_every_following_local_key() {
 
 #[tokio::test]
 async fn set_default_between_local_tables_remains_sqlites_action() {
-    const SCHEMA: &str = "CREATE TABLE synced(id TEXT NOT NULL PRIMARY KEY); CREATE TABLE parent(id TEXT PRIMARY KEY); CREATE TABLE child(p TEXT NOT NULL DEFAULT 'fallback' REFERENCES parent(id) ON DELETE SET DEFAULT ON UPDATE SET DEFAULT); CREATE TABLE null_default(p TEXT NOT NULL REFERENCES parent(id) ON DELETE SET DEFAULT)";
+    const SCHEMA: &str = "CREATE TABLE synced(id TEXT NOT NULL PRIMARY KEY); CREATE TABLE parent(id TEXT NOT NULL PRIMARY KEY); CREATE TABLE child(p TEXT NOT NULL DEFAULT 'fallback' REFERENCES parent(id) ON DELETE SET DEFAULT ON UPDATE SET DEFAULT); CREATE TABLE null_default(p TEXT NOT NULL REFERENCES parent(id) ON DELETE SET DEFAULT)";
     let store = TestStore::new();
     let db = store.schema(vec![shared("synced")], SCHEMA).await.unwrap();
     crate::write::tests::sql(&db, "INSERT INTO parent VALUES('p'),('fallback'); INSERT INTO child VALUES('p'); UPDATE parent SET id='q' WHERE id='p'").await.unwrap();

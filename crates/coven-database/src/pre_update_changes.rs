@@ -12,7 +12,7 @@ use crate::sql_value::SqlValue;
 use crate::DbError;
 use rusqlite::hooks::{PreUpdateCase, PreUpdateNewValueAccessor, PreUpdateOldValueAccessor};
 use rusqlite::types::ValueRef;
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 
 /// A whole row's change, beside the column positions an update names.
@@ -31,8 +31,7 @@ struct TableShape {
     /// Each column at its pre-update position: lowercase name, whether it is
     /// part of the key, and whether it is hidden or generated.
     columns: Vec<(String, bool, bool)>,
-    /// No key can name its rows' changes, as for change capture's tables
-    /// without a primary key, or with one that can hold NULL.
+    /// No key can name its rows' changes: the table has no primary key.
     whole: bool,
     /// The virtual table a shadow table belongs to.
     parent: Option<String>,
@@ -49,7 +48,6 @@ impl TableShapes {
     pub(crate) fn read(
         database: &DatabaseConnection,
         synced: &[crate::SyncedTable],
-        supplemental: &BTreeMap<String, Option<String>>,
     ) -> Result<Self, DbError> {
         let synced: BTreeSet<String> =
             synced.iter().map(|table| table.name.to_ascii_lowercase()).collect();
@@ -77,7 +75,7 @@ impl TableShapes {
             positions.insert(table.clone(), shapes.len());
             shapes.push(TableShape {
                 synced: synced.contains(&name),
-                whole: !keyed || supplemental.contains_key(&name),
+                whole: !keyed,
                 parent: crate::change_capture::shadow_parent(database, &name)?,
                 name,
                 columns,

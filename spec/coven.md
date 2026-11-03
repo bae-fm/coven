@@ -2367,8 +2367,15 @@ Coven refuses, when the database opens and after migrating:
   row's content is not one of these, and is allowed;
 - a synced table with no primary key;
 - an independent key with no text column to hold its UUID;
-- a primary-key column that allows NULL. SQLite lets a non-integer key column hold
-  NULL unless it is declared `NOT NULL`, and a key with a NULL in it names no row;
+- a primary-key column that allows NULL, in a synced table or a device-local
+  one. SQLite lets a non-integer key column hold NULL unless it is declared
+  `NOT NULL`, and a key with a NULL in it names no row. A local row never syncs,
+  but coven tells live queries which local rows a write changed by their keys
+  (§4), so a query reading Ben's `recent(path TEXT PRIMARY KEY)` would run
+  again after every change to it. A key declared `NOT NULL`, or one in a
+  `STRICT` or `WITHOUT ROWID` table, where SQLite refuses NULL itself, opens. A
+  local table with no primary key is allowed: every change to it reaches every
+  live query reading it;
 - a column that declares a collation other than `BINARY` when it is:
   - a primary-key column of a synced table;
   - a column of a synced table's unique constraint or unique index (a unique

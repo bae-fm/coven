@@ -157,18 +157,13 @@ impl DatabaseConnection {
                 };
                 let result = coven(database, &events, begun)?;
                 database.require_transaction()?;
-                if let Some(observation) = &database.observation {
+                if database.observation.is_some() {
                     let scoped = database
                         .handle
                         .as_ref()
                         .map(crate::observation::CommitObserver::scoped_columns)
                         .unwrap_or_default();
-                    let mut app = crate::change_capture::event_changes(
-                        database,
-                        &events,
-                        &observation.supplemental,
-                        &scoped,
-                    )?;
+                    let mut app = crate::change_capture::event_changes(database, &events, &scoped)?;
                     app.append(&mut changes);
                     changes = app;
                 } else {

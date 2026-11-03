@@ -85,6 +85,7 @@ pub(crate) fn run<'a>(
     }
     let before = Schema::read(database, &crate::file_table::declared(tables))?;
     before.validate(tables)?;
+    crate::schema::validate_local_keys(database, &before, tables)?;
     database.check_followed_triggers()?;
     let final_schema = before;
     let mut synced: BTreeSet<_> = tables.iter().map(|t| t.name.to_ascii_lowercase()).collect();

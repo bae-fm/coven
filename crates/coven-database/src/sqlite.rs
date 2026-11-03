@@ -250,6 +250,7 @@ impl DatabaseConnection {
         if read_only || current == supported {
             let schema = Schema::read(self, &crate::file_table::declared(tables))?;
             schema.validate(tables)?;
+            crate::schema::validate_local_keys(self, &schema, tables)?;
             self.check_followed_triggers()?;
             if let Some(table) =
                 crate::row_queries::owner_declaration_changed(self, &schema, tables)?
@@ -710,7 +711,6 @@ impl DatabaseConnection {
         let tables = Arc::new(pre_update_changes::TableShapes::read(
             self,
             &crate::file_table::synced(synced),
-            &supplemental,
         )?);
         self.serve(handle);
         self.observation =

@@ -89,7 +89,7 @@ async fn set_default_errors_identify_composite_implicit_and_self_references() {
             "(\"x\", \"y\") REFERENCES \"parent\" (\"a\", \"b\")",
         ),
         (
-            "CREATE TABLE parent(id TEXT PRIMARY KEY); CREATE TABLE child(id TEXT NOT NULL PRIMARY KEY,p TEXT REFERENCES parent ON UPDATE SET DEFAULT)",
+            "CREATE TABLE parent(id TEXT NOT NULL PRIMARY KEY); CREATE TABLE child(id TEXT NOT NULL PRIMARY KEY,p TEXT REFERENCES parent ON UPDATE SET DEFAULT)",
             "(\"p\") REFERENCES \"parent\"",
         ),
         (
@@ -501,6 +501,47 @@ async fn nullable_primary_keys_are_refused_on_open_and_after_migrating() {
         assert!(
             matches!(database_error(error), DbError::Schema(SchemaError::NullableKey { table, column: found }) if table == "notes" && found == column)
         );
+    }
+}
+
+/// Ben's music app keeps the paths he played recently in a device-local
+/// table. Keyed `path TEXT PRIMARY KEY`, it could hold a row keyed NULL,
+/// which no key names, so coven refuses it as it does a synced table's;
+/// keys that can't hold NULL open (§9.2).
+#[tokio::test]
+async fn device_local_nullable_primary_keys_are_refused_on_open_and_after_migrating() {
+    for (schema, column) in [
+        ("CREATE TABLE recent(path TEXT PRIMARY KEY, played TEXT)", "path"),
+        ("CREATE TABLE recent(path TEXT NOT NULL, seq INT, PRIMARY KEY(path,seq))", "seq"),
+        ("CREATE TABLE recent(id INTEGER PRIMARY KEY DESC, path TEXT)", "id"),
+    ] {
+        let store = TestStore::new();
+        let error = store.schema(vec![], schema).await.err().expect("nullable key must fail");
+        assert!(
+            matches!(database_error(error), DbError::Schema(SchemaError::NullableKey { table, column: found }) if table == "recent" && found == column),
+            "{schema}"
+        );
+        let db = store.builder(vec![], vec![]).open().await.unwrap();
+        db.inspect_writer(|db| db.batch(schema).unwrap());
+        db.close().await.unwrap();
+        let error = store.builder(vec![], vec![]).open().await.err().expect("must fail open");
+        assert!(
+            matches!(database_error(error), DbError::Schema(SchemaError::NullableKey { table, column: found }) if table == "recent" && found == column),
+            "{schema}"
+        );
+    }
+    for schema in [
+        "CREATE TABLE recent(path TEXT NOT NULL PRIMARY KEY, played TEXT)",
+        "CREATE TABLE recent(path TEXT PRIMARY KEY, played TEXT) STRICT",
+        "CREATE TABLE recent(path TEXT PRIMARY KEY, played TEXT) WITHOUT ROWID",
+        "CREATE TABLE recent(id INTEGER PRIMARY KEY, path TEXT)",
+        "CREATE TABLE recent(path TEXT, played TEXT)",
+        // A virtual table and its shadow tables are SQLite's own.
+        "CREATE VIRTUAL TABLE recent USING fts5(path)",
+    ] {
+        let store = TestStore::new();
+        let db = store.schema(vec![], schema).await.unwrap_or_else(|e| panic!("{schema}: {e}"));
+        db.close().await.unwrap();
     }
 }
 

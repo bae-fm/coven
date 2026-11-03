@@ -117,7 +117,7 @@ async fn binary_keys_and_folded_values_outside_keys_are_accepted() {
             "CREATE TABLE notes(id TEXT COLLATE BINARY NOT NULL PRIMARY KEY, title TEXT COLLATE NOCASE, body TEXT COLLATE RTRIM, slug TEXT, UNIQUE(slug COLLATE BINARY));
              CREATE UNIQUE INDEX lowered ON notes(lower(title));
              CREATE TABLE tags(id TEXT NOT NULL PRIMARY KEY, note TEXT COLLATE BINARY REFERENCES notes(id) ON DELETE CASCADE);
-             CREATE TABLE local_words(word TEXT COLLATE NOCASE PRIMARY KEY, note TEXT REFERENCES local_words(word))",
+             CREATE TABLE local_words(word TEXT NOT NULL COLLATE NOCASE PRIMARY KEY, note TEXT REFERENCES local_words(word))",
         )
         .await
         .unwrap();

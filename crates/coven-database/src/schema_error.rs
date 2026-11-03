@@ -129,10 +129,11 @@ pub enum SchemaError {
         /// The declared table.
         table: String,
     },
-    /// A primary-key column permits NULL (§9.2).
+    /// A primary-key column of a synced or device-local table permits NULL
+    /// (§9.2).
     #[error("primary-key column {table}.{column} allows NULL")]
     NullableKey {
-        /// The synced table.
+        /// The table.
         table: String,
         /// The nullable key column.
         column: String,

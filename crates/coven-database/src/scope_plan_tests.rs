@@ -317,11 +317,10 @@ async fn parameters_preserve_nul_text_and_real_precision_and_slot_identity() {
 #[tokio::test]
 async fn unsupported_key_schemas_use_whole_tables() {
     let store = TestStore::new();
-    let db = store.schema(vec![], "CREATE TABLE folded(id TEXT COLLATE NOCASE PRIMARY KEY, value INTEGER); CREATE TABLE unkeyed(id INTEGER, value INTEGER); CREATE TABLE decimal(id NUMERIC PRIMARY KEY, value INTEGER); INSERT INTO folded VALUES ('A',0),('z',0); INSERT INTO unkeyed VALUES(1,0),(9,0); INSERT INTO decimal VALUES(1,0),(9,0)").await.unwrap();
+    let db = store.schema(vec![], "CREATE TABLE folded(id TEXT NOT NULL COLLATE NOCASE PRIMARY KEY, value INTEGER); CREATE TABLE unkeyed(id INTEGER, value INTEGER); INSERT INTO folded VALUES ('A',0),('z',0); INSERT INTO unkeyed VALUES(1,0),(9,0)").await.unwrap();
     for (select, update) in [
         ("SELECT value FROM folded WHERE id='a'", "UPDATE folded SET value=value+1 WHERE id='z'"),
         ("SELECT value FROM unkeyed WHERE id=1", "UPDATE unkeyed SET value=value+1 WHERE id=9"),
-        ("SELECT value FROM decimal WHERE id=1", "UPDATE decimal SET value=value+1 WHERE id=9"),
     ] {
         let calls = Arc::new(AtomicUsize::new(0));
         let count = calls.clone();
@@ -334,23 +333,6 @@ async fn unsupported_key_schemas_use_whole_tables() {
         assert_eq!(next(&mut query).await.0, 2);
         assert_eq!(calls.load(Ordering::SeqCst), 2, "{select}");
     }
-    db.close().await.unwrap();
-}
-
-#[tokio::test]
-async fn nullable_composite_keys_observe_changes_to_null_rows() {
-    let store = TestStore::new();
-    let db = store.schema(vec![], "CREATE TABLE items(a INTEGER, b TEXT, value INTEGER, PRIMARY KEY(a,b)); INSERT INTO items VALUES (NULL,'yes',0),(1,NULL,0),(2,'no',0)").await.unwrap();
-    let mut query = db.subscribe(|db| {
-        Ok(db.query("SELECT value FROM items WHERE a=1 OR b='yes' ORDER BY rowid", [], |r| {
-            r.get::<_, i64>(0)
-        })?)
-    });
-    assert_eq!(next(&mut query).await, [0, 0]);
-    write(&db, "UPDATE items SET value=1 WHERE a IS NULL OR b IS NULL");
-    assert_eq!(next(&mut query).await, [1, 1]);
-    write(&db, "DELETE FROM items");
-    assert!(next(&mut query).await.is_empty());
     db.close().await.unwrap();
 }
 

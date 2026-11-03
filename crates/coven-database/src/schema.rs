@@ -692,6 +692,48 @@ impl SchemaForeignKey {
     }
 }
 
+/// Refuse a device-local table whose primary key allows NULL (§9.2). Coven
+/// tells live queries which of a local table's rows a write changed by their
+/// keys, and a NULL key names no row, so every live query reading the table
+/// would run again after any change to it. Refusing such a key makes a
+/// NULL-keyed row impossible instead. A table with no primary key is told of
+/// as a whole, by design. An integer rowid alias has no key index and can't
+/// hold NULL. Virtual tables and their shadow tables are SQLite's own.
+pub(crate) fn validate_local_keys(
+    db: &DatabaseConnection,
+    schema: &Schema,
+    declarations: &[SyncedTable],
+) -> Result<(), DbError> {
+    let synced: BTreeSet<String> =
+        declarations.iter().map(|table| table.name.to_ascii_lowercase()).collect();
+    let sqlite_own: BTreeSet<String> = db
+        .query(
+            "SELECT lower(name) FROM pragma_table_list
+             WHERE schema='main' AND type IN ('virtual','shadow')",
+            [],
+            |r| r.get(0),
+        )?
+        .into_iter()
+        .collect();
+    for (name, table) in &schema.tables {
+        if synced.contains(name)
+            || sqlite_own.contains(name)
+            || name == crate::internal_schema::FILES
+            || !table.indices.iter().any(|index| index.primary)
+        {
+            continue;
+        }
+        if let Some(column) = table.columns.iter().find(|c| c.primary_key > 0 && !c.not_null) {
+            return Err(SchemaError::NullableKey {
+                table: table.name.clone(),
+                column: column.name.clone(),
+            }
+            .into());
+        }
+    }
+    Ok(())
+}
+
 fn text_affinity(kind: &str) -> bool {
     let kind = kind.to_ascii_uppercase();
     !kind.contains("INT") && ["CHAR", "CLOB", "TEXT"].iter().any(|s| kind.contains(s))

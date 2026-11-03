@@ -181,15 +181,15 @@ async fn classify_each_sqlite_definition_change() {
             MigrationChange::Breaking,
         ),
         (
-            "CREATE TABLE extra(id TEXT PRIMARY KEY); CREATE INDEX extra_ids ON extra(id)",
+            "CREATE TABLE extra(id TEXT NOT NULL PRIMARY KEY); CREATE INDEX extra_ids ON extra(id)",
             MigrationChange::NoChange,
         ),
         (
-            "CREATE TABLE extra(id TEXT PRIMARY KEY); CREATE TRIGGER extra_insert AFTER INSERT ON extra BEGIN SELECT 1; END",
+            "CREATE TABLE extra(id TEXT NOT NULL PRIMARY KEY); CREATE TRIGGER extra_insert AFTER INSERT ON extra BEGIN SELECT 1; END",
             MigrationChange::NoChange,
         ),
         (
-            "CREATE TABLE extra(id TEXT PRIMARY KEY)",
+            "CREATE TABLE extra(id TEXT NOT NULL PRIMARY KEY)",
             MigrationChange::NoChange,
         ),
         (
@@ -349,7 +349,7 @@ async fn local_schema_and_views_have_no_migration_change() {
     ] {
         let store = TestStore::new();
         let db = store.builder(notes_tables(), vec![
-            Migration::addition(1, "tables", "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY,title TEXT); CREATE TABLE local(id TEXT PRIMARY KEY,title TEXT,extra TEXT); CREATE INDEX local_titles ON local(title); CREATE TRIGGER edited AFTER UPDATE ON local BEGIN SELECT 1; END; CREATE VIEW existing AS SELECT title FROM notes"),
+            Migration::addition(1, "tables", "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY,title TEXT); CREATE TABLE local(id TEXT NOT NULL PRIMARY KEY,title TEXT,extra TEXT); CREATE INDEX local_titles ON local(title); CREATE TRIGGER edited AFTER UPDATE ON local BEGIN SELECT 1; END; CREATE VIEW existing AS SELECT title FROM notes"),
             Migration::addition(2, "change", change),
         ]).open().await.unwrap();
         assert_eq!(

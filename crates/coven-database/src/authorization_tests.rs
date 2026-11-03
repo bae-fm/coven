@@ -233,12 +233,7 @@ async fn a_temporary_trigger_cannot_impersonate_a_declared_shared_trigger() {
 
 #[tokio::test]
 async fn hidden_rowid_assignments_are_refused_in_writes_and_migrations() {
-    for key in [
-        "id TEXT NOT NULL PRIMARY KEY",
-        "id TEXT PRIMARY KEY",
-        "id TEXT",
-        "id INTEGER PRIMARY KEY DESC",
-    ] {
+    for key in ["id TEXT NOT NULL PRIMARY KEY", "id TEXT", "id INTEGER NOT NULL PRIMARY KEY DESC"] {
         for column in ["rowid", "_rowid_", "oid", "\"RoWiD\"", "[OID]", "`_rowid_`", "'rowid'"] {
             let operation = format!("UPDATE items SET {column}=2");
             let store = TestStore::new();
@@ -417,7 +412,7 @@ async fn rowid_policy_follows_nested_alias_updates_and_foreign_key_actions() {
             "UPDATE source SET _rowid_=2",
         ),
         (
-            "CREATE TABLE source(id INTEGER PRIMARY KEY); CREATE TABLE middle(id TEXT PRIMARY KEY, parent INTEGER REFERENCES source(id) ON UPDATE CASCADE); CREATE TRIGGER child AFTER UPDATE OF parent ON middle BEGIN UPDATE target SET rowid=2; END;",
+            "CREATE TABLE source(id INTEGER PRIMARY KEY); CREATE TABLE middle(id TEXT NOT NULL PRIMARY KEY, parent INTEGER REFERENCES source(id) ON UPDATE CASCADE); CREATE TRIGGER child AFTER UPDATE OF parent ON middle BEGIN UPDATE target SET rowid=2; END;",
             "UPDATE source SET id=2",
         ),
     ] {

@@ -12,7 +12,7 @@ const CIRCLE_SCHEMA: &str = "
     CREATE TABLE roots(id TEXT NOT NULL PRIMARY KEY,audience TEXT NOT NULL,body TEXT);
     CREATE TABLE children(id TEXT NOT NULL PRIMARY KEY,root TEXT NOT NULL REFERENCES roots(id) ON DELETE CASCADE,body TEXT);
     CREATE TABLE events(id TEXT NOT NULL PRIMARY KEY,circle TEXT NOT NULL);
-    CREATE TABLE local_rows(id TEXT PRIMARY KEY);
+    CREATE TABLE local_rows(id TEXT NOT NULL PRIMARY KEY);
     CREATE TRIGGER event_root AFTER INSERT ON events WHEN NOT coven_applying()
     BEGIN INSERT INTO roots VALUES(new.id,new.circle,'trigger'); END;
 ";
@@ -100,7 +100,7 @@ async fn membership_refuses_sql_triggers_and_both_sides_of_moves_atomically() {
     db.close().await.unwrap();
 }
 
-const FILES_SCHEMA: &str = "CREATE TABLE files(id TEXT NOT NULL PRIMARY KEY,file TEXT,audience TEXT NOT NULL); CREATE TABLE local_rows(id TEXT PRIMARY KEY)";
+const FILES_SCHEMA: &str = "CREATE TABLE files(id TEXT NOT NULL PRIMARY KEY,file TEXT,audience TEXT NOT NULL); CREATE TABLE local_rows(id TEXT NOT NULL PRIMARY KEY)";
 
 async fn files_store(store: &TestStore, kind: crate::Provenance) -> Database {
     store

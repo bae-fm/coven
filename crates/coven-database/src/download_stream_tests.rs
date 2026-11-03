@@ -465,7 +465,7 @@ async fn a_constraint_refused_at_commit_reports_itself_and_keeps_the_handle_usab
     let ids = SequentialIds::new();
     let a_store = TestStore::with_ids(&ids);
     let b_store = TestStore::with_ids(&ids);
-    let schema = "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY,title TEXT,body TEXT); CREATE TABLE parents(id TEXT PRIMARY KEY); CREATE TABLE guard(parent TEXT REFERENCES parents(id) DEFERRABLE INITIALLY DEFERRED); CREATE TRIGGER guarded AFTER INSERT ON notes WHEN coven_applying() BEGIN INSERT INTO guard VALUES('absent'); END";
+    let schema = "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY,title TEXT,body TEXT); CREATE TABLE parents(id TEXT NOT NULL PRIMARY KEY); CREATE TABLE guard(parent TEXT REFERENCES parents(id) DEFERRABLE INITIALLY DEFERRED); CREATE TRIGGER guarded AFTER INSERT ON notes WHEN coven_applying() BEGIN INSERT INTO guard VALUES('absent'); END";
     let tables = || vec![SyncedTable::new("notes", RowIdentity::SharedKey)];
     let a = a_store.schema(tables(), schema).await.unwrap();
     let b = b_store.schema(tables(), schema).await.unwrap();

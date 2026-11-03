@@ -433,7 +433,7 @@ async fn restoration_triggers_cannot_leave_invalid_local_references() {
 #[tokio::test]
 async fn restoration_trigger_cannot_orphan_unchanged_local_children() {
     let store = TestStore::new();
-    let db=store.schema(vec![SyncedTable::new("notes",RowIdentity::SharedKey)],"CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY,title TEXT UNIQUE); CREATE TABLE folders(id TEXT PRIMARY KEY); CREATE TABLE links(folder TEXT REFERENCES folders(id)); CREATE TRIGGER restore AFTER INSERT ON notes WHEN coven_applying() BEGIN DELETE FROM folders WHERE id='Work'; END").await.unwrap();
+    let db=store.schema(vec![SyncedTable::new("notes",RowIdentity::SharedKey)],"CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY,title TEXT UNIQUE); CREATE TABLE folders(id TEXT NOT NULL PRIMARY KEY); CREATE TABLE links(folder TEXT REFERENCES folders(id)); CREATE TRIGGER restore AFTER INSERT ON notes WHEN coven_applying() BEGIN DELETE FROM folders WHERE id='Work'; END").await.unwrap();
     sql(&db,"INSERT INTO folders VALUES('Work'); INSERT INTO links VALUES('Work'); INSERT INTO notes VALUES('45','Groceries'),('46','Shopping')").await.unwrap();
     crate::tests::remote_update(
         &db,
@@ -666,12 +666,11 @@ async fn hook_tables_are_selected_once_from_the_open_schema() {
         CREATE TABLE ordinary(id INTEGER PRIMARY KEY,value TEXT);
         CREATE TABLE unkeyed(value TEXT);
         CREATE TABLE sqliteish(value TEXT);
-        CREATE TABLE nullable(id TEXT PRIMARY KEY,value TEXT);
-        CREATE TABLE composite(a TEXT NOT NULL,b INTEGER,PRIMARY KEY(a,b));
+        CREATE TABLE composite(a TEXT NOT NULL,b INTEGER NOT NULL,PRIMARY KEY(a,b));
         CREATE TABLE nonnull(id TEXT NOT NULL PRIMARY KEY,value TEXT);
         CREATE TABLE without_rowid(id TEXT PRIMARY KEY,value TEXT) WITHOUT ROWID;
         CREATE TABLE strict_key(id TEXT PRIMARY KEY,value TEXT) STRICT;
-        CREATE TABLE descending(id INTEGER PRIMARY KEY DESC,value TEXT);
+        CREATE TABLE descending(id INTEGER NOT NULL PRIMARY KEY DESC,value TEXT);
         CREATE TABLE alias_descending(id INTEGER,value TEXT,PRIMARY KEY(id DESC));
     ",
         )
@@ -679,10 +678,7 @@ async fn hook_tables_are_selected_once_from_the_open_schema() {
         .unwrap();
     db.inspect_writer(|writer| {
         let tables = &writer.observation.as_ref().unwrap().supplemental;
-        assert_eq!(
-            tables.keys().map(String::as_str).collect::<Vec<_>>(),
-            ["composite", "descending", "nullable", "sqliteish", "unkeyed"]
-        );
+        assert_eq!(tables.keys().map(String::as_str).collect::<Vec<_>>(), ["sqliteish", "unkeyed"]);
     });
     db.close().await.unwrap();
 }
@@ -732,7 +728,7 @@ async fn ordinary_tables_get_no_hook_change_and_retain_column_and_key_precision(
 #[tokio::test]
 async fn hook_changes_publish_after_commit_and_are_discarded_on_transaction_failure() {
     let store = TestStore::new();
-    let db=store.schema(vec![],"CREATE TABLE parent(id INTEGER PRIMARY KEY); CREATE TABLE local(id TEXT PRIMARY KEY,value TEXT,extra INTEGER,parent REFERENCES parent DEFERRABLE INITIALLY DEFERRED); INSERT INTO local VALUES(NULL,'unchanged',0,NULL)").await.unwrap();
+    let db=store.schema(vec![],"CREATE TABLE parent(id INTEGER PRIMARY KEY); CREATE TABLE local(id TEXT,value TEXT,extra INTEGER,parent REFERENCES parent DEFERRABLE INITIALLY DEFERRED); INSERT INTO local VALUES(NULL,'unchanged',0,NULL)").await.unwrap();
     let count = std::sync::atomic::AtomicUsize::new(0);
     let mut query = db.subscribe(move |sql| {
         let values =

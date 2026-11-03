@@ -75,9 +75,9 @@ fn observe_table<'a>(
     Ok(columns)
 }
 
-/// Tables whose changes need an update hook in addition to the session. An
-/// INTEGER PRIMARY KEY alias has no primary-key index and cannot contain NULL,
-/// even though table_xinfo reports its declared NOT NULL flag as false.
+/// Tables whose changes need an update hook in addition to the session: those
+/// with no primary key, whose rows no key names. A table whose key allows
+/// NULL never opens (`schema::validate_local_keys`, §9.2).
 pub(crate) fn supplemental_tables(
     database: &DatabaseConnection,
 ) -> Result<BTreeMap<String, Option<String>>, DbError> {
@@ -85,9 +85,7 @@ pub(crate) fn supplemental_tables(
         "SELECT name FROM pragma_table_list AS t
          WHERE schema='main' AND type IN ('table','shadow') AND wr=0
          AND name NOT GLOB 'sqlite_*'
-         AND (NOT EXISTS (SELECT 1 FROM pragma_table_xinfo(t.name,'main') WHERE pk>0)
-              OR (EXISTS (SELECT 1 FROM pragma_table_xinfo(t.name,'main') WHERE pk>0 AND \"notnull\"=0)
-                  AND EXISTS (SELECT 1 FROM pragma_index_list(t.name,'main') WHERE origin='pk')))",
+         AND NOT EXISTS (SELECT 1 FROM pragma_table_xinfo(t.name,'main') WHERE pk>0)",
         [],
         |row| row.get::<_, String>(0).map(|name| name.to_ascii_lowercase()),
     )?;
@@ -306,11 +304,10 @@ fn value(
 /// Each operation counts as a session change of its row would: inserts and
 /// deletes change the whole row, updates each column whose value changed,
 /// and a primary-key update deletes the old key's row and inserts the new.
-/// Tables a session cannot key report table-wide changes.
+/// Tables with no primary key report table-wide changes.
 pub(crate) fn event_changes(
     database: &DatabaseConnection,
     events: &[crate::sqlite::Event],
-    supplemental: &BTreeMap<String, Option<String>>,
     scoped: &ScopedColumns,
 ) -> Result<Vec<RowChange>, DbError> {
     let mut tables = BTreeMap::new();
@@ -319,7 +316,7 @@ pub(crate) fn event_changes(
     for event in events {
         let table = event.table.to_ascii_lowercase();
         let fields = observe_table(database, &table, &mut tables, &mut changes)?;
-        if !fields.has_primary_key || supplemental.contains_key(&table) {
+        if !fields.has_primary_key {
             changes.push(RowChange { table, column: String::new(), rows: None });
             continue;
         }

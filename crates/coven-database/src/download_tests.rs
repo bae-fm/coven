@@ -240,7 +240,7 @@ async fn local_child_actions_are_checked_transitively_at_open_and_after_migratio
             ("parent TEXT NOT NULL", "SET NULL", true),
         ] {
             let store = TestStore::new();
-            let base = format!("CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY); CREATE TABLE pins(id TEXT PRIMARY KEY,note TEXT REFERENCES NOTES(id) ON DELETE {first_action}); CREATE TABLE nested({last_column} REFERENCES pins(id) ON DELETE {action})");
+            let base = format!("CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY); CREATE TABLE pins(id TEXT NOT NULL PRIMARY KEY,note TEXT REFERENCES NOTES(id) ON DELETE {first_action}); CREATE TABLE nested({last_column} REFERENCES pins(id) ON DELETE {action})");
             let tables = || vec![SyncedTable::new("notes", RowIdentity::SharedKey)];
             let result = store
                 .builder(
