@@ -49,18 +49,26 @@ pub(crate) fn capture_rows<'a>(
     Ok(())
 }
 
-pub(crate) fn capture(db: &DatabaseConnection, store: &MergeStore<'_>) -> Result<(), DbError> {
-    let rows=db.query("SELECT table_name,key,audience FROM _coven_rows UNION SELECT table_name,key,audience FROM _coven_lost",[],crate::row_queries::read_identity)?;
-    capture_rows(db, store, &rows)
-}
-
-/// Migrations preserve the entire counted projection before changing its schema.
-pub(crate) fn before_migration(
+/// Before a migration's statement changes `tables`, by lowercase name, keep
+/// the counted state of their rows: the migration carries it through the new
+/// schema with them (§18.1). A row kept already, by an earlier statement or a
+/// queued write, keeps what it kept.
+pub(crate) fn before_migrating(
     db: &DatabaseConnection,
     schema: &crate::schema::Schema,
+    tables: &BTreeSet<String>,
 ) -> Result<(), DbError> {
     let store = MergeStore::from_schema(db, schema).without_row_cache();
-    capture(db, &store)
+    for table in tables.iter().filter_map(|table| schema.tables.get(table)) {
+        let rows = db.query(
+            "SELECT table_name,key,audience FROM _coven_rows WHERE table_name=?1
+             UNION SELECT table_name,key,audience FROM _coven_lost WHERE table_name=?1",
+            [&table.name],
+            crate::row_queries::read_identity,
+        )?;
+        capture_rows(db, &store, &rows)?;
+    }
+    Ok(())
 }
 
 pub(crate) fn clear(db: &DatabaseConnection) -> Result<(), DbError> {

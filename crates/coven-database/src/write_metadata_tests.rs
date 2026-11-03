@@ -19,7 +19,14 @@ async fn unreadable_metadata(
     database.inspect_writer_schema(|db, schema| {
         db.batch("SAVEPOINT unreadable").unwrap();
         let store = crate::merge_store::MergeStore::from_schema(db, &schema.schema);
-        crate::published::capture(db, &store).unwrap();
+        let rows = db
+            .query(
+                "SELECT table_name,key,audience FROM _coven_rows",
+                [],
+                crate::row_queries::read_identity,
+            )
+            .unwrap();
+        crate::published::capture_rows(db, &store, &rows).unwrap();
         db.batch("ALTER TABLE _coven_writes RENAME TO _coven_writes_moved").unwrap();
         check(db, schema);
         db.batch("ROLLBACK TO unreadable; RELEASE unreadable").unwrap();

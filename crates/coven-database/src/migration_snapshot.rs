@@ -73,6 +73,9 @@ impl<'c> MigrationCapture<'c> {
         let command = Parser::new(&bump, sql.as_bytes())
             .next()
             .map_err(|e| rusqlite::Error::UserFunctionError(Box::new(e)))?;
+        let named = named_table(&command);
+        // The synced tables whose rows this statement may change, lowercase.
+        let mut changes = BTreeSet::new();
         let main = |name: &Option<sqlite3_parser::ast::Name<'_>>| {
             name.as_ref().is_none_or(|n| crate::sql::name(n.0).eq_ignore_ascii_case("main"))
         };
@@ -121,6 +124,7 @@ impl<'c> MigrationCapture<'c> {
             other => {
                 let targets = db.migration_targets(sql)?;
                 let breaking = targets.iter().any(|t| self.synced.contains(t));
+                changes.extend(targets.iter().cloned());
                 // A statement that writes rows names its tables, and those
                 // its triggers write, whether or not a row matches.
                 if matches!(
@@ -137,11 +141,15 @@ impl<'c> MigrationCapture<'c> {
                 breaking
             }
         };
-        if breaking && self.snapshot.is_none() {
-            self.snapshot = Some(
-                MigrationSnapshot::capture(db, before, &self.synced)
-                    .map_err(|e| rusqlite::Error::UserFunctionError(Box::new(e)))?,
-            );
+        if breaking {
+            let failed = |e| rusqlite::Error::UserFunctionError(Box::new(e));
+            changes.extend(named);
+            changes.retain(|table| self.synced.contains(table));
+            crate::published::before_migrating(db, before, &changes).map_err(failed)?;
+            if self.snapshot.is_none() {
+                self.snapshot =
+                    Some(MigrationSnapshot::capture(db, before, &self.synced).map_err(failed)?);
+            }
         }
         Ok(())
     }
@@ -162,13 +170,25 @@ impl<'c> MigrationCapture<'c> {
     }
 }
 
+/// The table a schema statement changes, lowercase: an altered, dropped,
+/// indexed or triggered one.
+fn named_table(command: &Option<Cmd<'_>>) -> Option<String> {
+    let name = match command {
+        Some(Cmd::Stmt(Stmt::AlterTable(table, _))) => table.name.0,
+        Some(Cmd::Stmt(Stmt::DropTable { tbl_name, .. })) => tbl_name.name.0,
+        Some(Cmd::Stmt(Stmt::CreateIndex { tbl_name, .. })) => tbl_name.0,
+        Some(Cmd::Stmt(Stmt::CreateTrigger { tbl_name, .. })) => tbl_name.name.0,
+        _ => return None,
+    };
+    Some(crate::sql::name(name).to_ascii_lowercase())
+}
+
 impl<'c> MigrationSnapshot<'c> {
     fn capture(
         db: &'c DatabaseConnection,
         schema: &Schema,
         synced: &BTreeSet<String>,
     ) -> Result<Self, DbError> {
-        crate::published::before_migration(db, schema)?;
         let mut tables = BTreeMap::new();
         for table in
             schema.tables.values().filter(|t| synced.contains(&t.name.to_ascii_lowercase()))

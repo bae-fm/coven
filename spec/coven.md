@@ -1428,6 +1428,10 @@ rebuild the whole store: over 8 s for each of Ben's slots once his library held
 81,000 rows, so an import that took 29 s with nothing waiting took over an hour.
 A reload keeps aside the same rows: those the unsent writes change, over the
 state it loaded (§16.5).
+A migration keeps aside the rows it changes: each synced table's rows just
+before its first statement that changes that table, and the rows its new rules
+recompute (§18.1). A row it doesn't touch is kept aside already if an unsent
+write reached it, and otherwise holds the state the slots give.
 
 A slot that can't apply stops the device (§5.4): a missing key reports
 `KeyUnavailable`, a newer schema or format reports `UpdateRequired`, and a damaged

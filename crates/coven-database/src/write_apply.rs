@@ -17,6 +17,10 @@ pub(crate) struct WriteApply<'a> {
     before: &'a AppView<'a>,
     visible: &'a AppView<'a>,
     deleted: &'a BTreeMap<CircleId, crate::Slot>,
+    /// Whether the rows a recompute with no arriving write reaches keep
+    /// their counted state first, as a write's rows do: a migration's new
+    /// rules recompute them on this device alone, beside the queue.
+    keeps_recomputed: bool,
 }
 
 impl<'a> WriteApply<'a> {
@@ -28,7 +32,14 @@ impl<'a> WriteApply<'a> {
         visible: &'a AppView<'a>,
         deleted: &'a BTreeMap<CircleId, crate::Slot>,
     ) -> Self {
-        Self { database, schema, store, before, visible, deleted }
+        Self { database, schema, store, before, visible, deleted, keeps_recomputed: false }
+    }
+
+    /// Recompute as a migration's new rules do: the rows this reaches keep
+    /// their counted state first, while a queue of uncounted writes keeps
+    /// one (§6.2).
+    pub(crate) fn keeping_recomputed(self) -> Self {
+        Self { keeps_recomputed: true, ..self }
     }
 
     pub(crate) fn apply(
@@ -117,7 +128,13 @@ impl<'a> WriteApply<'a> {
         let removal = coven_merge::recompute(old, new, touched.clone())
             .map_err(|error| error.into_db_error(write))?;
         self.store.retain_materialization_values(&removal.region)?;
-        if write.is_some() {
+        // Every row this recomputes keeps its counted state first, while a
+        // queue of uncounted writes keeps one (§6.2): a write's rows, and
+        // the rows a migration's new rules recompute. Without a queue the
+        // stored state is the counted state, and nothing needs keeping. A
+        // slot or a snapshot changes the counted state itself, beside what
+        // `published::restore` put back.
+        if write.is_some() || (self.keeps_recomputed && crate::published::exists(self.database)?) {
             crate::published::capture_rows(self.database, self.store, &removal.region)?;
         }
         let stored = persist()?;
