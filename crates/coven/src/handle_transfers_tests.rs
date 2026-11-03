@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 /// A store on in-memory S3 that takes one request up to `single_limit`
-/// bytes and parts of `part_size`, with uploads paused and sync stopped.
+/// bytes and parts of `part_size`, with uploads paused and passes held.
 async fn paused_store(
     single_limit: u64,
     part_size: usize,
@@ -49,8 +49,7 @@ async fn paused_store(
         .unwrap();
     // The first pass after setup ends synced.
     handle.test_last_pass().wait_for(|last| *last == Some(LastPass::Synced)).await;
-    connector.stop(&handle).await;
-    handle.unlock_store_key().await.unwrap();
+    handle.test_hold_passes(true).await;
     handle.set_uploads_paused(true).await.unwrap();
     (root, memory, handle)
 }

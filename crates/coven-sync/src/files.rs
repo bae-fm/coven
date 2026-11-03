@@ -194,7 +194,7 @@ impl Files {
     /// every upload that can retry, whatever its wait, and this returns once
     /// each attempt has ended. Provider cooldowns and failures that never
     /// clear still hold (§17.9), and while uploads are paused only bound ones
-    /// are tried (§17.4).
+    /// are tried; while sync is stopped none is (§17.4).
     pub async fn retry_uploads_now(&self) -> Result<DrainOutcome, SyncError> {
         // The worker stopping with the store drops the retry unanswered.
         self.inner.ask_retry()?.answered().await
@@ -269,7 +269,8 @@ impl Drop for ConnectionChange<'_> {
 }
 
 /// The upload worker: runs uploads whenever queued work, a changed
-/// prerequisite or a due retry may let one start (§17.9). A run keeps the
+/// prerequisite or a due retry may let one start, while sync is started
+/// (§17.4, §17.9). A run keeps the
 /// upload limit's number in flight until none can start. After each run it
 /// makes the pins coven keeps that may be made (§17.8).
 async fn upload_worker(
@@ -282,6 +283,7 @@ async fn upload_worker(
     // Pins coven keeps resume as the store opens (§17.8).
     wake.notify_one();
     let mut sending = first.send.watch();
+    let mut syncing = first.waits.syncing();
     let mut reports = first.waits.network_reports();
     drop(first);
     // The earliest due upload retry, armed after each run (§6.7).
@@ -298,6 +300,8 @@ async fn upload_worker(
             },
             () = wake.notified() => {},
             result = sending.changed() => if result.is_err() { break; },
+            // Starting sync lets uploads run (§17.4).
+            result = syncing.changed() => if result.is_err() { break; },
             result = reports.changed() => if result.is_err() { break; },
             () = &mut retry => {},
         }

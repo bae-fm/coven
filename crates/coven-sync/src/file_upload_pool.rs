@@ -35,6 +35,8 @@ pub enum DrainOutcome {
     /// Uploads were paused: no trailing upload was tried. Each bound upload
     /// the retry covered was, since the pause holds none (§17.4).
     Paused,
+    /// Sync is stopped: no upload was tried (§17.4).
+    NotSyncing,
 }
 
 /// An app's early retry, waiting for its answer. A run takes it when it
@@ -88,6 +90,8 @@ impl Lane {
 #[derive(Clone, Copy, Debug)]
 enum Blocked {
     Closed,
+    /// Sync is stopped, which stops both lanes (§17.4).
+    NotSyncing,
     NoStorage,
     /// The app paused uploads, and no bound upload waits.
     Paused,
@@ -105,6 +109,7 @@ impl Blocked {
     fn retry_answer(self) -> Option<Result<DrainOutcome, SyncError>> {
         Some(match self {
             Self::Closed => Err(DbError::StoreClosed.into()),
+            Self::NotSyncing => Ok(DrainOutcome::NotSyncing),
             Self::NoStorage => Err(SyncError::NoStorage),
             Self::Paused => Ok(DrainOutcome::Paused),
             Self::CatchUp => Err(StorageFailure::CatchUpRequired.into()),
@@ -240,6 +245,8 @@ impl FilesInner {
     fn blocked(&self) -> Option<Blocked> {
         if self.check_open().is_err() {
             Some(Blocked::Closed)
+        } else if !self.waits.started() {
+            Some(Blocked::NotSyncing)
         } else if self.storage.read().expect("storage lock poisoned").is_none() {
             Some(Blocked::NoStorage)
         } else if self.changing.load(Ordering::Acquire) > 0 {
@@ -271,18 +278,19 @@ impl FilesInner {
         let mut sending = self.send.watch();
         let mut reports = self.waits.network_reports();
         let mut rearmed = self.waits.rearmed();
+        let mut syncing = self.waits.syncing();
         if let Some(blocked @ Blocked::Closed) = self.blocked() {
             return self.end_blocked(blocked, 0);
         }
-        // Uploads no file waits for any more go first, paused or not and
+        // Uploads no file waits for any more go first, paused, stopped or
         // with no storage too; an attempt in flight retires its own as it
         // ends (§17.9). One holding a provider session has it aborted
-        // first, which needs storage.
+        // first, which needs storage and sync started.
         self.end_abandoned_sessions().await?;
         for id in self.database.retire_unlinked(self.in_flight.current(), upload_subject).await? {
             self.waits.forget(RetrySubject::Upload(id));
         }
-        if let Some(blocked @ Blocked::NoStorage) = self.blocked() {
+        if let Some(blocked @ (Blocked::NotSyncing | Blocked::NoStorage)) = self.blocked() {
             return self.end_blocked(blocked, 0);
         }
         // The persisted setting governs; parts check this copy between sends.
@@ -381,6 +389,7 @@ impl FilesInner {
                     run.committed = true;
                 }
                 _ = sending.changed() => run.stale = true,
+                _ = syncing.changed() => run.stale = true,
                 _ = reports.changed() => {}
                 _ = rearmed.changed() => {}
                 () = async {

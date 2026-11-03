@@ -548,3 +548,26 @@ async fn changes_on_a_migration_another_raise_replaced_are_lost_everywhere() {
     assert_eq!(ana.handle.lost_values().await.unwrap(), ben.handle.lost_values().await.unwrap());
     network.close().await;
 }
+
+/// Stopping sync stops both lanes, though the handle is connected, as
+/// unlocking its store key leaves it: neither the cover nor the photo
+/// uploads, and an early retry says sync is stopped. Starting sync sends
+/// both (§17.4).
+#[tokio::test]
+async fn both_lanes_wait_while_sync_is_stopped() {
+    let network = household().await;
+    let ana = &network.devices[0];
+    stopped(ana).await;
+    ana.handle.unlock_store_key().await.unwrap();
+    let cover = stage(ana, "covers", "abbey-road", vec![1; 1024]).await;
+    let photo = stage(ana, "photos", "studio", vec![2; 2048]).await;
+    assert_eq!(ana.handle.retry_uploads_now().await.unwrap(), DrainOutcome::NotSyncing);
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(!file_stored(ana, cover).await, "a stopped sync sent the cover");
+    assert!(!file_stored(ana, photo).await, "a stopped sync sent the photo");
+    ana.handle.start_sync().await.unwrap();
+    crate::tests::wait_for_empty_queue(&ana.handle).await;
+    assert!(file_stored(ana, cover).await);
+    assert!(file_stored(ana, photo).await);
+    network.close().await;
+}

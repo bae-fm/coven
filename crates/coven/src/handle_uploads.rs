@@ -11,7 +11,8 @@ impl CovenHandle {
     }
     /// Optionally retry recoverable uploads early; provider cooldowns still
     /// hold them and individual failures stay in pending() (§17.9). While
-    /// uploads are paused it tries only bound ones (§17.4).
+    /// uploads are paused it tries only bound ones, and while sync is
+    /// stopped none, saying so (§17.4).
     pub async fn retry_uploads_now(&self) -> Result<DrainOutcome, SyncError> {
         self.files.retry_uploads_now().await
     }

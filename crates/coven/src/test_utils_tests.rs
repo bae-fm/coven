@@ -388,6 +388,8 @@ async fn identical_app_files_have_distinct_stored_ciphertext() {
         .await
         .unwrap();
     handle.set_uploads_paused(false).await.unwrap();
+    // Uploads run only while sync is started (§17.4).
+    handle.start_sync().await.unwrap();
     let mut uploads = handle.subscribe(|sql| {
         Ok(sql.query_row("SELECT count(*) FROM coven_uploads", [], |r| r.get::<_, i64>(0))?)
     });

@@ -12,7 +12,8 @@ impl CovenHandle {
     /// waiting retries are answered `NotSyncing` first; then the active pass
     /// and transfers finish, the provider client is released and the
     /// location recorded as custody holds it, and this returns. Once it has,
-    /// no pass runs until sync starts again. Keys remain unlocked for the
+    /// no pass or upload runs until sync starts again, whatever connects the
+    /// handle meanwhile. Keys remain unlocked for the
     /// handle session. A `start_sync` asked meanwhile starts after it, and
     /// dropping this future leaves stopping to finish. Stopping changes
     /// nothing the sync state reads; a release failure is recorded as the
@@ -54,6 +55,12 @@ impl CovenHandle {
     /// failed the handle, and is returned.
     pub async fn retry_now(&self) -> Result<RetryAnswer, SyncError> {
         self.storage.retry_now().await
+    }
+    /// Hold the connection's passes, or let them run again, with sync left
+    /// as it is: a test runs uploads with no pass beside them so.
+    #[cfg(test)]
+    pub(crate) async fn test_hold_passes(&self, held: bool) {
+        self.storage.hold_passes(held).await;
     }
     /// Follow `coven_retry_effect` with a live query, as an app does (E5).
     #[cfg(any(test, feature = "test-utils"))]

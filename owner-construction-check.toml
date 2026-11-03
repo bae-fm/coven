@@ -468,6 +468,9 @@ RetryAnswer = "RetryWaits"
 NetworkReportWatch = "RetryWaits"
 # Each wait a failed attempt arms, so an owner plans again (§6.7).
 RearmWatch = "RetryWaits"
+# Sync starting and stopping, for the upload worker, which runs only while
+# sync is started (§17.4).
+SyncingWatch = "RetryWaits"
 # The answer to an app's early retry of its uploads (§17.9).
 UploadRetryAnswer = "FilesInner"
 # One observation of the store's commits, shared by the observer that

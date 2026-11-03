@@ -12,8 +12,12 @@ impl FilesInner {
     /// A session already complete needs no abort, and one of a location this
     /// store has moved from is beyond this connection. A failed abort is the
     /// upload's failure, recorded and retried as an attempt's is. Without
-    /// storage nothing is aborted, and those uploads stay queued.
+    /// storage, or while sync is stopped, nothing is aborted, and those
+    /// uploads stay queued.
     pub(super) async fn end_abandoned_sessions(&self) -> Result<(), SyncError> {
+        if !self.waits.started() {
+            return Ok(());
+        }
         let Some(storage) = self.storage.read().expect("storage lock poisoned").clone() else {
             return Ok(());
         };

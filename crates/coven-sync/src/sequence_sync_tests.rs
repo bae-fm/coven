@@ -263,6 +263,9 @@ impl Group {
         let device = directory.settings().unwrap().device_id;
         let state = Arc::new(SequenceState::new());
         let waits = Arc::new(RetryWaits::open(database.clone(), clock.clone()).await.unwrap());
+        // The fixture's passes run as a started sync's do; uploads run only
+        // then (§17.4).
+        waits.sync_started().await.unwrap();
         let transfers = Arc::new(coven_storage::TransferBudget::new(TransferLimits::default()));
         let storage = storage
             .with_device(device)

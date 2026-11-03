@@ -70,6 +70,8 @@ impl Fixture {
         let send = ready_state();
         let waits =
             Arc::new(crate::RetryWaits::open(database.clone(), clock.clone()).await.unwrap());
+        // Sync is started: uploads run only then (§17.4).
+        waits.sync_started().await.unwrap();
         let transfers =
             Arc::new(coven_storage::TransferBudget::new(crate::TransferLimits::default()));
         let storage = Arc::new(
@@ -101,6 +103,7 @@ impl Fixture {
         let waits = Arc::new(
             crate::RetryWaits::open(self.database.clone(), self.clock.clone()).await.unwrap(),
         );
+        waits.sync_started().await.unwrap();
         let transfers =
             Arc::new(coven_storage::TransferBudget::new(crate::TransferLimits::default()));
         self.storage = Arc::new(

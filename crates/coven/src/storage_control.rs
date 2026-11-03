@@ -332,3 +332,21 @@ async fn attempt_ended(task: tokio::task::JoinHandle<()>) {
         tracing::debug!("{shutdown}");
     }
 }
+
+#[cfg(test)]
+impl StorageConnections {
+    /// Hold the connection's passes, or let them run again, leaving sync
+    /// as started or stopped as it is: while started, uploads run beside
+    /// held passes, as during a connection change (§17.4).
+    pub(crate) async fn hold_passes(&self, held: bool) {
+        let live = self.live.lock().await;
+        let ConnectionState::Active(live) = &*live else {
+            panic!("passes are held on a connection");
+        };
+        if held {
+            live.sync_loop.pause().await.unwrap();
+        } else {
+            live.sync_loop.resume().unwrap();
+        }
+    }
+}

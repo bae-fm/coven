@@ -121,6 +121,9 @@ async fn app_reopening_resumes_operations_and_files_using_one_storage_capability
     handle.close().await.unwrap();
     let handle = open().open(directory.id(), |_| ()).await.unwrap();
     handle.unlock_store_key().await.unwrap();
+    // Sync starts with its passes held, so the uploads run first.
+    handle.test_hold_passes(true).await;
+    handle.start_sync().await.unwrap();
     // The pause setting survived reopening; the app resumes uploads.
     assert!(handle.uploads().await.unwrap().paused);
     handle.set_uploads_paused(false).await.unwrap();
@@ -158,7 +161,7 @@ async fn app_reopening_resumes_operations_and_files_using_one_storage_capability
     // clock moves, so that pass's end moves the last synced time.
     clock.set(clock.now() + std::time::Duration::from_secs(1));
     let mut status = handle.test_sync_status();
-    handle.start_sync().await.unwrap();
+    handle.test_hold_passes(false).await;
     status.wait_for(|s| s.last_synced >= Some(clock.now())).await;
     let circle = handle.circles().list().await.unwrap().remove(0);
     assert_eq!((circle.id, circle.name.as_str()), (interrupted, "Interrupted"));

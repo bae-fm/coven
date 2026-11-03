@@ -272,6 +272,10 @@ impl RetryWaits {
             .change_retry_state(
                 move |state| cooling(change(state)),
                 move |state| {
+                    waits.syncing.send_if_modified(|syncing| {
+                        let started = matches!(state.sync, RetrySync::Started { .. });
+                        std::mem::replace(syncing, started) != started
+                    });
                     then(
                         &waits,
                         &mut waits.requests.lock().expect("retry requests poisoned"),

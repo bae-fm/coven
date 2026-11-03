@@ -52,6 +52,9 @@ pub struct RetryWaits {
     network: network_report::Reports,
     /// The person's retry requests waiting for a pass (`retry_answer.rs`).
     requests: Mutex<retry_answer::RetryRequests>,
+    /// Whether `coven_retry_effect` says sync is started, as its last step
+    /// committed it: uploads run only then (§17.4).
+    syncing: tokio::sync::watch::Sender<bool>,
     /// The reason last logged for each subject's failure.
     failures: crate::failure_log::FailureLog,
 }
@@ -64,6 +67,18 @@ impl RearmWatch {
     /// Resolves once another wait is armed; an error once the schedule is
     /// gone.
     pub async fn changed(&mut self) -> Result<(), tokio::sync::watch::error::RecvError> {
+        self.0.changed().await
+    }
+}
+
+/// Hears sync start and stop, so the upload worker runs only while it is
+/// started (`RetryWaits::syncing`, §17.4).
+pub(crate) struct SyncingWatch(tokio::sync::watch::Receiver<bool>);
+
+impl SyncingWatch {
+    /// Resolves at the next start or stop; an error once the schedule is
+    /// gone.
+    pub(crate) async fn changed(&mut self) -> Result<(), tokio::sync::watch::error::RecvError> {
         self.0.changed().await
     }
 }
@@ -111,6 +126,7 @@ impl RetryWaits {
             network: network_report::Reports::new(),
             requests: Mutex::new(retry_answer::RetryRequests::new()),
             failures: crate::failure_log::FailureLog::new(),
+            syncing: tokio::sync::watch::channel(false).0,
         };
         for (subject, wait) in waits {
             owner.arm_for(subject, wait.not_before, restart_wait(wait.not_before, now, wait.wait));
@@ -130,6 +146,7 @@ impl RetryWaits {
             network: network_report::Reports::new(),
             requests: Mutex::new(retry_answer::RetryRequests::new()),
             failures: crate::failure_log::FailureLog::new(),
+            syncing: tokio::sync::watch::channel(false).0,
         }
     }
 
@@ -187,6 +204,18 @@ impl RetryWaits {
         self.lock()
             .armed
             .insert(subject, Armed { not_before, timer: Some(timer), ends, seen: false });
+    }
+
+    /// Hear sync start and stop, as `coven_retry_effect` commits it.
+    pub(crate) fn syncing(&self) -> SyncingWatch {
+        SyncingWatch(self.syncing.subscribe())
+    }
+
+    /// Whether sync is started now, as `coven_retry_effect` last committed
+    /// it: starting and stopping write the row. A store opens stopped, and
+    /// a read-only handle never starts.
+    pub(crate) fn started(&self) -> bool {
+        *self.syncing.borrow()
     }
 
     /// Changes whenever a failed attempt arms a new wait.

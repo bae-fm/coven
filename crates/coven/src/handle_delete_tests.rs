@@ -106,8 +106,9 @@ async fn a_store_never_connected_deletes_with_its_local_writes() {
     assert_eq!(app.store_keychain(directory.id()).device_id().unwrap(), None);
 }
 
-/// A store on memory storage, synced once, then stopped with uploads paused,
-/// so committed writes and attached files stay unsent until the test sends them.
+/// A store on memory storage, synced once, then with its passes held and
+/// uploads paused, so committed writes and attached files stay unsent until
+/// the test sends them.
 async fn stopped_store_with_files() -> (tempfile::TempDir, TestCoven, CovenHandle) {
     use coven_storage::{test_utils::MemoryStorage, Storage};
     let root = tempfile::tempdir().unwrap();
@@ -152,8 +153,7 @@ async fn stopped_store_with_files() -> (tempfile::TempDir, TestCoven, CovenHandl
         .unwrap();
     // The first pass after setup ends synced.
     handle.test_last_pass().wait_for(|last| *last == Some(LastPass::Synced)).await;
-    connector.stop(&handle).await;
-    handle.unlock_store_key().await.unwrap();
+    handle.test_hold_passes(true).await;
     handle.set_uploads_paused(true).await.unwrap();
     (root, app, handle)
 }
@@ -199,7 +199,7 @@ async fn unsent_work_is_what_deleting_refuses_until_uploads_confirm() {
     handle.retry_uploads_now().await.unwrap();
     assert_eq!(handle.unsent_work().await.unwrap(), UnsentWork { writes: 3, files: 0 });
     let mut live = handle.subscribe_unsent_work();
-    handle.start_sync().await.unwrap();
+    handle.test_hold_passes(false).await;
     until(&mut live, UnsentWork { writes: 0, files: 0 }).await;
     assert!(handle.unsent_work().await.unwrap().is_empty());
     handle.delete_store(IfUnsent::Refuse).await.unwrap();
@@ -224,7 +224,7 @@ async fn subscribed_unsent_work_follows_each_commit_and_confirmation() {
         UnsentWork { writes: 2, files: 1 }
     );
     handle.set_uploads_paused(false).await.unwrap();
-    handle.start_sync().await.unwrap();
+    handle.test_hold_passes(false).await;
     until(&mut live, UnsentWork { writes: 0, files: 0 }).await;
     handle.close().await.unwrap();
 }

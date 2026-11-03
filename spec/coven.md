@@ -6294,12 +6294,17 @@ to the same limit, so a cover never waits behind the photos (§17.4).
 - `retry_uploads_now` joins the uploads in progress rather than waiting for
   them. It covers every queued file that can retry, whatever its delay, and
   returns once each one's attempt has ended. While uploads are paused it tries
-  only bound ones, and says uploads are paused.
+  only bound ones, and says uploads are paused; while sync is stopped it tries
+  none, and says sync isn't running.
 - **Same stops as writes.** File sends follow the stuck-device rule (§5.4) and the
   removal cut-off (§14.1). Parts the provider confirmed stay recorded for
   resuming; no time-based permission to send is needed.
-- **Stopping sync** waits for transfers in progress. Requests made outside the
-  pass count as well as those inside it (§21.1).
+- **Stopping sync** waits for transfers in progress, and no upload of either
+  lane starts until sync starts again, though an admin call or unlocking the
+  store key connects the handle meanwhile (§17.4). The worker reads whether
+  sync is started from `coven_retry_effect`, as the sync state's
+  `NotSyncing` wait does (§19.1). Requests made outside the pass count as well
+  as those inside it (§21.1).
 
 **What the queue keeps.** Each queued upload keeps the staging write's fixed
 location and key, the files it stores, and the source location with its size,

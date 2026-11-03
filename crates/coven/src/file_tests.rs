@@ -50,13 +50,12 @@ async fn stage_rows(
         .unwrap()
 }
 
-/// Once the first pass after setup ends synced, stop sync, wait for its
-/// release, which drops the provider's client after `stop_sync` returns,
-/// and connect without syncing.
-async fn stop_connected(handle: &CovenHandle, connector: &crate::tests::Connector) {
+/// Once the first pass after setup ends synced, hold the connection's
+/// passes with sync left started: uploads run with no pass beside them
+/// (§17.4).
+async fn hold_passes(handle: &CovenHandle) {
     handle.test_last_pass().wait_for(|last| *last == Some(LastPass::Synced)).await;
-    connector.stop(handle).await;
-    handle.unlock_store_key().await.unwrap();
+    handle.test_hold_passes(true).await;
 }
 
 /// Wait for the first pass that begins after the request, and check it
@@ -85,10 +84,10 @@ async fn uncached_file_bodies_and_sequence_reads_share_the_download_limit() {
             .migrations(vec![Migration::addition(1, "files", FILES)])
             .open(directory.id(), |_| ()).await.unwrap();
         handle.setup_s3_storage(memory.config(), "Device", "key".into(), SecretText::new("secret".into()), |_| {}).await.unwrap();
-        stop_connected(&handle, &connector).await;
+        hold_passes(&handle).await;
         let ids = stage_rows(&handle, 2, |id| vec![id; 2048].into()).await;
         handle.retry_uploads_now().await.unwrap();
-        handle.start_sync().await.unwrap();
+        handle.test_hold_passes(false).await;
         passed(&handle).await;
         let first_file = handle.file_ref(ids[0]).await.unwrap();
         let second_file = handle.file_ref(ids[1]).await.unwrap();
@@ -170,7 +169,7 @@ async fn transfer_limits_bound_requests_and_a_changed_limit_applies_to_the_next_
             )
             .await
             .unwrap();
-        stop_connected(&handle, &connector).await;
+        hold_passes(&handle).await;
         handle.set_uploads_paused(true).await.unwrap();
         let ids = stage_rows(&handle, 4, |id| {
             FileSource::Stream(Box::pin(std::io::Cursor::new(vec![id; 2048])))
@@ -481,7 +480,7 @@ async fn uploaded_files_pins_and_read_only_ranges_use_the_composed_owner() {
         )
         .await
         .unwrap();
-    stop_connected(&handle, &connector).await;
+    hold_passes(&handle).await;
     handle.set_uploads_paused(true).await.unwrap();
     let note = ids.new_id().to_string();
     let row = ids.new_id().to_string();
@@ -635,7 +634,7 @@ async fn the_apps_sql_reads_uploads_pins_and_pending_records() {
         )
         .await
         .unwrap();
-    stop_connected(&handle, &connector).await;
+    hold_passes(&handle).await;
     handle.set_uploads_paused(true).await.unwrap();
 
     let note = ids.new_id().to_string();

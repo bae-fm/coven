@@ -3816,8 +3816,8 @@ while let Some(Ok(values)) = lost.next().await {
 - `stop_sync` first writes `coven_retry_effect` as not running and answers
   the waiting retries; then the active pass and transfers finish, the
   providers are released and the location recorded, and it returns. Once it
-  has, no pass runs until sync starts again. It holds the store's call lock
-  throughout, so a `start_sync` asked meanwhile starts after it, and it
+  has, no pass or upload runs until sync starts again. It holds the store's
+  call lock throughout, so a `start_sync` asked meanwhile starts after it, and it
   finishes even if the app drops its future. Keys, credentials and location
   remain. Stopping changes nothing the sync state reads; a failure releasing
   the providers is recorded as the last pass's failure, with no pending
@@ -5337,8 +5337,9 @@ impl CovenHandle {
     /// It joins the uploads in progress, covers every queued file that can
     /// retry whatever its delay, and returns once each one's attempt ended.
     /// While uploads are paused it tries only bound ones and returns
-    /// `Paused`. Provider cooldowns still hold; failures stay in pending()
-    /// (§6.7).
+    /// `Paused`; while sync is stopped it tries none and returns
+    /// `NotSyncing`. Provider cooldowns still hold; failures stay in
+    /// pending() (§6.7).
     pub async fn retry_uploads_now(&self) -> Result<DrainOutcome, SyncError>;
 
     /// `CovenWrite::set_uploads_paused`, in a write of its own.
@@ -5439,6 +5440,8 @@ pub enum DrainOutcome {
     /// Uploads were paused: no trailing upload was tried, and each bound
     /// one it covered was (§17.4).
     Paused,
+    /// Sync is stopped: no upload was tried (§17.4).
+    NotSyncing,
 }
 ```
 
