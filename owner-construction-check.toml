@@ -307,6 +307,12 @@ task_types = [
     # One write's changes, and each live query's verdict on them, until it
     # commits (§4).
     "Judged",
+    # One attempt to transfer a stored object, and what tells it how far it
+    # has got.
+    "Transferring",
+    "TransferMeter",
+    # Where one run of a file's chunks goes: the cache, or a pin's whole file.
+    "ChunkDestination",
 ]
 # The shared in-memory state the runtime and the standard library declare.
 external_types = [
@@ -379,6 +385,9 @@ CommitSubscription = "CommitObserver"
 DatabaseChanges = "CommitObserver"
 # How far each file in flight one way has got (api.md E7, E8).
 TransferWatch = "InFlight"
+# The files in flight one way, which the worker moving them marks as each
+# attempt starts and ends (§17.8, §17.9).
+InFlight = "TransfersInFlight"
 
 # The raw handles and coven's own SQL are the database boundary's subject;
 # the SQLite capability's row names the database's home and the SQLite
@@ -618,6 +627,12 @@ tables = [
     # Makes each subscription's state, which its observer reaches by a weak
     # reference.
     "CommitSubscription::new",
+]
+# One per open store, with each way's shared state, which its handles
+# share (§4).
+"crates/coven-database/src/transfers_in_flight.rs" = [
+    "TransfersInFlight::new",
+    "InFlight::new",
 ]
 
 "crates/coven-storage/src/providers/connector.rs" = [

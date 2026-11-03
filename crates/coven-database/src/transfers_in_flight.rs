@@ -60,8 +60,8 @@ pub(crate) const FUNCTIONS: [&str; 3] =
 /// Both ways files go: one owner per open store, whose clones share it.
 #[derive(Clone)]
 pub(crate) struct TransfersInFlight {
-    pub(crate) uploads: InFlight,
-    pub(crate) downloads: InFlight,
+    uploads: InFlight,
+    downloads: InFlight,
 }
 
 impl TransfersInFlight {
@@ -70,6 +70,17 @@ impl TransfersInFlight {
             uploads: InFlight::new(&SENDING, observer.clone()),
             downloads: InFlight::new(&DOWNLOADING, observer),
         }
+    }
+
+    /// The files this process is sending, as the upload worker marks them.
+    pub(crate) fn uploads(&self) -> InFlight {
+        self.uploads.clone()
+    }
+
+    /// The files this process is downloading to keep whole, as each pin's
+    /// download marks them.
+    pub(crate) fn downloads(&self) -> InFlight {
+        self.downloads.clone()
     }
 
     /// Register both ways' functions on a connection to the store's

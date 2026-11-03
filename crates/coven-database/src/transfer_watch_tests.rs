@@ -25,7 +25,7 @@ async fn next(watch: &mut TransferWatch) -> Vec<TransferChange> {
 #[tokio::test]
 async fn a_reader_hears_each_file_whose_progress_moved() {
     let transfers = TransfersInFlight::new(CommitObserver::new());
-    let uploads = transfers.uploads;
+    let uploads = transfers.uploads();
     let first = uploads.start(DeviceId(1), file(1), vec![file(1)], progress(0, 100));
     let mut watch = uploads.subscribe();
     assert_eq!(
@@ -54,7 +54,7 @@ async fn a_reader_hears_each_file_whose_progress_moved() {
 #[tokio::test]
 async fn an_ended_attempt_moves_no_later_one() {
     let transfers = TransfersInFlight::new(CommitObserver::new());
-    let downloads = transfers.downloads;
+    let downloads = transfers.downloads();
     let ended = downloads.start(DeviceId(1), file(1), vec![file(1)], progress(0, 100));
     let stale = ended.meter();
     drop(ended);
@@ -79,11 +79,11 @@ async fn an_ended_attempt_moves_no_later_one() {
 async fn closing_the_store_ends_the_watch() {
     let observer = CommitObserver::new();
     let transfers = TransfersInFlight::new(observer.clone());
-    let mut open = transfers.uploads.subscribe();
+    let mut open = transfers.uploads().subscribe();
     assert_eq!(next(&mut open).await, [TransferChange::Reset(BTreeMap::new())]);
     let waiting = tokio::spawn(async move { open.next().await });
     observer.close();
     assert_eq!(waiting.await.unwrap(), None);
-    let mut closed = transfers.uploads.subscribe();
+    let mut closed = transfers.uploads().subscribe();
     assert_eq!(closed.next().await, None);
 }
