@@ -15,16 +15,22 @@ use sqlite3_parser::{
 };
 use std::collections::{BTreeMap, BTreeSet};
 
-pub(crate) struct MigrationCapture {
-    pub(crate) synced: BTreeSet<String>,
-    pub(crate) snapshot: Option<MigrationSnapshot>,
+/// What one migration run captures of the synced state before its first
+/// breaking statement, on the connection the run migrates.
+pub(crate) struct MigrationCapture<'c> {
+    database: &'c DatabaseConnection,
+    synced: BTreeSet<String>,
+    snapshot: Option<MigrationSnapshot<'c>>,
     /// Tables the current step's statements write rows of, as SQLite
     /// authorizes each statement when it is prepared: whether any row
     /// matches never decides a step's class (§18.1).
     targets: BTreeSet<String>,
 }
 
-pub(crate) struct MigrationSnapshot {
+/// The synced rows before a run's first breaking statement, in temporary
+/// tables of the run's connection until the run drops them.
+pub(crate) struct MigrationSnapshot<'c> {
+    database: &'c DatabaseConnection,
     tables: BTreeMap<String, SnapshotTable>,
 }
 
@@ -33,8 +39,8 @@ struct SnapshotTable {
     columns: BTreeMap<String, String>,
 }
 
-impl MigrationCapture {
-    pub(crate) fn new(db: &DatabaseConnection, tables: &[SyncedTable]) -> Result<Self, DbError> {
+impl<'c> MigrationCapture<'c> {
+    pub(crate) fn new(db: &'c DatabaseConnection, tables: &[SyncedTable]) -> Result<Self, DbError> {
         // Column identities survive an empty table, and identify its old synced name
         // even when the app declares only the renamed, final schema.
         let mut synced: BTreeSet<String> = db
@@ -42,7 +48,18 @@ impl MigrationCapture {
             .into_iter()
             .collect();
         synced.extend(tables.iter().map(|t| t.name.to_ascii_lowercase()));
-        Ok(Self { synced, snapshot: None, targets: BTreeSet::new() })
+        Ok(Self { database: db, synced, snapshot: None, targets: BTreeSet::new() })
+    }
+
+    /// The synced tables, by their names before the run, lowercase.
+    pub(crate) fn synced(&self) -> &BTreeSet<String> {
+        &self.synced
+    }
+
+    /// The state captured before the run's first breaking statement, for
+    /// the run's last phase.
+    pub(crate) fn into_snapshot(self) -> Option<MigrationSnapshot<'c>> {
+        self.snapshot
     }
 
     /// The tables the step's statements so far named, starting the next step.
@@ -50,12 +67,8 @@ impl MigrationCapture {
         std::mem::take(&mut self.targets)
     }
 
-    pub(crate) fn before(
-        &mut self,
-        db: &DatabaseConnection,
-        before: &Schema,
-        sql: &str,
-    ) -> rusqlite::Result<()> {
+    pub(crate) fn before(&mut self, before: &Schema, sql: &str) -> rusqlite::Result<()> {
+        let db = self.database;
         let bump = Bump::new();
         let command = Parser::new(&bump, sql.as_bytes())
             .next()
@@ -134,28 +147,24 @@ impl MigrationCapture {
     }
 
     /// Capture the synced state now, before any statement of the batch.
-    pub(crate) fn capture_now(
-        &mut self,
-        db: &DatabaseConnection,
-        before: &Schema,
-    ) -> Result<(), DbError> {
+    pub(crate) fn capture_now(&mut self, before: &Schema) -> Result<(), DbError> {
         if self.snapshot.is_none() {
-            self.snapshot = Some(MigrationSnapshot::capture(db, before, &self.synced)?);
+            self.snapshot = Some(MigrationSnapshot::capture(self.database, before, &self.synced)?);
         }
         Ok(())
     }
 
-    pub(crate) fn discard(&mut self, db: &DatabaseConnection) -> Result<(), DbError> {
+    pub(crate) fn discard(&mut self) -> Result<(), DbError> {
         if let Some(snapshot) = self.snapshot.take() {
-            snapshot.drop(db)?;
+            snapshot.drop()?;
         }
         Ok(())
     }
 }
 
-impl MigrationSnapshot {
+impl<'c> MigrationSnapshot<'c> {
     fn capture(
-        db: &DatabaseConnection,
+        db: &'c DatabaseConnection,
         schema: &Schema,
         synced: &BTreeSet<String>,
     ) -> Result<Self, DbError> {
@@ -185,14 +194,11 @@ impl MigrationSnapshot {
             db.batch(&format!("CREATE TEMP TABLE {} AS SELECT {} AS coven_key,{projection} FROM main.{}; CREATE UNIQUE INDEX temp.{} ON {}(coven_key)",identifier(&temporary),key_sql(table,""),identifier(&table.name),identifier(&format!("{temporary}_key")),identifier(&temporary)))?;
             tables.insert(table.name.clone(), SnapshotTable { temporary, columns });
         }
-        Ok(Self { tables })
+        Ok(Self { database: db, tables })
     }
 
-    pub(crate) fn rename(
-        &mut self,
-        db: &DatabaseConnection,
-        names: &MigrationMatch,
-    ) -> Result<(), DbError> {
+    pub(crate) fn rename(&mut self, names: &MigrationMatch) -> Result<(), DbError> {
+        let db = self.database;
         for (old, table) in &self.tables {
             if !names.tables.contains_key(old) {
                 db.batch(&format!("DROP TABLE temp.{}", identifier(&table.temporary)))?;
@@ -215,11 +221,8 @@ impl MigrationSnapshot {
         Ok(())
     }
 
-    pub(crate) fn row(
-        &self,
-        db: &DatabaseConnection,
-        key: &AppKey,
-    ) -> Result<Option<AppRow>, DbError> {
+    pub(crate) fn row(&self, key: &AppKey) -> Result<Option<AppRow>, DbError> {
+        let db = self.database;
         let Some(table) = self.tables.get(&key.0) else {
             return Ok(None);
         };
@@ -257,11 +260,11 @@ impl MigrationSnapshot {
 
     pub(crate) fn find(
         &self,
-        db: &DatabaseConnection,
         table: &TableSchema,
         columns: &[String],
         values: &[coven_format::value::Value],
     ) -> Result<Vec<AppValues>, DbError> {
+        let db = self.database;
         let Some(snapshot) = self.tables.get(&table.name) else {
             return Ok(Vec::new());
         };
@@ -297,10 +300,10 @@ impl MigrationSnapshot {
 
     pub(crate) fn differences(
         &self,
-        db: &DatabaseConnection,
         schema: &crate::write_schema::WriteSchema,
         references: &BTreeMap<String, BTreeSet<String>>,
     ) -> Result<BTreeMap<AppKey, BTreeSet<String>>, DbError> {
+        let db = self.database;
         let mut changed = BTreeMap::new();
         for declaration in &schema.declarations {
             let table = schema.table(&declaration.name);
@@ -358,9 +361,9 @@ impl MigrationSnapshot {
         Ok(changed)
     }
 
-    pub(crate) fn drop(self, db: &DatabaseConnection) -> Result<(), DbError> {
+    pub(crate) fn drop(self) -> Result<(), DbError> {
         for table in self.tables.into_values() {
-            db.batch(&format!("DROP TABLE temp.{}", identifier(&table.temporary)))?;
+            self.database.batch(&format!("DROP TABLE temp.{}", identifier(&table.temporary)))?;
         }
         Ok(())
     }

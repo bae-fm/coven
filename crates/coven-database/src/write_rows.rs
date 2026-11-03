@@ -30,7 +30,7 @@ pub(crate) struct AppView<'a> {
     overrides: BTreeMap<AppKey, Option<AppValues>>,
     lookup: BTreeMap<(String, Vec<String>, Vec<u8>), Vec<AppKey>>,
     rows: Option<RefCell<BTreeMap<AppKey, Option<AppRow>>>>,
-    migration: Option<&'a crate::migration_snapshot::MigrationSnapshot>,
+    migration: Option<&'a crate::migration_snapshot::MigrationSnapshot<'a>>,
 }
 
 impl<'a> AppView<'a> {
@@ -92,7 +92,7 @@ impl<'a> AppView<'a> {
             }
         }
         if let Some(snapshot) = self.migration {
-            let row = snapshot.row(self.database, key)?;
+            let row = snapshot.row(key)?;
             return Ok(self.remember(key, row));
         }
         let table = self.schema.table(&key.0);
@@ -184,7 +184,7 @@ impl<'a> AppView<'a> {
     pub(crate) fn migration_before(
         database: &'a DatabaseConnection,
         schema: &'a WriteSchema,
-        snapshot: &'a crate::migration_snapshot::MigrationSnapshot,
+        snapshot: &'a crate::migration_snapshot::MigrationSnapshot<'a>,
     ) -> Self {
         let mut view = Self::after(database, schema);
         view.migration = Some(snapshot);
@@ -239,7 +239,7 @@ impl<'a> AppView<'a> {
         values: &[Value],
     ) -> Result<Vec<AppValues>, DbError> {
         if let Some(snapshot) = self.migration {
-            return snapshot.find(self.database, table, columns, values);
+            return snapshot.find(table, columns, values);
         }
         let matching = |parameters: &[Value]| {
             self.database.query(

@@ -8,7 +8,6 @@ use crate::write_rows::AppView;
 use crate::{DbError, Migration, MigrationChange, MigrationContext, MigrationOutcome, SyncedTable};
 use coven_format::write::WriteDisposition;
 use coven_foundation::id_source::DeviceId;
-use std::cell::RefCell;
 use std::collections::BTreeSet;
 use std::time::SystemTime;
 
@@ -44,7 +43,7 @@ pub(crate) fn run<'a>(
     // each step's renames, then the final declarations (§18.1).
     let mut files = crate::file_table::registered_columns(database)?;
     let mut before = Schema::read(database, &files)?;
-    let capture = RefCell::new(MigrationCapture::new(database, tables)?);
+    let mut capture = MigrationCapture::new(database, tables)?;
     // Changing an existing table's owner declaration or file references is
     // breaking (§18.1): the raise captures the state before any statement
     // runs.
@@ -52,17 +51,18 @@ pub(crate) fn run<'a>(
         .is_some()
         || crate::file_table::changed(database, &before, tables)?.is_some();
     if declared {
-        capture.borrow_mut().capture_now(database, &before)?;
+        capture.capture_now(&before)?;
     }
     let mut breaking = declared;
     let mut steps = Vec::new();
     for (ran, migration) in migrations.iter().filter(|m| m.version > current).enumerate() {
         *at = migration;
-        let context = MigrationContext::new(database, &before, &capture);
+        let context = MigrationContext::new(database, before, capture);
         database.migrating(|| migration.apply(&context))?;
-        let changed = capture.borrow_mut().take_targets();
         let after = Schema::read(database, &files)?;
-        let effects = context.finish(&before, &after);
+        let (effects, step_before, step_capture) = context.finish(&after);
+        capture = step_capture;
+        let changed = capture.take_targets();
         files = crate::file_table::renamed(&files, &effects.names);
         let after = Schema::read(database, &files)?;
         crate::source_names::record(
@@ -72,14 +72,14 @@ pub(crate) fn run<'a>(
             &after,
             &effects.names,
         )?;
-        let synced = capture.borrow().synced.clone();
+        let synced = capture.synced().clone();
         breaking |= changed.iter().any(|t| synced.contains(t))
             || effects.dropped.iter().any(|t| synced.contains(t))
-            || before.change_to(&after, &synced) == MigrationChange::Breaking;
+            || step_before.change_to(&after, &synced) == MigrationChange::Breaking;
         if !breaking {
-            capture.borrow_mut().discard(database)?;
+            capture.discard()?;
         }
-        steps.push(MigrationStep { migration, before, effects, changed });
+        steps.push(MigrationStep { migration, before: step_before, effects, changed });
         before = after;
         progress.done(ran as u64 + 1);
     }
@@ -90,7 +90,7 @@ pub(crate) fn run<'a>(
     let mut synced: BTreeSet<_> = tables.iter().map(|t| t.name.to_ascii_lowercase()).collect();
     let mut outcomes = Vec::new();
     let mut after = &final_schema;
-    synced.extend(capture.borrow().synced.iter().cloned());
+    synced.extend(capture.synced().iter().cloned());
     for step in steps.iter().rev() {
         synced.extend(
             step.effects
@@ -172,7 +172,7 @@ pub(crate) fn run<'a>(
             &names,
             &steps[first].before,
             &baseline_names,
-            capture.into_inner().snapshot.expect("breaking statement captured its before state"),
+            capture.into_snapshot().expect("breaking statement captured its before state"),
             author,
         )?);
     }
@@ -212,7 +212,7 @@ fn finish(
     names: &MigrationMatch,
     baseline_schema: &Schema,
     baseline_names: &MigrationMatch,
-    mut snapshot: crate::migration_snapshot::MigrationSnapshot,
+    mut snapshot: crate::migration_snapshot::MigrationSnapshot<'_>,
     (device, now): (DeviceId, SystemTime),
 ) -> Result<coven_merge::WriteId, DbError> {
     let schema = crate::write_schema::WriteSchema::read(database, tables.to_vec())?;
@@ -223,11 +223,11 @@ fn finish(
         let refresh = crate::migration_state::carry(database, initial_schema, names, &schema)?;
         crate::migration_files::carry(database, names)?;
         crate::row_queries::register_schema(database, &schema.schema, tables)?;
-        snapshot.rename(database, baseline_names)?;
+        snapshot.rename(baseline_names)?;
         let before = AppView::migration_before(database, &schema, &snapshot);
         let visible = AppView::after(database, &schema);
         let reference_columns = baseline_names.reference_columns(baseline_schema, &schema.schema);
-        let mut changed = snapshot.differences(database, &schema, &reference_columns)?;
+        let mut changed = snapshot.differences(&schema, &reference_columns)?;
         for key in changed.keys() {
             if before.row(key)?.is_none() {
                 if let Some(row) = visible.row(key)? {
@@ -260,7 +260,7 @@ fn finish(
         let selected = hidden.select();
         let mut deletes = Vec::new();
         for row in &selected {
-            if let Some(change) = crate::migration_hidden::Hidden::delete(database, &store, row)? {
+            if let Some(change) = hidden.delete(&store, row)? {
                 deletes.push(row.clone());
                 changes.insert(row.clone(), change);
             }
@@ -268,7 +268,6 @@ fn finish(
         let mut record = crate::write_record::changed(database, device, now, changes)?;
         for row in &deletes {
             hidden.freeze(
-                database,
                 &schema,
                 &store,
                 row,
@@ -301,7 +300,7 @@ fn finish(
         crate::captured_changes::capture(database,record.header.position,record.header.schema_version)?;
         database.internal_execute("INSERT INTO _coven_migration_losses(write_id,audience,record) SELECT ?1,audience,record FROM temp._coven_migration_frozen",[coven_format::merge_fields::encode_write_id(&record.header.position)?])?;
         database.batch("DROP TABLE temp._coven_migration_frozen")?;
-        snapshot.drop(database)?;
+        snapshot.drop()?;
         Ok(record.header.position)
     })
 }

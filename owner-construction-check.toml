@@ -357,6 +357,12 @@ task_types = [
     # One try at a store's lock: the closing holder it waits for, or the
     # registration it reserved.
     "Acquisition",
+    # One migration run's capture of the synced state, the temporary tables
+    # holding it, and the rows removal rules hid before it, on the connection
+    # the run migrates (§18.1, §18.7).
+    "MigrationCapture",
+    "MigrationSnapshot",
+    "Hidden",
 ]
 # The shared in-memory state the runtime and the standard library declare.
 external_types = [

@@ -155,25 +155,41 @@ pub(crate) fn validate_versions(migrations: &[Migration]) -> Result<u32, Migrati
 pub struct MigrationContext<'connection> {
     database: &'connection DatabaseConnection,
     names: RefCell<MigrationNames>,
-    before: &'connection crate::schema::Schema,
-    capture: &'connection RefCell<crate::migration_snapshot::MigrationCapture>,
+    /// The schema before this step, which the step hands back when it ends.
+    before: crate::schema::Schema,
+    /// The run's capture, which each step takes from the last.
+    capture: RefCell<crate::migration_snapshot::MigrationCapture<'connection>>,
 }
 
 impl<'connection> MigrationContext<'connection> {
     pub(crate) fn new(
         database: &'connection DatabaseConnection,
-        before: &'connection crate::schema::Schema,
-        capture: &'connection RefCell<crate::migration_snapshot::MigrationCapture>,
+        before: crate::schema::Schema,
+        capture: crate::migration_snapshot::MigrationCapture<'connection>,
     ) -> Self {
-        Self { database, names: RefCell::new(MigrationNames::new(before)), before, capture }
+        Self {
+            database,
+            names: RefCell::new(MigrationNames::new(&before)),
+            before,
+            capture: RefCell::new(capture),
+        }
     }
 
+    /// The step's effects on the schema, the schema it started from, and the
+    /// run's capture for the next step.
     pub(crate) fn finish(
         self,
-        before: &crate::schema::Schema,
         after: &crate::schema::Schema,
-    ) -> crate::migration_names::MigrationEffects {
-        self.names.into_inner().finish(before, after)
+    ) -> (
+        crate::migration_names::MigrationEffects,
+        crate::schema::Schema,
+        crate::migration_snapshot::MigrationCapture<'connection>,
+    ) {
+        (
+            self.names.into_inner().finish(&self.before, after),
+            self.before,
+            self.capture.into_inner(),
+        )
     }
 
     fn statement<T>(
@@ -191,7 +207,7 @@ impl<'connection> MigrationContext<'connection> {
     }
 
     pub(crate) fn before_statement(&self, sql: &str) -> rusqlite::Result<()> {
-        self.capture.borrow_mut().before(self.database, self.before, sql)
+        self.capture.borrow_mut().before(&self.before, sql)
     }
 
     pub(crate) fn record(&self, sql: &str) -> rusqlite::Result<()> {

@@ -13,18 +13,20 @@ use coven_format::write::RowChange;
 use coven_merge::{Change, Operation, RowId, RowState};
 use std::collections::{BTreeMap, BTreeSet};
 
-/// The rows removal rules hide before the migration, under their old names.
-pub(crate) struct Hidden {
+/// The rows removal rules hide before the migration, under their old names,
+/// for the migration run on this connection.
+pub(crate) struct Hidden<'c> {
+    database: &'c DatabaseConnection,
     /// Merge state under the old identity and column names, by new identity.
     rows: BTreeMap<RowId, (RowId, RowState<Value>)>,
 }
 
-impl Hidden {
+impl<'c> Hidden<'c> {
     /// Read every hidden row before identities move. A hidden row of a dropped
     /// table has no generation left to delete; its losses are frozen with the
     /// table's (`migration_state::carry`).
     pub(crate) fn before(
-        db: &DatabaseConnection,
+        db: &'c DatabaseConnection,
         before: &crate::schema::Schema,
         names: &MigrationMatch,
     ) -> Result<Self, DbError> {
@@ -45,7 +47,7 @@ impl Hidden {
             };
             rows.insert(new, (row, state));
         }
-        Ok(Self { rows })
+        Ok(Self { database: db, rows })
     }
 
     /// Rows hidden by the counted removal rules before migration.
@@ -56,7 +58,7 @@ impl Hidden {
     /// The migration write's delete of one selected row at its generation,
     /// naming the generation and every setter it replaces.
     pub(crate) fn delete(
-        db: &DatabaseConnection,
+        &self,
         store: &MergeStore<'_>,
         row: &RowId,
     ) -> Result<Option<RowChange>, DbError> {
@@ -71,7 +73,7 @@ impl Hidden {
             .map(|(column, cell)| (column.clone(), cell.value.value.clone()))
             .collect();
         crate::write_sources::authored(
-            db,
+            self.database,
             store,
             row.clone(),
             Change { generation, operation: Operation::Delete },
@@ -85,7 +87,6 @@ impl Hidden {
     /// their old names, with their original setters and no live parent links.
     pub(crate) fn freeze(
         &self,
-        db: &DatabaseConnection,
         schema: &WriteSchema,
         store: &MergeStore<'_>,
         row: &RowId,
@@ -107,6 +108,7 @@ impl Hidden {
             values: LossValues::Row(cells),
             cause: LossCause::Excluded { write: migration, version },
         };
+        let db = self.database;
         db.internal_execute(
             "INSERT INTO _coven_migration_losses(write_id,audience,record) VALUES(?1,?2,?3)",
             rusqlite::params![
