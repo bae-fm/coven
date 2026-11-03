@@ -199,6 +199,9 @@ borrowed_facade_types = [
     "PreWrite",
 ]
 task_types = [
+    # One copy being written under its temporary name in the folder the
+    # person picked, whose file its blocking writes share (§17.3).
+    "CopyWriter",
     # The measurement in effect on a thread for one scope of a test, and the
     # one it replaced, put back when the scope ends.
     "Active",
