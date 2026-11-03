@@ -9691,7 +9691,9 @@ may use real ones. The checker's policy lists as shared state `Barrier`,
 `Semaphore`, `RwLock`, the atomics (`AtomicBool`, `AtomicI64`, `AtomicU64`,
 `AtomicUsize`), `OnceLock` and `LazyLock`, which the first of their holders to
 reach them sets for all the others, `Notify`, which wakes whichever holder
-waits on it, and a task's `JoinHandle`, which can abort or await the task.
+waits on it, a task's `JoinHandle`, which can abort or await the task, and
+the ends of a channel, `Sender`, `UnboundedSender`, `Receiver` and
+`UnboundedReceiver`, each of which shares the channel with the other.
 
 - The builder configures the clock, custody and OAuth. Ids use OS randomness;
   only `test-utils` allows replacing their source (api.md E1).

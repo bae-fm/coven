@@ -85,6 +85,10 @@ shared_state_types = [
     "OnceLock",
     "LazyLock",
     "Notify",
+    "Sender",
+    "UnboundedSender",
+    "Receiver",
+    "UnboundedReceiver",
 ]
 capability_traits = [
     "Clock",
@@ -334,6 +338,10 @@ external_types = [
     "OnceLock",
     "LazyLock",
     "Notify",
+    "Sender",
+    "UnboundedSender",
+    "Receiver",
+    "UnboundedReceiver",
 ]
 internal_dependency_types = ["DatabaseConnection"]
 closed_session_types = [
