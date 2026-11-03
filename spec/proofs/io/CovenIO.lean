@@ -5,6 +5,7 @@ import CovenIO.WaitingEvidence
 import CovenIO.WaitingReopen
 import CovenIO.WaitingNetwork
 import CovenIO.RetryAnswer
+import CovenIO.SyncState
 import CovenIO.Wakes
 import CovenIO.Downloads
 import CovenIO.Keep

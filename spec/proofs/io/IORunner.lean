@@ -4,6 +4,7 @@ import CovenIO.Keep
 import CovenIO.Retired
 import CovenIO.WaitingReopen
 import CovenIO.Wakes
+import CovenIO.SyncState
 import Lean
 
 open Lean CovenIO
@@ -204,6 +205,139 @@ private def fileScan (j : Json) : Except String Json := do
     results := results.push (if f.listed then toJson (f.candidates.mergeSort (· ≤ ·)) else Json.null)
   return Json.arr results
 
+namespace SyncStateCase
+open CovenIO.SyncState
+
+private def failures : List (String × CovenIO.SyncState.Failure) := [
+    ("providerUnavailable", .providerUnavailable),
+    ("accessNotRegistered", .accessNotRegistered),
+    ("accessNotGranted", .accessNotGranted),
+    ("dropboxAppFolderNotShareable", .dropboxAppFolderNotShareable),
+    ("catchUpRequired", .catchUpRequired),
+    ("network", .network),
+    ("authentication", .authentication),
+    ("permissionDenied", .permissionDenied),
+    ("notFound", .notFound),
+    ("alreadyExists", .alreadyExists),
+    ("conflict", .conflict),
+    ("containerNotFound", .containerNotFound),
+    ("regionMismatch", .regionMismatch),
+    ("storeExists", .storeExists),
+    ("clockSkew", .clockSkew),
+    ("ownBucketRequired", .ownBucketRequired),
+    ("quotaExceeded", .quotaExceeded),
+    ("rateLimited", .rateLimited),
+    ("invalidConfiguration", .invalidConfiguration),
+    ("refused", .refused),
+    ("protocol", .protocol),
+    ("invalidPath", .invalidPath),
+    ("invalidRange", .invalidRange),
+    ("notStoreOwner", .notStoreOwner),
+    ("inviteeIsStoreOwner", .inviteeIsStoreOwner),
+    ("accountIdUnavailable", .accountIdUnavailable),
+    ("invitationMismatch", .invitationMismatch),
+    ("sessionMismatch", .sessionMismatch),
+    ("sessionExpired", .sessionExpired),
+    ("sessionIdentityUnknown", .sessionIdentityUnknown),
+    ("invalidPart", .invalidPart),
+    ("singleRequestTooLarge", .singleRequestTooLarge),
+    ("copyTooLarge", .copyTooLarge),
+    ("encoding", .encoding),
+    ("file", .file),
+    ("memberKeysMissing", .memberKeysMissing)]
+
+private def reasons : List (String × Reason) := [
+    ("missing", .missing),
+    ("waits", .waits),
+    ("keyUnavailable", .keyUnavailable),
+    ("updateRequired", .updateRequired),
+    ("noStorage", .noStorage),
+    ("refused", .refused),
+    ("writesRefused", .writesRefused),
+    ("providerPending", .providerPending),
+    ("accountInUse", .accountInUse),
+    ("accessRemains", .accessRemains),
+    ("fileLost", .fileLost),
+    ("fileSource", .fileSource),
+    ("originalMissing", .originalMissing),
+    ("originalChanged", .originalChanged),
+    ("rejected", .rejected),
+    ("paused", .paused),
+    ("removed", .removed),
+    ("memberKeysReplaced", .memberKeysReplaced)]
+
+private def locals : List (String × Local) := [
+    ("database", .database), ("disk", .disk), ("keyCustody", .keyCustody),
+    ("crypto", .crypto), ("operation", .operation), ("shutdown", .shutdown)]
+
+private def named {α : Type} (table : List (String × α)) (what name : String) : Except String α :=
+  match table.lookup name with
+  | some value => .ok value
+  | none => .error s!"unknown {what} {name}"
+
+private def failure (j : Json) : Except String CovenIO.SyncState.Failure := do named failures "failure" (← j.getStr?)
+
+/-- A reason: its name, or `{"storage": failure, "answered": bool}`,
+`{"failed": local}` or `{"cleanup": [operation, cleanup]}`. -/
+private partial def reason (j : Json) : Except String Reason := do
+  if let .ok name := j.getStr? then return ← named reasons "reason" name
+  if let .ok f := j.getObjVal? "storage" then
+    return .storage (← failure f) (← j.getObjValAs? Bool "answered")
+  if let .ok l := j.getObjValAs? String "failed" then return .failed (← named locals "local failure" l)
+  if let .ok pair := j.getObjValAs? (Array Json) "cleanup" then
+    if h : pair.size = 2 then return .cleanup (← reason pair[0]) (← reason pair[1])
+  throw s!"unknown reason {j.compress}"
+
+/-- A failed pass: `offline`, `updateRequired`, `removed`, `deviceIdInUse`,
+`other`, or `{"storage": failure}`, `{"operation": reason}`,
+`{"blocked": reason}`. -/
+private def passFailure (j : Json) : Except String PassFailure := do
+  if let .ok name := j.getStr? then
+    return ← named [("offline", .offline), ("updateRequired", .updateRequired), ("removed", .removed),
+      ("deviceIdInUse", .deviceIdInUse), ("other", .other)] "pass failure" name
+  if let .ok f := j.getObjVal? "storage" then return .storage (← failure f)
+  if let .ok r := j.getObjVal? "operation" then return .operation (← reason r)
+  if let .ok r := j.getObjVal? "blocked" then return .blocked (← reason r)
+  throw s!"unknown pass failure {j.compress}"
+
+def stateName : State → String
+  | .notSynced => "notSynced"
+  | .syncing => "syncing"
+  | .synced => "synced"
+  | .offline => "offline"
+  | .offlineUnsent => "offlineUnsent"
+  | .signedOut => "signedOut"
+  | .noAccess => "noAccess"
+  | .storageFull => "storageFull"
+  | .folderMissing => "folderMissing"
+  | .updateNeeded => "updateNeeded"
+  | .removed => "removed"
+  | .needsReset => "needsReset"
+  | .clockWrong => "clockWrong"
+  | .failed => "failed"
+
+/-- `SyncState.state` of one set of facts: `storage` (`none`, `signedOut`,
+`connected`), `last` (`synced` or `{"failed": pass failure}`), `moving`,
+`transferring`, `unsent` and the pending `records`' reasons. Reports the
+state's name. -/
+def run (j : Json) : Except String Json := do
+  let storage ← named [("none", Storage.none), ("signedOut", .signedOut), ("connected", .connected)]
+    "storage" (← j.getObjValAs? String "storage")
+  let lastJson ← j.getObjVal? "last"
+  let last ← match lastJson.getStr? with
+    | .ok "synced" => pure LastPass.synced
+    | _ => pure (LastPass.failed (← passFailure (← lastJson.getObjVal? "failed")))
+  let records ← (← j.getObjValAs? (Array Json) "records").toList.mapM reason
+  let facts : Facts := {
+    storage, last, passing := false
+    moving := ← j.getObjValAs? Bool "moving"
+    transferring := ← j.getObjValAs? Bool "transferring"
+    unsent := ← j.getObjValAs? Bool "unsent"
+    records, lastSynced := none }
+  return toJson (stateName (state facts))
+
+end SyncStateCase
+
 private def run (j : Json) : Except String Json := do
   match ← j.getObjValAs? String "check" with
   | "retained" => retained j
@@ -213,6 +347,7 @@ private def run (j : Json) : Except String Json := do
   | "evidence" => evidence j
   | "wakes" => wakes j
   | "file_scan" => fileScan j
+  | "sync_state" => SyncStateCase.run j
   | check => throw s!"unknown IO check {check}"
 
 def main : IO UInt32 := do
