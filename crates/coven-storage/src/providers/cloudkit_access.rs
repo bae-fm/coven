@@ -187,7 +187,7 @@ fn participant(container: &CKContainer, email: &str) -> CloudKitRequest<Particip
         container.addOperation(&operation);
         operation.into_super().into_super()
     });
-    CloudKitRequest { operation, result }
+    CloudKitRequest::new(operation, result)
 }
 
 fn metadata(
@@ -235,7 +235,7 @@ fn metadata(
         container.addOperation(&operation);
         operation.into_super().into_super()
     });
-    Ok(CloudKitRequest { operation, result })
+    Ok(CloudKitRequest::new(operation, result))
 }
 
 fn accept(container: &CKContainer, metadata: Metadata) -> CloudKitRequest<()> {
@@ -255,7 +255,7 @@ fn accept(container: &CKContainer, metadata: Metadata) -> CloudKitRequest<()> {
         container.addOperation(&operation);
         operation.into_super().into_super()
     });
-    CloudKitRequest { operation, result }
+    CloudKitRequest::new(operation, result)
 }
 
 impl CloudKitStorage {

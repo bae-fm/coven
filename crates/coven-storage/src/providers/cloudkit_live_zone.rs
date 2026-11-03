@@ -134,7 +134,7 @@ fn remove(storage: &CloudKitStorage) -> CloudKitRequest<()> {
         storage.database.addOperation(&operation);
         operation.into_super().into_super().into_super()
     });
-    CloudKitRequest { operation, result }
+    CloudKitRequest::new(operation, result)
 }
 
 /// Every zone name in the signed-in account's private database.
@@ -160,7 +160,7 @@ fn list(container: &CKContainer) -> CloudKitRequest<Vec<String>> {
         container.privateCloudDatabase().addOperation(&operation);
         operation.into_super().into_super().into_super()
     });
-    CloudKitRequest { operation, result }
+    CloudKitRequest::new(operation, result)
 }
 
 #[cfg(test)]

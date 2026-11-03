@@ -22,10 +22,15 @@ pub(super) type CloudKitReply<T> = oneshot::Receiver<Result<T, StorageError>>;
 /// An enqueued operation is only cancelled through NSOperation's thread-safe API.
 /// Its CloudKit configuration and callbacks are never changed after enqueueing.
 pub(super) struct CloudKitRequest<T> {
-    pub(super) operation: Retained<NSOperation>,
-    pub(super) result: CloudKitReply<T>,
+    operation: Retained<NSOperation>,
+    result: CloudKitReply<T>,
 }
 impl<T> CloudKitRequest<T> {
+    /// The enqueued `operation`, whose completion answers `result`.
+    pub(super) fn new(operation: Retained<NSOperation>, result: CloudKitReply<T>) -> Self {
+        Self { operation, result }
+    }
+
     pub(super) async fn wait(mut self) -> Result<T, StorageError> {
         (&mut self.result).await.map_err(|error| StorageFailure::Protocol.with_source(error))?
     }

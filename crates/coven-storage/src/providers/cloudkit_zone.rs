@@ -64,5 +64,5 @@ fn save(container: &CKContainer, name: &str) -> CloudKitRequest<()> {
         container.privateCloudDatabase().addOperation(&operation);
         operation.into_super().into_super().into_super()
     });
-    CloudKitRequest { operation, result }
+    CloudKitRequest::new(operation, result)
 }
