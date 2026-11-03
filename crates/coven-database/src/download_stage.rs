@@ -173,7 +173,7 @@ pub(crate) fn stage(
                 OriginalRow::Change(row) => part.rows.push(row),
                 OriginalRow::Execution(execution) => part.executions.push(execution),
             }
-            let Some(part) = interpreter.part(database, schema, part)? else {
+            let Some(part) = interpreter.part(part)? else {
                 continue;
             };
             let record = WriteRecord {

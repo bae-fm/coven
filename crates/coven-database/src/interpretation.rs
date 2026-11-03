@@ -39,25 +39,34 @@ enum Interpretation {
 
 /// One write's received interpretation: every opened change's verdict,
 /// decided for the whole write before any part merges, since a foreign-key
-/// action and its causes can be in different parts (§9.5, §9.6).
-pub(crate) struct Interpreter {
+/// action and its causes can be in different parts (§9.5, §9.6). It admits
+/// the write's parts on the connection staging it, under the schema it was
+/// judged with.
+pub(crate) struct Interpreter<'a> {
+    database: &'a DatabaseConnection,
+    schema: &'a WriteSchema,
     header: WriteHeader,
     parts: BTreeMap<Audience, PartAdmission>,
     verdicts: BTreeMap<RowId, ChangeVerdict>,
 }
 
-impl Interpreter {
+impl<'a> Interpreter<'a> {
     /// Judge every change of the write's parts in `audiences`, whose original
     /// records the caller has retained. Changes in other parts this device
     /// holds keep the verdicts already recorded for them.
     pub(crate) fn new(
-        database: &DatabaseConnection,
-        schema: &WriteSchema,
+        database: &'a DatabaseConnection,
+        schema: &'a WriteSchema,
         header: &WriteHeader,
         audiences: &[Audience],
     ) -> Result<Self, DbError> {
-        let mut interpreter =
-            Self { header: header.clone(), parts: BTreeMap::new(), verdicts: BTreeMap::new() };
+        let mut interpreter = Self {
+            database,
+            schema,
+            header: header.clone(),
+            parts: BTreeMap::new(),
+            verdicts: BTreeMap::new(),
+        };
         // A write after its cut-off is consumed without effects or losses (§14.1).
         if crate::sequence::refused(database, header.position)? {
             for audience in audiences {
@@ -159,13 +168,8 @@ impl Interpreter {
     /// Admit one opened part's changes, or any slice of them in row order,
     /// under the write's verdicts: frozen losses for changes that do not
     /// apply, and the changes that do, converted where a raise requires it.
-    pub(crate) fn part(
-        &self,
-        database: &DatabaseConnection,
-        schema: &WriteSchema,
-        mut part: WritePart,
-    ) -> Result<Option<WritePart>, DbError> {
-        let header = &self.header;
+    pub(crate) fn part(&self, mut part: WritePart) -> Result<Option<WritePart>, DbError> {
+        let (database, schema, header) = (self.database, self.schema, &self.header);
         let admission = self
             .parts
             .get(&part.audience)
