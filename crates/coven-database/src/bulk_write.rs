@@ -10,14 +10,14 @@
 use super::DatabaseConnection;
 
 impl DatabaseConnection {
-    pub(crate) fn bulk_write<F, R, E>(&self, sql: F) -> Result<R, E>
+    pub(crate) fn bulk_write<F, R, E>(&mut self, sql: F) -> Result<R, E>
     where
         E: crate::WriteFailure,
         F: FnOnce(crate::BulkSqlContext<'_>) -> Result<R, E>,
     {
         #[cfg(test)]
-        let _profile = self.profile_statements();
-        self.write_transaction(false, || {
+        self.start_profile();
+        let written = self.write_transaction(false, || {
             let scope = self.authorization.bulk();
             let result = sql(crate::BulkSqlContext::new(self))?;
             self.require_transaction()?;
@@ -25,7 +25,10 @@ impl DatabaseConnection {
             drop(scope);
             let changes = crate::change_capture::table_changes(self, changed)?;
             Ok(((), result, changes))
-        })
+        });
+        #[cfg(test)]
+        self.end_profile();
+        written
     }
 }
 

@@ -11,7 +11,7 @@ use std::time::SystemTime;
 
 impl DatabaseConnection {
     pub(crate) fn local_write<F, R, E>(
-        &self,
+        &mut self,
         schema: &crate::write_schema::WriteSchema,
         device: DeviceId,
         now: SystemTime,
@@ -23,8 +23,8 @@ impl DatabaseConnection {
         F: FnOnce(crate::SqlContext<'_, '_>) -> Result<R, E>,
     {
         #[cfg(test)]
-        let _profile = self.profile_statements();
-        self.local_transaction(|database, phase| {
+        self.start_profile();
+        let written = self.local_transaction(|database, phase| {
             let files = &crate::file_write::FileWrite::new(database, files);
             let deleted_circles = crate::store_state_tables::deleted_circles(database)?;
             let result = {
@@ -101,7 +101,10 @@ impl DatabaseConnection {
             files.queue_uploads(now, record.map(|record| record.header.position.number))?;
             files.before_commit()?;
             Ok(result)
-        })
+        });
+        #[cfg(test)]
+        self.end_profile();
+        written
     }
 
     /// A local write's transaction. Its app phase records each row operation

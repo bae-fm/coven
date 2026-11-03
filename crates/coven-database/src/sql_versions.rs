@@ -54,7 +54,7 @@ pub(crate) struct SqlVersion {
 /// SQLite's own `REINDEX EXPRESSIONS` rebuilds the same indexes, all at
 /// once; coven rebuilds them one by one.
 pub(crate) fn rebuild(
-    db: &DatabaseConnection,
+    db: &mut DatabaseConnection,
     synced: &[crate::SyncedTable],
     registered: &[SqlVersion],
     progress: &mut ProgressReport<OpenStep>,

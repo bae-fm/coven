@@ -13,7 +13,7 @@ use rusqlite::params;
 use std::collections::{BTreeMap, BTreeSet};
 
 pub(crate) fn load<P: crate::PendingValue>(
-    database: &DatabaseConnection,
+    database: &mut DatabaseConnection,
     before: &DatabaseConnection,
     schema: &WriteSchema,
     reload: crate::SnapshotReload<PreparedSnapshot<'_>, crate::download_stream::PreparedWrite<'_>>,

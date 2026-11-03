@@ -64,7 +64,7 @@ impl FileDatabase {
 
     async fn run<T: Send + 'static, E: From<DbError> + Send + 'static>(
         &self,
-        run: impl FnOnce(&DatabaseConnection, &WriteSchema, &StoreDir, DeviceId) -> Result<T, E>
+        run: impl FnOnce(&mut DatabaseConnection, &WriteSchema, &StoreDir, DeviceId) -> Result<T, E>
             + Send
             + 'static,
     ) -> Result<T, E> {

@@ -129,7 +129,7 @@ async fn coverage_survives_restart_and_rejects_replacement() {
     assert!(db.coverage_fixture(Slot(1), Audience::Store, 1).is_err());
     db.close().await.unwrap();
     let db = store.schema(notes(), NOTES).await.unwrap();
-    let boundaries = db.inspect_writer(super::WriteBoundary::load).unwrap();
+    let boundaries = db.inspect_writer(|db| super::WriteBoundary::load(db)).unwrap();
     assert_eq!(boundaries.len(), 1);
     assert_eq!(boundaries[0].rule, super::BoundaryRule::Reset(Slot(1)));
     assert_eq!(boundaries[0].included, 0);

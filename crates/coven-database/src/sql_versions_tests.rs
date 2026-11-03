@@ -321,7 +321,7 @@ fn recorded_library(database: &Database) -> Vec<i64> {
 #[test]
 fn a_new_database_records_the_sqlite_that_created_it() {
     let directory = tempfile::tempdir().unwrap();
-    let connection = DatabaseConnection::open(
+    let mut connection = DatabaseConnection::open(
         &directory.path().join("new.db"),
         false,
         crate::authorization::SqlAuthorization::new(&[]),

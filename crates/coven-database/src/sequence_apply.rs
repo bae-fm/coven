@@ -65,7 +65,7 @@ pub(crate) fn retain(
 }
 
 pub(crate) fn apply<P: crate::PendingValue>(
-    db: &DatabaseConnection,
+    db: &mut DatabaseConnection,
     before: &DatabaseConnection,
     schema: &WriteSchema,
     incoming: IncomingSlot<PreparedWrite<'_>>,

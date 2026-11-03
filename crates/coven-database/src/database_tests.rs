@@ -16,18 +16,21 @@ impl Database {
 
     pub(crate) fn inspect_writer_schema<T>(
         &self,
-        inspect: impl FnOnce(&DatabaseConnection, &crate::write_schema::WriteSchema) -> T,
+        inspect: impl FnOnce(&mut DatabaseConnection, &crate::write_schema::WriteSchema) -> T,
     ) -> T {
         let slot = self.inner.read().unwrap();
         let inner = slot.as_ref().unwrap();
-        let writer = inner.access.writer.lock().unwrap();
-        inspect(&writer, &inner.access.write_schema)
+        let mut writer = inner.access.writer.lock().unwrap();
+        inspect(&mut writer, &inner.access.write_schema)
     }
 
-    pub(crate) fn inspect_writer<T>(&self, inspect: impl FnOnce(&DatabaseConnection) -> T) -> T {
+    pub(crate) fn inspect_writer<T>(
+        &self,
+        inspect: impl FnOnce(&mut DatabaseConnection) -> T,
+    ) -> T {
         let inner = self.inner.read().unwrap();
-        let writer = inner.as_ref().unwrap().access.writer.lock().unwrap();
-        inspect(&writer)
+        let mut writer = inner.as_ref().unwrap().access.writer.lock().unwrap();
+        inspect(&mut writer)
     }
 
     pub(crate) fn inspect_readers(&self, inspect: impl Fn(&DatabaseConnection)) {
@@ -81,10 +84,13 @@ impl DatabaseReadHandle {
         inner.as_ref().unwrap().readers.inspect_each(inspect);
     }
 
-    pub(crate) fn inspect_writer<T>(&self, inspect: impl FnOnce(&DatabaseConnection) -> T) -> T {
+    pub(crate) fn inspect_writer<T>(
+        &self,
+        inspect: impl FnOnce(&mut DatabaseConnection) -> T,
+    ) -> T {
         let inner = self.inner.read().unwrap();
-        let writer = inner.as_ref().unwrap().writer.lock().unwrap();
-        inspect(&writer)
+        let mut writer = inner.as_ref().unwrap().writer.lock().unwrap();
+        inspect(&mut writer)
     }
 }
 

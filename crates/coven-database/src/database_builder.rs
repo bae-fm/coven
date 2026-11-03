@@ -165,8 +165,9 @@ impl DatabaseBuilder {
         writer.identify_device(settings.device_id)?;
         // Before the app's migrations, which may read coven's views.
         writer.serve_transfers(&transfers)?;
+        // A failed open drops the writer with its profile.
         #[cfg(test)]
-        let profile = writer.profile_statements();
+        writer.start_profile();
         writer.enable_wal()?;
         let mut progress = ProgressReport::of(&self.progress, clock.clone());
         let migrating = clock.elapsed();
@@ -178,8 +179,8 @@ impl DatabaseBuilder {
             self.migration_operation.as_deref(),
             &mut progress,
         )?;
-        crate::database::file_database::declare_budgets(&writer, &self.namespaces)?;
-        crate::file_removals::finish_at_open(&writer, &self.directory)?;
+        crate::database::file_database::declare_budgets(&mut writer, &self.namespaces)?;
+        crate::file_removals::finish_at_open(&mut writer, &self.directory)?;
         crate::pending::forget_causes(&writer)?;
         // No connection plans until sync starts in this process.
         crate::internal_schema::retry_effect::save(
@@ -251,7 +252,7 @@ impl DatabaseBuilder {
         )?];
         let inputs = input_database::InputDatabase::new(input_reader, input_writer)?;
         #[cfg(test)]
-        drop(profile);
+        writer.end_profile();
         writer.observe_commits(observer.clone(), settings.device_id, &tables)?;
         let writer = Arc::new(Mutex::new(writer));
         if let Some(pages) = self.sqlite.checkpoint_pages() {

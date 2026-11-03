@@ -236,7 +236,7 @@ fn batch(
 }
 
 pub(crate) fn prepare_batch<E: From<DbError> + From<coven_format::Error>>(
-    database: &DatabaseConnection,
+    database: &mut DatabaseConnection,
     device: DeviceId,
     through: u64,
     mut select: impl FnMut(&WriteHeaderFrame) -> Result<WriteObjectPrefix, E>,
@@ -331,7 +331,7 @@ pub(crate) fn each_plaintext(
 
 #[cfg(test)]
 pub(crate) fn prepare(
-    database: &DatabaseConnection,
+    database: &mut DatabaseConnection,
     log: &crate::StoreState,
     select: impl FnOnce(
         &crate::StoreState,

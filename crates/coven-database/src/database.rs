@@ -142,7 +142,7 @@ impl<L> DatabaseAccess<L> {
 
     fn with_writer<R, E: From<DbError>>(
         &self,
-        run: impl FnOnce(&DatabaseConnection) -> Result<R, E>,
+        run: impl FnOnce(&mut DatabaseConnection) -> Result<R, E>,
     ) -> Result<R, E> {
         with_locked(&self.writer, |writer| {
             #[cfg(any(test, feature = "test-utils"))]
@@ -263,7 +263,7 @@ impl DatabaseInner {
     /// follow its commit.
     fn with_files<R, E: crate::WriteFailure>(
         &self,
-        run: impl FnOnce(&DatabaseConnection, &crate::file_write::WriteFiles<'_>) -> Result<R, E>,
+        run: impl FnOnce(&mut DatabaseConnection, &crate::file_write::WriteFiles<'_>) -> Result<R, E>,
     ) -> Result<R, E> {
         let (outcome, chosen, committed) = self.access.with_writer(|writer| {
             let files = crate::file_write::WriteFiles::new(

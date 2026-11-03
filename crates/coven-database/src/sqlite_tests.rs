@@ -22,21 +22,6 @@ pub(crate) struct ProfiledStatement {
     pub(crate) vm_steps: i32,
 }
 
-pub(crate) struct StatementProfile<'a>(&'a DatabaseConnection);
-
-/// Each profile that ends publishes what the outermost one has traced so
-/// far; only the outermost stops tracing.
-impl Drop for StatementProfile<'_> {
-    fn drop(&mut self) {
-        let open = self.0.profiles.get() - 1;
-        self.0.profiles.set(open);
-        if open == 0 {
-            self.0.connection.trace_v2(rusqlite::trace::TraceEventCodes::empty(), None);
-        }
-        *self.0.scans.lock().unwrap() = SCANS.with(|scans| scans.borrow().clone());
-    }
-}
-
 impl DatabaseConnection {
     pub(crate) fn fail_at(&self, name: &str, event: &str, message: &str) {
         self.batch(&format!(
@@ -59,11 +44,14 @@ impl DatabaseConnection {
         self.connection.set_limit(rusqlite::limits::Limit::SQLITE_LIMIT_LENGTH, bytes).unwrap()
     }
 
-    pub(crate) fn profile_statements(&self) -> StatementProfile<'_> {
+    /// Trace this connection's statements until the matching
+    /// [`Self::end_profile`]. A profile inside another, as a migration's
+    /// inside the open's, leaves the outer one tracing.
+    pub(crate) fn start_profile(&mut self) {
         let open = self.profiles.get();
         self.profiles.set(open + 1);
         if open > 0 {
-            return StatementProfile(self);
+            return;
         }
         SCANS.with(|scans| scans.borrow_mut().clear());
         self.connection.trace_v2(
@@ -82,7 +70,17 @@ impl DatabaseConnection {
                 }
             }),
         );
-        StatementProfile(self)
+    }
+
+    /// End a profile, publishing what the outermost one has traced so far;
+    /// only the outermost stops tracing.
+    pub(crate) fn end_profile(&mut self) {
+        let open = self.profiles.get() - 1;
+        self.profiles.set(open);
+        if open == 0 {
+            self.connection.trace_v2(rusqlite::trace::TraceEventCodes::empty(), None);
+        }
+        *self.scans.lock().unwrap() = SCANS.with(|scans| scans.borrow().clone());
     }
 
     pub(crate) fn profiled_statements(&self) -> Vec<ProfiledStatement> {
@@ -474,12 +472,14 @@ async fn audience_validation_looks_up_children_only_when_the_parent_moves() {
             let events=recording.events();
             drop(recording);
             let captured=crate::write_capture::capture(schema,&events).unwrap();
-            let before=crate::write_rows::AppView::before(writer,schema,&captured).unwrap();
-            let after=crate::write_rows::AppView::after(writer,schema);
-            let stored=crate::merge_store::MergeStore::new(writer,&before);
-            let profile=writer.profile_statements();
-            let changes=crate::write_record::changes(writer,schema,&before,&after,&stored,&before.changes(&after, captured.keys().cloned()).unwrap(),&BTreeMap::new(),&Default::default());
-            drop(profile);
+            writer.start_profile();
+            let changes={
+                let before=crate::write_rows::AppView::before(writer,schema,&captured).unwrap();
+                let after=crate::write_rows::AppView::after(writer,schema);
+                let stored=crate::merge_store::MergeStore::new(writer,&before);
+                crate::write_record::changes(writer,schema,&before,&after,&stored,&before.changes(&after, captured.keys().cloned()).unwrap(),&BTreeMap::new(),&Default::default())
+            };
+            writer.end_profile();
             let lookups=writer.profiled_statements().into_iter().filter(|s| s.sql.starts_with("SELECT DISTINCT r.table_name,r.key,r.audience FROM _coven_references v")).count();
             if moving {
                 assert!(matches!(changes,Err(DbError::ReferenceAudience{..})));
@@ -756,24 +756,33 @@ async fn hook_changes_publish_after_commit_and_are_discarded_on_transaction_fail
 async fn rowid_authorization_does_not_query_metadata_for_each_write_or_trigger() {
     let store = TestStore::new();
     let db = store.schema(vec![], "CREATE TABLE items(id TEXT NOT NULL PRIMARY KEY,value BLOB); CREATE TABLE audit(value BLOB); INSERT INTO items VALUES('a',x'01'); CREATE TRIGGER effect AFTER UPDATE ON items BEGIN INSERT INTO audit VALUES(new.value); END").await.unwrap();
-    db.inspect_writer(|writer| {
-        writer
-            .transaction(|writer| {
-                let profile = writer.profile_statements();
-                for value in [vec![1u8; 4096], vec![2u8; 4096]] {
-                    writer.app_execute("UPDATE items SET value=?1 WHERE id='a'", [value])?;
-                }
-                drop(profile);
-                for ProfiledStatement { sql: statement, .. } in writer.profiled_statements() {
-                    assert!(
-                        !statement.contains("pragma_table") && !statement.contains("sqlite_schema"),
-                        "write queried metadata: {statement}"
-                    );
-                }
-                Ok(())
-            })
-            .unwrap();
-    });
+    // The metadata reads of a write of two updates and one of six: each
+    // update and the trigger it fires read none, so the two are the same,
+    // whatever the commit reads once.
+    let metadata_reads = |updates: u8| {
+        db.inspect_writer(|writer| {
+            writer.start_profile();
+            writer
+                .transaction(|writer| {
+                    for value in 0..updates {
+                        writer.app_execute(
+                            "UPDATE items SET value=?1 WHERE id='a'",
+                            [vec![value; 4096]],
+                        )?;
+                    }
+                    Ok(())
+                })
+                .unwrap();
+            writer.end_profile();
+            writer
+                .profiled_statements()
+                .into_iter()
+                .filter(|s| s.sql.contains("pragma_table") || s.sql.contains("sqlite_schema"))
+                .map(|s| s.sql)
+                .collect::<Vec<_>>()
+        })
+    };
+    assert_eq!(metadata_reads(2), metadata_reads(6));
     db.close().await.unwrap();
 }
 

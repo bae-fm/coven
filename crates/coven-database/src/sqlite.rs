@@ -176,7 +176,7 @@ impl DatabaseConnection {
 
     /// Migrate local tables before app migrations or recovery's waiting work.
     /// Read-only connections require the supported internal version already.
-    pub(crate) fn prepare_internal_schema(&self) -> CovenResult<()> {
+    pub(crate) fn prepare_internal_schema(&mut self) -> CovenResult<()> {
         let internal: i32 = self.query_row("PRAGMA application_id", [], |r| r.get(0))?;
         let internal = internal as u32;
         if internal > internal_schema::VERSION {
@@ -208,7 +208,7 @@ impl DatabaseConnection {
     /// read-only one, require the app's versions rebuilt and the migrations
     /// done, which reports nothing.
     pub(crate) fn prepare_schema(
-        &self,
+        &mut self,
         tables: &[SyncedTable],
         migrations: &[Migration],
         versions: &[crate::sql_versions::SqlVersion],
@@ -261,7 +261,7 @@ impl DatabaseConnection {
         }
         let mut at = migrations.iter().find(|m| m.version > current).expect("pending migration");
         #[cfg(test)]
-        let _profile = self.profile_statements();
+        self.start_profile();
         let publishes = author.is_some();
         let device = author.as_ref().map(|origin| origin.0);
         progress.begin(
@@ -338,6 +338,8 @@ impl DatabaseConnection {
             db.refresh_hidden_rowids()?;
             Ok(outcomes)
         });
+        #[cfg(test)]
+        self.end_profile();
         result.map_err(|source| {
             MigrationError::Failed { version: at.version, name: at.name, source: Box::new(source) }
                 .into()
@@ -375,7 +377,7 @@ impl DatabaseConnection {
     }
 
     pub(crate) fn state_transaction<T>(
-        &self,
+        &mut self,
         run: impl FnOnce(&Self) -> Result<T, DbError>,
     ) -> Result<T, DbError> {
         self.transaction(run).map_err(|error| self.pending_failure(error))
@@ -804,7 +806,7 @@ impl DatabaseConnection {
     }
 
     pub(crate) fn transaction<T>(
-        &self,
+        &mut self,
         run: impl FnOnce(&Self) -> Result<T, DbError>,
     ) -> Result<T, DbError> {
         self.transaction_captured(false, run)
@@ -813,14 +815,14 @@ impl DatabaseConnection {
     /// Streaming transfers publish table invalidations without a session's
     /// retained before/after BLOB values growing with the transferred object.
     pub(crate) fn stream_transaction<T>(
-        &self,
+        &mut self,
         run: impl FnOnce(&Self) -> Result<T, DbError>,
     ) -> Result<T, DbError> {
         self.transaction_captured(true, run)
     }
 
     fn transaction_captured<T, E: crate::WriteFailure>(
-        &self,
+        &mut self,
         streaming: bool,
         run: impl FnOnce(&Self) -> Result<T, E>,
     ) -> Result<T, E> {

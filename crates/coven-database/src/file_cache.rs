@@ -284,7 +284,7 @@ fn release<L>(access: &DatabaseAccess<L>, name: &FileName) -> Vec<DbError> {
 /// `set_cache_budget` changes it after (E8). Two declarations of one
 /// namespace are refused.
 pub(crate) fn declare_budgets(
-    db: &DatabaseConnection,
+    db: &mut DatabaseConnection,
     namespaces: &[crate::Namespace],
 ) -> Result<(), DbError> {
     let mut declared = std::collections::BTreeSet::new();
@@ -347,7 +347,7 @@ pub(crate) fn total(db: &DatabaseConnection, namespace: &str) -> Result<i64, DbE
 /// Evict over-budget entries in a transaction of their own; returns their
 /// recorded names, whose bytes the caller removes once the writer is free
 /// (Appendix C.3).
-pub(super) fn trim(db: &DatabaseConnection, namespace: &str) -> Result<Vec<String>, DbError> {
+pub(super) fn trim(db: &mut DatabaseConnection, namespace: &str) -> Result<Vec<String>, DbError> {
     db.transaction(|db| trim_entries(db, namespace))
 }
 /// Evict over-budget entries in the transaction under way, such as a

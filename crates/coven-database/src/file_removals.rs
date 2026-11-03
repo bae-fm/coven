@@ -257,7 +257,7 @@ pub(crate) fn forget(db: &DatabaseConnection, removed: &[Released]) -> Result<()
 /// any app write can run, by the same steps. First, cache ranges still
 /// recorded as being written whose writer is gone become removals.
 pub(crate) fn finish_at_open(
-    writer: &DatabaseConnection,
+    writer: &mut DatabaseConnection,
     directory: &StoreDir,
 ) -> Result<(), DbError> {
     abandon_cache_writes(writer, directory)?;
@@ -284,7 +284,10 @@ pub(crate) fn finish_at_open(
 /// lock shared, so once it is held exclusively, the ranges still recorded
 /// as being written have no live writer: they become removals. No other
 /// database lock is held while waiting, so a waited-for range can commit.
-fn abandon_cache_writes(writer: &DatabaseConnection, directory: &StoreDir) -> Result<(), DbError> {
+fn abandon_cache_writes(
+    writer: &mut DatabaseConnection,
+    directory: &StoreDir,
+) -> Result<(), DbError> {
     if !writer.query_row("SELECT EXISTS(SELECT 1 FROM _coven_cache_writes)", [], |r| {
         r.get::<_, bool>(0)
     })? {
