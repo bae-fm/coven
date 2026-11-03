@@ -199,6 +199,9 @@ borrowed_facade_types = [
     "PreWrite",
 ]
 task_types = [
+    # What one S3 detection read from its responses' headers, shared with
+    # the interceptor each of its requests carries (§20.7).
+    "HeaderCapture",
     # One copy being written under its temporary name in the folder the
     # person picked, whose file its blocking writes share (§17.3).
     "CopyWriter",
