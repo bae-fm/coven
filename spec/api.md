@@ -3006,7 +3006,7 @@ let moved = handle
 | `coven_upload_queue`: each file waiting in this device's upload queue, as `coven_uploads` lists it; a table, which local triggers can follow | `file` | the file's id, as in `coven_uploads` |
 | | `position` | its place in the queue, as in `coven_uploads` |
 | `coven_pins`: each file this device keeps pinned, whole on this device (E8); a table, which local triggers can follow | `file` | the file's id |
-| `coven_sync_status`: what this installation's sync state is computed from, in one row from the store's creation on, with no storage set up too (E5); a table, which local triggers can follow; not readable on a read-only handle; read the state with `SyncStatus::read` | `storage` | `none` with no location recorded, `signed_out` with a location whose credentials this device doesn't hold, `connected` with both |
+| `coven_sync_status`: what this installation's sync state is computed from, in one row from the store's creation on, with no storage set up too (E5); a table, which local triggers can follow; not readable on a read-only handle; read the state with `sync_status` | `storage` | `none` with no location recorded, `signed_out` with a location whose credentials this device doesn't hold, `connected` with both |
 | | `provider` | the recorded location's provider, read as `CloudProvider`; NULL with none |
 | | `last_pass` | how the last pass ended, read as `LastPass`; NULL until a pass ends on this device, which counts as synced, since setup, joining and restoring read the store to its end |
 | | `moving` | 1 while a running pass has read a slot it hadn't, or claimed one; opening writes 0 |
@@ -3723,8 +3723,8 @@ while let Some(Ok(values)) = lost.next().await {
 
 - The sync state is what a status screen shows: one of the states of
   [§19.1](coven.md#191-what-the-app-sees), its cause where it has one, and
-  when sync last finished. `SyncStatus::read` reads it, and
-  `handle.subscribe(SyncStatus::read)` follows it: its first value is the
+  when sync last finished. `sync_status()` reads it, and
+  `subscribe_sync_status()` follows it: its first value is the
   current state, read at once from what opening wrote, so the app shows no
   placeholder before it. Coven names the states; the app picks the words.
   - The state is computed in the read from the row of `coven_sync_status`
@@ -3760,7 +3760,7 @@ while let Some(Ok(values)) = lost.next().await {
   writer that last wrote it still runs: one that ended mid-pass left its move
   behind, and no write marks its end. So app SQL on a read-only handle may
   not read either row, directly or through the app's own view, and
-  `SyncStatus::read` fails there: `StatementForbidden`. The app's trigger on
+  `sync_status` fails there: `StatementForbidden`. The app's trigger on
   them still lets a read-only handle open, since it never runs there.
 - An offline pass describes the last failed attempt, not the connection's
   history. A failed pass: storage refused the whole pass, or coven's own
@@ -4817,6 +4817,16 @@ impl CovenHandle {
     /// the cause the view keeps beside it (§19.1).
     pub async fn pending(&self) -> CovenResult<Vec<PendingRecord>>;
 
+    /// The sync state and when sync last finished, computed from
+    /// `coven_sync_status`, the send queue, the files moving and the pending
+    /// records in one committed snapshot (§19.1). A read-only handle has
+    /// none: `StatementForbidden`.
+    pub async fn sync_status(&self) -> CovenResult<SyncStatus>;
+
+    /// The same pre-built query, live (E4): its first value is the current
+    /// state.
+    pub fn subscribe_sync_status(&self) -> LiveQuery<SyncStatus>;
+
     /// How many file uploads and file downloads run at once.
     pub fn transfer_limits(&self) -> TransferLimits;
 
@@ -4851,19 +4861,13 @@ pub enum SyncFailure {
 }
 
 /// What a status screen shows (E5, §19.1): the sync state and when sync
-/// last finished. Read it with `SyncStatus::read`, or follow it with
-/// `handle.subscribe(SyncStatus::read)`.
+/// last finished, as `sync_status()` reads it and `subscribe_sync_status()`
+/// follows it.
 pub struct SyncStatus {
     pub state: SyncState,
     /// When a pass last reached the end of the sequence, by the store's
     /// clock; kept across every state and never earlier than before.
     pub last_synced: Option<SystemTime>,
-}
-
-impl SyncStatus {
-    /// Computes the state from `coven_sync_status`, the send queue, the
-    /// files moving and the pending records, in one read.
-    pub fn read(sql: SqlReadContext<'_>) -> CovenResult<SyncStatus>;
 }
 
 /// The sync state (§19.1). With several candidates, the first of `Removed`,
@@ -5060,7 +5064,7 @@ match handle.setup_s3_storage(storage, device_name, access_key_id, secret, show_
 
 // The sync state, as a live query follows it; the first value is the
 // current state.
-let mut status = handle.subscribe(SyncStatus::read);
+let mut status = handle.subscribe_sync_status();
 while let Some(result) = status.next().await {
     let SyncStatus { state, last_synced } = result?;
     show_sync_line(&state, last_synced);
