@@ -252,8 +252,9 @@ fn invalid_capability_factories(files: &[RustFile], policy: &Policy) -> Vec<Stri
         .collect()
 }
 
-/// A handle is no capability row of its own, and its owner, another type,
-/// has a method returning it: a row whose owner makes none covers nothing.
+/// A handle is no capability or shared state row of its own, and its owner,
+/// another type, has a method returning it: a row whose owner makes none
+/// covers nothing. Shared state is no capability row too.
 fn invalid_handles(files: &[RustFile], policy: &Policy) -> Vec<String> {
     let methods = declared_methods(files);
     let mut stale = Vec::new();
@@ -274,6 +275,12 @@ fn invalid_handles(files: &[RustFile], policy: &Policy) -> Vec<String> {
         if policy.capability_types.contains(handle) {
             stale.push(format!("handles: {handle} is also in capability_types"));
         }
+        if policy.shared_state_types.contains(handle) {
+            stale.push(format!("handles: {handle} is also in shared_state_types"));
+        }
+    }
+    for name in policy.shared_state_types.intersection(&policy.capability_types) {
+        stale.push(format!("shared_state_types: {name} is also in capability_types"));
     }
     stale
 }

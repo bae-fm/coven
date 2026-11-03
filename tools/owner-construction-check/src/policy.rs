@@ -32,8 +32,9 @@ pub(crate) enum Rule {
     /// tables stay in the database's homes, and each domain's tables are
     /// written only in its homes (`database_boundary.rs`).
     DatabaseBoundary,
-    /// Appendix F.3: an owner never hands out what it holds, and only its
-    /// owner hands out a handle (`owner_dependency_boundary.rs`).
+    /// Appendix F.3: an owner never hands out what it holds, only its owner
+    /// and what holds that owner hand out a handle, and shared state leaves
+    /// its owner only inside one (`owner_dependency_boundary.rs`).
     OwnerDependencies,
     /// Appendix F.2 and F.3: an owner's method never takes a
     /// construction-only capability, and no method but a constructor takes
@@ -116,6 +117,13 @@ pub(crate) struct Policy {
     /// an owner, is an owner.
     #[serde(default)]
     pub(crate) capability_types: BTreeSet<String>,
+    /// Shared in-memory state (Appendix F.2), such as a lock or a channel's
+    /// end, which the standard library and the runtime declare: whoever holds
+    /// one shares it with the others that do. A type holding one is an owner,
+    /// as one holding a capability is, and it leaves its owner only inside a
+    /// handle: no method crossing its module returns one, held or new.
+    #[serde(default)]
+    pub(crate) shared_state_types: BTreeSet<String>,
     /// Capability interfaces. Every workspace implementation is construction-only,
     /// including generic implementations and feature-gated test support.
     #[serde(default)]
@@ -317,10 +325,15 @@ impl Policy {
             .map_or(&[], |capability| capability.homes.as_slice())
     }
 
-    /// The types whose holder is an owner: the capability types and the
-    /// handles.
+    /// The types whose holder is an owner: the capability types, shared
+    /// state and the handles.
     pub(crate) fn held_capabilities(&self) -> BTreeSet<String> {
-        self.capability_types.iter().chain(self.handles.keys()).cloned().collect()
+        self.capability_types
+            .iter()
+            .chain(&self.shared_state_types)
+            .chain(self.handles.keys())
+            .cloned()
+            .collect()
     }
 
     /// Whether `handle` is a handle and `maker` may make and return it: its
@@ -331,8 +344,9 @@ impl Policy {
 
     /// Every type name the policy holds, with the row it came from.
     pub(crate) fn named_types(&self) -> Vec<(&'static str, &str)> {
-        let lists: [(&str, &BTreeSet<String>); 9] = [
+        let lists: [(&str, &BTreeSet<String>); 10] = [
             ("capability_types", &self.capability_types),
+            ("shared_state_types", &self.shared_state_types),
             ("capability_traits", &self.capability_traits),
             ("construction_only_capability_types", &self.construction_only_capability_types),
             ("non_owner_types", &self.non_owner_types),

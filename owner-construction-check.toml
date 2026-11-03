@@ -69,9 +69,11 @@ capability_types = [
     "OAuthPresenter",
     "OAuthSession",
     "DatabaseConnection",
-    # Shared in-memory state (F.2): whoever holds one shares it with the
-    # others that do, so it is shared on purpose, by an owner, and never
-    # handed out.
+]
+# Shared in-memory state (F.2): whoever holds one shares it with the others
+# that do, so it is shared on purpose, by an owner, and leaves that owner only
+# inside a handle.
+shared_state_types = [
     "Barrier",
     "Semaphore",
     "RwLock",

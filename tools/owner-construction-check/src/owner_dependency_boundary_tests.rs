@@ -234,6 +234,40 @@ fn only_a_handles_owner_and_what_holds_it_hand_it_out() {
     );
 }
 
+/// Shared state leaves its owner only inside a handle: no method crossing
+/// its module returns it bare, whether held or just made, except at a root.
+#[test]
+fn shared_state_leaves_an_owner_only_inside_a_handle() {
+    let mut policy = policy();
+    policy.shared_state_types.insert("Sender".into());
+    policy.shared_state_types.insert("Receiver".into());
+    policy.handles.insert("Watch".into(), "Status".into());
+    let source = "struct Watch(Receiver<u8>); \
+        struct Status { sender: Sender<u8> } \
+        impl Status { \
+            pub fn subscribe(&self) -> Receiver<u8> { todo!() } \
+            pub fn sender(&self) -> Sender<u8> { todo!() } \
+            pub fn watch(&self) -> Watch { todo!() } \
+            fn inner(&self) -> Receiver<u8> { todo!() } \
+        } \
+        struct Value; \
+        impl Value { pub fn channel() -> (Sender<u8>, Receiver<u8>) { todo!() } } \
+        struct Owner { clock: Clock } \
+        impl Owner { pub fn open(&self) -> Receiver<u8> { todo!() } }";
+    let files = [RustFile::fixture(PATH, source)];
+    let found = find_owner_dependency_leaks(&files, &policy, &OwnerGraph::collect(&files, &policy));
+    let finding = |message: &str| Finding::new(PATH, 1, message, SHARED_STATE_REMEDY);
+    assert_eq!(
+        found,
+        [
+            finding("Status::sender hands out shared state Sender"),
+            finding("Status::subscribe hands out shared state Receiver"),
+            finding("Value::channel hands out shared state Receiver"),
+            finding("Value::channel hands out shared state Sender"),
+        ]
+    );
+}
+
 /// What shares an owner's state without being declared its handle is no
 /// handle: returning it hands out what the owner holds.
 #[test]

@@ -5,7 +5,9 @@
 //! A handle is the one thing an owner hands out on purpose: its owner returns
 //! it, and so does an owner holding that owner, at any depth, passing up a
 //! fresh one it asked for. Nothing that holds the handle itself returns it,
-//! not even a holder it was given to.
+//! not even a holder it was given to. Shared state leaves a type only inside
+//! a handle: no method that crosses its module returns a bare receiver or
+//! lock, whether it holds that one or just made it.
 //!
 //! The rules here read the declared types transitively: what an owner
 //! retains is every type its fields reach. A method that returns a retained
@@ -92,6 +94,20 @@ pub(crate) fn find_owner_dependency_leaks(
                     }
                     continue;
                 }
+                if policy.shared_state_types.contains(output) {
+                    if method.public && !rooted {
+                        leaks.insert(Finding::new(
+                            &method.path,
+                            method.line,
+                            format!(
+                                "{}::{} hands out shared state {output}",
+                                method.owner, method.method
+                            ),
+                            SHARED_STATE_REMEDY,
+                        ));
+                    }
+                    continue;
+                }
                 let retained_service = services.contains(output)
                     && held.contains(output)
                     && !transfers_task(method, output, policy);
@@ -155,6 +171,9 @@ const REMEDY: &str = "an owner never hands out what it holds; callers ask it to 
 
 const HANDLE_REMEDY: &str =
     "a handle's owner makes it, and what holds that owner asks it for a fresh one; a holder receives one when it is built and keeps it";
+
+const SHARED_STATE_REMEDY: &str =
+    "shared state leaves its owner only inside a handle the policy names with that owner";
 
 /// A consumed task can hand its owned permit or prepared result to the next
 /// task. Borrowed getters and wrappers exposing raw dependencies

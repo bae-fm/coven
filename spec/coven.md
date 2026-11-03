@@ -9671,9 +9671,12 @@ until several writers arrive is changed by every one of them: whoever holds it
 shares it with the others. Passed from hand to hand, such state ends up shared
 by holders nobody chose, and lives as long as the last of them. So it is shared
 on purpose: an object holding it is an owner (F.3), built at a composition root
-and never handing it out except as a handle (F.3). A value made for one piece
-of work that shares its owner's state, such as one read's response body, is a
-task. Tests may use real ones. The checker counts as shared state `Barrier`,
+and never handing it out except as a handle (F.3). No method gives out bare
+shared state, whether it holds that value or has just made it, as a channel's
+new receiving end is: an owner gives out a handle of its own type, which the
+checker's policy names with it. A value made for one piece of work that
+shares its owner's state, such as one read's response body, is a task. Tests
+may use real ones. The checker's policy lists as shared state `Barrier`,
 `Semaphore`, `RwLock`, the atomics (`AtomicBool`, `AtomicI64`, `AtomicU64`,
 `AtomicUsize`), `OnceLock` and `LazyLock`, which the first of their holders to
 reach them sets for all the others, `Notify`, which wakes whichever holder
