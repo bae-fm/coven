@@ -299,12 +299,7 @@ pub(crate) fn validate_past(
     header: &coven_format::write::WriteHeader,
     dismissal: &Dismissal,
 ) -> Result<(), DbError> {
-    if !coven_merge::had_read(
-        header.position,
-        header.read_through,
-        dismissal.write,
-        crate::sequence::write_slot(database, dismissal.write)?,
-    ) {
+    if !crate::write_sources::had_read(database, header, dismissal.write)? {
         return Err(crate::snapshot_error::invalid(
             "dismissal names a write outside authored past",
         ));

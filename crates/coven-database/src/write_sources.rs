@@ -302,18 +302,29 @@ pub(crate) fn validate(
     Ok(())
 }
 
+/// Whether `earlier` is in the authored past of the write `header` heads:
+/// the slots through its `read_through`, and its device's earlier writes
+/// (§7.1).
+pub(crate) fn had_read(
+    db: &DatabaseConnection,
+    header: &WriteHeader,
+    earlier: coven_merge::WriteId,
+) -> Result<bool, DbError> {
+    Ok(coven_merge::had_read(
+        header.position,
+        header.read_through,
+        earlier,
+        crate::sequence::write_slot(db, earlier)?,
+    ))
+}
+
 pub(crate) fn validate_past(
     db: &DatabaseConnection,
     header: &WriteHeader,
     sources: &WriteSources,
 ) -> Result<(), DbError> {
     for source in sources.changes() {
-        if !coven_merge::had_read(
-            header.position,
-            header.read_through,
-            source.write,
-            crate::sequence::write_slot(db, source.write)?,
-        ) {
+        if !had_read(db, header, source.write)? {
             return Err(invalid("write source is outside authored past"));
         }
     }
