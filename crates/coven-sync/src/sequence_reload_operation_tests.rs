@@ -283,7 +283,7 @@ async fn breaking_raise() -> (Value, Value) {
     assert_eq!(rows(ana.database()).await.len(), 2);
     ben.database().close().await.unwrap();
     let copy = tempfile::tempdir().unwrap();
-    crate::tests::copy_tree(ben._temp.path(), copy.path());
+    coven_foundation::files::copy_tree(ben._temp.path(), copy.path());
     let queued = open_migrated(&group, copy, ben.identity.clone()).await;
     let ben = open_migrated(&group, ben._temp, ben.identity).await;
     let before_rows = rows(queued.database()).await;

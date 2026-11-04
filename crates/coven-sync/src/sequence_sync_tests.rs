@@ -90,7 +90,7 @@ impl Group {
     pub(crate) async fn copy(&self, device: Device) -> (Device, Device) {
         device.sync.database.close().await.unwrap();
         let temp = tempfile::tempdir().unwrap();
-        crate::tests::copy_tree(device._temp.path(), temp.path());
+        coven_foundation::files::copy_tree(device._temp.path(), temp.path());
         let identity = device.identity.clone();
         let original = self.open(device._temp, identity.clone()).await;
         (original, self.open(temp, identity).await)

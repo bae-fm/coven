@@ -224,19 +224,6 @@ async fn missing_custody_resets_as_a_new_device_and_keeps_the_notice() {
     handle.close().await.unwrap();
 }
 
-fn copy_tree(from: &std::path::Path, to: &std::path::Path) {
-    std::fs::create_dir_all(to).unwrap();
-    for entry in std::fs::read_dir(from).unwrap() {
-        let entry = entry.unwrap();
-        let target = to.join(entry.file_name());
-        if entry.file_type().unwrap().is_dir() {
-            copy_tree(&entry.path(), &target);
-        } else {
-            std::fs::copy(entry.path(), target).unwrap();
-        }
-    }
-}
-
 fn sends(f: &Fixture) -> usize {
     f.storage
         .request_trace()
@@ -258,7 +245,7 @@ async fn a_restored_copy_behind_storage_stops_until_the_app_resets_it() {
     f.handle.close().await.unwrap();
     let store = f.directory.database_path().parent().unwrap().to_owned();
     let backup = tempfile::tempdir().unwrap();
-    copy_tree(&store, backup.path());
+    coven_foundation::files::copy_tree(&store, backup.path());
     let handle = reopen(&f).open(f.directory.id(), |_| ()).await.unwrap();
     // The first pass captures an empty queue before this write commits. Its
     // later completion must not let closing discard the write's upload.
@@ -279,7 +266,7 @@ async fn a_restored_copy_behind_storage_stops_until_the_app_resets_it() {
     assert!(handle.test_queued_writes().await.unwrap().is_empty());
     handle.close().await.unwrap();
     std::fs::remove_dir_all(&store).unwrap();
-    copy_tree(backup.path(), &store);
+    coven_foundation::files::copy_tree(backup.path(), &store);
     let old = f.directory.settings().unwrap().device_id;
     let before = sends(&f);
     for opening in 0..2 {

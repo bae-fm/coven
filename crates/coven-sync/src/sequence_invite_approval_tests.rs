@@ -470,15 +470,7 @@ async fn a_crash_between_any_two_commits_leaves_the_approval_and_its_binding_agr
 /// running installation holds locked and opening makes again. Windows
 /// refuses to read a range another process has locked.
 fn copy_committed(from: &std::path::Path, to: &std::path::Path) {
-    for entry in std::fs::read_dir(from).unwrap() {
-        let entry = entry.unwrap();
-        let name = entry.file_name().into_string().unwrap();
-        let target = to.join(&name);
-        if entry.file_type().unwrap().is_dir() {
-            std::fs::create_dir_all(&target).unwrap();
-            copy_committed(&entry.path(), &target);
-        } else if !name.ends_with(".lock") && !name.ends_with("-shm") {
-            std::fs::copy(entry.path(), target).unwrap();
-        }
-    }
+    coven_foundation::files::copy_tree_keeping(from, to, &|name| {
+        !name.ends_with(".lock") && !name.ends_with("-shm")
+    });
 }
