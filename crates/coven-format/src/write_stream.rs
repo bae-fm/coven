@@ -63,13 +63,7 @@ impl WriteHeaderFrame {
     }
 
     fn validate(&self) -> Result<(), Error> {
-        self.header.validate()?;
-        self.header.disposition.validate_parts(self.parts.len())?;
-        require(
-            self.parts.windows(2).all(|p| p[0].audience < p[1].audience),
-            "write parts",
-            Rule::Order,
-        )?;
+        self.header.validate_parts(self.parts.iter().map(|part| &part.audience))?;
         for part in &self.parts {
             part.validate()?;
         }

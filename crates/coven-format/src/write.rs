@@ -35,6 +35,23 @@ impl WriteHeader {
         )?;
         Ok(())
     }
+
+    /// The header with its parts' audiences: as many parts as its
+    /// disposition allows, in strictly increasing audience order, store
+    /// first. A whole record and a streamed header frame both hold this.
+    pub(crate) fn validate_parts<'a>(
+        &self,
+        audiences: impl ExactSizeIterator<Item = &'a Audience>,
+    ) -> Result<(), Error> {
+        self.validate()?;
+        self.disposition.validate_parts(audiences.len())?;
+        let mut previous = None;
+        for audience in audiences {
+            require(previous.is_none_or(|p| p < audience), "write parts", Rule::Order)?;
+            previous = Some(audience);
+        }
+        Ok(())
+    }
 }
 
 /// An ordinary write or a breaking migration's empty marker (D5). Schema
@@ -499,13 +516,7 @@ pub struct WriteRecord {
 }
 impl WriteRecord {
     pub(crate) fn validate(&self) -> Result<(), Error> {
-        self.header.validate()?;
-        self.header.disposition.validate_parts(self.parts.len())?;
-        require(
-            self.parts.windows(2).all(|p| p[0].audience < p[1].audience),
-            "write parts",
-            Rule::Order,
-        )?;
+        self.header.validate_parts(self.parts.iter().map(|part| &part.audience))?;
         for part in &self.parts {
             part.validate()?;
         }
