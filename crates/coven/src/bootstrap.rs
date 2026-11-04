@@ -706,10 +706,7 @@ async fn prepare_and_load(
     let (waits, storage, files, sync) = match connected {
         Ok(connected) => connected,
         Err(error) => {
-            return combine(
-                sign_in.refused(provider, Err(error)),
-                database.close().await.map_err(CovenError::from).map_err(BootstrapError::from),
-            )
+            return combine(sign_in.refused(provider, Err(error)), close_database(&database).await)
         }
     };
     #[cfg(test)]
@@ -808,8 +805,7 @@ async fn prepare_and_load(
             waits,
         })),
         result => {
-            let closed =
-                database.close().await.map_err(CovenError::from).map_err(BootstrapError::from);
+            let closed = close_database(&database).await;
             combine(result.map(|_| None), closed)
         }
     }
@@ -839,6 +835,11 @@ fn cleanup<T>(
     result: Result<T, BootstrapError>,
 ) -> Result<T, BootstrapError> {
     combine(result, pending.cancel().map_err(BootstrapError::from))
+}
+
+/// Close the installation's database; its failure is the bootstrap's.
+async fn close_database(database: &Database) -> Result<(), BootstrapError> {
+    database.close().await.map_err(CovenError::from).map_err(BootstrapError::from)
 }
 
 fn combine<T>(

@@ -147,11 +147,7 @@ async fn reset_unconnected(
                 Ok::<_, BootstrapError>(())
             }
             .await;
-            combine(
-                recorded,
-                database.close().await.map_err(CovenError::from).map_err(BootstrapError::from),
-            )
-            .map(|()| name)
+            combine(recorded, close_database(&database).await).map(|()| name)
         }
         .await;
         let name = match prepared {

@@ -268,7 +268,7 @@ pub(super) async fn undo(
 }
 
 async fn close(database: Database) -> Result<(), BootstrapError> {
-    database.close().await.map_err(CovenError::from).map_err(BootstrapError::from)
+    close_database(&database).await
 }
 
 #[cfg(test)]
