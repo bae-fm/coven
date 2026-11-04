@@ -200,7 +200,7 @@ impl StoreKeychain {
     }
 
     fn account(&self, name: &str) -> String {
-        format!("{name}:{}", self.store)
+        account(name, self.store)
     }
     fn read(&self, name: &str) -> Result<Option<SecretBytes>, KeyError> {
         self.keychain.read(EntryScope::DeviceOnly, &self.account(name))
@@ -370,6 +370,12 @@ impl std::fmt::Debug for StoreKeychain {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("StoreKeychain([REDACTED])")
     }
+}
+
+/// The account of one store's entry `name`, in device-only and person
+/// entries alike: `<name>:<store>`.
+pub(super) fn account(name: &str, store: StoreId) -> String {
+    format!("{name}:{store}")
 }
 
 // Hex keeps empty, NUL-containing and Unicode names distinct and separates every

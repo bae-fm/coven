@@ -58,7 +58,7 @@ impl PersonEntries {
     }
 
     fn account(&self, name: &str) -> String {
-        format!("{name}:{}", self.store)
+        super::keychain::account(name, self.store)
     }
     fn read(&self, name: &str) -> Result<Option<SecretBytes>, KeyError> {
         self.keychain.read(EntryScope::Person, &self.account(name))

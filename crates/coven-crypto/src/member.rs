@@ -199,7 +199,7 @@ impl MemberKeys {
     /// Encode both private seeds for custody or the person's restore code (§13.1).
     pub fn to_secret_bytes(&self) -> SecretBytes {
         let mut bytes = Zeroizing::new(Vec::with_capacity(MEMBER_KEYS_LENGTH));
-        bytes.extend_from_slice(b"CVMK\x01");
+        bytes.extend_from_slice(MEMBER_KEYS_MAGIC);
         bytes.extend_from_slice(self.signing.as_bytes());
         bytes.extend_from_slice(self.sealing.as_bytes());
         SecretBytes(bytes)
@@ -207,7 +207,7 @@ impl MemberKeys {
 
     /// Restore both pairs from custody or the person's restore code (§13.1).
     pub fn from_secret_bytes(mut bytes: &[u8]) -> Result<Self, MaterialError> {
-        wire::prefix(&mut bytes, b"CVMK\x01")?;
+        wire::prefix(&mut bytes, MEMBER_KEYS_MAGIC)?;
         let signing = Zeroizing::new(wire::array(&mut bytes)?);
         let sealing = Zeroizing::new(wire::array(&mut bytes)?);
         wire::end(bytes)?;
@@ -390,7 +390,7 @@ impl MemberIdentity {
         // Allocate once so growth cannot leave an unerased copy of the seeds.
         let pairs = 1 + self.retained.len() + usize::from(self.candidate.is_some());
         let mut bytes = Zeroizing::new(Vec::with_capacity(30 + pairs * MEMBER_KEYS_LENGTH));
-        bytes.extend_from_slice(b"CVMI\x01");
+        bytes.extend_from_slice(IDENTITY_MAGIC);
         bytes.extend_from_slice(self.member.0.as_bytes());
         bytes.extend_from_slice(self.keys.to_secret_bytes().as_bytes());
         bytes.extend_from_slice(&(self.retained.len() as u64).to_le_bytes());
@@ -412,7 +412,7 @@ impl MemberIdentity {
         fn pair(bytes: &mut &[u8]) -> Result<MemberKeys, MaterialError> {
             MemberKeys::from_secret_bytes(wire::take(bytes, MEMBER_KEYS_LENGTH)?)
         }
-        wire::prefix(&mut bytes, b"CVMI\x01")?;
+        wire::prefix(&mut bytes, IDENTITY_MAGIC)?;
         let member = MemberId(uuid::Uuid::from_bytes(wire::array(&mut bytes)?));
         let keys = pair(&mut bytes)?;
         let count = wire::number(&mut bytes)?;
@@ -438,8 +438,12 @@ impl MemberIdentity {
     }
 }
 
-/// The length of a private-pair blob, `CVMK 01` and both 32-byte secrets.
-const MEMBER_KEYS_LENGTH: usize = 69;
+/// The first bytes of a private pair's encoding: its magic and version.
+const MEMBER_KEYS_MAGIC: &[u8] = b"CVMK\x01";
+/// The first bytes of an identity's custody encoding: its magic and version.
+const IDENTITY_MAGIC: &[u8] = b"CVMI\x01";
+/// The length of a private-pair blob: its magic and both 32-byte secrets.
+const MEMBER_KEYS_LENGTH: usize = MEMBER_KEYS_MAGIC.len() + 2 * 32;
 
 impl fmt::Debug for MemberIdentity {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {

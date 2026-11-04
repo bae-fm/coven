@@ -132,6 +132,9 @@ impl CircleKey {
     }
 }
 
+/// The first bytes of a keyring's custody encoding: its magic and version.
+const KEYRING_MAGIC: &[u8] = b"CVKR\x01";
+
 /// Every store and circle key this device has opened, including older keys (§12.2).
 /// Cloning lets in-memory custody keep its copy while returning an unlocked one.
 #[derive(Clone, Debug)]
@@ -197,7 +200,7 @@ impl StoreKeyring {
         let mut bytes = Zeroizing::new(Vec::with_capacity(
             21 + self.stores.len() * 48 + self.circles.len() * 64,
         ));
-        bytes.extend_from_slice(b"CVKR\x01");
+        bytes.extend_from_slice(KEYRING_MAGIC);
         bytes.extend_from_slice(&(self.stores.len() as u64).to_le_bytes());
         for key in self.stores.values() {
             key.encode_into(&mut bytes);
@@ -211,7 +214,7 @@ impl StoreKeyring {
 
     /// Decode custody bytes, rejecting malformed, duplicate or empty keyrings.
     pub fn from_secret_bytes(mut bytes: &[u8]) -> Result<Self, MaterialError> {
-        wire::prefix(&mut bytes, b"CVKR\x01")?;
+        wire::prefix(&mut bytes, KEYRING_MAGIC)?;
         let count = wire::number(&mut bytes)?;
         if count == 0 || count > (bytes.len() / 48) as u64 {
             return Err(MaterialError::Encoding);
