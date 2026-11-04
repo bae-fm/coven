@@ -823,6 +823,46 @@ async fn a_panicking_authorizer_fails_the_handle_with_its_bug() {
     assert!(matches!(db.write(|_| Ok(())).await, Err(DbError::Bug(_))));
 }
 
+/// A panic after SQLite committed a write, before the handle's live queries
+/// heard of it: a live query may be untold of the commit, so the handle
+/// fails with the bug, and the write and every later call return it. The
+/// write's changes stay committed (E15).
+#[tokio::test]
+async fn a_panic_after_commit_fails_the_handle_and_keeps_the_write() {
+    let store = TestStore::new();
+    let db = store.builder(notes_tables(), notes_migrations()).open().await.unwrap();
+    db.test_on_write_checkpoint(|point| {
+        if point == crate::test_utils::WriteCheckpoint::Committed {
+            panic!("the live queries' list is torn");
+        }
+    })
+    .await
+    .unwrap();
+    let failed = db
+        .write(|sql| {
+            sql.execute(
+                "INSERT INTO notes VALUES('00000000-0000-4000-8000-000000000001','kept','')",
+                [],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap_err();
+    let DbError::Bug(bug) = &failed else { panic!("the write heard no bug: {failed:?}") };
+    assert_eq!(bug.operation, "tell the live queries of a commit");
+    assert_eq!(bug.message, "the live queries' list is torn");
+    assert!(
+        matches!(db.read(|_| Ok(())).await, Err(CovenError::Database(DbError::Bug(later))) if later == *bug),
+        "a later call reports the bug"
+    );
+    drop(db);
+    let notes: i64 = rusqlite::Connection::open(store.database_path())
+        .unwrap()
+        .query_row("SELECT count(*) FROM notes", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(notes, 1, "the write committed");
+}
+
 /// A write's row-operation hook panics: rusqlite drops a hook's panic, so
 /// the write rolls back with it rather than committing what its capture
 /// missed, and the next write goes on (E15).

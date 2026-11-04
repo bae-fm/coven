@@ -8,7 +8,7 @@ use super::DatabaseConnection;
 use crate::observation::RowChange;
 use crate::DbError;
 use coven_foundation::locks::lock_unpoisoned;
-use coven_foundation::task::Bug;
+use coven_foundation::task::{caught_sync, Bug};
 use rusqlite::hooks::{Action, PreUpdateCase};
 use std::cell::Cell;
 use std::sync::{Arc, Mutex};
@@ -140,18 +140,26 @@ impl<'a> WriteTransaction<'a> {
             #[cfg(any(test, feature = "test-utils"))]
             database.checkpoint(crate::test_utils::WriteCheckpoint::Judged);
             database.batch("COMMIT")?;
-            if let Some(checkpoints) = &database.checkpoints {
-                checkpoints.committed();
+            // The write took effect, whatever follows, so it returns as
+            // committed. A panic telling the handle's live queries may have
+            // left one untold of it, so it fails the handle (E15).
+            let told = caught_sync("tell the live queries of a commit", || {
+                if let Some(checkpoints) = &database.checkpoints {
+                    checkpoints.committed();
+                }
+                #[cfg(any(test, feature = "test-utils"))]
+                database.record_work(|work| work.commits += 1);
+                #[cfg(any(test, feature = "test-utils"))]
+                database.checkpoint(crate::test_utils::WriteCheckpoint::Committed);
+                if let (Some(handle), Some(judged)) = (&database.handle, judged) {
+                    handle.commit(judged, crate::commit_scope::committing());
+                }
+                #[cfg(any(test, feature = "test-utils"))]
+                database.checkpoint(crate::test_utils::WriteCheckpoint::Observed);
+            });
+            if let (Err(bug), Some(handle)) = (told, &database.handle) {
+                handle.fail_after_panic(bug);
             }
-            #[cfg(any(test, feature = "test-utils"))]
-            database.record_work(|work| work.commits += 1);
-            #[cfg(any(test, feature = "test-utils"))]
-            database.checkpoint(crate::test_utils::WriteCheckpoint::Committed);
-            if let (Some(handle), Some(judged)) = (&database.handle, judged) {
-                handle.commit(judged, crate::commit_scope::committing());
-            }
-            #[cfg(any(test, feature = "test-utils"))]
-            database.checkpoint(crate::test_utils::WriteCheckpoint::Observed);
             Ok(result)
         });
         self.open.set(false);

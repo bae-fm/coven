@@ -1269,7 +1269,8 @@ pub enum DbError {
     /// The call's work panicked: a bug in coven or in the app's callback,
     /// which the caller reports (E15). A write that panicked rolled back,
     /// and the bytes it released or staged are removed as after any failed
-    /// write.
+    /// write. One that panicked after it committed, telling its live
+    /// queries, kept its changes and failed the handle with the bug.
     Bug(Bug),
     /// SQLite refused or failed a statement, preserving its error.
     Sqlite(rusqlite::Error),
@@ -8538,7 +8539,10 @@ panic leaves nothing half-changed, by how the state changes.
   absent.
 - A panic while the handle's live-query state is held may have left a live
   query untold of a commit, so the handle fails with the bug, and each live
-  query returns it as its last result.
+  query returns it as its last result. A panic after a write commits, as
+  it tells its live queries, does the same at once, with that panic's own
+  bug. The write's changes stay committed, and the write returns the bug
+  as every later call does.
 - The registry of the store locks this process holds is shared by every
   store, and its changes check its rules as they go. A panic partway ends
   the process: no one store's handle covers it. A lock's drop that finds

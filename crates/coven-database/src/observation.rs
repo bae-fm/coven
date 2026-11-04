@@ -589,6 +589,17 @@ impl CommitObserver {
         self.with_state(|state| state.fail(failure));
     }
 
+    /// Fail the handle with `bug`, a panic in work that may have held its
+    /// state. The handle fails with the panic's own bug, not the one a
+    /// poisoned lock would name.
+    pub(crate) fn fail_after_panic(&self, bug: Bug) {
+        let mut state = self.state.lock().unwrap_or_else(|poisoned| {
+            self.state.clear_poison();
+            poisoned.into_inner()
+        });
+        state.fail(HandleFailure::Bug(bug));
+    }
+
     pub(crate) fn close(&self) {
         self.with_state(ObserverState::close);
     }
