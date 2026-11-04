@@ -236,6 +236,34 @@ impl MigrationMatch {
     }
 }
 
+impl MigrationMatch {
+    /// A value's parents in `table` carried through the run: each one whose
+    /// foreign key the migrated table still declares in `after`, naming its
+    /// parent's new table. A table the run drops carries none.
+    pub(crate) fn carried_parents(
+        &self,
+        after: &crate::write_schema::WriteSchema,
+        table: &str,
+        parents: BTreeMap<ForeignKey, coven_merge::Parent>,
+    ) -> BTreeMap<ForeignKey, coven_merge::Parent> {
+        let Some(target) = self.tables.get(table) else {
+            return BTreeMap::new();
+        };
+        let target = after.table(target);
+        parents
+            .into_iter()
+            .filter_map(|(key, mut parent)| {
+                let key = self.foreign_key(table, &key, None)?;
+                if !target.foreign_keys.iter().any(|fk| after.foreign_key(target, fk) == key) {
+                    return None;
+                }
+                parent.row.table = self.tables.get(&parent.row.table)?.clone();
+                Some((key, parent))
+            })
+            .collect()
+    }
+}
+
 fn main(schema: &Option<sqlite3_parser::ast::Name<'_>>) -> bool {
     schema.as_ref().is_none_or(|s| name(s.0).eq_ignore_ascii_case("main"))
 }

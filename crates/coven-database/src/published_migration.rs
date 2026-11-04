@@ -21,21 +21,9 @@ fn column(
     name: String,
     mut value: ColumnValue<coven_format::value::Value>,
 ) -> Option<(String, ColumnValue<coven_format::value::Value>)> {
-    let target = names.tables.get(table)?;
+    names.tables.get(table)?;
     let name = names.columns.get(&(table.to_owned(), name))?.clone();
-    value.parents = value
-        .parents
-        .into_iter()
-        .filter_map(|(key, mut parent)| {
-            let key = names.foreign_key(table, &key, None)?;
-            let target = schema.table(target);
-            if !target.foreign_keys.iter().any(|fk| schema.foreign_key(target, fk) == key) {
-                return None;
-            }
-            parent.row.table = names.tables.get(&parent.row.table)?.clone();
-            Some((key, parent))
-        })
-        .collect();
+    value.parents = names.carried_parents(schema, table, value.parents);
     Some((name, value))
 }
 

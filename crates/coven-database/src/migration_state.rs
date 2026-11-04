@@ -292,13 +292,7 @@ fn references(
             let id: i64 = r.get(0)?;
             let mut value = decoded(merge_fields::decode_column_value(&r.get::<_,Vec<u8>>(1)?))?;
             let old = value.clone();
-            value.parents = value.parents.into_iter().filter_map(|(fk,mut parent)| {
-                let fk = names.foreign_key(&table,&fk, None)?;
-                let target = after.table(&names.tables[&table]);
-                if !target.foreign_keys.iter().any(|f|after.foreign_key(target,f)==fk) { return None; }
-                parent.row.table = names.tables.get(&parent.row.table)?.clone();
-                Some((fk,parent))
-            }).collect();
+            value.parents = names.carried_parents(after, &table, value.parents);
             if value != old {
                 db.internal_execute("UPDATE _coven_lost SET value=?2 WHERE id=?1",params![id,encoded(merge_fields::encode_column_value(&value))?])?;
             }
