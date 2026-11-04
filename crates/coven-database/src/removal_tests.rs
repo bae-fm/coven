@@ -651,7 +651,7 @@ async fn a_constant_unique_index_keeps_its_expression_term() {
     let db=store.schema(vec![table("notes")],"CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY); CREATE UNIQUE INDEX one_note ON notes((1))").await.unwrap();
     sql(&db, "INSERT INTO notes VALUES('45')").await.unwrap();
     let mut second = records(&db)[0].parts[0].rows[0].clone();
-    second.row.key = coven_format::key::encode_key(&[Value::Text("46".into())]).unwrap();
+    second.row.key = crate::tests::text_key("46");
     let Operation::Insert(columns) = &mut second.change.operation else { panic!("insert") };
     columns.get_mut("id").unwrap().value = Value::Text("46".into());
     crate::tests::remote_write(&db, second).await;
@@ -697,7 +697,7 @@ pub(crate) fn materialize_deleted(
             )?;
             let rows = keys.iter().map(|key| coven_merge::RowId {
                 table: table.into(),
-                key: coven_format::key::encode_key(&[Value::Text((*key).into())]).unwrap(),
+                key: crate::tests::text_key(key),
                 audience: coven_merge::Audience::Circle(circle),
             });
             let result = match coven_merge::recompute(&view, &view, rows) {

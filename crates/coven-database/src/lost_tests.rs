@@ -292,10 +292,7 @@ async fn wrong_column_table_is_a_damaged_database() {
 async fn a_lost_row_does_not_require_an_accepted_generation() {
     let store = TestStore::new();
     let db = store.builder(vec![], vec![]).open().await.unwrap();
-    let key = coven_format::key::encode_key(&[WireValue::Text(
-        "f47ac10b-58cc-4372-a567-0e02b2c3d479".into(),
-    )])
-    .unwrap();
+    let key = crate::tests::text_key("f47ac10b-58cc-4372-a567-0e02b2c3d479");
     let write = WriteId { device: DeviceId(u64::MAX), number: u64::MAX };
     let values = BTreeMap::from([(
         "title".into(),

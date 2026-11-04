@@ -107,15 +107,8 @@ async fn parsed_constraints_keep_names_expressions_collations_and_generated_valu
     sql(&db, "INSERT INTO notes(id,title,body,active) VALUES('1','Title','body',1)").await.unwrap();
     db.inspect_writer_schema(|writer, schema| {
         let app = crate::write_rows::AppView::after(writer, schema);
-        let values = app
-            .row(&(
-                "notes".into(),
-                coven_format::key::encode_key(&[coven_format::value::Value::Text("1".into())])
-                    .unwrap(),
-            ))
-            .unwrap()
-            .unwrap()
-            .values;
+        let values =
+            app.row(&("notes".into(), crate::tests::text_key("1"))).unwrap().unwrap().values;
         let evaluated =
             crate::removal_sql::evaluate_values(writer, schema.table("notes"), &values).unwrap();
         assert_eq!(evaluated["folded"], coven_format::value::Value::Text("title".into()));

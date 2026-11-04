@@ -621,12 +621,7 @@ fn synced_track<'a>(
         .iter_mut()
         .find_map(|record| match record {
             SnapshotRecord::Synced(row)
-                if row.row.table == "tracks"
-                    && row.row.key
-                        == coven_format::key::encode_key(&[coven_format::value::Value::Text(
-                            key.into(),
-                        )])
-                        .unwrap() =>
+                if row.row.table == "tracks" && row.row.key == crate::tests::text_key(key) =>
             {
                 Some(row)
             }
@@ -641,11 +636,7 @@ fn is_track(record: &SnapshotRecord, kind: usize, key: &str) -> bool {
         SnapshotRecord::Merge(row) => row.state.row(),
         _ => return false,
     };
-    record.section() == kind
-        && row.table == "tracks"
-        && row.key
-            == coven_format::key::encode_key(&[coven_format::value::Value::Text(key.into())])
-                .unwrap()
+    record.section() == kind && row.table == "tracks" && row.key == crate::tests::text_key(key)
 }
 
 #[tokio::test]

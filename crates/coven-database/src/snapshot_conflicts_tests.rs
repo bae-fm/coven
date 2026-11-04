@@ -111,8 +111,7 @@ async fn a_key_in_two_circles_is_judged_by_the_rows_this_device_has() {
         .await
         .unwrap();
     publish(&gifts, &[&both, &gifts]).await;
-    let key =
-        coven_format::key::encode_key(&[coven_format::value::Value::Text(KEY.into())]).unwrap();
+    let key = crate::tests::text_key(KEY);
     let shown = |db: &Database| {
         db.inspect_writer(|db| {
             db.query("SELECT audience FROM notes WHERE id=?1", [KEY], |r| r.get::<_, String>(0))

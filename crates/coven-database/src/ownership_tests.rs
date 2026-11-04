@@ -4,18 +4,13 @@ use crate::test_utils::tests::{insert, SCHEMA};
 use crate::tests::TestStore;
 use crate::write::tests::sql;
 use crate::{Database, RowIdentity, SyncedTable};
-use coven_format::value::Value;
 
 fn owned() -> Vec<SyncedTable> {
     vec![SyncedTable::new("rows", RowIdentity::SharedKey).owner_only()]
 }
 
 fn row(n: usize) -> RowId {
-    RowId {
-        table: "rows".into(),
-        key: coven_format::key::encode_key(&[Value::Text(n.to_string())]).unwrap(),
-        audience: Audience::Store,
-    }
+    crate::tests::store_row("rows", &n.to_string())
 }
 
 fn selected(db: &Database, row: &RowId) -> Option<Creation> {

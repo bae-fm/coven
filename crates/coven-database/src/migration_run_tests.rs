@@ -77,8 +77,7 @@ async fn migrations_leave_unrelated_merge_rows_unloaded_in_a_ten_thousand_row_st
 }
 
 fn setters(db: &Database, table: &str, key: &str) -> BTreeMap<String, u64> {
-    let key =
-        coven_format::key::encode_key(&[coven_format::value::Value::Text(key.into())]).unwrap();
+    let key = crate::tests::text_key(key);
     db.inspect_writer(|db| db.query("SELECT c.column_name,w.number FROM _coven_cells v JOIN _coven_columns c ON c.id=v.column_id JOIN _coven_writes w ON w.id=v.write_id JOIN _coven_rows r ON r.id=v.row_id WHERE r.table_name=?1 AND r.key=?2 ORDER BY c.column_name", rusqlite::params![table,key], |r| Ok((r.get(0)?, crate::write_encoding::counter(r.get(1)?)))).unwrap().into_iter().collect())
 }
 
@@ -766,7 +765,7 @@ fn downloaded_update(
     original.header.position = id;
     original.header.timestamp = Timestamp::new(after.milliseconds() + 1, 0, id.device).unwrap();
     original.header.read_through = past.number;
-    let key = coven_format::key::encode_key(&[Value::Text(key.into())]).unwrap();
+    let key = crate::tests::text_key(key);
     original.parts[0].rows.retain(|row| row.row.key == key);
     assert_eq!(original.parts[0].rows.len(), 1);
     let row = &mut original.parts[0].rows[0];

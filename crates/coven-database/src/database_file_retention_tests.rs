@@ -116,13 +116,9 @@ pub(crate) fn stored(device: u64, object: FileId, key: &str) -> Value {
 }
 
 pub(crate) fn insert(table: &str, key: &str, columns: Vec<(&str, Value)>) -> RowChange {
-    use coven_merge::{Audience, Change, RowId};
+    use coven_merge::Change;
     RowChange {
-        row: RowId {
-            table: table.into(),
-            key: coven_format::key::encode_key(&[Value::Text(key.into())]).unwrap(),
-            audience: Audience::Store,
-        },
+        row: crate::tests::store_row(table, key),
         creator: None,
         execution: Default::default(),
         change: Change {

@@ -16,11 +16,7 @@ fn owned() -> Vec<SyncedTable> {
 }
 
 fn row() -> RowId {
-    RowId {
-        table: "rows".into(),
-        key: coven_format::key::encode_key(&[Value::Text("0".into())]).unwrap(),
-        audience: Audience::Store,
-    }
+    crate::tests::store_row("rows", "0")
 }
 
 /// Device 101 replaces column `a` of device 100's row, having read it.

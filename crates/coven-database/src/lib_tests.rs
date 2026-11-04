@@ -156,6 +156,20 @@ impl TestStore {
     }
 }
 
+/// A row key as coven encodes a single text primary key (format.md D3).
+pub(crate) fn text_key(id: &str) -> Vec<u8> {
+    coven_format::key::encode_key(&[coven_format::value::Value::Text(id.into())]).unwrap()
+}
+
+/// The store audience's row of `table` whose single text key is `id`.
+pub(crate) fn store_row(table: &str, id: &str) -> coven_merge::RowId {
+    coven_merge::RowId {
+        table: table.into(),
+        key: text_key(id),
+        audience: coven_merge::Audience::Store,
+    }
+}
+
 pub(crate) fn database_error(error: CovenError) -> DbError {
     match error {
         CovenError::Database(error) => error,
@@ -250,8 +264,7 @@ fn change_from(
     changes: &[(&str, coven_format::value::Value)],
 ) -> coven_format::write::RowChange {
     use coven_merge::Operation;
-    let key =
-        coven_format::key::encode_key(&[coven_format::value::Value::Text(id.into())]).unwrap();
+    let key = crate::tests::text_key(id);
     let rows: Vec<_> = records
         .iter()
         .flat_map(|r| &r.parts)

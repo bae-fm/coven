@@ -36,11 +36,7 @@ async fn database(store: &TestStore) -> Database {
 }
 
 fn row(table: &str, key: &str) -> RowId {
-    RowId {
-        table: table.into(),
-        key: coven_format::key::encode_key(&[Value::Text(key.into())]).unwrap(),
-        audience: Audience::Store,
-    }
+    crate::tests::store_row(table, key)
 }
 
 /// A queued write's steps by row, and the cause its judgement found for each

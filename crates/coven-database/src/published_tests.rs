@@ -116,7 +116,7 @@ async fn a_migration_keeps_the_counted_state_of_only_the_rows_it_changes() {
 
 /// Whether the counted projection a snapshot reads shows `albums` row `id`.
 fn counted_visible(database: &crate::Database, id: &str) -> bool {
-    let key = coven_format::key::encode_key(&[Value::Text(id.into())]).unwrap();
+    let key = crate::tests::text_key(id);
     database.inspect_writer_schema(|db, schema| {
         let mut visible = None;
         let removed = crate::published::removals(db, &schema.schema, &schema.rules).unwrap();
@@ -178,7 +178,7 @@ async fn a_migrations_recomputed_rows_keep_their_counted_state() {
 /// The counted projection a snapshot reads of `albums` row `id`: its
 /// `artist`, or `None` while it shows no such row.
 fn counted_artist(database: &crate::Database, id: &str) -> Option<Value> {
-    let key = coven_format::key::encode_key(&[Value::Text(id.into())]).unwrap();
+    let key = crate::tests::text_key(id);
     database.inspect_writer_schema(|db, schema| {
         let mut shown = None;
         let removed = crate::published::removals(db, &schema.schema, &schema.rules).unwrap();
@@ -464,15 +464,11 @@ async fn a_dropped_table_keeps_a_kept_row_without_the_queues_losses() {
 /// Another device's insert of `albums` row `id`, titled `title`, at
 /// generation 1.
 fn album_insert(id: &str, title: &str) -> coven_format::write::RowChange {
-    use coven_merge::{Change, ColumnValue, Operation, RowId};
+    use coven_merge::{Change, ColumnValue, Operation};
     let value =
         |value: &str| ColumnValue { value: Value::Text(value.into()), parents: Default::default() };
     coven_format::write::RowChange {
-        row: RowId {
-            table: "albums".into(),
-            key: coven_format::key::encode_key(&[Value::Text(id.into())]).unwrap(),
-            audience: Audience::Store,
-        },
+        row: crate::tests::store_row("albums", id),
         change: Change {
             generation: 0,
             operation: Operation::Insert(

@@ -3,7 +3,7 @@ use crate::write::tests::{count, records, sql};
 use crate::{Database, RowIdentity, SyncedTable};
 use coven_format::value::Value;
 use coven_foundation::id_source::SequentialIds;
-use coven_merge::{Audience, RowId};
+use coven_merge::Audience;
 
 async fn open(store: &TestStore, seconds: u64) -> Database {
     store.builder(tables(), vec![crate::Migration::addition_with(1, "references", move |sql| {
@@ -62,11 +62,7 @@ async fn restored_parents_restore_live_references_while_losses_keep_written_valu
         }
         // Save only the parent's input metadata for the reset fixture. The
         // production recompute below owns all changes to the child.
-        let parent = RowId {
-            table: "parents".into(),
-            key: coven_format::key::encode_key(&[Value::Text("parent".into())]).unwrap(),
-            audience: Audience::Store,
-        };
+        let parent = crate::tests::store_row("parents", "parent");
         let cells = b.inspect_writer(|db| db.query("SELECT c.column_id,c.row_id,c.write_id FROM _coven_cells c JOIN _coven_rows r ON r.id=c.row_id WHERE r.table_name='parents' AND r.key=?1", [&parent.key], |r| Ok((r.get::<_,i64>(0)?,r.get::<_,i64>(1)?,r.get::<_,i64>(2)?))).unwrap());
         sql(&a, "DELETE FROM parents WHERE id='parent'").await.unwrap();
         b.receive(records(&a).remove(1).into()).await.unwrap();
@@ -74,11 +70,7 @@ async fn restored_parents_restore_live_references_while_losses_keep_written_valu
         b.inspect_writer_schema(|db, schema| {
             let app = crate::write_rows::AppView::after(db, schema);
             let merge = crate::merge_store::MergeStore::new(db, &app);
-            let child = RowId {
-                table: "children".into(),
-                key: coven_format::key::encode_key(&[Value::Text("child".into())]).unwrap(),
-                audience: Audience::Store,
-            };
+            let child = crate::tests::store_row("children", "child");
             let state = merge.row(&child).unwrap().state;
             let written = if lost {
                 &state.lost().iter().find(|(key, _)| key.column == "parent").unwrap().1.value
@@ -233,11 +225,7 @@ async fn migrations_freeze_deleted_rows_and_preserve_surviving_written_reference
         .unwrap();
         let app = crate::write_rows::AppView::after(db, schema);
         let merge = crate::merge_store::MergeStore::new(db, &app);
-        let live = RowId {
-            table: "children".into(),
-            key: coven_format::key::encode_key(&[Value::Text("live".into())]).unwrap(),
-            audience: Audience::Store,
-        };
+        let live = crate::tests::store_row("children", "live");
         assert_eq!(
             merge.row(&live).unwrap().state.cells()["root"].value.value,
             Value::Text("parent".into())

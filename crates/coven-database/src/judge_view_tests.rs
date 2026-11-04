@@ -708,11 +708,7 @@ CREATE TABLE reviews(id TEXT NOT NULL PRIMARY KEY, track TEXT REFERENCES tracks(
     assert_eq!(shown, None);
     sql(ben, "DELETE FROM tracks").await.unwrap();
     let genuine = records(ben).pop().unwrap();
-    let review = RowId {
-        table: "reviews".into(),
-        key: coven_format::key::encode_key(&[Value::Text("r".into())]).unwrap(),
-        audience: coven_merge::Audience::Store,
-    };
+    let review = crate::tests::store_row("reviews", "r");
     let change = genuine.parts[0].rows.iter().find(|change| change.row == review).unwrap();
     let text = |s: &str| Value::Text(s.into());
     assert_eq!(

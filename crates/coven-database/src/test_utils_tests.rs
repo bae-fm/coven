@@ -72,11 +72,7 @@ pub(crate) fn merge_write(record: &WriteRecord, earlier: &[WriteRecord]) -> Writ
     }
 }
 fn row(n: usize) -> RowId {
-    RowId {
-        table: "rows".into(),
-        key: coven_format::key::encode_key(&[Scalar::Text(n.to_string())]).unwrap(),
-        audience: Audience::Store,
-    }
+    crate::tests::store_row("rows", &n.to_string())
 }
 pub(crate) fn insert(n: u64, r: usize) -> WriteRecord {
     let position = WriteId { device: DeviceId(100 + n), number: 1 };

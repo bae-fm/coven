@@ -34,7 +34,7 @@ fn record(
     cols.get_mut("a").unwrap().value = Scalar::Text(value.to_string());
     let mut owned = w.parts[0].rows[0].clone();
     owned.row.table = "owned".into();
-    owned.row.key = coven_format::key::encode_key(&[Scalar::Text(owner.to_string())]).unwrap();
+    owned.row.key = crate::tests::text_key(&owner.to_string());
     let Operation::Insert(cols) = &mut owned.change.operation else { unreachable!() };
     cols.get_mut("id").unwrap().value = Scalar::Text(owner.to_string());
     w.parts[0].rows.push(owned);

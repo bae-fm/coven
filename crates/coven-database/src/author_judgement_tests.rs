@@ -676,7 +676,8 @@ async fn a_trigger_making_a_cascades_exact_effect_commits_as_receivers_admit_it(
 /// from the action, as an invalid foreign-key effect (§9.6).
 #[tokio::test]
 async fn actions_on_rows_nobody_owns_match_with_generated_columns() {
-    use crate::judge::tests::{album_kept, generated_tables, key, verdict, ALBUM_GONE, GENERATED};
+    use crate::judge::tests::{album_kept, generated_tables, verdict, ALBUM_GONE, GENERATED};
+    use crate::tests::store_row;
     for statement in ALBUM_GONE {
         let pair = Pair::with(generated_tables(false), GENERATED).await;
         sql(
@@ -689,14 +690,14 @@ async fn actions_on_rows_nobody_owns_match_with_generated_columns() {
         deliver(&pair.ben, &pair.ana).await;
         sql(&pair.ben, statement).await.unwrap();
         let genuine = records(&pair.ben).pop().unwrap();
-        for row in [key("notes", "n"), key("tracks", "t")] {
+        for row in [store_row("notes", "n"), store_row("tracks", "t")] {
             let derived = verdict(&pair.ben, &genuine, &row);
             assert!(matches!(derived, ChangeVerdict::Derived(_)), "{statement}: {derived:?}");
         }
         let forged = album_kept(&genuine);
         pair.ana.receive_stream(stream(&forged), || Ok(())).await.unwrap();
         assert_eq!(
-            verdict(&pair.ana, &forged, &key("notes", "n")),
+            verdict(&pair.ana, &forged, &store_row("notes", "n")),
             ChangeVerdict::NotAuthorized(AuthorizationFailure::InvalidForeignKeyEffect),
             "{statement}"
         );
@@ -737,7 +738,8 @@ async fn the_author_judges_its_write_without_reading_it_back() {
 /// name one either: no write sets a generated cell to be its source.
 #[tokio::test]
 async fn a_record_naming_a_generated_column_is_refused() {
-    use crate::judge::tests::{generated_tables, key, GENERATED};
+    use crate::judge::tests::{generated_tables, GENERATED};
+    use crate::tests::store_row;
     use coven_format::value::Value;
     use coven_format::write::WriteRecord;
     use coven_merge::{ColumnValue, Operation};
@@ -746,7 +748,7 @@ async fn a_record_naming_a_generated_column_is_refused() {
         record.parts[0]
             .rows
             .iter_mut()
-            .find(|row| row.row == key(table, if table == "albums" { "a" } else { "n" }))
+            .find(|row| row.row == store_row(table, if table == "albums" { "a" } else { "n" }))
             .unwrap()
     }
     fn cell(value: &str) -> ColumnValue<Value> {

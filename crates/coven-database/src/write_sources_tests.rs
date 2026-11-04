@@ -283,10 +283,7 @@ async fn old_incarnation_setters_and_nonexistent_rows_refuse_before_consumption(
         match damage {
             0 => source.change.write = history[0].header.position,
             1 => source.change.write = history[1].header.position,
-            2 => {
-                source.change.row.key =
-                    coven_format::key::encode_key(&[Value::Text("absent".into())]).unwrap()
-            }
+            2 => source.change.row.key = crate::tests::text_key("absent"),
             _ => unreachable!(),
         }
         let before = crate::tests::contents(&target);
@@ -429,10 +426,7 @@ async fn covered_source_streams_authenticate_atomically_and_refuse_conflicting_c
                 )
                 .unwrap()
             }
-            1 => {
-                record.parts[0].rows[0].row.key =
-                    coven_format::key::encode_key(&[Value::Text("0".into())]).unwrap()
-            }
+            1 => record.parts[0].rows[0].row.key = crate::tests::text_key("0"),
             2 => {
                 let Operation::Insert(columns) = &mut record.parts[0].rows[0].change.operation
                 else {

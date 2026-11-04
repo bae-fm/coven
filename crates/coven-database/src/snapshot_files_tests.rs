@@ -213,7 +213,7 @@ async fn installed_rows_protect_what_the_snapshots_device_does() {
         db.inspect_writer(|db| {
             db.query(
                 "SELECT file FROM _coven_file_references WHERE key=?1 ORDER BY file",
-                [coven_format::key::encode_key(&[Value::Text("five".into())]).unwrap()],
+                [crate::tests::text_key("five")],
                 |r| r.get::<_, String>(0),
             )
             .unwrap()

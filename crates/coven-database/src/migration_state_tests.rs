@@ -22,7 +22,7 @@ pub(crate) fn migration_insert(n: u64, key: usize, audience: Audience) -> WriteR
     let key =
         uuid::Uuid::from_u128(0x00000000000040008000000000000000 + key as u128 + 1).to_string();
     let row = &mut write.parts[0].rows[0];
-    row.row.key = coven_format::key::encode_key(&[Scalar::Text(key.clone())]).unwrap();
+    row.row.key = crate::tests::text_key(&key);
     row.row.audience = audience.clone();
     let Operation::Insert(cols) = &mut row.change.operation else { unreachable!() };
     cols.get_mut("id").unwrap().value = Scalar::Text(key);

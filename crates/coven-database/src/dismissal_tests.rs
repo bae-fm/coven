@@ -291,7 +291,8 @@ pub(crate) async fn cascade_deletions(
     mut compare: impl FnMut(&crate::Database, &coven_format::write::WriteRecord),
 ) {
     use crate::author_judgement::tests::deliver;
-    use crate::judge::tests::{causes, key, verdict};
+    use crate::judge::tests::{causes, verdict};
+    use crate::tests::store_row;
     use coven_format::snapshot_rows::ChangeVerdict;
     use coven_merge::Operation;
 
@@ -352,11 +353,11 @@ pub(crate) async fn cascade_deletions(
         compare(&b, &record);
         for db in [&a, &b] {
             assert_eq!(
-                verdict(db, &record, &key("children", "c")),
+                verdict(db, &record, &store_row("children", "c")),
                 ChangeVerdict::Derived(causes(&record, &[("parents", "b")]))
             );
             assert_eq!(
-                verdict(db, &record, &key("grandchildren", "g")),
+                verdict(db, &record, &store_row("grandchildren", "g")),
                 ChangeVerdict::Derived(causes(&record, &[("parents", "b"), ("children", "c")]))
             );
             assert!(db.lost_values().await.unwrap().is_empty());
