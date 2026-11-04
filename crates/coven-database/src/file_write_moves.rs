@@ -135,7 +135,7 @@ impl FileWrite<'_> {
             Some(MoveState::Moving | MoveState::Failed) => {
                 self.files.moving.borrow_mut().retain(|moving| moving.id != id);
                 file_moves::end_unswitched(db, id, MoveState::Cancelled)?;
-                file_moves::clear_pending(db, id)
+                crate::pending::clear_move(db, id)
             }
         }
     }

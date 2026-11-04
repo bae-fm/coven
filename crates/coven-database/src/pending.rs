@@ -200,6 +200,14 @@ pub(crate) fn clear_key(db: &DatabaseConnection, subject: &SubjectKey) -> Result
     })
 }
 
+/// Clear the record of the move `id`, whatever it says.
+pub(crate) fn clear_move(db: &DatabaseConnection, id: crate::MoveId) -> Result<(), DbError> {
+    db.pending_change(|| {
+        db.internal_execute("DELETE FROM _coven_pending WHERE move=?1", [id])?;
+        Ok(())
+    })
+}
+
 /// An operation's retry wait lives only while its condition does: advancing,
 /// finishing or an explicit retry ends both (§6.7).
 pub(crate) fn clear_operation(db: &DatabaseConnection, id: OperationId) -> Result<(), DbError> {

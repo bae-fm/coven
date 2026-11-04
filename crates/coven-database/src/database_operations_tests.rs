@@ -67,19 +67,6 @@ impl Database {
         .await
     }
 
-    /// Model a database last judged by another library release before reopening it.
-    pub async fn test_pending_version(&self, version: &'static str) -> Result<(), DbError> {
-        self.call(move |inner| {
-            inner.access.with_writer(|writer| {
-                writer.transaction(|db| {
-                    db.internal_execute("UPDATE _coven_pending SET coven_version=?1", [version])?;
-                    Ok(())
-                })
-            })
-        })
-        .await
-    }
-
     /// Test transport: read actual queued records without reauthoring their writes.
     pub async fn test_queued_writes(
         &self,

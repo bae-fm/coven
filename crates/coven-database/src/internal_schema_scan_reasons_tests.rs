@@ -74,11 +74,6 @@ mod fixture {
             'table_' || ((i-1)%32) AS tab, 'audience_' || ((i-1)%64) AS audience,
             CAST(printf('%032d',i) AS BLOB) AS key,
             CAST(printf('%016d',i) AS BLOB) AS member FROM numbers;
-     INSERT INTO _coven_pending(subject,value,operation,object,work,device,file,coven_version)
-       SELECT key,x'00',CASE WHEN i%2=0 THEN i END,
-              CAST(x'00' || n AS BLOB),CASE WHEN i%4=1 THEN 'upload' WHEN i%4=3 THEN 'download' END,
-              CASE WHEN i%2=1 THEN device END,
-              CASE WHEN i%2=1 THEN substr(key,17,16) END,'1' FROM fixture;
      INSERT INTO _coven_row_file_refs SELECT device,substr(key,1,16),tab,key FROM fixture;
      INSERT INTO _coven_stored_files SELECT 'file_' || i,audience,device,substr(key,17,16),'file_' || i,key FROM fixture;
      INSERT INTO coven_files SELECT 'file_' || i,audience,1,zeroblob(32),'device 1','files' FROM fixture;
@@ -135,6 +130,7 @@ mod fixture {
         crate::store_state_tables::tests::fill_for_plans(&db);
         crate::published::tests::fill_for_plans(&db);
         crate::claim::tests::fill_for_plans(&db);
+        crate::pending::tests::fill_for_plans(&db);
         crate::provider_access::tests::fill_for_plans(&db);
         crate::object_removals::tests::fill_for_plans(&db);
         crate::sequence::tests::fill_for_plans(&db);
@@ -299,6 +295,7 @@ mod source {
                     | "claim_schema.rs"
                     | "published_schema.rs"
                     | "store_state_schema.rs"
+                    | "pending_schema.rs"
                     | "provider_access_schema.rs"
                     | "object_removals_schema.rs"
                     | "raise_capture_schema.rs"

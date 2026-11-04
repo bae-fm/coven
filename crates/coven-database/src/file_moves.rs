@@ -147,21 +147,13 @@ pub(crate) fn complete(db: &DatabaseConnection) -> Result<Vec<(MoveId, Vec<i64>)
 /// A move ended with its files switched: whatever its record said ends.
 pub(crate) fn finish(db: &DatabaseConnection, id: MoveId) -> Result<(), DbError> {
     set(db, id, MoveState::Finished)?;
-    clear_pending(db, id)
+    crate::pending::clear_move(db, id)
 }
 
 /// Mark an upload's bytes stored: its move switches it with the rest.
 pub(crate) fn stored(db: &DatabaseConnection, upload: i64) -> Result<(), DbError> {
     db.internal_execute("UPDATE _coven_file_uploads SET stored=1 WHERE id=?1", [upload])?;
     Ok(())
-}
-
-/// Clear the move's pending record, whatever it says.
-pub(crate) fn clear_pending(db: &DatabaseConnection, id: MoveId) -> Result<(), DbError> {
-    db.pending_change(|| {
-        db.internal_execute("DELETE FROM _coven_pending WHERE move=?1", [id])?;
-        Ok(())
-    })
 }
 
 #[cfg(test)]

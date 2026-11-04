@@ -15,6 +15,7 @@ pub(super) fn reason(statement: &Statement, relation: &str) -> Option<&'static s
     database_reason(statement, relation)
         .or_else(|| crate::store_state_tables::tests::scan_reason(file, template, sql, relation))
         .or_else(|| crate::published::tests::scan_reason(file, template, sql, relation))
+        .or_else(|| crate::pending::tests::scan_reason(file, template, sql, relation))
         .or_else(|| crate::raise_capture::tests::scan_reason(file, template, sql, relation))
 }
 
@@ -177,14 +178,6 @@ fn database_reason(statement: &Statement, relation: &str) -> Option<&'static str
     Some("retention enumerates every locally protected file"),
 ("migration_run.rs", "INSERT INTO _coven_migration_losses(write_id,audience,record) SELECT ?1,audience,record FROM temp._coven_migration_frozen", "temp._coven_migration_frozen") =>
     Some("the marker retains every loss frozen by this migration"),
-("pending.rs", "{SELECT} ORDER BY id", "_coven_pending") =>
-    Some("pending returns every retained condition"),
-("pending.rs", "SELECT subject,value,operation,object,work,device,file,coven_version,move,pin,cause,id FROM _coven_pending", "_coven_pending") =>
-    Some("pending returns every retained condition"),
-("pending.rs", "UPDATE _coven_pending SET cause=NULL WHERE cause IS NOT NULL", "_coven_pending") =>
-    Some("once per open: every record's cause names an error an earlier run met"),
-("pending.rs", "DELETE FROM _coven_pending AS p WHERE NOT EXISTS(SELECT 1 FROM _coven_provider_access a WHERE a.operation=p.operation)", "p") =>
-    Some("reset visits every condition; provider-obligation lookups remain indexed"),
 ("reload_gate.rs", "SELECT audience FROM _coven_data_reloads", "_coven_data_reloads") =>
     Some("sync schedules every audience awaiting replacement data"),
 ("sequence.rs", "SELECT device,number,digest FROM _coven_last_claims ORDER BY device", "_coven_last_claims") =>

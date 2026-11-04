@@ -23,7 +23,16 @@ pub(crate) fn require_reload<P: PendingValue>(
 /// no longer reads it.
 pub(crate) fn clear_reload(db: &DatabaseConnection, audience: &Audience) -> Result<(), DbError> {
     db.pending_change(|| {
-        db.internal_execute("DELETE FROM _coven_pending WHERE subject IN (SELECT subject FROM _coven_data_reloads WHERE audience=?1)", [audience_text(audience)])?;
+        let subject = db
+            .query(
+                "SELECT subject FROM _coven_data_reloads WHERE audience=?1",
+                [audience_text(audience)],
+                |r| r.get::<_, crate::pending::SubjectKey>(0),
+            )?
+            .pop();
+        if let Some(subject) = subject {
+            crate::pending::clear_key(db, &subject)?;
+        }
         db.internal_execute(
             "DELETE FROM _coven_data_reloads WHERE audience=?1",
             [audience_text(audience)],

@@ -135,7 +135,11 @@ async fn reopening_preserves_conditions_and_a_version_change_rearms_without_eras
     let db = store.builder(vec![], vec![]).open().await.unwrap();
     assert_eq!(db.pending::<Record>().await.unwrap(), std::slice::from_ref(&pending));
     assert!(!db.pending_can_retry::<Record>(1.into()).await.unwrap());
-    db.test_pending_version("previous-version").await.unwrap();
+    // A database last judged by another library release.
+    db.commit_writer(|sql| {
+        sql.internal_execute("UPDATE _coven_pending SET coven_version=?1", ["previous-version"])
+            .unwrap()
+    });
     db.close().await.unwrap();
     let db = store.builder(vec![], vec![]).open().await.unwrap();
     assert_eq!(db.pending::<Record>().await.unwrap(), std::slice::from_ref(&pending));
@@ -571,4 +575,39 @@ async fn a_records_cause_is_written_with_it_and_cleared_at_open() {
     assert_eq!(db.pending::<Record>().await.unwrap(), vec![record(1)]);
     let mut live = follow(&db);
     assert_eq!(live.next().await.unwrap().unwrap(), vec![(record(1), None)]);
+}
+
+/// Fill this domain's tables from the rows of the plan audit's `fixture`
+/// table, inside its transaction (`internal_schema_scan_reasons_tests.rs`).
+pub(crate) fn fill_for_plans(db: &rusqlite::Connection) {
+    db.execute_batch(
+        "INSERT INTO _coven_pending(subject,value,operation,object,work,device,file,coven_version)
+           SELECT key,x'00',CASE WHEN i%2=0 THEN i END,
+                  CAST(x'00' || n AS BLOB),CASE WHEN i%4=1 THEN 'upload' WHEN i%4=3 THEN 'download' END,
+                  CASE WHEN i%2=1 THEN device END,
+                  CASE WHEN i%2=1 THEN substr(key,17,16) END,'1' FROM fixture;",
+    )
+    .unwrap();
+}
+
+/// The scans this module's statements may make, with their reasons, for the
+/// plan audit (`internal_schema_scan_reasons.rs`): `template` is the statement as
+/// written, `sql` as run.
+pub(crate) fn scan_reason(
+    file: &str,
+    template: &str,
+    _sql: &str,
+    relation: &str,
+) -> Option<&'static str> {
+    match (file, template, relation) {
+("pending.rs", "{SELECT} ORDER BY id", "_coven_pending") =>
+    Some("pending returns every retained condition"),
+("pending.rs", "SELECT subject,value,operation,object,work,device,file,coven_version,move,pin,cause,id FROM _coven_pending", "_coven_pending") =>
+    Some("pending returns every retained condition"),
+("pending.rs", "UPDATE _coven_pending SET cause=NULL WHERE cause IS NOT NULL", "_coven_pending") =>
+    Some("once per open: every record's cause names an error an earlier run met"),
+("pending.rs", "DELETE FROM _coven_pending AS p WHERE NOT EXISTS(SELECT 1 FROM _coven_provider_access a WHERE a.operation=p.operation)", "p") =>
+    Some("reset visits every condition; provider-obligation lookups remain indexed"),
+        _ => None,
+    }
 }
