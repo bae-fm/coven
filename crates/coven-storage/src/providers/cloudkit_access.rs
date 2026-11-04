@@ -283,10 +283,11 @@ impl CloudKitStorage {
                         .with_source("CloudKit omitted the participant's invitation email")
                 })?
                 .to_string();
-            if email.trim().is_empty() {
+            let email = coven_format::MemberAccess::normalized_account(&email);
+            if email.is_empty() {
                 return Err(StorageFailure::Authentication.into());
             }
-            Ok(email.trim().to_ascii_lowercase())
+            Ok(email)
         }
     }
 

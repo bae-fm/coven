@@ -70,10 +70,11 @@ impl OAuthSession {
             }
             _ => unreachable!("checked OAuth provider"),
         };
+        let account = coven_format::MemberAccess::normalized_account(account);
         if account.is_empty() {
             return Err(StorageFailure::Protocol.with_source("empty signed-in account"));
         }
-        Ok(account.to_ascii_lowercase())
+        Ok(account)
     }
     /// Install tokens after their owner committed them to custody.
     pub async fn set_tokens(&self, tokens: OAuthTokens) {

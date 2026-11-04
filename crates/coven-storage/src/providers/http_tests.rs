@@ -777,3 +777,21 @@ fn provider_responses_name_their_fixed_vocabulary_codes() {
         assert!(!debug.contains("secret"), "{debug}");
     }
 }
+
+/// The signed-in account takes the one spelling member access compares:
+/// trimmed and lowercase. One that is only spaces is empty.
+#[tokio::test]
+async fn the_signed_in_account_is_trimmed_and_lowercase() {
+    for (email, expected) in [(" Owner@Example.TEST ", Some("owner@example.test")), ("  ", None)] {
+        let server = TestServer::new(Router::new().fallback(move || async move {
+            crate::providers::tests::json(serde_json::json!({ "email": email }))
+        }))
+        .await;
+        let session = crate::providers::tests::session(CloudProvider::Dropbox);
+        let account = session.account_at(&server.url).await;
+        match expected {
+            Some(expected) => assert_eq!(account.unwrap(), expected),
+            None => assert_eq!(account.unwrap_err().failure(), StorageFailure::Protocol),
+        }
+    }
+}
