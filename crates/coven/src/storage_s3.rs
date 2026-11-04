@@ -14,11 +14,7 @@ impl StorageConnections {
         secret_access_key: SecretText,
         progress: SetupProgress,
     ) -> Result<StorageSetup, StorageSetupError> {
-        if storage.provider() != CloudProvider::S3 {
-            return Err(StorageFailure::InvalidConfiguration
-                .with_source("expected S3 storage")
-                .into());
-        }
+        require_s3(&storage)?;
         let credentials = S3Credentials { access_key_id, secret_access_key };
         let device_name = device_name.to_owned();
         self.call(move |owner| async move {
@@ -71,11 +67,7 @@ impl StorageConnections {
         access_key_id: String,
         secret_access_key: SecretText,
     ) -> Result<S3Detection, StorageSetupError> {
-        if storage.provider() != CloudProvider::S3 {
-            return Err(StorageFailure::InvalidConfiguration
-                .with_source("expected S3 storage")
-                .into());
-        }
+        require_s3(&storage)?;
         let credentials = S3Credentials { access_key_id, secret_access_key };
         // The task owns detection until its cleanup finishes, even if the
         // awaiting app future is dropped. Detecting is its own call: its
@@ -88,6 +80,13 @@ impl StorageConnections {
         })
         .await
     }
+}
+
+fn require_s3(storage: &StorageConfig) -> Result<(), StorageSetupError> {
+    if storage.provider() != CloudProvider::S3 {
+        return Err(StorageFailure::InvalidConfiguration.with_source("expected S3 storage").into());
+    }
+    Ok(())
 }
 
 /// Reconnecting with the recorded S3 location and no profile reuses the
