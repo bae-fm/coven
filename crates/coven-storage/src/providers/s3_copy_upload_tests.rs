@@ -880,3 +880,27 @@ async fn every_temporary_sits_in_the_staging_devices_folder() {
     assert_eq!(assembled.len(), 1);
     assert!(assembled[0].starts_with(&folder), "{assembled:?}");
 }
+
+/// An upload listing that doesn't say whether more pages follow is a
+/// protocol failure, never taken as the last page: uploads left on a later
+/// page would stay behind unaborted.
+#[tokio::test]
+async fn an_upload_listing_without_its_completion_is_a_protocol_failure() {
+    let server = TestServer::new(Router::new().fallback(|method: Method, uri: Uri| async move {
+        let q = query(&uri);
+        match method {
+            Method::DELETE => response(204, ""),
+            _ if q.contains_key("uploads") => response(
+                200,
+                "<ListMultipartUploadsResult><Upload><Key>dev/k</Key><UploadId>u1</UploadId></Upload></ListMultipartUploadsResult>",
+            ),
+            _ => response(404, ""),
+        }
+    }))
+    .await;
+    let storage = profile_provider(&server.url, profile::PLAIN);
+
+    let error = storage.provider().abort_private_uploads("dev/k", None).await.unwrap_err();
+
+    assert_eq!(error.failure(), StorageFailure::Protocol);
+}

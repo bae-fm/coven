@@ -52,7 +52,7 @@ async fn observe(
         s.upload_part(&mut session, b"data").await?;
         let listed: Vec<_> = s
             .provider()
-            .unfinished_uploads(&key)
+            .unfinished_uploads(&key, None)
             .await?
             .into_iter()
             .filter(|(listed, _, _)| *listed == key)

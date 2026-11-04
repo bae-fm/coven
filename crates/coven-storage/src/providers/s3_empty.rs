@@ -81,7 +81,7 @@ impl S3Storage {
         prefix: &str,
         listing: S3Listing,
     ) -> Result<EmptiedS3Prefix, StorageError> {
-        let uploads = self.unfinished_uploads(prefix).await?;
+        let uploads = self.unfinished_uploads(prefix, None).await?;
         for (key, id, _) in &uploads {
             self.abort_multipart(key, id, None).await?;
         }
@@ -92,7 +92,8 @@ impl S3Storage {
         // Something still writing here, such as another device's library,
         // would leave the prefix occupied however often it is emptied.
         let objects = self.list_page(listing, prefix, None, None, Some(1)).await?;
-        if !objects.contents.is_empty() || !self.unfinished_uploads(prefix).await?.is_empty() {
+        if !objects.contents.is_empty() || !self.unfinished_uploads(prefix, None).await?.is_empty()
+        {
             return Err(StorageFailure::Conflict
                 .with_source("objects or uploads arrived under the prefix while it was emptied"));
         }

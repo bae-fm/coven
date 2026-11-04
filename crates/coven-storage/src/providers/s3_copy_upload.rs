@@ -150,66 +150,19 @@ impl S3Storage {
         }
     }
 
+    /// Abort every unfinished multipart upload of exactly `key`.
     pub(super) async fn abort_private_uploads(
         &self,
         key: &str,
         publication: Option<&PublicationRequest>,
     ) -> Result<(), StorageError> {
-        let mut markers: Option<(String, String)> = None;
-        let mut seen = Pagination::new();
         let mut result = Ok(());
-        loop {
-            let mut request = self
-                .client
-                .list_multipart_uploads()
-                .bucket(&self.bucket)
-                .prefix(key)
-                .set_key_marker(markers.as_ref().map(|(key, _)| key.clone()))
-                .set_upload_id_marker(markers.as_ref().map(|(_, id)| id.clone()))
-                .customize();
-            if let Some(publication) = publication {
-                request = request.interceptor(publication.clone());
+        for (listed, id, _) in self.unfinished_uploads(key, publication).await? {
+            if listed == key {
+                result = with_cleanup(result, self.abort_multipart(key, &id, publication).await);
             }
-            let response = match request.send().await.map_err(s3_error) {
-                Ok(response) => response,
-                Err(error) => return with_cleanup(result, Err(error)),
-            };
-            for upload in response.uploads() {
-                if upload.key() != Some(key) {
-                    continue;
-                }
-                let id = match upload.upload_id().filter(|id| !id.is_empty()) {
-                    Some(id) => id,
-                    None => {
-                        result = with_cleanup(
-                            result,
-                            Err(StorageFailure::Protocol.with_source("S3 omitted upload id")),
-                        );
-                        continue;
-                    }
-                };
-                result = with_cleanup(result, self.abort_multipart(key, id, publication).await);
-            }
-            if !response.is_truncated().unwrap_or(false) {
-                return result;
-            }
-            let next = match response.next_key_marker().filter(|value| !value.is_empty()) {
-                Some(key) => (
-                    key.to_owned(),
-                    response.next_upload_id_marker().unwrap_or_default().to_owned(),
-                ),
-                None => {
-                    return with_cleanup(
-                        result,
-                        Err(StorageFailure::Protocol.with_source("S3 omitted upload marker")),
-                    )
-                }
-            };
-            if let Err(error) = seen.check(&format!("{}\n{}", next.0, next.1)) {
-                return with_cleanup(result, Err(error));
-            }
-            markers = Some(next);
         }
+        result
     }
 
     pub(super) async fn recover_completed_upload(

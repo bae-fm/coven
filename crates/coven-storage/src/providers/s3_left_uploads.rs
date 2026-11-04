@@ -27,7 +27,7 @@ impl S3Storage {
             // listed, and a session kept when its path names the device.
             self.prefix.key_prefix_of(&ObjectPrefix::snapshots(store)),
         ] {
-            for (key, id, _) in self.unfinished_uploads(&prefix).await? {
+            for (key, id, _) in self.unfinished_uploads(&prefix, None).await? {
                 let named = key.starts_with(&folder)
                     || key
                         .strip_prefix(&base)
@@ -58,7 +58,7 @@ impl S3Storage {
         let base = self.prefix.key_prefix();
         let mut left = Vec::new();
         let slots = self.prefix.key_prefix_of(&ObjectPrefix::slots(store));
-        for (key, id, _) in self.unfinished_uploads(&slots).await? {
+        for (key, id, _) in self.unfinished_uploads(&slots, None).await? {
             let settled = key
                 .strip_prefix(&base)
                 .and_then(|path| ObjectPath::parse(path).ok())
@@ -84,7 +84,7 @@ impl S3Storage {
         let key = self.prefix.key(&floor.path);
         let published = floor.stored_at.seconds();
         let mut left = Vec::new();
-        for (listed, id, initiated) in self.unfinished_uploads(&key).await? {
+        for (listed, id, initiated) in self.unfinished_uploads(&key, None).await? {
             if listed != key {
                 continue;
             }
@@ -114,26 +114,31 @@ impl S3Storage {
     }
 
     /// Every unfinished multipart upload under `prefix`: its key, upload id
-    /// and, where the service lists it, when it began.
+    /// and, where the service lists it, when it began. The requests count
+    /// under `publication` when one is given. A page that doesn't say
+    /// whether another follows is a protocol failure, never the last.
     pub(super) async fn unfinished_uploads(
         &self,
         prefix: &str,
+        publication: Option<&PublicationRequest>,
     ) -> Result<Vec<(String, String, Option<aws_sdk_s3::primitives::DateTime>)>, StorageError> {
         let mut key_marker = None;
         let mut upload_marker = None;
         let mut uploads = Vec::new();
         let mut pages = Pagination::new();
         loop {
-            let page = self
+            let mut request = self
                 .client
                 .list_multipart_uploads()
                 .bucket(&self.bucket)
                 .prefix(prefix)
                 .set_key_marker(key_marker)
                 .set_upload_id_marker(upload_marker)
-                .send()
-                .await
-                .map_err(s3_error)?;
+                .customize();
+            if let Some(publication) = publication {
+                request = request.interceptor(publication.clone());
+            }
+            let page = request.send().await.map_err(s3_error)?;
             for upload in page.uploads() {
                 let key = metadata::required(upload.key(), "S3 upload listing omitted key")?;
                 within(key, prefix)?;
