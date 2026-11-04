@@ -7,6 +7,7 @@ use super::http::transport;
 use crate::{ByteProgress, CloudProvider, StorageError, StorageFailure};
 use bytes::Bytes;
 use coven_foundation::clock::ClockRef;
+use coven_foundation::task::{caught_sync, Bug};
 use reqwest::{IntoUrl, Method};
 use std::fmt;
 use std::future::Future;
@@ -141,7 +142,7 @@ impl HttpClient {
             }));
         }
         let response = tokio::select! {
-            response = self.client.execute(request) => response.map_err(SendError::Http)?,
+            response = self.client.execute(request) => response.map_err(SendError::of_http)?,
             () = progress.stalled() => return Err(SendError::Stalled(Stalled)),
         };
         progress.mark();
@@ -163,9 +164,25 @@ pub(crate) enum SendError {
     Http(reqwest::Error),
     /// No bytes moved for `STALL_WINDOW`.
     Stalled(Stalled),
+    /// Handing over the request's body panicked, as in a caller's progress
+    /// reader: a bug, not a failure of the exchange (E15).
+    Bug(Bug),
 }
 
 impl SendError {
+    /// reqwest's `error`, or the bug a panic handing over the body failed
+    /// the exchange with, which reqwest keeps among its causes.
+    fn of_http(error: reqwest::Error) -> Self {
+        let mut cause: Option<&(dyn std::error::Error + 'static)> = Some(&error);
+        while let Some(error) = cause {
+            if let Some(bug) = error.downcast_ref::<Bug>() {
+                return Self::Bug(bug.clone());
+            }
+            cause = error.source();
+        }
+        Self::Http(error)
+    }
+
     pub(crate) fn into_storage(self, provider: CloudProvider) -> StorageError {
         match self {
             Self::Http(error) => transport(provider, error),
@@ -174,6 +191,7 @@ impl SendError {
                 failure: StorageFailure::Network,
                 source: Box::new(stalled),
             },
+            Self::Bug(bug) => StorageError::Bug(bug),
         }
     }
 }
@@ -244,27 +262,17 @@ impl http_body::Body for UploadBody {
     type Data = Bytes;
     type Error = BoxError;
 
+    /// A panic handing over a step, as in the caller's progress reader,
+    /// fails the exchange with its bug: unwinding into the connection would
+    /// end it with an error that names a network failure instead.
     fn poll_frame(
-        mut self: Pin<&mut Self>,
+        self: Pin<&mut Self>,
         cx: &mut Context<'_>,
     ) -> Poll<Option<Result<http_body::Frame<Bytes>, BoxError>>> {
-        loop {
-            if !self.pending.is_empty() {
-                let step = self.pending.len().min(UPLOAD_STEP);
-                let step = self.pending.split_to(step);
-                self.progress.mark();
-                self.taken += step.len() as u64;
-                self.sent.moved(self.taken);
-                return Poll::Ready(Some(Ok(http_body::Frame::data(step))));
-            }
-            match std::task::ready!(Pin::new(&mut self.inner).poll_frame(cx)) {
-                Some(Ok(frame)) => match frame.into_data() {
-                    Ok(data) => self.pending = data,
-                    Err(frame) => return Poll::Ready(Some(Ok(frame))),
-                },
-                Some(Err(error)) => return Poll::Ready(Some(Err(error.into()))),
-                None => return Poll::Ready(None),
-            }
+        let body = self.get_mut();
+        match caught_sync("send a request body", || body.poll_step(cx)) {
+            Ok(polled) => polled,
+            Err(bug) => Poll::Ready(Some(Err(Box::new(bug)))),
         }
     }
 
@@ -281,6 +289,33 @@ impl http_body::Body for UploadBody {
             hint.set_upper(upper + pending);
         }
         hint
+    }
+}
+
+impl UploadBody {
+    /// The body's next step, telling the caller the bytes taken so far.
+    fn poll_step(
+        &mut self,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<http_body::Frame<Bytes>, BoxError>>> {
+        loop {
+            if !self.pending.is_empty() {
+                let step = self.pending.len().min(UPLOAD_STEP);
+                let step = self.pending.split_to(step);
+                self.progress.mark();
+                self.taken += step.len() as u64;
+                self.sent.moved(self.taken);
+                return Poll::Ready(Some(Ok(http_body::Frame::data(step))));
+            }
+            match std::task::ready!(http_body::Body::poll_frame(Pin::new(&mut self.inner), cx)) {
+                Some(Ok(frame)) => match frame.into_data() {
+                    Ok(data) => self.pending = data,
+                    Err(frame) => return Poll::Ready(Some(Ok(frame))),
+                },
+                Some(Err(error)) => return Poll::Ready(Some(Err(error.into()))),
+                None => return Poll::Ready(None),
+            }
+        }
     }
 }
 

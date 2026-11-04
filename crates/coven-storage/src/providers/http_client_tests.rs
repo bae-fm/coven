@@ -241,6 +241,23 @@ async fn a_body_is_heard_a_step_at_a_time_as_the_connection_takes_it() {
     assert_eq!(*heard.lock().unwrap(), [step, 2 * step, 3 * step, length as u64]);
 }
 
+/// A caller's progress reader that panics as the connection takes the
+/// body fails the request with the bug, not as a network failure the
+/// caller would retry (E15).
+#[tokio::test]
+async fn a_panicking_progress_reader_fails_the_request_with_its_bug() {
+    let time = Time::new();
+    let client = time.client();
+    let (url, _received) = counting_upload().await;
+    let sent = ByteProgress::new(|_count| panic!("the progress bar is gone"));
+    let request = client.request(Method::PUT, &url).body(vec![7u8; 4]).build().unwrap();
+    let error = client.execute(request, &sent).await.unwrap_err();
+    let StorageError::Bug(bug) = error.into_storage(CloudProvider::OneDrive) else {
+        panic!("the request heard no bug")
+    };
+    assert_eq!(bug.message, "the progress bar is gone");
+}
+
 /// Connecting and waiting for the reply count too: a server that never
 /// answers fails the request after the window.
 #[tokio::test]

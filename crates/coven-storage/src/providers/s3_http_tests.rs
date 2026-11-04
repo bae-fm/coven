@@ -144,3 +144,35 @@ async fn an_s3_body_is_heard_as_the_connection_takes_it() {
     assert_eq!(response.status().as_u16(), 200);
     assert_eq!(*heard.lock().unwrap(), [64 * 1024, length as u64]);
 }
+
+/// A progress reader that panics as an S3 upload's body goes fails the
+/// request with the bug, as a failure the SDK doesn't retry (E15).
+#[tokio::test]
+#[expect(clippy::let_underscore_must_use, reason = "the server only waits for the client to close")]
+async fn a_panicking_progress_reader_fails_an_s3_request_with_its_bug() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let _ = socket.read_to_end(&mut Vec::new()).await;
+    });
+    let mut request = HttpRequest::try_from(
+        ::http::Request::builder()
+            .method("PUT")
+            .uri(format!("http://{address}/bucket/object"))
+            .body(SdkBody::from(vec![7u8; 4]))
+            .unwrap(),
+    )
+    .unwrap();
+    request.add_extension(ByteProgress::new(|_count| panic!("the progress bar is gone")));
+    let clock = std::sync::Arc::new(coven_foundation::clock::FixedClock::new(
+        std::time::SystemTime::UNIX_EPOCH,
+    ));
+    let connector = S3HttpConnector(HttpClient::new(clock).unwrap());
+    let failure = connector.call(request).await.unwrap_err();
+    assert!(!failure.is_io() && !failure.is_timeout(), "{failure:?}");
+    let bug = std::error::Error::source(&failure)
+        .and_then(|cause| cause.downcast_ref::<coven_foundation::task::Bug>())
+        .expect("the connector's failure keeps the bug");
+    assert_eq!(bug.message, "the progress bar is gone");
+}

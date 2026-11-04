@@ -79,6 +79,9 @@ impl HttpConnector for S3HttpConnector {
             let response = client.execute(request, &sent).await.map_err(|error| match error {
                 SendError::Http(error) => connector_error(error),
                 SendError::Stalled(stalled) => ConnectorError::timeout(stalled.into()),
+                // Not a transfer failure, so the SDK doesn't retry it;
+                // `s3_error` finds the bug among the causes.
+                SendError::Bug(bug) => ConnectorError::other(Box::new(bug), None),
             })?;
             let response =
                 ::http::Response::<reqwest::Body>::from(response).map(SdkBody::from_body_1_x);

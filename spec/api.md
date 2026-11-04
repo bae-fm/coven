@@ -8393,6 +8393,10 @@ for file work, and a `Bug` variant of each error that has a `Shutdown` one.
   record's progress or the operation's completion, answers the request with
   `StorageError::Bug`. The completion still runs its own work, such as
   removing the operation's staged asset files.
+- A panic as an HTTPS request hands its body to the connection, such as
+  in the progress reader that hears the bytes go, fails that request with
+  `StorageError::Bug`. Unwound into the connection, it would end the
+  exchange with what reads as a network failure, which the caller retries.
 
 An error that keeps another failure takes the bug that failure carries as
 its own `Bug`, never under a disk, lock, storage or custody label, so the

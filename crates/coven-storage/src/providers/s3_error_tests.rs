@@ -231,6 +231,22 @@ fn sdk_transport_failures_remain_retryable_and_name_their_redacted_causes() {
     }
 }
 
+/// A request whose local work panicked, as its connector says when a
+/// progress reader panics, is `StorageError::Bug`, not a network failure
+/// (E15).
+#[test]
+fn a_bug_behind_a_dispatch_failure_is_the_requests_bug() {
+    let bug = coven_foundation::task::Bug {
+        operation: "send a request body",
+        message: "the progress bar is gone".into(),
+    };
+    let native = SdkError::<ListObjectsV2Error>::dispatch_failure(ConnectorError::other(
+        Box::new(bug.clone()),
+        None,
+    ));
+    assert!(matches!(s3_error(native), StorageError::Bug(found) if found == bug));
+}
+
 /// A certificate the device does not trust fails the request with a message
 /// naming the certificate, and nothing of the request but its host.
 #[tokio::test]

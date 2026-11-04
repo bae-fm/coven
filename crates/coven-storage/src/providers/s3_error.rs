@@ -12,6 +12,11 @@ where
     // the refusal is a cause further down, so the whole chain prints.
     let mut cause: &(dyn std::error::Error + 'static) = &error;
     loop {
+        // Coven's own work for the request panicked, as handing over its
+        // body does when a progress reader panics (E15).
+        if let Some(bug) = cause.downcast_ref::<coven_foundation::task::Bug>() {
+            return StorageError::Bug(bug.clone());
+        }
         if let Some(refusal) = cause.downcast_ref::<StorageError>() {
             return refusal.failure().with_source(crate::providers::error_text::WithCauses(error));
         }
