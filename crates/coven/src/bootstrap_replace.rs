@@ -4,19 +4,41 @@
 use super::*;
 use coven_foundation::files::DirectoryCreationError;
 
+/// The app's step on a restored installation before it swaps in: one bulk
+/// write of device-local tables on the loaded database (E10).
+pub(crate) type Prepare = Box<dyn FnOnce(BulkSqlContext<'_>) -> CovenResult<()> + Send>;
+
+/// Which call replaces the installation: a reset, or a restore with the
+/// app's step on the new installation.
+pub(super) enum Replacing {
+    Reset,
+    Restore(Prepare),
+}
+
+impl Replacing {
+    fn by(&self) -> ReplacedBy {
+        match self {
+            Self::Reset => ReplacedBy::Reset,
+            Self::Restore(_) => ReplacedBy::Restore,
+        }
+    }
+}
+
 /// Restore this device's installation of `store` from the person's current
 /// restore code, in place of the installation it holds (§13.1). The code must
 /// name this store; its member keys are checked against history before the
 /// store or keychain changes. A device whose custody holds the code's pair and whose
 /// applied history binds it has nothing to restore, which is also what a
 /// retry finds after an interruption once the restore was published: the
-/// store simply opens.
+/// store simply opens. `prepare` runs on the new installation before it
+/// swaps in.
 pub(crate) async fn restore_device(
     mut builder: CovenBuilder,
     store: StoreId,
     code: &str,
     s3_credentials: Option<S3Credentials>,
     device_name: &str,
+    prepare: Prepare,
     status: impl Fn(BootstrapStatus),
     cancel: &watch::Receiver<bool>,
 ) -> Result<CovenHandle, BootstrapError> {
@@ -61,7 +83,7 @@ pub(crate) async fn restore_device(
         builder,
         store,
         BootstrapRequest::Restore { code, data, sign_in, name: device_name.into() },
-        ReplacedBy::Restore,
+        Replacing::Restore(prepare),
         status,
         cancel,
     )
@@ -71,7 +93,8 @@ pub(crate) async fn restore_device(
 /// Load the new installation beside the old one, swap it into the store's
 /// directory, commit its custody, settle the old installation's local state,
 /// then publish it. A reset keeps the old local state for inspection; a
-/// restore removes it (§13.1). Until the swap, the old installation and every
+/// restore removes it (§13.1), and runs the app's step on the new
+/// installation before the swap. Until the swap, the old installation and every
 /// keychain entry stay as they were, and the store opens as before. A failure
 /// after this call's own swap, with custody unchanged, puts the old
 /// installation back. A swap interrupted any other way only moves forward:
@@ -80,11 +103,12 @@ pub(super) async fn replace_installation(
     mut builder: CovenBuilder,
     store: StoreId,
     request: BootstrapRequest,
-    by: ReplacedBy,
+    call: Replacing,
     status: impl Fn(BootstrapStatus),
     cancel: &watch::Receiver<bool>,
 ) -> Result<CovenHandle, BootstrapError> {
     check_cancel(cancel)?;
+    let by = call.by();
     let keychain = builder.keychain()?;
     let replacement = builder.layout.begin_replacement(store, by, builder.ids.as_ref()).await?;
     let swapping = !replacement.is_swapped();
@@ -106,6 +130,14 @@ pub(super) async fn replace_installation(
         Err(error) => return Err(error),
     };
     let (database, waits) = if swapping {
+        // The app's step writes the new installation before it takes the old
+        // one's place, so its rows arrive with the swap or not at all. After
+        // an earlier call's swap they are there already.
+        if let Replacing::Restore(prepare) = call {
+            if let Err(error) = database.write_bulk(prepare).await {
+                return combine(Err(error.into()), close(database).await);
+            }
+        }
         // Listings show this name until the swap finishes.
         let name = database.store_name().await;
         // The loading database closes before its files move.

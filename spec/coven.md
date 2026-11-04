@@ -3802,6 +3802,16 @@ failed. Instead the app passes Carol's current code to
   has finished (§19.3). Then the new device takes its place, coven commits the
   new pair and removes the old copy. The saved restore code is rewritten with
   the current pair, never deleted.
+- **The app's own device-local rows move in the swap.** Carol's laptop keeps
+  her theme in a local `preferences` table, which the new device would start
+  without. The app reads it from the old copy, which still opens, and passes a
+  step that writes it. Coven runs the step as one bulk write on the new device
+  once it has loaded and before the swap (§4), so the theme takes the old
+  copy's place with the new device or not at all. Written after the call
+  returned instead, it would be lost for good to a crash in between, with the
+  old copy already removed. A step that writes a synced table fails the call
+  before the swap, with `SyncedTableInBulkWrite`. A call that finds the swap
+  already made doesn't run its step: the new device holds the rows already.
 - A failure before that swap, or a key commit that fails right after it, leaves
   the old copy and every keychain entry as they were. Calling it again finishes
   an interrupted restore. Once the pair is installed, the call just opens the

@@ -7136,13 +7136,20 @@ impl CovenBuilder {
     /// changing nothing. When custody holds the code's pair and applied
     /// history binds it, the store just opens, reporting the open's steps as
     /// `BootstrapStatus::Opening`. S3 credentials as for
-    /// `restore_from_code`. The handle holds the device-reset notice (E5).
+    /// `restore_from_code`. `prepare` is the app's step on the new
+    /// installation, one bulk write of its device-local tables
+    /// (`CovenHandle::write_bulk`, E3), run after loading and before the
+    /// swap: what it writes swaps in with the new installation or not at all.
+    /// A failed step fails the call before the swap; a call that finds the
+    /// swap made or the pair installed doesn't run it. The handle holds the
+    /// device-reset notice (E5).
     pub async fn restore_device(
         self,
         store: StoreId,
         code: &str,
         s3_credentials: Option<S3Credentials>,
         device_name: &str,
+        prepare: impl FnOnce(BulkSqlContext<'_>) -> CovenResult<()> + Send + 'static,
         on_status: impl Fn(BootstrapStatus),
         cancel: &watch::Receiver<bool>,
     ) -> Result<CovenHandle, BootstrapError>;
@@ -7432,7 +7439,8 @@ match restore_from_saved_code(
 ```
 
 If Carol's laptop stopped with `MemberKeysReplaced`, it restores in place from the
-code her phone shows, keeping its copy until the new one is ready:
+code her phone shows, keeping its copy until the new one is ready. Her theme,
+read from the old copy before the call, goes into the new one in the same swap:
 
 ```rust
 let handle = Coven::builder(layout.clone())
@@ -7443,6 +7451,10 @@ let handle = Coven::builder(layout.clone())
         &scanned,
         s3_credentials,
         "Carol's laptop",
+        move |sql| {
+            sql.execute("INSERT INTO preferences VALUES('theme',?1)", [theme])?;
+            Ok(())
+        },
         |step| show_step(step),
         &cancel_rx,
     )

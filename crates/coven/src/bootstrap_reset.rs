@@ -82,7 +82,7 @@ pub(crate) async fn reset_device(
         builder,
         store,
         BootstrapRequest::Restore { code, data, sign_in, name: device_name.into() },
-        ReplacedBy::Reset,
+        replace::Replacing::Reset,
         status,
         &never,
     )

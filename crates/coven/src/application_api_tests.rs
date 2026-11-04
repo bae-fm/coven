@@ -194,6 +194,7 @@ fn bootstrap_and_operation_futures_stay_small() {
         std::mem::size_of::<F>()
     }
     type Status = fn(BootstrapStatus);
+    type Prepare = fn(crate::BulkSqlContext<'_>) -> crate::CovenResult<()>;
     let sizes = [
         (
             "restore_from_code",
@@ -249,15 +250,16 @@ fn bootstrap_and_operation_futures_stay_small() {
         (
             "restore_device",
             size(
-                |(b, s, c, k, d, o, x): (
+                |(b, s, c, k, d, p, o, x): (
                     CovenBuilder,
                     StoreId,
                     &'static str,
                     Option<S3Credentials>,
                     &'static str,
+                    Prepare,
                     Status,
                     &'static Receiver<bool>,
-                )| b.restore_device(s, c, k, d, o, x),
+                )| b.restore_device(s, c, k, d, p, o, x),
             ),
         ),
         (

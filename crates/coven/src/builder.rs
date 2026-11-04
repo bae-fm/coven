@@ -337,13 +337,20 @@ impl CovenBuilder {
     /// began is refused with `StoreLockError::ReplacementUnfinished`, changing
     /// nothing. A device whose custody and applied history already hold the
     /// code's pair just opens. S3 requires the separately held key, as
-    /// `restore_from_code` does.
+    /// `restore_from_code` does. `prepare` is the app's step on the new
+    /// installation: one bulk write (`CovenHandle::write_bulk`) of its
+    /// device-local tables, run after loading and before the swap, so what it
+    /// writes, such as preferences read from the old copy before the call,
+    /// takes the old copy's place with the new installation or not at all. A
+    /// call that finds the swap already made, or the pair already installed,
+    /// doesn't run it.
     pub async fn restore_device(
         self,
         store: StoreId,
         code: &str,
         s3_credentials: Option<S3Credentials>,
         device_name: &str,
+        prepare: impl FnOnce(BulkSqlContext<'_>) -> CovenResult<()> + Send + 'static,
         on_status: impl Fn(BootstrapStatus),
         cancel: &tokio::sync::watch::Receiver<bool>,
     ) -> Result<CovenHandle, BootstrapError> {
@@ -353,6 +360,7 @@ impl CovenBuilder {
             code,
             s3_credentials,
             device_name,
+            Box::new(prepare),
             on_status,
             cancel,
         ))

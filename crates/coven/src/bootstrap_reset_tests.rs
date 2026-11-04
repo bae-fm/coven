@@ -399,6 +399,7 @@ async fn a_reset_interrupted_after_its_swap_is_finished_by_the_next_reset() {
                 secret_access_key: SecretText::new("secret".into()),
             }),
             "Restored phone",
+            |_| Ok(()),
             |_| {},
             &cancel,
         )

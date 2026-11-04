@@ -17,7 +17,17 @@ async fn restore(
     code: &str,
 ) -> Result<CovenHandle, BootstrapError> {
     let (_, cancel) = watch::channel(false);
-    builder.restore_device(store, code, Some(carol_key()), "Carol's laptop", |_| {}, &cancel).await
+    builder
+        .restore_device(
+            store,
+            code,
+            Some(carol_key()),
+            "Carol's laptop",
+            |_| Ok(()),
+            |_| {},
+            &cancel,
+        )
+        .await
 }
 
 /// The store's own directory, where the replaced installation lived.
@@ -127,6 +137,7 @@ async fn a_restore_installs_the_current_pair_in_place_of_the_replaced_installati
             &replaced.code,
             Some(carol_key()),
             "Carol's laptop",
+            |_| Ok(()),
             |status| statuses.borrow_mut().push(status),
             &cancel,
         )
@@ -327,5 +338,143 @@ async fn a_restore_interrupted_after_its_swap_is_finished_by_retrying_it() {
     let handle = restore(network.reopen(&replaced.carol), store, &replaced.code).await.unwrap();
     assert_eq!(restored(&network, &replaced, handle, old).await, decided.reset.new_device);
     assert_eq!(layout.stores().await.unwrap()[0].unfinished_replacement, None);
+    network.close().await;
+}
+
+/// The network's migrations, with Carol's app keeping her theme in a
+/// device-local table.
+fn with_preferences() -> Vec<Migration> {
+    let mut migrations = crate::tests::migrations();
+    migrations.push(Migration::addition(
+        2,
+        "preferences",
+        "CREATE TABLE preferences(name TEXT NOT NULL PRIMARY KEY, value TEXT NOT NULL)",
+    ));
+    migrations
+}
+
+/// Carol's theme, as `handle` holds it.
+async fn theme(handle: &CovenHandle) -> Option<String> {
+    handle
+        .read(|sql| {
+            Ok(sql.query("SELECT value FROM preferences WHERE name='theme'", [], |r| {
+                r.get::<_, String>(0)
+            })?)
+        })
+        .await
+        .unwrap()
+        .pop()
+}
+
+/// Carol's laptop keeps her theme in a device-local table the new device
+/// would start without. Her app reads it from the old copy, which still
+/// opens, and the restore's step writes it into the new device before the
+/// swap: a step that writes a synced table fails the restore with the old
+/// copy in place and its theme kept, and the restore that follows carries
+/// the theme over with the new device (§13.1).
+#[tokio::test]
+async fn a_restore_carries_device_local_rows_its_step_writes() {
+    let mut network = Network::new(2).await;
+    let replaced = network.replace_keys_elsewhere().await;
+    let store = replaced.carol.store;
+    let old = held(&replaced.carol.app, store).device.unwrap();
+    let laptop = || network.reopen(&replaced.carol).migrations(with_preferences());
+    let handle = laptop().open(store, |_| ()).await.unwrap();
+    handle
+        .write_bulk(|sql| {
+            sql.execute("INSERT INTO preferences VALUES('theme','dark')", [])?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let kept = theme(&handle).await.unwrap();
+    handle.close().await.unwrap();
+
+    let (_, cancel) = watch::channel(false);
+    let refused = laptop()
+        .restore_device(
+            store,
+            &replaced.code,
+            Some(carol_key()),
+            "Carol's laptop",
+            |sql| {
+                sql.execute("INSERT INTO parents VALUES('p','label',1)", [])?;
+                Ok(())
+            },
+            |_| {},
+            &cancel,
+        )
+        .await;
+    assert!(
+        matches!(&refused, Err(BootstrapError::Store(CovenError::Database(DbError::SyncedTableInBulkWrite { table }))) if table == "parents"),
+        "{:?}",
+        refused.as_ref().err()
+    );
+    let handle = laptop().open(store, |_| ()).await.unwrap();
+    assert_eq!(handle.device_id(), old);
+    assert_eq!(theme(&handle).await.as_deref(), Some("dark"));
+    handle.close().await.unwrap();
+
+    let handle = laptop()
+        .restore_device(
+            store,
+            &replaced.code,
+            Some(carol_key()),
+            "Carol's laptop",
+            move |sql| {
+                sql.execute("INSERT INTO preferences VALUES('theme',?1)", [kept])?;
+                Ok(())
+            },
+            |_| {},
+            &cancel,
+        )
+        .await
+        .unwrap();
+    assert_ne!(handle.device_id(), old);
+    assert_eq!(theme(&handle).await.as_deref(), Some("dark"));
+    handle.close().await.unwrap();
+    network.close().await;
+}
+
+/// The step's rows are in the new device once it has swapped in: a restore
+/// stopped right after the swap is finished by a call whose step isn't run,
+/// and the theme the first call's step wrote is there (§13.1).
+#[tokio::test]
+async fn a_restore_finished_after_its_swap_keeps_the_rows_its_step_wrote() {
+    let mut network = Network::new(2).await;
+    let replaced = network.replace_keys_elsewhere().await;
+    let store = replaced.carol.store;
+    let laptop = || network.reopen(&replaced.carol).migrations(with_preferences());
+    let (_, cancel) = watch::channel(false);
+    let interrupted = laptop()
+        .interrupt_after_swap()
+        .restore_device(
+            store,
+            &replaced.code,
+            Some(carol_key()),
+            "Carol's laptop",
+            |sql| {
+                sql.execute("INSERT INTO preferences VALUES('theme','dark')", [])?;
+                Ok(())
+            },
+            |_| {},
+            &cancel,
+        )
+        .await;
+    assert!(matches!(interrupted, Err(BootstrapError::Cancelled)), "{interrupted:?}");
+    let handle = laptop()
+        .restore_device(
+            store,
+            &replaced.code,
+            Some(carol_key()),
+            "Carol's laptop",
+            |_| panic!("the swapped installation's step already ran"),
+            |_| {},
+            &cancel,
+        )
+        .await
+        .unwrap();
+    assert_eq!(theme(&handle).await.as_deref(), Some("dark"));
+    handle.close().await.unwrap();
     network.close().await;
 }

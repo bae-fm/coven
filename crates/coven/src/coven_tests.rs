@@ -395,6 +395,7 @@ async fn discarding_a_store_whose_replacement_stopped_after_its_swap_removes_bot
                             secret_access_key: SecretText::new("secret".into()),
                         }),
                         "Carol's laptop",
+                        |_| Ok(()),
                         |_| {},
                         &cancel,
                     )
