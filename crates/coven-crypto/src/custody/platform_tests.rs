@@ -56,8 +56,13 @@ fn native_search_discovers_restore_codes_and_propagates_read_failures() {
 #[cfg(not(any(target_os = "macos", target_os = "ios")))]
 #[test]
 fn native_non_apple_sync_operations_are_unsupported() {
-    // No live credential store or platform service is needed to reject sync.
-    let native = NativeKeychain { device_only: keyring_core::mock::Store::new().unwrap() };
+    // No live credential store or platform service is needed to reject sync:
+    // on Android, a phone without Google Play services has no Block Store.
+    let native = NativeKeychain {
+        device_only: keyring_core::mock::Store::new().unwrap(),
+        #[cfg(target_os = "android")]
+        block_store: None,
+    };
     assert!(matches!(
         native.read(EntryScope::Person, "app", "restore-code:1"),
         Err(KeyError::Unsupported)
@@ -119,6 +124,8 @@ fn inaccessible_native_custody_is_distinct_on_read_write_and_delete() {
         device_only: Arc::new(DeviceEntries(store.clone())),
         #[cfg(any(target_os = "macos", target_os = "ios"))]
         synced: store.clone(),
+        #[cfg(target_os = "android")]
+        block_store: None,
     };
     for operation in ["read", "write", "delete"] {
         let entry = store.build("app", "secret", None).unwrap();

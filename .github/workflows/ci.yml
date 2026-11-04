@@ -1,7 +1,8 @@
 name: ci
 
 # One script runs every check of Appendix F.6: its code checks on every platform,
-# and the Lean proofs once, on Linux, since a proof checks the same anywhere.
+# clippy for Android on Linux, and the Lean proofs once, on Linux, since a proof
+# checks the same anywhere.
 # Spec edits alone don't run it, so they never cancel a run checking code.
 on:
   push:
@@ -114,6 +115,33 @@ jobs:
         uses: actions/cache/save@v5
         with:
           path: *build_paths
+          key: ${{ steps.build.outputs.cache-primary-key }}
+
+  # Android compiles code no host does; no runner hosts it, so its check is
+  # clippy alone, with the NDK the Ubuntu image carries (ANDROID_NDK_HOME).
+  android:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v6
+      - name: Restore the build
+        id: build
+        uses: actions/cache/restore@v5
+        with:
+          path: &android_paths |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: android-${{ hashFiles('Cargo.lock', 'Cargo.toml', '**/Cargo.toml', 'rust-toolchain.toml') }}-${{ github.sha }}
+          restore-keys: android-${{ hashFiles('Cargo.lock', 'Cargo.toml', '**/Cargo.toml', 'rust-toolchain.toml') }}-
+      - name: scripts/check.sh android
+        run: scripts/check.sh android
+      - name: Save the build
+        if: ${{ !cancelled() && github.ref == 'refs/heads/main' }}
+        uses: actions/cache/save@v5
+        with:
+          path: *android_paths
           key: ${{ steps.build.outputs.cache-primary-key }}
 
   proofs:

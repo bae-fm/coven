@@ -12,6 +12,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+#[cfg(not(any(target_os = "ios", target_os = "android")))]
 #[path = "onedrive_live.rs"]
 mod live;
 

@@ -4,6 +4,10 @@
 #
 #   scripts/check.sh                  everything
 #   scripts/check.sh code             the code checks only
+#   scripts/check.sh android          clippy for Android, which no CI runner hosts:
+#                                     it needs an Android NDK (ANDROID_NDK_HOME,
+#                                     ANDROID_NDK_LATEST_HOME, or the newest under
+#                                     ANDROID_HOME's or ~/Library/Android/sdk's ndk)
 #   scripts/check.sh proofs           the Lean proofs and their differential tests
 #   scripts/check.sh changed [base]   the same checks, limited to what differs from
 #                                     base (default origin/main): changed crates and
@@ -16,13 +20,13 @@ set -euo pipefail
 
 base=
 case "${1-all}:$#" in
-    all:0 | code:1 | proofs:1) part=${1-all} ;;
+    all:0 | code:1 | android:1 | proofs:1) part=${1-all} ;;
     changed:1 | changed:2)
         part=changed
         base=${2-origin/main}
         ;;
     *)
-        echo "usage: scripts/check.sh [code | proofs | changed [base]]" >&2
+        echo "usage: scripts/check.sh [code | android | proofs | changed [base]]" >&2
         exit 2
         ;;
 esac
@@ -213,6 +217,29 @@ code_checks() {
         # shellcheck disable=SC2086
         scripts/cargo.sh test $packages --no-default-features --doc
     fi
+}
+
+# Clippy for Android, on every crate and test, with warnings denied: Android
+# compiles code no host does (its keychain, its network watch), and its tests
+# must build though they run nowhere. The C the crates build is compiled with
+# the NDK's clang for API 26, the oldest Android coven supports.
+android_checks() {
+    local ndk=${ANDROID_NDK_HOME:-${ANDROID_NDK_LATEST_HOME:-}}
+    if [ -z "$ndk" ]; then
+        local sdk=${ANDROID_HOME:-$HOME/Library/Android/sdk}
+        ndk=$(find "$sdk/ndk" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | sort -V | tail -1)
+    fi
+    local bin
+    bin=$(find "$ndk/toolchains/llvm/prebuilt" -mindepth 2 -maxdepth 2 -name bin -type d 2>/dev/null | head -1)
+    if [ -z "$bin" ]; then
+        echo "no Android NDK found: set ANDROID_NDK_HOME" >&2
+        exit 1
+    fi
+    step "cargo clippy --target aarch64-linux-android --all-targets --all-features (NDK $(basename "$ndk"))"
+    CC_aarch64_linux_android="$bin/aarch64-linux-android26-clang" \
+        AR_aarch64_linux_android="$bin/llvm-ar" \
+        scripts/cargo.sh clippy --workspace --target aarch64-linux-android --all-targets --all-features \
+        -- -D warnings
 }
 
 # The crates whose build without their features compiles something the build
@@ -515,10 +542,13 @@ if [ "$part" = changed ]; then
 else
     select_all
 fi
-if [ "$part" != proofs ]; then
+if [ "$part" != proofs ] && [ "$part" != android ]; then
     code_checks
 fi
-if [ "$part" != code ]; then
+if [ "$part" = all ] || [ "$part" = android ]; then
+    android_checks
+fi
+if [ "$part" != code ] && [ "$part" != android ]; then
     proofs
 fi
 

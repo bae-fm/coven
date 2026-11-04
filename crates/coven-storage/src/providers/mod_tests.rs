@@ -12,6 +12,7 @@ use coven_crypto::SecretText;
 use coven_foundation::clock::FixedClock;
 use std::{sync::Arc, time::SystemTime};
 
+#[cfg(not(any(target_os = "ios", target_os = "android")))]
 #[path = "sequence_live.rs"]
 pub(crate) mod sequence_live;
 
@@ -46,6 +47,7 @@ pub(crate) fn full_access(provider: CloudProvider) -> crate::OAuthAccess {
 
 /// A held sign-in whose access token is unknown, as live credentials files
 /// supply it: refreshing it is the first request.
+#[cfg(not(any(target_os = "ios", target_os = "android")))]
 pub(crate) fn refresh_only(
     client_id: &str,
     access: crate::OAuthAccess,

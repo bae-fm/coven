@@ -118,7 +118,11 @@ impl S3Storage {
                 Err(error) => Err(s3_error(error)),
             },
             Left::Staged(key) => self.delete_key(key).await,
-            _ => Err(StorageFailure::SessionMismatch.into()),
+            // Another provider's: not this one's to end.
+            #[cfg(target_vendor = "apple")]
+            Left::CloudKitRoot(_) => Err(StorageFailure::SessionMismatch.into()),
+            #[cfg(any(test, feature = "test-utils"))]
+            Left::Memory(_) => Err(StorageFailure::SessionMismatch.into()),
         }
     }
 

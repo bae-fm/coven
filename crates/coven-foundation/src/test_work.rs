@@ -36,6 +36,10 @@ struct Active {
 }
 
 thread_local! {
+    // Clippy asks for a `const` initializer this already has where the
+    // target has no native thread locals, as Android: std builds those
+    // from a function, which the lint reads as the initializer.
+    #[cfg_attr(target_os = "android", allow(clippy::missing_const_for_thread_local))]
     static ACTIVE: RefCell<Option<Active>> = const { RefCell::new(None) };
 }
 

@@ -10215,10 +10215,12 @@ the rules above.
 
 ### F.6 Checks
 
-One script runs every check. CI runs the code checks on every platform, and the
-Lean proofs once, on Linux, since a proof checks the same on any platform.
+One script runs every check. CI runs the code checks on every platform, clippy
+for Android on Linux, and the Lean proofs once, on Linux, since a proof checks
+the same on any platform.
 
-1. Formatting, and clippy with warnings denied.
+1. Formatting, and clippy with warnings denied: on the host, and for Android,
+   which compiles code no host does and hosts no runner.
 2. The dependency rules of F.1, with `cargo deny check bans` for the crates
    `deny.toml` refuses.
 3. The rules of F.2 and F.3, by a checker that reads the syntax tree of every
