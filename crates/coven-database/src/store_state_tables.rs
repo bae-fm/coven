@@ -65,6 +65,15 @@ pub(crate) fn named(database: &DatabaseConnection) -> Result<(String, Slot), DbE
         .ok_or(DbError::DamagedDatabase)
 }
 
+/// Whether the applied history has created the store.
+pub(crate) fn created(database: &DatabaseConnection) -> Result<bool, DbError> {
+    database.query_row(
+        "SELECT EXISTS(SELECT 1 FROM _coven_store WHERE singleton=1 AND created=1)",
+        [],
+        |r| r.get(0),
+    )
+}
+
 pub(crate) fn read(database: &DatabaseConnection) -> Result<StoreState, DbError> {
     let mut state = StoreState::default();
     state.store = database

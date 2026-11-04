@@ -103,8 +103,13 @@ pub(crate) fn apply<P: crate::PendingValue>(
                 retain(db, "admin", &original)?;
                 if let Some(effect) = effect {
                     let old = crate::store_state_tables::deleted_circles(db)?;
+                    let created = !crate::store_state_tables::created(db)?
+                        && effect.state.store.is_some();
                     crate::sequence::cutoff(db, incoming.slot, &effect.change)?;
                     crate::store_state_tables::replace(db, &effect.state)?;
+                    if created {
+                        crate::raise_capture::capture_created(db, schema)?;
+                    }
                     crate::provider_access::adopt::<P>(db, &effect.provider.accounts)?;
                     for circle in effect.state.circle_deletions.keys().filter(|circle| !old.contains_key(circle)) {
                         touched.extend(db.query(

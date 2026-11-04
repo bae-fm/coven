@@ -6920,6 +6920,14 @@ raise. A higher raise is checked against that state.
 An update that runs several breaking migrations makes one migration write (§18.4)
 and raises the store once, to the newest version.
 
+A store's creator raises it too. Ana sets up Household with an app whose
+version 2 already retitles notes: her phone ran the breaking step on its first
+open, before the store existed, so once the store is created her phone raises
+it to version 2 through the marker that step queued, and the history records
+the version her app runs. Ben's phone on an app before version 2 then stops with
+`UpdateRequired`, as on any store raised past its app, instead of failing on a
+version 2 snapshot it can't read.
+
 **Devices on an older app.** An older app can't apply an audience's newer schema.
 It records `UpdateRequired` and stops at that slot under §5's rule for stuck
 devices, which also means it stops uploading. After updating, it reloads from the

@@ -311,6 +311,16 @@ impl Network {
     }
     /// Join device `index` through an invite for `target`, approved by device 0.
     pub(crate) async fn join_as(&mut self, index: usize, target: InviteTarget) {
+        let joined = self.try_join_as(index, target).await;
+        assert!(joined.is_ok(), "{:?}", joined.err());
+    }
+    /// Join device `index` as `join_as` does, returning what the join returned:
+    /// the device joins the network only when it opened.
+    pub(crate) async fn try_join_as(
+        &mut self,
+        index: usize,
+        target: InviteTarget,
+    ) -> Result<(), BootstrapError> {
         let owner = &self.devices[0].handle;
         let invite = crate::tests::invite(
             owner,
@@ -339,11 +349,12 @@ impl Network {
             &control,
         );
         let (handle, _) = join_and_approve(owner, joining, |_| async {}).await;
-        let handle = handle.unwrap().unwrap();
+        let handle = handle?.expect("an approved join opens");
         let store = decode_code_info(invite.shown_code()).unwrap().metadata().store_id;
         handle.start_sync().await.unwrap();
         self.devices.push(Device { app, store, handle, storage, connector });
         self.sync(index).await;
+        Ok(())
     }
     pub(crate) async fn sync(&self, index: usize) {
         let handle = &self.devices[index].handle;

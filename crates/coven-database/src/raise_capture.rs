@@ -48,6 +48,49 @@ pub(crate) fn capture(
     Ok(true)
 }
 
+/// The creator's raise, as the store it created comes into being. A breaking
+/// migration that ran before the store existed captured nothing, as there
+/// was no shared version to raise; the store's history records the version
+/// its creating app runs only once this device raises it, through the marker
+/// that migration queued (§18.3).
+pub(crate) fn capture_created(
+    db: &DatabaseConnection,
+    schema: &WriteSchema,
+) -> Result<(), DbError> {
+    let minimum: u32 =
+        db.query_row("SELECT minimum FROM _coven_snapshot_schema WHERE singleton=1", [], |r| {
+            r.get(0)
+        })?;
+    if minimum == 0 || !provisional(db)?.is_empty() {
+        return Ok(());
+    }
+    let device = db
+        .local_device()
+        .ok_or(DbError::Invariant { what: "a writer connection observes this device" })?;
+    let queued = db.query(
+        "SELECT number FROM _coven_uploads WHERE device=?1 ORDER BY number DESC",
+        [device],
+        |r| Ok(counter(r.get::<_, Vec<u8>>(0)?)),
+    )?;
+    for number in queued {
+        let marker = WriteId { device, number };
+        let header = crate::upload::queued(db, marker)?
+            .ok_or(DbError::Invariant { what: "a queued write has its header" })?
+            .header;
+        if header.disposition == coven_format::write::WriteDisposition::Migration {
+            let version = db.schema_version()?;
+            if capture(db, schema, marker, version)? {
+                db.internal_execute(
+                    "UPDATE _coven_snapshot_schema SET publication=?1 WHERE singleton=1",
+                    [version],
+                )?;
+            }
+            return Ok(());
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn raise_to(
     db: &DatabaseConnection,
     _tables: &[crate::SyncedTable],
