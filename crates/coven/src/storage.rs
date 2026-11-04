@@ -731,10 +731,7 @@ impl StorageConnections {
         }
         let result = match (released, started) {
             (Ok(()), result) | (result, Ok(())) => result,
-            (Err(operation), Err(cleanup)) => Err(SyncError::Cleanup {
-                operation: Box::new(operation),
-                cleanup: Box::new(cleanup),
-            }),
+            (Err(operation), Err(cleanup)) => Err(SyncError::cleanup(operation, cleanup)),
         };
         if let Err(error) = result {
             let failure = LastPass::failed(error);
@@ -836,17 +833,11 @@ impl StorageConnections {
             if let Err(error) = unlocked {
                 let error = match owner.release(&mut live).await {
                     Ok(()) => error,
-                    Err(cleanup) => SyncError::Cleanup {
-                        operation: Box::new(error),
-                        cleanup: Box::new(cleanup),
-                    },
+                    Err(cleanup) => SyncError::cleanup(error, cleanup),
                 };
                 let error = match owner.publish_released(Ok(())).await {
                     Ok(()) => error,
-                    Err(cleanup) => SyncError::Cleanup {
-                        operation: Box::new(error),
-                        cleanup: Box::new(cleanup),
-                    },
+                    Err(cleanup) => SyncError::cleanup(error, cleanup),
                 };
                 return Err(unlock_error(error));
             }
