@@ -48,13 +48,7 @@ impl SqlValue {
 
 impl ToSql for SqlValue {
     fn to_sql(&self) -> rusqlite::Result<ToSqlOutput<'_>> {
-        Ok(ToSqlOutput::Borrowed(match self {
-            Self::Null => ValueRef::Null,
-            Self::Integer(value) => ValueRef::Integer(*value),
-            Self::Real(value) => ValueRef::Real(*value),
-            Self::Text(value) => ValueRef::Text(value),
-            Self::Blob(value) => ValueRef::Blob(value),
-        }))
+        Ok(ToSqlOutput::Borrowed(self.as_value_ref()))
     }
 }
 
