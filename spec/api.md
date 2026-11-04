@@ -8381,6 +8381,12 @@ for file work, and a `Bug` variant of each error that has a `Shutdown` one.
 - A file removal that fails after such a write joins the bug as
   `DbError::FileCleanup`, as it joins any failed write's error, so neither
   failure is lost.
+- CloudKit calls each operation's callbacks on its own queues, where a
+  panic unwinding out would end the process. Each callback catches its
+  panic, and the first panic in any of an operation's callbacks, such as a
+  record's progress or the operation's completion, answers the request with
+  `StorageError::Bug`. The completion still runs its own work, such as
+  removing the operation's staged asset files.
 
 An error that keeps another failure takes the bug that failure carries as
 its own `Bug`, never under a disk, lock, storage or custody label, so the

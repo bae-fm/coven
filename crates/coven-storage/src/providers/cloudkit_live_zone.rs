@@ -5,7 +5,7 @@
 //! marker record no store writes, saved before anything else in the zone. Only
 //! a zone carrying it can be deleted here; a zone without it is never touched.
 
-use crate::providers::cloudkit::native::{self, completion, error, CloudKitRequest};
+use crate::providers::cloudkit::native::{self, error, CloudKitCompletion, CloudKitRequest};
 use crate::providers::cloudkit::record::Record;
 use crate::providers::cloudkit::{zone, CloudKitStorage};
 use crate::{StorageError, StorageFailure};
@@ -111,7 +111,7 @@ pub(crate) async fn delete(storage: &CloudKitStorage) -> Result<String, StorageE
 }
 
 fn remove(storage: &CloudKitStorage) -> CloudKitRequest<()> {
-    let (complete, result) = completion();
+    let (completion, result) = CloudKitCompletion::new();
     let operation = objc2::rc::autoreleasepool(|_| unsafe {
         let operation =
             CKModifyRecordZonesOperation::initWithRecordZonesToSave_recordZoneIDsToDelete(
@@ -123,7 +123,7 @@ fn remove(storage: &CloudKitStorage) -> CloudKitRequest<()> {
             move |_saved: *mut NSArray<CKRecordZone>,
                   _deleted: *mut NSArray<CKRecordZoneID>,
                   failure: *mut NSError| {
-                complete(match error(failure) {
+                completion.finish("finish removing a CloudKit zone", || match error(failure) {
                     Some(error) => Err(error),
                     None => Ok(()),
                 });
@@ -138,12 +138,12 @@ fn remove(storage: &CloudKitStorage) -> CloudKitRequest<()> {
 
 /// Every zone name in the signed-in account's private database.
 fn list(container: &CKContainer) -> CloudKitRequest<Vec<String>> {
-    let (complete, result) = completion();
+    let (completion, result) = CloudKitCompletion::new();
     let operation = objc2::rc::autoreleasepool(|_| unsafe {
         let operation = CKFetchRecordZonesOperation::fetchAllRecordZonesOperation();
         let callback = RcBlock::new(
             move |zones: *mut NSDictionary<CKRecordZoneID, CKRecordZone>, failure: *mut NSError| {
-                complete(match error(failure) {
+                completion.finish("finish listing CloudKit zones", || match error(failure) {
                     Some(error) => Err(error),
                     None => match zones.as_ref() {
                         Some(zones) => {

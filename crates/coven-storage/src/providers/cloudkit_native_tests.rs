@@ -239,3 +239,74 @@ async fn a_fetch_hears_its_assets_progress_as_bytes() {
     // 8 + 10%, then clamped to the whole asset and to the range's end.
     assert_eq!(*heard.lock().unwrap(), [18, 50]);
 }
+
+fn record_id(name: &str) -> Retained<CKRecordID> {
+    unsafe { CKRecordID::initWithRecordName(CKRecordID::alloc(), &NSString::from_str(name)) }
+}
+
+/// A panic in an operation's last callback, which CloudKit calls on its
+/// own queue, answers the request with the bug rather than unwinding into
+/// CloudKit (api.md E15).
+#[tokio::test]
+async fn a_panic_in_a_completion_answers_the_request_with_its_bug() {
+    let id = record_id("upload/8");
+    let result = fetch_with(
+        |operation| unsafe {
+            let record = Record::new("CovenObject", &id);
+            let records = NSDictionary::from_slices(&[&*id], &[record.raw()]);
+            operation
+                .fetchRecordsCompletionBlock()
+                .as_ref()
+                .unwrap()
+                .call((&*records as *const _ as *mut _, std::ptr::null_mut()));
+        },
+        &id,
+        &["data"],
+        |_record| -> Result<(), StorageError> { panic!("the record has no data field") },
+        None,
+    )
+    .wait()
+    .await;
+    let Err(StorageError::Bug(bug)) = result else { panic!("expected a bug, got {result:?}") };
+    assert_eq!(bug.message, "the record has no data field");
+}
+
+/// A panic in a callback before the last, such as per-record progress,
+/// answers the request with that bug once the operation completes, whatever
+/// the completion says.
+#[tokio::test]
+async fn a_panic_in_progress_answers_the_request_with_its_bug() {
+    let files = coven_foundation::files::AssetFiles::new().unwrap();
+    let mut part = Record::new("CovenAsset", &record_id("upload/0"));
+    let asset = files.stage(&[1; 10]).unwrap();
+    let staged = asset.path().to_owned();
+    part.set_asset(asset.path()).unwrap();
+    let sent = crate::ByteProgress::new(|_count| panic!("the progress reader is gone"));
+    let progress = AssetProgress::bytes("upload/0".into(), 0, 10, 10, &sent);
+    let result = modify_with(
+        |operation| unsafe {
+            let records = operation.recordsToSave().unwrap();
+            let block = operation.perRecordProgressBlock().as_ref().unwrap();
+            block.call((NonNull::from(&*records.objectAtIndex(0)), 0.5));
+            operation.modifyRecordsCompletionBlock().as_ref().unwrap().call((
+                &*records as *const _ as *mut _,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            ));
+        },
+        vec![part],
+        &[],
+        CKRecordSavePolicy::IfServerRecordUnchanged,
+        None,
+        vec![asset],
+        Some(progress),
+    )
+    .wait()
+    .await;
+    let Err(StorageError::Bug(bug)) = result.map(|saved| saved.len()) else {
+        panic!("expected a bug")
+    };
+    assert_eq!(bug.message, "the progress reader is gone");
+    // The completion still closed the save's asset file.
+    assert!(!staged.exists());
+}

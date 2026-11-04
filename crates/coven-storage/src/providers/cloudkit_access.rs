@@ -1,7 +1,7 @@
 //! Native CloudKit sharing and recipient acceptance.
 
 use super::{
-    native::{self as native, completion, error, CloudKitRequest},
+    native::{self as native, error, CloudKitCompletion, CloudKitRequest},
     record::Record,
     CloudKitStorage,
 };
@@ -144,7 +144,7 @@ fn revocation(
 }
 
 fn participant(container: &CKContainer, email: &str) -> CloudKitRequest<Participant> {
-    let (complete, result) = completion();
+    let (completion, result) = CloudKitCompletion::new();
     let value = Arc::new(Mutex::new(None));
     let fetched = value.clone();
     let operation = objc2::rc::autoreleasepool(|_| unsafe {
@@ -156,29 +156,31 @@ fn participant(container: &CKContainer, email: &str) -> CloudKitRequest<Particip
             CKFetchShareParticipantsOperation::alloc(),
             &NSArray::from_retained_slice(&[lookup]),
         );
+        let fetching = completion.clone();
         let block = RcBlock::new(
             move |_lookup: NonNull<CKUserIdentityLookupInfo>,
                   participant: *mut CKShareParticipant,
                   failure: *mut NSError| {
-                let response = match error(failure) {
-                    Some(error) => Err(error),
-                    None => participant
-                        .as_ref()
-                        .map(|value| Participant(value.copy()))
-                        .ok_or_else(|| StorageFailure::Protocol.into()),
-                };
-                *lock_unpoisoned(&fetched) = Some(response);
+                fetching.during("hear a CloudKit share participant", || {
+                    let response = match error(failure) {
+                        Some(error) => Err(error),
+                        None => participant
+                            .as_ref()
+                            .map(|value| Participant(value.copy()))
+                            .ok_or_else(|| StorageFailure::Protocol.into()),
+                    };
+                    *lock_unpoisoned(&fetched) = Some(response);
+                });
             },
         );
         operation.setPerShareParticipantCompletionBlock(Some(&block));
         let block = RcBlock::new(move |failure: *mut NSError| {
-            let response = match error(failure) {
+            completion.finish("finish a CloudKit participant fetch", || match error(failure) {
                 Some(error) => Err(error),
                 None => lock_unpoisoned(&value).take().unwrap_or_else(|| {
                     Err(StorageFailure::Protocol.with_source("CloudKit omitted participant"))
                 }),
-            };
-            complete(response);
+            });
         });
         operation.setFetchShareParticipantsCompletionBlock(Some(&block));
         container.addOperation(&operation);
@@ -194,7 +196,7 @@ fn metadata(
     let url = NSURL::URLWithString(&NSString::from_str(url.as_str())).ok_or_else(|| {
         StorageFailure::InvitationMismatch.with_source("NSURL cannot parse the share URL")
     })?;
-    let (complete, result) = completion();
+    let (completion, result) = CloudKitCompletion::new();
     let value = Arc::new(Mutex::new(None));
     let fetched = value.clone();
     let operation = objc2::rc::autoreleasepool(|_| unsafe {
@@ -202,27 +204,29 @@ fn metadata(
             CKFetchShareMetadataOperation::alloc(),
             &NSArray::from_retained_slice(&[url]),
         );
+        let fetching = completion.clone();
         let block = RcBlock::new(
             move |_url: NonNull<NSURL>, metadata: *mut CKShareMetadata, failure: *mut NSError| {
-                let response = match error(failure) {
-                    Some(error) => Err(error),
-                    None => metadata
-                        .as_ref()
-                        .map(|value| Metadata(value.copy()))
-                        .ok_or_else(|| StorageFailure::Protocol.into()),
-                };
-                *lock_unpoisoned(&fetched) = Some(response);
+                fetching.during("hear a CloudKit share's metadata", || {
+                    let response = match error(failure) {
+                        Some(error) => Err(error),
+                        None => metadata
+                            .as_ref()
+                            .map(|value| Metadata(value.copy()))
+                            .ok_or_else(|| StorageFailure::Protocol.into()),
+                    };
+                    *lock_unpoisoned(&fetched) = Some(response);
+                });
             },
         );
         operation.setPerShareMetadataBlock(Some(&block));
         let block = RcBlock::new(move |failure: *mut NSError| {
-            let response = match error(failure) {
+            completion.finish("finish a CloudKit share metadata fetch", || match error(failure) {
                 Some(error) => Err(error),
                 None => lock_unpoisoned(&value).take().unwrap_or_else(|| {
                     Err(StorageFailure::Protocol.with_source("CloudKit omitted share metadata"))
                 }),
-            };
-            complete(response);
+            });
         });
         operation.setFetchShareMetadataCompletionBlock(Some(&block));
         container.addOperation(&operation);
@@ -232,17 +236,17 @@ fn metadata(
 }
 
 fn accept(container: &CKContainer, metadata: Metadata) -> CloudKitRequest<()> {
-    let (complete, result) = completion();
+    let (completion, result) = CloudKitCompletion::new();
     let operation = objc2::rc::autoreleasepool(|_| unsafe {
         let operation = CKAcceptSharesOperation::initWithShareMetadatas(
             CKAcceptSharesOperation::alloc(),
             &NSArray::from_retained_slice(&[metadata.0]),
         );
         let block = RcBlock::new(move |failure: *mut NSError| {
-            complete(match error(failure) {
+            completion.finish("finish accepting a CloudKit share", || match error(failure) {
                 Some(error) => Err(error),
                 None => Ok(()),
-            })
+            });
         });
         operation.setAcceptSharesCompletionBlock(Some(&block));
         container.addOperation(&operation);

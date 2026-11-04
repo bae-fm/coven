@@ -258,10 +258,12 @@ task_types = [
     "DownloadLease",
     # One snapshot body read, hashing the stream it reads.
     "HashedBody",
-    # One CloudKit operation, cancelled if dropped, and the reply its
-    # completion sends.
+    # One CloudKit operation, cancelled if dropped, the reply its
+    # completion sends, and what its callbacks answer it with until then.
     "CloudKitRequest",
     "CloudKitReply",
+    "CloudKitCompletion",
+    "Unanswered",
     # A test's hold on one request of the in-memory provider, until the
     # test releases it.
     "HeldRead",

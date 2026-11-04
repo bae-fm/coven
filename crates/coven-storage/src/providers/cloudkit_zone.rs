@@ -1,6 +1,6 @@
 //! Provisioning the owner's custom zone; reconnecting never recreates a zone.
 
-use super::native::{self as native, completion, error, CloudKitRequest};
+use super::native::{self as native, error, CloudKitCompletion, CloudKitRequest};
 use crate::{StorageConfig, StorageError, StorageFailure};
 use block2::RcBlock;
 use coven_foundation::id_source::StoreId;
@@ -29,7 +29,7 @@ pub(crate) async fn prepare(
 }
 
 fn save(container: &CKContainer, name: &str) -> CloudKitRequest<()> {
-    let (complete, result) = completion();
+    let (completion, result) = CloudKitCompletion::new();
     let operation = objc2::rc::autoreleasepool(|_| unsafe {
         let zone = CKRecordZone::initWithZoneName(CKRecordZone::alloc(), &NSString::from_str(name));
         let operation =
@@ -42,7 +42,7 @@ fn save(container: &CKContainer, name: &str) -> CloudKitRequest<()> {
             move |zones: *mut NSArray<CKRecordZone>,
                   _deleted: *mut NSArray<CKRecordZoneID>,
                   failure: *mut NSError| {
-                complete(match error(failure) {
+                completion.finish("finish saving a CloudKit zone", || match error(failure) {
                     Some(error) => Err(error),
                     None => match zones.as_ref() {
                         Some(zones)
