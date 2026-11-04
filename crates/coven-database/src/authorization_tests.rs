@@ -3,12 +3,24 @@ use crate::{
     *,
 };
 
+/// An app migration running `attack` fails to open, refused as reaching an
+/// internal object. A domain's tests show its own tables refused this way.
+pub(crate) async fn refused_as_internal(attack: &'static str) {
+    let store = TestStore::new();
+    let error = store
+        .builder(vec![], vec![Migration::addition(1, "attack", attack)])
+        .open()
+        .await
+        .err()
+        .unwrap();
+    assert!(matches!(database_error(error), DbError::InternalTable { .. }), "{attack}");
+}
+
 #[tokio::test]
 async fn app_statements_cannot_read_or_mutate_internal_objects() {
     for attack in [
         "SELECT * FROM _coven_rows",
         "SELECT count(*) FROM _COVEN_ROWS",
-        "INSERT INTO _coven_operations(kind,last_step,data,started_by) VALUES ('x',0,x'','x')",
         "UPDATE _coven_rows SET audience = 'store'",
         "DELETE FROM _coven_uploads",
         "DROP TABLE _coven_columns",
@@ -20,14 +32,7 @@ async fn app_statements_cannot_read_or_mutate_internal_objects() {
         "CREATE TEMP TABLE _coven_cells(x)",
         "CREATE VIEW hidden AS SELECT * FROM _coven_rows; SELECT * FROM hidden",
     ] {
-        let store = TestStore::new();
-        let error = store
-            .builder(vec![], vec![Migration::addition(1, "attack", attack)])
-            .open()
-            .await
-            .err()
-            .unwrap();
-        assert!(matches!(database_error(error), DbError::InternalTable { .. }), "{attack}");
+        refused_as_internal(attack).await;
     }
 }
 

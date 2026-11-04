@@ -71,6 +71,30 @@ pub(crate) fn finish(
     Ok(())
 }
 
+/// Fix a request's target to the account's intention before storage is
+/// called. A revoke may remove the direct share supplying acceptance
+/// tokens even when other permissions remain, so neither confirmation is
+/// kept.
+pub(crate) fn fix_target(db: &DatabaseConnection, account: &str) -> Result<(), DbError> {
+    db.internal_execute("UPDATE _coven_provider_access SET granted=NULL,invitation=NULL,target=intended WHERE account=?1", [account])?;
+    Ok(())
+}
+
+/// The provider confirmed `target`, with its acceptance information when
+/// it granted access; the request has no target fixed any more.
+pub(crate) fn confirm(
+    db: &DatabaseConnection,
+    account: &str,
+    target: bool,
+    invitation: Option<&SecretBytes>,
+) -> Result<(), DbError> {
+    db.internal_execute(
+        "UPDATE _coven_provider_access SET granted=?1,invitation=?2,target=NULL WHERE account=?3",
+        (target, invitation.map(SecretBytes::as_bytes), account),
+    )?;
+    Ok(())
+}
+
 /// Called inside the same transaction as membership or an invitation change.
 pub(crate) fn adopt<P: PendingValue>(
     db: &DatabaseConnection,
@@ -117,10 +141,7 @@ pub(crate) fn adopt<P: PendingValue>(
         }
         let id = match before.request {
             Some(request) => {
-                db.internal_execute(
-                    "UPDATE _coven_operations SET last_step=0 WHERE id=?1 AND last_step!=0",
-                    [request.operation.0],
-                )?;
+                crate::operation::set_step(db, request.operation, REQUEST_QUEUED_STEP)?;
                 crate::retry::clear(db, crate::RetrySubject::Operation(request.operation))?;
                 db.internal_execute("UPDATE _coven_provider_access SET target=NULL WHERE account=?1 AND target IS NOT NULL", [&change.account])?;
                 request.operation
@@ -138,3 +159,7 @@ pub(crate) fn adopt<P: PendingValue>(
     }
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "provider_access_tests.rs"]
+pub(crate) mod tests;

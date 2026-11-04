@@ -913,4 +913,4 @@ impl AuthorizationState {
 
 #[cfg(test)]
 #[path = "authorization_tests.rs"]
-mod tests;
+pub(crate) mod tests;

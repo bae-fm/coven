@@ -57,19 +57,27 @@ impl crate::Database {
         account: String,
         id: OperationId,
     ) -> Result<bool, DbError> {
-        self.call(move |inner| inner.access.with_writer(|db| db.transaction(|db| {
-            let state = read(db,&account)?.ok_or(DbError::OperationChanged(id))?;
-            if state.request.as_ref().map(|r|r.operation) != Some(id) { return Err(DbError::OperationChanged(id)); }
-            let record = crate::operation::find(db,id)?.ok_or(DbError::OperationChanged(id))?;
-            if record.last_step == crate::provider_access::REQUEST_FIXED_STEP { return Err(DbError::OperationChanged(id)); }
-            // A revoke may remove the direct share supplying acceptance tokens
-            // even when other permissions remain. Retain neither confirmation.
-            db.internal_execute("UPDATE _coven_provider_access SET granted=NULL,invitation=NULL,target=intended WHERE account=?1", [&account])?;
-            db.internal_execute("UPDATE _coven_operations SET last_step=?2 WHERE id=?1", (id.0, crate::provider_access::REQUEST_FIXED_STEP))?;
-            crate::retry::clear(db, crate::RetrySubject::Operation(id))?;
-            crate::pending::save(db,&P::provider_access(id,account,state.intended))?;
-            Ok(state.intended)
-        }))).await
+        self.call(move |inner| {
+            inner.access.with_writer(|db| {
+                db.transaction(|db| {
+                    let state = read(db, &account)?.ok_or(DbError::OperationChanged(id))?;
+                    if state.request.as_ref().map(|r| r.operation) != Some(id) {
+                        return Err(DbError::OperationChanged(id));
+                    }
+                    let record =
+                        crate::operation::find(db, id)?.ok_or(DbError::OperationChanged(id))?;
+                    if record.last_step == crate::provider_access::REQUEST_FIXED_STEP {
+                        return Err(DbError::OperationChanged(id));
+                    }
+                    crate::provider_access::fix_target(db, &account)?;
+                    crate::operation::set_step(db, id, crate::provider_access::REQUEST_FIXED_STEP)?;
+                    crate::retry::clear(db, crate::RetrySubject::Operation(id))?;
+                    crate::pending::save(db, &P::provider_access(id, account, state.intended))?;
+                    Ok(state.intended)
+                })
+            })
+        })
+        .await
     }
 
     /// Keep an inconclusive request with its notice and unknown confirmation:
@@ -116,20 +124,33 @@ impl crate::Database {
         target: bool,
         invitation: Option<SecretBytes>,
     ) -> Result<bool, DbError> {
-        self.call(move |inner| inner.access.with_writer(|db| db.transaction(|db| {
-            let state = read(db,&account)?.ok_or(DbError::OperationChanged(id))?;
-            if state.request != Some(ProviderAccessRequest {operation:id,target:Some(target)}) { return Err(DbError::OperationChanged(id)); }
-            db.internal_execute("UPDATE _coven_provider_access SET granted=?1,invitation=?2,target=NULL WHERE account=?3", (target,invitation.as_ref().map(SecretBytes::as_bytes),&account))?;
-            if state.intended == target {
-                finish(db,&account,id)?;
-                Ok(true)
-            } else {
-                db.internal_execute("UPDATE _coven_operations SET last_step=?2 WHERE id=?1", (id.0, crate::provider_access::REQUEST_QUEUED_STEP))?;
-                crate::retry::clear(db, crate::RetrySubject::Operation(id))?;
-                crate::pending::save(db,&P::provider_access(id,account,state.intended))?;
-                Ok(false)
-            }
-        }))).await
+        self.call(move |inner| {
+            inner.access.with_writer(|db| {
+                db.transaction(|db| {
+                    let state = read(db, &account)?.ok_or(DbError::OperationChanged(id))?;
+                    if state.request
+                        != Some(ProviderAccessRequest { operation: id, target: Some(target) })
+                    {
+                        return Err(DbError::OperationChanged(id));
+                    }
+                    crate::provider_access::confirm(db, &account, target, invitation.as_ref())?;
+                    if state.intended == target {
+                        finish(db, &account, id)?;
+                        Ok(true)
+                    } else {
+                        crate::operation::set_step(
+                            db,
+                            id,
+                            crate::provider_access::REQUEST_QUEUED_STEP,
+                        )?;
+                        crate::retry::clear(db, crate::RetrySubject::Operation(id))?;
+                        crate::pending::save(db, &P::provider_access(id, account, state.intended))?;
+                        Ok(false)
+                    }
+                })
+            })
+        })
+        .await
     }
 }
 

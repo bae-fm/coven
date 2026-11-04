@@ -107,6 +107,9 @@ mod object_removals_schema;
 #[path = "operation_schema.rs"]
 mod operation_schema;
 #[macro_use]
+#[path = "provider_access_schema.rs"]
+mod provider_access_schema;
+#[macro_use]
 #[path = "published_schema.rs"]
 mod published_schema;
 #[macro_use]
@@ -632,49 +635,10 @@ macro_rules! coven_tables {
                 UPDATE _coven_cache_budgets SET total=total-OLD.size WHERE namespace=OLD.namespace;
             END;
         ");
-        $visit!(_coven_provider_access, "
-            CREATE TABLE _coven_provider_access (
-                account TEXT PRIMARY KEY NOT NULL,
-                intended INTEGER NOT NULL CHECK(intended IN (0,1)),
-                granted INTEGER CHECK(granted IN (0,1)),
-                invitation BLOB,
-                operation INTEGER UNIQUE REFERENCES _coven_operations(id),
-                target INTEGER CHECK(target IN (0,1)),
-                CHECK(target IS NULL OR operation IS NOT NULL)
-            ) STRICT, WITHOUT ROWID;
-        ");
-        $visit!(_coven_operations, "
-            CREATE TABLE _coven_operations (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                kind TEXT NOT NULL,
-                last_step INTEGER NOT NULL,
-                data BLOB NOT NULL,
-                started_by TEXT NOT NULL
-            );
-            CREATE INDEX _coven_operations_kind ON _coven_operations(kind);
-        ");
-        coven_operation_state_tables!($visit);
+        coven_provider_access_tables!($visit);
+        coven_operations_tables!($visit);
         coven_object_removals_tables!($visit);
         coven_ended_requests_tables!($visit);
-        // The operations the app's writes journaled, each with its kind as
-        // coven-sync names it and, once it has finished, its outcome as
-        // coven-sync encodes it, until the app acknowledges it
-        // (`coven_operations`, §11.4). The journal row of an app operation
-        // without its outcome can't be deleted: the outcome is written
-        // first, in the same transaction.
-        $visit!(_coven_app_operations, "
-            CREATE TABLE _coven_app_operations (
-                operation INTEGER PRIMARY KEY,
-                kind TEXT NOT NULL,
-                outcome BLOB
-            ) STRICT;
-            CREATE TRIGGER _coven_app_operation_ends BEFORE DELETE ON _coven_operations
-            WHEN EXISTS(SELECT 1 FROM _coven_app_operations
-                WHERE operation=OLD.id AND outcome IS NULL)
-            BEGIN
-                SELECT RAISE(ABORT,'an app operation ends with its outcome');
-            END;
-        ");
         coven_retries_tables!($visit);
     };
 }

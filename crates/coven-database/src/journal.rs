@@ -61,12 +61,7 @@ impl<'write> Journal<'write> {
         operation: &NewOperation,
         kind: &str,
     ) -> Result<OperationId, DbError> {
-        let id = crate::operation::insert(self.files.database, operation)?;
-        self.files.database.internal_execute(
-            "INSERT INTO _coven_app_operations(operation,kind) VALUES(?1,?2)",
-            (id.0, kind),
-        )?;
-        Ok(id)
+        crate::operation::insert_for_app(self.files.database, operation, kind)
     }
 
     /// End the app's record of a finished operation: it leaves
@@ -74,26 +69,7 @@ impl<'write> Journal<'write> {
     /// one this device doesn't list, never journaled by the app or
     /// acknowledged already, with `OperationUnknown`.
     pub(crate) fn acknowledge(&self, id: OperationId) -> Result<(), DbError> {
-        let finished: Option<bool> = self
-            .files
-            .database
-            .query(
-                "SELECT outcome IS NOT NULL FROM _coven_app_operations WHERE operation=?1",
-                [id.0],
-                |row| row.get(0),
-            )?
-            .pop();
-        match finished {
-            None => Err(DbError::OperationUnknown(id)),
-            Some(false) => Err(DbError::OperationRunning(id)),
-            Some(true) => {
-                self.files.database.internal_execute(
-                    "DELETE FROM _coven_app_operations WHERE operation=?1",
-                    [id.0],
-                )?;
-                Ok(())
-            }
-        }
+        crate::operation::acknowledge(self.files.database, id)
     }
 
     /// The pending record that names the operation, if any.

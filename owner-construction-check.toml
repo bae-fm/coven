@@ -529,13 +529,14 @@ table_macros = [
     "coven_queued_file_references_tables",
     "coven_file_chunks_tables",
     "coven_writes_tables",
-    "coven_operation_state_tables",
+    "coven_operations_tables",
     "coven_upload_settings_tables",
     "coven_applied_sequence_tables",
     "coven_file_retention_tables",
     "coven_ended_requests_tables",
     "coven_raises_tables",
     "coven_object_removals_tables",
+    "coven_provider_access_tables",
 ]
 # The API re-exports the database crate's `rusqlite` so a host can name the
 # types its own SQL uses.
@@ -846,14 +847,16 @@ tables = [
 ]
 
 [[database.domains]]
-name = "operation state"
+name = "operations"
 owner = "Database"
 homes = [
     "crates/coven-database/src/operation.rs",
     "crates/coven-database/src/operation_schema.rs",
 ]
 tables = [
+    "_coven_app_operations",
     "_coven_held_keys",
+    "_coven_operations",
     "_coven_snapshot_reservation",
     "_coven_write_pause",
 ]
@@ -931,11 +934,21 @@ tables = [
 ]
 
 [[database.domains]]
+name = "provider access"
+owner = "Database"
+homes = [
+    "crates/coven-database/src/provider_access.rs",
+    "crates/coven-database/src/provider_access_schema.rs",
+]
+tables = [
+    "_coven_provider_access",
+]
+
+[[database.domains]]
 name = "database"
 owner = "Database"
 homes = ["crates/coven-database/src/"]
 tables = [
-    "_coven_app_operations",
     "_coven_authored_admissions",
     "_coven_authored_changes",
     "_coven_authored_parts",
@@ -958,9 +971,7 @@ tables = [
     "_coven_lost",
     "_coven_migration_counted_losses",
     "_coven_migration_losses",
-    "_coven_operations",
     "_coven_pending",
-    "_coven_provider_access",
     "_coven_references",
     "_coven_row_file_refs",
     "_coven_rows",

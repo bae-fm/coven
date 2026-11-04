@@ -93,6 +93,44 @@ pub(crate) fn insert(db: &DatabaseConnection, new: &NewOperation) -> Result<Oper
     Ok(id)
 }
 
+/// Journal an operation the app's write asks for, of `kind` as sync names
+/// it: listed in `coven_operations` from this write's commit until the app
+/// acknowledges its outcome.
+pub(crate) fn insert_for_app(
+    db: &DatabaseConnection,
+    new: &NewOperation,
+    kind: &str,
+) -> Result<OperationId, DbError> {
+    let id = insert(db, new)?;
+    db.internal_execute(
+        "INSERT INTO _coven_app_operations(operation,kind) VALUES(?1,?2)",
+        (id.0, kind),
+    )?;
+    Ok(id)
+}
+
+/// End the app's record of a finished operation: it leaves
+/// `coven_operations`. One still running fails with `OperationRunning`;
+/// one this device doesn't list, never journaled by the app or
+/// acknowledged already, with `OperationUnknown`.
+pub(crate) fn acknowledge(db: &DatabaseConnection, id: OperationId) -> Result<(), DbError> {
+    let finished: Option<bool> = db
+        .query(
+            "SELECT outcome IS NOT NULL FROM _coven_app_operations WHERE operation=?1",
+            [id.0],
+            |row| row.get(0),
+        )?
+        .pop();
+    match finished {
+        None => Err(DbError::OperationUnknown(id)),
+        Some(false) => Err(DbError::OperationRunning(id)),
+        Some(true) => {
+            db.internal_execute("DELETE FROM _coven_app_operations WHERE operation=?1", [id.0])?;
+            Ok(())
+        }
+    }
+}
+
 /// Whether a self-replacement pauses this device's writes (§12.3).
 pub(crate) fn writes_paused(db: &DatabaseConnection) -> Result<bool, DbError> {
     db.query_row("SELECT EXISTS(SELECT 1 FROM _coven_write_pause WHERE paused=1)", [], |r| r.get(0))
@@ -181,6 +219,17 @@ pub(crate) fn advance(db: &DatabaseConnection, update: &OperationUpdate) -> Resu
         return Err(DbError::OperationChanged(update.id));
     }
     crate::pending::clear_operation(db, update.id)
+}
+
+/// Put the operation `id` at `step`, keeping its data, unguarded by the step
+/// it was at: a provider-access request moves between its steps as the
+/// account's row says (§14.2).
+pub(crate) fn set_step(db: &DatabaseConnection, id: OperationId, step: u32) -> Result<(), DbError> {
+    db.internal_execute(
+        "UPDATE _coven_operations SET last_step=?2 WHERE id=?1 AND last_step!=?2",
+        (id.0, step),
+    )?;
+    Ok(())
 }
 
 /// Delete the row and its condition, returning how many rows were deleted.
