@@ -8,9 +8,7 @@ use crate::{
     slot_object, OperationOutcome, OperationRejection, SyncError,
 };
 use coven_crypto::{MemberIdentity, StoreKeyring};
-use coven_database::{
-    ClaimAttempt, ClaimSettlement, ClaimWork, NewOperation, OperationId, OperationRecord,
-};
+use coven_database::{ClaimAttempt, ClaimSettlement, ClaimWork, OperationId, OperationRecord};
 use coven_format::{
     admin::StoreChange,
     sealed_key::{CopyBox, KeyCopyPrefix},
@@ -162,6 +160,19 @@ impl SequenceSync {
         .map_err(|error| SyncError::disk(std::io::Error::other(error)))?
     }
 
+    /// Journal `request` as a new sequence operation, before its first step.
+    pub(crate) async fn start_request_row(
+        &self,
+        request: Request,
+        started_by: &str,
+    ) -> Result<OperationId, SyncError> {
+        let work = SequenceOperation {
+            request,
+            progress: OperationProgress::Running(OperationStep::Preparing),
+        };
+        Ok(self.database.start_operation(crate::admin_steps::journaled(&work, started_by)?).await?)
+    }
+
     pub(crate) async fn start_request(
         &self,
         session: &mut Session,
@@ -173,19 +184,7 @@ impl SequenceSync {
         if !self.validate_request(session, member, &request)? {
             return Ok(OperationOutcome::Satisfied);
         }
-        let work = SequenceOperation {
-            request,
-            progress: OperationProgress::Running(OperationStep::Preparing),
-        };
-        let id = self
-            .database
-            .start_operation(NewOperation {
-                kind: "sequence".into(),
-                data: serde_json::to_vec(&work)?,
-                started_by: started_by.into(),
-                pauses_writes: false,
-            })
-            .await?;
+        let id = self.start_request_row(request, started_by).await?;
         self.run_administration(session, ring, member, id).await
     }
 
@@ -625,19 +624,7 @@ impl SequenceSync {
             Ok(false) => return Ok((None, OperationOutcome::Satisfied)),
             Ok(true) => (),
         }
-        let work = SequenceOperation {
-            request,
-            progress: OperationProgress::Running(OperationStep::Preparing),
-        };
-        let id = self
-            .database
-            .start_operation(NewOperation {
-                kind: "sequence".into(),
-                data: serde_json::to_vec(&work)?,
-                started_by: started_by.into(),
-                pauses_writes: false,
-            })
-            .await?;
+        let id = self.start_request_row(request, started_by).await?;
         Ok((Some(id), self.run_administration(session, ring, member, id).await?))
     }
 

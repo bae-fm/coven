@@ -222,17 +222,11 @@ async fn resume_key_generation(saved: bool) -> serde_json::Value {
     let circle = CircleId(group.ids.new_id());
     let key = KeyId(group.ids.new_id());
     let record = ana
-        .database()
-        .start_operation(NewOperation {
-            kind: "sequence".into(),
-            data: serde_json::to_vec(&SequenceOperation {
-                request: Request::Key(KeyPreparation::Circle { circle, key, name: "Gifts".into() }),
-                progress: OperationProgress::Running(OperationStep::Preparing),
-            })
-            .unwrap(),
-            started_by: "key".into(),
-            pauses_writes: false,
-        })
+        .sync
+        .start_request_row(
+            Request::Key(KeyPreparation::Circle { circle, key, name: "Gifts".into() }),
+            "key",
+        )
         .await
         .unwrap();
     let kept = coven_crypto::CircleKey::from_bytes(circle, key, [29; 32]);

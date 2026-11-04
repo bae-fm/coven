@@ -8,7 +8,7 @@ use crate::{
     SyncError,
 };
 use coven_crypto::{MemberIdentity, StoreKeyring};
-use coven_database::{NewOperation, OperationRecord};
+use coven_database::OperationRecord;
 use coven_format::admin::StoreChange;
 use coven_foundation::id_source::{CircleId, KeyId};
 use coven_merge::Audience;
@@ -75,19 +75,7 @@ impl SequenceSync {
         audience: Audience,
     ) -> Result<(), SyncError> {
         let target = KeyPreparation::Rotation { audience, key: KeyId(self.ids.new_id()) };
-        let work = SequenceOperation {
-            request: Request::Key(target),
-            progress: OperationProgress::Running(OperationStep::Preparing),
-        };
-        let id = self
-            .database
-            .start_operation(NewOperation {
-                kind: "sequence".into(),
-                data: serde_json::to_vec(&work)?,
-                started_by: "key".into(),
-                pauses_writes: false,
-            })
-            .await?;
+        let id = self.start_request_row(Request::Key(target), "key").await?;
         crate::operation_outcome::into_slot(
             self.run_administration(session, ring, member, id).await?,
         )
