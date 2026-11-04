@@ -75,15 +75,8 @@ fn reads_alike(name: &std::ffi::OsStr) -> bool {
     if name.ends_with(['.', ' ']) {
         return false;
     }
-    let stem = name.split('.').next().unwrap_or_default().trim_end().to_ascii_uppercase();
-    let device = matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$")
-        || ["COM", "LPT"].iter().any(|kind| {
-            stem.strip_prefix(kind).is_some_and(|number| {
-                matches!(number, "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9")
-                    || matches!(number, "¹" | "²" | "³")
-            })
-        });
-    !device
+    let base = name.split('.').next().unwrap_or_default().trim_end_matches(' ');
+    !coven_foundation::files::windows_device(base)
 }
 
 #[cfg(test)]

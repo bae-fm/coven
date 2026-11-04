@@ -105,7 +105,7 @@ pub(super) fn local_name(name: &str) -> String {
 /// spaces, names a Windows device: Windows opens the device for it, with any
 /// extension on some versions, and in any ASCII case. `¹`, `²` and `³` count
 /// as digits.
-pub(super) fn windows_device(base: &str) -> bool {
+pub fn windows_device(base: &str) -> bool {
     let base = base.to_ascii_uppercase();
     if matches!(base.as_str(), "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$") {
         return true;

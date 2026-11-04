@@ -26,6 +26,9 @@ fn a_verbatim_path_goes_to_sqlite_in_its_plain_form() {
         (r"\\?\D:\a\_temp\stores\store.db", r"D:\a\_temp\stores\store.db"),
         (r"\\?\UNC\server\share\stores\store.db", r"\\server\share\stores\store.db"),
         (r"D:\stores\store.db", r"D:\stores\store.db"),
+        // Windows opens no device for COM0 or LPT0.
+        (r"\\?\D:\COM0\store.db", r"D:\COM0\store.db"),
+        (r"\\?\D:\lpt0.music\store.db", r"D:\lpt0.music\store.db"),
     ] {
         assert_eq!(sqlite_path(Path::new(verbatim)).unwrap(), Path::new(plain));
     }
