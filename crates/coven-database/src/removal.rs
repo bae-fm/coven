@@ -4,12 +4,12 @@ use crate::schema::TableSchema;
 use crate::sql::identifier;
 use crate::sqlite::changed_once;
 use crate::sqlite::DatabaseConnection;
-use crate::write_encoding::{audience_text, sql_value};
+use crate::write_encoding::sql_value;
 use crate::write_rows::{key_columns, AppValues, AppView};
 use crate::write_schema::WriteSchema;
 use crate::DbError;
 use coven_merge::{RemovalResult, RowId};
-use rusqlite::{params, params_from_iter};
+use rusqlite::params_from_iter;
 use std::collections::{BTreeMap, BTreeSet};
 
 /// `stored` names the current generation's id of each present row the
@@ -189,14 +189,6 @@ pub(crate) fn record(
             &state,
             (!result.removed.contains_key(id)).then_some(&row.values),
         )?;
-        let previous_claims: BTreeMap<i64, Vec<u8>> = database
-            .query(
-                "SELECT constraint_id,value FROM _coven_claims WHERE row_id=?1",
-                [row_ordinal],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )?
-            .into_iter()
-            .collect();
         let mut claims = BTreeMap::new();
         if result.removed.contains_key(id) {
             for (constraint, claim) in &row.constraints.unique {
@@ -204,17 +196,7 @@ pub(crate) fn record(
                 claims.insert(constraint, claim.value.clone());
             }
         }
-        for constraint in previous_claims.keys().filter(|c| !claims.contains_key(c)) {
-            database.internal_execute(
-                "DELETE FROM _coven_claims WHERE row_id=?1 AND constraint_id=?2",
-                params![row_ordinal, constraint],
-            )?;
-        }
-        for (constraint, value) in &claims {
-            if previous_claims.get(constraint) != Some(value) {
-                database.internal_execute("INSERT INTO _coven_claims(row_id,constraint_id,audience,value) VALUES(?1,?2,?3,?4) ON CONFLICT(row_id,constraint_id) DO UPDATE SET value=excluded.value", params![row_ordinal,constraint,audience_text(&id.audience),value])?;
-            }
-        }
+        crate::write_commit::store_claims(database, row_ordinal, &id.audience, &claims)?;
         if let Some(rules) = result.removed.get(id) {
             let setters = state.cells().iter().map(|(n, c)| (n.clone(), c.write)).collect();
             crate::loss_record::put_rules_loss(

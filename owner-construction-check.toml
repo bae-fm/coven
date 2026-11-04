@@ -527,7 +527,7 @@ table_macros = [
     "coven_schema_definitions_tables",
     "coven_device_only_copies_tables",
     "coven_file_protection_tables",
-    "coven_writes_tables",
+    "coven_merge_store_tables",
     "coven_operations_tables",
     "coven_file_uploads_tables",
     "coven_applied_sequence_tables",
@@ -552,9 +552,8 @@ rusqlite_reexport = "coven-database"
 # Appendix F.2: the database's tables by the module that writes them. SQL
 # anywhere may read a table; only its domain's homes write it, in a statement
 # or a trigger's body, create it and its indexes, and hold the tests that
-# write it. Each domain names the owner that does its work. The tables no one
-# module writes form the database's own domain, which every module of
-# coven-database writes.
+# write it. Each domain names the owner that does its work, and every table
+# is in one domain.
 
 [[database.domains]]
 name = "sequence claims"
@@ -846,13 +845,20 @@ tables = [
 ]
 
 [[database.domains]]
-name = "writes"
+name = "merge store"
 owner = "Database"
+# A snapshot install writes the merge records of its staged rows a table at
+# a time in snapshot_install.rs.
 homes = [
+    "crates/coven-database/src/snapshot_install.rs",
     "crates/coven-database/src/write_commit.rs",
     "crates/coven-database/src/write_commit_schema.rs",
 ]
 tables = [
+    "_coven_cells",
+    "_coven_claims",
+    "_coven_references",
+    "_coven_rows",
     "_coven_writes",
 ]
 
@@ -1057,17 +1063,6 @@ homes = [
 ]
 tables = [
     "_coven_lost",
-]
-
-[[database.domains]]
-name = "database"
-owner = "Database"
-homes = ["crates/coven-database/src/"]
-tables = [
-    "_coven_cells",
-    "_coven_claims",
-    "_coven_references",
-    "_coven_rows",
 ]
 
 # One list for owner construction, runtime acquisition and background work starts.

@@ -95,17 +95,26 @@ async fn restored_parents_restore_live_references_while_losses_keep_written_valu
         let b = open(&b_store, 2).await;
         b.inspect_writer_schema(|db, schema| {
             db.transaction(|db| {
-                db.internal_execute("DELETE FROM _coven_rows WHERE table_name='parents' AND key=?1 AND generation=?2", crate::params![parent.key, 2u64.to_be_bytes().as_slice()])?;
-                db.materialize(|db| { db.internal_execute("INSERT INTO parents VALUES('parent')", [])?; Ok(()) })?;
-                let row:i64=db.query_row("SELECT id FROM _coven_rows WHERE table_name='parents' AND key=?1 AND generation=?2",crate::params![parent.key,1u64.to_be_bytes()],|r|r.get(0))?;
-                db.internal_execute("DELETE FROM _coven_cells WHERE row_id=?1",[row])?;
-                for (column,_,write) in cells {
-                    db.internal_execute("INSERT INTO _coven_cells(column_id,row_id,write_id) VALUES(?1,?2,?3)", crate::params![column,row,write])?;
-                }
-                let app = crate::write_rows::AppView::after(db,schema);
-                let store = crate::merge_store::MergeStore::new(db,&app);
-                crate::write_apply::WriteApply::new(db,schema,&store,&app,&app,&Default::default()).apply(None,[parent].into())
-            }).unwrap();
+                let cells: Vec<_> =
+                    cells.iter().map(|(column, _, write)| (*column, *write)).collect();
+                crate::write_commit::tests::restore_first_generation(db, &parent, &cells)?;
+                db.materialize(|db| {
+                    db.internal_execute("INSERT INTO parents VALUES('parent')", [])?;
+                    Ok(())
+                })?;
+                let app = crate::write_rows::AppView::after(db, schema);
+                let store = crate::merge_store::MergeStore::new(db, &app);
+                crate::write_apply::WriteApply::new(
+                    db,
+                    schema,
+                    &store,
+                    &app,
+                    &app,
+                    &Default::default(),
+                )
+                .apply(None, [parent].into())
+            })
+            .unwrap();
         });
         assert_eq!(
             reference(&b, lost).await,

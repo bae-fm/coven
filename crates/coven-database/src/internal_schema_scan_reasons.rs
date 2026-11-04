@@ -15,6 +15,8 @@ pub(super) fn reason(statement: &Statement, relation: &str) -> Option<&'static s
     database_reason(statement, relation)
         .or_else(|| crate::store_state_tables::tests::scan_reason(file, template, sql, relation))
         .or_else(|| crate::published::tests::scan_reason(file, template, sql, relation))
+        .or_else(|| crate::snapshot_install::tests::scan_reason(file, template, sql, relation))
+        .or_else(|| crate::write_commit::tests::scan_reason(file, template, sql, relation))
         .or_else(|| crate::row_queries::tests::scan_reason(file, template, sql, relation))
         .or_else(|| crate::write_sources::tests::scan_reason(file, template, sql, relation))
         .or_else(|| crate::ownership::tests::scan_reason(file, template, sql, relation))
@@ -32,8 +34,6 @@ fn database_reason(statement: &Statement, relation: &str) -> Option<&'static str
     let file = statement.file.as_str();
     let sql = statement.template.as_str();
     match (file, sql, relation) {
-("write_commit.rs", "INSERT INTO _coven_cells(column_id,row_id,write_id) VALUES{values} ON CONFLICT(column_id,row_id) DO UPDATE SET write_id=excluded.write_id", "2-ROW") =>
-    Some("a row's cells are the statement's own values"),
 ("coven_uploads", "SELECT * FROM coven_uploads", "l" | "z" | "w") =>
     Some("the view lists every queued file, which its link to its upload enumerates; the pause and setting tables hold at most one row each"),
 ("coven_files", "SELECT * FROM coven_files", "coven_files") =>
@@ -124,21 +124,6 @@ fn database_reason(statement: &Statement, relation: &str) -> Option<&'static str
 ("snapshot_conflicts.rs", sql, "_coven_lost")
     if sql.contains("FROM _coven_lost WHERE frozen=0 AND replacement_kind='rules'") =>
     Some("a reload visits every row the rules take out in the audiences it keeps, through the index of rules losses, since a replaced row can bring any back"),
-("snapshot_install.rs", sql, "g")
-    if sql.starts_with("INSERT INTO _coven_rows(") =>
-    Some("installing writes each earlier generation of the snapshot's rows; its write lookup is indexed"),
-("snapshot_install.rs", sql, "i")
-    if sql.starts_with("INSERT INTO _coven_rows(")
-        || sql.starts_with("INSERT INTO _coven_cells(")
-        || sql.starts_with("INSERT INTO _coven_references(") =>
-    Some("installing writes the merge records of every row of the snapshot, one statement per table, column and reference; each lookup is indexed"),
-("snapshot_install.rs", sql, "i")
-    if sql.starts_with("SELECT EXISTS(SELECT 1 FROM {installed} AS i") =>
-    Some("installing checks every row of the snapshot once; its loss lookup is indexed"),
-("snapshot_install.rs", sql, relation)
-    if (relation == "s" || relation.starts_with("temp._coven_install_"))
-        && (sql.contains("temp._coven_install_parts") || sql.contains("temp._coven_install_authored")) =>
-    Some("installing checks and writes every source record of the snapshot once; each lookup of the device's own is indexed"),
 ("sqlite.rs", "{} ORDER BY l.id", "l") =>
     Some("the public losses reader returns all losses"),
 ("upload.rs", "SELECT u.rowid,u.device,u.number,k.sealing_keys FROM _coven_uploads u LEFT JOIN _coven_upload_keys k ON k.device=u.device AND k.number=u.number ORDER BY u.rowid LIMIT 1", "u") =>
@@ -157,9 +142,6 @@ fn database_reason(statement: &Statement, relation: &str) -> Option<&'static str
     Some("once per migration: carry all foreign-key definitions through schema changes"),
 ("migration_state.rs", "SELECT id,table_name,identity FROM _coven_constraints", "_coven_constraints") =>
     Some("once per migration: carry all unique constraints through schema changes"),
-("migration_state.rs", "DELETE FROM _coven_cells WHERE column_id=?1"
-    | "UPDATE {table} SET column_id=?2 WHERE column_id=?1", "_coven_cells") =>
-    Some("once per migration: move/drop a column and check its cell references"),
 ("reload_gate.rs", "SELECT audience FROM _coven_data_reloads", "_coven_data_reloads") =>
     Some("sync schedules every audience awaiting replacement data"),
 ("sequence.rs", "SELECT device,number,digest FROM _coven_last_claims ORDER BY device", "_coven_last_claims") =>

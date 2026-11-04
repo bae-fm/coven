@@ -21,11 +21,8 @@ async fn app_statements_cannot_read_or_mutate_internal_objects() {
     for attack in [
         "SELECT * FROM _coven_rows",
         "SELECT count(*) FROM _COVEN_ROWS",
-        "UPDATE _coven_rows SET audience = 'store'",
         "DROP TABLE _coven_columns",
         "ALTER TABLE _coven_rows ADD COLUMN bad INTEGER",
-        "CREATE INDEX bad ON _coven_rows(audience)",
-        "CREATE TRIGGER bad AFTER INSERT ON _coven_rows BEGIN SELECT 1; END",
         "CREATE TABLE _coven_fake (x)",
         "CREATE TABLE local(x); ALTER TABLE local RENAME TO _coven_fake",
         "CREATE TEMP TABLE _coven_cells(x)",

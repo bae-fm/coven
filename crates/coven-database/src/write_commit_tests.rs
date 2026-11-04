@@ -760,12 +760,59 @@ async fn a_row_stores_its_cells_in_one_statement() {
     db.close().await.unwrap();
 }
 
+/// An app migration can't change the merge store's rows, or index or follow
+/// them with objects of its own.
+#[tokio::test]
+async fn app_statements_cannot_change_the_merge_store() {
+    for attack in [
+        "UPDATE _coven_rows SET audience = 'store'",
+        "CREATE INDEX bad ON _coven_rows(audience)",
+        "CREATE TRIGGER bad AFTER INSERT ON _coven_rows BEGIN SELECT 1; END",
+    ] {
+        crate::authorization::tests::refused_as_internal(attack).await;
+    }
+}
+
+/// Take `row`, which a second generation deleted, back to its first: the
+/// second generation's record goes, and the first holds exactly `cells`,
+/// each a column's id and the id of the write that set it.
+pub(crate) fn restore_first_generation(
+    db: &crate::sqlite::DatabaseConnection,
+    row: &coven_merge::RowId,
+    cells: &[(i64, i64)],
+) -> Result<(), crate::DbError> {
+    let audience = crate::write_encoding::audience_text(&row.audience);
+    db.internal_execute(
+        "DELETE FROM _coven_rows WHERE table_name=?1 AND key=?2 AND audience=?3 AND generation=?4",
+        crate::params![row.table, row.key, audience, 2u64.to_be_bytes().as_slice()],
+    )?;
+    let id: i64 = db.query_row(
+        "SELECT id FROM _coven_rows WHERE table_name=?1 AND key=?2 AND audience=?3 AND generation=?4",
+        crate::params![row.table, row.key, audience, 1u64.to_be_bytes().as_slice()],
+        |r| r.get(0),
+    )?;
+    db.internal_execute("DELETE FROM _coven_cells WHERE row_id=?1", [id])?;
+    for (column, write) in cells {
+        db.internal_execute(
+            "INSERT INTO _coven_cells(column_id,row_id,write_id) VALUES(?1,?2,?3)",
+            crate::params![column, id, write],
+        )?;
+    }
+    Ok(())
+}
+
 /// Fill this domain's tables from the rows of the plan audit's `fixture`
 /// table, inside its transaction (`internal_schema_scan_reasons_tests.rs`).
 pub(crate) fn fill_for_plans(db: &rusqlite::Connection) {
     db.execute_batch(
         "INSERT INTO _coven_writes
-           SELECT i,CAST(n || device AS BLOB),n,counter(0),n FROM fixture;",
+           SELECT i,CAST(n || device AS BLOB),n,counter(0),n FROM fixture;
+         INSERT INTO _coven_rows SELECT i,tab,key,audience,counter(1),i FROM fixture;
+         INSERT INTO _coven_cells
+           SELECT (i-1)%1024+1+offset,i,i FROM fixture
+           CROSS JOIN (SELECT 0 AS offset UNION ALL SELECT 1024 UNION ALL SELECT 2048);
+         INSERT INTO _coven_references SELECT i,(i-1)%1024+1,i,tab,key,audience,counter(1) FROM fixture;
+         INSERT INTO _coven_claims SELECT i,i,audience,key FROM fixture;",
     )
     .unwrap();
 }
@@ -790,4 +837,23 @@ pub(crate) fn record_write(
         ],
     )
     .unwrap();
+}
+
+/// The scans this module's statements may make, with their reasons, for the
+/// plan audit (`internal_schema_scan_reasons.rs`): `template` is the statement as
+/// written, `sql` as run.
+pub(crate) fn scan_reason(
+    file: &str,
+    template: &str,
+    _sql: &str,
+    relation: &str,
+) -> Option<&'static str> {
+    match (file, template, relation) {
+("write_commit.rs", "INSERT INTO _coven_cells(column_id,row_id,write_id) VALUES{values} ON CONFLICT(column_id,row_id) DO UPDATE SET write_id=excluded.write_id", "2-ROW") =>
+    Some("a row's cells are the statement's own values"),
+("write_commit.rs", "DELETE FROM _coven_cells WHERE column_id=?1"
+    | "UPDATE _coven_cells SET column_id=?2 WHERE column_id=?1", "_coven_cells") =>
+    Some("once per migration: move/drop a column and check its cell references"),
+        _ => None,
+    }
 }

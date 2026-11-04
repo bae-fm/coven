@@ -692,3 +692,7 @@ pub(crate) fn file_locations(
         |r| visit(&value(r.get_ref(0)?)?),
     )
 }
+
+#[cfg(test)]
+#[path = "snapshot_install_tests.rs"]
+pub(crate) mod tests;

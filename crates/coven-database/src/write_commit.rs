@@ -73,8 +73,8 @@ fn retain(
         |r| r.get(0))
 }
 
-/// Which stored rows' cells, references and claims [`delete_children`]
-/// deletes.
+/// Which stored rows [`forget`] deletes, with their cells, references and
+/// claims.
 pub(crate) enum StoredRows<'a> {
     /// Every row an audience holds.
     InAudience(&'a str),
@@ -86,12 +86,30 @@ pub(crate) enum StoredRows<'a> {
     Generation(i64),
 }
 
+/// Remove the stored `rows` and their cells, references and claims.
+pub(crate) fn forget(database: &DatabaseConnection, rows: &StoredRows<'_>) -> Result<(), DbError> {
+    delete_children(database, rows)?;
+    match rows {
+        StoredRows::InAudience(audience) => {
+            database.internal_execute("DELETE FROM _coven_rows WHERE audience=?1", [audience])
+        }
+        StoredRows::Row(row) => database.internal_execute(
+            "DELETE FROM _coven_rows WHERE table_name=?1 AND key=?2 AND audience=?3",
+            params![row.table, row.key, audience_text(&row.audience)],
+        ),
+        StoredRows::InTable(name) => {
+            database.internal_execute("DELETE FROM _coven_rows WHERE table_name=?1", [name])
+        }
+        StoredRows::Generation(id) => {
+            database.internal_execute("DELETE FROM _coven_rows WHERE id=?1", [id])
+        }
+    }?;
+    Ok(())
+}
+
 /// Remove the cells, references and claims of `rows` in `_coven_rows`. The
 /// rows themselves stay for the caller to remove or keep.
-pub(crate) fn delete_children(
-    database: &DatabaseConnection,
-    rows: &StoredRows<'_>,
-) -> Result<(), DbError> {
+fn delete_children(database: &DatabaseConnection, rows: &StoredRows<'_>) -> Result<(), DbError> {
     for table in ["_coven_references", "_coven_cells", "_coven_claims"] {
         match rows {
             StoredRows::InAudience(audience) => database.internal_execute(
@@ -201,6 +219,97 @@ pub(crate) fn persist(
         }
     }
     Ok(present)
+}
+
+/// Replace the unique-constraint claims of the stored generation `row`,
+/// which holds `audience`'s row, with `claims`, each a constraint's id and
+/// the value the row claims. Unchanged claims are left alone.
+pub(crate) fn store_claims(
+    database: &DatabaseConnection,
+    row: i64,
+    audience: &Audience,
+    claims: &BTreeMap<i64, Vec<u8>>,
+) -> Result<(), DbError> {
+    let previous: BTreeMap<i64, Vec<u8>> = database
+        .query("SELECT constraint_id,value FROM _coven_claims WHERE row_id=?1", [row], |r| {
+            Ok((r.get(0)?, r.get(1)?))
+        })?
+        .into_iter()
+        .collect();
+    for constraint in previous.keys().filter(|c| !claims.contains_key(c)) {
+        database.internal_execute(
+            "DELETE FROM _coven_claims WHERE row_id=?1 AND constraint_id=?2",
+            params![row, constraint],
+        )?;
+    }
+    for (constraint, value) in claims {
+        if previous.get(constraint) != Some(value) {
+            database.internal_execute("INSERT INTO _coven_claims(row_id,constraint_id,audience,value) VALUES(?1,?2,?3,?4) ON CONFLICT(row_id,constraint_id) DO UPDATE SET value=excluded.value", params![row,constraint,audience_text(audience),value])?;
+        }
+    }
+    Ok(())
+}
+
+/// Table `old`'s stored rows take the name `new`.
+pub(crate) fn rename_table(
+    database: &DatabaseConnection,
+    old: &str,
+    new: &str,
+) -> Result<(), DbError> {
+    database.internal_execute(
+        "UPDATE _coven_rows SET table_name=?2 WHERE table_name=?1",
+        params![old, new],
+    )?;
+    Ok(())
+}
+
+/// Delete the cells and references of column `id`, which a migration dropped.
+pub(crate) fn forget_column(database: &DatabaseConnection, id: i64) -> Result<(), DbError> {
+    database.internal_execute("DELETE FROM _coven_references WHERE column_id=?1", [id])?;
+    database.internal_execute("DELETE FROM _coven_cells WHERE column_id=?1", [id])?;
+    Ok(())
+}
+
+/// The cells and references of column `old` move to column `new`.
+pub(crate) fn move_column(
+    database: &DatabaseConnection,
+    old: i64,
+    new: i64,
+) -> Result<(), DbError> {
+    database.internal_execute(
+        "UPDATE _coven_cells SET column_id=?2 WHERE column_id=?1",
+        params![old, new],
+    )?;
+    database.internal_execute(
+        "UPDATE _coven_references SET column_id=?2 WHERE column_id=?1",
+        params![old, new],
+    )?;
+    Ok(())
+}
+
+/// Delete the references through foreign key `id`, which a migration dropped.
+pub(crate) fn forget_foreign_key(database: &DatabaseConnection, id: i64) -> Result<(), DbError> {
+    database.internal_execute("DELETE FROM _coven_references WHERE foreign_key_id=?1", [id])?;
+    Ok(())
+}
+
+/// The references through foreign key `id` name their parent table `parent`.
+pub(crate) fn repoint_references(
+    database: &DatabaseConnection,
+    id: i64,
+    parent: &str,
+) -> Result<(), DbError> {
+    database.internal_execute(
+        "UPDATE _coven_references SET parent_table=?2 WHERE foreign_key_id=?1 AND parent_table<>?2",
+        params![id, parent],
+    )?;
+    Ok(())
+}
+
+/// Delete the claims on unique constraint `id`, which a migration dropped.
+pub(crate) fn forget_constraint(database: &DatabaseConnection, id: i64) -> Result<(), DbError> {
+    database.internal_execute("DELETE FROM _coven_claims WHERE constraint_id=?1", [id])?;
+    Ok(())
 }
 
 /// Queue a new write only after authorizing every circle part and every row

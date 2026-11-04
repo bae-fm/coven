@@ -10171,13 +10171,15 @@ shared state.
   deadlines (§6.7) the retry module's.
   A trigger on a domain's table that writes no domain's table is that
   table's schema: the pins' triggers on the stored files and on the cache
-  keep the pins table, so their file is a home of both domains. The tables
-  several modules write, the merge store's rows and cells among them, form
-  the database's own domain, which every module may write. Each
-  domain names the owner that does its work: the input database's owner for
-  the remote observations, the database owner for the rest. A type whose
-  every method only passes its call on to that owner would be a second name
-  for it. The checker finds a write in SQL text, a statement or a trigger's
+  keep the pins table, so their file is a home of both domains. Every table
+  is in one domain, and a module changing another domain's table asks that
+  domain's module to make the write. A second module is a home of a domain
+  only where it writes the domain's tables in bulk, a table at a time, as a
+  snapshot install writes the merge store's records and their files'
+  protection. Each domain names the owner that does its work: the input
+  database's owner for the remote observations, the database owner for the
+  rest. A type whose every method only passes its call on to that owner
+  would be a second name for it. The checker finds a write in SQL text, a statement or a trigger's
   body, in string literals and in `.sql` files, where the text is written:
   a macro's definition answers for the SQL it holds, and code invoking the
   macro writes nothing itself, so a table's seed row in its domain's schema

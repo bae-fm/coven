@@ -268,12 +268,7 @@ pub(crate) fn restore(
     #[cfg(any(test, feature = "test-utils"))]
     db.record_work(|work| work.published_rows += rows.len());
     for row in rows {
-        let audience = audience_text(&row.audience);
-        crate::write_commit::delete_children(db, &crate::write_commit::StoredRows::Row(&row))?;
-        db.internal_execute(
-            "DELETE FROM _coven_rows WHERE table_name=?1 AND key=?2 AND audience=?3",
-            params![row.table, row.key, audience],
-        )?;
+        crate::write_commit::forget(db, &crate::write_commit::StoredRows::Row(&row))?;
         crate::loss_record::forget_row(db, &row)?;
         crate::ownership::forget_row(db, &row)?;
         if schema.schema.tables.contains_key(&row.table.to_ascii_lowercase()) {

@@ -32,11 +32,7 @@ pub(crate) fn begin(database: &DatabaseConnection, audience: &Audience) -> Resul
          SELECT DISTINCT table_name,key FROM _coven_lost WHERE audience=?1 ON CONFLICT DO NOTHING",
         [&audience],
     )?;
-    crate::write_commit::delete_children(
-        database,
-        &crate::write_commit::StoredRows::InAudience(&audience),
-    )?;
-    database.internal_execute("DELETE FROM _coven_rows WHERE audience=?1", [&audience])?;
+    crate::write_commit::forget(database, &crate::write_commit::StoredRows::InAudience(&audience))?;
     crate::loss_record::forget_audience(database, &audience)
 }
 

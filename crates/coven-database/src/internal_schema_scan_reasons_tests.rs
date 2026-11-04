@@ -75,12 +75,6 @@ mod fixture {
             CAST(printf('%032d',i) AS BLOB) AS key,
             CAST(printf('%016d',i) AS BLOB) AS member FROM numbers;
      INSERT INTO coven_files SELECT 'file_' || i,audience,1,zeroblob(32),'device 1','files' FROM fixture;
-     INSERT INTO _coven_rows SELECT i,tab,key,audience,counter(1),i FROM fixture;
-     INSERT INTO _coven_cells
-       SELECT (i-1)%1024+1+offset,i,i FROM fixture
-       CROSS JOIN (SELECT 0 AS offset UNION ALL SELECT 1024 UNION ALL SELECT 2048);
-     INSERT INTO _coven_references SELECT i,(i-1)%1024+1,i,tab,key,audience,counter(1) FROM fixture;
-     INSERT INTO _coven_claims SELECT i,i,audience,key FROM fixture;
      INSERT INTO _coven_install_fixture SELECT key,audience,'1',1,counter(1),device,n,0,1,1,x'00',device,n,key,audience,counter(1) FROM fixture;
      INSERT INTO _coven_install_generations SELECT tab,key,audience,counter(1),device,n FROM fixture;
      INSERT INTO _coven_install_parts SELECT CAST(device || n AS BLOB),audience,x'00',i%2 FROM fixture;

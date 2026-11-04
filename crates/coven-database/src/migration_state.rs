@@ -30,11 +30,10 @@ pub(crate) fn carry(
             }
         }
         if !names.tables.contains_key(&table.name) {
-            crate::write_commit::delete_children(
+            crate::write_commit::forget(
                 db,
                 &crate::write_commit::StoredRows::InTable(&table.name),
             )?;
-            db.internal_execute("DELETE FROM _coven_rows WHERE table_name=?1", [&table.name])?;
             crate::ownership::forget_table(db, &table.name)?;
             // A dropped table's losses stay, frozen under its old names (§18.7).
             let losses = db.query(
@@ -84,10 +83,7 @@ pub(crate) fn freeze(db: &DatabaseConnection, ids: Vec<i64>) -> Result<(), DbErr
 }
 
 fn rename_table(db: &DatabaseConnection, old: &str, new: &str) -> Result<(), DbError> {
-    db.internal_execute(
-        "UPDATE _coven_rows SET table_name=?2 WHERE table_name=?1",
-        params![old, new],
-    )?;
+    crate::write_commit::rename_table(db, old, new)?;
     // A renamed table's rows keep their original creations (§9.6).
     crate::ownership::rename(db, old, new)?;
     crate::loss_record::rename_table(db, old, new)
@@ -114,8 +110,7 @@ fn columns(db: &DatabaseConnection, names: &MigrationMatch) -> Result<(), DbErro
             .or_default()
             .insert(column.clone(), target.map(|(_, column)| column.clone()));
         let Some((new_table, new_column)) = target else {
-            db.internal_execute("DELETE FROM _coven_references WHERE column_id=?1", [id])?;
-            db.internal_execute("DELETE FROM _coven_cells WHERE column_id=?1", [id])?;
+            crate::write_commit::forget_column(db, id)?;
             // Its cell losses stay, frozen under the old name (§18.7).
             let losses = db.query(
                 "SELECT id FROM _coven_lost WHERE column_id=?1 AND frozen=0",
@@ -162,12 +157,7 @@ fn columns(db: &DatabaseConnection, names: &MigrationMatch) -> Result<(), DbErro
 }
 
 fn move_column(db: &DatabaseConnection, old: i64, new: i64) -> Result<(), DbError> {
-    for table in ["_coven_cells", "_coven_references"] {
-        db.internal_execute(
-            &format!("UPDATE {table} SET column_id=?2 WHERE column_id=?1"),
-            params![old, new],
-        )?;
-    }
+    crate::write_commit::move_column(db, old, new)?;
     crate::loss_record::move_column(db, old, new)
 }
 
@@ -209,7 +199,7 @@ fn references(
             )?;
             renamed.push((id, table, key));
         } else {
-            db.internal_execute("DELETE FROM _coven_references WHERE foreign_key_id=?1", [id])?;
+            crate::write_commit::forget_foreign_key(db, id)?;
             crate::row_queries::forget_definition(
                 db,
                 crate::row_queries::Definition::ForeignKey,
@@ -225,7 +215,7 @@ fn references(
             table,
             &encoded(merge_fields::encode_foreign_key(&key))?,
         )?;
-        db.internal_execute("UPDATE _coven_references SET parent_table=?2 WHERE foreign_key_id=?1 AND parent_table<>?2",params![id,key.parent])?;
+        crate::write_commit::repoint_references(db, id, &key.parent)?;
     }
     for table in losses {
         // Values of concurrent cell losses embed reference identities as well.
@@ -279,7 +269,7 @@ fn constraints(
         } else {
             // A dropped constraint's claims go with it. Definitions that no
             // longer exist must not be reused by a later incarnation.
-            db.internal_execute("DELETE FROM _coven_claims WHERE constraint_id=?1", [id])?;
+            crate::write_commit::forget_constraint(db, id)?;
             crate::row_queries::forget_definition(
                 db,
                 crate::row_queries::Definition::Constraint,
