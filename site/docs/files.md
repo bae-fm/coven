@@ -402,7 +402,9 @@ view says whether uploads are paused, with nothing queued too.
 `set_unmetered_only(true)` moves files only on unmetered networks: on a
 metered one, such as cellular, trailing uploads and pins' downloads wait, and
 reads still stream. Coven watches the device's network itself, and the
-`coven_network` view says whether it is metered, beside the setting. Coven
+`coven_network` view says whether it is metered, beside the setting. A
+platform that stops answering after the store opened may be on a metered
+network, so coven counts it as metered until it answers again. Coven
 retries failures on its own; `retry_uploads_now()` lets the app try early.
 Uploads follow the same stops as writes: a device stuck at a slot, or one that
 has been removed, sends nothing.
