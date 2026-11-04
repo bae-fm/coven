@@ -304,15 +304,18 @@ const SCORED_WORDS: &str = "CREATE TABLE words(word TEXT NOT NULL, score REAL NO
 
 /// The SQLite library the store records as the one that built its indexes.
 fn recorded_library(database: &Database) -> Vec<i64> {
-    database.inspect_writer(|writer| {
-        writer
-            .query(
-                "SELECT version FROM _coven_sql_versions WHERE kind='library' AND name='sqlite'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap()
-    })
+    database.inspect_writer(|writer| recorded_library_in(writer))
+}
+
+/// [`recorded_library`] as `connection` reads it.
+fn recorded_library_in(connection: &DatabaseConnection) -> Vec<i64> {
+    connection
+        .query(
+            "SELECT version FROM _coven_sql_versions WHERE kind='library' AND name='sqlite'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap()
 }
 
 /// A new database records the SQLite that creates its tables, in the same
@@ -330,14 +333,7 @@ fn a_new_database_records_the_sqlite_that_created_it() {
     )
     .unwrap();
     connection.prepare_internal_schema().unwrap();
-    let recorded: Vec<i64> = connection
-        .query(
-            "SELECT version FROM _coven_sql_versions WHERE kind='library' AND name='sqlite'",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap();
-    assert_eq!(recorded, [i64::from(rusqlite::version_number())]);
+    assert_eq!(recorded_library_in(&connection), [i64::from(rusqlite::version_number())]);
 }
 
 /// Ana's app indexes each score as text. SQLite 3.53 writes a third as
