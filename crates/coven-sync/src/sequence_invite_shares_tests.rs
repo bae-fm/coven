@@ -113,15 +113,7 @@ async fn a_gone_devices_share_stays_for_an_active_member() {
     let group = Group::shared();
     let (phone, ben, laptop) = household(&group).await;
     invite(&phone).await;
-    let in_person = phone
-        .sync
-        .create_invite(
-            InviteTarget::NewMember { role: MemberRole::Member, name: "Carol".into() },
-            InviteAccess::ProviderAccount { email: CAROL.into() },
-            InviteDelivery::InPerson,
-        )
-        .await
-        .unwrap();
+    let in_person = carol_invite(&phone, crate::InviteDelivery::InPerson).await;
     let mut carol = join(&group, in_person.shown_code(), "Carol's phone").await;
     group.clock.set(group.clock.now() + std::time::Duration::from_secs(1));
     phone.sync.pass().await.unwrap();

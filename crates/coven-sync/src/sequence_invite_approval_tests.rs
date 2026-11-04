@@ -7,17 +7,6 @@ use coven_database::operation_kind;
 use coven_format::{admin::MemberRole, MemberAccess};
 use coven_storage::ObjectPath;
 
-async fn in_person_invite(ana: &Device) -> Invite {
-    ana.sync
-        .create_invite(
-            InviteTarget::NewMember { role: MemberRole::Member, name: "Carol".into() },
-            InviteAccess::ProviderAccount { email: "carol@example.org".into() },
-            InviteDelivery::InPerson,
-        )
-        .await
-        .unwrap()
-}
-
 /// Ana watched Carol's phone scan an in-person invite: the pass that reads
 /// and checks the request approves it, with no call from the app (§13.2).
 #[tokio::test]
@@ -25,7 +14,7 @@ async fn an_in_person_request_is_approved_in_the_pass_that_reads_it() {
     let group = Group::shared();
     let ana = group.device(1).await;
     group.create(&ana).await;
-    let invite = in_person_invite(&ana).await;
+    let invite = carol_invite(&ana, InviteDelivery::InPerson).await;
     let mut carol = join(&group, invite.shown_code(), "Carol's phone").await;
     ana.sync.pass().await.unwrap();
     assert!(listed(&ana).await.is_empty());
@@ -48,7 +37,7 @@ async fn an_in_person_approval_under_way_refuses_the_apps_decisions() {
     let group = Group::shared();
     let ana = group.device(1).await;
     group.create(&ana).await;
-    let invite = in_person_invite(&ana).await;
+    let invite = carol_invite(&ana, InviteDelivery::InPerson).await;
     let mut carol = join(&group, invite.shown_code(), "Carol's phone").await;
     let next = ana.sync.database.applied_slot().await.unwrap() + 1;
     ana.storage
@@ -105,7 +94,7 @@ async fn a_check_between_the_copies_and_the_entry_finds_the_approval_begun() {
     let group = Group::shared();
     let ana = group.device(1).await;
     group.create(&ana).await;
-    let invite = in_person_invite(&ana).await;
+    let invite = carol_invite(&ana, InviteDelivery::InPerson).await;
     let mut carol = join(&group, invite.shown_code(), "Carol's phone").await;
     assert_eq!(
         carol.device.sync.join_outcome(&mut carol.request).await.unwrap(),
@@ -260,15 +249,7 @@ async fn a_replacement_invite_keeps_its_expected_pair_across_approval_and_retry(
             })
             .await
             .unwrap();
-        let invite = ana
-            .sync
-            .create_invite(
-                InviteTarget::ReplaceMemberKeys { member: target },
-                InviteAccess::ProviderAccount { email: "carol@example.org".into() },
-                crate::InviteDelivery::Sent { lifetime: crate::InviteLifetime::Day },
-            )
-            .await
-            .unwrap();
+        let invite = key_replacement_invite(&ana, target).await;
         let carol = join(&group, invite.shown_code(), "Carol's replacement").await;
         ana.sync.pass().await.unwrap();
         let request = requests(&ana).await.remove(0);

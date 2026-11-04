@@ -13,9 +13,7 @@ use coven_foundation::{
     files::{StoreDirectories, StoreFile},
     id_source::{IdSource, KeyId, MemberId, SequentialIds, StoreId},
 };
-use coven_storage::{
-    test_utils::MemoryStorage, InviteStorage, ObjectPath, Storage, StorageSettings,
-};
+use coven_storage::{test_utils::MemoryStorage, ObjectPath, Storage, StorageSettings};
 use std::sync::Arc;
 
 #[cfg(test)]
@@ -379,66 +377,10 @@ impl Group {
         ana.sync.pass().await.unwrap();
     }
 }
-pub(super) struct Joiner {
-    pub(super) device: Device,
-    pub(super) request: JoiningIdentity,
-}
-
-/// A joining device for an account invite's `code`: its request prepared
-/// and the provider's share accepted, the request not yet sent.
-pub(super) async fn joiner(group: &Group, code: &str, name: &str) -> Joiner {
-    let code = read_invite_code(code).unwrap();
-    let InviteStorage::Account(invitation) =
-        InviteStorage::decode(code.storage.as_bytes()).unwrap()
-    else {
-        panic!("an account invite");
-    };
-    let (temp, directory) = group.directory();
-    let request = JoiningIdentity::prepare(&directory, &code, name).unwrap();
-    let storage = MemoryStorage::for_recipient(&group.storage, "carol@example.org").unwrap();
-    let device = group.open_with(temp, request.identity(), None, storage).await;
-    device.sync.accept_join(&invitation).await.unwrap();
-    Joiner { device, request }
-}
-
-/// A joining device that has sent its request to an open invite.
-pub(super) async fn join(group: &Group, code: &str, name: &str) -> Joiner {
-    let joiner = joiner(group, code, name).await;
-    assert!(joiner.device.sync.submit_join(&joiner.request).await.unwrap(), "the invite is open");
-    joiner
-}
-
-/// Where `invite`'s join request goes: under the device that made it, as its
-/// code names it (§13.2).
-pub(crate) fn request_path(invite: &Invite) -> ObjectPath {
-    read_invite_code(invite.shown_code()).unwrap().request_path()
-}
-
-/// Whether no join request is at `path`: nothing, or the marker an ended
-/// invite leaves in the request's place (§13.2).
-pub(crate) async fn no_request(storage: &MemoryStorage, path: &ObjectPath) -> bool {
-    match storage.read(path).await {
-        Ok(found) => coven_format::invite_end::InviteEnd::decode(&found).is_ok(),
-        Err(error) if error.failure() == coven_storage::StorageFailure::NotFound => true,
-        Err(error) => panic!("reading the request: {error}"),
-    }
-}
-
-/// The device's open invites, as `coven_invites` lists them.
-pub(crate) async fn listed(device: &Device) -> Vec<Invite> {
-    device.sync.database.read(Invite::list).await.unwrap()
-}
-
-pub(super) async fn invite(ana: &Device) -> Invite {
-    ana.sync
-        .create_invite(
-            InviteTarget::NewMember { role: MemberRole::Member, name: "Carol".into() },
-            InviteAccess::ProviderAccount { email: "Carol@example.org".into() },
-            crate::InviteDelivery::Sent { lifetime: crate::InviteLifetime::Day },
-        )
-        .await
-        .unwrap()
-}
+pub(crate) use super::sequence_invites::tests::{
+    carol_invite, invite, join, joiner, key_replacement_invite, listed, no_request, request_path,
+    s3_invite, Joiner,
+};
 
 pub(crate) fn codes(
     device: &Device,

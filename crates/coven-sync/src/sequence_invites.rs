@@ -770,7 +770,7 @@ fn decode_request(bytes: &[u8]) -> Result<coven_format::objects::JoinRequest, Sy
 
 #[cfg(test)]
 #[path = "sequence_invites_tests.rs"]
-mod tests;
+pub(crate) mod tests;
 
 #[path = "sequence_invite_approval.rs"]
 mod approval;

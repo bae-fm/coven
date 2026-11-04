@@ -507,17 +507,7 @@ async fn a_copy_stopped_by_history_ends_its_operations_and_invites() {
     let group = Group::new();
     let ana = group.device(1).await;
     group.create(&ana).await;
-    ana.sync
-        .create_invite(
-            crate::InviteTarget::NewMember { role: MemberRole::Member, name: "Carol".into() },
-            crate::InviteAccess::S3AccessKey {
-                access_key_id: "carol-key".into(),
-                secret_access_key: coven_crypto::SecretText::new("secret".into()),
-            },
-            crate::InviteDelivery::Sent { lifetime: crate::InviteLifetime::Day },
-        )
-        .await
-        .unwrap();
+    s3_invite(&ana, "Carol").await;
     let (ana, copy) = group.copy(ana).await;
     let rename = journal(&copy, StoreChange::RenameStore { name: "Copied".into() }).await;
     insert(&ana.sync.database, "a", "from the original").await;

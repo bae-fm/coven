@@ -70,15 +70,7 @@ impl Case {
         let laptop = group.laptop(&ana).await;
         ana.sync.pass().await.unwrap();
         ben.sync.pass().await.unwrap();
-        let invite = ana
-            .sync
-            .create_invite(
-                InviteTarget::NewMember { role: MemberRole::Member, name: "Carol".into() },
-                InviteAccess::ProviderAccount { email: "carol@example.org".into() },
-                delivery,
-            )
-            .await
-            .unwrap();
+        let invite = carol_invite(&ana, delivery).await;
         let operation = invite.operation;
         Self {
             group,

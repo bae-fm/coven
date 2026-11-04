@@ -4,24 +4,6 @@ use coven_format::{admin::StoreChange, device_gone::DeviceGone};
 use coven_foundation::id_source::DeviceId;
 use coven_storage::{ObjectPath, ObjectPrefix, Storage, StorageFailure};
 
-/// A sent invite on S3, naming the key Ana made for `name`.
-async fn s3_invite(ana: &Device, name: &str) -> Invite {
-    ana.sync
-        .create_invite(
-            InviteTarget::NewMember {
-                role: coven_format::admin::MemberRole::Member,
-                name: name.into(),
-            },
-            InviteAccess::S3AccessKey {
-                access_key_id: format!("{name}-key"),
-                secret_access_key: coven_crypto::SecretText::new("secret".into()),
-            },
-            InviteDelivery::Sent { lifetime: InviteLifetime::Day },
-        )
-        .await
-        .unwrap()
-}
-
 /// A joining device for `invite`'s code, with its request prepared and not
 /// yet sent.
 async fn s3_joiner(group: &Group, invite: &Invite, name: &str) -> Joiner {

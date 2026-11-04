@@ -100,17 +100,7 @@ async fn an_ended_operation_wait_does_not_starve_a_requested_pass() {
     let group = Group::shared();
     let ana = group.device(1).await;
     group.create(&ana).await;
-    ana.sync
-        .create_invite(
-            InviteTarget::NewMember {
-                role: coven_format::admin::MemberRole::Member,
-                name: "Carol".into(),
-            },
-            InviteAccess::ProviderAccount { email: "carol@example.org".into() },
-            crate::InviteDelivery::Sent { lifetime: crate::InviteLifetime::Day },
-        )
-        .await
-        .unwrap();
+    invite(&ana).await;
     group.clock.set(std::time::UNIX_EPOCH + std::time::Duration::from_secs(5));
     let (ana_codes, _) = codes(&ana, Keychain::in_memory("sync-loop-ana").unwrap());
     let ana_loop = SyncLoop::new(ana.sync.clone(), ana_codes);

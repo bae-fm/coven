@@ -1,5 +1,5 @@
 use super::*;
-use crate::sequence_sync::tests::{Device, Group};
+use crate::sequence_sync::tests::{invite, key_replacement_invite, s3_invite, Device, Group};
 use coven_foundation::id_source::IdSource;
 use coven_storage::test_utils::{Faults, MemoryRequest};
 
@@ -26,14 +26,7 @@ async fn carried_account_revocation_reports_failure_and_survives_reopening() {
     let group = Group::shared();
     let ana = group.device(1).await;
     group.create(&ana).await;
-    ana.sync
-        .create_invite(
-            InviteTarget::NewMember { role: MemberRole::Member, name: "Carol".into() },
-            InviteAccess::ProviderAccount { email: "carol@example.org".into() },
-            crate::InviteDelivery::Sent { lifetime: crate::InviteLifetime::Day },
-        )
-        .await
-        .unwrap();
+    invite(&ana).await;
     let new = replacement(&group, &ana).await;
     carry(&ana, &new).await;
     let (entered, entering) = tokio::sync::oneshot::channel();
@@ -80,15 +73,7 @@ async fn reset_carries_account_work_after_the_invite_journal_has_finished() {
     let group = Group::shared();
     let ana = group.device(1).await;
     group.create(&ana).await;
-    let invite = ana
-        .sync
-        .create_invite(
-            InviteTarget::NewMember { role: MemberRole::Member, name: "Carol".into() },
-            InviteAccess::ProviderAccount { email: "carol@example.org".into() },
-            crate::InviteDelivery::Sent { lifetime: crate::InviteLifetime::Day },
-        )
-        .await
-        .unwrap();
+    let invite = invite(&ana).await;
     ana.sync.cancel_invite(invite.id).await.unwrap();
     assert!(ana.database().first_operation(operation_kind::INVITE).await.unwrap().is_none());
     let new = replacement(&group, &ana).await;
@@ -116,14 +101,7 @@ async fn reset_preserves_an_active_members_account() {
         })
         .await
         .unwrap();
-    ana.sync
-        .create_invite(
-            InviteTarget::ReplaceMemberKeys { member: target },
-            InviteAccess::ProviderAccount { email: "carol@example.org".into() },
-            crate::InviteDelivery::Sent { lifetime: crate::InviteLifetime::Day },
-        )
-        .await
-        .unwrap();
+    key_replacement_invite(&ana, target).await;
     let new = replacement(&group, &ana).await;
     carry(&ana, &new).await;
     new.sync.pass().await.unwrap();
@@ -171,18 +149,7 @@ async fn reset_keeps_an_invite_key_whose_approval_landed_before_journal_completi
     let group = Group::new();
     let ana = group.device(1).await;
     group.create(&ana).await;
-    let invite = ana
-        .sync
-        .create_invite(
-            InviteTarget::NewMember { role: MemberRole::Member, name: "Carol".into() },
-            InviteAccess::S3AccessKey {
-                access_key_id: "carol-key".into(),
-                secret_access_key: SecretText::new("secret".into()),
-            },
-            crate::InviteDelivery::Sent { lifetime: crate::InviteLifetime::Day },
-        )
-        .await
-        .unwrap();
+    let invite = s3_invite(&ana, "Carol").await;
     let record = ana.database().first_operation(operation_kind::INVITE).await.unwrap().unwrap();
     let mut work = InviteWork::read(&record).unwrap();
     let keys = coven_format::test_utils::keys_from_seed(3).public_keys();
@@ -225,17 +192,7 @@ async fn an_undecodable_invite_fails_reset_without_a_completion_notice() {
     let group = Group::new();
     let ana = group.device(1).await;
     group.create(&ana).await;
-    ana.sync
-        .create_invite(
-            InviteTarget::NewMember { role: MemberRole::Member, name: "Carol".into() },
-            InviteAccess::S3AccessKey {
-                access_key_id: "carol-key".into(),
-                secret_access_key: SecretText::new("secret".into()),
-            },
-            crate::InviteDelivery::Sent { lifetime: crate::InviteLifetime::Day },
-        )
-        .await
-        .unwrap();
+    s3_invite(&ana, "Carol").await;
     let mut records = ana.database().operations().await.unwrap();
     records.iter_mut().find(|record| record.kind == operation_kind::INVITE).unwrap().data =
         b"{".to_vec();
@@ -269,15 +226,7 @@ async fn a_carried_invite_ends_its_request_under_the_device_that_made_it() {
     let group = Group::shared();
     let ana = group.device(1).await;
     group.create(&ana).await;
-    let invite = ana
-        .sync
-        .create_invite(
-            InviteTarget::NewMember { role: MemberRole::Member, name: "Carol".into() },
-            InviteAccess::ProviderAccount { email: "carol@example.org".into() },
-            crate::InviteDelivery::Sent { lifetime: crate::InviteLifetime::Day },
-        )
-        .await
-        .unwrap();
+    let invite = invite(&ana).await;
     let carol = join(&group, invite.shown_code(), "Carol's phone").await;
     let new = replacement(&group, &ana).await;
     carry(&ana, &new).await;
