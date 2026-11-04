@@ -346,11 +346,33 @@ impl Database {
         change: impl FnOnce(RetryState) -> RetryState + Send + 'static,
         then: impl FnOnce(RetryState) -> T + Send + 'static,
     ) -> Result<T, DbError> {
+        self.retry_step(change, then, |_| Ok(())).await
+    }
+
+    /// Change the retry state as sync starts, as `change_retry_state` does,
+    /// and count the start in `coven_sync_status.starts` in the same
+    /// transaction: every start writes the row, even one that holds for the
+    /// reason the last one did.
+    pub async fn start_retry_state<T: Send + 'static>(
+        &self,
+        change: impl FnOnce(RetryState) -> RetryState + Send + 'static,
+        then: impl FnOnce(RetryState) -> T + Send + 'static,
+    ) -> Result<T, DbError> {
+        self.retry_step(change, then, crate::internal_schema::sync_status::save_start).await
+    }
+
+    async fn retry_step<T: Send + 'static>(
+        &self,
+        change: impl FnOnce(RetryState) -> RetryState + Send + 'static,
+        then: impl FnOnce(RetryState) -> T + Send + 'static,
+        also: fn(&crate::sqlite::DatabaseConnection) -> Result<(), DbError>,
+    ) -> Result<T, DbError> {
         self.call(move |inner| {
             inner.access.with_writer(|writer| {
                 let state = writer.state_transaction(|db| {
                     let state = retry_effect::stored(change(retry_effect::read(db)?))?;
                     retry_effect::save(db, state)?;
+                    also(db)?;
                     Ok(state)
                 })?;
                 Ok(then(state))

@@ -38,12 +38,15 @@ impl Database {
         .await
     }
 
-    /// Make every later write of the sync status fail, as a full disk would.
+    /// Make every later write of how the passes go fail, as a full disk
+    /// would: their move, their end and the last synced time. Counting a
+    /// start still writes, so the loop starts and its first pass fails.
     pub async fn test_fail_sync_status(&self) -> Result<(), DbError> {
         self.call(move |inner| {
             inner.access.with_writer(|writer| {
                 writer.batch(
-                    "CREATE TEMP TRIGGER fail_sync_status BEFORE UPDATE ON coven_sync_status
+                    "CREATE TEMP TRIGGER fail_sync_status
+                     BEFORE UPDATE OF last_pass,moving,last_synced ON coven_sync_status
                      BEGIN SELECT RAISE(ABORT,'injected sync status failure'); END;",
                 )
             })

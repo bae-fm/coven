@@ -40,6 +40,14 @@ use std::{
 };
 use tokio::sync::oneshot;
 
+/// How a step commits: a change of the retry state alone, or a start of
+/// sync, which `coven_sync_status` counts in the same transaction.
+#[derive(Clone, Copy)]
+enum Step {
+    Change,
+    Start,
+}
+
 /// What the first sync pass after the person's retry came to (E5).
 #[derive(Clone, Debug)]
 pub enum RetryOutcome {
@@ -265,27 +273,33 @@ impl RetryWaits {
         change: impl FnOnce(RetryState) -> RetryState + Send + 'static,
         then: impl FnOnce(&RetryWaits, &mut RetryRequests, RetryState) -> T + Send + 'static,
     ) -> Result<T, DbError> {
+        self.step_as(Step::Change, change, then).await
+    }
+
+    /// `step`, as `kind` commits it.
+    async fn step_as<T: Send + 'static>(
+        self: &Arc<Self>,
+        kind: Step,
+        change: impl FnOnce(RetryState) -> RetryState + Send + 'static,
+        then: impl FnOnce(&RetryWaits, &mut RetryRequests, RetryState) -> T + Send + 'static,
+    ) -> Result<T, DbError> {
         let Some(database) = &self.database else {
             return Err(DbError::Invariant { what: "only a handle that writes the store syncs" });
         };
         let cooling = self.live_cooldown();
         let waits = self.clone();
-        let result = database
-            .change_retry_state(
-                move |state| cooling(change(state)),
-                move |state| {
-                    waits.syncing.send_if_modified(|syncing| {
-                        let started = matches!(state.sync, RetrySync::Started { .. });
-                        std::mem::replace(syncing, started) != started
-                    });
-                    then(
-                        &waits,
-                        &mut waits.requests.lock().expect("retry requests poisoned"),
-                        state,
-                    )
-                },
-            )
-            .await;
+        let change = move |state| cooling(change(state));
+        let then = move |state: RetryState| {
+            waits.syncing.send_if_modified(|syncing| {
+                let started = matches!(state.sync, RetrySync::Started { .. });
+                std::mem::replace(syncing, started) != started
+            });
+            then(&waits, &mut waits.requests.lock().expect("retry requests poisoned"), state)
+        };
+        let result = match kind {
+            Step::Change => database.change_retry_state(change, then).await,
+            Step::Start => database.start_retry_state(change, then).await,
+        };
         if let Err(error) = &result {
             let waiting =
                 std::mem::take(&mut self.requests.lock().expect("retry requests poisoned").waiting);
@@ -339,7 +353,8 @@ impl RetryWaits {
     /// A started connection will plan: requests wait for its passes, and
     /// the failure its owner last found still holds them.
     pub async fn sync_started(self: &Arc<Self>) -> Result<(), DbError> {
-        self.step(
+        self.step_as(
+            Step::Start,
             |state| RetryState { sync: RetrySync::Started { cooling_until: None }, ..state },
             |_, _, _| (),
         )

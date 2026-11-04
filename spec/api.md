@@ -3102,6 +3102,7 @@ let moved = handle
 | | `last_pass` | how the last pass ended, read as `LastPass`; NULL until a pass ends on this device, which counts as synced, since setup, joining and restoring read the store to its end |
 | | `moving` | 1 while a running pass has read a slot it hadn't, or claimed one; opening writes 0 |
 | | `last_synced` | when a pass last reached the end of the sequence, or setup, joining or restoring finished, in milliseconds since the Unix epoch by the store's clock; never earlier than before; NULL until then |
+| | `starts` | how many times sync has started in this installation, the app's starts and the one setup makes alike; each start adds one in the step that starts it, so a trigger hears a start that holds for the reason the last one did, which changes no other column; 0 until sync first starts |
 | `coven_retry_effect`: what the person's retry would do if made now, in one row from the store's creation on (E5); a table, which local triggers can follow; not readable on a read-only handle | `effect` | `pass`, `cooling_down`, `failed` or `not_syncing`, computed from the columns below, read as `RetryEffect` with `RetryEffect::read` |
 | | `syncing` | 1 while a started connection will plan |
 | | `held` | 1 while a failure only new credentials, an update or a reset can clear holds every pass |

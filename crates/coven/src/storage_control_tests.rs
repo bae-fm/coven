@@ -716,3 +716,37 @@ async fn a_start_right_after_a_stop_connects_a_new_client() {
     assert_eq!(clients, [false, true]);
     f.handle.close().await.unwrap();
 }
+
+/// `coven_sync_status.starts` and `last_pass`, as an app reads them now.
+async fn starts_and_last_pass(f: &Fixture) -> (i64, Option<Vec<u8>>) {
+    f.handle
+        .read(|sql| {
+            Ok(sql.query_row("SELECT starts,last_pass FROM coven_sync_status", [], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })?)
+        })
+        .await
+        .unwrap()
+}
+
+/// Dan's key is refused, so his start holds on a failure only new
+/// credentials clear. He stops sync and starts it again: the second start
+/// holds for the same reason and ends the way the first did, yet it still
+/// writes the row, which counts it, so an app's trigger that clears its
+/// record of a failed start hears it (E5).
+#[tokio::test]
+async fn every_start_counts_even_one_held_for_the_reason_the_last_was() {
+    let f = stopped_fixture().await;
+    let (before, _) = starts_and_last_pass(&f).await;
+    *f.connector.failure.lock().unwrap() = Some(StorageFailure::Authentication.into());
+    f.handle.start_sync().await.unwrap();
+    assert_eq!(starts_and_last_pass(&f).await.0, before + 1);
+    last_pass(&f.handle, failed).await;
+    effect_becomes(&f, RetryEffect::Failed).await;
+    let (_, held) = starts_and_last_pass(&f).await;
+    f.handle.stop_sync().await.unwrap();
+    f.handle.start_sync().await.unwrap();
+    effect_becomes(&f, RetryEffect::Failed).await;
+    assert_eq!(starts_and_last_pass(&f).await, (before + 2, held));
+    f.handle.close().await.unwrap();
+}

@@ -8,7 +8,9 @@
 //! location is recorded and this device holds its credentials (`storage`,
 //! with the location's `provider`) and that no pass moves; setup, joining
 //! and restoring write storage set up and their finish as the last synced
-//! time; the loop writes that its pass moved a slot (`moving`) and how the
+//! time; each start of sync adds one to `starts`, so even a start that ends
+//! the way the last one did writes the row; the loop writes that its pass
+//! moved a slot (`moving`) and how the
 //! pass ended (`last_pass`, which sync encodes as JSON and the app reads as
 //! `LastPass`), with a synced pass's finish as `last_synced`, in milliseconds
 //! since the Unix epoch by the store's clock. That time never goes backward:
@@ -32,10 +34,11 @@ pub(super) const SCHEMA: &str = "CREATE TABLE coven_sync_status (
         last_pass BLOB,
         moving INTEGER NOT NULL CHECK(moving IN (0,1)),
         last_synced INTEGER CHECK(last_synced>=0),
+        starts INTEGER NOT NULL CHECK(starts>=0),
         CHECK((storage='none')=(provider IS NULL))
     ) STRICT;
-    INSERT INTO coven_sync_status(singleton,storage,provider,last_pass,moving,last_synced)
-        VALUES(1,'none',NULL,NULL,0,NULL);";
+    INSERT INTO coven_sync_status(singleton,storage,provider,last_pass,moving,last_synced,starts)
+        VALUES(1,'none',NULL,NULL,0,NULL,0);";
 
 /// Whether a storage location is recorded on this device, and whether this
 /// device holds credentials for it (§19.1), with the location's provider.
@@ -161,6 +164,12 @@ pub(crate) fn save_moving(db: &crate::sqlite::DatabaseConnection) -> Result<(), 
         "UPDATE coven_sync_status SET moving=1 WHERE singleton=1 AND moving=0",
         [],
     )?;
+    Ok(())
+}
+
+/// Write that sync started once more.
+pub(crate) fn save_start(db: &crate::sqlite::DatabaseConnection) -> Result<(), DbError> {
+    db.internal_execute("UPDATE coven_sync_status SET starts=starts+1 WHERE singleton=1", [])?;
     Ok(())
 }
 

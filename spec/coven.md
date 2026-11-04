@@ -7358,18 +7358,21 @@ which state each fact names.
   sequence, by the store's clock. It is kept across every state and every
   reopen, and never goes backward: a clock set back doesn't move it back.
 
-The facts the loop knows are the one row of `coven_sync_status`, which the
-app's live queries and local triggers follow like any table
-([api.md E5](api.md#e5-storage-and-sync)). Opening writes whether storage is
-set up there, before the handle exists, so the state is ready the moment the
-store opens and no app shows a placeholder. The loop writes the rest in the
-step that changes it: that the pass moved a slot, as it first does, and how
-the pass ended, as it ends. A failure keeps its error as text, which names
-every cause, so the state still says why after the process that wrote it has
-ended. If the row can't be written, the store's handle fails, as it does when
-a pending record can't be saved (below). The row describes the sync of the
-handle that holds the store's writer lock, so a read-only handle may not read
-it: that handle can't tell whether the writer that last wrote the row still
+The facts the loop knows are the one row of `coven_sync_status`, which the app's
+live queries and local triggers follow like any table ([api.md
+E5](api.md#e5-storage-and-sync)). Opening writes whether storage is set up
+there, before the handle exists, so the state is ready the moment the store
+opens and no app shows a placeholder. The loop writes the rest in the step that
+changes it: that the pass moved a slot, as it first does, and how the pass
+ended, as it ends. Each start of sync counts in the row too. Dan's app keeps a
+record of his failed start until a later one gets under way; when his next start
+holds for the same refused key, nothing else in the row changes, and without the
+count his app would never hear that start. A failure keeps its error as text,
+which names every cause, so the state still says why after the process that
+wrote it has ended. If the row can't be written, the store's handle fails, as it
+does when a pending record can't be saved (below). The row describes the sync of
+the handle that holds the store's writer lock, so a read-only handle may not
+read it: that handle can't tell whether the writer that last wrote the row still
 runs, and a writer that ended mid-pass left the pass's move behind. The same
 holds for `coven_retry_effect`, what the person's retry would do (§6.7).
 
