@@ -99,6 +99,17 @@ pub enum CodeError {
     },
 }
 
+impl CodeError {
+    /// A code naming `actual` can be used only for the `expected` store.
+    pub fn require_store(expected: StoreId, actual: StoreId) -> Result<(), Self> {
+        if actual == expected {
+            Ok(())
+        } else {
+            Err(Self::WrongStore { expected, actual })
+        }
+    }
+}
+
 /// Decode and validate the complete code before returning public metadata.
 pub fn decode_code_info(code: &str) -> Result<CodeInfo, CodeError> {
     let (code, location, carries_s3_key) = decode(code)?;

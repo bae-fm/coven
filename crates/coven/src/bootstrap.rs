@@ -241,11 +241,7 @@ pub(super) async fn unfinished_joins(
                 .into())
             }
         };
-        if info.metadata.store_id != store {
-            return Err(
-                CodeError::WrongStore { expected: store, actual: info.metadata.store_id }.into()
-            );
-        }
+        CodeError::require_store(store, info.metadata.store_id)?;
         joins.push(info);
     }
     Ok(joins)
@@ -280,9 +276,7 @@ fn saved_invite_code(
         return Ok(None);
     };
     let code = coven_sync::read_invite_code(text.as_str())?;
-    if code.store != store {
-        return Err(CodeError::WrongStore { expected: store, actual: code.store }.into());
-    }
+    CodeError::require_store(store, code.store)?;
     Ok(Some(code))
 }
 

@@ -44,9 +44,7 @@ pub(crate) async fn restore_device(
 ) -> Result<CovenHandle, BootstrapError> {
     check_cancel(cancel)?;
     let code = coven_sync::read_restore_code(code)?;
-    if code.store != store {
-        return Err(CodeError::WrongStore { expected: store, actual: code.store }.into());
-    }
+    CodeError::require_store(store, code.store)?;
     let storage = RestoreStorage::decode(code.storage.as_bytes()).map_err(SyncError::from)?;
     let (data, sign_in) = restore_connection(&builder, storage, s3_credentials)?;
     let directory = builder.layout.store_dir(&store);
