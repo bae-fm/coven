@@ -161,3 +161,30 @@ fn unique_indexes_and_virtual_tables_are_schema() {
         Some(Creation::Table("note_search".into()))
     );
 }
+
+/// The tables a statement reads: after `FROM` and `JOIN`, in a `FROM` list,
+/// and in subqueries; a `DELETE FROM`'s target is its write, and a
+/// table-valued function no table.
+#[test]
+fn each_statement_names_the_tables_it_reads() {
+    let reads = |sql: &str| {
+        statements(sql)
+            .into_iter()
+            .flat_map(|statement| statement.reads.into_iter().map(|read| read.table))
+            .collect::<Vec<_>>()
+    };
+    for (sql, tables) in [
+        ("SELECT body FROM main.notes AS n JOIN tags t ON t.note = n.id", &["notes", "tags"][..]),
+        (
+            "SELECT 1 FROM notes n, tags, listing AS l WHERE n.id = l.id",
+            &["notes", "tags", "listing"],
+        ),
+        ("DELETE FROM notes WHERE id IN (SELECT note FROM tags)", &["tags"]),
+        ("INSERT INTO listing SELECT id FROM notes", &["notes"]),
+        ("SELECT value FROM json_each(?1) JOIN notes ON notes.id = value", &["notes"]),
+        ("UPDATE listing SET shown = 1 FROM notes WHERE notes.id = listing.id", &["notes"]),
+        ("SELECT * FROM (SELECT id FROM notes)", &["notes"]),
+    ] {
+        assert_eq!(reads(sql), tables, "{sql}");
+    }
+}

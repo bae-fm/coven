@@ -25,9 +25,12 @@
 //! - test code that writes or creates the table is the domain's tests. A
 //!   home file's tests, `<name>_tests.rs` beside it, are in its home.
 //!
-//! Reads are free across domains. SQL the program builds at runtime, from
-//! `format!` or by joining pieces, names its table nowhere in the source, so
-//! the rule cannot see it.
+//! Reads are free across domains, but SQL follows the policy's
+//! `crate_order`: a domain is in the crate its homes are in, and the
+//! production SQL of a crate fires a trigger on, and reads, only the tables
+//! and views of its own crate's domains and of the crates before it. SQL the
+//! program builds at runtime, from `format!` or by joining pieces, names its
+//! table nowhere in the source, so the rule cannot see it.
 //!
 //! The SQL the rule reads is every string literal of the crates and their
 //! `.sql` files, which the crates bring in with `include_str!`. Test code is
@@ -65,7 +68,7 @@ pub(crate) fn find_database_boundary_violations(code: &CrateCode, policy: &Polic
         .as_ref()
         .and_then(|database| database.rusqlite_reexport.as_deref())
         .map(|package| package.replace('-', "_"));
-    let domains = Domains::of(policy, schema_views(code));
+    let domains = Domains::of(policy, schema_views(code), code);
     for file in &code.expanded {
         let mut visitor = DatabaseBoundaryVisitor {
             path: &file.relative_path,
@@ -93,6 +96,30 @@ pub(crate) fn find_database_boundary_violations(code: &CrateCode, policy: &Polic
                 ));
             }
         }
+    }
+    // Production SQL follows the crate order.
+    for file in &code.sql {
+        let line = |at| line_of(&file.text, at);
+        domains.check_crate_order(
+            &file.relative_path,
+            &file.package,
+            &file.text,
+            line,
+            &mut violations,
+        );
+    }
+    for file in &code.written {
+        SqlLiterals::new(|literal: &syn::LitStr| {
+            let (sql, line) = (literal.value(), literal.span().start().line);
+            domains.check_crate_order(
+                &file.relative_path,
+                &file.package,
+                &sql,
+                |_| line,
+                &mut violations,
+            );
+        })
+        .visit_file(&file.syntax);
     }
     // The domains read SQL files whole, tests' included.
     for file in code.sql.iter().chain(&code.test_sql) {
@@ -148,11 +175,38 @@ struct Domains<'a> {
     /// domains' tables, with those domains.
     shared_views: BTreeMap<String, BTreeSet<&'a str>>,
     schema_views: SchemaViews,
+    /// Each domain's crate, by the domain's name: the latest in
+    /// `crate_order` of the crates its homes hold sources in, with its
+    /// place there.
+    crates: BTreeMap<&'a str, (usize, &'a str)>,
+    /// Each crate's place in `crate_order`.
+    order: BTreeMap<&'a str, usize>,
 }
 
 impl<'a> Domains<'a> {
-    fn of(policy: &'a Policy, schema_views: SchemaViews) -> Self {
+    fn of(policy: &'a Policy, schema_views: SchemaViews, code: &CrateCode) -> Self {
         let domains = || policy.database.iter().flat_map(|database| &database.domains);
+        let order: BTreeMap<&str, usize> = policy
+            .crate_order
+            .iter()
+            .enumerate()
+            .map(|(place, name)| (name.as_str(), place))
+            .collect();
+        let sources = code
+            .written
+            .iter()
+            .map(|file| (&file.relative_path, &file.package))
+            .chain(code.sql.iter().map(|file| (&file.relative_path, &file.package)));
+        let mut crates: BTreeMap<&str, (usize, &str)> = BTreeMap::new();
+        for (path, package) in sources {
+            let Some((&name, &place)) = order.get_key_value(package.as_str()) else { continue };
+            for domain in domains().filter(|domain| domain.holds(path)) {
+                let entry = crates.entry(domain.name.as_str()).or_insert((place, name));
+                if place > entry.0 {
+                    *entry = (place, name);
+                }
+            }
+        }
         let tables: BTreeMap<String, &Domain> = domains()
             .flat_map(|domain| {
                 domain.tables.iter().map(move |table| (table.to_lowercase(), domain))
@@ -182,7 +236,59 @@ impl<'a> Domains<'a> {
                 }
             }
         }
-        Self { tables, views, shared_views, schema_views }
+        Self { tables, views, shared_views, schema_views, crates, order }
+    }
+
+    /// The domain keeping the table or view `name`, lowercase.
+    fn keeper(&self, name: &str) -> Option<&'a Domain> {
+        self.tables.get(name).or_else(|| self.views.get(name)).copied()
+    }
+
+    /// Each trigger `sql`, production SQL of `package`, fires on, and each
+    /// table or view it reads, that a domain of a later crate in
+    /// `crate_order` keeps.
+    fn check_crate_order(
+        &self,
+        path: &str,
+        package: &str,
+        sql: &str,
+        line: impl Fn(usize) -> usize,
+        violations: &mut BTreeSet<Finding>,
+    ) {
+        let Some(&place) = self.order.get(package) else { return };
+        let later = |name: &str| {
+            let domain = self.keeper(name)?;
+            let &(kept, keeping) = self.crates.get(domain.name.as_str())?;
+            (kept > place).then(|| {
+                format!(
+                    "which the {} domain keeps in {keeping}, after {package} in crate_order",
+                    domain.name
+                )
+            })
+        };
+        let remedy = "a crate's SQL fires triggers on, and reads, only the tables and views of its own crate's domains and of the crates before it in crate_order";
+        for statement in statements(sql) {
+            if let Some(Creation::Trigger { table, .. }) = &statement.creation {
+                if let Some(keeper) = later(table) {
+                    violations.insert(Finding::new(
+                        path,
+                        line(statement.at),
+                        format!("a trigger in {package} fires on {table}, {keeper}"),
+                        remedy,
+                    ));
+                }
+            }
+            for read in &statement.reads {
+                if let Some(keeper) = later(&read.table) {
+                    violations.insert(Finding::new(
+                        path,
+                        line(read.at),
+                        format!("SQL in {package} reads {}, {keeper}", read.table),
+                        remedy,
+                    ));
+                }
+            }
+        }
     }
 
     /// Whether any table `statement` writes, through views or not, is in a
@@ -268,7 +374,7 @@ impl<'a> Domains<'a> {
                 ));
                 continue;
             }
-            let Some(domain) = self.tables.get(&name).or_else(|| self.views.get(&name)) else {
+            let Some(domain) = self.keeper(&name) else {
                 continue;
             };
             if domain.holds(path) {

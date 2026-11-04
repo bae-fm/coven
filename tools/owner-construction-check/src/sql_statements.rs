@@ -39,8 +39,20 @@ pub(crate) struct Statement {
     pub(crate) at: usize,
     pub(crate) end: usize,
     pub(crate) creation: Option<Creation>,
-    /// The tables the statement writes, each once, in the order they appear.
+    /// The tables the statement writes, each once for each way it writes
+    /// it, in the order they appear.
     pub(crate) writes: Vec<Write>,
+    /// The tables the statement reads, after `FROM` or `JOIN`, each once, in
+    /// the order they appear.
+    pub(crate) reads: Vec<Read>,
+}
+
+/// A table a statement reads, lowercase, and the byte offset of its name in
+/// the text.
+#[derive(Debug, PartialEq)]
+pub(crate) struct Read {
+    pub(crate) table: String,
+    pub(crate) at: usize,
 }
 
 /// What a `CREATE` statement adds to the schema, by the table it is about.
@@ -111,7 +123,13 @@ pub(crate) fn statements(sql: &str) -> Vec<Statement> {
 }
 
 fn statement(words: &[Located], end: usize) -> Option<Statement> {
-    Some(Statement { at: words.first()?.at, end, creation: creation(words), writes: writes(words) })
+    Some(Statement {
+        at: words.first()?.at,
+        end,
+        creation: creation(words),
+        writes: writes(words),
+        reads: reads(words),
+    })
 }
 
 fn name_at(words: &[Located], index: usize) -> Option<&str> {
@@ -214,6 +232,78 @@ fn writes(words: &[Located]) -> Vec<Write> {
     }
     writes
 }
+
+/// The tables after `FROM` and `JOIN`, a `DELETE FROM`'s target aside, and
+/// each further table of a `FROM a, b` list. A name followed by `(` is a
+/// table-valued function, and `(` itself opens a subquery, whose reads are
+/// read in turn.
+fn reads(words: &[Located]) -> Vec<Read> {
+    let mut reads: Vec<Read> = Vec::new();
+    let push = |index: usize, reads: &mut Vec<Read>| -> Option<usize> {
+        let (table, _, after) = object_at(words, index)?;
+        if matches!(words.get(after).map(|located| &located.word), Some(Word::Symbol('('))) {
+            return None;
+        }
+        if !reads.iter().any(|known| known.table == table) {
+            reads.push(Read { table, at: words[index].at });
+        }
+        Some(after)
+    };
+    for index in 0..words.len() {
+        let read = match name_at(words, index) {
+            Some("from") => index == 0 || name_at(words, index - 1) != Some("delete"),
+            Some("join") => true,
+            _ => false,
+        };
+        if !read {
+            continue;
+        }
+        let mut next = index + 1;
+        while let Some(mut after) = push(next, &mut reads) {
+            // An alias, with or without `AS`.
+            if name_at(words, after) == Some("as") {
+                after += 2;
+            } else if name_at(words, after).is_some_and(|name| !CLAUSE_WORDS.contains(&name)) {
+                after += 1;
+            }
+            match words.get(after).map(|located| &located.word) {
+                Some(Word::Symbol(',')) => next = after + 1,
+                _ => break,
+            }
+        }
+    }
+    reads
+}
+
+/// The words that can follow a table in a `FROM` list, so they are no alias.
+const CLAUSE_WORDS: &[&str] = &[
+    "where",
+    "join",
+    "inner",
+    "left",
+    "right",
+    "full",
+    "cross",
+    "natural",
+    "on",
+    "using",
+    "group",
+    "order",
+    "limit",
+    "having",
+    "window",
+    "union",
+    "except",
+    "intersect",
+    "indexed",
+    "not",
+    "returning",
+    "set",
+    "values",
+    "select",
+    "do",
+    "end",
+];
 
 fn words(sql: &str) -> Vec<Located> {
     let characters = sql.chars().collect::<Vec<_>>();

@@ -10183,7 +10183,10 @@ shared state.
   domain's tables up to date by inserting into that domain's view writes
   that domain. A domain keeps its views as it keeps its tables, each
   `CREATE VIEW` in its homes: the views whose `INSTEAD OF` triggers write
-  its tables alone, and the views it names. Every table
+  its tables alone, and the views it names. SQL follows the crate order
+  (F.1): a domain is in the crate that holds its homes, and a crate's SQL
+  fires triggers on, and reads, only the tables and views of its own
+  crate's domains and of the crates before it. Every table
   is in one domain, and a module changing another domain's table asks that
   domain's module to make the write. A second module is a home of a domain
   only where it writes the domain's tables in bulk, a table at a time, as a

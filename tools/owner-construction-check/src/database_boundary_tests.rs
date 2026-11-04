@@ -699,3 +699,70 @@ END;",
         ]
     );
 }
+
+/// SQL follows the crate order: the records' crate comes first, so its SQL
+/// neither reads the listing, which a later crate keeps, nor fires a trigger
+/// on it; the listing's crate reads the records freely. Tests are free.
+#[test]
+fn sql_reads_and_fires_on_only_its_own_and_earlier_crates() {
+    let mut policy = view_policy();
+    policy.crate_order = vec!["app-database".into(), "app-core".into()];
+    let files = [
+        RustFile::fixture(
+            "crates/app-database/src/notes.rs",
+            r#"
+            const SHOWN: &str = "SELECT n.id FROM notes n JOIN note_listing l ON l.id = n.id";
+            const REFRESHED: &str = "SELECT id FROM listing_refresh";
+            "#,
+        ),
+        RustFile::fixture(
+            "crates/app-core/src/listing/refresh.rs",
+            r#"const LISTED: &str = "INSERT INTO note_listing SELECT id FROM notes";"#,
+        ),
+        RustFile::fixture(
+            "crates/app-database/src/notes_tests.rs",
+            r#"const LISTED: &str = "SELECT id FROM note_listing";"#,
+        ),
+    ];
+    let schema = [
+        sql("crates/app-core/src/listing/views.sql", LISTING_VIEWS),
+        sql(
+            "crates/app-database/src/listed.sql",
+            "CREATE TRIGGER listed AFTER INSERT ON note_listing BEGIN SELECT RAISE(ABORT, 'no'); END;",
+        ),
+    ];
+    let violations = find_database_boundary_violations(&CrateCode::of(&files, &schema), &policy)
+        .into_iter()
+        .map(|violation| (violation.path, violation.line, violation.message))
+        .collect::<Vec<_>>();
+    let kept = |name: &str| {
+        format!(
+            "{name}, which the listing domain keeps in app-core, after app-database in crate_order"
+        )
+    };
+    assert_eq!(
+        violations,
+        [
+            (
+                "crates/app-database/src/listed.sql".to_string(),
+                1,
+                "SQL creates a trigger, writing no domain's table, on note_listing, whose schema the listing domain keeps in crates/app-core/src/listing/".to_string()
+            ),
+            (
+                "crates/app-database/src/listed.sql".to_string(),
+                1,
+                format!("a trigger in app-database fires on {}", kept("note_listing"))
+            ),
+            (
+                "crates/app-database/src/notes.rs".to_string(),
+                2,
+                format!("SQL in app-database reads {}", kept("note_listing"))
+            ),
+            (
+                "crates/app-database/src/notes.rs".to_string(),
+                3,
+                format!("SQL in app-database reads {}", kept("listing_refresh"))
+            ),
+        ]
+    );
+}
