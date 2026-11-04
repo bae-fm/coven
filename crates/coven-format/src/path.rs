@@ -4,7 +4,7 @@
 //! prefixes here. Native provider adapters map these validated paths into
 //! their provider's object names.
 
-use coven_foundation::id_source::{CircleId, DeviceId, FileId, InviteId, StoreId};
+use coven_foundation::id_source::{DeviceId, FileId, InviteId, StoreId};
 use coven_merge::Audience;
 use serde::{Deserialize, Serialize};
 use std::num::NonZeroU64;
@@ -34,11 +34,7 @@ impl ObjectPath {
         let rest = self.relative().strip_prefix("snapshots/")?;
         let (audience, rest) = rest.split_once('/').expect("validated snapshot path");
         let (device, number) = rest.split_once('/').expect("validated snapshot path");
-        let audience = if audience == "store" {
-            Audience::Store
-        } else {
-            Audience::Circle(CircleId(audience.parse().expect("validated circle")))
-        };
+        let audience: Audience = audience.parse().expect("validated audience");
         Some(crate::admin::SnapshotId {
             audience,
             device: DeviceId(device.parse().expect("validated device")),
@@ -52,7 +48,7 @@ impl ObjectPath {
         device: DeviceId,
         number: NonZeroU64,
     ) -> Self {
-        Self(format!("{store}/snapshots/{}/{}/{number}", audience_part(&audience), device.0))
+        Self(format!("{store}/snapshots/{}/{}/{number}", audience, device.0))
     }
     /// Encrypted file bytes named by a random UUID (§17.5).
     pub fn file(store: StoreId, device: DeviceId, name: FileId) -> Self {
@@ -144,9 +140,7 @@ impl TryFrom<String> for ObjectPath {
         let valid = match parts.as_slice() {
             ["seq", n] => decimal(n, true),
             ["snapshots", audience, device, n] => {
-                (*audience == "store" || canonical_uuid(audience))
-                    && decimal(device, false)
-                    && decimal(n, true)
+                audience.parse::<Audience>().is_ok() && decimal(device, false) && decimal(n, true)
             }
             ["files", device, name] => decimal(device, false) && canonical_uuid(name),
             ["join-requests", device, GONE] => decimal(device, false),
@@ -187,7 +181,7 @@ impl ObjectPrefix {
     }
     /// The snapshots one device stored of one audience (§16.6).
     pub fn device_snapshots(store: StoreId, audience: Audience, device: DeviceId) -> Self {
-        Self(format!("{store}/snapshots/{}/{}/", audience_part(&audience), device.0))
+        Self(format!("{store}/snapshots/{}/{}/", audience, device.0))
     }
     /// Every waiting join request.
     pub fn join_requests(store: StoreId) -> Self {
@@ -232,9 +226,9 @@ pub fn validate_directory(value: &str) -> Result<(), PathError> {
         [] => true,
         ["seq" | "snapshots" | "files" | "join-requests"] => true,
         ["files", device] | ["join-requests", device] => decimal(device, false),
-        ["snapshots", audience] => *audience == "store" || canonical_uuid(audience),
+        ["snapshots", audience] => audience.parse::<Audience>().is_ok(),
         ["snapshots", audience, device] => {
-            (*audience == "store" || canonical_uuid(audience)) && decimal(device, false)
+            audience.parse::<Audience>().is_ok() && decimal(device, false)
         }
         _ => false,
     };
@@ -242,14 +236,6 @@ pub fn validate_directory(value: &str) -> Result<(), PathError> {
         return Err(PathError);
     }
     Ok(())
-}
-
-/// An audience as its snapshots' folder spells it: `store` or the circle's id.
-fn audience_part(audience: &Audience) -> String {
-    match audience {
-        Audience::Store => "store".to_owned(),
-        Audience::Circle(circle) => circle.to_string(),
-    }
 }
 
 fn store_id(path: &str) -> StoreId {

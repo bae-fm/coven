@@ -62,22 +62,12 @@ pub(crate) mod audience {
         value: &Audience,
         serializer: S,
     ) -> Result<S::Ok, S::Error> {
-        match value {
-            Audience::Store => serializer.serialize_str("store"),
-            Audience::Circle(id) => serializer.serialize_str(&id.to_string()),
-        }
+        serializer.collect_str(value)
     }
     pub(crate) fn deserialize<'de, D: serde::Deserializer<'de>>(
         deserializer: D,
     ) -> Result<Audience, D::Error> {
-        let value = String::deserialize(deserializer)?;
-        if value == "store" {
-            Ok(Audience::Store)
-        } else {
-            Ok(Audience::Circle(coven_foundation::id_source::CircleId(
-                value.parse().map_err(serde::de::Error::custom)?,
-            )))
-        }
+        String::deserialize(deserializer)?.parse().map_err(serde::de::Error::custom)
     }
 }
 

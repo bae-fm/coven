@@ -5,7 +5,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use coven_format::value::Value;
 use coven_foundation::id_source::DeviceId;
 use coven_merge::{Audience, Timestamp};
-use rusqlite::types::{FromSql, Type, ValueRef};
+use rusqlite::types::{Type, ValueRef};
 
 use crate::DbError;
 
@@ -89,12 +89,11 @@ pub(crate) fn audience_text(audience: &Audience) -> String {
 /// it: receivers compare a root's audience cell with that text, so any other
 /// spelling of the same circle id names no audience (§15).
 pub(crate) fn canonical_audience(text: &str) -> Option<Audience> {
-    Audience::column_result(ValueRef::Text(text.as_bytes())).ok()
+    text.parse().ok()
 }
 
 pub(crate) fn audience(text: &str) -> rusqlite::Result<Audience> {
-    Audience::column_result(ValueRef::Text(text.as_bytes()))
-        .map_err(|error| decode_failure(0, Type::Text, error))
+    text.parse().map_err(|error| decode_failure(0, Type::Text, error))
 }
 
 pub(crate) fn counter(bytes: Vec<u8>) -> u64 {

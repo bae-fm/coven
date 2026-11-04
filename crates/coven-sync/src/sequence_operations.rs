@@ -867,13 +867,7 @@ mod route {
     ) -> Result<KeyCopyPrefix, D::Error> {
         let (audience, key, member, sealing): (String, _, _, [u8; 32]) =
             Deserialize::deserialize(input)?;
-        let audience = if audience == "store" {
-            Audience::Store
-        } else {
-            Audience::Circle(coven_foundation::id_source::CircleId(
-                audience.parse().map_err(serde::de::Error::custom)?,
-            ))
-        };
+        let audience: Audience = audience.parse().map_err(serde::de::Error::custom)?;
         Ok(KeyCopyPrefix {
             audience,
             key,

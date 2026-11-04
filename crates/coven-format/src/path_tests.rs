@@ -1,5 +1,6 @@
 use super::*;
 use crate::test_utils::STORE_ID;
+use coven_foundation::id_source::CircleId;
 
 #[test]
 fn sequence_slots_have_one_store_wide_identity_and_floor_is_replaceable() {

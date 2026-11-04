@@ -7,6 +7,7 @@
 //! unique claims after resolving references, using its own SQL semantics.
 
 mod audience_sql;
+pub use audience_sql::InvalidAudience;
 mod dependency;
 mod error;
 #[cfg(any(test, feature = "test-utils"))]
