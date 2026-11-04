@@ -291,7 +291,6 @@ async fn internal_tables_transaction_control_and_pragmas_remain_protected() {
     let database = store.schema(notes(), NOTES).await.unwrap();
     for statement in [
         "SELECT * FROM _coven_writes",
-        "INSERT INTO _coven_uploads(device,number,record) VALUES(x'',x'',x'')",
         "COMMIT",
         "ROLLBACK",
         "SAVEPOINT a",

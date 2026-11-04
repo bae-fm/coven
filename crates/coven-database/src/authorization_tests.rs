@@ -22,7 +22,6 @@ async fn app_statements_cannot_read_or_mutate_internal_objects() {
         "SELECT * FROM _coven_rows",
         "SELECT count(*) FROM _COVEN_ROWS",
         "UPDATE _coven_rows SET audience = 'store'",
-        "DELETE FROM _coven_uploads",
         "DROP TABLE _coven_columns",
         "ALTER TABLE _coven_rows ADD COLUMN bad INTEGER",
         "CREATE INDEX bad ON _coven_rows(audience)",

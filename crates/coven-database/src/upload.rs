@@ -279,6 +279,34 @@ pub(crate) fn read_batch<E: From<DbError>>(
     Ok(())
 }
 
+/// Queue this device's write `write`, its plaintext `record` fixed at
+/// commit, to wait for its upload.
+pub(crate) fn queue(
+    database: &DatabaseConnection,
+    write: WriteId,
+    record: &[u8],
+) -> Result<(), DbError> {
+    database.internal_execute(
+        "INSERT INTO _coven_uploads(device,number,record) VALUES(?1,?2,?3)",
+        params![write.device, write.number.to_be_bytes().as_slice(), record],
+    )?;
+    Ok(())
+}
+
+/// The writes `device`'s landed claim `claim` carried leave the queue.
+pub(crate) fn forget_claimed(
+    database: &DatabaseConnection,
+    device: DeviceId,
+    claim: u64,
+) -> Result<(), DbError> {
+    database.internal_execute(
+        "DELETE FROM _coven_uploads WHERE device=?1 AND number IN
+         (SELECT number FROM _coven_upload_claims WHERE device=?1 AND claim=?2)",
+        params![device, claim.to_be_bytes().as_slice()],
+    )?;
+    Ok(())
+}
+
 /// The header of this device's write `write` while it waits in the queue.
 pub(crate) fn queued(
     database: &DatabaseConnection,

@@ -137,7 +137,7 @@ async fn waiting_writes_keep_their_numbers_and_merge_as_late_writes_on_every_loa
         .unwrap();
     sql(&a, "INSERT INTO notes VALUES('n','base','')").await.unwrap();
     b.receive(records(&a).remove(0).into()).await.unwrap();
-    a.inspect_writer(|db| db.internal_execute("DELETE FROM _coven_uploads", []).unwrap());
+    crate::upload::tests::empty_queue(&a);
     sql(&a, "UPDATE notes SET title='offline'").await.unwrap();
     let waiting = records(&a);
     assert_eq!(waiting[0].header.position.number, 2);
@@ -536,7 +536,7 @@ async fn reloading_keeps_uploaded_own_history_before_authoring_another() {
     let snapshot = frames(&db, Audience::Store).await;
     sql(&db, "UPDATE notes SET title='second'").await.unwrap();
     let uploaded = records(&db);
-    db.inspect_writer(|db| db.internal_execute("DELETE FROM _coven_uploads", []).unwrap());
+    crate::upload::tests::empty_queue(&db);
     db.load_snapshots::<crate::pending::tests::Record, _>(
         crate::tests::reload(
             &db,
@@ -664,7 +664,7 @@ async fn a_snapshot_removing_a_queued_files_row_keeps_its_upload_source() {
     let empty = frames(&source, Audience::Store).await;
     let empty_prefix = empty.prefix.clone();
     let empty = empty.concat();
-    db.inspect_writer(|sql| sql.internal_execute("DELETE FROM _coven_uploads", []).unwrap());
+    crate::upload::tests::empty_queue(&db);
     let paths = owned_paths(&store);
     let before = contents(&db);
     let truncated = empty[..empty.len() - 1].to_vec();
@@ -702,7 +702,7 @@ async fn waiting_changes_replay_after_their_missing_own_predecessor() {
         let ready = frames(&db, Audience::Store).await;
         let ready_prefix = ready.prefix.clone();
         let ready = ready.concat();
-        db.inspect_writer(|db| db.internal_execute("DELETE FROM _coven_uploads", []).unwrap());
+        crate::upload::tests::empty_queue(&db);
         sql(&db, waiting_sql).await.unwrap();
         let waiting = records(&db);
         let expected = crate::tests::data(&db, Audience::Store);

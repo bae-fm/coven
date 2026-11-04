@@ -387,11 +387,7 @@ pub(crate) fn finish(db: &DatabaseConnection) -> Result<(), DbError> {
             if unconsumed {
                 return Err(DbError::ClaimUnsettled);
             }
-            db.internal_execute(
-                "DELETE FROM _coven_uploads WHERE device=?1 AND number IN
-                 (SELECT number FROM _coven_upload_claims WHERE device=?1 AND claim=?2)",
-                params![claim.device, claim.number.to_be_bytes().as_slice()],
-            )?;
+            crate::upload::forget_claimed(db, claim.device, claim.number)?;
         }
         _ => (),
     }

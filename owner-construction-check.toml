@@ -516,7 +516,7 @@ table_macros = [
     "coven_source_names_tables",
     "coven_write_boundaries_tables",
     "coven_retries_tables",
-    "coven_upload_keys_tables",
+    "coven_uploads_tables",
     "coven_device_reset_tables",
     "coven_file_columns_tables",
     "coven_pin_requests_tables",
@@ -706,7 +706,7 @@ tables = [
 ]
 
 [[database.domains]]
-name = "upload keys"
+name = "uploads"
 owner = "Database"
 homes = [
     "crates/coven-database/src/upload.rs",
@@ -714,6 +714,7 @@ homes = [
 ]
 tables = [
     "_coven_upload_keys",
+    "_coven_uploads",
 ]
 
 [[database.domains]]
@@ -1000,7 +1001,6 @@ tables = [
     "_coven_stored_files",
     "_coven_unreferenced_files",
     "_coven_upload_files",
-    "_coven_uploads",
     "_coven_user_chunks",
     "_coven_user_files",
 ]

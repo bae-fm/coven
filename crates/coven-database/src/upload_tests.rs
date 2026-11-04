@@ -442,6 +442,29 @@ async fn a_captured_batch_keeps_original_keys_and_excludes_later_commits() {
 /// Fill this domain's tables from the rows of the plan audit's `fixture`
 /// table, inside its transaction (`internal_schema_scan_reasons_tests.rs`).
 pub(crate) fn fill_for_plans(db: &rusqlite::Connection) {
-    db.execute_batch("INSERT INTO _coven_upload_keys SELECT device,n,zeroblob(32) FROM fixture;")
-        .unwrap();
+    db.execute_batch(
+        "INSERT INTO _coven_uploads SELECT device,n,zeroblob(256) FROM fixture;
+         INSERT INTO _coven_upload_keys SELECT device,n,zeroblob(32) FROM fixture;",
+    )
+    .unwrap();
+}
+
+/// Empty `db`'s upload queue, as though every write in it were sent.
+pub(crate) fn empty_queue(db: &crate::Database) {
+    db.inspect_writer(|db| db.internal_execute("DELETE FROM _coven_uploads", []).unwrap());
+}
+
+/// The app's SQL can't write the upload queue, in a migration or in a
+/// write.
+#[tokio::test]
+async fn app_statements_cannot_write_the_queue() {
+    crate::authorization::tests::refused_as_internal("DELETE FROM _coven_uploads").await;
+    let store = TestStore::new();
+    let database = store.schema(notes(), NOTES).await.unwrap();
+    let error =
+        sql(&database, "INSERT INTO _coven_uploads(device,number,record) VALUES(x'',x'',x'')")
+            .await
+            .unwrap_err();
+    assert!(matches!(error, DbError::InternalTable { .. }), "{error:?}");
+    database.close().await.unwrap();
 }

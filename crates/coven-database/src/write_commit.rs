@@ -286,14 +286,7 @@ pub(crate) fn retain_queue(
     }
     let encoder = encoded(WriteEncoder::new(record))?;
     let bytes = plaintext(database, encoder)?;
-    database.internal_execute(
-        "INSERT INTO _coven_uploads(device,number,record) VALUES(?1,?2,?3)",
-        params![
-            record.header.position.device,
-            record.header.position.number.to_be_bytes().as_slice(),
-            bytes
-        ],
-    )?;
+    crate::upload::queue(database, record.header.position, &bytes)?;
     crate::file_protection::queued(database, record)
 }
 

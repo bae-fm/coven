@@ -43,7 +43,7 @@ pub(crate) async fn open(store: &TestStore) -> Database {
 /// Apply `writer`'s queued writes on each of `devices`, in their order.
 pub(crate) async fn publish(writer: &Database, devices: &[&Database]) {
     let writes = records(writer);
-    writer.inspect_writer(|db| db.internal_execute("DELETE FROM _coven_uploads", []).unwrap());
+    crate::upload::tests::empty_queue(writer);
     for write in writes {
         for device in devices {
             device.receive(write.clone().into()).await.unwrap();

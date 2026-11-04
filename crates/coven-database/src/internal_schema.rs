@@ -372,15 +372,7 @@ macro_rules! coven_tables {
                     AND NOT EXISTS(SELECT 1 FROM _coven_lost WHERE column_id=OLD.column_id);
             END;
         ");
-        $visit!(_coven_uploads, "
-            CREATE TABLE _coven_uploads (
-                device BLOB NOT NULL CHECK(length(device) = 8),
-                number BLOB NOT NULL CHECK(length(number) = 8 AND number > x'0000000000000000'),
-                record BLOB NOT NULL,
-                PRIMARY KEY(device, number)
-            ) STRICT;
-        ");
-        coven_upload_keys_tables!($visit);
+        coven_uploads_tables!($visit);
         coven_queued_file_references_tables!($visit);
         // The user's originals this device has, by file, while their
         // records exist here: the path, as the operating system's bytes
