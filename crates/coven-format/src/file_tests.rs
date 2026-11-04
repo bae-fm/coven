@@ -130,7 +130,7 @@ fn an_unrequested_damaged_chunk_does_not_prevent_opening_another() {
     assert!(header.open_chunk(&FileKey::from_bytes([0x78; 32]), PATH, 1, bytes).is_err());
 }
 
-// Public test material sealed independently with Python ctypes and libsodium.
+// Public test material that fixtures/generate-deterministic.py seals with libsodium.
 #[test]
 fn file_fixture_opens_and_reseals_each_chunk() {
     let bytes = crate::tests::hex(include_str!("../fixtures/file.hex"));

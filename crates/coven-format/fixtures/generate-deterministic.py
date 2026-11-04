@@ -487,6 +487,58 @@ def device_gone():
     return bytes([40]) + u16(1)
 
 
+def keychain_restore_code():
+    """D13 saved restore code (kind 17): the store's name as the saving device had
+    it, the slot that set it, then a whole restore code frame."""
+    return frame(17, text(b"Family") + u64(41) + text(restore_code()))
+
+
+FILE_ID = bytes([0x11]) * 16
+FILE_KEY = bytes([0x77]) * 32
+FILE_PATH = STORE_TEXT + b"files/1/11111111-1111-1111-1111-111111111111"
+FILE_SIZE = 65_536 + 29
+
+
+def file_object(sodium):
+    """D12 "The object": the 11-byte header, then each 64 KiB chunk of the
+    `i % 251` plaintext sealed under the file's key, its nonce its index."""
+    plaintext = bytes(i % 251 for i in range(FILE_SIZE))
+    header = u8(38) + u16(1) + u64(FILE_SIZE)
+    body = header
+    for index, start in enumerate(range(0, FILE_SIZE, 65536)):
+        piece = plaintext[start:start + 65536]
+        aad = context(b"coven/file-chunk/v1", FILE_PATH, header, u64(index))
+        ciphertext = c.create_string_buffer(len(piece) + 16)
+        length = c.c_ulonglong()
+        checked(sodium.crypto_aead_xchacha20poly1305_ietf_encrypt(
+            ciphertext, c.byref(length), piece, len(piece), aad, len(aad),
+            None, index.to_bytes(24, "big"), FILE_KEY,
+        ))
+        assert length.value == len(ciphertext)
+        body += ciphertext.raw
+    return body
+
+
+def file_reference():
+    """D12 "Coordinates": the object's path, then the `file` coordinates text."""
+    return (FILE_PATH.decode() + "\n"
+            + f"file 1 11111111-1111-1111-1111-111111111111 {FILE_KEY.hex()}\n")
+
+
+def confirmation_number(invite, keys):
+    """D11 "Confirmation numbers": the first 8 bytes of the hash, modulo 1,000,000."""
+    digest = hashlib.sha256(context(b"coven/confirmation-number/v1", invite, keys)).digest()
+    return int.from_bytes(digest[:8], "big") % 1_000_000
+
+
+def confirmation_numbers(sodium):
+    """One line per case: the invite id, the request's `MemberKeys`, the number."""
+    cases = [(bytes([0x55]) * 16, 0x33), (bytes([0x55]) * 16, 0x34), (bytes([0x56]) * 16, 0x33)]
+    return "".join(
+        f"{invite.hex()} {pair(sodium, seed).hex()} {confirmation_number(invite, pair(sodium, seed))}\n"
+        for invite, seed in cases)
+
+
 def load_sodium():
     library = ctypes.util.find_library("sodium")
     # On macOS ctypes searches /usr/local/lib but not Apple-silicon Homebrew's
@@ -655,8 +707,12 @@ def main():
         ("invite-code.hex", invite_code()),
         ("invite-end.hex", invite_end()),
         ("device-gone.hex", device_gone()),
+        ("keychain-restore-code.hex", keychain_restore_code()),
+        ("file.hex", file_object(sodium)),
     ]:
         (out / name).write_text(data.hex() + "\n")
+    (out / "file-reference.txt").write_text(file_reference())
+    (out / "confirmation-numbers.txt").write_text(confirmation_numbers(sodium))
     (out / "codes.txt").write_text(
         code_text("CVR1-", restore_code()) + "\n" + code_text("CVI1-", invite_code()) + "\n")
 

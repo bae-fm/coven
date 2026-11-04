@@ -2275,9 +2275,10 @@ kind, sealed object, file and code. Format 1 includes:
 **Cryptography.**
 
 - Fixture keys and nonces are public test data.
-- Ciphertext, derivations, confirmation numbers and signatures are calculated
-  independently with Python's hashlib and hmac and libsodium, then opened
-  through Rust.
+- `coven-format/fixtures/generate-deterministic.py` calculates every fixture's
+  ciphertext, derivations, confirmation numbers and signatures independently,
+  with Python's hashlib and hmac and libsodium, and a test reruns it and
+  compares every byte; Rust then opens them.
 - Mutations must reject changed paths, routing credentials, slot order, authored
   views, roots and signatures.
 - A retry at the same slot repeats every byte. A different slot changes its outer
