@@ -426,3 +426,122 @@ async fn publication_with_a_loaded_provider_does_not_suspend() {
 fn household() -> coven_sync::SavedName {
     coven_sync::SavedName { name: "Household".into(), named_at: coven_merge::Slot(1) }
 }
+
+/// Identity custody that panics as it persists, as a bug in an app's
+/// custody would.
+struct PanickingIdentity;
+impl MemberKeyCustody for PanickingIdentity {
+    fn unlock(&self) -> Result<Option<MemberIdentity>, KeyError> {
+        Ok(None)
+    }
+    fn persist(&self, _: &MemberIdentity) -> Result<(), KeyError> {
+        panic!("the identity's entry is half written")
+    }
+    fn forget(&self) -> Result<(), KeyError> {
+        Ok(())
+    }
+    fn close(&self) {}
+}
+
+/// A custody step that panics fails the commit with the bug, and every
+/// value the commit changed before it holds its prior value again, as after
+/// any failure before publication (E15).
+#[tokio::test]
+async fn a_panicking_custody_step_restores_the_prior_custody() {
+    let root = tempfile::tempdir().unwrap();
+    let id = StoreId(UuidIds.new_id());
+    let keychain = Keychain::in_memory("commit-test").unwrap();
+    let app = Coven::with_keychain(root.path().into(), keychain.clone());
+    let scoped = Arc::new(StoreKeychain::new(keychain.clone(), id));
+    let (pending, owners, database) = prepared(
+        &app,
+        id,
+        keychain,
+        KeyCustody::Keyring,
+        IdentityCustody::Custom(Arc::new(PanickingIdentity)),
+    )
+    .await;
+    let next = StoreKeyring::new(StoreKey::generate(KeyId(UuidIds.new_id())).unwrap());
+    let error = publish_bootstrap(
+        &pending,
+        code(id),
+        household(),
+        credentials(),
+        SignInCustody::None,
+        next,
+        owners,
+        database.clone(),
+        waits(&database).await,
+    )
+    .await
+    .unwrap_err();
+    let BootstrapError::Bug(bug) = &error else { panic!("{error:?}") };
+    assert_eq!(bug.message, "the identity's entry is half written");
+    assert!(StoreKeyCustody::unlock(&KeyringCustody::new(scoped.clone())).unwrap().is_none());
+    assert!(StorageSettings::new(pending.directory()).read().unwrap().is_none());
+    assert!(scoped.device_id().unwrap().is_none());
+    assert!(app.stores().await.unwrap().is_empty());
+    database.close().await.unwrap();
+}
+
+/// Publishes with the bootstrap's own step, then panics where `after` says:
+/// before the marker goes, or after.
+struct PanickingPublication<'a> {
+    pending: &'a BootstrapStore,
+    after: bool,
+}
+impl Publish for PanickingPublication<'_> {
+    fn publish(&self) -> Result<(), BootstrapDirectoryError> {
+        if self.after {
+            self.pending.publish()?;
+        }
+        panic!("the marker's removal is lost")
+    }
+    fn published(&self) -> Result<bool, coven_foundation::files::FileError> {
+        self.pending.is_published()
+    }
+}
+
+/// Publication panics. Whether the marker went says how far it got: a
+/// store still unpublished has its custody restored, and a published one
+/// keeps it, with the bug as the failure after publication (E15).
+#[tokio::test]
+async fn a_panicking_publication_settles_custody_by_the_marker() {
+    for after in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let id = StoreId(UuidIds.new_id());
+        let keychain = Keychain::in_memory("commit-test").unwrap();
+        let app = Coven::with_keychain(root.path().into(), keychain.clone());
+        let scoped = Arc::new(StoreKeychain::new(keychain.clone(), id));
+        let (pending, owners, database) =
+            prepared(&app, id, keychain, KeyCustody::Keyring, IdentityCustody::Keyring).await;
+        let ring = StoreKeyring::new(StoreKey::generate(KeyId(UuidIds.new_id())).unwrap());
+        let committed = commit(
+            &pending.directory(),
+            &code(id),
+            &household(),
+            &credentials(),
+            &SignInCustody::None,
+            &ring,
+            &owners,
+            &PanickingPublication { pending: &pending, after },
+        );
+        let kept = StoreKeyCustody::unlock(&KeyringCustody::new(scoped.clone())).unwrap();
+        match committed {
+            Ok(Some(BootstrapError::Bug(bug))) if after => {
+                assert_eq!(bug.message, "the marker's removal is lost");
+                assert!(kept.is_some());
+                assert_eq!(scoped.device_id().unwrap(), Some(owners.device));
+            }
+            Err(Uncommitted::Restored(BootstrapError::Bug(bug))) if !after => {
+                assert_eq!(bug.message, "the marker's removal is lost");
+                assert!(kept.is_none());
+                assert!(scoped.device_id().unwrap().is_none());
+                assert!(StorageSettings::new(pending.directory()).read().unwrap().is_none());
+            }
+            Ok(other) => panic!("after {after}: {other:?}"),
+            Err(other) => panic!("after {after}: {:?}", other.into_error()),
+        }
+        database.close().await.unwrap();
+    }
+}

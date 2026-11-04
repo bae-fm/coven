@@ -1,7 +1,42 @@
 //! Publish settings, custody and the loaded directory as the final bootstrap step.
 
 use super::*;
-use coven_foundation::files::StoreDirAccess;
+use coven_foundation::files::{FileError, StoreDirAccess};
+use coven_foundation::task::caught_sync;
+
+/// The step that publishes what `commit` committed, its last.
+pub(super) trait Publish {
+    /// Publish the store.
+    fn publish(&self) -> Result<(), BootstrapDirectoryError>;
+    /// Whether the store is published, which `commit` reads after
+    /// `publish` panicked to learn how far it got.
+    fn published(&self) -> Result<bool, FileError>;
+}
+
+impl Publish for BootstrapStore {
+    fn publish(&self) -> Result<(), BootstrapDirectoryError> {
+        BootstrapStore::publish(self)
+    }
+
+    fn published(&self) -> Result<bool, FileError> {
+        self.is_published()
+    }
+}
+
+/// A replacement's commit: its store publishes after the commit
+/// (`bootstrap_replace.rs`), so the commit publishes nothing, and the store
+/// stays unpublished meanwhile.
+pub(super) struct PublishedLater;
+
+impl Publish for PublishedLater {
+    fn publish(&self) -> Result<(), BootstrapDirectoryError> {
+        Ok(())
+    }
+
+    fn published(&self) -> Result<bool, FileError> {
+        Ok(false)
+    }
+}
 
 /// Committing a loaded installation's custody failed before publication.
 pub(super) enum Uncommitted {
@@ -26,8 +61,10 @@ impl Uncommitted {
 /// custody; a rollback holds them in the session again. A join's sign-in is
 /// already the device's, refreshes included, and stays as it is: only the
 /// code commits beside it, so a rollback leaves the join its kept sign-in
-/// (§13.2). A failure before publication restores every prior value.
-/// `Ok(Some(_))` is a failure after publication, which keeps custody
+/// (§13.2). A failure before publication restores every prior value, and
+/// so does a panic in a step, as `BootstrapError::Bug` (E15). A panic in
+/// `publish` leaves unknown whether the store was published, so its marker
+/// says. `Ok(Some(_))` is a failure after publication, which keeps custody
 /// committed.
 pub(super) fn commit(
     directory: &StoreDir,
@@ -37,7 +74,7 @@ pub(super) fn commit(
     sign_in: &SignInCustody,
     ring: &StoreKeyring,
     owners: &OpeningOwners,
-    publish: impl FnOnce() -> Result<(), BootstrapDirectoryError>,
+    publish: &impl Publish,
 ) -> Result<Option<BootstrapError>, Uncommitted> {
     let unchanged = Uncommitted::Restored;
     let keys = &owners.keys;
@@ -72,13 +109,33 @@ pub(super) fn commit(
                 coven_sync::commit_credentials(keychain, credentials, Some((code, name)))
             })?,
         });
-        Ok(publish()?)
+        Ok(())
     };
-    let mut error = match commit() {
-        Ok(()) => return Ok(None),
-        Err(BootstrapError::Directory(error)) if error.published_unsynced() => {
-            return Ok(Some(BootstrapError::Directory(error)))
-        }
+    let committed = caught_sync("commit the loaded store's custody", commit)
+        .unwrap_or_else(|bug| Err(BootstrapError::Bug(bug)));
+    let mut error = match committed {
+        Ok(()) => match caught_sync("publish the loaded store", || publish.publish()) {
+            Ok(Ok(())) => return Ok(None),
+            Ok(Err(error)) if error.published_unsynced() => {
+                return Ok(Some(BootstrapError::Directory(error)))
+            }
+            Ok(Err(error)) => error.into(),
+            Err(bug) => match publish.published() {
+                Ok(true) => return Ok(Some(BootstrapError::Bug(bug))),
+                Ok(false) => BootstrapError::Bug(bug),
+                // How far publication got is unknown: custody stays, and
+                // listing the stores shows whether it was published.
+                Err(read) => {
+                    return Err(Uncommitted::Partly(
+                        combine::<()>(
+                            Err(BootstrapError::Bug(bug)),
+                            Err(BootstrapDirectoryError::from(read).into()),
+                        )
+                        .expect_err("failed publication"),
+                    ))
+                }
+            },
+        },
         Err(error) => error,
     };
     // Attempt every rollback even if an earlier one fails. A failure is
@@ -139,10 +196,8 @@ pub(super) async fn publish_bootstrap(
 ) -> Result<CovenHandle, BootstrapError> {
     let directory = pending.directory();
     let publication_error =
-        commit(&directory, &code, &name, &credentials, &sign_in, &ring, &owners, || {
-            pending.publish()
-        })
-        .map_err(Uncommitted::into_error)?;
+        commit(&directory, &code, &name, &credentials, &sign_in, &ring, &owners, pending)
+            .map_err(Uncommitted::into_error)?;
     let handle = owners.into_handle(database, waits, true);
     let cleanup = directory
         .owned_file(StoreFile::Bootstrap)

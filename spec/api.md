@@ -6827,6 +6827,12 @@ pub enum ProviderSignOut {
     keeps its sign-in; rollback failures retain both causes. Errors after
     publication carry the open handle, including its session-only keys, and
     retain committed custody.
+  - A panic in a custody step rolls back the same way, as
+    `BootstrapError::Bug` (E15). A panic while publishing leaves unknown
+    whether the marker went, so coven reads it: a store already published
+    keeps its custody, with the bug as the error after publication, and
+    one still unpublished rolls back. Rolling back a published store's
+    custody would leave it visible with keys it can't open.
   - Cancellation closes the loading database and removes the unpublished store,
     with a join's kept sign-in and code, without committing final keys or
     credentials. Dropping a waiting future
