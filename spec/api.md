@@ -5504,7 +5504,9 @@ impl CovenHandle {
     /// retry whatever its delay, and returns once each one's attempt ended.
     /// While uploads are paused it tries only bound ones and returns
     /// `Paused`, and while the setting holds trailing uploads on a metered
-    /// network it does the same and returns `Metered`; while sync is stopped
+    /// network it does the same and returns `Metered`. While a
+    /// self-replacement pauses writes it does the same and fails with
+    /// `MemberKeysChanging` (§12.3, §17.4); while sync is stopped
     /// it tries none and returns `NotSyncing`. Provider cooldowns still hold; failures stay in
     /// pending() (§6.7).
     pub async fn retry_uploads_now(&self) -> Result<DrainOutcome, SyncError>;

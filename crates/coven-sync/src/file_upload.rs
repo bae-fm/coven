@@ -118,11 +118,18 @@ impl FilesInner {
                 error => FileReadError::Database(DbError::SyncStream(Box::new(error))),
             },
         )?;
-        self.database
-            .complete_upload(item.id, upload_subject(&item.location))
-            .await
-            .map_err(FileReadError::from)?;
-        Ok(true)
+        match self.database.complete_upload(item.id, upload_subject(&item.location)).await {
+            Ok(()) => Ok(true),
+            // A self-replacement paused writes while the file was sent. The
+            // stored bytes wait under their path, and the upload stays
+            // queued, held, until a run after the pause finds them and
+            // completes it (§12.3, §17.4).
+            Err(DbError::MemberKeysChanging) => {
+                self.writes_were_paused();
+                Ok(false)
+            }
+            Err(error) => Err(FileReadError::from(error).into()),
+        }
     }
     /// Different bytes at a file path fail this upload attempt (§19.3).
     async fn settle_occupied(

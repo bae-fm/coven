@@ -83,6 +83,9 @@ struct FilesInner {
     /// of the last upload run or app change; parts and pins' downloads
     /// check it, with the network, between requests (§17.9).
     unmetered_only: AtomicBool,
+    /// Whether a self-replacement pauses this device's writes, as of the last
+    /// read of the upload queue or a completion it refused (§12.3).
+    writes_paused: AtomicBool,
     /// Held by an app's change of either setting, and by an upload run from
     /// its read of the persisted settings until it has acted on them, so
     /// neither the copies above nor a retry's answer comes from a setting
@@ -156,6 +159,7 @@ impl Files {
             clock,
             paused: AtomicBool::new(false),
             unmetered_only: AtomicBool::new(false),
+            writes_paused: AtomicBool::new(false),
             hold_change: tokio::sync::Mutex::new(()),
             network,
             hold_wake: Notify::new(),
@@ -435,16 +439,30 @@ impl FilesInner {
             Ok(())
         }
     }
-    /// What holds trailing uploads now (§17.4, §17.9): the app's pause, or
-    /// a metered network while the app moves files only on unmetered ones.
+    /// What holds trailing uploads now (§12.3, §17.4, §17.9): the app's
+    /// pause, a self-replacement's pause of this device's writes, or a
+    /// metered network while the app moves files only on unmetered ones.
     pub(crate) fn trailing_hold(&self) -> Option<TrailingHold> {
         if self.paused.load(Ordering::Acquire) {
             Some(TrailingHold::Paused)
+        } else if self.writes_paused.load(Ordering::Acquire) {
+            Some(TrailingHold::MemberKeysChanging)
         } else if self.metered_holds(false) {
             Some(TrailingHold::Metered)
         } else {
             None
         }
+    }
+    /// Read whether a self-replacement pauses this device's writes.
+    pub(crate) async fn read_writes_paused(&self) -> Result<(), DbError> {
+        let paused = self.database.writes_paused().await?;
+        self.writes_paused.store(paused, Ordering::Release);
+        Ok(())
+    }
+    /// A trailing upload's completion was refused: the pause holds the lane
+    /// until a read of the queue finds it ended.
+    pub(crate) fn writes_were_paused(&self) {
+        self.writes_paused.store(true, Ordering::Release);
     }
     /// Whether anything holds trailing uploads now.
     pub(crate) fn trailing_held(&self) -> bool {
@@ -505,6 +523,10 @@ impl FilesInner {
 pub(crate) enum TrailingHold {
     /// The app paused uploads.
     Paused,
+    /// A self-replacement pauses this device's writes, so a trailing
+    /// upload's completion would have to wait for it (§12.3). A bound
+    /// upload's completion goes through: the replacement waits for it.
+    MemberKeysChanging,
     /// The network is metered and the app moves files only on unmetered
     /// networks.
     Metered,

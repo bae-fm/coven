@@ -92,13 +92,14 @@ pub(crate) fn insert(db: &DatabaseConnection, new: &NewOperation) -> Result<Oper
     Ok(id)
 }
 
+/// Whether a self-replacement pauses this device's writes (§12.3).
+pub(crate) fn writes_paused(db: &DatabaseConnection) -> Result<bool, DbError> {
+    db.query_row("SELECT EXISTS(SELECT 1 FROM _coven_write_pause WHERE paused=1)", [], |r| r.get(0))
+}
+
 /// Refuse an app write while a self-replacement pauses writes (§12.3).
 pub(crate) fn check_write_pause(db: &DatabaseConnection) -> Result<(), DbError> {
-    let paused: bool =
-        db.query_row("SELECT EXISTS(SELECT 1 FROM _coven_write_pause WHERE paused=1)", [], |r| {
-            r.get(0)
-        })?;
-    if paused {
+    if writes_paused(db)? {
         return Err(DbError::MemberKeysChanging);
     }
     Ok(())

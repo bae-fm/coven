@@ -118,6 +118,8 @@ impl Blocked {
             Self::NoStorage => Err(SyncError::NoStorage),
             Self::Held(TrailingHold::Paused) => Ok(DrainOutcome::Paused),
             Self::Held(TrailingHold::Metered) => Ok(DrainOutcome::Metered),
+            // As for an app write (§12.3).
+            Self::Held(TrailingHold::MemberKeysChanging) => Err(DbError::MemberKeysChanging.into()),
             Self::CatchUp => Err(StorageFailure::CatchUpRequired.into()),
             // An app retry overrides ordinary backoff, never a provider cooldown.
             Self::Cooling(remaining) => Err(StorageFailure::RateLimited
@@ -127,11 +129,14 @@ impl Blocked {
         })
     }
 
-    /// What the run itself returns. Automatic work waits out a cooldown and
-    /// a connection change without failing.
+    /// What the run itself returns. Automatic work waits out a cooldown, a
+    /// connection change and a self-replacement's write pause without
+    /// failing.
     fn run_outcome(self, uploaded: usize) -> Result<DrainOutcome, SyncError> {
         match self {
-            Self::Cooling(_) | Self::Changing => Ok(DrainOutcome::Drained { uploaded }),
+            Self::Cooling(_) | Self::Changing | Self::Held(TrailingHold::MemberKeysChanging) => {
+                Ok(DrainOutcome::Drained { uploaded })
+            }
             blocked => blocked.retry_answer().unwrap_or(Ok(DrainOutcome::Drained { uploaded })),
         }
     }
@@ -309,9 +314,10 @@ impl FilesInner {
         self.paused.store(paused, Ordering::Release);
         let unmetered_only = self.database.unmetered_only().await?;
         self.unmetered_only.store(unmetered_only, Ordering::Release);
+        self.read_writes_paused().await?;
         let work = self.database.upload_work::<PendingRecord>(upload_subject).await?;
-        // The pause and a metered network hold trailing uploads only
-        // (§17.4, §17.9).
+        // The pause, a self-replacement's write pause and a metered network
+        // hold trailing uploads only (§12.3, §17.4, §17.9).
         if let Some(hold) = self.trailing_hold() {
             if work.iter().all(|(item, _)| Lane::of(item) == Lane::Trailing) {
                 return self.end_blocked(Blocked::Held(hold), 0);
@@ -338,7 +344,12 @@ impl FilesInner {
                     // The first read went stale if a report ended waits since.
                     let work = match work.take() {
                         Some(work) if !run.stale => work,
-                        _ => self.database.upload_work::<PendingRecord>(upload_subject).await?,
+                        _ => {
+                            // A self-replacement's pause starts and ends
+                            // with a commit, which made the read stale.
+                            self.read_writes_paused().await?;
+                            self.database.upload_work::<PendingRecord>(upload_subject).await?
+                        }
                     };
                     self.read_ready(&mut run, work);
                 }
@@ -355,6 +366,7 @@ impl FilesInner {
                         // resume since the check, the run serves uploads
                         // again.
                         let _change = self.hold_change.lock().await;
+                        self.read_writes_paused().await?;
                         if let Some(hold) = self.trailing_hold() {
                             return self.end_blocked(Blocked::Held(hold), run.uploaded);
                         }

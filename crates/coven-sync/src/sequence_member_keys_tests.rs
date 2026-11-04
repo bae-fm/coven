@@ -451,3 +451,94 @@ async fn a_self_replacement_waits_for_a_held_write_until_its_file_is_stored() {
     ana.files().close().await;
     ana.database().close().await.unwrap();
 }
+
+/// §12.3 and §17.4: a trailing upload whose file is stored while a
+/// self-replacement pauses writes waits for the pause to end to switch its
+/// file to the cloud. It records no failure of its own.
+#[tokio::test]
+async fn a_trailing_upload_stored_during_a_self_replacement_waits_for_its_pause() {
+    use coven_database::{
+        DatabaseBuilder, FileColumn, FilePlace, Migration, Namespace, Place, Provenance,
+        RowIdentity, SyncedTable,
+    };
+    use coven_foundation::id_source::{IdSource, MemberId};
+    let group = Group::new();
+    let (temp, directory) = group.directory();
+    let builder = |directory| {
+        DatabaseBuilder::new(directory)
+            .synced_tables(vec![SyncedTable::new("photos", RowIdentity::SharedKey)
+                .file_column(FileColumn::new("file"))])
+            .namespaces(vec![Namespace::new("photos", Provenance::AppProvided, 1 << 20)])
+            .migrations(vec![Migration::addition(
+                1,
+                "photos",
+                "CREATE TABLE photos(id TEXT NOT NULL PRIMARY KEY,file TEXT)",
+            )])
+    };
+    let database = builder(directory).open().await.unwrap();
+    let identity = coven_crypto::MemberIdentity::new(
+        MemberId(group.ids.new_id()),
+        coven_format::test_utils::keys_from_seed(1),
+    );
+    let ana = group
+        .attach(temp, identity, Some(group.ring.clone()), group.storage.for_device(), database)
+        .await;
+    group.create(&ana).await;
+    // The photo's upload starts, and its one create is held.
+    let (started, observed) = tokio::sync::oneshot::channel();
+    let (resume, held) = tokio::sync::oneshot::channel();
+    ana.storage
+        .hold_next_creation(
+            coven_storage::ObjectPrefix::device_files(group.store, ana.sync.device),
+            started,
+            held,
+        )
+        .await;
+    let photo = ana
+        .database()
+        .staged_write::<_, _, _, _, coven_database::DbError>(
+            |batch| Ok(batch.put_file("photos", b"photo".to_vec(), Place::Cloud)),
+            |sql, file| {
+                sql.execute("INSERT INTO photos(id,file) VALUES('1',?1)", [file])?;
+                Ok(file)
+            },
+        )
+        .await
+        .unwrap();
+    observed.await.unwrap();
+    // The replacement binds the new pair, and its code refresh fails, so
+    // writes stay paused.
+    let keychain = Keychain::in_memory("trailing-upload-code").unwrap();
+    let (owner, store) = codes(&ana, keychain.clone());
+    store.set_restore_code(&SecretBytes::new(b"old code".to_vec())).unwrap();
+    keychain.fail_operations_after(&[0]);
+    let result = owner.replace_member_keys().await;
+    assert!(matches!(result, Err(SyncError::SecureStorage(_))), "{result:?}");
+    resume.send(()).unwrap();
+    let retried = ana.files().retry_uploads_now().await;
+    assert!(
+        matches!(retried, Err(SyncError::Database(coven_database::DbError::MemberKeysChanging))),
+        "{retried:?}"
+    );
+    let pending = ana.database().pending::<PendingRecord>().await.unwrap();
+    assert!(
+        pending.iter().all(|record| !matches!(record.subject, PendingSubject::Upload { .. })),
+        "{pending:?}"
+    );
+    assert!(matches!(
+        ana.database().file_ref(photo).await.unwrap().place(),
+        FilePlace::DeviceOnly { .. }
+    ));
+    // The app retries the replacement, which finishes and ends the pause;
+    // the photo's upload then completes.
+    owner.replace_member_keys().await.unwrap();
+    assert!(ana.database().operations().await.unwrap().is_empty());
+    ana.files().retry_uploads_now().await.unwrap();
+    assert!(matches!(
+        ana.database().file_ref(photo).await.unwrap().place(),
+        FilePlace::Cloud { .. }
+    ));
+    owner.close().await;
+    ana.files().close().await;
+    ana.database().close().await.unwrap();
+}

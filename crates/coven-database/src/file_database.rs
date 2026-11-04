@@ -369,6 +369,11 @@ impl FileDatabase {
     pub async fn uploads_paused(&self) -> Result<bool, DbError> {
         self.read(file_queue::paused).await
     }
+    /// Whether a self-replacement pauses this device's writes, which holds
+    /// a trailing upload's completion until it ends (§12.3, §17.4).
+    pub async fn writes_paused(&self) -> Result<bool, DbError> {
+        self.read(crate::operation::writes_paused).await
+    }
     /// Whether the app moves files only on unmetered networks, as persisted
     /// (E7).
     pub async fn unmetered_only(&self) -> Result<bool, DbError> {
@@ -592,9 +597,17 @@ impl FileDatabase {
         match &self.access {
             FileDatabaseAccess::Reader(database) => database.observer.closed_changes(),
             FileDatabaseAccess::Writer(database) => {
-                // A newly queued upload, and an upload a file stopped
-                // waiting for, which the worker then retires (§17.9).
+                // A newly queued upload, an upload a file stopped waiting
+                // for, which the worker then retires (§17.9), and a
+                // self-replacement's write pause starting or ending, which
+                // holds trailing uploads' completions (§12.3, §17.4).
                 let reads = vec![
+                    crate::observation::TableRead {
+                        table: "_coven_write_pause".into(),
+                        columns: ["paused".into()].into(),
+                        scope: crate::row_scope::RowScope::All,
+                        inserted_only: false,
+                    },
                     crate::observation::TableRead {
                         table: "_coven_file_uploads".into(),
                         columns: ["location".into()].into(),

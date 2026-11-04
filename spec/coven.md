@@ -3454,7 +3454,8 @@ Ana replaces her own keys:
 2. It sends and confirms the writes already queued, while her old keys still
    count. A write held for a bound file goes out with the write completing the
    file's upload, which the pause lets through, and the replacement waits until
-   it can send both (§17.4).
+   it can send both. A trailing upload's completion waits for the pause to
+   lift (§17.4).
 3. It keeps the new private pair in custody before claiming anything.
 4. It claims copies of the audience keys she holds, sealed to her new sealing
    key, then the replacement entry.
@@ -5989,6 +5990,13 @@ covers are in flight.
 - **Moving files only on unmetered networks holds only trailing uploads**
   too (§17.9), for the same reason: on a metered network the writes still go
   out, and a bound file is part of them.
+- **A self-replacement's write pause holds only trailing uploads** (§12.3).
+  Completing an upload is a write, and only a bound upload's completion goes
+  through the pause. A trailing upload already sending when the pause starts
+  stops between parts, and one whose file is stored meanwhile records no
+  failure: it stays queued, and the first run after the pause finds its bytes
+  stored and completes it. `retry_uploads_now` meanwhile tries only bound
+  uploads and returns `MemberKeysChanging`, as an app write does.
 - **Both lanes stop** for the stuck-device stop (§5.4), the removal cut-off
   (§14.1), a provider cooldown, a connection change and stopping sync, as writes
   do.
