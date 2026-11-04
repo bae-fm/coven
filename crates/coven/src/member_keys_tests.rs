@@ -1,4 +1,5 @@
 use super::*;
+use coven_foundation::clock::HANG_GUARD;
 
 /// Carol joins (the request she is approved by names her exact pair), then
 /// replaces her own keys through the public call: her id, role and device
@@ -294,7 +295,7 @@ mod owner_identity {
 #[tokio::test]
 async fn concurrent_replacements_return_their_own_codes() {
     let owner = Owner::new(CloudProvider::S3, false).await;
-    let (first, second) = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+    let (first, second) = tokio::time::timeout(HANG_GUARD, async {
         tokio::join!(owner.handle.replace_member_keys(), owner.handle.replace_member_keys())
     })
     .await

@@ -1,4 +1,5 @@
 use super::*;
+use coven_foundation::clock::HANG_GUARD;
 use coven_sync::JoiningIdentity;
 
 #[tokio::test]
@@ -327,8 +328,7 @@ async fn an_in_person_join_loads_without_an_approval_call() {
         &cancel,
         |_| {},
     );
-    let handle =
-        tokio::time::timeout(Duration::from_secs(20), joining).await.unwrap().unwrap().unwrap();
+    let handle = tokio::time::timeout(HANG_GUARD, joining).await.unwrap().unwrap().unwrap();
     assert!(handle
         .members()
         .await

@@ -8,6 +8,7 @@ use crate::tests::{
 };
 use crate::*;
 use coven_database::test_utils::Followed;
+use coven_foundation::clock::HANG_GUARD;
 use coven_storage::{
     test_utils::{Faults, MemoryRequest},
     ObjectPrefix, Storage, StorageFailure,
@@ -242,7 +243,7 @@ async fn an_uploads_retry_after_holds_the_next_pass() {
     let mut pending = subscribe_records(&device.handle);
     device.handle.set_uploads_paused(false).await.unwrap();
     // The upload's 429 is its file's record.
-    tokio::time::timeout(Duration::from_secs(5), async {
+    tokio::time::timeout(HANG_GUARD, async {
         while !pending.next().await.expect("the live query answers").unwrap().iter().any(|record| {
             matches!(record.subject, PendingSubject::Upload { .. })
                 && matches!(record.reason, PendingReason::Storage { failure, .. } if failure == StorageFailure::RateLimited)
@@ -286,7 +287,7 @@ async fn a_refused_file_upload_leaves_the_pass_synced_with_its_pending_record() 
     };
     let mut pending = subscribe_records(&device.handle);
     device.handle.set_uploads_paused(false).await.unwrap();
-    tokio::time::timeout(Duration::from_secs(5), async {
+    tokio::time::timeout(HANG_GUARD, async {
         while !refused(&pending.next().await.expect("the live query answers").unwrap()) {}
     })
     .await
@@ -703,7 +704,7 @@ async fn a_network_report_ends_an_offline_upload_backoff() {
     };
     let mut pending = subscribe_records(&device.handle);
     device.handle.set_uploads_paused(false).await.unwrap();
-    tokio::time::timeout(Duration::from_secs(5), async {
+    tokio::time::timeout(HANG_GUARD, async {
         while !offline(&pending.next().await.expect("the live query answers").unwrap()) {}
     })
     .await
@@ -745,7 +746,7 @@ async fn retry_now_ends_an_answered_upload_backoff() {
     };
     let mut pending = subscribe_records(&device.handle);
     device.handle.set_uploads_paused(false).await.unwrap();
-    tokio::time::timeout(Duration::from_secs(5), async {
+    tokio::time::timeout(HANG_GUARD, async {
         while !answered(&pending.next().await.expect("the live query answers").unwrap()) {}
     })
     .await
@@ -787,7 +788,7 @@ async fn a_view_record_arrives_with_its_cause() {
         )?)
     });
     device.handle.set_uploads_paused(false).await.unwrap();
-    let (record, cause, id) = tokio::time::timeout(Duration::from_secs(5), async {
+    let (record, cause, id) = tokio::time::timeout(HANG_GUARD, async {
         loop {
             let rows = list.next().await.expect("the live query answers").unwrap();
             if let Some(row) = rows.into_iter().next() {

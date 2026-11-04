@@ -1,6 +1,7 @@
 use crate::*;
 use coven_crypto::custody::{KeyringCustody, StoreKeychain};
 use coven_database::DatabaseBuilder;
+use coven_foundation::clock::HANG_GUARD;
 use coven_foundation::files::StoreDirAccess;
 use coven_storage::{test_utils::MemoryStorage, Storage};
 use std::sync::Arc;
@@ -125,7 +126,7 @@ async fn app_reopening_resumes_operations_and_files_using_one_storage_capability
     let mut uploads = handle.subscribe(|sql| {
         Ok(sql.query_row("SELECT count(*) FROM coven_uploads", [], |r| r.get::<_, i64>(0))?)
     });
-    tokio::time::timeout(std::time::Duration::from_secs(20), async {
+    tokio::time::timeout(HANG_GUARD, async {
         while uploads.next().await.expect("the live query answers").unwrap() != 0 {}
     })
     .await

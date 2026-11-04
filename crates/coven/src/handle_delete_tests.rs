@@ -4,8 +4,9 @@
 use crate::tests::Network;
 use crate::*;
 use coven_crypto::custody::{KeyringCustody, MemberKeyCustody, StoreKeyCustody};
+use coven_foundation::clock::HANG_GUARD;
 use coven_foundation::files::StoreDirAccess;
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
 
 async fn insert(handle: &CovenHandle, id: &str) {
     let id = id.to_owned();
@@ -169,7 +170,7 @@ async fn attach(handle: &CovenHandle, id: &str) {
 }
 
 async fn until(work: &mut LiveQuery<UnsentWork>, expected: UnsentWork) {
-    tokio::time::timeout(Duration::from_secs(10), async {
+    tokio::time::timeout(HANG_GUARD, async {
         while work.next().await.expect("the live query answers").unwrap() != expected {}
     })
     .await

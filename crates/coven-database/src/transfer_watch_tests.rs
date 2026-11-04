@@ -1,8 +1,8 @@
 use super::*;
 use crate::observation::CommitObserver;
 use crate::transfers_in_flight::TransfersInFlight;
+use coven_foundation::clock::HANG_GUARD;
 use coven_foundation::id_source::DeviceId;
-use std::time::Duration;
 
 fn file(n: u128) -> FileId {
     FileId(uuid::Uuid::from_u128(n))
@@ -13,7 +13,7 @@ fn progress(bytes_transferred: u64, bytes_total: u64) -> TransferProgress {
 }
 
 async fn next(watch: &mut TransferWatch) -> Vec<TransferChange> {
-    tokio::time::timeout(Duration::from_secs(5), watch.next())
+    tokio::time::timeout(HANG_GUARD, watch.next())
         .await
         .expect("the watch answers")
         .expect("the watch is open")

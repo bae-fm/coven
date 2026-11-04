@@ -3,11 +3,11 @@ use crate::{
     tests::TestStore,
     CovenError, DbError,
 };
+use coven_foundation::clock::HANG_GUARD;
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
     mpsc, Arc,
 };
-use std::time::Duration;
 
 #[tokio::test]
 async fn read_is_lazy_and_readonly_opens_use_the_same_api() {
@@ -54,7 +54,7 @@ async fn snapshot_is_fixed_before_the_closure_and_across_its_statements() {
         clone
             .read(move |sql| {
                 entered.send(()).unwrap();
-                released.recv_timeout(Duration::from_secs(5)).unwrap();
+                released.recv_timeout(HANG_GUARD).unwrap();
                 let first =
                     sql.query_row("SELECT title FROM notes", [], |r| r.get::<_, String>(0))?;
                 let second =
@@ -63,7 +63,7 @@ async fn snapshot_is_fixed_before_the_closure_and_across_its_statements() {
             })
             .await
     });
-    entry.recv_timeout(Duration::from_secs(5)).unwrap();
+    entry.recv_timeout(HANG_GUARD).unwrap();
     db.commit_writer(|sql| sql.batch("UPDATE notes SET title='new'").unwrap());
     release.send(()).unwrap();
     assert_eq!(task.await.unwrap().unwrap(), ("old".into(), "old".into()));
@@ -134,20 +134,17 @@ async fn process_releases_all_reader_leases_and_store_borrows() {
                 })
                 .process(move |value| {
                     entered.send(()).unwrap();
-                    released.recv_timeout(Duration::from_secs(5)).unwrap();
+                    released.recv_timeout(HANG_GUARD).unwrap();
                     Ok(value + 1)
                 })
                 .await
         }));
     }
     for _ in 0..4 {
-        entry.recv_timeout(Duration::from_secs(5)).unwrap();
+        entry.recv_timeout(HANG_GUARD).unwrap();
     }
-    assert_eq!(
-        tokio::time::timeout(Duration::from_secs(2), db.read(|_| Ok(42))).await.unwrap().unwrap(),
-        42
-    );
-    tokio::time::timeout(Duration::from_secs(2), db.close()).await.unwrap().unwrap();
+    assert_eq!(tokio::time::timeout(HANG_GUARD, db.read(|_| Ok(42))).await.unwrap().unwrap(), 42);
+    tokio::time::timeout(HANG_GUARD, db.close()).await.unwrap().unwrap();
     for release in releases {
         release.send(()).unwrap();
     }

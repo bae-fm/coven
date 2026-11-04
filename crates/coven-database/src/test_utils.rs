@@ -42,14 +42,13 @@ impl<T: Clone + PartialEq + std::fmt::Debug + Send + 'static> Followed<T> {
     }
 
     /// The next result the query reports. Panics on an error result or
-    /// after the query ends, and after ten seconds with no result.
+    /// after the query ends, and when none ever comes.
     pub async fn next(&mut self) -> T {
-        let next =
-            coven_foundation::clock::within(std::time::Duration::from_secs(10), self.query.next())
-                .await
-                .unwrap_or_else(|| panic!("no result after {:?}", self.latest))
-                .expect("the live query ended")
-                .expect("the live query failed");
+        let next = coven_foundation::clock::within(self.query.next())
+            .await
+            .unwrap_or_else(|| panic!("no result after {:?}", self.latest))
+            .expect("the live query ended")
+            .expect("the live query failed");
         self.latest = Some(next.clone());
         next
     }

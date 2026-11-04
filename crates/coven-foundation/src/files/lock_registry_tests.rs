@@ -1,4 +1,5 @@
 use super::*;
+use crate::clock::HANG_GUARD;
 use crate::files::StoreDirAccess;
 use crate::{files::StoreDirectories, id_source::UuidIds};
 use std::{
@@ -47,7 +48,7 @@ fn cancelling_filesystem_lock_acquisition_keeps_the_runtime_available_for_reopen
             drop(lock);
         });
     });
-    let pending = polling.recv_timeout(std::time::Duration::from_secs(5));
+    let pending = polling.recv_timeout(HANG_GUARD);
     drop(layout_lock);
     worker.join().unwrap();
     assert_eq!(pending, Ok(true), "filesystem locking blocked the runtime");

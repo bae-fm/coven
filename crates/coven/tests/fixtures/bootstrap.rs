@@ -1,5 +1,6 @@
 use super::*;
 pub(super) use crate::tests::{join_and_approve, join_with_response, next_join_request};
+use coven_foundation::clock::HANG_GUARD;
 use coven_foundation::progress::RecordingClock;
 
 pub(super) fn tables() -> Vec<SyncedTable> {
@@ -423,7 +424,7 @@ pub(super) async fn waiting_join_with(builder: CovenBuilder, invite: &Invite) {
         },
         &control,
     );
-    tokio::time::timeout(Duration::from_secs(20), async {
+    tokio::time::timeout(HANG_GUARD, async {
         tokio::select! {
             result = joining => panic!("the join ended while waiting: {result:?}"),
             changed = waits.wait_for(|waiting| *waiting) => drop(changed.unwrap()),

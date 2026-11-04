@@ -146,12 +146,12 @@ fn boot_time() -> Duration {
 #[cfg(any(test, feature = "test-utils"))]
 pub const HANG_GUARD: Duration = Duration::from_secs(300);
 
-/// `future`'s output, or `None` once `limit` of real time passes first: a
-/// test waiting on the system fails instead of hanging, whatever clock the
-/// store under it reads.
+/// `future`'s output, or `None` once `HANG_GUARD` of real time passes
+/// first: a test waiting on the system fails instead of hanging, whatever
+/// clock the store under it reads.
 #[cfg(feature = "test-utils")]
-pub async fn within<F: Future>(limit: Duration, future: F) -> Option<F::Output> {
-    tokio::time::timeout(limit, future).await.ok()
+pub async fn within<F: Future>(future: F) -> Option<F::Output> {
+    tokio::time::timeout(HANG_GUARD, future).await.ok()
 }
 
 /// A clock that returns the instant supplied by a test until it is set again.

@@ -1,5 +1,6 @@
 use super::*;
 use crate::{tests::TestStore, CovenError, NewOperation, OperationUpdate};
+use coven_foundation::clock::HANG_GUARD;
 use coven_foundation::id_source::DeviceId;
 use serde::Deserialize;
 
@@ -276,7 +277,7 @@ async fn losing_a_pending_update_fails_an_already_running_subscription() {
     let mut live = db.subscribe(move |sql| {
         let records = sql.pending::<Record>()?;
         entered.lock().unwrap().take().unwrap().send(()).unwrap();
-        released.lock().unwrap().recv_timeout(std::time::Duration::from_secs(10)).unwrap();
+        released.lock().unwrap().recv_timeout(HANG_GUARD).unwrap();
         Ok(records)
     });
     tokio::select! {

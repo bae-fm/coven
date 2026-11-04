@@ -1,6 +1,7 @@
 use crate::sequence_sync::tests::*;
 use crate::*;
 use coven_format::admin::{MemberRole, StoreChange};
+use coven_foundation::clock::HANG_GUARD;
 use coven_foundation::id_source::{IdSource, KeyId};
 use coven_storage::{ObjectPath, Storage};
 
@@ -102,11 +103,9 @@ async fn abandoned_preparation_deletion_preserves_reader_progress() {
             .unwrap();
         activate_resume.send(()).unwrap();
     };
-    let (result, ()) = tokio::time::timeout(std::time::Duration::from_secs(15), async {
-        tokio::join!(prepare, remove)
-    })
-    .await
-    .expect("publication controls must finish");
+    let (result, ()) = tokio::time::timeout(HANG_GUARD, async { tokio::join!(prepare, remove) })
+        .await
+        .expect("publication controls must finish");
     assert!(
         matches!(result, Err(SyncError::Rejected(OperationRejection::NotAllowed))),
         "{result:?}"

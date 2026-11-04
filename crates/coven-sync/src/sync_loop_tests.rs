@@ -2,6 +2,7 @@ use crate::sequence_sync::tests::*;
 use crate::*;
 use coven_crypto::custody::Keychain;
 use coven_database::test_utils::Followed;
+use coven_foundation::clock::HANG_GUARD;
 
 /// E5 and §6.5: an incomplete read is retryable input,
 /// never evidence that the slot's bytes cannot apply.
@@ -56,7 +57,7 @@ async fn slot_read_failures_keep_their_pass_status_and_retry() {
 async fn reached(device: &Device, slot: u64) {
     let mut status = device.sync.state.subscribe();
     tokio::time::timeout(
-        std::time::Duration::from_secs(10),
+        HANG_GUARD,
         status.wait_for(
             |status| matches!(status, SequenceStatus::Synced { through } if *through >= slot),
         ),
@@ -177,7 +178,7 @@ async fn a_pass_end_that_cant_be_written_fails_the_handle() {
     let (ana_codes, _) = codes(&ana, Keychain::in_memory("sync-loop-ana").unwrap());
     let ana_loop = SyncLoop::new(ana.sync.clone(), ana_codes);
     ana_loop.start().await.unwrap();
-    let failed = tokio::time::timeout(std::time::Duration::from_secs(10), status.next())
+    let failed = tokio::time::timeout(HANG_GUARD, status.next())
         .await
         .unwrap()
         .expect("the live query reports the failure");
@@ -271,7 +272,7 @@ async fn a_removed_device_never_retries_on_a_new_connection() {
     worker.sync_now().unwrap();
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     // Pulling to refresh is told why at once, and runs no pass.
-    let answer = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+    let answer = tokio::time::timeout(HANG_GUARD, async {
         ben.sync.waits.retry_requested().await.unwrap().await
     })
     .await
@@ -310,7 +311,7 @@ async fn a_panicking_pass_fails_sync_and_answers_its_retry_with_the_bug() {
     let mut faults = coven_storage::test_utils::Faults::none();
     faults.read_panics.insert(ana.sync.path(before + 1).unwrap());
     ben.storage.set_faults(faults).await;
-    let answer = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+    let answer = tokio::time::timeout(HANG_GUARD, async {
         ben.sync.waits.retry_requested().await.unwrap().await
     })
     .await

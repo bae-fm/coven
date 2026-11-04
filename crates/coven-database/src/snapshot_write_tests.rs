@@ -6,11 +6,11 @@ use crate::{Database, RowIdentity, SyncedTable};
 use coven_format::snapshot::section;
 use coven_format::snapshot::SnapshotDecoder;
 use coven_format::value::Value;
+use coven_foundation::clock::HANG_GUARD;
 use coven_foundation::id_source::{CircleId, DeviceId, SequentialIds};
 use coven_merge::{MergeError, Timestamp, WriteOracle};
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
 #[derive(Default)]
 struct Oracle(BTreeMap<WriteId, AppliedWrite>);
@@ -316,7 +316,7 @@ async fn snapshot_frames_keep_one_committed_state_while_the_writer_commits() {
                 move |header| {
                     *metadata_output.lock().unwrap() = Some(prefix(header));
                     started.send(()).unwrap();
-                    wait.recv_timeout(Duration::from_secs(20)).unwrap();
+                    wait.recv_timeout(HANG_GUARD).unwrap();
                     Ok(())
                 },
                 move |frame| {
@@ -327,9 +327,9 @@ async fn snapshot_frames_keep_one_committed_state_while_the_writer_commits() {
             .await
             .unwrap();
     });
-    tokio::time::timeout(Duration::from_secs(20), observed).await.unwrap().unwrap();
+    tokio::time::timeout(HANG_GUARD, observed).await.unwrap().unwrap();
     tokio::time::timeout(
-        Duration::from_secs(20),
+        HANG_GUARD,
         sql(
             &database,
             "UPDATE notes SET title='after'; INSERT INTO notes VALUES('other','new','')",

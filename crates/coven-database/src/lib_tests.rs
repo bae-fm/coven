@@ -1,4 +1,5 @@
 use crate::{CovenError, DatabaseBuilder, DbError, Migration, SyncedTable};
+use coven_foundation::clock::HANG_GUARD;
 use coven_foundation::files::StoreDirAccess;
 use coven_foundation::{
     files::{StoreDir, StoreDirectories},
@@ -175,7 +176,7 @@ pub(crate) fn store_row(table: &str, id: &str) -> coven_merge::RowId {
 pub(crate) async fn next_result<T: Clone + PartialEq + Send + 'static>(
     query: &mut crate::LiveQuery<T>,
 ) -> crate::CovenResult<T> {
-    tokio::time::timeout(std::time::Duration::from_secs(5), query.next())
+    tokio::time::timeout(HANG_GUARD, query.next())
         .await
         .expect("the live query answers in time")
         .expect("the live query is open")

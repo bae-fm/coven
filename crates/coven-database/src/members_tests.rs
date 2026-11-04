@@ -2,7 +2,7 @@ use super::*;
 use crate::tests::TestStore;
 use crate::tests::{keys, member};
 use crate::{StoreCircle, StoreDevice, StoreMember};
-use std::time::Duration;
+use coven_foundation::clock::HANG_GUARD;
 
 /// Member 2 reaches storage through a provider account, the others through
 /// S3 keys.
@@ -160,20 +160,20 @@ async fn subscriptions_start_with_the_committed_value_and_follow_replay() {
     assert!(circles.next().await.expect("the live query answers").unwrap().is_empty());
     assert!(circle.next().await.expect("the live query answers").unwrap().is_empty());
     fixture(&db).await;
-    let next = tokio::time::timeout(Duration::from_secs(5), members.next())
+    let next = tokio::time::timeout(HANG_GUARD, members.next())
         .await
         .unwrap()
         .expect("the live query answers")
         .unwrap();
     assert_eq!(next, db.members().await.unwrap());
     assert_eq!(next.len(), 2);
-    let next = tokio::time::timeout(Duration::from_secs(5), circles.next())
+    let next = tokio::time::timeout(HANG_GUARD, circles.next())
         .await
         .unwrap()
         .expect("the live query answers")
         .unwrap();
     assert_eq!(next.len(), 1);
-    let next = tokio::time::timeout(Duration::from_secs(5), circle.next())
+    let next = tokio::time::timeout(HANG_GUARD, circle.next())
         .await
         .unwrap()
         .expect("the live query answers")
@@ -294,7 +294,7 @@ async fn the_apps_sql_reads_members_and_devices_former_ones_included() {
     ];
     expected.sort_by_key(|row| row.0.to_string());
     // Applying the membership reruns the app's query.
-    let next = tokio::time::timeout(Duration::from_secs(5), members.next())
+    let next = tokio::time::timeout(HANG_GUARD, members.next())
         .await
         .unwrap()
         .expect("the live query answers")

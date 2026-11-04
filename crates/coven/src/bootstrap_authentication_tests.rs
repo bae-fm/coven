@@ -1,5 +1,6 @@
 use super::*;
 use crate::authentication::SignIn;
+use coven_foundation::clock::HANG_GUARD;
 
 #[tokio::test]
 async fn restore_and_keychain_restore_use_builder_sign_in_without_returning_tokens() {
@@ -291,7 +292,7 @@ async fn a_refresh_while_waiting_is_kept_for_the_resumed_join() {
         // The second wait follows the check that refreshed the token.
         waits.wait_for(|waits| *waits >= 2).await.unwrap();
     };
-    tokio::time::timeout(Duration::from_secs(20), async {
+    tokio::time::timeout(HANG_GUARD, async {
         tokio::select! {
             result = joining => panic!("the join ended while waiting: {result:?}"),
             () = refreshed => (),

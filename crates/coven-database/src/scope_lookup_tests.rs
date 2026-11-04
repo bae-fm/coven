@@ -4,6 +4,7 @@
 use crate::tests::next;
 use crate::tests::TestStore;
 use crate::{Database, LiveQuery};
+use coven_foundation::clock::HANG_GUARD;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -597,7 +598,7 @@ async fn writes_during_a_run_are_judged_against_its_snapshot() {
             let rows = sql.query(ALBUM_X, [], |r| r.get::<_, String>(0))?;
             if let Some(entered) = entered.lock().unwrap().take() {
                 entered.send(()).unwrap();
-                released.lock().unwrap().recv_timeout(Duration::from_secs(5)).unwrap();
+                released.lock().unwrap().recv_timeout(HANG_GUARD).unwrap();
             }
             Ok(rows)
         });
@@ -639,7 +640,7 @@ async fn a_run_between_a_writes_judging_and_its_commit_follows_the_write() {
         if point == crate::test_utils::WriteCheckpoint::Judged {
             if let Some(judged) = judged.lock().unwrap().take() {
                 judged.send(()).unwrap();
-                resumed.lock().unwrap().recv_timeout(Duration::from_secs(5)).unwrap();
+                resumed.lock().unwrap().recv_timeout(HANG_GUARD).unwrap();
             }
         }
     })
@@ -665,7 +666,7 @@ where
     Q: Clone + PartialEq + Send + Sync + 'static,
     T: Clone + PartialEq + Send + 'static,
 {
-    tokio::time::timeout(Duration::from_secs(5), query.next())
+    tokio::time::timeout(HANG_GUARD, query.next())
         .await
         .expect("query must answer")
         .expect("the live query answers")

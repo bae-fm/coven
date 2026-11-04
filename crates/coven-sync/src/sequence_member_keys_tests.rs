@@ -137,6 +137,7 @@ async fn a_replaced_pair_stops_at_its_replacement_before_a_slot_it_cannot_open()
 
 use coven_crypto::custody::Keychain;
 use coven_crypto::SecretBytes;
+use coven_foundation::clock::HANG_GUARD;
 
 // §11.5 and E9: identity installation is unfinished until code custody commits.
 #[tokio::test]
@@ -367,7 +368,6 @@ async fn a_self_replacement_waits_for_a_held_write_until_its_file_is_stored() {
         RowIdentity, SyncedTable,
     };
     use coven_foundation::id_source::{IdSource, MemberId};
-    use std::time::Duration;
     let group = Group::new();
     let (temp, directory) = group.directory();
     let database = DatabaseBuilder::new(directory)
@@ -412,11 +412,8 @@ async fn a_self_replacement_waits_for_a_held_write_until_its_file_is_stored() {
         )
         .await
         .unwrap();
-    tokio::time::timeout(Duration::from_secs(10), observed)
-        .await
-        .expect("the cover's upload starts")
-        .unwrap();
-    let result = tokio::time::timeout(Duration::from_secs(10), ana.sync.replace_member_keys())
+    tokio::time::timeout(HANG_GUARD, observed).await.expect("the cover's upload starts").unwrap();
+    let result = tokio::time::timeout(HANG_GUARD, ana.sync.replace_member_keys())
         .await
         .expect("a held write makes replacement wait, not block");
     assert!(
@@ -439,10 +436,8 @@ async fn a_self_replacement_waits_for_a_held_write_until_its_file_is_stored() {
         ana.database().file_ref(cover).await.unwrap().place(),
         FilePlace::Cloud { .. }
     ));
-    let installed = tokio::time::timeout(Duration::from_secs(10), ana.sync.replace_member_keys())
-        .await
-        .unwrap()
-        .unwrap();
+    let installed =
+        tokio::time::timeout(HANG_GUARD, ana.sync.replace_member_keys()).await.unwrap().unwrap();
     assert_ne!(installed.keys().public_keys(), old);
     assert_eq!(
         ana.database().store_state().await.unwrap().members[&ana.identity.member()].keys,

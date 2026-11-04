@@ -1,4 +1,5 @@
 use crate::{tests::TestStore, write::tests::records, *};
+use coven_foundation::clock::HANG_GUARD;
 use coven_foundation::{
     clock::FixedClock,
     id_source::{CircleId, FileId, SequentialIds},
@@ -277,7 +278,7 @@ async fn originals_are_checked_while_prepared_and_never_under_the_writer() {
     std::fs::remove_file(&path).unwrap();
     assert!(std::process::Command::new("mkfifo").arg(&path).status().unwrap().success());
     tokio::time::timeout(
-        Duration::from_secs(5),
+        HANG_GUARD,
         db.write_as::<_, _, crate::DbError>(move |sql| {
             let file = sql.put_user_file("files", prepared, crate::Place::Cloud)?;
             sql.execute("INSERT INTO files(id,file) VALUES('7',?1)", [file])?;

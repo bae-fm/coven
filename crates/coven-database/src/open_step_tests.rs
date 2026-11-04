@@ -3,6 +3,7 @@ use crate::tests::TestStore;
 use crate::write::tests::sql;
 use crate::{Migration, RowIdentity, SqlFunctions, SyncedTable};
 use coven_foundation::clock::FixedClock;
+use coven_foundation::clock::HANG_GUARD;
 use coven_foundation::progress::Progress;
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, SystemTime};
@@ -22,9 +23,7 @@ impl Seen {
     fn wait_for(&self, progress: Progress<OpenStep>) {
         let (seen, changed) = &*self.0;
         let (_seen, _timed_out) = changed
-            .wait_timeout_while(seen.lock().unwrap(), Duration::from_secs(10), |seen| {
-                !seen.contains(&progress)
-            })
+            .wait_timeout_while(seen.lock().unwrap(), HANG_GUARD, |seen| !seen.contains(&progress))
             .unwrap();
     }
 

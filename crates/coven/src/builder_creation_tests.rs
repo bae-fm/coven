@@ -1,5 +1,6 @@
 use crate::*;
 use coven_crypto::custody::Keychain;
+use coven_foundation::clock::HANG_GUARD;
 use coven_foundation::files::StoreDirAccess;
 use coven_storage::{test_utils::MemoryStorage, Storage};
 use std::sync::{Arc, Mutex};
@@ -92,7 +93,7 @@ impl MemberKeyCustody for ClosingIdentity {
 
     fn close(&self) {
         self.closing.notify_one();
-        self.release.lock().unwrap().recv_timeout(std::time::Duration::from_secs(10)).unwrap();
+        self.release.lock().unwrap().recv_timeout(HANG_GUARD).unwrap();
         self.keys.lock().unwrap().take();
     }
 }
@@ -117,9 +118,7 @@ async fn publication_sync_failure_waits_for_close_and_releases_session_custody()
         "Household".into(),
         fail_publication_sync,
     ));
-    tokio::time::timeout(std::time::Duration::from_secs(5), identity.closing.notified())
-        .await
-        .unwrap();
+    tokio::time::timeout(HANG_GUARD, identity.closing.notified()).await.unwrap();
     assert!(!creation.is_finished(), "creation returned before custody closed");
     assert!(identity.keys.lock().unwrap().is_some());
     release.send(()).unwrap();

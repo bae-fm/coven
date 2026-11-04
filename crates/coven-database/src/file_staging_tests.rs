@@ -3,6 +3,7 @@ use crate::{
     tests::TestStore,
     *,
 };
+use coven_foundation::clock::HANG_GUARD;
 use std::{
     pin::Pin,
     sync::{
@@ -178,7 +179,7 @@ async fn a_socket_stream_leaves_the_writer_available_and_keeps_its_pending_bytes
         }
     });
     reading.await.unwrap();
-    let unrelated = tokio::time::timeout(Duration::from_secs(1), db.write(|_| Ok(()))).await;
+    let unrelated = tokio::time::timeout(HANG_GUARD, db.write(|_| Ok(()))).await;
     // Release the reader before asserting, so a failing implementation can exit.
     producer.write_all(b"socket bytes").await.unwrap();
     producer.shutdown().await.unwrap();
@@ -228,7 +229,7 @@ async fn close_waits_for_staging_and_reopen_removes_bytes_no_write_took() {
             producer.shutdown().await.unwrap();
             Some(staging.await.unwrap().unwrap())
         };
-        tokio::time::timeout(Duration::from_secs(5), closing).await.unwrap().unwrap();
+        tokio::time::timeout(HANG_GUARD, closing).await.unwrap().unwrap();
         assert_eq!(owned_paths(&store).len(), 1);
         let sql = rusqlite::Connection::open(store.database_path()).unwrap();
         assert_eq!(
@@ -304,7 +305,7 @@ fn a_file_reader_and_writer_can_share_one_blocking_worker() {
         std::fs::write(original.path(), vec![9; 3 * 64 * 1024 + 17]).unwrap();
         let reader = tokio::fs::File::open(original.path()).await.unwrap();
         let file = tokio::time::timeout(
-            Duration::from_secs(5),
+            HANG_GUARD,
             db.staged_write::<_, _, _, _, crate::DbError>(
                 move |batch| {
                     Ok(batch.put_file(
@@ -364,6 +365,6 @@ async fn staged_files_dropped_in_a_write_go_free_while_the_store_closes() {
     // reach the store's lock and wait for it.
     tokio::time::sleep(Duration::from_millis(200)).await;
     release.send(()).unwrap();
-    tokio::time::timeout(Duration::from_secs(10), writing).await.unwrap().unwrap().unwrap();
-    tokio::time::timeout(Duration::from_secs(10), closing).await.unwrap().unwrap().unwrap();
+    tokio::time::timeout(HANG_GUARD, writing).await.unwrap().unwrap().unwrap();
+    tokio::time::timeout(HANG_GUARD, closing).await.unwrap().unwrap().unwrap();
 }

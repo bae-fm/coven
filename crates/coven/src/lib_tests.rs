@@ -1,4 +1,5 @@
 use crate::*;
+use coven_foundation::clock::HANG_GUARD;
 use coven_storage::{test_utils::MemoryStorage, Storage};
 use std::{
     sync::Arc,
@@ -571,9 +572,7 @@ pub(crate) async fn join_with_response<T, U>(
     joining: impl std::future::Future<Output = T>,
     response: impl std::future::Future<Output = U>,
 ) -> (T, U) {
-    tokio::time::timeout(Duration::from_secs(20), async { tokio::join!(joining, response) })
-        .await
-        .unwrap()
+    tokio::time::timeout(HANG_GUARD, async { tokio::join!(joining, response) }).await.unwrap()
 }
 
 pub(crate) async fn join_and_approve<T, F: std::future::Future<Output = ()>>(
@@ -752,7 +751,7 @@ async fn seeded_whole_system_convergence() {
             network.assert_converged().await;
             network.close().await;
         });
-        match tokio::time::timeout(Duration::from_secs(90), task).await {
+        match tokio::time::timeout(HANG_GUARD, task).await {
             Ok(Ok(())) => {}
             result => panic!("convergence seed {seed}: {result:?}"),
         }

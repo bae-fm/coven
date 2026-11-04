@@ -1,11 +1,11 @@
 use crate::{tests::TestStore, CovenError, Database, DbError};
 use crate::{Lost, LostCell, RemovalRule, Replacement, WriteId};
 use coven_format::{key::encode_key, merge_fields::*, value::Value as WireValue};
+use coven_foundation::clock::HANG_GUARD;
 use coven_foundation::id_source::DeviceId;
 use coven_merge::{ColumnValue, Rule};
 use rusqlite::types::Value;
 use std::collections::{BTreeMap, BTreeSet};
-use std::time::Duration;
 
 fn setter(number: u64) -> WriteId {
     WriteId { device: DeviceId(u64::MAX), number }
@@ -236,7 +236,7 @@ async fn corrupt_values_fail_typed_and_live_losses_recover_after_repair() {
         rules,
     );
     assert!(matches!(
-        tokio::time::timeout(Duration::from_secs(3), query.next())
+        tokio::time::timeout(HANG_GUARD, query.next())
             .await
             .unwrap()
             .expect("the live query answers"),
@@ -250,7 +250,7 @@ async fn corrupt_values_fail_typed_and_live_losses_recover_after_repair() {
         .unwrap()
     });
     assert_eq!(
-        tokio::time::timeout(Duration::from_secs(3), query.next())
+        tokio::time::timeout(HANG_GUARD, query.next())
             .await
             .unwrap()
             .expect("the live query answers")

@@ -3,6 +3,7 @@
 //! the app keeps files off stops new starts (§17.9, E7).
 
 use super::*;
+use coven_foundation::clock::HANG_GUARD;
 use coven_storage::test_utils::MemoryRequest;
 use std::num::NonZeroUsize;
 use tokio::sync::Semaphore;
@@ -32,7 +33,7 @@ fn creates(f: &Fixture) -> Vec<coven_storage::ObjectPath> {
 
 async fn until_creates(f: &Fixture, count: usize) {
     let mut requests = f.storage.subscribe_requests();
-    tokio::time::timeout(Duration::from_secs(10), async {
+    tokio::time::timeout(HANG_GUARD, async {
         while creates(f).len() < count {
             requests.changed().await.unwrap();
         }
@@ -43,7 +44,7 @@ async fn until_creates(f: &Fixture, count: usize) {
 
 async fn until_queued(f: &Fixture, count: usize) {
     let mut queue = f.subscribe_queue();
-    tokio::time::timeout(Duration::from_secs(10), async {
+    tokio::time::timeout(HANG_GUARD, async {
         while queue.next().await.expect("the live query answers").unwrap().files.len() != count {}
     })
     .await
@@ -230,10 +231,7 @@ async fn a_metered_network_holds_trailing_uploads_until_it_is_unmetered() {
     f.set_uploads_paused(false).await;
     f.attach("files", "a", photo(1)).await;
     assert_eq!(
-        tokio::time::timeout(Duration::from_secs(10), f.files.retry_uploads_now())
-            .await
-            .unwrap()
-            .unwrap(),
+        tokio::time::timeout(HANG_GUARD, f.files.retry_uploads_now()).await.unwrap().unwrap(),
         DrainOutcome::Metered
     );
     assert!(creates(&f).is_empty());
@@ -262,7 +260,7 @@ async fn a_panicking_upload_worker_answers_app_retries_with_its_bug() {
     f.storage.set_faults(faults).await;
     f.attach("files", "a", photo(1)).await;
     f.set_uploads_paused(false).await;
-    let answered = tokio::time::timeout(Duration::from_secs(10), f.files.retry_uploads_now())
+    let answered = tokio::time::timeout(HANG_GUARD, f.files.retry_uploads_now())
         .await
         .expect("the retry is answered");
     let Err(SyncError::Bug(bug)) = answered else {
@@ -287,7 +285,7 @@ async fn an_upload_worker_ended_by_a_failed_handle_answers_app_retries() {
     f.database.test_fail_retry_effect().await.unwrap();
     assert!(f.files.inner.waits.sync_stopped().await.is_err(), "the write failed the handle");
     for _ in 0..2 {
-        let answered = tokio::time::timeout(Duration::from_secs(10), f.files.retry_uploads_now())
+        let answered = tokio::time::timeout(HANG_GUARD, f.files.retry_uploads_now())
             .await
             .expect("the retry is answered");
         let Err(error) = answered else { panic!("the retry heard no failure: {answered:?}") };
@@ -319,7 +317,7 @@ async fn an_app_retry_joins_the_run_in_progress() {
     until_creates(&f, 3).await;
     gate.add_permits(2);
     assert_eq!(
-        tokio::time::timeout(Duration::from_secs(10), answer.answered()).await.unwrap().unwrap(),
+        tokio::time::timeout(HANG_GUARD, answer.answered()).await.unwrap().unwrap(),
         DrainOutcome::Drained { uploaded: 2 }
     );
     until_queued(&f, 0).await;
@@ -389,7 +387,7 @@ async fn a_retry_after_resuming_as_a_paused_run_ends_is_not_answered_paused() {
         }
     }));
     gate.add_permits(1);
-    tokio::time::timeout(Duration::from_secs(10), ending.recv())
+    tokio::time::timeout(HANG_GUARD, ending.recv())
         .await
         .expect("the run ends paused once its upload ends")
         .unwrap();
@@ -399,7 +397,7 @@ async fn a_retry_after_resuming_as_a_paused_run_ends_is_not_answered_paused() {
     proceed.send(()).unwrap();
     gate.add_permits(1);
     assert_eq!(
-        tokio::time::timeout(Duration::from_secs(10), answer.answered())
+        tokio::time::timeout(HANG_GUARD, answer.answered())
             .await
             .expect("the retry is answered")
             .unwrap(),
@@ -423,7 +421,7 @@ async fn a_single_request_is_uploading_without_progress_until_completion_retires
     f.set_uploads_paused(false).await;
     let files = f.files.clone();
     let task = tokio::spawn(async move { files.retry_uploads_now().await });
-    tokio::time::timeout(Duration::from_secs(20), receiving).await.unwrap().unwrap();
+    tokio::time::timeout(HANG_GUARD, receiving).await.unwrap().unwrap();
     // The file is being sent, but bytes in flight are not progress: it has
     // none until storage confirms and completion retires it.
     let mut uploads = f.subscribe_queue();
@@ -461,7 +459,7 @@ async fn the_worker_s_attempts_are_what_sending_reads() {
     // The files being sent, how many `sending` counts, and how many are queued.
     type Outbox = (Vec<String>, i64, i64);
     let mut until = async |done: &dyn Fn(&Outbox) -> bool| loop {
-        let answer = tokio::time::timeout(Duration::from_secs(10), counts.next())
+        let answer = tokio::time::timeout(HANG_GUARD, counts.next())
             .await
             .expect("the live query answers")
             .expect("the live query is open")

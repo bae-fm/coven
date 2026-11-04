@@ -1,5 +1,6 @@
 use crate::sequence_sync::tests::*;
 use coven_format::admin::StoreChange;
+use coven_foundation::clock::HANG_GUARD;
 use coven_storage::{ObjectPath, Storage};
 
 /// Ana's store on S3 with Ben admitted, then removed: his key still works.
@@ -154,7 +155,6 @@ async fn stalled_pin_downloads_leave_sequence_passes_free() {
         RowIdentity, SyncedTable,
     };
     use coven_foundation::id_source::{IdSource, MemberId};
-    use std::time::Duration;
     let group = Group::new();
     let mut devices = Vec::new();
     for seed in [1, 2] {
@@ -226,9 +226,9 @@ async fn stalled_pin_downloads_leave_sequence_passes_free() {
         let file = file.clone();
         async move { files.pin(std::slice::from_ref(&file)).await }
     });
-    tokio::time::timeout(Duration::from_secs(20), observed).await.unwrap().unwrap();
+    tokio::time::timeout(HANG_GUARD, observed).await.unwrap().unwrap();
     // The pass completes while the file's one download waits.
-    let pass = tokio::time::timeout(Duration::from_secs(20), ana.sync.pass())
+    let pass = tokio::time::timeout(HANG_GUARD, ana.sync.pass())
         .await
         .expect("a held file must not hold a sequence pass");
     assert!(matches!(pass.unwrap(), crate::SequenceStatus::Synced { .. }));
@@ -237,7 +237,7 @@ async fn stalled_pin_downloads_leave_sequence_passes_free() {
     let applied = ana.database().applied_slot().await.unwrap();
     insert(ben.database(), "later", "arrived while the file waited").await;
     ben.sync.pass().await.unwrap();
-    let pass = tokio::time::timeout(Duration::from_secs(20), ana.sync.pass())
+    let pass = tokio::time::timeout(HANG_GUARD, ana.sync.pass())
         .await
         .expect("later slots must apply while the file waits")
         .unwrap();
@@ -250,7 +250,7 @@ async fn stalled_pin_downloads_leave_sequence_passes_free() {
     assert!(!resume.is_closed(), "the passes left the download in flight");
     assert!(!kept().await);
     resume.send(()).unwrap();
-    tokio::time::timeout(Duration::from_secs(20), pinning).await.unwrap().unwrap().unwrap();
+    tokio::time::timeout(HANG_GUARD, pinning).await.unwrap().unwrap().unwrap();
     assert!(kept().await);
     assert_eq!(ana.files().read_file(&file).await.unwrap(), b"sound");
     for device in devices {

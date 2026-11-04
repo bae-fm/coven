@@ -12,9 +12,9 @@ use crate::sql_value::SqlValue;
 use crate::tests::next;
 use crate::tests::TestStore;
 use crate::{CovenResult, Database, LiveQuery, RowIdentity, SyncedTable};
+use coven_foundation::clock::HANG_GUARD;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
 /// One write, run when awaited.
 type Pending = std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>;
@@ -131,7 +131,7 @@ async fn a_write_during_the_read_that_reveals_the_scope_wakes_it() {
     let mut query = db.subscribe(move |sql| -> CovenResult<_> {
         if let Some(entered) = entered.lock().unwrap().take() {
             entered.send(()).unwrap();
-            released.lock().unwrap().recv_timeout(Duration::from_secs(5)).unwrap();
+            released.lock().unwrap().recv_timeout(HANG_GUARD).unwrap();
         }
         Ok(sql.query("SELECT title FROM tracks WHERE release='a' ORDER BY id", [], |r| {
             r.get::<_, String>(0)
@@ -574,7 +574,7 @@ async fn one_shot(db: &Database, query: &Generated) -> Rows {
 }
 
 async fn next_rows(query: &mut LiveQuery<(usize, Rows)>) -> (usize, Rows) {
-    tokio::time::timeout(Duration::from_secs(5), query.next())
+    tokio::time::timeout(HANG_GUARD, query.next())
         .await
         .expect("query must answer")
         .expect("the live query answers")

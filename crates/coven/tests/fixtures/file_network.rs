@@ -2,8 +2,8 @@
 //! calls its tests stage, await and find those files with.
 use super::{Device, Network};
 use crate::*;
+use coven_foundation::clock::HANG_GUARD;
 use coven_storage::Storage;
-use std::time::Duration;
 
 /// One plain table and one whose rows reference app-provided files in the
 /// `files` namespace every network declares.
@@ -60,7 +60,7 @@ pub(crate) async fn wait_for_empty_queue(handle: &CovenHandle) {
     let mut uploads = handle.subscribe(|sql| {
         Ok(sql.query_row("SELECT count(*) FROM coven_uploads", [], |r| r.get::<_, i64>(0))?)
     });
-    tokio::time::timeout(Duration::from_secs(10), async {
+    tokio::time::timeout(HANG_GUARD, async {
         while uploads.next().await.expect("the live query answers").unwrap() != 0 {}
     })
     .await

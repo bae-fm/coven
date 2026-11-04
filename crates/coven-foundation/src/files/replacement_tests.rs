@@ -1,4 +1,5 @@
 use super::*;
+use crate::clock::HANG_GUARD;
 use crate::files::{FileArea, FileName, StoreDirAccess, StoreDirectories, StoreFile};
 use crate::id_source::UuidIds;
 
@@ -346,7 +347,7 @@ fn removing_the_replaced_installation_leaves_the_runtime_thread_free() {
         let (release, gate) = std::sync::mpsc::channel::<()>();
         let blocker = tokio::task::spawn_blocking(move || {
             started.send(()).unwrap();
-            gate.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
+            gate.recv_timeout(HANG_GUARD).unwrap();
         });
         ready.recv().unwrap();
         let mut removing = std::pin::pin!(replacement.remove_replaced());

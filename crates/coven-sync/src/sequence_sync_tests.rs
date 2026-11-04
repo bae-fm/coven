@@ -8,6 +8,7 @@ use coven_crypto::{
 };
 use coven_database::{Database, DatabaseBuilder, Migration, RowIdentity, SyncedTable};
 use coven_format::admin::{MemberRole, StoreChange};
+use coven_foundation::clock::HANG_GUARD;
 use coven_foundation::files::StoreDirAccess;
 use coven_foundation::{
     files::{StoreDirectories, StoreFile},
@@ -609,12 +610,9 @@ async fn a_stalled_slot_body_leaves_the_application_writer_available() {
     group.storage.hold_body_at(path, 65_537, stalled, held).await;
     let app = async {
         observed.await.unwrap();
-        tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            insert(&ben.sync.database, "local", "during download"),
-        )
-        .await
-        .expect("network input held the application writer");
+        tokio::time::timeout(HANG_GUARD, insert(&ben.sync.database, "local", "during download"))
+            .await
+            .expect("network input held the application writer");
         resume.send(()).unwrap();
     };
     let (person, ()) = tokio::join!(ben.sync.pass(), app);

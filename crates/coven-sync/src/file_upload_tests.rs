@@ -1,6 +1,7 @@
 use super::{files_runner, Fixture, CHUNK};
 use crate::files::file_error::*;
 use coven_database::{FileLocation, FileLocationKey, FilePlace, FileRef, Provenance};
+use coven_foundation::clock::HANG_GUARD;
 use coven_foundation::files::StoreDirAccess;
 use coven_storage::{test_utils::Faults, Storage, UploadSession};
 use std::time::Duration;
@@ -83,7 +84,7 @@ async fn same_size_edits_with_restored_mtime_send_no_changed_chunks() {
             let mut upload = Box::pin(f.files.inner.upload(&item, unwatched(&f, &item)));
             tokio::select! {
                 result = &mut upload => panic!("upload ended before its first request: {result:?}"),
-                result = tokio::time::timeout(Duration::from_secs(10), requests.changed()) => result.unwrap().unwrap(),
+                result = tokio::time::timeout(HANG_GUARD, requests.changed()) => result.unwrap().unwrap(),
             }
             let mut changed = bytes.clone();
             changed[0] = 42;
@@ -165,7 +166,7 @@ async fn an_upload_reader_retains_the_store_after_its_database_closes() {
     let mut upload = Box::pin(f.files.inner.upload(&item, unwatched(&f, &item)));
     tokio::select! {
         result = &mut upload => panic!("upload finished before its storage request: {result:?}"),
-        result = tokio::time::timeout(Duration::from_secs(10), requests.changed()) => result.unwrap().unwrap(),
+        result = tokio::time::timeout(HANG_GUARD, requests.changed()) => result.unwrap().unwrap(),
     }
     f.database.close().await.unwrap();
     assert!(matches!(
@@ -482,7 +483,7 @@ async fn attaching_starts_upload_after_commit_and_checks_changed_originals() {
     f.set_uploads_paused(false).await;
     f.attach("files", "one", vec![14; CHUNK]).await;
     let mut uploads = f.subscribe_queue();
-    tokio::time::timeout(Duration::from_secs(20), async {
+    tokio::time::timeout(HANG_GUARD, async {
         loop {
             let queue = uploads.next().await.expect("the live query answers");
             if queue.unwrap().files.is_empty() {

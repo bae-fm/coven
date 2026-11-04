@@ -10,6 +10,7 @@ use std::time::Duration;
 
 #[path = "../tests/fixtures/bootstrap.rs"]
 mod fixtures;
+use coven_foundation::clock::HANG_GUARD;
 use fixtures::*;
 
 #[tokio::test]
@@ -250,7 +251,7 @@ async fn restart_while_waiting_reuses_the_member_device_and_request_bytes() {
         |_| {},
         &control,
     ));
-    let request = tokio::time::timeout(Duration::from_secs(20), async {
+    let request = tokio::time::timeout(HANG_GUARD, async {
         tokio::select! {
             result = &mut joining => panic!("join returned before approval: {result:?}"),
             request = next_join_request(&owner.handle) => request,
@@ -603,11 +604,9 @@ async fn removal_lists_every_recorded_key_including_a_concurrent_replacement() {
                 let journaled = owner.handle.remove_member(&member).await.unwrap();
                 crate::tests::landed(&owner.handle, journaled).await
             };
-            tokio::time::timeout(Duration::from_secs(20), async {
-                tokio::join!(removal, replacement)
-            })
-            .await
-            .unwrap();
+            tokio::time::timeout(HANG_GUARD, async { tokio::join!(removal, replacement) })
+                .await
+                .unwrap();
         } else {
             replace().await.unwrap();
             let code = handle.restore_code().await.unwrap();

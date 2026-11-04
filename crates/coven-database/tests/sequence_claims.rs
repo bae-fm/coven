@@ -3,6 +3,7 @@ use coven_database::{
     ClaimAttempt, ClaimRead, ClaimSettlement, ClaimWork, Database, DatabaseBuilder, NewOperation,
 };
 use coven_format::path::ObjectPath;
+use coven_foundation::clock::HANG_GUARD;
 use coven_foundation::{
     files::StoreDirectories,
     id_source::{IdSource, SequentialIds, StoreId},
@@ -382,7 +383,7 @@ async fn claim_sealing_and_streaming_leave_the_app_writer_available() {
         });
         started.await.unwrap();
         let written = tokio::time::timeout(
-            std::time::Duration::from_secs(2),
+            HANG_GUARD,
             db.write(|sql| {
                 sql.execute("INSERT INTO items VALUES('while sealing')", [])?;
                 Ok(())
@@ -409,7 +410,7 @@ impl HeldBytes {
     fn wait(&mut self) {
         if let Some(entered) = self.entered.take() {
             entered.send(()).unwrap();
-            self.resume.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
+            self.resume.recv_timeout(HANG_GUARD).unwrap();
         }
     }
 }

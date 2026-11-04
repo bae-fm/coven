@@ -1,4 +1,5 @@
 use super::*;
+use crate::clock::HANG_GUARD;
 use crate::files::StoreDirectories;
 use crate::id_source::UuidIds;
 use uuid::Uuid;
@@ -22,9 +23,9 @@ fn cancelled_writes_retain_the_store_until_blocking_io_finishes() {
             let (release, gate) = std::sync::mpsc::channel();
             let blocker = tokio::task::spawn_blocking(move || {
                 started.send(()).unwrap();
-                gate.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
+                gate.recv_timeout(HANG_GUARD).unwrap();
             });
-            ready.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
+            ready.recv_timeout(HANG_GUARD).unwrap();
             let mut write = Box::pin(async move {
                 if finish {
                     writer.finish().await

@@ -1,6 +1,7 @@
 //! Recoverable upload failures make progress without an app retry.
 use super::*;
 use crate::{FileMissingReason, FileSourceFailure, Retry};
+use coven_foundation::clock::HANG_GUARD;
 
 /// A moved original fails at opening, before any provider request, and its
 /// move says it is missing. A same-size change to coven's copy opens, and the
@@ -343,7 +344,7 @@ async fn the_worker_retries_a_restored_original_without_an_app_call() {
     let mut uploads = f.subscribe_queue();
     f.set_uploads_paused(false).await;
     for failures in [1, 2] {
-        tokio::time::timeout(Duration::from_secs(5), async {
+        tokio::time::timeout(HANG_GUARD, async {
             while retry(&f).await.is_none_or(|wait| wait.failures < failures) {
                 uploads.next().await.expect("the live query answers").unwrap();
             }
@@ -359,7 +360,7 @@ async fn the_worker_retries_a_restored_original_without_an_app_call() {
     }
     std::fs::rename(saved, path).unwrap();
     clock.set(clock.now() + Duration::from_secs(2));
-    tokio::time::timeout(Duration::from_secs(5), async {
+    tokio::time::timeout(HANG_GUARD, async {
         while f.queued(&file).await {
             uploads.next().await.expect("the live query answers").unwrap();
         }
@@ -378,7 +379,7 @@ async fn the_worker_retries_sign_in_failure_on_client_swap() {
     f.storage.set_faults(fail_next(StorageFailure::Authentication, None)).await;
     let mut pending = f.subscribe_pending();
     f.set_uploads_paused(false).await;
-    tokio::time::timeout(Duration::from_secs(5), async {
+    tokio::time::timeout(HANG_GUARD, async {
         while f.upload_reason(&file).await.is_none() {
             pending.next().await.expect("the live query answers").unwrap();
         }
@@ -395,7 +396,7 @@ async fn the_worker_retries_sign_in_failure_on_client_swap() {
         )
         .await
         .unwrap();
-    tokio::time::timeout(Duration::from_secs(5), async {
+    tokio::time::timeout(HANG_GUARD, async {
         while f.queued(&file).await {
             uploads.next().await.expect("the live query answers").unwrap();
         }

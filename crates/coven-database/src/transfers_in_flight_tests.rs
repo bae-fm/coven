@@ -10,6 +10,7 @@ async fn queued(db: &crate::Database) -> (FileId, DeviceId, FileId) {
     let upload = crate::FileDatabase::new(db.clone()).uploads().await.unwrap().remove(0);
     (file, upload.location.uploader(), upload.location.object())
 }
+use coven_foundation::clock::HANG_GUARD;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -23,7 +24,7 @@ const PROGRESS: crate::TransferProgress =
 const COUNTS: &str = "SELECT count(*) FILTER (WHERE sending),count(*) FROM coven_uploads";
 
 async fn next<T: Clone + PartialEq + Send + 'static>(query: &mut crate::LiveQuery<T>) -> T {
-    tokio::time::timeout(Duration::from_secs(5), query.next())
+    tokio::time::timeout(HANG_GUARD, query.next())
         .await
         .expect("the live query answers")
         .expect("the live query is open")

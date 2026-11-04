@@ -4,6 +4,7 @@ use crate::sequence_sync::tests::*;
 use crate::*;
 use coven_database::{operation_kind, DbError};
 use coven_foundation::clock::Clock;
+use coven_foundation::clock::HANG_GUARD;
 use std::sync::Arc;
 
 /// A wall clock a person sets by hand, as on a phone: its elapsed time and
@@ -61,7 +62,7 @@ async fn the_expiry_wake_follows_a_clock_set_by_hand() {
     let early = tokio::time::timeout(Duration::from_millis(200), open.next()).await;
     assert!(early.is_err(), "the invite ended before its expiry: {early:?}");
     group.clock.set(invite.expires_at);
-    let ended = tokio::time::timeout(Duration::from_secs(10), open.next()).await;
+    let ended = tokio::time::timeout(HANG_GUARD, open.next()).await;
     assert_eq!(ended.expect("the handle woke at the expiry").unwrap().unwrap(), 0);
     expiry.close().await;
     ana.sync.database.close().await.unwrap();

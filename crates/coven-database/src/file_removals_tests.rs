@@ -3,6 +3,7 @@ use crate::{
     tests::TestStore,
     *,
 };
+use coven_foundation::clock::HANG_GUARD;
 
 /// A committed write returns its own result while a removal fails: the
 /// removal stays recorded, and an app that retries on `Err` would apply its
@@ -336,7 +337,6 @@ async fn a_failed_rollback_cannot_release_bytes_using_uncommitted_records() {
 #[tokio::test]
 async fn a_stalled_file_removal_holds_back_no_app_write() {
     use std::sync::{mpsc, Mutex};
-    use std::time::Duration;
     let store = TestStore::new();
     let db = open(&store, Provenance::AppProvided).await;
     stage(&db, b"original".to_vec(), true).await.unwrap();
@@ -348,7 +348,7 @@ async fn a_stalled_file_removal_holds_back_no_app_write() {
         let first = gate.lock().unwrap().take();
         if let Some((entered, released)) = first {
             entered.send(()).unwrap();
-            released.recv_timeout(Duration::from_secs(10)).unwrap();
+            released.recv_timeout(HANG_GUARD).unwrap();
         }
     })
     .await;
@@ -356,13 +356,11 @@ async fn a_stalled_file_removal_holds_back_no_app_write() {
         let db = db.clone();
         async move { complete(&db).await }
     });
-    tokio::task::spawn_blocking(move || stalled.recv_timeout(Duration::from_secs(5)).unwrap())
-        .await
-        .unwrap();
+    tokio::task::spawn_blocking(move || stalled.recv_timeout(HANG_GUARD).unwrap()).await.unwrap();
     assert_eq!(local_count(&db, "_coven_device_files"), 0);
     assert_eq!(local_count(&db, "_coven_file_removals"), 1);
     let written = tokio::time::timeout(
-        Duration::from_secs(5),
+        HANG_GUARD,
         db.write(|sql| {
             sql.execute("UPDATE files SET title=title", [])?;
             Ok(())

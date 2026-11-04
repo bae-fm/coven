@@ -5,12 +5,10 @@ use crate::{
     test_utils::{notes_migrations, notes_tables},
     tests::TestStore,
 };
-use std::{
-    sync::{
-        atomic::{AtomicUsize, Ordering},
-        mpsc,
-    },
-    time::Duration,
+use coven_foundation::clock::HANG_GUARD;
+use std::sync::{
+    atomic::{AtomicUsize, Ordering},
+    mpsc,
 };
 
 #[tokio::test]
@@ -27,7 +25,7 @@ async fn reopen_after_drop_waits_only_for_a_subscriptions_active_read() {
     let released = Mutex::new(released);
     let mut query = database.subscribe(move |_| {
         entered.lock().unwrap().take().unwrap().send(()).unwrap();
-        released.lock().unwrap().recv_timeout(Duration::from_secs(10)).unwrap();
+        released.lock().unwrap().recv_timeout(HANG_GUARD).unwrap();
         Ok(17)
     });
     tokio::select! {
@@ -190,7 +188,7 @@ async fn commit_between_finished_read_and_wait_is_not_missed() {
     let mut query = query.process(move |value| {
         if calls.fetch_add(1, Ordering::SeqCst) == 0 {
             entered.send(()).unwrap();
-            released.lock().unwrap().recv_timeout(Duration::from_secs(5)).unwrap();
+            released.lock().unwrap().recv_timeout(HANG_GUARD).unwrap();
         }
         Ok(value)
     });
@@ -198,7 +196,7 @@ async fn commit_between_finished_read_and_wait_is_not_missed() {
         let value = next_result(&mut query).await.unwrap();
         (query, value)
     });
-    entry.recv_timeout(Duration::from_secs(5)).unwrap();
+    entry.recv_timeout(HANG_GUARD).unwrap();
     // process starts only after the snapshot and pool lease have ended.
     db.commit_writer(|sql| sql.batch("INSERT INTO notes VALUES ('a','Plan','')").unwrap());
     release.send(()).unwrap();
@@ -291,7 +289,7 @@ async fn cancelled_next_keeps_its_request_and_inflight_result() {
     let mut query = db.subscribe_reconfigurable(5, move |request, sql| {
         if let Some(entered) = entered.lock().unwrap().take() {
             entered.send(()).unwrap();
-            released.lock().unwrap().recv_timeout(Duration::from_secs(5)).unwrap();
+            released.lock().unwrap().recv_timeout(HANG_GUARD).unwrap();
         }
         Ok(sql.query_row("SELECT ?1", [request], |r| r.get::<_, i32>(0))?)
     });
@@ -638,7 +636,7 @@ async fn reconfigurable_processing_releases_the_connection_before_its_worker_run
         })
         .process(move |value| {
             entered.lock().unwrap().take().unwrap().send(()).unwrap();
-            released.lock().unwrap().recv_timeout(Duration::from_secs(10)).unwrap();
+            released.lock().unwrap().recv_timeout(HANG_GUARD).unwrap();
             Ok(value.to_string())
         });
     tokio::select! {
@@ -646,7 +644,7 @@ async fn reconfigurable_processing_releases_the_connection_before_its_worker_run
         _ = query.next() => panic!("processing is held"),
     }
     // Closing waits for active reads, so this would block if processing held its lease.
-    tokio::time::timeout(Duration::from_secs(5), db.close()).await.unwrap().unwrap();
+    tokio::time::timeout(HANG_GUARD, db.close()).await.unwrap().unwrap();
     release.send(()).unwrap();
     let event = query.next().await.expect("the live query answers");
     assert_eq!(

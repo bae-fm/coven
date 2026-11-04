@@ -1,4 +1,5 @@
 use super::*;
+use coven_foundation::clock::HANG_GUARD;
 
 #[tokio::test]
 async fn repeated_start_preserves_the_connector_waiting_in_backoff() {
@@ -46,7 +47,7 @@ async fn stopping_a_failing_connector_does_not_wait_for_its_backoff() {
     entering.await.unwrap();
     let stopping = crate::tests::stopping(&f.handle);
     resume.send(()).unwrap();
-    tokio::time::timeout(Duration::from_secs(10), stopping)
+    tokio::time::timeout(HANG_GUARD, stopping)
         .await
         .expect("stopping must wake a connector even while its request is in flight")
         .unwrap()
@@ -247,7 +248,7 @@ async fn credentials_changed_during_a_failed_pass_are_evidence_for_its_retry() {
 
 /// What `retry_now` came to, within the test's patience.
 async fn answer(answer: RetryAnswer) -> RetryOutcome {
-    tokio::time::timeout(Duration::from_secs(10), answer).await.expect("the retry was answered")
+    tokio::time::timeout(HANG_GUARD, answer).await.expect("the retry was answered")
 }
 
 /// Ana pulls to refresh: the pass her retry runs answers her (§6.7).

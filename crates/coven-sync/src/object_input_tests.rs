@@ -1,4 +1,5 @@
 use super::*;
+use coven_foundation::clock::HANG_GUARD;
 use coven_foundation::{
     files::{StoreDir, StoreDirectories},
     id_source::{SequentialIds, StoreId},
@@ -34,7 +35,7 @@ async fn a_partial_response_retries_with_one_download_slot() {
     storage.set_faults(Faults::none()).await;
     let response = storage.stream_object(&path, None).await.unwrap();
     let input = tokio::time::timeout(
-        std::time::Duration::from_secs(5),
+        HANG_GUARD,
         ObjectInput::receive_response(&receiver.db, &storage, &path, response),
     )
     .await

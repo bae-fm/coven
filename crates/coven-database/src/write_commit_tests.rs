@@ -5,6 +5,7 @@ use coven_merge::{Timestamp, WriteId};
 use crate::tests::{contents, TestStore};
 use crate::write::tests::{count, notes, records, sql, NOTES};
 use crate::{Database, Migration, SyncedTable};
+use coven_foundation::clock::HANG_GUARD;
 
 const CIRCLE: &str = "00000000-0000-4000-8000-00000000000a";
 const ROOT: &str = "00000000-0000-4000-8000-000000000001";
@@ -147,20 +148,13 @@ async fn membership_is_rechecked_after_file_staging_and_refusal_discards_bytes()
         }
     });
     // A one-byte pipe cannot accept both bytes until staging starts consuming it.
-    tokio::time::timeout(std::time::Duration::from_secs(5), producer.write_all(b"or"))
-        .await
-        .unwrap()
-        .unwrap();
+    tokio::time::timeout(HANG_GUARD, producer.write_all(b"or")).await.unwrap().unwrap();
     leave_circle(&db);
     let mut before = contents(&db);
     before.get_mut("_coven_file_removals").unwrap().clear();
     producer.write_all(b"iginal").await.unwrap();
     producer.shutdown().await.unwrap();
-    let error = tokio::time::timeout(std::time::Duration::from_secs(5), writing)
-        .await
-        .unwrap()
-        .unwrap()
-        .unwrap_err();
+    let error = tokio::time::timeout(HANG_GUARD, writing).await.unwrap().unwrap().unwrap_err();
     assert!(matches!(error, crate::DbError::NotInCircle(id) if id == circle()));
     assert_eq!(contents(&db), before);
     assert!(crate::file_write::tests::owned_paths(&store).is_empty());

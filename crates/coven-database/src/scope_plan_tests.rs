@@ -1,11 +1,9 @@
 use crate::tests::next;
 use crate::{tests::TestStore, CovenResult, Database};
-use std::{
-    sync::{
-        atomic::{AtomicUsize, Ordering},
-        Arc, Mutex,
-    },
-    time::Duration,
+use coven_foundation::clock::HANG_GUARD;
+use std::sync::{
+    atomic::{AtomicUsize, Ordering},
+    Arc, Mutex,
 };
 
 fn write(db: &Database, sql: &str) {
@@ -225,7 +223,7 @@ async fn commit_before_the_statement_reveals_its_range_is_not_missed() {
     let mut query = db.subscribe(move |db| -> CovenResult<_> {
         if let Some(entered) = entered.lock().unwrap().take() {
             entered.send(()).unwrap();
-            released.lock().unwrap().recv_timeout(Duration::from_secs(5)).unwrap();
+            released.lock().unwrap().recv_timeout(HANG_GUARD).unwrap();
         }
         Ok(db.query("SELECT value FROM items WHERE id=3", [], |r| r.get::<_, String>(0))?)
     });
@@ -364,7 +362,7 @@ async fn multiple_statement_errors_remain_live_without_inventing_a_key_range() {
             write(&db, "UPDATE items SET value=1 WHERE id=9");
         }
         assert!(matches!(
-            tokio::time::timeout(Duration::from_secs(5), query.next())
+            tokio::time::timeout(HANG_GUARD, query.next())
                 .await
                 .unwrap()
                 .expect("the live query answers"),
@@ -465,7 +463,7 @@ async fn commits_while_dependencies_are_unknown_still_filter_outside_keys() {
         count.fetch_add(1, Ordering::SeqCst);
         if let Some(entered) = entered.lock().unwrap().take() {
             entered.send(()).unwrap();
-            released.lock().unwrap().recv_timeout(Duration::from_secs(5)).unwrap();
+            released.lock().unwrap().recv_timeout(HANG_GUARD).unwrap();
         }
         Ok(db.query("SELECT value FROM items WHERE id=3", [], |r| r.get::<_, String>(0))?)
     });

@@ -1,5 +1,6 @@
 use super::*;
 use crate::{test_utils::MemoryStorage, ObjectStream, Storage};
+use coven_foundation::clock::HANG_GUARD;
 
 #[tokio::test]
 async fn a_lower_limit_waits_for_existing_leases_and_an_increase_wakes_waiters() {
@@ -153,13 +154,10 @@ async fn only_file_reads_wait_for_the_download_limit() {
     let file = file_path();
     storage.create(&file, b"file bytes").await.unwrap();
     let downloading = budget.download().await;
-    let mut read = tokio::time::timeout(
-        std::time::Duration::from_secs(10),
-        storage.stream_object(&floor, None),
-    )
-    .await
-    .expect("the floor's read waited for the file download")
-    .unwrap();
+    let mut read = tokio::time::timeout(HANG_GUARD, storage.stream_object(&floor, None))
+        .await
+        .expect("the floor's read waited for the file download")
+        .unwrap();
     let mut bytes = [0; 8];
     let length = read.read(&mut bytes).await.unwrap();
     assert_eq!(&bytes[..length], b"floor");

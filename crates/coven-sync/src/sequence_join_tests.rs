@@ -2,6 +2,7 @@ use crate::sequence_sync::tests::*;
 use crate::{floor_object::FloorObject, JoinOutcome};
 use coven_format::{admin::StoreChange, sealed_slot::SlotKind};
 use coven_foundation::clock::FixedClock;
+use coven_foundation::clock::HANG_GUARD;
 use coven_merge::Audience;
 use coven_storage::{test_utils::MemoryStorage, CloudProvider, ObjectPath, Storage};
 use std::{
@@ -337,7 +338,7 @@ async fn check_now_ends_the_joins_wait_but_not_a_provider_cooldown() {
     assert!(tokio::time::timeout(Duration::from_millis(100), &mut due).await.is_err());
     assert_eq!(*reported.lock().unwrap(), [NextCheck::At(now + Duration::from_secs(300))]);
     asking.send_modify(|asked| *asked += 1);
-    tokio::time::timeout(Duration::from_secs(5), due).await.unwrap().unwrap();
+    tokio::time::timeout(HANG_GUARD, due).await.unwrap().unwrap();
     let ended = wait().await;
     assert_eq!((ended.failures, ended.wait), (failures, Duration::ZERO));
 
@@ -357,7 +358,7 @@ async fn check_now_ends_the_joins_wait_but_not_a_provider_cooldown() {
     assert_eq!(wait().await.wait, Duration::ZERO);
     assert_eq!(*reported.lock().unwrap(), [cooling, cooling]);
     group.clock.set(now + Duration::from_secs(600));
-    tokio::time::timeout(Duration::from_secs(5), due).await.unwrap().unwrap();
+    tokio::time::timeout(HANG_GUARD, due).await.unwrap().unwrap();
     for device in [&ana, &carol.device] {
         device.database().close().await.unwrap();
     }

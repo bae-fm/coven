@@ -1,5 +1,6 @@
 use super::*;
 use coven_foundation::clock::Clock;
+use coven_foundation::clock::HANG_GUARD;
 use coven_foundation::{
     clock::FixedClock,
     files::{StoreDir, StoreDirectories},
@@ -232,7 +233,7 @@ async fn the_worker_wakes_for_the_earliest_due_retry() {
     let mut wake = waits.next_wake(operations).unwrap();
     assert!((&mut wake).now_or_never().is_none());
     fixture.advance(1);
-    tokio::time::timeout(Duration::from_secs(5), wake).await.unwrap();
+    tokio::time::timeout(HANG_GUARD, wake).await.unwrap();
     // Once the sooner wait is evaluated, the next wake is the later one.
     assert!(waits.due(operation(2), Some(&sooner)));
     waits.forget(operation(2));
@@ -240,6 +241,6 @@ async fn the_worker_wakes_for_the_earliest_due_retry() {
     fixture.advance(2);
     assert!((&mut wake).now_or_never().is_none());
     fixture.advance(1);
-    tokio::time::timeout(Duration::from_secs(5), wake).await.unwrap();
+    tokio::time::timeout(HANG_GUARD, wake).await.unwrap();
     database.close().await.unwrap();
 }

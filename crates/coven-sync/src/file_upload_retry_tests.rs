@@ -4,6 +4,7 @@
 use super::*;
 use crate::PendingReason;
 use coven_database::RetrySubject;
+use coven_foundation::clock::HANG_GUARD;
 use coven_foundation::clock::{Clock, FixedClock};
 use coven_storage::{test_utils::Faults, StorageFailure};
 
@@ -155,7 +156,7 @@ async fn the_worker_wakes_for_a_due_retry_without_another_commit() {
     // The database's queue state includes each persisted wait.
     let mut uploads = f.subscribe_queue();
     f.set_uploads_paused(false).await;
-    tokio::time::timeout(Duration::from_secs(5), async {
+    tokio::time::timeout(HANG_GUARD, async {
         while retry(&f).await.is_none() {
             uploads.next().await.expect("the live query answers").unwrap();
         }
@@ -167,7 +168,7 @@ async fn the_worker_wakes_for_a_due_retry_without_another_commit() {
     .await
     .unwrap();
     advance(&clock, 1);
-    tokio::time::timeout(Duration::from_secs(5), async {
+    tokio::time::timeout(HANG_GUARD, async {
         while f.queued(&file).await {
             uploads.next().await.expect("the live query answers").unwrap();
         }
@@ -193,7 +194,7 @@ async fn completed_catch_up_wakes_a_worker_blocked_between_file_sends() {
     f.send.set(crate::SequenceStatus::Opening);
     resume.send(()).unwrap();
     // The first file finishes; the second does not start until a catch-up.
-    tokio::time::timeout(Duration::from_secs(5), async {
+    tokio::time::timeout(HANG_GUARD, async {
         while uploads.next().await.expect("the live query answers").unwrap().files.len() != 1 {}
     })
     .await
@@ -216,7 +217,7 @@ async fn completed_catch_up_wakes_a_worker_blocked_between_file_sends() {
     assert!(f.queued(&second).await);
     f.send.set(crate::SequenceStatus::Opening);
     f.send.set(crate::SequenceStatus::Synced { through: 0 });
-    tokio::time::timeout(Duration::from_secs(5), async {
+    tokio::time::timeout(HANG_GUARD, async {
         loop {
             uploads.next().await.expect("the live query answers").unwrap();
             if !f.queued(&second).await {

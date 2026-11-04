@@ -1,5 +1,6 @@
 use super::*;
 use crate::tests::{last_pass, synced, wait_for_sent};
+use coven_foundation::clock::HANG_GUARD;
 use coven_foundation::progress::RecordingClock;
 use coven_storage::{
     test_utils::{Faults, MemoryStorage},
@@ -271,7 +272,7 @@ async fn a_panicking_connection_attempt_reaches_the_apps_bug_sink() {
     let answer = f.handle.retry_now().await.unwrap();
     f.connector.panics.store(true, Ordering::SeqCst);
     resume.send(()).unwrap();
-    let answer = tokio::time::timeout(Duration::from_secs(10), answer).await.unwrap();
+    let answer = tokio::time::timeout(HANG_GUARD, answer).await.unwrap();
     let bug =
         crate::task::Bug { operation: "connect to storage", message: "connecting panicked".into() };
     let coven_sync::RetryOutcome::Failed(coven_sync::PassFailure::Failed {
@@ -764,7 +765,7 @@ async fn repeated_setup_and_sync_requests_do_not_deadlock_credential_refresh() {
     // Each round has its own generous limit: a deadlock never finishes, while
     // a slow filesystem (Windows CI) only takes longer.
     for round in 0..30 {
-        tokio::time::timeout(Duration::from_secs(60), async {
+        tokio::time::timeout(HANG_GUARD, async {
             let setup = f.setup();
             let request = async {
                 tokio::task::yield_now().await;

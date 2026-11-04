@@ -1,9 +1,9 @@
 use crate::*;
+use coven_foundation::clock::HANG_GUARD;
 use coven_storage::test_utils::MemoryStorage;
 use coven_storage::Storage;
 use std::collections::BTreeMap;
 use std::sync::Arc;
-use std::time::Duration;
 
 /// A store on in-memory S3 that takes one request up to `single_limit`
 /// bytes and parts of `part_size`, with uploads paused and passes held.
@@ -81,7 +81,7 @@ async fn hear_until(
     heard: &mut Vec<Option<TransferProgress>>,
     done: impl Fn(Option<TransferProgress>) -> bool,
 ) {
-    tokio::time::timeout(Duration::from_secs(10), async {
+    tokio::time::timeout(HANG_GUARD, async {
         loop {
             let changes = watch.next().await.expect("the watch is open");
             for change in changes {

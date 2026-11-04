@@ -1,4 +1,5 @@
 use super::*;
+use coven_foundation::clock::HANG_GUARD;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 #[tokio::test]
@@ -46,7 +47,7 @@ async fn http_delivers_the_first_body_bytes_before_the_response_finishes() {
         assert_eq!(&first, b"abc");
         body
     };
-    let mut body = tokio::time::timeout(std::time::Duration::from_secs(2), receive).await.unwrap();
+    let mut body = tokio::time::timeout(HANG_GUARD, receive).await.unwrap();
     release.send(()).unwrap();
     let mut last = [0; 3];
     assert_eq!(body.read(&mut last).await.unwrap(), 3);

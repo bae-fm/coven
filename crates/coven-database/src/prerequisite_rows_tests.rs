@@ -1,6 +1,7 @@
 use super::*;
 use crate::tests::TestStore;
 use crate::CommitScope;
+use coven_foundation::clock::HANG_GUARD;
 use std::collections::BTreeSet;
 
 /// Each read keys its table's rows by primary-key columns and names every
@@ -96,7 +97,7 @@ async fn a_wait_observes_its_rows_outside_its_attempt() {
     assert!(!wait.take_changed().unwrap());
     let wake = wait.changed();
     observe(7).await;
-    tokio::time::timeout(std::time::Duration::from_secs(5), wake).await.unwrap();
+    tokio::time::timeout(HANG_GUARD, wake).await.unwrap();
     assert!(wait.take_changed().unwrap());
     assert!(!wait.take_changed().unwrap());
     // Other work changes it while an attempt runs, or a task the attempt

@@ -1,4 +1,5 @@
 use crate::*;
+use coven_foundation::clock::HANG_GUARD;
 use std::sync::{
     atomic::{AtomicBool, AtomicUsize, Ordering},
     Arc, Mutex,
@@ -35,7 +36,7 @@ async fn reopening_waits_after_the_last_handle_drops_or_close_starts() {
         let (release, released) = std::sync::mpsc::channel();
         let mut read = Box::pin(clone.read(move |_| {
             entered.send(()).unwrap();
-            released.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
+            released.recv_timeout(HANG_GUARD).unwrap();
             Ok(())
         }));
         tokio::select! {
@@ -238,7 +239,7 @@ async fn cancelling_the_close_caller_still_closes_all_clones() {
         .await;
     }
     assert!(matches!(
-        tokio::time::timeout(std::time::Duration::from_secs(5), live.next())
+        tokio::time::timeout(HANG_GUARD, live.next())
             .await
             .unwrap()
             .expect("the live query answers"),
@@ -347,7 +348,7 @@ async fn disconnected_member_and_circle_reads_match_their_subscriptions() {
 
 #[tokio::test]
 async fn closing_waits_for_setup_after_its_caller_is_cancelled() {
-    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+    tokio::time::timeout(HANG_GUARD, async {
         use coven_storage::{test_utils::MemoryStorage, StorageSettings};
         let root = tempfile::tempdir().unwrap();
         let app = Coven::in_memory(root.path().to_owned());
@@ -715,10 +716,9 @@ fn cut_off_writes_are_final_and_rejected_operations_wait_for_the_app() {
 mod store_rename {
     use super::*;
     use crate::tests::{landed, Network};
-    use std::time::Duration;
 
     async fn name(query: &mut LiveQuery<String>) -> String {
-        tokio::time::timeout(Duration::from_secs(10), query.next())
+        tokio::time::timeout(HANG_GUARD, query.next())
             .await
             .unwrap()
             .expect("the live query answers")

@@ -1,4 +1,5 @@
 use crate::*;
+use coven_foundation::clock::HANG_GUARD;
 use coven_foundation::files::{StoreDirAccess, StoreFile};
 use coven_storage::{test_utils::MemoryStorage, Storage};
 use std::sync::Arc;
@@ -449,7 +450,7 @@ async fn discarding_waits_after_the_last_handle_drops_or_close_starts() {
         let (release, released) = std::sync::mpsc::channel();
         let mut read = Box::pin(handle.read(move |_| {
             entered.send(()).unwrap();
-            released.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
+            released.recv_timeout(HANG_GUARD).unwrap();
             Ok(())
         }));
         tokio::select! {

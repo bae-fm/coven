@@ -4,6 +4,7 @@ use crate::{
     tests::TestStore,
     CovenError, Migration, Namespace, Provenance, SchemaError,
 };
+use coven_foundation::clock::HANG_GUARD;
 
 /// A stored file of these bytes, referenced by row `7`.
 async fn stored(db: &Database, bytes: Vec<u8>) -> FileRef {
@@ -483,7 +484,7 @@ async fn a_stalled_cache_range_write_holds_back_no_app_write() {
     tokio::time::sleep(Duration::from_millis(200)).await;
     assert!(!writing.is_finished(), "the range write is stalled");
     let written = tokio::time::timeout(
-        Duration::from_secs(5),
+        HANG_GUARD,
         db.write(|sql| {
             sql.execute("UPDATE files SET title='while caching'", [])?;
             Ok(())
@@ -535,7 +536,7 @@ async fn another_handles_removals_leave_a_range_being_written() {
     assert!(!writing.is_finished(), "the range write is stalled");
     // Completing the upload releases the queue's copy, which the writer
     // removes with every other recorded removal.
-    let completed = tokio::time::timeout(Duration::from_secs(5), complete_uploads(&db)).await;
+    let completed = tokio::time::timeout(HANG_GUARD, complete_uploads(&db)).await;
     let left = path.exists();
     release_fifo_writer(path.clone()).await;
     completed.expect("completion waited for a stalled cache range write");
@@ -618,7 +619,7 @@ async fn a_stalled_cache_read_holds_back_no_app_write() {
     tokio::time::sleep(Duration::from_millis(200)).await;
     assert!(!reading.is_finished(), "the cache read is stalled");
     let written = tokio::time::timeout(
-        Duration::from_secs(5),
+        HANG_GUARD,
         db.write(|sql| {
             sql.execute("UPDATE files SET title='while reading'", [])?;
             Ok(())
@@ -659,7 +660,7 @@ async fn a_stalled_upload_source_holds_back_no_app_write() {
     tokio::time::sleep(Duration::from_millis(200)).await;
     assert!(!opening.is_finished(), "opening the source is stalled");
     let written = tokio::time::timeout(
-        Duration::from_secs(5),
+        HANG_GUARD,
         db.write(|sql| {
             sql.execute("UPDATE files SET title='while uploading'", [])?;
             Ok(())

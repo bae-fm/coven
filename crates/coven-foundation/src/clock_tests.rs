@@ -1,4 +1,5 @@
 use super::*;
+use crate::clock::HANG_GUARD;
 
 #[test]
 fn system_clock_is_a_shared_clock() {
@@ -81,8 +82,7 @@ fn fixed_elapsed_time_counts_forward_settings_as_sleep_and_ignores_backward_ones
 async fn a_system_wall_wait_for_a_time_already_past_ends_at_once() {
     use std::time::UNIX_EPOCH;
     for at in [SystemClock.now() - Duration::from_secs(3600), UNIX_EPOCH] {
-        let waited =
-            tokio::time::timeout(Duration::from_secs(2), SystemClock.sleep_until(at)).await;
+        let waited = tokio::time::timeout(HANG_GUARD, SystemClock.sleep_until(at)).await;
         waited.expect("the wait ended at once").unwrap();
     }
 }
@@ -92,7 +92,7 @@ async fn a_system_wall_wait_for_a_time_already_past_ends_at_once() {
 #[tokio::test]
 async fn a_system_wall_wait_ends_when_the_clock_reaches_its_time() {
     let at = SystemClock.now() + Duration::from_millis(300);
-    let waited = tokio::time::timeout(Duration::from_secs(10), SystemClock.sleep_until(at)).await;
+    let waited = tokio::time::timeout(HANG_GUARD, SystemClock.sleep_until(at)).await;
     waited.expect("the timer fired").unwrap();
     let woke = SystemClock.now();
     assert!(woke >= at, "the timer fired {:?} early", at.duration_since(woke));

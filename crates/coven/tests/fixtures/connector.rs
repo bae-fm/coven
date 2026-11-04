@@ -5,12 +5,9 @@
 //! a test checks that release through the drop.
 use crate::*;
 use coven_storage::{test_utils::MemoryStorage, PublicationGate, StorageError};
-use std::{
-    sync::{
-        atomic::{AtomicUsize, Ordering},
-        Arc,
-    },
-    time::Duration,
+use std::sync::{
+    atomic::{AtomicUsize, Ordering},
+    Arc,
 };
 
 /// The clients a connector made, and how many of them have been dropped.
@@ -34,7 +31,7 @@ impl Clients {
     /// Wait until `count` clients have been dropped.
     pub(crate) async fn dropped(&self, count: usize) {
         let mut dropped = self.dropped.subscribe();
-        coven_foundation::clock::within(Duration::from_secs(10), dropped.wait_for(|n| *n >= count))
+        coven_foundation::clock::within(dropped.wait_for(|n| *n >= count))
             .await
             .unwrap_or_else(|| panic!("{count} clients dropped"))
             .unwrap();

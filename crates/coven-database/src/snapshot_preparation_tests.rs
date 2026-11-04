@@ -1,6 +1,7 @@
 use crate::snapshot_write::tests::{author, frames, id, load_one};
 use crate::tests::TestStore;
 use crate::write::tests::{notes, sql, NOTES};
+use coven_foundation::clock::HANG_GUARD;
 use coven_merge::Audience;
 use std::io::{Cursor, Read};
 
@@ -60,11 +61,9 @@ async fn snapshot_staging_leaves_the_application_writer_available() {
         });
         started.await.unwrap();
         assert!(db.staged_snapshot_records().await.unwrap() > 0);
-        let written = tokio::time::timeout(
-            std::time::Duration::from_secs(2),
-            sql(&db, "UPDATE notes SET title='while staging'"),
-        )
-        .await;
+        let written =
+            tokio::time::timeout(HANG_GUARD, sql(&db, "UPDATE notes SET title='while staging'"))
+                .await;
         release.send(()).unwrap();
         load.await.unwrap().unwrap();
         assert_eq!(db.staged_snapshot_records().await.unwrap(), 0);
@@ -86,7 +85,7 @@ impl Read for HeldSnapshot {
         if self.reads == 2 {
             if let Some(entered) = self.entered.take() {
                 entered.send(()).unwrap();
-                self.resume.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
+                self.resume.recv_timeout(HANG_GUARD).unwrap();
             }
         }
         let length = output.len().min(self.bytes.get_ref().len().div_ceil(2));

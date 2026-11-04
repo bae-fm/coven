@@ -3,6 +3,7 @@ use crate::snapshot_write::tests::{frames, id, load_one, stream, SnapshotFrames}
 use crate::tests::{contents, TestStore};
 use crate::write::tests::{count, notes, records, sql, NOTES};
 use crate::{Database, Provenance, RowIdentity, SyncedTable};
+use coven_foundation::clock::HANG_GUARD;
 use coven_foundation::id_source::{CircleId, SequentialIds};
 use coven_merge::Audience;
 use std::io::Cursor;
@@ -311,7 +312,6 @@ async fn readers_and_live_queries_observe_only_the_committed_reload() {
         atomic::{AtomicUsize, Ordering},
         Arc, Mutex,
     };
-    use std::time::Duration;
     struct GatedRead {
         bytes: Cursor<Vec<u8>>,
         started: Option<tokio::sync::oneshot::Sender<()>>,
@@ -321,7 +321,7 @@ async fn readers_and_live_queries_observe_only_the_committed_reload() {
         fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
             if let Some(started) = self.started.take() {
                 started.send(()).unwrap();
-                self.wait.recv_timeout(Duration::from_secs(10)).unwrap();
+                self.wait.recv_timeout(HANG_GUARD).unwrap();
             }
             let size = buffer.len().min(17);
             std::io::Read::read(&mut self.bytes, &mut buffer[..size])
@@ -360,7 +360,7 @@ async fn readers_and_live_queries_observe_only_the_committed_reload() {
         )
         .await
     });
-    tokio::time::timeout(Duration::from_secs(10), notice).await.unwrap().unwrap();
+    tokio::time::timeout(HANG_GUARD, notice).await.unwrap().unwrap();
     assert_eq!(
         b.read(|db| Ok(db.query_row("SELECT count(*) FROM notes", [], |r| r.get::<_, i64>(0))?))
             .await
@@ -561,7 +561,6 @@ async fn reloading_keeps_uploaded_own_history_before_authoring_another() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn waiting_for_a_snapshot_reader_keeps_the_writer_available() {
-    use std::time::Duration;
     let store = TestStore::new();
     let db = store.schema(notes(), NOTES).await.unwrap();
     sql(&db, "INSERT INTO notes VALUES('n','before','')").await.unwrap();
@@ -584,7 +583,7 @@ async fn waiting_for_a_snapshot_reader_keeps_the_writer_available() {
                     move |_| {
                         if let Some(started) = started.take() {
                             started.send(()).unwrap();
-                            wait.recv_timeout(Duration::from_secs(10)).unwrap();
+                            wait.recv_timeout(HANG_GUARD).unwrap();
                         }
                         Ok::<_, std::convert::Infallible>(())
                     },
@@ -599,9 +598,9 @@ async fn waiting_for_a_snapshot_reader_keeps_the_writer_available() {
     let loading = tokio::spawn(async move {
         load_one(&target, id(Audience::Store), snapshot_prefix.clone(), Cursor::new(snapshot)).await
     });
-    tokio::time::timeout(Duration::from_secs(10), waiting).await.unwrap().unwrap();
+    tokio::time::timeout(HANG_GUARD, waiting).await.unwrap().unwrap();
     let committed = tokio::time::timeout(
-        Duration::from_secs(1),
+        HANG_GUARD,
         sql(&db, "UPDATE notes SET title='while readers are occupied'"),
     )
     .await;

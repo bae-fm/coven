@@ -1,5 +1,6 @@
 use crate::tests::TestStore;
 use crate::Database;
+use coven_foundation::clock::HANG_GUARD;
 
 async fn blobs(store: &TestStore) -> Database {
     let db = store
@@ -95,7 +96,7 @@ async fn releasing_memory_never_waits_for_a_write() {
     // The write holds the writer until `finish_tx` sends, which comes only
     // after the release returns; a release that waited for it would fail
     // here.
-    tokio::time::timeout(std::time::Duration::from_secs(10), db.release_memory())
+    tokio::time::timeout(HANG_GUARD, db.release_memory())
         .await
         .expect("the release returns while the write holds the writer")
         .unwrap();

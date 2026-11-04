@@ -6,6 +6,7 @@
 //! never a bound upload's (§17.3).
 use crate::tests::{file_stored, stage, upload_path, wait_for_sent, Device, Network};
 use crate::*;
+use coven_foundation::clock::HANG_GUARD;
 use coven_storage::test_utils::Faults;
 use std::time::Duration;
 
@@ -92,7 +93,7 @@ async fn upload_failed(device: &Device, failure: StorageFailure) {
             r.get::<_, PendingRecord>(0)
         })?)
     });
-    tokio::time::timeout(Duration::from_secs(10), async {
+    tokio::time::timeout(HANG_GUARD, async {
         while !pending
             .next()
             .await

@@ -3,6 +3,7 @@ use coven_database::{
     Database, DatabaseBuilder, FileColumn, FileLocation, FilePlace, FileRef, FileUpload, Migration,
     Namespace, Provenance, RowIdentity, SyncedTable,
 };
+use coven_foundation::clock::HANG_GUARD;
 use coven_foundation::{
     clock::{ClockRef, ClosureClock},
     files::StoreDirectories,
@@ -514,7 +515,7 @@ async fn sequential_reading_starts_read_ahead_and_streams_a_whole_hash_check() {
     stream.read_at(0, CHUNK as u64).await.unwrap();
     let mut requests = f.storage.subscribe_requests();
     stream.read_at(CHUNK as u64, CHUNK as u64).await.unwrap();
-    tokio::time::timeout(Duration::from_secs(20), async {
+    tokio::time::timeout(HANG_GUARD, async {
         loop {
             let ranges = f.storage.ranges().await;
             if ranges.iter().any(|range| range.start() == 11 + 2 * (CHUNK as u64 + 16)) {
@@ -552,7 +553,7 @@ async fn cancelling_a_pin_releases_partial_budget_exemptions() {
     let reference = file.clone();
     let task = tokio::spawn(async move { files.pin(&[reference]).await });
     // A range download has started for the whole-file pin.
-    tokio::time::timeout(Duration::from_secs(20), requests.wait_for(|count| *count > before + 1))
+    tokio::time::timeout(HANG_GUARD, requests.wait_for(|count| *count > before + 1))
         .await
         .unwrap()
         .unwrap();
@@ -731,7 +732,7 @@ async fn a_file_is_on_its_device_only_until_its_upload_completes() {
         assert!(b.files.inner.database.uploads().await.unwrap().is_empty());
         let mut uploads = a.subscribe_queue();
         a.files.set_storage(Some(a.storage.clone()), std::future::ready(Ok(()))).await.unwrap();
-        tokio::time::timeout(Duration::from_secs(20), async {
+        tokio::time::timeout(HANG_GUARD, async {
             while !uploads.next().await.expect("the live query answers").unwrap().files.is_empty() {
             }
         })

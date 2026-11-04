@@ -1,5 +1,6 @@
 use crate::tests::stored_path;
 use crate::*;
+use coven_foundation::clock::HANG_GUARD;
 use coven_foundation::files::StoreDirAccess;
 use std::sync::Arc;
 
@@ -62,7 +63,7 @@ async fn passed(handle: &CovenHandle) {
 async fn uncached_file_bodies_and_sequence_reads_share_the_download_limit() {
     use coven_storage::{test_utils::MemoryStorage, Storage};
     use std::time::Duration;
-    tokio::time::timeout(Duration::from_secs(20), async {
+    tokio::time::timeout(HANG_GUARD, async {
         let root = tempfile::tempdir().unwrap();
         let app = Coven::in_memory(root.path().into());
         let memory = Arc::new(MemoryStorage::builder().clock(Arc::new(SystemClock)).build().unwrap());
@@ -120,7 +121,7 @@ async fn transfer_limits_bound_requests_and_a_changed_limit_applies_to_the_next_
         num::NonZeroUsize,
         time::{Duration, UNIX_EPOCH},
     };
-    tokio::time::timeout(Duration::from_secs(20), async {
+    tokio::time::timeout(HANG_GUARD, async {
         let root = tempfile::tempdir().unwrap();
         let app = Coven::in_memory(root.path().into());
         let clock = Arc::new(coven_foundation::clock::ClosureClock(|| {

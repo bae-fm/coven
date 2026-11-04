@@ -1,6 +1,7 @@
 use super::*;
 use crate::test_utils::{notes_migrations, notes_tables};
 use crate::tests::TestStore;
+use coven_foundation::clock::HANG_GUARD;
 use coven_foundation::files::{SettingsError, StoreLockError};
 
 impl Database {
@@ -155,7 +156,7 @@ async fn read_connections_are_read_only_and_run_concurrently() {
             let slot = database.inner.read().unwrap();
             let _reader = slot.as_ref().unwrap().access.readers.acquire_reader();
             entered_tx.send(()).unwrap();
-            release_rx.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
+            release_rx.recv_timeout(HANG_GUARD).unwrap();
         });
         entered_rx.recv().unwrap();
         (release_tx, held)
@@ -169,7 +170,7 @@ async fn read_connections_are_read_only_and_run_concurrently() {
         let call = tokio::spawn(async move {
             tx.send(clone.schema_version().await).unwrap();
         });
-        assert_eq!(rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap().unwrap(), 1);
+        assert_eq!(rx.recv_timeout(HANG_GUARD).unwrap().unwrap(), 1);
         call.await.unwrap();
     }
     for _ in 0..3 {
@@ -187,7 +188,7 @@ async fn read_connections_are_read_only_and_run_concurrently() {
     let (release, worker) = held.pop().unwrap();
     release.send(()).unwrap();
     worker.join().unwrap();
-    assert_eq!(rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap().unwrap(), 1);
+    assert_eq!(rx.recv_timeout(HANG_GUARD).unwrap().unwrap(), 1);
     fifth.await.unwrap();
     for (release, worker) in held {
         release.send(()).unwrap();
@@ -207,7 +208,7 @@ async fn closing_waits_for_a_borrowed_connection_before_releasing_the_lock() {
         let slot = clone.inner.read().unwrap();
         let reader = slot.as_ref().unwrap().access.readers.acquire_reader();
         entered_tx.send(()).unwrap();
-        release_rx.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
+        release_rx.recv_timeout(HANG_GUARD).unwrap();
         reader.schema_version().unwrap()
     });
     entered_rx.recv().unwrap();
@@ -313,7 +314,7 @@ async fn dropped_bootstrap_reopen_waits_for_the_active_read_to_finish() {
     let (release, released) = std::sync::mpsc::channel();
     let mut read = Box::pin(database.read(move |_| {
         entered.send(()).unwrap();
-        released.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
+        released.recv_timeout(HANG_GUARD).unwrap();
         Ok(())
     }));
     tokio::select! {
@@ -355,7 +356,7 @@ async fn reopening_a_dropped_or_closing_database_waits_for_its_active_read() {
         let (release, released) = std::sync::mpsc::channel();
         let read = database.start_read(move |_| {
             entered.send(()).unwrap();
-            released.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
+            released.recv_timeout(HANG_GUARD).unwrap();
             Ok(())
         });
         entry.await.unwrap();
@@ -402,11 +403,7 @@ async fn a_dropped_open_waits_for_its_blocking_migration_before_reopening() {
                 vec![],
                 vec![Migration::addition_with(1, "held", move |_| {
                     entered.lock().unwrap().take().unwrap().send(()).unwrap();
-                    released
-                        .lock()
-                        .unwrap()
-                        .recv_timeout(std::time::Duration::from_secs(10))
-                        .unwrap();
+                    released.lock().unwrap().recv_timeout(HANG_GUARD).unwrap();
                     Ok(())
                 })],
             )
@@ -454,7 +451,7 @@ async fn dropping_a_write_caller_makes_reopen_wait_for_its_commit() {
             [],
         )?;
         entered.send(()).unwrap();
-        released.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
+        released.recv_timeout(HANG_GUARD).unwrap();
         Ok(())
     }));
     tokio::select! {

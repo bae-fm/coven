@@ -5,6 +5,7 @@ use coven_format::{
     value::Value,
     write::{RowChange as WireChange, WriteDisposition, WriteHeader, WritePart, WriteRecord},
 };
+use coven_foundation::clock::HANG_GUARD;
 use coven_foundation::{
     files::StoreDirectories,
     id_source::{DeviceId, IdSource, MemberId, SequentialIds, StoreId},
@@ -743,7 +744,7 @@ async fn preparing_an_incoming_part_leaves_the_application_writer_available() {
     });
     started.await.unwrap();
     let written = tokio::time::timeout(
-        std::time::Duration::from_secs(2),
+        HANG_GUARD,
         db.write(|sql| {
             sql.execute("INSERT INTO items VALUES('local','while decoding')", [])?;
             Ok(())
@@ -765,7 +766,7 @@ impl std::io::Read for HeldPart {
     fn read(&mut self, output: &mut [u8]) -> std::io::Result<usize> {
         if let Some(entered) = self.entered.take() {
             entered.send(()).unwrap();
-            self.resume.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
+            self.resume.recv_timeout(HANG_GUARD).unwrap();
         }
         self.bytes.read(output)
     }

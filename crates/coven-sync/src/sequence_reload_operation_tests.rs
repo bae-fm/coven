@@ -4,6 +4,7 @@ use crate::sequence_sync::tests::*;
 use crate::{SequenceSync, SyncError};
 use coven_database::DbError;
 use coven_format::admin::StoreChange;
+use coven_foundation::clock::HANG_GUARD;
 use coven_merge::Audience;
 use coven_storage::{test_utils::Faults, ObjectPath, Storage, StorageFailure};
 use serde_json::{json, Value};
@@ -140,7 +141,7 @@ async fn during_load(
     let (started, observed) = tokio::sync::oneshot::channel();
     let (release, held) = tokio::sync::oneshot::channel();
     device.storage.hold_next_read(path, started, held).await;
-    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+    tokio::time::timeout(HANG_GUARD, async {
         let loading = read(device);
         tokio::pin!(loading);
         tokio::select! {

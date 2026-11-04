@@ -1,5 +1,6 @@
 use super::*;
 use crate::tests::TestStore;
+use coven_foundation::clock::HANG_GUARD;
 
 impl InputDatabase {
     /// Visit the reader, then the writer, each under its own lock.
@@ -214,15 +215,13 @@ async fn input_commits_do_not_wait_for_the_application_writer() {
         writer
             .write(move |_| {
                 entered.send(()).unwrap();
-                wait_release.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
+                wait_release.recv_timeout(HANG_GUARD).unwrap();
                 Ok(())
             })
             .await
     });
     wait_entered.await.unwrap();
-    let retained =
-        tokio::time::timeout(std::time::Duration::from_secs(5), input.keep_range(0, vec![1, 2]))
-            .await;
+    let retained = tokio::time::timeout(HANG_GUARD, input.keep_range(0, vec![1, 2])).await;
     release.send(()).unwrap();
     writing.await.unwrap().unwrap();
     retained.expect("input persistence waited for the application writer").unwrap();

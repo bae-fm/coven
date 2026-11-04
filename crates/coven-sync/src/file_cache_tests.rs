@@ -1,6 +1,7 @@
 //! Reads and pins (§17.7, §17.8, E8): one file's failure as its own pending
 //! record.
 use super::*;
+use coven_foundation::clock::HANG_GUARD;
 use coven_storage::StorageFailure;
 
 #[tokio::test]
@@ -791,7 +792,7 @@ async fn a_metered_network_holds_a_pins_download_but_not_a_read() {
     assert!(file_records(&f).await.is_empty());
     // The waiting pin holds no lock a connection change needs.
     tokio::time::timeout(
-        Duration::from_secs(10),
+        HANG_GUARD,
         f.files.set_storage(Some(f.storage.clone()), std::future::ready(Ok(()))),
     )
     .await
@@ -799,7 +800,7 @@ async fn a_metered_network_holds_a_pins_download_but_not_a_read() {
     .unwrap();
     assert_eq!(f.files.read_file(&file).await.unwrap(), vec![5; CHUNK * 3]);
     f.network.join(false);
-    tokio::time::timeout(Duration::from_secs(10), pin).await.unwrap().unwrap();
+    tokio::time::timeout(HANG_GUARD, pin).await.unwrap().unwrap();
     assert_eq!(f.database.files_pinned(vec![file.id()]).await.unwrap(), vec![Some(true)]);
     f.close().await;
 }
@@ -841,7 +842,7 @@ async fn a_pins_download_stops_before_its_next_request_on_a_metered_network() {
     assert!(tokio::time::timeout(Duration::from_millis(50), &mut pin).await.is_err());
     assert_eq!(requests(&f), first);
     f.set_unmetered_only(false).await;
-    tokio::time::timeout(Duration::from_secs(10), pin).await.unwrap().unwrap();
+    tokio::time::timeout(HANG_GUARD, pin).await.unwrap().unwrap();
     assert_eq!(f.files.read_file(&file).await.unwrap(), bytes);
     // A pin waiting as the store closes ends with it.
     let other = f.uploaded("other", vec![3; CHUNK]).await;
@@ -851,7 +852,7 @@ async fn a_pins_download_stops_before_its_next_request_on_a_metered_network() {
     assert!(tokio::time::timeout(Duration::from_millis(50), &mut waiting).await.is_err());
     f.files.close().await;
     assert!(matches!(
-        tokio::time::timeout(Duration::from_secs(10), waiting).await.unwrap(),
+        tokio::time::timeout(HANG_GUARD, waiting).await.unwrap(),
         Err(FileReadError::Database(DbError::StoreClosed))
     ));
     f.database.close().await.unwrap();
@@ -874,6 +875,6 @@ async fn a_pin_prepared_after_reopening_holds_as_the_stored_setting_says() {
     assert!(tokio::time::timeout(Duration::from_millis(50), &mut pin).await.is_err());
     assert_eq!(requests(&f), before);
     f.network.set_metered(false);
-    tokio::time::timeout(Duration::from_secs(10), pin).await.unwrap().unwrap();
+    tokio::time::timeout(HANG_GUARD, pin).await.unwrap().unwrap();
     f.close().await;
 }
