@@ -839,3 +839,37 @@ async fn s3_invite(ana: &Device) -> Invite {
         .await
         .unwrap()
 }
+
+/// A join request is checked as signed by the pair it names before what it
+/// says is compared, as a saved request is: one naming another member and
+/// not signed by its own pair is refused as unsigned (§13.2).
+#[tokio::test]
+async fn a_request_not_signed_by_its_pair_is_refused_before_its_fields() {
+    let group = Group::shared();
+    let ana = group.device(1).await;
+    group.create(&ana).await;
+    let invite = invite(&ana).await;
+    let code = read_invite_code(invite.shown_code()).unwrap();
+    let named = coven_crypto::MemberKeys::generate().unwrap();
+    let signer = coven_crypto::MemberKeys::generate().unwrap();
+    let forged = coven_format::objects::JoinRequest {
+        invite: code.invite,
+        member: coven_foundation::id_source::MemberId(uuid::Uuid::from_u128(99)),
+        keys: named.public_keys(),
+        device_name: "forged".into(),
+    };
+    let bytes = sealed_join_request(&code.secret, &code.request_path(), &forged, &signer).unwrap();
+    let record = ana
+        .sync
+        .database
+        .operations()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|record| record.kind == INVITE)
+        .unwrap();
+    let work: super::InviteWork = serde_json::from_slice(&record.data).unwrap();
+    let result = ana.sync.open_request(&work, &bytes);
+    assert!(matches!(result, Err(SyncError::Crypto(_))), "{result:?}");
+    ana.sync.database.close().await.unwrap();
+}

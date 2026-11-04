@@ -43,6 +43,33 @@ pub fn sealed_join_request(
     .encode()?)
 }
 
+/// The request stored at `path` as `sealed_join_request` sealed it, opened
+/// with the invite secret's request key and checked as signed by the pair
+/// it names, before the caller compares what it says; with its plaintext.
+/// `None` when the chunk holds another kind of object (§13.2).
+pub(crate) fn opened_join_request(
+    secret: &InviteSecret,
+    path: &ObjectPath,
+    bytes: &[u8],
+) -> Result<Option<(JoinRequest, Vec<u8>)>, SyncError> {
+    let envelope = SingleChunkObject::decode(bytes)?;
+    let SingleChunkObject::JoinRequest { chunk, signature } = &envelope;
+    let plain = secret.join_request_key().open_object_chunk(
+        path.as_str(),
+        &envelope.prefix().encode()?,
+        0,
+        0,
+        chunk,
+    )?;
+    let Object::JoinRequest(request) = Object::decode(&plain)? else {
+        return Ok(None);
+    };
+    let mut hash = ObjectHasher::new();
+    hash.update(&envelope.signed_bytes()?);
+    request.keys.signing.verify_object(path.as_str(), &hash.finish(), signature)?;
+    Ok(Some((request, plain)))
+}
+
 /// An unpublished member identity and its immutable request. The member id
 /// is the one the invite fixes; the keys are this device's fresh pair. The
 /// only durable local copy is encrypted with the invite secret, bound to the
@@ -149,7 +176,6 @@ impl JoiningIdentity {
         let file = directory.owned_file(StoreFile::Bootstrap);
         let sealing = Sealing::new(code)?;
         let path = code.request_path();
-        let prefix = SingleChunkPrefix::JoinRequest;
         let Some(sealed) = file.read_optional()? else {
             return Ok(None);
         };
@@ -176,21 +202,8 @@ impl JoiningIdentity {
         );
         let keys = identity.keys().public_keys();
         let request = bytes.get(end..).ok_or(coven_database::DbError::DamagedDatabase)?.to_vec();
-        let object = SingleChunkObject::decode(&request)?;
-        let SingleChunkObject::JoinRequest { chunk, signature } = &object;
-        let mut hash = ObjectHasher::new();
-        hash.update(&object.signed_bytes()?);
-        keys.signing.verify_object(path.as_str(), &hash.finish(), signature)?;
-        let plain = code.secret.join_request_key().open_object_chunk(
-            path.as_str(),
-            &prefix.encode()?,
-            0,
-            0,
-            chunk,
-        )?;
-        let Object::JoinRequest(opened) = Object::decode(&plain)? else {
-            return Err(coven_database::DbError::DamagedDatabase.into());
-        };
+        let (opened, _) = opened_join_request(&code.secret, &path, &request)?
+            .ok_or(coven_database::DbError::DamagedDatabase)?;
         if opened.invite != code.invite || opened.member != code.member || opened.keys != keys {
             return Err(SyncError::InvitationChanged);
         }

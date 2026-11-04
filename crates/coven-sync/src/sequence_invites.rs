@@ -9,15 +9,12 @@ use crate::{
     OperationOutcome, OperationRejection, PendingReason, PendingRecord, PendingSubject,
     ProviderAccessAction, RetryWaits, SequenceState, SyncError,
 };
-use coven_crypto::{
-    ConfirmationNumber, InviteSecret, MemberIdentity, ObjectHasher, SecretText, StoreKeyring,
-};
+use coven_crypto::{ConfirmationNumber, InviteSecret, MemberIdentity, SecretText, StoreKeyring};
 use coven_database::{Journal, NewOperation, OperationId, OperationRecord, SqlContext};
 use coven_format::{
     admin::{MemberRole, StoreChange},
     codes::{InviteCode, InviteDeliveryKind},
     invite_end::InviteEnd,
-    sealed_single::SingleChunkObject,
     MemberAccess, Object,
 };
 use coven_foundation::id_source::{DeviceId, IdSource, InviteId, MemberId};
@@ -731,24 +728,14 @@ impl SequenceSync {
     /// Open and check a request: it repeats the invite's id and member id,
     /// and its own new signing key verifies it (§13.2).
     fn open_request(&self, work: &InviteWork, bytes: &[u8]) -> Result<Vec<u8>, SyncError> {
-        let envelope = SingleChunkObject::decode(bytes)?;
-        let SingleChunkObject::JoinRequest { signature, .. } = &envelope;
         let path = ObjectPath::join_request(self.store(), work.device, work.id);
-        let plain = work.secret()?.join_request_key().open_object_chunk(
-            path.as_str(),
-            &envelope.prefix().encode()?,
-            0,
-            0,
-            envelope.chunk(),
-        )?;
-        let request = decode_request(&plain)?;
+        let (request, plain) =
+            crate::joining_identity::opened_join_request(&work.secret()?, &path, bytes)?
+                .ok_or(SyncError::InvitationChanged)?;
         if request.invite != work.id || request.member != work.member {
             return Err(SyncError::InvitationChanged);
         }
-        let mut hasher = ObjectHasher::new();
-        hasher.update(&envelope.signed_bytes()?);
-        request.keys.signing.verify_object(path.as_str(), &hasher.finish(), signature)?;
-        Ok(plain.to_vec())
+        Ok(plain)
     }
 }
 
