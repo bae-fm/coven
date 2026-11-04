@@ -1053,7 +1053,7 @@ tables = [
     "StorageConnections::authenticate",
     "StorageConnections::call",
     "StorageConnections::new",
-    "StorageConnections::release",
+    "StorageConnections::close_live",
     # Setup, unlocking, starting and loading compose a connection's sequence
     # owner, loop and credential owner at runtime.
     "StorageConnections::attach",

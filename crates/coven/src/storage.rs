@@ -444,16 +444,21 @@ impl StorageConnections {
         started
     }
 
+    /// Leave the connection released, closing its owners if it was active.
+    async fn close_live(live: &mut ConnectionState) -> Result<(), SyncError> {
+        match std::mem::replace(live, ConnectionState::Released) {
+            ConnectionState::Active(previous) => previous.close().await,
+            ConnectionState::Released | ConnectionState::Loaded(_) => Ok(()),
+        }
+    }
+
     /// Release the current connection after its active pass and transfers.
     /// No connection plans afterwards, so retries waiting for a pass are
     /// answered `NotSyncing`.
     async fn release(&self, live: &mut ConnectionState) -> Result<(), SyncError> {
         let stopped = self.waits.sync_stopped().await;
         self.control.lock().expect("loop control poisoned").take();
-        let closed = match std::mem::replace(live, ConnectionState::Released) {
-            ConnectionState::Active(previous) => previous.close().await,
-            ConnectionState::Released | ConnectionState::Loaded(_) => Ok(()),
-        };
+        let closed = Self::close_live(live).await;
         let released = self.files.set_storage(None, std::future::ready(Ok(()))).await;
         closed.and(released).and(stopped.map_err(SyncError::from))
     }
@@ -715,10 +720,7 @@ impl StorageConnections {
                 return Err(setup_error(error));
             }
         };
-        let released = match std::mem::replace(&mut *live, ConnectionState::Released) {
-            ConnectionState::Active(previous) => previous.close().await,
-            _ => Ok(()),
-        };
+        let released = Self::close_live(&mut live).await;
         let started = self.activate(&mut live, sync, true).await;
         // Custody and provider are committed, and setup read the store to its
         // end. Worker failures now belong to the sync state; setup must
@@ -869,10 +871,7 @@ impl StorageConnections {
                 }
                 let stopped = owner.waits.sync_stopped().await;
                 owner.control.lock().expect("loop control poisoned").take();
-                let released = match std::mem::replace(&mut *live, ConnectionState::Released) {
-                    ConnectionState::Active(previous) => previous.close().await,
-                    _ => Ok(()),
-                };
+                let released = Self::close_live(&mut live).await;
                 // Forgetting succeeded. A worker release failure is recorded
                 // as the last pass's failure; no later custody read can turn
                 // removal into an error. Stopping writes nothing else the
