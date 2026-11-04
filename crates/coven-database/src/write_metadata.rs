@@ -48,6 +48,38 @@ impl From<MergeError> for MetadataFailure {
     }
 }
 
+/// A write coven applied, as its `_coven_writes` row holds it.
+pub(crate) struct StoredWrite {
+    pub(crate) ordinal: i64,
+    pub(crate) timestamp: Timestamp,
+    pub(crate) read_through: u64,
+    pub(crate) slot: Option<Slot>,
+}
+
+/// `id`'s row in `_coven_writes`, if coven has stored it.
+pub(crate) fn stored_write(
+    db: &DatabaseConnection,
+    id: WriteId,
+) -> Result<Option<StoredWrite>, DbError> {
+    let mut rows = db.query(
+        &format!(
+            "SELECT id,timestamp,read_through,slot FROM _coven_writes WHERE {WRITE_DEVICE_SQL}=?1 AND number=?2"
+        ),
+        params![id.device.0.to_be_bytes().as_slice(), id.number.to_be_bytes().as_slice()],
+        |r| {
+            Ok(StoredWrite {
+                ordinal: r.get(0)?,
+                timestamp: decoded(coven_format::merge_fields::decode_timestamp(
+                    &r.get::<_, Vec<u8>>(1)?,
+                ))?,
+                read_through: counter(r.get(2)?),
+                slot: r.get::<_, Option<Vec<u8>>>(3)?.map(|s| Slot(counter(s))),
+            })
+        },
+    )?;
+    Ok(rows.pop())
+}
+
 /// The metadata of the writes coven applied, read from `_coven_writes`.
 pub(crate) struct DatabaseMetadata<'a> {
     db: &'a DatabaseConnection,
@@ -56,37 +88,17 @@ impl<'a> DatabaseMetadata<'a> {
     pub(crate) fn new(db: &'a DatabaseConnection) -> Self {
         Self { db }
     }
-    fn read(&self, id: WriteId) -> Result<Option<(Timestamp, u64, Option<Slot>)>, DbError> {
-        let mut rows = self.db.query(
-            &format!(
-                "SELECT timestamp,read_through,slot FROM _coven_writes WHERE {WRITE_DEVICE_SQL}=?1 AND number=?2"
-            ),
-            params![
-                id.device.0.to_be_bytes().as_slice(),
-                id.number.to_be_bytes().as_slice()
-            ],
-            |r| {
-                Ok((
-                    decoded(coven_format::merge_fields::decode_timestamp(
-                        &r.get::<_, Vec<u8>>(0)?,
-                    ))?,
-                    counter(r.get(1)?),
-                    r.get::<_, Option<Vec<u8>>>(2)?.map(|s| Slot(counter(s))),
-                ))
-            },
-        )?;
-        Ok(rows.pop())
-    }
 }
 impl WriteOracle for DatabaseMetadata<'_> {
     type Error = MetadataFailure;
     fn timestamp(&self, id: WriteId) -> Result<Option<Timestamp>, MetadataFailure> {
-        Ok(self.read(id)?.map(|w| w.0))
+        Ok(stored_write(self.db, id)?.map(|w| w.timestamp))
     }
     fn had_read(&self, reader: WriteId, earlier: WriteId) -> Result<bool, MetadataFailure> {
-        let (_, through, _) = self.read(reader)?.ok_or(MergeError::MissingWrite(reader))?;
-        let slot = self.read(earlier)?.and_then(|w| w.2);
-        Ok(coven_merge::had_read(reader, through, earlier, slot))
+        let reader_write =
+            stored_write(self.db, reader)?.ok_or(MergeError::MissingWrite(reader))?;
+        let slot = stored_write(self.db, earlier)?.and_then(|w| w.slot);
+        Ok(coven_merge::had_read(reader, reader_write.read_through, earlier, slot))
     }
 }
 

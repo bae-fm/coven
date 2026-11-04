@@ -66,7 +66,7 @@ impl<'a> SnapshotMetadata<'a> {
         if let Some(write) = self.read.borrow().get(&id) {
             return Ok(Some(write.clone()));
         }
-        let row = self.database.query("SELECT timestamp,read_through,slot FROM temp._coven_snapshot_writes WHERE source=?1 AND device=?2 AND number=?3", params![self.source,id.device.0.to_be_bytes().as_slice(),id.number.to_be_bytes().as_slice()], |r| Ok(AppliedWrite { id, timestamp: decoded(merge_fields::decode_timestamp(&r.get::<_,Vec<u8>>(0)?))?, read_through:counter(r.get(1)?),slot:coven_merge::Slot(counter(r.get(2)?)) }))?;
+        let row = self.database.query("SELECT device,number,timestamp,read_through,slot FROM temp._coven_snapshot_writes WHERE source=?1 AND device=?2 AND number=?3", params![self.source,id.device.0.to_be_bytes().as_slice(),id.number.to_be_bytes().as_slice()], applied)?;
         let write = row.into_iter().next();
         if let Some(write) = &write {
             self.read.borrow_mut().insert(id, write.clone());

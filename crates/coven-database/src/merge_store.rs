@@ -4,6 +4,7 @@ use crate::internal_schema::WRITE_DEVICE_SQL;
 use crate::row_cache::{value_weight, RowCache, Weight};
 use crate::sqlite::DatabaseConnection;
 use crate::write_encoding::{audience_text, counter, decoded};
+use crate::write_metadata::StoredWrite;
 use crate::write_rows::AppView;
 use crate::DbError;
 use coven_format::{merge_fields, value::Value, write::WriteRecord};
@@ -28,13 +29,6 @@ pub(crate) fn newest_read() -> String {
     )
 }
 
-struct StoredWrite {
-    ordinal: i64,
-    timestamp: Timestamp,
-    read_through: u64,
-    slot: Option<coven_merge::Slot>,
-}
-
 struct WriteMetadata<'a> {
     database: &'a DatabaseConnection,
     writes: RefCell<BTreeMap<WriteId, StoredWrite>>,
@@ -48,10 +42,8 @@ impl<'a> WriteMetadata<'a> {
         if self.writes.borrow().contains_key(&id) {
             return Ok(());
         }
-        let applied = self.database.query_row(
-            &format!("SELECT id,timestamp,read_through,slot FROM _coven_writes WHERE {WRITE_DEVICE_SQL}=?1 AND number=?2"),
-            params![id.device.0.to_be_bytes().as_slice(),id.number.to_be_bytes().as_slice()],
-            |r| Ok(StoredWrite { ordinal:r.get(0)?, timestamp:decoded(merge_fields::decode_timestamp(&r.get::<_,Vec<u8>>(1)?))?, read_through:counter(r.get(2)?), slot:r.get::<_,Option<Vec<u8>>>(3)?.map(|s|coven_merge::Slot(counter(s))) }))?;
+        let applied = crate::write_metadata::stored_write(self.database, id)?
+            .ok_or(DbError::from(rusqlite::Error::QueryReturnedNoRows))?;
         self.writes.borrow_mut().insert(id, applied);
         Ok(())
     }

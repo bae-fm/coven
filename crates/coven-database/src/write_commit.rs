@@ -1,5 +1,4 @@
 //! Persist exactly the row updates produced by coven-merge, with their record.
-use crate::internal_schema::WRITE_DEVICE_SQL;
 use crate::merge_store::MergeStore;
 use crate::sqlite::DatabaseConnection;
 use crate::write_encoding::{audience_text, encoded};
@@ -50,29 +49,23 @@ fn retain(
     slot: Option<coven_merge::Slot>,
 ) -> Result<i64, DbError> {
     let stamp = encoded(merge_fields::encode_timestamp(&timestamp))?;
-    let known = database.query(
-        &format!("SELECT id,timestamp,read_through,slot FROM _coven_writes WHERE {WRITE_DEVICE_SQL}=?1 AND number=?2"),
-        params![id.device.0.to_be_bytes().as_slice(), id.number.to_be_bytes().as_slice()],
-        |r| Ok((r.get::<_,i64>(0)?, r.get::<_,Vec<u8>>(1)?, r.get::<_,Vec<u8>>(2)?, r.get::<_,Option<Vec<u8>>>(3)?)))?;
-    if let Some((ordinal, old_stamp, old_past, old_slot)) = known.into_iter().next() {
-        if old_stamp != stamp
-            || crate::write_encoding::counter(old_past) != read_through
-            || slot
-                .zip(old_slot.as_ref())
-                .is_some_and(|(s, old)| s.0.to_be_bytes().as_slice() != old)
+    if let Some(known) = crate::write_metadata::stored_write(database, id)? {
+        if known.timestamp != timestamp
+            || known.read_through != read_through
+            || slot.zip(known.slot).is_some_and(|(slot, old)| slot != old)
         {
             return Err(DbError::InvalidWrite {
                 write: id,
                 error: coven_merge::MergeError::DuplicateWrite(id),
             });
         }
-        if let Some(slot) = slot.filter(|_| old_slot.is_none()) {
+        if let Some(slot) = slot.filter(|_| known.slot.is_none()) {
             database.internal_execute(
                 "UPDATE _coven_writes SET slot=?1 WHERE id=?2",
-                params![slot.0.to_be_bytes().as_slice(), ordinal],
+                params![slot.0.to_be_bytes().as_slice(), known.ordinal],
             )?;
         }
-        return Ok(ordinal);
+        return Ok(known.ordinal);
     }
     database.query_row(
         "INSERT INTO _coven_writes(timestamp,number,read_through,slot) VALUES(?1,?2,?3,?4) RETURNING id",
