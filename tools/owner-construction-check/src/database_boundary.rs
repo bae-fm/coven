@@ -13,8 +13,10 @@
 //! - a statement that writes the table, or a trigger whose body does, is
 //!   the domain's own work;
 //! - the table's `CREATE TABLE` and `CREATE INDEX`, and a trigger on it that
-//!   writes no domain's table, are its schema, read where the text is written:
-//!   in a `.sql` file, or in a string literal, a macro's definition included;
+//!   writes no domain's table, are its schema;
+//! - both are read where the text is written: in a `.sql` file, or in a
+//!   string literal, a macro's definition included, so the code invoking a
+//!   macro writes nothing itself;
 //! - test code that writes or creates the table is the domain's tests. A
 //!   home file's tests, `<name>_tests.rs` beside it, are in its home.
 //!
@@ -65,7 +67,6 @@ pub(crate) fn find_database_boundary_violations(code: &CrateCode, policy: &Polic
             confined_to: &confined_to,
             reexporting_crate: reexporting_crate.as_deref(),
             tables: &tables,
-            domains: &domains,
             violations: &mut violations,
         };
         visitor.visit_file(&file.syntax);
@@ -93,17 +94,14 @@ pub(crate) fn find_database_boundary_violations(code: &CrateCode, policy: &Polic
         domains.check_writes(&file.relative_path, &file.text, line, &mut violations);
         domains.check_schema(&file.relative_path, &file.text, line, &mut violations);
     }
-    // Schema is read where its text is written, macro definitions included.
+    // Writes and schema are read where their text is written, macro
+    // definitions included: code invoking a macro writes nothing itself.
     for file in &code.written {
         SqlLiterals {
             visit: |literal: &syn::LitStr| {
-                let line = literal.span().start().line;
-                domains.check_schema(
-                    &file.relative_path,
-                    &literal.value(),
-                    |_| line,
-                    &mut violations,
-                )
+                let (sql, line) = (literal.value(), literal.span().start().line);
+                domains.check_writes(&file.relative_path, &sql, |_| line, &mut violations);
+                domains.check_schema(&file.relative_path, &sql, |_| line, &mut violations);
             },
         }
         .visit_file(&file.syntax);
@@ -258,7 +256,6 @@ struct DatabaseBoundaryVisitor<'a> {
     /// The crate, as Rust names it, whose `rusqlite` re-export may be imported.
     reexporting_crate: Option<&'a str>,
     tables: &'a BTreeSet<String>,
-    domains: &'a Domains<'a>,
     violations: &'a mut BTreeSet<Finding>,
 }
 
@@ -280,8 +277,6 @@ impl DatabaseBoundaryVisitor<'_> {
         if let Some(table) = schema_table_in_sql(&sql, self.tables) {
             self.record(&format!("SQL on the database's own table {table}"), literal.span());
         }
-        let line = literal.span().start().line;
-        self.domains.check_writes(self.path, &sql, |_| line, self.violations);
     }
 }
 

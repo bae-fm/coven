@@ -10106,8 +10106,11 @@ shared state.
   the remote observations, the database owner for the rest. A type whose
   every method only passes its call on to that owner would be a second name
   for it. The checker finds a write in SQL text, a statement or a trigger's
-  body, in string literals and in `.sql` files; SQL built while the program
-  runs names its table nowhere in the source, so the checker can't see it.
+  body, in string literals and in `.sql` files, where the text is written:
+  a macro's definition answers for the SQL it holds, and code invoking the
+  macro writes nothing itself, so a table's seed row in its domain's schema
+  is that domain's write. SQL built while the program runs names its table
+  nowhere in the source, so the checker can't see it.
 
 ### F.3 Owners and tasks
 

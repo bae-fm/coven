@@ -455,6 +455,49 @@ CREATE TRIGGER notes_listed AFTER INSERT ON notes BEGIN INSERT INTO note_listing
     );
 }
 
+/// A write is read where its text is written, as schema is: a macro's
+/// definition writing a domain's table answers for it in its own file, and
+/// the code that invokes the macro writes nothing itself. A table's seed row
+/// in its domain's schema macro is the domain's own write wherever the macro
+/// is expanded.
+#[test]
+fn a_write_in_a_macro_is_read_where_the_macro_is_written() {
+    let files = [
+        RustFile::fixture(
+            "crates/app-core/src/listing.rs",
+            r#"
+            macro_rules! listing_tables {
+                () => { "CREATE TABLE note_listing (id TEXT); INSERT INTO note_listing VALUES (0);" };
+            }
+            "#,
+        ),
+        RustFile::fixture(
+            "crates/app-sync/src/apply.rs",
+            r#"
+            macro_rules! clear_search {
+                () => { "DELETE FROM note_search" };
+            }
+            "#,
+        ),
+        RustFile::fixture(
+            "crates/app-database/src/schema.rs",
+            r#"
+            fn schema() -> String {
+                [listing_tables!(), clear_search!(), "CREATE TABLE notes (id TEXT)"].concat()
+            }
+            "#,
+        ),
+    ];
+    assert_eq!(
+        domain_violations(&files, &[]),
+        [(
+            "crates/app-sync/src/apply.rs".to_string(),
+            3,
+            "SQL writes note_search, which only the listing domain writes, in crates/app-core/src/listing/, crates/app-core/src/listing.rs".to_string()
+        )]
+    );
+}
+
 /// A domain's tests live in its homes: a home file's `<name>_tests.rs`, and
 /// its directory's test files, may write its tables; test code elsewhere,
 /// a test-only item of another file or a SQL file under `tests/`, may not.
