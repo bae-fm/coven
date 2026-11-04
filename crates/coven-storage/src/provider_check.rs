@@ -34,9 +34,7 @@ pub async fn check_provider(
         created?;
         check = StorageCheck::CreateOnce;
         match storage.create(path, encrypted_bytes).await {
-            Err(error)
-                if error.failure() == StorageFailure::AlreadyExists
-                    && !matches!(error, StorageError::Cleanup { .. }) => {}
+            Err(error) if error.own_failure() == Some(StorageFailure::AlreadyExists) => {}
             Err(error) => return Err(error),
             Ok(_) => {
                 return Err(

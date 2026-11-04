@@ -4467,6 +4467,9 @@ pub enum StorageError {
 impl StorageError {
     /// The stored classification; for Cleanup, the original operation's failure.
     pub fn failure(&self) -> StorageFailure;
+    /// The failure when the request alone failed; none for Cleanup, which
+    /// leaves state behind that handling the failure itself doesn't know of.
+    pub fn own_failure(&self) -> Option<StorageFailure>;
     /// True only for network interruptions and provider throttling.
     pub fn retryable(&self) -> bool;
 

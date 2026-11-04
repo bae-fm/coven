@@ -432,9 +432,9 @@ impl SequenceSync {
                         session.floor = None;
                     }
                     Err(error)
-                        if matches!(&error, SyncError::Storage(storage) if !matches!(storage, coven_storage::StorageError::Cleanup { .. }) && matches!(
-                            storage.failure(),
-                            StorageFailure::Conflict | StorageFailure::AlreadyExists
+                        if matches!(&error, SyncError::Storage(storage) if matches!(
+                            storage.own_failure(),
+                            Some(StorageFailure::Conflict | StorageFailure::AlreadyExists)
                         )) =>
                     {
                         self.read_forward(session, ring, member).await?;

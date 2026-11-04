@@ -35,9 +35,7 @@ impl SetupWaits {
     /// is left of the cooldown that refused it, and never less than the
     /// ordinary delay (§6.7).
     pub(crate) async fn wait_to_resend(&self, clock: &dyn Clock, error: &StorageError) -> bool {
-        if error.failure() != StorageFailure::RateLimited
-            || matches!(error, StorageError::Cleanup { .. })
-        {
+        if error.own_failure() != Some(StorageFailure::RateLimited) {
             return false;
         }
         let (wait, resends) = {

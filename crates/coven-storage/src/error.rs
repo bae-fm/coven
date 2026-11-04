@@ -176,6 +176,17 @@ impl StorageError {
         }
     }
 
+    /// The failure when the request alone failed: none when its cleanup
+    /// failed too, which leaves state behind that a caller handling the
+    /// failure itself, such as an occupied path or a throttled request,
+    /// doesn't know of.
+    pub fn own_failure(&self) -> Option<StorageFailure> {
+        match self {
+            Self::Cleanup { .. } => None,
+            _ => Some(self.failure()),
+        }
+    }
+
     /// Whether the provider answered the request behind this failure, even
     /// with an error (E5). `Network` alone cannot say: a server's error
     /// response is an answer; a refused connection or a timeout is not.

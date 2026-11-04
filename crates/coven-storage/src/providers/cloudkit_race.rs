@@ -325,19 +325,12 @@ async fn read_back(
     loop {
         match reader.read(path).await {
             Ok(bytes) => return Ok(Some(bytes)),
+            Err(error) if error.own_failure() == Some(StorageFailure::NotFound) => return Ok(None),
             Err(error)
-                if !matches!(error, StorageError::Cleanup { .. })
-                    && error.failure() == StorageFailure::NotFound =>
-            {
-                return Ok(None)
-            }
-            Err(error)
-                if !matches!(error, StorageError::Cleanup { .. })
-                    && matches!(
-                        error.failure(),
-                        StorageFailure::RateLimited | StorageFailure::Network
-                    )
-                    && tries < RETRIES =>
+                if matches!(
+                    error.own_failure(),
+                    Some(StorageFailure::RateLimited | StorageFailure::Network)
+                ) && tries < RETRIES =>
             {
                 tries += 1;
                 clock.sleep(error.retry_after().map_or(RETRY_WAIT, RetryAfter::wait)).await;

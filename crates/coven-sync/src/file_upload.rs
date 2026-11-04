@@ -92,8 +92,8 @@ impl FilesInner {
             match storage.create_reporting(&path, &bytes, &transfer.sent).await {
                 Ok(_) => {}
                 Err(error)
-                    if error.failure() == coven_storage::StorageFailure::AlreadyExists
-                        && !matches!(error, coven_storage::StorageError::Cleanup { .. }) =>
+                    if error.own_failure()
+                        == Some(coven_storage::StorageFailure::AlreadyExists) =>
                 {
                     self.settle_occupied(storage.as_ref(), &path, crate::identity::digest(&bytes))
                         .await?;

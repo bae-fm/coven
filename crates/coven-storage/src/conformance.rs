@@ -11,10 +11,7 @@ pub struct Conformance {
 }
 /// The provider refused an occupied immutable path and left it unchanged.
 fn occupied<T>(result: Result<T, StorageError>) -> bool {
-    result.is_err_and(|error| {
-        error.failure() == StorageFailure::AlreadyExists
-            && !matches!(error, StorageError::Cleanup { .. })
-    })
+    result.is_err_and(|error| error.own_failure() == Some(StorageFailure::AlreadyExists))
 }
 
 impl Conformance {
@@ -225,9 +222,7 @@ impl Conformance {
         for (index, result) in [first, second, third].into_iter().enumerate() {
             match result {
                 Ok(_) => winners.push(index),
-                Err(error)
-                    if error.failure() == StorageFailure::AlreadyExists
-                        && !matches!(error, StorageError::Cleanup { .. }) => {}
+                Err(error) if error.own_failure() == Some(StorageFailure::AlreadyExists) => {}
                 Err(error) => return Err(error),
             }
         }
@@ -428,10 +423,9 @@ impl Conformance {
             };
             let error = result.unwrap_err();
             assert_eq!(
-                error.failure(),
-                if seeded { StorageFailure::Conflict } else { StorageFailure::AlreadyExists }
+                error.own_failure(),
+                Some(if seeded { StorageFailure::Conflict } else { StorageFailure::AlreadyExists })
             );
-            assert!(!matches!(error, StorageError::Cleanup { .. }));
             for upload in &uploads {
                 storage.abort_upload(upload).await.unwrap();
             }

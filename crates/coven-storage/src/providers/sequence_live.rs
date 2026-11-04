@@ -53,15 +53,14 @@ pub(crate) fn replies_valid(replies: &[Reply]) -> Result<(), StorageError> {
     require(
         replies.iter().all(|r| match &r.result {
             Ok(()) => true,
-            Err(error) => {
-                !matches!(error, StorageError::Cleanup { .. })
-                    && matches!(
-                        error.failure(),
-                        StorageFailure::AlreadyExists
-                            | StorageFailure::Conflict
-                            | StorageFailure::RateLimited
-                    )
-            }
+            Err(error) => matches!(
+                error.own_failure(),
+                Some(
+                    StorageFailure::AlreadyExists
+                        | StorageFailure::Conflict
+                        | StorageFailure::RateLimited
+                )
+            ),
         }),
         "race writer returned an unexpected error or cleanup failure",
     )
@@ -134,10 +133,7 @@ pub(crate) async fn retry<T>(
 ) -> Result<T, StorageError> {
     for attempt in 0..20 {
         match request().await {
-            Err(error)
-                if error.failure() == StorageFailure::RateLimited
-                    && !matches!(error, StorageError::Cleanup { .. }) =>
-            {
+            Err(error) if error.own_failure() == Some(StorageFailure::RateLimited) => {
                 let wait = throttled_wait(&error, attempt);
                 println!(
                     "sequence auxiliary throttled attempt={} wait_ms={}",
@@ -189,10 +185,7 @@ pub(crate) async fn rounds(
                     );
                 }
             }
-            Err(error)
-                if error.failure() == StorageFailure::RateLimited
-                    && !matches!(error, StorageError::Cleanup { .. }) =>
-            {
+            Err(error) if error.own_failure() == Some(StorageFailure::RateLimited) => {
                 tally.throttled += 1;
                 let wait = throttled_wait(&error, consecutive);
                 println!(
@@ -242,7 +235,7 @@ fn require(ok: bool, reason: &'static str) -> Result<(), StorageError> {
 }
 
 fn expect_failure(error: StorageError, expected: StorageFailure) -> Result<(), StorageError> {
-    if !matches!(error, StorageError::Cleanup { .. }) && error.failure() == expected {
+    if error.own_failure() == Some(expected) {
         Ok(())
     } else {
         Err(error)
@@ -278,9 +271,7 @@ pub(crate) async fn lost_replies(
     let retried = retry(clock, async || writer.create(&slot, bytes).await).await;
     match retried {
         Ok(_) => {}
-        Err(error)
-            if !matches!(error, StorageError::Cleanup { .. })
-                && error.failure() == StorageFailure::AlreadyExists => {}
+        Err(error) if error.own_failure() == Some(StorageFailure::AlreadyExists) => {}
         Err(error) => return Err(error),
     }
     require(

@@ -172,10 +172,7 @@ impl<P: ProviderOps + ?Sized> StorageConnection<P> {
         loop {
             let replaced = self.replace_once(previous, bytes).await;
             if let Err(error) = &replaced {
-                if resent
-                    && error.failure() == StorageFailure::Conflict
-                    && !matches!(error, StorageError::Cleanup { .. })
-                {
+                if resent && error.own_failure() == Some(StorageFailure::Conflict) {
                     let stored = self.read(&previous.path).await?;
                     return if stored == bytes { Ok(()) } else { replaced };
                 }
@@ -380,10 +377,7 @@ impl<P: ProviderOps + ?Sized> Storage for StorageConnection<P> {
         loop {
             let created = self.create_once(path, bytes, sent).await;
             if let Err(error) = &created {
-                if resent
-                    && error.failure() == StorageFailure::AlreadyExists
-                    && !matches!(error, StorageError::Cleanup { .. })
-                {
+                if resent && error.own_failure() == Some(StorageFailure::AlreadyExists) {
                     let stored = self.read_object(path, None).await?;
                     return if stored.bytes == bytes { Ok(Some(stored.metadata)) } else { created };
                 }

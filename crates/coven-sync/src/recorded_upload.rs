@@ -51,9 +51,7 @@ async fn source_digest<S: UploadSource>(source: &mut S, total: u64) -> Result<Up
 }
 
 fn occupied(target: &UploadTarget, error: &StorageError) -> bool {
-    !target.path().is_replaceable()
-        && error.failure() == StorageFailure::AlreadyExists
-        && !matches!(error, StorageError::Cleanup { .. })
+    !target.path().is_replaceable() && error.own_failure() == Some(StorageFailure::AlreadyExists)
 }
 
 /// Persist every confirmed session before continuing; read only its next part.
@@ -76,9 +74,7 @@ pub(crate) async fn upload<S: UploadSource>(
                 if occupied(target, &error) {
                     return source_digest(source, total).await;
                 }
-                if error.failure() != StorageFailure::SessionExpired
-                    || matches!(error, StorageError::Cleanup { .. })
-                {
+                if error.own_failure() != Some(StorageFailure::SessionExpired) {
                     return Err(error.into());
                 }
                 session = match storage.restart_upload(&session).await {

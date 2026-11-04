@@ -51,10 +51,7 @@ impl<P: ProviderOps + ?Sized> StorageConnection<P> {
             .await;
         match created {
             Ok(()) => Ok(()),
-            Err(error)
-                if error.failure() == StorageFailure::AlreadyExists
-                    && !matches!(error, StorageError::Cleanup { .. }) =>
-            {
+            Err(error) if error.own_failure() == Some(StorageFailure::AlreadyExists) => {
                 self.check_bucket(store).await
             }
             Err(error) => Err(error),
