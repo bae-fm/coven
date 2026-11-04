@@ -1,9 +1,8 @@
 //! A staged snapshot's write evidence authenticated before installation, and
 //! its staged tables read back without decoding the snapshot again.
 use crate::{
-    authorship::Authorship, input_preparation::PreparedInputs, snapshot_error::invalid,
-    snapshot_metadata::SnapshotMetadata, sqlite::DatabaseConnection,
-    write_metadata::MetadataFailure, DbError,
+    authorship::Authorship, snapshot_error::invalid, snapshot_metadata::SnapshotMetadata,
+    sqlite::DatabaseConnection, write_metadata::MetadataFailure, DbError,
 };
 use coven_format::snapshot::{SnapshotHeader, SnapshotRecord};
 use std::collections::VecDeque;
@@ -26,38 +25,37 @@ pub(crate) struct PreparedSnapshot<'a> {
 }
 
 /// Authenticate each staged write evidence of the staging `staging`, whose
-/// stream carried `header`, once the snapshot's history is known (D7.5).
-/// Staging checked every record but this one, and found `refusal`.
+/// stream carried `header`, once the snapshot's history is known (D7.5),
+/// on the input transaction `db` has open. Staging checked every record but
+/// this one, and found `refusal`.
 pub(crate) fn prepare<'a>(
-    inputs: &PreparedInputs<'a>,
+    db: &'a DatabaseConnection,
     staging: i64,
     header: SnapshotHeader,
     refusal: Option<(u8, DbError)>,
     authorship: &dyn Authorship,
 ) -> Result<PreparedSnapshot<'a>, DbError> {
-    inputs.run(|db| {
-        let oracle = SnapshotMetadata::staged(db, staging);
-        let mut evidence = VecDeque::new();
-        db.for_each(
-            &format!(
-                "SELECT record FROM {} WHERE evidence=1 ORDER BY rowid",
-                crate::database::input_database::staging::table(staging, "records")
-            ),
-            [],
-            |row| {
-                let record = SnapshotRecord::decode_checked(&row.get::<_, Vec<u8>>(0)?, &oracle)
-                    .map_err(MetadataFailure::snapshot)?;
-                let SnapshotRecord::Evidence(original) = record else {
-                    return Err(invalid("staged evidence is another record"));
-                };
-                let verified =
-                    crate::authorship::authenticate(authorship, &header.id.audience, &original)?;
-                evidence.push_back(PreparedEvidence { original, verified });
-                Ok::<_, DbError>(())
-            },
-        )?;
-        Ok(PreparedSnapshot { db, staging, header, evidence, refusal })
-    })
+    let oracle = SnapshotMetadata::staged(db, staging);
+    let mut evidence = VecDeque::new();
+    db.for_each(
+        &format!(
+            "SELECT record FROM {} WHERE evidence=1 ORDER BY rowid",
+            crate::database::input_database::staging::table(staging, "records")
+        ),
+        [],
+        |row| {
+            let record = SnapshotRecord::decode_checked(&row.get::<_, Vec<u8>>(0)?, &oracle)
+                .map_err(MetadataFailure::snapshot)?;
+            let SnapshotRecord::Evidence(original) = record else {
+                return Err(invalid("staged evidence is another record"));
+            };
+            let verified =
+                crate::authorship::authenticate(authorship, &header.id.audience, &original)?;
+            evidence.push_back(PreparedEvidence { original, verified });
+            Ok::<_, DbError>(())
+        },
+    )?;
+    Ok(PreparedSnapshot { db, staging, header, evidence, refusal })
 }
 
 impl PreparedSnapshot<'_> {

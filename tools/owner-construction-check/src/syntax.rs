@@ -150,6 +150,117 @@ pub(crate) fn supplied_type_names(ty: &syn::Type, types: FileTypes<'_>) -> BTree
     names.names
 }
 
+/// What a signature's callbacks can keep of what the callable gives them:
+/// each argument type of a callback its parameters' types or its generics'
+/// bounds name, `impl FnOnce(&'a Connection)` or `fn(Permit)`, except one
+/// lent only for the callback's call. A reference, or a value borrowing,
+/// whose every lifetime is elided, `'_`, or bound by the callback's own
+/// `for<…>` is lent so: `impl FnOnce(&Connection)` lets the callback use
+/// the connection while it runs and keep none of it. An argument the
+/// callback can keep is handed out, as a returned value is.
+pub(crate) fn kept_callback_arguments(signature: &syn::Signature) -> Vec<&syn::Type> {
+    let mut arguments = KeptCallbackArguments { bound: Vec::new(), kept: Vec::new() };
+    for input in &signature.inputs {
+        if let syn::FnArg::Typed(input) = input {
+            arguments.visit_type(&input.ty);
+        }
+    }
+    arguments.visit_generics(&signature.generics);
+    arguments.kept
+}
+
+struct KeptCallbackArguments<'ast> {
+    /// The lifetimes the enclosing `for<…>` binders bind.
+    bound: Vec<&'ast syn::Lifetime>,
+    kept: Vec<&'ast syn::Type>,
+}
+
+impl<'ast> KeptCallbackArguments<'ast> {
+    fn bind<T: ?Sized>(
+        &mut self,
+        binder: Option<&'ast syn::BoundLifetimes>,
+        node: &'ast T,
+        visit: impl FnOnce(&mut Self, &'ast T),
+    ) {
+        let depth = self.bound.len();
+        for parameter in binder.into_iter().flat_map(|binder| &binder.lifetimes) {
+            if let syn::GenericParam::Lifetime(parameter) = parameter {
+                self.bound.push(&parameter.lifetime);
+            }
+        }
+        visit(self, node);
+        self.bound.truncate(depth);
+    }
+
+    /// Each callback argument the callback can keep. What a callback's own
+    /// arguments and result carry flows between the callback and its
+    /// caller, not out of the callable.
+    fn arguments(&mut self, arguments: impl IntoIterator<Item = &'ast syn::Type>) {
+        for argument in arguments {
+            if !self.lent(argument) {
+                self.kept.push(argument);
+            }
+        }
+    }
+
+    fn lent(&self, ty: &syn::Type) -> bool {
+        let local = |lifetime: &syn::Lifetime| {
+            lifetime.ident == "_" || self.bound.iter().any(|bound| bound.ident == lifetime.ident)
+        };
+        match ty {
+            syn::Type::Paren(inner) => self.lent(&inner.elem),
+            syn::Type::Group(inner) => self.lent(&inner.elem),
+            syn::Type::Reference(reference) => reference.lifetime.as_ref().is_none_or(local),
+            syn::Type::Path(path) => {
+                let lifetimes = path
+                    .path
+                    .segments
+                    .iter()
+                    .flat_map(|segment| match &segment.arguments {
+                        syn::PathArguments::AngleBracketed(arguments) => {
+                            arguments.args.iter().collect::<Vec<_>>()
+                        }
+                        _ => Vec::new(),
+                    })
+                    .filter_map(|argument| match argument {
+                        syn::GenericArgument::Lifetime(lifetime) => Some(lifetime),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>();
+                !lifetimes.is_empty() && lifetimes.into_iter().all(local)
+            }
+            _ => false,
+        }
+    }
+}
+
+impl<'ast> Visit<'ast> for KeptCallbackArguments<'ast> {
+    fn visit_trait_bound(&mut self, node: &'ast syn::TraitBound) {
+        self.bind(node.lifetimes.as_ref(), node, |this, node| {
+            visit::visit_trait_bound(this, node);
+        });
+    }
+
+    fn visit_predicate_type(&mut self, node: &'ast syn::PredicateType) {
+        self.bind(node.lifetimes.as_ref(), node, |this, node| {
+            visit::visit_predicate_type(this, node);
+        });
+    }
+
+    fn visit_parenthesized_generic_arguments(
+        &mut self,
+        node: &'ast syn::ParenthesizedGenericArguments,
+    ) {
+        self.arguments(node.inputs.iter().map(|input| &input.ty));
+    }
+
+    fn visit_type_fn_ptr(&mut self, node: &'ast syn::TypeFnPtr) {
+        self.bind(node.lifetimes.as_ref(), node, |this, node| {
+            this.arguments(node.inputs.iter().map(|input| &input.ty));
+        });
+    }
+}
+
 /// The types a type holds through a shared pointer, such as `Arc`, or a
 /// reference: values its holder shares with whatever else points at them.
 /// `Arc<Mutex<State>>` holds `Mutex` and `State` so; `Mutex<State>` holds

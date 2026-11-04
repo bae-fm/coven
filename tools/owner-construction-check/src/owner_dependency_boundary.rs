@@ -1,6 +1,8 @@
-//! An owner never hands out what it holds (Appendix F.3), by returning it or by a
-//! public field; callers ask it to do the work. And a method never takes a raw
-//! capability, such as a database connection, as a parameter.
+//! An owner never hands out what it holds (Appendix F.3), by returning it, by a
+//! public field, or as an argument its caller's callback can keep
+//! (`kept_callback_arguments`); callers ask it to do the work. And a method
+//! never takes a raw capability, such as a database connection, as a
+//! parameter.
 //!
 //! A handle is the one thing an owner hands out on purpose: its owner returns
 //! it, and so does an owner holding that owner, at any depth, passing up a
@@ -28,8 +30,8 @@ use crate::finding::Finding;
 use crate::owner_graph::OwnerGraph;
 use crate::policy::Policy;
 use crate::syntax::{
-    shared_type_names, supplied_type_names, type_name, type_names, visibility_crosses_owner,
-    RustFile,
+    kept_callback_arguments, shared_type_names, supplied_type_names, type_name, type_names,
+    visibility_crosses_owner, RustFile,
 };
 use crate::type_identity::TypeIdentity;
 
@@ -39,13 +41,40 @@ struct OwnerMethod {
     owner: String,
     method: String,
     output: BTreeSet<String>,
-    /// What the output holds through a shared pointer or a reference.
+    /// What the method's callbacks can keep of the arguments it gives them
+    /// (`kept_callback_arguments`): handed out, as its output is.
+    callback_output: BTreeSet<String>,
+    /// What the output and those arguments hold through a shared pointer or
+    /// a reference.
     shared_output: BTreeSet<String>,
     parameters: BTreeSet<String>,
     mutates_owner: bool,
     consumes_owner: bool,
     borrows_output: bool,
+    /// Whether a kept callback argument is a reference or a pointer.
+    borrows_callback_output: bool,
     public: bool,
+}
+
+/// How a method hands a value out: as what it returns, or as an argument
+/// its caller's callback can keep.
+#[derive(Clone, Copy)]
+enum Route {
+    Return,
+    Callback,
+}
+
+impl OwnerMethod {
+    /// Everything the method hands out, each by its route. A type both
+    /// returned and given to a callback is named by its return.
+    fn handed_out(&self) -> impl Iterator<Item = (&String, Route)> {
+        self.output.iter().map(|output| (output, Route::Return)).chain(
+            self.callback_output
+                .iter()
+                .filter(|output| !self.output.contains(*output))
+                .map(|output| (output, Route::Callback)),
+        )
+    }
 }
 
 pub(crate) fn find_owner_dependency_leaks(
@@ -85,7 +114,7 @@ pub(crate) fn find_owner_dependency_leaks(
         for method in &methods {
             let held = &retained[&method.owner];
             let rooted = policy.is_composition_root(&method.path, &method.owner, &method.method);
-            for output in &method.output {
+            for (output, route) in method.handed_out() {
                 if let Some(maker) = policy.handles.get(output) {
                     let message = if rooted || policy.makes_handle(&method.owner, output) {
                         None
@@ -131,7 +160,7 @@ pub(crate) fn find_owner_dependency_leaks(
                 }
                 let retained_service = services.contains(output)
                     && held.contains(output)
-                    && !transfers_task(method, output, policy);
+                    && !transfers_task(method, route, output, policy);
                 let new_service = method.public
                     && graph.owners.contains(output)
                     && !policy.task_types.contains(output)
@@ -152,10 +181,16 @@ pub(crate) fn find_owner_dependency_leaks(
                     leaks.insert(Finding::new(
                         &method.path,
                         method.line,
-                        format!(
-                            "{}::{} returns retained dependency {output}",
-                            method.owner, method.method
-                        ),
+                        match route {
+                            Route::Return => format!(
+                                "{}::{} returns retained dependency {output}",
+                                method.owner, method.method
+                            ),
+                            Route::Callback => format!(
+                                "{}::{} hands its callback retained dependency {output}",
+                                method.owner, method.method
+                            ),
+                        },
                         REMEDY,
                     ));
                 }
@@ -199,8 +234,12 @@ const SHARED_STATE_REMEDY: &str =
 /// A consumed task can hand its owned permit or prepared result to the next
 /// task. Borrowed getters and wrappers exposing raw dependencies
 /// still answer to the ordinary leak rules.
-fn transfers_task(method: &OwnerMethod, output: &str, policy: &Policy) -> bool {
-    method.consumes_owner && !method.borrows_output && policy.task_types.contains(output)
+fn transfers_task(method: &OwnerMethod, route: Route, output: &str, policy: &Policy) -> bool {
+    let borrows = match route {
+        Route::Return => method.borrows_output,
+        Route::Callback => method.borrows_callback_output,
+    };
+    method.consumes_owner && !borrows && policy.task_types.contains(output)
 }
 
 fn collect_retained_service_owner_fields(
@@ -524,15 +563,27 @@ fn owner_method(
     pointers: &BTreeSet<String>,
     identity: &TypeIdentity,
 ) -> OwnerMethod {
-    let (mut output, shared_output) = match &signature.output {
+    let (mut output, mut shared_output) = match &signature.output {
         syn::ReturnType::Default => (BTreeSet::new(), BTreeSet::new()),
         syn::ReturnType::Type(_, output) => (
             type_names(output, identity.in_file(path)),
             shared_type_names(output, pointers, identity.in_file(path)),
         ),
     };
-    output.remove("Self");
-    output.remove(owner);
+    let kept = kept_callback_arguments(signature);
+    let mut callback_output = BTreeSet::new();
+    let mut borrows_callback_output = false;
+    for argument in kept {
+        callback_output.extend(type_names(argument, identity.in_file(path)));
+        shared_output.extend(shared_type_names(argument, pointers, identity.in_file(path)));
+        let mut borrowed = BorrowedOutput(false);
+        borrowed.visit_type(argument);
+        borrows_callback_output |= borrowed.0;
+    }
+    for names in [&mut output, &mut callback_output] {
+        names.remove("Self");
+        names.remove(owner);
+    }
     let parameters = signature
         .inputs
         .iter()
@@ -562,7 +613,9 @@ fn owner_method(
             borrowed.0
         },
         output,
+        callback_output,
         shared_output,
+        borrows_callback_output,
         parameters,
     }
 }

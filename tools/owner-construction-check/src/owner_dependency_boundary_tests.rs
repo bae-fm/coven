@@ -163,6 +163,36 @@ fn consuming_tasks_can_transfer_products_but_cannot_lend_or_expose_raw_handles()
     );
 }
 
+/// A callback that can keep what a method gives it has been handed it, as a
+/// returned value is; one lent it only for the call, its lifetime elided,
+/// `'_` or bound by the callback's `for<…>`, has not, and what a callback
+/// returns is the caller's, not the method's.
+#[test]
+fn a_callback_that_can_keep_a_retained_dependency_is_handed_it() {
+    let source = "struct Inputs<'a> { db: &'a DatabaseConnection } impl<'a> Inputs<'a> { \
+        pub fn run<T>(&self, work: impl FnOnce(&'a DatabaseConnection) -> T) -> T { todo!() } \
+        pub fn bound<T, F: FnOnce(&'a DatabaseConnection) -> T>(&self, work: F) -> T { todo!() } \
+        pub fn pointer(&self, work: fn(&'a DatabaseConnection)) { todo!() } \
+        pub fn owned(self, work: &mut dyn FnMut(DatabaseConnection)) { todo!() } \
+        pub fn lend<T>(&self, work: impl FnOnce(&DatabaseConnection) -> T) -> T { todo!() } \
+        pub fn lend_bound<T>(&self, work: impl for<'r> FnOnce(&'r DatabaseConnection) -> T) -> T { todo!() } \
+        pub fn lend_where<T, F>(&self, work: F) -> T where F: for<'r> Fn(&'r DatabaseConnection) -> T { todo!() } \
+        pub fn lend_view(&self, work: impl FnOnce(View<'_>)) { todo!() } \
+        pub fn supplied(&self, work: impl FnOnce() -> &'a DatabaseConnection) { todo!() } }";
+    assert_eq!(
+        leaks(PATH, source),
+        findings(
+            PATH,
+            &[
+                "Inputs::bound hands its callback retained dependency DatabaseConnection",
+                "Inputs::owned hands its callback retained dependency DatabaseConnection",
+                "Inputs::pointer hands its callback retained dependency DatabaseConnection",
+                "Inputs::run hands its callback retained dependency DatabaseConnection",
+            ]
+        )
+    );
+}
+
 #[test]
 fn a_listed_root_can_return_the_graph_it_constructs() {
     let source = "struct Child { clock: Clock } struct Owner { child: Child } impl Owner { pub fn open(&self) -> Child { todo!() } }";

@@ -478,13 +478,7 @@ impl SnapshotStaging {
                 what: "a snapshot is read once its stream checked out to its end",
             });
         };
-        crate::snapshot_preparation::prepare(
-            inputs,
-            staging,
-            header.clone(),
-            refusal.take(),
-            authorship,
-        )
+        inputs.snapshot(staging, header.clone(), refusal.take(), authorship)
     }
 
     /// Its records are gone, with the transaction that removed them.

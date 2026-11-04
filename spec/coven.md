@@ -10103,9 +10103,13 @@ finds a task built with a new `Arc`, `Rc` or `Weak` of one of coven's types
 that is state, an owner or a type holding shared state, and refuses any type
 but a task, or a handle that task makes, holding that type through one.
 
-**Owners don't hand out what they hold,** by returning it or through a public
-field; callers ask the owner to do the work. Nothing outside `coven-database`
-gets the SQLite connection; it asks the database owner to run a write. A struct
+**Owners don't hand out what they hold,** by returning it, through a public
+field, or as an argument a caller's callback can keep; callers ask the owner to
+do the work. A callback lent what it holds for one call, as one taking
+`&DatabaseConnection` with no lifetime of its own is, can use it while it runs
+and keep none of it; one taking the connection for the lifetime its holder
+borrows it for has been given it. Nothing outside `coven-database` gets the
+SQLite connection; it asks the database owner to run a write. A struct
 built only to be taken apart again, with every field public and no methods, isn't
 used to pass collaborators; they are passed by name.
 

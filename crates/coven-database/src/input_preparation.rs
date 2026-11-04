@@ -20,9 +20,18 @@ impl<'a> PreparedInputs<'a> {
     pub(crate) fn finish(self) -> Result<(), DbError> {
         self.db.batch("DROP TABLE temp._coven_prepared_records")
     }
-    /// Run transaction-local work on the catalog's connection.
-    pub(crate) fn run<T>(&self, work: impl FnOnce(&'a DatabaseConnection) -> T) -> T {
-        work(self.db)
+    /// The staged snapshot of the staging `staging`, whose stream carried
+    /// `header`, with its write evidence authenticated, read on this
+    /// transaction (D7.5). Staging checked every record but this one, and
+    /// found `refusal`.
+    pub(crate) fn snapshot(
+        &self,
+        staging: i64,
+        header: coven_format::snapshot::SnapshotHeader,
+        refusal: Option<(u8, DbError)>,
+        authorship: &dyn crate::authorship::Authorship,
+    ) -> Result<crate::snapshot_preparation::PreparedSnapshot<'a>, DbError> {
+        crate::snapshot_preparation::prepare(self.db, staging, header, refusal, authorship)
     }
     pub(crate) fn records(&self) -> PreparedRecords<'a> {
         let id = self.next.get();
