@@ -48,7 +48,9 @@ impl Projection {
         }
         let mut hashes: BTreeSet<_> = history.introductions.iter().map(|i| i.hash).collect();
         for (audience, key) in &keys {
-            if let Some(hash) = held_hash(ring, audience, *key) {
+            if let Some(hash) =
+                crate::write_seal::held(ring, audience, *key).map(|held| held.hash())
+            {
                 hashes.insert(hash);
             }
         }
@@ -118,7 +120,7 @@ impl Projection {
             .keys
             .iter()
             .filter_map(|(a, k)| {
-                held_hash(ring, a, *k).map(|hash| {
+                crate::write_seal::held(ring, a, *k).map(|held| held.hash()).map(|hash| {
                     json!({"audience":self.audience(a),
                 "key":self.key(a, *k), "hash":token(&self.hashes, &hash)})
                 })
@@ -260,7 +262,9 @@ fn sequence_key_selection_matches_lean() {
                 slot: Slot(if index == 0 { 1 } else { 2 * index as u64 + 2 }),
                 audience: audience.clone(),
                 key: *id,
-                hash: held_hash(&material, audience, *id).unwrap(),
+                hash: crate::write_seal::held(&material, audience, *id)
+                    .map(|held| held.hash())
+                    .unwrap(),
             });
             let recipient = if mode == 3 && index % 2 == 1 {
                 member(3)

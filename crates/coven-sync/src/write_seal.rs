@@ -1,26 +1,56 @@
 //! Fixed original write envelopes and audience key derivation.
 
 use crate::SyncError;
-use coven_crypto::{DerivedKeys, MemberIdentity, ObjectHasher, StoreKeyring};
+use coven_crypto::{CircleKey, DerivedKeys, MemberIdentity, ObjectHasher, StoreKey, StoreKeyring};
 use coven_database::{DbError, WaitingUpload};
 use coven_format::sealed_write::WriteObjectLayout;
 use coven_foundation::id_source::{KeyId, StoreId};
 use coven_merge::Audience;
 
+/// An audience's key this device holds.
+pub(crate) enum HeldKey<'r> {
+    Store(&'r StoreKey),
+    Circle(&'r CircleKey),
+}
+
+impl HeldKey<'_> {
+    /// The keys it derives for sealing and authorship.
+    pub(crate) fn derive(&self) -> DerivedKeys {
+        match self {
+            Self::Store(key) => key.derive(),
+            Self::Circle(key) => key.derive(),
+        }
+    }
+
+    /// The hash its introduction commits to.
+    pub(crate) fn hash(&self) -> [u8; 32] {
+        match self {
+            Self::Store(key) => key.hash(),
+            Self::Circle(key) => key.hash(),
+        }
+    }
+}
+
+/// The audience's key `key`, when this device holds it.
+pub(crate) fn held<'r>(
+    ring: &'r StoreKeyring,
+    audience: &Audience,
+    key: KeyId,
+) -> Option<HeldKey<'r>> {
+    match audience {
+        Audience::Store => ring.store_key(key).ok().map(HeldKey::Store),
+        Audience::Circle(circle) => ring.circle_key(*circle, key).ok().map(HeldKey::Circle),
+    }
+}
+
+/// The keys the audience's key `key` derives; `KeyUnavailable` when this
+/// device doesn't hold it.
 pub(crate) fn derive(
     ring: &StoreKeyring,
     audience: &Audience,
     key: KeyId,
 ) -> Result<DerivedKeys, SyncError> {
-    let derived = match audience {
-        Audience::Store => ring.store_key(key).map(|key| key.derive()),
-        Audience::Circle(circle) => ring.circle_key(*circle, key).map(|key| key.derive()),
-    };
-    derived.map_err(|error| match error {
-        coven_crypto::MaterialError::UnknownStoreKey(_)
-        | coven_crypto::MaterialError::UnknownCircleKey { .. } => SyncError::KeyUnavailable(key),
-        error => error.into(),
-    })
+    held(ring, audience, key).map(|held| held.derive()).ok_or(SyncError::KeyUnavailable(key))
 }
 
 pub(crate) fn seal(

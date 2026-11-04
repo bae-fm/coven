@@ -376,8 +376,9 @@ impl History {
     }
 
     pub(crate) fn accepted(&self, ring: &StoreKeyring, audience: &Audience, key: KeyId) -> bool {
-        self.commitment(audience, key)
-            .is_some_and(|hash| held_hash(ring, audience, key) == Some(hash))
+        self.commitment(audience, key).is_some_and(|hash| {
+            crate::write_seal::held(ring, audience, key).map(|held| held.hash()) == Some(hash)
+        })
     }
 
     pub(crate) fn exposed(&self, audience: &Audience, key: KeyId) -> bool {
@@ -484,7 +485,8 @@ impl History {
                 continue;
             }
             let hash = self.commitment(&route.audience, route.key);
-            if hash.is_none() && held_hash(ring, &route.audience, route.key).is_some() {
+            if hash.is_none() && crate::write_seal::held(ring, &route.audience, route.key).is_some()
+            {
                 continue;
             }
             let context =
@@ -536,21 +538,6 @@ pub(crate) fn introduction(change: &StoreChange) -> Option<(Audience, KeyId, [u8
             Some((audience.clone(), *key, *key_hash))
         }
         _ => None,
-    }
-}
-
-fn held_hash(ring: &StoreKeyring, audience: &Audience, key: KeyId) -> Option<[u8; 32]> {
-    match audience {
-        Audience::Store => match ring.store_key(key) {
-            Ok(held) => Some(held.hash()),
-            Err(coven_crypto::MaterialError::UnknownStoreKey(_)) => None,
-            Err(_) => unreachable!("store-key lookup only reports absence"),
-        },
-        Audience::Circle(circle) => match ring.circle_key(*circle, key) {
-            Ok(held) => Some(held.hash()),
-            Err(coven_crypto::MaterialError::UnknownCircleKey { .. }) => None,
-            Err(_) => unreachable!("circle-key lookup only reports absence"),
-        },
     }
 }
 

@@ -5,7 +5,6 @@ use crate::{
 };
 use coven_crypto::StoreKeyring;
 use coven_database::{Journal, OperationId, OperationRecord, RetrySubject};
-use coven_merge::Audience;
 use std::sync::Arc;
 
 /// An operation's failed attempt, and who receives its error.
@@ -88,8 +87,9 @@ impl SequenceSync {
         ring: &StoreKeyring,
     ) -> Result<bool, SyncError> {
         let subject = RetrySubject::Operation(record.id);
-        let woken =
-            self.waits.evidence_woken(record.id, |audience, key| Ok(holds(ring, audience, key)))?;
+        let woken = self.waits.evidence_woken(record.id, |audience, key| {
+            Ok(crate::write_seal::held(ring, audience, key).is_some())
+        })?;
         if let Some(pending) = self.database.operation_pending::<PendingRecord>(record.id).await? {
             if !self.database.pending_can_retry::<PendingRecord>(pending.subject).await? {
                 self.waits.seen(subject);
@@ -195,8 +195,10 @@ impl SequenceSync {
                 let pending = PendingRecord { subject, reason, cause };
                 let subject = RetrySubject::Operation(id);
                 if pending.retry() == Retry::Automatic {
-                    let held = crate::RetryWaits::lacks_key(&pending.reason)
-                        .map(|(audience, key)| holds(ring, &audience, key));
+                    let held =
+                        crate::RetryWaits::lacks_key(&pending.reason).map(|(audience, key)| {
+                            crate::write_seal::held(ring, &audience, key).is_some()
+                        });
                     let reason = pending.reason.clone();
                     let prior = self.database.retry_wait(subject).await?;
                     let wait = self.waits.next(prior.as_ref())?;
@@ -224,17 +226,6 @@ impl SequenceSync {
             .await
     }
 }
-fn holds(
-    ring: &StoreKeyring,
-    audience: &Audience,
-    key: coven_foundation::id_source::KeyId,
-) -> bool {
-    match audience {
-        Audience::Store => ring.store_key_ids().any(|id| id == key),
-        Audience::Circle(circle) => ring.circle_key_ids(*circle).any(|id| id == key),
-    }
-}
-
 #[cfg(test)]
 #[path = "sequence_retry_tests.rs"]
 mod tests;
