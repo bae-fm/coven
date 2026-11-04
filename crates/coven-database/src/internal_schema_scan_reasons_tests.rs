@@ -120,8 +120,6 @@ mod fixture {
      INSERT INTO _coven_install_before SELECT tab,key,audience,i%2 FROM fixture;
      INSERT INTO _coven_install_region SELECT tab,key,audience FROM fixture WHERE i%16=0;
      INSERT INTO _coven_download_replaced SELECT DISTINCT audience FROM fixture WHERE i<=4;
-     INSERT INTO _coven_migration_losses SELECT CAST(device || n AS BLOB),audience,key FROM fixture;
-     INSERT INTO _coven_migration_counted_losses SELECT CAST(device || n AS BLOB),audience,key FROM fixture;
      INSERT INTO _coven_constraints SELECT i,tab,n FROM fixture;
      INSERT INTO _coven_foreign_keys SELECT i,tab,n FROM fixture;
 "
@@ -130,6 +128,7 @@ mod fixture {
         crate::store_state_tables::tests::fill_for_plans(&db);
         crate::published::tests::fill_for_plans(&db);
         crate::claim::tests::fill_for_plans(&db);
+        crate::migration_run::tests::fill_for_plans(&db);
         crate::pending::tests::fill_for_plans(&db);
         crate::provider_access::tests::fill_for_plans(&db);
         crate::object_removals::tests::fill_for_plans(&db);
@@ -295,6 +294,7 @@ mod source {
                     | "claim_schema.rs"
                     | "published_schema.rs"
                     | "store_state_schema.rs"
+                    | "migration_run_schema.rs"
                     | "pending_schema.rs"
                     | "provider_access_schema.rs"
                     | "object_removals_schema.rs"

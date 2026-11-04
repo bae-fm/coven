@@ -343,6 +343,39 @@ fn finish(
     })
 }
 
+/// Keep a freeze the breaking migration made, which the migration write
+/// `migration` puts as its loss once it applies (§18.5).
+pub(crate) fn keep_loss(
+    db: &DatabaseConnection,
+    migration: coven_merge::WriteId,
+    loss: &coven_format::loss::Loss,
+) -> Result<(), DbError> {
+    db.internal_execute(
+        "INSERT INTO _coven_migration_losses(write_id,audience,record) VALUES(?1,?2,?3)",
+        rusqlite::params![
+            coven_format::merge_fields::encode_write_id(&migration)?,
+            crate::write_encoding::audience_text(&loss.row.audience),
+            coven_format::merge_fields::encode_loss(loss)?
+        ],
+    )?;
+    Ok(())
+}
+
+/// Forget the migration losses kept for `audience`, whose state a loaded
+/// snapshot replaces.
+pub(crate) fn forget_audience(
+    db: &DatabaseConnection,
+    audience: &coven_merge::Audience,
+) -> Result<(), DbError> {
+    for table in ["_coven_migration_losses", "_coven_migration_counted_losses"] {
+        db.internal_execute(
+            &format!("DELETE FROM {table} WHERE audience=?1"),
+            [crate::write_encoding::audience_text(audience)],
+        )?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 #[path = "migration_run_tests.rs"]
-mod tests;
+pub(crate) mod tests;

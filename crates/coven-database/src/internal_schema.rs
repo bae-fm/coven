@@ -101,6 +101,9 @@ mod file_write_uploads_schema;
 #[path = "migration_receive_schema.rs"]
 mod migration_receive_schema;
 #[macro_use]
+#[path = "migration_run_schema.rs"]
+mod migration_run_schema;
+#[macro_use]
 #[path = "object_removals_schema.rs"]
 mod object_removals_schema;
 #[macro_use]

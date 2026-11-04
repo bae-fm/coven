@@ -106,14 +106,7 @@ impl<'c> Hidden<'c> {
         }
         .freeze();
         let db = self.database;
-        db.internal_execute(
-            "INSERT INTO _coven_migration_losses(write_id,audience,record) VALUES(?1,?2,?3)",
-            rusqlite::params![
-                coven_format::merge_fields::encode_write_id(&migration)?,
-                crate::write_encoding::audience_text(&loss.row.audience),
-                coven_format::merge_fields::encode_loss(&loss)?
-            ],
-        )?;
+        crate::migration_run::keep_loss(db, migration, &loss)?;
         crate::loss_record::keep(db, schema, &loss)
     }
 }

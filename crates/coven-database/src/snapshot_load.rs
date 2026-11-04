@@ -81,12 +81,7 @@ pub(crate) fn load<P: crate::PendingValue>(
                     )?;
                     coverage.loaded(id.audience.clone(), header.covers)?;
                     crate::raise_capture::loaded(database, &id.audience, header.schema_version)?;
-                    for table in ["_coven_migration_losses", "_coven_migration_counted_losses"] {
-                        database.internal_execute(
-                            &format!("DELETE FROM {table} WHERE audience=?1"),
-                            [crate::write_encoding::audience_text(&id.audience)],
-                        )?;
-                    }
+                    crate::migration_run::forget_audience(database, &id.audience)?;
                     loaded.push(crate::LoadedSnapshot { id, files });
                 }
                 crate::SnapshotSource::Empty(audience) => {

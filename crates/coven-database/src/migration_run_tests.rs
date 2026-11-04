@@ -816,3 +816,29 @@ fn assert_same_loss_values(actual: &[crate::LostValue], expected: &[crate::LostV
         );
     }
 }
+
+/// Fill this domain's tables from the rows of the plan audit's `fixture`
+/// table, inside its transaction (`internal_schema_scan_reasons_tests.rs`).
+pub(crate) fn fill_for_plans(db: &rusqlite::Connection) {
+    db.execute_batch(
+        "INSERT INTO _coven_migration_losses SELECT CAST(device || n AS BLOB),audience,key FROM fixture;
+         INSERT INTO _coven_migration_counted_losses SELECT CAST(device || n AS BLOB),audience,key FROM fixture;",
+    )
+    .unwrap();
+}
+
+/// The scans this module's statements may make, with their reasons, for the
+/// plan audit (`internal_schema_scan_reasons.rs`): `template` is the statement as
+/// written, `sql` as run.
+pub(crate) fn scan_reason(
+    file: &str,
+    template: &str,
+    _sql: &str,
+    relation: &str,
+) -> Option<&'static str> {
+    match (file, template, relation) {
+("migration_run.rs", "INSERT INTO _coven_migration_losses(write_id,audience,record) SELECT ?1,audience,record FROM temp._coven_migration_frozen", "temp._coven_migration_frozen") =>
+    Some("the marker retains every loss frozen by this migration"),
+        _ => None,
+    }
+}
