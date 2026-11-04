@@ -21,11 +21,8 @@ impl WriteOracle for Oracle {
     }
     fn had_read(&self, reader: WriteId, earlier: WriteId) -> Result<bool, coven_format::Error> {
         let write = self.0.get(&reader).ok_or(MergeError::MissingWrite(reader))?;
-        Ok(if reader.device == earlier.device {
-            earlier.number < reader.number
-        } else {
-            self.0.get(&earlier).is_some_and(|earlier| earlier.slot.0 <= write.read_through)
-        })
+        let slot = self.0.get(&earlier).map(|earlier| earlier.slot);
+        Ok(coven_merge::had_read(reader, write.read_through, earlier, slot))
     }
 }
 

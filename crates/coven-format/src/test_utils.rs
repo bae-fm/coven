@@ -50,10 +50,7 @@ pub fn column(value: Value) -> ColumnValue<Value> {
 }
 /// A private pair whose signing and sealing seeds are both `seed`: public test data.
 pub fn keys_from_seed(seed: u8) -> MemberKeys {
-    let mut bytes = Zeroizing::new(Vec::with_capacity(69));
-    bytes.extend_from_slice(b"CVMK\x01");
-    bytes.extend_from_slice(&[seed; 64]);
-    MemberKeys::from_secret_bytes(&bytes).unwrap()
+    MemberKeys::from_seed(seed)
 }
 /// The fixture member Ana's stable id, independent of every key she holds.
 pub fn member_id() -> MemberId {
@@ -266,11 +263,8 @@ impl WriteOracle for TestOracle {
     }
     fn had_read(&self, reader: WriteId, earlier: WriteId) -> Result<bool, crate::Error> {
         let write = self.writes.get(&reader).ok_or(MergeError::MissingWrite(reader))?;
-        if !self.writes.contains_key(&earlier) {
-            return Err(MergeError::MissingWrite(earlier).into());
-        }
-        Ok((reader.device == earlier.device && earlier.number < reader.number)
-            || self.writes[&earlier].slot.0 <= write.read_through)
+        let slot = self.writes.get(&earlier).map(|earlier| earlier.slot);
+        Ok(coven_merge::had_read(reader, write.read_through, earlier, slot))
     }
 }
 impl crate::snapshot::WriteSlots for TestOracle {

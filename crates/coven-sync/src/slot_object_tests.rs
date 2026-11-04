@@ -31,8 +31,8 @@ async fn inner_lengths_never_read_past_the_declared_object() {
         .unwrap();
         let key = Arc::new(store_key.derive());
         let sealed = key.seal_object_chunk(path.as_str(), &prefix, 0, 0, &plaintext).unwrap();
-        let mut bytes = (plaintext.len() as u32).to_be_bytes().to_vec();
-        bytes.extend_from_slice(&sealed);
+        let bytes =
+            coven_format::sealed_stream::StreamObjectLayout::new().encode_chunk(&sealed).unwrap();
         let input = device
             .database()
             .observe_input(path.as_str().into(), vec![index as u8], Vec::new(), false)

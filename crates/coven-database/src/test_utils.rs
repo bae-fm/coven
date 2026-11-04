@@ -152,27 +152,25 @@ impl TestAuthorship {
         leaves: Vec<Vec<coven_format::authorship::Leaf>>,
     ) -> crate::WriteAuthorship {
         let key = Self::key();
-        let prefix = coven_format::sealed_write::WriteObjectPrefix {
+        let object = coven_format::sealed_write::WriteObjectPrefix {
             format: coven_format::FormatVersion::CURRENT,
             store_key: key.id(),
             part_keys: vec![key.id(); frame.parts.len()],
-        }
-        .encode()
-        .unwrap();
+        };
+        let prefix = object.encode().unwrap();
+        let plain = frame.encode().unwrap();
         let sealed = key
             .derive()
-            .seal_object_chunk(
-                &Self::path(frame.header.position),
-                &prefix,
-                0,
-                0,
-                &frame.encode().unwrap(),
-            )
+            .seal_object_chunk(&Self::path(frame.header.position), &prefix, 0, 0, &plain)
             .unwrap();
-        let mut header = ((sealed.len() - coven_crypto::SEALED_OBJECT_CHUNK_OVERHEAD) as u32)
-            .to_be_bytes()
-            .to_vec();
-        header.extend(sealed);
+        let header = coven_format::sealed_write::WriteObjectLayout::new(
+            object,
+            &plain,
+            frame.parts.iter().map(|part| part.plaintext_length).collect(),
+        )
+        .unwrap()
+        .encode_chunk(&sealed)
+        .unwrap();
         let hasher = key.derive().authorship_hasher();
         crate::WriteAuthorship {
             evidence: crate::HeaderEvidence {

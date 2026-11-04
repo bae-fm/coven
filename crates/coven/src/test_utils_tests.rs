@@ -26,10 +26,7 @@ fn namespaces() -> Vec<Namespace> {
 }
 
 fn member(seed: u8) -> MemberIdentity {
-    MemberIdentity::new(
-        MemberId(uuid::Uuid::from_bytes([seed; 16])),
-        MemberKeys::from_secret_bytes(&[b"CVMK\x01".as_slice(), &[seed; 64]].concat()).unwrap(),
-    )
+    MemberIdentity::new(MemberId(uuid::Uuid::from_bytes([seed; 16])), MemberKeys::from_seed(seed))
 }
 
 struct Fixture {

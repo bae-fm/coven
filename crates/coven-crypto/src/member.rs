@@ -138,6 +138,16 @@ pub struct MemberKeys {
 }
 
 impl MemberKeys {
+    /// A pair whose signing and sealing seeds are both `seed`: public test
+    /// data, never a person's keys.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn from_seed(seed: u8) -> Self {
+        Self {
+            signing: ed25519_dalek::SigningKey::from_bytes(&[seed; 32]),
+            sealing: StaticSecret::from([seed; 32]),
+        }
+    }
+
     /// Make both member key pairs using the operating system's randomness.
     pub fn generate() -> Result<Self, CryptoError> {
         let signing = randomness::secret_bytes()?;
