@@ -540,6 +540,7 @@ table_macros = [
     "coven_migration_losses_tables",
     "coven_user_originals_tables",
     "coven_file_removals_tables",
+    "coven_cache_tables",
 ]
 # The API re-exports the database crate's `rusqlite` so a host can name the
 # types its own SQL uses.
@@ -1003,6 +1004,21 @@ tables = [
 ]
 
 [[database.domains]]
+name = "cache"
+owner = "Database"
+# The pins' triggers on the cache keep the pins table, the cache's schema.
+homes = [
+    "crates/coven-database/src/file_cache.rs",
+    "crates/coven-database/src/file_cache_schema.rs",
+    "crates/coven-database/src/internal_schema_pins.rs",
+]
+tables = [
+    "_coven_cache",
+    "_coven_cache_budgets",
+    "_coven_cache_writes",
+]
+
+[[database.domains]]
 name = "database"
 owner = "Database"
 homes = ["crates/coven-database/src/"]
@@ -1010,9 +1026,6 @@ tables = [
     "_coven_authored_admissions",
     "_coven_authored_changes",
     "_coven_authored_parts",
-    "_coven_cache",
-    "_coven_cache_budgets",
-    "_coven_cache_writes",
     "_coven_cells",
     "_coven_claims",
     "_coven_columns",

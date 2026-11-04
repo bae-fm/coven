@@ -352,8 +352,7 @@ async fn cache_ranges_publish_whole_and_never_overlap() {
     assert!(!cache.join("overlap").exists());
     // A crash after the range's name was recorded and its bytes written.
     db.inspect_writer(|sql| {
-        sql.internal_execute("INSERT INTO _coven_cache_writes(path) VALUES('interrupted')", [])
-            .unwrap();
+        super::cache::tests::writing(sql, "interrupted");
     });
     std::fs::write(cache.join("interrupted"), b"bytes").unwrap();
     db.close().await.unwrap();
@@ -565,8 +564,7 @@ async fn opening_waits_for_a_range_being_written_and_removes_abandoned_ones() {
     let file = stored(&db, vec![5; 3]).await;
     let abandoned = cache_path(&store, &FileName::new("abandoned").unwrap());
     db.inspect_writer(|sql| {
-        sql.internal_execute("INSERT INTO _coven_cache_writes(path) VALUES('abandoned')", [])
-            .unwrap();
+        super::cache::tests::writing(sql, "abandoned");
     });
     std::fs::write(&abandoned, b"partial").unwrap();
     let read_only = store
@@ -710,12 +708,7 @@ async fn a_namespace_has_the_budget_its_declaration_gives_until_set() {
     // The cache holds its budget: the older entry goes once the total exceeds it.
     let removed = db.inspect_writer(|sql| {
         for (path, read) in [("old", 1), ("new", 2)] {
-            sql.internal_execute(
-                "INSERT INTO _coven_cache(namespace,file_id,chunk,path,size,last_read,pinned)
-                 VALUES('files',?1,0,?1,30,?2,0)",
-                (path, read),
-            )
-            .unwrap();
+            super::cache::tests::cached(sql, path, path, 30, read).unwrap();
         }
         super::cache::trim(sql, "files").unwrap()
     });
@@ -733,12 +726,7 @@ async fn a_budget_and_its_eviction_go_with_their_write() {
     let db = open(&store, Provenance::AppProvided).await;
     db.inspect_writer(|sql| {
         for (path, read) in [("old", 1), ("new", 2)] {
-            sql.internal_execute(
-                "INSERT INTO _coven_cache(namespace,file_id,chunk,path,size,last_read,pinned)
-                 VALUES('files',?1,0,?1,30,?2,0)",
-                (path, read),
-            )
-            .unwrap();
+            super::cache::tests::cached(sql, path, path, 30, read).unwrap();
         }
     });
     let failed = db

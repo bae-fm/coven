@@ -16,7 +16,7 @@ use coven_foundation::{
 use std::sync::{Arc, RwLock};
 
 #[path = "file_cache.rs"]
-mod cache;
+pub(crate) mod cache;
 pub(crate) use cache::{
     declare_budgets, file_id as file_cache_id, id as cache_id, kept as cache_kept,
     pin_complete as pin_cached, publish as publish_cached, remove_entries as remove_cached,

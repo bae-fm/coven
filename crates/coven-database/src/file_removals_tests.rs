@@ -401,11 +401,7 @@ async fn a_referenced_path_cannot_be_recorded_for_removal() {
                 "INSERT INTO _coven_file_removals(area,path) VALUES('cache','released')",
                 [],
             )?;
-            db.internal_execute(
-                "INSERT INTO _coven_cache(namespace,file_id,chunk,path,size,last_read,pinned)
-                 VALUES('files','file',0,'released',1,1,0)",
-                [],
-            )
+            crate::database::file_database::cache::tests::cached(db, "file", "released", 1, 1)
         })
     });
     assert!(cached.is_err(), "{cached:?}");

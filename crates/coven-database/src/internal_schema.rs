@@ -77,6 +77,9 @@ mod database_operations_schema;
 #[path = "device_reset_schema.rs"]
 mod device_reset_schema;
 #[macro_use]
+#[path = "file_cache_schema.rs"]
+mod file_cache_schema;
+#[macro_use]
 #[path = "file_database_copies_schema.rs"]
 mod file_database_copies_schema;
 #[macro_use]
@@ -335,54 +338,11 @@ macro_rules! coven_tables {
         coven_user_originals_tables!($visit);
         coven_device_only_copies_tables!($visit);
         coven_file_removals_tables!($visit);
-        // Cache ranges whose bytes are being written with no writer held;
-        // opening makes the abandoned ones removals (Appendix C.3).
-        $visit!(_coven_cache_writes, "
-            CREATE TABLE _coven_cache_writes (path TEXT NOT NULL PRIMARY KEY) STRICT, WITHOUT ROWID;
-        ");
         coven_pin_requests_tables!($visit);
         coven_file_moves_tables!($visit);
         coven_file_uploads_tables!($visit);
         coven_file_retention_tables!($visit);
-        // Recorded bytes are removed once the writer is free, with no check
-        // of their own: its triggers record a removal only for a path no row
-        // names, and let no row name a path recorded for removal (Appendix C.3).
-        $visit!(_coven_cache, "
-            CREATE TABLE _coven_cache (
-                namespace TEXT NOT NULL,
-                file_id TEXT NOT NULL,
-                chunk INTEGER NOT NULL CHECK(chunk>={CACHE_COMPLETE_FILE}),
-                chunks INTEGER NOT NULL DEFAULT 1 CHECK(chunks>=1) CHECK(chunk>=0 OR chunks=1),
-                path TEXT NOT NULL UNIQUE,
-                size INTEGER NOT NULL CHECK(size>=0),
-                last_read INTEGER NOT NULL,
-                pinned INTEGER NOT NULL CHECK(pinned IN (0,1)) CHECK(pinned=0 OR chunk={CACHE_COMPLETE_FILE}),
-                checked_hash BLOB CHECK((chunk={CACHE_COMPLETE_FILE})=(checked_hash IS NOT NULL)) CHECK(checked_hash IS NULL OR length(checked_hash)=32),
-                PRIMARY KEY(namespace,file_id,chunk)
-            ) STRICT, WITHOUT ROWID;
-            CREATE INDEX _coven_cache_lru ON _coven_cache(namespace,pinned,last_read);
-            CREATE INDEX _coven_cache_recency ON _coven_cache(last_read);
-            CREATE TRIGGER _coven_cache_unremoved BEFORE INSERT ON _coven_cache BEGIN
-                SELECT RAISE(ABORT,'a file recorded for removal is named by a row')
-                WHERE EXISTS(SELECT 1 FROM _coven_file_removals WHERE path=NEW.path);
-            END;
-        ");
-        // Each declared namespace's budget and the cached bytes the cache
-        // records hold, maintained with them so a budget check needs no sum.
-        // Cache records live only in declared namespaces (FileRef validation).
-        $visit!(_coven_cache_budgets, "
-            CREATE TABLE _coven_cache_budgets (
-                namespace TEXT PRIMARY KEY NOT NULL,
-                bytes BLOB NOT NULL CHECK(length(bytes)=8),
-                total INTEGER NOT NULL DEFAULT 0 CHECK(total>=0)
-            ) STRICT, WITHOUT ROWID;
-            CREATE TRIGGER _coven_cache_added AFTER INSERT ON _coven_cache BEGIN
-                UPDATE _coven_cache_budgets SET total=total+NEW.size WHERE namespace=NEW.namespace;
-            END;
-            CREATE TRIGGER _coven_cache_removed AFTER DELETE ON _coven_cache BEGIN
-                UPDATE _coven_cache_budgets SET total=total-OLD.size WHERE namespace=OLD.namespace;
-            END;
-        ");
+        coven_cache_tables!($visit);
         coven_provider_access_tables!($visit);
         coven_operations_tables!($visit);
         coven_object_removals_tables!($visit);

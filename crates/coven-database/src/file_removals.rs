@@ -329,7 +329,7 @@ fn abandon_cache_writes(
             "INSERT INTO _coven_file_removals(area,path) SELECT 'cache',path FROM _coven_cache_writes",
             [],
         )?;
-        db.internal_execute("DELETE FROM _coven_cache_writes", [])?;
+        crate::database::file_database::cache::forget_writes(db)?;
         Ok(())
     })
 }

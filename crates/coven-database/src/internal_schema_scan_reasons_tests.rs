@@ -90,12 +90,6 @@ mod fixture {
        (table_name,key,audience,generation,column_id,value,set_by,frozen,replacement_kind,replaced_by)
        SELECT tab,key,audience,counter(1),CASE WHEN i%3=0 THEN i END,
               zeroblob(64),n,i%2,CASE WHEN i%3=0 THEN 'write' ELSE 'rules' END,n FROM fixture;
-     INSERT INTO _coven_cache_writes SELECT 'writing_' || i FROM fixture;
-     INSERT INTO _coven_cache(namespace,file_id,chunk,path,size,last_read,pinned,checked_hash)
-       SELECT audience,'file_' || i,CASE WHEN (i/64)%4=0 THEN -2 ELSE 0 END,'cache_' || i,
-              65536,i,CASE WHEN (i/64)%4=0 THEN 1 ELSE 0 END,
-              CASE WHEN (i/64)%4=0 THEN key END FROM fixture;
-     INSERT INTO _coven_cache_budgets(namespace,bytes) SELECT 'audience_' || i,counter(1048576) FROM fixture WHERE true ON CONFLICT(namespace) DO UPDATE SET bytes=excluded.bytes;
      INSERT INTO _coven_install_fixture SELECT key,audience,'1',1,counter(1),device,n,0,1,1,x'00',device,n,key,audience,counter(1) FROM fixture;
      INSERT INTO _coven_install_generations SELECT tab,key,audience,counter(1),device,n FROM fixture;
      INSERT INTO _coven_install_parts SELECT CAST(device || n AS BLOB),audience,x'00',i%2 FROM fixture;
@@ -111,6 +105,7 @@ mod fixture {
         crate::store_state_tables::tests::fill_for_plans(&db);
         crate::published::tests::fill_for_plans(&db);
         crate::claim::tests::fill_for_plans(&db);
+        crate::database::file_database::cache::tests::fill_for_plans(&db);
         crate::file_removals::tests::fill_for_plans(&db);
         crate::user_file::tests::fill_for_plans(&db);
         crate::migration_run::tests::fill_for_plans(&db);
@@ -278,6 +273,7 @@ mod source {
                     | "claim_schema.rs"
                     | "published_schema.rs"
                     | "store_state_schema.rs"
+                    | "file_cache_schema.rs"
                     | "file_removals_schema.rs"
                     | "user_file_schema.rs"
                     | "migration_run_schema.rs"

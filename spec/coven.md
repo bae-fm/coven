@@ -10169,9 +10169,11 @@ shared state.
   audiences (§10, §15) to the store's state tables. A table only one other
   module writes is that module's, in a domain of its own, such as the retry
   deadlines (§6.7) the retry module's.
-  The tables several modules write, the merge store's rows and cells among
-  them, and the cache's, whose triggers keep the pins table, form the
-  database's own domain, which every module may write. Each
+  A trigger on a domain's table that writes no domain's table is that
+  table's schema: the pins' triggers on the stored files and on the cache
+  keep the pins table, so their file is a home of both domains. The tables
+  several modules write, the merge store's rows and cells among them, form
+  the database's own domain, which every module may write. Each
   domain names the owner that does its work: the input database's owner for
   the remote observations, the database owner for the rest. A type whose
   every method only passes its call on to that owner would be a second name

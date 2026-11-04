@@ -479,3 +479,14 @@ fn observation(error: coven_foundation::files::ObservationError) -> DbError {
         _ => DbError::DamagedDatabase,
     }
 }
+
+/// Opening found the cache ranges recorded as being written abandoned:
+/// their records go, once the caller has recorded each for removal.
+pub(crate) fn forget_writes(db: &DatabaseConnection) -> Result<(), DbError> {
+    db.internal_execute("DELETE FROM _coven_cache_writes", [])?;
+    Ok(())
+}
+
+#[cfg(test)]
+#[path = "file_cache_tests.rs"]
+pub(crate) mod tests;
