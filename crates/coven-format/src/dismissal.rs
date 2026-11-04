@@ -95,6 +95,16 @@ impl WriteFrame {
         }
     }
 
+    /// The row record this frame carries, as a part's evidence names it;
+    /// none for a dismissal.
+    pub fn record(&self) -> Option<crate::write::PartRecord<'_>> {
+        match self {
+            Self::Change(row) => Some(crate::write::PartRecord::Change(row)),
+            Self::Execution(execution) => Some(crate::write::PartRecord::Execution(execution)),
+            Self::Dismissal(_) => None,
+        }
+    }
+
     /// Decode a row change, execution or dismissal, refusing other frame kinds.
     pub fn decode(bytes: &[u8]) -> Result<Self, Error> {
         let (kind, _) = decode_frame(bytes)?;

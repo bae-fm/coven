@@ -3,7 +3,6 @@
 use crate::SnapshotError;
 use coven_format::chunks::CHUNK_SIZE;
 use coven_format::dismissal::WriteFrame;
-use coven_format::write::PartRecord;
 use coven_format::write_stream::{PartDecoder, WriteHeaderFrame};
 use std::io::Read;
 
@@ -49,10 +48,9 @@ fn hash_frame(
     root: &mut crate::authorship::PartRoot,
     frame: &WriteFrame,
 ) -> Result<(), crate::DbError> {
-    match frame {
-        WriteFrame::Change(row) => root.record(PartRecord::Change(row)),
-        WriteFrame::Execution(execution) => root.record(PartRecord::Execution(execution)),
-        WriteFrame::Dismissal(_) => Ok(()),
+    match frame.record() {
+        Some(record) => root.record(record),
+        None => Ok(()),
     }
 }
 
@@ -173,7 +171,7 @@ pub(crate) fn stage_selected(
                 return Ok(());
             }
             if refused {
-                if let Some(record) = source_record(&frame) {
+                if let Some(record) = frame.record() {
                     crate::write_sources::retain(database, header, record)?;
                     crate::write_sources::admit(
                         database,
@@ -184,14 +182,11 @@ pub(crate) fn stage_selected(
                 }
                 return Ok(());
             }
-            let ignored = matches!(
-                crate::write_boundary::WriteBoundary::part_verdict(
-                    &boundaries,
-                    header,
-                    audience,
-                    Some(slot)
-                ),
-                Some(coven_format::snapshot_rows::ChangeVerdict::Ignored(_))
+            let ignored = crate::write_boundary::WriteBoundary::ignore(
+                &boundaries,
+                header,
+                audience,
+                Some(slot),
             );
             crate::download_stage::frame(database, header, ignored, frame)
         },
@@ -225,7 +220,7 @@ pub(crate) fn retain_sources(
         db,
         write,
         |header, _, frame| {
-            if let Some(record) = source_record(&frame) {
+            if let Some(record) = frame.record() {
                 crate::write_sources::retain(db, header, record)?;
             }
             Ok(())
@@ -263,14 +258,6 @@ fn read_authenticated(
     }
     crate::write_headers::retain(database, &write.header)?;
     crate::authorship::retain_header(database, position, &write.evidence)
-}
-
-fn source_record(frame: &WriteFrame) -> Option<PartRecord<'_>> {
-    match frame {
-        WriteFrame::Change(row) => Some(PartRecord::Change(row)),
-        WriteFrame::Execution(row) => Some(PartRecord::Execution(row)),
-        WriteFrame::Dismissal(_) => None,
-    }
 }
 
 /// Decode and validate one part without collecting its row frames. Every

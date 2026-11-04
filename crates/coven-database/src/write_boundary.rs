@@ -286,6 +286,20 @@ impl WriteBoundary {
         }
     }
 
+    /// Whether the selected boundaries ignore one part (§18.6): its changes
+    /// stay as evidence and are never checked or merged.
+    pub(crate) fn ignore(
+        boundaries: &[Self],
+        header: &WriteHeader,
+        audience: &Audience,
+        slot: Option<Slot>,
+    ) -> bool {
+        matches!(
+            Self::part_verdict(boundaries, header, audience, slot),
+            Some(ChangeVerdict::Ignored(_))
+        )
+    }
+
     /// The selected boundaries' combined verdict on one part. Reset
     /// eligibility comes first, so an ignored part never gains a schema loss;
     /// otherwise the highest excluding raise names the loss.

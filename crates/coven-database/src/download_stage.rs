@@ -79,14 +79,11 @@ pub(crate) fn ignored(
     header: &WriteHeader,
     audience: &Audience,
 ) -> Result<bool, DbError> {
-    Ok(matches!(
-        crate::write_boundary::WriteBoundary::part_verdict(
-            &crate::write_boundary::WriteBoundary::judging(database)?,
-            header,
-            audience,
-            crate::sequence::write_slot(database, header.position)?
-        ),
-        Some(coven_format::snapshot_rows::ChangeVerdict::Ignored(_))
+    Ok(crate::write_boundary::WriteBoundary::ignore(
+        &crate::write_boundary::WriteBoundary::judging(database)?,
+        header,
+        audience,
+        crate::sequence::write_slot(database, header.position)?,
     ))
 }
 
