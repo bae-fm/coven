@@ -140,7 +140,6 @@ impl NetworkSink {
     /// files only on unmetered networks moves them only on one known to be
     /// unmetered. The network the device was last on stays its last, so
     /// that network read again is no report: nothing said it changed.
-    #[cfg(any(test, feature = "test-utils", target_os = "linux", windows))]
     pub(crate) fn cannot_tell(&mut self) {
         self.state.send_if_modified(|state| {
             let next = NetworkState { usable: None, metered: true, joined: state.joined };
@@ -163,6 +162,34 @@ impl NetworkSink {
             self.state.send_modify(|state| state.joined += 1);
         }
     }
+}
+
+/// Run `read`, what a platform's callback does with what the platform says
+/// of the network. A panic unwinding out of a callback the platform calls
+/// would end the process; here it goes to `bugs` (api.md E5, E15).
+#[cfg(any(test, target_vendor = "apple", target_os = "android", windows))]
+pub(crate) fn heard(
+    sink: &Mutex<NetworkSink>,
+    bugs: &dyn crate::task::BugSink,
+    operation: &'static str,
+    read: impl FnOnce(),
+) {
+    if let Err(bug) = crate::task::caught_sync(operation, read) {
+        panicked(sink, bugs, &bug);
+    }
+}
+
+/// The watch's reading of what the platform says panicked with `bug`: it
+/// goes to `bugs`, and the watch can't tell until the platform says again,
+/// calling the network metered meanwhile, as after a failed read.
+#[cfg(any(test, target_vendor = "apple", target_os = "android", target_os = "linux", windows))]
+pub(crate) fn panicked(
+    sink: &Mutex<NetworkSink>,
+    bugs: &dyn crate::task::BugSink,
+    bug: &crate::task::Bug,
+) {
+    lock_unpoisoned(sink).cannot_tell();
+    crate::task::report(bugs, bug);
 }
 
 /// Where the store's watch hears about the network: the platform's own, or
@@ -208,8 +235,21 @@ pub struct NetworkWatch {
 
 impl NetworkWatch {
     /// Start watching, as `source` says. The state already holds what the
-    /// platform says now.
-    pub fn start(source: &NetworkSource) -> Result<Self, NetworkWatchError> {
+    /// platform says now. A panic in what the platform's callbacks run goes
+    /// to `bugs`.
+    pub fn start(
+        source: &NetworkSource,
+        #[cfg_attr(
+            not(any(
+                target_vendor = "apple",
+                target_os = "android",
+                target_os = "linux",
+                windows
+            )),
+            expect(unused_variables, reason = "where coven asks nothing, nothing calls back")
+        )]
+        bugs: &crate::task::BugSinkRef,
+    ) -> Result<Self, NetworkWatchError> {
         match source {
             #[cfg(any(
                 target_vendor = "apple",
@@ -221,14 +261,14 @@ impl NetworkWatch {
                 let sink = Arc::new(Mutex::new(NetworkSink::new()));
                 let state = lock_unpoisoned(&sink).subscribe();
                 #[cfg(target_vendor = "apple")]
-                let platform = Some(apple::PathMonitor::start(sink)?);
+                let platform = Some(apple::PathMonitor::start(sink, bugs.clone())?);
                 #[cfg(target_os = "android")]
-                let platform = Some(android::JavaWatch::start(sink)?);
+                let platform = Some(android::JavaWatch::start(sink, bugs.clone())?);
                 #[cfg(windows)]
-                let platform = Some(winrt::ProfileWatch::start(sink)?);
+                let platform = Some(winrt::ProfileWatch::start(sink, bugs.clone())?);
                 // None without NetworkManager: the state stays can't tell.
                 #[cfg(target_os = "linux")]
-                let platform = linux::ManagerWatch::start(sink)?;
+                let platform = linux::ManagerWatch::start(sink, bugs.clone())?;
                 Ok(Self { state, _platform: platform })
             }
             // Elsewhere, as on the BSDs, coven asks nothing and can't tell

@@ -193,7 +193,7 @@ async fn joined_keeps_a_payload_whose_drop_panics_from_unwinding() {
 
 /// Keeps every bug it hears of, as an app's crash reporter would.
 #[derive(Default)]
-struct HeardBugs(std::sync::Mutex<Vec<Bug>>);
+pub(crate) struct HeardBugs(std::sync::Mutex<Vec<Bug>>);
 
 impl BugSink for HeardBugs {
     fn report(&self, bug: &Bug) {
@@ -202,7 +202,7 @@ impl BugSink for HeardBugs {
 }
 
 impl HeardBugs {
-    fn heard(&self) -> Vec<Bug> {
+    pub(crate) fn heard(&self) -> Vec<Bug> {
         self.0.lock().unwrap().clone()
     }
 }

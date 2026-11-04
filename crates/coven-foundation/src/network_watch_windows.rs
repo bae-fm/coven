@@ -4,8 +4,9 @@
 //! is another network. It is metered when its cost is fixed or variable,
 //! when it roams, or when it is over its data limit.
 
-use super::{NetworkSink, NetworkWatchError, UsableNetwork};
+use super::{heard, NetworkSink, NetworkWatchError, UsableNetwork};
 use crate::locks::lock_unpoisoned;
+use crate::task::BugSinkRef;
 use std::sync::{Arc, Mutex};
 use windows::Networking::Connectivity::{
     NetworkConnectivityLevel, NetworkCostType, NetworkInformation, NetworkStatusChangedEventHandler,
@@ -19,19 +20,25 @@ pub(super) struct ProfileWatch {
 impl ProfileWatch {
     /// Follow the profile's changes, then read it as it is now. Each read
     /// and what it says reach the sink under its lock, so the last thing it
-    /// hears is a read made after the last change.
-    pub(super) fn start(sink: Arc<Mutex<NetworkSink>>) -> Result<Self, NetworkWatchError> {
+    /// hears is a read made after the last change. A panic in a change's
+    /// read goes to `bugs`.
+    pub(super) fn start(
+        sink: Arc<Mutex<NetworkSink>>,
+        bugs: BugSinkRef,
+    ) -> Result<Self, NetworkWatchError> {
         let followed = Arc::clone(&sink);
         let handler = NetworkStatusChangedEventHandler::new(move |_| {
-            let mut sink = lock_unpoisoned(&followed);
-            match network() {
-                Ok(network) => sink.observe(network),
-                // Coven can't tell until the next change reads again.
-                Err(error) => {
-                    tracing::error!(%error, "reading the internet connection profile failed");
-                    sink.cannot_tell();
+            heard(&followed, bugs.as_ref(), "read the internet connection profile", || {
+                let mut sink = lock_unpoisoned(&followed);
+                match network() {
+                    Ok(network) => sink.observe(network),
+                    // Coven can't tell until the next change reads again.
+                    Err(error) => {
+                        tracing::error!(%error, "reading the internet connection profile failed");
+                        sink.cannot_tell();
+                    }
                 }
-            }
+            });
             Ok(())
         });
         let token =

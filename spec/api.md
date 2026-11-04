@@ -3935,6 +3935,12 @@ while let Some(Ok(values)) = lost.next().await {
     Meanwhile coven calls the network metered, since it may be:
     `coven_network.metered` says 1, and the setting holds what it holds on
     a metered network, with `SyncWait::Metered` (E7).
+    A panic in coven's reading of what the platform says can't unwind into
+    the platform's callback, which would end the process. It goes to the
+    app's bug sink (E15), and coven can't tell, as after a failed read,
+    until the platform says again. On Linux, where coven follows
+    NetworkManager on a thread of its own, that thread ends with it, as
+    when the system bus closes.
   - `retry_now` is the person asking to retry everything now, such as by
     pulling to refresh. `sync_now` leaves every backoff in place; `retry_now`
     ends every ordinary one, answered or not: the connection's, operations',

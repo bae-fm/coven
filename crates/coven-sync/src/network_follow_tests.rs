@@ -40,7 +40,11 @@ async fn each_network_that_appears_is_one_report() {
         .unwrap();
     let waits = Arc::new(RetryWaits::open(database.clone(), clock).await.unwrap());
     let network = TestNetwork::new(true, false);
-    let watch = NetworkWatch::start(&NetworkSource::Test(network.clone())).unwrap();
+    let watch = NetworkWatch::start(
+        &NetworkSource::Test(network.clone()),
+        &(Arc::new(coven_foundation::task::LoggedBugs) as coven_foundation::task::BugSinkRef),
+    )
+    .unwrap();
     let follow = NetworkFollow::start(watch, waits.clone(), database.clone());
     // The network found at the start ends the waits saved before the store
     // opened, and the views show it at once.

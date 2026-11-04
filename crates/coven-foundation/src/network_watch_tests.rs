@@ -1,7 +1,12 @@
 use super::*;
 
+/// Where a test watch's bugs go: none of its callbacks panic.
+fn logged() -> crate::task::BugSinkRef {
+    Arc::new(crate::task::LoggedBugs)
+}
+
 fn state(network: &TestNetwork) -> NetworkState {
-    NetworkWatch::start(&NetworkSource::Test(network.clone())).unwrap().view().current()
+    NetworkWatch::start(&NetworkSource::Test(network.clone()), &logged()).unwrap().view().current()
 }
 
 #[test]
@@ -60,7 +65,7 @@ fn a_failed_read_cannot_tell_until_the_next_one() {
 #[tokio::test]
 async fn a_view_hears_each_change_and_an_unwatched_one_never_does() {
     let network = TestNetwork::new(true, false);
-    let watch = NetworkWatch::start(&NetworkSource::Test(network.clone())).unwrap();
+    let watch = NetworkWatch::start(&NetworkSource::Test(network.clone()), &logged()).unwrap();
     let mut view = watch.view();
     view.read();
     network.set_metered(true);
@@ -83,7 +88,7 @@ async fn a_view_hears_each_change_and_an_unwatched_one_never_does() {
 #[test]
 fn the_platform_watch_knows_the_network_as_it_starts() {
     for _ in 0..3 {
-        let watch = NetworkWatch::start(&NetworkSource::Platform).unwrap();
+        let watch = NetworkWatch::start(&NetworkSource::Platform, &logged()).unwrap();
         let state = watch.view().current();
         #[cfg(not(target_os = "linux"))]
         assert!(state.usable.is_some(), "{state:?}");
@@ -93,4 +98,31 @@ fn the_platform_watch_knows_the_network_as_it_starts() {
         assert_eq!(state.joined, u64::from(state.usable == Some(true)));
         drop(watch);
     }
+}
+
+/// A panic in what a platform callback runs can't unwind into the
+/// platform, which would end the process: it goes to the bug sink, and the
+/// watch can't tell, calling the network metered, until the platform says
+/// again (api.md E5, E15).
+#[test]
+fn a_panic_in_a_platform_callback_goes_to_the_bug_sink_and_cannot_tell() {
+    let sink = Mutex::new(NetworkSink::new());
+    let state = lock_unpoisoned(&sink).subscribe();
+    lock_unpoisoned(&sink).observe(Some(UsableNetwork { id: "wifi".into(), metered: false }));
+    let bugs = crate::task::tests::HeardBugs::default();
+    heard(&sink, &bugs, "read the network's path", || panic!("the path has no interfaces"));
+    assert_eq!(*state.borrow(), NetworkState { usable: None, metered: true, joined: 1 });
+    assert_eq!(
+        bugs.heard(),
+        [crate::task::Bug {
+            operation: "read the network's path",
+            message: "the path has no interfaces".into()
+        }]
+    );
+    // The platform saying again tells the network: the same one is no report.
+    heard(&sink, &bugs, "read the network's path", || {
+        lock_unpoisoned(&sink).observe(Some(UsableNetwork { id: "wifi".into(), metered: false }));
+    });
+    assert_eq!(*state.borrow(), NetworkState { usable: Some(true), metered: false, joined: 1 });
+    assert_eq!(bugs.heard().len(), 1);
 }

@@ -6,8 +6,9 @@
 //! No crate binds Network.framework (`objc2-network` is a reserved name with
 //! no bindings), so coven declares the few C functions it calls here.
 
-use super::{NetworkSink, NetworkWatchError, UsableNetwork};
+use super::{heard, NetworkSink, NetworkWatchError, UsableNetwork};
 use crate::locks::lock_unpoisoned;
+use crate::task::BugSinkRef;
 use block2::RcBlock;
 use std::ffi::{c_char, c_void, CStr};
 use std::sync::{mpsc, Arc, Mutex};
@@ -58,12 +59,18 @@ unsafe impl Sync for PathMonitor {}
 
 impl PathMonitor {
     /// Start the monitor, and return once it has described the path as it
-    /// is now, which it does as it starts.
-    pub(super) fn start(sink: Arc<Mutex<NetworkSink>>) -> Result<Self, NetworkWatchError> {
+    /// is now, which it does as it starts. A panic reading a path goes to
+    /// `bugs`.
+    pub(super) fn start(
+        sink: Arc<Mutex<NetworkSink>>,
+        bugs: BugSinkRef,
+    ) -> Result<Self, NetworkWatchError> {
         let (first, described) = mpsc::channel::<()>();
         let first = Mutex::new(Some(first));
         let handler = RcBlock::new(move |path: *mut c_void| {
-            lock_unpoisoned(&sink).observe(network(path));
+            heard(&sink, bugs.as_ref(), "read the network's path", || {
+                lock_unpoisoned(&sink).observe(network(path));
+            });
             if let Some(first) = lock_unpoisoned(&first).take() {
                 // The opener waiting for it may have gone; nothing is lost.
                 #[expect(clippy::let_underscore_must_use, reason = "the opener may have gone")]

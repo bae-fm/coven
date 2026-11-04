@@ -582,8 +582,9 @@ impl CovenBuilder {
         let identity =
             Self::make_identity(self.identity, &directory, settings.id, keychain.clone())?;
         let state = Arc::new(coven_sync::SequenceState::new());
-        let network = coven_foundation::network_watch::NetworkWatch::start(&self.network)
-            .map_err(CovenError::NetworkWatch)?;
+        let network =
+            coven_foundation::network_watch::NetworkWatch::start(&self.network, &self.bugs)
+                .map_err(CovenError::NetworkWatch)?;
         Ok(OpeningOwners {
             directory,
             custody: StoreCustody::new(keys.clone(), identity.clone(), keychain.clone()),

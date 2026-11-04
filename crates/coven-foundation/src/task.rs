@@ -422,4 +422,4 @@ impl<F: Future> Future for Caught<F> {
 
 #[cfg(test)]
 #[path = "task_tests.rs"]
-mod tests;
+pub(crate) mod tests;

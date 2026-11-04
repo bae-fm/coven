@@ -816,6 +816,7 @@ fn watched(
 ) -> coven_foundation::network_watch::NetworkView {
     coven_foundation::network_watch::NetworkWatch::start(
         &coven_foundation::network_watch::NetworkSource::Test(network.clone()),
+        &(Arc::new(coven_foundation::task::LoggedBugs) as coven_foundation::task::BugSinkRef),
     )
     .unwrap()
     .view()

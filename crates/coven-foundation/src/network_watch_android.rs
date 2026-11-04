@@ -7,9 +7,10 @@
 //! writes no JNI. What each callback means is `DefaultNetwork`'s.
 
 use super::default_network::DefaultNetwork;
-use super::{NetworkSink, NetworkWatchError};
+use super::{heard, NetworkSink, NetworkWatchError};
 use crate::java_exception::{caught, JniFailure};
 use crate::locks::lock_unpoisoned;
+use crate::task::BugSinkRef;
 use jni::objects::{Global, JClass, JClassLoader, JObject, JValue};
 use jni::sys::{jboolean, jlong};
 use jni::{jni_sig, jni_str, Env, EnvUnowned, JavaVM, NativeMethod};
@@ -28,7 +29,14 @@ static WATCHES: Mutex<Watches> = Mutex::new(Watches { next: 1, running: BTreeMap
 
 struct Watches {
     next: i64,
-    running: BTreeMap<i64, Weak<Mutex<DefaultNetwork>>>,
+    running: BTreeMap<i64, Weak<RunningWatch>>,
+}
+
+/// What one running watch's callbacks tell, and where a panic in them goes.
+struct RunningWatch {
+    network: Mutex<DefaultNetwork>,
+    sink: Arc<Mutex<NetworkSink>>,
+    bugs: BugSinkRef,
 }
 
 /// The running Java watch, stopped as this drops.
@@ -37,24 +45,31 @@ pub(super) struct JavaWatch {
     watch: Global<JObject<'static>>,
     number: i64,
     /// What the callbacks tell, while the watch runs.
-    _network: Arc<Mutex<DefaultNetwork>>,
+    _running: Arc<RunningWatch>,
 }
 
 impl JavaWatch {
     /// Load and start the Java watch, which tells the current default
-    /// network before it returns.
-    pub(super) fn start(sink: Arc<Mutex<NetworkSink>>) -> Result<Self, NetworkWatchError> {
-        let network = Arc::new(Mutex::new(DefaultNetwork::new(sink)));
+    /// network before it returns. A panic in a callback goes to `bugs`.
+    pub(super) fn start(
+        sink: Arc<Mutex<NetworkSink>>,
+        bugs: BugSinkRef,
+    ) -> Result<Self, NetworkWatchError> {
+        let running = Arc::new(RunningWatch {
+            network: Mutex::new(DefaultNetwork::new(sink.clone())),
+            sink,
+            bugs,
+        });
         let number = {
             let mut watches = lock_unpoisoned(&WATCHES);
             let number = watches.next;
             watches.next += 1;
-            watches.running.insert(number, Arc::downgrade(&network));
+            watches.running.insert(number, Arc::downgrade(&running));
             number
         };
         let started = Self::start_java(number);
         match started {
-            Ok((vm, watch)) => Ok(Self { vm, watch, number, _network: network }),
+            Ok((vm, watch)) => Ok(Self { vm, watch, number, _running: running }),
             Err(failure) => {
                 lock_unpoisoned(&WATCHES).running.remove(&number);
                 Err(NetworkWatchError::new(format!("starting {WATCH_CLASS}: {failure}")))
@@ -150,16 +165,22 @@ fn register(env: &mut Env, class: &JClass) -> jni::errors::Result<()> {
     }
 }
 
-/// Tell the running watch numbered `watch`, if it still runs.
-fn told(watch: jlong, tell: impl FnOnce(&mut DefaultNetwork)) {
-    let network = lock_unpoisoned(&WATCHES).running.get(&watch).and_then(Weak::upgrade);
-    if let Some(network) = network {
-        tell(&mut lock_unpoisoned(&network));
+/// Tell the running watch numbered `watch`, if it still runs. A panic in
+/// what the watch does with it goes to its bug sink. Finding the watch
+/// takes only the process's registry, whose changes are whole and which
+/// nothing here changes; a panic there would end the process, as is right
+/// for state the whole process shares.
+fn told(watch: jlong, operation: &'static str, tell: impl FnOnce(&mut DefaultNetwork)) {
+    let running = lock_unpoisoned(&WATCHES).running.get(&watch).and_then(Weak::upgrade);
+    if let Some(running) = running {
+        heard(&running.sink, running.bugs.as_ref(), operation, || {
+            tell(&mut lock_unpoisoned(&running.network));
+        });
     }
 }
 
 extern "system" fn available(_env: EnvUnowned, _class: JClass, watch: jlong, network: jlong) {
-    told(watch, |state| state.available(network));
+    told(watch, "hear a default network", |state| state.available(network));
 }
 
 extern "system" fn capabilities(
@@ -170,7 +191,9 @@ extern "system" fn capabilities(
     validated: jboolean,
     metered: jboolean,
 ) {
-    told(watch, |state| state.capabilities(network, validated, metered));
+    told(watch, "hear a network's capabilities", |state| {
+        state.capabilities(network, validated, metered);
+    });
 }
 
 extern "system" fn blocked(
@@ -180,14 +203,14 @@ extern "system" fn blocked(
     network: jlong,
     blocked: jboolean,
 ) {
-    told(watch, |state| state.blocked(network, blocked));
+    told(watch, "hear a network blocked", |state| state.blocked(network, blocked));
 }
 
 /// The network is gone; 0 when Android had no default network at all.
 extern "system" fn lost(_env: EnvUnowned, _class: JClass, watch: jlong, network: jlong) {
-    told(watch, |state| state.lost((network != 0).then_some(network)));
+    told(watch, "hear a network lost", |state| state.lost((network != 0).then_some(network)));
 }
 
 extern "system" fn awake(_env: EnvUnowned, _class: JClass, watch: jlong) {
-    told(watch, DefaultNetwork::awake);
+    told(watch, "hear Doze end", DefaultNetwork::awake);
 }

@@ -5,8 +5,9 @@
 //! guesses so. Without a system bus, or NetworkManager on it, coven can't
 //! tell, and says so in the log as the store opens.
 
-use super::{NetworkSink, NetworkWatchError, UsableNetwork};
+use super::{panicked, NetworkSink, NetworkWatchError, UsableNetwork};
 use crate::locks::lock_unpoisoned;
+use crate::task::BugSinkRef;
 use futures_lite::StreamExt;
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
@@ -34,12 +35,19 @@ pub(super) struct ManagerWatch {
 
 impl ManagerWatch {
     /// Follow NetworkManager's changes, then read its network as it is now.
-    /// `None` where there is no system bus, or no NetworkManager on it.
-    pub(super) fn start(sink: Arc<Mutex<NetworkSink>>) -> Result<Option<Self>, NetworkWatchError> {
-        futures_lite::future::block_on(Self::started(sink))
+    /// `None` where there is no system bus, or no NetworkManager on it. A
+    /// panic following the changes goes to `bugs`.
+    pub(super) fn start(
+        sink: Arc<Mutex<NetworkSink>>,
+        bugs: BugSinkRef,
+    ) -> Result<Option<Self>, NetworkWatchError> {
+        futures_lite::future::block_on(Self::started(sink, bugs))
     }
 
-    async fn started(sink: Arc<Mutex<NetworkSink>>) -> Result<Option<Self>, NetworkWatchError> {
+    async fn started(
+        sink: Arc<Mutex<NetworkSink>>,
+        bugs: BugSinkRef,
+    ) -> Result<Option<Self>, NetworkWatchError> {
         let connection = match zbus::Connection::system().await {
             Ok(connection) => connection,
             Err(error) => {
@@ -89,6 +97,7 @@ impl ManagerWatch {
         let first = network(&manager).await.map_err(NetworkWatchError::new)?;
         lock_unpoisoned(&sink).observe(first);
         let (stop, stopped) = oneshot::channel::<()>();
+        let followed = Arc::clone(&sink);
         let following = async move {
             while changes.next().await.is_some() {
                 let read = network(&manager).await;
@@ -110,6 +119,16 @@ impl ManagerWatch {
         let follow = std::thread::Builder::new()
             .name("coven network watch".into())
             .spawn(move || {
+                // A panic following the changes would end this thread unseen,
+                // leaving the watch with what it heard last: it goes to the
+                // bug sink, and nothing tells coven any more, as when the bus
+                // closes.
+                let following = async {
+                    if let Err(bug) = crate::task::caught("follow NetworkManager", following).await
+                    {
+                        panicked(&followed, bugs.as_ref(), &bug);
+                    }
+                };
                 futures_lite::future::block_on(futures_lite::future::or(following, async {
                     // Told to stop, or the watch is gone: either way, stop.
                     stopped.await.ok();
