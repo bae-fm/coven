@@ -156,13 +156,20 @@ first step after the cooldown ends writes it, the owner's when it wakes for it,
 and until then the row says the cooldown holds. The failure objects a held
 answer carries stay in memory beside the row, written in the same step. The
 model leaves out what a pass does, keeping only how it ends.
-`retry_waits::retry_answer::tests` check the requests and the row against
-these rules, `internal_schema::retry_effect::tests` that the row computes the
-effect and a live query follows it; the retry tests in
-`storage::tests::control` and
+`retry_waits::retry_answer::tests::io_differential_retry_answer` drives the
+Rust owner through requests, network reports, starting and stopping, holds
+beginning and ending, the owner planning and answering a held pass, passes
+beginning and ending, and the connection's first attempt handing its requests
+back. After each event it compares whether the event was taken (a pass
+begins only when the row lets it), where each report number's request
+stands, and the effect `coven_retry_effect` shows, with the runner's
+`retry_answer` case. The other `retry_waits::retry_answer::tests` check the
+requests and the row against these rules, `internal_schema::retry_effect::tests`
+that the row computes the effect and a live query follows it; the retry tests
+in `storage::tests::control` and
 `sequence_sync::sync_loop::tests::a_removed_device_never_retries_on_a_new_connection` check
 the connection's first attempt and its loop, and that the row each writes is
-how its retries are answered. No differential runner compares them.
+how its retries are answered.
 
 ## The sync state
 

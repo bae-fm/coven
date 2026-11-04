@@ -5,6 +5,7 @@ import CovenIO.Retired
 import CovenIO.WaitingReopen
 import CovenIO.Wakes
 import CovenIO.SyncState
+import CovenIO.RetryAnswer
 import Lean
 
 open Lean CovenIO
@@ -215,6 +216,73 @@ private def fileScan (j : Json) : Except String Json := do
     results := results.push (if f.listed then toJson (f.candidates.mergeSort (· ≤ ·)) else Json.null)
   return Json.arr results
 
+namespace RetryAnswerCase
+open CovenIO.RetryAnswer
+
+private def outcomeName : Outcome → String
+  | .synced => "synced"
+  | .failed => "failed"
+  | .coolingDown => "coolingDown"
+  | .notSyncing => "notSyncing"
+
+private def phaseName : Phase → String
+  | .unasked => "unasked"
+  | .waiting => "waiting"
+  | .inPass => "inPass"
+  | .answered o => outcomeName o
+
+private def effectName : Effect → String
+  | .pass => "pass"
+  | .coolingDown => "coolingDown"
+  | .failed => "failed"
+  | .notSyncing => "notSyncing"
+
+/-- An event: its name, or `{"held": null | "cooldown" | "failure"}` or
+`{"finish": "synced" | "failed" | "stopped"}`. -/
+private def event (j : Json) : Except String Event := do
+  if let .ok name := j.getStr? then
+    return ← match name with
+      | "ask" => pure .ask
+      | "report" => pure .report
+      | "start" => pure .start
+      | "stop" => pure .stop
+      | "plan" => pure .plan
+      | "wait" => pure .wait
+      | "begin" => pure .begin
+      | "connected" => pure .connected
+      | other => throw s!"unknown retry event {other}"
+  if let .ok held := j.getObjVal? "held" then
+    if held.isNull then return .held none
+    return ← match ← held.getStr? with
+      | "cooldown" => pure (.held (some .cooldown))
+      | "failure" => pure (.held (some .failure))
+      | other => throw s!"unknown hold {other}"
+  if let .ok finish := j.getObjValAs? String "finish" then
+    return ← match finish with
+      | "synced" => pure (.finish .synced)
+      | "failed" => pure (.finish .failed)
+      | "stopped" => pure (.finish .stopped)
+      | other => throw s!"unknown pass end {other}"
+  throw s!"unknown retry event {j.compress}"
+
+/-- `RetryAnswer.step` from `initial` over `events`. After each, whether the
+model takes the event (`step` gives a state; the state stays otherwise), where
+every report number's request stands, and the effect a retry made then would
+have. -/
+def run (j : Json) : Except String Json := do
+  let events ← (← j.getObjValAs? (Array Json) "events").mapM event
+  let mut s := initial
+  let mut out := #[]
+  for e in events do
+    let next := step s e
+    if let some t := next then s := t
+    let requests := (List.range s.reported).map fun m => phaseName (s.request (m + 1))
+    out := out.push (Json.mkObj [("applied", toJson next.isSome),
+      ("requests", toJson requests), ("effect", toJson (effectName s.effect))])
+  return toJson out
+
+end RetryAnswerCase
+
 namespace SyncStateCase
 open CovenIO.SyncState
 
@@ -391,6 +459,7 @@ private def run (j : Json) : Except String Json := do
   | "wakes" => wakes j
   | "file_scan" => fileScan j
   | "sync_state" => SyncStateCase.run j
+  | "retry_answer" => RetryAnswerCase.run j
   | check => throw s!"unknown IO check {check}"
 
 def main : IO UInt32 := do

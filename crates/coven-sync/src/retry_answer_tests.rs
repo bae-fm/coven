@@ -323,3 +323,156 @@ fn a_failed_steps_answer_keeps_its_typed_error() {
     );
     assert!(matches!(failed(&DbError::StoreClosed), RetryOutcome::NotSyncing));
 }
+
+/// What holds the pass in the comparison below, as the test made it.
+#[derive(Clone, Copy, PartialEq)]
+enum Hold {
+    Cooldown,
+    Failure,
+}
+
+fn outcome_name(outcome: &RetryOutcome) -> &'static str {
+    match outcome {
+        RetryOutcome::Synced { .. } => "synced",
+        RetryOutcome::Failed(_) => "failed",
+        RetryOutcome::CoolingDown { .. } => "coolingDown",
+        RetryOutcome::NotSyncing => "notSyncing",
+    }
+}
+
+fn effect_name(effect: RetryEffect) -> &'static str {
+    match effect {
+        RetryEffect::Pass => "pass",
+        RetryEffect::CoolingDown { .. } => "coolingDown",
+        RetryEffect::Failed => "failed",
+        RetryEffect::NotSyncing => "notSyncing",
+    }
+}
+
+/// IO `RetryAnswer` through the Rust owner: requests, network reports,
+/// starting and stopping, holds beginning and ending, the owner planning and
+/// answering a held pass, passes beginning and ending, and the connection's
+/// first attempt handing its requests back. After each event, whether it was
+/// taken (a pass begins only when the row lets it), where each report
+/// number's request stands, and the effect `coven_retry_effect` shows, against
+/// the runner's `retry_answer` case.
+#[tokio::test]
+#[ignore = "requires COVEN_IO_LEAN"]
+async fn io_differential_retry_answer() {
+    use serde_json::{json, Value};
+    let mut seed = 0x9e37_79b9_7f4a_7c15u64;
+    let mut pick = move |n: u64| {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        seed % n
+    };
+    let mut inputs = Vec::new();
+    let mut actual = Vec::new();
+    for _ in 0..8 {
+        let fixture = Fixture::new();
+        let (database, waits) = open(&fixture).await;
+        let mut events: Vec<Value> = Vec::new();
+        let mut observed = Vec::new();
+        let mut hold: Option<Hold> = None;
+        let mut taken: Option<PassRequests> = None;
+        let mut asked: Vec<(u64, RetryAnswer, Option<&'static str>)> = Vec::new();
+        for _ in 0..60 {
+            let running = taken.is_some();
+            let started = waits.started();
+            let mut applied = true;
+            let event = match pick(16) {
+                0..=2 => {
+                    let answer = ask(&waits).await;
+                    asked.push((waits.network_reported(), answer, None));
+                    json!("ask")
+                }
+                3 => {
+                    waits.report_network();
+                    json!("report")
+                }
+                4 => {
+                    waits.sync_started().await.unwrap();
+                    json!("start")
+                }
+                5 => {
+                    waits.sync_stopped().await.unwrap();
+                    json!("stop")
+                }
+                6 | 7 => match hold {
+                    None if pick(2) == 0 => {
+                        waits.record(Duration::from_secs(600)).await.unwrap();
+                        hold = Some(Hold::Cooldown);
+                        json!({"held": "cooldown"})
+                    }
+                    None => {
+                        waits.holds(Some(&failure())).await.unwrap();
+                        hold = Some(Hold::Failure);
+                        json!({"held": "failure"})
+                    }
+                    Some(ended) => {
+                        if ended == Hold::Cooldown {
+                            fixture.advance(600);
+                        }
+                        waits.holds(None).await.unwrap();
+                        hold = None;
+                        json!({"held": null})
+                    }
+                },
+                8 | 9 if started && !running => {
+                    plan(&waits).await;
+                    json!("plan")
+                }
+                10 if started && !running && hold.is_some() => {
+                    let failure = (hold == Some(Hold::Failure)).then(failure);
+                    waits.answer_held(failure.as_ref()).await.unwrap();
+                    json!("wait")
+                }
+                11 | 12 if !running => {
+                    taken = waits.begin_pass().await.unwrap();
+                    applied = taken.is_some();
+                    json!("begin")
+                }
+                13 if running => {
+                    waits.return_requests(taken.take().unwrap()).await.unwrap();
+                    json!("connected")
+                }
+                14 | 15 if running => {
+                    let (end, outcome) = match pick(3) {
+                        0 => ("synced", RetryOutcome::Synced { finished_at: fixture.clock.now() }),
+                        1 => ("failed", RetryOutcome::Failed(failure())),
+                        _ => ("stopped", RetryOutcome::NotSyncing),
+                    };
+                    taken.take().unwrap().answer(&outcome);
+                    json!({"finish": end})
+                }
+                _ => continue,
+            };
+            events.push(event);
+            for (_, answer, answered) in &mut asked {
+                if answered.is_none() {
+                    *answered = answer.now_or_never().map(|outcome| outcome_name(&outcome));
+                }
+            }
+            let waiting: Vec<u64> =
+                waits.requests.lock().unwrap().waiting.iter().map(|(number, _)| *number).collect();
+            let in_pass: Vec<u64> =
+                taken.iter().flat_map(|pass| pass.0.iter().map(|(number, _)| *number)).collect();
+            let requests: Vec<&str> = (1..=waits.network_reported())
+                .map(|number| match asked.iter().find(|(asked, ..)| *asked == number) {
+                    None => "unasked",
+                    Some((_, _, Some(outcome))) => outcome,
+                    Some(_) if in_pass.contains(&number) => "inPass",
+                    Some(_) if waiting.contains(&number) => "waiting",
+                    Some(_) => "lost",
+                })
+                .collect();
+            let effect = effect_name(database.read(RetryEffect::read).await.unwrap());
+            observed.push(json!({"applied": applied, "requests": requests, "effect": effect}));
+        }
+        inputs.push(json!({"check": "retry_answer", "events": events}));
+        actual.push(json!(observed));
+        database.close().await.unwrap();
+    }
+    assert_eq!(actual, crate::tests::io_runner(&inputs), "{inputs:?}");
+}
