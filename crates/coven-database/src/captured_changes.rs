@@ -187,8 +187,7 @@ pub(crate) fn losses(
         [coven_format::merge_fields::encode_write_id(&header.position)?],
         |r| {
             let loss = coven_format::merge_fields::decode_loss(&r.get::<_, Vec<u8>>(0)?)?;
-            crate::loss_record::put(db, &loss, None)?;
-            crate::file_protection::retain_loss(db, schema, &loss)
+            crate::loss_record::keep(db, schema, &loss)
         },
     )?;
     for key in &released {

@@ -99,8 +99,7 @@ pub(crate) fn loss(
             _ => return Err(invalid("active loss disagrees with merge state")),
         }
     }
-    crate::loss_record::put(database, &loss, None)?;
-    crate::file_protection::retain_loss(database, schema, &loss)
+    crate::loss_record::keep(database, schema, &loss)
 }
 
 pub(crate) fn ordinal(database: &DatabaseConnection, id: WriteId) -> Result<i64, DbError> {

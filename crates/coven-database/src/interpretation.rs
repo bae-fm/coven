@@ -421,6 +421,5 @@ fn freeze(
         ),
         cause,
     };
-    crate::loss_record::put(database, &loss, None)?;
-    crate::file_protection::retain_loss(database, schema, &loss)
+    crate::loss_record::keep(database, schema, &loss)
 }

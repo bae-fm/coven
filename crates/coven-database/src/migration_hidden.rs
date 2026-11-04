@@ -117,8 +117,7 @@ impl<'c> Hidden<'c> {
                 coven_format::merge_fields::encode_loss(&loss)?
             ],
         )?;
-        crate::loss_record::put(db, &loss, None)?;
-        crate::file_protection::retain_loss(db, schema, &loss)
+        crate::loss_record::keep(db, schema, &loss)
     }
 }
 

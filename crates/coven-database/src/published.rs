@@ -321,8 +321,7 @@ pub(crate) fn restore(
     )?;
     db.for_each("SELECT record FROM _coven_published_losses ORDER BY id", [], |r| {
         let loss = decoded(merge_fields::decode_loss(&r.get::<_, Vec<u8>>(0)?))?;
-        crate::loss_record::put(db, &loss, None)?;
-        crate::file_protection::retain_loss(db, schema, &loss)
+        crate::loss_record::keep(db, schema, &loss)
     })?;
     db.internal_execute(
         "INSERT INTO _coven_creations SELECT * FROM _coven_published_creations",

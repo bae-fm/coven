@@ -104,6 +104,17 @@ pub(crate) fn read(r: &rusqlite::Row<'_>) -> rusqlite::Result<Loss> {
     Ok(Loss { row, generation, frozen: r.get(9)?, values, cause })
 }
 
+/// Store a new loss that arrived without a displayed row change, and keep
+/// its paths and file references at once (`file_protection::retain_loss`).
+pub(crate) fn keep(
+    database: &DatabaseConnection,
+    schema: &crate::write_schema::WriteSchema,
+    loss: &Loss,
+) -> Result<(), DbError> {
+    put(database, loss, None)?;
+    crate::file_protection::retain_loss(database, schema, loss)
+}
+
 /// Keep an existing local identity when freezing or dismissing part of a loss.
 pub(crate) fn put(
     database: &DatabaseConnection,
