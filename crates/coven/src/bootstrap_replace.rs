@@ -47,7 +47,7 @@ pub(crate) async fn restore_device(
     CodeError::require_store(store, code.store)?;
     let storage = RestoreStorage::decode(code.storage.as_bytes()).map_err(SyncError::from)?;
     let (data, sign_in) = restore_connection(&builder, storage, s3_credentials)?;
-    let directory = builder.layout.store_dir(&store);
+    let directory = builder.directories.store_dir(&store);
     let keychain = Arc::new(StoreKeychain::new(builder.keychain()?, store));
     // One identity session reads now and keeps the code's pair at publication.
     let identity = CovenBuilder::make_identity(
@@ -108,7 +108,8 @@ pub(super) async fn replace_installation(
     check_cancel(cancel)?;
     let by = call.by();
     let keychain = builder.keychain()?;
-    let replacement = builder.layout.begin_replacement(store, by, builder.ids.as_ref()).await?;
+    let replacement =
+        builder.directories.begin_replacement(store, by, builder.ids.as_ref()).await?;
     let swapping = !replacement.is_swapped();
     let loaded = prepare_and_load(
         &mut builder,

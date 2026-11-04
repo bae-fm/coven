@@ -27,7 +27,7 @@ async fn stopped(device: &crate::tests::Device) {
 async fn deleting_refuses_unsent_writes_then_retires_this_device() {
     let mut network = Network::new(2).await;
     let phone = &network.devices[1];
-    let directory = phone.layout.store_dir(&phone.store);
+    let directory = phone.app.store_dir(&phone.store);
     let device = directory.settings().unwrap().device_id;
     stopped(phone).await;
     insert(&phone.handle, "unsent").await;
@@ -36,11 +36,11 @@ async fn deleting_refuses_unsent_writes_then_retires_this_device() {
         Err(StoreDeletionError::Unsent(UnsentWork { writes: 1, files: 0 }))
     ));
     // Nothing was deleted: the store stays open and the write still sends.
-    assert_eq!(phone.layout.stores().await.unwrap().len(), 1);
+    assert_eq!(phone.app.stores().await.unwrap().len(), 1);
     phone.handle.start_sync().await.unwrap();
     network.sync(1).await;
     network.devices[1].handle.delete_store(IfUnsent::Refuse).await.unwrap();
-    assert!(network.devices[1].layout.stores().await.unwrap().is_empty());
+    assert!(network.devices[1].app.stores().await.unwrap().is_empty());
     network.devices.remove(1);
     // The owner reads the write, and the retirement that stops its polling.
     network.sync(0).await;
@@ -67,11 +67,11 @@ async fn deleting_refuses_unsent_writes_then_retires_this_device() {
 async fn discarding_still_retires_this_device() {
     let mut network = Network::new(2).await;
     let phone = &network.devices[1];
-    let device = phone.layout.store_dir(&phone.store).settings().unwrap().device_id;
+    let device = phone.app.store_dir(&phone.store).settings().unwrap().device_id;
     stopped(phone).await;
     insert(&phone.handle, "discarded").await;
     phone.handle.delete_store(IfUnsent::Discard).await.unwrap();
-    assert!(phone.layout.stores().await.unwrap().is_empty());
+    assert!(phone.app.stores().await.unwrap().is_empty());
     network.devices.remove(1);
     network.sync(0).await;
     let owner = &network.devices[0].handle;
@@ -89,12 +89,10 @@ async fn discarding_still_retires_this_device() {
 #[tokio::test]
 async fn a_store_never_connected_deletes_with_its_local_writes() {
     let root = tempfile::tempdir().unwrap();
-    let layout = StoreLayout::new(root.path().into());
-    let app = TestCoven::new();
-    let directory =
-        app.create_closed_store(&layout, "Local", std::sync::Arc::new(UuidIds)).await.unwrap();
+    let app = Coven::in_memory(root.path().into());
+    let directory = app.create_closed_store("Local", std::sync::Arc::new(UuidIds)).await.unwrap();
     let handle = app
-        .builder(layout.clone())
+        .builder()
         .synced_tables(vec![SyncedTable::new("parents", RowIdentity::SharedKey)])
         .migrations(vec![Migration::addition(1, "parents", "CREATE TABLE parents(id TEXT NOT NULL PRIMARY KEY,label TEXT NOT NULL,value INTEGER NOT NULL)")])
         .open(directory.id(), |_| ())
@@ -102,20 +100,18 @@ async fn a_store_never_connected_deletes_with_its_local_writes() {
         .unwrap();
     insert(&handle, "local").await;
     handle.delete_store(IfUnsent::Refuse).await.unwrap();
-    assert!(layout.stores().await.unwrap().is_empty());
+    assert!(app.stores().await.unwrap().is_empty());
     assert_eq!(app.store_keychain(directory.id()).device_id().unwrap(), None);
 }
 
 /// A store on memory storage, synced once, then with its passes held and
 /// uploads paused, so committed writes and attached files stay unsent until
 /// the test sends them.
-async fn stopped_store_with_files() -> (tempfile::TempDir, TestCoven, CovenHandle) {
+async fn stopped_store_with_files() -> (tempfile::TempDir, Coven, CovenHandle) {
     use coven_storage::{test_utils::MemoryStorage, Storage};
     let root = tempfile::tempdir().unwrap();
-    let app = TestCoven::new();
-    let layout = StoreLayout::new(root.path().into());
-    let directory =
-        app.create_closed_store(&layout, "Files", std::sync::Arc::new(UuidIds)).await.unwrap();
+    let app = Coven::in_memory(root.path().into());
+    let directory = app.create_closed_store("Files", std::sync::Arc::new(UuidIds)).await.unwrap();
     let memory = std::sync::Arc::new(
         MemoryStorage::builder()
             .clock(std::sync::Arc::new(SystemClock))
@@ -125,7 +121,7 @@ async fn stopped_store_with_files() -> (tempfile::TempDir, TestCoven, CovenHandl
     );
     let connector = crate::tests::Connector::new(memory.clone());
     let handle = app
-        .builder(layout)
+        .builder()
         .storage_connector(connector.clone())
         .synced_tables(vec![
             SyncedTable::new("parents", RowIdentity::SharedKey),
@@ -230,7 +226,7 @@ async fn subscribed_unsent_work_follows_each_commit_and_confirmation() {
 }
 
 /// Every entry this device kept for the store is gone.
-fn device_entries_gone(app: &TestCoven, store: StoreId) {
+fn device_entries_gone(app: &Coven, store: StoreId) {
     let keychain = Arc::new(app.store_keychain(store));
     assert!(keychain.device_id().unwrap().is_none());
     assert!(keychain.storage_credentials().unwrap().is_none());
@@ -251,26 +247,26 @@ async fn removing_a_store_from_one_device_keeps_the_person_entries() {
     for discard in [false, true] {
         let mut network = Network::with_schema(CloudProvider::S3, Vec::new(), Vec::new()).await;
         let phone = network.devices.remove(0);
-        let laptop = phone.app.another_device();
+        let root = tempfile::tempdir().unwrap();
+        let laptop = phone.app.another_device(root.path().into());
         let saved = crate::tests::readable(laptop.saved_restore_codes().await.unwrap());
         assert_eq!(saved.len(), 1);
         assert!(saved[0].has_s3_credentials);
         phone.handle.set_host_secret("api-token", "phone token").unwrap();
         if discard {
             phone.handle.close().await.unwrap();
-            phone.app.discard_store(&phone.layout.store_dir(&phone.store)).await.unwrap();
+            phone.app.discard_store(&phone.app.store_dir(&phone.store)).await.unwrap();
         } else {
             phone.handle.delete_store(IfUnsent::Refuse).await.unwrap();
         }
-        assert!(phone.layout.stores().await.unwrap().is_empty());
+        assert!(phone.app.stores().await.unwrap().is_empty());
         device_entries_gone(&phone.app, phone.store);
         assert_eq!(crate::tests::readable(laptop.saved_restore_codes().await.unwrap()), saved);
         assert_eq!(crate::tests::readable(phone.app.saved_restore_codes().await.unwrap()), saved);
-        let root = tempfile::tempdir().unwrap();
         let (_, cancel) = tokio::sync::watch::channel(false);
         let restored = restore_from_saved_code(
             laptop
-                .builder(StoreLayout::new(root.path().into()))
+                .builder()
                 .synced_tables(Vec::new())
                 .migrations(Vec::new())
                 .clock(Arc::new(crate::tests::PollingClock::new(network.clock.clone())))
@@ -289,10 +285,7 @@ async fn removing_a_store_from_one_device_keeps_the_person_entries() {
         // restore's bootstrap lock included.
         if discard {
             restored.close().await.unwrap();
-            laptop
-                .discard_store(&StoreLayout::new(root.path().into()).store_dir(&phone.store))
-                .await
-                .unwrap();
+            laptop.discard_store(&laptop.store_dir(&phone.store)).await.unwrap();
         } else {
             restored.delete_store(IfUnsent::Discard).await.unwrap();
         }
@@ -317,7 +310,7 @@ fn files_named_for(app_dir: &std::path::Path, store: StoreId) -> Vec<String> {
 async fn a_close_failing_after_the_removal_is_finished_by_discarding() {
     let mut network = Network::new(2).await;
     let phone = &network.devices[1];
-    let directory = phone.layout.store_dir(&phone.store);
+    let directory = phone.app.store_dir(&phone.store);
     let device = directory.settings().unwrap().device_id;
     phone.handle.storage.fail_next_close(SyncError::Database(DbError::RollbackFailed));
     let failed = phone.handle.delete_store(IfUnsent::Refuse).await;
@@ -328,9 +321,9 @@ async fn a_close_failing_after_the_removal_is_finished_by_discarding() {
         ),
         "{failed:?}"
     );
-    assert_eq!(phone.layout.stores().await.unwrap().len(), 1);
+    assert_eq!(phone.app.stores().await.unwrap().len(), 1);
     phone.app.discard_store(&directory).await.unwrap();
-    assert!(phone.layout.stores().await.unwrap().is_empty());
+    assert!(phone.app.stores().await.unwrap().is_empty());
     network.devices.remove(1);
     network.sync(0).await;
     let removed = network.devices[0]

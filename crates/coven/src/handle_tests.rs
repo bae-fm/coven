@@ -4,14 +4,14 @@ use std::sync::{
     Arc, Mutex,
 };
 
-fn builder(app: &TestCoven, layout: StoreLayout) -> CovenBuilder {
-    app.builder(layout)
-        .synced_tables(vec![SyncedTable::new("notes", RowIdentity::SharedKey)])
-        .migrations(vec![Migration::addition(
+fn builder(app: &Coven) -> CovenBuilder {
+    app.builder().synced_tables(vec![SyncedTable::new("notes", RowIdentity::SharedKey)]).migrations(
+        vec![Migration::addition(
             1,
             "notes",
             "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY,title TEXT NOT NULL)",
-        )])
+        )],
+    )
 }
 
 #[tokio::test]
@@ -22,15 +22,13 @@ async fn reopening_waits_after_the_last_handle_drops_or_close_starts() {
     };
     for close in [false, true] {
         let root = tempfile::tempdir().unwrap();
-        let layout = StoreLayout::new(root.path().into());
-        let app = TestCoven::new();
-        let directory =
-            app.create_closed_store(&layout, "Reopen", Arc::new(UuidIds)).await.unwrap();
-        let handle = builder(&app, layout.clone()).open(directory.id(), |_| ()).await.unwrap();
+        let app = Coven::in_memory(root.path().into());
+        let directory = app.create_closed_store("Reopen", Arc::new(UuidIds)).await.unwrap();
+        let handle = builder(&app).open(directory.id(), |_| ()).await.unwrap();
         let clone = handle.clone();
         drop(handle);
         assert!(matches!(
-            builder(&app, layout.clone()).open(directory.id(), |_| ()).await,
+            builder(&app).open(directory.id(), |_| ()).await,
             Err(CovenError::Lock(StoreLockError::AlreadyOpen(_)))
         ));
         let (entered, entry) = tokio::sync::oneshot::channel();
@@ -55,7 +53,7 @@ async fn reopening_waits_after_the_last_handle_drops_or_close_starts() {
             drop(closing);
         }
         drop(clone);
-        let mut reopen = Box::pin(builder(&app, layout.clone()).open(directory.id(), |_| ()));
+        let mut reopen = Box::pin(builder(&app).open(directory.id(), |_| ()));
         poll_fn(|cx| {
             assert!(reopen.as_mut().poll(cx).is_pending());
             Poll::Ready(())
@@ -71,18 +69,17 @@ async fn reopening_waits_after_the_last_handle_drops_or_close_starts() {
 #[tokio::test]
 async fn kept_keys_survive_reopen_and_forgetting_preserves_identity() {
     let root = tempfile::tempdir().unwrap();
-    let layout = StoreLayout::new(root.path().to_owned());
-    let app = TestCoven::new();
+    let app = Coven::in_memory(root.path().to_owned());
     let ids = Arc::new(UuidIds);
-    let directory = app.create_closed_store(&layout, "keys", ids.clone()).await.unwrap();
+    let directory = app.create_closed_store("keys", ids.clone()).await.unwrap();
     let keys = StoreKeyring::new(StoreKey::generate(KeyId(ids.new_id())).unwrap());
     app.keep_store_keys(&directory, &keys).unwrap();
-    let handle = builder(&app, layout.clone()).open(directory.id(), |_| ()).await.unwrap();
+    let handle = builder(&app).open(directory.id(), |_| ()).await.unwrap();
     assert_eq!(handle.store_key_state().unwrap(), StoreKeyState::Available);
 
     handle.set_host_secret("token", "secret").unwrap();
     handle.close().await.unwrap();
-    let handle = builder(&app, layout.clone()).open(directory.id(), |_| ()).await.unwrap();
+    let handle = builder(&app).open(directory.id(), |_| ()).await.unwrap();
     assert_eq!(handle.store_key_state().unwrap(), StoreKeyState::Available);
     app.fail_next_keychain_operation();
     assert!(handle.forget_store_keys().await.is_err());
@@ -165,17 +162,16 @@ impl MemberKeyCustody for Identity {
 #[tokio::test]
 async fn creation_unlocks_once_and_sql_callback_failures_roll_back() {
     let root = tempfile::tempdir().unwrap();
-    let layout = StoreLayout::new(root.path().to_owned());
-    let app = TestCoven::new();
+    let app = Coven::in_memory(root.path().to_owned());
     let keys = Arc::new(Keys::default());
     let identity = Arc::new(Identity::default());
-    let handle = builder(&app, layout.clone())
+    let handle = builder(&app)
         .key_custody(KeyCustody::Custom(keys.clone()))
         .identity_custody(IdentityCustody::Custom(identity.clone()))
         .create_store("session")
         .await
         .unwrap();
-    let directory = layout.store_dir(&handle.store_id());
+    let directory = app.store_dir(&handle.store_id());
     let failed: CovenResult<()> = handle
         .write(|sql| {
             sql.execute("INSERT INTO notes VALUES('a','not committed')", [])?;
@@ -193,7 +189,7 @@ async fn creation_unlocks_once_and_sql_callback_failures_roll_back() {
         0
     );
     assert!(handle.pending().await.unwrap().is_empty());
-    let reader = builder(&app, layout.clone())
+    let reader = builder(&app)
         .key_custody(KeyCustody::Custom(keys.clone()))
         .identity_custody(IdentityCustody::Custom(identity.clone()))
         .open_read_only(directory.id())
@@ -226,10 +222,9 @@ async fn cancelling_the_close_caller_still_closes_all_clones() {
         task::Poll,
     };
     let root = tempfile::tempdir().unwrap();
-    let layout = StoreLayout::new(root.path().to_owned());
-    let app = TestCoven::new();
-    let directory = app.create_closed_store(&layout, "closing", Arc::new(UuidIds)).await.unwrap();
-    let handle = builder(&app, layout.clone()).open(directory.id(), |_| ()).await.unwrap();
+    let app = Coven::in_memory(root.path().to_owned());
+    let directory = app.create_closed_store("closing", Arc::new(UuidIds)).await.unwrap();
+    let handle = builder(&app).open(directory.id(), |_| ()).await.unwrap();
     let mut live = handle.subscribe(|_| Ok(()));
     live.next().await.expect("the live query answers").unwrap();
     // Polling starts closing; dropping only the caller must not cancel it.
@@ -254,17 +249,16 @@ async fn cancelling_the_close_caller_still_closes_all_clones() {
         Err(CovenError::Database(DbError::StoreClosed))
     ));
     assert!(matches!(handle.host_secret("token"), Err(KeyError::StoreClosed)));
-    let reopened = builder(&app, layout.clone()).open(directory.id(), |_| ()).await.unwrap();
+    let reopened = builder(&app).open(directory.id(), |_| ()).await.unwrap();
     reopened.close().await.unwrap();
 }
 
 #[tokio::test]
 async fn closed_storage_calls_keep_their_public_errors_on_every_clone() {
     let root = tempfile::tempdir().unwrap();
-    let layout = StoreLayout::new(root.path().to_owned());
-    let app = TestCoven::new();
-    let directory = app.create_closed_store(&layout, "closed", Arc::new(UuidIds)).await.unwrap();
-    let original = builder(&app, layout).open(directory.id(), |_| ()).await.unwrap();
+    let app = Coven::in_memory(root.path().to_owned());
+    let directory = app.create_closed_store("closed", Arc::new(UuidIds)).await.unwrap();
+    let original = builder(&app).open(directory.id(), |_| ()).await.unwrap();
     let handle = original.clone();
     assert_eq!(handle.store_key_state().unwrap(), StoreKeyState::Locked);
     original.close().await.unwrap();
@@ -328,10 +322,9 @@ async fn closed_storage_calls_keep_their_public_errors_on_every_clone() {
 #[tokio::test]
 async fn disconnected_member_and_circle_reads_match_their_subscriptions() {
     let root = tempfile::tempdir().unwrap();
-    let layout = StoreLayout::new(root.path().to_owned());
-    let app = TestCoven::new();
-    let directory = app.create_closed_store(&layout, "members", Arc::new(UuidIds)).await.unwrap();
-    let handle = builder(&app, layout).open(directory.id(), |_| ()).await.unwrap();
+    let app = Coven::in_memory(root.path().to_owned());
+    let directory = app.create_closed_store("members", Arc::new(UuidIds)).await.unwrap();
+    let handle = builder(&app).open(directory.id(), |_| ()).await.unwrap();
     assert_eq!(handle.store_key_state().unwrap(), StoreKeyState::Locked);
     let members = handle.members().await.unwrap();
     assert!(members.is_empty());
@@ -357,14 +350,13 @@ async fn closing_waits_for_setup_after_its_caller_is_cancelled() {
     tokio::time::timeout(std::time::Duration::from_secs(10), async {
         use coven_storage::{test_utils::MemoryStorage, StorageSettings};
         let root = tempfile::tempdir().unwrap();
-        let layout = StoreLayout::new(root.path().to_owned());
-        let app = TestCoven::new();
-        let directory = app.create_closed_store(&layout, "setup", Arc::new(UuidIds)).await.unwrap();
+        let app = Coven::in_memory(root.path().to_owned());
+        let directory = app.create_closed_store("setup", Arc::new(UuidIds)).await.unwrap();
         let config = StorageConfig::S3 {
             bucket: "bucket".into(), region: "region".into(), prefix: crate::S3Prefix::parse("store").unwrap(), endpoint: None, profile: None,
         };
         let storage = Arc::new(MemoryStorage::builder().location(config.clone()).clock(Arc::new(SystemClock)).build().unwrap());
-        let handle = builder(&app, layout).storage_connector(storage.clone()).open(directory.id(), |_| ()).await.unwrap();
+        let handle = builder(&app).storage_connector(storage.clone()).open(directory.id(), |_| ()).await.unwrap();
 
         let (entered, entering) = tokio::sync::oneshot::channel();
         let (resume, resumed) = tokio::sync::oneshot::channel();
@@ -396,13 +388,12 @@ async fn closing_waits_for_setup_after_its_caller_is_cancelled() {
 async fn workers_share_keys_across_stop_forget_and_reacquisition_until_close() {
     use coven_storage::{test_utils::MemoryStorage, Storage};
     let root = tempfile::tempdir().unwrap();
-    let layout = StoreLayout::new(root.path().into());
-    let app = TestCoven::new();
+    let app = Coven::in_memory(root.path().into());
     let storage = Arc::new(MemoryStorage::builder().build().unwrap());
     let connector = crate::tests::Connector::new(storage.clone());
     let keys = Arc::new(Keys::default());
     let identity = Arc::new(Identity::default());
-    let handle = builder(&app, layout.clone())
+    let handle = builder(&app)
         .key_custody(KeyCustody::Custom(keys.clone()))
         .identity_custody(IdentityCustody::Custom(identity.clone()))
         .storage_connector(connector.clone())
@@ -455,14 +446,13 @@ async fn workers_share_keys_across_stop_forget_and_reacquisition_until_close() {
 #[tokio::test]
 async fn failed_identity_unlock_releases_the_opened_store_session() {
     let root = tempfile::tempdir().unwrap();
-    let layout = StoreLayout::new(root.path().into());
-    let app = TestCoven::new();
-    let directory = app.create_closed_store(&layout, "session", Arc::new(UuidIds)).await.unwrap();
+    let app = Coven::in_memory(root.path().into());
+    let directory = app.create_closed_store("session", Arc::new(UuidIds)).await.unwrap();
     let keys = Arc::new(Keys::default());
     let identity = Arc::new(Identity::default());
     identity.refuse.store(true, Ordering::SeqCst);
     assert!(matches!(
-        builder(&app, layout)
+        builder(&app)
             .key_custody(KeyCustody::Custom(keys.clone()))
             .identity_custody(IdentityCustody::Custom(identity.clone()))
             .open(directory.id(), |_| ())
@@ -478,13 +468,12 @@ async fn failed_identity_unlock_releases_the_opened_store_session() {
 #[tokio::test]
 async fn migration_failure_precedes_custody_unlock() {
     let root = tempfile::tempdir().unwrap();
-    let layout = StoreLayout::new(root.path().into());
-    let app = TestCoven::new();
-    let directory = app.create_closed_store(&layout, "session", Arc::new(UuidIds)).await.unwrap();
+    let app = Coven::in_memory(root.path().into());
+    let directory = app.create_closed_store("session", Arc::new(UuidIds)).await.unwrap();
     let keys = Arc::new(Keys::default());
     let identity = Arc::new(Identity::default());
     keys.refuse.store(true, Ordering::SeqCst);
-    let error = builder(&app, layout)
+    let error = builder(&app)
         .migrations(vec![Migration::addition(1, "invalid", "INVALID SQL")])
         .key_custody(KeyCustody::Custom(keys.clone()))
         .identity_custody(IdentityCustody::Custom(identity.clone()))
@@ -499,15 +488,14 @@ async fn migration_failure_precedes_custody_unlock() {
 #[tokio::test]
 async fn closing_erases_custody_once_and_fails_later_calls_on_every_clone() {
     let root = tempfile::tempdir().unwrap();
-    let layout = StoreLayout::new(root.path().into());
-    let app = TestCoven::new();
+    let app = Coven::in_memory(root.path().into());
     let ids = Arc::new(UuidIds);
     let keys = Arc::new(Keys {
         keys: Mutex::new(Some(StoreKeyring::new(StoreKey::generate(KeyId(ids.new_id())).unwrap()))),
         ..Keys::default()
     });
     let identity = Arc::new(Identity::default());
-    let handle = builder(&app, layout.clone())
+    let handle = builder(&app)
         .key_custody(KeyCustody::Custom(keys.clone()))
         .identity_custody(IdentityCustody::Custom(identity.clone()))
         .create_store("session")
@@ -762,7 +750,7 @@ mod store_rename {
         for device in &network.devices {
             assert_eq!(device.handle.store_name().await.unwrap(), "家庭 recipes");
             assert_eq!(
-                device.layout.stores().await.unwrap(),
+                device.app.stores().await.unwrap(),
                 vec![StoreInfo {
                     id: device.store,
                     name: "家庭 recipes".into(),

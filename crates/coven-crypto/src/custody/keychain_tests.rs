@@ -6,18 +6,6 @@ use coven_foundation::id_source::KeyId;
 use uuid::Uuid;
 
 #[test]
-#[should_panic(expected = "keyring service name lock is poisoned")]
-fn registration_propagates_a_poisoned_service_lock() {
-    let service = Mutex::new(None);
-    let poisoned = std::panic::catch_unwind(|| {
-        let _guard = service.lock().unwrap();
-        panic!("poison service name");
-    });
-    assert!(poisoned.is_err());
-    let _registration = register(&service, "service".into());
-}
-
-#[test]
 #[should_panic(expected = "in-memory keychain entries lock is poisoned")]
 fn discovery_propagates_a_poisoned_entries_lock() {
     let fake = Keychain::in_memory("poisoned").unwrap();
@@ -214,22 +202,10 @@ fn present_but_empty_or_malformed_key_entries_are_errors() {
 }
 
 #[test]
-fn registration_is_atomic_and_cannot_switch_services() {
-    let service = Mutex::new(None);
+fn a_keychain_needs_a_service_name_with_no_nul() {
     for name in ["", "nul\0name"] {
-        assert!(matches!(register(&service, name.into()), Err(KeyError::InvalidServiceName)));
-        assert!(service.lock().unwrap().is_none());
+        assert!(matches!(Keychain::native(name), Err(KeyError::InvalidServiceName)));
     }
-    register(&service, "service".into()).unwrap();
-    register(&service, "service".into()).unwrap();
-    assert!(matches!(
-        register(&service, "different".into()),
-        Err(KeyError::ServiceAlreadyRegistered)
-    ));
-    for name in ["", "nul\0name"] {
-        assert!(matches!(register(&service, name.into()), Err(KeyError::InvalidServiceName)));
-    }
-    assert_eq!(service.lock().unwrap().as_deref(), Some("service"));
 }
 
 #[test]

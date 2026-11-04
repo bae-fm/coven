@@ -3,40 +3,38 @@ use coven_foundation::files::{StoreDirAccess, StoreFile};
 use coven_storage::{test_utils::MemoryStorage, Storage};
 use std::sync::Arc;
 
-fn builder(app: &TestCoven, layout: StoreLayout) -> CovenBuilder {
-    app.builder(layout)
-        .synced_tables(vec![SyncedTable::new("notes", RowIdentity::SharedKey)])
-        .migrations(vec![Migration::addition(
+fn builder(app: &Coven) -> CovenBuilder {
+    app.builder().synced_tables(vec![SyncedTable::new("notes", RowIdentity::SharedKey)]).migrations(
+        vec![Migration::addition(
             1,
             "notes",
             "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY,title TEXT NOT NULL)",
-        )])
+        )],
+    )
 }
 
 #[tokio::test]
 async fn application_lifecycle_two_stores_lock_read_only_live_query_and_reopen() {
-    set_keyring_service("com.example.notes").unwrap();
     let root = tempfile::tempdir().unwrap();
-    let layout = StoreLayout::new(root.path().to_owned());
-    let app = TestCoven::new();
+    let app = Coven::in_memory(root.path().to_owned());
     let ids: IdSourceRef = Arc::new(SequentialIds::new());
-    let first = app.create_closed_store(&layout, "Household", ids.clone()).await.unwrap();
-    let second = app.create_closed_store(&layout, "Work", ids).await.unwrap();
+    let first = app.create_closed_store("Household", ids.clone()).await.unwrap();
+    let second = app.create_closed_store("Work", ids).await.unwrap();
     assert_eq!(
-        layout.stores().await.unwrap().iter().map(|s| &s.name).collect::<Vec<_>>(),
+        app.stores().await.unwrap().iter().map(|s| &s.name).collect::<Vec<_>>(),
         [&"Household", &"Work"]
     );
-    let a = builder(&app, layout.clone()).open(first.id(), |_| ()).await.unwrap();
-    let b = builder(&app, layout.clone()).open(second.id(), |_| ()).await.unwrap();
+    let a = builder(&app).open(first.id(), |_| ()).await.unwrap();
+    let b = builder(&app).open(second.id(), |_| ()).await.unwrap();
     assert!(matches!(
-        builder(&app, layout.clone()).open(first.id(), |_| ()).await,
+        builder(&app).open(first.id(), |_| ()).await,
         Err(CovenError::Lock(StoreLockError::AlreadyOpen(_)))
     ));
     assert!(matches!(
         app.discard_store(&first).await,
         Err(StoreDeletionError::Lock(StoreLockError::AlreadyOpen(_)))
     ));
-    let reader = builder(&app, layout.clone()).open_read_only(first.id()).await.unwrap();
+    let reader = builder(&app).open_read_only(first.id()).await.unwrap();
     let mut live = a.subscribe(|sql| {
         Ok(sql.query("SELECT title FROM notes ORDER BY title", [], |r| r.get::<_, String>(0))?)
     });
@@ -95,7 +93,7 @@ async fn application_lifecycle_two_stores_lock_read_only_live_query_and_reopen()
         Err(StoreDeletionError::Lock(StoreLockError::AlreadyOpen(_)))
     ));
     reader.close().await.unwrap();
-    let a = builder(&app, layout.clone()).open(first.id(), |_| ()).await.unwrap();
+    let a = builder(&app).open(first.id(), |_| ()).await.unwrap();
     assert_eq!(
         a.read(|sql| Ok(sql.query_row("SELECT title FROM notes", [], |r| r.get::<_, String>(0))?))
             .await
@@ -107,7 +105,7 @@ async fn application_lifecycle_two_stores_lock_read_only_live_query_and_reopen()
     app.discard_store(&first).await.unwrap();
     app.discard_store(&first).await.unwrap();
     assert_eq!(
-        layout.stores().await.unwrap(),
+        app.stores().await.unwrap(),
         vec![StoreInfo { id: second.id(), name: "Work".into(), unfinished_replacement: None }]
     );
 }
@@ -115,32 +113,31 @@ async fn application_lifecycle_two_stores_lock_read_only_live_query_and_reopen()
 #[tokio::test]
 async fn host_secrets_identity_and_failed_deletion_survive_reopen() {
     let root = tempfile::tempdir().unwrap();
-    let layout = StoreLayout::new(root.path().to_owned());
-    let app = TestCoven::new();
-    let directory = app.create_closed_store(&layout, "private", Arc::new(UuidIds)).await.unwrap();
+    let app = Coven::in_memory(root.path().to_owned());
+    let directory = app.create_closed_store("private", Arc::new(UuidIds)).await.unwrap();
     let key_id = KeyId(UuidIds.new_id());
     let keys = StoreKeyring::new(StoreKey::generate(key_id).unwrap());
     app.keep_store_keys(&directory, &keys).unwrap();
-    let handle = builder(&app, layout.clone()).open(directory.id(), |_| ()).await.unwrap();
+    let handle = builder(&app).open(directory.id(), |_| ()).await.unwrap();
     let member = identity(&app, directory.id()).member();
     handle.set_host_secret("token", "the app's token").unwrap();
     handle.set_host_secret("device-id", "app secret").unwrap();
     handle.set_host_secret("discarded", "discard me").unwrap();
     handle.delete_host_secret("discarded").unwrap();
     handle.close().await.unwrap();
-    let handle = builder(&app, layout.clone()).open(directory.id(), |_| ()).await.unwrap();
+    let handle = builder(&app).open(directory.id(), |_| ()).await.unwrap();
     assert_eq!(identity(&app, directory.id()).member(), member);
     assert_eq!(handle.host_secret("token").unwrap().as_deref(), Some("the app's token"));
     handle.close().await.unwrap();
     std::fs::write(directory.database_path(), b"damaged database").unwrap();
     app.fail_next_keychain_operation();
     assert!(matches!(app.discard_store(&directory).await, Err(StoreDeletionError::Key(_))));
-    assert!(matches!(layout.stores().await, Err(StoreLayoutError::Store {
+    assert!(matches!(app.stores().await, Err(StoreListError::Store {
         store, source: CovenError::Database(DbError::DamagedDatabase),
     }) if store == directory.id()));
     assert_eq!(directory.settings().unwrap().id, directory.id());
     app.discard_store(&directory).await.unwrap();
-    assert!(layout.stores().await.unwrap().is_empty());
+    assert!(app.stores().await.unwrap().is_empty());
     // Recreate exactly this store id to prove deletion removed all its keychain entries.
     struct SameStore(std::sync::Mutex<Option<StoreId>>, UuidIds);
     impl IdSource for SameStore {
@@ -153,13 +150,12 @@ async fn host_secrets_identity_and_failed_deletion_survive_reopen() {
     }
     let directory = app
         .create_closed_store(
-            &layout,
             "replacement",
             Arc::new(SameStore(std::sync::Mutex::new(Some(directory.id())), UuidIds)),
         )
         .await
         .unwrap();
-    let replacement = builder(&app, layout.clone()).open(directory.id(), |_| ()).await.unwrap();
+    let replacement = builder(&app).open(directory.id(), |_| ()).await.unwrap();
     for name in ["token", "device-id", "discarded"] {
         assert_eq!(replacement.host_secret(name).unwrap(), None);
     }
@@ -171,14 +167,13 @@ async fn host_secrets_identity_and_failed_deletion_survive_reopen() {
 #[tokio::test]
 async fn a_failed_device_identity_prevents_publication() {
     let root = tempfile::tempdir().unwrap();
-    let layout = StoreLayout::new(root.path().to_owned());
-    let app = TestCoven::new();
+    let app = Coven::in_memory(root.path().to_owned());
     app.fail_next_keychain_operation();
     assert!(matches!(
-        app.create_closed_store(&layout, "refused", Arc::new(UuidIds)).await,
+        app.create_closed_store("refused", Arc::new(UuidIds)).await,
         Err(StoreCreationError::Store(CovenError::Key(_)))
     ));
-    assert!(layout.stores().await.unwrap().is_empty());
+    assert!(app.stores().await.unwrap().is_empty());
 }
 
 #[tokio::test]
@@ -186,10 +181,8 @@ async fn a_failed_device_identity_prevents_publication() {
 /// original schema and the callback serves only received late writes (§18.6).
 async fn a_breaking_migration_keeps_the_waiting_write_as_authored() {
     let root = tempfile::tempdir().unwrap();
-    let layout = StoreLayout::new(root.path().to_owned());
-    let app = TestCoven::new();
-    let directory =
-        app.create_closed_store(&layout, "migrations", Arc::new(UuidIds)).await.unwrap();
+    let app = Coven::in_memory(root.path().to_owned());
+    let directory = app.create_closed_store("migrations", Arc::new(UuidIds)).await.unwrap();
     let first = || {
         Migration::addition(
             1,
@@ -199,7 +192,7 @@ async fn a_breaking_migration_keeps_the_waiting_write_as_authored() {
     };
     let table = || vec![SyncedTable::new("attachments", RowIdentity::SharedKey)];
     let handle = app
-        .builder(layout.clone())
+        .builder()
         .synced_tables(table())
         .migrations(vec![first()])
         .open(directory.id(), |_| ())
@@ -228,7 +221,7 @@ async fn a_breaking_migration_keeps_the_waiting_write_as_authored() {
         })),
     );
     let handle = app
-        .builder(layout.clone())
+        .builder()
         .synced_tables(table())
         .migrations(vec![first(), migration])
         .open(directory.id(), |_| ())
@@ -247,7 +240,7 @@ async fn a_breaking_migration_keeps_the_waiting_write_as_authored() {
     handle.close().await.unwrap();
 }
 
-fn identity(app: &TestCoven, id: StoreId) -> MemberIdentity {
+fn identity(app: &Coven, id: StoreId) -> MemberIdentity {
     MemberKeyCustody::unlock(&coven_crypto::custody::KeyringCustody::new(Arc::new(
         app.store_keychain(id),
     )))
@@ -258,17 +251,13 @@ fn identity(app: &TestCoven, id: StoreId) -> MemberIdentity {
 #[tokio::test]
 async fn saved_location_survives_lost_credentials_and_reopen_without_custody_reads() {
     let root = tempfile::tempdir().unwrap();
-    let layout = StoreLayout::new(root.path().into());
-    let app = TestCoven::new();
+    let app = Coven::in_memory(root.path().into());
     let storage = Arc::new(MemoryStorage::builder().build().unwrap());
     let builder = || {
-        app.builder(layout.clone())
-            .synced_tables(vec![])
-            .migrations(vec![])
-            .storage_connector(storage.clone())
+        app.builder().synced_tables(vec![]).migrations(vec![]).storage_connector(storage.clone())
     };
     let handle = builder().create_store("Household").await.unwrap();
-    let directory = layout.store_dir(&handle.store_id());
+    let directory = app.store_dir(&handle.store_id());
     assert_eq!(handle.storage_config().await.unwrap(), None);
     assert_eq!(Coven::storage_config(&directory).await.unwrap(), None);
     let setup = handle
@@ -324,23 +313,22 @@ async fn saved_location_survives_lost_credentials_and_reopen_without_custody_rea
 #[tokio::test]
 async fn device_id_is_available_before_setup_and_survives_reopen() {
     let root = tempfile::tempdir().unwrap();
-    let layout = StoreLayout::new(root.path().into());
-    let app = TestCoven::new();
-    let handle = builder(&app, layout.clone()).create_store("Household").await.unwrap();
+    let app = Coven::in_memory(root.path().into());
+    let handle = builder(&app).create_store("Household").await.unwrap();
     let store = handle.store_id();
     let device = handle.device_id();
     assert_eq!(handle.clone().device_id(), device);
     assert!(handle.members().await.unwrap().is_empty());
     handle.close().await.unwrap();
     assert_eq!(handle.device_id(), device);
-    let handle = builder(&app, layout).open(store, |_| ()).await.unwrap();
+    let handle = builder(&app).open(store, |_| ()).await.unwrap();
     assert_eq!(handle.device_id(), device);
     handle.close().await.unwrap();
 }
 
 /// Whether this device still keeps any entry of its own for `store`: its
 /// device id, member keys, store keys or provider credentials.
-fn device_entries_remain(app: &TestCoven, store: StoreId) -> bool {
+fn device_entries_remain(app: &Coven, store: StoreId) -> bool {
     use coven_crypto::custody::KeyringCustody;
     let keychain = Arc::new(app.store_keychain(store));
     keychain.device_id().unwrap().is_some()
@@ -354,7 +342,7 @@ fn device_entries_remain(app: &TestCoven, store: StoreId) -> bool {
 }
 
 /// The person's saved restore code and S3 key for `store`.
-fn person_entries(app: &TestCoven, store: StoreId) -> (Option<Vec<u8>>, Option<Vec<u8>>) {
+fn person_entries(app: &Coven, store: StoreId) -> (Option<Vec<u8>>, Option<Vec<u8>>) {
     let person = app.person_entries(store);
     let bytes = |value: Option<SecretBytes>| value.map(|value| value.as_bytes().to_vec());
     (bytes(person.restore_code().unwrap()), bytes(person.s3_credentials().unwrap()))
@@ -405,7 +393,7 @@ async fn discarding_a_store_whose_replacement_stopped_after_its_swap_removes_bot
         };
         assert!(matches!(interrupted, Err(BootstrapError::Cancelled)));
         let store = carol.store;
-        let directory = carol.layout.store_dir(&store);
+        let directory = carol.app.store_dir(&store);
         let record = directory.unfinished_replacement().unwrap().unwrap();
         assert_eq!(record.by, by);
         // As if the keychain already named the new device when it stopped.
@@ -427,7 +415,7 @@ async fn discarding_a_store_whose_replacement_stopped_after_its_swap_removes_bot
             carol.app.discard_store(&directory).await,
             Err(StoreDeletionError::Key(_))
         ));
-        assert_eq!(carol.layout.stores().await.unwrap()[0].unfinished_replacement, Some(by));
+        assert_eq!(carol.app.stores().await.unwrap()[0].unfinished_replacement, Some(by));
         assert_eq!(directory.unfinished_replacement().unwrap(), Some(record));
         assert!(device_entries_remain(&carol.app, store));
         // Discarding reaches no person entry: refusing them changes nothing.
@@ -435,7 +423,7 @@ async fn discarding_a_store_whose_replacement_stopped_after_its_swap_removes_bot
         carol.app.discard_store(&directory).await.unwrap();
         carol.app.refuse_person_entry_operations(false);
         assert!(!path.exists());
-        assert!(carol.layout.stores().await.unwrap().is_empty());
+        assert!(carol.app.stores().await.unwrap().is_empty());
         assert!(!device_entries_remain(&carol.app, store));
         assert_eq!(person_entries(&carol.app, store), person);
         carol.app.discard_store(&directory).await.unwrap();
@@ -454,11 +442,9 @@ async fn discarding_waits_after_the_last_handle_drops_or_close_starts() {
     };
     for close in [false, true] {
         let root = tempfile::tempdir().unwrap();
-        let layout = StoreLayout::new(root.path().into());
-        let app = TestCoven::new();
-        let directory =
-            app.create_closed_store(&layout, "Discard", Arc::new(UuidIds)).await.unwrap();
-        let handle = builder(&app, layout.clone()).open(directory.id(), |_| ()).await.unwrap();
+        let app = Coven::in_memory(root.path().into());
+        let directory = app.create_closed_store("Discard", Arc::new(UuidIds)).await.unwrap();
+        let handle = builder(&app).open(directory.id(), |_| ()).await.unwrap();
         let (entered, entry) = tokio::sync::oneshot::channel();
         let (release, released) = std::sync::mpsc::channel();
         let mut read = Box::pin(handle.read(move |_| {
@@ -489,6 +475,6 @@ async fn discarding_waits_after_the_last_handle_drops_or_close_starts() {
         .await;
         release.send(()).unwrap();
         discard.await.unwrap();
-        assert!(layout.stores().await.unwrap().is_empty());
+        assert!(app.stores().await.unwrap().is_empty());
     }
 }

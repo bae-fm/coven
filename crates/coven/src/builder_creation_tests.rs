@@ -18,10 +18,9 @@ fn fail_publication_sync(
 #[tokio::test]
 async fn publication_sync_failure_releases_the_store_before_returning() {
     let root = tempfile::tempdir().unwrap();
-    let layout = StoreLayout::new(root.path().into());
-    let app = TestCoven::new();
+    let app = Coven::in_memory(root.path().into());
     let builder = || {
-        app.builder(layout.clone()).synced_tables(vec![]).migrations(vec![Migration::addition(
+        app.builder().synced_tables(vec![]).migrations(vec![Migration::addition(
             1,
             "initial content",
             "CREATE TABLE initial_content (value TEXT NOT NULL); \
@@ -49,7 +48,7 @@ async fn publication_sync_failure_releases_the_store_before_returning() {
         coven_crypto::custody::KeyringCustody::new(Arc::new(app.store_keychain(expected)));
     let member = MemberKeyCustody::unlock(&identity).unwrap().unwrap();
     assert_eq!(
-        layout.stores().await.unwrap(),
+        app.stores().await.unwrap(),
         [StoreInfo { id: expected, name: "Household".into(), unfinished_replacement: None }]
     );
     let reopened = builder().open(expected, |_| ()).await.unwrap();
@@ -66,8 +65,8 @@ async fn publication_sync_failure_releases_the_store_before_returning() {
         member.keys().public_keys()
     );
     reopened.close().await.unwrap();
-    app.discard_store(&layout.store_dir(&expected)).await.unwrap();
-    assert!(layout.stores().await.unwrap().is_empty());
+    app.discard_store(&app.store_dir(&expected)).await.unwrap();
+    assert!(app.stores().await.unwrap().is_empty());
     drop(error);
 }
 
@@ -101,8 +100,7 @@ impl MemberKeyCustody for ClosingIdentity {
 #[tokio::test]
 async fn publication_sync_failure_waits_for_close_and_releases_session_custody() {
     let root = tempfile::tempdir().unwrap();
-    let layout = StoreLayout::new(root.path().into());
-    let app = TestCoven::new();
+    let app = Coven::in_memory(root.path().into());
     let expected = StoreId(SequentialIds::new().new_id());
     let (release, wait) = std::sync::mpsc::channel();
     let identity = Arc::new(ClosingIdentity {
@@ -111,7 +109,7 @@ async fn publication_sync_failure_waits_for_close_and_releases_session_custody()
         release: Mutex::new(wait),
     });
     let creation = tokio::spawn(super::create(
-        app.builder(layout.clone())
+        app.builder()
             .id_source(Arc::new(SequentialIds::new()))
             .synced_tables(vec![])
             .migrations(vec![])
@@ -132,8 +130,8 @@ async fn publication_sync_failure_waits_for_close_and_releases_session_custody()
     ));
     assert!(identity.keys.lock().unwrap().is_none());
     assert_eq!(Arc::strong_count(&identity), 1, "creation retained custody");
-    app.discard_store(&layout.store_dir(&expected)).await.unwrap();
-    assert!(layout.stores().await.unwrap().is_empty());
+    app.discard_store(&app.store_dir(&expected)).await.unwrap();
+    assert!(app.stores().await.unwrap().is_empty());
     drop(error);
 }
 
@@ -147,11 +145,10 @@ async fn creation_initializes_every_builtin_identity_custody_before_setup() {
         let persisted = !matches!(custody, IdentityCustody::InMemory);
         let passphrase = matches!(custody, IdentityCustody::Passphrase(_));
         let root = tempfile::tempdir().unwrap();
-        let layout = StoreLayout::new(root.path().into());
-        let app = TestCoven::new();
+        let app = Coven::in_memory(root.path().into());
         let storage = Arc::new(MemoryStorage::builder().build().unwrap());
         let builder = || {
-            app.builder(layout.clone())
+            app.builder()
                 .synced_tables(vec![])
                 .migrations(vec![])
                 .storage_connector(storage.clone())
@@ -159,7 +156,7 @@ async fn creation_initializes_every_builtin_identity_custody_before_setup() {
         let handle = builder().identity_custody(custody).create_store("Created").await.unwrap();
         let id = handle.store_id();
         assert_eq!(
-            layout.stores().await.unwrap(),
+            app.stores().await.unwrap(),
             [StoreInfo { id, name: "Created".into(), unfinished_replacement: None }]
         );
         handle
@@ -216,19 +213,14 @@ impl MemberKeyCustody for FailAfterIdentity {
 async fn failure_after_identity_creation_never_exposes_an_incomplete_store() {
     for fail_cleanup in [false, true] {
         let root = tempfile::tempdir().unwrap();
-        let layout = StoreLayout::new(root.path().into());
         let keychain = Keychain::in_memory("creation-failure").unwrap();
+        let app = Coven::with_keychain(root.path().into(), keychain.clone());
         let identity = Arc::new(FailAfterIdentity {
             keychain: keychain.clone(),
             identity: Mutex::new(None),
             fail_cleanup,
         });
-        let builder = || {
-            Coven::builder(layout.clone())
-                .with_keychain(keychain.clone())
-                .synced_tables(vec![])
-                .migrations(vec![])
-        };
+        let builder = || app.builder().synced_tables(vec![]).migrations(vec![]);
         let expected = StoreId(SequentialIds::new().new_id());
         let error = builder()
             .id_source(Arc::new(SequentialIds::new()))
@@ -244,8 +236,8 @@ async fn failure_after_identity_creation_never_exposes_an_incomplete_store() {
             assert!(matches!(error, StoreCreationError::Store(CovenError::Key(_))), "{error:?}");
             assert!(identity.identity.lock().unwrap().is_none());
         }
-        assert!(layout.stores().await.unwrap().is_empty());
-        assert!(!layout.store_dir(&expected).database_path().exists());
+        assert!(app.stores().await.unwrap().is_empty());
+        assert!(!app.store_dir(&expected).database_path().exists());
         assert!(builder().open(expected, |_| ()).await.is_err());
         assert!(coven_crypto::custody::StoreKeychain::new(keychain, expected)
             .device_id()
@@ -257,16 +249,16 @@ async fn failure_after_identity_creation_never_exposes_an_incomplete_store() {
 #[tokio::test]
 async fn creation_does_not_replace_an_existing_custom_identity() {
     let root = tempfile::tempdir().unwrap();
-    let layout = StoreLayout::new(root.path().into());
     let keychain = Keychain::in_memory("creation-existing").unwrap();
+    let app = Coven::with_keychain(root.path().into(), keychain.clone());
     let existing = MemberIdentity::generate(MemberId(UuidIds.new_id())).unwrap();
     let identity = Arc::new(FailAfterIdentity {
         keychain: keychain.clone(),
         identity: Mutex::new(Some(existing.clone())),
         fail_cleanup: false,
     });
-    let error = Coven::builder(layout.clone())
-        .with_keychain(keychain)
+    let error = app
+        .builder()
         .synced_tables(vec![])
         .migrations(vec![])
         .identity_custody(IdentityCustody::Custom(identity.clone()))
@@ -278,5 +270,5 @@ async fn creation_does_not_replace_an_existing_custom_identity() {
         identity.identity.lock().unwrap().as_ref().unwrap().keys().public_keys(),
         existing.keys().public_keys()
     );
-    assert!(layout.stores().await.unwrap().is_empty());
+    assert!(app.stores().await.unwrap().is_empty());
 }

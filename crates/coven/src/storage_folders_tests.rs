@@ -158,7 +158,7 @@ impl StorageConnector for Connector {
 }
 struct Fixture {
     _root: tempfile::TempDir,
-    app: TestCoven,
+    app: Coven,
     handle: CovenHandle,
     sign_in: SignIn,
     fake: Fake,
@@ -166,7 +166,7 @@ struct Fixture {
 impl Fixture {
     async fn new(location: StorageConfig) -> Self {
         let root = tempfile::tempdir().unwrap();
-        let app = TestCoven::new();
+        let app = Coven::in_memory(root.path().into());
         let clock = Arc::new(FixedClock::new(std::time::UNIX_EPOCH));
         let sign_in = SignIn::new().await;
         let fake = Fake::new().await;
@@ -177,7 +177,7 @@ impl Fixture {
             .with_folder_api(fake.url.clone());
         let handle = sign_in
             .configure(
-                app.builder(StoreLayout::new(root.path().into()))
+                app.builder()
                     .clock(clock)
                     .synced_tables(vec![])
                     .migrations(vec![])
@@ -628,7 +628,7 @@ async fn setup_records_the_account_and_signing_in_again_refreshes_only_the_label
         ));
         f.fake.consumed();
         f.handle.close().await.unwrap();
-        let directory = StoreLayout::new(f._root.path().into()).store_dir(&f.handle.store_id());
+        let directory = f.app.store_dir(&f.handle.store_id());
         assert_eq!(
             Coven::storage_config(&directory).await.unwrap(),
             Some(labelled(location, "ana@work.example"))

@@ -32,14 +32,7 @@ async fn restore(
 
 /// The store's own directory, where the replaced installation lived.
 fn store_path(replaced: &KeysReplaced) -> std::path::PathBuf {
-    replaced
-        .carol
-        .layout
-        .store_dir(&replaced.carol.store)
-        .database_path()
-        .parent()
-        .unwrap()
-        .to_owned()
+    replaced.carol.app.store_dir(&replaced.carol.store).database_path().parent().unwrap().to_owned()
 }
 
 /// The entries a finished restore leaves no trace of: an archive of the old
@@ -218,7 +211,7 @@ async fn failures_while_loading_or_swapping_leave_the_old_installation() {
     ));
     reader.close().await.unwrap();
     assert_eq!(held(&replaced.carol.app, store), before);
-    assert_eq!(replaced.carol.layout.store_dir(&store).unfinished_replacement().unwrap(), None);
+    assert_eq!(replaced.carol.app.store_dir(&store).unfinished_replacement().unwrap(), None);
     opens_as_before(&network, &replaced, old).await;
     let handle = restore(network.reopen(&replaced.carol), store, &replaced.code).await.unwrap();
     restored(&network, &replaced, handle, old).await;
@@ -295,10 +288,10 @@ async fn a_restore_interrupted_after_its_swap_is_finished_by_retrying_it() {
     let mut network = Network::new(2).await;
     let replaced = network.replace_keys_elsewhere().await;
     let store = replaced.carol.store;
-    let layout = &replaced.carol.layout;
+    let app = &replaced.carol.app;
     let before = held(&replaced.carol.app, store);
     let old = before.device.unwrap();
-    let listed = layout.stores().await.unwrap();
+    let listed = app.stores().await.unwrap();
     assert_eq!(listed.len(), 1);
     let name = listed[0].name.clone();
     assert!(matches!(
@@ -306,7 +299,7 @@ async fn a_restore_interrupted_after_its_swap_is_finished_by_retrying_it() {
             .await,
         Err(BootstrapError::Cancelled)
     ));
-    let directory = layout.store_dir(&store);
+    let directory = app.store_dir(&store);
     let decided = directory.unfinished_replacement().unwrap().unwrap();
     assert_eq!(decided.reset.old_device, old);
     assert_eq!(decided.by, ReplacedBy::Restore);
@@ -320,7 +313,7 @@ async fn a_restore_interrupted_after_its_swap_is_finished_by_retrying_it() {
         Err(ReadOnlyOpenError::Local(CovenError::Lock(error))) if unfinished(&error)
     ));
     assert_eq!(
-        layout.stores().await.unwrap(),
+        app.stores().await.unwrap(),
         [StoreInfo { id: store, name, unfinished_replacement: Some(ReplacedBy::Restore) }]
     );
     assert_eq!(held(&replaced.carol.app, store), before);
@@ -337,7 +330,7 @@ async fn a_restore_interrupted_after_its_swap_is_finished_by_retrying_it() {
     assert_eq!(held(&replaced.carol.app, store), before);
     let handle = restore(network.reopen(&replaced.carol), store, &replaced.code).await.unwrap();
     assert_eq!(restored(&network, &replaced, handle, old).await, decided.reset.new_device);
-    assert_eq!(layout.stores().await.unwrap()[0].unfinished_replacement, None);
+    assert_eq!(app.stores().await.unwrap()[0].unfinished_replacement, None);
     network.close().await;
 }
 

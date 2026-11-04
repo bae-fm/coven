@@ -33,7 +33,7 @@ fn entry(code: &RestoreCode) -> SecretBytes {
     SecretBytes::new(KeychainRestoreCode::encode(&name(code.store), 1, code).unwrap().to_vec())
 }
 
-fn save(app: &TestCoven, code: &RestoreCode) -> PersonEntries {
+fn save(app: &Coven, code: &RestoreCode) -> PersonEntries {
     let store = app.person_entries(code.store);
     store.set_restore_code(&entry(code)).unwrap();
     store
@@ -41,7 +41,8 @@ fn save(app: &TestCoven, code: &RestoreCode) -> PersonEntries {
 
 #[tokio::test]
 async fn listing_reports_each_saved_location_and_separate_s3_key_presence() {
-    let app = TestCoven::new();
+    let app_dir = tempfile::tempdir().unwrap();
+    let app = Coven::in_memory(app_dir.path().into());
     assert!(crate::tests::readable(app.saved_restore_codes().await.unwrap()).is_empty());
     let locations = [
         s3_location(),
@@ -127,7 +128,8 @@ async fn listing_reports_each_saved_location_and_separate_s3_key_presence() {
 
 #[tokio::test]
 async fn dropbox_accounts_are_distinguishable_in_both_saved_and_decoded_choices() {
-    let app = TestCoven::new();
+    let app_dir = tempfile::tempdir().unwrap();
+    let app = Coven::in_memory(app_dir.path().into());
     let mut decoded = Vec::new();
     for (index, label) in ["ana@example.com", "ana@work.example"].into_iter().enumerate() {
         let location = StorageConfig::Dropbox {
@@ -151,7 +153,8 @@ async fn dropbox_accounts_are_distinguishable_in_both_saved_and_decoded_choices(
 
 #[tokio::test]
 async fn listing_fails_as_a_whole_when_discovery_or_a_separate_key_read_fails() {
-    let app = TestCoven::new();
+    let app_dir = tempfile::tempdir().unwrap();
+    let app = Coven::in_memory(app_dir.path().into());
     for id in [1, 2] {
         save(&app, &code(id, &s3_location()));
     }
@@ -177,7 +180,8 @@ async fn listing_fails_as_a_whole_when_discovery_or_a_separate_key_read_fails() 
 
 #[tokio::test]
 async fn listing_shows_an_unreadable_entry_beside_a_readable_one() {
-    let app = TestCoven::new();
+    let app_dir = tempfile::tempdir().unwrap();
+    let app = Coven::in_memory(app_dir.path().into());
     let valid = code(1, &s3_location());
     save(&app, &valid);
     let readable = SavedRestoreEntry::Readable(SavedRestoreCode {
@@ -233,8 +237,10 @@ async fn an_entry_more_than_one_keychain_group_holds_is_unreadable_without_readi
 
 #[tokio::test]
 async fn forgetting_an_unreadable_entry_deletes_its_code_and_key_and_keeps_the_others() {
-    let phone = TestCoven::new();
-    let laptop = phone.another_device();
+    let phone_dir = tempfile::tempdir().unwrap();
+    let phone = Coven::in_memory(phone_dir.path().into());
+    let laptop_dir = tempfile::tempdir().unwrap();
+    let laptop = phone.another_device(laptop_dir.path().into());
     let household = save(&phone, &code(1, &s3_location()));
     let key = SecretBytes::new(b"S3 key".to_vec());
     household.set_s3_credentials(&key).unwrap();
@@ -263,7 +269,8 @@ async fn forgetting_an_unreadable_entry_deletes_its_code_and_key_and_keeps_the_o
 
 #[tokio::test]
 async fn listing_reports_presence_without_decoding_the_separately_saved_key() {
-    let app = TestCoven::new();
+    let app_dir = tempfile::tempdir().unwrap();
+    let app = Coven::in_memory(app_dir.path().into());
     let store = save(&app, &code(1, &s3_location()));
     store.set_s3_credentials(&SecretBytes::new(b"damaged key".to_vec())).unwrap();
     assert!(crate::tests::readable(app.saved_restore_codes().await.unwrap())[0].has_s3_credentials);
@@ -316,13 +323,12 @@ async fn setup_refresh_and_restore_on_another_device_share_one_entry_per_store()
     }
     // A selection made before replacement reads the current pair and separate
     // key, on Ana's laptop, which iCloud Keychain gave the same entries.
-    let laptop = app.another_device();
-    let root = tempfile::tempdir().unwrap();
-    let layout = StoreLayout::new(root.path().into());
+    let laptop_dir = tempfile::tempdir().unwrap();
+    let laptop = app.another_device(laptop_dir.path().into());
     let (_, cancel) = tokio::sync::watch::channel(false);
     let restored = restore_from_saved_code(
         laptop
-            .builder(layout.clone())
+            .builder()
             .synced_tables(Vec::new())
             .migrations(Vec::new())
             .clock(Arc::new(crate::tests::PollingClock::new(network.clock.clone())))
@@ -344,21 +350,8 @@ async fn setup_refresh_and_restore_on_another_device_share_one_entry_per_store()
     network.close().await;
 }
 
-#[cfg(not(any(target_os = "macos", target_os = "ios")))]
-#[tokio::test]
-async fn native_listing_and_forgetting_are_unavailable_off_apple_without_opening_a_keychain() {
-    assert!(matches!(
-        crate::saved_restore_codes().await,
-        Err(BootstrapError::SecureStorage(KeyError::Unsupported))
-    ));
-    assert!(matches!(
-        crate::forget_saved_restore_code(StoreId(Uuid::from_u128(1))).await,
-        Err(BootstrapError::SecureStorage(KeyError::Unsupported))
-    ));
-}
-
 /// The saved entry's name and the slot that set it, as `app` sees it.
-fn saved_name(app: &TestCoven, store: StoreId) -> (String, u64) {
+fn saved_name(app: &Coven, store: StoreId) -> (String, u64) {
     let saved = crate::tests::saved_entry(app, store).unwrap();
     (saved.name, saved.named_at)
 }
@@ -467,8 +460,10 @@ async fn a_rename_after_forgetting_saves_nothing_and_a_key_replacement_saves_aga
 
 #[tokio::test]
 async fn forgetting_deletes_the_code_and_key_from_every_device_and_repeats() {
-    let phone = TestCoven::new();
-    let laptop = phone.another_device();
+    let phone_dir = tempfile::tempdir().unwrap();
+    let phone = Coven::in_memory(phone_dir.path().into());
+    let laptop_dir = tempfile::tempdir().unwrap();
+    let laptop = phone.another_device(laptop_dir.path().into());
     let household = save(&phone, &code(1, &s3_location()));
     household.set_s3_credentials(&SecretBytes::new(b"S3 key".to_vec())).unwrap();
     save(&phone, &code(2, &s3_location()));
@@ -491,7 +486,8 @@ async fn forgetting_deletes_the_code_and_key_from_every_device_and_repeats() {
 
 #[tokio::test]
 async fn forgetting_fails_part_way_with_the_store_still_listed() {
-    let app = TestCoven::new();
+    let app_dir = tempfile::tempdir().unwrap();
+    let app = Coven::in_memory(app_dir.path().into());
     let store = save(&app, &code(1, &s3_location()));
     store.set_s3_credentials(&SecretBytes::new(b"S3 key".to_vec())).unwrap();
     let id = StoreId(Uuid::from_u128(1));

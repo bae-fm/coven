@@ -105,25 +105,20 @@ async fn setup_key_failure_restores_the_separate_saved_values() {
     let old_key = SecretBytes::new(b"previous saved S3 key".to_vec());
     person.set_restore_code(&old_code).unwrap();
     person.set_s3_credentials(&old_key).unwrap();
-    let handle = builder(
-        &f.app,
-        StoreLayout::new(f._root.path().into()),
-        f.clock.clone(),
-        f.storage.clone(),
-    )
-    .with_keychain(keychain)
-    .identity_custody(IdentityCustody::Custom(Arc::new(
-        coven_crypto::custody::KeyringCustody::new(Arc::new(
-            f.app.store_keychain(f.directory.id()),
-        )),
-    )))
-    .key_custody(KeyCustody::Custom(Arc::new(RefusePersist {
-        keys: std::sync::Mutex::new(None),
-        refuse: AtomicBool::new(true),
-    })))
-    .open(f.directory.id(), |_| ())
-    .await
-    .unwrap();
+    let app = Coven::with_keychain(f._root.path().into(), keychain);
+    let handle = builder(&app, f.clock.clone(), f.storage.clone())
+        .identity_custody(IdentityCustody::Custom(Arc::new(
+            coven_crypto::custody::KeyringCustody::new(Arc::new(
+                f.app.store_keychain(f.directory.id()),
+            )),
+        )))
+        .key_custody(KeyCustody::Custom(Arc::new(RefusePersist {
+            keys: std::sync::Mutex::new(None),
+            refuse: AtomicBool::new(true),
+        })))
+        .open(f.directory.id(), |_| ())
+        .await
+        .unwrap();
     assert!(matches!(
         handle
             .setup_s3_storage(
@@ -174,15 +169,8 @@ async fn connected_and_signed_out_updates_install_the_supplied_key_without_chang
     f.handle.close().await.unwrap();
     // The device's key is gone, as when the person deletes the keychain entry.
     f.app.lose_storage_credentials(f.directory.id()).unwrap();
-    let reopen = || {
-        builder(
-            &f.app,
-            StoreLayout::new(f._root.path().into()),
-            f.clock.clone(),
-            f.connector.clone(),
-        )
-        .open(f.directory.id(), |_| ())
-    };
+    let reopen =
+        || builder(&f.app, f.clock.clone(), f.connector.clone()).open(f.directory.id(), |_| ());
     let handle = reopen().await.unwrap();
     assert_eq!(
         handle.test_sync_status().latest().await.state,
@@ -237,15 +225,10 @@ async fn dropping_a_replacement_waiter_does_not_interrupt_key_installation_or_pu
     assert_connected_key(&f, "retained", "retained-secret").await;
     resume.send(()).unwrap();
     f.handle.close().await.unwrap();
-    let handle = builder(
-        &f.app,
-        StoreLayout::new(f._root.path().into()),
-        f.clock.clone(),
-        f.connector.clone(),
-    )
-    .open(f.directory.id(), |_| ())
-    .await
-    .unwrap();
+    let handle = builder(&f.app, f.clock.clone(), f.connector.clone())
+        .open(f.directory.id(), |_| ())
+        .await
+        .unwrap();
     f.advance(Duration::from_secs(1));
     handle.start_sync().await.unwrap();
     synced_since(&handle, f.clock.now()).await;
@@ -258,19 +241,14 @@ async fn dropping_a_replacement_waiter_does_not_interrupt_key_installation_or_pu
 async fn custody_failure_rolls_back_credentials_before_claiming_the_creation() {
     let f = Fixture::new().await;
     f.handle.close().await.unwrap();
-    let handle = builder(
-        &f.app,
-        StoreLayout::new(f._root.path().into()),
-        f.clock.clone(),
-        f.storage.clone(),
-    )
-    .key_custody(KeyCustody::Custom(Arc::new(RefusePersist {
-        keys: std::sync::Mutex::new(None),
-        refuse: AtomicBool::new(true),
-    })))
-    .open(f.directory.id(), |_| ())
-    .await
-    .unwrap();
+    let handle = builder(&f.app, f.clock.clone(), f.storage.clone())
+        .key_custody(KeyCustody::Custom(Arc::new(RefusePersist {
+            keys: std::sync::Mutex::new(None),
+            refuse: AtomicBool::new(true),
+        })))
+        .open(f.directory.id(), |_| ())
+        .await
+        .unwrap();
     let setup = |key: &str| {
         handle.setup_s3_storage(
             f.storage.config(),

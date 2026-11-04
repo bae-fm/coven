@@ -51,12 +51,6 @@ pub enum KeyError {
          (errSecMissingEntitlement, OSStatus -34018): {0}"
     )]
     MissingKeychainEntitlement(#[source] KeychainError),
-    /// The startup registration has not happened.
-    #[error("call set_keyring_service before constructing keychain custody")]
-    ServiceNotRegistered,
-    /// A process cannot change its service name after registration.
-    #[error("keyring service is already registered under a different name")]
-    ServiceAlreadyRegistered,
     /// The service name is empty or contains a NUL.
     #[error("keyring service requires a nonempty name without NUL")]
     InvalidServiceName,

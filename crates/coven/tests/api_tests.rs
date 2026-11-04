@@ -52,17 +52,16 @@ fn appendix_e_types_and_variants_are_available_at_the_crate_root() {
 #[tokio::test]
 async fn application_tests_use_memory_storage_through_the_facade() {
     use coven::{
-        BodyFailure, Faults, MemoryRequest, MemoryStorage, MemoryStorageBuilder, Storage,
-        StorageFailure, TestCoven,
+        BodyFailure, Coven, Faults, MemoryRequest, MemoryStorage, MemoryStorageBuilder, Storage,
+        StorageFailure,
     };
     use std::sync::Arc;
     let root = tempfile::tempdir().unwrap();
-    let app = TestCoven::new();
-    let layout = coven::StoreLayout::new(root.path().into());
+    let app = Coven::in_memory(root.path().into());
     let builder: MemoryStorageBuilder = MemoryStorage::builder();
     let storage: Arc<MemoryStorage> = Arc::new(builder.build().unwrap());
     let handle = app
-        .builder(layout)
+        .builder()
         .synced_tables(vec![])
         .migrations(vec![])
         .storage_connector(storage.clone())

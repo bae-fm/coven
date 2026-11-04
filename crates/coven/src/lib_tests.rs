@@ -102,8 +102,7 @@ async fn storage_metadata_and_snapshot_subjects_are_available_through_the_facade
 
 #[cfg(test)]
 pub(crate) struct Device {
-    pub(crate) app: TestCoven,
-    pub(crate) layout: StoreLayout,
+    pub(crate) app: Coven,
     pub(crate) store: StoreId,
     pub(crate) handle: CovenHandle,
     pub(crate) storage: Arc<MemoryStorage>,
@@ -154,13 +153,12 @@ pub(crate) fn migrations() -> Vec<Migration> {
     ")]
 }
 fn builder(
-    app: &TestCoven,
-    layout: StoreLayout,
+    app: &Coven,
     clock: Arc<PollingClock>,
     ids: IdSourceRef,
     connector: Arc<Connector>,
 ) -> CovenBuilder {
-    app.builder(layout)
+    app.builder()
         .synced_tables(tables())
         .namespaces(file_network::namespaces())
         .migrations(migrations())
@@ -199,11 +197,8 @@ impl Network {
         let clock = Arc::new(FixedClock::new(UNIX_EPOCH + Duration::from_secs(1000)));
         let polling = Arc::new(PollingClock::new(clock.clone()));
         let ids: IdSourceRef = Arc::new(SequentialIds::new());
-        let app = TestCoven::new();
-        let directory = app
-            .create_closed_store(&StoreLayout::new(app_dir.clone()), "Household", ids.clone())
-            .await
-            .unwrap();
+        let app = Coven::in_memory(app_dir);
+        let directory = app.create_closed_store("Household", ids.clone()).await.unwrap();
         let storage = Arc::new(
             MemoryStorage::builder()
                 .provider(provider)
@@ -213,15 +208,9 @@ impl Network {
                 .unwrap(),
         );
         let connector = Connector::new(storage.clone());
-        let builder = builder(
-            &app,
-            StoreLayout::new(app_dir.clone()),
-            polling.clone(),
-            ids.clone(),
-            connector.clone(),
-        )
-        .synced_tables(tables.clone())
-        .migrations(migrations.clone());
+        let builder = builder(&app, polling.clone(), ids.clone(), connector.clone())
+            .synced_tables(tables.clone())
+            .migrations(migrations.clone());
         let (builder, sign_in) =
             if matches!(provider, CloudProvider::Dropbox | CloudProvider::OneDrive) {
                 let sign_in = crate::authentication::SignIn::new().await;
@@ -249,7 +238,6 @@ impl Network {
             }
             _ => handle.setup_oauth_storage(storage.config(), "Device 0", |_| {}).await.unwrap(),
         };
-        let initial_layout = StoreLayout::new(app_dir);
         let network = Self {
             _sign_in: sign_in,
             root,
@@ -257,14 +245,7 @@ impl Network {
             polling,
             ids,
             schema: (tables, migrations),
-            devices: vec![Device {
-                app,
-                layout: initial_layout,
-                store: directory.id(),
-                handle,
-                storage,
-                connector,
-            }],
+            devices: vec![Device { app, store: directory.id(), handle, storage, connector }],
         };
         network.sync(0).await;
         network
@@ -289,24 +270,17 @@ impl Network {
             crate::InviteDelivery::Sent { lifetime: crate::InviteLifetime::Day },
         )
         .await;
-        let app = TestCoven::new();
         let app_dir = self.root.path().join(index.to_string());
         std::fs::create_dir(&app_dir).unwrap();
-        let layout = StoreLayout::new(app_dir);
+        let app = Coven::in_memory(app_dir);
         let storage = Arc::new(self.devices[0].storage.for_device());
         let connector = Connector::new(storage.clone());
         let control = JoinControl::new();
         let name = format!("Device {index}");
         let joining = join_with_invite(
-            builder(
-                &app,
-                layout.clone(),
-                self.polling.clone(),
-                self.ids.clone(),
-                connector.clone(),
-            )
-            .synced_tables(self.schema.0.clone())
-            .migrations(self.schema.1.clone()),
+            builder(&app, self.polling.clone(), self.ids.clone(), connector.clone())
+                .synced_tables(self.schema.0.clone())
+                .migrations(self.schema.1.clone()),
             invite.shown_code(),
             &name,
             |_| {},
@@ -316,7 +290,7 @@ impl Network {
         let handle = handle.unwrap().unwrap();
         let store = decode_code_info(invite.shown_code()).unwrap().metadata().store_id;
         handle.start_sync().await.unwrap();
-        self.devices.push(Device { app, layout, store, handle, storage, connector });
+        self.devices.push(Device { app, store, handle, storage, connector });
         self.sync(index).await;
     }
     pub(crate) async fn sync(&self, index: usize) {
@@ -385,7 +359,6 @@ impl Network {
             device.handle.close().await.unwrap();
             device.handle = builder(
                 &device.app,
-                device.layout.clone(),
                 self.polling.clone(),
                 self.ids.clone(),
                 device.connector.clone(),
@@ -417,15 +390,9 @@ impl Network {
 
     /// A builder for a device's directory, as the app would reopen it.
     pub(crate) fn reopen(&self, device: &Device) -> CovenBuilder {
-        builder(
-            &device.app,
-            device.layout.clone(),
-            self.polling.clone(),
-            self.ids.clone(),
-            device.connector.clone(),
-        )
-        .synced_tables(self.schema.0.clone())
-        .migrations(self.schema.1.clone())
+        builder(&device.app, self.polling.clone(), self.ids.clone(), device.connector.clone())
+            .synced_tables(self.schema.0.clone())
+            .migrations(self.schema.1.clone())
     }
     pub(crate) async fn close(self) {
         for device in self.devices {
@@ -495,7 +462,7 @@ pub(crate) struct Held {
     pub(crate) credentials: Option<Vec<u8>>,
 }
 
-pub(crate) fn held(app: &TestCoven, store: StoreId) -> Held {
+pub(crate) fn held(app: &Coven, store: StoreId) -> Held {
     use coven_crypto::custody::KeyringCustody;
     let keychain = Arc::new(app.store_keychain(store));
     let identity =
@@ -907,7 +874,7 @@ pub(crate) fn keychain_entry(code: &coven_format::codes::RestoreCode) -> SecretB
 
 /// The saved entry iCloud Keychain holds for `store`, decoded.
 pub(crate) fn saved_entry(
-    app: &TestCoven,
+    app: &Coven,
     store: StoreId,
 ) -> Option<coven_format::codes::KeychainRestoreCode> {
     app.person_entries(store)

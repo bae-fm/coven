@@ -6,7 +6,8 @@ async fn joining_refuses_an_invite_for_another_store_before_keeping_an_identity(
     let owner = Owner::new(CloudProvider::S3, false).await;
     let invite = owner.invite().await;
     let install = Installation::new();
-    let pending = install.layout.begin_bootstrap(owner.directory.id(), &UuidIds).await.unwrap();
+    let pending =
+        install.app.directories().begin_bootstrap(owner.directory.id(), &UuidIds).await.unwrap();
     let directory = pending.directory();
     let mut code = coven_sync::read_invite_code(invite.shown_code()).unwrap();
     code.store = StoreId(UuidIds.new_id());
@@ -26,7 +27,8 @@ async fn resuming_join_authenticates_the_initial_key_and_writer_cursor() {
     let owner = Owner::new(CloudProvider::S3, false).await;
     let invite = owner.invite().await;
     let install = Installation::new();
-    let pending = install.layout.begin_bootstrap(owner.directory.id(), &UuidIds).await.unwrap();
+    let pending =
+        install.app.directories().begin_bootstrap(owner.directory.id(), &UuidIds).await.unwrap();
     let directory = pending.directory();
     let code = coven_sync::read_invite_code(invite.shown_code()).unwrap();
     let mut identity = JoiningIdentity::prepare(&directory, &code, "New phone").unwrap();
@@ -61,7 +63,8 @@ async fn resuming_join_authenticates_the_initial_key_and_writer_cursor() {
         assert_eq!(file.read_optional().unwrap().unwrap(), saved);
         install.absent(owner.directory.id()).await;
     }
-    let pending = install.layout.begin_bootstrap(owner.directory.id(), &UuidIds).await.unwrap();
+    let pending =
+        install.app.directories().begin_bootstrap(owner.directory.id(), &UuidIds).await.unwrap();
     let directory = pending.directory();
     let resumed = JoiningIdentity::prepare(&directory, &code, "New phone").unwrap();
     assert!(resumed.attempted());
@@ -239,7 +242,7 @@ async fn snapshots_restore_the_name_and_invites_keep_the_name_at_creation() {
         .unwrap();
     assert_eq!(reopened.store_name().await.unwrap(), "After snapshot");
     reopened.close().await.unwrap();
-    assert_eq!(install.layout.stores().await.unwrap()[0].name, "After snapshot");
+    assert_eq!(install.app.stores().await.unwrap()[0].name, "After snapshot");
 
     // An unexpired invite's captured label cannot become the joined store's name.
     let joined = Installation::new();
@@ -586,7 +589,7 @@ async fn cancelling_an_approved_join_while_it_loads_keeps_it() {
     );
     let (result, member) = join_and_approve(&owner.handle, joining, |_| async {}).await;
     assert!(matches!(result, Err(BootstrapError::JoinRequestSent)), "{result:?}");
-    assert!(install.layout.stores().await.unwrap().is_empty());
+    assert!(install.app.stores().await.unwrap().is_empty());
     let (_, cancel) = watch::channel(false);
     let handle = install
         .run(&owner, Installation::join_request(&invite), owner.recipient(), &cancel, |_| {})

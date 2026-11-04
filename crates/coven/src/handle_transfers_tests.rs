@@ -12,7 +12,7 @@ async fn paused_store(
     part_size: usize,
 ) -> (tempfile::TempDir, Arc<MemoryStorage>, CovenHandle) {
     let root = tempfile::tempdir().unwrap();
-    let app = TestCoven::new();
+    let app = Coven::in_memory(root.path().into());
     let memory = Arc::new(
         MemoryStorage::builder()
             .clock(Arc::new(SystemClock))
@@ -20,11 +20,10 @@ async fn paused_store(
             .build()
             .unwrap(),
     );
-    let layout = StoreLayout::new(root.path().into());
-    let directory = app.create_closed_store(&layout, "Transfers", Arc::new(UuidIds)).await.unwrap();
+    let directory = app.create_closed_store("Transfers", Arc::new(UuidIds)).await.unwrap();
     let connector = crate::tests::Connector::new(memory.clone());
     let handle =
-        app.builder(layout)
+        app.builder()
             .storage_connector(connector.clone())
             .synced_tables(vec![SyncedTable::new("photos", RowIdentity::SharedKey)
                 .file_column(FileColumn::new("file"))])

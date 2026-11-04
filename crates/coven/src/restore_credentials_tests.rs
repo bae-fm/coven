@@ -313,7 +313,7 @@ async fn cancelled_keychain_restore_preserves_the_code_and_separately_held_key()
         assert_eq!(person.restore_code().unwrap().unwrap().as_bytes(), code.as_bytes());
         assert_eq!(person.s3_credentials().unwrap().unwrap().as_bytes(), key.as_bytes());
         assert!(store.storage_credentials().unwrap().is_none());
-        assert!(install.layout.stores().await.unwrap().is_empty());
+        assert!(install.app.stores().await.unwrap().is_empty());
     }
     owner.close().await;
 }
@@ -323,14 +323,14 @@ async fn deleting_a_restored_store_keeps_the_code_and_separate_key() {
     let owner = Owner::new(CloudProvider::S3, false).await;
     let install = Installation::new();
     let handle = install.restore(&owner).await;
-    let directory = install.layout.store_dir(&owner.directory.id());
+    let directory = install.app.store_dir(&owner.directory.id());
     let store = scoped(&install, &owner);
     let person = person_entries(&install, &owner);
     assert_key(&install, owner.directory.id(), &owner.s3_credentials().unwrap());
     let code = person.restore_code().unwrap().unwrap();
     handle.close().await.unwrap();
     crate::coven::delete(&directory, &store).unwrap();
-    assert!(install.layout.stores().await.unwrap().is_empty());
+    assert!(install.app.stores().await.unwrap().is_empty());
     assert!(store.device_id().unwrap().is_none());
     assert!(store.storage_credentials().unwrap().is_none());
     // The person's other devices still restore from these.
@@ -364,7 +364,7 @@ async fn the_key_in_the_transfer_code_is_the_one_this_device_uses_now() {
     let owner = Owner::new(CloudProvider::S3, false).await;
     let phone = Installation::new();
     let handle = phone.restore(&owner).await;
-    let directory = phone.layout.store_dir(&owner.directory.id());
+    let directory = phone.app.store_dir(&owner.directory.id());
     let code = handle.restore_code().await.unwrap();
     assert_same_key(&transfer_key(&handle).await, &owner.s3_credentials().unwrap());
     let replaced = supplied_key("replaced");

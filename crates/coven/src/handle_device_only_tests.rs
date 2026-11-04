@@ -109,8 +109,7 @@ fn names(folder: &Path) -> Vec<String> {
 
 /// How many cache files the device keeps.
 fn cached(device: &Device) -> usize {
-    let cache =
-        device.layout.store_dir(&device.store).database_path().parent().unwrap().join("cache");
+    let cache = device.app.store_dir(&device.store).database_path().parent().unwrap().join("cache");
     std::fs::read_dir(cache).map_or(0, Iterator::count)
 }
 

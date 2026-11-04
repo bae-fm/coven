@@ -17,7 +17,7 @@ pub(crate) async fn reset_device(
     device_name: &str,
     status: impl Fn(BootstrapStatus),
 ) -> Result<CovenHandle, BootstrapError> {
-    let directory = builder.layout.store_dir(&store);
+    let directory = builder.directories.store_dir(&store);
     let keychain = Arc::new(StoreKeychain::new(builder.keychain()?, store));
     let location = StorageSettings::new(directory.clone());
     if location.read().map_err(SyncError::from)?.is_none() {
@@ -122,8 +122,10 @@ async fn reset_unconnected(
     keychain: Arc<StoreKeychain>,
     status: &impl Fn(BootstrapStatus),
 ) -> Result<CovenHandle, BootstrapError> {
-    let replacement =
-        builder.layout.begin_replacement(store, ReplacedBy::Reset, builder.ids.as_ref()).await?;
+    let replacement = builder
+        .directories
+        .begin_replacement(store, ReplacedBy::Reset, builder.ids.as_ref())
+        .await?;
     let reset = replacement.device_reset();
     let swapping = !replacement.is_swapped();
     let (database, waits) = if swapping {

@@ -20,7 +20,7 @@ mod store_custody;
 
 pub use error::{KeyError, KeychainError};
 pub use key_session::KeySession;
-pub use keychain::{set_keyring_service, Keychain, KeyringCustody, StoreKeychain};
+pub use keychain::{Keychain, KeyringCustody, StoreKeychain};
 pub use memory::InMemoryCustody;
 pub use passphrase::{Passphrase, PassphraseCustody};
 pub use person_entries::{PersonEntries, PersonRestoreCode, RestoreCodeChange};

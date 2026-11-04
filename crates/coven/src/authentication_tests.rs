@@ -91,14 +91,12 @@ impl Drop for SignIn {
 }
 
 fn builder(
-    layout: StoreLayout,
-    keychain: Arc<Keychain>,
+    app: &Coven,
     clock: ClockRef,
     storage: Arc<MemoryStorage>,
     sign_in: &SignIn,
 ) -> CovenBuilder {
-    Coven::builder(layout)
-        .with_keychain(keychain)
+    app.builder()
         .synced_tables(Vec::new())
         .migrations(Vec::new())
         .clock(clock)
@@ -110,8 +108,8 @@ fn builder(
 #[tokio::test]
 async fn handle_sign_in_setup_refresh_and_reopen_keep_tokens_in_coven() {
     let root = tempfile::tempdir().unwrap();
-    let layout = StoreLayout::new(root.path().into());
     let keychain = Keychain::in_memory("oauth-custody").unwrap();
+    let app = Coven::with_keychain(root.path().into(), keychain.clone());
     let clock = Arc::new(FixedClock::new(std::time::SystemTime::UNIX_EPOCH));
     let sign_in = SignIn::new().await;
     let storage = Arc::new(
@@ -121,12 +119,11 @@ async fn handle_sign_in_setup_refresh_and_reopen_keep_tokens_in_coven() {
             .build()
             .unwrap(),
     );
-    let handle =
-        builder(layout.clone(), keychain.clone(), clock.clone(), storage.clone(), &sign_in)
-            .create_store("Account")
-            .await
-            .unwrap();
-    let directory = layout.store_dir(&handle.store_id());
+    let handle = builder(&app, clock.clone(), storage.clone(), &sign_in)
+        .create_store("Account")
+        .await
+        .unwrap();
+    let directory = app.store_dir(&handle.store_id());
     let scoped = StoreKeychain::new(keychain.clone(), directory.id());
     let person = PersonEntries::new(keychain.clone(), directory.id());
 
@@ -181,11 +178,10 @@ async fn handle_sign_in_setup_refresh_and_reopen_keep_tokens_in_coven() {
     // A clock set a year ahead does not expire the token; the provider's
     // rejection does, and the next request refreshes it once.
     clock.set(clock.now() + std::time::Duration::from_secs(365 * 24 * 3600));
-    let handle =
-        builder(layout.clone(), keychain.clone(), clock.clone(), storage.clone(), &sign_in)
-            .open(directory.id(), |_| ())
-            .await
-            .unwrap();
+    let handle = builder(&app, clock.clone(), storage.clone(), &sign_in)
+        .open(directory.id(), |_| ())
+        .await
+        .unwrap();
     handle.unlock_store_key().await.unwrap();
     assert_eq!(sign_in.request_count(), 1, "a token is used until rejected");
     storage.reject_access_token("access-0").await;
@@ -210,10 +206,8 @@ async fn handle_sign_in_setup_refresh_and_reopen_keep_tokens_in_coven() {
     // The device's tokens are gone, as when the person deletes the keychain
     // entry: connecting the recorded location again needs a new sign-in.
     scoped.delete_storage_credentials().unwrap();
-    let handle = builder(layout, keychain, clock, storage.clone(), &sign_in)
-        .open(directory.id(), |_| ())
-        .await
-        .unwrap();
+    let handle =
+        builder(&app, clock, storage.clone(), &sign_in).open(directory.id(), |_| ()).await.unwrap();
     assert!(matches!(
         handle.setup_oauth_storage(storage.config(), "Laptop", |_| {}).await,
         Err(StorageSetupError::OAuth(OAuthError::Reauthorize(CloudProvider::Dropbox)))
@@ -232,8 +226,8 @@ async fn handle_sign_in_setup_refresh_and_reopen_keep_tokens_in_coven() {
 #[tokio::test]
 async fn builder_sign_in_is_provider_bound_and_refreshes_when_setup_is_rejected() {
     let root = tempfile::tempdir().unwrap();
-    let layout = StoreLayout::new(root.path().into());
     let keychain = Keychain::in_memory("oauth-builder").unwrap();
+    let app = Coven::with_keychain(root.path().into(), keychain.clone());
     let clock = Arc::new(FixedClock::new(std::time::SystemTime::UNIX_EPOCH));
     let sign_in = SignIn::new().await;
     let storage = Arc::new(
@@ -243,7 +237,7 @@ async fn builder_sign_in_is_provider_bound_and_refreshes_when_setup_is_rejected(
             .build()
             .unwrap(),
     );
-    let mut builder = builder(layout, keychain.clone(), clock.clone(), storage.clone(), &sign_in);
+    let mut builder = builder(&app, clock.clone(), storage.clone(), &sign_in);
     builder.authenticate(coven_storage::OAuthAccess::OneDrive).await.unwrap();
     let handle = builder.create_store("Account").await.unwrap();
     let store = handle.store_id();
@@ -278,7 +272,7 @@ mod provider_access_tests {
 
     struct Fixture {
         _root: tempfile::TempDir,
-        layout: StoreLayout,
+        app: Coven,
         directory: StoreDir,
         keychain: Arc<Keychain>,
         clock: ClockRef,
@@ -288,30 +282,23 @@ mod provider_access_tests {
     impl Fixture {
         async fn new(location: StorageConfig) -> Self {
             let root = tempfile::tempdir().unwrap();
-            let layout = StoreLayout::new(root.path().into());
             let keychain = Keychain::in_memory("provider-access").unwrap();
+            let app = Coven::with_keychain(root.path().into(), keychain.clone());
             let clock: ClockRef = Arc::new(FixedClock::new(std::time::UNIX_EPOCH));
             let sign_in = SignIn::new().await;
             let storage = Arc::new(
                 MemoryStorage::builder().location(location).clock(clock.clone()).build().unwrap(),
             );
-            let handle =
-                builder(layout.clone(), keychain.clone(), clock.clone(), storage.clone(), &sign_in)
-                    .create_store("Account")
-                    .await
-                    .unwrap();
-            let directory = layout.store_dir(&handle.store_id());
+            let handle = builder(&app, clock.clone(), storage.clone(), &sign_in)
+                .create_store("Account")
+                .await
+                .unwrap();
+            let directory = app.store_dir(&handle.store_id());
             handle.close().await.unwrap();
-            Self { _root: root, layout, directory, keychain, clock, sign_in, storage }
+            Self { _root: root, app, directory, keychain, clock, sign_in, storage }
         }
         fn builder(&self) -> CovenBuilder {
-            builder(
-                self.layout.clone(),
-                self.keychain.clone(),
-                self.clock.clone(),
-                self.storage.clone(),
-                &self.sign_in,
-            )
+            builder(&self.app, self.clock.clone(), self.storage.clone(), &self.sign_in)
         }
         async fn setup(&self, builder: CovenBuilder) -> CovenHandle {
             let handle = builder.open(self.directory.id(), |_| ()).await.unwrap();

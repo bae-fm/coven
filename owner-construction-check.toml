@@ -42,7 +42,6 @@ capability_types = [
     "IdSource",
     "IdSourceRef",
     "UuidIds",
-    "StoreLayout",
     "StoreDirectories",
     "BootstrapStore",
     "ReplacementStore",
@@ -759,8 +758,6 @@ tables = [
     "for_deletion",
 ]
 
-# The keychain service the app registers once for the process (E1).
-"crates/coven-crypto/src/custody/keychain.rs" = ["SERVICE_NAME"]
 # Serializes every change of the person's entries: the native keychain
 # holding them is one per process.
 "crates/coven-crypto/src/custody/person_entries.rs" = ["CHANGES"]
@@ -1012,8 +1009,6 @@ tables = [
     # Builder setters replace a configured or already-unlocked custody choice.
     "CovenBuilder::key_custody",
     "CovenBuilder::identity_custody",
-    # The test's network replaces the platform's.
-    "CovenBuilder::network",
     "CovenBuilder::make_identity",
     "CovenBuilder::make_keys",
     "CovenBuilder::new",
@@ -1031,20 +1026,17 @@ tables = [
     "OpeningStore::open",
 ]
 "crates/coven/src/builder_creation.rs" = ["create", "prepare"]
+# The app's stores on this device, with the OS keychain it builds once at
+# startup and the platform's network, and what it builds over them.
 "crates/coven/src/coven.rs" = [
+    "Coven::new",
     "Coven::builder",
     "Coven::storage_config",
     "Coven::discard_store",
 ]
-"crates/coven/src/store_layout.rs" = ["StoreLayout::new"]
-# Recovery discovery and forgetting acquire the registered keychain and scope
-# its entries.
-"crates/coven/src/saved_restore.rs" = [
-    "saved_restore_codes",
-    "list",
-    "forget_saved_restore_code",
-    "forget",
-]
+# Recovery discovery and forgetting scope the installation's keychain to each
+# store's entries.
+"crates/coven/src/saved_restore.rs" = ["list", "forget"]
 "crates/coven/src/handle.rs" = ["CovenHandle::close", "CovenHandle::new"]
 "crates/coven/src/read_handle.rs" = ["CovenReadHandle::close", "CovenReadHandle::new"]
 "crates/coven/src/storage.rs" = [
@@ -1067,23 +1059,22 @@ tables = [
 # and awaits them. Stopping releases the client after the pass.
 "crates/coven/src/storage_control.rs" = ["StorageConnections::start", "StorageConnections::stop"]
 "crates/coven/src/test_utils.rs" = [
-    "TestCoven::builder",
-    "TestCoven::create_closed_store",
-    "TestCoven::discard_store",
-    "TestCoven::keep_store_keys",
+    # An installation for a test, with an in-memory keychain and a network the
+    # test drives.
+    "Coven::testing",
+    "Coven::create_closed_store",
+    "Coven::keep_store_keys",
     # Deleting one store's credentials reaches its device-only entries, as a
     # person deleting the keychain entry by hand does.
-    "TestCoven::lose_storage_credentials",
-    "TestCoven::new",
-    # Each installation's network, which its test drives.
-    "TestCoven::wifi",
+    "Coven::lose_storage_credentials",
+    "Coven::in_memory",
     # Another of the person's devices shares only the person entries.
-    "TestCoven::another_device",
+    "Coven::another_device",
     # An Android phone keeps the person entries in Block Store, and a new
     # phone set up from it receives a copy of them.
-    "TestCoven::with_block_store",
-    "TestCoven::set_up_new_device",
-    "TestCoven::restore_new_device_from_cloud",
+    "Coven::with_block_store",
+    "Coven::set_up_new_device",
+    "Coven::restore_new_device_from_cloud",
 ]
 
 # These methods derive a scoped capability from their injected directory.

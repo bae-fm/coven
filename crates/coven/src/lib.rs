@@ -18,8 +18,6 @@ mod error;
 mod handle;
 mod read_handle;
 mod saved_restore;
-#[cfg(any(test, feature = "test-utils"))]
-mod test_utils;
 
 mod circles;
 
@@ -28,7 +26,6 @@ mod dev_tools;
 
 mod authentication;
 mod storage;
-mod store_layout;
 
 #[cfg(test)]
 #[path = "lib_tests.rs"]

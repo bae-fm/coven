@@ -267,13 +267,11 @@ async fn a_photo_taken_offline_shows_unsent_changes() {
 /// the last synced time, which a clock set back never moves back (§19.1).
 #[tokio::test]
 async fn the_first_value_is_the_state_and_the_last_synced_time_is_kept() {
-    let app = TestCoven::new();
-    let root = tempfile::tempdir().unwrap();
-    let layout = StoreLayout::new(root.path().into());
-    let directory =
-        app.create_closed_store(&layout, "Notes", std::sync::Arc::new(UuidIds)).await.unwrap();
+    let app_dir = tempfile::tempdir().unwrap();
+    let app = Coven::in_memory(app_dir.path().into());
+    let directory = app.create_closed_store("Notes", std::sync::Arc::new(UuidIds)).await.unwrap();
     let alone = app
-        .builder(layout)
+        .builder()
         .synced_tables(tables())
         .migrations(vec![Migration::addition(1, "covers", SCHEMA)])
         .open(directory.id(), |_| ())

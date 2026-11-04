@@ -27,9 +27,9 @@
 #![cfg(feature = "test-utils")]
 
 use coven::{
-    Clock, CovenBuilder, CovenHandle, CovenResult, CovenWrite, FileColumn, FileId, FileSource,
-    MemoryStorage, Migration, Namespace, ObjectPath, ObjectPrefix, Place, Provenance, RetryOutcome,
-    RowIdentity, SecretText, Storage, StoreLayout, SyncedTable, TestCoven,
+    Clock, Coven, CovenBuilder, CovenHandle, CovenResult, CovenWrite, FileColumn, FileId,
+    FileSource, MemoryStorage, Migration, Namespace, ObjectPath, ObjectPrefix, Place, Provenance,
+    RetryOutcome, RowIdentity, SecretText, Storage, SyncedTable,
 };
 use std::{
     sync::{
@@ -320,7 +320,7 @@ async fn create(
     root: &std::path::Path,
     library: Library,
 ) -> CovenHandle {
-    let handle = configured(TestCoven::new().builder(StoreLayout::new(root.into())), library)
+    let handle = configured(Coven::in_memory(root.into()).builder(), library)
         .clock(clock.clone())
         .storage_connector(storage.clone())
         .create_store("Library")
@@ -352,7 +352,7 @@ async fn restore(
     let (_cancelling, cancel) = tokio::sync::watch::channel(false);
     let restoring = Instant::now();
     let restored = coven::restore_from_code(
-        configured(TestCoven::new().builder(StoreLayout::new(root.into())), library)
+        configured(Coven::in_memory(root.into()).builder(), library)
             .clock(clock.clone())
             .storage_connector(Arc::new(storage.for_device())),
         code,

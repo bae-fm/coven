@@ -71,12 +71,11 @@ async fn uncached_file_bodies_and_sequence_reads_share_the_download_limit() {
     use std::time::Duration;
     tokio::time::timeout(Duration::from_secs(20), async {
         let root = tempfile::tempdir().unwrap();
-        let app = TestCoven::new();
+        let app = Coven::in_memory(root.path().into());
         let memory = Arc::new(MemoryStorage::builder().clock(Arc::new(SystemClock)).build().unwrap());
-        let layout = StoreLayout::new(root.path().into());
-        let directory = app.create_closed_store(&layout, "Downloads", Arc::new(UuidIds)).await.unwrap();
+        let directory = app.create_closed_store("Downloads", Arc::new(UuidIds)).await.unwrap();
         let connector = crate::tests::Connector::new(memory.clone());
-        let handle = app.builder(layout).storage_connector(connector.clone())
+        let handle = app.builder().storage_connector(connector.clone())
             .synced_tables(files_table())
             .namespaces(files_namespace())
             .migrations(vec![Migration::addition(1, "files", FILES)])
@@ -130,7 +129,7 @@ async fn transfer_limits_bound_requests_and_a_changed_limit_applies_to_the_next_
     };
     tokio::time::timeout(Duration::from_secs(20), async {
         let root = tempfile::tempdir().unwrap();
-        let app = TestCoven::new();
+        let app = Coven::in_memory(root.path().into());
         let clock = Arc::new(coven_foundation::clock::ClosureClock(|| {
             UNIX_EPOCH + Duration::from_secs(1000)
         }));
@@ -141,11 +140,10 @@ async fn transfer_limits_bound_requests_and_a_changed_limit_applies_to_the_next_
                 .build()
                 .unwrap(),
         );
-        let layout = StoreLayout::new(root.path().into());
-        let directory = app.create_closed_store(&layout, "Files", Arc::new(UuidIds)).await.unwrap();
+        let directory = app.create_closed_store("Files", Arc::new(UuidIds)).await.unwrap();
         let connector = crate::tests::Connector::new(memory.clone());
         let handle = app
-            .builder(layout)
+            .builder()
             .clock(clock)
             .storage_connector(connector.clone())
             .max_concurrent_uploads(NonZeroUsize::new(2).unwrap())
@@ -258,8 +256,8 @@ CREATE TABLE thumbnails(id TEXT NOT NULL PRIMARY KEY,note_id TEXT NOT NULL REFER
 CREATE TABLE tags(id TEXT NOT NULL PRIMARY KEY);
 CREATE TABLE note_tags(note_id TEXT NOT NULL REFERENCES notes(id) ON DELETE CASCADE,tag_id TEXT NOT NULL REFERENCES tags(id) ON DELETE CASCADE,PRIMARY KEY(note_id,tag_id));";
 
-fn builder(app: &TestCoven, layout: StoreLayout, ids: IdSourceRef) -> CovenBuilder {
-    app.builder(layout)
+fn builder(app: &Coven, ids: IdSourceRef) -> CovenBuilder {
+    app.builder()
         .synced_tables(tables())
         .namespaces(vec![
             Namespace::new("attachments", Provenance::UserProvided, 1 << 30),
@@ -301,12 +299,10 @@ async fn thumbnail(
 #[tokio::test]
 async fn originals_owned_copies_ranges_references_and_deletion_use_the_app_api() {
     let root = tempfile::tempdir().unwrap();
-    let layout = StoreLayout::new(root.path().to_owned());
-    let app = TestCoven::new();
+    let app = Coven::in_memory(root.path().to_owned());
     let ids: IdSourceRef = Arc::new(SequentialIds::new());
-    let directory = app.create_closed_store(&layout, "Household", ids.clone()).await.unwrap();
-    let handle =
-        builder(&app, layout.clone(), ids.clone()).open(directory.id(), |_| ()).await.unwrap();
+    let directory = app.create_closed_store("Household", ids.clone()).await.unwrap();
+    let handle = builder(&app, ids.clone()).open(directory.id(), |_| ()).await.unwrap();
     let note_id = ids.new_id().to_string();
     let attachment_id = ids.new_id().to_string();
     let thumbnail_id = ids.new_id().to_string();
@@ -360,8 +356,7 @@ async fn originals_owned_copies_ranges_references_and_deletion_use_the_app_api()
     assert_eq!(reference.audience(), Audience::Store);
     let old_stream = handle.open_file_stream(&reference).await.unwrap();
     assert_eq!(old_stream.read_at(2, 4).await.unwrap(), b"umbn");
-    let readonly =
-        builder(&app, layout.clone(), ids.clone()).open_read_only(directory.id()).await.unwrap();
+    let readonly = builder(&app, ids.clone()).open_read_only(directory.id()).await.unwrap();
     assert_eq!(readonly.read_file(&reference).await.unwrap(), b"thumbnail");
     // Pointing the row at another file deletes the first one's record: nothing
     // references it now. A stream already open keeps reading it.
@@ -402,13 +397,11 @@ async fn originals_owned_copies_ranges_references_and_deletion_use_the_app_api()
 
 #[tokio::test]
 async fn a_restored_install_resets_as_a_new_device_before_its_first_write() {
-    let root = tempfile::tempdir().unwrap();
-    let layout = StoreLayout::new(root.path().to_owned());
-    let original = TestCoven::new();
+    let original_dir = tempfile::tempdir().unwrap();
+    let original = Coven::in_memory(original_dir.path().into());
     let ids: IdSourceRef = Arc::new(SequentialIds::new());
-    let directory = original.create_closed_store(&layout, "restored", ids.clone()).await.unwrap();
-    let handle =
-        builder(&original, layout.clone(), ids.clone()).open(directory.id(), |_| ()).await.unwrap();
+    let directory = original.create_closed_store("restored", ids.clone()).await.unwrap();
+    let handle = builder(&original, ids.clone()).open(directory.id(), |_| ()).await.unwrap();
     let note = ids.new_id().to_string();
     let row = ids.new_id().to_string();
     let old = thumbnail(&handle, &note, &row, b"old".to_vec(), true).await;
@@ -417,14 +410,14 @@ async fn a_restored_install_resets_as_a_new_device_before_its_first_write() {
     // Backup bytes survive, but the new installation has no device-only entry.
     // Opening refuses; an approved reset makes a new device, and nothing of
     // the old copy is renumbered (§19.3).
-    let restored = TestCoven::new();
+    let restored = Coven::in_memory(original_dir.path().into());
     let old_device = directory.settings().unwrap().device_id;
     assert!(matches!(
-        builder(&restored, layout.clone(), ids.clone()).open(directory.id(), |_| ()).await,
+        builder(&restored, ids.clone()).open(directory.id(), |_| ()).await,
         Err(CovenError::DeviceKeyMissing { .. })
     ));
     assert_eq!(directory.unfinished_replacement().unwrap(), None);
-    let handle = builder(&restored, layout.clone(), ids.clone())
+    let handle = builder(&restored, ids.clone())
         .reset_device(directory.id(), "Restored", |_| ())
         .await
         .unwrap();
@@ -439,8 +432,7 @@ async fn a_restored_install_resets_as_a_new_device_before_its_first_write() {
     assert_eq!(new.place(), FilePlace::DeviceOnly { device: reset.new_device });
     assert_eq!(handle.read_file(&new).await.unwrap(), b"new");
     handle.close().await.unwrap();
-    let handle =
-        builder(&restored, layout.clone(), ids).open(directory.id(), |_| ()).await.unwrap();
+    let handle = builder(&restored, ids).open(directory.id(), |_| ()).await.unwrap();
     assert_eq!(handle.device_reset().await.unwrap(), Some(reset));
     assert_eq!(handle.file_ref(new.id()).await.unwrap(), new);
     handle.close().await.unwrap();
@@ -449,10 +441,9 @@ async fn a_restored_install_resets_as_a_new_device_before_its_first_write() {
 #[tokio::test]
 async fn uploaded_files_pins_and_read_only_ranges_use_the_composed_owner() {
     let root = tempfile::tempdir().unwrap();
-    let app = TestCoven::new();
+    let app = Coven::in_memory(root.path().into());
     let ids: IdSourceRef = Arc::new(SequentialIds::new());
-    let layout = StoreLayout::new(root.path().to_owned());
-    let directory = app.create_closed_store(&layout, "uploaded", ids.clone()).await.unwrap();
+    let directory = app.create_closed_store("uploaded", ids.clone()).await.unwrap();
     let storage = Arc::new(
         coven_storage::test_utils::MemoryStorage::builder()
             .clock(Arc::new(SystemClock))
@@ -461,7 +452,7 @@ async fn uploaded_files_pins_and_read_only_ranges_use_the_composed_owner() {
             .unwrap(),
     );
     let connector = crate::tests::Connector::new(storage.clone());
-    let handle = builder(&app, layout.clone(), ids.clone())
+    let handle = builder(&app, ids.clone())
         .storage_connector(connector.clone())
         .open(directory.id(), |_| ())
         .await
@@ -536,14 +527,14 @@ async fn uploaded_files_pins_and_read_only_ranges_use_the_composed_owner() {
             .unwrap(),
     );
     assert!(matches!(
-        builder(&app, layout.clone(), ids.clone())
+        builder(&app, ids.clone())
             .storage_connector(wrong_location)
             .open_read_only(directory.id())
             .await,
         Err(ReadOnlyOpenError::Storage(SyncError::Storage(error)))
             if error.failure() == StorageFailure::InvalidConfiguration
     ));
-    let readonly = builder(&app, layout.clone(), ids)
+    let readonly = builder(&app, ids)
         .storage_connector(storage.clone())
         .open_read_only(directory.id())
         .await
@@ -605,10 +596,9 @@ fn queued_rows(sql: SqlReadContext<'_>) -> CovenResult<Vec<QueuedRow>> {
 #[tokio::test]
 async fn the_apps_sql_reads_uploads_pins_and_pending_records() {
     let root = tempfile::tempdir().unwrap();
-    let app = TestCoven::new();
+    let app = Coven::in_memory(root.path().into());
     let ids: IdSourceRef = Arc::new(SequentialIds::new());
-    let layout = StoreLayout::new(root.path().to_owned());
-    let directory = app.create_closed_store(&layout, "uploaded", ids.clone()).await.unwrap();
+    let directory = app.create_closed_store("uploaded", ids.clone()).await.unwrap();
     let storage = Arc::new(
         coven_storage::test_utils::MemoryStorage::builder()
             .clock(Arc::new(SystemClock))
@@ -616,7 +606,7 @@ async fn the_apps_sql_reads_uploads_pins_and_pending_records() {
             .unwrap(),
     );
     let connector = crate::tests::Connector::new(storage.clone());
-    let handle = builder(&app, layout.clone(), ids.clone())
+    let handle = builder(&app, ids.clone())
         .storage_connector(connector.clone())
         .open(directory.id(), |_| ())
         .await

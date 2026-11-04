@@ -40,7 +40,7 @@ impl MemberKeyCustody for RefusedIdentity {
             std::fs::remove_file(path).unwrap();
             std::fs::create_dir(path).unwrap();
         }
-        Err(KeyError::ServiceNotRegistered)
+        Err(KeyError::Unsupported)
     }
     fn forget(&self) -> Result<(), KeyError> {
         Ok(())
@@ -61,15 +61,15 @@ async fn waits(database: &Database) -> Arc<coven_sync::RetryWaits> {
 }
 
 async fn prepared(
-    layout: &StoreLayout,
+    app: &Coven,
     id: StoreId,
     keychain: Arc<Keychain>,
     keys: KeyCustody,
     identity: IdentityCustody,
 ) -> (BootstrapStore, OpeningOwners, Database) {
-    let pending = layout.begin_bootstrap(id, &UuidIds).await.unwrap();
-    let builder = Coven::builder(layout.clone())
-        .with_keychain(keychain.clone())
+    let pending = app.directories().begin_bootstrap(id, &UuidIds).await.unwrap();
+    let builder = app
+        .builder()
         .synced_tables(Vec::new())
         .migrations(Vec::new())
         .key_custody(keys)
@@ -84,9 +84,9 @@ async fn prepared(
 #[tokio::test]
 async fn custody_failure_restores_the_prior_keys_without_publishing() {
     let root = tempfile::tempdir().unwrap();
-    let layout = StoreLayout::new(root.path().into());
     let id = StoreId(UuidIds.new_id());
     let keychain = Keychain::in_memory("commit-test").unwrap();
+    let app = Coven::with_keychain(root.path().into(), keychain.clone());
     let scoped = Arc::new(StoreKeychain::new(keychain.clone(), id));
     let person = PersonEntries::new(keychain.clone(), id);
     let old = StoreKeyring::new(StoreKey::generate(KeyId(UuidIds.new_id())).unwrap());
@@ -94,7 +94,7 @@ async fn custody_failure_restores_the_prior_keys_without_publishing() {
     custody.persist(&old).unwrap();
     let next = StoreKeyring::new(StoreKey::generate(KeyId(UuidIds.new_id())).unwrap());
     let (pending, owners, database) = prepared(
-        &layout,
+        &app,
         id,
         keychain,
         KeyCustody::Custom(custody.clone()),
@@ -114,7 +114,7 @@ async fn custody_failure_restores_the_prior_keys_without_publishing() {
     )
     .await
     .unwrap_err();
-    assert!(matches!(error, BootstrapError::SecureStorage(KeyError::ServiceNotRegistered)));
+    assert!(matches!(error, BootstrapError::SecureStorage(KeyError::Unsupported)));
     assert_eq!(
         custody.unlock().unwrap().unwrap().to_secret_bytes().as_bytes(),
         old.to_secret_bytes().as_bytes()
@@ -124,20 +124,20 @@ async fn custody_failure_restores_the_prior_keys_without_publishing() {
     assert!(person.restore_code().unwrap().is_none());
     assert!(person.s3_credentials().unwrap().is_none());
     assert!(StorageSettings::new(pending.directory()).read().unwrap().is_none());
-    assert!(layout.stores().await.unwrap().is_empty());
+    assert!(app.stores().await.unwrap().is_empty());
     database.close().await.unwrap();
 }
 
 #[tokio::test]
 async fn settings_rollback_failure_retains_both_causes_and_restores_other_custody() {
     let root = tempfile::tempdir().unwrap();
-    let layout = StoreLayout::new(root.path().into());
     let id = StoreId(UuidIds.new_id());
     let keychain = Keychain::in_memory("commit-test").unwrap();
+    let app = Coven::with_keychain(root.path().into(), keychain.clone());
     let custody = Arc::new(InMemoryCustody::<StoreKeyring>::empty());
     let path = root.path().join("stores").join(id.to_string()).join("storage.json");
     let (pending, owners, database) = prepared(
-        &layout,
+        &app,
         id,
         keychain,
         KeyCustody::Custom(custody.clone()),
@@ -161,23 +161,23 @@ async fn settings_rollback_failure_retains_both_causes_and_restores_other_custod
     let BootstrapError::Cleanup { operation, cleanup } = error else {
         panic!("rollback failure was discarded: {error}")
     };
-    assert!(matches!(*operation, BootstrapError::SecureStorage(KeyError::ServiceNotRegistered)));
+    assert!(matches!(*operation, BootstrapError::SecureStorage(KeyError::Unsupported)));
     assert!(matches!(*cleanup, BootstrapError::Sync(SyncError::Storage(_))));
     assert!(custody.unlock().unwrap().is_none());
-    assert!(layout.stores().await.unwrap().is_empty());
+    assert!(app.stores().await.unwrap().is_empty());
     database.close().await.unwrap();
 }
 
 #[tokio::test]
 async fn publication_failure_rolls_back_settings_and_custody() {
     let root = tempfile::tempdir().unwrap();
-    let layout = StoreLayout::new(root.path().into());
     let id = StoreId(UuidIds.new_id());
     let keychain = Keychain::in_memory("commit-test").unwrap();
+    let app = Coven::with_keychain(root.path().into(), keychain.clone());
     let scoped = Arc::new(StoreKeychain::new(keychain.clone(), id));
     let person = PersonEntries::new(keychain.clone(), id);
     let (pending, owners, database) =
-        prepared(&layout, id, keychain, KeyCustody::Keyring, IdentityCustody::Keyring).await;
+        prepared(&app, id, keychain, KeyCustody::Keyring, IdentityCustody::Keyring).await;
     let settings = StorageSettings::new(pending.directory());
     let old_credentials = SecretBytes::new(b"device credentials before restore".to_vec());
     let old_s3_key = SecretBytes::new(b"saved S3 key before restore".to_vec());
@@ -220,7 +220,7 @@ async fn publication_failure_rolls_back_settings_and_custody() {
     assert_eq!(person.s3_credentials().unwrap().unwrap().as_bytes(), old_s3_key.as_bytes());
     assert!(scoped.device_id().unwrap().is_none());
     assert_eq!(settings.read().unwrap(), Some(old_location));
-    assert!(layout.stores().await.unwrap().is_empty());
+    assert!(app.stores().await.unwrap().is_empty());
     database.close().await.unwrap();
 }
 
@@ -228,9 +228,9 @@ async fn publication_failure_rolls_back_settings_and_custody() {
 async fn credential_publication_failures_restore_every_prior_custody_value() {
     for after in 0..8 {
         let root = tempfile::tempdir().unwrap();
-        let layout = StoreLayout::new(root.path().into());
         let id = StoreId(UuidIds.new_id());
         let keychain = Keychain::in_memory("commit-test").unwrap();
+        let app = Coven::with_keychain(root.path().into(), keychain.clone());
         let scoped = StoreKeychain::new(keychain.clone(), id);
         let person_entries = PersonEntries::new(keychain.clone(), id);
         let old_device = SecretBytes::new(b"old device credentials".to_vec());
@@ -239,14 +239,9 @@ async fn credential_publication_failures_restore_every_prior_custody_value() {
         scoped.set_storage_credentials(&old_device).unwrap();
         person_entries.set_s3_credentials(&old_key).unwrap();
         person_entries.set_restore_code(&old_code).unwrap();
-        let (pending, owners, database) = prepared(
-            &layout,
-            id,
-            keychain.clone(),
-            KeyCustody::InMemory,
-            IdentityCustody::InMemory,
-        )
-        .await;
+        let (pending, owners, database) =
+            prepared(&app, id, keychain.clone(), KeyCustody::InMemory, IdentityCustody::InMemory)
+                .await;
         // Device id read/write, then all three credential reads and writes.
         keychain.fail_operations_after(&[after]);
         let ring = StoreKeyring::new(StoreKey::generate(KeyId(UuidIds.new_id())).unwrap());
@@ -282,7 +277,7 @@ async fn credential_publication_failures_restore_every_prior_custody_value() {
         assert_eq!(person_entries.restore_code().unwrap().unwrap().as_bytes(), old_code.as_bytes());
         assert!(scoped.device_id().unwrap().is_none());
         assert!(StorageSettings::new(pending.directory()).read().unwrap().is_none());
-        assert!(layout.stores().await.unwrap().is_empty());
+        assert!(app.stores().await.unwrap().is_empty());
         database.close().await.unwrap();
     }
 }
@@ -290,14 +285,13 @@ async fn credential_publication_failures_restore_every_prior_custody_value() {
 #[tokio::test]
 async fn bootstrap_reports_saved_key_rollback_failure_with_the_publication_failure() {
     let root = tempfile::tempdir().unwrap();
-    let layout = StoreLayout::new(root.path().into());
     let id = StoreId(UuidIds.new_id());
     let keychain = Keychain::in_memory("commit-test").unwrap();
+    let app = Coven::with_keychain(root.path().into(), keychain.clone());
     let scoped = StoreKeychain::new(keychain.clone(), id);
     let person = PersonEntries::new(keychain.clone(), id);
     let (pending, owners, database) =
-        prepared(&layout, id, keychain.clone(), KeyCustody::InMemory, IdentityCustody::InMemory)
-            .await;
+        prepared(&app, id, keychain.clone(), KeyCustody::InMemory, IdentityCustody::InMemory).await;
     // Refuse the code write, then refuse rolling back the separate S3 entry.
     keychain.fail_operations_after(&[7, 1]);
     let ring = StoreKeyring::new(StoreKey::generate(KeyId(UuidIds.new_id())).unwrap());
@@ -321,21 +315,21 @@ async fn bootstrap_reports_saved_key_rollback_failure_with_the_publication_failu
     assert!(person.restore_code().unwrap().is_none());
     assert!(scoped.device_id().unwrap().is_none());
     assert!(StorageSettings::new(pending.directory()).read().unwrap().is_none());
-    assert!(layout.stores().await.unwrap().is_empty());
+    assert!(app.stores().await.unwrap().is_empty());
     database.close().await.unwrap();
 }
 
 #[tokio::test]
 async fn cleanup_failure_returns_the_open_handle_with_its_session_keys() {
     let root = tempfile::tempdir().unwrap();
-    let layout = StoreLayout::new(root.path().into());
     let id = StoreId(UuidIds.new_id());
     let keychain = Keychain::in_memory("commit-test").unwrap();
+    let app = Coven::with_keychain(root.path().into(), keychain.clone());
     let code = code(id);
     let key = KeyId(UuidIds.new_id());
     let ring = StoreKeyring::new(StoreKey::generate(key).unwrap());
     let (pending, owners, database) =
-        prepared(&layout, id, keychain, KeyCustody::InMemory, IdentityCustody::InMemory).await;
+        prepared(&app, id, keychain, KeyCustody::InMemory, IdentityCustody::InMemory).await;
     let leftover = root.path().join("stores").join(id.to_string()).join("bootstrap.sealed");
     std::fs::create_dir(leftover).unwrap();
     let location = coven_storage::RestoreStorage::decode(code.storage.as_bytes()).unwrap().location;
@@ -355,7 +349,7 @@ async fn cleanup_failure_returns_the_open_handle_with_its_session_keys() {
     let BootstrapError::Published { handle, .. } = error else {
         panic!("expected published handle")
     };
-    assert_eq!(layout.stores().await.unwrap().len(), 1);
+    assert_eq!(app.stores().await.unwrap().len(), 1);
     assert_eq!(StorageSettings::new(pending.directory()).read().unwrap(), Some(location));
     assert_eq!(handle.store_key_state().unwrap(), StoreKeyState::Available);
     handle.read(|_| Ok(())).await.unwrap();
@@ -365,12 +359,11 @@ async fn cleanup_failure_returns_the_open_handle_with_its_session_keys() {
 #[tokio::test]
 async fn publication_returns_the_handle_without_rereading_custody() {
     let root = tempfile::tempdir().unwrap();
-    let layout = StoreLayout::new(root.path().into());
     let id = StoreId(UuidIds.new_id());
     let keychain = Keychain::in_memory("commit-test").unwrap();
+    let app = Coven::with_keychain(root.path().into(), keychain.clone());
     let (pending, owners, database) =
-        prepared(&layout, id, keychain.clone(), KeyCustody::InMemory, IdentityCustody::InMemory)
-            .await;
+        prepared(&app, id, keychain.clone(), KeyCustody::InMemory, IdentityCustody::InMemory).await;
     let waits = waits(&database).await;
     // Publication needs nine keychain operations; the next read fails.
     keychain.fail_operations_after(&[9]);
@@ -390,7 +383,7 @@ async fn publication_returns_the_handle_without_rereading_custody() {
         Ok(handle) | Err(BootstrapError::Published { handle, .. }) => handle,
         Err(error) => panic!("publication lost its handle: {error}"),
     };
-    assert_eq!(layout.stores().await.unwrap().len(), 1);
+    assert_eq!(app.stores().await.unwrap().len(), 1);
     assert_eq!(handle.store_key_state().unwrap(), StoreKeyState::Available);
     keychain.fail_operations_after(&[]);
     handle.close().await.unwrap();
@@ -400,16 +393,11 @@ async fn publication_returns_the_handle_without_rereading_custody() {
 async fn publication_with_a_loaded_provider_does_not_suspend() {
     use std::{future::Future, task::Poll};
     let root = tempfile::tempdir().unwrap();
-    let layout = StoreLayout::new(root.path().into());
+    let keychain = Keychain::in_memory("commit-test").unwrap();
+    let app = Coven::with_keychain(root.path().into(), keychain.clone());
     let id = StoreId(UuidIds.new_id());
-    let (pending, mut owners, database) = prepared(
-        &layout,
-        id,
-        Keychain::in_memory("commit-test").unwrap(),
-        KeyCustody::InMemory,
-        IdentityCustody::InMemory,
-    )
-    .await;
+    let (pending, mut owners, database) =
+        prepared(&app, id, keychain, KeyCustody::InMemory, IdentityCustody::InMemory).await;
     let provider = coven_storage::test_utils::MemoryStorage::builder().build().unwrap();
     owners.storage = Some(provider.shared_connection());
     let waits = waits(&database).await;
@@ -429,7 +417,7 @@ async fn publication_with_a_loaded_provider_does_not_suspend() {
         panic!("publication suspended before returning its handle");
     };
     let handle = result.unwrap();
-    assert_eq!(layout.stores().await.unwrap().len(), 1);
+    assert_eq!(app.stores().await.unwrap().len(), 1);
     assert_eq!(handle.store_key_state().unwrap(), StoreKeyState::Available);
     handle.close().await.unwrap();
 }

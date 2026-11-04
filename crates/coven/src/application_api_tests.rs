@@ -66,9 +66,9 @@
 //! let _ = coven::StoreDir::file;
 //! ```
 //!
-//! `StoreLayout::begin_bootstrap` is a crate-to-crate operation.
+//! `Beginning a bootstrap is a crate-to-crate operation.
 //! ```compile_fail
-//! let _ = coven::StoreLayout::begin_bootstrap;
+//! let _ = coven::Coven::begin_bootstrap;
 //! ```
 //!
 //! `OAuthClients::refresh` is a crate-to-crate operation.
@@ -308,10 +308,10 @@ fn bootstrap_and_operation_futures_stay_small() {
 /// with a title, which reads every note, runs more.
 #[tokio::test]
 async fn app_tests_count_the_steps_a_read_runs() {
-    use crate::{types, Migration, RowIdentity, StoreLayout, SyncedTable, TestCoven, WorkCounter};
+    use crate::{types, Coven, Migration, RowIdentity, SyncedTable, WorkCounter};
     let root = tempfile::tempdir().unwrap();
-    let handle = TestCoven::new()
-        .builder(StoreLayout::new(root.path().into()))
+    let handle = Coven::in_memory(root.path().into())
+        .builder()
         .synced_tables(vec![SyncedTable::new("notes", RowIdentity::SharedKey)])
         .migrations(vec![Migration::addition(
             1,

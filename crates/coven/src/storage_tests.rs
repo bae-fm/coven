@@ -11,7 +11,7 @@ use std::{
 };
 
 struct Fixture {
-    app: TestCoven,
+    app: Coven,
     handle: CovenHandle,
     storage: Arc<MemoryStorage>,
     connector: Arc<TrackingConnector>,
@@ -26,7 +26,7 @@ struct Fixture {
 impl Fixture {
     async fn new() -> Self {
         let root = tempfile::tempdir().unwrap();
-        let app = TestCoven::new();
+        let app = Coven::in_memory(root.path().into());
         let clock = Arc::new(FixedClock::new(UNIX_EPOCH + Duration::from_secs(1000)));
         let storage = Arc::new(
             MemoryStorage::builder()
@@ -35,10 +35,7 @@ impl Fixture {
                 .build()
                 .unwrap(),
         );
-        let directory = app
-            .create_closed_store(&StoreLayout::new(root.path().into()), "Loop", Arc::new(UuidIds))
-            .await
-            .unwrap();
+        let directory = app.create_closed_store("Loop", Arc::new(UuidIds)).await.unwrap();
         let connector = Arc::new(TrackingConnector {
             storage: storage.clone(),
             clients: std::sync::Mutex::new(Vec::new()),
@@ -50,15 +47,10 @@ impl Fixture {
             held: tokio::sync::Mutex::new(None),
         });
         let recorder = Arc::new(RecordingClock::new(clock.clone()));
-        let handle = builder(
-            &app,
-            StoreLayout::new(root.path().into()),
-            recorder.clone(),
-            connector.clone(),
-        )
-        .open(directory.id(), |_| ())
-        .await
-        .unwrap();
+        let handle = builder(&app, recorder.clone(), connector.clone())
+            .open(directory.id(), |_| ())
+            .await
+            .unwrap();
 
         Self { app, handle, storage, connector, clock, recorder, directory, _root: root }
     }
@@ -85,15 +77,10 @@ impl Fixture {
     async fn lose_credentials(&mut self) {
         self.handle.close().await.unwrap();
         self.app.lose_storage_credentials(self.directory.id()).unwrap();
-        self.handle = builder(
-            &self.app,
-            StoreLayout::new(self._root.path().into()),
-            self.recorder.clone(),
-            self.connector.clone(),
-        )
-        .open(self.directory.id(), |_| ())
-        .await
-        .unwrap();
+        self.handle = builder(&self.app, self.recorder.clone(), self.connector.clone())
+            .open(self.directory.id(), |_| ())
+            .await
+            .unwrap();
     }
 }
 
@@ -311,26 +298,16 @@ async fn an_invite_expires_with_sync_stopped_and_while_closed() {
     drop(invites);
     f.handle.close().await.unwrap();
     f.clock.set(second.expires_at);
-    let handle = builder(
-        &f.app,
-        StoreLayout::new(f._root.path().into()),
-        f.clock.clone(),
-        f.connector.clone(),
-    )
-    .open(f.directory.id(), |_| ())
-    .await
-    .unwrap();
+    let handle = builder(&f.app, f.clock.clone(), f.connector.clone())
+        .open(f.directory.id(), |_| ())
+        .await
+        .unwrap();
     assert!(handle.read(Invite::list).await.unwrap().is_empty());
     handle.close().await.unwrap();
 }
 
-fn builder(
-    app: &TestCoven,
-    layout: StoreLayout,
-    clock: ClockRef,
-    storage: Arc<dyn StorageConnector>,
-) -> CovenBuilder {
-    app.builder(layout)
+fn builder(app: &Coven, clock: ClockRef, storage: Arc<dyn StorageConnector>) -> CovenBuilder {
+    app.builder()
         .clock(clock)
         .storage_connector(storage)
         .synced_tables(vec![SyncedTable::new("notes", RowIdentity::SharedKey)])
@@ -412,8 +389,7 @@ async fn setup_reports_each_step_it_runs() {
     f.app.lose_storage_credentials(f.directory.id()).unwrap();
 
     let recorder = Arc::new(RecordingClock::new(f.clock.clone()));
-    let layout = StoreLayout::new(f._root.path().into());
-    let reopened = builder(&f.app, layout, recorder.clone(), f.connector.clone())
+    let reopened = builder(&f.app, recorder.clone(), f.connector.clone())
         .open(f.directory.id(), |_| ())
         .await
         .unwrap();
@@ -671,9 +647,8 @@ async fn two_stores_share_one_location_without_reading_each_others_history() {
     let f = Fixture::new().await;
     f.setup().await.unwrap();
     synced(&f.handle).await;
-    let layout = StoreLayout::new(f._root.path().into());
-    let directory = f.app.create_closed_store(&layout, "Garden", Arc::new(UuidIds)).await.unwrap();
-    let other = builder(&f.app, layout, f.clock.clone(), f.connector.clone())
+    let directory = f.app.create_closed_store("Garden", Arc::new(UuidIds)).await.unwrap();
+    let other = builder(&f.app, f.clock.clone(), f.connector.clone())
         .open(directory.id(), |_| ())
         .await
         .unwrap();
@@ -798,7 +773,6 @@ async fn setup_refuses_another_location_after_lost_credentials_and_reopen() {
     f.app.lose_storage_credentials(f.directory.id()).unwrap();
     let handle = builder(
         &f.app,
-        StoreLayout::new(f._root.path().into()),
         f.clock.clone(),
         Arc::new(Locations(vec![f.storage.clone(), destination.clone()])),
     )
@@ -936,8 +910,7 @@ async fn reconnect_checks_the_provider_and_preserves_the_previous_connection() {
 #[tokio::test]
 async fn setup_with_an_account_other_than_the_one_holding_the_store_is_refused() {
     let root = tempfile::tempdir().unwrap();
-    let app = TestCoven::new();
-    let layout = StoreLayout::new(root.path().into());
+    let app = Coven::in_memory(root.path().into());
     let clock = Arc::new(FixedClock::new(UNIX_EPOCH + Duration::from_secs(1000)));
     let storage = Arc::new(
         MemoryStorage::builder()
@@ -947,11 +920,9 @@ async fn setup_with_an_account_other_than_the_one_holding_the_store_is_refused()
             .unwrap(),
     );
     let StorageConfig::CloudKit { container, .. } = storage.config() else { unreachable!() };
-    let directory = app.create_closed_store(&layout, "Household", Arc::new(UuidIds)).await.unwrap();
-    let handle = builder(&app, layout.clone(), clock.clone(), storage.clone())
-        .open(directory.id(), |_| ())
-        .await
-        .unwrap();
+    let directory = app.create_closed_store("Household", Arc::new(UuidIds)).await.unwrap();
+    let handle =
+        builder(&app, clock.clone(), storage.clone()).open(directory.id(), |_| ()).await.unwrap();
     handle.setup_cloudkit_storage(&container, "Ana's Mac", |_| {}).await.unwrap();
     let owner = handle.members().await.unwrap().into_iter().find(|m| m.is_self).unwrap().access;
     let coven_storage::AccessGrant::Granted { invitation } =
@@ -963,7 +934,7 @@ async fn setup_with_an_account_other_than_the_one_holding_the_store_is_refused()
     work.join(directory.id(), &invitation).await.unwrap();
     let code = handle.restore_code().await.unwrap();
     handle.close().await.unwrap();
-    let handle = builder(&app, layout, clock, work).open(directory.id(), |_| ()).await.unwrap();
+    let handle = builder(&app, clock, work).open(directory.id(), |_| ()).await.unwrap();
     let result = handle.setup_cloudkit_storage(&container, "Ana's Mac", |_| {}).await;
     assert!(matches!(result, Err(StorageSetupError::StoreOwner)), "{result:?}");
     assert_eq!(handle.restore_code().await.unwrap(), code);

@@ -7,7 +7,7 @@ pub use crate::builder::{
     JoinControl,
 };
 pub use crate::circles::Circles;
-pub use crate::coven::Coven;
+pub use crate::coven::{Coven, StoreInfo, StoreListError};
 pub use crate::coven_write::CovenWrite;
 #[cfg(feature = "dev-tools")]
 pub use crate::dev_tools::empty_s3_prefix;
@@ -16,17 +16,12 @@ pub use crate::error::{
 };
 pub use crate::handle::{CovenHandle, IfUnsent};
 pub use crate::read_handle::CovenReadHandle;
-pub use crate::saved_restore::{
-    forget_saved_restore_code, saved_restore_codes, SavedRestoreCode, SavedRestoreEntry,
-};
+pub use crate::saved_restore::{SavedRestoreCode, SavedRestoreEntry};
 pub use crate::storage::GuidedAccessKey;
 pub use crate::storage::{ConnectedStorage, StorageSetup, StorageSetupStep, StoreKeyState};
-pub use crate::store_layout::{StoreInfo, StoreLayout, StoreLayoutError};
-#[cfg(any(test, feature = "test-utils"))]
-pub use crate::test_utils::TestCoven;
 pub use coven_crypto::custody::{
-    set_keyring_service, IdentityCustody, IdentityError, KeyCustody, KeyError, KeychainError,
-    MemberKeyCustody, Passphrase, StoreKeyCustody,
+    IdentityCustody, IdentityError, KeyCustody, KeyError, KeychainError, MemberKeyCustody,
+    Passphrase, StoreKeyCustody,
 };
 pub use coven_crypto::{
     CircleKey, ConfirmationNumber, CryptoError, MaterialError, MemberIdentity, MemberKeys,

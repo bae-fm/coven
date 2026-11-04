@@ -105,15 +105,10 @@ async fn connection_backoff_keeps_its_deadline_and_exponent_across_reopening() {
     // The device still has no network as it reopens: opening on one would
     // end this wait for the network (§6.7).
     f.app.lose_network();
-    let reopened = builder(
-        &f.app,
-        StoreLayout::new(f._root.path().into()),
-        f.clock.clone(),
-        f.connector.clone(),
-    )
-    .open(f.directory.id(), |_| ())
-    .await
-    .unwrap();
+    let reopened = builder(&f.app, f.clock.clone(), f.connector.clone())
+        .open(f.directory.id(), |_| ())
+        .await
+        .unwrap();
     assert_eq!(reopened.test_connection_retry_wait().await, Some(persisted));
     let attempts = *f.connector.attempts.borrow();
     *f.connector.failure.lock().unwrap() = Some(attempt_failure(5));

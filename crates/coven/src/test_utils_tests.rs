@@ -30,9 +30,8 @@ fn member(seed: u8) -> MemberIdentity {
 }
 
 struct Fixture {
-    app: TestCoven,
+    app: Coven,
     directory: StoreDir,
-    layout: StoreLayout,
     ids: IdSourceRef,
     clock: Arc<FixedClock>,
     storage: Arc<MemoryStorage>,
@@ -46,8 +45,7 @@ struct Fixture {
 impl Fixture {
     async fn new() -> (Self, CovenHandle) {
         let root = tempfile::tempdir().unwrap();
-        let layout = StoreLayout::new(root.path().into());
-        let app = TestCoven::new();
+        let app = Coven::in_memory(root.path().into());
         let ids: IdSourceRef = Arc::new(SequentialIds::new());
         let clock = Arc::new(FixedClock::new(UNIX_EPOCH + Duration::from_secs(1000)));
         let storage = Arc::new(
@@ -68,7 +66,7 @@ impl Fixture {
                 .build()
                 .unwrap(),
         );
-        let directory = app.create_closed_store(&layout, "Guarantees", ids.clone()).await.unwrap();
+        let directory = app.create_closed_store("Guarantees", ids.clone()).await.unwrap();
         let keys = Arc::new(KeyringCustody::new(Arc::new(StoreKeychain::new(
             app.keychain.clone(),
             directory.id(),
@@ -76,7 +74,6 @@ impl Fixture {
         let f = Self {
             app,
             directory,
-            layout,
             ids,
             clock,
             connector: crate::tests::Connector::new(storage.clone()),
@@ -104,7 +101,7 @@ impl Fixture {
 
     async fn open(&self) -> CovenHandle {
         self.app
-            .builder(self.layout.clone())
+            .builder()
             .synced_tables(tables())
             .namespaces(namespaces())
             .migrations(vec![Migration::addition(1, "records", SCHEMA)])
@@ -235,7 +232,7 @@ fn every_post_commit_crash_preserves_the_write_for_upload() {
         });
         drop(runtime);
         let output = std::process::Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", "test_utils::tests::crashing_local_write", "--nocapture"])
+            .args(["--exact", "coven::test_utils::tests::crashing_local_write", "--nocapture"])
             .env("COVEN_GUARANTEE_ROOT", f._root.path())
             .env("COVEN_GUARANTEE_STORE", f.directory.id().to_string())
             .env("COVEN_GUARANTEE_POINT", index.to_string())
@@ -278,16 +275,17 @@ fn crashing_local_write() {
         StoreId(uuid::Uuid::parse_str(&std::env::var("COVEN_GUARANTEE_STORE").unwrap()).unwrap());
     let point: usize = std::env::var("COVEN_GUARANTEE_POINT").unwrap().parse().unwrap();
     tokio::runtime::Runtime::new().unwrap().block_on(async {
-        let db =
-            coven_database::DatabaseBuilder::new(StoreLayout::new(root.into()).store_dir(&store))
-                .synced_tables(tables())
-                .namespaces(namespaces())
-                .migrations(vec![Migration::addition(1, "records", SCHEMA)])
-                .clock(Arc::new(FixedClock::new(UNIX_EPOCH + Duration::from_secs(1001))))
-                .id_source(Arc::new(SequentialIds::new()))
-                .open()
-                .await
-                .unwrap();
+        let db = coven_database::DatabaseBuilder::new(
+            coven_foundation::files::StoreDirectories::new(root.into()).store_dir(&store),
+        )
+        .synced_tables(tables())
+        .namespaces(namespaces())
+        .migrations(vec![Migration::addition(1, "records", SCHEMA)])
+        .clock(Arc::new(FixedClock::new(UNIX_EPOCH + Duration::from_secs(1001))))
+        .id_source(Arc::new(SequentialIds::new()))
+        .open()
+        .await
+        .unwrap();
         let next = std::cell::Cell::new(0);
         db.test_on_write_checkpoint(move |checkpoint| {
             let index = next.get();

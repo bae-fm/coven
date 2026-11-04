@@ -1,13 +1,81 @@
-//! The calls that create, locate, open and remove device-local stores.
+//! This app's stores on this device: where they live, the keychain their
+//! entries are kept in, and the device's network; and the calls that create,
+//! list, locate, open and remove them (E1).
 
-use crate::{CovenBuilder, StoreDeletionError, StoreDir, StoreLayout};
+use crate::{
+    BootstrapError, CovenBuilder, CovenError, FileError, SavedRestoreEntry, StoreDeletionError,
+    StoreDir, StoreId,
+};
 use coven_crypto::custody::{KeyError, Keychain, StoreKeychain};
-use coven_foundation::files::StoreDirAccess;
+use coven_foundation::files::{ReplacedBy, StoreDirAccess, StoreDirectories};
+use coven_foundation::network_watch::NetworkSource;
+use std::path::PathBuf;
+use std::sync::Arc;
 
-/// Creating, opening and deleting stores on this device (E1).
-pub struct Coven;
+/// This app's stores on this device (E1): the app directory each has its own
+/// directory under, the OS keychain service their keys and secrets are kept
+/// under, and the device's network, which each open store watches. The app
+/// builds one at startup and holds it.
+#[derive(Clone)]
+pub struct Coven {
+    directories: StoreDirectories,
+    keychain: Arc<Keychain>,
+    network: NetworkSource,
+}
+
+/// A store on this device (E1).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StoreInfo {
+    /// The store's identity.
+    pub id: StoreId,
+    /// The current name from this device's committed database state. While
+    /// a replacement is unfinished, the name its new installation loaded.
+    pub name: String,
+    /// The call that must finish a replacement of this device's installation
+    /// before the store opens (§19.3); `None` when no replacement is unfinished.
+    pub unfinished_replacement: Option<ReplacedBy>,
+}
+
+/// A failure listing stores or reading a committed store name.
+#[derive(Debug, thiserror::Error)]
+pub enum StoreListError {
+    /// The directory listing or an identity settings read failed.
+    #[error(transparent)]
+    File(#[from] FileError),
+    /// Reading a store's current name failed.
+    #[error("read name of store {store}: {source}")]
+    Store {
+        /// The store whose name could not be read.
+        store: StoreId,
+        /// The database or lock failure.
+        #[source]
+        source: CovenError,
+    },
+}
+
+impl From<coven_foundation::files::StoreDirectoriesError> for StoreListError {
+    fn from(error: coven_foundation::files::StoreDirectoriesError) -> Self {
+        let coven_foundation::files::StoreDirectoriesError::File(error) = error;
+        Self::File(error)
+    }
+}
 
 impl Coven {
+    /// The stores under `app_dir`, their keys and secrets in the OS keychain
+    /// under the service `keyring_service`, watching the platform's network.
+    /// The app creates `app_dir`; coven creates directories only inside it
+    /// and never opens a directory above it, which Android refuses. No key
+    /// is read here. An empty service name, or one containing NUL, fails with
+    /// `KeyError::InvalidServiceName`; an OS keychain coven can't reach
+    /// fails with its `KeyError`.
+    pub fn new(app_dir: PathBuf, keyring_service: &str) -> Result<Self, KeyError> {
+        Ok(Self {
+            directories: StoreDirectories::new(app_dir),
+            keychain: Keychain::native(keyring_service)?,
+            network: NetworkSource::Platform,
+        })
+    }
+
     /// Read the saved storage location without opening the store or its custody.
     /// None means storage has never been set up; once set up, the location stays.
     pub async fn storage_config(
@@ -30,9 +98,47 @@ impl Coven {
         coven_database::set_temporary_directory(directory)
     }
 
+    /// Stores on this device, ordered by id, with their committed names.
+    /// A damaged name is an error; a listing never substitutes an older name.
+    /// A store whose replacement is unfinished lists with the call that
+    /// finishes it, so the app can offer to; an unfinished first installation
+    /// is not listed.
+    pub async fn stores(&self) -> Result<Vec<StoreInfo>, StoreListError> {
+        let mut stores = Vec::new();
+        for id in self.directories.store_ids().await? {
+            let directory = self.store_dir(&id);
+            let failed = |source: CovenError| StoreListError::Store { store: id, source };
+            let unfinished = {
+                let directory = directory.clone();
+                crate::task::blocking("read the replacement record", move || {
+                    directory.unfinished_replacement()
+                })
+                .await
+                .map_err(|shutdown| failed(shutdown.into()))?
+                .map_err(|error| failed(error.into()))?
+            };
+            stores.push(match unfinished {
+                Some(record) => {
+                    StoreInfo { id, name: record.name, unfinished_replacement: Some(record.by) }
+                }
+                None => StoreInfo {
+                    id,
+                    name: coven_database::read_store_name(directory).await.map_err(failed)?,
+                    unfinished_replacement: None,
+                },
+            });
+        }
+        Ok(stores)
+    }
+
+    /// Address a store without reading settings or acquiring the writer lock.
+    pub fn store_dir(&self, id: &StoreId) -> StoreDir {
+        self.directories.store_dir(id)
+    }
+
     /// Configure creating, opening, restoring or joining a store.
-    pub fn builder(layout: StoreLayout) -> CovenBuilder {
-        CovenBuilder::new(layout)
+    pub fn builder(&self) -> CovenBuilder {
+        CovenBuilder::new(self.directories.clone(), self.keychain.clone(), self.network.clone())
     }
 
     /// Deletes a closed store from this device without opening it: this
@@ -50,22 +156,48 @@ impl Coven {
     /// replacement remains; storage is untouched. A handle of it in this
     /// process that is closing, or whose last clone was dropped, is waited
     /// for. Retrying finishes a deletion that failed partway.
-    pub async fn discard_store(store_dir: &StoreDir) -> Result<(), StoreDeletionError> {
-        let store = store_dir.id();
-        discard(store_dir, move || Ok(StoreKeychain::new(Keychain::registered()?, store))).await
+    pub async fn discard_store(&self, store_dir: &StoreDir) -> Result<(), StoreDeletionError> {
+        store_dir.closed().await?;
+        let directory = store_dir.clone();
+        let keys = StoreKeychain::new(self.keychain.clone(), store_dir.id());
+        crate::task::blocking("discard the store", move || delete(&directory, &keys)).await?
     }
-}
 
-/// Wait for any closing instance of the store in this process, then delete
-/// it with this device's entries in the keychain `keys` makes, made on the
-/// blocking pool as the deletion runs.
-pub(crate) async fn discard(
-    store_dir: &StoreDir,
-    keys: impl FnOnce() -> Result<StoreKeychain, KeyError> + Send + 'static,
-) -> Result<(), StoreDeletionError> {
-    store_dir.closed().await?;
-    let directory = store_dir.clone();
-    crate::task::blocking("discard the store", move || delete(&directory, &keys()?)).await?
+    /// The saved entries of this app's keychain service, in iCloud Keychain on
+    /// Apple and in this phone's Block Store on Android, one per store,
+    /// ordered by store id; empty when none are saved. An entry coven can't
+    /// restore from is listed as `Unreadable`, never omitted, so the person
+    /// can forget it. A keychain read failure (the search, an entry's bytes
+    /// or an S3 key's presence) fails the whole call, as does a restore-code
+    /// account with no store id, `KeyError::RestoreCodeStoreId`. A keychain
+    /// with neither iCloud Keychain nor Block Store fails with
+    /// `BootstrapError::SecureStorage(KeyError::Unsupported)`. Pass a readable
+    /// entry to `restore_from_saved_code`, which reads its current code and key.
+    pub async fn saved_restore_codes(&self) -> Result<Vec<SavedRestoreEntry>, BootstrapError> {
+        let keychain = self.keychain.clone();
+        crate::task::blocking("list saved restore codes", move || {
+            crate::saved_restore::list(keychain)
+        })
+        .await?
+    }
+
+    /// Delete the store's saved S3 key, then its restore code: from iCloud
+    /// Keychain, and so from every one of the person's Apple devices, or from
+    /// this phone's Block Store, leaving other phones' own (§13.1). Readable
+    /// and unreadable entries alike; every keychain group's copy goes. The
+    /// store, its storage and every device's copy stay; no store need be open
+    /// and no provider connected. Absent entries succeed; after a failure
+    /// part way the store is still listed, and calling again finishes. A
+    /// later join, restore, reset or member-key replacement saves the entry
+    /// again. A keychain with neither iCloud Keychain nor Block Store fails
+    /// with `BootstrapError::SecureStorage(KeyError::Unsupported)`.
+    pub async fn forget_saved_restore_code(&self, store: StoreId) -> Result<(), BootstrapError> {
+        let keychain = self.keychain.clone();
+        crate::task::blocking("forget the saved restore code", move || {
+            crate::saved_restore::forget(keychain, store)
+        })
+        .await?
+    }
 }
 
 pub(crate) fn delete(directory: &StoreDir, keys: &StoreKeychain) -> Result<(), StoreDeletionError> {
@@ -76,6 +208,10 @@ pub(crate) fn delete(directory: &StoreDir, keys: &StoreKeychain) -> Result<(), S
     }
     Ok(())
 }
+
+#[cfg(any(test, feature = "test-utils"))]
+#[path = "test_utils.rs"]
+mod test_utils;
 
 #[cfg(test)]
 #[path = "coven_tests.rs"]

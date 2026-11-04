@@ -41,6 +41,6 @@ fn setup_preserves_sign_in_and_custody_causes() {
         error.source().unwrap().downcast_ref::<std::io::Error>().unwrap().kind(),
         std::io::ErrorKind::TimedOut,
     );
-    let setup = StorageSetupError::from(KeyError::ServiceNotRegistered);
-    assert!(matches!(setup, StorageSetupError::SecureStorage(KeyError::ServiceNotRegistered)));
+    let setup = StorageSetupError::from(KeyError::Unsupported);
+    assert!(matches!(setup, StorageSetupError::SecureStorage(KeyError::Unsupported)));
 }

@@ -10,28 +10,6 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-// The API registers process-wide naming metadata (E1), not a live capability.
-// Each composition root acquires its keychain explicitly and injects it.
-static SERVICE_NAME: Mutex<Option<String>> = Mutex::new(None);
-
-/// Registers the OS keychain service every key and secret is stored under.
-/// Called once at startup, before any store opens (E1). Repeating the same
-/// name is idempotent; another name is refused. This registers only the name;
-/// the composition root constructs the native capability with `Keychain::registered`.
-pub fn set_keyring_service(name: impl Into<String>) -> Result<(), KeyError> {
-    register(&SERVICE_NAME, name.into())
-}
-
-fn register(service: &Mutex<Option<String>>, name: String) -> Result<(), KeyError> {
-    validate_service(&name)?;
-    let mut registered = service.lock().expect("keyring service name lock is poisoned");
-    if let Some(existing) = registered.as_ref() {
-        return if *existing == name { Ok(()) } else { Err(KeyError::ServiceAlreadyRegistered) };
-    }
-    *registered = Some(name);
-    Ok(())
-}
-
 fn validate_service(name: &str) -> Result<(), KeyError> {
     if name.is_empty() || name.contains('\0') {
         return Err(KeyError::InvalidServiceName);
@@ -99,15 +77,12 @@ pub struct Keychain {
 }
 
 impl Keychain {
-    /// Construct the native capability under the service registered at startup.
-    /// Call only at a composition root, then inject it; no key is read here.
-    pub fn registered() -> Result<Arc<Self>, KeyError> {
-        let name = SERVICE_NAME
-            .lock()
-            .expect("keyring service name lock is poisoned")
-            .as_ref()
-            .cloned()
-            .ok_or(KeyError::ServiceNotRegistered)?;
+    /// The OS keychain, every key and secret kept under the service `name`
+    /// (E1). Call only at a composition root, then inject it; no key is read
+    /// here.
+    pub fn native(name: impl Into<String>) -> Result<Arc<Self>, KeyError> {
+        let name = name.into();
+        validate_service(&name)?;
         Ok(Arc::new(Self {
             name,
             backend: Box::new(NativeKeychain::new()?),

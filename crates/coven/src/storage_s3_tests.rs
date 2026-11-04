@@ -148,16 +148,10 @@ async fn versioning_refusal_commits_nothing_and_preserves_an_existing_connection
 
 async fn open(storage: Arc<dyn StorageConnector>) -> Opened {
     let root = tempfile::tempdir().unwrap();
-    let app = TestCoven::new();
+    let app = Coven::in_memory(root.path().into());
     let clock = Arc::new(FixedClock::new(UNIX_EPOCH + Duration::from_secs(1000)));
-    let directory = app
-        .create_closed_store(&StoreLayout::new(root.path().into()), "Loop", Arc::new(UuidIds))
-        .await
-        .unwrap();
-    let handle = builder(&app, StoreLayout::new(root.path().into()), clock, storage)
-        .open(directory.id(), |_| ())
-        .await
-        .unwrap();
+    let directory = app.create_closed_store("Loop", Arc::new(UuidIds)).await.unwrap();
+    let handle = builder(&app, clock, storage).open(directory.id(), |_| ()).await.unwrap();
 
     Opened { handle, directory, _root: root }
 }

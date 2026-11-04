@@ -157,7 +157,13 @@ pub enum Audience {
   available; with both the app supplies the user's or its own explicit choice.
   The choice survives reopening and restore and cannot be changed by
   reconnecting.
-- A `StoreLayout` says where an app's stores live on disk.
+- A `Coven` is this app's stores on this device: the app directory they live
+  under, the OS keychain service their keys and secrets are kept under, and the
+  device's network. The app builds one at startup, holds it while it runs, and
+  makes every builder, listing and deletion from it. `Coven::new` names the
+  keychain service and opens the OS keychain, so an invalid name or a
+  keychain coven can't reach fails at startup rather than at the first store; an
+  application test builds its installation with `Coven::in_memory` instead.
 - `Coven::storage_config` reads a closed store's saved location without opening
   its database or custody. The handle's `storage_config` reads the same committed
   `StorageConfig`, including the member's account label, so an app can show
@@ -530,33 +536,33 @@ impl Clock for SystemClock {
     fn elapsed(&self) -> Duration;
 }
 
-/// An installation with an isolated in-memory keychain and a network the
-/// test drives, for application tests. Its network starts usable and
-/// unmetered; each installation has its own.
+/// Installations for application tests, built in place of `Coven::new`: an
+/// isolated in-memory keychain and a network the test drives. The network
+/// starts usable and unmetered; each installation has its own.
 #[cfg(feature = "test-utils")]
-pub struct TestCoven { /* private */ }
-
-#[cfg(feature = "test-utils")]
-impl TestCoven {
-    /// Make an installation with no device-only entries and none of the person's entries.
-    pub fn new() -> Self;
+impl Coven {
+    /// An installation with its stores under `app_dir`, no device-only
+    /// entries and none of the person's entries.
+    pub fn in_memory(app_dir: PathBuf) -> Self;
 
     /// An installation on an Android phone: the person's entries behave as
     /// Block Store keeps them, this phone's own, with its limits (§13.1).
-    pub fn with_block_store() -> Self;
+    pub fn with_block_store(app_dir: PathBuf) -> Self;
 
-    /// Another device of the same person: its own empty device-only keychain.
-    /// It shares the person's entries with this one as iCloud Keychain would,
-    /// or with Block Store has its own, empty (§13.1).
-    pub fn another_device(&self) -> Self;
+    /// Another device of the same person, its stores under `app_dir`: its own
+    /// empty device-only keychain. It shares the person's entries with this
+    /// one as iCloud Keychain would, or with Block Store has its own, empty
+    /// (§13.1).
+    pub fn another_device(&self, app_dir: PathBuf) -> Self;
 
-    /// A new phone set up from this one by direct transfer: a copy of its
-    /// Block Store entries. Requires `with_block_store`.
-    pub fn set_up_new_device(&self) -> Self;
+    /// A new phone set up from this one by direct transfer, its stores under
+    /// `app_dir`: a copy of its Block Store entries. Requires `with_block_store`.
+    pub fn set_up_new_device(&self, app_dir: PathBuf) -> Self;
 
-    /// A new phone set up from this phone's last cloud backup: the Block Store
-    /// entries it holds. Requires `with_block_store`.
-    pub fn restore_new_device_from_cloud(&self) -> Self;
+    /// A new phone set up from this phone's last cloud backup, its stores
+    /// under `app_dir`: the Block Store entries it holds. Requires
+    /// `with_block_store`.
+    pub fn restore_new_device_from_cloud(&self, app_dir: PathBuf) -> Self;
 
     /// Google's periodic cloud backup of this phone's Block Store: the entries
     /// stored while end-to-end encryption was available.
@@ -569,14 +575,16 @@ impl TestCoven {
     /// Create through the production builder, then close for a reopening fixture.
     pub async fn create_closed_store(
         &self,
-        layout: &StoreLayout,
         name: &str,
         ids: IdSourceRef,
     ) -> Result<StoreDir, StoreCreationError>;
 
-    /// Build the production graph with this installation's keychain and
-    /// network.
-    pub fn builder(&self, layout: StoreLayout) -> CovenBuilder;
+    /// Publish a directory fixture without a database or member custody.
+    pub fn create_store_dir(
+        &self,
+        id: StoreId,
+        ids: &dyn IdSource,
+    ) -> Result<StoreDir, DirectoryCreationError>;
 
     /// The device moves to another usable network: a network report (E5).
     pub fn join_network(&self, metered: bool);
@@ -584,17 +592,12 @@ impl TestCoven {
     /// The device loses its network: no report.
     pub fn lose_network(&self);
 
+    /// The platform fails to say what the device's network is: coven can't
+    /// tell, and calls it metered, until the test says again.
+    pub fn network_cannot_tell(&self);
+
     /// The device's network turns metered or unmetered: no report.
     pub fn set_network_metered(&self, metered: bool);
-
-    /// Discard through the same locked directory and keychain path as `Coven`.
-    pub async fn discard_store(&self, directory: &StoreDir) -> Result<(), StoreDeletionError>;
-
-    /// List this installation's saved codes through the production discovery path (E10).
-    pub async fn saved_restore_codes(&self) -> Result<Vec<SavedRestoreEntry>, BootstrapError>;
-
-    /// Forget one store's saved code and S3 key through the production path (E10).
-    pub async fn forget_saved_restore_code(&self, store: StoreId) -> Result<(), BootstrapError>;
 
     /// Seed the simulated OS custody as if this installation had opened keys.
     pub fn keep_store_keys(
@@ -786,8 +789,11 @@ impl IdSource for UuidIds {
 /// One store's directory; its path and store id are private (E1).
 pub struct StoreDir { /* private fields */ }
 
-/// The app directory under which each store has its own directory (E1).
-pub struct StoreLayout { /* private fields */ }
+/// This app's stores on this device: the app directory each has its own
+/// directory under, the OS keychain service their keys and secrets are kept
+/// under, and the device's network (E1).
+#[derive(Clone)]
+pub struct Coven { /* private fields */ }
 
 /// A store on this device (E1).
 pub struct StoreInfo {
@@ -810,7 +816,7 @@ pub enum ReplacedBy {
     Restore,
 }
 
-/// The opening choices for stores under one layout (E1).
+/// The opening choices for one store of a `Coven` (E1).
 pub struct CovenBuilder { /* private fields */ }
 
 /// A shared handle to the open store and its running work (Appendix F.4).
@@ -1695,7 +1701,7 @@ pub enum ReadOnlyOpenError {
 }
 
 /// Listing the app's stores failed (E1).
-pub enum StoreLayoutError {
+pub enum StoreListError {
     /// Listing directories or reading settings failed.
     File(FileError),
     /// Reading this store's current name failed; no older name is substituted.
@@ -1819,10 +1825,6 @@ pub enum KeyError {
     /// Apple's errSecMissingEntitlement (-34018): the app lacks its
     /// keychain-access-groups entitlement; retains the native cause.
     MissingKeychainEntitlement(KeychainError),
-    /// The keyring service was not registered at startup.
-    ServiceNotRegistered,
-    /// A different service name was already registered.
-    ServiceAlreadyRegistered,
     /// The service name is empty or contains NUL.
     InvalidServiceName,
     /// This platform has no native credential store.
@@ -1915,47 +1917,35 @@ pub enum MaterialError {
 /// brings the key in (§12.1).
 pub struct KeyId(pub Uuid);
 
-/// Registers the OS keychain service every key and secret is stored under.
-/// Called once at startup, before any store opens.
-pub fn set_keyring_service(name: impl Into<String>) -> Result<(), KeyError>;
-
 impl StoreDir {
     /// The store identified by this directory.
     pub fn id(&self) -> StoreId;
 }
 
-impl StoreLayout {
-    /// The stores under `app_dir`, one directory each. The app creates
-    /// `app_dir`; coven creates directories only inside it and never opens a
-    /// directory above it, which Android refuses.
-    pub fn new(app_dir: PathBuf) -> Self;
+impl Coven {
+    /// The stores under `app_dir`, their keys and secrets in the OS keychain
+    /// under the service `keyring_service`, watching the platform's network.
+    /// The app creates `app_dir`; coven creates directories only inside it
+    /// and never opens a directory above it, which Android refuses. No key is
+    /// read here. An empty service name, or one containing NUL, fails with
+    /// `KeyError::InvalidServiceName`; an OS keychain coven can't reach
+    /// fails with its `KeyError`.
+    pub fn new(app_dir: PathBuf, keyring_service: &str) -> Result<Self, KeyError>;
 
     /// The stores on this device, ordered by id, with their committed names.
-    /// Reads names from their databases; unreadable names return StoreLayoutError::Store.
+    /// Reads names from their databases; unreadable names return StoreListError::Store.
     /// A store whose replacement is unfinished is listed with the call that
     /// finishes it; an unfinished first installation is not listed.
-    pub async fn stores(&self) -> Result<Vec<StoreInfo>, StoreLayoutError>;
+    pub async fn stores(&self) -> Result<Vec<StoreInfo>, StoreListError>;
 
     /// The directory of the store with `id`.
     pub fn store_dir(&self, id: &StoreId) -> StoreDir;
 
-    /// Publish a directory fixture without a database or member custody.
-    #[cfg(feature = "test-utils")]
-    pub fn create_store_dir(
-        &self,
-        id: StoreId,
-        ids: &dyn IdSource,
-    ) -> Result<StoreDir, DirectoryCreationError>;
-}
+    /// Configure creating, opening, restoring or joining a store.
+    pub fn builder(&self) -> CovenBuilder;
 
-pub struct Coven;
-
-impl Coven {
     /// Read the recorded location without opening the store or its custody (E1).
     pub async fn storage_config(store_dir: &StoreDir) -> Result<Option<StorageConfig>, StorageError>;
-
-    /// Configure creating, opening, restoring or joining a store.
-    pub fn builder(layout: StoreLayout) -> CovenBuilder;
 
     /// Keep SQLite's temporary tables in `directory`, such as the app's cache
     /// folder, for every store this process opens. Called before the first
@@ -1975,7 +1965,7 @@ impl Coven {
     /// this process that is closing, or whose last clone was dropped, is
     /// waited for first, as opening waits for it. Retrying finishes a
     /// deletion that failed partway.
-    pub async fn discard_store(store_dir: &StoreDir) -> Result<(), StoreDeletionError>;
+    pub async fn discard_store(&self, store_dir: &StoreDir) -> Result<(), StoreDeletionError>;
 }
 
 impl CovenBuilder {
@@ -2398,10 +2388,8 @@ impl FunctionArguments<'_> {
 Example:
 
 ```rust
-coven::set_keyring_service("com.example.notes")?;
-
-let layout = StoreLayout::new(app_dir);
-let handle = Coven::builder(layout.clone())
+let coven = Coven::new(app_dir, "com.example.notes")?;
+let handle = coven.builder()
     .synced_tables(tables())                        // E2
     .namespaces(vec![
         Namespace::new("attachments", Provenance::UserProvided, 2 << 30),
@@ -6456,7 +6444,8 @@ pub enum ProviderSignOut {
 - `decode_code_info` reports `carries_s3_key`, so the new device asks for a key
   only when the code holds none. Restoring with a code that holds a key and a
   key supplied beside it fails with `InvalidConfiguration` before bootstrap.
-- `saved_restore_codes()` lists the registered service's saved codes so the
+- `Coven::saved_restore_codes` lists the saved codes of the installation's
+  keychain service so the
   app can offer a choice before opening a store. A readable entry exposes the
   store's saved name and id, provider location, including the member's account
   label, and separate S3-key presence, with no secrets.
@@ -6476,7 +6465,7 @@ pub enum ProviderSignOut {
 - Both saved entries belong to the person. Deleting the store from one device
   keeps them; a device deletes them when it applies the person's removal from
   the store, before the slot applies (§14.1).
-- `forget_saved_restore_code(store)` deletes one store's saved restore code
+- `Coven::forget_saved_restore_code(store)` deletes one store's saved restore code
   and S3 key, removing them from all the person's Apple devices, or on Android
   from this phone, leaving other phones' own. It changes no
   store, storage or device's copy, needs no open store or provider connection,
@@ -6490,7 +6479,7 @@ pub enum ProviderSignOut {
   completes; a failure before the swap, or a failed key commit after it,
   leaves the old copy and every keychain entry as they were. Retrying the
   same call finishes an interrupted restore. Until then, opening fails with
-  `StoreLockError::ReplacementUnfinished { by: Restore }`, `StoreLayout::stores`
+  `StoreLockError::ReplacementUnfinished { by: Restore }`, `Coven::stores`
   lists the store in that state, and `reset_device` is refused with that error,
   changing nothing ([§19.3](coven.md#193-another-copy-of-the-same-device)).
   `Coven::discard_store` can delete the store from the device instead, both
@@ -6586,7 +6575,7 @@ pub enum ProviderSignOut {
   member whose account holds the store fails with `SyncError::StoreOwner`
   under another account. After registering, it records a changed account or
   key as the member's access, as setup does.
-- Each call takes the app's layout-scoped `CovenBuilder`, plus its code,
+- Each call takes a `CovenBuilder` from the app's `Coven`, plus its code,
   device name, status callback and cancellation receiver, and
   returns the open `CovenHandle`. Restore also accepts the separately
   supplied S3 credentials. There is no second app-side open.
@@ -7199,26 +7188,28 @@ pub enum UnreadableSavedCode {
     Ambiguous,
 }
 
-/// The registered service's saved entries, in iCloud Keychain on Apple and in
-/// this phone's Block Store on Android, one per store,
-/// ordered by store id; empty when none are saved. An entry coven can't
-/// restore from is listed as `Unreadable`, never omitted, and never fails the
-/// call. A keychain read failure (the search, an entry's bytes or an S3 key's
-/// presence) fails the whole call, as does a restore-code account with no
-/// store id, `KeyError::RestoreCodeStoreId`.
-/// Platforms with neither iCloud Keychain nor Block Store return BootstrapError::SecureStorage(KeyError::Unsupported).
-pub async fn saved_restore_codes() -> Result<Vec<SavedRestoreEntry>, BootstrapError>;
+impl Coven {
+    /// The saved entries of this installation's keychain service, in iCloud
+    /// Keychain on Apple and in this phone's Block Store on Android, one per store,
+    /// ordered by store id; empty when none are saved. An entry coven can't
+    /// restore from is listed as `Unreadable`, never omitted, and never fails the
+    /// call. A keychain read failure (the search, an entry's bytes or an S3 key's
+    /// presence) fails the whole call, as does a restore-code account with no
+    /// store id, `KeyError::RestoreCodeStoreId`.
+    /// Platforms with neither iCloud Keychain nor Block Store return BootstrapError::SecureStorage(KeyError::Unsupported).
+    pub async fn saved_restore_codes(&self) -> Result<Vec<SavedRestoreEntry>, BootstrapError>;
 
-/// Deletes the store's saved S3 key, then its restore code: from iCloud
-/// Keychain, and so from every one of the person's Apple devices, or from this
-/// phone's Block Store, leaving other phones' own (§13.1).
-/// Readable and unreadable entries alike; every keychain group's copy goes.
-/// Touches no store, storage or device's copy, and needs no open store or
-/// provider connection. Absent entries succeed; after a failure part way the
-/// store is still listed and calling again finishes. A later join, restore,
-/// reset or member-key replacement saves the entry again.
-/// Platforms with neither iCloud Keychain nor Block Store return BootstrapError::SecureStorage(KeyError::Unsupported).
-pub async fn forget_saved_restore_code(store: StoreId) -> Result<(), BootstrapError>;
+    /// Deletes the store's saved S3 key, then its restore code: from iCloud
+    /// Keychain, and so from every one of the person's Apple devices, or from this
+    /// phone's Block Store, leaving other phones' own (§13.1).
+    /// Readable and unreadable entries alike; every keychain group's copy goes.
+    /// Touches no store, storage or device's copy, and needs no open store or
+    /// provider connection. Absent entries succeed; after a failure part way the
+    /// store is still listed and calling again finishes. A later join, restore,
+    /// reset or member-key replacement saves the entry again.
+    /// Platforms with neither iCloud Keychain nor Block Store return BootstrapError::SecureStorage(KeyError::Unsupported).
+    pub async fn forget_saved_restore_code(&self, store: StoreId) -> Result<(), BootstrapError>;
+}
 
 /// Opens the selected store on a new device from its current saved restore
 /// code, in iCloud Keychain or Block Store (§13.1). On S3, uses supplied credentials when Some; None reads
@@ -7376,7 +7367,7 @@ On the laptop:
 let info = decode_code_info(&scanned)?;
 let metadata = info.metadata();
 show_provider_location(&metadata.location);
-let mut builder = Coven::builder(layout.clone())
+let mut builder = coven.builder()
     .synced_tables(tables())
     .migrations(migrations())
     .oauth_clients(oauth_clients.clone())
@@ -7404,16 +7395,16 @@ If the laptop has her saved entries instead, from iCloud Keychain, Ana chooses
 from them:
 
 ```rust
-let saved = saved_restore_codes().await?;
+let saved = coven.saved_restore_codes().await?;
 let selected = match choose_saved_store(&saved) {
     SavedRestoreEntry::Readable(selected) => selected,
     // An entry coven can't read is offered only for deletion.
     SavedRestoreEntry::Unreadable { store_id, .. } => {
-        forget_saved_restore_code(*store_id).await?;
+        coven.forget_saved_restore_code(*store_id).await?;
         return Ok(());
     }
 };
-let mut builder = Coven::builder(layout.clone())
+let mut builder = coven.builder()
     .synced_tables(tables())
     .migrations(migrations())
     .oauth_clients(oauth_clients.clone());
@@ -7440,7 +7431,7 @@ code her phone shows, keeping its copy until the new one is ready. Her theme,
 read from the old copy before the call, goes into the new one in the same swap:
 
 ```rust
-let handle = Coven::builder(layout.clone())
+let handle = coven.builder()
     .synced_tables(tables())
     .migrations(migrations())
     .restore_device(
@@ -7497,7 +7488,7 @@ while let Some(open) = invites.next().await {
 On Carol's phone:
 
 ```rust
-let mut builder = Coven::builder(layout.clone())
+let mut builder = coven.builder()
     .synced_tables(tables())
     .migrations(migrations())
     .oauth_clients(oauth_clients.clone())
@@ -7525,7 +7516,7 @@ When Carol's app next starts after closing while she waited:
 ```rust
 // Each call consumes its builder, so each gets one configured as above.
 let new_builder = || {
-    Coven::builder(layout.clone())
+    coven.builder()
         .synced_tables(tables())
         .migrations(migrations())
         .oauth_clients(oauth_clients.clone())

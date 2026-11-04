@@ -9,7 +9,7 @@ pub(super) async fn create(
     publish: impl FnOnce(&BootstrapStore) -> Result<(), BootstrapDirectoryError> + Send + 'static,
 ) -> Result<CovenHandle, StoreCreationError> {
     let id = StoreId(builder.ids.new_id());
-    let pending = Arc::new(builder.layout.begin_bootstrap(id, builder.ids.as_ref()).await?);
+    let pending = Arc::new(builder.directories.begin_bootstrap(id, builder.ids.as_ref()).await?);
     match prepare(builder, pending.clone(), name, publish).await {
         Ok(handle) => Ok(handle),
         Err(error @ StoreCreationError::PublishedButNotSynced { .. }) => Err(error),

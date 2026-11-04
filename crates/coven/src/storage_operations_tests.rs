@@ -33,7 +33,8 @@ async fn a_members_removal_deletes_their_synced_entries_before_it_applies() {
     let network = Network::new(2).await;
     let ana = &network.devices[0];
     let ben = &network.devices[1];
-    let laptop = ben.app.another_device();
+    let laptop_dir = tempfile::tempdir().unwrap();
+    let laptop = ben.app.another_device(laptop_dir.path().into());
     let saved = crate::tests::readable(laptop.saved_restore_codes().await.unwrap());
     assert_eq!(saved.len(), 1);
     assert!(saved[0].has_s3_credentials);
@@ -72,7 +73,8 @@ async fn a_rename_rewrites_the_saved_name_before_it_applies() {
     let network = Network::new(2).await;
     let ana = &network.devices[0];
     let ben = &network.devices[1];
-    let laptop = ben.app.another_device();
+    let laptop_dir = tempfile::tempdir().unwrap();
+    let laptop = ben.app.another_device(laptop_dir.path().into());
     ben.stop_sync().await;
     let applied = ben.handle.applied_slot().await;
     crate::tests::landed(&ana.handle, ana.handle.rename_store("Family").await.unwrap()).await;
@@ -106,12 +108,13 @@ async fn a_removed_member_cannot_save_storage_credentials() {
     let network = Network::new(2).await;
     let ana = &network.devices[0];
     let ben = &network.devices[1];
-    let laptop = ben.app.another_device();
+    let laptop_dir = tempfile::tempdir().unwrap();
+    let laptop = ben.app.another_device(laptop_dir.path().into());
     let removal = ana.handle.remove_member(&own_member(&ben.handle).await).await.unwrap();
     crate::tests::landed(&ana.handle, removal).await;
     ben.handle.sync_now();
     removed(&ben.handle).await;
-    let held = |app: &TestCoven| {
+    let held = |app: &Coven| {
         app.store_keychain(ben.store)
             .storage_credentials()
             .unwrap()
@@ -161,7 +164,8 @@ async fn leave(refused: bool) {
         .await;
     let ana = &network.devices[0];
     let ben = &network.devices[1];
-    let laptop = ben.app.another_device();
+    let laptop_dir = tempfile::tempdir().unwrap();
+    let laptop = ben.app.another_device(laptop_dir.path().into());
     assert_eq!(crate::tests::readable(laptop.saved_restore_codes().await.unwrap()).len(), 1);
     let member = own_member(&ben.handle).await;
     ben.app.refuse_person_entry_operations(refused);
@@ -193,13 +197,13 @@ async fn leave(refused: bool) {
 async fn removing_one_device_keeps_the_person_entries() {
     let network = Network::with_schema(CloudProvider::S3, Vec::new(), Vec::new()).await;
     let phone = &network.devices[0];
-    let laptop = phone.app.another_device();
+    let laptop_dir = tempfile::tempdir().unwrap();
+    let laptop = phone.app.another_device(laptop_dir.path().into());
     let saved = crate::tests::readable(laptop.saved_restore_codes().await.unwrap());
-    let root = tempfile::tempdir().unwrap();
     let (_, cancel) = tokio::sync::watch::channel(false);
     let restored = restore_from_saved_code(
         laptop
-            .builder(StoreLayout::new(root.path().into()))
+            .builder()
             .synced_tables(Vec::new())
             .migrations(Vec::new())
             .clock(std::sync::Arc::new(crate::tests::PollingClock::new(network.clock.clone())))
@@ -233,13 +237,13 @@ async fn removing_one_device_keeps_the_person_entries() {
 async fn a_device_is_removable_right_after_its_restore_finished() {
     let network = Network::with_schema(CloudProvider::S3, Vec::new(), Vec::new()).await;
     let phone = &network.devices[0];
-    let laptop = phone.app.another_device();
+    let laptop_dir = tempfile::tempdir().unwrap();
+    let laptop = phone.app.another_device(laptop_dir.path().into());
     let saved = crate::tests::readable(laptop.saved_restore_codes().await.unwrap());
-    let root = tempfile::tempdir().unwrap();
     let (_, cancel) = tokio::sync::watch::channel(false);
     let restored = restore_from_saved_code(
         laptop
-            .builder(StoreLayout::new(root.path().into()))
+            .builder()
             .synced_tables(Vec::new())
             .migrations(Vec::new())
             .clock(std::sync::Arc::new(crate::tests::PollingClock::new(network.clock.clone())))

@@ -411,7 +411,7 @@ async fn a_join_that_fails_to_end_still_lists_and_the_next_call_ends_it() {
         waiting_join(&owner, &install, &invite).await;
         let request = next_join_request(&owner.handle).await;
         owner.handle.decline_join_request(&request).await.unwrap();
-        let pending = install.layout.begin_bootstrap(store, &UuidIds).await.unwrap();
+        let pending = install.app.directories().begin_bootstrap(store, &UuidIds).await.unwrap();
         // The first deletion that fails: the sign-in's, or the code's after it.
         install.keychain.fail_operations_after(&[usize::from(sign_in_removed)]);
         let ended = remove_unfinished(

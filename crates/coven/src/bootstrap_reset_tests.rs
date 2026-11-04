@@ -7,7 +7,7 @@ use coven_storage::{
 use std::time::{Duration, UNIX_EPOCH};
 
 struct Fixture {
-    app: TestCoven,
+    app: Coven,
     handle: CovenHandle,
     storage: Arc<MemoryStorage>,
     /// The connector over `storage` every handle opens with.
@@ -20,7 +20,7 @@ struct Fixture {
 impl Fixture {
     async fn new() -> Self {
         let root = tempfile::tempdir().unwrap();
-        let app = TestCoven::new();
+        let app = Coven::in_memory(root.path().into());
         let clock = Arc::new(FixedClock::new(UNIX_EPOCH + Duration::from_secs(1000)));
         let storage = Arc::new(
             MemoryStorage::builder()
@@ -29,13 +29,9 @@ impl Fixture {
                 .build()
                 .unwrap(),
         );
-        let directory = app
-            .create_closed_store(&StoreLayout::new(root.path().into()), "Reset", Arc::new(UuidIds))
-            .await
-            .unwrap();
+        let directory = app.create_closed_store("Reset", Arc::new(UuidIds)).await.unwrap();
         let connector = crate::tests::Connector::new(storage.clone());
-        let handle =
-            builder(&app, &root, &clock, &connector).open(directory.id(), |_| ()).await.unwrap();
+        let handle = builder(&app, &clock, &connector).open(directory.id(), |_| ()).await.unwrap();
 
         Self { app, handle, storage, connector, clock, directory, _root: root }
     }
@@ -54,12 +50,11 @@ impl Fixture {
 }
 
 fn builder(
-    app: &TestCoven,
-    root: &tempfile::TempDir,
+    app: &Coven,
     clock: &Arc<FixedClock>,
     connector: &Arc<crate::tests::Connector>,
 ) -> CovenBuilder {
-    app.builder(StoreLayout::new(root.path().into()))
+    app.builder()
         .clock(clock.clone())
         .storage_connector(connector.clone())
         .synced_tables(vec![SyncedTable::new("notes", RowIdentity::SharedKey)])
@@ -103,7 +98,7 @@ async fn notes(handle: &CovenHandle) -> Vec<String> {
 }
 
 fn reopen(f: &Fixture) -> CovenBuilder {
-    builder(&f.app, &f._root, &f.clock, &f.connector)
+    builder(&f.app, &f.clock, &f.connector)
 }
 
 /// The hidden directory a replacement loads in, inside the store's (§19.3).
@@ -376,9 +371,8 @@ async fn a_reset_interrupted_after_its_swap_is_finished_by_the_next_reset() {
         reopen(&f).open(store, |_| ()).await,
         Err(CovenError::Lock(error)) if unfinished(&error)
     ));
-    let layout = StoreLayout::new(f._root.path().into());
     assert_eq!(
-        layout.stores().await.unwrap(),
+        f.app.stores().await.unwrap(),
         [StoreInfo {
             id: store,
             name: "Reset".into(),
@@ -416,7 +410,7 @@ async fn a_reset_interrupted_after_its_swap_is_finished_by_the_next_reset() {
     assert_eq!(notes(&handle).await, ["kept"]);
     assert!(!loading_area(&f).exists());
     handle.close().await.unwrap();
-    assert_eq!(layout.stores().await.unwrap()[0].unfinished_replacement, None);
+    assert_eq!(f.app.stores().await.unwrap()[0].unfinished_replacement, None);
 }
 
 /// A reset that fails while its new device loads changes nothing: the store
@@ -492,9 +486,9 @@ async fn a_keychain_without_the_store_refuses_and_names_the_missing_member_keys(
     let old = f.directory.settings().unwrap().device_id;
     // Another keychain, as after the app changes its service name: neither the
     // device entry nor the member keys are there, so only a restore continues.
-    let renamed = TestCoven::new();
+    let renamed = Coven::in_memory(f._root.path().into());
     assert!(matches!(
-        builder(&renamed, &f._root, &f.clock, &f.connector)
+        builder(&renamed, &f.clock, &f.connector)
             .open(f.directory.id(), |_| ())
             .await,
         Err(CovenError::MemberKeysMissing { store }) if store == f.directory.id()
@@ -548,7 +542,7 @@ async fn an_unconnected_reset_keeps_files_when_the_local_name_cannot_be_read() {
 async fn a_reset_with_replaced_member_keys_refuses_and_changes_nothing() {
     let mut network = crate::tests::Network::new(2).await;
     let crate::tests::KeysReplaced { carol, member, .. } = network.replace_keys_elsewhere().await;
-    let directory = carol.layout.store_dir(&carol.store);
+    let directory = carol.app.store_dir(&carol.store);
     let settings = directory.settings().unwrap();
     let before = held(&carol.app, carol.store);
     let devices = network.devices[0].handle.members().await.unwrap();

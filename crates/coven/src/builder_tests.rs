@@ -29,12 +29,11 @@ fn migrations() -> Vec<Migration> {
 #[tokio::test]
 async fn opening_reports_its_steps_to_the_app() {
     let root = tempfile::tempdir().unwrap();
-    let layout = StoreLayout::new(root.path().into());
-    let app = TestCoven::new();
-    let directory = app.create_closed_store(&layout, "Household", Arc::new(UuidIds)).await.unwrap();
+    let app = Coven::in_memory(root.path().into());
+    let directory = app.create_closed_store("Household", Arc::new(UuidIds)).await.unwrap();
     let seen = std::cell::RefCell::new(Vec::new());
     let handle = app
-        .builder(layout.clone())
+        .builder()
         .synced_tables(tables())
         .namespaces(namespaces())
         .migrations(migrations())
@@ -53,10 +52,9 @@ async fn opening_reports_its_steps_to_the_app() {
 #[tokio::test]
 async fn app_reopening_resumes_operations_and_files_using_one_storage_capability() {
     let root = tempfile::tempdir().unwrap();
-    let layout = StoreLayout::new(root.path().into());
-    let app = TestCoven::new();
+    let app = Coven::in_memory(root.path().into());
     let ids = Arc::new(UuidIds);
-    let directory = app.create_closed_store(&layout, "Household", ids.clone()).await.unwrap();
+    let directory = app.create_closed_store("Household", ids.clone()).await.unwrap();
     let clock = Arc::new(FixedClock::new(UNIX_EPOCH));
     let storage = Arc::new(
         MemoryStorage::builder()
@@ -66,15 +64,12 @@ async fn app_reopening_resumes_operations_and_files_using_one_storage_capability
             .unwrap(),
     );
     let member = MemberIdentity::generate(MemberId(uuid::Uuid::from_u128(0x4d))).unwrap();
-    let scoped = Arc::new(StoreKeychain::new(
-        app.builder(layout.clone()).keychain().unwrap(),
-        directory.id(),
-    ));
+    let scoped = Arc::new(StoreKeychain::new(app.builder().keychain().unwrap(), directory.id()));
     let identity = Arc::new(KeyringCustody::<MemberIdentity>::new(scoped.clone()));
     identity.persist(&member).unwrap();
     let keys = Arc::new(KeyringCustody::<StoreKeyring>::new(scoped));
     let open = || {
-        app.builder(layout.clone())
+        app.builder()
             .synced_tables(tables())
             .namespaces(namespaces())
             .migrations(migrations())
@@ -295,10 +290,8 @@ mod recovery {
             },
         ] {
             let root = tempfile::tempdir().unwrap();
-            let layout = StoreLayout::new(root.path().into());
-            let app = TestCoven::new();
-            let directory =
-                app.create_closed_store(&layout, "Recovery", Arc::new(UuidIds)).await.unwrap();
+            let app = Coven::in_memory(root.path().into());
+            let directory = app.create_closed_store("Recovery", Arc::new(UuidIds)).await.unwrap();
             let clock = Arc::new(FixedClock::new(UNIX_EPOCH));
             let sign_in = crate::authentication::SignIn::new().await;
             let storage = Arc::new(
@@ -312,7 +305,7 @@ mod recovery {
             let connector = crate::tests::Connector::new(storage.clone());
             let builder = || {
                 sign_in.configure(
-                    app.builder(layout.clone())
+                    app.builder()
                         .synced_tables(recovery_tables())
                         .migrations(recovery_migrations())
                         .clock(clock.clone())
@@ -488,15 +481,11 @@ mod recovery {
 #[tokio::test]
 async fn creation_identity_matches_settings_before_and_after_reopening() {
     let root = tempfile::tempdir().unwrap();
-    let layout = StoreLayout::new(root.path().into());
-    let app = TestCoven::new();
-    let directory = app.create_closed_store(&layout, "Recipes", Arc::new(UuidIds)).await.unwrap();
+    let app = Coven::in_memory(root.path().into());
+    let directory = app.create_closed_store("Recipes", Arc::new(UuidIds)).await.unwrap();
     let storage = Arc::new(MemoryStorage::builder().build().unwrap());
     let builder = || {
-        app.builder(layout.clone())
-            .synced_tables(vec![])
-            .migrations(vec![])
-            .storage_connector(storage.clone())
+        app.builder().synced_tables(vec![]).migrations(vec![]).storage_connector(storage.clone())
     };
     // Directory settings identify the store before creation is published.
     let handle = builder().open(directory.id(), |_| ()).await.unwrap();
@@ -544,8 +533,7 @@ async fn creation_identity_matches_settings_before_and_after_reopening() {
 #[tokio::test]
 async fn the_apps_sqlite_settings_reach_both_handles_from_creation() {
     let root = tempfile::tempdir().unwrap();
-    let layout = StoreLayout::new(root.path().into());
-    let app = TestCoven::new();
+    let app = Coven::in_memory(root.path().into());
     let settings = SqliteSettings {
         cache_size: Some(CacheSize::Kibibytes(65536)),
         wal_autocheckpoint: Some(WalAutocheckpoint::Off),
@@ -553,12 +541,8 @@ async fn the_apps_sqlite_settings_reach_both_handles_from_creation() {
         auto_vacuum: Some(AutoVacuum::Incremental),
         ..SqliteSettings::default()
     };
-    let builder = || {
-        app.builder(layout.clone())
-            .synced_tables(vec![])
-            .migrations(vec![])
-            .sqlite_settings(settings.clone())
-    };
+    let builder =
+        || app.builder().synced_tables(vec![]).migrations(vec![]).sqlite_settings(settings.clone());
     let handle = builder().create_store("Recipes").await.unwrap();
     let chosen = |effect: SqliteSettingsInEffect| {
         (effect.cache_size, effect.wal_autocheckpoint, effect.page_size, effect.auto_vacuum)
@@ -583,10 +567,9 @@ async fn the_apps_sqlite_settings_reach_both_handles_from_creation() {
 #[tokio::test]
 async fn the_apps_collations_reach_both_handles_from_creation() {
     let root = tempfile::tempdir().unwrap();
-    let layout = StoreLayout::new(root.path().into());
-    let app = TestCoven::new();
+    let app = Coven::in_memory(root.path().into());
     let builder = || {
-        app.builder(layout.clone())
+        app.builder()
             .synced_tables(vec![SyncedTable::new("notes", RowIdentity::SharedKey)])
             .migrations(vec![Migration::addition(
                 1,
@@ -626,10 +609,9 @@ async fn the_apps_collations_reach_both_handles_from_creation() {
 #[tokio::test]
 async fn the_apps_functions_reach_both_handles_from_creation() {
     let root = tempfile::tempdir().unwrap();
-    let layout = StoreLayout::new(root.path().into());
-    let app = TestCoven::new();
+    let app = Coven::in_memory(root.path().into());
     let builder = || {
-        app.builder(layout.clone())
+        app.builder()
             .synced_tables(vec![SyncedTable::new("notes", RowIdentity::SharedKey)])
             .migrations(vec![Migration::addition(
                 1,
@@ -709,17 +691,12 @@ fn refused_class(error: &(dyn std::error::Error + 'static)) -> bool {
 #[tokio::test]
 async fn the_chosen_protection_class_reaches_every_file_of_the_store() {
     let root = tempfile::tempdir().unwrap();
-    let layout = StoreLayout::new(root.path().into());
-    let app = TestCoven::new();
-    let plain = || {
-        app.builder(layout.clone())
-            .synced_tables(tables())
-            .namespaces(namespaces())
-            .migrations(migrations())
-    };
+    let app = Coven::in_memory(root.path().into());
+    let plain =
+        || app.builder().synced_tables(tables()).namespaces(namespaces()).migrations(migrations());
     let builder = |class| plain().file_protection(class);
     if !FileProtection::settable_in(root.path()).unwrap() {
-        refused_on_a_volume_without_classes(&layout, plain, builder).await;
+        refused_on_a_volume_without_classes(&app, plain, builder).await;
         return;
     }
     let assert_store = |store: &std::path::Path, class| {
@@ -762,14 +739,14 @@ async fn the_chosen_protection_class_reaches_every_file_of_the_store() {
 /// with one, though it opens without.
 #[cfg(target_vendor = "apple")]
 async fn refused_on_a_volume_without_classes(
-    layout: &StoreLayout,
+    app: &Coven,
     plain: impl Fn() -> CovenBuilder,
     builder: impl Fn(FileProtection) -> CovenBuilder,
 ) {
     let created = builder(FileProtection::CompleteUnlessOpen).create_store("Household").await;
     let error = created.map(drop).unwrap_err();
     assert!(refused_class(&error), "{error:?}");
-    assert!(layout.stores().await.unwrap().is_empty());
+    assert!(app.stores().await.unwrap().is_empty());
     let handle = plain().create_store("Household").await.unwrap();
     let id = handle.store_id();
     handle.close().await.unwrap();

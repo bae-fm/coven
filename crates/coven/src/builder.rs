@@ -6,8 +6,8 @@ use coven_crypto::custody::{
     StoreCustody, StoreKeychain,
 };
 use coven_database::{DatabaseBuilder, OpenStep};
-use coven_foundation::files::StoreDirAccess;
 use coven_foundation::files::StoreFile;
+use coven_foundation::files::{StoreDirAccess, StoreDirectoriesAccess};
 use coven_foundation::progress::Progress;
 #[cfg(test)]
 use coven_foundation::progress::RecordingClock;
@@ -20,13 +20,14 @@ use std::sync::Arc;
 /// The choices for creating or opening a store (E1).
 #[cfg_attr(
     not(feature = "test-utils"),
-    doc = "\nProduction builders cannot replace the random id source.\n```compile_fail\nuse coven::{Coven, StoreLayout, UuidIds};\nuse std::sync::Arc;\nlet builder = Coven::builder(StoreLayout::new(\"stores\".into()));\nlet _ = builder.id_source(Arc::new(UuidIds));\n```"
+    doc = "\nProduction builders cannot replace the random id source.\n```compile_fail\nuse coven::{Coven, UuidIds};\nuse std::sync::Arc;\nlet coven = Coven::new(\"stores\".into(), \"com.example.notes\").unwrap();\nlet _ = coven.builder().id_source(Arc::new(UuidIds));\n```"
 )]
 pub struct CovenBuilder {
     tables: Option<Vec<SyncedTable>>,
     namespaces: Vec<coven_database::Namespace>,
     migrations: Option<Vec<Migration>>,
-    layout: StoreLayout,
+    directories: coven_foundation::files::StoreDirectories,
+    keychain: Arc<Keychain>,
     ids: IdSourceRef,
     clock: ClockRef,
     connector: Option<Arc<dyn StorageConnector>>,
@@ -42,8 +43,6 @@ pub struct CovenBuilder {
     identity: CustodyChoice<IdentityCustody, MemberIdentity>,
     sqlite: SqliteSettings,
     sql_functions: coven_database::SqlFunctions,
-    #[cfg(any(test, feature = "test-utils"))]
-    keychain: Option<Arc<Keychain>>,
     /// Stop a replacement right after its swap, as if the process ended there.
     #[cfg(test)]
     interrupt_after_swap: bool,
@@ -60,14 +59,19 @@ enum CustodyChoice<C, T> {
 }
 
 impl CovenBuilder {
-    pub(crate) fn new(layout: StoreLayout) -> Self {
+    pub(crate) fn new(
+        directories: coven_foundation::files::StoreDirectories,
+        keychain: Arc<Keychain>,
+        network: coven_foundation::network_watch::NetworkSource,
+    ) -> Self {
         let ids: IdSourceRef = Arc::new(UuidIds);
         let clock: ClockRef = Arc::new(SystemClock);
         Self {
             tables: None,
             namespaces: Vec::new(),
             migrations: None,
-            layout,
+            directories,
+            keychain,
             ids,
             clock,
             connector: None,
@@ -78,13 +82,11 @@ impl CovenBuilder {
             presenter: None,
             authentication: None,
             transfers: Arc::new(coven_storage::TransferBudget::new(TransferLimits::default())),
-            network: coven_foundation::network_watch::NetworkSource::Platform,
+            network,
             keys: CustodyChoice::Configured(KeyCustody::Keyring),
             identity: CustodyChoice::Configured(IdentityCustody::Keyring),
             sqlite: SqliteSettings::default(),
             sql_functions: coven_database::SqlFunctions::default(),
-            #[cfg(any(test, feature = "test-utils"))]
-            keychain: None,
             #[cfg(test)]
             interrupt_after_swap: false,
             #[cfg(test)]
@@ -118,12 +120,6 @@ impl CovenBuilder {
     #[cfg(any(test, feature = "test-utils"))]
     pub fn id_source(mut self, ids: IdSourceRef) -> Self {
         self.ids = ids;
-        self
-    }
-    /// Replace the platform's network with one the test drives (E5).
-    #[cfg(any(test, feature = "test-utils"))]
-    pub fn network(mut self, network: coven_foundation::network_watch::TestNetwork) -> Self {
-        self.network = coven_foundation::network_watch::NetworkSource::Test(network);
         self
     }
     /// Replace provider construction in tests while exercising setup, credential
@@ -236,7 +232,7 @@ impl CovenBuilder {
     /// folder's.
     #[cfg(target_vendor = "apple")]
     pub fn file_protection(mut self, protection: FileProtection) -> Self {
-        self.layout = self.layout.file_protection(protection);
+        self.directories = self.directories.file_protection(protection);
         self
     }
 
@@ -418,7 +414,7 @@ impl CovenBuilder {
         mut self,
         store: StoreId,
     ) -> Result<CovenReadHandle, ReadOnlyOpenError> {
-        let directory = self.layout.store_dir(&store);
+        let directory = self.directories.store_dir(&store);
         let ids = self.ids.clone();
         let clock = self.clock.clone();
         // A read-only handle cannot persist a cooldown; it holds its own requests.
@@ -504,15 +500,11 @@ impl CovenBuilder {
     }
 
     fn keychain(&self) -> Result<Arc<Keychain>, KeyError> {
-        #[cfg(any(test, feature = "test-utils"))]
-        if let Some(keychain) = &self.keychain {
-            return Ok(keychain.clone());
-        }
-        Keychain::registered()
+        Ok(self.keychain.clone())
     }
 
     async fn open_graph(self, store: StoreId) -> CovenResult<OpeningStore> {
-        let directory = self.layout.store_dir(&store);
+        let directory = self.directories.store_dir(&store);
         let database = self.database(directory.clone())?;
         let lock = directory.lock_for_open().await?;
         let closing = lock.closing_guard();
@@ -652,12 +644,6 @@ impl CovenBuilder {
             KeyCustody::Custom(keys) => keys,
         };
         Ok(Arc::new(KeySession::store(custody)?))
-    }
-
-    #[cfg(any(test, feature = "test-utils"))]
-    pub(crate) fn with_keychain(mut self, keychain: Arc<Keychain>) -> Self {
-        self.keychain = Some(keychain);
-        self
     }
 
     /// Make the next replacement stop right after its swap, undoing nothing.

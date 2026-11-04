@@ -77,7 +77,7 @@ async fn restore_loads_snapshots_and_later_writes_and_registers_the_device() {
     let owner = Owner::new(CloudProvider::S3, true).await;
     let install = Installation::new();
     let handle = install.restore(&owner).await;
-    let directory = install.layout.store_dir(&owner.directory.id());
+    let directory = install.app.store_dir(&owner.directory.id());
     assert_eq!(handle.restore_code().await.unwrap(), owner.code.to_text().unwrap().as_str());
     let (person, _) = keychain_code(
         &PersonEntries::new(install.keychain.clone(), owner.directory.id()),
@@ -249,7 +249,8 @@ async fn restart_while_waiting_reuses_the_member_device_and_request_bytes() {
     .unwrap();
     let bytes = owner.storage.read(&crate::tests::request_path(&invite)).await.unwrap();
     drop(joining);
-    let pending = install.layout.begin_bootstrap(owner.directory.id(), &UuidIds).await.unwrap();
+    let pending =
+        install.app.directories().begin_bootstrap(owner.directory.id(), &UuidIds).await.unwrap();
     drop(pending.directory().lock_exclusive().unwrap());
     let device = pending.directory().settings().unwrap().device_id;
     drop(pending);
@@ -267,7 +268,7 @@ async fn restart_while_waiting_reuses_the_member_device_and_request_bytes() {
     };
     let (result, ()) = join_with_response(resumed, approve).await;
     let handle = result.unwrap().unwrap();
-    let directory = install.layout.store_dir(&owner.directory.id());
+    let directory = install.app.store_dir(&owner.directory.id());
     assert_eq!(directory.settings().unwrap().device_id, device);
     assert_eq!(
         keychain_code(
@@ -374,7 +375,7 @@ async fn s3_credential_changes_preserve_the_code_location_and_member_across_reop
     let owner = Owner::new(CloudProvider::S3, false).await;
     let install = Installation::new();
     let handle = install.restore(&owner).await;
-    let directory = install.layout.store_dir(&owner.directory.id());
+    let directory = install.app.store_dir(&owner.directory.id());
     let before = handle.restore_code().await.unwrap();
     let code = coven_sync::read_restore_code(&before).unwrap();
     let person = PersonEntries::new(install.keychain.clone(), directory.id());
@@ -417,8 +418,9 @@ async fn s3_credential_changes_preserve_the_code_location_and_member_across_reop
         },
     );
     handle.close().await.unwrap();
-    let handle = Coven::builder(install.layout.clone())
-        .with_keychain(install.keychain.clone())
+    let handle = install
+        .app
+        .builder()
         .synced_tables(tables())
         .migrations(migrations())
         .clock(owner.clock.clone())
@@ -615,7 +617,7 @@ async fn failed_access_publication_retains_credentials_and_retry_finishes_once()
     let owner = Owner::new(CloudProvider::S3, false).await;
     let install = Installation::new();
     let handle = install.restore(&owner).await;
-    let directory = install.layout.store_dir(&owner.directory.id());
+    let directory = install.app.store_dir(&owner.directory.id());
     let before = handle.restore_code().await.unwrap();
     let slots = || async {
         crate::tests::stored(&owner.storage, owner.directory.id(), |path| {
@@ -666,8 +668,9 @@ async fn failed_access_publication_retains_credentials_and_retry_finishes_once()
     owner.sync().await;
     assert_eq!(slots().await, entries_before + 1);
     handle.close().await.unwrap();
-    let disconnected = Coven::builder(install.layout.clone())
-        .with_keychain(install.keychain.clone())
+    let disconnected = install
+        .app
+        .builder()
         .synced_tables(tables())
         .migrations(migrations())
         .open(directory.id(), |_| ())
@@ -746,8 +749,8 @@ async fn restores_return_session_keys_and_builder_choices_without_reopening() {
                 })
                 .await
                 .unwrap();
-            assert_eq!(install.layout.stores().await.unwrap().len(), 1);
-            let directory = install.layout.store_dir(&owner.directory.id());
+            assert_eq!(install.app.stores().await.unwrap().len(), 1);
+            let directory = install.app.store_dir(&owner.directory.id());
             assert!(matches!(directory.lock_exclusive(), Err(StoreLockError::AlreadyOpen(_))));
             let member = coven_sync::read_restore_code(&handle.restore_code().await.unwrap())
                 .unwrap()
@@ -809,18 +812,12 @@ async fn missing_keychain_code_returns_none_without_creating_a_store() {
             .remove(0);
     person.delete_restore_code().unwrap();
     let (_, cancel) = watch::channel(false);
-    let result = restore_from_saved_code(
-        Coven::builder(install.layout.clone()).with_keychain(install.keychain.clone()),
-        &saved,
-        None,
-        "Laptop",
-        |_| {},
-        &cancel,
-    )
-    .await
-    .unwrap();
+    let result =
+        restore_from_saved_code(install.app.builder(), &saved, None, "Laptop", |_| {}, &cancel)
+            .await
+            .unwrap();
     assert!(result.is_none());
-    assert!(install.layout.stores().await.unwrap().is_empty());
+    assert!(install.app.stores().await.unwrap().is_empty());
     owner.close().await;
 }
 

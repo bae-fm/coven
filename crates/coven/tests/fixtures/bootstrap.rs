@@ -30,7 +30,7 @@ impl Owner {
         let network = crate::tests::Network::with_schema(provider, tables(), migrations()).await;
         let device = &network.devices[0];
         let handle = device.handle.clone();
-        let directory = device.layout.store_dir(&device.store);
+        let directory = device.app.store_dir(&device.store);
         let storage = device.storage.clone();
         let clock = network.clock.clone();
         let code = coven_sync::read_restore_code(&handle.restore_code().await.unwrap()).unwrap();
@@ -139,20 +139,21 @@ impl Owner {
 #[cfg(test)]
 pub(super) struct Installation {
     pub(super) root: tempfile::TempDir,
-    pub(super) layout: StoreLayout,
+    pub(super) app: Coven,
     pub(super) keychain: Arc<Keychain>,
 }
 
 impl Installation {
     pub(super) fn new() -> Self {
         let root = tempfile::tempdir().unwrap();
-        let layout = StoreLayout::new(root.path().into());
-        Self { root, layout, keychain: Keychain::in_memory("bootstrap-test").unwrap() }
+        let keychain = Keychain::in_memory("bootstrap-test").unwrap();
+        let app = Coven::with_keychain(root.path().into(), keychain.clone());
+        Self { root, app, keychain }
     }
 
     pub(super) fn builder(&self, owner: &Owner, storage: Arc<MemoryStorage>) -> CovenBuilder {
-        Coven::builder(self.layout.clone())
-            .with_keychain(self.keychain.clone())
+        self.app
+            .builder()
             .synced_tables(tables())
             .migrations(migrations())
             .clock(Arc::new(crate::tests::PollingClock::new(owner.clock.clone())))
@@ -262,7 +263,7 @@ impl Installation {
         &self,
         id: StoreId,
     ) -> Option<coven_storage::OAuthTokens> {
-        assert!(self.layout.stores().await.unwrap().is_empty());
+        assert!(self.app.stores().await.unwrap().is_empty());
         let scoped = Arc::new(StoreKeychain::new(self.keychain.clone(), id));
         let person = PersonEntries::new(self.keychain.clone(), id);
         assert!(StoreKeyCustody::unlock(&KeyringCustody::new(scoped.clone())).unwrap().is_none());
