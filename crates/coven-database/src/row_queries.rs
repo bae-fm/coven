@@ -61,8 +61,7 @@ pub(crate) fn register_schema(
         for key in &table.foreign_keys {
             definition_id(
                 database,
-                "_coven_foreign_keys",
-                "identity",
+                FOREIGN_KEYS,
                 &table.name,
                 &encoded(merge_fields::encode_foreign_key(&schema.foreign_key(table, key)))?,
             )?;
@@ -103,8 +102,7 @@ pub(crate) fn constraint(
 ) -> Result<i64, DbError> {
     definition_id(
         database,
-        "_coven_constraints",
-        "identity",
+        CONSTRAINTS,
         table,
         &encoded(merge_fields::encode_unique_constraint(constraint))?,
     )
@@ -124,26 +122,35 @@ pub(crate) fn read_identity(r: &rusqlite::Row<'_>) -> rusqlite::Result<RowId> {
     Ok(RowId { table: r.get(0)?, key: r.get(1)?, audience: audience(&r.get::<_, String>(2)?)? })
 }
 
+/// A table-scoped metadata definition's statements: record it once, and
+/// read its stable row id.
+struct Definitions {
+    insert: &'static str,
+    id: &'static str,
+}
+
+const FOREIGN_KEYS: Definitions = Definitions {
+    insert:
+        "INSERT INTO _coven_foreign_keys(table_name,identity) VALUES(?1,?2) ON CONFLICT DO NOTHING",
+    id: "SELECT id FROM _coven_foreign_keys WHERE table_name=?1 AND identity=?2",
+};
+
+const CONSTRAINTS: Definitions = Definitions {
+    insert:
+        "INSERT INTO _coven_constraints(table_name,identity) VALUES(?1,?2) ON CONFLICT DO NOTHING",
+    id: "SELECT id FROM _coven_constraints WHERE table_name=?1 AND identity=?2",
+};
+
 /// Insert a table-scoped metadata definition once and return its stable row id.
-pub(crate) fn definition_id(
+fn definition_id(
     database: &DatabaseConnection,
-    metadata: &'static str,
-    column: &'static str,
+    definitions: Definitions,
     table: &str,
     identity: &dyn rusqlite::ToSql,
 ) -> Result<i64, DbError> {
     let parameters = rusqlite::params![table, identity];
-    database.internal_execute(
-        &format!(
-            "INSERT INTO {metadata}(table_name,{column}) VALUES(?1,?2) ON CONFLICT DO NOTHING"
-        ),
-        parameters,
-    )?;
-    database.query_row(
-        &format!("SELECT id FROM {metadata} WHERE table_name=?1 AND {column}=?2"),
-        parameters,
-        |r| r.get(0),
-    )
+    database.internal_execute(definitions.insert, parameters)?;
+    database.query_row(definitions.id, parameters, |r| r.get(0))
 }
 
 #[cfg(test)]

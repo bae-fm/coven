@@ -605,17 +605,6 @@ mod source {
             );
             return Vec::new();
         }
-        if sql.contains("{metadata}") {
-            assert_eq!(file, "row_queries.rs");
-            return [
-                ("_coven_columns", "column_name"),
-                ("_coven_foreign_keys", "identity"),
-                ("_coven_constraints", "identity"),
-            ]
-            .into_iter()
-            .map(|(table, column)| sql.replace("{metadata}", table).replace("{column}", column))
-            .collect();
-        }
         // A row's cells, and the written values it keeps, bound as lists of
         // a length only the row knows; two of each stand for any.
         if file == "write_commit.rs" && sql.contains("{values}") {
