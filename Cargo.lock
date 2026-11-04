@@ -3098,8 +3098,7 @@ dependencies = [
 [[package]]
 name = "sqlite3-parser"
 version = "0.17.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fbb44bfd84bfd1bde5ee215dd0b27d10c3c601a1b7cf03a91c7d6f607f2a10f7"
+source = "git+https://github.com/bae-fm/lemon-rs?rev=c0fc0b12a08a8bab5cdd93182e99344dca796cd3#c0fc0b12a08a8bab5cdd93182e99344dca796cd3"
 dependencies = [
  "bitflags",
  "bumpalo",

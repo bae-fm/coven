@@ -122,3 +122,7 @@ debug = "line-tables-only"
 
 [profile.test.package."*"]
 opt-level = 3
+
+[patch.crates-io]
+# v0.17.0 plus the scanner fix that builds a token's debug position only when it is kept.
+sqlite3-parser = { git = "https://github.com/bae-fm/lemon-rs", rev = "c0fc0b12a08a8bab5cdd93182e99344dca796cd3" }
