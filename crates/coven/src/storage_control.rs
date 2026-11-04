@@ -88,6 +88,11 @@ impl StorageConnections {
             {
                 return self.give_up(coven_sync::connection_failure(error)).await;
             }
+            // The cooldown's end changes what the person's retry would do,
+            // even while the connection's backoff still holds. Taken before
+            // the write below, so a cooldown that ends after it wakes the
+            // attempt to write that.
+            let cooldown = self.waits.cooldown_wake();
             // A held pass answers the retries acted on at once, and a
             // cooldown that ended is written.
             if self.waits.answer_held(retry.held(&self.waits)).await.is_err() {
@@ -105,9 +110,6 @@ impl StorageConnections {
             {
                 let wake =
                     self.waits.next_wake(|subject| *subject == coven_database::RetrySubject::Sync);
-                // The cooldown's end changes what the person's retry would
-                // do, even while the connection's backoff still holds.
-                let cooldown = self.waits.cooldown_wake();
                 tokio::select! {
                     () = async { if let Some(wake) = wake { wake.await } else { std::future::pending().await } } => {}
                     () = async { if let Some(cooldown) = cooldown { cooldown.await } else { std::future::pending().await } } => {}

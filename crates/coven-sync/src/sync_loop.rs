@@ -230,6 +230,11 @@ async fn run(
                 }
             }
         }
+        // The cooldown's end wakes the loop to write it. Taken before the
+        // write below, so a cooldown that write still finds live, but that
+        // ends before the loop waits, wakes it at once instead of leaving
+        // the row saying it holds.
+        let cooldown = sync.waits.cooldown_wake();
         // A pass held by a cooldown, or by a failure only the person can
         // clear, answers the retries acted on at once (IO `held_answers`),
         // and what a retry would do is written again, with a cooldown that
@@ -269,7 +274,6 @@ async fn run(
         let due = !paused
             && retry.held(&sync.waits).is_none()
             && sync.waits.due(RetrySubject::Sync, previous.as_ref());
-        let cooldown = sync.waits.cooldown_wake();
         tokio::select! {
             biased;
             command = commands.recv() => match command {

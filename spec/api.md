@@ -3724,7 +3724,9 @@ while let Some(Ok(values)) = lost.next().await {
     to the millisecond, rounded up, so the row and the answer name one
     instant. Its end is a write too: the connection's owner wakes when the
     cooldown ends and writes it, and any earlier step that finds it over
-    writes it first, so the app polls nothing. While sync is stopped the row
+    writes it first, so the app polls nothing. The owner takes that wake
+    before it writes the row, so a cooldown the write still names that ends
+    right after wakes it too. While sync is stopped the row
     keeps no cooldown, since no owner would write its end; a held failure
     stays across stopping and starting, as the connection's retry state does.
     Opening writes `not_syncing` with nothing held

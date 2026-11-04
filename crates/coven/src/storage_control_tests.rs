@@ -615,12 +615,13 @@ async fn an_uploads_cooldown_is_published_until_it_ends() {
     network.sync(0).await;
     let mut effect = device.handle.test_retry_effect();
     assert_eq!(effect.latest().await, RetryEffect::Pass);
+    // The cooldown ends only as the test moves the clock.
+    network.polling.hold_waits();
     device
         .storage
         .set_faults(Faults {
             fail_next: 1,
             failure: StorageFailure::RateLimited,
-            // Two hundred seconds pass in two hundred milliseconds here.
             retry_after: Some(200),
             ..Faults::none()
         })
@@ -631,6 +632,7 @@ async fn an_uploads_cooldown_is_published_until_it_ends() {
     // The upload waits, so its retry after the cooldown wakes nothing. Idle
     // passes come every thirty seconds here; the cooldown's end comes first.
     device.handle.set_uploads_paused(true).await.unwrap();
+    network.clock.set(until);
     effect.wait_for(|effect| *effect == RetryEffect::Pass).await;
     let outcome = answer(device.handle.retry_now().await.unwrap()).await;
     assert!(matches!(outcome, RetryOutcome::Synced { .. }), "{outcome:?}");
