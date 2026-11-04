@@ -10177,7 +10177,13 @@ shared state.
   deadlines (§6.7) the retry module's.
   A trigger on a domain's table that writes no domain's table is that
   table's schema: the pins' triggers on the stored files and on the cache
-  keep the pins table, so their file is a home of both domains. Every table
+  keep the pins table, so their file is a home of both domains. A write to
+  a view is the writes of the view's `INSTEAD OF` triggers for that
+  operation, through views in turn, so a trigger that brings another
+  domain's tables up to date by inserting into that domain's view writes
+  that domain. A domain keeps its views as it keeps its tables, each
+  `CREATE VIEW` in its homes: the views whose `INSTEAD OF` triggers write
+  its tables alone, and the views it names. Every table
   is in one domain, and a module changing another domain's table asks that
   domain's module to make the write. A second module is a home of a domain
   only where it writes the domain's tables in bulk, a table at a time, as a

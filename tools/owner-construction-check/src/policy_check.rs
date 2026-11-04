@@ -11,7 +11,7 @@ use syn::visit::{self, Visit};
 use crate::capability_construction::construction_only_types;
 use crate::crate_code::CrateCode;
 use crate::crate_dependencies::{dependency_entries, dependency_package};
-use crate::database_boundary::schema_table_macros;
+use crate::database_boundary::{schema_table_macros, schema_views};
 use crate::macros::parse_macro_body;
 use crate::owner_graph::OwnerGraph;
 use crate::policy::{Database, Policy};
@@ -453,6 +453,7 @@ fn invalid_database(code: &CrateCode, workspace: &Workspace, policy: &Policy) ->
             );
         }
     }
+    stale.extend(invalid_domain_views(code, database, &schema));
     if !database.domains.is_empty() {
         let placed = database
             .domains
@@ -464,6 +465,41 @@ fn invalid_database(code: &CrateCode, workspace: &Workspace, policy: &Policy) ->
         }
         for table in placed.difference(&schema) {
             stale.push(format!("database: domain table {table} is not a schema table"));
+        }
+    }
+    stale
+}
+
+/// Each view a domain names is a view the crates' production SQL creates,
+/// not one of the schema's tables, and is in one domain.
+fn invalid_domain_views(
+    code: &CrateCode,
+    database: &Database,
+    schema: &BTreeSet<String>,
+) -> Vec<String> {
+    let views = schema_views(code);
+    let mut stale = Vec::new();
+    let mut keepers = BTreeMap::new();
+    for domain in &database.domains {
+        for view in &domain.views {
+            let name = view.to_lowercase();
+            if schema.contains(&name) {
+                stale.push(format!(
+                    "database: domain {} names view {view}, which is a schema table",
+                    domain.name
+                ));
+            } else if !views.is_view(&name) {
+                stale.push(format!(
+                    "database: domain {} names view {view}, which the SQL never creates",
+                    domain.name
+                ));
+            }
+            if let Some(other) = keepers.insert(name, domain.name.as_str()) {
+                stale.push(format!(
+                    "database: view {view} is in domains {other} and {}",
+                    domain.name
+                ));
+            }
         }
     }
     stale

@@ -582,3 +582,120 @@ fn test_code_writing_a_domains_tables_lives_in_its_homes() {
         ]
     );
 }
+
+fn view_policy() -> Policy {
+    Policy::fixture(
+        r#"
+        [database]
+        capability = "SQLite"
+
+        [[database.domains]]
+        name = "listing"
+        homes = ["crates/app-core/src/listing/"]
+        tables = ["note_listing"]
+        views = ["listing_moves"]
+        owner = "Listing"
+
+        [[database.domains]]
+        name = "records"
+        homes = ["crates/app-database/src/"]
+        tables = ["notes"]
+        owner = "Database"
+
+        [[capabilities]]
+        name = "SQLite"
+        homes = ["crates/app-database/src/"]
+        "#,
+    )
+}
+
+/// The listing's procedure view: inserting into it refreshes the listing.
+const LISTING_VIEWS: &str = "CREATE TABLE note_listing (id TEXT);
+CREATE VIEW listing_refresh AS SELECT id FROM note_listing;
+CREATE TRIGGER listing_refreshed INSTEAD OF INSERT ON listing_refresh BEGIN
+    DELETE FROM note_listing WHERE id = new.id;
+    INSERT INTO note_listing VALUES (new.id);
+END;
+CREATE VIEW listing_moves AS SELECT id FROM note_listing;
+CREATE TRIGGER listing_moved INSTEAD OF INSERT ON listing_moves BEGIN
+    SELECT RAISE(ABORT, 'moves are read only');
+END;";
+
+fn view_violations(files: &[RustFile], sql: &[SqlFile]) -> Vec<(String, usize, String)> {
+    find_database_boundary_violations(&CrateCode::of(files, sql), &view_policy())
+        .into_iter()
+        .map(|violation| (violation.path, violation.line, violation.message))
+        .collect()
+}
+
+/// A write to a view is its `INSTEAD OF` triggers' writes: a trigger on the
+/// records that inserts into the listing's procedure view writes the
+/// listing, so it lives in the listing's homes, and is no part of the
+/// records' schema there.
+#[test]
+fn a_write_to_a_view_is_its_instead_of_triggers_writes() {
+    let views = sql("crates/app-core/src/listing/views.sql", LISTING_VIEWS);
+    let follows = "CREATE TRIGGER listing_follows AFTER INSERT ON notes BEGIN
+    INSERT INTO listing_refresh VALUES (new.id);
+END;";
+    assert_eq!(
+        view_violations(
+            &[],
+            &[views.clone(), sql("crates/app-core/src/listing/follows.sql", follows)]
+        ),
+        []
+    );
+    assert_eq!(
+        view_violations(&[], &[views, sql("crates/app-database/src/follows.sql", follows)]),
+        [(
+            "crates/app-database/src/follows.sql".to_string(),
+            2,
+            "SQL writes note_listing through the view listing_refresh, which only the listing domain writes, in crates/app-core/src/listing/".to_string()
+        )]
+    );
+}
+
+/// A domain keeps the views whose triggers write its tables alone, and those
+/// it names; a view writing several domains that none names is refused.
+#[test]
+fn a_domain_keeps_its_views() {
+    let views = sql("crates/app-core/src/listing/views.sql", LISTING_VIEWS);
+    let elsewhere = sql(
+        "crates/app-database/src/views.sql",
+        "CREATE VIEW listing_refresh AS SELECT 1;
+CREATE TRIGGER refresh_checked INSTEAD OF DELETE ON listing_refresh BEGIN SELECT RAISE(ABORT, 'no'); END;
+CREATE VIEW listing_moves AS SELECT 1;
+CREATE VIEW note_moves AS SELECT 1;
+CREATE TRIGGER note_moved INSTEAD OF INSERT ON note_moves BEGIN
+    INSERT INTO note_listing VALUES (new.id);
+    DELETE FROM notes WHERE id = new.id;
+END;",
+    );
+    let homes = "crates/app-core/src/listing/";
+    let violations = view_violations(&[], &[views, elsewhere]);
+    let schema = |line, what: &str| {
+        (
+            "crates/app-database/src/views.sql".to_string(),
+            line,
+            format!("SQL {what}, whose schema the listing domain keeps in {homes}"),
+        )
+    };
+    assert_eq!(
+        violations,
+        [
+            schema(1, "creates view listing_refresh"),
+            schema(2, "creates a trigger, writing no domain's table, on listing_refresh"),
+            schema(3, "creates view listing_moves"),
+            (
+                "crates/app-database/src/views.sql".to_string(),
+                4,
+                "SQL creates view note_moves, whose INSTEAD OF triggers write the tables of domains listing, records".to_string()
+            ),
+            (
+                "crates/app-database/src/views.sql".to_string(),
+                6,
+                format!("SQL writes note_listing, which only the listing domain writes, in {homes}")
+            ),
+        ]
+    );
+}

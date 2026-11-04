@@ -279,9 +279,11 @@ pub(crate) struct Database {
 
 /// A domain: tables whose schema and writes only its homes hold. SQL
 /// elsewhere may read them; writing one — `INSERT`, `UPDATE`, `DELETE` or
-/// `REPLACE`, in a statement or in a trigger's body — is the domain's own
-/// work, and so are their `CREATE` statements and the tests that write them
-/// (`database_boundary.rs`).
+/// `REPLACE`, in a statement or in a trigger's body, or through a view whose
+/// `INSTEAD OF` triggers write it — is the domain's own work, and so are
+/// their `CREATE` statements and the tests that write them. The domain keeps
+/// its views too: those it names, and those whose `INSTEAD OF` triggers write
+/// only its tables (`database_boundary.rs`).
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Domain {
@@ -291,6 +293,10 @@ pub(crate) struct Domain {
     pub(crate) homes: Vec<String>,
     /// Table names, as SQL writes them; they compare without case.
     pub(crate) tables: Vec<String>,
+    /// Views the domain keeps whose `INSTEAD OF` triggers don't write its
+    /// tables alone, as SQL writes them; they compare without case.
+    #[serde(default)]
+    pub(crate) views: Vec<String>,
     /// The owner that does the domain's work: the type holding what the
     /// domain's writes go through (`domain_owners.rs`).
     pub(crate) owner: String,

@@ -33,6 +33,7 @@ mod policy_check;
 mod report;
 mod retained_capability_parameters;
 mod rust_prelude;
+mod schema_views;
 mod sources;
 mod sql_statements;
 mod syntax;

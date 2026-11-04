@@ -11,9 +11,14 @@
 //! the database's homes included (`sql_statements.rs`):
 //!
 //! - a statement that writes the table, or a trigger whose body does, is
-//!   the domain's own work;
+//!   the domain's own work, and so is a write to a view whose `INSTEAD OF`
+//!   triggers write it, through views in turn (`schema_views.rs`);
 //! - the table's `CREATE TABLE` and `CREATE INDEX`, and a trigger on it that
 //!   writes no domain's table, are its schema;
+//! - a domain keeps its views as it keeps its tables: those its `views` name,
+//!   and those whose `INSTEAD OF` triggers write its tables alone. A view
+//!   whose triggers write several domains' tables is named by the domain that
+//!   keeps it;
 //! - both are read where the text is written: in a `.sql` file, or in a
 //!   string literal, a macro's definition included, so the code invoking a
 //!   macro writes nothing itself;
@@ -39,7 +44,8 @@ use crate::crate_code::CrateCode;
 use crate::macros::{parse_macro_body, token_paths, token_strings, unparsed_tokens};
 use crate::module_sources::module_sources;
 use crate::policy::{describe_homes, Domain, Policy};
-use crate::sql_statements::{line_of, statements, Creation};
+use crate::schema_views::SchemaViews;
+use crate::sql_statements::{line_of, statements, Creation, Statement};
 use crate::syntax::RustFile;
 
 /// rusqlite's raw handles. Only the database crate holds one.
@@ -59,7 +65,7 @@ pub(crate) fn find_database_boundary_violations(code: &CrateCode, policy: &Polic
         .as_ref()
         .and_then(|database| database.rusqlite_reexport.as_deref())
         .map(|package| package.replace('-', "_"));
-    let domains = Domains::of(policy);
+    let domains = Domains::of(policy, schema_views(code));
     for file in &code.expanded {
         let mut visitor = DatabaseBoundaryVisitor {
             path: &file.relative_path,
@@ -121,27 +127,77 @@ fn confined_remedy(confined_to: &str) -> String {
     )
 }
 
-/// The policy's domains, by table.
+/// The views the crates' production SQL creates: in its `.sql` files and in
+/// its string literals, as the domains read them.
+pub(crate) fn schema_views(code: &CrateCode) -> SchemaViews {
+    let mut texts = code.sql.iter().map(|file| file.text.clone()).collect::<Vec<_>>();
+    for file in &code.written {
+        SqlLiterals::new(|literal: &syn::LitStr| texts.push(literal.value()))
+            .visit_file(&file.syntax);
+    }
+    SchemaViews::collect(texts.iter().map(String::as_str))
+}
+
+/// The policy's domains, by table and by view.
 struct Domains<'a> {
     /// Each domain's tables, lowercase, and the domain.
     tables: BTreeMap<String, &'a Domain>,
+    /// Each view a domain keeps, lowercase, and the domain.
+    views: BTreeMap<String, &'a Domain>,
+    /// Each view no domain names whose `INSTEAD OF` triggers write several
+    /// domains' tables, with those domains.
+    shared_views: BTreeMap<String, BTreeSet<&'a str>>,
+    schema_views: SchemaViews,
 }
 
 impl<'a> Domains<'a> {
-    fn of(policy: &'a Policy) -> Self {
-        Self {
-            tables: policy
-                .database
+    fn of(policy: &'a Policy, schema_views: SchemaViews) -> Self {
+        let domains = || policy.database.iter().flat_map(|database| &database.domains);
+        let tables: BTreeMap<String, &Domain> = domains()
+            .flat_map(|domain| {
+                domain.tables.iter().map(move |table| (table.to_lowercase(), domain))
+            })
+            .collect();
+        let mut views: BTreeMap<String, &Domain> = domains()
+            .flat_map(|domain| domain.views.iter().map(move |view| (view.to_lowercase(), domain)))
+            .collect();
+        let mut shared_views = BTreeMap::new();
+        for view in schema_views.names() {
+            if views.contains_key(view) {
+                continue;
+            }
+            let writers = schema_views
+                .tables_behind(view)
                 .iter()
-                .flat_map(|database| &database.domains)
-                .flat_map(|domain| {
-                    domain.tables.iter().map(move |table| (table.to_lowercase(), domain))
-                })
-                .collect(),
+                .filter_map(|table| tables.get(table).copied())
+                .map(|domain| (domain.name.as_str(), domain))
+                .collect::<BTreeMap<_, _>>();
+            match writers.len() {
+                0 => {}
+                1 => {
+                    views.extend(writers.into_values().map(|domain| (view.clone(), domain)));
+                }
+                _ => {
+                    shared_views.insert(view.clone(), writers.into_keys().collect());
+                }
+            }
         }
+        Self { tables, views, shared_views, schema_views }
     }
 
-    /// Each write `sql` makes to a domain's table outside the domain's homes.
+    /// Whether any table `statement` writes, through views or not, is in a
+    /// domain.
+    fn writes_a_domain(&self, statement: &Statement) -> bool {
+        statement.writes.iter().any(|write| {
+            self.schema_views
+                .tables(&write.table, write.operation)
+                .iter()
+                .any(|table| self.tables.contains_key(table))
+        })
+    }
+
+    /// Each write `sql` makes to a domain's table outside the domain's homes,
+    /// directly or through a view.
     fn check_writes(
         &self,
         path: &str,
@@ -149,28 +205,39 @@ impl<'a> Domains<'a> {
         line: impl Fn(usize) -> usize,
         violations: &mut BTreeSet<Finding>,
     ) {
-        for write in statements(sql).into_iter().flat_map(|statement| statement.writes) {
-            let Some(domain) = self.tables.get(&write.table) else { continue };
-            if domain.holds(path) {
-                continue;
+        for statement in statements(sql) {
+            let mut reported = BTreeSet::new();
+            for write in &statement.writes {
+                for table in self.schema_views.tables(&write.table, write.operation) {
+                    let Some(domain) = self.tables.get(&table) else { continue };
+                    if domain.holds(path) || !reported.insert(table.clone()) {
+                        continue;
+                    }
+                    let through = if table == write.table {
+                        String::new()
+                    } else {
+                        format!(" through the view {}", write.table)
+                    };
+                    violations.insert(Finding::new(
+                        path,
+                        line(write.at),
+                        format!(
+                            "SQL writes {table}{through}, which only the {} domain writes, in {}",
+                            domain.name,
+                            describe_homes(&domain.homes)
+                        ),
+                        "a table is written only in its domain's homes; ask the domain to make the write, or move the SQL there",
+                    ));
+                }
             }
-            violations.insert(Finding::new(
-                path,
-                line(write.at),
-                format!(
-                    "SQL writes {}, which only the {} domain writes, in {}",
-                    write.table,
-                    domain.name,
-                    describe_homes(&domain.homes)
-                ),
-                "a table is written only in its domain's homes; ask the domain to make the write, or move the SQL there",
-            ));
         }
     }
 
     /// Each part of a domain's schema `sql` creates outside the domain's
-    /// homes: a table, an index on one, or a trigger on one writing no
-    /// domain's table (a trigger writing one is its write, `check_writes`).
+    /// homes: a table, a view, an index on a table, or a trigger on either
+    /// writing no domain's table (a trigger writing one is its write,
+    /// `check_writes`); and each view no domain names whose triggers write
+    /// several domains' tables.
     fn check_schema(
         &self,
         path: &str,
@@ -179,20 +246,31 @@ impl<'a> Domains<'a> {
         violations: &mut BTreeSet<Finding>,
     ) {
         for statement in statements(sql) {
-            let (what, table) = match statement.creation {
+            let writes_a_domain = self.writes_a_domain(&statement);
+            let (what, name) = match statement.creation {
                 Some(Creation::Table(table)) => ("creates table", table),
+                Some(Creation::View(view)) => ("creates view", view),
                 Some(Creation::Index(table)) => ("indexes", table),
-                Some(Creation::Trigger(table))
-                    if statement
-                        .writes
-                        .iter()
-                        .all(|write| !self.tables.contains_key(&write.table)) =>
-                {
+                Some(Creation::Trigger { table, .. }) if !writes_a_domain => {
                     ("creates a trigger, writing no domain's table, on", table)
                 }
                 _ => continue,
             };
-            let Some(domain) = self.tables.get(&table) else { continue };
+            if let Some(writers) = self.shared_views.get(&name) {
+                violations.insert(Finding::new(
+                    path,
+                    line(statement.at),
+                    format!(
+                        "SQL creates view {name}, whose INSTEAD OF triggers write the tables of domains {}",
+                        writers.iter().copied().collect::<Vec<_>>().join(", ")
+                    ),
+                    "a view is kept by one domain: name it in the views of the domain that keeps it",
+                ));
+                continue;
+            }
+            let Some(domain) = self.tables.get(&name).or_else(|| self.views.get(&name)) else {
+                continue;
+            };
             if domain.holds(path) {
                 continue;
             }
@@ -200,11 +278,11 @@ impl<'a> Domains<'a> {
                 path,
                 line(statement.at),
                 format!(
-                    "SQL {what} {table}, whose schema the {} domain keeps in {}",
+                    "SQL {what} {name}, whose schema the {} domain keeps in {}",
                     domain.name,
                     describe_homes(&domain.homes)
                 ),
-                "a domain keeps its tables' schema with it: each table's CREATE TABLE and CREATE INDEX, and a trigger on it writing no domain's table, sit in the table's domain's homes",
+                "a domain keeps its tables' and views' schema with it: each table's CREATE TABLE and CREATE INDEX, each view's CREATE VIEW, and a trigger on either writing no domain's table, sit in the domain's homes",
             ));
         }
     }

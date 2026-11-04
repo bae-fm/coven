@@ -1,15 +1,17 @@
 //! What a piece of SQL text does to a schema's tables, statement by
-//! statement: the table a `CREATE TABLE` makes, the table a `CREATE INDEX`
-//! indexes or a `CREATE TRIGGER` fires on, and the tables each statement
-//! writes.
+//! statement: the table a `CREATE TABLE` makes, the view a `CREATE VIEW`
+//! makes, the table a `CREATE INDEX` indexes or a `CREATE TRIGGER` fires on,
+//! with the operation an `INSTEAD OF` trigger stands in for, and the tables
+//! each statement writes, with how.
 //!
 //! A write is the table after `INSERT INTO`, `REPLACE INTO`, `UPDATE` and
 //! `DELETE FROM`, with SQLite's `OR <conflict>` forms, wherever they stand —
 //! a statement on its own, a CTE's, or one in a `CREATE TRIGGER` body, which
 //! is the trigger's write. A trigger's own `AFTER UPDATE ON t` names the
 //! table it fires on, which it does not write. Reads (`SELECT`, `FROM`,
-//! `JOIN`) are not writes. A temporary table, index or trigger belongs to the
-//! connection that makes it, not to the schema, so its creation is none.
+//! `JOIN`) are not writes. A temporary table, view, index or trigger belongs
+//! to the connection that makes it, not to the schema, so its creation is
+//! none.
 //!
 //! Names compare as SQLite compares them: without case, quoted or not, and
 //! without a schema prefix (`main.notes` is `notes`). String literals and
@@ -46,17 +48,29 @@ pub(crate) struct Statement {
 pub(crate) enum Creation {
     /// `CREATE TABLE t` or `CREATE VIRTUAL TABLE t`.
     Table(String),
+    /// `CREATE VIEW v`.
+    View(String),
     /// `CREATE INDEX i ON t`.
     Index(String),
-    /// `CREATE TRIGGER g … ON t`.
-    Trigger(String),
+    /// `CREATE TRIGGER g … ON t`, and for `INSTEAD OF`, the operation on the
+    /// view `t` the trigger runs instead of.
+    Trigger { table: String, instead_of: Option<Operation> },
 }
 
-/// A table a statement writes, lowercase, and the byte offset of its name in
-/// the text.
+/// How a statement writes a table. `REPLACE INTO` inserts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum Operation {
+    Insert,
+    Update,
+    Delete,
+}
+
+/// A table a statement writes, lowercase, how it writes it, and the byte
+/// offset of its name in the text.
 #[derive(Debug, PartialEq)]
 pub(crate) struct Write {
     pub(crate) table: String,
+    pub(crate) operation: Operation,
     pub(crate) at: usize,
 }
 
@@ -146,8 +160,22 @@ fn creation(words: &[Located]) -> Option<Creation> {
     };
     match kind {
         "table" => Some(Creation::Table(name)),
+        "view" => Some(Creation::View(name)),
         "index" => on_table().map(Creation::Index),
-        "trigger" => on_table().map(Creation::Trigger),
+        "trigger" => {
+            let table = on_table()?;
+            // `INSTEAD OF INSERT ON v`, `INSTEAD OF UPDATE OF c ON v`.
+            let instead_of = (name_at(words, after) == Some("instead")
+                && name_at(words, after + 1) == Some("of"))
+            .then(|| match name_at(words, after + 2) {
+                Some("insert") => Some(Operation::Insert),
+                Some("update") => Some(Operation::Update),
+                Some("delete") => Some(Operation::Delete),
+                _ => None,
+            })
+            .flatten();
+            Some(Creation::Trigger { table, instead_of })
+        }
         _ => None,
     }
 }
@@ -156,25 +184,30 @@ fn writes(words: &[Located]) -> Vec<Write> {
     // SQLite's `OR ROLLBACK`, `OR REPLACE`, … after INSERT and UPDATE.
     let after_conflict =
         |index: usize| if name_at(words, index) == Some("or") { index + 2 } else { index };
-    let table_at = |index: usize| {
-        object_at(words, index).map(|(table, _, _)| Write { table, at: words[index].at })
+    let table_at = |index: usize, operation| {
+        object_at(words, index).map(|(table, _, _)| Write { table, operation, at: words[index].at })
     };
     let mut writes: Vec<Write> = Vec::new();
     for index in 0..words.len() {
         let write = match name_at(words, index) {
             Some("insert" | "replace") => {
                 let into = after_conflict(index + 1);
-                (name_at(words, into) == Some("into")).then(|| table_at(into + 1)).flatten()
+                (name_at(words, into) == Some("into"))
+                    .then(|| table_at(into + 1, Operation::Insert))
+                    .flatten()
             }
-            Some("update") => table_at(after_conflict(index + 1))
+            Some("update") => table_at(after_conflict(index + 1), Operation::Update)
                 .filter(|write| !matches!(write.table.as_str(), "set" | "of" | "on")),
-            Some("delete") => {
-                (name_at(words, index + 1) == Some("from")).then(|| table_at(index + 2)).flatten()
-            }
+            Some("delete") => (name_at(words, index + 1) == Some("from"))
+                .then(|| table_at(index + 2, Operation::Delete))
+                .flatten(),
             _ => None,
         };
         if let Some(write) = write {
-            if !writes.iter().any(|known| known.table == write.table) {
+            if !writes
+                .iter()
+                .any(|known| known.table == write.table && known.operation == write.operation)
+            {
                 writes.push(write);
             }
         }

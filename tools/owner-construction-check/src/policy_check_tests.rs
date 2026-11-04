@@ -408,6 +408,62 @@ fn sql_files_create_the_schemas_tables() {
     );
 }
 
+/// A domain's views are views the crates' production SQL creates, each in
+/// one domain.
+#[test]
+fn domains_name_views_the_sql_creates() {
+    let mut workspace = workspace(
+        vec![RustFile::fixture(
+            "crates/app-foundation/src/listing.rs",
+            r#"struct Listing { connection: Connection }
+            const VIEW: &str = "CREATE VIEW listing_moves AS SELECT id FROM listing";"#,
+        )],
+        &[("crates/app-foundation", "app-foundation")],
+    );
+    workspace.sql_files = [
+        ("crates/app-foundation/src/listing.sql", "CREATE TABLE listing (id TEXT);"),
+        ("crates/app-foundation/tests/fixture.sql", "CREATE VIEW fixture AS SELECT 1;"),
+    ]
+    .map(|(path, text)| SqlFile {
+        relative_path: path.into(),
+        package_root: "crates/app-foundation/".into(),
+        package: "app-foundation".into(),
+        text: text.into(),
+    })
+    .into();
+    let policy = Policy::fixture(
+        r#"rules = ["database-boundary"]
+        capability_types = ["Connection"]
+        external_types = ["Connection"]
+        [database]
+        capability = "SQLite"
+        [[database.domains]]
+        name = "listing"
+        homes = ["crates/app-foundation/src/"]
+        tables = ["listing"]
+        views = ["listing_moves", "listing", "fixture"]
+        owner = "Listing"
+        [[database.domains]]
+        name = "moves"
+        homes = ["crates/app-foundation/src/"]
+        tables = []
+        views = ["Listing_Moves"]
+        owner = "Listing"
+        [[capabilities]]
+        name = "SQLite"
+        homes = ["crates/app-foundation/src/"]
+        "#,
+    );
+    assert_eq!(
+        stale_rows(&workspace, &CrateCode::read(&workspace, &policy), &policy),
+        [
+            "database: domain listing names view listing, which is a schema table",
+            "database: domain listing names view fixture, which the SQL never creates",
+            "database: view Listing_Moves is in domains listing and moves",
+        ]
+    );
+}
+
 #[test]
 fn external_types_are_named_by_a_crate_and_declared_by_none() {
     let files = vec![

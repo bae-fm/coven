@@ -81,7 +81,7 @@ INSERT INTO notes (body) VALUES ('BEGIN; END;')";
             (2, Some(Creation::Index("notes".into())), vec![]),
             (
                 3,
-                Some(Creation::Trigger("notes".into())),
+                Some(Creation::Trigger { table: "notes".into(), instead_of: None }),
                 vec![("listing".into(), 4), ("search".into(), 5)]
             ),
             (7, None, vec![("notes".into(), 7)]),
@@ -89,20 +89,65 @@ INSERT INTO notes (body) VALUES ('BEGIN; END;')";
     );
 }
 
-/// Temporary objects belong to the connection that makes them; views are
-/// no tables.
+/// Temporary objects belong to the connection that makes them.
 #[test]
-fn temporary_objects_and_views_create_nothing_of_the_schema() {
+fn temporary_objects_create_nothing_of_the_schema() {
     for sql in [
         "CREATE TEMP TABLE staged (id INTEGER)",
         "CREATE TEMPORARY TABLE staged (id INTEGER)",
         "CREATE TABLE temp.staged (id INTEGER)",
         "CREATE INDEX temp.staged_id ON staged(id)",
         "CREATE TEMP TRIGGER staged_added AFTER INSERT ON main.notes BEGIN SELECT 1; END",
-        "CREATE VIEW IF NOT EXISTS listing AS SELECT * FROM notes",
+        "CREATE TEMP VIEW staged_listing AS SELECT * FROM notes",
     ] {
         assert_eq!(statements(sql)[0].creation, None, "{sql}");
     }
+}
+
+/// A view is schema, and an `INSTEAD OF` trigger on one names the operation
+/// it stands in for.
+#[test]
+fn views_and_the_operations_their_triggers_stand_in_for() {
+    assert_eq!(
+        statements("CREATE VIEW IF NOT EXISTS Listing AS SELECT * FROM notes")[0].creation,
+        Some(Creation::View("listing".into()))
+    );
+    for (sql, operation) in [
+        ("CREATE TRIGGER t INSTEAD OF INSERT ON listing BEGIN SELECT 1; END", Operation::Insert),
+        (
+            "CREATE TRIGGER IF NOT EXISTS t INSTEAD OF UPDATE OF body ON main.listing BEGIN SELECT 1; END",
+            Operation::Update,
+        ),
+        ("CREATE TRIGGER t INSTEAD OF DELETE ON listing BEGIN SELECT 1; END", Operation::Delete),
+    ] {
+        assert_eq!(
+            statements(sql)[0].creation,
+            Some(Creation::Trigger { table: "listing".into(), instead_of: Some(operation) }),
+            "{sql}"
+        );
+    }
+}
+
+/// Each write says how it writes: `REPLACE` inserts.
+#[test]
+fn each_write_names_its_operation() {
+    let operations = |sql: &str| {
+        statements(sql)
+            .into_iter()
+            .flat_map(|statement| statement.writes.into_iter().map(|write| write.operation))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        operations(
+            "INSERT INTO a VALUES (1); REPLACE INTO a VALUES (1); UPDATE a SET b = 1; DELETE FROM a"
+        ),
+        [Operation::Insert, Operation::Insert, Operation::Update, Operation::Delete]
+    );
+    // One statement writing a table two ways writes it once each way.
+    assert_eq!(
+        operations("CREATE TRIGGER t AFTER INSERT ON a BEGIN DELETE FROM b; INSERT INTO b VALUES (1); DELETE FROM b; END"),
+        [Operation::Delete, Operation::Insert]
+    );
 }
 
 #[test]
