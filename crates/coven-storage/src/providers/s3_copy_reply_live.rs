@@ -156,7 +156,7 @@ async fn multipart(
         return Err(StorageFailure::SessionMismatch.into());
     };
     let temporary = s.provider().session_key(&session)?;
-    races::multipart_request(s.provider(), &session)?.send().await.map_err(s3_error)?;
+    s.provider().completion(&session)?.send().await.map_err(s3_error)?;
     // Initiation stores the session token as both markers.
     publish(s.provider(), &temporary, target, condition, token.clone(), true).await
 }

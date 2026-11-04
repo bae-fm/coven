@@ -4,6 +4,34 @@ use aws_sdk_s3::error::ProvideErrorMetadata;
 use coven_foundation::id_source::DeviceId;
 
 impl S3Storage {
+    /// The request that assembles a session's uploaded parts, without a
+    /// condition on its destination.
+    pub(super) fn completion(
+        &self,
+        session: &UploadSession,
+    ) -> Result<
+        aws_sdk_s3::operation::complete_multipart_upload::builders::CompleteMultipartUploadFluentBuilder,
+        StorageError,
+    >{
+        let id = self.upload_id(session)?;
+        let SessionState::S3 { parts, .. } = &session.state else {
+            return Err(StorageFailure::SessionMismatch.into());
+        };
+        let completed = parts
+            .iter()
+            .map(|part| CompletedPart::builder().part_number(part.number).e_tag(&part.etag).build())
+            .collect();
+        Ok(self
+            .client
+            .complete_multipart_upload()
+            .bucket(&self.bucket)
+            .key(self.session_key(session)?)
+            .upload_id(id)
+            .multipart_upload(
+                CompletedMultipartUpload::builder().set_parts(Some(completed)).build(),
+            ))
+    }
+
     /// The reserved temporary named by `token` in `device`'s folder of
     /// `store`, outside every object path (D10).
     fn temporary_key(

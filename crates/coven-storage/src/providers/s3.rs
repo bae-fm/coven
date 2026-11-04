@@ -712,23 +712,7 @@ impl ProviderOps for S3Storage {
         if session.confirmed != session.total {
             return Err(StorageFailure::InvalidPart.into());
         }
-        let id = self.upload_id(session)?;
-        let SessionState::S3 { parts, .. } = &session.state else {
-            return Err(StorageFailure::SessionMismatch.into());
-        };
-        let completed = parts
-            .iter()
-            .map(|part| CompletedPart::builder().part_number(part.number).e_tag(&part.etag).build())
-            .collect();
-        let mut request = self
-            .client
-            .complete_multipart_upload()
-            .bucket(&self.bucket)
-            .key(self.session_key(session)?)
-            .upload_id(id)
-            .multipart_upload(
-                CompletedMultipartUpload::builder().set_parts(Some(completed)).build(),
-            );
+        let mut request = self.completion(session)?;
         if self.settings.copy_publication == S3CopyPublication::Never {
             request = match session.target() {
                 UploadTarget::Create(_) => request.if_none_match("*"),

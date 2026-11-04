@@ -3,7 +3,6 @@
 //! Concurrent certification uses native publication replies: adapter recovery
 //! must not hide two accepted writes. Preparation finishes before release.
 use super::*;
-use aws_sdk_s3::operation::complete_multipart_upload::builders::CompleteMultipartUploadFluentBuilder;
 
 #[derive(Clone, Copy, Debug)]
 pub(super) enum Race {
@@ -28,36 +27,6 @@ pub(super) enum Write {
 
 pub(super) use crate::providers::tests::sequence_live::{judge, Reply};
 
-/// The unconditional completion that assembles a session's upload.
-pub(super) fn multipart_request(
-    s: &S3Storage,
-    session: &UploadSession,
-) -> Result<CompleteMultipartUploadFluentBuilder, StorageError> {
-    let SessionState::S3 { id, parts, .. } = &session.state else {
-        return Err(StorageFailure::SessionMismatch.into());
-    };
-    Ok(s.client
-        .complete_multipart_upload()
-        .bucket(&s.bucket)
-        .key(s.session_key(session)?)
-        .upload_id(id.as_str())
-        .multipart_upload(
-            CompletedMultipartUpload::builder()
-                .set_parts(Some(
-                    parts
-                        .iter()
-                        .map(|part| {
-                            CompletedPart::builder()
-                                .part_number(part.number)
-                                .e_tag(&part.etag)
-                                .build()
-                        })
-                        .collect(),
-                ))
-                .build(),
-        ))
-}
-
 pub(super) async fn prepare(
     s: &StorageConnection<S3Storage>,
     target: &ObjectPath,
@@ -67,7 +36,7 @@ pub(super) async fn prepare(
     s.upload_part(&mut session, bytes).await?;
     if let Some(condition) = s.provider().settings.copy_publication.multipart() {
         // The profile's publication request is the copy, not temporary assembly.
-        multipart_request(s.provider(), &session)?.send().await.map_err(s3_error)?;
+        s.provider().completion(&session)?.send().await.map_err(s3_error)?;
         Ok(Write::Copy { temporary: s.provider().session_key(&session)?, condition })
     } else {
         Ok(Write::Complete(session))
@@ -129,7 +98,7 @@ pub(super) async fn fire(
                 .map_err(s3_error)?;
         }
         Write::Complete(session) => {
-            multipart_request(s, &session)?.if_none_match("*").send().await.map_err(s3_error)?;
+            s.completion(&session)?.if_none_match("*").send().await.map_err(s3_error)?;
         }
         Write::Copy { temporary, condition } => {
             let (header, value) = condition.header();
