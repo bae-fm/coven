@@ -7,7 +7,9 @@
 //! which ends the waits that followed an attempt with no answer from
 //! storage. Losing the network, or a network turning metered or unmetered,
 //! counts nothing. Where the platform can't tell, the watch says so: no
-//! network counts and none is metered.
+//! network counts and none is metered. A platform that fails to answer
+//! after the watch started can't tell either, but its network may be
+//! metered, so the watch calls it metered until the platform answers.
 
 // The platforms coven watches; elsewhere it can't tell.
 #[cfg(target_os = "android")]
@@ -39,8 +41,9 @@ pub struct NetworkState {
     /// Whether the device has a usable network; `None` where the platform
     /// can't tell.
     pub usable: Option<bool>,
-    /// Whether that network is metered: false with none, and where the
-    /// platform can't tell.
+    /// Whether coven treats that network as metered: the platform says it
+    /// is, or failed to answer since the watch started, so it may be. False
+    /// with no network, and where the platform never tells.
     pub metered: bool,
     /// How many times a usable network has appeared, or the device moved to
     /// another one, since the watch started, the network it found at the
@@ -108,13 +111,15 @@ impl NetworkSink {
     }
 
     /// The platform failed to say: a read it answered with an error after
-    /// the watch started. Coven can't tell until a read succeeds. The
-    /// network the device was last on stays its last, so that network read
-    /// again is no report: nothing said it changed.
+    /// the watch started. Coven can't tell until a read succeeds, and calls
+    /// the network metered meanwhile: it may be, and the setting to move
+    /// files only on unmetered networks moves them only on one known to be
+    /// unmetered. The network the device was last on stays its last, so
+    /// that network read again is no report: nothing said it changed.
     #[cfg(any(test, feature = "test-utils", windows))]
     pub(crate) fn cannot_tell(&mut self) {
         self.state.send_if_modified(|state| {
-            let next = NetworkState { joined: state.joined, ..NetworkState::UNKNOWN };
+            let next = NetworkState { usable: None, metered: true, joined: state.joined };
             let changed = *state != next;
             *state = next;
             changed
@@ -294,8 +299,8 @@ impl TestNetwork {
         self.state.lock().expect("test network poisoned").sink.observe(None);
     }
 
-    /// The platform fails to say what the network is: coven can't tell
-    /// until the test says again.
+    /// The platform fails to say what the network is: coven can't tell, and
+    /// calls the network metered, until the test says again.
     pub fn cannot_tell(&self) {
         self.state.lock().expect("test network poisoned").sink.cannot_tell();
     }

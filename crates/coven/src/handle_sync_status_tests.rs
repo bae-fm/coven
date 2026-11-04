@@ -106,6 +106,35 @@ async fn a_photo_waits_for_an_unmetered_network_and_a_cover_does_not() {
     network.close().await;
 }
 
+/// Ben's phone stops answering what its network is after his store opened:
+/// it may be cellular, so his photo waits as it would on a metered network,
+/// and `coven_network` says it can't tell. Once the phone answers again,
+/// unmetered, the photo uploads (§6.7, §17.9).
+#[tokio::test]
+async fn a_photo_waits_while_coven_cannot_tell_the_network() {
+    let network = household().await;
+    let ben = &network.devices[0];
+    ben.handle.set_unmetered_only(true).await.unwrap();
+    ben.app.network_cannot_tell();
+    let photo = stage(ben, "photos", "beach", vec![7; 4096]).await;
+    wait_for_sent(&ben.handle).await;
+    state(ben, |state| *state == SyncState::WaitingToSync(UploadWait::Metered)).await;
+    let shown: (Option<bool>, bool) = ben
+        .handle
+        .read(|sql| {
+            Ok(sql.query_row("SELECT usable,metered FROM coven_network", [], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })?)
+        })
+        .await
+        .unwrap();
+    assert_eq!(shown, (None, true));
+    ben.app.set_network_metered(false);
+    state(ben, |state| *state == SyncState::Synced).await;
+    assert!(file_stored(ben, photo).await);
+    network.close().await;
+}
+
 /// A cover is bound, so the pause doesn't hold it. While sync is stopped it
 /// waits on that; once a server error fails its upload, it waits on its own
 /// backoff, paused or not, and the error names nothing of its own (§17.4,

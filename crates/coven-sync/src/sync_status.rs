@@ -92,7 +92,8 @@ pub enum UploadWait {
     /// The app paused uploads, and the file's reference trails
     /// (`set_uploads_paused`, §17.4).
     Paused,
-    /// The network is metered, the app moves files only on unmetered
+    /// The network is metered, or may be, since the platform stopped
+    /// answering after opening (E5); the app moves files only on unmetered
     /// networks (`set_unmetered_only`, §17.9), and the file's reference
     /// trails.
     Metered,

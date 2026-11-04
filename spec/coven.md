@@ -1711,8 +1711,9 @@ leave every backoff to run out.
 - **Where the platform can't tell,** coven makes no report and calls no
   network metered. Waits then end on their timers or the person's retry, as
   they would on a platform with no watch at all. A platform that fails to
-  answer after the store opens can't tell until it answers again; the
-  network it then names makes a report only if it is another one.
+  answer after the store opens can't tell until it answers again, and
+  coven calls its network metered meanwhile: it may be (§17.9). The
+  network the platform then names makes a report only if it is another one.
 
 Whether the network is metered matters only to transfers: an app can ask
 that files move only on unmetered networks (§17.9). What the report does
@@ -6398,7 +6399,11 @@ his phone joins Wi-Fi, coven hears it (§6.7), and the photos go up.
   platform does (§6.7): cellular, a phone's hotspot, Low Data Mode, a
   connection marked metered. Where the platform says nothing, no network is
   metered and the setting holds nothing: holding every transfer on a guess
-  would stop them all for good on such a device.
+  would stop them all for good on such a device. A platform that answered
+  as the store opened and then fails to is different: the network may be
+  metered, and the setting moves files only on one known not to be, so it
+  holds what it holds on a metered network until the platform answers
+  again (§6.7). The state then says the network is metered.
 - **It belongs to this device.** The setting is a step of a write, like the
   pause, so Ben's app records its own switch in the same write, and it is
   persisted, so it holds from the moment the store opens, before the app has

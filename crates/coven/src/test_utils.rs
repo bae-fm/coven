@@ -112,6 +112,12 @@ impl TestCoven {
         self.network.lose();
     }
 
+    /// The platform fails to say what the device's network is: coven can't
+    /// tell, and calls it metered, until the test says again.
+    pub fn network_cannot_tell(&self) {
+        self.network.cannot_tell();
+    }
+
     /// The device's network turns metered or unmetered: no report.
     pub fn set_network_metered(&self, metered: bool) {
         self.network.set_metered(metered);

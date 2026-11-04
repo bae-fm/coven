@@ -299,7 +299,8 @@ structure Facts where
   paused : Bool
   /-- The setting to transfer only on unmetered networks is on. -/
   unmeteredOnly : Bool
-  /-- The platform says the device's network is metered. -/
+  /-- The platform says the device's network is metered, or failed to
+  answer after the store opened, so it may be. -/
   metered : Bool
   /-- The time of the last pass that reached the read end. -/
   lastSynced : Option Nat
@@ -770,7 +771,8 @@ inductive Event
   resumes uploads, or turns the setting to transfer only on unmetered
   networks on or off. -/
   | settings (running cooling paused unmeteredOnly : Bool)
-  /-- The platform says the device's network is now metered, or not. -/
+  /-- The platform says the device's network is now metered, or not, or
+  fails to answer, which counts as metered. -/
   | network (metered : Bool)
   /-- The process ends and the store opens again. -/
   | reopen

@@ -3072,7 +3072,7 @@ let moved = handle
 | `coven_downloading`: each stored file this process is downloading now to keep whole, for a pin (E8); never stored | `file` | the file's id |
 | `coven_upload_pause`: whether uploads are paused, in one row, with an empty queue too | `paused` | 1 while the app has paused uploads (`set_uploads_paused`); persisted across reopening |
 | `coven_network`: the device's network as coven last heard from the platform, and the setting that holds transfers on a metered one, in one row (E5, E7) | `usable` | 1 while the device has a usable network, 0 while it has none, NULL where coven can't tell; never stored, read from the platform as the store opens |
-| | `metered` | 1 while that network is metered; 0 with none, and where coven can't tell; never stored |
+| | `metered` | 1 while that network is metered, and while coven can't tell after the platform failed to answer since opening; 0 with none, and where the platform never tells; never stored |
 | | `unmetered_only` | 1 while the app moves files only on unmetered networks (`set_unmetered_only`); persisted across reopening |
 | `coven_upload_queue`: each file waiting in this device's upload queue, as `coven_uploads` lists it; a table, which local triggers can follow | `file` | the file's id, as in `coven_uploads` |
 | | `position` | its place in the queue, as in `coven_uploads` |
@@ -3760,6 +3760,9 @@ while let Some(Ok(values)) = lost.next().await {
     library. Windows and Linux read the network again at each change; a
     read that fails after opening logs an error and says coven can't tell,
     so `coven_network.usable` is NULL, until the next read succeeds.
+    Meanwhile coven calls the network metered, since it may be:
+    `coven_network.metered` says 1, and the setting holds what it holds on
+    a metered network, with `UploadWait::Metered` (E7).
   - `retry_now` is the person asking to retry everything now, such as by
     pulling to refresh. `sync_now` leaves every backoff in place; `retry_now`
     ends every ordinary one, answered or not: the connection's, operations',
@@ -5032,7 +5035,8 @@ pub enum UploadWait {
     /// The app paused uploads, and the file's reference trails
     /// (`set_uploads_paused`, §17.4).
     Paused,
-    /// The network is metered, the app moves files only on unmetered
+    /// The network is metered, or may be, since the platform stopped
+    /// answering after opening (E5); the app moves files only on unmetered
     /// networks (`set_unmetered_only`, §17.9), and the file's reference
     /// trails.
     Metered,
