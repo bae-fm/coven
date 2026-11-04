@@ -5318,7 +5318,8 @@ pub enum OperationKind {
     CreateCircle,
     /// Seal the circle's history and add a member.
     AddCircleMember,
-    /// Delete a circle's rows and publish its deletion.
+    /// Publish a circle's deletion; its rows are taken out from that slot
+    /// (§15.9).
     DeleteCircle,
     /// An owner’s device grants or takes back one account’s required access.
     RevokeAccess,

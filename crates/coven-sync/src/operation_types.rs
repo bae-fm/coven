@@ -55,7 +55,8 @@ pub enum OperationKind {
     CreateCircle,
     /// Seal a circle's history to a member.
     AddCircleMember,
-    /// Delete a circle's rows and publish its deletion.
+    /// Publish a circle's deletion; its rows are taken out from that slot
+    /// (§15.9).
     DeleteCircle,
     /// Share storage and settle an invitation.
     Invite,
