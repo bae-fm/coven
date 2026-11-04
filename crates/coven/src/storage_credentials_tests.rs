@@ -292,3 +292,48 @@ async fn custody_failure_rolls_back_credentials_before_claiming_the_creation() {
     assert_eq!(me.devices.len(), 1);
     handle.close().await.unwrap();
 }
+
+/// Store key custody whose forgetting panics, as a bug in an app's custody
+/// would.
+struct PanicsForgetting(std::sync::Mutex<Option<StoreKeyring>>);
+
+impl StoreKeyCustody for PanicsForgetting {
+    fn unlock(&self) -> Result<Option<StoreKeyring>, KeyError> {
+        Ok(self.0.lock().unwrap().clone())
+    }
+    fn persist(&self, keys: &StoreKeyring) -> Result<(), KeyError> {
+        *self.0.lock().unwrap() = Some(keys.clone());
+        Ok(())
+    }
+    fn forget(&self) -> Result<(), KeyError> {
+        panic!("the key's entry is locked")
+    }
+    fn close(&self) {}
+}
+
+/// Forgetting the store keys panics in custody: the call fails with the
+/// bug as `KeyError::Bug`, not as custody that is unavailable (E15).
+#[tokio::test]
+async fn a_panicking_key_forget_fails_with_its_bug() {
+    let f = Fixture::new().await;
+    f.handle.close().await.unwrap();
+    let handle = builder(&f.app, f.clock.clone(), f.storage.clone())
+        .key_custody(KeyCustody::Custom(Arc::new(PanicsForgetting(std::sync::Mutex::new(None)))))
+        .open(f.directory.id(), |_| ())
+        .await
+        .unwrap();
+    handle
+        .setup_s3_storage(
+            f.storage.config(),
+            "Test device",
+            "member-key".into(),
+            SecretText::new("secret".into()),
+            |_| {},
+        )
+        .await
+        .unwrap();
+    let failed = handle.forget_store_keys().await.unwrap_err();
+    let KeyError::Bug(bug) = &failed else { panic!("the call heard no bug: {failed:?}") };
+    assert_eq!(bug.message, "the key's entry is locked");
+    handle.close().await.unwrap();
+}

@@ -897,7 +897,12 @@ impl StorageConnections {
             result.map_err(|error| match error {
                 SyncError::SecureStorage(error) => error,
                 SyncError::Database(DbError::StoreClosed) => KeyError::StoreClosed,
-                error => KeyError::Unavailable(Box::new(error)),
+                // A bug is the call's own `Bug`, never custody that is
+                // unavailable (E15).
+                error => match crate::task::CarriesBug::bug(&error) {
+                    Some(bug) => KeyError::Bug(bug.clone()),
+                    None => KeyError::Unavailable(Box::new(error)),
+                },
             })
         })
         .await

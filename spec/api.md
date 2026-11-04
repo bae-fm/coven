@@ -7958,6 +7958,8 @@ impl CovenHandle {
     /// Finishes work using store keys, removes them from custody, erases
     /// them from the held session and drops the provider connection.
     /// A failed custody removal retains the previous session and connection.
+    /// A bug in the call's work, such as a panic in the app's custody, is
+    /// `KeyError::Bug` (E15).
     pub async fn forget_store_keys(&self) -> Result<(), KeyError>;
 
     /// Keeps an app secret, such as an API token, in the same keychain and
