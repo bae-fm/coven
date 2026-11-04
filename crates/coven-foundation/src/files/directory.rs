@@ -18,9 +18,6 @@ pub fn is_folder(path: &std::path::Path) -> bool {
 /// The store database file, also its name in a discarded device archive.
 pub(super) const DATABASE: &str = "store.db";
 
-pub(crate) const APP_FILES: &str = "files";
-pub(crate) const CACHE: &str = "cache";
-
 /// One file owned by a crate, beside the database and store settings.
 /// The enum reserves the name so a caller cannot replace the database or settings.
 #[derive(Clone, Copy, Debug)]
@@ -54,6 +51,18 @@ pub enum FileArea {
     AppProvided,
     /// The cache of uploaded files and chunks (§17.8).
     Cache,
+}
+
+impl FileArea {
+    const ALL: [Self; 2] = [Self::AppProvided, Self::Cache];
+
+    /// The area's folder in the store's directory.
+    const fn name(self) -> &'static str {
+        match self {
+            Self::AppProvided => "files",
+            Self::Cache => "cache",
+        }
+    }
 }
 
 /// A portable single filename: ASCII letters, digits, `-`, `_` and interior
@@ -151,14 +160,21 @@ impl StoreDir {
     pub fn id(&self) -> StoreId {
         self.id
     }
+
+    /// The folder of the store's file `area`, for a test that looks at the
+    /// files coven keeps there.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn area_path(&self, area: FileArea) -> std::path::PathBuf {
+        self.path.join(area.name())
+    }
 }
 
 pub(crate) fn initialize(
     path: &std::path::Path,
     settings: &StoreSettings,
 ) -> Result<(), SettingsError> {
-    for name in [APP_FILES, CACHE] {
-        let directory = path.join(name);
+    for area in FileArea::ALL {
+        let directory = path.join(area.name());
         std::fs::create_dir(&directory).map_err(|source| {
             crate::files::FileError::at("create store files directory", &directory, source)
         })?;
@@ -316,11 +332,7 @@ impl StoreDirAccess for StoreDir {
         AtomicFile::new(self.path.join(file.name()))
     }
     fn file(&self, area: FileArea, name: &FileName) -> AtomicFile {
-        let area = match area {
-            FileArea::AppProvided => APP_FILES,
-            FileArea::Cache => CACHE,
-        };
-        AtomicFile::new(self.path.join(area).join(&name.0))
+        AtomicFile::new(self.path.join(area.name()).join(&name.0))
     }
     fn create_writer(&self, area: FileArea, name: &FileName) -> Result<FileWriter, WriterError> {
         let lock = self.lock_read_only()?;

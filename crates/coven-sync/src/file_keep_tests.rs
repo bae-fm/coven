@@ -77,13 +77,8 @@ async fn an_app_file_kept_here_is_pinned_from_coven_copy_without_storage() {
     assert_eq!(requests.len(), 1);
     assert_eq!(requests[0].file, file);
     let copy = requests[0].copy.clone().expect("coven's copy is kept for the pin");
-    let copy = f
-        .root
-        .path()
-        .join("stores")
-        .join(f.directory.id().to_string())
-        .join("files")
-        .join(copy.as_str());
+    let copy =
+        f.directory.area_path(coven_foundation::files::FileArea::AppProvided).join(copy.as_str());
     assert!(copy.exists());
     let before = f.storage.request_trace().len();
     f.files.inner.keep_pinned().await.unwrap();
@@ -203,13 +198,8 @@ async fn a_damaged_copy_falls_back_to_downloading_the_kept_pin() {
     f.drain().await;
     let request = f.files.inner.database.pin_requests().await.unwrap().remove(0);
     let copy = request.copy.expect("an app file's request keeps coven's copy");
-    let path = f
-        .root
-        .path()
-        .join("stores")
-        .join(f.directory.id().to_string())
-        .join("files")
-        .join(copy.as_str());
+    let path =
+        f.directory.area_path(coven_foundation::files::FileArea::AppProvided).join(copy.as_str());
     std::fs::write(&path, vec![51; bytes.len()]).unwrap();
     let before = f.storage.request_trace().len();
     f.files.inner.keep_pinned().await.unwrap();
@@ -332,11 +322,8 @@ async fn io_differential_keep() {
             let copy =
                 f.files.inner.database.pin_requests().await.unwrap()[0].copy.clone().unwrap();
             let path = f
-                .root
-                .path()
-                .join("stores")
-                .join(f.directory.id().to_string())
-                .join("files")
+                .directory
+                .area_path(coven_foundation::files::FileArea::AppProvided)
                 .join(copy.as_str());
             std::fs::write(&path, vec![55; bytes.len()]).unwrap();
         }

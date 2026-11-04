@@ -65,6 +65,11 @@ impl StoreDirectories {
         self
     }
 
+    /// The folder that holds one directory per store.
+    fn stores(&self) -> PathBuf {
+        self.app_dir.join("stores")
+    }
+
     /// The stores on this device, ordered by id (E1), including those whose
     /// replacement is unfinished, but no unpublished first installation.
     /// Only directories with a canonical UUID name and matching valid settings
@@ -96,7 +101,7 @@ impl StoreDirectories {
         &self,
         installations: Installations,
     ) -> Result<Vec<StoreId>, StoreDirectoriesError> {
-        let root = self.app_dir.join("stores");
+        let root = self.stores();
         let entries = match fs::read_dir(&root) {
             Ok(entries) => entries,
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
@@ -152,7 +157,7 @@ impl StoreDirectories {
     /// The directory of the store with `id` (E1). This does not create it,
     /// read settings, or acquire the writer's lock.
     pub fn store_dir(&self, id: &StoreId) -> StoreDir {
-        StoreDir::new(self.app_dir.join("stores").join(id.to_string()), *id, self.protection)
+        StoreDir::new(self.stores().join(id.to_string()), *id, self.protection)
     }
 
     /// Publish a directory fixture without initializing member custody.
@@ -162,13 +167,7 @@ impl StoreDirectories {
         id: StoreId,
         ids: &dyn IdSource,
     ) -> Result<StoreDir, DirectoryCreationError> {
-        crate::files::creation::create(
-            &self.app_dir.join("stores"),
-            id,
-            ids,
-            false,
-            self.protection,
-        )
+        crate::files::creation::create(&self.stores(), id, ids, false, self.protection)
     }
 }
 
@@ -182,13 +181,8 @@ impl StoreDirectories {
         id: StoreId,
         ids: &dyn IdSource,
     ) -> Result<super::BootstrapStore, super::BootstrapDirectoryError> {
-        super::bootstrap::reserve_bootstrap_directory(
-            &self.app_dir.join("stores"),
-            id,
-            ids,
-            self.protection,
-        )
-        .await
+        super::bootstrap::reserve_bootstrap_directory(&self.stores(), id, ids, self.protection)
+            .await
     }
 
     /// Replace the installation of a published store, or continue a
@@ -203,7 +197,7 @@ impl StoreDirectories {
         by: super::ReplacedBy,
         ids: &dyn IdSource,
     ) -> Result<super::ReplacementStore, super::BootstrapDirectoryError> {
-        super::replacement::begin(&self.app_dir.join("stores"), id, by, ids, self.protection).await
+        super::replacement::begin(&self.stores(), id, by, ids, self.protection).await
     }
 }
 

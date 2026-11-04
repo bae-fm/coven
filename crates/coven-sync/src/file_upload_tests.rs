@@ -34,8 +34,7 @@ async fn same_size_edits_with_restored_mtime_send_no_changed_chunks() {
                     f.attach("files", "changed-during-upload", bytes.clone()).await
                 }
             };
-            let owned =
-                f.root.path().join("stores").join(f.directory.id().to_string()).join("files");
+            let owned = f.directory.area_path(coven_foundation::files::FileArea::AppProvided);
             let paths =
                 std::fs::read_dir(&owned).unwrap().map(|p| p.unwrap().path()).collect::<Vec<_>>();
             let path = match provenance {
@@ -224,11 +223,9 @@ async fn a_reopened_upload_refuses_a_changed_original_without_a_copy() {
     assert_eq!(item.files, [file.id()]);
     assert_eq!(f.storage.request_count(), 0);
     assert_eq!(
-        std::fs::read_dir(
-            f.root.path().join("stores").join(f.directory.id().to_string()).join("files")
-        )
-        .unwrap()
-        .count(),
+        std::fs::read_dir(f.directory.area_path(coven_foundation::files::FileArea::AppProvided))
+            .unwrap()
+            .count(),
         0
     );
     let path = f.root.path().join("recording");

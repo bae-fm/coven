@@ -22,8 +22,8 @@ pub(crate) async fn synced(handle: &CovenHandle) {
 
 /// How many cache files the device keeps.
 pub(crate) fn cached(device: &Device) -> usize {
-    use coven_foundation::files::StoreDirAccess;
-    let cache = device.app.store_dir(&device.store).database_path().parent().unwrap().join("cache");
+    let cache =
+        device.app.store_dir(&device.store).area_path(coven_foundation::files::FileArea::Cache);
     std::fs::read_dir(cache).map_or(0, Iterator::count)
 }
 

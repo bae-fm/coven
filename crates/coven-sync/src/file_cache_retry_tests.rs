@@ -48,7 +48,7 @@ async fn io_differential_download() {
             a.storage.corrupt_byte(&a.path(&file), 15).await.unwrap();
         }
         a.storage.set_online(fetched);
-        let cache = b.root.path().join("stores").join(b.directory.id().to_string()).join("cache");
+        let cache = b.directory.area_path(coven_foundation::files::FileArea::Cache);
         let saved = cache.with_file_name("saved-cache");
         if !disk {
             // A file where the cache directory belongs causes a real local

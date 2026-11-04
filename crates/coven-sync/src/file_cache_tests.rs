@@ -449,7 +449,7 @@ async fn a_kept_copy_evicted_before_the_write_fails_the_pin() {
 
 /// Files in the store's cache folder, published or not.
 fn cache_files(f: &Fixture) -> usize {
-    std::fs::read_dir(f.root.path().join("stores").join(f.directory.id().to_string()).join("cache"))
+    std::fs::read_dir(f.directory.area_path(coven_foundation::files::FileArea::Cache))
         .map(|entries| entries.count())
         .unwrap_or(0)
 }

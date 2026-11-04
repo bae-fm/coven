@@ -21,7 +21,7 @@ async fn restored_sources_upload_after_backoff() {
             FileSourceFailure::Integrity => {
                 let file = f.attach("files", "photo", bytes.clone()).await;
                 let directory =
-                    f.root.path().join("stores").join(f.directory.id().to_string()).join("files");
+                    f.directory.area_path(coven_foundation::files::FileArea::AppProvided);
                 let paths: Vec<_> = std::fs::read_dir(directory)
                     .unwrap()
                     .map(|entry| entry.unwrap().path())

@@ -2007,9 +2007,21 @@ pub enum MaterialError {
 /// brings the key in (§12.1).
 pub struct KeyId(pub Uuid);
 
+/// The two places coven keeps file bytes inside a store (E1).
+pub enum FileArea {
+    /// Coven's own copies of app-provided files (§17.1).
+    AppProvided,
+    /// The cache of uploaded files and chunks (§17.8).
+    Cache,
+}
+
 impl StoreDir {
     /// The store identified by this directory.
     pub fn id(&self) -> StoreId;
+    /// The folder of the store's file `area`, for a test that looks at the
+    /// files coven keeps there.
+    #[cfg(feature = "test-utils")]
+    pub fn area_path(&self, area: FileArea) -> PathBuf;
 }
 
 impl Coven {
