@@ -427,9 +427,10 @@ tables like these, so the list stays one query over the database:
 | View | One row per | Columns |
 | --- | --- | --- |
 | `coven_files` (a table) | file this device has a record of | `id`, `audience`, `size`, `hash`, `coordinates`, `namespace` |
-| `coven_uploads` | file waiting in this device's upload queue | `file`, `position`, `paused`, `retry_at`, `pending`, `bytes_confirmed`, `bytes_total`, `sending`, `move` |
+| `coven_uploads` | file waiting in this device's upload queue | `file`, `position`, `paused`, `metered`, `retry_at`, `pending`, `bytes_confirmed`, `bytes_total`, `sending`, `move` |
 | `coven_sending` | queued file this process is sending now | `file`, `position` |
 | `coven_upload_pause` | store, always exactly one row | `paused` |
+| `coven_network` | store, always exactly one row | `usable`, `metered`, `unmetered_only` |
 | `coven_upload_queue` (a table) | file waiting in this device's upload queue | `file`, `position` |
 | `coven_pins` (a table) | file this device keeps pinned | `file` |
 | `coven_pending` | pending record | `record`, `file`, `position`, `cause` |

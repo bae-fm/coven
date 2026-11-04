@@ -398,8 +398,12 @@ device is sending right now.
 `set_uploads_paused(true)`, a step of the app's write or a write of its own on
 the handle, pauses its trailing uploads, keeping each upload's place; bound
 ones run on, since writes wait for them. The `coven_upload_pause`
-view says whether uploads are paused, with nothing queued too. Coven retries
-failures on its own; `retry_uploads_now()` lets the app try early.
+view says whether uploads are paused, with nothing queued too.
+`set_unmetered_only(true)` moves files only on unmetered networks: on a
+metered one, such as cellular, trailing uploads and pins' downloads wait, and
+reads still stream. Coven watches the device's network itself, and the
+`coven_network` view says whether it is metered, beside the setting. Coven
+retries failures on its own; `retry_uploads_now()` lets the app try early.
 Uploads follow the same stops as writes: a device stuck at a slot, or one that
 has been removed, sends nothing.
 

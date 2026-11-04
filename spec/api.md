@@ -477,6 +477,20 @@ Every SQLite setting, and who chooses it. Settings marked *app* are fields of
   phone without Google Play services, coven keeps no saved entries. Each call
   waits on Google's `Tasks.await`, which Android refuses on the main thread, so
   such a call made there fails with `KeyError::Keychain`.
+- On Android, coven watches the device's network through
+  `ConnectivityManager` (E5). A callback the platform calls must be a Java
+  class, which JNI can't define, so coven ships one, compiled, as an Android
+  library: a Maven repository in coven-storage's `android/maven` folder, with
+  `fm.coven:coven-network` in it. The app adds that folder as a repository,
+  found through `cargo metadata` as the verifier's is, and the library to its
+  dependencies; its manifest asks for `ACCESS_NETWORK_STATE`, which merges
+  into the app's. Coven loads the class through the app's class loader, with
+  the context the app gives `ndk-context`, and registers its native methods
+  itself, so the app writes no JNI. Without the library, opening fails with
+  `CovenError::NetworkWatch` naming the missing class.
+- On Apple platforms coven links Network.framework; on Windows it uses
+  `Windows.Networking.Connectivity`; on Linux it talks to NetworkManager over
+  the system bus, and works without it (E5).
 
 ```rust
 /// A store's UUID, independent of its name and location (E1).
@@ -1082,7 +1096,14 @@ pub enum CovenError {
     /// unstarted, such as opening's custody work; a dropped database call is
     /// `DbError::Shutdown` (E15).
     Shutdown(Shutdown),
+    /// The platform refused to let coven watch the device's network, such as
+    /// an Android app without coven's Android library (E1, E5).
+    NetworkWatch(NetworkWatchError),
 }
+
+/// Why coven can't watch the device's network (E5): the platform's own
+/// failure, with its text.
+pub struct NetworkWatchError { /* private fields */ }
 
 /// Invalid input to the pure merge; no partially changed state is returned.
 pub enum MergeError {
@@ -1942,6 +1963,10 @@ impl CovenBuilder {
     /// Replace OS-random ids in tests (Appendix F.2).
     #[cfg(feature = "test-utils")]
     pub fn id_source(self, ids: IdSourceRef) -> Self;
+
+    /// Replace the platform's network with one the test drives (E5).
+    #[cfg(feature = "test-utils")]
+    pub fn network(self, network: TestNetwork) -> Self;
 
     /// The app's own OAuth clients for Dropbox and OneDrive. Coven ships none.
     pub fn oauth_clients(self, clients: OAuthClients) -> Self;
@@ -2983,6 +3008,12 @@ let moved = handle
   directly, or in the app's own view or trigger, fails with
   `StatementForbidden`. A read-only handle transfers nothing, and shows every
   file waiting and none downloading.
+- The device's network is the same kind of fact. `coven_network`'s `usable`
+  and `metered`, and `coven_uploads.metered`, read it from the store's watch
+  of the network (E5), and a live query that reads one runs again as the
+  network changes. The function behind them, `_coven_network`, refuses a
+  direct call in the same way. A read-only handle watches nothing: it shows
+  no usable network and none metered, with the setting as stored.
 - Count what is being sent through `coven_sending`, which holds one row per
   upload in flight and finds each by index. Counting `sending` over
   `coven_uploads` reads every queued file.
@@ -3014,6 +3045,7 @@ let moved = handle
 | `coven_uploads`: each file waiting in this device's upload queue, as `uploads()` lists it | `file` | the file's id; this device uploads it |
 | | `position` | its place in the queue, smallest first: the order uploads start in |
 | | `paused` | 1 while the app has paused uploads (`set_uploads_paused`) and the upload is trailing; 0 for a bound upload, which the pause doesn't hold ([§17.4](coven.md#174-bound-and-trailing-references)) |
+| | `metered` | 1 while the network is metered, the app moves files only on unmetered networks, and the upload is trailing; 0 for a bound upload, which the setting doesn't hold ([§17.9](coven.md#179-uploads)); follows the network, which isn't stored |
 | | `retry_at` | when its retry wait ends, in milliseconds since the Unix epoch; NULL with none |
 | | `pending` | its pending record, read as `PendingRecord`; NULL with none |
 | | `bytes_confirmed` | the encrypted bytes the provider confirmed in its resumable session, as `UploadProgress` gives them (E7); NULL with no session, as for a file sent in one request |
@@ -3024,6 +3056,9 @@ let moved = handle
 | | `position` | its place in the queue, as in `coven_uploads` |
 | `coven_downloading`: each stored file this process is downloading now to keep whole, for a pin (E8); never stored | `file` | the file's id |
 | `coven_upload_pause`: whether uploads are paused, in one row, with an empty queue too | `paused` | 1 while the app has paused uploads (`set_uploads_paused`); persisted across reopening |
+| `coven_network`: the device's network as coven last heard from the platform, and the setting that holds transfers on a metered one, in one row (E5, E7) | `usable` | 1 while the device has a usable network; never stored, read from the platform as the store opens |
+| | `metered` | 1 while that network is metered; 0 with none, and where the platform can't tell; never stored |
+| | `unmetered_only` | 1 while the app moves files only on unmetered networks (`set_unmetered_only`); persisted across reopening |
 | `coven_upload_queue`: each file waiting in this device's upload queue, as `coven_uploads` lists it; a table, which local triggers can follow | `file` | the file's id, as in `coven_uploads` |
 | | `position` | its place in the queue, as in `coven_uploads` |
 | `coven_pins`: each file this device keeps pinned, whole on this device (E8); a table, which local triggers can follow | `file` | the file's id |
@@ -3672,21 +3707,40 @@ while let Some(Ok(values)) = lost.next().await {
     Coven sets no lower bound: each idle pass costs its requests, two for a
     quiet one. The request outlives stopping and starting sync, and runs no
     pass while sync is stopped ([§6.7](coven.md#67-waiting-and-retrying)).
-  - `sync_now` never shortens a backoff. `network_changed` ends every backoff
-    whose last attempt got no provider response: the connection's, which the sync state
-    shows as `Offline`, and those of coven's operations and queued uploads,
-    whose pending records say `answered: false`. Call it when
-    the platform reports that the network became available or changed, and
-    when the app returns to the foreground or the device wakes. It also requests
-    a pass, so the app need not call both. A backoff after a provider's answer,
-    such as a server error, and a provider cooldown hold: a new network changes
-    neither ([§6.7](coven.md#67-waiting-and-retrying)).
+  - `sync_now` never shortens a backoff. Coven watches the device's network
+    itself, from opening to closing, and needs no call from the app
+    ([§6.7](coven.md#67-waiting-and-retrying)). When the device gains a
+    usable network, or moves to another, coven makes a network report: it
+    ends every backoff whose last attempt got no provider response, the
+    connection's, which the sync state shows as `Offline`, and those of
+    coven's operations and queued uploads, whose pending records say
+    `answered: false`, and it requests a pass. A backoff after a provider's
+    answer, such as a server error, and a provider cooldown hold: a new
+    network changes neither. Losing the network, or a network turning metered
+    or unmetered, makes no report.
   - Each backoff ends durably, keeping its failure count: reopening after the
     report arms none. Reports during a pass coalesce into one more pass, and
     reports during transfers are acted on after them. If the running pass or
     transfer fails for want of a network, its wait ends too: the failure may
     have come before the change. Reports while the connection is stopped apply
     when it starts.
+  - What each platform says, and so what coven hears:
+
+    | Platform | Coven asks | A usable network | Metered |
+    |---|---|---|---|
+    | macOS, iOS | Network.framework's path monitor | the path is satisfied; another set of interfaces is another network | the path is expensive (cellular, a phone's hotspot) or constrained (Low Data Mode) |
+    | Android | `ConnectivityManager`'s default-network callback, through coven's Android library (E1) | the default network is validated and not blocked for the app, as Doze and App Standby block it; another default network is another network. Before Android 10 a blocked network isn't reported, so the end of Doze counts as the network coming back | the network has neither `NOT_METERED` nor `TEMPORARILY_NOT_METERED` |
+    | Windows | `NetworkInformation`'s internet connection profile, and its `NetworkStatusChanged` event | the profile has internet access; another profile is another network | the profile's cost is fixed or variable, roaming, or over its data limit |
+    | Linux | NetworkManager, on the system bus | its connectivity is full; another primary connection is another network | its `Metered` says yes, or guesses yes |
+    | Linux without NetworkManager | nothing | never reported | never |
+
+    Where coven asks nothing, it makes no report, and no network is metered,
+    so the setting to move files only on unmetered networks holds nothing
+    there (E7). A watch the platform refuses fails opening with
+    `CovenError::NetworkWatch` (E1), since a store that can't watch would
+    move files on a metered network the person asked it to keep off; on
+    Android that is most often an app that didn't package coven's Android
+    library.
   - `retry_now` is the person asking to retry everything now, such as by
     pulling to refresh. `sync_now` leaves every backoff in place; `retry_now`
     ends every ordinary one, answered or not: the connection's, operations',
@@ -3757,9 +3811,9 @@ while let Some(Ok(values)) = lost.next().await {
   placeholder before it. Coven names the states; the app picks the words.
   - The state is computed in the read from the rows of `coven_sync_status`
     and `coven_retry_effect` (E4), the send queue, the upload queue with its
-    pause and retry waits, the files being sent or downloaded and the
-    pending records, so the live query runs again whenever one of them
-    changes: a write committed while offline makes it offline with unsent
+    pause and retry waits, `coven_network`, the files being sent or
+    downloaded and the pending records, so the live query runs again
+    whenever one of them changes: a write committed while offline makes it offline with unsent
     changes in that transaction. With several candidates, the first in
     §19.1's order shows; Appendix H.3 of coven.md lists which state each
     fact names.
@@ -3818,7 +3872,9 @@ while let Some(Ok(values)) = lost.next().await {
   the pass: no access to storage. One bad photo while the rest syncs leaves
   the last pass synced; its upload's pending record makes the state failed,
   with that record as the cause. Paused uploads with photos queued make it
-  `WaitingToSync(UploadWait::Paused)`.
+  `WaitingToSync(UploadWait::Paused)`; photos queued on cellular while the
+  app moves files only on unmetered networks make it
+  `WaitingToSync(UploadWait::Metered)`.
 - A device that isn't connected still reads and writes
   ([§2.1](coven.md#21-local-writes)); its writes wait in `_coven_uploads`.
 - `start_sync` starts the loop; its first pass builds the provider client from
@@ -4821,14 +4877,6 @@ impl CovenHandle {
     /// while a pass or connection backoff is active; provider cooldowns hold.
     pub fn sync_now(&self);
 
-    /// The device's network changed: it became available, or moved to
-    /// another network. Ends every backoff whose last attempt got no provider
-    /// response: the connection's (offline), operations' and uploads'.
-    /// Syncs now, as `sync_now` does. Backoffs after a
-    /// provider's answer, and provider cooldowns, hold. Reports coalesce as
-    /// `sync_now` requests do (§6.7).
-    pub fn network_changed(&self);
-
     /// The person asked to retry everything now. Ends every ordinary
     /// backoff, answered or not: the connection's, operations' and
     /// uploads'; each keeps its failure count. Syncs now, as
@@ -4859,7 +4907,8 @@ impl CovenHandle {
 
     /// The sync state and when sync last finished, computed from
     /// `coven_sync_status`, `coven_retry_effect`, the send queue, the upload
-    /// queue, the files moving and the pending records in one committed
+    /// queue, `coven_network`, the files moving and the pending records in
+    /// one committed
     /// snapshot (§19.1). `CovenReadHandle` has none.
     pub async fn sync_status(&self) -> CovenResult<SyncStatus>;
 
@@ -4964,11 +5013,32 @@ pub enum UploadWait {
     /// The app paused uploads, and the file's reference trails
     /// (`set_uploads_paused`, §17.4).
     Paused,
+    /// The network is metered, the app moves files only on unmetered
+    /// networks (`set_unmetered_only`, §17.9), and the file's reference
+    /// trails.
+    Metered,
     /// Its last attempt failed, and it retries then, or at the person's
     /// retry (§6.7); `coven_uploads.pending` says why.
     Retrying { at: SystemTime },
     /// Its turn hasn't come.
     Queued,
+}
+
+/// A network a test drives in place of the platform's (E1 `network`, §6.7):
+/// clones drive the same network.
+#[cfg(feature = "test-utils")]
+pub struct TestNetwork { /* private fields */ }
+
+#[cfg(feature = "test-utils")]
+impl TestNetwork {
+    /// The network as the platform would describe it as the store opens.
+    pub fn new(usable: bool, metered: bool) -> Self;
+    /// The device moves to another usable network: a network report.
+    pub fn join(&self, metered: bool);
+    /// The device loses its network: no report.
+    pub fn lose(&self);
+    /// The same network turns metered or unmetered: no report.
+    pub fn set_metered(&self, metered: bool);
 }
 
 /// What names a state: the last pass, or the first pending record, in the
@@ -5331,6 +5401,14 @@ impl CovenHandle {
   one slot ([§17.4](coven.md#174-bound-and-trailing-references)). Bound
   uploads run in a lane of their own, up to the upload limit beside the
   trailing ones, and the pause holds only trailing uploads.
+- `set_unmetered_only(true)`, a step of the app's write or a write of its
+  own, moves files only on unmetered networks: while the network is metered
+  no trailing upload starts, one in flight stops at its next part, keeping
+  its session, and pins' downloads wait before their next request to storage
+  (E8). Bound uploads, reads and `prepare_device_only` run on. The setting
+  persists and is this device's alone, never synced; `coven_network` shows
+  it beside the network, and the sync state's `UploadWait::Metered` names it
+  ([§17.9](coven.md#179-uploads)).
 - Upload attempts open the source again, checking its size, and an
   original's modification time, before transfer, and the first-read hash of
   each plaintext chunk before encryption. A changed user original reports
@@ -5348,13 +5426,17 @@ impl CovenHandle {
     /// It joins the uploads in progress, covers every queued file that can
     /// retry whatever its delay, and returns once each one's attempt ended.
     /// While uploads are paused it tries only bound ones and returns
-    /// `Paused`; while sync is stopped it tries none and returns
-    /// `NotSyncing`. Provider cooldowns still hold; failures stay in
+    /// `Paused`, and while the setting holds trailing uploads on a metered
+    /// network it does the same and returns `Metered`; while sync is stopped
+    /// it tries none and returns `NotSyncing`. Provider cooldowns still hold; failures stay in
     /// pending() (§6.7).
     pub async fn retry_uploads_now(&self) -> Result<DrainOutcome, SyncError>;
 
     /// `CovenWrite::set_uploads_paused`, in a write of its own.
     pub async fn set_uploads_paused(&self, paused: bool) -> CovenResult<()>;
+
+    /// `CovenWrite::set_unmetered_only`, in a write of its own.
+    pub async fn set_unmetered_only(&self, unmetered_only: bool) -> CovenResult<()>;
 
     /// How far each file this process is sending has got, by file: every
     /// one being sent first, then each change as its bytes go, until the
@@ -5370,6 +5452,15 @@ impl CovenWrite<'_> {
     /// (§17.4). A retry asked after the write returns is never answered
     /// from the setting it replaced.
     pub fn set_uploads_paused(&self, paused: bool) -> Result<(), DbError>;
+
+    /// Moves files only on unmetered networks, or on any, as a step of this
+    /// write (§4, §17.9). While the network is metered, trailing uploads
+    /// start no more and stop between confirmed parts, and pins' downloads
+    /// wait before their next request to storage; bound uploads and reads
+    /// run on. The setting persists, on this device only. A retry asked
+    /// after the write returns is never answered from the setting it
+    /// replaced.
+    pub fn set_unmetered_only(&self, unmetered_only: bool) -> Result<(), DbError>;
 }
 
 /// How far one file's transfer has got: the bytes of its encrypted object
@@ -5451,6 +5542,10 @@ pub enum DrainOutcome {
     /// Uploads were paused: no trailing upload was tried, and each bound
     /// one it covered was (§17.4).
     Paused,
+    /// The network is metered and the app moves files only on unmetered
+    /// networks: no trailing upload was tried, and each bound one it covered
+    /// was (§17.9).
+    Metered,
     /// Sync is stopped: no upload was tried (§17.4).
     NotSyncing,
 }
@@ -5663,7 +5758,9 @@ impl CovenHandle {
     /// bytes of each download in flight are on
     /// subscribe_download_transfers(). A file staged or moved to be kept
     /// here needs no call: the write switching it to the cloud pins it, and
-    /// coven makes that pin itself.
+    /// coven makes that pin itself. While the network is metered and the
+    /// app moves files only on unmetered networks (E7), it waits before each
+    /// request to storage until that ends; dropping it cancels.
     pub async fn prepare_pin(&self, files: &[FileRef]) -> Result<PreparedPin, FileReadError>;
 
     /// `prepare_pin`, then `CovenWrite::pin` in a write of its own.

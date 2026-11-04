@@ -467,9 +467,9 @@ reference and where each is, which files are still waiting to upload and why,
 which files this device keeps pinned, what can't proceed, how sync is going,
 how the app's admin operations ended, who the members are, and which circles
 this member is in.
-So the app's SQL can read it through twelve views, `coven_uploads`,
-`coven_sending`, `coven_downloading`, `coven_upload_pause`, `coven_pending`,
-`coven_invites`, `coven_operations`, `coven_user_files`, `coven_members`,
+So the app's SQL can read it through thirteen views, `coven_uploads`,
+`coven_sending`, `coven_downloading`, `coven_upload_pause`, `coven_network`,
+`coven_pending`, `coven_invites`, `coven_operations`, `coven_user_files`, `coven_members`,
 `coven_devices`, `coven_circles` and `coven_circle_members`, and five tables,
 `coven_files`, `coven_pins`, `coven_upload_queue`, `coven_sync_status` and
 `coven_retry_effect` ([api.md E4](api.md#e4-reading) lists their columns).
@@ -567,6 +567,20 @@ wait, and its pending record. Whether uploads are paused is also its own view,
 `coven_upload_pause`, one row whose `paused` says so. Ana's app shows a paused
 banner and the toggle beside it from that view, which `coven_uploads` can't
 give once the queue is empty: it has no row to carry its `paused` column.
+
+What holds transfers for the network is one row of `coven_network` (§17.9).
+Two of its facts last only as long as the process: whether the device has a
+usable network, and whether it is metered, as coven last heard from the
+platform (§6.7). Opening asks the platform before the handle exists, so the
+first read is already true. The third is the setting to move files only on
+unmetered networks, which is stored. Ben's music app shows "Waiting for
+Wi-Fi" beside the albums it is pinning while both `metered` and
+`unmetered_only` say 1, and a live query that reads the view runs again as the
+network changes, as one reading `coven_sending` does as an upload starts.
+`coven_uploads.metered` says the same of each file the setting holds, as
+`paused` does for the pause. The network's facts come to SQL through a
+function of coven's, `_coven_network`, which refuses a direct call as the
+transfer functions do.
 
 So are the bytes the provider confirmed. Ben's music app draws each album's
 upload bar as `SUM(bytes_confirmed)` over `SUM(bytes_total)` for its tracks in
@@ -1667,12 +1681,38 @@ mode, which cuts the app's network (App Standby does the same to an app left
 unused), so every pass and every upload attempt fails before it reaches storage,
 and each backoff grows to five minutes. She unlocks the phone and the network is
 back, but the next pass and the next upload attempt are still up to five
-minutes away. Her app reports the change with `network_changed`
-([api.md E5](api.md#e5-storage-and-sync)), and both run at once.
+minutes away. Coven watches the phone's network, sees it come back, and both
+run at once. Her app does nothing for it.
+
+**Coven watches the network.** Each open store asks the platform about the
+device's network and hears each change: Network.framework on macOS and iOS,
+`ConnectivityManager` on Android, `NetworkInformation`'s internet connection
+profile on Windows, and NetworkManager on Linux
+([api.md E5](api.md#e5-storage-and-sync) has what each says). It keeps what
+it hears: whether the device has a usable network and which one, and whether
+that network is metered. An app left to report changes itself would have to
+watch the platform on every system it runs on, and one that forgot would
+leave every backoff to run out.
+
+- **A report is a network appearing.** When the device gains a usable
+  network, or moves to another one, coven makes a *network report*. Losing
+  the network makes none: the next attempt finds out, and the state says
+  offline (§19.1). Neither does a network that only turns metered or
+  unmetered: it was usable before and after.
+- **Passes don't wait for the platform.** A device the platform says has no
+  usable network still runs its passes on their schedule. Only an attempt
+  decides offline, so the state says what storage did.
+- **Where the platform can't tell,** coven makes no report and calls no
+  network metered. Waits then end on their timers or the person's retry, as
+  they would on a platform with no watch at all.
+
+Whether the network is metered matters only to transfers: an app can ask
+that files move only on unmetered networks (§17.9). What the report does
+follows.
 
 - **Only a wait for the network ends.** A backoff keeps a device from
-  hammering a network it can't reach. Once the platform says the network
-  changed, waiting longer only delays work that can now succeed. So the report
+  hammering a network it can't reach. Once a usable network appears, waiting
+  longer only delays work that can now succeed. So the report
   ends every wait whose last attempt got no provider response: the connection's,
   an operation's and a queued upload's. A wait after an
   answer, such as a server error, and a provider's cooldown hold: a new network
@@ -5914,6 +5954,9 @@ covers are in flight.
 - **Pausing holds only trailing uploads** (`set_uploads_paused`). The pause is
   for bandwidth, and a bound upload is part of sending writes, which the pause
   doesn't stop. `retry_uploads_now` covers both lanes.
+- **Moving files only on unmetered networks holds only trailing uploads**
+  too (§17.9), for the same reason: on a metered network the writes still go
+  out, and a bound file is part of them.
 - **Both lanes stop** for the stuck-device stop (§5.4), the removal cut-off
   (§14.1), a provider cooldown, a connection change and stopping sync, as writes
   do.
@@ -6147,6 +6190,14 @@ can't be a step itself.
 - **Download failures belong to the prepare.** A failed download is the stored
   bytes' pending record, as for any pin, and returns to the prepare's caller; a
   download that succeeds clears it.
+- **A metered network holds the download.** With the setting to move files
+  only on unmetered networks on (§17.9), preparing waits on a metered network
+  before it asks storage for bytes, until the network is unmetered or the
+  setting goes off; a download under way waits before its next request. The
+  call doesn't fail: the wish for the bytes stands, and the app that no longer
+  wants them drops the call. Bytes already here are copied without waiting.
+  Which files a prepare is downloading stays in `coven_downloading`, so one
+  waiting lists none.
 
 **Unpinning** is a step of a write (§4). Ben's music app marks an album as no
 longer offline in the same write that unpins its tracks, so the album's row and
@@ -6173,6 +6224,9 @@ it in a write of its own that ends its request too.
   copy, the pin downloads from storage instead.
 - **A user's file** is downloaded from storage, as any pin is. Its original is
   never read for the cache (§17.1).
+- **It waits for an unmetered network** as an app's prepare does, when the
+  setting is on (§17.9). One made from coven's own copy asks storage for
+  nothing, so it never waits.
 - **Its failures retry by themselves.** Nothing calls again for a pin coven
   keeps, so a failed attempt waits under the shared backoff (§6.7) and tries
   again; one only a person can clear waits for a new connection, and one that
@@ -6312,6 +6366,39 @@ to the same limit, so a cover never waits behind the photos (§17.4).
   sync is started from `coven_retry_effect`, as the sync state's
   `NotSyncing` wait does (§19.1). Requests made outside the pass count as well
   as those inside it (§21.1).
+
+**Only on unmetered networks.** Ben's phone plan charges for data, so his
+app asks coven to move files only on unmetered networks. On the train
+his phone is on cellular, and he imports 30 photos. His write goes out at the
+next pass, with each photo on his phone only, but no photo uploads: his sync
+state is waiting to sync, and says the network is metered (§19.1). At home
+his phone joins Wi-Fi, coven hears it (§6.7), and the photos go up.
+
+- **What it holds.** While the network is metered, the setting starts no new
+  trailing upload, and a pin's download waits before it asks storage for
+  bytes (§17.8). An upload in flight stops at its next part, keeping its
+  provider session, as a pause stops it; a download in flight stops before
+  its next request. A bound upload runs on, as it does through a pause: every
+  later write waits for it (§17.4).
+- **What it doesn't hold.** Passes run: they carry the writes, which are
+  small, and other devices wait for them. Reading a file doesn't wait: Ben
+  plays a song he never pinned, and it streams, since he is waiting for it
+  now. Neither does bringing files back to this device (§17.3), which the
+  person asked for and watches.
+- **Metered is the platform's word.** Coven calls a network metered when the
+  platform does (§6.7): cellular, a phone's hotspot, Low Data Mode, a
+  connection marked metered. Where the platform says nothing, no network is
+  metered and the setting holds nothing: holding every transfer on a guess
+  would stop them all for good on such a device.
+- **It belongs to this device.** The setting is a step of a write, like the
+  pause, so Ben's app records its own switch in the same write, and it is
+  persisted, so it holds from the moment the store opens, before the app has
+  said anything. It is never synced: each device has its own network and its
+  own plan, and Ben's laptop at home shouldn't wait for Wi-Fi because his
+  phone does.
+- **Retrying early** while the setting holds tries only bound uploads, and
+  says the network is metered
+  ([api.md E7](api.md#e7-moves-and-uploads)), as it says uploads are paused.
 
 **What the queue keeps.** Each queued upload keeps the staging write's fixed
 location and key, the files it stores, and the source location with its size,
@@ -7176,8 +7263,9 @@ The state is one of, in the order an app lists them:
 - **Waiting to sync:** a file waits in this device's upload queue and nothing
   moves. It names what the first such file waits for: sync isn't running, a
   provider's cooldown (§6.7), a pass blocked at a slot (§5.4), the app's pause
-  of trailing uploads (§17.4), its own backoff after a failed attempt, or its
-  turn.
+  of trailing uploads (§17.4), a metered network while the app moves files
+  only on unmetered ones (§17.9), its own backoff after a failed attempt, or
+  its turn.
 - **Synced:** the last pass reached storage, every file this device uploads
   is stored, and nothing below holds.
 - **Offline:** the last pass got no answer from storage.
@@ -7219,6 +7307,13 @@ which state each fact names.
   slot holds the upload queue too, and there a file isn't in storage yet, so
   the state can't be synced. Which wait it names follows the order above:
   what holds every upload first, then what holds the first waiting file.
+  The pause comes before the network, which doesn't matter while it holds,
+  and the network before the backoff: a file whose backoff ends still can't
+  go out on a metered network.
+- **The network changes only what a file waits for.** Ben's phone leaves
+  Wi-Fi with a photo queued: his state stays waiting to sync, and its wait
+  turns from the photo's turn to the metered network. No state reads the
+  network itself; offline comes from an attempt (§6.7).
 - **So does a failure that clears by itself on an upload's own retry,** such
   as a server error: the upload waits out its backoff and retries. On any
   other subject such a failure names nothing: the subject retries, and the
@@ -8725,8 +8820,8 @@ device consistent with the database.
   the `_coven_` prefix. Indexes SQLite generates for constraints keep SQLite's
   `sqlite_autoindex_` prefix before the table name.
 - The views the app's SQL reads use the `coven_` prefix: `coven_uploads`,
-  `coven_sending`, `coven_downloading`, `coven_upload_pause`, `coven_pending`,
-  `coven_invites`, `coven_operations`, `coven_user_files`, `coven_members`,
+  `coven_sending`, `coven_downloading`, `coven_upload_pause`, `coven_network`,
+  `coven_pending`, `coven_invites`, `coven_operations`, `coven_user_files`, `coven_members`,
   `coven_devices`, `coven_circles` and `coven_circle_members`
   ([api.md E4](api.md#e4-reading)). Each reads coven's tables through joins
   only, since SQLite names the view to the authorizer only for what a join
@@ -9844,7 +9939,7 @@ document:
 | `coven-merge` | timestamps, the merged state, the removal rules and lost values, as functions with no I/O | §7, §8, §15 |
 | `coven-format` | the bytes in storage: slots, inner writes, snapshots, file headers and chunks, encoded, decoded and checked, using merge's and crypto's types | format.md |
 | `coven-database` | the SQLite connection, coven's internal tables, applying the merge's results, triggers, live queries, migrations | §4, §9, §18 |
-| `coven-storage` | each provider, and the operations coven needs from it, including upload sessions | §20, Appendix E |
+| `coven-storage` | each provider, and the operations coven needs from it, including upload sessions; watching the device's network | §6.7, §20, Appendix E |
 | `coven-sync` | the sequence, members, circles, snapshots, files and the cache, operations, recovery | §5, §6, §10, §11, §13 to §19 |
 | `coven` | the API, and nothing else | api.md |
 
@@ -9878,6 +9973,7 @@ disk. Each is used directly in one place only:
 
 ```
 network          coven-storage's providers
+network state    coven-storage's network watch
 cryptography     coven-crypto
 SQLite           coven-database
 OS keychain      coven-crypto's custody
@@ -10032,7 +10128,9 @@ the rules above.
 - **Opening** records whether storage is set up on this device: no recorded
   location, a location whose credentials custody no longer holds, as after a
   keychain entry deleted by hand, or both. It keeps how the last pass ended
-  and when sync last finished (§19.1). Setup then reconnects at the recorded
+  and when sync last finished (§19.1). It starts the store's watch of the
+  device's network, which reads the network once before the handle exists
+  (§6.7, §4); closing stops it. Setup then reconnects at the recorded
   location. `start_sync` starts the loop, whose
   first pass builds the storage client from custody credentials (api.md E5).
   Starting again keeps the running loop.
@@ -10528,8 +10626,9 @@ What waiting to sync names, the first that holds for the first waiting file
 in the queue: sync isn't running (`NotSyncing`); a provider's cooldown holds
 every request (`CoolingDown`); the last pass is blocked at a slot
 (`Blocked`); the app paused uploads and the file's reference trails
-(`Paused`); its last attempt failed and it waits out its backoff
-(`Retrying`); else its turn hasn't come (`Queued`).
+(`Paused`); the network is metered, the app moves files only on unmetered
+networks, and the file's reference trails (`Metered`); its last attempt
+failed and it waits out its backoff (`Retrying`); else its turn hasn't come (`Queued`).
 
 The `Connection` subject's record names nothing of its own: it is the last
 pass's failure, kept for its retry.

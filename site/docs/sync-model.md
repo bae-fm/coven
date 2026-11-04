@@ -205,7 +205,9 @@ A device sleeps until something can have changed: a write from the app, a
 changed prerequisite, or a retry that is due. While idle, it runs a pass every
 30 seconds; a local write or `handle.sync_now()` asks for one at once. Requests
 that arrive during a pass, or during connection backoff, coalesce into the next
-one.
+one. Coven watches the device's network: when a usable network appears, every
+wait that followed an attempt with no answer from storage ends at once, and a
+pass runs. The app makes no call for it.
 
 Automatic retries share one schedule of delays: 1, 2, 4, …, 256 seconds, then
 300. The deadline is saved with the work, so reopening the app neither restarts

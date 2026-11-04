@@ -80,6 +80,12 @@ prepare leaves no half-downloaded file exempt from eviction. Only stored files a
 one device only, this one included while it uploads, fails with
 `FileReadError::DeviceOnly`, and the app pins it once it is stored.
 
+While the app moves files only on unmetered networks (`set_unmetered_only`,
+[Files](/docs/files)), preparing on a metered network waits before it asks
+storage for bytes, until the network is unmetered or the setting goes off;
+dropping the call cancels it. Reads don't wait: a song that isn't pinned
+still streams.
+
 To keep a file here as it goes to the cloud, stage it with
 `Place::CloudKeptHere`, or move it with
 `MoveFile::AppKeptHere` or `MoveFile::UserKeptHere`. The write that switches it
