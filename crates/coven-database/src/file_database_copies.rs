@@ -264,7 +264,7 @@ async fn remove_copies(database: &super::Database, paths: Vec<String>) -> Result
 }
 
 /// A path as coven records it: valid Unicode, as planning a copy checks.
-fn text(path: &Path) -> Result<&str, DbError> {
+pub(crate) fn text(path: &Path) -> Result<&str, DbError> {
     path.to_str().ok_or(DbError::Invariant { what: "a copy's path is valid Unicode" })
 }
 

@@ -835,7 +835,7 @@ mod prepared_pin;
 pub use prepared_pin::PreparedPin;
 
 #[path = "file_database_copies.rs"]
-mod copies;
+pub(crate) mod copies;
 pub use copies::{CopyReservation, FolderCopy, PreparedDeviceOnly};
 
 #[cfg(test)]

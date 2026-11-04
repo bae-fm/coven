@@ -122,10 +122,7 @@ impl FileWrite<'_> {
     pub(super) fn keep_device_only(&self) -> Result<(), DbError> {
         let db = self.database;
         for copy in self.local.take() {
-            let path = copy
-                .path
-                .to_str()
-                .ok_or(DbError::Invariant { what: "a copy's path is valid Unicode" })?;
+            let path = crate::database::file_database::copies::text(&copy.path)?;
             let (size, modified_at) = db
                 .query(
                     "SELECT size,modified_at FROM _coven_copies WHERE path=?1 AND state='placed'",
