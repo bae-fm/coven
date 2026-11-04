@@ -111,6 +111,8 @@ capability_traits = [
 ]
 construction_only_capability_types = [
     "AssetFiles",
+    "StoreDirectories",
+    "FileReader",
     "StoreDir",
     "StoreLock",
     "StoreReadLock",
@@ -816,7 +818,10 @@ tables = [
 ]
 "crates/coven-database/src/file_database.rs" = ["FileDatabase::new", "FileDatabase::read_only"]
 "crates/coven-database/src/file_staging.rs" = ["FileStaging::write"]
-"crates/coven-database/src/local_file.rs" = ["LocalFileStream::read_at"]
+# A file's stream opens its local source: a copy in the store's directory,
+# or the user's original, which lives outside it at the path the app staged
+# it from and is opened nowhere else (§17.9).
+"crates/coven-database/src/local_file.rs" = ["open_source", "LocalFileStream::read_at"]
 "crates/coven-database/src/read_pool.rs" = ["ReadPool::new"]
 "crates/coven-database/src/input_database.rs" = ["InputDatabase::new"]
 # A reconfigurable live query makes the request state its handles share;
@@ -1088,6 +1093,9 @@ tables = [
 
 [capability_factories."crates/coven-foundation/src/files/replacement.rs"]
 "ReplacementStore::directory" = "StoreDir"
+
+[capability_factories."crates/coven-foundation/src/files/atomic_file.rs"]
+"AtomicFile::open_reader" = "FileReader"
 
 [capability_factories."crates/coven-foundation/src/files/directory.rs"]
 "StoreDir::lock_read_only" = "StoreReadLock"

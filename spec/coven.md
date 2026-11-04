@@ -10056,6 +10056,13 @@ Everything else reaches a capability through the object that owns it, given to
 it when it is built. The snapshot writer never calls the system clock; it asks
 the clock it was given, and a test gives it a fixed one.
 
+A store's files on disk start from the app's store directories, which only a
+composition root builds, from the app directory the app gives its `Coven`
+(api.md E1): every store's directory, and the locks and files inside it, come
+from them. A file opened for positioned reads is one of those files, or, where
+coven opens a file's local source to read or upload it, a user's original at
+the path the app staged it from (§17.3, §17.7, §17.9).
+
 Shared in-memory state is a capability too. A barrier that holds each create
 until several writers arrive is changed by every one of them: whoever holds it
 shares it with the others. Passed from hand to hand, such state ends up shared
