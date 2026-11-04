@@ -470,11 +470,7 @@ fn elsewhere(db: &DatabaseConnection, file: FileId, device: DeviceId) -> Result<
         return Ok(());
     }
     for path in paths {
-        db.internal_execute(
-            "UPDATE _coven_copies SET state='lost' WHERE path=CAST(?1 AS TEXT) AND state='kept'
-             AND NOT EXISTS(SELECT 1 FROM _coven_user_files WHERE path=?1 AND file!=?2)",
-            params![path, file],
-        )?;
+        crate::database::file_database::copies::lose(db, &path, file)?;
     }
     db.internal_execute("DELETE FROM _coven_user_files WHERE file=?1", [file])?;
     Ok(())

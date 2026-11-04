@@ -129,7 +129,10 @@ async fn the_next_write_removes_what_a_dropped_call_made() {
 /// table, inside its transaction (`internal_schema_scan_reasons_tests.rs`).
 pub(crate) fn fill_for_plans(db: &rusqlite::Connection) {
     db.execute_batch(
-        "INSERT INTO _coven_copy_folders SELECT 'folder_' || (i%7),'path_' || i,i%2 FROM fixture;",
+        "INSERT INTO _coven_copies(path,temporary,state,size,modified_at)
+           SELECT 'path_' || i,'temporary_' || i,CASE i%4 WHEN 0 THEN 'writing' WHEN 1 THEN 'placed' WHEN 2 THEN 'kept' ELSE 'lost' END,
+             CASE WHEN i%4!=0 THEN i END,CASE WHEN i%4!=0 THEN zeroblob(13) END FROM fixture;
+         INSERT INTO _coven_copy_folders SELECT 'folder_' || (i%7),'path_' || i,i%2 FROM fixture;",
     )
     .unwrap();
 }

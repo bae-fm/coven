@@ -238,12 +238,8 @@ pub(crate) fn forget(db: &DatabaseConnection, removed: &[Released]) -> Result<()
                     (name.as_str(), area.as_str()),
                 )?;
             }
-            // Its folder links go with it.
             Released::Copy { path, state, .. } => {
-                db.internal_execute(
-                    "DELETE FROM _coven_copies WHERE path=?1 AND state=?2",
-                    (path, state),
-                )?;
+                crate::database::file_database::copies::forget(db, path, state)?;
             }
             Released::Folder(_) => {}
         }

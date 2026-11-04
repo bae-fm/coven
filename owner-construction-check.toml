@@ -525,7 +525,7 @@ table_macros = [
     "coven_conversion_schemas_tables",
     "coven_migration_prefix_tables",
     "coven_owner_tables_tables",
-    "coven_copy_folders_tables",
+    "coven_device_only_copies_tables",
     "coven_file_protection_tables",
     "coven_file_chunks_tables",
     "coven_writes_tables",
@@ -806,13 +806,14 @@ tables = [
 ]
 
 [[database.domains]]
-name = "copy folders"
+name = "device-only copies"
 owner = "Database"
 homes = [
     "crates/coven-database/src/file_database_copies.rs",
     "crates/coven-database/src/file_database_copies_schema.rs",
 ]
 tables = [
+    "_coven_copies",
     "_coven_copy_folders",
 ]
 
@@ -995,7 +996,6 @@ tables = [
     "_coven_claims",
     "_coven_columns",
     "_coven_constraints",
-    "_coven_copies",
     "_coven_copy_chunks",
     "_coven_creations",
     "_coven_device_files",

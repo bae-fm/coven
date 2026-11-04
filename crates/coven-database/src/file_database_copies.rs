@@ -256,6 +256,40 @@ async fn remove_copies(database: &super::Database, paths: Vec<String>) -> Result
 }
 
 /// A path as coven records it: valid Unicode, as planning a copy checks.
+/// The call's copy at `path` is placed and its file switched to it: the
+/// copy is an original this device records (§17.3).
+pub(crate) fn keep(db: &crate::sqlite::DatabaseConnection, path: &str) -> Result<(), DbError> {
+    db.internal_execute("UPDATE _coven_copies SET state='kept' WHERE path=?1", [path])?;
+    Ok(())
+}
+
+/// The kept copy at the original's `path` lost its switch to another
+/// device's, unless another of this device's files is recorded there: it is
+/// recorded for removal (Appendix C.3).
+pub(crate) fn lose(
+    db: &crate::sqlite::DatabaseConnection,
+    path: &[u8],
+    file: FileId,
+) -> Result<(), DbError> {
+    db.internal_execute(
+        "UPDATE _coven_copies SET state='lost' WHERE path=CAST(?1 AS TEXT) AND state='kept'
+         AND NOT EXISTS(SELECT 1 FROM _coven_user_files WHERE path=?1 AND file!=?2)",
+        params![path, file],
+    )?;
+    Ok(())
+}
+
+/// The copy at `path`, recorded as `state`, is removed; its folder links go
+/// with it.
+pub(crate) fn forget(
+    db: &crate::sqlite::DatabaseConnection,
+    path: &str,
+    state: &str,
+) -> Result<(), DbError> {
+    db.internal_execute("DELETE FROM _coven_copies WHERE path=?1 AND state=?2", (path, state))?;
+    Ok(())
+}
+
 pub(crate) fn text(path: &Path) -> Result<&str, DbError> {
     path.to_str().ok_or(DbError::Invariant { what: "a copy's path is valid Unicode" })
 }

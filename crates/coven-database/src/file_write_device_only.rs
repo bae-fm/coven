@@ -128,7 +128,7 @@ impl FileWrite<'_> {
             };
             db.internal_execute("DELETE FROM _coven_user_files WHERE file=?1", [copy.file])?;
             crate::user_file::record(db, copy.file, &original, &copy.hashes)?;
-            db.internal_execute("UPDATE _coven_copies SET state='kept' WHERE path=?1", [path])?;
+            crate::database::file_database::copies::keep(db, path)?;
         }
         Ok(())
     }
