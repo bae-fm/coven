@@ -101,6 +101,32 @@ impl SequenceSync {
             || (woken && wait.is_some() && self.waits.cooldown().is_none()))
     }
 
+    /// Close the attempt coven drove at the operation `id` while resuming
+    /// it: a failure becomes the operation's pending record and wait, and
+    /// the pass goes on to the next; a success ends its wait.
+    pub(crate) async fn settle_resumed(
+        &self,
+        id: OperationId,
+        kind: crate::OperationKind,
+        result: Result<(), SyncError>,
+        ring: &StoreKeyring,
+    ) -> Result<(), SyncError> {
+        match result {
+            Ok(()) => self.waits.operation_advanced(id),
+            Err(error) => {
+                self.record_operation_error(
+                    id,
+                    kind,
+                    crate::sequence_sync::OperationFailure::Held(error),
+                    ring,
+                )
+                .await?;
+                self.state.check()?;
+            }
+        }
+        Ok(())
+    }
+
     pub(crate) fn error_reason(&self, error: &SyncError) -> PendingReason {
         error.pending_reason(self.storage.config().provider())
     }

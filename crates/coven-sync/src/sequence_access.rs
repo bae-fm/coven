@@ -119,18 +119,7 @@ impl SequenceSync {
             }
             let scope = self.waits.begin_attempt(record.id);
             let result = scope.run(self.apply_access(session, ring, member, record.id)).await;
-            if let Err(error) = result {
-                self.record_operation_error(
-                    record.id,
-                    OperationKind::RevokeAccess,
-                    crate::sequence_sync::OperationFailure::Held(error),
-                    ring,
-                )
-                .await?;
-                self.state.check()?;
-            } else {
-                self.waits.operation_advanced(record.id);
-            }
+            self.settle_resumed(record.id, OperationKind::RevokeAccess, result, ring).await?;
         }
         Ok(())
     }

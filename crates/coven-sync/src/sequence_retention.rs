@@ -114,20 +114,9 @@ impl SequenceSync {
                 continue;
             }
             let scope = self.waits.begin_attempt(record.id);
-            if let Err(error) =
-                scope.run(self.apply_retention(session, ring, member, record.clone())).await
-            {
-                self.record_operation_error(
-                    record.id,
-                    OperationKind::RetainSequence,
-                    crate::sequence_sync::OperationFailure::Held(error),
-                    ring,
-                )
-                .await?;
-                self.state.check()?;
-            } else {
-                self.waits.operation_advanced(record.id);
-            }
+            let result =
+                scope.run(self.apply_retention(session, ring, member, record.clone())).await;
+            self.settle_resumed(record.id, OperationKind::RetainSequence, result, ring).await?;
         }
         Ok(())
     }
