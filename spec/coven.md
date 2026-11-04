@@ -1710,7 +1710,9 @@ leave every backoff to run out.
   decides offline, so the state says what storage did.
 - **Where the platform can't tell,** coven makes no report and calls no
   network metered. Waits then end on their timers or the person's retry, as
-  they would on a platform with no watch at all.
+  they would on a platform with no watch at all. A platform that fails to
+  answer after the store opens can't tell until it answers again; the
+  network it then names makes a report only if it is another one.
 
 Whether the network is metered matters only to transfers: an app can ask
 that files move only on unmetered networks (§17.9). What the report does

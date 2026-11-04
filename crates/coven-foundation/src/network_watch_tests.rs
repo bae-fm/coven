@@ -42,6 +42,21 @@ fn the_same_network_reported_again_counts_once() {
     assert_eq!(sink.subscribe().borrow().joined, 2, "the network coming back is a report");
 }
 
+/// A read the platform fails says can't tell, and the next one that
+/// succeeds says the network again: the same network is no report, another
+/// is one.
+#[test]
+fn a_failed_read_cannot_tell_until_the_next_one() {
+    let network = TestNetwork::new(true, true);
+    network.cannot_tell();
+    assert_eq!(state(&network), NetworkState { usable: None, metered: false, joined: 1 });
+    network.set_metered(true);
+    assert_eq!(state(&network), NetworkState { usable: Some(true), metered: true, joined: 1 });
+    network.cannot_tell();
+    network.join(false);
+    assert_eq!(state(&network), NetworkState { usable: Some(true), metered: false, joined: 2 });
+}
+
 #[tokio::test]
 async fn a_view_hears_each_change_and_an_unwatched_one_never_does() {
     let network = TestNetwork::new(true, false);

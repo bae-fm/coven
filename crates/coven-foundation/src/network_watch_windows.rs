@@ -25,10 +25,10 @@ impl ProfileWatch {
             let mut sink = followed.lock().expect("network sink poisoned");
             match network() {
                 Ok(network) => sink.observe(network),
-                // The sink keeps what it last heard; the next change reads
-                // again.
+                // Coven can't tell until the next change reads again.
                 Err(error) => {
                     tracing::error!(%error, "reading the internet connection profile failed");
+                    sink.cannot_tell();
                 }
             }
             Ok(())

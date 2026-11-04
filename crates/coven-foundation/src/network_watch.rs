@@ -107,6 +107,20 @@ impl NetworkSink {
         });
     }
 
+    /// The platform failed to say: a read it answered with an error after
+    /// the watch started. Coven can't tell until a read succeeds. The
+    /// network the device was last on stays its last, so that network read
+    /// again is no report: nothing said it changed.
+    #[cfg(any(test, feature = "test-utils", windows))]
+    pub(crate) fn cannot_tell(&mut self) {
+        self.state.send_if_modified(|state| {
+            let next = NetworkState { joined: state.joined, ..NetworkState::UNKNOWN };
+            let changed = *state != next;
+            *state = next;
+            changed
+        });
+    }
+
     fn subscribe(&self) -> watch::Receiver<NetworkState> {
         self.state.subscribe()
     }
@@ -278,6 +292,12 @@ impl TestNetwork {
     /// The device loses its network: no report.
     pub fn lose(&self) {
         self.state.lock().expect("test network poisoned").sink.observe(None);
+    }
+
+    /// The platform fails to say what the network is: coven can't tell
+    /// until the test says again.
+    pub fn cannot_tell(&self) {
+        self.state.lock().expect("test network poisoned").sink.cannot_tell();
     }
 
     /// The same network turns metered or unmetered: no report.

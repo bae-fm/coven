@@ -3757,7 +3757,9 @@ while let Some(Ok(values)) = lost.next().await {
     `CovenError::NetworkWatch` (E1), since a store that can't watch would
     move files on a metered network the person asked it to keep off; on
     Android that is most often an app that didn't package coven's Android
-    library.
+    library. Windows and Linux read the network again at each change; a
+    read that fails after opening logs an error and says coven can't tell,
+    so `coven_network.usable` is NULL, until the next read succeeds.
   - `retry_now` is the person asking to retry everything now, such as by
     pulling to refresh. `sync_now` leaves every backoff in place; `retry_now`
     ends every ordinary one, answered or not: the connection's, operations',
