@@ -5,14 +5,20 @@ use tokio::io::AsyncReadExt;
 
 struct S3Body(std::pin::Pin<Box<dyn tokio::io::AsyncRead + Send>>);
 
+/// A response body that broke off while it was read: a network failure,
+/// with every cause the SDK chained to it, a checksum mismatch among them.
+pub(super) fn body_read_error(source: std::io::Error) -> StorageError {
+    StorageError::Provider {
+        provider: CloudProvider::S3,
+        failure: StorageFailure::Network,
+        source: Box::new(crate::providers::error_text::WithCauses(source)),
+    }
+}
+
 #[async_trait]
 impl ObjectBody for S3Body {
     async fn read(&mut self, output: &mut [u8]) -> Result<usize, StorageError> {
-        self.0.read(output).await.map_err(|source| StorageError::Provider {
-            provider: CloudProvider::S3,
-            failure: StorageFailure::Network,
-            source: Box::new(crate::providers::error_text::WithCauses(source)),
-        })
+        self.0.read(output).await.map_err(body_read_error)
     }
 }
 

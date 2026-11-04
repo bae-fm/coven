@@ -27,11 +27,7 @@ impl S3Storage {
             .take((BUCKET_CLAIM_SIZE + 1) as u64)
             .read_to_end(&mut bytes)
             .await
-            .map_err(|source| StorageError::Provider {
-                provider: CloudProvider::S3,
-                failure: StorageFailure::Network,
-                source: Box::new(source),
-            })?;
+            .map_err(super::read::body_read_error)?;
         Ok(bytes)
     }
 }

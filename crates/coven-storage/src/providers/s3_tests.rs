@@ -883,3 +883,33 @@ mod bucket_claim_tests;
 
 #[path = "s3_left_uploads_tests.rs"]
 mod left_uploads_tests;
+
+/// A body that breaks off while read keeps every cause behind it, such as
+/// the SDK's checksum mismatch, whichever read met it.
+#[test]
+fn a_broken_body_keeps_its_causes() {
+    #[derive(Debug)]
+    struct Mismatch;
+    impl std::fmt::Display for Mismatch {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("checksum mismatch")
+        }
+    }
+    impl std::error::Error for Mismatch {}
+    #[derive(Debug)]
+    struct Stream(Mismatch);
+    impl std::fmt::Display for Stream {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("body stream failed")
+        }
+    }
+    impl std::error::Error for Stream {
+        fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+            Some(&self.0)
+        }
+    }
+    let error = super::read::body_read_error(std::io::Error::other(Stream(Mismatch)));
+    assert_eq!(error.failure(), StorageFailure::Network);
+    let StorageError::Provider { source, .. } = &error else { panic!("a provider failure") };
+    assert!(source.to_string().contains("checksum mismatch"), "{source}");
+}
