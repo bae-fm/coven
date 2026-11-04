@@ -181,11 +181,7 @@ impl ProviderConnector {
                 .with_source("account and folder requests require OAuth sign-in"));
         };
         let access = tokens.access;
-        let api = match access {
-            crate::OAuthAccess::Dropbox(_) => "https://api.dropboxapi.com/2",
-            crate::OAuthAccess::OneDrive => "https://graph.microsoft.com/v1.0",
-        }
-        .to_owned();
+        let api = super::oauth_api(access.provider()).expect("an OAuth provider").to_owned();
         #[cfg(any(test, feature = "test-utils"))]
         let api = self.folder_api.clone().unwrap_or(api);
         let session = OAuthSession::new(

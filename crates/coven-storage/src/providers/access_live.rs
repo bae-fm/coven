@@ -98,7 +98,7 @@ Arc::new(crate::TransferBudget::new(crate::TransferLimits::default())),
         session
             .send(
                 Method::POST,
-                "https://api.dropboxapi.com/2/files/delete_v2",
+                &format!("{}/files/delete_v2", crate::providers::DROPBOX_API),
                 &[],
                 Body::Json(json!({"path":format!("/{store}")})),
                 true,

@@ -37,11 +37,7 @@ impl OAuthSession {
     }
     /// Resolve the signed-in account through the provider's own identity API.
     pub async fn account(&self) -> Result<String, StorageError> {
-        let api = match self.provider {
-            CloudProvider::Dropbox => "https://api.dropboxapi.com/2",
-            CloudProvider::OneDrive => "https://graph.microsoft.com/v1.0",
-            _ => unreachable!("checked OAuth provider"),
-        };
+        let api = super::oauth_api(self.provider).expect("checked OAuth provider");
         self.account_at(api).await
     }
     pub(crate) async fn account_at(&self, api: &str) -> Result<String, StorageError> {

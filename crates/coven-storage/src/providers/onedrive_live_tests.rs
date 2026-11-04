@@ -54,7 +54,13 @@ fn run(test: impl AsyncFnOnce(&mut Live<'_>)) {
         http::json(
             PROVIDER,
             session
-                .send(Method::GET, &format!("{GRAPH}/me/drive?$select=id"), &[], Body::Empty, true)
+                .send(
+                    Method::GET,
+                    &format!("{GRAPH_API}/me/drive?$select=id"),
+                    &[],
+                    Body::Empty,
+                    true,
+                )
                 .await
                 .unwrap(),
         )

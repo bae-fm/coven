@@ -90,7 +90,7 @@ impl Live {
             .account
             .send(
                 Method::POST,
-                &format!("https://api.dropboxapi.com/2/{method}"),
+                &format!("{}/{method}", crate::providers::DROPBOX_API),
                 &[],
                 Body::Json(value),
                 true,

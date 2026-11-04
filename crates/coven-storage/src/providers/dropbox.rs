@@ -35,8 +35,8 @@ impl DropboxStorage {
         Ok(Self {
             config,
             session,
-            api: "https://api.dropboxapi.com/2".into(),
-            content: "https://content.dropboxapi.com/2".into(),
+            api: super::DROPBOX_API.into(),
+            content: super::DROPBOX_CONTENT.into(),
             single_request_limit: 150 * 1024 * 1024,
             removal_poll_unit: std::time::Duration::from_secs(1),
         })

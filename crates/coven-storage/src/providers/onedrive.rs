@@ -53,7 +53,7 @@ impl OneDriveStorage {
             config,
             session,
             ids,
-            api: "https://graph.microsoft.com/v1.0".into(),
+            api: super::GRAPH_API.into(),
             single_request_limit: 250_000_000,
             folder_ids: tokio::sync::Mutex::new(BTreeMap::new()),
         })

@@ -10,7 +10,7 @@ use coven_foundation::{
 };
 use std::sync::Arc;
 
-const GRAPH: &str = "https://graph.microsoft.com/v1.0";
+use crate::providers::GRAPH_API;
 type Connection = Arc<StorageConnection<OneDriveStorage>>;
 
 struct Folders {
@@ -43,13 +43,13 @@ impl Folders {
         .await?;
         let id = http::string(&value, "id")?.to_owned();
         // Record ownership before checking the rest of the response or making another request.
-        self.owned.push(http::endpoint(GRAPH, &["drives", &self.drive, "items", &id], &[])?);
+        self.owned.push(http::endpoint(GRAPH_API, &["drives", &self.drive, "items", &id], &[])?);
         assert!(value["folder"].is_object());
         Ok(id)
     }
 
     async fn prepare(&mut self, store: StoreId) -> String {
-        let root = http::endpoint(GRAPH, &["drives", &self.drive, "root"], &[]).unwrap();
+        let root = http::endpoint(GRAPH_API, &["drives", &self.drive, "root"], &[]).unwrap();
         let parent = match self.create(&root, "coven-live").await {
             Ok(id) => id,
             Err(error) if error.failure() == StorageFailure::AlreadyExists => {
@@ -61,7 +61,7 @@ impl Folders {
             Err(error) => panic!("create coven-live parent: {error}"),
         };
         let parent =
-            http::endpoint(GRAPH, &["drives", &self.drive, "items", &parent], &[]).unwrap();
+            http::endpoint(GRAPH_API, &["drives", &self.drive, "items", &parent], &[]).unwrap();
         self.create(&parent, &format!("onedrive-{store}")).await.unwrap()
     }
 
