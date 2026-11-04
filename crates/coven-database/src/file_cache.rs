@@ -2,6 +2,7 @@
 //! staged files. Cache bytes are written and read with no writer held (§21.2).
 
 use super::DatabaseAccess;
+use crate::internal_schema::CACHE_NAME_USED_SQL;
 use crate::{sqlite::DatabaseConnection, DbError, FileRef};
 use coven_foundation::files::StoreDirAccess;
 
@@ -155,14 +156,9 @@ pub(super) fn put<L>(
     let _writing = access.directory.lock_cache_write()?;
     let recorded = access.with_writer(|db| {
         db.transaction(|db| {
-            if db.query_row(
-                "SELECT EXISTS(
-                     SELECT 1 FROM _coven_cache WHERE path=?1 UNION ALL
-                     SELECT 1 FROM _coven_cache_writes WHERE path=?1 UNION ALL
-                     SELECT 1 FROM _coven_file_removals WHERE path=?1 AND area='cache')",
-                [name.as_str()],
-                |r| r.get::<_, bool>(0),
-            )? {
+            if db.query_row(&format!("SELECT {CACHE_NAME_USED_SQL}"), [name.as_str()], |r| {
+                r.get::<_, bool>(0)
+            })? {
                 return Err(DbError::FileNameReused { name: name.clone() });
             }
             // Stored entries never overlap: a range already covered in part

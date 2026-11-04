@@ -1,6 +1,7 @@
 //! Durable file upload facts; provider session bytes remain opaque to SQLite.
 
 use crate::file_location::FileLocation;
+use crate::internal_schema::FILE_NAMED_SQL;
 use crate::{sqlite::DatabaseConnection, DbError};
 use coven_crypto::{ContentHash, SecretBytes};
 use coven_format::file::FileHeader;
@@ -462,13 +463,7 @@ pub(crate) fn retire(db: &DatabaseConnection, id: i64) -> Result<(), DbError> {
 /// on this device only, no queued upload and no pin waiting to be made from
 /// it (Appendix C.3).
 pub(crate) fn release_copy(db: &DatabaseConnection, path: &str) -> Result<(), DbError> {
-    let named: bool = db.query_row(
-        "SELECT EXISTS(SELECT 1 FROM _coven_device_files WHERE path=?1)
-             OR EXISTS(SELECT 1 FROM _coven_file_uploads WHERE copy=?1)
-             OR EXISTS(SELECT 1 FROM _coven_pin_requests WHERE copy=?1)",
-        [path],
-        |r| r.get(0),
-    )?;
+    let named: bool = db.query_row(&format!("SELECT {FILE_NAMED_SQL}"), [path], |r| r.get(0))?;
     if named {
         return Ok(());
     }

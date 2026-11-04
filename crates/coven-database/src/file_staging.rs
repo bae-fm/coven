@@ -4,6 +4,7 @@
 use super::DatabaseInner;
 use crate::file_hashes::FileHasher;
 use crate::file_write::{StagedFile, StagedSource};
+use crate::internal_schema::FILE_NAMED_SQL;
 use crate::write_batch::BatchFile;
 use crate::{DbError, FileSource, Place, Provenance, WriteBatch};
 use coven_foundation::files::StoreDirAccess;
@@ -60,13 +61,12 @@ impl FileStaging {
                         .transaction(|db| {
                             let mut sources = VecDeque::new();
                             for BatchFile { id, namespace, source, place } in batch.files {
-                                let declared = inner
-                                    .access
-                                    .write_schema
-                                    .namespace(&namespace)
-                                    .ok_or_else(|| DbError::UndeclaredNamespace {
-                                        namespace: namespace.clone(),
-                                    })?;
+                                let declared =
+                                    inner.access.write_schema.namespace(&namespace).ok_or_else(
+                                        || DbError::UndeclaredNamespace {
+                                            namespace: namespace.clone(),
+                                        },
+                                    )?;
                                 if declared.kind != Provenance::AppProvided {
                                     return Err(DbError::NamespaceKind {
                                         kind: declared.kind.clone(),
@@ -76,10 +76,10 @@ impl FileStaging {
                                 let name = FileName::new(inner.ids.new_id().to_string())
                                     .expect("UUID is a portable filename");
                                 let recorded = db.internal_execute(
-                                    "INSERT INTO _coven_file_removals(path) SELECT ?1
-                                     WHERE NOT EXISTS(SELECT 1 FROM _coven_device_files WHERE path=?1)
-                                         AND NOT EXISTS(SELECT 1 FROM _coven_file_uploads WHERE copy=?1)
-                                         AND NOT EXISTS(SELECT 1 FROM _coven_pin_requests WHERE copy=?1)",
+                                    &format!(
+                                        "INSERT INTO _coven_file_removals(path) SELECT ?1
+                                         WHERE NOT {FILE_NAMED_SQL}"
+                                    ),
                                     [name.as_str()],
                                 )?;
                                 if recorded != 1 {

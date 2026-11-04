@@ -1,6 +1,7 @@
 //! File metadata operations through the owning database, never through app SQL.
 
 use super::{Database, DatabaseAccess, DatabaseInner, DatabaseReadHandle};
+use crate::internal_schema::CACHE_NAME_USED_SQL;
 use crate::DatabaseChanges;
 use crate::{
     file_queue, file_ref, sqlite::DatabaseConnection, write_schema::WriteSchema, DbError, FileRef,
@@ -564,11 +565,7 @@ impl FileDatabase {
                 inner.access.with_writer(|writer| {
                     writer.transaction(|db| {
                         if db.query_row(
-                            "SELECT EXISTS(
-                                SELECT 1 FROM _coven_device_files WHERE path=?1 UNION ALL
-                                SELECT 1 FROM _coven_file_uploads WHERE copy=?1 UNION ALL
-                                SELECT 1 FROM _coven_pin_requests WHERE copy=?1 UNION ALL
-                                SELECT 1 FROM _coven_cache WHERE path=?1)",
+                            &format!("SELECT {CACHE_NAME_USED_SQL}"),
                             [name.as_str()],
                             |r| r.get::<_, bool>(0),
                         )? {

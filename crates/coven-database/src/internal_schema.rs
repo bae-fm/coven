@@ -26,6 +26,16 @@ pub(crate) const CACHE_HEADER: i64 = -1;
 pub(crate) const CACHE_COMPLETE_FILE: i64 = -2;
 // D2 timestamps contain six clock bytes, two counter bytes, then the device id.
 pub(crate) const WRITE_DEVICE_SQL: &str = "substr(timestamp,9,8)";
+/// Whether the files-area path `?1` is named: by a file on this device
+/// only, or as the copy of a queued upload or a pin request (Appendix C.3).
+pub(crate) const FILE_NAMED_SQL: &str = "(EXISTS(SELECT 1 FROM _coven_device_files WHERE path=?1)
+    OR EXISTS(SELECT 1 FROM _coven_file_uploads WHERE copy=?1)
+    OR EXISTS(SELECT 1 FROM _coven_pin_requests WHERE copy=?1))";
+/// Whether the cache-area path `?1` is in use: by an entry, a range being
+/// written, or bytes recorded for removal (Appendix C.3).
+pub(crate) const CACHE_NAME_USED_SQL: &str = "(EXISTS(SELECT 1 FROM _coven_cache WHERE path=?1)
+    OR EXISTS(SELECT 1 FROM _coven_cache_writes WHERE path=?1)
+    OR EXISTS(SELECT 1 FROM _coven_file_removals WHERE path=?1 AND area='cache'))";
 
 /// App objects cannot use either reserved namespace (Appendix C.1).
 pub(crate) fn reserved_name(name: &str) -> bool {

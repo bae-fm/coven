@@ -12,6 +12,33 @@ async fn stored(db: &Database, bytes: Vec<u8>) -> FileRef {
     db.file_ref(file).await.unwrap()
 }
 
+/// A whole cache file can't take a name the cache area still has in use:
+/// a range being written, or bytes recorded for removal.
+#[tokio::test]
+async fn a_cache_reservation_refuses_a_name_the_cache_still_uses() {
+    let store = TestStore::new();
+    let db = open(&store, Provenance::AppProvided).await;
+    let file = stored(&db, vec![5; 3]).await;
+    let owner = FileDatabase::new(db.clone());
+    for (table, name) in
+        [("_coven_cache_writes(path)", "writing"), ("_coven_file_removals(area,path)", "removing")]
+    {
+        let values = if table.contains("area") { "('cache',?1)" } else { "(?1)" };
+        db.commit_writer(|db| {
+            db.internal_execute(&format!("INSERT INTO {table} VALUES{values}"), [name]).unwrap()
+        });
+        assert!(
+            matches!(
+                owner.reserve_cache_file(&file, FileName::new(name).unwrap()).await,
+                Err(DbError::FileNameReused { name: reused }) if reused.as_str() == name
+            ),
+            "{name}"
+        );
+    }
+    drop(owner);
+    db.close().await.ok();
+}
+
 #[tokio::test]
 async fn reopen_waits_for_a_cache_reservation_after_its_database_owner_drops() {
     use crate::file_write::tests::local_count;
