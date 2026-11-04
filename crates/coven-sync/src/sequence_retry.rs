@@ -103,7 +103,9 @@ impl SequenceSync {
 
     /// Close the attempt coven drove at the operation `id` while resuming
     /// it: a failure becomes the operation's pending record and wait, and
-    /// the pass goes on to the next; a success ends its wait.
+    /// the pass goes on to the next; a success ends its wait. A failure
+    /// that ended the operation, such as a refused request, has no record
+    /// to keep it: it is logged, and the operation's wait ends.
     pub(crate) async fn settle_resumed(
         &self,
         id: OperationId,
@@ -111,19 +113,23 @@ impl SequenceSync {
         result: Result<(), SyncError>,
         ring: &StoreKeyring,
     ) -> Result<(), SyncError> {
-        match result {
-            Ok(()) => self.waits.operation_advanced(id),
-            Err(error) => {
-                self.record_operation_error(
-                    id,
-                    kind,
-                    crate::sequence_sync::OperationFailure::Held(error),
-                    ring,
-                )
-                .await?;
-                self.state.check()?;
-            }
+        let Err(error) = result else {
+            self.waits.operation_advanced(id);
+            return Ok(());
+        };
+        if self.database.operation(id).await?.is_some() {
+            self.record_operation_error(
+                id,
+                kind,
+                crate::sequence_sync::OperationFailure::Held(error),
+                ring,
+            )
+            .await?;
+        } else {
+            tracing::warn!(?id, ?kind, "a resumed operation ended failing: {}", error.cause());
+            self.waits.operation_advanced(id);
         }
+        self.state.check()?;
         Ok(())
     }
 

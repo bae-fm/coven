@@ -152,18 +152,15 @@ impl SequenceSync {
             if record.kind != MEMBER_KEYS || !self.operation_ready(&record, ring).await? {
                 continue;
             }
-            if let Err(error) = self.advance_member_keys(session, ring, record.id).await {
-                if self.database.operation(record.id).await?.is_some() {
-                    self.record_operation_error(
-                        record.id,
-                        OperationKind::ReplaceMemberKeys,
-                        crate::sequence_sync::OperationFailure::Held(error),
-                        ring,
-                    )
-                    .await?;
-                }
-                self.state.check()?;
-            }
+            let scope = self.waits.begin_attempt(record.id);
+            let result = scope.run(self.advance_member_keys(session, ring, record.id)).await;
+            self.settle_resumed(
+                record.id,
+                OperationKind::ReplaceMemberKeys,
+                result.map(drop),
+                ring,
+            )
+            .await?;
         }
         Ok(())
     }

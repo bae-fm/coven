@@ -578,3 +578,49 @@ async fn a_replaced_pair_restores_as_replaced_past_a_floor() {
         device.sync.database.close().await.unwrap();
     }
 }
+
+/// §6.7 and §19.1: a pass that resumes a self-replacement past the failure
+/// its last attempt met ends that failure's wait, so a later failure for the
+/// same reason is new and logs again.
+#[tokio::test]
+async fn a_resumed_replacement_past_its_failure_ends_its_wait() {
+    let group = Group::new();
+    let ana = group.device(1).await;
+    group.create(&ana).await;
+    let next = ana.database().applied_slot().await.unwrap() + 1;
+    ana.storage
+        .set_faults(coven_storage::test_utils::Faults {
+            create_failures: [(
+                coven_storage::ObjectPath::slot(group.store, next.try_into().unwrap()),
+                (coven_storage::StorageFailure::Network, 500),
+            )]
+            .into(),
+            ..coven_storage::test_utils::Faults::none()
+        })
+        .await;
+    assert!(matches!(ana.sync.replace_member_keys().await, Err(SyncError::Storage(_))));
+    ana.storage.set_faults(coven_storage::test_utils::Faults::none()).await;
+    let id = ana
+        .database()
+        .operations()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|record| record.kind == "member-keys")
+        .unwrap()
+        .id;
+    let failed = ana.database().operation_pending::<PendingRecord>(id).await.unwrap().unwrap();
+    let wait = coven_database::RetrySubject::Operation(id);
+    assert!(ana.sync.waits.remaining(wait).is_some());
+    group.clock.set(std::time::UNIX_EPOCH + std::time::Duration::from_secs(120));
+    ana.sync.pass().await.unwrap();
+    // The binding applied; only the code refresh is left.
+    assert!(ana.database().operation(id).await.unwrap().is_some());
+    assert!(ana.database().operation_pending::<PendingRecord>(id).await.unwrap().is_none());
+    assert_eq!(ana.sync.waits.remaining(wait), None, "the failure's wait ended");
+    assert!(
+        ana.sync.waits.log_failure(&failed.subject, &failed.reason, &SyncError::NoStorage),
+        "the same failure after the resume is new"
+    );
+    ana.database().close().await.unwrap();
+}
