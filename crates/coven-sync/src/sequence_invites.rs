@@ -377,11 +377,7 @@ impl SequenceSync {
             let object = ObjectPath::parse(&path).map_err(|error| {
                 StorageFailure::Protocol.with_source(format!("a recorded removal's path: {error}"))
             })?;
-            match self.storage.delete(&object).await {
-                Ok(()) => (),
-                Err(error) if error.failure() == StorageFailure::NotFound => (),
-                Err(error) => return Err(error.into()),
-            }
+            self.storage.delete_if_present(&object).await?;
             self.database.object_removed(path).await?;
         }
         Ok(())
@@ -637,11 +633,7 @@ impl SequenceSync {
         let marker = InviteEnd { kept_until }.encode();
         let path = ObjectPath::join_request(self.store(), work.device, work.id);
         loop {
-            match self.storage.delete(&path).await {
-                Ok(()) => (),
-                Err(error) if error.failure() == StorageFailure::NotFound => (),
-                Err(error) => return Err(error.into()),
-            }
+            self.storage.delete_if_present(&path).await?;
             match self.storage.create(&path, &marker).await {
                 Ok(_) => return Ok(kept_until),
                 Err(error) if error.failure() == StorageFailure::AlreadyExists => {

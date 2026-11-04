@@ -62,11 +62,7 @@ impl SequenceSync {
             if object.path == marker {
                 continue;
             }
-            match self.storage.delete(&object.path).await {
-                Ok(()) => (),
-                Err(error) if error.failure() == StorageFailure::NotFound => (),
-                Err(error) => return Err(error.into()),
-            }
+            self.storage.delete_if_present(&object.path).await?;
         }
         Ok(())
     }

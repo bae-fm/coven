@@ -373,11 +373,7 @@ impl JoiningIdentity {
             Err(error) => return Err(error.into()),
         };
         if present && self.inviter_gone(storage).await? {
-            match storage.delete(&self.path).await {
-                Ok(()) => (),
-                Err(error) if error.failure() == StorageFailure::NotFound => (),
-                Err(error) => return Err(error.into()),
-            }
+            storage.delete_if_present(&self.path).await?;
             return Ok(false);
         }
         Ok(present)

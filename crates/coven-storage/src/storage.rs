@@ -224,6 +224,16 @@ pub trait Storage: Send + Sync {
     /// Sync chooses the deleting device under §16.6; storage exposes no deletion-rights
     /// query. A provider refusal retains its cause, including a refused owned-object deletion.
     async fn delete(&self, path: &ObjectPath) -> Result<(), StorageError>;
+    /// [`Self::delete`] for a caller that wants the object gone and has no use
+    /// for the difference between deleting it and finding nothing: a
+    /// `NotFound` failure, such as a provider reporting its folder missing,
+    /// is done too. Every other failure reaches the caller.
+    async fn delete_if_present(&self, path: &ObjectPath) -> Result<(), StorageError> {
+        match self.delete(path).await {
+            Err(error) if error.failure() == StorageFailure::NotFound => Ok(()),
+            result => result,
+        }
+    }
     /// Share the store using its owner's account, or tell an S3 admin to create a key.
     /// A signed-in sharing account that does not own the location gets `NotStoreOwner`.
     /// Ownership comes from Dropbox's folder `access_type`,
