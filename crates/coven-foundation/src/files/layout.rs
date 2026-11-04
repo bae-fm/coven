@@ -172,37 +172,12 @@ impl StoreDirectories {
     }
 }
 
-/// Crate-to-crate operations for coven's owners; not re-exported by the app API.
-pub trait StoreDirectoriesAccess: Sized {
+impl StoreDirectories {
     /// Reserve a hidden, restartable new-device store. A second attempt for the
     /// same id waits for a dropped bootstrap's remaining work to release its
     /// locks; a live bootstrap still refuses it. Ordinary store listings exclude
     /// it until `BootstrapStore::publish` succeeds.
-    fn begin_bootstrap(
-        &self,
-        id: StoreId,
-        ids: &dyn IdSource,
-    ) -> impl std::future::Future<
-        Output = Result<super::BootstrapStore, super::BootstrapDirectoryError>,
-    > + Send;
-    /// Replace the installation of a published store, or continue a
-    /// replacement under way: hold the store's bootstrap and writer locks, so
-    /// no handle opens it meanwhile, and load the new installation in a
-    /// hidden directory inside the store's directory (§19.3). A swap under
-    /// way that the other call began is refused with
-    /// `StoreLockError::ReplacementUnfinished`, changing nothing.
-    fn begin_replacement(
-        &self,
-        id: StoreId,
-        by: super::ReplacedBy,
-        ids: &dyn IdSource,
-    ) -> impl std::future::Future<
-        Output = Result<super::ReplacementStore, super::BootstrapDirectoryError>,
-    > + Send;
-}
-
-impl StoreDirectoriesAccess for StoreDirectories {
-    async fn begin_bootstrap(
+    pub async fn begin_bootstrap(
         &self,
         id: StoreId,
         ids: &dyn IdSource,
@@ -215,7 +190,14 @@ impl StoreDirectoriesAccess for StoreDirectories {
         )
         .await
     }
-    async fn begin_replacement(
+
+    /// Replace the installation of a published store, or continue a
+    /// replacement under way: hold the store's bootstrap and writer locks, so
+    /// no handle opens it meanwhile, and load the new installation in a
+    /// hidden directory inside the store's directory (§19.3). A swap under
+    /// way that the other call began is refused with
+    /// `StoreLockError::ReplacementUnfinished`, changing nothing.
+    pub async fn begin_replacement(
         &self,
         id: StoreId,
         by: super::ReplacedBy,

@@ -1,7 +1,5 @@
 use super::*;
-use crate::files::{
-    FileArea, FileName, StoreDirAccess, StoreDirectories, StoreDirectoriesAccess, StoreFile,
-};
+use crate::files::{FileArea, FileName, StoreDirAccess, StoreDirectories, StoreFile};
 use crate::id_source::UuidIds;
 
 struct Fixture {

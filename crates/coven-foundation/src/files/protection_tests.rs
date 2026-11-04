@@ -11,9 +11,7 @@
 //! a change Apple refuses another with `EBUSY`.
 
 use super::*;
-use crate::files::{
-    DirectoryCreationError, StoreDirAccess, StoreDirectories, StoreDirectoriesAccess,
-};
+use crate::files::{DirectoryCreationError, StoreDirAccess, StoreDirectories};
 use crate::id_source::{StoreId, UuidIds};
 use std::os::unix::fs::PermissionsExt;
 use uuid::Uuid;

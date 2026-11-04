@@ -6,8 +6,8 @@ use coven_crypto::custody::{
     StoreCustody, StoreKeychain,
 };
 use coven_database::{DatabaseBuilder, OpenStep};
+use coven_foundation::files::StoreDirAccess;
 use coven_foundation::files::StoreFile;
-use coven_foundation::files::{StoreDirAccess, StoreDirectoriesAccess};
 use coven_foundation::progress::Progress;
 #[cfg(test)]
 use coven_foundation::progress::RecordingClock;

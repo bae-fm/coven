@@ -1,5 +1,5 @@
 use super::*;
-use crate::files::{StoreDirAccess, StoreDirectoriesAccess};
+use crate::files::StoreDirAccess;
 use crate::{files::StoreDirectories, id_source::UuidIds};
 use std::{
     future::{poll_fn, Future},
