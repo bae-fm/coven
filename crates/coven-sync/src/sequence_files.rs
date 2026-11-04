@@ -418,11 +418,7 @@ impl SequenceSync {
             };
             FileEvidence::Unproven(UnprovenFiles::Schema(version))
         } else {
-            if object.prefix().covers != announcement.covers
-                || object.prefix().purpose != announcement.purpose
-            {
-                return Err(crate::write_object::wrong_identity(&path));
-            }
+            object.check_announced(announcement)?;
             let staging = self
                 .database
                 .stage_snapshot(announcement.snapshot.clone(), object.prefix().clone())
@@ -452,17 +448,8 @@ impl SequenceSync {
         let path = object.path();
         let read = async {
             let body = object
-                .read_body(
-                    self.storage.as_ref(),
-                    ring,
-                    &announcement.digest,
-                    Some(&mut staging),
-                    None,
-                )
+                .read_body(self.storage.as_ref(), ring, announcement, Some(&mut staging), None)
                 .await?;
-            if body.header.id != announcement.snapshot {
-                return Err(crate::write_object::wrong_identity(path));
-            }
             staging
                 .finish()
                 .await

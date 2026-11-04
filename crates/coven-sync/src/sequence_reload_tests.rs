@@ -62,7 +62,7 @@ async fn loading_a_snapshot_checks_its_announced_digest_before_its_signature() {
     // The signature's last byte changed: every chunk still opens, and the
     // body is refused for its digest before its signature is checked.
     let result = snapshot
-        .read_body(ben.sync.storage.as_ref(), &ring, &announcement.digest, None, None)
+        .read_body(ben.sync.storage.as_ref(), &ring, announcement, None, None)
         .await
         .map(drop);
     assert!(

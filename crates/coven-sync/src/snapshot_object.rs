@@ -92,6 +92,18 @@ impl SnapshotObject {
         Ok(Self { input, prefix, signature, prefix_bytes })
     }
 
+    /// The prefix covers what `announcement` says, for its purpose.
+    pub(crate) fn check_announced(
+        &self,
+        announcement: &coven_format::sequence::SnapshotAnnouncement,
+    ) -> Result<(), SyncError> {
+        if self.prefix.covers != announcement.covers || self.prefix.purpose != announcement.purpose
+        {
+            return Err(crate::write_object::wrong_identity(&self.input.object().path));
+        }
+        Ok(())
+    }
+
     pub(crate) fn verify_prefix(
         &self,
         history: &History,

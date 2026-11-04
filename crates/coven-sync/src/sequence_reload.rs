@@ -226,11 +226,7 @@ impl SequenceSync {
         let path = snapshot_object::path(self.store(), &announcement.snapshot)?;
         let object =
             SnapshotObject::read_prefix(&self.database, self.storage.as_ref(), &path).await?;
-        if object.prefix().covers != announcement.covers
-            || object.prefix().purpose != announcement.purpose
-        {
-            return Err(crate::write_object::wrong_identity(&path));
-        }
+        object.check_announced(announcement)?;
         Ok(object)
     }
 
@@ -246,18 +242,14 @@ impl SequenceSync {
         progress: Option<&mut ProgressReport<LoadStep>>,
     ) -> Result<ReadSnapshot, SyncError> {
         let started = self.clock.elapsed();
-        let body = object
-            .read_body(self.storage.as_ref(), ring, &announcement.digest, staging, progress)
-            .await;
+        let body =
+            object.read_body(self.storage.as_ref(), ring, &announcement, staging, progress).await;
         let body = match (body, object.release().await) {
             (Ok(body), Ok(())) => body,
             (Ok(_), Err(cleanup)) => return Err(cleanup),
             (Err(error), Ok(())) => return Err(error),
             (Err(error), Err(cleanup)) => return Err(SyncError::cleanup(error, cleanup)),
         };
-        if body.header.id != announcement.snapshot {
-            return Err(crate::write_object::wrong_identity(object.path()));
-        }
         tracing::info!(
             audience = ?announcement.snapshot.audience,
             covers = announcement.covers,

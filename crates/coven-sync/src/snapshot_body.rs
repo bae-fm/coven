@@ -14,6 +14,7 @@ use coven_format::{
     floor::OriginalSlot,
     path::ObjectPath,
     sealed_stream::StreamObjectLayout,
+    sequence::SnapshotAnnouncement,
     snapshot::{LastClaim, SnapshotHeader, SnapshotRecord},
     snapshot_stream::SnapshotChunkDecoder,
 };
@@ -43,12 +44,13 @@ impl SnapshotObject {
     /// sealed byte is retained (§16.2). A body that fails its checks is read
     /// to its end, so it is refused for its digest first when that differs.
     /// An interrupted stream starts over. The object's bytes count toward
-    /// the step `progress` is on as they arrive.
+    /// the step `progress` is on as they arrive. The body must be the one
+    /// `announcement` names, with its digest.
     pub(crate) async fn read_body(
         &self,
         storage: &dyn coven_storage::Storage,
         ring: &StoreKeyring,
-        announced: &[u8; 32],
+        announcement: &SnapshotAnnouncement,
         mut staging: Option<&mut SnapshotStaging>,
         mut progress: Option<&mut ProgressReport<LoadStep>>,
     ) -> Result<SnapshotBody, SyncError> {
@@ -100,7 +102,7 @@ impl SnapshotObject {
             return Err(StorageFailure::Protocol.with_source("stream has extra bytes").into());
         }
         let digest = body.digest.finish(signature);
-        if digest.complete() != announced {
+        if digest.complete() != &announcement.digest {
             return Err(crate::write_object::wrong_identity(path));
         }
         if let Some(refused) = refused {
@@ -112,13 +114,12 @@ impl SnapshotObject {
         checked(path, opening.layout.read_signature(&signature))?;
         checked(path, opening.decoder.finish())?;
         let Opening { decoder, mut originals, claims, .. } = opening;
+        let header = decoder.header().expect("finished snapshot").clone();
+        if header.id != announcement.snapshot {
+            return Err(crate::write_object::wrong_identity(path));
+        }
         originals.sort_by_key(|original| original.slot);
-        Ok(SnapshotBody {
-            header: decoder.header().expect("finished snapshot").clone(),
-            originals,
-            claims,
-            digest,
-        })
+        Ok(SnapshotBody { header, originals, claims, digest })
     }
 }
 
