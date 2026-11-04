@@ -69,41 +69,25 @@ pub(crate) async fn upload<S: UploadSource>(
             if session.target() != target || session.total_bytes() != total {
                 return Err(StorageError::from(StorageFailure::SessionMismatch).into());
             }
-            if session.is_at(&storage.config()) {
-                match storage.resume_upload(&mut session).await {
-                    Ok(()) => (),
-                    Err(error) => {
-                        let error = save_failure(source, session.clone(), error).await?;
-                        if occupied(target, &error) {
-                            return source_digest(source, total).await;
-                        }
-                        if error.failure() != StorageFailure::SessionExpired
-                            || matches!(error, StorageError::Cleanup { .. })
-                        {
-                            return Err(error.into());
-                        }
-                        session = match storage.restart_upload(&session).await {
-                            Ok(session) => session,
-                            Err(error) if occupied(target, &error) => {
-                                return source_digest(source, total).await
-                            }
-                            Err(error) => return Err(error.into()),
-                        };
-                    }
+            // A store never changes location, so the connection refuses a
+            // session naming another one before any request.
+            if let Err(error) = storage.resume_upload(&mut session).await {
+                let error = save_failure(source, session.clone(), error).await?;
+                if occupied(target, &error) {
+                    return source_digest(source, total).await;
                 }
-            } else {
-                if matches!(target, UploadTarget::Replace(_)) {
-                    return Err(StorageError::from(StorageFailure::SessionMismatch).into());
+                if error.failure() != StorageFailure::SessionExpired
+                    || matches!(error, StorageError::Cleanup { .. })
+                {
+                    return Err(error.into());
                 }
-                // A location move copies published objects, but provider sessions
-                // belong to the old location. Send the same bytes in a new one.
-                match begin(storage, target, total).await {
-                    Ok(replacement) => session = replacement,
+                session = match storage.restart_upload(&session).await {
+                    Ok(session) => session,
                     Err(error) if occupied(target, &error) => {
                         return source_digest(source, total).await
                     }
                     Err(error) => return Err(error.into()),
-                }
+                };
             }
             session
         }

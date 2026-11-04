@@ -370,7 +370,6 @@ fn refreshed_account_labels_do_not_change_upload_destinations() {
             _ => unreachable!(),
         }
         assert_ne!(location, session.location);
-        assert!(session.is_at(&location));
         session.check(&location).unwrap();
     }
 }

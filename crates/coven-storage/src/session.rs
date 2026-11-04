@@ -207,10 +207,6 @@ impl UploadSession {
     pub fn device(&self) -> DeviceId {
         self.device
     }
-    /// Whether this recorded transfer belongs to the connected location.
-    pub fn is_at(&self, location: &StorageConfig) -> bool {
-        self.location.same_location(location)
-    }
     /// The destination encrypted-object path.
     pub fn path(&self) -> &ObjectPath {
         self.target.path()

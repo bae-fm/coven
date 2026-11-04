@@ -6348,9 +6348,10 @@ to the same limit, so a cover never waits behind the photos (§17.4).
   storage, so with none connected the upload stays queued. A failed abort is
   the upload's failure, recorded and retried like an attempt's, and the upload
   stays queued meanwhile; aborting an ended session succeeds, so a retry after
-  a crash is safe. A session already complete needs no abort, and one at a
-  location the store has moved from is out of this connection's reach, so it
-  is forgotten.
+  a crash is safe. A session already complete needs no abort. A store never
+  changes location (§20.3), so a recorded session naming another location is
+  damage: the connection refuses it before any request, a failure that never
+  clears.
 - A changed limit applies to the next upload that starts. Uploads in flight
   keep running when the limit drops.
 - Pausing starts no new trailing upload; a bound one runs on (§17.4). The pause
