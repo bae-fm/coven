@@ -20,10 +20,7 @@ impl Coordinates {
     #[expect(clippy::map_err_ignore, reason = "malformed coordinates are invalid as a whole")]
     pub fn decode(text: &str) -> Result<Self, Error> {
         if let Some(device) = text.strip_prefix("device ") {
-            let number: u64 = device.parse().map_err(|_| invalid())?;
-            if number.to_string() != device {
-                return Err(invalid());
-            }
+            let number = crate::path::canonical_decimal(device).ok_or_else(invalid)?;
             return Ok(Self::DeviceOnly(DeviceId(number)));
         }
         FileReference::decode(text).map(Self::Cloud).map_err(|_| invalid())

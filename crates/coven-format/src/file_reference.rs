@@ -29,11 +29,8 @@ impl FileReference {
         let rest = text.strip_prefix("file ").ok_or_else(invalid)?;
         let (device, rest) = rest.split_once(' ').ok_or_else(invalid)?;
         let (id, key) = rest.split_once(' ').ok_or_else(invalid)?;
-        let number: u64 = device.parse().map_err(|_| invalid())?;
+        let number = crate::path::canonical_decimal(device).ok_or_else(invalid)?;
         let uuid = coven_foundation::id_source::canonical_uuid(id).map_err(|_| invalid())?;
-        if number.to_string() != device {
-            return Err(invalid());
-        }
         let mut bytes = Zeroizing::new([0; 32]);
         hex::decode_to_slice(key, bytes.as_mut()).map_err(|_| invalid())?;
         if key.bytes().any(|b| b.is_ascii_uppercase()) {

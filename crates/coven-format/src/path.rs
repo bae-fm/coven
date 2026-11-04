@@ -259,10 +259,13 @@ fn store_id(path: &str) -> StoreId {
 }
 
 fn decimal(part: &str, nonzero: bool) -> bool {
-    match part.parse::<u64>() {
-        Ok(n) => (!nonzero || n != 0) && n.to_string() == part,
-        Err(_) => false,
-    }
+    canonical_decimal(part).is_some_and(|n| !nonzero || n != 0)
+}
+
+/// The number `text` spells in decimal with no sign, padding or leading
+/// zeros (D10), the one spelling coven writes.
+pub(crate) fn canonical_decimal(text: &str) -> Option<u64> {
+    text.parse::<u64>().ok().filter(|n| n.to_string() == text)
 }
 fn canonical_uuid(value: &str) -> bool {
     coven_foundation::id_source::canonical_uuid(value).is_ok()
