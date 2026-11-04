@@ -409,3 +409,13 @@ pub(crate) fn fill_for_plans(db: &rusqlite::Connection) {
     )
     .unwrap();
 }
+
+/// A stored list of hashes is whole 32-byte hashes; a remainder is a stored
+/// fact that doesn't decode (§19.3), never dropped.
+#[test]
+fn a_stored_hash_list_with_a_remainder_is_damaged_database() {
+    let hashes = [[1; 32], [2; 32]];
+    assert_eq!(hash_list(&hash_bytes(&hashes)).unwrap(), hashes);
+    assert!(hash_list(&[]).unwrap().is_empty());
+    assert!(matches!(hash_list(&[0; 33]), Err(DbError::DamagedDatabase)));
+}

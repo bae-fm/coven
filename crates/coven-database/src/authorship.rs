@@ -49,12 +49,28 @@ pub struct HeaderEvidence {
     pub signature: [u8; coven_crypto::SIGNATURE_LEN],
 }
 
+/// A list of 32-byte hashes as coven's tables store it: the hashes end to
+/// end.
+fn hash_bytes(hashes: &[[u8; 32]]) -> Vec<u8> {
+    hashes.iter().flatten().copied().collect()
+}
+
+/// The hashes a stored list holds. One whose length isn't whole hashes is
+/// `DamagedDatabase` (§19.3).
+fn hash_list(bytes: &[u8]) -> Result<Vec<[u8; 32]>, DbError> {
+    let hashes = bytes.chunks_exact(32);
+    if !hashes.remainder().is_empty() {
+        return Err(DbError::DamagedDatabase);
+    }
+    Ok(hashes.map(|hash| hash.try_into().expect("a 32-byte chunk")).collect())
+}
+
 pub(crate) fn retain_header(
     db: &DatabaseConnection,
     write: WriteId,
     evidence: &HeaderEvidence,
 ) -> Result<(), DbError> {
-    let roots: Vec<u8> = evidence.roots.iter().flatten().copied().collect();
+    let roots = hash_bytes(&evidence.roots);
     db.internal_execute(
         "INSERT INTO _coven_write_evidence(write_id,prefix,header,roots,signature) VALUES(?1,?2,?3,?4,?5) ON CONFLICT(write_id) DO NOTHING",
         params![
@@ -68,11 +84,16 @@ pub(crate) fn retain_header(
     Ok(())
 }
 
-#[expect(
-    clippy::map_err_ignore,
-    reason = "a stored signature of the wrong width is this column type error"
-)]
+/// A write's stored header evidence. Roots that aren't whole hashes, or a
+/// signature of the wrong width, are `DamagedDatabase` (§19.3).
 fn header(db: &DatabaseConnection, write: WriteId) -> Result<Option<HeaderEvidence>, DbError> {
+    let damaged = |column| {
+        crate::write_encoding::decode_failure(
+            column,
+            rusqlite::types::Type::Blob,
+            DbError::DamagedDatabase,
+        )
+    };
     Ok(db
         .query(
             "SELECT prefix,header,roots,signature FROM _coven_write_evidence WHERE write_id=?1",
@@ -83,17 +104,8 @@ fn header(db: &DatabaseConnection, write: WriteId) -> Result<Option<HeaderEviden
                 Ok(HeaderEvidence {
                     prefix: r.get(0)?,
                     header: r.get(1)?,
-                    roots: roots
-                        .chunks_exact(32)
-                        .map(|root| root.try_into().expect("32 bytes"))
-                        .collect(),
-                    signature: signature.try_into().map_err(|_| {
-                        rusqlite::Error::InvalidColumnType(
-                            3,
-                            "signature".into(),
-                            rusqlite::types::Type::Blob,
-                        )
-                    })?,
+                    roots: hash_list(&roots).map_err(|_damaged| damaged(2))?,
+                    signature: signature.try_into().map_err(|_wrong_width| damaged(3))?,
                 })
             },
         )?
@@ -107,7 +119,7 @@ pub(crate) fn retain_leaves(
     audience: &Audience,
     hashes: &[[u8; 32]],
 ) -> Result<(), DbError> {
-    let hashes: Vec<u8> = hashes.iter().flatten().copied().collect();
+    let hashes = hash_bytes(hashes);
     db.internal_execute(
         "INSERT INTO _coven_part_leaves(write_id,audience,hashes) VALUES(?1,?2,?3) ON CONFLICT(write_id,audience) DO NOTHING",
         params![
@@ -317,8 +329,7 @@ fn open(
         |r| r.get(0),
     )?;
     if let Some(hashes) = hashes {
-        let hashes: Vec<[u8; 32]> =
-            hashes.chunks_exact(32).map(|hash| hash.try_into().expect("32 bytes")).collect();
+        let hashes = hash_list(&hashes)?;
         let mut leaves = Vec::new();
         db.for_each::<_, DbError>(
             "SELECT record FROM _coven_authored_changes WHERE write_id=?1 AND audience=?2 ORDER BY table_name,key",
@@ -351,8 +362,7 @@ fn open(
         .pop()
         .ok_or_else(|| missing(write))?;
     let proof = decoded(merge_fields::decode_multiproof(&proof))?;
-    let hashes: Vec<[u8; 32]> =
-        hashes.chunks_exact(32).map(|hash| hash.try_into().expect("32 bytes")).collect();
+    let hashes = hash_list(&hashes)?;
     let keep = proof
         .opened()?
         .iter()
@@ -422,7 +432,7 @@ pub(crate) fn load(
         },
     )?;
     if verified.part {
-        let hashes: Vec<u8> = verified.hashes.iter().flatten().copied().collect();
+        let hashes = hash_bytes(&verified.hashes);
         db.internal_execute(
             "INSERT INTO _coven_part_proofs(write_id,audience,proof,hashes) VALUES(?1,?2,?3,?4) ON CONFLICT(write_id,audience) DO UPDATE SET proof=excluded.proof,hashes=excluded.hashes",
             params![

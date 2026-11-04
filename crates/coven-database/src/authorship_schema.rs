@@ -10,7 +10,7 @@ macro_rules! coven_authorship_tables {
                 write_id BLOB PRIMARY KEY NOT NULL CHECK(length(write_id)=16),
                 prefix BLOB NOT NULL,
                 header BLOB NOT NULL,
-                roots BLOB NOT NULL,
+                roots BLOB NOT NULL CHECK(length(roots)%32=0),
                 signature BLOB NOT NULL CHECK(length(signature)=64)
             ) STRICT, WITHOUT ROWID;
         "
