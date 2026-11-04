@@ -1,15 +1,11 @@
 //! Carry the counted projection through the same schema identities as app rows.
 use crate::{
-    migration_names::MigrationMatch,
-    sqlite::DatabaseConnection,
-    write_encoding::{decoded, encoded},
-    write_schema::WriteSchema,
-    DbError,
+    migration_names::MigrationMatch, sqlite::DatabaseConnection, write_encoding::decoded,
+    write_schema::WriteSchema, DbError,
 };
 use coven_format::{
     loss::{Loss, LossValues},
     merge_fields,
-    snapshot_rows::MergeRow,
 };
 use coven_merge::{ColumnValue, RowId};
 use rusqlite::params;
@@ -64,16 +60,7 @@ pub(crate) fn carry(
         let state = merged
             .state
             .map_schema(row.clone(), |name, value| column(names, schema, &old.table, name, value));
-        db.internal_execute(
-            "INSERT INTO _coven_published_rows(table_name,key,audience,record) VALUES(?1,?2,?3,?4)",
-            params![
-                row.table,
-                row.key,
-                crate::write_encoding::audience_text(&row.audience),
-                encoded(merge_fields::encode_merge_row(&MergeRow { state }))?
-            ],
-        )?;
-        Ok::<_, DbError>(())
+        crate::published::put_row(db, state)
     })?;
     db.batch("DROP TABLE temp._coven_carried_rows; CREATE TEMP TABLE _coven_carried_creations AS SELECT * FROM _coven_published_creations; CREATE INDEX temp._coven_carried_creations_table ON _coven_carried_creations(table_name); DELETE FROM _coven_published_creations")?;
     for (old, new) in &names.tables {
@@ -87,28 +74,15 @@ pub(crate) fn carry(
         if loss.frozen && !was_frozen {
             frozen.push(loss.clone());
         }
-        put(db, &loss)
+        crate::published::put_loss(db, &loss)
     })?;
     db.batch("DROP TABLE temp._coven_carried_losses")?;
     for loss in removed.iter().filter(|loss| !names.tables.contains_key(&loss.row.table)) {
         let loss = crate::migration_state::frozen(loss.clone());
-        put(db, &loss)?;
+        crate::published::put_loss(db, &loss)?;
         frozen.push(loss);
     }
     Ok(frozen)
-}
-
-fn put(db: &DatabaseConnection, loss: &Loss) -> Result<(), DbError> {
-    db.internal_execute(
-        "INSERT INTO _coven_published_losses(table_name,key,audience,record) VALUES(?1,?2,?3,?4)",
-        params![
-            loss.row.table,
-            loss.row.key,
-            crate::write_encoding::audience_text(&loss.row.audience),
-            encoded(merge_fields::encode_loss(loss))?
-        ],
-    )?;
-    Ok(())
 }
 
 /// A kept loss under the run's names. The kept losses are frozen ones and

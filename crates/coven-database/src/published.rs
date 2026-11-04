@@ -42,20 +42,40 @@ pub(crate) fn capture_rows<'a>(
         }
         #[cfg(any(test, feature = "test-utils"))]
         db.record_work(|work| work.published_rows += 1);
-        let stored = store.row_without_losses(row)?;
-        db.internal_execute(
-            "INSERT INTO _coven_published_rows(table_name,key,audience,record) VALUES(?1,?2,?3,?4)",
-            params![
-                row.table,
-                row.key,
-                audience,
-                encoded(merge_fields::encode_merge_row(&MergeRow { state: stored.state }))?
-            ],
-        )?;
+        put_row(db, store.row_without_losses(row)?.state)?;
         keep_losses(db, row)?;
         db.internal_execute("INSERT INTO _coven_published_creations SELECT * FROM _coven_creations WHERE table_name=?1 AND key=?2 AND audience=?3",params![row.table,row.key,audience])?;
         db.internal_execute("INSERT INTO _coven_published_file_refs SELECT device,file FROM _coven_row_file_refs WHERE table_name=?1 AND key=?2 ON CONFLICT DO NOTHING",params![row.table,row.key])?;
     }
+    Ok(())
+}
+
+/// Keep a row's record in the counted state, under the row it names.
+pub(crate) fn put_row(db: &DatabaseConnection, state: RowState<Value>) -> Result<(), DbError> {
+    let row = state.row().clone();
+    db.internal_execute(
+        "INSERT INTO _coven_published_rows(table_name,key,audience,record) VALUES(?1,?2,?3,?4)",
+        params![
+            row.table,
+            row.key,
+            audience_text(&row.audience),
+            encoded(merge_fields::encode_merge_row(&MergeRow { state }))?
+        ],
+    )?;
+    Ok(())
+}
+
+/// Keep a loss in the counted state, beside its row's record.
+pub(crate) fn put_loss(db: &DatabaseConnection, loss: &Loss) -> Result<(), DbError> {
+    db.internal_execute(
+        "INSERT INTO _coven_published_losses(table_name,key,audience,record) VALUES(?1,?2,?3,?4)",
+        params![
+            loss.row.table,
+            loss.row.key,
+            audience_text(&loss.row.audience),
+            encoded(merge_fields::encode_loss(loss))?
+        ],
+    )?;
     Ok(())
 }
 
@@ -67,9 +87,7 @@ pub(crate) fn capture_rows<'a>(
 fn keep_losses(db: &DatabaseConnection, row: &RowId) -> Result<(), DbError> {
     let audience = audience_text(&row.audience);
     db.for_each(&format!("{} WHERE l.table_name=?1 AND l.key=?2 AND l.audience=?3 AND NOT (l.replacement_kind='rules' AND l.frozen=0)",crate::loss_record::SELECT),params![row.table,row.key,audience],|r| {
-        let loss=crate::loss_record::read(r)?;
-        db.internal_execute("INSERT INTO _coven_published_losses(table_name,key,audience,record) VALUES(?1,?2,?3,?4)",params![row.table,row.key,audience,encoded(merge_fields::encode_loss(&loss))?])?;
-        Ok::<_,DbError>(())
+        put_loss(db, &crate::loss_record::read(r)?)
     })
 }
 
