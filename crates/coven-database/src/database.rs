@@ -75,6 +75,14 @@ pub struct Database {
     /// whole state: the lock is taken as it is (E15).
     inner: Arc<RwLock<Option<DatabaseInner>>>,
     file_tasks: Arc<tokio::sync::RwLock<()>>,
+    /// Told when a close finds a call holding the open store and waits for
+    /// it to end.
+    #[cfg(test)]
+    close_waits: Arc<Mutex<Option<tokio::sync::oneshot::Sender<()>>>>,
+    /// The removals of snapshot stagings their callers abandoned, for a test
+    /// to wait on.
+    #[cfg(test)]
+    abandoned_stagings: Arc<Mutex<Vec<tests::hooks::StagingRemoval>>>,
 }
 
 struct DatabaseInner {
@@ -368,32 +376,6 @@ fn released(writer: &DatabaseConnection, inner: &DatabaseInner) -> crate::file_r
     let active = lock_unpoisoned(&inner.staging);
     let copying = lock_unpoisoned(&inner.copying);
     crate::file_removals::choose(writer, &active, &copying)
-}
-
-#[cfg(test)]
-impl Database {
-    /// Run `gate` where released files' bytes are about to go, after the
-    /// writer is free, so a test can stall that disk work.
-    pub(crate) async fn test_gate_file_removal(&self, gate: impl Fn() + Send + Sync + 'static) {
-        let gate: Arc<dyn Fn() + Send + Sync> = Arc::new(gate);
-        self.call(move |inner| {
-            *lock_unpoisoned(&inner.removal_gate) = Some(gate);
-            Ok::<_, DbError>(())
-        })
-        .await
-        .unwrap();
-    }
-
-    /// Run `hook` where each write's staged files have been flushed, before
-    /// its commit; an error from it fails the flush.
-    pub(crate) async fn test_on_file_flush(&self, hook: coven_foundation::files::FlushHook) {
-        self.call(move |inner| {
-            *lock_unpoisoned(&inner.flush_hook) = Some(hook);
-            Ok::<_, DbError>(())
-        })
-        .await
-        .unwrap();
-    }
 }
 
 impl Database {
@@ -782,6 +764,8 @@ impl Database {
                 "close the store",
                 tokio::task::spawn_blocking(crate::commit_scope::bind(move || {
                     let _file_tasks = file_tasks;
+                    #[cfg(test)]
+                    database.tell_close_wait();
                     let mut slot = write_unpoisoned(&database.inner);
                     let Some(inner) = slot.take() else {
                         return Err(DbError::StoreClosed);

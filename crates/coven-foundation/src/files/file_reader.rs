@@ -99,6 +99,8 @@ impl FileReader {
 
 /// Open a regular file for positioned reads, with its metadata.
 fn open_file(path: &Path) -> Result<(File, Metadata), ObservationError> {
+    #[cfg(any(test, feature = "test-utils"))]
+    super::reached::reached(path);
     let file = File::open(path).map_err(|error| ObservationError::at("read file", path, error))?;
     let metadata =
         file.metadata().map_err(|error| ObservationError::at("read file", path, error))?;

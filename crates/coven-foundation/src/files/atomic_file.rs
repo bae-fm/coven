@@ -138,6 +138,8 @@ impl AtomicFile {
     /// but a regular file there is refused before a byte is written.
     pub fn write_recorded(&self, bytes: &[u8]) -> Result<(), FileError> {
         let path = self.resolved()?;
+        #[cfg(any(test, feature = "test-utils"))]
+        super::reached::reached(&path);
         let mut file = owned_options()
             .create(true)
             .truncate(true)

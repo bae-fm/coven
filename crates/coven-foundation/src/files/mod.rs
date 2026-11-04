@@ -26,6 +26,8 @@ mod protection;
 #[cfg(not(target_vendor = "apple"))]
 #[path = "protection_elsewhere.rs"]
 mod protection;
+#[cfg(any(test, feature = "test-utils"))]
+mod reached;
 mod relative_path;
 mod replacement;
 mod settings;
@@ -47,6 +49,8 @@ pub use flush_batch::FlushHook;
 pub use flush_batch::{FlushBatch, Flushed};
 pub use folder_copy::{CopyFolder, CopyPathError, CopyPlan, CopyWriter, MadeFolder, RecordedCopy};
 pub use layout::StoreDirectories;
+#[cfg(any(test, feature = "test-utils"))]
+pub use lock::cache_writes_lock;
 pub use lock::{
     CacheWriteLock, StoreClosingGuard, StoreDeletionLock, StoreLock, StoreLockError, StoreReadLock,
 };
@@ -58,6 +62,8 @@ pub use path_bytes::{path_bytes, path_bytes_text, path_from_bytes, path_text, Pa
 pub use protection::FileProtection;
 #[cfg(all(target_vendor = "apple", any(test, feature = "test-utils")))]
 pub use protection::ProtectionSupport;
+#[cfg(any(test, feature = "test-utils"))]
+pub use reached::when_reached;
 pub use relative_path::{windows_device, RelativePath, RelativePathError};
 pub use replacement::ReplacementStore;
 pub use settings::{SettingsError, StoreSettings};

@@ -469,7 +469,6 @@ async fn release_fifo_writer(path: std::path::PathBuf) {
 #[tokio::test]
 async fn a_stalled_cache_range_write_holds_back_no_app_write() {
     use crate::file_write::tests::local_count;
-    use std::time::Duration;
     let store = TestStore::new();
     let db = open(&store, Provenance::AppProvided).await;
     let file = stored(&db, vec![5; 3]).await;
@@ -477,11 +476,16 @@ async fn a_stalled_cache_range_write_holds_back_no_app_write() {
     let name = FileName::new("range").unwrap();
     let path = cache_path(&store, &name);
     fifo(&path);
+    let reached = coven_foundation::files::when_reached(&path);
     let writing = tokio::spawn({
         let name = name.clone();
         async move { owner.cache_range(&file, 0, 1, name, vec![1; 19]).await }
     });
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    // The work reached the FIFO, whose open holds it until released.
+    tokio::time::timeout(HANG_GUARD, reached)
+        .await
+        .expect("the work reaches the stalled file")
+        .unwrap();
     assert!(!writing.is_finished(), "the range write is stalled");
     let written = tokio::time::timeout(
         HANG_GUARD,
@@ -512,7 +516,6 @@ async fn a_stalled_cache_range_write_holds_back_no_app_write() {
 #[tokio::test]
 async fn another_handles_removals_leave_a_range_being_written() {
     use crate::file_write::tests::{local_count, owned_paths};
-    use std::time::Duration;
     let store = TestStore::new();
     let db = open(&store, Provenance::AppProvided).await;
     let file = stored(&db, vec![5; 3]).await;
@@ -528,11 +531,16 @@ async fn another_handles_removals_leave_a_range_being_written() {
     let name = FileName::new("range").unwrap();
     let path = cache_path(&store, &name);
     fifo(&path);
+    let reached = coven_foundation::files::when_reached(&path);
     let writing = tokio::spawn({
         let name = name.clone();
         async move { reader.cache_range(&file, 0, 1, name, vec![1; 19]).await }
     });
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    // The work reached the FIFO, whose open holds it until released.
+    tokio::time::timeout(HANG_GUARD, reached)
+        .await
+        .expect("the work reaches the stalled file")
+        .unwrap();
     assert!(!writing.is_finished(), "the range write is stalled");
     // Completing the upload releases the queue's copy, which the writer
     // removes with every other recorded removal.
@@ -558,7 +566,6 @@ async fn another_handles_removals_leave_a_range_being_written() {
 #[tokio::test]
 async fn opening_waits_for_a_range_being_written_and_removes_abandoned_ones() {
     use crate::file_write::tests::local_count;
-    use std::time::Duration;
     let store = TestStore::new();
     let reopen = || open(&store, Provenance::AppProvided);
     let db = reopen().await;
@@ -578,15 +585,28 @@ async fn opening_waits_for_a_range_being_written_and_removes_abandoned_ones() {
     let name = FileName::new("live").unwrap();
     let live = cache_path(&store, &name);
     fifo(&live);
+    let reached = coven_foundation::files::when_reached(&live);
     let writing =
         tokio::spawn(async move { reader.cache_range(&file, 0, 1, name, vec![1; 19]).await });
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    // The work reached the FIFO, whose open holds it until released.
+    tokio::time::timeout(HANG_GUARD, reached)
+        .await
+        .expect("the work reaches the stalled file")
+        .unwrap();
     assert!(!writing.is_finished(), "the range write is stalled");
     db.close().await.unwrap();
+    let lock = coven_foundation::files::cache_writes_lock(store.database_path().parent().unwrap());
+    let waiting = coven_foundation::files::when_reached(&lock);
     let mut opening = Box::pin(reopen());
-    let waited = tokio::time::timeout(Duration::from_millis(300), &mut opening).await.is_err();
+    // Opening finds the range write holding the cache-write lock and waits
+    // for it, which only the write ending lets go.
+    tokio::select! {
+        _ = &mut opening => panic!("opening took a range another handle was writing"),
+        waited = tokio::time::timeout(HANG_GUARD, waiting) => {
+            waited.expect("opening reaches the range write's lock").unwrap();
+        }
+    }
     release_fifo_writer(live.clone()).await;
-    assert!(waited, "opening took a range another handle was writing");
     let db = opening.await;
     assert!(writing.await.unwrap().is_err());
     assert!(!abandoned.exists());
@@ -605,7 +625,6 @@ async fn opening_waits_for_a_range_being_written_and_removes_abandoned_ones() {
 #[tokio::test]
 async fn a_stalled_cache_read_holds_back_no_app_write() {
     use crate::file_write::tests::local_count;
-    use std::time::Duration;
     let store = TestStore::new();
     let db = open(&store, Provenance::AppProvided).await;
     let file = stored(&db, vec![5; 3]).await;
@@ -615,8 +634,13 @@ async fn a_stalled_cache_read_holds_back_no_app_write() {
     let path = cache_path(&store, &name);
     std::fs::remove_file(&path).unwrap();
     fifo(&path);
+    let reached = coven_foundation::files::when_reached(&path);
     let reading = tokio::spawn(async move { owner.cached(&file, 0).await });
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    // The work reached the FIFO, whose open holds it until released.
+    tokio::time::timeout(HANG_GUARD, reached)
+        .await
+        .expect("the work reaches the stalled file")
+        .unwrap();
     assert!(!reading.is_finished(), "the cache read is stalled");
     let written = tokio::time::timeout(
         HANG_GUARD,
@@ -647,7 +671,6 @@ async fn a_stalled_cache_read_holds_back_no_app_write() {
 #[tokio::test]
 async fn a_stalled_upload_source_holds_back_no_app_write() {
     use crate::file_write::tests::owned_paths;
-    use std::time::Duration;
     let store = TestStore::new();
     let db = open(&store, Provenance::AppProvided).await;
     stage(&db, vec![5; 3], true).await.unwrap();
@@ -656,8 +679,13 @@ async fn a_stalled_upload_source_holds_back_no_app_write() {
     let [path] = owned_paths(&store).try_into().unwrap();
     std::fs::remove_file(&path).unwrap();
     fifo(&path);
+    let reached = coven_foundation::files::when_reached(&path);
     let opening = tokio::spawn(async move { owner.open_upload_source(&upload).await });
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    // The work reached the FIFO, whose open holds it until released.
+    tokio::time::timeout(HANG_GUARD, reached)
+        .await
+        .expect("the work reaches the stalled file")
+        .unwrap();
     assert!(!opening.is_finished(), "opening the source is stalled");
     let written = tokio::time::timeout(
         HANG_GUARD,

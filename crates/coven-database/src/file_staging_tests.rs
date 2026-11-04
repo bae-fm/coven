@@ -11,7 +11,6 @@ use std::{
         Arc, Mutex,
     },
     task::{Context, Poll},
-    time::Duration,
 };
 use tokio::io::{AsyncRead, AsyncWriteExt, ReadBuf};
 
@@ -357,13 +356,13 @@ async fn staged_files_dropped_in_a_write_go_free_while_the_store_closes() {
         }
     });
     tokio::task::spawn_blocking(move || entering.recv().unwrap()).await.unwrap();
+    let close_waits = db.observe_close_wait();
     let closing = tokio::spawn({
         let db = db.clone();
         async move { db.close().await }
     });
-    // Absence has no event to wait on: the close gets a window in which to
-    // reach the store's lock and wait for it.
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    // The close reaches the store's lock and waits for the write holding it.
+    tokio::time::timeout(HANG_GUARD, close_waits).await.unwrap().unwrap();
     release.send(()).unwrap();
     tokio::time::timeout(HANG_GUARD, writing).await.unwrap().unwrap().unwrap();
     tokio::time::timeout(HANG_GUARD, closing).await.unwrap().unwrap().unwrap();

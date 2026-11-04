@@ -75,9 +75,29 @@ const CACHE_WRITES: &str = ".coven-cache-writes.lock";
 pub(super) fn cache_writes(store: &Path, shared: bool) -> Result<CacheWriteLock, FileError> {
     let path = store.join(CACHE_WRITES);
     let mode = if shared { LockMode::Shared } else { LockMode::Exclusive };
-    let file = FileLock::lock(open_lock(&path)?, mode)
+    let file = open_lock(&path)?;
+    let attempt =
+        file.try_clone().map_err(|source| FileError::at("lock cache writes", &path, source))?;
+    match FileLock::try_lock(attempt, mode) {
+        Ok(file) => return Ok(CacheWriteLock { _file: file }),
+        Err(std::fs::TryLockError::WouldBlock) => {
+            #[cfg(any(test, feature = "test-utils"))]
+            super::reached::reached(&path);
+        }
+        Err(std::fs::TryLockError::Error(source)) => {
+            return Err(FileError::at("lock cache writes", &path, source))
+        }
+    }
+    let file = FileLock::lock(file, mode)
         .map_err(|source| FileError::at("lock cache writes", &path, source))?;
     Ok(CacheWriteLock { _file: file })
+}
+
+/// The cache-write lock file of the store at `store`, which a test waits on
+/// to know a range write or an open waits for it.
+#[cfg(any(test, feature = "test-utils"))]
+pub fn cache_writes_lock(store: &Path) -> std::path::PathBuf {
+    store.join(CACHE_WRITES)
 }
 
 /// Exclusive access to the writer, readers and bootstrap, authorizing

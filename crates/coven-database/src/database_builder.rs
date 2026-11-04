@@ -305,6 +305,10 @@ impl DatabaseBuilder {
             bugs: self.bugs,
             closing: Arc::new(lock.closing_guard()),
             file_tasks: Arc::new(tokio::sync::RwLock::new(())),
+            #[cfg(test)]
+            close_waits: Arc::new(Mutex::new(None)),
+            #[cfg(test)]
+            abandoned_stagings: Arc::new(Mutex::new(Vec::new())),
             inner: Arc::new(RwLock::new(Some(DatabaseInner {
                 inputs,
                 access: DatabaseAccess {

@@ -1749,6 +1749,17 @@ pub fn copy_tree(from: &Path, to: &Path);
 #[cfg(feature = "test-utils")]
 pub fn copy_tree_keeping(from: &Path, to: &Path, keep: &dyn Fn(&str) -> bool);
 
+/// Told once file work reaches `path`: about to open it, or finding its
+/// lock held and about to wait for it. A test that stalls the file, as a
+/// FIFO in its place does, then knows the work is held there.
+#[cfg(feature = "test-utils")]
+pub fn when_reached(path: &Path) -> tokio::sync::oneshot::Receiver<()>;
+
+/// The lock file a store's cache range writes share and its opening takes
+/// alone (Appendix C.3), for a test to wait on with `when_reached`.
+#[cfg(feature = "test-utils")]
+pub fn cache_writes_lock(store: &Path) -> PathBuf;
+
 /// The store's directory settings could not be read or written (E1).
 pub enum SettingsError {
     /// No settings file exists.

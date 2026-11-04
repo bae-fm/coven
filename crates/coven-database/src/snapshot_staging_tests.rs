@@ -141,13 +141,10 @@ async fn an_abandoned_staging_removes_its_records() {
     let staged = staged(&db, &snapshot).await;
     assert!(db.staged_snapshot_records().await.unwrap() > 0);
     drop(staged);
-    tokio::time::timeout(std::time::Duration::from_secs(10), async {
-        while db.staged_snapshot_records().await.unwrap() > 0 {
-            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-        }
-    })
-    .await
-    .expect("the abandoned staging was removed");
+    tokio::time::timeout(coven_foundation::clock::HANG_GUARD, db.abandoned_stagings_removed())
+        .await
+        .expect("the abandoned staging's removal ends");
+    assert_eq!(db.staged_snapshot_records().await.unwrap(), 0);
     db.close().await.unwrap();
 }
 

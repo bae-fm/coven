@@ -1102,6 +1102,9 @@ tables = [
     # enters set and put back: its scope is the thread.
     "ACTIVE",
 ]
+# The paths tests wait on file work to reach: a path names one file to the
+# whole process, so the waits on it are the process's.
+"crates/coven-foundation/src/files/reached.rs" = ["WATCHED"]
 "crates/coven-foundation/src/progress.rs" = [
     "RecordingClock::new",
     # Where an owner reports each run of one kind of operation, made with
