@@ -65,3 +65,35 @@ fn a_poisoned_process_wide_lock_ends_the_process() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("a panic left the test registry half-changed"), "{stderr}");
 }
+
+/// Set in the child process `broken_process_wide_state_ends_the_process`
+/// runs, which finds the state broken.
+const BREAKING: &str = "COVEN_LOCKS_TEST_BREAKS";
+
+#[test]
+fn broken_process_wide_state_ends_the_process() {
+    if std::env::var_os(BREAKING).is_some() {
+        abort_broken("the test registry", "a held lock is registered");
+    }
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "--nocapture",
+            "locks::tests::broken_process_wide_state_ends_the_process",
+        ])
+        .env(BREAKING, "1")
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    #[cfg(unix)]
+    assert_eq!(
+        std::os::unix::process::ExitStatusExt::signal(&output.status),
+        Some(6),
+        "the process aborts"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("the test registry broke its rule that a held lock is registered"),
+        "{stderr}"
+    );
+}

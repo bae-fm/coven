@@ -77,7 +77,9 @@ impl StoreClosingGuard {
         if *entry.phase.borrow() == LockPhase::Released {
             return;
         }
-        let locks = registry.stores.get(&entry.store).expect("held lock is registered");
+        let Some(locks) = registry.stores.get(&entry.store) else {
+            crate::locks::abort_broken(REGISTRY, "a held lock is registered")
+        };
         // A dropped bootstrap owns the installation, including a writer that
         // may still be opening or running blocking work on its behalf.
         for (kind, held) in locks {
@@ -154,9 +156,13 @@ impl LockRegistration {
 impl Drop for LockRegistration {
     fn drop(&mut self) {
         let mut registry = crate::locks::lock_or_abort(&STORES, REGISTRY);
-        let locks = registry.stores.get_mut(&self.entry.store).expect("held lock is registered");
-        let removed = locks.remove(&self.entry.kind).expect("held lock kind");
-        assert!(Arc::ptr_eq(&removed, &self.entry));
+        let Some(locks) = registry.stores.get_mut(&self.entry.store) else {
+            crate::locks::abort_broken(REGISTRY, "a held lock is registered")
+        };
+        match locks.remove(&self.entry.kind) {
+            Some(removed) if Arc::ptr_eq(&removed, &self.entry) => {}
+            _ => crate::locks::abort_broken(REGISTRY, "a held lock is registered as itself"),
+        }
         if locks.is_empty() {
             registry.stores.remove(&self.entry.store);
         }

@@ -8461,7 +8461,9 @@ panic leaves nothing half-changed, by how the state changes.
   query returns it as its last result.
 - The registry of the store locks this process holds is shared by every
   store, and its changes check its rules as they go. A panic partway ends
-  the process: no one store's handle covers it.
+  the process: no one store's handle covers it. A lock's drop that finds
+  the registry breaking a rule ends the process the same way, without a
+  panic.
 - Every other lock coven takes guards state that each change leaves whole
   before anything in it can panic, such as a set it adds a name to or an
   option it takes, so a poisoned lock is used as it is.

@@ -58,6 +58,15 @@ fn abort_on(what: &'static str) -> ! {
     std::process::abort()
 }
 
+/// End the process: `what`, state the whole process shares, breaks `rule`.
+/// Nothing narrower than the process can be failed for it, and a drop that
+/// finds it, perhaps during an unwind, must not panic.
+pub(crate) fn abort_broken(what: &'static str, rule: &'static str) -> ! {
+    tracing::error!(what, rule, "process-wide state broke its rule; ending the process");
+    eprintln!("coven: {what} broke its rule that {rule}; ending the process");
+    std::process::abort()
+}
+
 #[cfg(test)]
 #[path = "locks_tests.rs"]
 mod tests;
