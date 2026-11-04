@@ -445,12 +445,7 @@ impl CovenBuilder {
         let device = directory.settings().map_err(CovenError::from)?.device_id;
         let oauth = self.oauth_exchange();
         let (credentials, data) = crate::task::blocking("read the saved credentials", move || {
-            let keychain = self.keychain()?;
-            let credentials = Arc::new(coven_sync::DeviceCredentials::new(
-                Arc::new(StoreKeychain::new(keychain.clone(), store)),
-                Arc::new(PersonEntries::new(keychain, store)),
-                oauth,
-            ));
+            let credentials = device_credentials(self.keychain()?, store, oauth);
             let data = credentials.connection(&settings)?;
             Ok::<_, SyncError>((credentials, data))
         })
@@ -778,6 +773,19 @@ impl OpeningStore {
 }
 
 /// A sync failure while opening, as the opening call reports it.
+/// The device-custody credentials of `store`'s installation.
+pub(crate) fn device_credentials(
+    keychain: Arc<Keychain>,
+    store: StoreId,
+    oauth: Option<OAuthExchange>,
+) -> Arc<coven_sync::DeviceCredentials> {
+    Arc::new(coven_sync::DeviceCredentials::new(
+        Arc::new(StoreKeychain::new(keychain.clone(), store)),
+        Arc::new(PersonEntries::new(keychain, store)),
+        oauth,
+    ))
+}
+
 fn sync_error(error: SyncError) -> CovenError {
     CovenError::Database(DbError::SyncStream(Box::new(error)))
 }

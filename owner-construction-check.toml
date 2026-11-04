@@ -1006,6 +1006,7 @@ tables = [
 "crates/coven/src/builder.rs" = [
     "CovenBuilder::authenticate",
     "CovenBuilder::connector",
+    "device_credentials",
     "CovenBuilder::database",
     "CovenBuilder::keychain",
     # Builder setters replace a configured or already-unlocked custody choice.

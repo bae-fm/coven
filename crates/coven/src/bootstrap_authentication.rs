@@ -72,12 +72,8 @@ pub(super) fn join_sign_in(
     location: &StorageConfig,
 ) -> Result<(SignInCustody, OAuthTokens), BootstrapError> {
     let provider = location.provider();
-    let keychain = builder.keychain()?;
-    let credentials = Arc::new(DeviceCredentials::new(
-        Arc::new(StoreKeychain::new(keychain.clone(), store)),
-        Arc::new(PersonEntries::new(keychain, store)),
-        builder.oauth_exchange(),
-    ));
+    let credentials =
+        crate::builder::device_credentials(builder.keychain()?, store, builder.oauth_exchange());
     let kept = builder.authentication.is_none();
     let tokens = if kept {
         if credentials.write(|keychains| keychains.storage_credentials())?.is_none() {
