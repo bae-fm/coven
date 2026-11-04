@@ -526,7 +526,7 @@ table_macros = [
     "coven_migration_prefix_tables",
     "coven_owner_tables_tables",
     "coven_copy_folders_tables",
-    "coven_queued_file_references_tables",
+    "coven_file_protection_tables",
     "coven_file_chunks_tables",
     "coven_writes_tables",
     "coven_operations_tables",
@@ -817,14 +817,23 @@ tables = [
 ]
 
 [[database.domains]]
-name = "queued file references"
+name = "file protection"
 owner = "Database"
+# A snapshot install settles protection a table at a time in
+# snapshot_files.rs; the pins' triggers on the stored files keep the pins
+# table, the stored files' schema.
 homes = [
     "crates/coven-database/src/file_protection.rs",
     "crates/coven-database/src/file_protection_schema.rs",
+    "crates/coven-database/src/internal_schema_pins.rs",
+    "crates/coven-database/src/snapshot_files.rs",
 ]
 tables = [
+    "_coven_file_references",
     "_coven_queued_file_refs",
+    "_coven_row_file_refs",
+    "_coven_stored_files",
+    "_coven_unreferenced_files",
 ]
 
 [[database.domains]]
@@ -990,16 +999,12 @@ tables = [
     "_coven_copy_chunks",
     "_coven_creations",
     "_coven_device_files",
-    "_coven_file_references",
     "_coven_file_removals",
     "_coven_file_uploads",
     "_coven_foreign_keys",
     "_coven_lost",
     "_coven_references",
-    "_coven_row_file_refs",
     "_coven_rows",
-    "_coven_stored_files",
-    "_coven_unreferenced_files",
     "_coven_upload_files",
     "_coven_user_chunks",
     "_coven_user_files",

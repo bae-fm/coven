@@ -206,6 +206,47 @@ pub(crate) fn refresh_received(
     await_own_write(db, refresh(db, schema, key)?)
 }
 
+/// A file referenced again, or whose record is gone, no longer waits for
+/// its record's delete.
+pub(crate) fn settle_unreferenced(db: &DatabaseConnection) -> Result<(), DbError> {
+    db.internal_execute(
+        "DELETE FROM _coven_unreferenced_files WHERE EXISTS(
+             SELECT 1 FROM _coven_file_references AS r WHERE r.file=_coven_unreferenced_files.file)
+         OR NOT EXISTS(SELECT 1 FROM main.coven_files AS f WHERE f.id=_coven_unreferenced_files.file)",
+        [],
+    )?;
+    Ok(())
+}
+
+/// A migration renamed `table`'s file column `old` to `new`: its references
+/// take the new name.
+pub(crate) fn rename_reference_column(
+    db: &DatabaseConnection,
+    table: &str,
+    old: &str,
+    new: &str,
+) -> Result<(), DbError> {
+    db.internal_execute(
+        "UPDATE _coven_file_references SET column_name=?3 WHERE table_name=?1 AND column_name=?2",
+        params![table, old, new],
+    )?;
+    Ok(())
+}
+
+/// A migration renamed the table `old` to `new`: its rows' references take
+/// the new name.
+pub(crate) fn rename_reference_table(
+    db: &DatabaseConnection,
+    old: &str,
+    new: &str,
+) -> Result<(), DbError> {
+    db.internal_execute(
+        "UPDATE _coven_file_references SET table_name=?2 WHERE table_name=?1",
+        params![old, new],
+    )?;
+    Ok(())
+}
+
 /// Each of `released`, files left with no reference, whose record this
 /// device still has, waits for this device's next write of its own to
 /// delete that record (§17.2).

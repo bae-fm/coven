@@ -552,7 +552,7 @@ impl<'a> FileWrite<'a> {
             for key in &keys {
                 crate::file_protection::refresh_received(db, self.files.schema, key)?;
             }
-            return settle_unreferenced(db);
+            return crate::file_protection::settle_unreferenced(db);
         };
         // A file one row stops naming can be named by another row of the
         // same write, whichever key comes first: only the whole write's
@@ -575,7 +575,7 @@ impl<'a> FileWrite<'a> {
                 });
             }
         }
-        settle_unreferenced(db)
+        crate::file_protection::settle_unreferenced(db)
     }
 
     /// `retain_rows` for one row of a transaction that only applies other
@@ -592,7 +592,7 @@ impl<'a> FileWrite<'a> {
 
     /// Settle the files the rows `retain_received` visited left unreferenced.
     pub(crate) fn settle_received(&self) -> Result<(), DbError> {
-        settle_unreferenced(self.database)
+        crate::file_protection::settle_unreferenced(self.database)
     }
 
     /// Keep the bytes of each staged file a row names on this device, for
@@ -686,16 +686,4 @@ impl<'a> FileWrite<'a> {
         }
         Ok(())
     }
-}
-
-/// A file referenced again, or whose record is gone, no longer waits for
-/// its record's delete.
-fn settle_unreferenced(db: &DatabaseConnection) -> Result<(), DbError> {
-    db.internal_execute(
-        "DELETE FROM _coven_unreferenced_files WHERE EXISTS(
-             SELECT 1 FROM _coven_file_references AS r WHERE r.file=_coven_unreferenced_files.file)
-         OR NOT EXISTS(SELECT 1 FROM main.coven_files AS f WHERE f.id=_coven_unreferenced_files.file)",
-        [],
-    )?;
-    Ok(())
 }

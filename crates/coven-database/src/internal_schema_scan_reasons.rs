@@ -15,6 +15,7 @@ pub(super) fn reason(statement: &Statement, relation: &str) -> Option<&'static s
     database_reason(statement, relation)
         .or_else(|| crate::store_state_tables::tests::scan_reason(file, template, sql, relation))
         .or_else(|| crate::published::tests::scan_reason(file, template, sql, relation))
+        .or_else(|| crate::file_protection::tests::scan_reason(file, template, sql, relation))
         .or_else(|| {
             crate::database::file_retention::tests::scan_reason(file, template, sql, relation)
         })
@@ -88,10 +89,7 @@ fn database_reason(statement: &Statement, relation: &str) -> Option<&'static str
     Some("each upload worker run aborts the session of every upload no file waits for"),
 ("file_table.rs", "SELECT table_name,column_name,write_once FROM _coven_file_columns ORDER BY table_name,column_name", "_coven_file_columns") =>
     Some("opening and each migration compare every registered file column with the declarations"),
-("file_protection.rs", "SELECT DISTINCT table_name,key FROM _coven_file_references", "_coven_file_references") =>
-    Some("once per migration: rebuild every referencing row's file references"),
-("file_write.rs", "DELETE FROM _coven_unreferenced_files WHERE EXISTS( SELECT 1 FROM _coven_file_references AS r WHERE r.file=_coven_unreferenced_files.file) OR NOT EXISTS(SELECT 1 FROM main.coven_files AS f WHERE f.id=_coven_unreferenced_files.file)", "_coven_unreferenced_files")
-| ("file_write_uploads.rs", "SELECT file FROM _coven_unreferenced_files ORDER BY file", "_coven_unreferenced_files")=>
+("file_write_uploads.rs", "SELECT file FROM _coven_unreferenced_files ORDER BY file", "_coven_unreferenced_files") =>
     Some("files other devices' writes left for this device's next write, which concurrent removals leave; normally none"),
 ("file_database.rs", "SELECT EXISTS(SELECT 1 FROM _coven_unreferenced_files) AND NOT EXISTS(SELECT 1 FROM _coven_write_pause)", "_coven_unreferenced_files" | "_coven_write_pause") =>
     Some("unfiltered EXISTS stops at the first row; the pause table holds at most one row"),

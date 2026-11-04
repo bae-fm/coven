@@ -74,11 +74,7 @@ mod fixture {
             'table_' || ((i-1)%32) AS tab, 'audience_' || ((i-1)%64) AS audience,
             CAST(printf('%032d',i) AS BLOB) AS key,
             CAST(printf('%016d',i) AS BLOB) AS member FROM numbers;
-     INSERT INTO _coven_row_file_refs SELECT device,substr(key,1,16),tab,key FROM fixture;
-     INSERT INTO _coven_stored_files SELECT 'file_' || i,audience,device,substr(key,17,16),'file_' || i,key FROM fixture;
      INSERT INTO coven_files SELECT 'file_' || i,audience,1,zeroblob(32),'device 1','files' FROM fixture;
-     INSERT INTO _coven_file_references SELECT 'file_' || i,tab,key,'column_' || i FROM fixture;
-     INSERT INTO _coven_unreferenced_files SELECT 'file_' || i FROM fixture;
      INSERT INTO _coven_authored_parts SELECT CAST(device || n AS BLOB),audience,x'00',1 FROM fixture;
      INSERT INTO _coven_authored_changes SELECT CAST(device || n AS BLOB),audience,tab,key,x'00' FROM fixture;
      INSERT INTO _coven_authored_admissions SELECT CAST(device || n AS BLOB),audience,tab,key,x'00' FROM fixture;
