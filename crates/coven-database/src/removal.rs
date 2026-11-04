@@ -2,6 +2,7 @@
 use crate::removal_view::DatabaseRemovalView;
 use crate::schema::TableSchema;
 use crate::sql::identifier;
+use crate::sqlite::changed_once;
 use crate::sqlite::DatabaseConnection;
 use crate::write_encoding::{audience_text, encoded, sql_value};
 use crate::write_rows::{key_columns, AppValues, AppView};
@@ -350,14 +351,6 @@ fn put(
         }
     }
     Ok(false)
-}
-
-pub(crate) fn changed_once(changed: usize) -> Result<(), DbError> {
-    if changed == 1 {
-        Ok(())
-    } else {
-        Err(rusqlite::Error::StatementChangedRows(changed).into())
-    }
 }
 
 #[cfg(test)]

@@ -8,6 +8,7 @@
 
 use crate::file_location::Place;
 use crate::internal_schema::FILES;
+use crate::sqlite::changed_once;
 use crate::sqlite::DatabaseConnection;
 use crate::write_encoding::{audience_text, encoded, sql_value};
 use crate::write_rows::AppValues;
@@ -356,14 +357,6 @@ pub(crate) fn device_only(
 /// removes its last reference (§17.2).
 pub(crate) fn delete(db: &DatabaseConnection, file: FileId) -> Result<(), DbError> {
     changed_once(db.internal_execute("DELETE FROM main.coven_files WHERE id=?1", [file])?)
-}
-
-fn changed_once(count: usize) -> Result<(), DbError> {
-    if count == 1 {
-        Ok(())
-    } else {
-        Err(rusqlite::Error::StatementChangedRows(count).into())
-    }
 }
 
 #[cfg(test)]

@@ -203,7 +203,7 @@ fn update(
                 ),
                 params_from_iter(parameters),
             )?;
-            crate::removal::changed_once(changed_rows)
+            crate::sqlite::changed_once(changed_rows)
         },
     )
 }
@@ -247,7 +247,7 @@ fn delete(
                 ),
                 params_from_iter(key_parameters(&key)?),
             )?;
-            crate::removal::changed_once(changed)
+            crate::sqlite::changed_once(changed)
         },
     )
 }

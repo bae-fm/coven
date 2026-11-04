@@ -117,9 +117,7 @@ impl FileWrite<'_> {
                                 .chain(crate::write_rows::key_parameters(&old.key)?),
                         ),
                     )?;
-                    if changed != 1 {
-                        return Err(rusqlite::Error::StatementChangedRows(changed).into());
-                    }
+                    crate::sqlite::changed_once(changed)?;
                 } else {
                     copies.taken_out.insert((file, new.audience.clone()), copy);
                 }

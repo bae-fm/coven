@@ -947,6 +947,15 @@ enum Observing {
     Nothing,
 }
 
+/// Refuse a statement that should change exactly one row and didn't.
+pub(crate) fn changed_once(changed: usize) -> Result<(), DbError> {
+    if changed == 1 {
+        Ok(())
+    } else {
+        Err(rusqlite::Error::StatementChangedRows(changed).into())
+    }
+}
+
 #[cfg(test)]
 #[path = "sqlite_tests.rs"]
 pub(crate) mod tests;
