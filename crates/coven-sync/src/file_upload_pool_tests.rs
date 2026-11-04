@@ -161,6 +161,40 @@ async fn pausing_a_cooldown_and_a_metered_network_start_no_new_upload() {
     }
 }
 
+/// Ben pauses uploads while two are in flight, his phone moves to cellular,
+/// and both uploads then fail. Nothing was committed since the run last read
+/// the queue, which held no bound upload, so no bound upload can be waiting:
+/// the paused run ends, though the network's change made what it read stale
+/// (§17.4).
+#[tokio::test]
+async fn a_paused_run_ends_when_no_bound_upload_could_have_been_queued() {
+    let f = Fixture::new(Provenance::AppProvided).await;
+    let gate = gated(&f, 2).await;
+    for id in ["a", "b"] {
+        f.attach("files", id, photo(7)).await;
+    }
+    f.storage
+        .set_faults(coven_storage::test_utils::Faults {
+            fail_next: 2,
+            failure: coven_storage::StorageFailure::QuotaExceeded,
+            ..coven_storage::test_utils::Faults::none()
+        })
+        .await;
+    f.set_uploads_paused(false).await;
+    until_creates(&f, 2).await;
+    f.set_uploads_paused(true).await;
+    // His phone moves to cellular, which makes the run's read stale without
+    // queueing anything.
+    f.network.set_metered(true);
+    gate.add_permits(2);
+    // The run ends once both attempts did.
+    drop(f.files.inner.drain.lock().await);
+    assert_eq!(creates(&f).len(), 2);
+    let queue = f.queue().await;
+    assert_eq!(queue.files.len(), 2);
+    f.close().await;
+}
+
 /// Ben moves files only on unmetered networks. On cellular his photo
 /// doesn't upload, and an early retry says the network is metered; once his
 /// phone joins Wi-Fi it goes up with no call of his app's. Turning the
