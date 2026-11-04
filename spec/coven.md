@@ -162,13 +162,10 @@ migration (§18).
 
 **Edge cases.**
 
-- **Reloads.** Only three kinds of reload refuse writes: a reset, a breaking
-  schema raise, and a circle the device can newly read. While one runs, that
-  audience refuses writes with `AudienceReloading` until the reload commits.
-  Other audiences stay writable. An ordinary reload, including one because the
-  floor has passed the device's next slot, allows app writes throughout (§16.5).
-- **A raise not yet published.** An app that has migrated can commit writes
-  before its raise has claimed a slot. Those writes wait in its queue (§18.5).
+- **Reloads.** Some reloads refuse writes to their audience
+  (`AudienceReloading`, §16.5); the table above names them.
+- **A raise not yet published.** Writes made after migrating wait in the queue
+  for the raise (§18.5).
 - **A bound file not stored yet.** A write setting a bound reference commits at
   once, but it and every later write wait in the queue until the file is
   stored (§17.4).
