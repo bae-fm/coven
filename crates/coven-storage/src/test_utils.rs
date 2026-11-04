@@ -451,17 +451,41 @@ impl MemoryProvider {
             self.clock.sleep(delay).await;
         }
         match failure {
-            Some((failure, None, None)) => Err(StorageError::Failure(failure)),
-            Some((failure, status, retry_after)) => {
-                Err(crate::providers::ProviderResponse::injected(
-                    self.config.provider(),
-                    failure,
-                    status.unwrap_or(429),
-                    retry_after,
-                ))
-            }
+            Some(failure) => Err(self.injected(failure)),
             None => self.authorize(request).await,
         }
+    }
+    /// An injected failure, as `Faults` describes it: no response without a
+    /// status or a `Retry-After`, else a response, a 429 unless it names
+    /// another status.
+    fn injected(
+        &self,
+        (failure, status, retry_after): (StorageFailure, Option<u16>, Option<u64>),
+    ) -> StorageError {
+        match (status, retry_after) {
+            (None, None) => StorageError::Failure(failure),
+            (status, retry_after) => crate::providers::ProviderResponse::injected(
+                self.config.provider(),
+                failure,
+                status.unwrap_or(429),
+                retry_after,
+            ),
+        }
+    }
+    /// Refuse the upload of the file at `path` as it starts, while
+    /// `Faults::refuse_file_uploads` counts refusals left; any other path
+    /// goes through.
+    async fn refuse_file_upload(&self, path: &ObjectPath) -> Result<(), StorageError> {
+        if path.file_id().is_none() {
+            return Ok(());
+        }
+        let mut state = self.state.lock().await;
+        if state.faults.refuse_file_uploads == 0 {
+            return Ok(());
+        }
+        state.faults.refuse_file_uploads -= 1;
+        let faults = &state.faults;
+        Err(self.injected((faults.failure, faults.response, faults.retry_after)))
     }
     /// Send the held token; a rejected one is replaced once and the request
     /// retried once, counted as a second request.
@@ -591,6 +615,7 @@ impl ProviderOps for MemoryProvider {
         // for its reply with every byte sent.
         sent.moved(bytes.len() as u64);
         self.before(MemoryRequest::Create(path.clone())).await?;
+        self.refuse_file_upload(path).await?;
         let mut state = self.state.lock().await;
         if let Some((failure, status)) = state.faults.create_failures.get(path) {
             return Err(crate::providers::ProviderResponse::injected(

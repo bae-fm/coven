@@ -164,6 +164,37 @@ async fn a_bound_file_waits_on_its_retry_while_uploads_are_paused() {
     network.close().await;
 }
 
+/// With sync running, a test refuses exactly one file upload: the photo's
+/// first attempt is refused and its next stores it, with no fault left to
+/// clear, while every request of the passes beside it goes through.
+#[tokio::test]
+async fn one_refused_file_upload_leaves_the_passes_alone() {
+    let network = household().await;
+    let ana = &network.devices[0];
+    let before = ana.storage.request_trace().len();
+    ana.storage
+        .set_faults(Faults {
+            refuse_file_uploads: 1,
+            failure: StorageFailure::Network,
+            response: Some(500),
+            ..Faults::none()
+        })
+        .await;
+    let photo = stage(ana, "photos", "beach", vec![7; 4096]).await;
+    wait_for_sent(&ana.handle).await;
+    state(ana, |state| *state == SyncState::Synced).await;
+    assert!(file_stored(ana, photo).await);
+    let file = ana.handle.file_ref(photo).await.unwrap();
+    let FilePlace::Cloud { location, .. } = file.place() else { unreachable!("stored") };
+    let path = coven_storage::ObjectPath::file(ana.store, location.uploader(), location.object());
+    let creates = ana.storage.request_trace()[before..]
+        .iter()
+        .filter(|request| matches!(request, MemoryRequest::Create(created) if *created == path))
+        .count();
+    assert_eq!(creates, 2, "one refused create, then the one that stored it");
+    network.close().await;
+}
+
 /// Dan's track sits on a drive he unplugs before it uploads: his state is
 /// failed, naming the track's move, and stays so while the track is gone.
 /// Once the drive is back and the track uploads, he is synced (§17.3).

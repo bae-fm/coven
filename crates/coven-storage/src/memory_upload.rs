@@ -153,6 +153,7 @@ impl MemoryProvider {
     ) -> Result<UploadSession, StorageError> {
         publication.check()?;
         self.before(MemoryRequest::Other("begin_upload")).await?;
+        self.refuse_file_upload(target.path()).await?;
         let mut state = self.state.lock().await;
         check_target(&state, target)?;
         let id = state.next_id()?;

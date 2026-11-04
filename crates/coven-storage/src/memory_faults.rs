@@ -10,6 +10,12 @@ use std::time::Duration;
 pub struct Faults {
     /// Fail this many calls before doing their work.
     pub fail_next: usize,
+    /// Refuse this many file uploads as they start, each with `failure`,
+    /// `response` and `retry_after` as `fail_next` fails a call: a file's
+    /// single create, or the call beginning its multipart upload. Nothing is
+    /// stored. Every other call goes through, so a pass beside the upload
+    /// can't take the fault.
+    pub refuse_file_uploads: usize,
     /// Fail exact reads at these paths, retaining other in-flight responses.
     pub read_failures: BTreeMap<ObjectPath, StorageFailure>,
     /// Fail exact status calls at these paths, independently of reads.
@@ -69,6 +75,7 @@ impl Faults {
     pub fn none() -> Self {
         Self {
             fail_next: 0,
+            refuse_file_uploads: 0,
             read_failures: BTreeMap::new(),
             status_failures: BTreeMap::new(),
             delete_failures: BTreeMap::new(),
