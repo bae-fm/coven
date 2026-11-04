@@ -586,6 +586,71 @@ async fn a_blocked_slot_stops_reads_and_sends_but_preserves_app_writes() {
     ben.sync.database.close().await.unwrap();
 }
 
+/// Ana adds Ben to Gifts, whose snapshot she published. Applying the change,
+/// Ben loads Gifts from that snapshot, and storage fails its read: the
+/// change's slot blocks with the storage failure, which retries by itself,
+/// and the next pass, with storage serving the snapshot again, loads Gifts
+/// and leaves nothing pending (§16.5, §19.1).
+#[tokio::test]
+async fn a_slot_whose_reload_read_fails_blocks_and_the_next_pass_loads_it() {
+    let group = Group::new();
+    let ana = group.device(1).await;
+    let ben = group.device(2).await;
+    group.create(&ana).await;
+    group.admit(&ana, &ben).await;
+    let gifts = ana.sync.create_circle("Gifts".into()).await.unwrap();
+    pin(ana.database(), "00000000-0000-4000-8000-000000000001", gifts, "gift").await;
+    ana.sync.pass().await.unwrap();
+    let traced = ana.storage.request_trace().len();
+    ana.sync.snapshot(coven_merge::Audience::Circle(gifts)).await.unwrap();
+    let snapshot = ana.storage.request_trace()[traced..]
+        .iter()
+        .find_map(|request| match request {
+            coven_storage::test_utils::MemoryRequest::Create(path)
+                if path.snapshot_id().is_some() =>
+            {
+                Some(path.clone())
+            }
+            _ => None,
+        })
+        .expect("the snapshot is uploaded");
+    ben.sync.pass().await.unwrap();
+    assert!(pins(ben.database()).await.is_empty(), "Ben reads no circle he isn't in");
+
+    group
+        .storage
+        .set_faults(coven_storage::test_utils::Faults {
+            read_failures: [(snapshot, coven_storage::StorageFailure::Network)].into(),
+            ..coven_storage::test_utils::Faults::none()
+        })
+        .await;
+    ana.sync
+        .administer(StoreChange::AddCircleMember { circle: gifts, member: ben.identity.member() })
+        .await
+        .unwrap();
+    assert!(ben.sync.pass().await.is_err());
+    let SequenceStatus::Blocked(record) = ben.sync.state.subscribe().borrow().clone() else {
+        panic!("the change's slot blocks on the reload's read");
+    };
+    assert!(
+        matches!(record.reason, PendingReason::Storage { .. }),
+        "the slot keeps the storage failure: {record:?}"
+    );
+    assert_eq!(record.retry(), Retry::Automatic, "a storage failure retries by itself");
+    assert!(pins(ben.database()).await.is_empty());
+
+    group.storage.set_faults(coven_storage::test_utils::Faults::none()).await;
+    assert!(matches!(ben.sync.pass().await.unwrap(), SequenceStatus::Synced { .. }));
+    assert_eq!(
+        pins(ben.database()).await,
+        [("00000000-0000-4000-8000-000000000001".into(), "gift".into())]
+    );
+    assert!(ben.database().pending::<PendingRecord>().await.unwrap().is_empty());
+    for device in [&ana, &ben] {
+        device.database().close().await.unwrap();
+    }
+}
+
 #[tokio::test]
 async fn a_stalled_slot_body_leaves_the_application_writer_available() {
     let group = Group::new();
