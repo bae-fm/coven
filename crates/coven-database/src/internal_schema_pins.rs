@@ -41,11 +41,15 @@ macro_rules! named_by {
     };
 }
 
-pub(super) const SCHEMA: &str = concat!(
+/// The view, table and triggers, with the cache's whole-file chunk
+/// number filled in.
+pub(super) fn schema() -> String {
+    format!(
+        concat!(
     "CREATE VIEW _coven_pin_source(file) AS
         SELECT f.file FROM _coven_stored_files AS f
         JOIN _coven_cache AS c ON c.namespace=f.namespace
-            AND c.file_id=f.cache_id AND c.chunk=-2
+            AND c.file_id=f.cache_id AND c.chunk={complete}
             AND c.pinned=1 AND c.checked_hash=f.hash;
     CREATE TABLE coven_pins (
         file TEXT PRIMARY KEY NOT NULL
@@ -60,18 +64,21 @@ pub(super) const SCHEMA: &str = concat!(
     CREATE TRIGGER _coven_pins_stored_file_removed AFTER DELETE ON _coven_stored_files BEGIN ",
     refresh!("SELECT OLD.file"),
     " END;
-    CREATE TRIGGER _coven_pins_cached AFTER INSERT ON _coven_cache WHEN NEW.chunk=-2 BEGIN ",
+    CREATE TRIGGER _coven_pins_cached AFTER INSERT ON _coven_cache WHEN NEW.chunk={complete} BEGIN ",
     refresh!(named_by!("NEW")),
     " END;
     CREATE TRIGGER _coven_pins_cache_changed AFTER UPDATE OF namespace,file_id,chunk,pinned,checked_hash
-        ON _coven_cache WHEN OLD.chunk=-2 OR NEW.chunk=-2 BEGIN ",
+        ON _coven_cache WHEN OLD.chunk={complete} OR NEW.chunk={complete} BEGIN ",
     refresh!(named_by!("OLD")),
     refresh!(named_by!("NEW")),
     " END;
-    CREATE TRIGGER _coven_pins_cache_removed AFTER DELETE ON _coven_cache WHEN OLD.chunk=-2 BEGIN ",
+    CREATE TRIGGER _coven_pins_cache_removed AFTER DELETE ON _coven_cache WHEN OLD.chunk={complete} BEGIN ",
     refresh!(named_by!("OLD")),
     " END;",
-);
+        ),
+        complete = super::CACHE_COMPLETE_FILE,
+    )
+}
 
 #[cfg(test)]
 #[path = "internal_schema_pins_tests.rs"]

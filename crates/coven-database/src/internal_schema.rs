@@ -846,7 +846,7 @@ pub(crate) fn initial_schema() -> String {
     }
     coven_tables!(append);
     sql.push_str(files::SCHEMA);
-    sql.push_str(pins::SCHEMA);
+    sql.push_str(&pins::schema());
     sql.push_str(upload_queue::SCHEMA);
     sql.push_str(sync_status::SCHEMA);
     sql.push_str(retry_effect::SCHEMA);
