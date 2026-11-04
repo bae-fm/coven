@@ -512,9 +512,8 @@ rewriting that object.
 ### D5.3 Authenticating a write, and cut-offs
 
 - **Slot order.** The containing slot supplies slot order.
-- **Cut-off.** A device or member removal in a lower slot, or a replacement of
-  this author's signing credential, consumes the writes without effects or lost
-  values and records the refusal (§14.1). No storage-time deadline applies.
+- **Cut-off.** A removal or replacement in a lower slot consumes the writes
+  without effect (§14.1).
 - **Signature.** The original write is authenticated with its device owner's
   signing key at `read_through`. The exception is §7.1's creation binding: the
   first device's pre-setup writes at zero.
@@ -657,21 +656,17 @@ parent links, and the row's own admission are retained independently of
 received interpretations and dismissible lost values.
 
 **Edge cases: frozen and dependent changes.** A change whose sources were
-dropped is kept as a frozen lost value (§9.5). Its bytes must survive everything
-that follows.
+dropped is kept as a frozen lost value. Its bytes must survive everything that
+follows; what is lost, and what dismissing can't erase, is §9.5's.
 
 - Source evidence and received frozen-change representations preserve the
   original write, row and column identities through conversion and renaming.
 - A frozen dependent loss keeps its generation, old names and scalar values,
   with the failed source identities in authored role order: generation first,
   then replaced setters. Repeated identities stay when one write supplied
-  several roles. Its operation remains in the separately retained original
-  change, so dismissing the display loss cannot erase it.
+  several roles.
 - Frozen display values have no live parent links. Their original source
   evidence is retained separately.
-- A delete with no scalar values still retains its write and row identity and its
-  cause.
-- One row change, including all its columns, is the unit of loss.
 - Converted changes and frozen originals can share a received part. Frozen
   originals never enter conversion callbacks or current removal rules. Their
   values and original causes survive later raises and snapshot reloads.
