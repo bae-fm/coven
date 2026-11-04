@@ -92,11 +92,6 @@ mod fixture {
               zeroblob(64),n,i%2,CASE WHEN i%3=0 THEN 'write' ELSE 'rules' END,n FROM fixture;
      INSERT INTO _coven_file_removals SELECT 'removed_' || i,'files' FROM fixture;
      INSERT INTO _coven_cache_writes SELECT 'writing_' || i FROM fixture;
-     INSERT INTO _coven_file_uploads(id,location,device,file,size,hash,copy,move,stored,queued_at)
-       SELECT i,'location_' || i,device,substr(key,17,16),1,zeroblob(32),'copy_' || i,i,i%2,zeroblob(13) FROM fixture;
-     INSERT INTO _coven_upload_files SELECT 'file_' || i,i,i%2 FROM fixture;
-     INSERT INTO _coven_device_files SELECT 'file_' || i,'path_' || i,zeroblob(32) FROM fixture;
-     INSERT INTO _coven_copy_chunks SELECT 'path_' || i,0,zeroblob(32) FROM fixture;
      INSERT INTO _coven_cache(namespace,file_id,chunk,path,size,last_read,pinned,checked_hash)
        SELECT audience,'file_' || i,CASE WHEN (i/64)%4=0 THEN -2 ELSE 0 END,'cache_' || i,
               65536,i,CASE WHEN (i/64)%4=0 THEN 1 ELSE 0 END,
@@ -129,7 +124,6 @@ mod fixture {
         crate::file_queue::tests::fill_for_plans(&db);
         crate::operation::tests::fill_for_plans(&db);
         crate::write_commit::tests::fill_for_plans(&db);
-        crate::file_write::upload_tests::fill_for_plans(&db);
         crate::file_protection::tests::fill_for_plans(&db);
         crate::database::file_database::copies::tests::fill_for_plans(&db);
         crate::row_queries::tests::fill_for_plans(&db);
@@ -296,7 +290,6 @@ mod source {
                     | "file_queue_schema.rs"
                     | "operation_schema.rs"
                     | "write_commit_schema.rs"
-                    | "file_write_uploads_schema.rs"
                     | "file_protection_schema.rs"
                     | "file_database_copies_schema.rs"
                     | "row_queries_schema.rs"

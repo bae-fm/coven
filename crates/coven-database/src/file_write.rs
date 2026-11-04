@@ -40,8 +40,6 @@ mod references;
 
 #[path = "file_write_uploads.rs"]
 mod uploads;
-#[cfg(test)]
-pub(crate) use uploads::tests as upload_tests;
 
 #[path = "file_write_moves.rs"]
 mod moves;
@@ -650,9 +648,9 @@ impl<'a> FileWrite<'a> {
                 (None, None) => *group.insert(crate::file_moves::create(db)?),
             };
             let location = FileLocation::new(self.files.device, self.files.ids)?;
-            uploads::enqueue(
+            crate::file_queue::enqueue(
                 db,
-                uploads::Queued {
+                crate::file_queue::Queued {
                     files: &[(first, file.place == crate::Place::CloudKeptHere)],
                     size: file.size,
                     source: &file.source,

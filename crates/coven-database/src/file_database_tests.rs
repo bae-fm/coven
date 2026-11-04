@@ -244,7 +244,7 @@ async fn an_empty_file_queues_no_chunk_hash_and_a_missing_one_is_damage() {
     let uploads = owner.uploads().await.unwrap();
     assert_eq!(uploads.len(), 1);
     assert_eq!(local_count(&db, "_coven_file_chunks"), 1);
-    db.commit_writer(crate::file_write::upload_tests::lose_chunk_hashes);
+    db.commit_writer(crate::file_queue::tests::lose_chunk_hashes);
     assert!(matches!(
         owner.upload_chunk_hash(&uploads[0].location, 0).await,
         Err(DbError::DamagedDatabase)
@@ -260,9 +260,7 @@ async fn a_damaged_queue_row_fails_the_query_instead_of_emptying_it() {
     stage(&db, vec![5; 3], true).await.unwrap();
     assert_eq!(owner.uploads().await.unwrap().len(), 1);
     // A stored time no decoder accepts: decoding stored facts finds damage.
-    db.commit_writer(|sql| {
-        sql.internal_execute("UPDATE _coven_file_uploads SET queued_at=x'00'", []).unwrap()
-    });
+    db.commit_writer(crate::file_queue::tests::damage_queued_times);
     assert!(matches!(owner.uploads().await, Err(DbError::DamagedDatabase)));
     db.close().await.unwrap();
 }

@@ -8,9 +8,7 @@ use crate::{
     sqlite::DatabaseConnection,
     DbError,
 };
-use coven_format::file::FileHeader;
 use coven_foundation::id_source::FileId;
-use rusqlite::params;
 
 /// What the transaction completing an upload does once its write applied:
 /// clear the upload's pending record (§17.9).
@@ -44,92 +42,9 @@ pub(super) fn keep_source(
                 "DELETE FROM _coven_file_removals WHERE path=?1 AND area='files'",
                 [name.as_str()],
             )?;
-            db.internal_execute(
-                "INSERT INTO _coven_device_files(file,path,hash) VALUES(?1,?2,?3)",
-                params![id, name.as_str(), hashes.content.as_bytes().as_slice()],
-            )?;
-            for (index, hash) in hashes.chunks().iter().enumerate() {
-                db.internal_execute(
-                    "INSERT INTO _coven_copy_chunks(path,chunk,hash) VALUES(?1,?2,?3)",
-                    params![name.as_str(), index as i64, hash.as_bytes().as_slice()],
-                )?;
-            }
+            crate::file_queue::keep_copy(db, id, name.as_str(), hashes)?;
         }
         StagedSource::Original(original) => crate::user_file::record(db, id, original, hashes)?,
-    }
-    Ok(())
-}
-
-/// One upload to queue: the files it stores, which share its bytes, each
-/// with whether this device keeps it whole once stored, their size, source
-/// and first-read hashes, the move it belongs to, and for a bound upload the
-/// write it holds (§17.4).
-pub(super) struct Queued<'a> {
-    pub(super) files: &'a [(FileId, bool)],
-    pub(super) size: u64,
-    pub(super) source: &'a StagedSource,
-    pub(super) hashes: &'a crate::file_hashes::FileHashes,
-    pub(super) of: crate::MoveId,
-    pub(super) holds: Option<u64>,
-}
-
-/// Queue the upload to `location` of files for the cloud, with their source
-/// and one hash per plaintext chunk, in their move (§17.3, §17.9).
-pub(super) fn enqueue(
-    db: &DatabaseConnection,
-    queued: Queued<'_>,
-    location: &FileLocation,
-    now: std::time::SystemTime,
-) -> Result<(), DbError> {
-    let Queued { files, size, source, hashes, of, holds } = queued;
-    let header = FileHeader::new(size);
-    if hashes.chunks().len() as u64 != header.chunk_count() {
-        return Err(DbError::Invariant { what: "a staged file hashes every plaintext chunk" });
-    }
-    // So every queued file has a whole encrypted size to send.
-    header.encrypted_size().map_err(|_overflow| DbError::Invariant {
-        what: "a queued file's encrypted layout fits in its offsets",
-    })?;
-    let size = crate::sqlite::integer("file size", size)?;
-    let device = location.uploader();
-    let object = location.object().0;
-    let (original, modified_at, copy) = match source {
-        StagedSource::Original(original) => (
-            Some(coven_foundation::files::path_bytes(&original.path)),
-            Some(crate::user_file::encode_time(original.modified_at)),
-            None,
-        ),
-        StagedSource::Copy(name) => (None, None, Some(name.as_str())),
-    };
-    let upload = db.query_row(
-        "INSERT INTO _coven_file_uploads(location,device,file,size,hash,original,modified_at,copy,move,queued_at,holds)
-         VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11) RETURNING id",
-        params![
-            location.text(),
-            device,
-            object.as_bytes(),
-            size,
-            hashes.content.as_bytes().as_slice(),
-            original,
-            modified_at,
-            copy,
-            of,
-            crate::user_file::encode_time(now),
-            holds.map(u64::to_be_bytes)
-        ],
-        |r| r.get::<_, i64>(0),
-    )?;
-    for (index, hash) in hashes.chunks().iter().enumerate() {
-        db.internal_execute(
-            "INSERT INTO _coven_file_chunks(device,file,chunk,hash) VALUES(?1,?2,?3,?4)",
-            params![device, object.as_bytes(), index as i64, hash.as_bytes().as_slice()],
-        )?;
-    }
-    for (file, keep) in files {
-        db.internal_execute(
-            "INSERT INTO _coven_upload_files(file,upload,keep) VALUES(?1,?2,?3)",
-            params![file, upload, keep],
-        )?;
     }
     Ok(())
 }
@@ -139,18 +54,8 @@ pub(super) fn enqueue(
 /// one is queued: the upload's completion switches both to the cloud
 /// (§17.2).
 pub(crate) fn share(db: &DatabaseConnection, from: FileId, to: FileId) -> Result<(), DbError> {
-    db.internal_execute(
-        "INSERT INTO _coven_upload_files(file,upload,keep)
-         SELECT ?2,upload,keep FROM _coven_upload_files WHERE file=?1",
-        params![from, to],
-    )?;
-    crate::user_file::share(db, from, to)?;
-    db.internal_execute(
-        "INSERT INTO _coven_device_files(file,path,hash)
-         SELECT ?2,path,hash FROM _coven_device_files WHERE file=?1",
-        params![from, to],
-    )?;
-    Ok(())
+    crate::file_queue::share(db, from, to)?;
+    crate::user_file::share(db, from, to)
 }
 
 impl FileWrite<'_> {
@@ -196,7 +101,7 @@ impl FileWrite<'_> {
         completion.after.push(after);
         completion.bound |= bound;
         if linked {
-            crate::file_moves::stored(db, upload)?;
+            crate::file_queue::stored(db, upload)?;
             Ok(crate::UploadCompletion::Stored)
         } else {
             completion.retired.push(upload);

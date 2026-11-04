@@ -442,15 +442,8 @@ pub(crate) fn settle_record(
         // and an upload no other file shares is left for the upload worker
         // to retire (§17.9).
         crate::user_file::forget(db, id)?;
-        db.internal_execute("DELETE FROM _coven_upload_files WHERE file=?1", [id])?;
+        crate::file_queue::forget(db, id)?;
         crate::file_pins::end(db, id)?;
-        for copy in
-            db.query("DELETE FROM _coven_device_files WHERE file=?1 RETURNING path", [id], |r| {
-                r.get::<_, String>(0)
-            })?
-        {
-            crate::file_queue::release_copy(db, &copy)?;
-        }
     }
     Ok(())
 }

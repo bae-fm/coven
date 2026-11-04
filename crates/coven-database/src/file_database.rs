@@ -436,18 +436,8 @@ impl FileDatabase {
     /// finds the session gone and starts another.
     pub async fn forget_session(&self, id: i64) -> Result<(), DbError> {
         self.require_writer()?;
-        self.run(move |db, _, _, _| {
-            db.transaction(|db| {
-                db.internal_execute(
-                    "UPDATE _coven_file_uploads SET session=NULL,bytes_confirmed=NULL,bytes_total=NULL
-                     WHERE id=?1
-                     AND NOT EXISTS(SELECT 1 FROM _coven_upload_files WHERE upload=?1)",
-                    [id],
-                )
-                .map(drop)
-            })
-        })
-        .await
+        self.run(move |db, _, _, _| db.transaction(|db| crate::file_queue::forget_session(db, id)))
+            .await
     }
     /// Record a failed attempt as this device's pending record about its file,
     /// with its retry wait or none when it waits for a prerequisite or the app,
@@ -533,10 +523,12 @@ impl FileDatabase {
         let total = count(progress.bytes_total)?;
         self.run(move |db, _, _, _| {
             db.transaction(|db| {
-                changed(db.internal_execute(
-                    "UPDATE _coven_file_uploads SET session=?2,bytes_confirmed=?3,bytes_total=?4
-                     WHERE id=?1",
-                    (id, session.as_bytes(), confirmed, total),
+                changed(crate::file_queue::record_session(
+                    db,
+                    id,
+                    session.as_bytes(),
+                    confirmed,
+                    total,
                 )?)
             })
         })

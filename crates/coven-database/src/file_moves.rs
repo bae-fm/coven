@@ -109,11 +109,7 @@ pub(crate) fn end_unswitched(
     id: MoveId,
     state: MoveState,
 ) -> Result<(), DbError> {
-    db.internal_execute(
-        "DELETE FROM _coven_upload_files
-         WHERE upload IN (SELECT id FROM _coven_file_uploads WHERE move=?1)",
-        [id],
-    )?;
+    crate::file_queue::unswitch_move(db, id)?;
     set(db, id, state)
 }
 
@@ -148,12 +144,6 @@ pub(crate) fn complete(db: &DatabaseConnection) -> Result<Vec<(MoveId, Vec<i64>)
 pub(crate) fn finish(db: &DatabaseConnection, id: MoveId) -> Result<(), DbError> {
     set(db, id, MoveState::Finished)?;
     crate::pending::clear_move(db, id)
-}
-
-/// Mark an upload's bytes stored: its move switches it with the rest.
-pub(crate) fn stored(db: &DatabaseConnection, upload: i64) -> Result<(), DbError> {
-    db.internal_execute("UPDATE _coven_file_uploads SET stored=1 WHERE id=?1", [upload])?;
-    Ok(())
 }
 
 #[cfg(test)]

@@ -160,9 +160,9 @@ impl FileWrite<'_> {
                     continue;
                 }
                 let location = FileLocation::new(self.files.device, self.files.ids)?;
-                super::uploads::enqueue(
+                crate::file_queue::enqueue(
                     db,
-                    super::uploads::Queued {
+                    crate::file_queue::Queued {
                         files: &files,
                         size: upload.size,
                         source: &upload.source,

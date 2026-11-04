@@ -147,20 +147,15 @@ async fn queued_tracks(files: usize) -> (TestStore, crate::Database, Vec<crate::
         .open()
         .await
         .unwrap();
-    db.inspect_writer(|writer| {
+    db.commit_writer(|writer| {
         writer
             .batch(&format!(
-                "BEGIN;
-                 WITH RECURSIVE n(i) AS (VALUES(1) UNION ALL SELECT i+1 FROM n WHERE i<{files})
+                "WITH RECURSIVE n(i) AS (VALUES(1) UNION ALL SELECT i+1 FROM n WHERE i<{files})
                    INSERT INTO tracks(id,release_id,file) SELECT 't' || i, 'r' || ((i-1)/10+1),
-                       lower(printf('%08x-0000-4000-8000-%012x',i,i)) FROM n;
-                 INSERT INTO _coven_file_uploads(id,location,device,file,size,hash,queued_at)
-                   SELECT rowid,'file 0 ' || file || ' ' || hex(zeroblob(32)),zeroblob(8),
-                          unhex(printf('%032x',rowid)),0,zeroblob(32),zeroblob(13) FROM tracks;
-                 INSERT INTO _coven_upload_files(file,upload) SELECT file,rowid FROM tracks;
-                 COMMIT;"
+                       lower(printf('%08x-0000-4000-8000-%012x',i,i)) FROM n;"
             ))
-            .unwrap()
+            .unwrap();
+        crate::file_queue::tests::queue_track_files(writer);
     });
     let sending = (1..=3)
         .map(|i| {

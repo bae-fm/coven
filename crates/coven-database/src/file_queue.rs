@@ -481,6 +481,178 @@ pub(crate) fn release_copy(db: &DatabaseConnection, path: &str) -> Result<(), Db
     Ok(())
 }
 
+/// One upload to queue: the files it stores, which share its bytes, each
+/// with whether this device keeps it whole once stored, their size, source
+/// and first-read hashes, the move it belongs to, and for a bound upload the
+/// write it holds (§17.4).
+pub(crate) struct Queued<'a> {
+    pub(crate) files: &'a [(FileId, bool)],
+    pub(crate) size: u64,
+    pub(crate) source: &'a crate::file_write::StagedSource,
+    pub(crate) hashes: &'a crate::file_hashes::FileHashes,
+    pub(crate) of: crate::MoveId,
+    pub(crate) holds: Option<u64>,
+}
+
+/// Queue the upload to `location` of files for the cloud, with their source
+/// and one hash per plaintext chunk, in their move (§17.3, §17.9).
+pub(crate) fn enqueue(
+    db: &DatabaseConnection,
+    queued: Queued<'_>,
+    location: &FileLocation,
+    now: std::time::SystemTime,
+) -> Result<(), DbError> {
+    let Queued { files, size, source, hashes, of, holds } = queued;
+    let header = FileHeader::new(size);
+    if hashes.chunks().len() as u64 != header.chunk_count() {
+        return Err(DbError::Invariant { what: "a staged file hashes every plaintext chunk" });
+    }
+    // So every queued file has a whole encrypted size to send.
+    header.encrypted_size().map_err(|_overflow| DbError::Invariant {
+        what: "a queued file's encrypted layout fits in its offsets",
+    })?;
+    let size = crate::sqlite::integer("file size", size)?;
+    let device = location.uploader();
+    let object = location.object().0;
+    let (original, modified_at, copy) = match source {
+        crate::file_write::StagedSource::Original(original) => (
+            Some(coven_foundation::files::path_bytes(&original.path)),
+            Some(crate::user_file::encode_time(original.modified_at)),
+            None,
+        ),
+        crate::file_write::StagedSource::Copy(name) => (None, None, Some(name.as_str())),
+    };
+    let upload = db.query_row(
+        "INSERT INTO _coven_file_uploads(location,device,file,size,hash,original,modified_at,copy,move,queued_at,holds)
+         VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11) RETURNING id",
+        rusqlite::params![
+            location.text(),
+            device,
+            object.as_bytes(),
+            size,
+            hashes.content.as_bytes().as_slice(),
+            original,
+            modified_at,
+            copy,
+            of,
+            crate::user_file::encode_time(now),
+            holds.map(u64::to_be_bytes)
+        ],
+        |r| r.get::<_, i64>(0),
+    )?;
+    for (index, hash) in hashes.chunks().iter().enumerate() {
+        db.internal_execute(
+            "INSERT INTO _coven_file_chunks(device,file,chunk,hash) VALUES(?1,?2,?3,?4)",
+            rusqlite::params![device, object.as_bytes(), index as i64, hash.as_bytes().as_slice()],
+        )?;
+    }
+    for (file, keep) in files {
+        db.internal_execute(
+            "INSERT INTO _coven_upload_files(file,upload,keep) VALUES(?1,?2,?3)",
+            rusqlite::params![file, upload, keep],
+        )?;
+    }
+    Ok(())
+}
+
+/// Keep coven's copy `name` of the app bytes of `file`, which is on this
+/// device only, with the hashes its first read found, which an upload
+/// checks if the file moves to the cloud (§17.3).
+pub(crate) fn keep_copy(
+    db: &DatabaseConnection,
+    file: FileId,
+    name: &str,
+    hashes: &crate::file_hashes::FileHashes,
+) -> Result<(), DbError> {
+    db.internal_execute(
+        "INSERT INTO _coven_device_files(file,path,hash) VALUES(?1,?2,?3)",
+        rusqlite::params![file, name, hashes.content.as_bytes().as_slice()],
+    )?;
+    for (index, hash) in hashes.chunks().iter().enumerate() {
+        db.internal_execute(
+            "INSERT INTO _coven_copy_chunks(path,chunk,hash) VALUES(?1,?2,?3)",
+            rusqlite::params![name, index as i64, hash.as_bytes().as_slice()],
+        )?;
+    }
+    Ok(())
+}
+
+/// The new file `to` over `from`'s bytes shares coven's copy of them and
+/// the upload queued for them, if any (§17.2).
+pub(crate) fn share(db: &DatabaseConnection, from: FileId, to: FileId) -> Result<(), DbError> {
+    db.internal_execute(
+        "INSERT INTO _coven_upload_files(file,upload,keep)
+         SELECT ?2,upload,keep FROM _coven_upload_files WHERE file=?1",
+        rusqlite::params![from, to],
+    )?;
+    db.internal_execute(
+        "INSERT INTO _coven_device_files(file,path,hash)
+         SELECT ?2,path,hash FROM _coven_device_files WHERE file=?1",
+        rusqlite::params![from, to],
+    )?;
+    Ok(())
+}
+
+/// `file`'s record is gone from this device: no upload switches it, and
+/// coven's copy of its bytes goes once nothing names it. An upload no other
+/// file shares is left for the upload worker to retire (§17.9).
+pub(crate) fn forget(db: &DatabaseConnection, file: FileId) -> Result<(), DbError> {
+    db.internal_execute("DELETE FROM _coven_upload_files WHERE file=?1", [file])?;
+    for copy in
+        db.query("DELETE FROM _coven_device_files WHERE file=?1 RETURNING path", [file], |r| {
+            r.get::<_, String>(0)
+        })?
+    {
+        release_copy(db, &copy)?;
+    }
+    Ok(())
+}
+
+/// Forget upload `id`'s session, once storage has aborted it, if no file
+/// waits for the upload; one a file waits for again keeps it.
+pub(crate) fn forget_session(db: &DatabaseConnection, id: i64) -> Result<(), DbError> {
+    db.internal_execute(
+        "UPDATE _coven_file_uploads SET session=NULL,bytes_confirmed=NULL,bytes_total=NULL
+         WHERE id=?1
+         AND NOT EXISTS(SELECT 1 FROM _coven_upload_files WHERE upload=?1)",
+        [id],
+    )?;
+    Ok(())
+}
+
+/// Record upload `id`'s session and how far storage has confirmed it,
+/// returning how many uploads changed: none once it has gone.
+pub(crate) fn record_session(
+    db: &DatabaseConnection,
+    id: i64,
+    session: &[u8],
+    confirmed: i64,
+    total: i64,
+) -> Result<usize, DbError> {
+    db.internal_execute(
+        "UPDATE _coven_file_uploads SET session=?2,bytes_confirmed=?3,bytes_total=?4
+         WHERE id=?1",
+        (id, session, confirmed, total),
+    )
+}
+
+/// Mark an upload's bytes stored: its move switches it with the rest.
+pub(crate) fn stored(db: &DatabaseConnection, upload: i64) -> Result<(), DbError> {
+    db.internal_execute("UPDATE _coven_file_uploads SET stored=1 WHERE id=?1", [upload])?;
+    Ok(())
+}
+
+/// The move `of` switches none of its files: no upload of it switches a
+/// file any more, so the upload worker retires them (§17.10).
+pub(crate) fn unswitch_move(db: &DatabaseConnection, of: crate::MoveId) -> Result<(), DbError> {
+    db.internal_execute(
+        "DELETE FROM _coven_upload_files
+         WHERE upload IN (SELECT id FROM _coven_file_uploads WHERE move=?1)",
+        [of],
+    )?;
+    Ok(())
+}
+
 #[cfg(test)]
 #[path = "file_queue_tests.rs"]
 pub(crate) mod tests;
