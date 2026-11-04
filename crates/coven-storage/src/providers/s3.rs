@@ -380,7 +380,7 @@ impl ProviderOps for S3Storage {
         // publication time. A copy reply's `LastModified` equals HEAD's at
         // whole seconds on every certified copy profile, but the rest of the
         // reply differs from HEAD's: SeaweedFS sends its ETag unquoted, GCS no
-        // checksum (suite 6, spec/s3-certification.md, Appendix E.11).
+        // checksum (suite 6, spec/storage-certification.md, Appendix E.11).
         self.create_at(Some(publication), Destination::Object(path), bytes, sent, device).await?;
         Ok(None)
     }

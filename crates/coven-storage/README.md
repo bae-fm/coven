@@ -92,7 +92,7 @@ The ignored `s3_certification` test reads `COVEN_LIVE_S3_ENV`, detects native
 behavior, exercises the adapter and deletes its live objects and uploads. GCS
 and R2 passed suite version 1 on 2026-10-13; AWS remains uncertified without a
 live account. See the [procedure](../../spec/coven.md#e6-running-the-certification-suite)
-and [raw evidence](../../spec/s3-certification.md).
+and [raw evidence](../../spec/storage-certification.md).
 Every live test that reads an env file (`COVEN_LIVE_S3_ENV`,
 `COVEN_LIVE_DROPBOX_ENV`, `COVEN_LIVE_DROPBOX_B_ENV`,
 `COVEN_LIVE_ONEDRIVE_ENV`) reads it through one reader that fails the run on a

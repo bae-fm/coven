@@ -168,7 +168,7 @@ const GCS: CataloguedProfile = CataloguedProfile {
     certification: Certification::Passed { date: "2026-10-28", suite: 6 },
     upload_initiation: Certification::Uncertified,
 };
-// Detected by certification suite 1; the raw observations are in spec/s3-certification.md.
+// Detected by certification suite 1; the raw observations are in spec/storage-certification.md.
 // Cloudflare documents the API differences at https://developers.cloudflare.com/r2/api/s3/api/.
 // Native completion passed create-once and completion-time checks, so no copy is needed.
 // Suite 5 passed on 2026-10-14; R2 has no bucket versioning to certify.
@@ -186,7 +186,7 @@ const R2: CataloguedProfile = CataloguedProfile {
     upload_initiation: Certification::Uncertified,
 };
 // Self-hosted services are reached at arbitrary endpoints and selected only by
-// name. The raw observations are in spec/s3-certification.md.
+// name. The raw observations are in spec/storage-certification.md.
 // Detected by certification suite 2. RustFS refused occupied names on PUT and
 // multipart completion with HTTP 412 and dated objects at completion, so no
 // copy is needed. It returned no checksum, even when
@@ -216,7 +216,7 @@ const RUSTFS: CataloguedProfile = CataloguedProfile {
 // rerun that failed later that day had raced detected settings, which
 // publish by conditional completion; with the entry's own publication suite
 // 5 passed three more times in each bucket state, and suite 6 passed it in
-// both states on 2026-10-28. See spec/s3-certification.md.
+// both states on 2026-10-28. See spec/storage-certification.md.
 const SEAWEEDFS: CataloguedProfile = CataloguedProfile {
     name: S3ProfileName::SeaweedFs,
     endpoint: None,
@@ -238,7 +238,7 @@ const SEAWEEDFS: CataloguedProfile = CataloguedProfile {
 // with versioning disabled; with versioning enabled every conditional writer
 // in a race succeeded, so versioned buckets stay uncertified. It passed
 // suite 6 with versioning disabled on 2026-10-28. See
-// spec/s3-certification.md.
+// spec/storage-certification.md.
 const CEPH_RGW: CataloguedProfile = CataloguedProfile {
     name: S3ProfileName::CephRgw,
     endpoint: None,
@@ -254,7 +254,7 @@ const CEPH_RGW: CataloguedProfile = CataloguedProfile {
 // Versity Gateway 1.9.0 (POSIX backend) detected the plain S3 settings and
 // passed suite 5 with them, versioning disabled and enabled, on 2026-10-14;
 // on 2026-10-15 this named entry passed suite 5 in both states, and suite 6
-// on 2026-10-28. See spec/s3-certification.md.
+// on 2026-10-28. See spec/storage-certification.md.
 const VERSITY_GW: CataloguedProfile = CataloguedProfile {
     name: S3ProfileName::VersityGw,
     endpoint: None,

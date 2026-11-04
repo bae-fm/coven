@@ -8244,21 +8244,12 @@ conditional multipart completions of one name both succeeded. Its earlier
 certificate was withdrawn, and its profile now publishes every object by copy,
 which passed.
 
-Today:
-
-| Service | Certified |
-|---|---|
-| GCS | yes, versioning off only |
-| R2 | yes (R2 has no versioning) |
-| RustFS 1.0.1 | yes, versioning off and on |
-| SeaweedFS 4.48 | yes, versioning off and on, publishing every object by copy |
-| Ceph RGW 20.2.4 | versioning off only; fails the versioned races |
-| Versity Gateway 1.9.0 | yes, versioning off and on |
-| AWS S3 | no: there is no live account to run against |
+Which services are certified today, in which bucket states, and by which run is
+the table in [storage-certification.md](storage-certification.md#where-each-provider-stands).
 
 Certification never exempts a connection from setup's own checks (§20.8). Appendix
-E.4 gives each profile's behaviours, E.5 the certification history, and E.6 how
-to run the suite.
+E.4 gives each profile's behaviours, E.5 where the certification history is, and
+E.6 how to run the suite.
 
 **Edge cases.**
 
@@ -9366,13 +9357,14 @@ replaced through an upload session instead.
   refused with `resourceModified` once the session can no longer publish.
 - Microsoft documents that `If-Match` is compared when the session is created,
   not that it holds through completion. Two-account live races are the evidence
-  that it does (2026-10-17: one winner in every round, 200 two-writer and 50
-  eight-writer rounds).
+  that it does: [one winner in every
+  round](storage-certification.md#onedrive-floor-replacement-through-an-upload-session-2026-10-17).
 
 **Creating through OneDrive upload sessions.** On personal OneDrive, a session
 creating an item at its final name exposed it unfinished: with 7,864,320 of
 7,864,321 bytes confirmed, a listing included the destination and a read
-succeeded (live test, 2026-10-12). Graph's documentation says the opposite, that
+succeeded ([live test](storage-certification.md#earlier-live-findings-2026-10-11-to-2026-10-12)).
+Graph's documentation says the opposite, that
 the file appears only after the last byte. Whether `deferCommit: true` on such
 a session would keep the item hidden until an explicit commit was not tried. So
 coven uploads to `<store>/.coven-uploads/<device>/<session>` inside the
@@ -9475,12 +9467,12 @@ aren't asked for checksums they never return. GCS supplies its hashes without a
 checksum-mode request. Every profile but GCS reads S3 response headers; the
 adapter translates GCS's Google headers.
 
-**Versioned buckets.** RustFS 1.0.1, SeaweedFS 4.48 publishing every object by
-copy, and Versity Gateway 1.9.0 (POSIX backend with `--versioning-dir`) passed
-every suite 5 race with versioning on, and RustFS 1.0.2, SeaweedFS 4.48 and
-Versity Gateway 1.9.0 every suite 6 race. GCS ran only with versioning off, so it
-has no versioned-bucket evidence. AWS remains uncertified. R2 has no versioning
-feature. Ceph RGW 20.2.4 fails the versioned races.
+**Versioned buckets.** RustFS, SeaweedFS 4.48 publishing every object by copy,
+and Versity Gateway (POSIX backend with `--versioning-dir`) passed the races
+with versioning on. GCS ran only with versioning off, so it has no
+versioned-bucket evidence. AWS remains uncertified. R2 has no versioning
+feature. Ceph RGW 20.2.4 fails the versioned races. The builds and dates are in
+[storage-certification.md](storage-certification.md#where-each-provider-stands).
 
 **Why each profile is what it is.**
 
@@ -9552,51 +9544,10 @@ objects aren't dated that way.
 
 ### E.5 Certification history
 
-- **2026-10-13:** suite version 1 passed GCS and R2; suite version 2 passed RustFS
-  and SeaweedFS. Suite version 3, which detects with the production probes,
-  reproduced each of those four entries the same day and passed their setup
-  safety check.
-- **2026-10-14:** suite version 4 passed Ceph RGW 20.2.4 with versioning off, and
-  RustFS 1.0.1 with versioning off and on. It failed SeaweedFS 4.48 in both
-  states: concurrent conditional multipart completions both succeeded, so
-  SeaweedFS's suite 2 certificate was withdrawn.
-- **2026-10-14:** suite version 5, which races the named entry's own
-  publication, passed SeaweedFS's multipart copy publication with versioning off
-  and on. But with versioning off, a conditional PUT racing a conditional copy of
-  one name both succeeded in 14 of 200 trials. Its entry now publishes every
-  object by copy.
-- **2026-10-14:** suite 5 passed R2, RustFS 1.0.1 with versioning off and on, and
-  Ceph RGW 20.2.4 and GCS with versioning off; those entries record suite 5
-  certificates. It also passed Versity Gateway 1.9.0 with versioning off and on
-  from detected settings.
-- **2026-10-15:** suite 5 passed SeaweedFS's every-object entry with versioning
-  off and on. A rerun later that day failed its multipart and mixed races three
-  times, but that run had put the profile name in the env file, which the suite
-  then ignored, so it raced the detected settings' conditional completion, not
-  the entry's copies. Run again as the named entry, suite 5 passed it three times
-  with versioning off and three times with it on; its certificates cover both
-  states.
-- **2026-10-15:** suite 5 passed Versity Gateway again as the named `VersityGw`
-  entry; its certificates cover both states.
-- **2026-10-28:** suite version 6, which adds the copy reply observation, passed
-  GCS and Ceph RGW 20.2.4 with versioning off, and SeaweedFS 4.48, RustFS 1.0.2
-  and Versity Gateway 1.9.0 with versioning off and on; those entries record
-  suite 6 certificates. On GCS and SeaweedFS the copy reply's time equalled
-  HEAD's, but its checksum (GCS) or ETag (SeaweedFS) did not, so creates keep
-  their HEAD (E.11). R2's test key was refused, so R2 keeps its suite 5
-  certificate.
-- **AWS** is uncertified: there is no live account.
-
-The live runs and their bucket states are in the [suite 4
-evidence](s3-certification.md#concurrent-certification-suite-4), the [full
-battery](s3-certification.md#full-battery-2026-10-14), the [GCS and Versity
-Gateway runs](s3-certification.md#gcs-and-versity-gateway-2026-10-14), the
-[SeaweedFS every-object
-run](s3-certification.md#seaweedfs-every-object-copy-publication-2026-10-15),
-the [SeaweedFS rerun](s3-certification.md#seaweedfs-rerun-2026-10-15), the
-[named-entry
-reruns](s3-certification.md#seaweedfs-reruns-as-the-named-entry-2026-10-15) and
-the [suite 6 runs](s3-certification.md#suite-6-2026-10-28).
+[storage-certification.md](storage-certification.md) holds every provider's
+certification: what is tested, where each provider stands, and the recorded
+output of each run, newest first. A run that changes a provider's standing
+changes that document's table and the provider's profile entry.
 
 ### E.6 Running the certification suite
 
@@ -9716,7 +9667,7 @@ sit in a device's folder (§20.6).
   member deletion still addresses only the current object.
 - The suite prints a Rust profile entry with the passing date and suite version.
   Commit it only after every check passes, alongside the
-  [raw certification evidence](s3-certification.md).
+  [certification evidence](storage-certification.md).
 
 **Versioning certification.** Only a passing suite with the recorded state
 `Enabled` supplies it; a passing run on an unversioned bucket never does.
