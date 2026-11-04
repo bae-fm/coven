@@ -232,7 +232,8 @@ fn storage_names(failure: StorageFailure) -> Option<Named> {
         | CopyTooLarge { .. }
         | Encoding
         | File
-        | MemberKeysMissing => None,
+        | MemberKeysMissing
+        | Bug => None,
     }
 }
 

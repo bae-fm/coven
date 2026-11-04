@@ -395,7 +395,7 @@ pub(crate) fn storage_clears(failure: StorageFailure) -> Clears {
     use StorageFailure::*;
     match failure {
         Network | Conflict | RateLimited | NotFound | SessionExpired | CatchUpRequired
-        | QuotaExceeded | File => Clears::ByItself,
+        | QuotaExceeded | File | Bug => Clears::ByItself,
         Authentication
         | PermissionDenied
         | AccessNotRegistered { .. }

@@ -103,6 +103,9 @@ pub enum StorageFailure {
     File,
     /// This installation has no member keys in custody.
     MemberKeysMissing,
+    /// Coven's work for the request panicked: a bug, which the caller
+    /// reports (E15). `StorageError::Bug` carries it.
+    Bug,
 }
 
 /// Why an S3 location cannot hold a store that needs its own bucket (§20.7).
@@ -149,6 +152,20 @@ pub enum StorageError {
         /// Failure removing temporary data or recording the failed upload state.
         cleanup: Box<StorageError>,
     },
+    /// Coven's work for the request panicked: a bug, which the caller
+    /// reports (E15). Its failure is `StorageFailure::Bug`.
+    #[error(transparent)]
+    Bug(#[from] coven_foundation::task::Bug),
+}
+
+impl coven_foundation::task::CarriesBug for StorageError {
+    fn bug(&self) -> Option<&coven_foundation::task::Bug> {
+        match self {
+            Self::Bug(bug) => Some(bug),
+            Self::Cleanup { operation, cleanup } => operation.bug().or_else(|| cleanup.bug()),
+            Self::Failure(_) | Self::Caused { .. } | Self::Provider { .. } => None,
+        }
+    }
 }
 
 impl StorageError {
@@ -173,6 +190,7 @@ impl StorageError {
             Self::Provider { failure, .. } => *failure,
             Self::Failure(failure) | Self::Caused { failure, .. } => *failure,
             Self::Cleanup { operation, .. } => operation.failure(),
+            Self::Bug(_) => StorageFailure::Bug,
         }
     }
 
@@ -194,7 +212,7 @@ impl StorageError {
         match self {
             Self::Provider { source, .. } => crate::providers::response_arrived(source.as_ref()),
             Self::Cleanup { operation, .. } => operation.answered(),
-            Self::Failure(_) | Self::Caused { .. } => false,
+            Self::Failure(_) | Self::Caused { .. } | Self::Bug(_) => false,
         }
     }
 
@@ -217,7 +235,7 @@ impl StorageError {
                 crate::providers::retry_after(*provider, source.as_ref())
             }
             Self::Cleanup { operation, .. } => operation.retry_after(),
-            Self::Failure(_) | Self::Caused { .. } => None,
+            Self::Failure(_) | Self::Caused { .. } | Self::Bug(_) => None,
         }
     }
 
@@ -283,13 +301,13 @@ pub enum StorageSetupError {
     LocationChangeUnsupported,
     /// A classified storage failure.
     #[error(transparent)]
-    Storage(#[from] StorageError),
+    Storage(StorageError),
     /// Sign-in failed or was cancelled before setup could connect.
     #[error(transparent)]
     OAuth(#[from] OAuthError),
     /// The facade could not commit to key custody.
     #[error("secure storage: {0}")]
-    SecureStorage(#[from] KeyError),
+    SecureStorage(KeyError),
     /// This device or its member was removed from the store (§14.1).
     #[error("this device or its member was removed")]
     Removed,
@@ -319,7 +337,28 @@ impl coven_foundation::task::CarriesBug for StorageSetupError {
         match self {
             Self::Bug(bug) => Some(bug),
             Self::SecureStorage(error) => error.bug(),
+            Self::Storage(error) | Self::ProviderCheck { source: error, .. } => error.bug(),
+            Self::S3VersioningUnknown { source } => source.bug(),
+            Self::OAuth(error) => error.bug(),
             _ => None,
+        }
+    }
+}
+
+impl From<StorageError> for StorageSetupError {
+    fn from(error: StorageError) -> Self {
+        match error {
+            StorageError::Bug(bug) => Self::Bug(bug),
+            error => Self::Storage(error),
+        }
+    }
+}
+
+impl From<KeyError> for StorageSetupError {
+    fn from(error: KeyError) -> Self {
+        match error {
+            KeyError::Bug(bug) => Self::Bug(bug),
+            error => Self::SecureStorage(error),
         }
     }
 }
@@ -348,7 +387,10 @@ impl From<StorageFailure> for StorageError {
 
 impl From<coven_foundation::files::FileError> for StorageError {
     fn from(error: coven_foundation::files::FileError) -> Self {
-        StorageFailure::File.with_source(error)
+        match error {
+            coven_foundation::files::FileError::Bug(bug) => Self::Bug(bug),
+            error => StorageFailure::File.with_source(error),
+        }
     }
 }
 

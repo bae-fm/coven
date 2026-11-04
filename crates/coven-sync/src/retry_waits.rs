@@ -472,7 +472,10 @@ impl coven_storage::Cooldown for RetryWaits {
             Some(database) => database
                 .record_cooldown(cooldown, self.live_cooldown())
                 .await
-                .map_err(|error| StorageFailure::File.with_source(error)),
+                .map_err(|error| match error {
+                    coven_database::DbError::Bug(bug) => bug.into(),
+                    error => StorageFailure::File.with_source(error),
+                }),
             None => Ok(()),
         }
     }

@@ -64,13 +64,13 @@ pub enum SyncError {
     SequenceExhausted,
     /// Storage refused or failed a request.
     #[error(transparent)]
-    Storage(#[from] StorageError),
+    Storage(StorageError),
     /// The local database failed.
     #[error(transparent)]
     Database(DbError),
     /// Unlocking or keeping keys failed.
     #[error(transparent)]
-    SecureStorage(#[from] KeyError),
+    SecureStorage(KeyError),
     /// Making encrypted or signed bytes failed.
     #[error(transparent)]
     Crypto(CryptoError),
@@ -140,6 +140,7 @@ impl coven_foundation::task::CarriesBug for SyncError {
             Self::Bug(bug) => Some(bug),
             Self::Database(error) => error.bug(),
             Self::SecureStorage(error) => error.bug(),
+            Self::Storage(error) => error.bug(),
             Self::Cleanup { operation, cleanup } => operation.bug().or_else(|| cleanup.bug()),
             // The cause `into_shared` shares is the error itself.
             Self::Failed { source, .. } => {
@@ -340,6 +341,24 @@ impl SyncError {
         match self {
             Self::Failed { failure, source } => (failure, source),
             error => (error.local_failure(), Arc::new(error)),
+        }
+    }
+}
+
+impl From<StorageError> for SyncError {
+    fn from(error: StorageError) -> Self {
+        match error {
+            StorageError::Bug(bug) => Self::Bug(bug),
+            error => Self::Storage(error),
+        }
+    }
+}
+
+impl From<KeyError> for SyncError {
+    fn from(error: KeyError) -> Self {
+        match error {
+            KeyError::Bug(bug) => Self::Bug(bug),
+            error => Self::SecureStorage(error),
         }
     }
 }

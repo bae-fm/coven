@@ -121,7 +121,7 @@ inductive Failure
   | invalidRange | notStoreOwner | inviteeIsStoreOwner | accountIdUnavailable
   | invitationMismatch | sessionMismatch | sessionExpired | sessionIdentityUnknown
   | invalidPart | singleRequestTooLarge | copyTooLarge | encoding | file
-  | memberKeysMissing
+  | memberKeysMissing | bug
   deriving DecidableEq, Repr
 
 /-- The state a provider failure names: what storage said of this account or
@@ -137,7 +137,7 @@ def Failure.named : Failure → Option State
 /-- The failures that clear by themselves (`Clears::ByItself`). -/
 def Failure.byItself : Failure → Bool
   | .network | .conflict | .rateLimited | .notFound | .sessionExpired
-  | .catchUpRequired | .quotaExceeded | .file => true
+  | .catchUpRequired | .quotaExceeded | .file | .bug => true
   | _ => false
 
 /-- A local failure, as `LocalFailure` names it. -/

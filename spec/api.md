@@ -4522,6 +4522,9 @@ pub enum StorageFailure {
     File,
     /// This installation has no member keys in custody.
     MemberKeysMissing,
+    /// Coven's work for the request panicked: a bug (E15). `StorageError::Bug`
+    /// carries it. Like a local failure's `Bug`, it retries under backoff.
+    Bug,
 
     /// The installation must complete membership and key-copy catch-up before sending.
     CatchUpRequired,
@@ -4565,6 +4568,9 @@ pub enum StorageError {
     },
     /// Cleanup failed too; both causes and their classifications are retained.
     Cleanup { operation: Box<StorageError>, cleanup: Box<StorageError> },
+    /// Coven's work for the request panicked: a bug (E15). Its failure is
+    /// `StorageFailure::Bug`.
+    Bug(Bug),
 }
 
 impl StorageError {
@@ -8353,10 +8359,11 @@ An error that keeps a file or lock failure takes the bug as its own `Bug`,
 never under a disk label: `StoreLockError::Bug` for taking a store's lock,
 `DbError::Bug` for file work or a lock a database call ran,
 `StoreListError::Bug` for listing the stores, `KeyError::Bug` for
-custody's file work and `LocalFileError::Bug` for reading a file on this
-device. An error that keeps another call's error routes that error's `Bug`
-to its own, such as `IdentityError::Bug` for custody's and `CovenError::Bug`
-for custody's or a lock's. `CovenError` keeps a database call's as
+custody's file work, `LocalFileError::Bug` for reading a file on this
+device and `StorageError::Bug` for a provider request's local work. An error that keeps another call's error routes that error's `Bug`
+to its own, such as `IdentityError::Bug` for custody's, `CovenError::Bug`
+for custody's or a lock's, and `SyncError::Bug` or `StorageSetupError::Bug`
+for storage's or custody's. `CovenError` keeps a database call's as
 `CovenError::Database(DbError::Bug)`, as for its other failures. `SyncError`
 reports it as `LocalFailure::Bug`.
 

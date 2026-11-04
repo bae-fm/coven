@@ -44,3 +44,26 @@ fn setup_preserves_sign_in_and_custody_causes() {
     let setup = StorageSetupError::from(KeyError::Unsupported);
     assert!(matches!(setup, StorageSetupError::SecureStorage(KeyError::Unsupported)));
 }
+
+/// A panic in a provider request's local work is the request's bug,
+/// classified `Bug`, not a file failure; setup and sign-in carry it.
+#[test]
+fn a_bug_in_a_requests_file_work_is_storages_bug() {
+    use coven_foundation::task::{Bug, CarriesBug};
+    let bug = Bug { operation: "stage the asset", message: "it panicked".into() };
+    let storage = || StorageError::from(coven_foundation::files::FileError::Bug(bug.clone()));
+    assert!(matches!(storage(), StorageError::Bug(found) if found == bug));
+    assert_eq!(storage().failure(), StorageFailure::Bug);
+    let cleanup = StorageError::Cleanup {
+        operation: Box::new(StorageFailure::Network.into()),
+        cleanup: Box::new(storage()),
+    };
+    assert_eq!(cleanup.bug(), Some(&bug));
+    assert!(
+        matches!(StorageSetupError::from(storage()), StorageSetupError::Bug(found) if found == bug)
+    );
+    assert!(
+        matches!(StorageSetupError::from(KeyError::Bug(bug.clone())), StorageSetupError::Bug(found) if found == bug)
+    );
+    assert_eq!(OAuthError::Storage(storage()).bug(), Some(&bug));
+}

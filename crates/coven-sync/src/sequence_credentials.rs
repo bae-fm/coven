@@ -27,7 +27,7 @@ impl SequenceSync {
         refuse_after_leaving(&self.database, &self.member).await?;
         let rollback = commit()?;
         if let Err(error) = install_session(self.storage.as_ref(), next.credentials).await {
-            let mut error = SyncError::Storage(error);
+            let mut error = SyncError::from(error);
             for result in [
                 rollback(),
                 install_session(self.storage.as_ref(), previous.credentials)

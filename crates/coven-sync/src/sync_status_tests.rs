@@ -50,6 +50,7 @@ fn failures() -> Vec<StorageFailure> {
         Encoding,
         File,
         MemberKeysMissing,
+        Bug,
     ]
 }
 
@@ -94,6 +95,7 @@ fn failure_name(failure: StorageFailure) -> &'static str {
         Encoding => "encoding",
         File => "file",
         MemberKeysMissing => "memberKeysMissing",
+        Bug => "bug",
     }
 }
 

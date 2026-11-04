@@ -239,6 +239,7 @@ async fn refresh(
 fn storage_error(error: SyncError) -> StorageError {
     match error {
         SyncError::Storage(error) => error,
+        SyncError::Bug(bug) => bug.into(),
         // Custody could not keep the replacement: nothing was installed.
         error => StorageFailure::File.with_source(error),
     }

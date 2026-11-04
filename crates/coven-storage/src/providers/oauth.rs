@@ -44,6 +44,15 @@ pub enum OAuthError {
     Storage(#[from] StorageError),
 }
 
+impl coven_foundation::task::CarriesBug for OAuthError {
+    fn bug(&self) -> Option<&coven_foundation::task::Bug> {
+        match self {
+            Self::Storage(error) => error.bug(),
+            _ => None,
+        }
+    }
+}
+
 /// The original checked error callback. Diagnostics show only its `error`
 /// code (RFC 6749 §4.1.2.1), such as `server_error`: the callback's other
 /// fields may contain secrets echoed by the provider.

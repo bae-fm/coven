@@ -322,7 +322,8 @@ private def failures : List (String × CovenIO.SyncState.Failure) := [
     ("copyTooLarge", .copyTooLarge),
     ("encoding", .encoding),
     ("file", .file),
-    ("memberKeysMissing", .memberKeysMissing)]
+    ("memberKeysMissing", .memberKeysMissing),
+    ("bug", .bug)]
 
 private def reasons : List (String × Reason) := [
     ("missing", .missing),

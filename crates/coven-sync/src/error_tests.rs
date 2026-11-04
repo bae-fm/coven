@@ -215,3 +215,15 @@ fn a_failing_operation_names_its_reason_and_cause() {
     let failure = SyncFailure::Operation(Box::new(record));
     assert!(failure.to_string().ends_with(": Failed(Disk): disk full"), "{failure}");
 }
+
+/// Storage's and custody's bugs are sync's own bug, not a storage or
+/// custody failure.
+#[test]
+fn storage_and_custody_bugs_are_syncs_bug() {
+    use coven_foundation::task::Bug;
+    let bug = Bug { operation: "read the object", message: "it panicked".into() };
+    let storage = SyncError::from(StorageError::Bug(bug.clone()));
+    assert!(matches!(storage, SyncError::Bug(found) if found == bug));
+    let custody = SyncError::from(KeyError::Bug(bug.clone()));
+    assert!(matches!(custody, SyncError::Bug(found) if found == bug));
+}
