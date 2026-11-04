@@ -1258,12 +1258,8 @@ themselves, not a summary.
 
 ### D7.7 Last included claims (section 11)
 
-A device whose claim's slot was deleted settles it from the floor's snapshot
-(§5.3). Section 11 makes that possible. The device compares the claim number it
-recorded with the number section 11 holds for it: a lower number means the claim
-didn't land; an equal number with the digest of its recorded bytes means it
-landed; a higher number, or an equal one with another digest, means another copy
-uses its device id.
+A device settles a claim whose slot was deleted from this section (§5.3); which
+claims count is [§16.1's](coven.md#161-what-a-snapshot-holds).
 
 - It occurs in every snapshot, once per device known through its coverage.
 - It records that device's last claim: the greatest claim number among the
@@ -1271,12 +1267,6 @@ uses its device id.
   slots hold the same number, the later slot's digest is kept; that can happen
   only when two copies share a device id (§19.3). A device with no such claim
   has number zero and no digest.
-- A greater number in an earlier slot still wins. A restored copy of Ana's phone
-  can land claim 8 in slot 41 after claim 9 landed in slot 40; section 11 records
-  claim 9, with slot 40's digest.
-- Every slot kind counts, valid or refused, including writes whose parts were
-  unreadable or ignored by a reset. So this number settles every claim after
-  slot deletion ([§5.3](coven.md#53-settling-a-claim-after-its-slot-is-gone)).
 - Authenticate the snapshot before using these numbers. They establish that
   claims were included, not that their effects survived.
 

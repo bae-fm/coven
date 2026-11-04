@@ -1330,6 +1330,7 @@ one that lost would otherwise see "9" and believe the winner's slot was its own
 The claim number matters too. Looking at the data instead can't settle a claim:
 later writes or admin entries can erase every visible effect of a claim that
 landed ([`state_alone_cannot_settle`](proofs/sequence/CovenSequence/Settle.lean)).
+The numbers say whether a claim landed, not whether its effects survived.
 
 With this journal order and the floor's coverage, settling tells apart a claim
 that landed, one absent from the sequence, and one whose slot is still empty. A
@@ -4880,12 +4881,13 @@ includes from that device and the SHA-256 hash of that claim's slot bytes (§5.3
 Two included slots can carry the same greatest number only when two
 installations share one device id; the snapshot then keeps the hash of the later
 slot.
+A greater number in an earlier slot still wins: a restored copy of Ana's phone
+can land claim 8 in slot 41 after claim 9 landed in slot 40, and the snapshot
+records claim 9, with slot 40's hash.
 Every slot through coverage counts: writes, admin entries, key copies and
 announcements, valid or refused, including writes with parts this device can't
 open and parts a reset ignored. A device with no claim included has number zero
-and no hash. These numbers let a device settle a claim of any kind after its
-slot is deleted. They tell it whether the claim landed, not whether the claim's
-effects survived.
+and no hash. §5.3 settles a claim from these numbers.
 
 A snapshot leaves out everything that belongs to one device: local uploads,
 journals, pending records (§19.1), file sources and caches. Reloading keeps all
