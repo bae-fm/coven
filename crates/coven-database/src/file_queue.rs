@@ -439,12 +439,7 @@ pub(crate) fn switched(db: &DatabaseConnection, id: i64) -> Result<(), DbError> 
     )? {
         release_copy(db, &path)?;
     }
-    // A stored file never moves again; its original stays recorded.
-    db.internal_execute(
-        "DELETE FROM _coven_user_chunks
-         WHERE file IN (SELECT file FROM _coven_upload_files WHERE upload=?1)",
-        [id],
-    )?;
+    crate::user_file::uploaded(db, id)?;
     retire(db, id)
 }
 

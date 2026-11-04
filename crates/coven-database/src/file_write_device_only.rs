@@ -126,7 +126,7 @@ impl FileWrite<'_> {
                 size: u64::try_from(size).map_err(|_| DbError::DamagedDatabase)?,
                 modified_at: crate::user_file::decode_time(&modified_at)?,
             };
-            db.internal_execute("DELETE FROM _coven_user_files WHERE file=?1", [copy.file])?;
+            crate::user_file::forget(db, copy.file)?;
             crate::user_file::record(db, copy.file, &original, &copy.hashes)?;
             crate::database::file_database::copies::keep(db, path)?;
         }

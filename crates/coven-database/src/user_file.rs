@@ -141,6 +141,48 @@ pub(crate) fn record(
     Ok(())
 }
 
+/// Forget `file`'s original here, and its chunk hashes with it: the file
+/// never touches it again (§17.3).
+pub(crate) fn forget(
+    db: &crate::sqlite::DatabaseConnection,
+    file: coven_foundation::id_source::FileId,
+) -> Result<(), DbError> {
+    db.internal_execute("DELETE FROM _coven_user_files WHERE file=?1", [file])?;
+    Ok(())
+}
+
+/// The new file `to` over `from`'s bytes shares `from`'s original here and
+/// its chunk hashes (§17.2).
+pub(crate) fn share(
+    db: &crate::sqlite::DatabaseConnection,
+    from: coven_foundation::id_source::FileId,
+    to: coven_foundation::id_source::FileId,
+) -> Result<(), DbError> {
+    db.internal_execute(
+        "INSERT INTO _coven_user_files(file,path,size,modified_at,hash)
+         SELECT ?2,path,size,modified_at,hash FROM _coven_user_files WHERE file=?1",
+        rusqlite::params![from, to],
+    )?;
+    db.internal_execute(
+        "INSERT INTO _coven_user_chunks(file,chunk,hash)
+         SELECT ?2,chunk,hash FROM _coven_user_chunks WHERE file=?1",
+        rusqlite::params![from, to],
+    )?;
+    Ok(())
+}
+
+/// The files the upload `upload` switches are stored: a stored file never
+/// moves again, so its original's chunk hashes go; the original stays
+/// recorded (§17.3).
+pub(crate) fn uploaded(db: &crate::sqlite::DatabaseConnection, upload: i64) -> Result<(), DbError> {
+    db.internal_execute(
+        "DELETE FROM _coven_user_chunks
+         WHERE file IN (SELECT file FROM _coven_upload_files WHERE upload=?1)",
+        [upload],
+    )?;
+    Ok(())
+}
+
 /// The content hash and chunk hashes recorded with `file`'s original here,
 /// if it has one. Its chunk hashes are kept only while the file is on this
 /// device only: they go once it is stored (§17.3).
@@ -212,3 +254,7 @@ pub(crate) fn decode_path(bytes: Vec<u8>) -> Result<PathBuf, DbError> {
     coven_foundation::files::path_from_bytes(bytes)
         .map_err(|coven_foundation::files::PathBytesError| DbError::DamagedDatabase)
 }
+
+#[cfg(test)]
+#[path = "user_file_tests.rs"]
+pub(crate) mod tests;

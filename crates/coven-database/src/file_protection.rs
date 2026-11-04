@@ -441,7 +441,7 @@ pub(crate) fn settle_record(
         // forgotten, never touched, coven's copy goes once nothing names it,
         // and an upload no other file shares is left for the upload worker
         // to retire (§17.9).
-        db.internal_execute("DELETE FROM _coven_user_files WHERE file=?1", [id])?;
+        crate::user_file::forget(db, id)?;
         db.internal_execute("DELETE FROM _coven_upload_files WHERE file=?1", [id])?;
         crate::file_pins::end(db, id)?;
         for copy in
@@ -472,7 +472,7 @@ fn elsewhere(db: &DatabaseConnection, file: FileId, device: DeviceId) -> Result<
     for path in paths {
         crate::database::file_database::copies::lose(db, &path, file)?;
     }
-    db.internal_execute("DELETE FROM _coven_user_files WHERE file=?1", [file])?;
+    crate::user_file::forget(db, file)?;
     Ok(())
 }
 

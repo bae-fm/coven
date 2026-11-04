@@ -144,16 +144,7 @@ pub(crate) fn share(db: &DatabaseConnection, from: FileId, to: FileId) -> Result
          SELECT ?2,upload,keep FROM _coven_upload_files WHERE file=?1",
         params![from, to],
     )?;
-    db.internal_execute(
-        "INSERT INTO _coven_user_files(file,path,size,modified_at,hash)
-         SELECT ?2,path,size,modified_at,hash FROM _coven_user_files WHERE file=?1",
-        params![from, to],
-    )?;
-    db.internal_execute(
-        "INSERT INTO _coven_user_chunks(file,chunk,hash)
-         SELECT ?2,chunk,hash FROM _coven_user_chunks WHERE file=?1",
-        params![from, to],
-    )?;
+    crate::user_file::share(db, from, to)?;
     db.internal_execute(
         "INSERT INTO _coven_device_files(file,path,hash)
          SELECT ?2,path,hash FROM _coven_device_files WHERE file=?1",
