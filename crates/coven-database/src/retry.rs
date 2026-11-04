@@ -43,6 +43,19 @@ pub struct RetryWait {
     /// `W`: the full wait chosen when `T` was persisted.
     pub wait: Duration,
 }
+impl RetryWait {
+    /// A wait as a retry column set stores it: failures, `T` and `W` in
+    /// milliseconds.
+    pub(crate) fn stored(failures: i64, not_before: &[u8], wait: i64) -> Result<Self, DbError> {
+        Ok(Self {
+            failures: u32::try_from(failures).map_err(|_overflow| DbError::DamagedDatabase)?,
+            not_before: crate::user_file::decode_time(not_before)?,
+            wait: Duration::from_millis(
+                u64::try_from(wait).map_err(|_negative| DbError::DamagedDatabase)?,
+            ),
+        })
+    }
+}
 
 /// The row's one subject column and its value.
 enum Key {
@@ -162,16 +175,7 @@ impl RawRow {
                 (Some("provider"), None, None, None) => RetrySubject::Provider,
                 _ => return Err(DbError::DamagedDatabase),
             };
-        Ok((
-            subject,
-            RetryWait {
-                failures: u32::try_from(self.failures).map_err(|_| DbError::DamagedDatabase)?,
-                not_before: crate::user_file::decode_time(&self.not_before)?,
-                wait: Duration::from_millis(
-                    u64::try_from(self.wait).map_err(|_| DbError::DamagedDatabase)?,
-                ),
-            },
-        ))
+        Ok((subject, RetryWait::stored(self.failures, &self.not_before, self.wait)?))
     }
 }
 

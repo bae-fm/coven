@@ -260,13 +260,9 @@ fn decode_uploads(
         .map(|((id, location, size, hash, queued), session, retry, (of, stored, holds))| {
             let retry = match retry {
                 (None, None, None) => None,
-                (Some(failures), Some(not_before), Some(wait)) => Some(crate::RetryWait {
-                    failures: u32::try_from(failures).map_err(|_| DbError::DamagedDatabase)?,
-                    not_before: crate::user_file::decode_time(&not_before)?,
-                    wait: std::time::Duration::from_millis(
-                        u64::try_from(wait).map_err(|_| DbError::DamagedDatabase)?,
-                    ),
-                }),
+                (Some(failures), Some(not_before), Some(wait)) => {
+                    Some(crate::RetryWait::stored(failures, &not_before, wait)?)
+                }
                 _ => return Err(DbError::DamagedDatabase),
             };
             let (session, progress) = match session {
