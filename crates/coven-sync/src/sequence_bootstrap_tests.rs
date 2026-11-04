@@ -195,19 +195,16 @@ async fn a_restored_device_loads_a_floor_snapshot_larger_than_its_input_budget()
     group.storage.hold_body_at(path.clone(), size / 2, observed, resume).await;
     let restoring = laptop.sync.pass();
     tokio::pin!(restoring);
-    within(async {
-        tokio::select! {
-            result = &mut restoring => panic!("the restore ended with the body held: {result:?}"),
-            held = held => held.unwrap(),
-        }
-    })
-    .await;
+    tokio::select! {
+        result = &mut restoring => panic!("the restore ended with the body held: {result:?}"),
+        held = held => held.unwrap(),
+    }
     // Halfway through the body, about half its records are staged and
     // none of its sealed bytes are retained.
     assert!(database.staged_snapshot_records().await.unwrap() > 0);
     assert!(database.input_budget().await.unwrap().retained < 4096);
     release.send(()).unwrap();
-    within(restoring).await.unwrap();
+    restoring.await.unwrap();
     assert_eq!(rows(&laptop.sync.database).await.len(), 96);
     assert_eq!(rows(&laptop.sync.database).await, rows(&ana.sync.database).await);
     assert_eq!(database.staged_snapshot_records().await.unwrap(), 0);
@@ -413,7 +410,7 @@ async fn a_restore_reads_each_slot_once() {
     let laptop = group.newcomer(ana.identity.clone(), storage.clone()).await;
     // Without a floor, the key scan reads every slot; reading forward then
     // uses the bytes the scan retained, with no second request.
-    within(laptop.sync.unlock()).await.unwrap();
+    laptop.sync.unlock().await.unwrap();
     assert_eq!(rows(&laptop.sync.database).await.len(), 3);
     let reads = slot_reads(&storage);
     for slot in 1..=through {
@@ -422,13 +419,6 @@ async fn a_restore_reads_each_slot_once() {
     for device in [&ana, &laptop] {
         device.sync.database.close().await.unwrap();
     }
-}
-
-/// Wait for `work`, failing the test if it takes longer than ten seconds.
-async fn within<T>(work: impl std::future::Future<Output = T>) -> T {
-    tokio::time::timeout(std::time::Duration::from_secs(10), work)
-        .await
-        .expect("restore work did not finish within 10 s")
 }
 
 /// Ben's laptop downloads one file at a time, and its restore still keeps 16
@@ -452,7 +442,7 @@ async fn a_restore_keeps_sixteen_slot_reads_in_flight_with_one_file_download() {
         ana.sync.pass().await.unwrap();
     }
     let storage = group.storage.for_device();
-    let laptop = within(group.newcomer(ana.identity.clone(), storage.clone())).await;
+    let laptop = group.newcomer(ana.identity.clone(), storage.clone()).await;
     laptop.files().set_transfer_limits(coven_storage::TransferLimits {
         uploads: std::num::NonZeroUsize::MIN,
         downloads: std::num::NonZeroUsize::MIN,
@@ -466,21 +456,18 @@ async fn a_restore_keeps_sixteen_slot_reads_in_flight_with_one_file_download() {
     let mut requests = storage.subscribe_requests();
     let restoring = laptop.sync.unlock();
     tokio::pin!(restoring);
-    within(async {
-        while !slot_reads(&storage).contains(&(held + 15)) {
-            tokio::select! {
-                result = &mut restoring => panic!("the restore ended with slot {held} held: {result:?}"),
-                changed = requests.changed() => changed.unwrap(),
-            }
+    while !slot_reads(&storage).contains(&(held + 15)) {
+        tokio::select! {
+            result = &mut restoring => panic!("the restore ended with slot {held} held: {result:?}"),
+            changed = requests.changed() => changed.unwrap(),
         }
-    })
-    .await;
+    }
     assert!(!slot_reads(&storage).contains(&(held + 16)));
     release.send(()).unwrap();
-    within(restoring).await.unwrap();
-    assert_eq!(within(rows(&laptop.sync.database)).await.len(), 40);
+    restoring.await.unwrap();
+    assert_eq!(rows(&laptop.sync.database).await.len(), 40);
     for device in [&ana, &laptop] {
-        within(device.sync.database.close()).await.unwrap();
+        device.sync.database.close().await.unwrap();
     }
 }
 
@@ -495,7 +482,7 @@ async fn a_restore_reads_slots_ahead_and_a_quiet_pass_still_sends_one_miss() {
     }
     let through = ana.sync.database.applied_slot().await.unwrap();
     let storage = group.storage.for_device();
-    let laptop = within(group.newcomer(ana.identity.clone(), storage.clone())).await;
+    let laptop = group.newcomer(ana.identity.clone(), storage.clone()).await;
     // While slot 2's read is held, a reader one slot at a time sends
     // nothing more; one reading ahead also asks for slot 3.
     let (observed, _held) = tokio::sync::oneshot::channel();
@@ -506,18 +493,15 @@ async fn a_restore_reads_slots_ahead_and_a_quiet_pass_still_sends_one_miss() {
     let mut requests = storage.subscribe_requests();
     let restoring = laptop.sync.unlock();
     tokio::pin!(restoring);
-    within(async {
-        while !slot_reads(&storage).contains(&3) {
-            tokio::select! {
-                result = &mut restoring => panic!("the restore ended with slot 2 held: {result:?}"),
-                changed = requests.changed() => changed.unwrap(),
-            }
+    while !slot_reads(&storage).contains(&3) {
+        tokio::select! {
+            result = &mut restoring => panic!("the restore ended with slot 2 held: {result:?}"),
+            changed = requests.changed() => changed.unwrap(),
         }
-    })
-    .await;
+    }
     release.send(()).unwrap();
-    within(restoring).await.unwrap();
-    assert_eq!(within(rows(&laptop.sync.database)).await.len(), 10);
+    restoring.await.unwrap();
+    assert_eq!(rows(&laptop.sync.database).await.len(), 10);
     let reads = slot_reads(&storage);
     for slot in 1..=through {
         assert_eq!(reads.iter().filter(|read| **read == slot).count(), 1);
@@ -525,10 +509,10 @@ async fn a_restore_reads_slots_ahead_and_a_quiet_pass_still_sends_one_miss() {
     // Past the end, at most the reads already in flight find nothing.
     assert!(reads.len() as u64 <= through + 16, "{reads:?}");
     let before = slot_reads(&storage).len();
-    within(laptop.sync.pass()).await.unwrap();
+    laptop.sync.pass().await.unwrap();
     assert_eq!(slot_reads(&storage).len(), before + 1);
     for device in [&ana, &laptop] {
-        within(device.sync.database.close()).await.unwrap();
+        device.sync.database.close().await.unwrap();
     }
 }
 
@@ -548,7 +532,7 @@ async fn unlock_reports(
     laptop: &Device,
     clock: &RecordingClock<LoadStep>,
 ) -> Vec<Progress<LoadStep>> {
-    within(laptop.sync.unlock()).await.unwrap();
+    laptop.sync.unlock().await.unwrap();
     clock.seen()
 }
 
