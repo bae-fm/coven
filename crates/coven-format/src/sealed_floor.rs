@@ -1,7 +1,7 @@
 //! Streamed floor routing: a key id, first kept slot and original key copies (D9).
 //! The clear prefix has no total-size bound. Each returned piece is bounded.
 
-use crate::error::{bound, require, Error, Rule};
+use crate::error::{bound, exact_length, require, Error, Rule};
 use crate::floor::OriginalSlot;
 use crate::value::Slot;
 use crate::wire::{Decoder, Encoder, Wire, MAX_ITEMS};
@@ -76,13 +76,7 @@ impl FloorPrefixDecoder {
     }
     /// Decode one complete original slot, keeping its signed bytes intact.
     pub fn copy(&mut self, bytes: &[u8]) -> Result<OriginalSlot, Error> {
-        let length = self.copy_length(bytes)?;
-        if bytes.len() < length {
-            return Err(Error::Truncated);
-        }
-        if bytes.len() > length {
-            return Err(Error::TrailingBytes);
-        }
+        exact_length(bytes.len(), self.copy_length(bytes)?)?;
         let mut input = Decoder::new(bytes)?;
         let copy = OriginalSlot::get(&mut input)?;
         input.finish()?;

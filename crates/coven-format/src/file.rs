@@ -1,7 +1,7 @@
 //! The cleartext file header, indexed ciphertext chunks and authenticated ranges.
 
 use crate::chunks::CHUNK_SIZE;
-use crate::error::{require, Error, Rule};
+use crate::error::{exact_length, require, Error, Rule};
 use coven_crypto::{CryptoError, FileKey, FILE_CHUNK_TAG_LEN};
 
 /// Bytes before the first file chunk: kind, version and file size.
@@ -22,12 +22,7 @@ impl FileHeader {
     /// Decode exactly the 11-byte header, without reading any ciphertext.
     pub fn decode(bytes: &[u8]) -> Result<Self, Error> {
         crate::sealed::prefix(bytes, 38)?;
-        if bytes.len() < FILE_HEADER_LEN {
-            return Err(Error::Truncated);
-        }
-        if bytes.len() > FILE_HEADER_LEN {
-            return Err(Error::TrailingBytes);
-        }
+        exact_length(bytes.len(), FILE_HEADER_LEN)?;
         Ok(Self::new(u64::from_be_bytes(bytes[3..11].try_into().expect("eight bytes"))))
     }
 
@@ -96,7 +91,7 @@ impl FileHeader {
         bytes: &[u8],
     ) -> Result<Vec<u8>, FileError> {
         let chunk = self.chunk(index)?;
-        exact_length(bytes.len() as u64, (chunk.plaintext_length + FILE_CHUNK_TAG_LEN) as u64)?;
+        exact_length(bytes.len(), chunk.plaintext_length + FILE_CHUNK_TAG_LEN)?;
         Ok(key.open_chunk(path, &self.encode(), index, bytes)?)
     }
 }
@@ -112,13 +107,6 @@ pub struct FileChunk {
     pub plaintext_length: usize,
 }
 
-fn exact_length(actual: u64, expected: u64) -> Result<(), Error> {
-    match actual.cmp(&expected) {
-        std::cmp::Ordering::Less => Err(Error::Truncated),
-        std::cmp::Ordering::Greater => Err(Error::TrailingBytes),
-        std::cmp::Ordering::Equal => Ok(()),
-    }
-}
 fn offset_error() -> Error {
     Error::Invalid { field: "file offset", rule: Rule::Chunk }
 }

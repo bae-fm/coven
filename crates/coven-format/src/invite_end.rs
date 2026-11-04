@@ -1,6 +1,6 @@
 //! The marker an ended invite leaves at its join request's path (D9, D10).
 
-use crate::error::Error;
+use crate::error::{exact_length, Error};
 
 /// What an ended invite leaves at `<store>/join-requests/<device>/<invite>`, created
 /// once in place of the request: a joining device that finds it there ends
@@ -31,11 +31,8 @@ impl InviteEnd {
     /// with `UnknownTag`.
     pub fn decode(bytes: &[u8]) -> Result<Self, Error> {
         crate::sealed::prefix(bytes, KIND)?;
-        let time: [u8; 8] =
-            bytes.get(3..LENGTH).ok_or(Error::Truncated)?.try_into().expect("eight bytes");
-        if bytes.len() > LENGTH {
-            return Err(Error::TrailingBytes);
-        }
+        exact_length(bytes.len(), LENGTH)?;
+        let time: [u8; 8] = bytes[3..LENGTH].try_into().expect("eight bytes");
         Ok(Self { kept_until: u64::from_be_bytes(time) })
     }
 }

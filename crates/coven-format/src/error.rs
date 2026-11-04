@@ -169,6 +169,16 @@ pub(crate) fn require(ok: bool, field: &'static str, rule: Rule) -> Result<(), E
     }
 }
 
+/// Refuse a length other than `expected`: shorter is truncated, longer has
+/// trailing bytes.
+pub(crate) fn exact_length<T: Ord>(actual: T, expected: T) -> Result<(), Error> {
+    match actual.cmp(&expected) {
+        std::cmp::Ordering::Less => Err(Error::Truncated),
+        std::cmp::Ordering::Greater => Err(Error::TrailingBytes),
+        std::cmp::Ordering::Equal => Ok(()),
+    }
+}
+
 pub(crate) fn bound(n: usize, maximum: usize, field: &'static str) -> Result<(), Error> {
     if n <= maximum {
         Ok(())

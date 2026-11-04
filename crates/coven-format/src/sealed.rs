@@ -1,16 +1,11 @@
 //! Bounds shared by every sealed object layout.
 
-use crate::error::{bound, require, Error, Rule};
+use crate::error::{bound, exact_length, require, Error, Rule};
 
 use coven_crypto::SEALED_OBJECT_CHUNK_OVERHEAD;
 
 pub(crate) fn signature(bytes: &[u8]) -> Result<coven_crypto::Signature, Error> {
-    if bytes.len() < 64 {
-        return Err(Error::Truncated);
-    }
-    if bytes.len() > 64 {
-        return Err(Error::TrailingBytes);
-    }
+    exact_length(bytes.len(), 64)?;
     Ok(coven_crypto::Signature::from_bytes(bytes.try_into().expect("64 bytes")))
 }
 
@@ -32,13 +27,7 @@ pub(crate) fn chunk_length(prefix: &[u8], maximum: usize) -> Result<usize, Error
 }
 
 pub(crate) fn chunk(bytes: &[u8], maximum: usize) -> Result<&[u8], Error> {
-    let length = chunk_length(bytes, maximum)?;
-    if bytes.len() < length {
-        return Err(Error::Truncated);
-    }
-    if bytes.len() > length {
-        return Err(Error::TrailingBytes);
-    }
+    exact_length(bytes.len(), chunk_length(bytes, maximum)?)?;
     Ok(&bytes[4..])
 }
 

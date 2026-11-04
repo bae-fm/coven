@@ -1,7 +1,7 @@
 //! Piecewise sealed write layout. Crypto supplies and authenticates the bytes.
 
 use crate::chunks::CHUNK_SIZE;
-use crate::error::{bound, require, Error, Rule};
+use crate::error::{bound, exact_length, require, Error, Rule};
 use crate::sealed;
 use crate::wire::{Decoder, Encoder, Wire, MAX_ITEMS, MAX_OBJECT};
 use coven_crypto::{Signature, SEALED_OBJECT_CHUNK_OVERHEAD};
@@ -85,13 +85,7 @@ impl WriteObjectPrefix {
     /// Read exactly the part roots and header signature that follow the
     /// sealed header chunk.
     pub fn decode_tail(&self, bytes: &[u8]) -> Result<HeaderTail, Error> {
-        let length = Self::tail_length(self.part_keys.len());
-        if bytes.len() < length {
-            return Err(Error::Truncated);
-        }
-        if bytes.len() > length {
-            return Err(Error::TrailingBytes);
-        }
+        exact_length(bytes.len(), Self::tail_length(self.part_keys.len()))?;
         let (roots, signature) = bytes.split_at(32 * self.part_keys.len());
         Ok(HeaderTail {
             roots: roots.chunks_exact(32).map(|root| root.try_into().expect("32 bytes")).collect(),
@@ -127,13 +121,7 @@ impl WriteObjectPrefix {
 
     /// Decode exactly the complete prefix, refusing trailing bytes.
     pub fn decode(bytes: &[u8]) -> Result<Self, Error> {
-        let length = Self::length(bytes)?;
-        if bytes.len() < length {
-            return Err(Error::Truncated);
-        }
-        if bytes.len() > length {
-            return Err(Error::TrailingBytes);
-        }
+        exact_length(bytes.len(), Self::length(bytes)?)?;
         let mut input = Decoder::new(&bytes[3..])?;
         let result = Self {
             format: crate::FormatVersion::decode(bytes)?,
@@ -289,13 +277,7 @@ impl WriteObjectLayout {
     /// lacking this part's key can skip the returned bytes while hashing them.
     pub fn decode_chunk<'a>(&mut self, piece: &'a [u8]) -> Result<(ObjectChunk, &'a [u8]), Error> {
         let chunk = self.next_chunk().ok_or(Error::TrailingBytes)?;
-        let length = self.chunk_length(piece)?;
-        if piece.len() < length {
-            return Err(Error::Truncated);
-        }
-        if piece.len() > length {
-            return Err(Error::TrailingBytes);
-        }
+        exact_length(piece.len(), self.chunk_length(piece)?)?;
         self.advance();
         Ok((chunk, &piece[4..]))
     }

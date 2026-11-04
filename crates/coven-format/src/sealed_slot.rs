@@ -1,6 +1,6 @@
 //! Clear slot routing and bounded slot envelopes (D9). Writes stream separately.
 
-use crate::error::{bound, require, Error, Rule};
+use crate::error::{bound, exact_length, require, Error, Rule};
 use crate::sealed;
 use crate::sealed_key::{CopyBox, KeyCopyPrefix};
 use crate::sequence::{SlotFrame, MAX_BOUNDED_SLOT};
@@ -121,13 +121,7 @@ impl SlotObjectPrefix {
     }
     /// Decode exactly the prefix, without authenticating routing.
     pub fn decode(bytes: &[u8]) -> Result<Self, Error> {
-        let length = Self::length(bytes)?;
-        if bytes.len() < length {
-            return Err(Error::Truncated);
-        }
-        if bytes.len() > length {
-            return Err(Error::TrailingBytes);
-        }
+        exact_length(bytes.len(), Self::length(bytes)?)?;
         let mut input = Decoder::new(&bytes[4..])?;
         let key = KeyId::get(&mut input)?;
         let copy = Option::<CopyBox>::get(&mut input)?;

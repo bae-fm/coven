@@ -1,6 +1,6 @@
 //! The fixed-width, bounded binary primitives shared by every object.
 
-use crate::error::{bound, require, Error, Rule};
+use crate::error::{bound, exact_length, require, Error, Rule};
 use std::collections::{BTreeMap, BTreeSet};
 
 pub(crate) const MAX_OBJECT: usize = 16 * 1024 * 1024;
@@ -73,13 +73,7 @@ impl<'a> Decoder<'a> {
 }
 
 pub(crate) fn decode_frame(bytes: &[u8]) -> Result<(u8, Decoder<'_>), Error> {
-    let length = crate::frame_length(bytes)?;
-    if bytes.len() < length {
-        return Err(Error::Truncated);
-    }
-    if bytes.len() > length {
-        return Err(Error::TrailingBytes);
-    }
+    exact_length(bytes.len(), crate::frame_length(bytes)?)?;
     Ok((bytes[0], Decoder::new(&bytes[crate::FRAME_PREFIX_LEN..])?))
 }
 

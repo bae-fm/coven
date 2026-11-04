@@ -1,6 +1,6 @@
 //! The marker a device gone for good leaves among its join requests (D8, D10).
 
-use crate::error::Error;
+use crate::error::{exact_length, Error};
 
 /// What an admin's device creates at `<store>/join-requests/<device>/gone`
 /// once it applies the entry that stopped `<device>` for good, before it
@@ -28,9 +28,7 @@ impl DeviceGone {
     /// ended invite's marker, fail with `UnknownTag`.
     pub fn decode(bytes: &[u8]) -> Result<Self, Error> {
         crate::sealed::prefix(bytes, KIND)?;
-        if bytes.len() > LENGTH {
-            return Err(Error::TrailingBytes);
-        }
+        exact_length(bytes.len(), LENGTH)?;
         Ok(Self)
     }
 }

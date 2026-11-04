@@ -1,6 +1,6 @@
 //! Authenticated snapshot routing and coverage (D9).
 
-use crate::error::Error;
+use crate::error::{exact_length, Error};
 use crate::sealed;
 use crate::sequence::Purpose;
 use crate::wire::{Decoder, Encoder, Wire};
@@ -66,13 +66,7 @@ impl SnapshotObjectPrefix {
     }
     /// Decode exactly the clear prefix.
     pub fn decode(bytes: &[u8]) -> Result<Self, Error> {
-        let length = Self::length(bytes)?;
-        if bytes.len() < length {
-            return Err(Error::Truncated);
-        }
-        if bytes.len() > length {
-            return Err(Error::TrailingBytes);
-        }
+        exact_length(bytes.len(), Self::length(bytes)?)?;
         let mut input = Decoder::new(&bytes[3..])?;
         let prefix = Self {
             audience: Wire::get(&mut input)?,
