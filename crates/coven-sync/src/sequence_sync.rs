@@ -13,7 +13,9 @@ use coven_crypto::{
     custody::{KeySession, PersonEntries},
     MemberIdentity, StoreKeyring,
 };
-use coven_database::{Database, IncomingSlot, LoadStep, SlotContent};
+use coven_database::{
+    Database, IncomingSlot, LoadStep, NewOperation, ProviderAccessChange, SlotContent,
+};
 use coven_format::{floor::OriginalSlot, sequence::SlotFrame};
 use coven_foundation::{
     files::StoreDir,
@@ -640,6 +642,27 @@ impl History {
         previous.is_none_or(|covers| announcement.covers >= covers)
             && boundary.is_none_or(|at| announcement.covers >= at)
     }
+}
+
+/// The journal row and intention for one provider account; the caller sets
+/// whether history already shows it granted.
+pub(crate) fn account_change(
+    account: &str,
+    intended: bool,
+    needs_invitation: bool,
+) -> Result<ProviderAccessChange, SyncError> {
+    Ok(ProviderAccessChange {
+        operation: NewOperation {
+            kind: "provider-access".into(),
+            data: serde_json::to_vec(account)?,
+            started_by: "coven".into(),
+            pauses_writes: false,
+        },
+        account: account.to_owned(),
+        intended,
+        initially_granted: false,
+        needs_invitation,
+    })
 }
 
 #[path = "operation_state.rs"]

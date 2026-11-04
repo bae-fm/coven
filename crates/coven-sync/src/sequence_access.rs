@@ -5,9 +5,7 @@ use crate::{
     OperationKind, OperationRejection, PendingReason, PendingRecord, PendingSubject, SyncError,
 };
 use coven_crypto::{MemberIdentity, StoreKeyring};
-use coven_database::{
-    NewOperation, OperationId, OperationUpdate, ProviderAccessChange, ProviderChanges,
-};
+use coven_database::{OperationId, OperationUpdate, ProviderAccessChange, ProviderChanges};
 use coven_format::MemberAccess;
 use coven_foundation::id_source::MemberId;
 use std::collections::BTreeSet;
@@ -85,20 +83,13 @@ impl History {
             if !accounts.insert(account.clone()) {
                 continue;
             }
+            let intended = self.account_intended(&account);
+            // A member's access entry describes a grant already made,
+            // and an invite share one its own device makes: a device
+            // that first learns of an account never grants it itself.
             changes.accounts.push(ProviderAccessChange {
-                operation: NewOperation {
-                    kind: "provider-access".into(),
-                    data: serde_json::to_vec(&account)?,
-                    started_by: "coven".into(),
-                    pauses_writes: false,
-                },
-                intended: self.account_intended(&account),
-                account,
-                // A member's access entry describes a grant already made,
-                // and an invite share one its own device makes: a device
-                // that first learns of an account never grants it itself.
                 initially_granted: true,
-                needs_invitation: false,
+                ..crate::sequence_sync::account_change(&account, intended, false)?
             });
         }
         Ok(changes)

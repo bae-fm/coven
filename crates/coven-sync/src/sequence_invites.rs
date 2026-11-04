@@ -12,9 +12,7 @@ use crate::{
 use coven_crypto::{
     ConfirmationNumber, InviteSecret, MemberIdentity, ObjectHasher, SecretText, StoreKeyring,
 };
-use coven_database::{
-    Journal, NewOperation, OperationId, OperationRecord, ProviderAccessChange, SqlContext,
-};
+use coven_database::{Journal, NewOperation, OperationId, OperationRecord, SqlContext};
 use coven_format::{
     admin::{MemberRole, StoreChange},
     codes::{InviteCode, InviteDeliveryKind},
@@ -429,7 +427,9 @@ impl SequenceSync {
                     }
                     work.state = InviteState::Grant;
                     let changes = match work.account() {
-                        Some(account) => vec![self.account_change(account, true, true)?],
+                        Some(account) => {
+                            vec![crate::sequence_sync::account_change(account, true, true)?]
+                        }
                         None => Vec::new(),
                     };
                     let update = work.update(&record)?;
@@ -693,26 +693,6 @@ impl SequenceSync {
             }
         }
         Ok(())
-    }
-
-    fn account_change(
-        &self,
-        account: &str,
-        intended: bool,
-        needs_invitation: bool,
-    ) -> Result<ProviderAccessChange, SyncError> {
-        Ok(ProviderAccessChange {
-            operation: NewOperation {
-                kind: "provider-access".into(),
-                data: serde_json::to_vec(account)?,
-                started_by: "coven".into(),
-                pauses_writes: false,
-            },
-            account: account.to_owned(),
-            intended,
-            initially_granted: false,
-            needs_invitation,
-        })
     }
 
     /// The code to show, fixed once its access is granted: it names the

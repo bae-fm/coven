@@ -53,7 +53,7 @@ impl SequenceSync {
             // under its old id included until its replacement registers,
             // still holds the account (§14.2).
             let intended = session.history.account_intended(&account);
-            let mut change = self.account_change(&account, intended, false)?;
+            let mut change = crate::sequence_sync::account_change(&account, intended, false)?;
             // The discarded invite may have granted access even if its reply
             // was lost. The replacement must issue the owed revocation.
             change.initially_granted = true;
