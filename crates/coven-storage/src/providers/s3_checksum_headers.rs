@@ -5,6 +5,16 @@ use aws_sdk_s3::config::{
 };
 use aws_smithy_runtime_api::box_error::BoxError;
 
+/// The checksum headers S3 answers with, whose scope `x-amz-checksum-type`
+/// states.
+pub(super) const CHECKSUMS: [&str; 5] = [
+    "x-amz-checksum-sha256",
+    "x-amz-checksum-sha1",
+    "x-amz-checksum-crc32",
+    "x-amz-checksum-crc32c",
+    "x-amz-checksum-crc64nvme",
+];
+
 #[derive(Debug)]
 pub(super) struct UnstatedChecksumHeaders;
 impl Intercept for UnstatedChecksumHeaders {
@@ -19,13 +29,7 @@ impl Intercept for UnstatedChecksumHeaders {
     ) -> Result<(), BoxError> {
         let headers = context.response_mut().headers_mut();
         if headers.get("x-amz-checksum-type").is_none() {
-            for name in [
-                "x-amz-checksum-sha256",
-                "x-amz-checksum-sha1",
-                "x-amz-checksum-crc32",
-                "x-amz-checksum-crc32c",
-                "x-amz-checksum-crc64nvme",
-            ] {
+            for name in CHECKSUMS {
                 headers.remove(name);
             }
         }

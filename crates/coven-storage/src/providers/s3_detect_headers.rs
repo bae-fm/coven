@@ -9,13 +9,7 @@ use aws_sdk_s3::config::{
 use aws_smithy_runtime_api::box_error::BoxError;
 use std::sync::{Arc, Mutex};
 
-const CHECKSUMS: [&str; 5] = [
-    "x-amz-checksum-sha256",
-    "x-amz-checksum-sha1",
-    "x-amz-checksum-crc32",
-    "x-amz-checksum-crc32c",
-    "x-amz-checksum-crc64nvme",
-];
+use crate::providers::s3::checksum_headers::CHECKSUMS;
 
 #[derive(Clone, Copy, Debug, Default)]
 struct Facts {
