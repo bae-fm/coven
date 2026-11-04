@@ -183,7 +183,7 @@ pub enum DbError {
     DamagedDatabase,
     /// Coven's own code broke a rule it relies on, such as a caller's
     /// contract or a step its state machine cannot reach: a bug, not damage.
-    /// It crosses the sync boundary as `Failed(LocalFailure::Database)` (§19.1).
+    /// Sync reports it as `Failed(LocalFailure::Bug)` (§19.1).
     #[error("coven invariant failed: {what}")]
     Invariant {
         /// The broken rule.

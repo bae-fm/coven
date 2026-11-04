@@ -1213,12 +1213,34 @@ pub enum DbError {
     StoreSettingsMismatch { store: StoreId },
     /// A synced table declaration or schema is invalid.
     Schema(SchemaError),
+    /// A write was given files staged, or a pin prepared, in another open
+    /// store, or in this one before it closed: the copies they name aren't
+    /// reserved here (§17.3, §17.8).
+    PreparedElsewhere,
+    /// A write made a file device-only and also removed its last reference,
+    /// so the copy kept as its original would name no file (§17.3). Nothing
+    /// committed.
+    DeviceOnlyUnreferenced { file: FileId },
+    /// A pin prepared over a whole copy already kept found that copy gone
+    /// when its write committed it, evicted since: nothing was pinned, and
+    /// preparing again downloads it (§17.8).
+    PinChanged { file: FileId },
+    /// One of coven's steps in this write failed, and the write's closure
+    /// went on to return success: the write rolls back, since a failed step
+    /// may have made only part of its change (§4).
+    StepFailed,
+    /// One of the app's statements in this write failed, and the write's
+    /// closure went on to return success: the write rolls back, since SQLite
+    /// may have kept part of the statement's change or undone rows coven saw
+    /// it change (§4).
+    StatementFailed,
     /// App SQL read, changed or defined one of coven's internal objects (§4).
     InternalTable { table: String },
-    /// App SQL tried transaction control, a PRAGMA, ATTACH or loading an
-    /// extension (§4, E13).
+    /// App SQL tried transaction control, a PRAGMA, ATTACH, loading an
+    /// extension, changing a hidden rowid, or changing the schema outside a
+    /// migration (§4, E13).
     StatementForbidden { operation: &'static str },
-    /// SQLite rolled a migration's transaction back itself, so it can't go on (E13).
+    /// SQLite rolled the owned transaction back itself, so it can't go on (E3, E13).
     TransactionEnded,
     /// SQLite kept another journal mode instead of WAL (§4).
     WalUnavailable { mode: String },
@@ -1308,6 +1330,9 @@ pub enum DbError {
     MigrationTableMissing { table: String },
     /// Distinct original references became the same converted reference.
     MigrationReferenceCollision { table: String, reference: coven_merge::ForeignKey },
+    /// A write dismissed a removed row, deleting it for good, and also
+    /// changed that row or one its delete cascades to (§8.4).
+    DismissedRowChanged { table: String, key: RowKey },
     /// A write changed a write-once file reference that named a file (§17.2).
     FileWriteOnce { table: String, key: RowKey },
     /// The user's file is no longer at the recorded path (§17.1).
@@ -1395,7 +1420,7 @@ pub enum DbError {
     StateEncoding(serde_json::Error),
     /// Sync's part of a database transaction failed, keeping sync's own typed
     /// cause, and the transaction did not commit: a streamed transfer's
-    /// producer or final authentication check, or the schema raise
+    /// producer or final authentication check, or the schema publication
     /// operation a migration commits with (§18.3, E13).
     SyncStream(Box<dyn std::error::Error + Send + Sync>),
     /// Closing failed for these connections, after every one was tried (E1).
