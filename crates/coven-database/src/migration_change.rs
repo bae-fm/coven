@@ -308,9 +308,7 @@ fn references(
     schema: &Schema,
 ) -> Result<Vec<ForeignKey>, DbError> {
     source
-        .foreign_keys
-        .iter()
-        .filter(|fk| fk.columns.iter().any(|c| c.eq_ignore_ascii_case(name)))
+        .foreign_keys_of(name)
         .map(|fk| {
             table(schema, &fk.target)?;
             Ok(schema.foreign_key(source, fk))

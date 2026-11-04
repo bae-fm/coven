@@ -136,11 +136,7 @@ impl<'a> AppView<'a> {
             AudienceSource::Store => Audience::Store,
             AudienceSource::Column(column) => column_audience(table, column, &values)?,
             AudienceSource::ForeignKey(column) => {
-                let fk = table
-                    .foreign_keys
-                    .iter()
-                    .find(|fk| fk.columns.iter().any(|c| c.eq_ignore_ascii_case(column)))
-                    .expect("audience foreign key");
+                let fk = table.audience_key(column);
                 let parent = parents
                     .get(&self.schema.foreign_key(table, fk))
                     .ok_or_else(|| reference_error(table, &values, column))?;
@@ -164,11 +160,7 @@ impl<'a> AppView<'a> {
             AudienceSource::Store => Ok(Audience::Store),
             AudienceSource::Column(column) => column_audience(table, column, values),
             AudienceSource::ForeignKey(column) => {
-                let fk = table
-                    .foreign_keys
-                    .iter()
-                    .find(|fk| fk.columns.iter().any(|c| c.eq_ignore_ascii_case(column)))
-                    .expect("audience foreign key");
+                let fk = table.audience_key(column);
                 let parameters: Vec<_> =
                     fk.columns.iter().map(|c| values[column_name(table, c)].clone()).collect();
                 let target = self.schema.table(&fk.target);

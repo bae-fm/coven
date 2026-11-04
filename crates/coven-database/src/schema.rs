@@ -53,6 +53,23 @@ impl TableSchema {
     pub(crate) fn generated(&self, name: &str) -> bool {
         self.columns.iter().any(|column| column.generated && column.name == name)
     }
+
+    /// The table's foreign keys that `column` is one of the columns of,
+    /// named as SQLite names columns, in any case.
+    pub(crate) fn foreign_keys_of<'s, 'c>(
+        &'s self,
+        column: &'c str,
+    ) -> impl Iterator<Item = &'s SchemaForeignKey> + use<'s, 'c> {
+        self.foreign_keys
+            .iter()
+            .filter(move |key| key.columns.iter().any(|c| c.eq_ignore_ascii_case(column)))
+    }
+
+    /// The one foreign key an audience declared through `column` follows,
+    /// which validating the declaration found (§15.1).
+    pub(crate) fn audience_key(&self, column: &str) -> &SchemaForeignKey {
+        self.foreign_keys_of(column).next().expect("validated audience foreign key")
+    }
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -325,11 +342,7 @@ impl Schema {
                     Some(column)
                 }
                 AudienceSource::ForeignKey(column) => {
-                    let keys: Vec<_> = table
-                        .foreign_keys
-                        .iter()
-                        .filter(|f| f.columns.iter().any(|c| c.eq_ignore_ascii_case(column)))
-                        .collect();
+                    let keys: Vec<_> = table.foreign_keys_of(column).collect();
                     if keys.iter().any(|f| f.columns.len() != 1) {
                         return Err(SchemaError::AudienceForeignKeyColumns {
                             table: error_table(),
@@ -433,10 +446,7 @@ impl Schema {
                     }
                     .into());
                 }
-                if table.foreign_keys.iter().any(|key| {
-                    !key.is_file()
-                        && key.columns.iter().any(|c| c.eq_ignore_ascii_case(&column.name))
-                }) {
+                if table.foreign_keys_of(&column.name).any(|key| !key.is_file()) {
                     return Err(SchemaError::FileColumnForeignKey {
                         table: error_table(),
                         column: column.name.clone(),

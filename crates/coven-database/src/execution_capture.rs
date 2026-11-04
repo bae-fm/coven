@@ -73,11 +73,7 @@ impl Tracker<'_> {
             AudienceSource::Store => Ok(Some(Audience::Store)),
             AudienceSource::Column(column) => column_audience(table, column, values).map(Some),
             AudienceSource::ForeignKey(column) => {
-                let key = table
-                    .foreign_keys
-                    .iter()
-                    .find(|fk| fk.columns.iter().any(|c| c.eq_ignore_ascii_case(column)))
-                    .expect("audience foreign key");
+                let key = table.audience_key(column);
                 let Some(parent) = self.parent(table, key, values)? else {
                     return Ok(None);
                 };

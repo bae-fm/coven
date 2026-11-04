@@ -273,11 +273,7 @@ impl WriteSchema {
                 }
             }
             AudienceSource::ForeignKey(_) => {
-                let foreign = table
-                    .foreign_keys
-                    .iter()
-                    .find(|key| key.columns.iter().any(|column| column_name(table, column) == name))
-                    .expect("declared audience reference");
+                let foreign = table.audience_key(name);
                 let parent = value
                     .parents
                     .get(&self.foreign_key(table, foreign))

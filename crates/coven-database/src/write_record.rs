@@ -52,11 +52,7 @@ pub(crate) fn moved(
                 continue;
             };
             let table = schema.table(&declaration.name);
-            let fk = table
-                .foreign_keys
-                .iter()
-                .find(|fk| fk.columns.iter().any(|c| c.eq_ignore_ascii_case(column)))
-                .expect("audience foreign key");
+            let fk = table.audience_key(column);
             if !fk.target.eq_ignore_ascii_case(&parent.table) {
                 continue;
             }

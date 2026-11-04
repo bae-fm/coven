@@ -187,15 +187,11 @@ impl MigrationMatch {
             let old_table = &before.tables[&table.to_ascii_lowercase()];
             let new_table = &after.tables[&self.tables[table].to_ascii_lowercase()];
             let old: Option<BTreeSet<_>> = old_table
-                .foreign_keys
-                .iter()
-                .filter(|fk| fk.columns.iter().any(|c| c.eq_ignore_ascii_case(column)))
+                .foreign_keys_of(column)
                 .map(|fk| self.foreign_key(table, &before.foreign_key(old_table, fk), None))
                 .collect();
             let new: BTreeSet<_> = new_table
-                .foreign_keys
-                .iter()
-                .filter(|fk| fk.columns.iter().any(|c| c.eq_ignore_ascii_case(new_column)))
+                .foreign_keys_of(new_column)
                 .map(|fk| after.foreign_key(new_table, fk))
                 .collect();
             if old.as_ref() != Some(&new) {
