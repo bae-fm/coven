@@ -5600,7 +5600,9 @@ impl CovenHandle {
     /// self-replacement pauses writes it does the same and fails with
     /// `MemberKeysChanging` (§12.3, §17.4); while sync is stopped
     /// it tries none and returns `NotSyncing`. Provider cooldowns still hold; failures stay in
-    /// pending() (§6.7).
+    /// pending() (§6.7). Once the upload worker has ended other than with
+    /// the store, by a panic or a failure of the handle, no run follows, so
+    /// it fails with why, `SyncError::Bug` for a panic (E15).
     pub async fn retry_uploads_now(&self) -> Result<DrainOutcome, SyncError>;
 
     /// `CovenWrite::set_uploads_paused`, in a write of its own.
@@ -8322,7 +8324,8 @@ end it unseen, and the work it served would wait for it forever.
   that is gone. The sync loop and a connection attempt do as above, and
   answer every waiting retry with the bug, those the panicking pass took
   among them. The upload worker answers each waiting `retry_uploads_now`
-  with the bug, and each later one too. The invite expiry, the network
+  with the bug, and each later one too, as it does with the failure when a
+  failed handle ends it. The invite expiry, the network
   follower and a read-ahead only report: the next open writes the expiries
   that passed, the network shows as last heard until the store closes, and
   the next read fetches what the read-ahead would have.

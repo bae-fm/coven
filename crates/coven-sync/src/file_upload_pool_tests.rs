@@ -277,6 +277,29 @@ async fn a_panicking_upload_worker_answers_app_retries_with_its_bug() {
     f.close().await;
 }
 
+/// A write of the retry effect fails, as on a full disk, and fails the
+/// handle: the upload worker ends on that failure, and Ben's app's early
+/// retry, and any after it, hear it instead of waiting for a run that never
+/// comes.
+#[tokio::test]
+async fn an_upload_worker_ended_by_a_failed_handle_answers_app_retries() {
+    let f = Fixture::new(Provenance::AppProvided).await;
+    f.database.test_fail_retry_effect().await.unwrap();
+    assert!(f.files.inner.waits.sync_stopped().await.is_err(), "the write failed the handle");
+    for _ in 0..2 {
+        let answered = tokio::time::timeout(Duration::from_secs(10), f.files.retry_uploads_now())
+            .await
+            .expect("the retry is answered");
+        let Err(error) = answered else { panic!("the retry heard no failure: {answered:?}") };
+        assert!(
+            std::iter::successors(Some(&error as &dyn std::error::Error), |e| e.source())
+                .any(|e| e.to_string().contains("injected retry effect failure")),
+            "{error:?}"
+        );
+    }
+    f.close().await;
+}
+
 /// An app retry joins the run in progress rather than waiting for it: the
 /// run takes it at its next read of the queue, covering the upload still in
 /// flight and the one waiting, and answers once both attempts have ended.

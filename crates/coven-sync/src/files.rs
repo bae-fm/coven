@@ -113,9 +113,10 @@ struct FilesInner {
     downloading: coven_database::InFlight,
     /// App retries waiting for an upload run to serve them.
     app_retries: Mutex<Vec<file_upload_pool::AppRetry>>,
-    /// The bug the upload worker ended on, set under `app_retries`' lock: no
-    /// run serves a retry once it is set, so each fails with it (E15).
-    worker_bug: std::sync::OnceLock<coven_foundation::task::Bug>,
+    /// Why the upload worker ended, other than told to stop, set under
+    /// `app_retries`' lock: no run serves a retry once it is set, so each
+    /// fails with it (E15).
+    worker_ended: std::sync::OnceLock<file_upload_pool::WorkerEnd>,
     /// Connection changes waiting for the uploads in flight to end; while
     /// any waits, no upload starts.
     changing: AtomicUsize,
@@ -179,7 +180,7 @@ impl Files {
             in_flight,
             downloading,
             app_retries: Mutex::new(Vec::new()),
-            worker_bug: std::sync::OnceLock::new(),
+            worker_ended: std::sync::OnceLock::new(),
             changing: AtomicUsize::new(0),
             cache: tokio::sync::RwLock::new(()),
             reads: Mutex::new(BTreeMap::new()),
@@ -198,7 +199,7 @@ impl Files {
             upload_worker(Arc::downgrade(&inner), stop.subscribe(), uploads_changes),
             |bug| async move {
                 if let Some(owner) = owner.upgrade() {
-                    owner.worker_panicked(bug);
+                    owner.worker_ended(SyncError::Bug(bug));
                 }
             },
         );
@@ -241,7 +242,7 @@ impl Files {
     /// are tried; while sync is stopped none is (§17.4).
     pub async fn retry_uploads_now(&self) -> Result<DrainOutcome, SyncError> {
         // The worker stopping with the store drops the retry unanswered; a
-        // worker that panicked answers it with the bug.
+        // worker that ended otherwise answers it with why.
         self.inner.ask_retry()?.answered().await
     }
     /// Persist the pause setting, as a step of `sql`'s write; a running
@@ -345,10 +346,26 @@ impl Drop for ConnectionChange<'_> {
 /// makes the pins coven keeps that may be made (§17.8).
 async fn upload_worker(
     owner: std::sync::Weak<FilesInner>,
+    stopping: watch::Receiver<bool>,
+    changes: coven_database::DatabaseChanges,
+) {
+    let ended = serve_uploads(owner.clone(), stopping, changes).await;
+    // No run serves an app retry once the worker has ended, so each waiting
+    // one, and each asked after, hears why.
+    if let (Some(ended), Some(owner)) = (ended, owner.upgrade()) {
+        owner.worker_ended(ended);
+    }
+}
+
+/// The upload worker's runs, until it is told to stop or its owner is gone,
+/// which end it with `None`, or until what it watches fails, which ends it
+/// with that failure.
+async fn serve_uploads(
+    owner: std::sync::Weak<FilesInner>,
     mut stopping: watch::Receiver<bool>,
     mut changes: coven_database::DatabaseChanges,
-) {
-    let Some(first) = owner.upgrade() else { return };
+) -> Option<SyncError> {
+    let first = owner.upgrade()?;
     let wake = first.upload_wake.clone();
     // Pins coven keeps resume as the store opens (§17.8).
     wake.notify_one();
@@ -363,22 +380,24 @@ async fn upload_worker(
     loop {
         tokio::select! {
             biased;
-            _ = stopping.changed() => break,
+            _ = stopping.changed() => return None,
             result = changes.next() => if let Err(error) = result {
                 if !matches!(error, DbError::StoreClosed) {
                     tracing::error!(?error, "file commit observation failed");
                 }
-                break;
+                return Some(error.into());
             },
             () = wake.notified() => {},
-            result = sending.changed() => if result.is_err() { break; },
+            // The store's sequence state, retry waits and network go only
+            // with the store.
+            result = sending.changed() => if result.is_err() { return Some(DbError::StoreClosed.into()) },
             // Starting sync lets uploads run (§17.4).
-            result = syncing.changed() => if result.is_err() { break; },
-            result = reports.changed() => if result.is_err() { break; },
+            result = syncing.changed() => if result.is_err() { return Some(DbError::StoreClosed.into()) },
+            result = reports.changed() => if result.is_err() { return Some(DbError::StoreClosed.into()) },
             () = network.changed() => {},
             () = &mut retry => {},
         }
-        let Some(owner) = owner.upgrade() else { break };
+        let owner = owner.upgrade()?;
         let bugs = owner.database.bugs();
         let run = async {
             match owner.drain_uploads().await {
@@ -409,14 +428,14 @@ async fn upload_worker(
                 }
             }
         };
-        tokio::select! { biased; _ = stopping.changed() => break, () = run => {} }
+        tokio::select! { biased; _ = stopping.changed() => return None, () = run => {} }
         // A paused queue still runs its bound uploads, whose retries the
         // worker must wake for (§17.4).
         retry = match owner.database.bound_uploads().await {
             Ok(bound) => {
                 owner.next_upload_retry(&bound).unwrap_or_else(|| Box::pin(std::future::pending()))
             }
-            Err(DbError::StoreClosed) => break,
+            Err(DbError::StoreClosed) => return Some(DbError::StoreClosed.into()),
             // Commits, network reports and wakes still run the worker; no
             // retry wait wakes it until a later run arms one.
             Err(error) => {

@@ -79,6 +79,41 @@ impl UploadRetryAnswer {
     }
 }
 
+/// Why the upload worker ended, which each app retry from then on hears.
+#[derive(Debug)]
+pub(super) enum WorkerEnd {
+    /// It panicked: a bug.
+    Bug(coven_foundation::task::Bug),
+    /// The store closed under it.
+    Closed,
+    /// What it watches failed, as when the handle fails, with one shared
+    /// cause.
+    Failed(crate::LocalFailure, std::sync::Arc<dyn std::error::Error + Send + Sync>),
+}
+
+impl WorkerEnd {
+    fn of(error: SyncError) -> Self {
+        match error {
+            SyncError::Bug(bug) => Self::Bug(bug),
+            SyncError::Database(DbError::StoreClosed) => Self::Closed,
+            error => {
+                let (failure, source) = error.into_shared();
+                Self::Failed(failure, source)
+            }
+        }
+    }
+
+    fn error(&self) -> SyncError {
+        match self {
+            Self::Bug(bug) => SyncError::Bug(bug.clone()),
+            Self::Closed => DbError::StoreClosed.into(),
+            Self::Failed(failure, source) => {
+                SyncError::Failed { failure: *failure, source: source.clone() }
+            }
+        }
+    }
+}
+
 /// The lane an upload runs in (§17.4): a bound upload's write and every
 /// later one wait for it, so neither the pause nor trailing uploads hold it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -202,8 +237,8 @@ impl FilesInner {
             // retry queued here is either cleared, answered or refused.
             let mut retries = lock_unpoisoned(&self.app_retries);
             self.check_open()?;
-            if let Some(bug) = self.worker_bug.get() {
-                return Err(SyncError::Bug(bug.clone()));
+            if let Some(ended) = self.worker_ended.get() {
+                return Err(ended.error());
             }
             let asked = self.retries_asked.fetch_add(1, Ordering::AcqRel);
             retries.push(AppRetry { covers: None, uploaded: 0, asked, reply });
@@ -212,18 +247,18 @@ impl FilesInner {
         Ok(UploadRetryAnswer(answer))
     }
 
-    /// The upload worker panicked with `bug`: no run will serve an app
-    /// retry, so each waiting one is answered with the bug, as each asked
-    /// from now on is (E15).
-    pub(super) fn worker_panicked(&self, bug: coven_foundation::task::Bug) {
+    /// The upload worker ended with `error`, its panic's bug or the failure
+    /// of what it watches: no run will serve an app retry, so each waiting
+    /// one is answered with it, as each asked from now on is (E15).
+    pub(super) fn worker_ended(&self, error: SyncError) {
         let mut retries = lock_unpoisoned(&self.app_retries);
-        let bug = self.worker_bug.get_or_init(|| bug);
+        let ended = self.worker_ended.get_or_init(|| WorkerEnd::of(error));
         for retry in retries.drain(..) {
             #[expect(
                 clippy::let_underscore_must_use,
                 reason = "a retry whose caller stopped waiting needs no answer"
             )]
-            let _ = retry.reply.send(Err(SyncError::Bug(bug.clone())));
+            let _ = retry.reply.send(Err(ended.error()));
         }
     }
 
