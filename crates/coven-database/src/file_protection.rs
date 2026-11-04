@@ -495,3 +495,7 @@ pub(crate) fn queued(
     }
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "file_protection_tests.rs"]
+pub(crate) mod tests;

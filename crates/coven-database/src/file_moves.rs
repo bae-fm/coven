@@ -166,4 +166,4 @@ pub(crate) fn clear_pending(db: &DatabaseConnection, id: MoveId) -> Result<(), D
 
 #[cfg(test)]
 #[path = "file_moves_tests.rs"]
-mod tests;
+pub(crate) mod tests;

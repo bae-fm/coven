@@ -385,3 +385,18 @@ async fn a_move_kept_here_asks_for_its_pins_in_the_switch() {
     assert!(requests.pin_requests().await.unwrap().is_empty());
     db.close().await.unwrap();
 }
+
+/// Fill this domain's tables from the rows of the plan audit's `fixture`
+/// table, inside its transaction (`internal_schema_scan_reasons_tests.rs`).
+pub(crate) fn fill_for_plans(db: &rusqlite::Connection) {
+    db.execute_batch(
+        "INSERT INTO _coven_moves(id,state)
+           SELECT i,CASE i%4 WHEN 0 THEN 'moving' WHEN 1 THEN 'failed' WHEN 2 THEN 'cancelled' ELSE 'finished' END FROM fixture;",
+    )
+    .unwrap();
+}
+
+/// Record move `id` as still moving.
+pub(crate) fn moving(db: &crate::sqlite::DatabaseConnection, id: i64) {
+    db.internal_execute("INSERT INTO _coven_moves(id,state) VALUES(?1,'moving')", [id]).unwrap();
+}

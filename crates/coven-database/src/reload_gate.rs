@@ -49,3 +49,7 @@ pub(crate) fn reloading(db: &DatabaseConnection, audience: &Audience) -> Result<
         |r| r.get(0),
     )
 }
+
+#[cfg(test)]
+#[path = "reload_gate_tests.rs"]
+pub(crate) mod tests;

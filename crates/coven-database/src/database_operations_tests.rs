@@ -100,3 +100,14 @@ impl Database {
         .await
     }
 }
+
+/// Fill this domain's tables from the rows of the plan audit's `fixture`
+/// table, inside its transaction (`internal_schema_scan_reasons_tests.rs`).
+#[cfg(test)]
+pub(crate) fn fill_for_plans(db: &rusqlite::Connection) {
+    db.execute_batch(
+        "INSERT INTO _coven_gone_storage_cleared SELECT n FROM fixture;
+         INSERT INTO _coven_requests_ended SELECT n FROM fixture;",
+    )
+    .unwrap();
+}

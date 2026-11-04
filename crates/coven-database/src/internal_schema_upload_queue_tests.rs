@@ -201,13 +201,13 @@ async fn library(files: usize, follow: bool) -> (TestStore, crate::Database, std
     });
     let started = std::time::Instant::now();
     db.inspect_writer(|writer| {
+        // One write staged every track for the cloud: one move, and one
+        // upload of coven's copy of each track's bytes.
+        writer.batch("BEGIN").unwrap();
+        crate::file_moves::tests::moving(writer, 1);
         writer
             .batch(
-                // One write staged every track for the cloud: one move, and
-                // one upload of coven's copy of each track's bytes.
-                "BEGIN;
-                 INSERT INTO _coven_moves(id,state) VALUES(1,'moving');
-                 INSERT INTO _coven_file_uploads(id,location,device,file,size,hash,copy,move,queued_at)
+                "INSERT INTO _coven_file_uploads(id,location,device,file,size,hash,copy,move,queued_at)
                    SELECT rowid,'upload ' || rowid,zeroblob(8),unhex(printf('%032x',rowid)),bytes,
                           zeroblob(32),'copy ' || rowid,1,zeroblob(13) FROM tracks;
                  INSERT INTO _coven_upload_files(file,upload) SELECT file,rowid FROM tracks;

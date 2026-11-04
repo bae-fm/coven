@@ -108,4 +108,4 @@ pub(crate) fn convert(
 
 #[cfg(test)]
 #[path = "migration_receive_tests.rs"]
-mod tests;
+pub(crate) mod tests;

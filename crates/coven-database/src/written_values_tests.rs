@@ -422,3 +422,17 @@ async fn generated_columns_are_never_lost_or_kept_as_written() {
         }
     }
 }
+
+/// Fill this domain's tables from the rows of the plan audit's `fixture`
+/// table, inside its transaction (`internal_schema_scan_reasons_tests.rs`).
+pub(crate) fn fill_for_plans(db: &rusqlite::Connection) {
+    db.execute_batch(
+        "INSERT INTO _coven_written_values
+           SELECT column_id,row_id,'written value' FROM _coven_cells WHERE column_id<=1024;",
+    )
+    .unwrap();
+}
+
+/// The start of the statement that clears a row's written values, as a
+/// profile of the statements a write ran shows it.
+pub(crate) const CLEARED: &str = "DELETE FROM _coven_written_values";

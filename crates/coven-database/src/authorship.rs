@@ -560,4 +560,4 @@ impl PartRoot {
 
 #[cfg(test)]
 #[path = "authorship_tests.rs"]
-mod tests;
+pub(crate) mod tests;

@@ -84,3 +84,7 @@ pub(crate) fn read(db: &DatabaseConnection) -> Result<Vec<PinRequest>, DbError> 
     })
     .collect()
 }
+
+#[cfg(test)]
+#[path = "file_pins_tests.rs"]
+pub(crate) mod tests;

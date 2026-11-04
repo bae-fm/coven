@@ -10109,7 +10109,11 @@ shared state.
   claims (§5.1) belong to the claim module, the remote observations committed
   beside app writes to the input database, the published merge state to its
   own module, and membership and audiences (§10, §15) to the store's state
-  tables. Every other table of Appendix C is written across the crate. Each
+  tables. A table only one other module writes is that module's, in a
+  domain of its own, such as the retry deadlines (§6.7) the retry module's.
+  The tables several modules write, the merge store's rows and cells among
+  them, and the cache's, whose triggers keep the pins table, form the
+  database's own domain, which every module may write. Each
   domain names the owner that does its work: the input database's owner for
   the remote observations, the database owner for the rest. A type whose
   every method only passes its call on to that owner would be a second name

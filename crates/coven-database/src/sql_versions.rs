@@ -336,4 +336,4 @@ fn expression_uses(
 
 #[cfg(test)]
 #[path = "sql_versions_tests.rs"]
-mod tests;
+pub(crate) mod tests;

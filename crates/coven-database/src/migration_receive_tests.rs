@@ -194,3 +194,12 @@ async fn conversion_chain_matches_lean() {
     compare(Some(&runner)).await;
     crate::migration::tests::declarations::compare(Some(&runner)).await;
 }
+
+/// Fill this domain's tables from the rows of the plan audit's `fixture`
+/// table, inside its transaction (`internal_schema_scan_reasons_tests.rs`).
+pub(crate) fn fill_for_plans(db: &rusqlite::Connection) {
+    db.execute_batch(
+        "INSERT INTO _coven_conversion_schemas SELECT i,x'00',x'00',x'00',x'00' FROM fixture;",
+    )
+    .unwrap();
+}

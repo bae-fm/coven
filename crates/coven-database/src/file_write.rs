@@ -40,6 +40,8 @@ mod references;
 
 #[path = "file_write_uploads.rs"]
 mod uploads;
+#[cfg(test)]
+pub(crate) use uploads::tests as upload_tests;
 
 #[path = "file_write_moves.rs"]
 mod moves;

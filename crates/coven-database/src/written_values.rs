@@ -57,4 +57,4 @@ pub(crate) fn store(
 
 #[cfg(test)]
 #[path = "written_values_tests.rs"]
-mod tests;
+pub(crate) mod tests;

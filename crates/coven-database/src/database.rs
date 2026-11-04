@@ -30,7 +30,7 @@ mod snapshots;
 
 #[cfg(any(test, feature = "test-utils"))]
 #[path = "database_operations_tests.rs"]
-mod operation_tests;
+pub(crate) mod operation_tests;
 
 use coven_foundation::clock::{ClockRef, SystemClock};
 use coven_foundation::files::{StoreDir, StoreLock, StoreReadLock};

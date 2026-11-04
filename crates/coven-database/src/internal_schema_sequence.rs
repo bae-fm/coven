@@ -1,5 +1,5 @@
-//! The applied sequence prefix, the store, the migration prefix and what
-//! the sequence settles and refuses.
+//! The applied sequence prefix, the store, the migration's losses and what
+//! the sequence settles.
 
 macro_rules! coven_sequence_tables {
     ($visit:ident) => {
@@ -12,14 +12,7 @@ macro_rules! coven_sequence_tables {
                 created INTEGER NOT NULL CHECK(created IN (0,1))
             ) STRICT;
         ");
-        $visit!(_coven_migration_prefix, "
-            CREATE TABLE _coven_migration_prefix (
-                singleton INTEGER PRIMARY KEY CHECK(singleton=1),
-                device BLOB NOT NULL CHECK(length(device)=8),
-                through BLOB NOT NULL CHECK(length(through)=8),
-                version INTEGER NOT NULL
-            ) STRICT;
-        ");
+        coven_migration_prefix_tables!($visit);
         $visit!(_coven_migration_losses, "
             CREATE TABLE _coven_migration_losses (
                 write_id BLOB NOT NULL CHECK(length(write_id)=16),
@@ -41,21 +34,8 @@ macro_rules! coven_sequence_tables {
             ) STRICT, WITHOUT ROWID;
             CREATE INDEX _coven_migration_counted_losses_audience ON _coven_migration_counted_losses(audience);
         ");
-        $visit!(_coven_sequence, "
-            CREATE TABLE _coven_sequence (
-                singleton INTEGER PRIMARY KEY CHECK(singleton=1),
-                applied BLOB NOT NULL CHECK(length(applied)=8)
-            ) STRICT;
-            INSERT INTO _coven_sequence VALUES(1,x'0000000000000000');
-        ");
-        $visit!(_coven_absent_snapshots, "
-            CREATE TABLE _coven_absent_snapshots (
-                audience TEXT NOT NULL,
-                device BLOB NOT NULL CHECK(length(device)=8),
-                number BLOB NOT NULL CHECK(length(number)=8),
-                PRIMARY KEY(audience,device,number)
-            ) STRICT, WITHOUT ROWID;
-        ");
+        coven_applied_sequence_tables!($visit);
+        coven_file_retention_tables!($visit);
         $visit!(_coven_last_claims, "
             CREATE TABLE _coven_last_claims (
                 device BLOB PRIMARY KEY NOT NULL CHECK(length(device)=8),
@@ -65,28 +45,7 @@ macro_rules! coven_sequence_tables {
                 CHECK((number=x'0000000000000000')=(digest IS NULL))
             ) STRICT, WITHOUT ROWID;
         ");
-        $visit!(_coven_slot_records, "
-            CREATE TABLE _coven_slot_records (
-                slot BLOB PRIMARY KEY NOT NULL CHECK(length(slot)=8),
-                kind TEXT NOT NULL CHECK(kind IN ('admin','key','announcement')),
-                record BLOB NOT NULL
-            ) STRICT, WITHOUT ROWID;
-            CREATE INDEX _coven_slot_kind ON _coven_slot_records(kind,slot);
-        ");
-        // The sealed size of each applied writes slot: what a new device
-        // reads to replay it. Snapshot requests sum it (§16.2).
-        $visit!(_coven_write_slots, "
-            CREATE TABLE _coven_write_slots (
-                slot BLOB PRIMARY KEY NOT NULL CHECK(length(slot)=8),
-                size INTEGER NOT NULL CHECK(size>0)
-            ) STRICT, WITHOUT ROWID;
-        ");
-        $visit!(_coven_write_refusals, "
-            CREATE TABLE _coven_write_refusals (
-                slot BLOB PRIMARY KEY NOT NULL CHECK(length(slot)=8),
-                cutoff BLOB NOT NULL CHECK(length(cutoff)=8)
-            ) STRICT, WITHOUT ROWID;
-        ");
+        coven_sequence_application_tables!($visit);
         $visit!(_coven_cutoffs, "
             CREATE TABLE _coven_cutoffs (
                 slot BLOB PRIMARY KEY NOT NULL CHECK(length(slot)=8),

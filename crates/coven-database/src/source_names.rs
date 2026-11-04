@@ -103,3 +103,7 @@ pub(crate) fn column(
     }
     db.query_row("SELECT (SELECT target.name FROM _coven_column_origins source JOIN _coven_column_origins target ON target.origin_version=source.origin_version AND target.origin_table=source.origin_table AND target.origin_name=source.origin_name WHERE source.version=?1 AND source.table_name=?2 AND source.name=?3 AND target.version=?4 AND target.table_name=?5)",params![from,table,name,to,target],|r| r.get(0))
 }
+
+#[cfg(test)]
+#[path = "source_names_tests.rs"]
+pub(crate) mod tests;

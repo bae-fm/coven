@@ -42,3 +42,7 @@ pub(crate) fn read(
         .map(|bytes| WriteHeaderFrame::decode(&bytes).map_err(|_| DbError::DamagedDatabase))
         .transpose()
 }
+
+#[cfg(test)]
+#[path = "write_headers_tests.rs"]
+pub(crate) mod tests;

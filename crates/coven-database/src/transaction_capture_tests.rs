@@ -90,11 +90,12 @@ async fn a_captured_transaction_skips_tables_no_live_query_reads() {
                     .unwrap();
             let _internal = writer.authorization.internal();
             writer
-                .batch(
+                .batch(&format!(
                     "INSERT INTO notes VALUES ('1','a');
                      INSERT INTO _coven_creations VALUES('notes',x'01','store',zeroblob(16),x'00');
-                     INSERT INTO _coven_upload_pause VALUES(1);",
-                )
+                     {};",
+                    crate::file_queue::tests::PAUSE
+                ))
                 .unwrap();
             capture.changeset().unwrap()
         });

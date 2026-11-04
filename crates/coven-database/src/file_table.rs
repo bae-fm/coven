@@ -361,4 +361,4 @@ pub(crate) fn delete(db: &DatabaseConnection, file: FileId) -> Result<(), DbErro
 
 #[cfg(test)]
 #[path = "file_table_tests.rs"]
-mod tests;
+pub(crate) mod tests;

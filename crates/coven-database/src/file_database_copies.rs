@@ -270,4 +270,4 @@ pub(crate) fn text(path: &Path) -> Result<&str, DbError> {
 
 #[cfg(test)]
 #[path = "file_database_copies_tests.rs"]
-mod tests;
+pub(crate) mod tests;

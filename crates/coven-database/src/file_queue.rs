@@ -474,3 +474,7 @@ pub(crate) fn release_copy(db: &DatabaseConnection, path: &str) -> Result<(), Db
     )?;
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "file_queue_tests.rs"]
+pub(crate) mod tests;

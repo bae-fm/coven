@@ -422,16 +422,13 @@ pub(crate) fn contents(
 pub(crate) fn applied(database: &crate::Database, stamp: coven_merge::Timestamp, number: u64) {
     database.inspect_writer(|db| {
         let slot = crate::sequence::applied(db).unwrap() + 1;
-        db.internal_execute(
-            "INSERT INTO _coven_writes(timestamp,number,read_through,slot) VALUES(?1,?2,?3,?4)",
-            crate::params![
-                coven_format::merge_fields::encode_timestamp(&stamp).unwrap(),
-                number.to_be_bytes(),
-                0u64.to_be_bytes(),
-                slot.to_be_bytes()
-            ],
-        )
-        .unwrap();
+        crate::write_commit::tests::record_write(
+            db,
+            &coven_format::merge_fields::encode_timestamp(&stamp).unwrap(),
+            number,
+            0,
+            Some(slot),
+        );
         crate::sequence::set_applied(db, slot).unwrap();
     });
 }

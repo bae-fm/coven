@@ -345,4 +345,4 @@ impl FileWrite<'_> {
 
 #[cfg(test)]
 #[path = "file_write_uploads_tests.rs"]
-mod tests;
+pub(crate) mod tests;

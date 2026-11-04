@@ -754,8 +754,40 @@ async fn a_row_stores_its_cells_in_one_statement() {
     let statements = db.inspect_writer(|writer| writer.profiled_statements());
     let runs = |text: &str| statements.iter().filter(|s| s.sql.contains(text)).count();
     assert_eq!(runs("INSERT INTO _coven_cells"), 50);
-    assert_eq!(runs("DELETE FROM _coven_written_values"), 50);
+    assert_eq!(runs(crate::written_values::tests::CLEARED), 50);
     assert_eq!(runs("SELECT id FROM _coven_rows WHERE"), 0);
     assert_eq!(count(&db, "_coven_cells"), 150);
     db.close().await.unwrap();
+}
+
+/// Fill this domain's tables from the rows of the plan audit's `fixture`
+/// table, inside its transaction (`internal_schema_scan_reasons_tests.rs`).
+pub(crate) fn fill_for_plans(db: &rusqlite::Connection) {
+    db.execute_batch(
+        "INSERT INTO _coven_writes
+           SELECT i,CAST(n || device AS BLOB),n,counter(0),n FROM fixture;",
+    )
+    .unwrap();
+}
+
+/// Record a write as coven-merge's commit would, with only its counters:
+/// its timestamp, its number, the slot it read through and the slot it
+/// landed in, if it has.
+pub(crate) fn record_write(
+    db: &crate::sqlite::DatabaseConnection,
+    timestamp: &[u8],
+    number: u64,
+    read_through: u64,
+    slot: Option<u64>,
+) {
+    db.internal_execute(
+        "INSERT INTO _coven_writes(timestamp,number,read_through,slot) VALUES(?1,?2,?3,?4)",
+        crate::params![
+            timestamp,
+            number.to_be_bytes(),
+            read_through.to_be_bytes(),
+            slot.map(u64::to_be_bytes)
+        ],
+    )
+    .unwrap();
 }

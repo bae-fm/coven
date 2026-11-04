@@ -324,3 +324,7 @@ pub(crate) fn hold_keys(
     }
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "operation_tests.rs"]
+pub(crate) mod tests;

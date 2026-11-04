@@ -279,4 +279,4 @@ pub(crate) fn clear(db: &DatabaseConnection, subject: RetrySubject) -> Result<()
 
 #[cfg(test)]
 #[path = "retry_tests.rs"]
-mod tests;
+pub(crate) mod tests;

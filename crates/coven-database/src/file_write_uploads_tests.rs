@@ -546,3 +546,17 @@ async fn a_removed_devices_files_stay_on_it() {
     a.close().await.unwrap();
     b.close().await.unwrap();
 }
+
+/// Fill this domain's tables from the rows of the plan audit's `fixture`
+/// table, inside its transaction (`internal_schema_scan_reasons_tests.rs`).
+pub(crate) fn fill_for_plans(db: &rusqlite::Connection) {
+    db.execute_batch(
+        "INSERT INTO _coven_file_chunks SELECT device,substr(key,17,16),0,key FROM fixture;",
+    )
+    .unwrap();
+}
+
+/// Lose every queued file's chunk hashes, as a damaged database would.
+pub(crate) fn lose_chunk_hashes(db: &crate::sqlite::DatabaseConnection) {
+    db.internal_execute("DELETE FROM _coven_file_chunks", []).unwrap();
+}

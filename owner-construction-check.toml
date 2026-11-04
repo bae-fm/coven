@@ -508,6 +508,33 @@ table_macros = [
     "coven_claim_tables",
     "coven_published_tables",
     "coven_store_state_tables",
+    "coven_authorship_tables",
+    "coven_sequence_application_tables",
+    "coven_write_headers_tables",
+    "coven_written_values_tables",
+    "coven_SQL_versions_tables",
+    "coven_source_names_tables",
+    "coven_write_boundaries_tables",
+    "coven_retries_tables",
+    "coven_upload_keys_tables",
+    "coven_device_reset_tables",
+    "coven_file_columns_tables",
+    "coven_pin_requests_tables",
+    "coven_file_moves_tables",
+    "coven_data_reloads_tables",
+    "coven_conversion_schemas_tables",
+    "coven_migration_prefix_tables",
+    "coven_owner_tables_tables",
+    "coven_copy_folders_tables",
+    "coven_queued_file_references_tables",
+    "coven_file_chunks_tables",
+    "coven_writes_tables",
+    "coven_operation_state_tables",
+    "coven_upload_settings_tables",
+    "coven_applied_sequence_tables",
+    "coven_file_retention_tables",
+    "coven_ended_requests_tables",
+    "coven_snapshot_schema_tables",
 ]
 # The API re-exports the database crate's `rusqlite` so a host can name the
 # types its own SQL uses.
@@ -581,87 +608,357 @@ tables = [
 ]
 
 [[database.domains]]
+name = "authorship"
+owner = "Database"
+homes = [
+    "crates/coven-database/src/authorship.rs",
+    "crates/coven-database/src/authorship_schema.rs",
+]
+tables = [
+    "_coven_part_leaves",
+    "_coven_part_proofs",
+    "_coven_write_evidence",
+]
+
+[[database.domains]]
+name = "sequence application"
+owner = "Database"
+homes = [
+    "crates/coven-database/src/sequence_apply.rs",
+    "crates/coven-database/src/sequence_apply_schema.rs",
+]
+tables = [
+    "_coven_slot_records",
+    "_coven_write_refusals",
+    "_coven_write_slots",
+]
+
+[[database.domains]]
+name = "write headers"
+owner = "Database"
+homes = [
+    "crates/coven-database/src/write_headers.rs",
+    "crates/coven-database/src/write_headers_schema.rs",
+]
+tables = [
+    "_coven_write_headers",
+]
+
+[[database.domains]]
+name = "written values"
+owner = "Database"
+homes = [
+    "crates/coven-database/src/written_values.rs",
+    "crates/coven-database/src/written_values_schema.rs",
+]
+tables = [
+    "_coven_written_values",
+]
+
+[[database.domains]]
+name = "SQL versions"
+owner = "Database"
+homes = [
+    "crates/coven-database/src/sql_versions.rs",
+    "crates/coven-database/src/sql_versions_schema.rs",
+]
+tables = [
+    "_coven_sql_versions",
+]
+
+[[database.domains]]
+name = "source names"
+owner = "Database"
+homes = [
+    "crates/coven-database/src/source_names.rs",
+    "crates/coven-database/src/source_names_schema.rs",
+]
+tables = [
+    "_coven_column_origins",
+    "_coven_table_origins",
+]
+
+[[database.domains]]
+name = "write boundaries"
+owner = "Database"
+homes = [
+    "crates/coven-database/src/write_boundary.rs",
+    "crates/coven-database/src/write_boundary_schema.rs",
+]
+tables = [
+    "_coven_boundaries",
+]
+
+[[database.domains]]
+name = "retries"
+owner = "Database"
+homes = [
+    "crates/coven-database/src/retry.rs",
+    "crates/coven-database/src/retry_schema.rs",
+]
+tables = [
+    "_coven_retries",
+]
+
+[[database.domains]]
+name = "upload keys"
+owner = "Database"
+homes = [
+    "crates/coven-database/src/upload.rs",
+    "crates/coven-database/src/upload_schema.rs",
+]
+tables = [
+    "_coven_upload_keys",
+]
+
+[[database.domains]]
+name = "device reset"
+owner = "Database"
+homes = [
+    "crates/coven-database/src/device_reset.rs",
+    "crates/coven-database/src/device_reset_schema.rs",
+]
+tables = [
+    "_coven_device_reset",
+]
+
+[[database.domains]]
+name = "file columns"
+owner = "Database"
+homes = [
+    "crates/coven-database/src/file_table.rs",
+    "crates/coven-database/src/file_table_schema.rs",
+]
+tables = [
+    "_coven_file_columns",
+]
+
+[[database.domains]]
+name = "pin requests"
+owner = "Database"
+homes = [
+    "crates/coven-database/src/file_pins.rs",
+    "crates/coven-database/src/file_pins_schema.rs",
+]
+tables = [
+    "_coven_pin_requests",
+]
+
+[[database.domains]]
+name = "file moves"
+owner = "Database"
+homes = [
+    "crates/coven-database/src/file_moves.rs",
+    "crates/coven-database/src/file_moves_schema.rs",
+]
+tables = [
+    "_coven_moves",
+]
+
+[[database.domains]]
+name = "data reloads"
+owner = "Database"
+homes = [
+    "crates/coven-database/src/reload_gate.rs",
+    "crates/coven-database/src/reload_gate_schema.rs",
+]
+tables = [
+    "_coven_data_reloads",
+]
+
+[[database.domains]]
+name = "conversion schemas"
+owner = "Database"
+homes = [
+    "crates/coven-database/src/migration_receive.rs",
+    "crates/coven-database/src/migration_receive_schema.rs",
+]
+tables = [
+    "_coven_conversion_schemas",
+]
+
+[[database.domains]]
+name = "migration prefix"
+owner = "Database"
+homes = [
+    "crates/coven-database/src/captured_changes.rs",
+    "crates/coven-database/src/captured_changes_schema.rs",
+]
+tables = [
+    "_coven_migration_prefix",
+]
+
+[[database.domains]]
+name = "owner tables"
+owner = "Database"
+homes = [
+    "crates/coven-database/src/row_queries.rs",
+    "crates/coven-database/src/row_queries_schema.rs",
+]
+tables = [
+    "_coven_owner_tables",
+]
+
+[[database.domains]]
+name = "copy folders"
+owner = "Database"
+homes = [
+    "crates/coven-database/src/file_database_copies.rs",
+    "crates/coven-database/src/file_database_copies_schema.rs",
+]
+tables = [
+    "_coven_copy_folders",
+]
+
+[[database.domains]]
+name = "queued file references"
+owner = "Database"
+homes = [
+    "crates/coven-database/src/file_protection.rs",
+    "crates/coven-database/src/file_protection_schema.rs",
+]
+tables = [
+    "_coven_queued_file_refs",
+]
+
+[[database.domains]]
+name = "file chunks"
+owner = "Database"
+homes = [
+    "crates/coven-database/src/file_write_uploads.rs",
+    "crates/coven-database/src/file_write_uploads_schema.rs",
+]
+tables = [
+    "_coven_file_chunks",
+]
+
+[[database.domains]]
+name = "writes"
+owner = "Database"
+homes = [
+    "crates/coven-database/src/write_commit.rs",
+    "crates/coven-database/src/write_commit_schema.rs",
+]
+tables = [
+    "_coven_writes",
+]
+
+[[database.domains]]
+name = "operation state"
+owner = "Database"
+homes = [
+    "crates/coven-database/src/operation.rs",
+    "crates/coven-database/src/operation_schema.rs",
+]
+tables = [
+    "_coven_held_keys",
+    "_coven_snapshot_reservation",
+    "_coven_write_pause",
+]
+
+[[database.domains]]
+name = "upload settings"
+owner = "Database"
+homes = [
+    "crates/coven-database/src/file_queue.rs",
+    "crates/coven-database/src/file_queue_schema.rs",
+]
+tables = [
+    "_coven_unmetered_only",
+    "_coven_upload_pause",
+]
+
+[[database.domains]]
+name = "applied sequence"
+owner = "Database"
+homes = [
+    "crates/coven-database/src/sequence.rs",
+    "crates/coven-database/src/sequence_schema.rs",
+]
+tables = [
+    "_coven_sequence",
+]
+
+[[database.domains]]
+name = "file retention"
+owner = "Database"
+homes = [
+    "crates/coven-database/src/database_file_retention.rs",
+    "crates/coven-database/src/database_file_retention_schema.rs",
+]
+tables = [
+    "_coven_absent_snapshots",
+    "_coven_file_scans",
+]
+
+[[database.domains]]
+name = "ended requests"
+owner = "Database"
+homes = [
+    "crates/coven-database/src/database_operations.rs",
+    "crates/coven-database/src/database_operations_schema.rs",
+]
+tables = [
+    "_coven_gone_storage_cleared",
+    "_coven_requests_ended",
+]
+
+[[database.domains]]
+name = "snapshot schema"
+owner = "Database"
+homes = [
+    "crates/coven-database/src/sqlite.rs",
+    "crates/coven-database/src/sqlite_snapshot_schema.rs",
+]
+tables = [
+    "_coven_snapshot_schema",
+]
+
+[[database.domains]]
 name = "database"
 owner = "Database"
 homes = ["crates/coven-database/src/"]
 tables = [
-    "_coven_absent_snapshots",
     "_coven_app_operations",
     "_coven_authored_admissions",
     "_coven_authored_changes",
     "_coven_authored_parts",
-    "_coven_boundaries",
     "_coven_cache",
     "_coven_cache_budgets",
     "_coven_cache_writes",
     "_coven_cells",
     "_coven_claims",
-    "_coven_column_origins",
     "_coven_columns",
     "_coven_constraints",
-    "_coven_conversion_schemas",
     "_coven_copies",
     "_coven_copy_chunks",
-    "_coven_copy_folders",
     "_coven_creations",
     "_coven_cutoffs",
-    "_coven_data_reloads",
     "_coven_device_files",
-    "_coven_device_reset",
     "_coven_file_candidates",
-    "_coven_file_chunks",
-    "_coven_file_columns",
     "_coven_file_references",
     "_coven_file_removals",
-    "_coven_file_scans",
     "_coven_file_uploads",
     "_coven_foreign_keys",
-    "_coven_gone_storage_cleared",
-    "_coven_held_keys",
     "_coven_last_claims",
     "_coven_lost",
     "_coven_migration_counted_losses",
     "_coven_migration_losses",
-    "_coven_migration_prefix",
-    "_coven_moves",
     "_coven_object_removals",
     "_coven_operations",
-    "_coven_owner_tables",
-    "_coven_part_leaves",
-    "_coven_part_proofs",
     "_coven_pending",
-    "_coven_pin_requests",
     "_coven_provider_access",
-    "_coven_queued_file_refs",
     "_coven_raise_captures",
     "_coven_references",
-    "_coven_requests_ended",
-    "_coven_retries",
     "_coven_row_file_refs",
     "_coven_rows",
-    "_coven_sequence",
-    "_coven_slot_records",
-    "_coven_snapshot_reservation",
-    "_coven_snapshot_schema",
-    "_coven_sql_versions",
     "_coven_store",
     "_coven_stored_files",
-    "_coven_table_origins",
     "_coven_unreferenced_files",
     "_coven_upload_files",
-    "_coven_upload_keys",
-    "_coven_upload_pause",
-    "_coven_unmetered_only",
     "_coven_uploads",
     "_coven_user_chunks",
     "_coven_user_files",
-    "_coven_write_evidence",
-    "_coven_write_headers",
-    "_coven_write_pause",
-    "_coven_write_refusals",
-    "_coven_write_slots",
-    "_coven_writes",
-    "_coven_written_values",
 ]
 
 # One list for owner construction, runtime acquisition and background work starts.

@@ -537,3 +537,13 @@ async fn a_scan_is_recorded_against_a_replacement_of_its_members_keys() {
     assert_eq!(db.file_scan(uploader).await.unwrap(), Some(replaced));
     db.close().await.unwrap();
 }
+
+/// Fill this domain's tables from the rows of the plan audit's `fixture`
+/// table, inside its transaction (`internal_schema_scan_reasons_tests.rs`).
+pub(crate) fn fill_for_plans(db: &rusqlite::Connection) {
+    db.execute_batch(
+        "INSERT INTO _coven_absent_snapshots SELECT audience,device,n FROM fixture;
+         INSERT INTO _coven_file_scans SELECT n,n FROM fixture;",
+    )
+    .unwrap();
+}

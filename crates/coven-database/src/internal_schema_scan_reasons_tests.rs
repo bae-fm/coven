@@ -65,6 +65,9 @@ mod fixture {
         db.execute_batch(&super::source::staging_schema()).unwrap();
         db.execute_batch(
     "BEGIN;
+     -- Each domain fills its own tables, parents and children in any order:
+     -- the transaction's rows answer to their foreign keys as it commits.
+     PRAGMA defer_foreign_keys=ON;
      CREATE TEMP TABLE fixture AS
      WITH RECURSIVE numbers(i) AS (VALUES(1) UNION ALL SELECT i+1 FROM numbers WHERE i<4096)
      SELECT i, counter(i) AS n, counter((i-1)%64+1) AS device,
@@ -73,10 +76,7 @@ mod fixture {
             CAST(printf('%016d',i) AS BLOB) AS member FROM numbers;
      INSERT INTO _coven_operations(id,kind,last_step,data,started_by)
        SELECT i,'kind_' || (i%32),1,x'00','app' FROM fixture;
-     INSERT INTO _coven_held_keys SELECT CAST(printf('%032d',i) AS BLOB),zeroblob(32) FROM fixture;
      INSERT INTO _coven_object_removals SELECT 'path_' || i,i FROM fixture;
-     INSERT INTO _coven_requests_ended SELECT n FROM fixture;
-     INSERT INTO _coven_gone_storage_cleared SELECT n FROM fixture;
      INSERT INTO _coven_app_operations SELECT i,'Kind' || (i%32),CASE WHEN i%2=0 THEN x'00' END FROM fixture;
      INSERT INTO _coven_provider_access SELECT 'account_' || i,i%2,NULL,NULL,i,i%2 FROM fixture;
      INSERT INTO _coven_pending(subject,value,operation,object,work,device,file,coven_version)
@@ -88,71 +88,37 @@ mod fixture {
      INSERT INTO _coven_stored_files SELECT 'file_' || i,audience,device,substr(key,17,16),'file_' || i,key FROM fixture;
      INSERT INTO coven_files SELECT 'file_' || i,audience,1,zeroblob(32),'device 1','files' FROM fixture;
      INSERT INTO _coven_file_references SELECT 'file_' || i,tab,key,'column_' || i FROM fixture;
-     INSERT INTO _coven_file_columns SELECT tab,'column_' || i,i%2 FROM fixture;
      INSERT INTO _coven_unreferenced_files SELECT 'file_' || i FROM fixture;
-     INSERT INTO _coven_data_reloads SELECT 'audience_' || i,key FROM fixture;
-     INSERT INTO _coven_boundaries SELECT n,'schema',1,audience,device,n,counter(1),1 FROM fixture;
      INSERT INTO _coven_raise_captures SELECT 'audience_' || i,2,n,n FROM fixture;
-     INSERT INTO _coven_writes
-       SELECT i,CAST(n || device AS BLOB),n,counter(0),n FROM fixture;
-     INSERT INTO _coven_device_reset VALUES(1,zeroblob(8),counter(1));
-     INSERT INTO _coven_sql_versions SELECT CASE i%2 WHEN 0 THEN 'collation' ELSE 'function' END,'name_' || i,i FROM fixture;
-     INSERT INTO _coven_write_headers SELECT device,n,x'00' FROM fixture;
      INSERT INTO _coven_authored_parts SELECT CAST(device || n AS BLOB),audience,x'00',1 FROM fixture;
      INSERT INTO _coven_authored_changes SELECT CAST(device || n AS BLOB),audience,tab,key,x'00' FROM fixture;
      INSERT INTO _coven_authored_admissions SELECT CAST(device || n AS BLOB),audience,tab,key,x'00' FROM fixture;
      INSERT INTO _coven_creations SELECT tab,key,audience,CAST(device || n AS BLOB),x'00' FROM fixture;
-     INSERT INTO _coven_write_evidence SELECT CAST(device || n AS BLOB),x'00',x'00',x'',zeroblob(64) FROM fixture;
-     INSERT INTO _coven_part_leaves SELECT CAST(device || n AS BLOB),audience,zeroblob(32) FROM fixture;
-     INSERT INTO _coven_part_proofs SELECT CAST(device || n AS BLOB),audience,x'00',zeroblob(32) FROM fixture;
-     INSERT INTO _coven_owner_tables SELECT DISTINCT 'table_' || i FROM fixture;
-     INSERT INTO _coven_table_origins SELECT i,tab,1,tab FROM fixture;
-     INSERT INTO _coven_column_origins SELECT i,tab,'column_' || i,1,tab,'column_' || i FROM fixture;
-     INSERT INTO _coven_conversion_schemas SELECT i,x'00',x'00',x'00',x'00' FROM fixture;
      INSERT INTO _coven_columns SELECT i,tab,'column_' || i,1 FROM fixture;
      INSERT INTO _coven_rows SELECT i,tab,key,audience,counter(1),i FROM fixture;
      INSERT INTO _coven_cells
        SELECT (i-1)%1024+1+offset,i,i FROM fixture
        CROSS JOIN (SELECT 0 AS offset UNION ALL SELECT 1024 UNION ALL SELECT 2048);
-     INSERT INTO _coven_foreign_keys SELECT i,tab,n FROM fixture;
-     INSERT INTO _coven_written_values
-       SELECT column_id,row_id,'written value' FROM _coven_cells WHERE column_id<=1024;
      INSERT INTO _coven_references SELECT i,(i-1)%1024+1,i,tab,key,audience,counter(1) FROM fixture;
-     INSERT INTO _coven_constraints SELECT i,tab,n FROM fixture;
      INSERT INTO _coven_claims SELECT i,i,audience,key FROM fixture;
      INSERT INTO _coven_lost
        (table_name,key,audience,generation,column_id,value,set_by,frozen,replacement_kind,replaced_by)
        SELECT tab,key,audience,counter(1),CASE WHEN i%3=0 THEN i END,
               zeroblob(64),n,i%2,CASE WHEN i%3=0 THEN 'write' ELSE 'rules' END,n FROM fixture;
      INSERT INTO _coven_uploads SELECT device,n,zeroblob(256) FROM fixture;
-     INSERT INTO _coven_upload_keys SELECT device,n,zeroblob(32) FROM fixture;
-     INSERT INTO _coven_queued_file_refs SELECT device,substr(key,1,16),device,n FROM fixture;
      INSERT INTO _coven_user_files SELECT 'file_' || i,CAST('path_' || i AS BLOB),i,zeroblob(13),zeroblob(32) FROM fixture;
      INSERT INTO _coven_user_chunks SELECT 'file_' || i,0,zeroblob(32) FROM fixture;
      INSERT INTO _coven_copies(path,temporary,state,size,modified_at)
        SELECT 'path_' || i,'temporary_' || i,CASE i%4 WHEN 0 THEN 'writing' WHEN 1 THEN 'placed' WHEN 2 THEN 'kept' ELSE 'lost' END,
          CASE WHEN i%4!=0 THEN i END,CASE WHEN i%4!=0 THEN zeroblob(13) END FROM fixture;
-     INSERT INTO _coven_copy_folders SELECT 'folder_' || (i%7),'path_' || i,i%2 FROM fixture;
      INSERT INTO _coven_file_removals SELECT 'removed_' || i,'files' FROM fixture;
      INSERT INTO _coven_cache_writes SELECT 'writing_' || i FROM fixture;
-     INSERT INTO _coven_moves(id,state)
-       SELECT i,CASE i%4 WHEN 0 THEN 'moving' WHEN 1 THEN 'failed' WHEN 2 THEN 'cancelled' ELSE 'finished' END FROM fixture;
      INSERT INTO _coven_file_uploads(id,location,device,file,size,hash,copy,move,stored,queued_at)
        SELECT i,'location_' || i,device,substr(key,17,16),1,zeroblob(32),'copy_' || i,i,i%2,zeroblob(13) FROM fixture;
      INSERT INTO _coven_upload_files SELECT 'file_' || i,i,i%2 FROM fixture;
-     INSERT INTO _coven_pin_requests SELECT 'file_' || i,CASE WHEN i%2=0 THEN 'path_' || i END FROM fixture;
-     INSERT INTO _coven_retries(operation,upload,failures,not_before,wait)
-       SELECT CASE WHEN i%2=0 THEN i END,CASE WHEN i%2=1 THEN i END,1,zeroblob(13),1000 FROM fixture;
-     INSERT INTO _coven_retries(scope,failures,not_before,wait)
-       VALUES('join',1,zeroblob(13),1000),('provider',0,zeroblob(13),600000);
      INSERT INTO _coven_device_files SELECT 'file_' || i,'path_' || i,zeroblob(32) FROM fixture;
      INSERT INTO _coven_copy_chunks SELECT 'path_' || i,0,zeroblob(32) FROM fixture;
      INSERT INTO _coven_file_candidates SELECT device,substr(key,17,16),n FROM fixture;
-     INSERT INTO _coven_file_scans SELECT n,n FROM fixture;
-     INSERT INTO _coven_upload_pause VALUES(1);
-     INSERT INTO _coven_unmetered_only VALUES(1);
-     INSERT INTO _coven_write_pause VALUES(1,1);
-     INSERT INTO _coven_file_chunks SELECT device,substr(key,17,16),0,key FROM fixture;
      INSERT INTO _coven_cache(namespace,file_id,chunk,path,size,last_read,pinned,checked_hash)
        SELECT audience,'file_' || i,CASE WHEN (i/64)%4=0 THEN -2 ELSE 0 END,'cache_' || i,
               65536,i,CASE WHEN (i/64)%4=0 THEN 1 ELSE 0 END,
@@ -166,14 +132,11 @@ mod fixture {
      INSERT INTO _coven_install_region SELECT tab,key,audience FROM fixture WHERE i%16=0;
      INSERT INTO _coven_download_replaced SELECT DISTINCT audience FROM fixture WHERE i<=4;
      INSERT INTO _coven_store VALUES(1,zeroblob(16),'fixture',x'0000000000000001',1);
-     INSERT INTO _coven_migration_prefix VALUES(1,counter(1),counter(4096),2);
      INSERT INTO _coven_migration_losses SELECT CAST(device || n AS BLOB),audience,key FROM fixture;
      INSERT INTO _coven_migration_counted_losses SELECT CAST(device || n AS BLOB),audience,key FROM fixture;
      INSERT INTO _coven_last_claims SELECT n,n,key,n FROM fixture;
-     INSERT INTO _coven_absent_snapshots SELECT audience,device,n FROM fixture;
-     INSERT INTO _coven_slot_records SELECT n,CASE i%3 WHEN 0 THEN 'admin' WHEN 1 THEN 'key' ELSE 'announcement' END,key FROM fixture;
-     INSERT INTO _coven_write_slots SELECT n,i+1 FROM fixture;
-     INSERT INTO _coven_write_refusals SELECT n,n FROM fixture;
+     INSERT INTO _coven_constraints SELECT i,tab,n FROM fixture;
+     INSERT INTO _coven_foreign_keys SELECT i,tab,n FROM fixture;
      INSERT INTO _coven_cutoffs SELECT n,CASE WHEN i%3=0 THEN device END,CASE WHEN i%3<>0 THEN member END,CASE WHEN i%3=2 THEN key END FROM fixture;
 "
     ).unwrap();
@@ -181,6 +144,31 @@ mod fixture {
         crate::store_state_tables::tests::fill_for_plans(&db);
         crate::published::tests::fill_for_plans(&db);
         crate::claim::tests::fill_for_plans(&db);
+        crate::database::operation_tests::fill_for_plans(&db);
+        crate::database::file_retention::tests::fill_for_plans(&db);
+        crate::file_queue::tests::fill_for_plans(&db);
+        crate::operation::tests::fill_for_plans(&db);
+        crate::write_commit::tests::fill_for_plans(&db);
+        crate::file_write::upload_tests::fill_for_plans(&db);
+        crate::file_protection::tests::fill_for_plans(&db);
+        crate::database::file_database::copies::tests::fill_for_plans(&db);
+        crate::row_queries::tests::fill_for_plans(&db);
+        crate::captured_changes::tests::fill_for_plans(&db);
+        crate::migration_receive::tests::fill_for_plans(&db);
+        crate::reload_gate::tests::fill_for_plans(&db);
+        crate::file_moves::tests::fill_for_plans(&db);
+        crate::file_pins::tests::fill_for_plans(&db);
+        crate::file_table::tests::fill_for_plans(&db);
+        crate::device_reset::tests::fill_for_plans(&db);
+        crate::upload::tests::fill_for_plans(&db);
+        crate::retry::tests::fill_for_plans(&db);
+        crate::write_boundary::tests::fill_for_plans(&db);
+        crate::source_names::tests::fill_for_plans(&db);
+        crate::sql_versions::tests::fill_for_plans(&db);
+        crate::written_values::tests::fill_for_plans(&db);
+        crate::write_headers::tests::fill_for_plans(&db);
+        crate::sequence_apply::tests::fill_for_plans(&db);
+        crate::authorship::tests::fill_for_plans(&db);
         db.execute_batch("DROP TABLE fixture; COMMIT;").unwrap();
         let violations: i64 = db
             .query_row("SELECT count(*) FROM pragma_foreign_key_check", [], |r| r.get(0))
@@ -316,6 +304,33 @@ mod source {
                     | "claim_schema.rs"
                     | "published_schema.rs"
                     | "store_state_schema.rs"
+                    | "sqlite_snapshot_schema.rs"
+                    | "database_operations_schema.rs"
+                    | "database_file_retention_schema.rs"
+                    | "sequence_schema.rs"
+                    | "file_queue_schema.rs"
+                    | "operation_schema.rs"
+                    | "write_commit_schema.rs"
+                    | "file_write_uploads_schema.rs"
+                    | "file_protection_schema.rs"
+                    | "file_database_copies_schema.rs"
+                    | "row_queries_schema.rs"
+                    | "captured_changes_schema.rs"
+                    | "migration_receive_schema.rs"
+                    | "reload_gate_schema.rs"
+                    | "file_moves_schema.rs"
+                    | "file_pins_schema.rs"
+                    | "file_table_schema.rs"
+                    | "device_reset_schema.rs"
+                    | "upload_schema.rs"
+                    | "retry_schema.rs"
+                    | "write_boundary_schema.rs"
+                    | "source_names_schema.rs"
+                    | "sql_versions_schema.rs"
+                    | "written_values_schema.rs"
+                    | "write_headers_schema.rs"
+                    | "sequence_apply_schema.rs"
+                    | "authorship_schema.rs"
                     | "internal_schema_views.rs"
                     | "internal_schema_pins.rs"
                     | "internal_schema_upload_queue.rs"

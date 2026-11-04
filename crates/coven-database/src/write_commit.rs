@@ -313,4 +313,4 @@ fn store_cells(
 
 #[cfg(test)]
 #[path = "write_commit_tests.rs"]
-mod tests;
+pub(crate) mod tests;

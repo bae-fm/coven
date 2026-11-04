@@ -148,4 +148,4 @@ pub(crate) fn definition_id(
 
 #[cfg(test)]
 #[path = "row_queries_tests.rs"]
-mod tests;
+pub(crate) mod tests;

@@ -244,7 +244,7 @@ async fn an_empty_file_queues_no_chunk_hash_and_a_missing_one_is_damage() {
     let uploads = owner.uploads().await.unwrap();
     assert_eq!(uploads.len(), 1);
     assert_eq!(local_count(&db, "_coven_file_chunks"), 1);
-    db.commit_writer(|sql| sql.internal_execute("DELETE FROM _coven_file_chunks", []).unwrap());
+    db.commit_writer(crate::file_write::upload_tests::lose_chunk_hashes);
     assert!(matches!(
         owner.upload_chunk_hash(&uploads[0].location, 0).await,
         Err(DbError::DamagedDatabase)

@@ -23,3 +23,7 @@ pub(crate) fn record(database: &DatabaseConnection, reset: &DeviceReset) -> Resu
     )?;
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "device_reset_tests.rs"]
+pub(crate) mod tests;

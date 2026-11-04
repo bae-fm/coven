@@ -196,3 +196,7 @@ pub(crate) fn losses(
     }
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "captured_changes_tests.rs"]
+pub(crate) mod tests;
