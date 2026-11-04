@@ -1,9 +1,9 @@
 //! Request revisions and cancellation-safe, demand-driven live results.
 
+#[cfg(any(test, feature = "test-utils"))]
 use crate::live_query_runs::LiveQueryRuns;
 use crate::observation::CommitSubscription;
 use crate::CovenResult;
-#[cfg(any(test, feature = "test-utils"))]
 use coven_foundation::locks::lock_unpoisoned;
 use std::{
     future::Future,
