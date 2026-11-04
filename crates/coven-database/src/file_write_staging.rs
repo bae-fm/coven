@@ -33,17 +33,7 @@ impl FileWrite<'_> {
         original: PreparedUserFile,
         place: Place,
     ) -> Result<FileId, DbError> {
-        let declared = self
-            .files
-            .schema
-            .namespace(namespace)
-            .ok_or_else(|| DbError::UndeclaredNamespace { namespace: namespace.to_owned() })?;
-        if declared.kind != Provenance::UserProvided {
-            return Err(DbError::NamespaceKind {
-                kind: declared.kind.clone(),
-                namespace: namespace.to_owned(),
-            });
-        }
+        self.files.schema.namespace_of(namespace, Provenance::UserProvided)?;
         let id = FileId(self.files.ids.new_id());
         self.files.staged.borrow_mut().push(StagedFile {
             id,

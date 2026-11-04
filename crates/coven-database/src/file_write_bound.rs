@@ -62,20 +62,7 @@ impl FileWrite<'_> {
                 if record.audience != view.audience_of(table, &values)? {
                     continue;
                 }
-                let kind = &self
-                    .files
-                    .schema
-                    .namespace(&record.namespace)
-                    .ok_or_else(|| DbError::UndeclaredNamespace {
-                        namespace: record.namespace.clone(),
-                    })?
-                    .kind;
-                if *kind == Provenance::UserProvided {
-                    return Err(DbError::NamespaceKind {
-                        namespace: record.namespace,
-                        kind: Provenance::UserProvided,
-                    });
-                }
+                self.files.schema.namespace_of(&record.namespace, Provenance::AppProvided)?;
                 if record.size > limit {
                     return Err(DbError::BoundFileTooLarge {
                         table: table.name.clone(),

@@ -78,6 +78,24 @@ impl WriteSchema {
         self.namespaces.iter().find(|n| n.name == name)
     }
 
+    /// The declared namespace `name`, which must hold files of `kind`.
+    pub(crate) fn namespace_of(
+        &self,
+        name: &str,
+        kind: crate::Provenance,
+    ) -> Result<&crate::Namespace, DbError> {
+        let declared = self
+            .namespace(name)
+            .ok_or_else(|| DbError::UndeclaredNamespace { namespace: name.to_owned() })?;
+        if declared.kind != kind {
+            return Err(DbError::NamespaceKind {
+                kind: declared.kind.clone(),
+                namespace: name.to_owned(),
+            });
+        }
+        Ok(declared)
+    }
+
     pub(crate) fn table(&self, name: &str) -> &TableSchema {
         &self.schema.tables[&name.to_ascii_lowercase()]
     }

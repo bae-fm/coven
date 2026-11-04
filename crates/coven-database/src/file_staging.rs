@@ -61,18 +61,10 @@ impl FileStaging {
                         .transaction(|db| {
                             let mut sources = VecDeque::new();
                             for BatchFile { id, namespace, source, place } in files {
-                                let declared =
-                                    inner.access.write_schema.namespace(&namespace).ok_or_else(
-                                        || DbError::UndeclaredNamespace {
-                                            namespace: namespace.clone(),
-                                        },
-                                    )?;
-                                if declared.kind != Provenance::AppProvided {
-                                    return Err(DbError::NamespaceKind {
-                                        kind: declared.kind.clone(),
-                                        namespace,
-                                    });
-                                }
+                                inner
+                                    .access
+                                    .write_schema
+                                    .namespace_of(&namespace, Provenance::AppProvided)?;
                                 let name = FileName::new(inner.ids.new_id().to_string())
                                     .expect("UUID is a portable filename");
                                 let recorded = db.internal_execute(

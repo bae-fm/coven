@@ -43,14 +43,7 @@ pub(crate) fn permitted(
     file: FileId,
 ) -> Result<Record, DbError> {
     let record = Record::read(db, file)?.ok_or(DbError::FileAbsent { file })?;
-    let kind = schema
-        .namespace(&record.namespace)
-        .ok_or_else(|| DbError::UndeclaredNamespace { namespace: record.namespace.clone() })?
-        .kind
-        .clone();
-    if kind != Provenance::UserProvided {
-        return Err(DbError::NamespaceKind { namespace: record.namespace, kind });
-    }
+    schema.namespace_of(&record.namespace, Provenance::UserProvided)?;
     if !matches!(record.place, Place::Cloud(_)) {
         return Err(DbError::NotInCloud { file });
     }
