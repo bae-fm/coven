@@ -21,6 +21,8 @@ fn key() -> Vec<u8> {
     .unwrap()
 }
 
+/// Store a loss as coven does: excluded, dependent and unauthorized ones
+/// frozen, as the table's check requires (format.md D7.2).
 fn insert(
     db: &Database,
     column: Option<i64>,
@@ -31,7 +33,7 @@ fn insert(
 ) {
     db.commit_writer(|sql| {
         sql.internal_execute("INSERT INTO _coven_lost(table_name,key,audience,generation,column_id,value,set_by,replacement_kind,replaced_by,frozen) VALUES ('notes',?1,'store',?2,?3,?4,?5,?6,?7,?8)",
-            (key(), 0u64.to_be_bytes().to_vec(), column, value, setters, kind, replacement, matches!(kind, "excluded" | "dependency"))).unwrap();
+            (key(), 0u64.to_be_bytes().to_vec(), column, value, setters, kind, replacement, matches!(kind, "excluded" | "dependency" | "unauthorized"))).unwrap();
     });
 }
 
