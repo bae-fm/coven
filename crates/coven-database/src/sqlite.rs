@@ -294,10 +294,14 @@ impl DatabaseConnection {
                 .max();
             let raises = if let Some(minimum) = breaking {
                 // The raise snapshots are captured through the marker before any
-                // later app write; with no store there is no shared version to raise.
+                // later app write; with no store there is no shared version to
+                // raise, and an installation that loads its store has no marker.
                 let schema = crate::write_schema::WriteSchema::read(db, tables.to_vec())?;
-                let marker = marker.expect("a breaking batch appends its marker");
-                if crate::raise_capture::capture(db, &schema, marker, supported)? {
+                let captured = match marker {
+                    Some(marker) => crate::raise_capture::capture(db, &schema, marker, supported)?,
+                    None => false,
+                };
+                if captured {
                     db.internal_execute(
                         "UPDATE _coven_snapshot_schema SET minimum=?1,publication=?2 WHERE singleton=1",
                         (minimum, supported),

@@ -571,3 +571,38 @@ async fn both_lanes_wait_while_sync_is_stopped() {
     assert!(file_stored(ana, photo).await);
     network.close().await;
 }
+
+/// Ana's and Ben's apps update to the version that retitles notes, and
+/// Ana's raise is established. Carol's phone joins with the updated app:
+/// its new installation runs every migration from the start, the breaking
+/// one included, over tables no device's rows are in yet. That makes no
+/// write of its own, so its first pass claims nothing before it was
+/// registered, and it shows the notes at the store's version (§18.3).
+#[tokio::test]
+async fn a_device_joins_with_a_breaking_migration_declared() {
+    let mut network = household().await;
+    note(&network.devices[0], "n").await;
+    wait_for_sent(&network.devices[0].handle).await;
+    network.sync(1).await;
+    retitle(&mut network, 0).await;
+    for _ in 0..10 {
+        if !network.devices[0].handle.store_state().await.schema.is_empty() {
+            break;
+        }
+        network.sync(0).await;
+    }
+    retitle(&mut network, 1).await;
+    network.sync(1).await;
+    network.update_app(retitled());
+    network
+        .join_as(2, InviteTarget::NewMember { role: MemberRole::Member, name: "Carol".into() })
+        .await;
+    network.sync(2).await;
+    let (ben, carol) = (&network.devices[1], &network.devices[2]);
+    assert!(carol.handle.pending().await.unwrap().is_empty());
+    assert!(carol.handle.test_queued_writes().await.unwrap().is_empty());
+    assert_eq!(carol.handle.store_state().await.schema[&Audience::Store].number, 2);
+    assert_eq!(titles(carol).await, titles(ben).await);
+    assert_eq!(titles(carol).await, [("n".to_owned(), "migrated".to_owned())]);
+    network.close().await;
+}

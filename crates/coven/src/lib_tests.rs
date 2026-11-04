@@ -410,6 +410,11 @@ impl Network {
             assert_eq!(value.state, SyncState::Synced, "device {i}: {value:?}");
         }
     }
+    /// Open later joins and reopens with `migrations`, as an updated app does.
+    pub(crate) fn update_app(&mut self, migrations: Vec<Migration>) {
+        self.schema.1 = migrations;
+    }
+
     /// A builder for a device's directory, as the app would reopen it.
     pub(crate) fn reopen(&self, device: &Device) -> CovenBuilder {
         builder(

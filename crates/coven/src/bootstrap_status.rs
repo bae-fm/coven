@@ -34,11 +34,13 @@ pub enum BootstrapStatus {
 }
 
 /// Open a new installation's database, reporting the open's steps as
-/// `Opening` (E10). Its first open runs every migration from the start.
+/// `Opening` (E10). Its first open runs every migration from the start, and
+/// makes no migration write: the store it loads replaces that state.
 pub(super) async fn open_installation(
     database: coven_database::DatabaseBuilder,
     status: &impl Fn(BootstrapStatus),
 ) -> CovenResult<Database> {
+    let database = database.loading_store();
     let progress = database.subscribe_progress();
     progress.forward(database.open(), |progress| status(BootstrapStatus::Opening(progress))).await
 }

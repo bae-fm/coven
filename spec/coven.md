@@ -6972,6 +6972,18 @@ only in the raise's snapshot. So a device that runs the same migration later and
 then reloads from that snapshot changes nothing anywhere with its own migration
 write, and neither does one that adopts the raise already claimed.
 
+**An installation that loads its store makes no migration write.** A joining,
+restoring or reset device opens its new installation before it loads the store,
+and that first open runs every migration from the start. Carol's new phone
+joins Household with the app that retitles notes in version 2: it runs versions
+1 and 2, then loads Ana's raise snapshot at version 2. A migration write there
+would come from before her phone was registered, which every device refuses,
+her own included, so her first pass would stop; and the snapshot she loads
+replaces whatever the migration changed. Her phone still reads only snapshots
+at version 2 or later, as any device that ran the breaking step does. The
+store's creator, whose state is its own, makes its migration write as any
+device does.
+
 #### 18.5 The migrating device's own queue
 
 When Ana's phone migrates, its queue may already hold writes made at the old

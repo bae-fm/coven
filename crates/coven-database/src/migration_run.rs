@@ -18,9 +18,25 @@ pub(crate) struct MigrationRun {
     pub(crate) marker: Option<coven_merge::WriteId>,
 }
 
-/// The device and wall clock authoring a migration's local write.
+/// The device and wall clock authoring a migration's local write, and
+/// where the installation's state comes from.
 #[derive(Clone, Copy)]
-pub(crate) struct MigrationOrigin(pub(crate) DeviceId, pub(crate) SystemTime);
+pub(crate) struct MigrationOrigin(
+    pub(crate) DeviceId,
+    pub(crate) SystemTime,
+    pub(crate) Installation,
+);
+
+/// Where an installation's state comes from, which decides whether its
+/// breaking migrations make a migration write (§18.4).
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Installation {
+    /// Its own: the store's creator, or a device whose store has loaded.
+    Own,
+    /// The store it loads from storage next, for a join, restore or reset:
+    /// the device isn't registered yet, and the load replaces its state.
+    Loading,
+}
 
 struct MigrationStep<'a> {
     migration: &'a Migration,
@@ -144,7 +160,7 @@ pub(crate) fn run<'a>(
             )?;
         }
     }
-    let MigrationOrigin(device, now) = origin;
+    let MigrationOrigin(device, now, installation) = origin;
     let author = (device, now);
     *at = steps.last().expect("pending migrations").migration;
     let mut marker = None;
@@ -167,17 +183,22 @@ pub(crate) fn run<'a>(
             names.columns.retain(|(table, _), _| names.tables.contains_key(table));
         }
         crate::source_names::record(database, current, supported, &final_schema, &names)?;
-        marker = Some(finish(
-            database,
-            tables,
-            &steps[0].before,
-            &names,
-            &steps[first].before,
-            &baseline_names,
-            capture.into_snapshot().expect("breaking statement captured its before state"),
-            &removed,
-            author,
-        )?);
+        // A write made before the device is registered is one no device, its
+        // own included, can accept, and the store this installation loads
+        // replaces what the migration changed.
+        if installation == Installation::Own {
+            marker = Some(finish(
+                database,
+                tables,
+                &steps[0].before,
+                &names,
+                &steps[first].before,
+                &baseline_names,
+                capture.into_snapshot().expect("breaking statement captured its before state"),
+                &removed,
+                author,
+            )?);
+        }
     }
     if marker.is_none() && !steps.is_empty() {
         // Added columns can change generated values and removal predicates.

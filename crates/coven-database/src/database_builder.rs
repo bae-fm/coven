@@ -13,6 +13,7 @@ pub struct DatabaseBuilder {
     namespaces: Vec<crate::Namespace>,
     migrations: Option<Vec<Migration>>,
     migration_operation: Option<Box<MigrationOperation>>,
+    installation: crate::migration_run::Installation,
     clock: Option<ClockRef>,
     ids: Option<IdSourceRef>,
     sqlite: crate::SqliteSettings,
@@ -29,6 +30,7 @@ impl DatabaseBuilder {
             namespaces: Vec::new(),
             migrations: None,
             migration_operation: None,
+            installation: crate::migration_run::Installation::Own,
             clock: None,
             ids: None,
             sqlite: crate::SqliteSettings::default(),
@@ -58,6 +60,15 @@ impl DatabaseBuilder {
     /// The complete app migration sequence, numbered from one.
     pub fn migrations(mut self, migrations: Vec<Migration>) -> Self {
         self.migrations = Some(migrations);
+        self
+    }
+
+    /// Open an installation that loads its store from storage next, for a
+    /// join, restore or reset: its breaking migrations make no migration
+    /// write, since the device isn't registered yet and the load replaces
+    /// what they changed (§18.4).
+    pub fn loading_store(mut self) -> Self {
+        self.installation = crate::migration_run::Installation::Loading;
         self
     }
 
@@ -176,7 +187,11 @@ impl DatabaseBuilder {
                     &tables,
                     &migrations,
                     &self.functions.versions(),
-                    Some(crate::migration_run::MigrationOrigin(settings.device_id, clock.now())),
+                    Some(crate::migration_run::MigrationOrigin(
+                        settings.device_id,
+                        clock.now(),
+                        self.installation,
+                    )),
                     self.migration_operation.as_deref(),
                     &mut progress,
                 )?;
