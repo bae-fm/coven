@@ -67,16 +67,31 @@ pub(crate) fn losses<E: From<DbError>>(
         [audience_text(audience)],
         |r| {
             let loss = decoded(merge_fields::decode_loss(&r.get::<_, Vec<u8>>(0)?))?;
-            crate::loss_record::put_table(db, &loss, None, "temp._coven_snapshot_losses")
+            crate::loss_record::put_table(
+                db,
+                &loss,
+                None,
+                crate::loss_record::LossTable::SnapshotView,
+            )
         },
     )?;
     for (row, rules) in removed.iter().filter(|(row, _)| row.audience == *audience) {
         let state = crate::published::kept_state(db, row)?
             .ok_or(DbError::Invariant { what: "a kept row's removal names a kept record" })?;
         let loss = coven_format::loss::Loss::removed(&state, rules.clone());
-        crate::loss_record::put_table(db, &loss, None, "temp._coven_snapshot_losses")?;
+        crate::loss_record::put_table(
+            db,
+            &loss,
+            None,
+            crate::loss_record::LossTable::SnapshotView,
+        )?;
     }
-    crate::loss_record::visit_table(db, audience, "temp._coven_snapshot_losses", &mut visit)?;
+    crate::loss_record::visit_table(
+        db,
+        audience,
+        crate::loss_record::LossTable::SnapshotView,
+        &mut visit,
+    )?;
     db.batch("DROP TABLE temp._coven_snapshot_losses")?;
     Ok(())
 }

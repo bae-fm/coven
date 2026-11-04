@@ -145,7 +145,7 @@ pub(crate) fn persist(
                 delete_children(database, &StoredRows::Generation(ordinal))?;
             }
             if let Some(loss) = old.loss {
-                database.internal_execute("DELETE FROM _coven_lost WHERE id=?1", [loss])?;
+                crate::loss_record::delete(database, loss)?;
             }
         }
         if update.state.present() {
@@ -189,26 +189,14 @@ pub(crate) fn persist(
         }
         for change in &update.lost_changes {
             match change {
-                LostChange::Remove(key) => {
-                    database.internal_execute(
-                        "DELETE FROM _coven_lost WHERE id=?1",
-                        [old.lost_ids[key]],
-                    )?;
-                }
-                LostChange::Put(key, value) => {
-                    let bytes = encoded(merge_fields::encode_column_value(&value.value))?;
-                    let setter = encoded(merge_fields::encode_write_id(&key.write))?;
-                    let replaced_by = encoded(merge_fields::encode_write_id(&value.replaced_by))?;
-                    if let Some(id) = old.lost_ids.get(key) {
-                        database.internal_execute(
-                            "UPDATE _coven_lost SET value=?1,set_by=?2,replaced_by=?3 WHERE id=?4",
-                            params![bytes, setter, replaced_by, id],
-                        )?;
-                    } else {
-                        let column = database.column_id(&row.table, &key.column)?;
-                        database.internal_execute("INSERT INTO _coven_lost(table_name,key,audience,generation,column_id,value,set_by,replacement_kind,replaced_by) VALUES(?1,?2,?3,?4,?5,?6,?7,'write',?8)",params![row.table,row.key,audience,value.incarnation.to_be_bytes().as_slice(),column,bytes,setter,replaced_by])?;
-                    }
-                }
+                LostChange::Remove(key) => crate::loss_record::delete(database, old.lost_ids[key])?,
+                LostChange::Put(key, value) => crate::loss_record::put_write_loss(
+                    database,
+                    row,
+                    key,
+                    value,
+                    old.lost_ids.get(key).copied(),
+                )?,
             }
         }
     }

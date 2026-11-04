@@ -82,10 +82,6 @@ mod fixture {
        CROSS JOIN (SELECT 0 AS offset UNION ALL SELECT 1024 UNION ALL SELECT 2048);
      INSERT INTO _coven_references SELECT i,(i-1)%1024+1,i,tab,key,audience,counter(1) FROM fixture;
      INSERT INTO _coven_claims SELECT i,i,audience,key FROM fixture;
-     INSERT INTO _coven_lost
-       (table_name,key,audience,generation,column_id,value,set_by,frozen,replacement_kind,replaced_by)
-       SELECT tab,key,audience,counter(1),CASE WHEN i%3=0 THEN i END,
-              zeroblob(64),n,i%2,CASE WHEN i%3=0 THEN 'write' ELSE 'rules' END,n FROM fixture;
      INSERT INTO _coven_install_fixture SELECT key,audience,'1',1,counter(1),device,n,0,1,1,x'00',device,n,key,audience,counter(1) FROM fixture;
      INSERT INTO _coven_install_generations SELECT tab,key,audience,counter(1),device,n FROM fixture;
      INSERT INTO _coven_install_parts SELECT CAST(device || n AS BLOB),audience,x'00',i%2 FROM fixture;
@@ -99,6 +95,7 @@ mod fixture {
         crate::store_state_tables::tests::fill_for_plans(&db);
         crate::published::tests::fill_for_plans(&db);
         crate::claim::tests::fill_for_plans(&db);
+        crate::loss_record::tests::fill_for_plans(&db);
         crate::write_sources::tests::fill_for_plans(&db);
         crate::ownership::tests::fill_for_plans(&db);
         crate::database::file_database::cache::tests::fill_for_plans(&db);
@@ -269,6 +266,7 @@ mod source {
                     | "claim_schema.rs"
                     | "published_schema.rs"
                     | "store_state_schema.rs"
+                    | "loss_record_schema.rs"
                     | "write_sources_schema.rs"
                     | "ownership_schema.rs"
                     | "file_cache_schema.rs"

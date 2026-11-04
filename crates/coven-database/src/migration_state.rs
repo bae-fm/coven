@@ -90,42 +90,7 @@ fn rename_table(db: &DatabaseConnection, old: &str, new: &str) -> Result<(), DbE
     )?;
     // A renamed table's rows keep their original creations (§9.6).
     crate::ownership::rename(db, old, new)?;
-    // Active losses follow their row: a hidden row keeps its values in its
-    // removal record (§18.7).
-    db.internal_execute(
-        "UPDATE _coven_lost SET table_name=?2 WHERE table_name=?1 AND frozen=0",
-        params![old, new],
-    )?;
-    Ok(())
-}
-
-/// A hidden row's removal record holds its values by column name: renamed
-/// columns move with the row's cells, and dropped ones go with them.
-fn rename_removed_values(
-    db: &DatabaseConnection,
-    table: &str,
-    columns: &std::collections::BTreeMap<String, Option<String>>,
-) -> Result<(), DbError> {
-    for (id, bytes) in db.query(
-        "SELECT id,value FROM _coven_lost WHERE table_name=?1 AND frozen=0 AND replacement_kind='rules' AND column_id IS NULL",
-        [table],
-        |r| Ok((r.get::<_, i64>(0)?, r.get::<_, Vec<u8>>(1)?)),
-    )? {
-        let values = decoded(merge_fields::decode_columns(&bytes))?;
-        let renamed: std::collections::BTreeMap<_, _> = values
-            .into_iter()
-            .filter_map(|(column, value)| match columns.get(&column) {
-                Some(Some(new)) => Some((new.clone(), value)),
-                Some(None) => None,
-                None => Some((column, value)),
-            })
-            .collect();
-        db.internal_execute(
-            "UPDATE _coven_lost SET value=?2 WHERE id=?1",
-            params![id, encoded(merge_fields::encode_columns(&renamed))?],
-        )?;
-    }
-    Ok(())
+    crate::loss_record::rename_table(db, old, new)
 }
 
 fn columns(db: &DatabaseConnection, names: &MigrationMatch) -> Result<(), DbError> {
@@ -192,7 +157,7 @@ fn columns(db: &DatabaseConnection, names: &MigrationMatch) -> Result<(), DbErro
         renamed.push((active, new_table, new_column));
     }
     for (table, columns) in &removed_values {
-        rename_removed_values(db, table, columns)?;
+        crate::loss_record::rename_removed_values(db, table, columns)?;
     }
     for (id, table, column) in renamed {
         let existing: Option<i64> = db.query_row(
@@ -221,8 +186,7 @@ fn move_column(db: &DatabaseConnection, old: i64, new: i64) -> Result<(), DbErro
             params![old, new],
         )?;
     }
-    db.internal_execute("UPDATE _coven_lost SET column_id=?2 WHERE column_id=?1 AND frozen=0 AND replacement_kind='write'",params![old,new])?;
-    Ok(())
+    crate::loss_record::move_column(db, old, new)
 }
 
 fn references(
@@ -283,15 +247,9 @@ fn references(
     }
     for table in losses {
         // Values of concurrent cell losses embed reference identities as well.
-        db.for_each::<_, crate::DbError>("SELECT id,value FROM _coven_lost WHERE table_name=?1 AND frozen=0 AND replacement_kind='write'",[&table],|r| {
-            let id: i64 = r.get(0)?;
-            let mut value = decoded(merge_fields::decode_column_value(&r.get::<_,Vec<u8>>(1)?))?;
-            let old = value.clone();
+        crate::loss_record::carry_cell_values(db, &table, |mut value| {
             value.parents = names.carried_parents(after, &table, value.parents);
-            if value != old {
-                db.internal_execute("UPDATE _coven_lost SET value=?2 WHERE id=?1",params![id,encoded(merge_fields::encode_column_value(&value))?])?;
-            }
-            Ok(())
+            value
         })?;
     }
     Ok(())

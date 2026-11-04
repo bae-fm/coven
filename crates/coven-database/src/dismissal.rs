@@ -286,7 +286,7 @@ pub(crate) fn apply(
             if keep {
                 crate::loss_record::put(database, &loss, Some(id))?;
             } else {
-                database.internal_execute("DELETE FROM _coven_lost WHERE id=?1", [id])?;
+                crate::loss_record::delete(database, id)?;
             }
             affected.insert((row.table.clone(), row.key.clone()));
         }

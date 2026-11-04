@@ -163,12 +163,6 @@ fn database_reason(statement: &Statement, relation: &str) -> Option<&'static str
     Some("once per migration: move/drop a column and check its cell references"),
 ("_coven_lost_column_deleted" | "_coven_lost_column_moved", "DELETE FROM _coven_columns WHERE id=?4 AND synced=0 AND NOT EXISTS(SELECT 1 FROM _coven_lost WHERE column_id=?4)", "_coven_cells") =>
     Some("only a dropped column's last frozen loss deletes a row, and SQLite then checks the cells' foreign key"),
-("migration_state.rs", "DELETE FROM _coven_lost WHERE table_name=?1 AND frozen=0", "_coven_lost") =>
-    Some("once per migration: remove active losses of a dropped app table"),
-("migration_state.rs", "DELETE FROM _coven_lost WHERE column_id=?1 AND frozen=0 AND replacement_kind='write'"
-    | "SELECT EXISTS(SELECT 1 FROM _coven_lost WHERE column_id=?1 AND frozen=1)"
-    | "UPDATE _coven_lost SET column_id=?2 WHERE column_id=?1 AND frozen=0 AND replacement_kind='write'", "_coven_lost") =>
-    Some("once per migration: separate active and frozen losses when moving columns"),
 ("reload_gate.rs", "SELECT audience FROM _coven_data_reloads", "_coven_data_reloads") =>
     Some("sync schedules every audience awaiting replacement data"),
 ("sequence.rs", "SELECT device,number,digest FROM _coven_last_claims ORDER BY device", "_coven_last_claims") =>

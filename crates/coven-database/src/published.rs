@@ -270,12 +270,11 @@ pub(crate) fn restore(
     for row in rows {
         let audience = audience_text(&row.audience);
         crate::write_commit::delete_children(db, &crate::write_commit::StoredRows::Row(&row))?;
-        for table in ["_coven_rows", "_coven_lost"] {
-            db.internal_execute(
-                &format!("DELETE FROM {table} WHERE table_name=?1 AND key=?2 AND audience=?3"),
-                params![row.table, row.key, audience],
-            )?;
-        }
+        db.internal_execute(
+            "DELETE FROM _coven_rows WHERE table_name=?1 AND key=?2 AND audience=?3",
+            params![row.table, row.key, audience],
+        )?;
+        crate::loss_record::forget_row(db, &row)?;
         crate::ownership::forget_row(db, &row)?;
         if schema.schema.tables.contains_key(&row.table.to_ascii_lowercase()) {
             touched.insert(row);

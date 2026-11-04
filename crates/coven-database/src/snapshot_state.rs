@@ -36,11 +36,8 @@ pub(crate) fn begin(database: &DatabaseConnection, audience: &Audience) -> Resul
         database,
         &crate::write_commit::StoredRows::InAudience(&audience),
     )?;
-    for table in ["_coven_rows", "_coven_lost"] {
-        database
-            .internal_execute(&format!("DELETE FROM {table} WHERE audience=?1"), [&audience])?;
-    }
-    Ok(())
+    database.internal_execute("DELETE FROM _coven_rows WHERE audience=?1", [&audience])?;
+    crate::loss_record::forget_audience(database, &audience)
 }
 
 pub(crate) fn create_tables(database: &DatabaseConnection) -> Result<(), DbError> {

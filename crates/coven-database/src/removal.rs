@@ -4,11 +4,10 @@ use crate::schema::TableSchema;
 use crate::sql::identifier;
 use crate::sqlite::changed_once;
 use crate::sqlite::DatabaseConnection;
-use crate::write_encoding::{audience_text, encoded, sql_value};
+use crate::write_encoding::{audience_text, sql_value};
 use crate::write_rows::{key_columns, AppValues, AppView};
 use crate::write_schema::WriteSchema;
 use crate::DbError;
-use coven_format::merge_fields;
 use coven_merge::{RemovalResult, RowId};
 use rusqlite::{params, params_from_iter};
 use std::collections::{BTreeMap, BTreeSet};
@@ -218,23 +217,17 @@ pub(crate) fn record(
         }
         if let Some(rules) = result.removed.get(id) {
             let setters = state.cells().iter().map(|(n, c)| (n.clone(), c.write)).collect();
-            let values = encoded(merge_fields::encode_columns(&columns))?;
-            let setters = encoded(merge_fields::encode_setters(&setters))?;
-            let rules = encoded(merge_fields::encode_rules(rules))?;
-            match loss {
-                Some(loss) => {
-                    // Compare the stored fields so unchanged region neighbors
-                    // do not produce metadata writes or local trigger effects.
-                    database.internal_execute("UPDATE _coven_lost SET value=?1,set_by=?2,replaced_by=?3 WHERE id=?4 AND (value<>?1 OR set_by<>?2 OR replaced_by<>?3)",params![values,setters,rules,loss])?;
-                }
-                None => {
-                    database.internal_execute("INSERT INTO _coven_lost(table_name,key,audience,generation,column_id,value,set_by,replacement_kind,replaced_by) VALUES(?1,?2,?3,?4,NULL,?5,?6,'rules',?7)",params![id.table,id.key,audience_text(&id.audience),state.generation().to_be_bytes().as_slice(),values,setters,rules])?;
-                }
-            }
-        } else {
-            if let Some(loss) = loss {
-                database.internal_execute("DELETE FROM _coven_lost WHERE id=?1", [loss])?;
-            }
+            crate::loss_record::put_rules_loss(
+                database,
+                id,
+                state.generation(),
+                &columns,
+                &setters,
+                rules,
+                loss,
+            )?;
+        } else if let Some(loss) = loss {
+            crate::loss_record::delete(database, loss)?;
         }
     }
     Ok(())
