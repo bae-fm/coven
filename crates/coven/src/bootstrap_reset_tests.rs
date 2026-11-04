@@ -187,7 +187,12 @@ async fn missing_custody_resets_as_a_new_device_and_keeps_the_notice() {
     );
     // Then it connects, and loads the store.
     assert_eq!(reported.get(opened), Some(&BootstrapStatus::Connecting));
-    let loading = &reported[opened + 1..];
+    // Then it registers, and keeps its keys and publishes the store.
+    let [loading @ .., BootstrapStatus::Registering, BootstrapStatus::Committing] =
+        &reported[opened + 1..]
+    else {
+        panic!("{reported:?}");
+    };
     assert!(!loading.is_empty(), "{reported:?}");
     assert!(
         loading.iter().all(|status| matches!(status, BootstrapStatus::Loading(_))),

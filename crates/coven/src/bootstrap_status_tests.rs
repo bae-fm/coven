@@ -46,14 +46,17 @@ async fn a_restore_opens_its_new_installation_before_connecting() {
 
 /// Restoring Ana's store from its floor reports loading's steps as
 /// `Loading`, in order, from streaming the store's snapshot to applying the
-/// last slot after it; keeping keys and credentials follows (E10).
+/// last slot after it. Registering the device follows, then keeping keys and
+/// credentials and publishing the store, each a phase of its own with no
+/// count (E10).
 #[tokio::test]
 async fn a_restore_reports_loading_from_the_snapshot_to_the_last_slot() {
     let owner = Owner::new(CloudProvider::S3, true).await;
     let (reported, loading) = restore_statuses(&owner).await;
     let reported = after_opening(&reported);
     assert_eq!(reported.first(), Some(&BootstrapStatus::Connecting));
-    for status in &reported[1..] {
+    let loaded = before_finishing(&reported[1..]);
+    for status in loaded {
         assert!(matches!(status, BootstrapStatus::Loading(_)), "{status:?} while loading");
     }
     assert_honest(reported);
@@ -62,7 +65,7 @@ async fn a_restore_reports_loading_from_the_snapshot_to_the_last_slot() {
     let last = loading.last().expect("loading reports");
     assert_eq!(last.step, LoadStep::Applying, "{loading:?}");
     assert_eq!(last.done, last.total, "{loading:?}");
-    assert_eq!(reported.last(), Some(&BootstrapStatus::Loading(last.clone())));
+    assert_eq!(loaded.last(), Some(&BootstrapStatus::Loading(last.clone())));
     owner.close().await;
 }
 
@@ -180,7 +183,7 @@ async fn a_join_reports_finding_its_keys_before_it_loads() {
     result.unwrap().unwrap().close().await.unwrap();
     let reported = reported.into_inner().unwrap();
     assert_honest(&reported);
-    let after_loading_began: Vec<_> = reported
+    let after_loading_began: Vec<_> = before_finishing(&reported)
         .iter()
         .skip_while(|status| !matches!(status, BootstrapStatus::Loading(_)))
         .collect();
@@ -234,7 +237,7 @@ async fn a_join_reports_each_bootstrap_phase_in_order() {
     result.unwrap().unwrap().close().await.unwrap();
     let reported = reported.into_inner().unwrap();
     let request = approved.into_inner().unwrap().unwrap();
-    let reported = after_opening(&reported);
+    let reported = before_finishing(after_opening(&reported));
     assert_eq!(reported.first(), Some(&BootstrapStatus::Connecting));
     assert_honest(reported);
     let loading = reported

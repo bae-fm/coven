@@ -7104,9 +7104,18 @@ pub enum BootstrapStatus {
     },
     /// Loading the store from storage, with loading's steps (§13.4). A
     /// waiting join's scan for its keys is part of its wait; the check in
-    /// which its keys open reports that scan, then loads. Keeping keys and
-    /// credentials follows the last.
+    /// which its keys open reports that scan, then loads. Registering follows
+    /// the last.
     Loading(Progress<LoadStep>),
+    /// Registering this device once the store is loaded: a restore's check of
+    /// the access it reaches storage with, the registration, whose claim first
+    /// reads the slots added since loading, and the recorded access that
+    /// follows (§13.1). No count: the claim's reads aren't known until made.
+    Registering,
+    /// Keeping the member's keys and the device's credentials in custody and
+    /// publishing the store, the last work before the handle opens. A
+    /// replacement's swap and reopening, reported as `Opening`, come first.
+    Committing,
     Pending(Vec<PendingRecord>),
 }
 

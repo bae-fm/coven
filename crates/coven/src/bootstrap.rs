@@ -408,6 +408,7 @@ async fn bootstrap_device(
             waits,
         })) => {
             let requests = storage.requests();
+            status(BootstrapStatus::Committing);
             // The saved code's name, read before the final steps, which no
             // await separates; so is the status the published store opens
             // with (E5).
@@ -749,6 +750,7 @@ async fn prepare_and_load(
             requests = %storage.requests().since(&unlocking.1),
             "read the store forward with this member's keys"
         );
+        status(BootstrapStatus::Registering);
         // A restore checks the access it reaches storage with before it
         // registers, and records it after, as setup does, so the member's
         // recorded access is the one in use (§13.1). A joiner's is the one
