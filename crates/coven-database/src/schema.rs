@@ -3,6 +3,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::declaration::AudienceSource;
+use crate::scope_term::Affinity;
 use crate::sql::{guarded_trigger, identifier, table_parts, tokens};
 use crate::sqlite::DatabaseConnection;
 use crate::{DbError, MigrationChange, RowIdentity, SchemaError, SyncedTable};
@@ -735,8 +736,7 @@ pub(crate) fn validate_local_keys(
 }
 
 fn text_affinity(kind: &str) -> bool {
-    let kind = kind.to_ascii_uppercase();
-    !kind.contains("INT") && ["CHAR", "CLOB", "TEXT"].iter().any(|s| kind.contains(s))
+    Affinity::declared(kind) == Affinity::Text
 }
 
 #[cfg(test)]
