@@ -3,6 +3,7 @@
 use crate::snapshot_error::{invalid, SnapshotError};
 use crate::snapshot_layout::SnapshotLayout;
 use crate::snapshot_metadata::SnapshotMetadata;
+use crate::snapshot_metadata::STAGED_WRITES;
 use crate::snapshot_preparation::PreparedSnapshot;
 use crate::sqlite::DatabaseConnection;
 use crate::write_schema::WriteSchema;
@@ -173,7 +174,7 @@ pub(crate) fn read(
     crate::ownership::clear_audience(database, audience)?;
     let metadata = SnapshotMetadata::new(database);
     prepared.each(
-        "SELECT device,number,timestamp,read_through,slot FROM temp._coven_snapshot_writes WHERE source=?1 ORDER BY device,number",
+        &format!("{STAGED_WRITES} ORDER BY device,number"),
         [prepared.staging()],
         |r| metadata.put(&crate::snapshot_metadata::applied(r)?),
     )?;

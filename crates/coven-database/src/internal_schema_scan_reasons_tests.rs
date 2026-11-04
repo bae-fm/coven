@@ -352,6 +352,7 @@ mod source {
                     .replace("{FILE_NAMED_SQL}", crate::internal_schema::FILE_NAMED_SQL)
                     .replace("{CACHE_NAME_USED_SQL}", crate::internal_schema::CACHE_NAME_USED_SQL)
                     .replace("{RULES_REMOVED_SQL}", crate::internal_schema::RULES_REMOVED_SQL)
+                    .replace("{STAGED_WRITES}", crate::snapshot_metadata::STAGED_WRITES)
                     .replace("{select}", &losses)
                     .replace("{SELECT}", if file == "pending.rs" { &pending } else { &losses });
                 let sql = if sql.starts_with("{} WHERE l.") || sql.starts_with("{} ORDER BY l.") {

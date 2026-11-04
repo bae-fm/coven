@@ -27,6 +27,10 @@ pub(crate) struct SnapshotMetadata<'a> {
     read: RefCell<BTreeMap<WriteId, AppliedWrite>>,
 }
 
+/// The applied writes of the snapshot staged as `?1`, as [`applied`] reads
+/// them.
+pub(crate) const STAGED_WRITES: &str = "SELECT device,number,timestamp,read_through,slot FROM temp._coven_snapshot_writes WHERE source=?1";
+
 /// The source of the snapshot a loading transaction is installing.
 const INSTALLING: i64 = 0;
 
@@ -66,7 +70,11 @@ impl<'a> SnapshotMetadata<'a> {
         if let Some(write) = self.read.borrow().get(&id) {
             return Ok(Some(write.clone()));
         }
-        let row = self.database.query("SELECT device,number,timestamp,read_through,slot FROM temp._coven_snapshot_writes WHERE source=?1 AND device=?2 AND number=?3", params![self.source,id.device,id.number.to_be_bytes().as_slice()], applied)?;
+        let row = self.database.query(
+            &format!("{STAGED_WRITES} AND device=?2 AND number=?3"),
+            params![self.source, id.device, id.number.to_be_bytes().as_slice()],
+            applied,
+        )?;
         let write = row.into_iter().next();
         if let Some(write) = &write {
             self.read.borrow_mut().insert(id, write.clone());
@@ -85,7 +93,7 @@ impl<'a> SnapshotMetadata<'a> {
     /// earlier writes. This holds the snapshot's writes, a few counters each.
     pub(crate) fn validate(&self, covers: u64) -> Result<(), DbError> {
         let writes = self.database.query(
-            "SELECT device,number,timestamp,read_through,slot FROM temp._coven_snapshot_writes WHERE source=?1 ORDER BY device,number",
+            &format!("{STAGED_WRITES} ORDER BY device,number"),
             [self.source],
             applied,
         )?;
@@ -128,7 +136,7 @@ impl<'a> SnapshotMetadata<'a> {
 }
 
 /// An applied write as `_coven_snapshot_writes` holds it, selected as
-/// device, number, timestamp, read-through and slot.
+/// [`STAGED_WRITES`] selects it.
 pub(crate) fn applied(r: &rusqlite::Row<'_>) -> rusqlite::Result<AppliedWrite> {
     Ok(AppliedWrite {
         id: WriteId { device: r.get::<_, DeviceId>(0)?, number: counter(r.get(1)?) },
