@@ -94,12 +94,7 @@ impl OneDriveStorage {
         let response = self
             .publish(publication, Method::DELETE, &self.temporary_url(session)?, Body::Empty)
             .await?;
-        if response.status().as_u16() == 404 {
-            self.check_folder().await?;
-        } else {
-            http::checked(PROVIDER, response).await?;
-        }
-        Ok(())
+        self.found(response).await.map(drop)
     }
     /// `device`'s reserved folder, when it exists: what is in it is
     /// temporaries whose native upload finished before their copy. A native
@@ -113,11 +108,9 @@ impl OneDriveStorage {
         let folder = coven_format::path::device_uploads(store, device);
         let url = format!("{}:/{folder}:", self.item(&self.folder, &[])?);
         let response = self.send(Method::GET, &url, Body::Empty).await?;
-        if response.status().as_u16() == 404 {
-            self.check_folder().await?;
+        if !self.found(response).await? {
             return Ok(Vec::new());
         }
-        http::checked(PROVIDER, response).await?;
         Ok(vec![crate::LeftUpload(crate::left_upload::Left::Staged(folder))])
     }
     /// Delete a device's reserved folder with every temporary in it. An
@@ -128,11 +121,7 @@ impl OneDriveStorage {
         };
         let url = format!("{}:/{folder}:", self.item(&self.folder, &[])?);
         let response = self.send(Method::DELETE, &url, Body::Empty).await?;
-        if response.status().as_u16() == 404 {
-            self.check_folder().await?;
-        } else {
-            http::checked(PROVIDER, response).await?;
-        }
+        self.found(response).await?;
         // A remembered id of the deleted folder would send an upload into it.
         let inside = format!("{folder}/");
         self.folder_ids.lock().await.retain(|name, _| name != folder && !name.starts_with(&inside));

@@ -86,6 +86,17 @@ impl OneDriveStorage {
         let headers = body_headers(&body);
         self.session.publish(publication, method, url, &headers, body, true).await
     }
+    /// Whether an item request found its item. A 404 is an absent item once
+    /// the store's folder is confirmed still there, so a removed folder is
+    /// never taken for an absent item; any other answer must succeed.
+    pub(super) async fn found(&self, response: reqwest::Response) -> Result<bool, StorageError> {
+        if response.status().as_u16() == 404 {
+            self.check_folder().await?;
+            return Ok(false);
+        }
+        http::checked(PROVIDER, response).await?;
+        Ok(true)
+    }
     async fn check_folder(&self) -> Result<(), StorageError> {
         let value = http::json(
             PROVIDER,
@@ -318,12 +329,7 @@ impl ProviderOps for OneDriveStorage {
 
     async fn delete(&self, path: &ObjectPath) -> Result<(), StorageError> {
         let response = self.send(Method::DELETE, &self.by_path(path, "")?, Body::Empty).await?;
-        if response.status().as_u16() == 404 {
-            self.check_folder().await?;
-        } else {
-            http::checked(PROVIDER, response).await?;
-        }
-        Ok(())
+        self.found(response).await.map(drop)
     }
     async fn grant_access(&self, account: &str) -> Result<AccessGrant, StorageError> {
         self.require_owner().await?;
