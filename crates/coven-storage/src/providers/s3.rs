@@ -235,13 +235,7 @@ impl S3Storage {
                 let (name, value) = self.settings.single_put.header();
                 (name, value.to_owned())
             }
-            Some(token) => (
-                match self.settings.revision {
-                    S3Revision::ETag => "if-match",
-                    S3Revision::Generation => "x-goog-if-generation-match",
-                },
-                token.to_owned(),
-            ),
+            Some(token) => (self.settings.revision.match_header(), token.to_owned()),
         };
         let sent = sent.clone();
         let mut request = request.customize().mutate_request(move |request| {

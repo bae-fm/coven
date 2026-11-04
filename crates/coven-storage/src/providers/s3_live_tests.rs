@@ -448,10 +448,7 @@ async fn run_race_round(
     for (writer, bytes) in payloads.iter().enumerate() {
         prepared.push(match &previous {
             Some(previous) => Write::Put {
-                header: match s.provider().settings.revision {
-                    S3Revision::ETag => "if-match",
-                    S3Revision::Generation => "x-goog-if-generation-match",
-                },
+                header: s.provider().settings.revision.match_header(),
                 value: previous.metadata.replace_token.clone(),
             },
             None if matches!(race, Race::Multipart)

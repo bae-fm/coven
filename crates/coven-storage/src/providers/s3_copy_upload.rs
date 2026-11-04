@@ -298,14 +298,7 @@ impl S3Storage {
                 let (header, value) = condition.header();
                 (header, value.to_owned())
             }
-            Some(revision) => (
-                match condition {
-                    S3CopyCondition::IfNoneMatch => "if-match",
-                    S3CopyCondition::GenerationMatch => "x-goog-if-generation-match",
-                    S3CopyCondition::CloudflareIfNoneMatch => "cf-copy-destination-if-match",
-                },
-                revision.to_owned(),
-            ),
+            Some(revision) => (condition.match_header(), revision.to_owned()),
         };
         let mut request = self
             .client

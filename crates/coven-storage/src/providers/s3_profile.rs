@@ -27,11 +27,26 @@ impl EndpointMatch {
         }
     }
 }
+/// The conditional headers S3 services take: S3's ETag conditions, and
+/// GCS's generation condition, whose `0` names no object.
+const IF_NONE_MATCH: &str = "if-none-match";
+const IF_MATCH: &str = "if-match";
+const IF_GENERATION_MATCH: &str = "x-goog-if-generation-match";
+
 impl S3SinglePut {
     pub(super) fn header(self) -> (&'static str, &'static str) {
         match self {
-            Self::IfNoneMatch => ("if-none-match", "*"),
-            Self::GenerationMatch => ("x-goog-if-generation-match", "0"),
+            Self::IfNoneMatch => (IF_NONE_MATCH, "*"),
+            Self::GenerationMatch => (IF_GENERATION_MATCH, "0"),
+        }
+    }
+}
+impl S3Revision {
+    /// The header that makes a replacement wait for this revision.
+    pub(super) fn match_header(self) -> &'static str {
+        match self {
+            Self::ETag => IF_MATCH,
+            Self::Generation => IF_GENERATION_MATCH,
         }
     }
 }
@@ -49,9 +64,17 @@ impl S3CopyCondition {
     }
     pub(super) fn header(self) -> (&'static str, &'static str) {
         match self {
-            Self::IfNoneMatch => ("if-none-match", "*"),
-            Self::GenerationMatch => ("x-goog-if-generation-match", "0"),
+            Self::IfNoneMatch => (IF_NONE_MATCH, "*"),
+            Self::GenerationMatch => (IF_GENERATION_MATCH, "0"),
             Self::CloudflareIfNoneMatch => ("cf-copy-destination-if-none-match", "*"),
+        }
+    }
+    /// The header that makes a copy wait for the destination's revision.
+    pub(super) fn match_header(self) -> &'static str {
+        match self {
+            Self::IfNoneMatch => IF_MATCH,
+            Self::GenerationMatch => IF_GENERATION_MATCH,
+            Self::CloudflareIfNoneMatch => "cf-copy-destination-if-match",
         }
     }
 }
