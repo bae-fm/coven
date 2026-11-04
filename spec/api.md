@@ -1822,12 +1822,27 @@ pub enum ReadOnlyOpenError {
     Bug(Bug),
 }
 
-/// Listing the app's stores failed (E1).
+/// A store on this device as the listing found it (E1).
+pub enum ListedStore {
+    /// Its name and state read.
+    Readable(StoreInfo),
+    /// Its replacement record or name can't be read, for `reason`. The app
+    /// shows it as damaged and can offer `discard_store` for it.
+    Unreadable { id: StoreId, reason: CovenError },
+}
+
+impl ListedStore {
+    /// The store this entry lists.
+    pub fn id(&self) -> StoreId;
+}
+
+/// Listing the app's stores failed (E1). A store that can't be read is not a
+/// failure: it is listed as `ListedStore::Unreadable`.
 pub enum StoreListError {
     /// Listing directories or reading settings failed.
     File(FileError),
-    /// Reading this store's current name failed; no older name is substituted.
-    Store { store: StoreId, source: CovenError },
+    /// The runtime is shutting down and dropped the listing's work (E15).
+    Shutdown(Shutdown),
     /// Listing the stores panicked on the blocking pool: a bug (E15).
     Bug(Bug),
 }
@@ -2073,10 +2088,12 @@ impl Coven {
     pub fn new(app_dir: PathBuf, keyring_service: &str) -> Result<Self, KeyError>;
 
     /// The stores on this device, ordered by id, with their committed names.
-    /// Reads names from their databases; unreadable names return StoreListError::Store.
+    /// Reads names from their databases. A store whose replacement record or
+    /// name can't be read is listed as `Unreadable` with why; no older name is
+    /// substituted.
     /// A store whose replacement is unfinished is listed with the call that
     /// finishes it; an unfinished first installation is not listed.
-    pub async fn stores(&self) -> Result<Vec<StoreInfo>, StoreListError>;
+    pub async fn stores(&self) -> Result<Vec<ListedStore>, StoreListError>;
 
     /// The directory of the store with `id`.
     pub fn store_dir(&self, id: &StoreId) -> StoreDir;

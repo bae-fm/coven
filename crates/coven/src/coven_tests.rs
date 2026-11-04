@@ -22,7 +22,7 @@ async fn application_lifecycle_two_stores_lock_read_only_live_query_and_reopen()
     let first = app.create_closed_store("Household", ids.clone()).await.unwrap();
     let second = app.create_closed_store("Work", ids).await.unwrap();
     assert_eq!(
-        app.stores().await.unwrap().iter().map(|s| &s.name).collect::<Vec<_>>(),
+        app.readable_stores().await.iter().map(|s| &s.name).collect::<Vec<_>>(),
         [&"Household", &"Work"]
     );
     let a = builder(&app).open(first.id(), |_| ()).await.unwrap();
@@ -106,7 +106,7 @@ async fn application_lifecycle_two_stores_lock_read_only_live_query_and_reopen()
     app.discard_store(&first).await.unwrap();
     app.discard_store(&first).await.unwrap();
     assert_eq!(
-        app.stores().await.unwrap(),
+        app.readable_stores().await,
         vec![StoreInfo { id: second.id(), name: "Work".into(), unfinished_replacement: None }]
     );
 }
@@ -133,9 +133,11 @@ async fn host_secrets_identity_and_failed_deletion_survive_reopen() {
     std::fs::write(directory.database_path(), b"damaged database").unwrap();
     app.fail_next_keychain_operation();
     assert!(matches!(app.discard_store(&directory).await, Err(StoreDeletionError::Key(_))));
-    assert!(matches!(app.stores().await, Err(StoreListError::Store {
-        store, source: CovenError::Database(DbError::DamagedDatabase),
-    }) if store == directory.id()));
+    assert!(matches!(
+        app.stores().await.unwrap().as_slice(),
+        [ListedStore::Unreadable { id, reason: CovenError::Database(DbError::DamagedDatabase) }]
+            if *id == directory.id()
+    ));
     assert_eq!(directory.settings().unwrap().id, directory.id());
     app.discard_store(&directory).await.unwrap();
     assert!(app.stores().await.unwrap().is_empty());
@@ -416,7 +418,7 @@ async fn discarding_a_store_whose_replacement_stopped_after_its_swap_removes_bot
             carol.app.discard_store(&directory).await,
             Err(StoreDeletionError::Key(_))
         ));
-        assert_eq!(carol.app.stores().await.unwrap()[0].unfinished_replacement, Some(by));
+        assert_eq!(carol.app.readable_stores().await[0].unfinished_replacement, Some(by));
         assert_eq!(directory.unfinished_replacement().unwrap(), Some(record));
         assert!(device_entries_remain(&carol.app, store));
         // Discarding reaches no person entry: refusing them changes nothing.
@@ -503,4 +505,26 @@ fn a_closed_stores_location_read_after_its_runtime_shut_down_is_a_shutdown() {
             }))
         ));
     });
+}
+
+#[tokio::test]
+async fn a_store_whose_database_is_damaged_is_listed_as_unreadable_beside_the_others() {
+    let root = tempfile::tempdir().unwrap();
+    let app = Coven::in_memory(root.path().to_owned());
+    let ids: IdSourceRef = Arc::new(SequentialIds::new());
+    let good = app.create_closed_store("Household", ids.clone()).await.unwrap();
+    let damaged = app.create_closed_store("Work", ids).await.unwrap();
+    std::fs::write(damaged.database_path(), b"damaged database").unwrap();
+    let listed = app.stores().await.unwrap();
+    assert!(matches!(
+        listed.as_slice(),
+        [
+            ListedStore::Readable(StoreInfo { id: first, name, unfinished_replacement: None }),
+            ListedStore::Unreadable {
+                id: second,
+                reason: CovenError::Database(DbError::DamagedDatabase),
+            },
+        ] if *first == good.id() && name == "Household" && *second == damaged.id()
+    ));
+    assert_eq!(listed.iter().map(ListedStore::id).collect::<Vec<_>>(), [good.id(), damaged.id()]);
 }

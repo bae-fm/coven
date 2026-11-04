@@ -7,7 +7,7 @@ pub use crate::builder::{
     JoinControl,
 };
 pub use crate::circles::Circles;
-pub use crate::coven::{Coven, StoreInfo, StoreListError};
+pub use crate::coven::{Coven, ListedStore, StoreInfo, StoreListError};
 pub use crate::coven_write::CovenWrite;
 #[cfg(feature = "dev-tools")]
 pub use crate::dev_tools::empty_s3_prefix;

@@ -151,6 +151,14 @@ fn a_bug_listing_the_stores_is_the_listings_bug() {
     let listing = StoreListError::from(FileError::Bug(bug.clone()));
     assert!(matches!(&listing, StoreListError::Bug(found) if *found == bug));
     assert_eq!(listing.bug(), Some(&bug));
+    let shutdown = crate::task::Shutdown {
+        operation: "list stores",
+        outcome: crate::task::ShutdownOutcome::NotRun,
+    };
+    assert!(matches!(
+        StoreListError::from(FileError::Shutdown(shutdown)),
+        StoreListError::Shutdown(found) if found == shutdown
+    ));
 }
 
 /// A bug in any error coven's own calls keep is the call's bug: creation's,

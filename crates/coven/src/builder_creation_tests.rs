@@ -49,7 +49,7 @@ async fn publication_sync_failure_releases_the_store_before_returning() {
         coven_crypto::custody::KeyringCustody::new(Arc::new(app.store_keychain(expected)));
     let member = MemberKeyCustody::unlock(&identity).unwrap().unwrap();
     assert_eq!(
-        app.stores().await.unwrap(),
+        app.readable_stores().await,
         [StoreInfo { id: expected, name: "Household".into(), unfinished_replacement: None }]
     );
     let reopened = builder().open(expected, |_| ()).await.unwrap();
@@ -155,7 +155,7 @@ async fn creation_initializes_every_builtin_identity_custody_before_setup() {
         let handle = builder().identity_custody(custody).create_store("Created").await.unwrap();
         let id = handle.store_id();
         assert_eq!(
-            app.stores().await.unwrap(),
+            app.readable_stores().await,
             [StoreInfo { id, name: "Created".into(), unfinished_replacement: None }]
         );
         handle
@@ -329,7 +329,7 @@ async fn a_panic_after_publication_keeps_the_published_store() {
         "{source:?}"
     );
     assert_eq!(
-        app.stores().await.unwrap(),
+        app.readable_stores().await,
         [StoreInfo { id: expected, name: "Household".into(), unfinished_replacement: None }]
     );
     let reopened = builder().open(expected, |_| ()).await.unwrap();

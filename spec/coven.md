@@ -921,7 +921,9 @@ connection of a read-only handle. The writer is also where coven migrates,
 applies other devices' writes and merges them, so all of that uses the app's
 order. Listing the stores reads only each store's name, and a reset only the
 journal of the database it replaces (§19.3). Neither compares anything in the
-app's order, so neither needs the app's collations.
+app's order, so neither needs the app's collations. A store whose name can't
+be read is listed as unreadable, so it can't hide the others, and the app can
+discard it (§13.1 gives the same reason for saved entries).
 
 An order is part of the store's schema. At one version, its function must be
 deterministic: the same two strings compare the same way on every device, and

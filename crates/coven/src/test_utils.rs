@@ -184,6 +184,22 @@ impl Coven {
         self.keychain.refuse_person_entry_operations(refuse);
     }
 
+    /// The stores listed, every one readable; an unreadable entry fails the test.
+    #[cfg(test)]
+    pub(crate) async fn readable_stores(&self) -> Vec<StoreInfo> {
+        self.stores()
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|listed| match listed {
+                ListedStore::Readable(info) => info,
+                ListedStore::Unreadable { id, reason } => {
+                    panic!("store {id} is listed as unreadable: {reason}")
+                }
+            })
+            .collect()
+    }
+
     /// Refuse the next keychain operation before changing any stored value.
     pub fn fail_next_keychain_operation(&self) {
         self.keychain.fail_next_operation();

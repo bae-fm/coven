@@ -3,8 +3,8 @@
 //! list, locate, open and remove them (E1).
 
 use crate::{
-    BootstrapError, CovenBuilder, CovenError, FileError, SavedRestoreEntry, StoreDeletionError,
-    StoreDir, StoreId,
+    BootstrapError, CovenBuilder, CovenError, DbError, FileError, SavedRestoreEntry,
+    StoreDeletionError, StoreDir, StoreId,
 };
 use coven_crypto::custody::{KeyError, Keychain, StoreKeychain};
 use coven_foundation::files::{ReplacedBy, StoreDirAccess, StoreDirectories};
@@ -36,21 +36,41 @@ pub struct StoreInfo {
     pub unfinished_replacement: Option<ReplacedBy>,
 }
 
-/// A failure listing stores or reading a committed store name.
+/// A store on this device as the listing found it (E1).
+#[derive(Debug)]
+pub enum ListedStore {
+    /// Its name and state read.
+    Readable(StoreInfo),
+    /// Its replacement record or name can't be read, for `reason`. The app
+    /// shows it as damaged and can offer `discard_store` for it.
+    Unreadable {
+        /// The store whose record or name can't be read.
+        id: StoreId,
+        /// Why it can't be read.
+        reason: CovenError,
+    },
+}
+
+impl ListedStore {
+    /// The store this entry lists.
+    pub fn id(&self) -> StoreId {
+        match self {
+            Self::Readable(info) => info.id,
+            Self::Unreadable { id, .. } => *id,
+        }
+    }
+}
+
+/// A failure listing the stores. A store that can't be read is not one: it
+/// is listed as `ListedStore::Unreadable`.
 #[derive(Debug, thiserror::Error)]
 pub enum StoreListError {
     /// The directory listing or an identity settings read failed.
     #[error(transparent)]
     File(FileError),
-    /// Reading a store's current name failed.
-    #[error("read name of store {store}: {source}")]
-    Store {
-        /// The store whose name could not be read.
-        store: StoreId,
-        /// The database or lock failure.
-        #[source]
-        source: CovenError,
-    },
+    /// The runtime is shutting down and dropped the listing's work (E15).
+    #[error(transparent)]
+    Shutdown(#[from] crate::task::Shutdown),
     /// Listing the stores panicked on the blocking pool: a bug, which the
     /// caller reports (E15).
     #[error(transparent)]
@@ -61,6 +81,7 @@ impl From<FileError> for StoreListError {
     fn from(error: FileError) -> Self {
         match error {
             FileError::Bug(bug) => Self::Bug(bug),
+            FileError::Shutdown(shutdown) => Self::Shutdown(shutdown),
             error => Self::File(error),
         }
     }
@@ -71,7 +92,7 @@ impl crate::task::CarriesBug for StoreListError {
         match self {
             Self::Bug(bug) => Some(bug),
             Self::File(error) => error.bug(),
-            Self::Store { source, .. } => source.bug(),
+            Self::Shutdown(_) => None,
         }
     }
 }
@@ -115,36 +136,52 @@ impl Coven {
     }
 
     /// Stores on this device, ordered by id, with their committed names.
-    /// A damaged name is an error; a listing never substitutes an older name.
+    /// A store whose replacement record or name can't be read is listed as
+    /// `Unreadable` with why; a listing never substitutes an older name.
     /// A store whose replacement is unfinished lists with the call that
     /// finishes it, so the app can offer to; an unfinished first installation
     /// is not listed.
-    pub async fn stores(&self) -> Result<Vec<StoreInfo>, StoreListError> {
+    pub async fn stores(&self) -> Result<Vec<ListedStore>, StoreListError> {
         let mut stores = Vec::new();
         for id in self.directories.store_ids().await? {
-            let directory = self.store_dir(&id);
-            let failed = |source: CovenError| StoreListError::Store { store: id, source };
-            let unfinished = {
-                let directory = directory.clone();
-                crate::task::blocking("read the replacement record", move || {
-                    directory.unfinished_replacement()
-                })
-                .await
-                .map_err(|shutdown| failed(shutdown.into()))?
-                .map_err(|error| failed(error.into()))?
-            };
-            stores.push(match unfinished {
-                Some(record) => {
-                    StoreInfo { id, name: record.name, unfinished_replacement: Some(record.by) }
+            stores.push(match self.read_listed(id).await {
+                Ok(info) => ListedStore::Readable(info),
+                Err(error) => {
+                    if let Some(bug) = crate::task::CarriesBug::bug(&error) {
+                        return Err(StoreListError::Bug(bug.clone()));
+                    }
+                    match error {
+                        CovenError::Shutdown(shutdown)
+                        | CovenError::Database(DbError::Shutdown(shutdown)) => {
+                            return Err(StoreListError::Shutdown(shutdown));
+                        }
+                        reason => ListedStore::Unreadable { id, reason },
+                    }
                 }
-                None => StoreInfo {
-                    id,
-                    name: coven_database::read_store_name(directory).await.map_err(failed)?,
-                    unfinished_replacement: None,
-                },
             });
         }
         Ok(stores)
+    }
+
+    async fn read_listed(&self, id: StoreId) -> Result<StoreInfo, CovenError> {
+        let directory = self.store_dir(&id);
+        let unfinished = {
+            let directory = directory.clone();
+            crate::task::blocking("read the replacement record", move || {
+                directory.unfinished_replacement()
+            })
+            .await??
+        };
+        Ok(match unfinished {
+            Some(record) => {
+                StoreInfo { id, name: record.name, unfinished_replacement: Some(record.by) }
+            }
+            None => StoreInfo {
+                id,
+                name: coven_database::read_store_name(directory).await?,
+                unfinished_replacement: None,
+            },
+        })
     }
 
     /// Address a store without reading settings or acquiring the writer lock.

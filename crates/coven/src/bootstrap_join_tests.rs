@@ -247,7 +247,7 @@ async fn snapshots_restore_the_name_and_invites_keep_the_name_at_creation() {
         .unwrap();
     assert_eq!(reopened.store_name().await.unwrap(), "After snapshot");
     reopened.close().await.unwrap();
-    assert_eq!(install.app.stores().await.unwrap()[0].name, "After snapshot");
+    assert_eq!(install.app.readable_stores().await[0].name, "After snapshot");
 
     // An unexpired invite's captured label cannot become the joined store's name.
     let joined = Installation::new();

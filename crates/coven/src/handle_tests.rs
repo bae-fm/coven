@@ -750,7 +750,7 @@ mod store_rename {
         for device in &network.devices {
             assert_eq!(device.handle.store_name().await.unwrap(), "家庭 recipes");
             assert_eq!(
-                device.app.stores().await.unwrap(),
+                device.app.readable_stores().await,
                 vec![StoreInfo {
                     id: device.store,
                     name: "家庭 recipes".into(),

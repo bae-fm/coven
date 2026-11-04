@@ -350,7 +350,7 @@ async fn a_reset_interrupted_after_its_swap_is_finished_by_the_next_reset() {
         Err(CovenError::Lock(error)) if unfinished(&error)
     ));
     assert_eq!(
-        f.app.stores().await.unwrap(),
+        f.app.readable_stores().await,
         [StoreInfo {
             id: store,
             name: "Reset".into(),
@@ -388,7 +388,7 @@ async fn a_reset_interrupted_after_its_swap_is_finished_by_the_next_reset() {
     assert_eq!(notes(&handle).await, ["kept"]);
     assert!(!loading_area(&f).exists());
     handle.close().await.unwrap();
-    assert_eq!(f.app.stores().await.unwrap()[0].unfinished_replacement, None);
+    assert_eq!(f.app.readable_stores().await[0].unfinished_replacement, None);
 }
 
 /// A reset that fails while its new device loads changes nothing: the store
