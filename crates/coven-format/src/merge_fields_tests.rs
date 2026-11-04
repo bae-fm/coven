@@ -421,3 +421,20 @@ fn unnamed_check_rules_retain_full_expressions_in_loss_fields() {
     decoder.frame(&encoder.finish().unwrap(), &fixture::oracle()).unwrap();
     decoder.finish().unwrap();
 }
+
+/// A timestamp's 16 bytes and its value are one-to-one: every 16 bytes
+/// decode, and encode back to themselves. A stored write's timestamp can
+/// so be compared decoded as well as by its bytes.
+#[test]
+fn every_sixteen_bytes_decode_to_the_timestamp_that_encodes_them() {
+    let mut patterned = [0u8; 16];
+    for (index, byte) in patterned.iter_mut().enumerate() {
+        *byte = (index as u8).wrapping_mul(37).wrapping_add(11);
+    }
+    for bytes in [[0u8; 16], [0xff; 16], patterned] {
+        let timestamp = decode_timestamp(&bytes).unwrap();
+        assert_eq!(encode_timestamp(&timestamp).unwrap(), bytes);
+    }
+    assert!(decode_timestamp(&[0; 15]).is_err());
+    assert!(decode_timestamp(&[0; 17]).is_err());
+}
