@@ -607,3 +607,32 @@ mod dropped_schema {
         db.close().await.unwrap();
     }
 }
+
+/// A row has at most one active rules loss; a second is a damaged store,
+/// which a read reports as `DamagedDatabase` (§19.3), not a panic.
+#[tokio::test]
+async fn a_second_rules_loss_for_one_row_is_damaged_database() {
+    let store = TestStore::new();
+    let db = store.builder(vec![], vec![]).open().await.unwrap();
+    let values = BTreeMap::from([("a".to_owned(), cell(WireValue::Integer(1)))]);
+    let setters = BTreeMap::from([("a".to_owned(), setter(1))]);
+    for _ in 0..2 {
+        insert(
+            &db,
+            None,
+            encode_columns(&values).unwrap(),
+            encode_setters(&setters).unwrap(),
+            "rules",
+            encode_rules(&BTreeSet::from([Rule::OtherAudience])).unwrap(),
+        );
+    }
+    let row = coven_merge::RowId {
+        table: "notes".into(),
+        key: key(),
+        audience: coven_merge::Audience::Store,
+    };
+    assert!(matches!(
+        db.inspect_writer(|sql| crate::loss_record::removed(sql, &row, 0)),
+        Err(DbError::DamagedDatabase)
+    ));
+}

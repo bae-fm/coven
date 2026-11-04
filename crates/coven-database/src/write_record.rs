@@ -527,8 +527,11 @@ fn removed_values(
     row: &RowId,
     generation: u64,
 ) -> Result<AppValues, DbError> {
-    let removed = crate::loss_record::removed(database, row, generation)?
-        .expect("a removed row has its stored values");
+    // Each caller reaches a present merge row the app's tables didn't show,
+    // which removal rules took out: an active loss holds its values, and one
+    // without is a damaged store (§19.3).
+    let removed =
+        crate::loss_record::removed(database, row, generation)?.ok_or(DbError::DamagedDatabase)?;
     Ok(removed.columns.into_iter().map(|(column, value)| (column, value.value)).collect())
 }
 

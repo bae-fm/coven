@@ -233,7 +233,8 @@ pub(crate) struct RemovedRow {
 }
 
 /// The row removal rules took out of `row` at `generation`: none while the
-/// rules leave it shown. A row has at most one (format.md D7.2).
+/// rules leave it shown. A row has at most one (format.md D7.2); a second is
+/// `DamagedDatabase` (§19.3).
 pub(crate) fn removed(
     database: &DatabaseConnection,
     row: &coven_merge::RowId,
@@ -251,7 +252,9 @@ pub(crate) fn removed(
             })
         },
     )?;
-    assert!(removed.len() <= 1, "present row has more than one removal record: {row:?}");
+    if removed.len() > 1 {
+        return Err(DbError::DamagedDatabase);
+    }
     Ok(removed.pop())
 }
 
