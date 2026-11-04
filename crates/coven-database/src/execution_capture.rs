@@ -160,26 +160,14 @@ impl Tracker<'_> {
         audience: Option<&Audience>,
         changed: impl IntoIterator<Item = String>,
     ) -> Result<BTreeMap<String, ColumnValue<Value>>, DbError> {
-        let mut names: std::collections::BTreeSet<String> = changed.into_iter().collect();
-        loop {
-            let count = names.len();
-            for key in &table.foreign_keys {
-                if key.columns.iter().any(|c| names.contains(column_name(table, c))) {
-                    names.extend(key.columns.iter().map(|c| column_name(table, c).to_owned()));
-                }
-            }
-            if names.len() == count {
-                break;
-            }
-        }
-        let mut columns: BTreeMap<String, ColumnValue<Value>> = names
-            .into_iter()
-            .filter(|name| table.columns.iter().any(|c| c.name == *name && !c.generated))
-            .map(|name| {
-                let value = values[&name].clone();
-                (name, ColumnValue { value, parents: BTreeMap::new() })
-            })
-            .collect();
+        let mut columns: BTreeMap<String, ColumnValue<Value>> =
+            crate::write_rows::recorded_columns(table, changed)
+                .into_iter()
+                .map(|name| {
+                    let value = values[&name].clone();
+                    (name, ColumnValue { value, parents: BTreeMap::new() })
+                })
+                .collect();
         for key in &table.foreign_keys {
             if !key.columns.iter().any(|c| columns.contains_key(column_name(table, c))) {
                 continue;

@@ -376,6 +376,29 @@ pub(crate) fn row_id(key: &AppKey, row: &AppRow) -> RowId {
     RowId { table: key.0.clone(), key: key.1.clone(), audience: row.audience.clone() }
 }
 
+/// The columns an action writing `columns` records: every column sharing
+/// a foreign key with them, expanded until none is added, without generated
+/// columns (D5).
+pub(crate) fn recorded_columns(
+    table: &TableSchema,
+    columns: impl IntoIterator<Item = String>,
+) -> std::collections::BTreeSet<String> {
+    let mut names: std::collections::BTreeSet<String> = columns.into_iter().collect();
+    loop {
+        let count = names.len();
+        for key in &table.foreign_keys {
+            if key.columns.iter().any(|c| names.contains(column_name(table, c))) {
+                names.extend(key.columns.iter().map(|c| column_name(table, c).to_owned()));
+            }
+        }
+        if names.len() == count {
+            break;
+        }
+    }
+    names.retain(|name| table.columns.iter().any(|c| c.name == *name && !c.generated));
+    names
+}
+
 pub(crate) fn column_name<'a>(table: &'a TableSchema, name: &str) -> &'a str {
     &table
         .columns

@@ -24,7 +24,7 @@ use coven_format::snapshot_rows::OriginalRow;
 use coven_format::value::Value;
 use coven_format::write::Step;
 use coven_merge::{Audience, ColumnValue, ForeignKey, Operation, Parent, RowId};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 /// The schema a write was authored under: the current one, unless a
 /// breaking migration since then retained the earlier one (§18.6), and the
@@ -66,26 +66,6 @@ impl<'a> Authoring<'a> {
             Some(_) => crate::removal_sql::reference_values(self.database, table, columns, values),
             None => Ok(values.to_vec()),
         }
-    }
-
-    /// The columns an action writing `columns` records: every column sharing
-    /// a reference with them, expanded until none is added, without
-    /// generated columns (D5).
-    fn closure(&self, table: &TableSchema, columns: &[String]) -> BTreeSet<String> {
-        let mut names: BTreeSet<String> = columns.iter().cloned().collect();
-        loop {
-            let count = names.len();
-            for key in &table.foreign_keys {
-                if key.columns.iter().any(|c| names.contains(column_name(table, c))) {
-                    names.extend(key.columns.iter().map(|c| column_name(table, c).to_owned()));
-                }
-            }
-            if names.len() == count {
-                break;
-            }
-        }
-        names.retain(|name| table.columns.iter().any(|c| c.name == *name && !c.generated));
-        names
     }
 }
 
@@ -331,7 +311,7 @@ impl<'a> ChildView<'a> {
         recorded: &BTreeMap<String, ColumnValue<Value>>,
         step: &Step,
     ) -> Result<(BTreeMap<String, Value>, Option<OtherParents>), DbError> {
-        let names = self.authoring.closure(table, columns);
+        let names = crate::write_rows::recorded_columns(table, columns.iter().cloned());
         let mut current = BTreeMap::new();
         for name in &names {
             current.insert(name.clone(), self.value(name)?);
