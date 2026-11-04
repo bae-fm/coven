@@ -121,11 +121,7 @@ pub(crate) fn record(
     original: &UserFile,
     hashes: &FileHashes,
 ) -> Result<(), DbError> {
-    let size = i64::try_from(original.size).map_err(|_overflow| DbError::TooLarge {
-        field: "file size",
-        actual: original.size,
-        maximum: i64::MAX as u64,
-    })?;
+    let size = crate::sqlite::integer("file size", original.size)?;
     db.internal_execute(
         "INSERT INTO _coven_user_files(file,path,size,modified_at,hash) VALUES(?1,?2,?3,?4,?5)",
         rusqlite::params![

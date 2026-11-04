@@ -151,11 +151,7 @@ pub(crate) fn stage_writes<P: crate::PendingValue>(
 ) -> Result<(), DbError> {
     // A slot's object never changes, so a reload that stages it again
     // finds the same size.
-    let stored = i64::try_from(size).map_err(|_overflow| DbError::TooLarge {
-        field: "writes slot size",
-        actual: size,
-        maximum: i64::MAX as u64,
-    })?;
+    let stored = crate::sqlite::integer("writes slot size", size)?;
     db.internal_execute(
         "INSERT INTO _coven_write_slots(slot,size) VALUES(?1,?2) ON CONFLICT(slot) DO NOTHING",
         rusqlite::params![slot.0.to_be_bytes(), stored],

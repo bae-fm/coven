@@ -954,6 +954,16 @@ pub(crate) fn changed_once(changed: usize) -> Result<(), DbError> {
     }
 }
 
+/// `value` as an SQLite integer, which holds up to `i64::MAX`; a larger
+/// `field` is `TooLarge`.
+pub(crate) fn integer(field: &'static str, value: u64) -> Result<i64, DbError> {
+    i64::try_from(value).map_err(|_past_i64| DbError::TooLarge {
+        field,
+        actual: value,
+        maximum: i64::MAX as u64,
+    })
+}
+
 #[cfg(test)]
 #[path = "sqlite_tests.rs"]
 pub(crate) mod tests;

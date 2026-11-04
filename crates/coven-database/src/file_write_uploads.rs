@@ -90,12 +90,7 @@ pub(super) fn enqueue(
     header.encrypted_size().map_err(|_overflow| DbError::Invariant {
         what: "a queued file's encrypted layout fits in its offsets",
     })?;
-    let plain = size;
-    let size = i64::try_from(size).map_err(|_overflow| DbError::TooLarge {
-        field: "file size",
-        actual: plain,
-        maximum: i64::MAX as u64,
-    })?;
+    let size = crate::sqlite::integer("file size", size)?;
     let device = location.uploader();
     let object = location.object().0;
     let (original, modified_at, copy) = match source {

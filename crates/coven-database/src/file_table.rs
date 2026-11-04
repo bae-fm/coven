@@ -303,16 +303,8 @@ impl Record {
 
 /// Show a new record in `coven_files`, as coven's own statement in the write
 /// that makes it.
-#[expect(
-    clippy::map_err_ignore,
-    reason = "a size past the target integer is TooLarge, which names the field and size"
-)]
 pub(crate) fn insert(db: &DatabaseConnection, record: &Record) -> Result<(), DbError> {
-    let size = i64::try_from(record.size).map_err(|_| DbError::TooLarge {
-        field: "file size",
-        actual: record.size,
-        maximum: i64::MAX as u64,
-    })?;
+    let size = crate::sqlite::integer("file size", record.size)?;
     db.internal_execute(
         "INSERT INTO main.coven_files(id,audience,size,hash,coordinates,namespace)
          VALUES(?1,?2,?3,?4,?5,?6)",

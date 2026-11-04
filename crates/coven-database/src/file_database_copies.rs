@@ -127,18 +127,10 @@ impl FileDatabase {
 
     /// A copy is whole and synced at its path, renamed there from its
     /// temporary name, with the size and modification time `observed` read.
-    #[expect(
-        clippy::map_err_ignore,
-        reason = "a size past SQLite's integer is TooLarge, which names the field and size"
-    )]
     pub async fn place_copy(&self, observed: &ObservedFile) -> Result<(), DbError> {
         self.require_writer()?;
         let path = text(observed.path())?.to_owned();
-        let size = i64::try_from(observed.size()).map_err(|_| DbError::TooLarge {
-            field: "file size",
-            actual: observed.size(),
-            maximum: i64::MAX as u64,
-        })?;
+        let size = crate::sqlite::integer("file size", observed.size())?;
         let modified_at = crate::user_file::encode_time(observed.modified_at());
         self.run(move |db, _, _, _| {
             db.transaction(|db| {
