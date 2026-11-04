@@ -1,7 +1,7 @@
 #!/bin/bash
 # The fast checks of Appendix F.6, which the pre-commit hook runs: formatting,
-# clippy, the checker's rules of Appendix F.1 to F.5, and the spec's readability
-# checks (scripts/check-spec.py).
+# clippy, the checker's rules of Appendix F.1 to F.5, every crate built without
+# test code, and the spec's readability checks (scripts/check-spec.py).
 #
 #   scripts/check-fast.sh
 # COVEN_CHECK_PACKAGES may select Cargo packages for clippy and checker
@@ -41,3 +41,9 @@ cargo deny check bans
 
 step "cargo clippy ${packages[*]} --all-targets --all-features"
 scripts/cargo.sh clippy "${packages[@]}" --all-targets --all-features -- -D warnings
+
+# Clippy's build turns every feature on, test-utils among them, so code a
+# test-only feature gates by mistake compiles there. Each crate's own build,
+# with no features, as an app builds it, is checked too.
+step "every crate built without test code"
+scripts/cargo.sh check "${packages[@]}"

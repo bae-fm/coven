@@ -36,12 +36,18 @@ class FastChecks(unittest.TestCase):
                 )
                 commands = calls.read_text().splitlines()
                 self.assertEqual(result.returncode, checker_status, result.stderr)
+                diagnostics = "--message-format=json-render-diagnostics"
                 expected = [
                     "fmt --all --check",
-                    "run --quiet -p owner-construction-check -- . coven-storage",
+                    f"run {diagnostics} --quiet -p owner-construction-check -- . coven-storage",
                 ]
                 if checker_status == 0:
-                    expected.append("clippy -p coven-storage --all-targets --all-features -- -D warnings")
+                    expected += [
+                        "deny check bans",
+                        f"clippy {diagnostics} -p coven-storage --all-targets --all-features"
+                        " -- -D warnings",
+                        f"check {diagnostics} -p coven-storage",
+                    ]
                 self.assertEqual(commands, expected)
 
 

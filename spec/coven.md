@@ -10466,7 +10466,7 @@ tests use byte-sized payloads; races wait for observed events; interrupted
 operations are reopened until they report completion.
 
 The pre-commit hook runs the fast checks: formatting, clippy, the rules of F.1 to
-F.5, and the spec's own checks.
+F.5, every crate built without test code (check 7), and the spec's own checks.
 
 ---
 
