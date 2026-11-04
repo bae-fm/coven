@@ -406,30 +406,22 @@ impl DatabaseConnection {
         self.transaction(run).map_err(|error| self.pending_failure(error))
     }
 
-    /// Tell this connection to the store's database which installation it
-    /// serves, for coven's views of members and devices (Appendix C.1).
-    pub(crate) fn identify_device(&self, device: DeviceId) -> Result<(), DbError> {
-        Ok(crate::coven_functions::register_device(&self.connection, device)?)
-    }
-
-    /// Give this connection to the store's database the files this process
-    /// is transferring, for `coven_uploads.sending`, `coven_sending` and
-    /// `coven_downloading` (§4).
-    pub(crate) fn serve_transfers(
-        &self,
-        transfers: &crate::transfers_in_flight::TransfersInFlight,
-    ) -> Result<(), DbError> {
-        Ok(transfers.register(&self.connection)?)
-    }
-
-    /// Give this connection to the store's database the device's network as
-    /// this process last heard of it, for `coven_network` and
+    /// Give this connection to the store's database what coven's views read
+    /// of this process: the installation it serves, for the views of members
+    /// and devices (Appendix C.1); the files it is transferring, for
+    /// `coven_uploads.sending`, `coven_sending` and `coven_downloading`; and
+    /// the device's network as it last heard of it, for `coven_network` and
     /// `coven_uploads.metered` (§4).
-    pub(crate) fn serve_network(
+    pub(crate) fn serve_views(
         &self,
+        device: DeviceId,
+        transfers: &crate::transfers_in_flight::TransfersInFlight,
         network: &crate::network_facts::NetworkFacts,
     ) -> Result<(), DbError> {
-        Ok(network.register(&self.connection)?)
+        crate::coven_functions::register_device(&self.connection, device)?;
+        transfers.register(&self.connection)?;
+        network.register(&self.connection)?;
+        Ok(())
     }
 
     pub(crate) fn local_device(&self) -> Option<DeviceId> {

@@ -174,10 +174,8 @@ impl DatabaseBuilder {
             &self.sqlite,
             &self.functions,
         )?;
-        writer.identify_device(settings.device_id)?;
         // Before the app's migrations, which may read coven's views.
-        writer.serve_transfers(&transfers)?;
-        writer.serve_network(&network)?;
+        writer.serve_views(settings.device_id, &transfers, &network)?;
         let (outcomes, write_schema, inputs, mut checkpoints, migrating, migrated, optimized) =
             writer.with_profile(|writer| -> CovenResult<_> {
                 writer.enable_wal()?;
@@ -287,9 +285,7 @@ impl DatabaseBuilder {
                 &self.sqlite,
                 &self.functions,
             )?;
-            reader.identify_device(settings.device_id)?;
-            reader.serve_transfers(&transfers)?;
-            reader.serve_network(&network)?;
+            reader.serve_views(settings.device_id, &transfers, &network)?;
             reader.serve(observer.clone());
             readers.push(Mutex::new(reader));
         }
@@ -346,9 +342,7 @@ impl DatabaseBuilder {
             &self.sqlite,
             &self.functions,
         )?;
-        first.identify_device(settings.device_id)?;
-        first.serve_transfers(&transfers)?;
-        first.serve_network(&network)?;
+        first.serve_views(settings.device_id, &transfers, &network)?;
         // A read-only open runs no step, so nothing reaches `progress`.
         let clock = match self.clock {
             Some(clock) => clock,
@@ -374,9 +368,7 @@ impl DatabaseBuilder {
                 &self.sqlite,
                 &self.functions,
             )?;
-            reader.identify_device(settings.device_id)?;
-            reader.serve_transfers(&transfers)?;
-            reader.serve_network(&network)?;
+            reader.serve_views(settings.device_id, &transfers, &network)?;
             reader.serve(observer.clone());
             readers.push(Mutex::new(reader));
         }
@@ -387,9 +379,7 @@ impl DatabaseBuilder {
             &self.sqlite,
             &self.functions,
         )?;
-        writer.identify_device(settings.device_id)?;
-        writer.serve_transfers(&transfers)?;
-        writer.serve_network(&network)?;
+        writer.serve_views(settings.device_id, &transfers, &network)?;
         writer.serve(observer.clone());
         Ok(DatabaseReadHandle {
             observer: observer.clone(),
