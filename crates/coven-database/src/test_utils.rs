@@ -118,7 +118,8 @@ pub fn notes_migrations() -> Vec<Migration> {
 pub struct TestAuthorship;
 
 impl TestAuthorship {
-    const STORE: &'static str = "10101010-1010-1010-1010-101010101010";
+    const STORE: coven_foundation::id_source::StoreId =
+        coven_foundation::id_source::StoreId(uuid::Uuid::from_bytes([0x10; 16]));
 
     /// The test key sealing headers and keying every part's leaves.
     pub fn key() -> coven_crypto::StoreKey {
@@ -129,7 +130,11 @@ impl TestAuthorship {
     }
 
     fn path(write: coven_merge::WriteId) -> String {
-        format!("{}/seq/{}", Self::STORE, write.number)
+        coven_format::path::ObjectPath::slot(
+            Self::STORE,
+            std::num::NonZeroU64::new(write.number).expect("a positive write number"),
+        )
+        .into()
     }
 
     /// The evidence and hashers a stream of this record carries.

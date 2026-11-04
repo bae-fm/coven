@@ -26,7 +26,7 @@ impl S3Storage {
             // Its snapshots sit in one folder per audience, and storage
             // doesn't know the store's circles: the whole snapshots folder is
             // listed, and a session kept when its path names the device.
-            format!("{base}{store}/snapshots/"),
+            self.prefix.key_prefix_of(&ObjectPrefix::snapshots(store)),
         ] {
             for (key, id, _) in self.unfinished_uploads(&prefix).await? {
                 let named = key.starts_with(&folder)
@@ -58,7 +58,8 @@ impl S3Storage {
         }
         let base = self.prefix.key_prefix();
         let mut left = Vec::new();
-        for (key, id, _) in self.unfinished_uploads(&format!("{base}{store}/seq/")).await? {
+        let slots = self.prefix.key_prefix_of(&ObjectPrefix::slots(store));
+        for (key, id, _) in self.unfinished_uploads(&slots).await? {
             let settled = key
                 .strip_prefix(&base)
                 .and_then(|path| ObjectPath::parse(path).ok())

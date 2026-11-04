@@ -51,6 +51,8 @@ fn all_layouts_are_canonical_and_store_scoped() {
         assert_eq!(ObjectPath::parse(path.as_str()).unwrap(), path);
         assert_eq!(path.store(), STORE_ID);
         assert!(ObjectPrefix::all(STORE_ID).contains(&path));
+        assert_eq!(ObjectPrefix::slots(STORE_ID).contains(&path), path.slot_number().is_some());
+        assert_eq!(ObjectPrefix::snapshots(STORE_ID).contains(&path), path.snapshot_id().is_some());
         let parts = path.components();
         for end in 1..parts.len() {
             validate_directory(&parts[..end].join("/")).unwrap();

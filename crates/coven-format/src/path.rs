@@ -171,6 +171,14 @@ impl ObjectPrefix {
     pub fn all(store: StoreId) -> Self {
         Self(format!("{store}/"))
     }
+    /// Every slot of the store's sequence (§5).
+    pub fn slots(store: StoreId) -> Self {
+        Self(format!("{store}/seq/"))
+    }
+    /// Every snapshot, of every audience and device (§16).
+    pub fn snapshots(store: StoreId) -> Self {
+        Self(format!("{store}/snapshots/"))
+    }
     /// Every stored file.
     pub fn files(store: StoreId) -> Self {
         Self(format!("{store}/files/"))
