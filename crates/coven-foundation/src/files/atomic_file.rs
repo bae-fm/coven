@@ -335,6 +335,21 @@ pub(crate) fn read_optional(path: &Path) -> Result<Option<Vec<u8>>, FileError> {
     }
 }
 
+/// The JSON record at `path`, or `None` when it is absent. Bytes that don't
+/// decode are invalid data, reported as `operation`'s failure.
+pub(crate) fn read_json<T: serde::de::DeserializeOwned>(
+    path: &Path,
+    operation: &'static str,
+) -> Result<Option<T>, FileError> {
+    read_optional(path)?
+        .map(|bytes| {
+            serde_json::from_slice(&bytes).map_err(|error| {
+                FileError::at(operation, path, io::Error::new(io::ErrorKind::InvalidData, error))
+            })
+        })
+        .transpose()
+}
+
 fn open_reader(path: &Path) -> io::Result<fs::File> {
     let mut options = fs::OpenOptions::new();
     options.read(true);

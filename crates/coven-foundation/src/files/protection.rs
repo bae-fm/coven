@@ -274,18 +274,7 @@ fn class_number(file: &fs::File) -> io::Result<c_int> {
 }
 
 fn recorded(store: &Path) -> Result<Option<FileProtection>, FileError> {
-    let path = store.join(RECORD);
-    atomic_file::read_optional(&path)?
-        .map(|bytes| {
-            serde_json::from_slice(&bytes).map_err(|error| {
-                FileError::at(
-                    "read file protection record",
-                    &path,
-                    io::Error::new(io::ErrorKind::InvalidData, error),
-                )
-            })
-        })
-        .transpose()
+    atomic_file::read_json(&store.join(RECORD), "read file protection record")
 }
 
 /// Made in the store's directory after it has the class, so the record

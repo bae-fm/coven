@@ -73,18 +73,7 @@ pub struct ReplacementRecord {
 }
 
 pub(super) fn read(directory: &Path) -> Result<Option<ReplacementRecord>, FileError> {
-    let path = directory.join(RECORD);
-    atomic_file::read_optional(&path)?
-        .map(|bytes| {
-            serde_json::from_slice(&bytes).map_err(|error| {
-                FileError::at(
-                    "read replacement record",
-                    &path,
-                    std::io::Error::new(std::io::ErrorKind::InvalidData, error),
-                )
-            })
-        })
-        .transpose()
+    atomic_file::read_json(&directory.join(RECORD), "read replacement record")
 }
 
 /// The record of a replacement that has not finished: one whose marker is
