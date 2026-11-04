@@ -25,7 +25,8 @@ class FastChecks(unittest.TestCase):
                     ["bash", str(script)],
                     env={
                         **os.environ,
-                        "PATH": f"{directory}:{os.environ['PATH']}",
+                        "HOME": str(directory),
+                        "PATH": os.pathsep.join([str(directory), os.environ["PATH"]]),
                         "CARGO_CALLS": str(calls),
                         "CHECKER_STATUS": str(checker_status),
                         "COVEN_CHECK_PACKAGES": "coven-storage",
@@ -36,17 +37,16 @@ class FastChecks(unittest.TestCase):
                 )
                 commands = calls.read_text().splitlines()
                 self.assertEqual(result.returncode, checker_status, result.stderr)
-                diagnostics = "--message-format=json-render-diagnostics"
                 expected = [
                     "fmt --all --check",
-                    f"run {diagnostics} --quiet -p owner-construction-check -- . coven-storage",
+                    "run --quiet -p owner-construction-check -- . coven-storage",
                 ]
                 if checker_status == 0:
                     expected += [
                         "deny check bans",
-                        f"clippy {diagnostics} -p coven-storage --all-targets --all-features"
+                        "clippy -p coven-storage --all-targets --all-features"
                         " -- -D warnings",
-                        f"check {diagnostics} -p coven-storage",
+                        "check -p coven-storage",
                     ]
                 self.assertEqual(commands, expected)
 

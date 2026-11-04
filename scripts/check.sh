@@ -137,6 +137,10 @@ code_checks() {
     step "spec/coven.md and spec/format.md against spec/WRITING.md"
     "$(command -v python3 || command -v python)" scripts/check-spec.py
 
+    step "the check scripts' own tests"
+    "$(command -v python3 || command -v python)" scripts/check_spec_tests.py
+    "$(command -v python3 || command -v python)" scripts/check_fast_tests.py
+
     # Build the structural checker before the crates whose graph it validates (Appendix F.6).
     # It reads the whole workspace and runs in seconds, so every run includes it.
     step "owner-construction-check: Appendix F.1 dependencies, F.2 and F.3 capabilities and owners, F.5 conventions"
