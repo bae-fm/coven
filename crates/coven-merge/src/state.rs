@@ -358,7 +358,7 @@ pub fn apply<V: Clone + Eq, P: crate::WritePast, O: WriteOracle>(
         }
     }
     if change.operation.advances() {
-        let generation = change.generation.checked_add(1).ok_or(MergeError::GenerationExhausted)?;
+        let generation = change.after()?;
         let winner = match state.generations.get(&generation) {
             Some(old) if timestamp(oracle, *old)? < write.timestamp => *old,
             _ => write.id,

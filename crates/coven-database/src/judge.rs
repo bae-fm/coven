@@ -43,9 +43,10 @@ use std::collections::BTreeMap;
 pub(crate) struct Indexed {
     pub(crate) sequence: u32,
     pub(crate) delete: bool,
-    pub(crate) insert: bool,
     pub(crate) key_update: bool,
     pub(crate) generation: u64,
+    /// The row's generation after this step.
+    pub(crate) after: u64,
 }
 
 impl Indexed {
@@ -53,18 +54,9 @@ impl Indexed {
         Self {
             sequence: step.sequence,
             delete: matches!(step.change.operation, Operation::Delete),
-            insert: matches!(step.change.operation, Operation::Insert(_)),
             key_update: step.key_update,
             generation: step.change.generation,
-        }
-    }
-
-    /// The row's generation after this step.
-    pub(crate) fn after(&self) -> u64 {
-        if self.delete || self.insert {
-            self.generation.saturating_add(1)
-        } else {
-            self.generation
+            after: step.change.after().expect("a decoded step's generation advances"),
         }
     }
 }

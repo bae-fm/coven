@@ -289,7 +289,7 @@ impl<'a> ChildView<'a> {
                             audience,
                         };
                         let last = index.last_before(&row, step.sequence)?;
-                        let generation = if last.delete { last.generation } else { last.after() };
+                        let generation = if last.delete { last.generation } else { last.after };
                         Some((row, generation))
                     })
                     .collect(),
@@ -378,7 +378,7 @@ impl<'a> ChildView<'a> {
                     .cloned()
                     .and_then(|parent| match index.last_before(&parent.row, step.sequence) {
                         Some(last) if last.delete => None,
-                        Some(last) => Some(Parent { row: parent.row, generation: last.after() }),
+                        Some(last) => Some(Parent { row: parent.row, generation: last.after }),
                         None => Some(parent),
                     })
             } else {
@@ -419,7 +419,7 @@ impl<'a> ChildView<'a> {
             let row = RowId { table: parent_table.name.clone(), key: written.clone(), audience };
             match index.last_before(&row, step.sequence) {
                 Some(last) if !last.delete => {
-                    return Ok(Some(Some(Parent { row, generation: last.after() })))
+                    return Ok(Some(Some(Parent { row, generation: last.after })))
                 }
                 Some(_) => {}
                 None => untouched = true,
@@ -467,7 +467,7 @@ impl<'a> ChildView<'a> {
                 }
                 Some((
                     self.authoring.stored(table, &columns, &new)?,
-                    Parent { row: new_row.clone(), generation: new_step.after() },
+                    Parent { row: new_row.clone(), generation: new_step.after },
                 ))
             }
             ("SET NULL", _) => None,

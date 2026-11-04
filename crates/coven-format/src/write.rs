@@ -241,16 +241,6 @@ impl crate::wire::Wire for Step {
         Ok(Self { sequence, change, key_update })
     }
 }
-impl Step {
-    /// The generation after this step: a delete or insert advances it.
-    pub fn after(&self) -> Option<u64> {
-        match self.change.operation {
-            Operation::Update(_) => Some(self.change.generation),
-            _ => self.change.generation.checked_add(1),
-        }
-    }
-}
-
 /// A row's operations in execution order, with the sources they replaced
 /// that its net change, if any, does not already name (§9.5, D5). An
 /// operation after the row moved into this audience in the same write
@@ -323,7 +313,7 @@ impl Execution {
         for pair in self.steps.windows(2) {
             require(pair[0].sequence < pair[1].sequence, "execution steps", Rule::Order)?;
             require(
-                pair[0].after() == Some(pair[1].change.generation),
+                pair[0].change.after().ok() == Some(pair[1].change.generation),
                 "execution step generation",
                 Rule::Generation,
             )?;

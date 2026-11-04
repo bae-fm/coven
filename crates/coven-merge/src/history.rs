@@ -68,9 +68,7 @@ impl<V> History<V> {
     fn moved_to(&self, write: WriteId, row: &RowId) -> Result<Option<u64>, MergeError> {
         let write = self.writes.get(&write).ok_or(MergeError::MissingWrite(write))?;
         match write.changes.get(row) {
-            Some(change) if change.operation.advances() => {
-                Ok(Some(change.generation.checked_add(1).ok_or(MergeError::GenerationExhausted)?))
-            }
+            Some(change) if change.operation.advances() => Ok(Some(change.after()?)),
             _ => Ok(None),
         }
     }
@@ -111,8 +109,7 @@ pub(crate) fn from_writes<V: Clone>(
         let mut state = RowState::new(row.clone());
         for (write, change) in &changes {
             if change.operation.advances() {
-                let generation =
-                    change.generation.checked_add(1).ok_or(MergeError::GenerationExhausted)?;
+                let generation = change.after()?;
                 state.generation = state.generation.max(generation);
                 let earlier = match state.generations.get(&generation) {
                     Some(old) => write.timestamp < crate::state::timestamp(history, *old)?,

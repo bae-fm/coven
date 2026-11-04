@@ -531,7 +531,7 @@ fn classify(runner: &std::ffi::OsStr, db: &Database, record: &WriteRecord) -> (u
             }
             let becomes = step.key_update.then(|| {
                 let (new, new_step) = index.new_half(row, step.sequence).unwrap();
-                json!([ids.row(new), new_step.after()])
+                json!([ids.row(new), new_step.after])
             });
             steps.push(json!({
                 "effect": effect(&mut ids, schema, &by_row, row, step),

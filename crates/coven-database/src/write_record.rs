@@ -328,15 +328,7 @@ pub(crate) fn changes(
     }
     let generations: BTreeMap<_, _> = changes
         .iter()
-        .map(|(row, c)| {
-            (
-                row.clone(),
-                match c.change.operation {
-                    Operation::Update(_) => c.change.generation,
-                    _ => c.change.generation.checked_add(1).expect("generation exhausted"),
-                },
-            )
-        })
+        .map(|(row, c)| (row.clone(), c.change.after().expect("generation exhausted")))
         .collect();
     for (row, change) in &mut changes {
         if let Audience::Circle(circle) = row.audience {

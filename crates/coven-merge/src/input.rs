@@ -161,9 +161,7 @@ impl<V> Change<V> {
     /// change against applied metadata.
     pub fn validate(&self, row: &RowId) -> Result<(), MergeError> {
         self.incarnation()?;
-        if self.operation.advances() {
-            self.generation.checked_add(1).ok_or(MergeError::GenerationExhausted)?;
-        }
+        self.after()?;
         if let Some(columns) = self.operation.columns() {
             for value in columns.values() {
                 for parent in value.parents.values() {
@@ -172,6 +170,16 @@ impl<V> Change<V> {
             }
         }
         Ok(())
+    }
+
+    /// The row's generation after this change: an insert or a delete advances
+    /// it, an update keeps it (§8.3).
+    pub fn after(&self) -> Result<u64, MergeError> {
+        if self.operation.advances() {
+            self.generation.checked_add(1).ok_or(MergeError::GenerationExhausted)
+        } else {
+            Ok(self.generation)
+        }
     }
 
     /// The incarnation this change belongs to: generation + 1 for an insert,
