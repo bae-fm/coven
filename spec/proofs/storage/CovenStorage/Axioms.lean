@@ -17,7 +17,8 @@ import CovenStorage
 #print axioms CovenStorage.Clocks.no_clock_hold
 #print axioms CovenStorage.Clocks.waiting_is_not_seen
 #print axioms CovenStorage.Clocks.age_never_early
-#print axioms CovenStorage.Clocks.wall_jump_changes_no_age_or_retry
+#print axioms CovenStorage.Clocks.fast_clock_ages_at_once
+#print axioms CovenStorage.Clocks.wall_jump_changes_no_retry
 #print axioms CovenStorage.Clocks.retry_delay_bounded
 #print axioms CovenStorage.Examples.status_cases
 #print axioms CovenStorage.Examples.damage_cases

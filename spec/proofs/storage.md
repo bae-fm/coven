@@ -231,9 +231,14 @@ all observed timestamps without waiting for the wall clock. `stamp_after_latest`
 the merge. `representable_stamp_exists` states the bounded-counter premise;
 the model does not allow arithmetic overflow to become a timestamp.
 
-Storage ages and retry delays are distinct from authored timestamps.
-`age_never_early`, `wall_jump_changes_no_age_or_retry` and
-`retry_delay_bounded` describe the supplied storage/monotonic clock model.
+Storage ages and retry delays are distinct from authored timestamps. An
+object's age compares the deleting device's wall clock with the provider's time
+for the object plus that time's resolution (§16.6, §20.5). With a clock no
+faster than real time, an aged object really was published that long ago
+(`age_never_early`); a fast clock can end the wait at once
+(`fast_clock_ages_at_once`). A live retry wait runs on a clock that wall-clock
+changes don't move (`wall_jump_changes_no_retry`), and its delay never passes
+five minutes (`retry_delay_bounded`).
 Persisted wait reopening is covered in [IO](io.md#waiting-and-reopening).
 `clockRunner` compares timestamp generation with
 `write_encoding::tests::lean_differential_clocks` via `COVEN_CLOCK_LEAN`.

@@ -109,10 +109,11 @@ theorem clock_boundaries :
   decide
 
 theorem storage_age_boundaries :
-    aged ⟨1⟩ ⟨31⟩ 30 = true ∧
-    retentionAge ⟨1000000000, ⟨2⟩, 8⟩ ⟨1⟩ 30 = false ∧
-    retryReady ⟨-1000000000, ⟨2⟩, 8⟩ 0 8 = true ∧
-    retryReady ⟨1000000000, ⟨2⟩, 7⟩ 0 8 = false ∧
+    aged ⟨1000, 1000⟩ 2030 30 = true ∧
+    aged ⟨1000, 1000⟩ 2029 30 = false ∧
+    aged ⟨0, 0⟩ (-1) 0 = false ∧
+    retryReady ⟨-1000000000, 8⟩ 0 8 = true ∧
+    retryReady ⟨1000000000, 7⟩ 0 8 = false ∧
     retryDelay 0 = 1 ∧ retryDelay 3 = 8 ∧ retryDelay 9 = 300 := by decide
 
 end CovenStorage.Examples

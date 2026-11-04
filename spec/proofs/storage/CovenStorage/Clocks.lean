@@ -150,30 +150,41 @@ theorem waiting_is_not_seen (r : Receiver) (s : Timestamp) (causes keys : Bool)
     (h : (causes && keys) = false) : receive r s causes keys = r := by
   simp [receive, h]
 
-/-- A lower bound observed from provider metadata (§20.5), in milliseconds.
-There is deliberately no conversion from a device's Timestamp. -/
+/-- A provider's time for an object (§20.5), in milliseconds, with the time's
+resolution: the provider published the object no earlier than `value` and no
+later than `value + resolution`. There is deliberately no conversion from a
+device's Timestamp. -/
 structure StorageTime where
   value : Nat
+  resolution : Nat
   deriving DecidableEq, Repr
 
-/-- §16.6: equality with the retention duration suffices. -/
-def aged (stored observed : StorageTime) (duration : Nat) : Bool :=
-  decide (stored.value + duration ≤ observed.value)
+/-- §16.6: an object has passed a duration, such as the retention grace, once
+the deleting device's wall clock reads at least the provider's time for it,
+plus that time's resolution, plus the duration. Equality suffices. A wall clock
+before 1970 never ages anything. -/
+def aged (stored : StorageTime) (wall : Int) (duration : Nat) : Bool :=
+  decide (((stored.value + stored.resolution + duration : Nat) : Int) ≤ wall)
 
-theorem age_never_early (stored observed actual : StorageTime) (duration : Nat)
-    (lowerBound : observed.value ≤ actual.value) (h : aged stored observed duration = true) :
-    stored.value + duration ≤ actual.value := by
+/-- With a deleting clock no faster than real time, an aged object was
+published at least the duration ago. -/
+theorem age_never_early (stored : StorageTime) (published : Nat) (wall actual : Int)
+    (duration : Nat) (within : published ≤ stored.value + stored.resolution)
+    (slow : wall ≤ actual) (h : aged stored wall duration = true) :
+    ((published + duration : Nat) : Int) ≤ actual := by
   simp only [aged, decide_eq_true_eq] at h
   omega
 
+/-- A deleting clock ahead by the duration ages an object the moment it is
+published: a fast clock can shorten the wait to zero. -/
+theorem fast_clock_ages_at_once (stored : StorageTime) (duration : Nat) :
+    aged stored ((stored.value + stored.resolution + duration : Nat) : Int) duration = true := by
+  simp [aged]
+
 structure Maintenance where
   wall : Int
-  observed : StorageTime
   monotonic : Nat
   deriving DecidableEq, Repr
-
-def retentionAge (s : Maintenance) (stored : StorageTime) (duration : Nat) : Bool :=
-  aged stored s.observed duration
 
 /-- §6.7: the live timer, not a persisted wall-clock deadline. -/
 def retryReady (s : Maintenance) (started delay : Nat) : Bool :=
@@ -181,10 +192,8 @@ def retryReady (s : Maintenance) (started delay : Nat) : Bool :=
 
 def retryDelay (failures : Nat) : Nat := min (2 ^ failures) 300
 
-theorem wall_jump_changes_no_age_or_retry (s : Maintenance) (newWall : Int)
-    (stored : StorageTime) (duration started delay : Nat) :
-    retentionAge { s with wall := newWall } stored duration = retentionAge s stored duration ∧
-    retryReady { s with wall := newWall } started delay = retryReady s started delay := ⟨rfl, rfl⟩
+theorem wall_jump_changes_no_retry (s : Maintenance) (newWall : Int) (started delay : Nat) :
+    retryReady { s with wall := newWall } started delay = retryReady s started delay := rfl
 
 theorem retry_delay_bounded (failures : Nat) : retryDelay failures ≤ 300 :=
   Nat.min_le_right _ _
