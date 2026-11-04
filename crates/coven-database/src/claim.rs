@@ -1,7 +1,11 @@
 //! Durable identity and exact attempted bytes for one sequence claim (§5.1).
 
 use crate::internal_schema::WRITE_DEVICE_SQL;
-use crate::{sqlite::DatabaseConnection, write_encoding::counter, DbError, OperationId};
+use crate::{
+    sqlite::DatabaseConnection,
+    write_encoding::{counter, damaged},
+    DbError, OperationId,
+};
 use coven_format::path::ObjectPath;
 use coven_foundation::id_source::DeviceId;
 use rusqlite::params;
@@ -81,7 +85,7 @@ fn settlement(text: String) -> rusqlite::Result<ClaimSettlement> {
         "not-landed" => Ok(ClaimSettlement::NotLanded),
         "landed" => Ok(ClaimSettlement::Landed),
         "device-id-in-use" => Ok(ClaimSettlement::DeviceIdInUse),
-        _ => Err(rusqlite::Error::InvalidQuery),
+        _ => Err(damaged(4, rusqlite::types::Type::Text)),
     }
 }
 
@@ -90,7 +94,7 @@ fn metadata(db: &DatabaseConnection) -> Result<Option<Claim>, DbError> {
         let work = match (r.get::<_,Option<Vec<u8>>>(2)?, r.get::<_,Option<i64>>(3)?) {
             (Some(n),None) => ClaimWork::Writes(counter(n)?),
             (None,Some(id)) => ClaimWork::Operation(OperationId(id)),
-            _ => return Err(rusqlite::Error::InvalidQuery),
+            _ => return Err(damaged(2, rusqlite::types::Type::Blob)),
         };
         Ok(Claim { device:r.get::<_, DeviceId>(0)?, number:counter(r.get(1)?)?, work,
             attempts:Vec::new(), settlement:settlement(r.get(4)?)? })

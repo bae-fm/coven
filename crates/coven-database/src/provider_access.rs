@@ -55,7 +55,7 @@ pub(crate) fn read(
     db.query("SELECT intended,granted,invitation,operation,target FROM _coven_provider_access WHERE account=?1", [account], |row| {
         let operation: Option<i64> = row.get(3)?;
         let target: Option<bool> = row.get(4)?;
-        if operation.is_none() && target.is_some() { return Err(rusqlite::Error::InvalidQuery); }
+        if operation.is_none() && target.is_some() { return Err(crate::write_encoding::damaged(4, rusqlite::types::Type::Integer)); }
         Ok(ProviderAccess { intended: row.get(0)?, granted: row.get(1)?, invitation: row.get::<_,Option<Vec<u8>>>(2)?.map(SecretBytes::new),
             request: operation.map(|id| ProviderAccessRequest { operation: OperationId(id), target }) })
     }).map(|mut rows| rows.pop())

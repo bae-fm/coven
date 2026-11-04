@@ -1,6 +1,6 @@
 //! Checked entry boundaries, their immutable coverage, and slot selection.
 use crate::sqlite::DatabaseConnection;
-use crate::write_encoding::{audience, audience_text, counter};
+use crate::write_encoding::{audience, audience_text, counter, damaged};
 use crate::{DbError, StoreState, StoreVersion};
 use coven_format::{
     admin::SnapshotId, snapshot_rows::ChangeVerdict, value::Slot, write::WriteHeader,
@@ -196,7 +196,7 @@ fn retained(database: &DatabaseConnection) -> Result<Vec<RetainedBoundary>, DbEr
             let boundary = match (row.get::<_, String>(0)?.as_str(), row.get::<_, Option<u32>>(1)?) {
                 ("schema", Some(number)) => Boundary::SchemaChange(StoreVersion { number, snapshot, entry }),
                 ("reset", None) => Boundary::Reset { entry, snapshot },
-                _ => return Err(rusqlite::Error::InvalidQuery),
+                _ => return Err(damaged(0, rusqlite::types::Type::Text)),
             };
             let included = row.get::<_, Option<Vec<u8>>>(6)?.map(counter).transpose()?;
             Ok(RetainedBoundary { boundary, included, applied: row.get(7)? })

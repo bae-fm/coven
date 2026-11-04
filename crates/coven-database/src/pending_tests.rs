@@ -612,3 +612,22 @@ pub(crate) fn scan_reason(
         _ => None,
     }
 }
+
+/// §19.3: a stored record naming only part of a file is damage, not a
+/// query error.
+#[tokio::test]
+async fn a_stored_record_with_part_of_a_file_is_damaged_database() {
+    let store = TestStore::new();
+    let db = store.builder(vec![], vec![]).open().await.unwrap();
+    db.record_pending(record(1)).await.unwrap();
+    db.inspect_writer(|sql| {
+        sql.batch(
+            "PRAGMA ignore_check_constraints=ON; UPDATE _coven_pending SET work='upload';
+             PRAGMA ignore_check_constraints=OFF;",
+        )
+        .unwrap()
+    });
+    let read = db.pending::<Record>().await;
+    assert!(matches!(read, Err(CovenError::Database(DbError::DamagedDatabase))), "{read:?}");
+    db.close().await.unwrap();
+}

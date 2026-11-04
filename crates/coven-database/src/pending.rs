@@ -112,7 +112,7 @@ impl StoredRecord {
             ) {
                 (Some(work), Some(device), Some(file)) => Some((work, device, file)),
                 (None, None, None) => None,
-                _ => return Err(rusqlite::Error::InvalidQuery),
+                _ => return Err(crate::write_encoding::damaged(4, rusqlite::types::Type::Text)),
             },
             coven_version: row.get(7)?,
             moved: row.get(8)?,

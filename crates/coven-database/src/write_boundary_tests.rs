@@ -200,3 +200,22 @@ pub(crate) fn fill_for_plans(db: &rusqlite::Connection) {
     )
     .unwrap();
 }
+
+/// §19.3: a stored boundary of no kind coven writes is damage, not a query
+/// error.
+#[tokio::test]
+async fn a_stored_boundary_of_no_known_kind_is_damaged_database() {
+    let store = TestStore::new();
+    let db = store.schema(notes(), NOTES).await.unwrap();
+    assert!(db.install_reset_fixture(Slot(1), Audience::Store, 0).await.unwrap());
+    db.inspect_writer(|sql| {
+        sql.batch(
+            "PRAGMA ignore_check_constraints=ON; UPDATE _coven_boundaries SET kind='lost';
+             PRAGMA ignore_check_constraints=OFF;",
+        )
+        .unwrap()
+    });
+    let read = db.store_state().await;
+    assert!(matches!(read, Err(crate::CovenError::Database(DbError::DamagedDatabase))), "{read:?}");
+    db.close().await.unwrap();
+}

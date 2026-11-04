@@ -255,3 +255,32 @@ pub(crate) fn fill_for_plans(db: &rusqlite::Connection) {
     )
     .unwrap();
 }
+
+/// §19.3: a stored claim whose settlement or work doesn't decode is
+/// damage, not a query error.
+#[tokio::test]
+async fn a_stored_claim_that_does_not_decode_is_damaged_database() {
+    for broken in [
+        "UPDATE _coven_claim_journal SET settlement='lost'",
+        "UPDATE _coven_claim_journal SET through=NULL",
+    ] {
+        let store = TestStore::new();
+        let database = store.builder(vec![], vec![]).open().await.unwrap();
+        let path = ObjectPath::slot(coven_format::test_utils::STORE_ID, 1.try_into().unwrap());
+        database
+            .begin_claim(ClaimWork::Writes(0), move |_| {
+                Ok(ClaimAttempt { path, bytes: Cursor::new(b"slot".to_vec()) })
+            })
+            .await
+            .unwrap();
+        database.inspect_writer(|db| {
+            db.batch(&format!(
+                "PRAGMA ignore_check_constraints=ON; {broken}; PRAGMA ignore_check_constraints=OFF;"
+            ))
+            .unwrap()
+        });
+        let read = database.current_claim().await;
+        assert!(matches!(read, Err(crate::DbError::DamagedDatabase)), "{broken}: {read:?}");
+        database.close().await.unwrap();
+    }
+}
