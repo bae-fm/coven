@@ -81,9 +81,7 @@ pub(crate) fn checked_change(
     let permitted = match change {
         CreateStore { .. } => slot == Slot(1) && state.store.is_none(),
         AddDevice { .. } => active,
-        _ => {
-            active && state.devices.get(&writer).is_some_and(|d| d.active() && d.member == *author)
-        }
+        _ => active && state.device_acts_for(&writer, author),
     };
     if !permitted {
         return Err(NotAllowed);

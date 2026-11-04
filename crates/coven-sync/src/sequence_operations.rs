@@ -218,12 +218,7 @@ impl SequenceSync {
                     &session.history.state,
                     &request.audience,
                     &member.member(),
-                ) || !session
-                    .history
-                    .state
-                    .devices
-                    .get(&self.device)
-                    .is_some_and(|device| device.active() && device.member == member.member())
+                ) || !session.history.state.device_acts_for(&self.device, &member.member())
                     || (request.purpose == Purpose::Reset
                         && request.audience == Audience::Store
                         && !session.history.state.active_admin(&member.member()))

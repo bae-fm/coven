@@ -1,11 +1,13 @@
 //! The floor's encrypted header and original announcement frames (D8).
 
 use crate::error::{require, Error, Rule};
+use crate::path::ObjectPath;
 use crate::sequence::MAX_BOUNDED_SLOT;
 use crate::value::Slot;
 use crate::wire::{decode_frame, get_blob, put_blob, wire_struct, Decoder, Encoder, Wire};
-use coven_foundation::id_source::DeviceId;
+use coven_foundation::id_source::{DeviceId, StoreId};
 use std::collections::BTreeSet;
+use std::num::NonZeroU64;
 
 /// Exact original slot evidence, verified at its original slot path.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -14,6 +16,12 @@ pub struct OriginalSlot {
     pub slot: Slot,
     /// Complete original sealed bytes and signature.
     pub object: Vec<u8>,
+}
+impl OriginalSlot {
+    /// Where the slot's object lived in `store`.
+    pub fn path(&self, store: StoreId) -> ObjectPath {
+        ObjectPath::slot(store, NonZeroU64::new(self.slot.0).expect("an original slot is positive"))
+    }
 }
 impl Wire for OriginalSlot {
     fn put(&self, out: &mut Encoder) -> Result<(), Error> {

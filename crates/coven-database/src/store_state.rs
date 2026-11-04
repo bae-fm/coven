@@ -41,6 +41,11 @@ impl StoreState {
         self.members.get(id).filter(|member| !member.removed)
     }
 
+    /// Whether `device` is installed and active, and belongs to `member`.
+    pub fn device_acts_for(&self, device: &DeviceId, member: &MemberId) -> bool {
+        self.devices.get(device).is_some_and(|device| device.active() && device.member == *member)
+    }
+
     /// Whether `id` is a member who has not been removed and holds the admin role.
     pub fn active_admin(&self, id: &MemberId) -> bool {
         self.active_member(id).is_some_and(|member| member.role == MemberRole::Admin)

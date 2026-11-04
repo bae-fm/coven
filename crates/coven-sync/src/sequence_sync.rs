@@ -532,10 +532,7 @@ impl History {
         }
         let mut history = Self::default();
         for original in originals {
-            let path = ObjectPath::slot(
-                store,
-                NonZeroU64::new(original.slot.0).expect("positive original slot"),
-            );
+            let path = original.path(store);
             let received =
                 slot_object::open_bounded(original.object.clone(), &path, ring, &history)?;
             history.consume(received, member.member());
@@ -615,11 +612,7 @@ impl History {
         announcement: &coven_format::sequence::SnapshotAnnouncement,
     ) -> bool {
         if !crate::effects::belongs(&self.state, &announcement.snapshot.audience, &header.author)
-            || !self
-                .state
-                .devices
-                .get(&header.device)
-                .is_some_and(|device| device.active() && device.member == header.author)
+            || !self.state.device_acts_for(&header.device, &header.author)
             || announcement.snapshot.device != header.device
             || announcement.covers >= slot.0
         {

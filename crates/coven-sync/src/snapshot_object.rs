@@ -165,10 +165,7 @@ pub(crate) fn routed_key(
     member: &MemberIdentity,
 ) -> Result<Option<RoutedKey>, SyncError> {
     use coven_format::sealed_slot::{BoundedSlot, SlotKind, SlotObjectPrefix};
-    let path = ObjectPath::slot(
-        store,
-        std::num::NonZeroU64::new(original.slot.0).expect("original slot is positive"),
-    );
+    let path = original.path(store);
     let object = checked(&path, BoundedSlot::decode(&original.object))?;
     let SlotKind::KeyCopy(copy) = &object.prefix.kind else {
         return Ok(None);
