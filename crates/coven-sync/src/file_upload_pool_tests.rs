@@ -195,6 +195,29 @@ async fn a_paused_run_ends_when_no_bound_upload_could_have_been_queued() {
     f.close().await;
 }
 
+/// Ben cancels a photo's move while its upload is in flight. The provider
+/// stores the bytes, but no file switches to them: the upload is retired, and
+/// the run counts no file uploaded (§17.3, §17.9).
+#[tokio::test]
+async fn an_upload_whose_move_was_cancelled_counts_no_file_uploaded() {
+    let f = Fixture::new(Provenance::AppProvided).await;
+    f.files.stop_background_for_counts().await;
+    let gate = gated(&f, 1).await;
+    let file = f.attach("files", "a", photo(1)).await;
+    let id = f.upload_of(&file).await.expect("the photo is queued").of;
+    f.set_uploads_paused(false).await;
+    let inner = f.files.inner.clone();
+    let run = tokio::spawn(async move { inner.drain_uploads().await });
+    until_creates(&f, 1).await;
+    f.database.write(move |sql| sql.cancel_move(id)).await.unwrap();
+    gate.add_permits(1);
+    assert_eq!(run.await.unwrap().unwrap(), DrainOutcome::Drained { uploaded: 0 });
+    assert!(f.files.inner.database.all_uploads().await.unwrap().is_empty());
+    let photo = f.database.file_ref(file.id()).await.unwrap();
+    assert!(matches!(photo.place(), coven_database::FilePlace::DeviceOnly { .. }));
+    f.close().await;
+}
+
 /// Ben moves files only on unmetered networks. On cellular his photo
 /// doesn't upload, and an early retry says the network is metered; once his
 /// phone joins Wi-Fi it goes up with no call of his app's. Turning the

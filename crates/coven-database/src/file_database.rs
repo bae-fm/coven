@@ -539,12 +539,14 @@ impl FileDatabase {
     /// hashes, the copy kept for it and this device's pending record about
     /// it. A file gone meanwhile switches nothing. Afterwards this device
     /// reads the files from the cache or storage. A write that can't be made
-    /// now fails the transaction, and the upload stays queued.
+    /// now fails the transaction, and the upload stays queued. An upload no
+    /// file waits for any more, of a move that failed or was cancelled while
+    /// it was sent, retires instead, storing no file.
     pub async fn complete_upload<S: serde::Serialize + Send + 'static>(
         &self,
         id: i64,
         subject: S,
-    ) -> Result<(), DbError> {
+    ) -> Result<crate::UploadCompletion, DbError> {
         let FileDatabaseAccess::Writer(database) = &self.access else {
             return Err(read_only());
         };
@@ -750,7 +752,7 @@ fn complete(
     inner: &DatabaseInner,
     id: i64,
     subject: crate::pending::SubjectKey,
-) -> Result<(), DbError> {
+) -> Result<crate::UploadCompletion, DbError> {
     inner.with_files("complete an upload", |writer, files| {
         writer.local_write(
             &inner.access.write_schema,

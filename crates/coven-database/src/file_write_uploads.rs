@@ -189,7 +189,7 @@ impl FileWrite<'_> {
         &self,
         upload: i64,
         after: AfterCompletion,
-    ) -> Result<(), DbError> {
+    ) -> Result<crate::UploadCompletion, DbError> {
         let db = self.database;
         let (linked, bound): (bool, bool) = db
             .query_row(
@@ -211,10 +211,11 @@ impl FileWrite<'_> {
         completion.bound |= bound;
         if linked {
             crate::file_moves::stored(db, upload)?;
+            Ok(crate::UploadCompletion::Stored)
         } else {
             completion.retired.push(upload);
+            Ok(crate::UploadCompletion::Retired)
         }
-        Ok(())
     }
 
     /// Retire the uploads no file waits for any more, except those whose

@@ -357,7 +357,7 @@ pub(super) async fn retargeted_upload(f: &Fixture) -> (FileLocation, FileRef) {
     ));
     let writes = f.database.test_queued_writes().await.unwrap().len();
     release.send(()).unwrap();
-    assert!(uploading.await.unwrap());
+    assert_eq!(uploading.await.unwrap(), crate::files::file_upload::Attempted::Retired);
     f.files.inner.paused.store(true, std::sync::atomic::Ordering::Release);
     drop(guard);
     assert_eq!(f.database.file_ref(new.id()).await.unwrap(), new);
@@ -465,7 +465,7 @@ async fn deleting_a_row_during_its_upload_is_not_undone_by_completion() {
         .unwrap();
     let writes = f.database.test_queued_writes().await.unwrap().len();
     release.send(()).unwrap();
-    assert!(uploading.await.unwrap());
+    assert_eq!(uploading.await.unwrap(), crate::files::file_upload::Attempted::Retired);
     f.files.inner.paused.store(true, std::sync::atomic::Ordering::Release);
     drop(guard);
     assert!(matches!(
@@ -676,7 +676,7 @@ mod differential {
                     };
                     f.storage.set_online(true);
                     let settlement = match &result {
-                        Ok(true) => "stored",
+                        Ok(crate::files::file_upload::Attempted::Stored) => "stored",
                         Err(TransferError::File(FileReadError::Storage(error)))
                             if error.failure() == StorageFailure::Network =>
                         {

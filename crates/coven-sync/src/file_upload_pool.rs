@@ -24,10 +24,12 @@ use tokio::sync::oneshot;
 /// Individual failures stay in `pending()`.
 #[derive(Debug, PartialEq, Eq)]
 pub enum DrainOutcome {
-    /// Every upload the retry covered was attempted; this many were stored
-    /// and retired.
+    /// Every upload the retry covered was attempted; this many stored a
+    /// file.
     Drained {
-        /// Files storage confirmed, each retired from the queue.
+        /// Uploads whose bytes storage confirmed for files waiting for them.
+        /// One whose move failed or was cancelled while it was sent stored no
+        /// file, and doesn't count (§17.3).
         uploaded: usize,
     },
     /// No waiting upload exists.
@@ -142,7 +144,7 @@ impl Blocked {
     }
 }
 
-type Attempt<'a> = BoxFuture<'a, (i64, Result<bool, SyncError>)>;
+type Attempt<'a> = BoxFuture<'a, (i64, Result<super::file_upload::Attempted, SyncError>)>;
 
 /// One run's scheduling state.
 #[derive(Default)]
@@ -537,14 +539,21 @@ impl FilesInner {
     }
 
     /// One attempt ended: its slot is free, and the app retries covering it
-    /// count it.
-    fn finished(&self, run: &mut Run<'_>, id: i64, stored: bool) {
+    /// count it. Only an upload that stored a file counts as uploaded; one
+    /// that retired because no file waited for it any more stored none.
+    fn finished(&self, run: &mut Run<'_>, id: i64, attempted: super::file_upload::Attempted) {
+        use super::file_upload::Attempted;
         run.lanes.remove(&id);
         let started = run.started.remove(&id);
-        if stored {
-            run.uploaded += 1;
-        } else if let Some(ending) = started.and_then(|seen| self.waits.reports_since(seen)) {
-            run.crossed.insert(RetrySubject::Upload(id), ending);
+        let stored = attempted == Attempted::Stored;
+        match attempted {
+            Attempted::Stored => run.uploaded += 1,
+            Attempted::Retired => {}
+            Attempted::Queued => {
+                if let Some(ending) = started.and_then(|seen| self.waits.reports_since(seen)) {
+                    run.crossed.insert(RetrySubject::Upload(id), ending);
+                }
+            }
         }
         for retry in self.app_retries.lock().expect("app retries poisoned").iter_mut() {
             if let Some(covers) = &mut retry.covers {

@@ -175,7 +175,7 @@ fn crashing_file_writer() {
 
 /// Complete the only queued upload as confirmed storage would, whether a
 /// file still waits for it or not.
-async fn complete(db: &Database) -> Result<(), DbError> {
+async fn complete(db: &Database) -> Result<crate::UploadCompletion, DbError> {
     let id = db.inspect_writer(|sql| {
         sql.query_row("SELECT id FROM _coven_file_uploads", [], |r| r.get::<_, i64>(0)).unwrap()
     });

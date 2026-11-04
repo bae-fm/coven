@@ -5647,7 +5647,9 @@ pub struct UploadProgress {
 
 /// What `retry_uploads_now` did.
 pub enum DrainOutcome {
-    /// Every file it covered was attempted; this many were stored.
+    /// Every file it covered was attempted; this many were stored. An upload
+    /// whose move failed or was cancelled while it was sent stores no file
+    /// and doesn't count (§17.3).
     Drained { uploaded: usize },
     QueueEmpty,
     /// Uploads were paused: no trailing upload was tried, and each bound

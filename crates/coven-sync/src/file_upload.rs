@@ -11,44 +11,56 @@ use coven_database::{DbError, FileUpload, LocalFileStream, RetrySubject};
 use coven_format::file::{FileHeader, FILE_HEADER_LEN};
 use coven_storage::{ByteProgress, ObjectPath, UploadSession};
 
+/// How an upload attempt ended.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Attempted {
+    /// Storage holds the bytes, and the files waiting for them switch with
+    /// their move.
+    Stored,
+    /// Storage holds the bytes, but no file waited for them any more: the
+    /// upload retired, storing no file (§17.3).
+    Retired,
+    /// The upload stays queued: the attempt failed, or a hold stopped it.
+    Queued,
+}
+
 impl FilesInner {
-    /// Whether this attempt stored the file. A failure becomes the file's
-    /// pending record, which holds its error as the cause in this process.
-    /// The pause and a metered network hold a trailing upload only (§17.4,
-    /// §17.9).
+    /// How this attempt ended. A failure becomes the file's pending record,
+    /// which holds its error as the cause in this process. The pause and a
+    /// metered network hold a trailing upload only (§17.4, §17.9).
     pub(super) async fn attempt_upload(
         &self,
         item: FileUpload,
         meter: TransferMeter,
-    ) -> Result<bool, SyncError> {
+    ) -> Result<Attempted, SyncError> {
         if item.holds.is_none() && self.trailing_held() {
-            return Ok(false);
+            return Ok(Attempted::Queued);
         }
         self.forget_connection_wait(RetrySubject::Upload(item.id));
         match self.upload(&item, meter).await {
-            Ok(stored) => {
-                if stored {
+            Ok(attempted) => {
+                if attempted != Attempted::Queued {
                     self.waits.forget(RetrySubject::Upload(item.id));
                     self.waits.failure_cleared(&upload_subject(&item.location), |_| true);
                 }
-                Ok(stored)
+                Ok(attempted)
             }
             Err(error) => {
                 self.record_failure(&item, error).await?;
-                Ok(false)
+                Ok(Attempted::Queued)
             }
         }
     }
     /// Send the file to the path and key its staging write fixed, telling
     /// `meter` how far through the encrypted object the bytes handed over
     /// reach. Confirmed storage switches its files to the cloud and retires
-    /// the queue row (§17.9). Returns false when a trailing upload is held
-    /// between parts.
+    /// the queue row (§17.9). A trailing upload held between parts, or whose
+    /// completion a self-replacement's pause holds, stays queued.
     pub(super) async fn upload(
         &self,
         item: &FileUpload,
         meter: TransferMeter,
-    ) -> Result<bool, TransferError> {
+    ) -> Result<Attempted, TransferError> {
         let coven_format::file_reference::FileReference { key, .. } =
             item.location.reference().map_err(FileReadError::from)?;
         let path = item.location.path(self.directory.id());
@@ -104,7 +116,7 @@ impl FilesInner {
             .await?
             {
                 crate::recorded_upload::Uploaded::Stored => {}
-                crate::recorded_upload::Uploaded::Paused => return Ok(false),
+                crate::recorded_upload::Uploaded::Paused => return Ok(Attempted::Queued),
                 crate::recorded_upload::Uploaded::Occupied(expected) => {
                     self.settle_occupied(storage.as_ref(), &path, expected).await?;
                 }
@@ -119,14 +131,15 @@ impl FilesInner {
             },
         )?;
         match self.database.complete_upload(item.id, upload_subject(&item.location)).await {
-            Ok(()) => Ok(true),
+            Ok(coven_database::UploadCompletion::Stored) => Ok(Attempted::Stored),
+            Ok(coven_database::UploadCompletion::Retired) => Ok(Attempted::Retired),
             // A self-replacement paused writes while the file was sent. The
             // stored bytes wait under their path, and the upload stays
             // queued, held, until a run after the pause finds them and
             // completes it (§12.3, §17.4).
             Err(DbError::MemberKeysChanging) => {
                 self.writes_were_paused();
-                Ok(false)
+                Ok(Attempted::Queued)
             }
             Err(error) => Err(FileReadError::from(error).into()),
         }

@@ -113,6 +113,17 @@ pub struct UploadQueueState {
     pub sending: std::collections::BTreeSet<FileId>,
 }
 
+/// What an upload's completion did (§17.3, §17.9).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UploadCompletion {
+    /// Its bytes are stored for the files waiting for them, which switch to
+    /// the cloud with the rest of their move.
+    Stored,
+    /// No file waited for its bytes any more, its move having failed or
+    /// been cancelled while it was sent: it retired, storing no file.
+    Retired,
+}
+
 /// What this device committed and has not uploaded: writes and files (E1).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct UnsentWork {
