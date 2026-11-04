@@ -41,7 +41,7 @@ pub struct StoreInfo {
 pub enum StoreListError {
     /// The directory listing or an identity settings read failed.
     #[error(transparent)]
-    File(#[from] FileError),
+    File(FileError),
     /// Reading a store's current name failed.
     #[error("read name of store {store}: {source}")]
     Store {
@@ -51,12 +51,28 @@ pub enum StoreListError {
         #[source]
         source: CovenError,
     },
+    /// Listing the stores panicked on the blocking pool: a bug, which the
+    /// caller reports (E15).
+    #[error(transparent)]
+    Bug(#[from] crate::task::Bug),
 }
 
-impl From<coven_foundation::files::StoreDirectoriesError> for StoreListError {
-    fn from(error: coven_foundation::files::StoreDirectoriesError) -> Self {
-        let coven_foundation::files::StoreDirectoriesError::File(error) = error;
-        Self::File(error)
+impl From<FileError> for StoreListError {
+    fn from(error: FileError) -> Self {
+        match error {
+            FileError::Bug(bug) => Self::Bug(bug),
+            error => Self::File(error),
+        }
+    }
+}
+
+impl crate::task::CarriesBug for StoreListError {
+    fn bug(&self) -> Option<&crate::task::Bug> {
+        match self {
+            Self::Bug(bug) => Some(bug),
+            Self::File(error) => error.bug(),
+            Self::Store { source, .. } => source.bug(),
+        }
     }
 }
 

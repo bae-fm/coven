@@ -59,7 +59,7 @@ async fn directory_listing_errors_are_not_hidden_as_an_empty_layout() {
     let directory = tempfile::tempdir().unwrap();
     fs::write(directory.path().join("stores"), b"not a directory").unwrap();
     let layout = StoreDirectories::new(directory.path().to_owned());
-    assert!(matches!(layout.store_ids().await, Err(StoreDirectoriesError::File(_))));
+    assert!(matches!(layout.store_ids().await, Err(FileError::Io { .. })));
     assert!(matches!(
         layout.create_store_dir(StoreId(Uuid::nil()), &UuidIds),
         Err(DirectoryCreationError::File(_))

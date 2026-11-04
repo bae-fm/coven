@@ -1804,6 +1804,8 @@ pub enum StoreListError {
     File(FileError),
     /// Reading this store's current name failed; no older name is substituted.
     Store { store: StoreId, source: CovenError },
+    /// Listing the stores panicked on the blocking pool: a bug (E15).
+    Bug(Bug),
 }
 
 /// A store creation failure, with publication and rollback failures explicit.
@@ -8325,7 +8327,8 @@ carries it as `Bug`: `DbError::Bug` for a database call, `FileError::Bug`
 for file work, and a `Bug` variant of each error that has a `Shutdown` one.
 An error that keeps a file or lock failure takes the bug as its own `Bug`,
 never under a disk label: `StoreLockError::Bug` for taking a store's lock,
-and `CovenError::Bug` or `DbError::Bug` for a lock they took. `SyncError`
+`CovenError::Bug` or `DbError::Bug` for a lock they took, and
+`StoreListError::Bug` for listing the stores. `SyncError`
 reports it as `LocalFailure::Bug`.
 
 - Ana's app writes a note with `write`, and its closure panics on a note

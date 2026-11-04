@@ -258,11 +258,12 @@ pub(super) async fn unfinished_joins(
 ) -> Result<Vec<InviteInfo>, BootstrapError> {
     let keychain = builder.keychain()?;
     let mut joins = Vec::new();
-    for store in builder.directories.unfinished_first_installations().await.map_err(
-        |coven_foundation::files::StoreDirectoriesError::File(error)| {
-            BootstrapDirectoryError::from(error)
-        },
-    )? {
+    for store in builder
+        .directories
+        .unfinished_first_installations()
+        .await
+        .map_err(BootstrapDirectoryError::from)?
+    {
         // An unfinished restore, or a join that can't have sent its
         // request, saves no code: it is not a join to resume.
         let Some(text) = StoreKeychain::new(keychain.clone(), store).invite_code()? else {

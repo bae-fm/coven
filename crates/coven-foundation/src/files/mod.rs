@@ -48,7 +48,7 @@ pub use flush_batch::{FlushBatch, Flushed};
 pub use folder_copy::{
     remove_copy, remove_folder, remove_temporary, CopyFolder, CopyPathError, CopyPlan, CopyWriter,
 };
-pub use layout::{StoreDirectories, StoreDirectoriesError};
+pub use layout::StoreDirectories;
 pub use lock::{
     CacheWriteLock, StoreClosingGuard, StoreDeletionLock, StoreLock, StoreLockError, StoreReadLock,
 };

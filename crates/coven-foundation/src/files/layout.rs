@@ -38,15 +38,6 @@ enum Installations {
     UnfinishedFirst,
 }
 
-/// A failure reading the app's store directories.
-#[derive(Debug, thiserror::Error)]
-pub enum StoreDirectoriesError {
-    /// The operating system refused a listing or a settings read, or the
-    /// listing's runtime is shutting down and it did not run.
-    #[error("list stores: {0}")]
-    File(#[from] FileError),
-}
-
 impl StoreDirectories {
     /// The stores under `app_dir`, one directory each (E1). The app creates
     /// `app_dir`; coven creates directories only inside it.
@@ -74,33 +65,23 @@ impl StoreDirectories {
     /// replacement is unfinished, but no unpublished first installation.
     /// Only directories with a canonical UUID name and matching valid settings
     /// are stores. Invalid entries are logged; filesystem failures are errors.
-    pub async fn store_ids(&self) -> Result<Vec<StoreId>, StoreDirectoriesError> {
+    pub async fn store_ids(&self) -> Result<Vec<StoreId>, FileError> {
         self.listed(Installations::Published).await
     }
 
     /// The stores whose first installation on this device is unfinished, a
     /// restore or a join that hasn't loaded, ordered by id (§19.1). A store
     /// whose replacement is unfinished is listed by `store_ids` instead.
-    pub async fn unfinished_first_installations(
-        &self,
-    ) -> Result<Vec<StoreId>, StoreDirectoriesError> {
+    pub async fn unfinished_first_installations(&self) -> Result<Vec<StoreId>, FileError> {
         self.listed(Installations::UnfinishedFirst).await
     }
 
-    async fn listed(
-        &self,
-        installations: Installations,
-    ) -> Result<Vec<StoreId>, StoreDirectoriesError> {
+    async fn listed(&self, installations: Installations) -> Result<Vec<StoreId>, FileError> {
         let layout = self.clone();
-        crate::task::blocking("list stores", move || layout.list_stores(installations))
-            .await
-            .map_err(FileError::from)?
+        crate::task::blocking("list stores", move || layout.list_stores(installations)).await?
     }
 
-    fn list_stores(
-        &self,
-        installations: Installations,
-    ) -> Result<Vec<StoreId>, StoreDirectoriesError> {
+    fn list_stores(&self, installations: Installations) -> Result<Vec<StoreId>, FileError> {
         let root = self.stores();
         let entries = match fs::read_dir(&root) {
             Ok(entries) => entries,
@@ -108,9 +89,7 @@ impl StoreDirectories {
                 tracing::debug!(path = %root.display(), "stores directory is absent");
                 return Ok(Vec::new());
             }
-            Err(source) => {
-                return Err(FileError::at("list store directories", &root, source).into())
-            }
+            Err(source) => return Err(FileError::at("list store directories", &root, source)),
         };
         let mut stores = Vec::new();
         for entry in entries {
@@ -144,7 +123,7 @@ impl StoreDirectories {
             }
             match settings::read(&path, id) {
                 Ok(_) => stores.push(id),
-                Err(SettingsError::File(error)) => return Err(error.into()),
+                Err(SettingsError::File(error)) => return Err(error),
                 Err(error) => {
                     tracing::warn!(path = %path.display(), error = %error, "directory has no valid store settings")
                 }

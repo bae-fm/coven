@@ -141,3 +141,14 @@ fn a_bug_taking_a_stores_lock_is_each_errors_bug() {
     });
     assert_eq!(crate::CovenError::from(in_cleanup).bug(), Some(&bug));
 }
+
+/// A panic listing the stores is the listing's bug, not a disk failure.
+#[test]
+fn a_bug_listing_the_stores_is_the_listings_bug() {
+    use crate::task::{Bug, CarriesBug};
+    use crate::StoreListError;
+    let bug = Bug { operation: "list stores", message: "the listing panicked".into() };
+    let listing = StoreListError::from(FileError::Bug(bug.clone()));
+    assert!(matches!(&listing, StoreListError::Bug(found) if *found == bug));
+    assert_eq!(listing.bug(), Some(&bug));
+}
