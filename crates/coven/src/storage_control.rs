@@ -8,12 +8,7 @@ impl StorageConnections {
     /// credentials, failing and backing off like any pass (E5).
     pub(crate) async fn start(self: &Arc<Self>) -> Result<(), SyncError> {
         let _call = self.lock_open().await?;
-        let keys = self
-            .keys
-            .lock()
-            .expect("store keys lock poisoned")
-            .clone()
-            .ok_or(KeyError::StoreClosed)?;
+        let keys = self.with_keys(|keys| Ok(keys.clone()))?;
         if let Some(key) = SequenceSync::missing_store_key(&self.database, &keys).await? {
             return Err(SyncError::KeyUnavailable(key));
         }

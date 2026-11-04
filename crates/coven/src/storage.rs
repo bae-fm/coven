@@ -344,13 +344,20 @@ impl StorageConnections {
         self.codes.location().await
     }
 
+    /// Run `use_keys` on this session's store keys, holding the keys lock
+    /// throughout so closing cannot take them away mid-use. `StoreClosed`
+    /// once they are gone.
+    fn with_keys<T>(
+        &self,
+        use_keys: impl FnOnce(&Arc<KeySession<StoreKeyring>>) -> Result<T, KeyError>,
+    ) -> Result<T, KeyError> {
+        let keys = self.keys.lock().expect("store keys lock poisoned");
+        use_keys(keys.as_ref().ok_or(KeyError::StoreClosed)?)
+    }
+
     async fn lock_open(&self) -> Result<tokio::sync::MutexGuard<'_, ()>, KeyError> {
         let call = self.calls.lock().await;
-        self.keys
-            .lock()
-            .expect("store keys lock poisoned")
-            .as_ref()
-            .ok_or(KeyError::StoreClosed)?;
+        self.with_keys(|_| Ok(()))?;
         Ok(call)
     }
 
@@ -394,12 +401,7 @@ impl StorageConnections {
         if let ConnectionState::Active(previous) = previous {
             return Ok(Arc::new(previous.sync.reconnect(storage)));
         }
-        let keys = self
-            .keys
-            .lock()
-            .expect("store keys lock poisoned")
-            .clone()
-            .ok_or(KeyError::StoreClosed)?;
+        let keys = self.with_keys(|keys| Ok(keys.clone()))?;
         Ok(Arc::new(
             SequenceSync::open(
                 self.database.clone(),
@@ -489,13 +491,7 @@ impl StorageConnections {
     }
 
     pub(crate) fn key_state(&self) -> Result<StoreKeyState, KeyError> {
-        let held = self
-            .keys
-            .lock()
-            .expect("store keys lock poisoned")
-            .as_ref()
-            .ok_or(KeyError::StoreClosed)?
-            .read()?;
+        let held = self.with_keys(|keys| keys.read())?;
         Ok(match held {
             Some(_) => StoreKeyState::Available,
             None => StoreKeyState::Locked,
@@ -767,13 +763,7 @@ impl StorageConnections {
         let state = self.database.store_state().await?;
         let member = self.identity.read()?.ok_or(StorageFailure::MemberKeysMissing)?;
         if state.store.is_none() {
-            let held = self
-                .keys
-                .lock()
-                .expect("store keys lock poisoned")
-                .as_ref()
-                .ok_or(KeyError::StoreClosed)?
-                .read()?;
+            let held = self.with_keys(|keys| keys.read())?;
             let ring = match &held {
                 Some(ring) => ring.clone(),
                 None => {
@@ -820,21 +810,11 @@ impl StorageConnections {
     }
 
     fn persist_keys(&self, ring: &StoreKeyring) -> Result<(), KeyError> {
-        self.keys
-            .lock()
-            .expect("store keys lock poisoned")
-            .as_ref()
-            .ok_or(KeyError::StoreClosed)?
-            .persist(ring)
+        self.with_keys(|keys| keys.persist(ring))
     }
 
     fn forget_keys(&self) -> Result<(), KeyError> {
-        self.keys
-            .lock()
-            .expect("store keys lock poisoned")
-            .as_ref()
-            .ok_or(KeyError::StoreClosed)?
-            .forget()
+        self.with_keys(|keys| keys.forget())
     }
 
     pub(crate) async fn unlock(self: &Arc<Self>) -> Result<ConnectedStorage, StoreKeyUnlockError> {
