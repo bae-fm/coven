@@ -67,8 +67,7 @@ pub(crate) fn finish(
     id: OperationId,
 ) -> Result<(), DbError> {
     db.internal_execute("UPDATE _coven_provider_access SET operation=NULL,target=NULL WHERE account=?1 AND operation=?2", (account,id.0))?;
-    crate::pending::clear_operation(db, id)?;
-    db.internal_execute("DELETE FROM _coven_operations WHERE id=?1", [id.0])?;
+    crate::operation::finish(db, id)?;
     Ok(())
 }
 
