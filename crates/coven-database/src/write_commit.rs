@@ -73,6 +73,50 @@ fn retain(
         |r| r.get(0))
 }
 
+/// Which stored rows' cells, references and claims [`delete_children`]
+/// deletes.
+pub(crate) enum StoredRows<'a> {
+    /// Every row an audience holds.
+    InAudience(&'a str),
+    /// Every generation of one row.
+    Row(&'a RowId),
+    /// Every row of a table, in every audience.
+    InTable(&'a str),
+    /// One stored generation.
+    Generation(i64),
+}
+
+/// Remove the cells, references and claims of `rows` in `_coven_rows`. The
+/// rows themselves stay for the caller to remove or keep.
+pub(crate) fn delete_children(
+    database: &DatabaseConnection,
+    rows: &StoredRows<'_>,
+) -> Result<(), DbError> {
+    for table in ["_coven_references", "_coven_cells", "_coven_claims"] {
+        match rows {
+            StoredRows::InAudience(audience) => database.internal_execute(
+                &format!(
+                    "DELETE FROM {table} WHERE row_id IN (SELECT id FROM _coven_rows WHERE audience=?1)"
+                ),
+                [audience],
+            ),
+            StoredRows::Row(row) => database.internal_execute(
+                &format!("DELETE FROM {table} WHERE row_id IN (SELECT id FROM _coven_rows WHERE table_name=?1 AND key=?2 AND audience=?3)"),
+                params![row.table, row.key, audience_text(&row.audience)],
+            ),
+            StoredRows::InTable(name) => database.internal_execute(
+                &format!(
+                    "DELETE FROM {table} WHERE row_id IN (SELECT id FROM _coven_rows WHERE table_name=?1)"
+                ),
+                [name],
+            ),
+            StoredRows::Generation(id) => database
+                .internal_execute(&format!("DELETE FROM {table} WHERE row_id=?1"), [id]),
+        }?;
+    }
+    Ok(())
+}
+
 /// Store each row's update over its prior record. Returns the id of each
 /// present row's current generation.
 pub(crate) fn persist(
@@ -98,11 +142,7 @@ pub(crate) fn persist(
         let advanced = old.state.generation() != update.state.generation();
         if advanced {
             if let Some(ordinal) = old.ordinal {
-                database.internal_execute("DELETE FROM _coven_cells WHERE row_id=?1", [ordinal])?;
-                database
-                    .internal_execute("DELETE FROM _coven_references WHERE row_id=?1", [ordinal])?;
-                database
-                    .internal_execute("DELETE FROM _coven_claims WHERE row_id=?1", [ordinal])?;
+                delete_children(database, &StoredRows::Generation(ordinal))?;
             }
             if let Some(loss) = old.loss {
                 database.internal_execute("DELETE FROM _coven_lost WHERE id=?1", [loss])?;

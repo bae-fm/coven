@@ -30,14 +30,10 @@ pub(crate) fn begin(database: &DatabaseConnection, audience: &Audience) -> Resul
          SELECT DISTINCT table_name,key FROM _coven_lost WHERE audience=?1 ON CONFLICT DO NOTHING",
         [&audience],
     )?;
-    for table in ["_coven_references", "_coven_cells", "_coven_claims"] {
-        database.internal_execute(
-            &format!(
-                "DELETE FROM {table} WHERE row_id IN (SELECT id FROM _coven_rows WHERE audience=?1)"
-            ),
-            [&audience],
-        )?;
-    }
+    crate::write_commit::delete_children(
+        database,
+        &crate::write_commit::StoredRows::InAudience(&audience),
+    )?;
     for table in ["_coven_rows", "_coven_lost"] {
         database
             .internal_execute(&format!("DELETE FROM {table} WHERE audience=?1"), [&audience])?;

@@ -30,9 +30,10 @@ pub(crate) fn carry(
             }
         }
         if !names.tables.contains_key(&table.name) {
-            for child in ["_coven_references", "_coven_cells", "_coven_claims"] {
-                db.internal_execute(&format!("DELETE FROM {child} WHERE row_id IN (SELECT id FROM _coven_rows WHERE table_name=?1)"), [&table.name])?;
-            }
+            crate::write_commit::delete_children(
+                db,
+                &crate::write_commit::StoredRows::InTable(&table.name),
+            )?;
             db.internal_execute("DELETE FROM _coven_rows WHERE table_name=?1", [&table.name])?;
             crate::ownership::forget_table(db, &table.name)?;
             // A dropped table's losses stay, frozen under its old names (§18.7).

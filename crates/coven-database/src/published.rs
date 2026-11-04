@@ -269,9 +269,7 @@ pub(crate) fn restore(
     db.record_work(|work| work.published_rows += rows.len());
     for row in rows {
         let audience = audience_text(&row.audience);
-        for table in ["_coven_references", "_coven_cells", "_coven_claims"] {
-            db.internal_execute(&format!("DELETE FROM {table} WHERE row_id IN (SELECT id FROM _coven_rows WHERE table_name=?1 AND key=?2 AND audience=?3)"),params![row.table,row.key,audience])?;
-        }
+        crate::write_commit::delete_children(db, &crate::write_commit::StoredRows::Row(&row))?;
         for table in ["_coven_rows", "_coven_lost", "_coven_creations"] {
             db.internal_execute(
                 &format!("DELETE FROM {table} WHERE table_name=?1 AND key=?2 AND audience=?3"),
