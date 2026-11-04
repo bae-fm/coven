@@ -517,8 +517,7 @@ async fn blocking<T: Send + 'static, E: From<FileError> + Send + 'static>(
     operation: &'static str,
     run: impl FnOnce() -> Result<T, E> + Send + 'static,
 ) -> Result<T, E> {
-    let joined = tokio::task::spawn_blocking(run).await;
-    crate::unwinding::blocking(operation, joined).map_err(FileError::from)?
+    crate::unwinding::run_blocking(operation, run).await.map_err(FileError::from)?
 }
 
 #[cfg(test)]

@@ -1,6 +1,7 @@
 //! Deleting a store from this device without losing unsent work (E1).
 
 use crate::*;
+use coven_foundation::unwinding::run_blocking;
 
 /// What `delete_store` does with writes and files not yet uploaded.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -47,10 +48,8 @@ impl CovenHandle {
         self.close().await.map_err(StoreDeletionError::Closing)?;
         let directory = self.directory.clone();
         let keychain = self.keychain.clone();
-        crate::coven::blocking("delete the store", move || {
-            crate::coven::delete(&directory, &keychain)
-        })
-        .await?
+        run_blocking("delete the store", move || crate::coven::delete(&directory, &keychain))
+            .await?
     }
 }
 

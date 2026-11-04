@@ -2,6 +2,7 @@
 
 use super::*;
 use coven_foundation::files::{BootstrapDirectoryError, BootstrapStore};
+use coven_foundation::unwinding::run_blocking;
 
 pub(super) async fn create(
     builder: CovenBuilder,
@@ -15,11 +16,7 @@ pub(super) async fn create(
         Err(error @ StoreCreationError::PublishedButNotSynced { .. }) => Err(error),
         Err(error) => {
             Err(
-                match crate::coven::blocking("remove the unpublished store", move || {
-                    pending.cancel()
-                })
-                .await
-                {
+                match run_blocking("remove the unpublished store", move || pending.cancel()).await {
                     Ok(Ok(())) => error,
                     Ok(Err(cleanup)) => error.with_cleanup(cleanup.into()),
                     // The removal never ran, so the unpublished store stays
@@ -46,7 +43,7 @@ async fn prepare(
         Ok(waits) => Arc::new(waits),
         Err(error) => return Err(close_failed(&database, CovenError::from(error).into()).await),
     };
-    let prepared = crate::coven::blocking("create the store's custody", move || {
+    let prepared = run_blocking("create the store's custody", move || {
         let keychain = Arc::new(StoreKeychain::new(
             builder.keychain().map_err(CovenError::from)?,
             directory.id(),

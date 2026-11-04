@@ -40,6 +40,7 @@ mod writes;
 use crate::*;
 use coven_crypto::custody::{StoreCustody, StoreKeychain};
 use coven_database::Database;
+use coven_foundation::unwinding::run_blocking;
 use std::sync::{Arc, Mutex};
 
 /// A shared handle to the open store and its running work (Appendix F.4).
@@ -539,7 +540,7 @@ impl CovenHandle {
             let storage = handle.storage.close().await;
             handle.files.close().await;
             let custody = handle.custody.clone();
-            let custody = crate::coven::blocking("close custody", move || {
+            let custody = run_blocking("close custody", move || {
                 if let Some(custody) = custody.lock().expect("custody lock poisoned").take() {
                     custody.close();
                 }

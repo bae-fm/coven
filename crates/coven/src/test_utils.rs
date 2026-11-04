@@ -2,6 +2,7 @@
 
 use crate::*;
 use coven_crypto::custody::{Keychain, KeyringCustody, StoreKeychain};
+use coven_foundation::unwinding::run_blocking;
 use std::sync::Arc;
 
 /// One simulated installation's keychain, isolated from the OS and other tests.
@@ -90,16 +91,14 @@ impl TestCoven {
     /// List this installation's saved codes through the production discovery path.
     pub async fn saved_restore_codes(&self) -> Result<Vec<SavedRestoreEntry>, BootstrapError> {
         let keychain = self.keychain.clone();
-        crate::coven::blocking("list saved restore codes", move || {
-            crate::saved_restore::list(keychain)
-        })
-        .await?
+        run_blocking("list saved restore codes", move || crate::saved_restore::list(keychain))
+            .await?
     }
 
     /// Forget one store's saved code and S3 key through the production path.
     pub async fn forget_saved_restore_code(&self, store: StoreId) -> Result<(), BootstrapError> {
         let keychain = self.keychain.clone();
-        crate::coven::blocking("forget the saved restore code", move || {
+        run_blocking("forget the saved restore code", move || {
             crate::saved_restore::forget(keychain, store)
         })
         .await?

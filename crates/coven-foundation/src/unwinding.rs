@@ -18,6 +18,15 @@ pub fn blocking<T>(
     finish(operation, ShutdownOutcome::NotRun, joined)
 }
 
+/// Run `run`, the work named `operation`, on the blocking pool and wait for
+/// it, as [`blocking`] joins it.
+pub async fn run_blocking<T: Send + 'static>(
+    operation: &'static str,
+    run: impl FnOnce() -> T + Send + 'static,
+) -> Result<T, Shutdown> {
+    blocking(operation, tokio::task::spawn_blocking(run).await)
+}
+
 /// What a spawned task returned. The runtime drops such a task at whichever
 /// wait it is at, so what it would change may be changed in part:
 /// `ShutdownOutcome::Unknown`.

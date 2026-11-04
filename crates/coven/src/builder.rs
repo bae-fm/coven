@@ -11,6 +11,7 @@ use coven_foundation::files::StoreFile;
 use coven_foundation::progress::Progress;
 #[cfg(test)]
 use coven_foundation::progress::RecordingClock;
+use coven_foundation::unwinding::run_blocking;
 use coven_storage::{
     providers::{OAuthFlow, StorageConnector},
     Storage,
@@ -411,7 +412,7 @@ impl CovenBuilder {
         let settings = coven_storage::StorageSettings::new(directory.clone());
         let device = directory.settings().map_err(CovenError::from)?.device_id;
         let oauth = self.oauth.clone();
-        let (credentials, data) = crate::coven::blocking("read the saved credentials", move || {
+        let (credentials, data) = run_blocking("read the saved credentials", move || {
             let keychain = self.keychain()?;
             let credentials = Arc::new(coven_sync::DeviceCredentials::new(
                 Arc::new(StoreKeychain::new(keychain.clone(), store)),
@@ -487,7 +488,7 @@ impl CovenBuilder {
         let database = self.database(directory.clone())?;
         let lock = directory.lock_for_open().await?;
         let closing = lock.closing_guard();
-        let result = crate::coven::blocking("open the store's custody", move || {
+        let result = run_blocking("open the store's custody", move || {
             let mut builder = self;
             let settings = lock.settings()?;
             let keychain = Arc::new(StoreKeychain::new(builder.keychain()?, settings.id));
@@ -692,7 +693,7 @@ impl OpeningStore {
         let waits = Arc::new(
             coven_sync::RetryWaits::open(database.clone(), self.builder.clock.clone()).await?,
         );
-        let owners = crate::coven::blocking("open the store's owners", move || {
+        let owners = run_blocking("open the store's owners", move || {
             let owners = self.builder.owners(self.directory, self.keychain)?;
             // The saved restore code's name catches up with this store's
             // when the store's is newer, and an unreadable entry is replaced

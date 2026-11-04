@@ -3,6 +3,7 @@
 use crate::{CovenBuilder, StoreDeletionError, StoreDir, StoreLayout};
 use coven_crypto::custody::{KeyError, Keychain, StoreKeychain};
 use coven_foundation::files::StoreDirAccess;
+use coven_foundation::unwinding::run_blocking;
 
 /// Creating, opening and deleting stores on this device (E1).
 pub struct Coven;
@@ -14,7 +15,7 @@ impl Coven {
         store_dir: &StoreDir,
     ) -> Result<Option<crate::StorageConfig>, crate::StorageError> {
         let settings = coven_storage::StorageSettings::new(store_dir.clone());
-        blocking("read the storage settings", move || settings.read())
+        run_blocking("read the storage settings", move || settings.read())
             .await
             .map_err(|shutdown| crate::StorageError::from(crate::FileError::from(shutdown)))?
     }
@@ -65,7 +66,7 @@ pub(crate) async fn discard(
 ) -> Result<(), StoreDeletionError> {
     store_dir.closed().await?;
     let directory = store_dir.clone();
-    blocking("discard the store", move || delete(&directory, &keys()?)).await?
+    run_blocking("discard the store", move || delete(&directory, &keys()?)).await?
 }
 
 pub(crate) fn delete(directory: &StoreDir, keys: &StoreKeychain) -> Result<(), StoreDeletionError> {
@@ -75,16 +76,6 @@ pub(crate) fn delete(directory: &StoreDir, keys: &StoreKeychain) -> Result<(), S
         lock.remove_directory()?;
     }
     Ok(())
-}
-
-/// Run `run`, the work named `operation`, on the blocking pool. A panic in it
-/// unwinds into the caller; the pool dropping it unstarted, as it does once
-/// its runtime begins shutting down, is a `Shutdown` that changed nothing.
-pub(crate) async fn blocking<T: Send + 'static>(
-    operation: &'static str,
-    run: impl FnOnce() -> T + Send + 'static,
-) -> Result<T, crate::task::Shutdown> {
-    coven_foundation::unwinding::blocking(operation, tokio::task::spawn_blocking(run).await)
 }
 
 /// Wait for `task`, spawned so the call named `operation` finishes even when

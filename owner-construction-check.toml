@@ -670,12 +670,12 @@ tables = [
 # A batch's flush syncs its folders and the drive's cache on a blocking
 # task, which the write waits for before its commit.
 "crates/coven-foundation/src/files/flush_batch.rs" = ["FlushBatch::flush"]
-# Copies into a folder the person picked do their file work on a blocking
-# task, which finishes even if the call is dropped (§17.3).
-"crates/coven-foundation/src/files/folder_copy.rs" = ["blocking"]
 # Runs its caller's work on a blocking task and waits for it, so the work's
 # panic comes back to the caller as a value (api.md E15).
 "crates/coven-foundation/src/task.rs" = ["blocking"]
+# Runs coven's own work on a blocking task and waits for it; a panic in the
+# work unwinds into the caller (E15).
+"crates/coven-foundation/src/unwinding.rs" = ["run_blocking"]
 # A test clock that keeps time by the clock it is given and records what one
 # progress watch holds at each reading.
 # The work one test measures, shared by its task and the blocking calls it
@@ -971,7 +971,6 @@ tables = [
 ]
 "crates/coven/src/builder_creation.rs" = ["create", "prepare"]
 "crates/coven/src/coven.rs" = [
-    "blocking",
     "Coven::builder",
     "Coven::storage_config",
     "Coven::discard_store",
