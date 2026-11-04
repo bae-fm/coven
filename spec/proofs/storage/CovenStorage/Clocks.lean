@@ -34,6 +34,52 @@ def stamp (wall : Int) (device : Nat) (latest : Timestamp) : Except StampError T
     if h : next < tickLimit then .ok ⟨⟨next, h⟩, device⟩
     else .error .clockOutOfRange
 
+/-- §7.2: a device's first stamp, with no latest timestamp, takes the wall
+clock with counter 0; a wall clock before 1970 contributes zero. -/
+def stampFirst (wall : Int) (device : Nat) : Except StampError Timestamp :=
+  if h : wall < (msLimit : Int) then
+    .ok ⟨⟨wall.toNat * counterBase, by simp only [tickLimit, counterBase, msLimit] at *; omega⟩,
+      device⟩
+  else .error .clockOutOfRange
+
+theorem first_stamp (wall : Int) (device : Nat) (result : Timestamp)
+    (h : stampFirst wall device = .ok result) :
+    result.ms = wall.toNat ∧ result.counter = 0 ∧ result.device = device := by
+  unfold stampFirst at h
+  split at h
+  · cases h; simp [Timestamp.ms, Timestamp.counter, counterBase]
+  · contradiction
+
+/-- With no latest timestamp, a clock before 1970 starts at `0 ms #0`. -/
+theorem first_stamp_before_epoch (wall : Int) (device : Nat) (before : wall < 0) :
+    ∃ result, stampFirst wall device = .ok result ∧ result.ms = 0 ∧ result.counter = 0 := by
+  have ok : wall < (msLimit : Int) := by simp only [msLimit]; omega
+  refine ⟨_, by simp [stampFirst, ok]; rfl, ?_⟩
+  simp [Timestamp.ms, Timestamp.counter, counterBase]
+  omega
+
+/-- A wall clock past the last millisecond 48 bits hold fails every stamp. -/
+theorem clock_past_range_fails (wall : Int) (device : Nat) (latest : Timestamp)
+    (past : (msLimit : Int) ≤ wall) :
+    stampFirst wall device = .error .clockOutOfRange ∧
+    stamp wall device latest = .error .clockOutOfRange := by
+  constructor
+  · simp [stampFirst, show ¬ wall < (msLimit : Int) by omega]
+  · simp [stamp, past]
+
+/-- A latest timestamp at the last millisecond with its counter at the maximum
+fails the next stamp, whatever the wall clock reads. -/
+theorem exhausted_fails (wall : Int) (device : Nat) (latest : Timestamp)
+    (last : latest.tick.val + 1 = tickLimit) :
+    stamp wall device latest = .error .clockOutOfRange := by
+  unfold stamp
+  split
+  · rfl
+  · have : ¬ max (latest.tick.val + 1) (wall.toNat * counterBase) < tickLimit := by
+      have := Nat.le_max_left (latest.tick.val + 1) (wall.toNat * counterBase)
+      omega
+    simp [this]
+
 theorem stamp_after_latest (wall : Int) (device : Nat) (latest result : Timestamp)
     (h : stamp wall device latest = .ok result) : latest.tick.val < result.tick.val := by
   unfold stamp at h

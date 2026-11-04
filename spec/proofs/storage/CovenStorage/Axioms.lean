@@ -4,6 +4,10 @@ import CovenStorage
 #print axioms CovenStorage.BucketClaim.retry_passes
 #print axioms CovenStorage.BucketClaim.reconnect_refuses_other
 
+#print axioms CovenStorage.Clocks.first_stamp
+#print axioms CovenStorage.Clocks.first_stamp_before_epoch
+#print axioms CovenStorage.Clocks.clock_past_range_fails
+#print axioms CovenStorage.Clocks.exhausted_fails
 #print axioms CovenStorage.Clocks.stamp_after_latest
 #print axioms CovenStorage.Clocks.stamp_value
 #print axioms CovenStorage.Clocks.representable_stamp_exists

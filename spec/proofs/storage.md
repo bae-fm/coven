@@ -228,8 +228,12 @@ proved in [IO](io.md#removed-device-file-scan).
 all observed timestamps without waiting for the wall clock. `stamp_after_latest`,
 `stamp_after_every_read`, `different_devices_distinct` and
 `stamp_after_snapshot` provide the causal and uniqueness properties used by
-the merge. `representable_stamp_exists` states the bounded-counter premise;
-the model does not allow arithmetic overflow to become a timestamp.
+the merge. `wall_ahead_uses_zero_counter` and `wall_behind_increments` give
+the stamp's value either side of the latest time; `first_stamp` and
+`first_stamp_before_epoch` cover a device with no latest timestamp.
+`representable_stamp_exists` states the bounded-counter premise, and
+`clock_past_range_fails` and `exhausted_fails` its two failures: the model does
+not allow arithmetic overflow to become a timestamp.
 
 Storage ages and retry delays are distinct from authored timestamps. An
 object's age compares the deleting device's wall clock with the provider's time
@@ -241,7 +245,9 @@ changes don't move (`wall_jump_changes_no_retry`), and its delay never passes
 five minutes (`retry_delay_bounded`).
 Persisted wait reopening is covered in [IO](io.md#waiting-and-reopening).
 `clockRunner` compares timestamp generation with
-`write_encoding::tests::lean_differential_clocks` via `COVEN_CLOCK_LEAN`.
+`write_encoding::tests::lean_differential_clocks` via `COVEN_CLOCK_LEAN`: a
+first stamp at the edges of the range, a stamp with the wall clock ahead, and
+stamps after receiving writes and loading a snapshot with the clock behind.
 
 ## Signed roots and row authorship
 

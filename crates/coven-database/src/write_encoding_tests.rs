@@ -318,6 +318,47 @@ async fn lean_differential_clocks() {
     let runner = std::env::var_os("COVEN_CLOCK_LEAN")
         .expect("COVEN_CLOCK_LEAN must name the built Lean runner");
     let ids = SequentialIds::new();
+    let at = |wall: i64| {
+        if wall < 0 {
+            UNIX_EPOCH - Duration::from_millis(wall.unsigned_abs())
+        } else {
+            UNIX_EPOCH + Duration::from_millis(wall as u64)
+        }
+    };
+    let stamped = |result: Result<(), DbError>, db: &Database| match result {
+        Ok(()) => timestamp_json(records(db).pop().unwrap().header.timestamp),
+        Err(DbError::ClockOutOfRange) => Value::Null,
+        Err(error) => panic!("stamping failed with {error:?}"),
+    };
+    // A device's first stamp, with no latest timestamp, then a stamp with the
+    // wall clock ahead of the latest one.
+    let last = Timestamp::MAX_MILLISECONDS as i64;
+    for wall in [-1_000_i64, 0, 1_000, last - 1_000, last, last + 1] {
+        let store = TestStore::with_ids(&ids);
+        let clock = Arc::new(FixedClock::new(at(wall)));
+        let db = open(&store, &clock).await;
+        let device = store.device();
+        let expected = lean_model(
+            &runner,
+            json!({"wall": wall, "device": device.0, "latest": null, "incoming": []}),
+        );
+        let first = sql(&db, "INSERT INTO notes VALUES('n','first','')").await;
+        assert_eq!(expected["next"], stamped(first, &db));
+        if !expected["next"].is_null() {
+            let ahead = wall + 2_000;
+            clock.set(at(ahead));
+            let expected = lean_model(
+                &runner,
+                json!({
+                    "wall": ahead, "device": device.0, "latest": timestamp_json(latest(&db)),
+                    "incoming": [], "snapshot": false, "causes": true,
+                }),
+            );
+            let next = sql(&db, "UPDATE notes SET title='ahead'").await;
+            assert_eq!(expected["next"], stamped(next, &db));
+        }
+        db.close().await.unwrap();
+    }
     for milliseconds in [301_001, 31_536_000_000, Timestamp::MAX_MILLISECONDS] {
         let source_store = TestStore::with_ids(&ids);
         let source_clock =
