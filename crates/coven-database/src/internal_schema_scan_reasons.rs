@@ -71,7 +71,7 @@ fn database_reason(statement: &Statement, relation: &str) -> Option<&'static str
     Some("opening reconstructs authenticated administrative history once; passes retain the result"),
 ("sql_versions.rs", "SELECT kind,name,version FROM _coven_sql_versions WHERE kind IN ('collation','function')", "_coven_sql_versions") =>
     Some("opening compares every recorded version with the app's registered ones"),
-("members.rs", "SELECT member,role,signing,sealing,access FROM _coven_members WHERE removed=0 ORDER BY member", "_coven_members") =>
+("members.rs", "SELECT member,signing,sealing,role,removed,access FROM _coven_members WHERE removed=0 ORDER BY member", "_coven_members") =>
     Some("the member list returns every current member"),
 ("download.rs", "SELECT (SELECT publication FROM _coven_snapshot_schema WHERE EXISTS(SELECT 1 FROM _coven_members))", "_coven_snapshot_schema" | "_coven_members") =>
     Some("the schema row is singular; unfiltered membership EXISTS stops after its first row"),

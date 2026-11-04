@@ -169,7 +169,7 @@ fn by_another_member(
 ) -> Result<bool, DbError> {
     Ok(write.device != author.device
         && (author.member.is_none()
-            || crate::ownership::member(db, write.device)? != author.member))
+            || crate::store_state_tables::device_member(db, write.device)? != author.member))
 }
 
 /// Whether a leaf names this row, read through the write's schema version.

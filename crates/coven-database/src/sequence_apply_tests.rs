@@ -266,7 +266,7 @@ fn project(db: &Database, claims: &BTreeMap<coven_merge::WriteId, (u64, u64)>) -
                     claims[&creation.write].0,
                     creation.write.number,
                     creation.write.device.0,
-                    crate::ownership::member(c, creation.creator.write.device)
+                    crate::store_state_tables::device_member(c, creation.creator.write.device)
                         .unwrap()
                         .unwrap()
                         .0

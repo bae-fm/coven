@@ -15,17 +15,80 @@ use std::collections::{BTreeMap, BTreeSet};
 pub(crate) fn slot(row: &Row<'_>, column: usize) -> rusqlite::Result<Slot> {
     Ok(Slot(counter(row.get(column)?)))
 }
+
+/// A stored membership fact that doesn't decode: the database is damaged
+/// (§19.3).
+fn damaged(column: usize, kind: Type) -> rusqlite::Error {
+    decode_failure(column, kind, DbError::DamagedDatabase)
+}
+
+/// The value at `column`, which the membership tables' constraints keep
+/// decodable; a value that isn't is `DamagedDatabase`.
+fn stored<T: rusqlite::types::FromSql>(
+    row: &Row<'_>,
+    column: usize,
+    kind: Type,
+) -> rusqlite::Result<T> {
+    row.get(column).map_err(|error| match error {
+        rusqlite::Error::InvalidColumnType(..)
+        | rusqlite::Error::FromSqlConversionFailure(..)
+        | rusqlite::Error::IntegralValueOutOfRange(..) => damaged(column, kind),
+        error => error,
+    })
+}
+
+/// A member id as the membership tables hold it: its sixteen UUID bytes.
 pub(crate) fn member(row: &Row<'_>, column: usize) -> rusqlite::Result<MemberId> {
-    Ok(MemberId(uuid::Uuid::from_bytes(row.get(column)?)))
+    Ok(MemberId(uuid::Uuid::from_bytes(stored(row, column, Type::Blob)?)))
+}
+
+/// The member a device registered under, once its registration has applied.
+pub(crate) fn device_member(
+    db: &DatabaseConnection,
+    device: DeviceId,
+) -> Result<Option<MemberId>, DbError> {
+    Ok(db
+        .query("SELECT member FROM _coven_devices WHERE device=?1", [device], |r| member(r, 0))?
+        .pop())
+}
+
+/// A public key pair as the membership tables hold it: the signing key at
+/// `signing`, the sealing key in the column after it.
+fn member_keys(row: &Row<'_>, signing: usize) -> rusqlite::Result<MemberPublicKeys> {
+    Ok(MemberPublicKeys {
+        signing: SigningKey::from_bytes(stored(row, signing, Type::Blob)?)
+            .map_err(|_not_a_key| damaged(signing, Type::Blob))?,
+        sealing: SealingKey::from_bytes(stored(row, signing + 1, Type::Blob)?),
+    })
+}
+
+/// A `_coven_members` row, read as
+/// `SELECT member,signing,sealing,role,removed,access`. A fact that doesn't
+/// decode is `DamagedDatabase`.
+pub(crate) fn stored_member(row: &Row<'_>) -> rusqlite::Result<(MemberId, StoreMember)> {
+    Ok((
+        member(row, 0)?,
+        StoreMember {
+            keys: member_keys(row, 1)?,
+            role: match stored::<String>(row, 3, Type::Text)?.as_str() {
+                "admin" => MemberRole::Admin,
+                "member" => MemberRole::Member,
+                _ => return Err(damaged(3, Type::Text)),
+            },
+            removed: stored(row, 4, Type::Integer)?,
+            access: serde_json::from_slice(&stored::<Vec<u8>>(row, 5, Type::Blob)?)
+                .map_err(|_not_access| damaged(5, Type::Blob))?,
+        },
+    ))
 }
 
 /// A `_coven_devices.state` value.
-pub(crate) fn device_state(text: String) -> rusqlite::Result<DeviceState> {
-    match text.as_str() {
+pub(crate) fn device_state(row: &Row<'_>, column: usize) -> rusqlite::Result<DeviceState> {
+    match stored::<String>(row, column, Type::Text)?.as_str() {
         "active" => Ok(DeviceState::Active),
         "removed" => Ok(DeviceState::Removed),
         "replaced" => Ok(DeviceState::Replaced),
-        _ => Err(rusqlite::Error::InvalidQuery),
+        _ => Err(damaged(column, Type::Text)),
     }
 }
 
@@ -93,38 +156,12 @@ pub(crate) fn read(database: &DatabaseConnection) -> Result<StoreState, DbError>
         .query(
             "SELECT member,signing,sealing,role,removed,access FROM _coven_members",
             [],
-            |row| {
-                let role = match row.get::<_, String>(3)?.as_str() {
-                    "admin" => MemberRole::Admin,
-                    "member" => MemberRole::Member,
-                    _ => return Err(rusqlite::Error::InvalidQuery),
-                };
-                Ok((
-                    member(row, 0)?,
-                    StoreMember {
-                        keys: MemberPublicKeys {
-                            signing: SigningKey::from_bytes(row.get(1)?)
-                                .map_err(|error| decode_failure(1, Type::Blob, error))?,
-                            sealing: SealingKey::from_bytes(row.get(2)?),
-                        },
-                        role,
-                        removed: row.get(4)?,
-                        access: serde_json::from_slice(&row.get::<_, Vec<u8>>(5)?)
-                            .map_err(|error| decode_failure(5, Type::Blob, error))?,
-                    },
-                ))
-            },
+            stored_member,
         )?
         .into_iter()
         .collect();
     state.bound_keys = database
-        .query("SELECT signing,sealing FROM _coven_bound_keys", [], |row| {
-            Ok(MemberPublicKeys {
-                signing: SigningKey::from_bytes(row.get(0)?)
-                    .map_err(|error| decode_failure(0, Type::Blob, error))?,
-                sealing: SealingKey::from_bytes(row.get(1)?),
-            })
-        })?
+        .query("SELECT signing,sealing FROM _coven_bound_keys", [], |row| member_keys(row, 0))?
         .into_iter()
         .collect();
     state.devices = database
@@ -134,7 +171,7 @@ pub(crate) fn read(database: &DatabaseConnection) -> Result<StoreState, DbError>
                 StoreDevice {
                     member: member(row, 1)?,
                     name: row.get(2)?,
-                    state: device_state(row.get(3)?)?,
+                    state: device_state(row, 3)?,
                 },
             ))
         })?

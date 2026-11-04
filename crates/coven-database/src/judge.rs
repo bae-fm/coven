@@ -452,7 +452,7 @@ impl<'a> Owners<'a> {
             version,
             current: db.schema_version()?,
             device,
-            member: crate::ownership::member(db, device)?,
+            member: crate::store_state_tables::device_member(db, device)?,
             known: BTreeMap::new(),
         })
     }
@@ -488,7 +488,7 @@ impl<'a> Owners<'a> {
             return Ok(None);
         }
         // Every applied write's device is registered before it applies.
-        let owner = crate::ownership::member(db, creation.creator.write.device)?
+        let owner = crate::store_state_tables::device_member(db, creation.creator.write.device)?
             .ok_or(DbError::Invariant { what: "an applied write's device has a member" })?;
         Ok((self.member != Some(owner)).then_some(owner))
     }

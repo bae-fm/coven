@@ -17,14 +17,24 @@ pub(crate) fn fill_for_plans(db: &rusqlite::Connection) {
     .unwrap();
 }
 
-/// Give every member that isn't an admin a role no write stores, as damaged
+/// Each way damaged storage can break a stored member fact, or the member a
+/// device registered under, past the tables' constraints.
+pub(crate) const MEMBER_DAMAGE: [&str; 6] = [
+    "UPDATE _coven_members SET role='owner'",
+    "UPDATE _coven_members SET signing=x'00'",
+    "UPDATE _coven_members SET sealing=x'00'",
+    "UPDATE _coven_members SET access=x'00'",
+    "UPDATE _coven_devices SET state='lost'",
+    "UPDATE _coven_devices SET member=x'00'",
+];
+
+/// Damage the membership tables with one of [`MEMBER_DAMAGE`], as broken
 /// storage would, for tests of what reading members does.
-pub(crate) fn damage_roles(db: &crate::sqlite::DatabaseConnection) {
-    db.batch(
-        "PRAGMA ignore_check_constraints=ON;
-         UPDATE _coven_members SET role='owner' WHERE role='member';
-         PRAGMA ignore_check_constraints=OFF;",
-    )
+pub(crate) fn damage(db: &crate::sqlite::DatabaseConnection, damage: &str) {
+    db.batch(&format!(
+        "PRAGMA foreign_keys=OFF; PRAGMA ignore_check_constraints=ON; {damage};
+         PRAGMA ignore_check_constraints=OFF; PRAGMA foreign_keys=ON;"
+    ))
     .unwrap()
 }
 

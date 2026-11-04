@@ -73,7 +73,7 @@ pub(crate) fn write<E>(
         &audience,
         crate::authorship::Author {
             device: id.device,
-            member: crate::ownership::member(db, id.device)?,
+            member: crate::store_state_tables::device_member(db, id.device)?,
         },
     )?;
     counts[section::EVIDENCE] = evidence.len() as u64;

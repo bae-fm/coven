@@ -12,7 +12,6 @@ use crate::write_encoding::{audience_text, decoded, encoded};
 use crate::DbError;
 use coven_format::merge_fields;
 use coven_format::write_sources::ChangeId;
-use coven_foundation::id_source::{DeviceId, MemberId};
 use coven_merge::{Audience, RowId, WriteId};
 use rusqlite::params;
 
@@ -145,28 +144,6 @@ pub(crate) fn visit<E: From<DbError>>(
             visit(row, creation)
         },
     )
-}
-
-/// A device's member, as the counted membership records it.
-#[expect(
-    clippy::map_err_ignore,
-    reason = "a stored value that won't convert or decode is DamagedDatabase"
-)]
-pub(crate) fn member(
-    db: &DatabaseConnection,
-    device: DeviceId,
-) -> Result<Option<MemberId>, DbError> {
-    let member: Option<Vec<u8>> = db.query_row(
-        "SELECT (SELECT member FROM _coven_devices WHERE device=?1)",
-        [device],
-        |r| r.get(0),
-    )?;
-    member
-        .map(|bytes| {
-            let bytes: [u8; 16] = bytes.try_into().map_err(|_| DbError::DamagedDatabase)?;
-            Ok(MemberId(uuid::Uuid::from_bytes(bytes)))
-        })
-        .transpose()
 }
 
 /// Whether a synced table restricts direct writes to each row's owner.

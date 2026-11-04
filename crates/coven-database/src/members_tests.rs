@@ -190,11 +190,44 @@ async fn read_failures_reach_callers_and_subscribers() {
     fixture(&db).await;
     let mut members = db.subscribe_members();
     assert_eq!(members.next().await.expect("the live query answers").unwrap().len(), 2);
-    db.inspect_writer(|db| crate::store_state_tables::tests::damage_roles(db));
+    db.inspect_writer(|db| {
+        crate::store_state_tables::tests::damage(
+            db,
+            crate::store_state_tables::tests::MEMBER_DAMAGE[0],
+        )
+    });
     assert!(db.members().await.is_err());
     assert!(db.subscribe_members().next().await.expect("the live query answers").is_err());
     db.close().await.unwrap();
     assert!(matches!(db.members().await, Err(crate::CovenError::Database(DbError::StoreClosed))));
+}
+
+/// Each stored member fact, and the member a device registered under, that
+/// doesn't decode fails the read as `DamagedDatabase` (§19.3), whichever
+/// read meets it.
+#[tokio::test]
+async fn a_stored_member_fact_that_does_not_decode_is_damaged_database() {
+    use crate::store_state_tables::tests::{damage, MEMBER_DAMAGE};
+    for broken in MEMBER_DAMAGE {
+        let store = TestStore::new();
+        let db = store.builder(vec![], vec![]).open().await.unwrap();
+        fixture(&db).await;
+        let own = db.inspect_writer(|sql| sql.local_device()).unwrap();
+        db.inspect_writer(|sql| damage(sql, broken));
+        assert!(
+            matches!(
+                db.members().await,
+                Err(crate::CovenError::Database(DbError::DamagedDatabase))
+            ),
+            "{broken}"
+        );
+        if broken.contains("member=") {
+            assert!(matches!(
+                db.inspect_writer(|sql| crate::store_state_tables::device_member(sql, own)),
+                Err(DbError::DamagedDatabase)
+            ));
+        }
+    }
 }
 
 #[tokio::test]

@@ -286,11 +286,12 @@ async fn local_admission_matches_the_model() {
                 .iter()
                 .map(|(row, id)| {
                     let owner = match crate::ownership::creation(c, row).unwrap() {
-                        Some(creation) => {
-                            crate::ownership::member(c, creation.creator.write.device)
-                                .unwrap()
-                                .unwrap()
-                        }
+                        Some(creation) => crate::store_state_tables::device_member(
+                            c,
+                            creation.creator.write.device,
+                        )
+                        .unwrap()
+                        .unwrap(),
                         None => member(BEN),
                     };
                     let owner = if owner == member(ANA) { ANA } else { BEN };

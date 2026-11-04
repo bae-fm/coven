@@ -349,9 +349,12 @@ fn input(
                 crate::ownership::creation(db, row)
                     .unwrap()
                     .map(|creation| {
-                        let member = crate::ownership::member(db, creation.creator.write.device)
-                            .unwrap()
-                            .unwrap();
+                        let member = crate::store_state_tables::device_member(
+                            db,
+                            creation.creator.write.device,
+                        )
+                        .unwrap()
+                        .unwrap();
                         owners[&member]
                     })
                     .unwrap_or(BEN)

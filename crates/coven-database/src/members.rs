@@ -2,10 +2,8 @@
 //! Each call and its live subscription run the same query.
 
 use crate::{sqlite::DatabaseConnection, store_state::DeviceState, DbError};
-use coven_crypto::{SealingKey, SigningKey};
 use coven_format::admin::{MemberPublicKeys, MemberRole};
 use coven_foundation::id_source::{CircleId, DeviceId, MemberId};
-use rusqlite::types::Type;
 
 /// A live member and every device they registered (E9).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -56,46 +54,22 @@ pub struct CircleMemberInfo {
     pub is_self: bool,
 }
 
-use crate::store_state_tables::{circle, member};
-
-/// The member using this device, once its registration has applied.
-fn me(db: &DatabaseConnection, device: DeviceId) -> Result<Option<MemberId>, DbError> {
-    Ok(db
-        .query("SELECT member FROM _coven_devices WHERE device=?1", [device], |r| member(r, 0))?
-        .pop())
-}
+use crate::store_state_tables::{circle, device_member, member};
 
 pub(crate) fn members(
     db: &DatabaseConnection,
     device: DeviceId,
 ) -> Result<Vec<MemberInfo>, DbError> {
-    let me = me(db, device)?;
+    let me = device_member(db, device)?;
     let members = db.query(
-        "SELECT member,role,signing,sealing,access FROM _coven_members WHERE removed=0
+        "SELECT member,signing,sealing,role,removed,access FROM _coven_members WHERE removed=0
          ORDER BY member",
         [],
-        |r| {
-            Ok((
-                member(r, 0)?,
-                match r.get::<_, String>(1)?.as_str() {
-                    "admin" => MemberRole::Admin,
-                    "member" => MemberRole::Member,
-                    _ => return Err(rusqlite::Error::InvalidQuery),
-                },
-                MemberPublicKeys {
-                    signing: SigningKey::from_bytes(r.get(2)?).map_err(|error| {
-                        crate::write_encoding::decode_failure(2, Type::Blob, error)
-                    })?,
-                    sealing: SealingKey::from_bytes(r.get(3)?),
-                },
-                serde_json::from_slice::<coven_format::MemberAccess>(&r.get::<_, Vec<u8>>(4)?)
-                    .map_err(|error| crate::write_encoding::decode_failure(4, Type::Blob, error))?,
-            ))
-        },
+        crate::store_state_tables::stored_member,
     )?;
     members
         .into_iter()
-        .map(|(id, role, keys, access)| {
+        .map(|(id, crate::StoreMember { keys, access, role, .. })| {
             let devices = db.query(
                 "SELECT device,name,state FROM _coven_devices WHERE member=?1 ORDER BY device",
                 [id.0.as_bytes().as_slice()],
@@ -105,7 +79,7 @@ pub(crate) fn members(
                         id,
                         is_self: id == device,
                         name: r.get(1)?,
-                        state: crate::store_state_tables::device_state(r.get(2)?)?,
+                        state: crate::store_state_tables::device_state(r, 2)?,
                     })
                 },
             )?;
@@ -115,7 +89,7 @@ pub(crate) fn members(
 }
 
 pub(crate) fn circles(db: &DatabaseConnection, device: DeviceId) -> Result<Vec<Circle>, DbError> {
-    let Some(me) = me(db, device)? else {
+    let Some(me) = device_member(db, device)? else {
         return Ok(Vec::new());
     };
     // Ordered by the membership's circle, which the member's index holds in
@@ -141,7 +115,7 @@ pub(crate) fn circle_members(
     device: DeviceId,
     circle: CircleId,
 ) -> Result<Vec<CircleMemberInfo>, DbError> {
-    let me = me(db, device)?;
+    let me = device_member(db, device)?;
     let members = db.query(
         "SELECT m.member FROM _coven_circle_members m JOIN _coven_members s ON s.member=m.member
          WHERE m.circle=?1 AND s.removed=0
