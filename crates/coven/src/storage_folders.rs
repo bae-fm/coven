@@ -16,11 +16,7 @@ impl StorageConnections {
         let auth = {
             let held = self.authentication.lock().await;
             let sign_in = held.as_ref().ok_or(OAuthError::Reauthorize(provider))?;
-            crate::authentication::check_provider(sign_in, provider)?;
-            ProviderAuth::OAuth {
-                tokens: sign_in.tokens().map_err(setup_error)?,
-                custody: sign_in.clone(),
-            }
+            crate::authentication::held_auth(sign_in, provider)?
         };
         Ok(request(auth).await?)
     }

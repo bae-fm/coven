@@ -1,8 +1,12 @@
 //! Session custody for a sign-in awaiting storage setup or bootstrap
 //! publication (§20.2, E10): a completed sign-in is held for this session only.
 
+use crate::error::setup_error;
+use crate::StorageSetupError;
 use crate::{CloudProvider, OAuthError};
+use coven_storage::ProviderAuth;
 use coven_sync::SessionSignIn;
+use std::sync::Arc;
 
 /// A held sign-in serves only its own provider; another needs a new sign-in.
 pub(crate) fn check_provider(
@@ -13,6 +17,16 @@ pub(crate) fn check_provider(
         return Err(OAuthError::Reauthorize(provider));
     }
     Ok(())
+}
+
+/// How a connection starts with the held sign-in: its tokens now, refreshing
+/// in its custody. A held sign-in serves only its own provider.
+pub(crate) fn held_auth(
+    held: &Arc<SessionSignIn>,
+    provider: CloudProvider,
+) -> Result<ProviderAuth, StorageSetupError> {
+    check_provider(held, provider)?;
+    Ok(ProviderAuth::OAuth { tokens: held.tokens().map_err(setup_error)?, custody: held.clone() })
 }
 
 /// Record only the account reached by this sign-in, never a label supplied by a code.

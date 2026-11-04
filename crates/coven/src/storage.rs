@@ -526,11 +526,7 @@ impl StorageConnections {
             let mut held = owner.authentication.lock().await;
             let (auth, sign_in) = match held.as_ref() {
                 Some(sign_in) => {
-                    crate::authentication::check_provider(sign_in, provider)?;
-                    let auth = ProviderAuth::OAuth {
-                        tokens: sign_in.tokens().map_err(setup_error)?,
-                        custody: sign_in.clone(),
-                    };
+                    let auth = crate::authentication::held_auth(sign_in, provider)?;
                     (auth, Some(sign_in.clone()))
                 }
                 None => {
