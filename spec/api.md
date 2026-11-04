@@ -1739,6 +1739,16 @@ pub fn open_files_under(dir: &Path) -> Vec<PathBuf>;
 #[cfg(feature = "test-utils")]
 pub fn assert_no_open_files_under(dir: &Path);
 
+/// Copy the tree at `from` into `to`, making `to` and every folder below
+/// it, as restoring a backup of an installation does. Panics on failure.
+#[cfg(feature = "test-utils")]
+pub fn copy_tree(from: &Path, to: &Path);
+
+/// Copy the tree as `copy_tree` does, with only the files whose name
+/// `keep` accepts.
+#[cfg(feature = "test-utils")]
+pub fn copy_tree_keeping(from: &Path, to: &Path, keep: &dyn Fn(&str) -> bool);
+
 /// The store's directory settings could not be read or written (E1).
 pub enum SettingsError {
     /// No settings file exists.
