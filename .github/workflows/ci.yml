@@ -34,9 +34,13 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
-    # A passing check takes 8-40 minutes; a hung one held main's queue for
-    # hours under GitHub's 6-hour default.
-    timeout-minutes: 75
+    # A passing check takes 30-55 minutes on Linux and macOS. Windows compiles
+    # about three times as slowly and runs the tests five times as slowly:
+    # compiling the coven crate's tests alone takes 28 minutes there, with
+    # the build restored or not, so a passing run takes 75 minutes with a
+    # restored build and 90 without, before saving the build. A hung check
+    # held main's queue for hours under GitHub's 6-hour default.
+    timeout-minutes: ${{ matrix.os == 'windows-latest' && 110 || 75 }}
     defaults:
       run:
         shell: bash
