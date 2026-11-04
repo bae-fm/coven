@@ -24,14 +24,23 @@ impl MemberAccess {
     /// case or surrounding space, or one S3 key id.
     pub fn same_credential(&self, other: &Self) -> bool {
         match (self, other) {
-            (Self::ProviderAccount(a), Self::ProviderAccount(b)) => {
-                a.trim().eq_ignore_ascii_case(b.trim())
-            }
+            (Self::ProviderAccount(a), Self::ProviderAccount(b)) => Self::same_account(a, b),
             (Self::S3AccessKey { access_key_id: a }, Self::S3AccessKey { access_key_id: b }) => {
                 a == b
             }
             _ => false,
         }
+    }
+
+    /// Whether two provider accounts are one: without case or surrounding space.
+    pub fn same_account(a: &str, b: &str) -> bool {
+        a.trim().eq_ignore_ascii_case(b.trim())
+    }
+
+    /// An account in the one spelling its equal spellings share: trimmed and
+    /// lowercase.
+    pub fn normalized_account(account: &str) -> String {
+        account.trim().to_ascii_lowercase()
     }
 
     /// Whether both are the same kind of access: provider accounts, or S3

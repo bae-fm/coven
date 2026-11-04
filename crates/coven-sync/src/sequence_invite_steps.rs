@@ -132,7 +132,7 @@ pub fn create_invite(
 fn invite_grant(access: InviteAccess, provider: CloudProvider) -> Result<InviteGrant, SyncError> {
     match access {
         InviteAccess::ProviderAccount { email } => {
-            let email = email.trim().to_ascii_lowercase();
+            let email = MemberAccess::normalized_account(&email);
             if email.is_empty() {
                 return Err(StorageFailure::InvalidConfiguration
                     .with_source("invite account is empty")

@@ -8,6 +8,7 @@ use coven_format::{
     sealed_key::KeyCopyPrefix,
     sealed_slot::SlotObjectPrefix,
     sequence::{SlotFrame, SlotHeader, SnapshotAnnouncement},
+    MemberAccess,
 };
 use coven_foundation::id_source::{CircleId, DeviceId, InviteId, KeyId, MemberId};
 use coven_merge::{Audience, Slot};
@@ -100,9 +101,7 @@ fn changed<K: Ord + Clone, V: PartialEq + Clone>(
 }
 
 impl History {
-    pub(crate) fn recorded_access(
-        &self,
-    ) -> impl Iterator<Item = (MemberId, u64, &coven_format::MemberAccess)> {
+    pub(crate) fn recorded_access(&self) -> impl Iterator<Item = (MemberId, u64, &MemberAccess)> {
         self.members.iter().flat_map(|(id, changes)| {
             changes.iter().map(move |(at, value)| (*id, *at, &value.access))
         })
@@ -204,12 +203,14 @@ impl History {
     /// Whether `account` is meant to be shared: an active member reaches
     /// storage through it, or an open invite share names it (§14.2).
     pub(crate) fn account_intended(&self, account: &str) -> bool {
-        let access = coven_format::MemberAccess::ProviderAccount(account.to_owned());
+        let access = MemberAccess::ProviderAccount(account.to_owned());
         self.state
             .members
             .values()
             .any(|member| !member.removed && member.access.same_credential(&access))
-            || self.open_invite_shares().any(|share| same_account(&share.account, account))
+            || self
+                .open_invite_shares()
+                .any(|share| MemberAccess::same_account(&share.account, account))
     }
 
     pub(crate) fn belonged(&self, audience: &Audience, member: &MemberId, through: u64) -> bool {
@@ -262,7 +263,7 @@ impl History {
                     // satisfied; any other use of the id is refused.
                     return if !share.ended
                         && share.device == header.device
-                        && same_account(&share.account, account)
+                        && MemberAccess::same_account(&share.account, account)
                     {
                         Ok(None)
                     } else {
@@ -518,12 +519,6 @@ pub(crate) fn introduction(change: &StoreChange) -> Option<(Audience, KeyId, [u8
         }
         _ => None,
     }
-}
-
-/// Whether two provider accounts are one, compared as member access compares
-/// them: without case or surrounding space.
-pub(crate) fn same_account(a: &str, b: &str) -> bool {
-    a.trim().eq_ignore_ascii_case(b.trim())
 }
 
 fn held_hash(ring: &StoreKeyring, audience: &Audience, key: KeyId) -> Option<[u8; 32]> {

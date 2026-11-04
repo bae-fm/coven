@@ -81,7 +81,7 @@ impl History {
         });
         let shares = self.invite_shares.values().map(|share| share.account.as_str());
         for account in members.chain(shares) {
-            let account = account.trim().to_ascii_lowercase();
+            let account = MemberAccess::normalized_account(account);
             if !accounts.insert(account.clone()) {
                 continue;
             }
