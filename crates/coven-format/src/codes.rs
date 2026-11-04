@@ -13,7 +13,8 @@ use zeroize::Zeroizing;
 const MAX_CODE_BYTES: usize = 19 * 1024;
 // A saved code adds its frame prefix, a name of at most 1,024 bytes, its slot
 // and the code's length to the code itself.
-const MAX_KEYCHAIN_BYTES: usize = MAX_CODE_BYTES + crate::FRAME_PREFIX_LEN + 4 + 1024 + 8 + 4;
+const MAX_KEYCHAIN_BYTES: usize =
+    MAX_CODE_BYTES + crate::FRAME_PREFIX_LEN + 4 + crate::value::MAX_NAME + 8 + 4;
 const ALPHABET: &[u8; 32] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
 
 /// A person's keys and the store's identity and location (§13.1).

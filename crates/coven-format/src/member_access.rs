@@ -4,7 +4,8 @@ use crate::wire::{Decoder, Encoder, Wire};
 use crate::Error;
 use serde::{Deserialize, Serialize};
 
-const MAX_TEXT: usize = 1024;
+/// The longest account or key id member access carries (D6).
+pub(crate) const MAX_TEXT: usize = 1024;
 
 /// An account to share with, or the id of a member's S3 key.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

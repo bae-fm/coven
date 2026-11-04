@@ -215,7 +215,7 @@ pub(crate) fn get_name_map<V: Wire>(input: &mut Decoder<'_>) -> Result<BTreeMap<
 }
 
 pub(crate) fn get_name(input: &mut Decoder<'_>) -> Result<String, Error> {
-    let value = get_text(input, 1024, "name")?;
+    let value = get_text(input, crate::value::MAX_NAME, "name")?;
     crate::value::name(&value)?;
     Ok(value)
 }

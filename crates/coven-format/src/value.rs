@@ -292,10 +292,13 @@ pub(crate) fn row(row: &RowId) -> Result<(), Error> {
     Ok(())
 }
 
+/// The most bytes D2's `name` rule allows.
+pub(crate) const MAX_NAME: usize = 1024;
+
 /// Check D2's `name` rule: 1 to 1,024 bytes, no NUL. Table, column, store,
 /// device, circle and invited people's names follow it.
 pub fn name(value: &str) -> Result<(), Error> {
-    bound(value.len(), 1024, "name")?;
+    bound(value.len(), MAX_NAME, "name")?;
     require(!value.is_empty() && !value.contains('\0'), "name", Rule::Required)
 }
 

@@ -219,7 +219,11 @@ impl StoreChange {
             Self::Reset { announcement } => positive(announcement.0),
             Self::AddInviteShare { account, .. } => {
                 require(!account.trim().is_empty(), "invite share account", Rule::Required)?;
-                crate::error::bound(account.len(), MAX_ACCOUNT, "invite share account")
+                crate::error::bound(
+                    account.len(),
+                    crate::member_access::MAX_TEXT,
+                    "invite share account",
+                )
             }
             Self::RemoveMember { .. }
             | Self::RotateKey { .. }
@@ -276,12 +280,10 @@ store_changes!(
     19 => EndInviteShare { invite },
 );
 
-/// The longest provider account an invite share names, as member access
-/// bounds it (D6).
-const MAX_ACCOUNT: usize = 1024;
-
+/// An invite share's provider account, bounded as member access bounds an
+/// account (D6).
 fn get_account(input: &mut Decoder<'_>) -> Result<String, Error> {
-    crate::wire::get_text(input, MAX_ACCOUNT, "invite share account")
+    crate::wire::get_text(input, crate::member_access::MAX_TEXT, "invite share account")
 }
 
 impl StoreChange {
