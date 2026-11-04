@@ -186,7 +186,9 @@ fn append(
     Ok(())
 }
 
-fn read_chunk(bytes: &mut dyn Read) -> Result<Vec<u8>, DbError> {
+/// The next chunk of a claim's ciphertext stream: up to one chunk's bytes,
+/// none at its end.
+pub(crate) fn read_chunk(bytes: &mut dyn Read) -> Result<Vec<u8>, DbError> {
     let mut chunk = Vec::new();
     bytes
         .take(coven_format::chunks::CHUNK_SIZE as u64)

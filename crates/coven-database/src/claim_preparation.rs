@@ -19,13 +19,7 @@ pub(crate) fn prepare<T>(
     let mut hash = coven_crypto::ObjectHasher::new();
     let mut size = 0;
     for chunk in 0i64.. {
-        let mut bytes = Vec::new();
-        attempt
-            .bytes
-            .by_ref()
-            .take(coven_format::chunks::CHUNK_SIZE as u64)
-            .read_to_end(&mut bytes)
-            .map_err(|error| DbError::SyncStream(Box::new(error)))?;
+        let bytes = crate::claim::read_chunk(&mut attempt.bytes)?;
         if bytes.is_empty() {
             break;
         }
