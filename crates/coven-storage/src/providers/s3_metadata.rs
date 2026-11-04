@@ -6,6 +6,16 @@ use aws_sdk_s3::{
     types::ChecksumType,
 };
 
+/// When S3 says it stored an object, from a response's `Last-Modified`; a
+/// response without one is a protocol failure.
+pub(super) fn stored_at(
+    last_modified: Option<&aws_sdk_s3::primitives::DateTime>,
+) -> Result<coven_format::value::StorageTime, StorageError> {
+    crate::providers::http::storage_time(
+        *last_modified.ok_or(StorageFailure::Protocol.with_source("S3 omitted storage time"))?,
+    )
+}
+
 pub(super) fn required<'a>(
     value: Option<&'a str>,
     reason: &'static str,
@@ -84,11 +94,7 @@ macro_rules! observation {
         Ok(StoredObject {
             path: $path.clone(),
             size: $size,
-            stored_at: crate::providers::http::storage_time(
-                *response
-                    .last_modified()
-                    .ok_or(StorageFailure::Protocol.with_source("S3 omitted storage time"))?,
-            )?,
+            stored_at: $crate::providers::s3::metadata::stored_at(response.last_modified())?,
             time_resolution: std::time::Duration::from_secs(1),
             object_id: $storage.prefix.key(&$path),
             revision: revision(

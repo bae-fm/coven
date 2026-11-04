@@ -636,11 +636,7 @@ struct NativeUpload {
 }
 
 pub(super) fn time(head: &HeadObjectOutput) -> Result<StorageTime, StorageError> {
-    crate::providers::http::storage_time(
-        *head
-            .last_modified()
-            .ok_or(StorageFailure::Protocol.with_source("S3 omitted storage time"))?,
-    )
+    super::metadata::stored_at(head.last_modified())
 }
 
 #[cfg(test)]
