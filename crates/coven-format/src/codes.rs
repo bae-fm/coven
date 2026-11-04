@@ -195,6 +195,12 @@ pub struct InviteCode {
     pub storage: SecretBytes,
 }
 impl InviteCode {
+    /// Where the joining device's request goes: under the device that made the
+    /// invite, as this code names it (§13.2).
+    pub fn request_path(&self) -> crate::path::ObjectPath {
+        crate::path::ObjectPath::join_request(self.store, self.inviting_writer, self.invite)
+    }
+
     /// Encode a bounded frame into a buffer erased on drop, allocated once.
     pub fn to_bytes(&self) -> Result<Zeroizing<Vec<u8>>, Error> {
         let secret = self.secret.to_secret_bytes();

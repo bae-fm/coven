@@ -395,8 +395,7 @@ pub(super) async fn join(group: &Group, code: &str, name: &str) -> Joiner {
 /// Where `invite`'s join request goes: under the device that made it, as its
 /// code names it (§13.2).
 pub(crate) fn request_path(invite: &Invite) -> ObjectPath {
-    let code = read_invite_code(invite.shown_code()).unwrap();
-    ObjectPath::join_request(code.store, code.inviting_writer, code.invite)
+    read_invite_code(invite.shown_code()).unwrap().request_path()
 }
 
 /// Whether no join request is at `path`: nothing, or the marker an ended

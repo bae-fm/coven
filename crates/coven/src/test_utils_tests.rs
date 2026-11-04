@@ -468,10 +468,6 @@ async fn growth_snapshots_let_retention_delete_covered_slots_and_superseded_snap
 
 /// Admit a member with `keys` through an invite; returns the id it fixed.
 async fn admit_member(f: &Fixture, handle: &CovenHandle, keys: &MemberKeys) -> MemberId {
-    use coven_format::{
-        sealed_single::{SingleChunkObject, SingleChunkPrefix},
-        Object,
-    };
     let (id, _, _) = handle
         .create_invite(
             InviteTarget::NewMember { role: MemberRole::Member, name: "Carol".into() },
@@ -493,28 +489,18 @@ async fn admit_member(f: &Fixture, handle: &CovenHandle, keys: &MemberKeys) -> M
         .find(|invite| invite.id == id)
         .unwrap();
     let code = coven_format::codes::InviteCode::from_text(invite.shown_code()).unwrap();
-    let path = crate::tests::request_path(&invite);
-    let request = Object::JoinRequest(coven_format::objects::JoinRequest {
-        invite: invite.id,
-        member: code.member,
-        keys: keys.public_keys(),
-        device_name: "Departing member".into(),
-    })
-    .encode()
-    .unwrap();
-    let prefix = SingleChunkPrefix::JoinRequest;
-    let chunk = code
-        .secret
-        .join_request_key()
-        .seal_object_chunk(path.as_str(), &prefix.encode().unwrap(), 0, 0, &request)
-        .unwrap();
-    let mut hash = coven_crypto::ObjectHasher::new();
-    hash.update(&prefix.encode_chunk(&chunk).unwrap());
-    let bytes = SingleChunkObject::JoinRequest {
-        chunk: &chunk,
-        signature: keys.sign_object(path.as_str(), &hash.finish()),
-    }
-    .encode()
+    let path = code.request_path();
+    let bytes = coven_sync::sealed_join_request(
+        &code.secret,
+        &path,
+        &coven_format::objects::JoinRequest {
+            invite: invite.id,
+            member: code.member,
+            keys: keys.public_keys(),
+            device_name: "Departing member".into(),
+        },
+        keys,
+    )
     .unwrap();
     // The peer supplies a signed request; admission itself uses the app API.
     f.storage.create(&path, &bytes).await.unwrap();

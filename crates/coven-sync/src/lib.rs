@@ -60,7 +60,7 @@ pub use coven_database::{DeviceStop, EntryTarget, OperationOutcome, OperationRej
 pub use credential_custody::{commit_credentials, CredentialKeychains, CredentialRollback};
 pub use error::{DamagedObject, SyncError, SyncFailure};
 pub use identity::DeviceIdEvidence;
-pub use joining_identity::JoiningIdentity;
+pub use joining_identity::{sealed_join_request, JoiningIdentity};
 pub use last_pass::{LastPass, PassFailure, StatusFailure};
 pub use operation_types::*;
 pub use pending::{

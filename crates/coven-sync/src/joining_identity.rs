@@ -2,7 +2,8 @@
 
 use crate::SyncError;
 use coven_crypto::{
-    ConfirmationNumber, EncryptionKey, MemberIdentity, MemberKeys, MemberPublicKeys, ObjectHasher,
+    ConfirmationNumber, EncryptionKey, InviteSecret, MemberIdentity, MemberKeys, MemberPublicKeys,
+    ObjectHasher,
 };
 use coven_format::{
     codes::{InviteCode, InviteDeliveryKind},
@@ -15,6 +16,32 @@ use coven_foundation::files::StoreDirAccess;
 use coven_foundation::files::{AtomicFile, StoreDir, StoreFile};
 use coven_storage::{ObjectPath, Storage, StorageFailure};
 use zeroize::Zeroizing;
+
+/// The request as it is stored at `path`: sealed with the invite secret's
+/// request key and signed by the pair it names (§13.2).
+pub fn sealed_join_request(
+    secret: &InviteSecret,
+    path: &ObjectPath,
+    request: &JoinRequest,
+    signer: &MemberKeys,
+) -> Result<Vec<u8>, SyncError> {
+    let prefix = SingleChunkPrefix::JoinRequest;
+    let plain = Object::JoinRequest(request.clone()).encode()?;
+    let chunk = secret.join_request_key().seal_object_chunk(
+        path.as_str(),
+        &prefix.encode()?,
+        0,
+        0,
+        &plain,
+    )?;
+    let mut hash = ObjectHasher::new();
+    hash.update(&prefix.encode_chunk(&chunk)?);
+    Ok(SingleChunkObject::JoinRequest {
+        chunk: &chunk,
+        signature: signer.sign_object(path.as_str(), &hash.finish()),
+    }
+    .encode()?)
+}
 
 /// An unpublished member identity and its immutable request. The member id
 /// is the one the invite fixes; the keys are this device's fresh pair. The
@@ -121,7 +148,7 @@ impl JoiningIdentity {
         }
         let file = directory.owned_file(StoreFile::Bootstrap);
         let sealing = Sealing::new(code)?;
-        let path = ObjectPath::join_request(code.store, code.inviting_writer, code.invite);
+        let path = code.request_path();
         let prefix = SingleChunkPrefix::JoinRequest;
         let Some(sealed) = file.read_optional()? else {
             return Ok(None);
@@ -187,32 +214,21 @@ impl JoiningIdentity {
         code: &InviteCode,
         device_name: &str,
     ) -> Result<Self, SyncError> {
-        let path = ObjectPath::join_request(code.store, code.inviting_writer, code.invite);
-        let prefix = SingleChunkPrefix::JoinRequest;
+        let path = code.request_path();
         // The request repeats the id the invite fixed and names this
         // device's fresh pair, which signs it (D8).
         let identity = MemberIdentity::generate(code.member)?;
-        let plain = Object::JoinRequest(JoinRequest {
-            invite: code.invite,
-            member: code.member,
-            keys: identity.keys().public_keys(),
-            device_name: device_name.into(),
-        })
-        .encode()?;
-        let chunk = code.secret.join_request_key().seal_object_chunk(
-            path.as_str(),
-            &prefix.encode()?,
-            0,
-            0,
-            &plain,
+        let request = sealed_join_request(
+            &code.secret,
+            &path,
+            &JoinRequest {
+                invite: code.invite,
+                member: code.member,
+                keys: identity.keys().public_keys(),
+                device_name: device_name.into(),
+            },
+            identity.keys(),
         )?;
-        let mut hash = ObjectHasher::new();
-        hash.update(&prefix.encode_chunk(&chunk)?);
-        let request = SingleChunkObject::JoinRequest {
-            chunk: &chunk,
-            signature: identity.keys().sign_object(path.as_str(), &hash.finish()),
-        }
-        .encode()?;
         let identity = Self {
             file: directory.owned_file(StoreFile::Bootstrap),
             confirmation: confirmation(code, &identity.keys().public_keys()),
