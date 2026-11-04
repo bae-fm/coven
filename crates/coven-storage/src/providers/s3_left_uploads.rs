@@ -141,7 +141,7 @@ impl S3Storage {
             let page = request.send().await.map_err(s3_error)?;
             for upload in page.uploads() {
                 let key = metadata::required(upload.key(), "S3 upload listing omitted key")?;
-                within(key, prefix)?;
+                crate::object_listing::listed_within(key, prefix)?;
                 let id = metadata::required(upload.upload_id(), "S3 upload listing omitted id")?;
                 uploads.push((key.to_owned(), id.to_owned(), upload.initiated().copied()));
             }
@@ -172,7 +172,7 @@ impl S3Storage {
             let page = self.list_page(listing, prefix, None, marker, None).await?;
             for object in page.contents {
                 let key = metadata::required(object.key(), "S3 list entry omitted key")?;
-                within(key, prefix)?;
+                crate::object_listing::listed_within(key, prefix)?;
                 keys.push(key.to_owned());
             }
             let Some(next) = page.next else {
@@ -181,14 +181,5 @@ impl S3Storage {
             pages.check(&next)?;
             marker = Some(next);
         }
-    }
-}
-
-/// Refuse a listed key outside the requested prefix rather than remove it.
-pub(super) fn within(key: &str, prefix: &str) -> Result<(), StorageError> {
-    if key.starts_with(prefix) {
-        Ok(())
-    } else {
-        Err(StorageFailure::Protocol.with_source("S3 listed a key outside the requested prefix"))
     }
 }

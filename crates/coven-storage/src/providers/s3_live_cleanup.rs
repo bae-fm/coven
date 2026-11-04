@@ -37,7 +37,7 @@ pub(super) async fn cleanup_versions(
             .chain(page.delete_markers().iter().map(|v| (v.key(), v.version_id())))
         {
             let key = metadata::required(key, "version listing omitted key")?;
-            left_uploads::within(key, prefix)?;
+            crate::object_listing::listed_within(key, prefix)?;
             versions.push((
                 key.to_owned(),
                 metadata::required(version, "version listing omitted version")?.to_owned(),

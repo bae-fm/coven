@@ -18,6 +18,16 @@ pub struct ObjectListing {
     skipped: usize,
 }
 
+/// Refuse a name a provider listed outside the requested prefix, rather than
+/// act on it.
+pub(crate) fn listed_within(name: &str, prefix: &str) -> Result<(), StorageError> {
+    if name.starts_with(prefix) {
+        Ok(())
+    } else {
+        Err(StorageFailure::Protocol.with_source("provider listed outside the requested prefix"))
+    }
+}
+
 impl ObjectListing {
     pub(crate) fn new(prefix: ObjectPrefix, provider: CloudProvider) -> Self {
         Self { prefix, provider, objects: BTreeMap::new(), skipped: 0 }
@@ -78,11 +88,7 @@ impl ObjectListing {
     }
 
     fn within(&self, name: &str) -> Result<(), StorageError> {
-        if name.starts_with(self.prefix.as_str()) {
-            Ok(())
-        } else {
-            Err(StorageFailure::Protocol.with_source("provider listed outside prefix"))
-        }
+        listed_within(name, self.prefix.as_str())
     }
 
     pub(crate) fn finish(self) -> Vec<StoredObject> {
