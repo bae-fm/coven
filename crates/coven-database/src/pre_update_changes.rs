@@ -60,17 +60,7 @@ impl TableShapes {
         let mut shapes = Vec::new();
         for table in names {
             let name = table.to_ascii_lowercase();
-            let columns = database.query(
-                "SELECT name,pk,hidden FROM pragma_table_xinfo(?1,'main') ORDER BY cid",
-                [&table],
-                |r| {
-                    Ok((
-                        r.get::<_, String>(0)?.to_ascii_lowercase(),
-                        r.get::<_, bool>(1)?,
-                        r.get::<_, u32>(2)? != 0,
-                    ))
-                },
-            )?;
+            let columns = crate::change_capture::column_shapes(database, &table)?;
             let keyed = columns.iter().any(|(_, key, _)| *key);
             positions.insert(table.clone(), shapes.len());
             shapes.push(TableShape {

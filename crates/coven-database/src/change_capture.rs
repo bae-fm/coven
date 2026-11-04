@@ -43,17 +43,7 @@ fn observe_table<'a>(
     changes: &mut Vec<RowChange>,
 ) -> Result<&'a TableColumns, DbError> {
     if !tables.contains_key(table) {
-        let names = database.query(
-            "SELECT name,pk,hidden FROM pragma_table_xinfo(?1,'main') ORDER BY cid",
-            [table],
-            |r| {
-                Ok((
-                    r.get::<_, String>(0)?.to_ascii_lowercase(),
-                    r.get::<_, bool>(1)?,
-                    r.get::<_, u32>(2)? != 0,
-                ))
-            },
-        )?;
+        let names = column_shapes(database, table)?;
         let has_primary_key = names.iter().any(|(_, pk, _)| *pk);
         tables.insert(
             table.to_owned(),
@@ -110,6 +100,25 @@ pub(crate) fn table_changes(
         .into_iter()
         .map(|table| RowChange { table, column: String::new(), rows: None })
         .collect())
+}
+
+/// Each column of the main table `table` in declared order: its lowercase
+/// name, whether it is in the primary key, and whether it is hidden.
+pub(crate) fn column_shapes(
+    database: &DatabaseConnection,
+    table: &str,
+) -> Result<Vec<(String, bool, bool)>, DbError> {
+    database.query(
+        "SELECT name,pk,hidden FROM pragma_table_xinfo(?1,'main') ORDER BY cid",
+        [table],
+        |r| {
+            Ok((
+                r.get::<_, String>(0)?.to_ascii_lowercase(),
+                r.get::<_, bool>(1)?,
+                r.get::<_, u32>(2)? != 0,
+            ))
+        },
+    )
 }
 
 pub(crate) fn shadow_parent(
