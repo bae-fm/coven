@@ -475,7 +475,7 @@ pub(crate) fn remove_entries(
 }
 fn observation(error: coven_foundation::files::ObservationError) -> DbError {
     match error {
-        coven_foundation::files::ObservationError::File(error) => DbError::Disk(error),
+        coven_foundation::files::ObservationError::File(error) => error.into(),
         _ => DbError::DamagedDatabase,
     }
 }

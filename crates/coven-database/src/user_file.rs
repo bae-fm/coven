@@ -75,7 +75,7 @@ impl From<ObservationError> for DbError {
         match error {
             ObservationError::Missing(path) => Self::UserFileMissing { path },
             ObservationError::Changed(path) => Self::UserFileChanged { path },
-            ObservationError::File(error) => Self::Disk(error),
+            ObservationError::File(error) => error.into(),
         }
     }
 }

@@ -154,6 +154,7 @@ impl From<LocalFileError> for FileReadError {
             LocalFileError::Database(error) => error.into(),
             LocalFileError::Disk(error) => Self::Disk(error),
             LocalFileError::Lock(error) => Self::Lock(error),
+            LocalFileError::Bug(bug) => DbError::Bug(bug).into(),
         }
     }
 }

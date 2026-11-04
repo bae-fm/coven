@@ -3,6 +3,7 @@
 use super::FileRef;
 use crate::{sqlite::DatabaseConnection, DbError};
 use coven_foundation::files::StoreDirAccess;
+use coven_foundation::task::{Bug, CarriesBug};
 use coven_foundation::{
     files::{
         FileArea, FileError, FileName, FileReader, ObservationError, StoreDir, StoreLockError,
@@ -51,13 +52,56 @@ pub enum LocalFileError {
     },
     /// Looking up the file failed.
     #[error(transparent)]
-    Database(#[from] DbError),
+    Database(DbError),
     /// The filesystem failed.
     #[error(transparent)]
-    Disk(#[from] FileError),
+    Disk(FileError),
     /// The store cannot be retained while opening its file.
     #[error(transparent)]
-    Lock(#[from] StoreLockError),
+    Lock(StoreLockError),
+    /// Opening or reading the file panicked: a bug, which the caller reports
+    /// (E15).
+    #[error(transparent)]
+    Bug(#[from] Bug),
+}
+
+impl From<DbError> for LocalFileError {
+    fn from(error: DbError) -> Self {
+        match error {
+            DbError::Bug(bug) => Self::Bug(bug),
+            error => Self::Database(error),
+        }
+    }
+}
+
+impl From<FileError> for LocalFileError {
+    fn from(error: FileError) -> Self {
+        match error {
+            FileError::Bug(bug) => Self::Bug(bug),
+            error => Self::Disk(error),
+        }
+    }
+}
+
+impl From<StoreLockError> for LocalFileError {
+    fn from(error: StoreLockError) -> Self {
+        match error {
+            StoreLockError::Bug(bug) => Self::Bug(bug),
+            error => Self::Lock(error),
+        }
+    }
+}
+
+impl CarriesBug for LocalFileError {
+    fn bug(&self) -> Option<&Bug> {
+        match self {
+            Self::Bug(bug) => Some(bug),
+            Self::Database(error) => error.bug(),
+            Self::Disk(error) => error.bug(),
+            Self::Lock(error) => error.bug(),
+            _ => None,
+        }
+    }
 }
 
 /// An open local file checked against its recorded facts. Retaining it keeps
@@ -267,7 +311,7 @@ fn observation(error: ObservationError, id: &str, original: bool) -> LocalFileEr
         (ObservationError::Missing(_) | ObservationError::Changed(_), false) => {
             LocalFileError::Integrity { id: id.into() }
         }
-        (ObservationError::File(error), _) => LocalFileError::Disk(error),
+        (ObservationError::File(error), _) => error.into(),
     }
 }
 

@@ -552,7 +552,7 @@ impl CovenBuilder {
                     coven_foundation::files::FileError::DeviceLocked { path } => {
                         CovenError::DeviceLocked { path }
                     }
-                    error => DbError::Disk(error).into(),
+                    error => DbError::from(error).into(),
                 },
             )?;
             Ok(OpeningStore { database, lock, builder, directory, keychain })

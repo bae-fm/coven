@@ -12,7 +12,7 @@ pub type CovenResult<T> = Result<T, CovenError>;
 pub enum CovenError {
     /// Reading device identity or an app callback's custody operation failed.
     #[error(transparent)]
-    Key(#[from] coven_crypto::custody::KeyError),
+    Key(coven_crypto::custody::KeyError),
     /// An app callback failed and SQLite also failed to roll it back. Later
     /// calls fail with `DbError::RollbackFailed` until the store is reopened (§4).
     #[error("{operation}; rollback failed: {rollback}")]
@@ -129,6 +129,15 @@ impl CarriesBug for DbError {
             }
             Self::Closing { failures } => failures.iter().find_map(DbError::bug),
             _ => None,
+        }
+    }
+}
+
+impl From<coven_crypto::custody::KeyError> for CovenError {
+    fn from(error: coven_crypto::custody::KeyError) -> Self {
+        match error {
+            coven_crypto::custody::KeyError::Bug(bug) => Self::Bug(bug),
+            error => Self::Key(error),
         }
     }
 }
@@ -737,7 +746,7 @@ pub enum DbError {
     },
     /// Reading or keeping file bytes failed.
     #[error(transparent)]
-    Disk(#[from] coven_foundation::files::FileError),
+    Disk(coven_foundation::files::FileError),
     /// The staging write could not create its file's random key (§17.3).
     #[error("creating a file key failed: {0}")]
     FileKey(#[source] coven_crypto::CryptoError),
@@ -807,6 +816,15 @@ impl From<coven_foundation::task::TaskFailed> for DbError {
     }
 }
 
+impl From<coven_foundation::files::FileError> for DbError {
+    fn from(error: coven_foundation::files::FileError) -> Self {
+        match error {
+            coven_foundation::files::FileError::Bug(bug) => Self::Bug(bug),
+            error => Self::Disk(error),
+        }
+    }
+}
+
 impl From<StoreLockError> for DbError {
     fn from(error: StoreLockError) -> Self {
         match error {
@@ -820,7 +838,7 @@ impl From<coven_foundation::files::WriterError> for DbError {
     fn from(error: coven_foundation::files::WriterError) -> Self {
         match error {
             coven_foundation::files::WriterError::Lock(error) => error.into(),
-            coven_foundation::files::WriterError::File(error) => Self::Disk(error),
+            coven_foundation::files::WriterError::File(error) => error.into(),
         }
     }
 }
@@ -925,3 +943,7 @@ pub enum MigrationError {
         source: Box<DbError>,
     },
 }
+
+#[cfg(test)]
+#[path = "error_tests.rs"]
+mod tests;

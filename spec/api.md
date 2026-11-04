@@ -8340,10 +8340,13 @@ carries it as `Bug`: `DbError::Bug` for a database call, `FileError::Bug`
 for file work, and a `Bug` variant of each error that has a `Shutdown` one.
 An error that keeps a file or lock failure takes the bug as its own `Bug`,
 never under a disk label: `StoreLockError::Bug` for taking a store's lock,
-`CovenError::Bug` or `DbError::Bug` for a lock they took,
-`StoreListError::Bug` for listing the stores, and `KeyError::Bug` for
-custody's file work. An error that keeps another call's error routes that
-error's `Bug` to its own, such as `IdentityError::Bug` for custody's. `SyncError`
+`DbError::Bug` for file work or a lock a database call ran,
+`StoreListError::Bug` for listing the stores, `KeyError::Bug` for
+custody's file work and `LocalFileError::Bug` for reading a file on this
+device. An error that keeps another call's error routes that error's `Bug`
+to its own, such as `IdentityError::Bug` for custody's and `CovenError::Bug`
+for custody's or a lock's. `CovenError` keeps a database call's as
+`CovenError::Database(DbError::Bug)`, as for its other failures. `SyncError`
 reports it as `LocalFailure::Bug`.
 
 - Ana's app writes a note with `write`, and its closure panics on a note
