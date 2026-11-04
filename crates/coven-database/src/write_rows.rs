@@ -329,11 +329,7 @@ pub(crate) fn read_values(
         "SELECT {} FROM main.{} WHERE {}",
         column_list(table),
         identifier(&table.name),
-        key_columns(table)
-            .iter()
-            .map(|c| format!("{}=?", identifier(&c.name)))
-            .collect::<Vec<_>>()
-            .join(" AND ")
+        key_predicate(table)
     );
     let rows =
         database.query(&lookup, params_from_iter(components.iter().map(sql_value)), |r| {

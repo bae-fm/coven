@@ -109,7 +109,7 @@ pub(crate) fn materialize(
                         &format!(
                             "DELETE FROM main.{} WHERE {}",
                             identifier(&table.name),
-                            predicate(table)
+                            crate::write_rows::key_predicate(table)
                         ),
                         params_from_iter(
                             key_columns(table).iter().map(|c| sql_value(&values[&c.name])),
@@ -328,7 +328,7 @@ fn put(
                             .map(|c| format!("{}=?", identifier(&c.name)))
                             .collect::<Vec<_>>()
                             .join(","),
-                        predicate(table)
+                        crate::write_rows::key_predicate(table)
                     ),
                     params_from_iter(parameters),
                 )?)?;
@@ -350,14 +350,6 @@ fn put(
         }
     }
     Ok(false)
-}
-
-fn predicate(table: &TableSchema) -> String {
-    key_columns(table)
-        .iter()
-        .map(|c| format!("{}=?", identifier(&c.name)))
-        .collect::<Vec<_>>()
-        .join(" AND ")
 }
 
 pub(crate) fn changed_once(changed: usize) -> Result<(), DbError> {
