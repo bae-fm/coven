@@ -65,54 +65,21 @@ impl SequenceSync {
             return Ok(Some(ClaimSettlement::Landed));
         }
         let input = self.fetch(path).await?;
-        let floor = self.read_floor(session.floor.as_ref(), ring, member).await?;
-        let result = if floor
-            .as_ref()
-            .is_some_and(|floor| floor.header.first > path.slot_number().expect("claim slot"))
-        {
-            self.settle_compacted(floor.as_ref().expect("passed floor"), ring, member).await?
-        } else {
-            if let Some(floor) = &floor {
-                self.authenticate_floor(floor, &session.history, ring, member).await?;
-            }
-            match input {
-                Some(input) => {
-                    let bytes = input.local_bytes().await?;
-                    let received = slot_object::open(
-                        bytes.clone(),
-                        path,
-                        ring,
-                        &session.history,
-                        |audience| {
-                            crate::effects::belongs(
-                                &session.history.state,
-                                audience,
-                                &member.member(),
-                            )
-                        },
-                    )?;
-                    self.check_copy(&received, path).await?;
-                    self.database.settle_claim(ClaimRead::Kept(Some(Box::new(bytes)))).await?
-                }
-                None => self.database.settle_claim(ClaimRead::Kept(None)).await?,
-            }
-        };
-        if result == ClaimSettlement::DeviceIdInUse {
-            return Err(self
-                .stop_copy(crate::DeviceIdEvidence::UnattemptedSlot {
-                    slot: path.slot_number().expect("claim slot"),
-                })
-                .await);
-        }
-        self.remove_compacted_attempts(&claim, floor.as_ref()).await?;
-        if result == ClaimSettlement::Landed {
-            if let Some(floor) =
-                floor.filter(|floor| floor.header.first.0 > session.through.saturating_add(1))
-            {
-                self.reload_floor(session, floor, ring, member, None).await?;
-            }
-            self.apply_claim(session, ring, member).await?;
-        }
+        let (result, floor) = self
+            .settle_attempt(session, ring, member, path, async move |session, ring| {
+                let Some(input) = input else {
+                    return Ok(self.database.settle_claim(ClaimRead::Kept(None)).await?);
+                };
+                let bytes = input.local_bytes().await?;
+                let received =
+                    slot_object::open(bytes.clone(), path, ring, &session.history, |audience| {
+                        crate::effects::belongs(&session.history.state, audience, &member.member())
+                    })?;
+                self.check_copy(&received, path).await?;
+                Ok(self.database.settle_claim(ClaimRead::Kept(Some(Box::new(bytes)))).await?)
+            })
+            .await?;
+        self.act_on_settlement(session, ring, member, &claim, floor, result).await?;
         Ok(Some(result))
     }
 
@@ -182,18 +149,73 @@ impl SequenceSync {
         if !created {
             return Ok(self.settle_open(session, ring, member).await?.expect("open journal"));
         }
-        let floor = self.read_floor(session.floor.as_ref(), ring, member).await?;
-        let result = if floor
-            .as_ref()
-            .is_some_and(|floor| floor.header.first > path.slot_number().expect("claim slot"))
+        let (result, floor) = self
+            .settle_attempt(session, ring, member, path, async |_, _| {
+                Ok(self.database.settle_claim(ClaimRead::Created).await?)
+            })
+            .await?;
+        // The landed slot's bytes are the ones this attempt sent: keep them
+        // for applying it, unless the floor compacted it.
+        if result == ClaimSettlement::Landed
+            && floor
+                .as_ref()
+                .is_none_or(|floor| floor.header.first <= path.slot_number().expect("claim slot"))
         {
-            self.settle_compacted(floor.as_ref().expect("passed floor"), ring, member).await?
-        } else {
-            if let Some(floor) = &floor {
-                self.authenticate_floor(floor, &session.history, ring, member).await?;
+            let object = match publication {
+                Some(object) => object,
+                None => self.storage.status(path).await?.ok_or(StorageFailure::NotFound)?,
+            };
+            crate::object_input::ObjectInput::observe(&self.database, &object)
+                .await?
+                .keep_claim_bytes()
+                .await?;
+        }
+        self.act_on_settlement(session, ring, member, &claim, floor, result).await
+    }
+
+    /// Settle the open claim's attempt at `path` against the floor storage
+    /// holds now. A floor past its slot compacted it, and the floor's
+    /// snapshot says whether it landed; otherwise, once the floor is
+    /// authenticated, `settle` decides from what the slot showed.
+    async fn settle_attempt(
+        &self,
+        session: &mut Session,
+        ring: &mut StoreKeyring,
+        member: &MemberIdentity,
+        path: &coven_storage::ObjectPath,
+        settle: impl AsyncFnOnce(&Session, &mut StoreKeyring) -> Result<ClaimSettlement, SyncError>,
+    ) -> Result<(ClaimSettlement, Option<FloorObject>), SyncError> {
+        let floor = self.read_floor(session.floor.as_ref(), ring, member).await?;
+        let compacted = floor
+            .as_ref()
+            .filter(|floor| floor.header.first > path.slot_number().expect("claim slot"));
+        let result = match compacted {
+            Some(floor) => self.settle_compacted(floor, ring, member).await?,
+            None => {
+                if let Some(floor) = &floor {
+                    self.authenticate_floor(floor, &session.history, ring, member).await?;
+                }
+                settle(session, ring).await?
             }
-            self.database.settle_claim(ClaimRead::Created).await?
         };
+        Ok((result, floor))
+    }
+
+    /// Act on the settlement of `claim`'s last attempt: a slot
+    /// claimed under this device's id by another installation stops this
+    /// copy; attempts the floor compacted are deleted; a landed claim
+    /// applies, after the floor's snapshots when the floor passed the
+    /// applied prefix.
+    async fn act_on_settlement(
+        &self,
+        session: &mut Session,
+        ring: &mut StoreKeyring,
+        member: &MemberIdentity,
+        claim: &coven_database::Claim,
+        floor: Option<FloorObject>,
+        result: ClaimSettlement,
+    ) -> Result<ClaimSettlement, SyncError> {
+        let path = claim.attempts.last().expect("claim has an attempt");
         if result == ClaimSettlement::DeviceIdInUse {
             return Err(self
                 .stop_copy(crate::DeviceIdEvidence::UnattemptedSlot {
@@ -201,21 +223,8 @@ impl SequenceSync {
                 })
                 .await);
         }
-        self.remove_compacted_attempts(&claim, floor.as_ref()).await?;
+        self.remove_compacted_attempts(claim, floor.as_ref()).await?;
         if result == ClaimSettlement::Landed {
-            if floor
-                .as_ref()
-                .is_none_or(|floor| floor.header.first <= path.slot_number().expect("claim slot"))
-            {
-                let object = match publication {
-                    Some(object) => object,
-                    None => self.storage.status(path).await?.ok_or(StorageFailure::NotFound)?,
-                };
-                crate::object_input::ObjectInput::observe(&self.database, &object)
-                    .await?
-                    .keep_claim_bytes()
-                    .await?;
-            }
             if let Some(floor) =
                 floor.filter(|floor| floor.header.first.0 > session.through.saturating_add(1))
             {
