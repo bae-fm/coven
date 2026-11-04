@@ -1,7 +1,7 @@
 //! Journaled snapshot bytes, captured without holding the application writer.
 
 use crate::{sequence_sync::SequenceSync, SyncError};
-use coven_crypto::{DerivedKeys, MemberIdentity, ObjectHasher, StoreKeyring};
+use coven_crypto::{DerivedKeys, MemberIdentity, StoreKeyring};
 use coven_format::{
     admin::SnapshotId,
     sealed_snapshot::SnapshotObjectPrefix,
@@ -171,13 +171,10 @@ async fn seal_frames(
     let header = header.await.map_err(|_| coven_format::Error::Truncated)?;
     let prefix = header.encode()?;
     let signature = member.keys().sign_prefix(path.as_str(), &prefix);
-    let mut hash = ObjectHasher::new();
-    let mut size = (prefix.len() + 64) as u64;
-    for bytes in [prefix.as_slice(), signature.as_bytes().as_slice()] {
-        writer.append(bytes).await?;
-        hash.update(bytes);
-    }
-    let mut layout = coven_format::sealed_stream::StreamObjectLayout::new();
+    let (mut sealer, start) =
+        crate::sealed_stream::StreamSealer::start(path.clone(), prefix, Some(signature), key);
+    writer.append(&start).await?;
+    let mut size = start.len() as u64;
     let mut chunk = zeroize::Zeroizing::new(Vec::with_capacity(coven_format::chunks::CHUNK_SIZE));
     while let Some(frame) = receiver.recv().await {
         let mut remaining = frame.as_slice();
@@ -186,29 +183,23 @@ async fn seal_frames(
             chunk.extend_from_slice(&remaining[..length]);
             remaining = &remaining[length..];
             if chunk.len() == coven_format::chunks::CHUNK_SIZE {
-                let sealed =
-                    key.seal_object_chunk(path.as_str(), &prefix, 0, layout.index(), &chunk)?;
-                let piece = layout.encode_chunk(&sealed)?;
+                let piece = sealer.chunk(&chunk)?;
                 writer.append(&piece).await?;
-                hash.update(&piece);
                 size += piece.len() as u64;
                 chunk.clear();
             }
         }
     }
     if !chunk.is_empty() {
-        let sealed = key.seal_object_chunk(path.as_str(), &prefix, 0, layout.index(), &chunk)?;
-        let piece = layout.encode_chunk(&sealed)?;
+        let piece = sealer.chunk(&chunk)?;
         writer.append(&piece).await?;
-        hash.update(&piece);
         size += piece.len() as u64;
     }
-    let signature = member.keys().sign_object(path.as_str(), &hash.clone().finish());
+    let (signature, digest) = sealer.finish(member);
     writer.append(signature.as_bytes()).await?;
-    hash.update(signature.as_bytes());
-    size += 64;
+    size += signature.as_bytes().len() as u64;
     writer.finish().await?;
-    Ok((header.covers, *hash.finish().as_bytes(), size))
+    Ok((header.covers, *digest.as_bytes(), size))
 }
 
 #[derive(Clone, Serialize, Deserialize)]
