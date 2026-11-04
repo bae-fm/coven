@@ -17,6 +17,7 @@
 use coven_foundation::files::StoreDirAccess;
 use std::collections::BTreeSet;
 
+use crate::internal_schema::FILE_NAMED_SQL;
 use crate::{sqlite::DatabaseConnection, DbError};
 use coven_foundation::files::{FileArea, FileName, StoreDir};
 
@@ -225,6 +226,47 @@ pub(crate) fn remove_bytes(
     (removed, failures)
 }
 
+/// Record the cache range or file at `path` in the cache for removal once
+/// the writer is free.
+pub(crate) fn record_cached(db: &DatabaseConnection, path: &str) -> Result<(), DbError> {
+    db.internal_execute("INSERT INTO _coven_file_removals(area,path) VALUES('cache',?1)", [path])?;
+    Ok(())
+}
+
+/// Record the new name `path` in the files area for removal, unless a row
+/// names it, returning whether it was recorded: a staging write reserves
+/// it so a crash before its commit leaves nothing behind.
+pub(crate) fn record_unnamed(db: &DatabaseConnection, path: &str) -> Result<bool, DbError> {
+    let recorded = db.internal_execute(
+        &format!(
+            "INSERT INTO _coven_file_removals(path) SELECT ?1
+             WHERE NOT {FILE_NAMED_SQL}"
+        ),
+        [path],
+    )?;
+    Ok(recorded == 1)
+}
+
+/// Record coven's copy at `path`, which nothing names any more, for
+/// removal; one already recorded stays so.
+pub(crate) fn record_released(db: &DatabaseConnection, path: &str) -> Result<(), DbError> {
+    db.internal_execute(
+        "INSERT INTO _coven_file_removals(path) VALUES(?1) ON CONFLICT DO NOTHING",
+        [path],
+    )?;
+    Ok(())
+}
+
+/// The reserved name `path` in `area`'s bytes are kept: their removal
+/// record goes before a row names them.
+pub(crate) fn keep(db: &DatabaseConnection, area: &str, path: &str) -> Result<(), DbError> {
+    db.internal_execute(
+        "DELETE FROM _coven_file_removals WHERE path=?1 AND area=?2",
+        (path, area),
+    )?;
+    Ok(())
+}
+
 /// Delete the records of files whose bytes are gone, in the writer's
 /// transaction. A record already gone needs nothing.
 pub(crate) fn forget(db: &DatabaseConnection, removed: &[Released]) -> Result<(), DbError> {
@@ -232,12 +274,7 @@ pub(crate) fn forget(db: &DatabaseConnection, removed: &[Released]) -> Result<()
         #[cfg(any(test, feature = "test-utils"))]
         db.checkpoint(crate::test_utils::WriteCheckpoint::FileRemoved);
         match file {
-            Released::Owned { name, area } => {
-                db.internal_execute(
-                    "DELETE FROM _coven_file_removals WHERE path=?1 AND area=?2",
-                    (name.as_str(), area.as_str()),
-                )?;
-            }
+            Released::Owned { name, area } => keep(db, area, name.as_str())?,
             Released::Copy { path, state, .. } => {
                 crate::database::file_database::copies::forget(db, path, state)?;
             }
@@ -299,4 +336,4 @@ fn abandon_cache_writes(
 
 #[cfg(test)]
 #[path = "file_removals_tests.rs"]
-mod tests;
+pub(crate) mod tests;

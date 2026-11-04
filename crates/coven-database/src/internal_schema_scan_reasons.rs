@@ -15,6 +15,7 @@ pub(super) fn reason(statement: &Statement, relation: &str) -> Option<&'static s
     database_reason(statement, relation)
         .or_else(|| crate::store_state_tables::tests::scan_reason(file, template, sql, relation))
         .or_else(|| crate::published::tests::scan_reason(file, template, sql, relation))
+        .or_else(|| crate::file_removals::tests::scan_reason(file, template, sql, relation))
         .or_else(|| crate::file_protection::tests::scan_reason(file, template, sql, relation))
         .or_else(|| {
             crate::database::file_retention::tests::scan_reason(file, template, sql, relation)
@@ -105,14 +106,6 @@ fn database_reason(statement: &Statement, relation: &str) -> Option<&'static str
     Some("the setting's table holds at most one row"),
 ("retry.rs", "SELECT scope,operation,upload,pin,failures,not_before,wait FROM _coven_retries", "_coven_retries") =>
     Some("reopening arms every persisted retry wait"),
-("file_removals.rs", "SELECT path,area FROM _coven_file_removals ORDER BY area,path", "_coven_file_removals") =>
-    Some("file removal visits every queued filesystem deletion"),
-("file_removals.rs", "SELECT path,temporary,state,size,modified_at FROM _coven_copies WHERE state IN ('writing','placed','lost') ORDER BY path", "_coven_copies") =>
-    Some("the copies no call is writing that a lost switch or a failed, dropped or crashed call left; normally none"),
-("file_removals.rs", "SELECT EXISTS(SELECT 1 FROM _coven_cache_writes)", "_coven_cache_writes") =>
-    Some("opening stops at the first cache range recorded as being written"),
-("file_removals.rs", "INSERT INTO _coven_file_removals(area,path) SELECT 'cache',path FROM _coven_cache_writes", "_coven_cache_writes") =>
-    Some("opening makes every abandoned cache range write a removal"),
 ("database_operations.rs", "SELECT device FROM _coven_requests_ended", "_coven_requests_ended") =>
     Some("each pass reads every device gone for good whose join requests this device ended, once"),
 ("database_operations.rs", "SELECT device FROM _coven_gone_storage_cleared", "_coven_gone_storage_cleared") =>

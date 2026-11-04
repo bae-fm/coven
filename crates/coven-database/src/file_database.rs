@@ -580,10 +580,7 @@ impl FileDatabase {
                         )? {
                             return Err(DbError::FileNameReused { name: name.clone() });
                         }
-                        db.internal_execute(
-                            "INSERT INTO _coven_file_removals(area,path) VALUES(?1,?2)",
-                            ("cache", name.as_str()),
-                        )?;
+                        crate::file_removals::record_cached(db, name.as_str())?;
                         Ok(())
                     })?;
                     lock_unpoisoned(&inner.staging).insert(name.clone());

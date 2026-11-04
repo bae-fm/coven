@@ -4,7 +4,6 @@
 use super::DatabaseInner;
 use crate::file_hashes::FileHasher;
 use crate::file_write::{StagedFile, StagedSource};
-use crate::internal_schema::FILE_NAMED_SQL;
 use crate::write_batch::BatchFile;
 use crate::{DbError, FileSource, Place, Provenance, WriteBatch};
 use coven_foundation::files::StoreDirAccess;
@@ -68,14 +67,7 @@ impl FileStaging {
                                     .namespace_of(&namespace, Provenance::AppProvided)?;
                                 let name = FileName::new(inner.ids.new_id().to_string())
                                     .expect("UUID is a portable filename");
-                                let recorded = db.internal_execute(
-                                    &format!(
-                                        "INSERT INTO _coven_file_removals(path) SELECT ?1
-                                         WHERE NOT {FILE_NAMED_SQL}"
-                                    ),
-                                    [name.as_str()],
-                                )?;
-                                if recorded != 1 {
+                                if !crate::file_removals::record_unnamed(db, name.as_str())? {
                                     return Err(DbError::FileNameReused { name });
                                 }
                                 sources.push_back(StagingSource {

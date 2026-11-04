@@ -92,6 +92,9 @@ mod file_protection_schema;
 #[path = "file_queue_schema.rs"]
 mod file_queue_schema;
 #[macro_use]
+#[path = "file_removals_schema.rs"]
+mod file_removals_schema;
+#[macro_use]
 #[path = "file_table_schema.rs"]
 mod file_table_schema;
 #[macro_use]
@@ -331,13 +334,7 @@ macro_rules! coven_tables {
         coven_uploads_tables!($visit);
         coven_user_originals_tables!($visit);
         coven_device_only_copies_tables!($visit);
-        $visit!(_coven_file_removals, "
-            CREATE TABLE _coven_file_removals (
-                path TEXT NOT NULL,
-                area TEXT NOT NULL DEFAULT 'files' CHECK(area IN ('files','cache')),
-                PRIMARY KEY(path,area)
-            ) STRICT, WITHOUT ROWID;
-        ");
+        coven_file_removals_tables!($visit);
         // Cache ranges whose bytes are being written with no writer held;
         // opening makes the abandoned ones removals (Appendix C.3).
         $visit!(_coven_cache_writes, "
@@ -365,13 +362,6 @@ macro_rules! coven_tables {
             ) STRICT, WITHOUT ROWID;
             CREATE INDEX _coven_cache_lru ON _coven_cache(namespace,pinned,last_read);
             CREATE INDEX _coven_cache_recency ON _coven_cache(last_read);
-            CREATE TRIGGER _coven_file_removal_unnamed BEFORE INSERT ON _coven_file_removals BEGIN
-                SELECT RAISE(ABORT,'a file recorded for removal is named by a row')
-                WHERE EXISTS(SELECT 1 FROM _coven_device_files WHERE path=NEW.path)
-                    OR EXISTS(SELECT 1 FROM _coven_file_uploads WHERE copy=NEW.path)
-                    OR EXISTS(SELECT 1 FROM _coven_pin_requests WHERE copy=NEW.path)
-                    OR EXISTS(SELECT 1 FROM _coven_cache WHERE path=NEW.path);
-            END;
             CREATE TRIGGER _coven_cache_unremoved BEFORE INSERT ON _coven_cache BEGIN
                 SELECT RAISE(ABORT,'a file recorded for removal is named by a row')
                 WHERE EXISTS(SELECT 1 FROM _coven_file_removals WHERE path=NEW.path);

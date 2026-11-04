@@ -38,10 +38,7 @@ pub(super) fn keep_source(
     let hashes = &file.hashes;
     match &file.source {
         StagedSource::Copy(name) => {
-            db.internal_execute(
-                "DELETE FROM _coven_file_removals WHERE path=?1 AND area='files'",
-                [name.as_str()],
-            )?;
+            crate::file_removals::keep(db, "files", name.as_str())?;
             crate::file_queue::keep_copy(db, id, name.as_str(), hashes)?;
         }
         StagedSource::Original(original) => crate::user_file::record(db, id, original, hashes)?,

@@ -227,10 +227,7 @@ fn publish_range(
         });
     }
     if overlaps(db, file, first, chunks)? || !named(db, file)? {
-        db.internal_execute(
-            "INSERT INTO _coven_file_removals(area,path) VALUES('cache',?1)",
-            [name.as_str()],
-        )?;
+        crate::file_removals::record_cached(db, name.as_str())?;
         return Ok(false);
     }
     db.internal_execute(
@@ -260,10 +257,7 @@ fn release<L>(access: &DatabaseAccess<L>, name: &FileName) -> Vec<DbError> {
                 [name.as_str()],
             )? == 1
             {
-                db.internal_execute(
-                    "INSERT INTO _coven_file_removals(area,path) VALUES('cache',?1)",
-                    [name.as_str()],
-                )?;
+                crate::file_removals::record_cached(db, name.as_str())?;
             }
             Ok(())
         })
@@ -377,10 +371,7 @@ pub(crate) fn trim_entries(
             break;
         };
         db.internal_execute("DELETE FROM _coven_cache WHERE path=?1", [&path])?;
-        db.internal_execute(
-            "INSERT INTO _coven_file_removals(area,path) VALUES('cache',?1)",
-            [&path],
-        )?;
+        crate::file_removals::record_cached(db, &path)?;
         total -= size;
         removed.push(path);
     }
@@ -450,10 +441,7 @@ pub(crate) fn publish(
     let id = id(file)?;
     remove_entries(db, file.namespace(), &id)?;
     // The reservation's cleanup record goes before the row names its bytes.
-    db.internal_execute(
-        "DELETE FROM _coven_file_removals WHERE area='cache' AND path=?1",
-        [name.as_str()],
-    )?;
+    crate::file_removals::keep(db, "cache", name.as_str())?;
     db.internal_execute("INSERT INTO _coven_cache(namespace,file_id,chunk,path,size,last_read,pinned,checked_hash) VALUES(?1,?2,?7,?3,?4,?5,?8,?6)",rusqlite::params![file.namespace(),id,name.as_str(),size,tick(db)?,hash.as_bytes().as_slice(),COMPLETE_FILE,pinned])?;
     Ok(true)
 }
@@ -481,10 +469,7 @@ pub(crate) fn remove_entries(
         |r| r.get::<_, String>(0),
     )?;
     for path in &paths {
-        db.internal_execute(
-            "INSERT INTO _coven_file_removals(area,path) VALUES('cache',?1)",
-            [path],
-        )?;
+        crate::file_removals::record_cached(db, path)?;
     }
     Ok(paths)
 }

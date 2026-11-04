@@ -474,10 +474,7 @@ pub(crate) fn release_copy(db: &DatabaseConnection, path: &str) -> Result<(), Db
         return Ok(());
     }
     db.internal_execute("DELETE FROM _coven_copy_chunks WHERE path=?1", [path])?;
-    db.internal_execute(
-        "INSERT INTO _coven_file_removals(path) VALUES(?1) ON CONFLICT DO NOTHING",
-        [path],
-    )?;
+    crate::file_removals::record_released(db, path)?;
     Ok(())
 }
 

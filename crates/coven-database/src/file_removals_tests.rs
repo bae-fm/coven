@@ -414,3 +414,34 @@ async fn a_referenced_path_cannot_be_recorded_for_removal() {
     assert_eq!(std::fs::read(path).unwrap(), b"original");
     db.close().await.unwrap();
 }
+
+/// Fill this domain's tables from the rows of the plan audit's `fixture`
+/// table, inside its transaction (`internal_schema_scan_reasons_tests.rs`).
+pub(crate) fn fill_for_plans(db: &rusqlite::Connection) {
+    db.execute_batch(
+        "INSERT INTO _coven_file_removals SELECT 'removed_' || i,'files' FROM fixture;",
+    )
+    .unwrap();
+}
+
+/// The scans this module's statements may make, with their reasons, for the
+/// plan audit (`internal_schema_scan_reasons.rs`): `template` is the statement as
+/// written, `sql` as run.
+pub(crate) fn scan_reason(
+    file: &str,
+    template: &str,
+    _sql: &str,
+    relation: &str,
+) -> Option<&'static str> {
+    match (file, template, relation) {
+("file_removals.rs", "SELECT path,area FROM _coven_file_removals ORDER BY area,path", "_coven_file_removals") =>
+    Some("file removal visits every queued filesystem deletion"),
+("file_removals.rs", "SELECT path,temporary,state,size,modified_at FROM _coven_copies WHERE state IN ('writing','placed','lost') ORDER BY path", "_coven_copies") =>
+    Some("the copies no call is writing that a lost switch or a failed, dropped or crashed call left; normally none"),
+("file_removals.rs", "SELECT EXISTS(SELECT 1 FROM _coven_cache_writes)", "_coven_cache_writes") =>
+    Some("opening stops at the first cache range recorded as being written"),
+("file_removals.rs", "INSERT INTO _coven_file_removals(area,path) SELECT 'cache',path FROM _coven_cache_writes", "_coven_cache_writes") =>
+    Some("opening makes every abandoned cache range write a removal"),
+        _ => None,
+    }
+}

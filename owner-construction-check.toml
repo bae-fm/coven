@@ -539,6 +539,7 @@ table_macros = [
     "coven_pending_tables",
     "coven_migration_losses_tables",
     "coven_user_originals_tables",
+    "coven_file_removals_tables",
 ]
 # The API re-exports the database crate's `rusqlite` so a host can name the
 # types its own SQL uses.
@@ -991,6 +992,17 @@ tables = [
 ]
 
 [[database.domains]]
+name = "file removals"
+owner = "Database"
+homes = [
+    "crates/coven-database/src/file_removals.rs",
+    "crates/coven-database/src/file_removals_schema.rs",
+]
+tables = [
+    "_coven_file_removals",
+]
+
+[[database.domains]]
 name = "database"
 owner = "Database"
 homes = ["crates/coven-database/src/"]
@@ -1006,7 +1018,6 @@ tables = [
     "_coven_columns",
     "_coven_constraints",
     "_coven_creations",
-    "_coven_file_removals",
     "_coven_foreign_keys",
     "_coven_lost",
     "_coven_references",
