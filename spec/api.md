@@ -2083,7 +2083,7 @@ impl Coven {
     pub fn builder(&self) -> CovenBuilder;
 
     /// Read the recorded location without opening the store or its custody (E1).
-    pub async fn storage_config(store_dir: &StoreDir) -> Result<Option<StorageConfig>, StorageError>;
+    pub async fn storage_config(store_dir: &StoreDir) -> Result<Option<StorageConfig>, SyncError>;
 
     /// Keep SQLite's temporary tables in `directory`, such as the app's cache
     /// folder, for every store this process opens. Called before the first

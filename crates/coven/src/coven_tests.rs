@@ -304,10 +304,10 @@ async fn saved_location_survives_lost_credentials_and_reopen_without_custody_rea
     assert_eq!(Coven::storage_config(&directory).await.unwrap(), expected);
     assert!(matches!(app.discard_store(&directory).await, Err(StoreDeletionError::Key(_))));
     directory.owned_file(StoreFile::StorageSettings).replace(b"malformed").unwrap();
-    assert_eq!(
-        Coven::storage_config(&directory).await.unwrap_err().failure(),
-        StorageFailure::Encoding
-    );
+    assert!(matches!(
+        Coven::storage_config(&directory).await,
+        Err(SyncError::Storage(error)) if error.failure() == StorageFailure::Encoding
+    ));
     app.discard_store(&directory).await.unwrap();
 }
 
@@ -478,4 +478,29 @@ async fn discarding_waits_after_the_last_handle_drops_or_close_starts() {
         discard.await.unwrap();
         assert!(app.stores().await.unwrap().is_empty());
     }
+}
+
+/// A location read whose runtime shut down is a shutdown, not a file failure (E15).
+#[test]
+fn a_closed_stores_location_read_after_its_runtime_shut_down_is_a_shutdown() {
+    use coven_foundation::task::{Shutdown, ShutdownOutcome};
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let handle = runtime.handle().clone();
+    let root = tempfile::tempdir().unwrap();
+    let app = Coven::in_memory(root.path().into());
+    let directory = runtime
+        .block_on(app.create_closed_store("Household", Arc::new(SequentialIds::new())))
+        .unwrap();
+    drop(runtime);
+    let outlived = tokio::runtime::Builder::new_current_thread().build().unwrap();
+    outlived.block_on(async {
+        let _entered = handle.enter();
+        assert!(matches!(
+            Coven::storage_config(&directory).await,
+            Err(SyncError::Shutdown(Shutdown {
+                operation: "read the storage settings",
+                outcome: ShutdownOutcome::NotRun,
+            }))
+        ));
+    });
 }

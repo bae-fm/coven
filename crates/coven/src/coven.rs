@@ -96,11 +96,11 @@ impl Coven {
     /// None means storage has never been set up; once set up, the location stays.
     pub async fn storage_config(
         store_dir: &StoreDir,
-    ) -> Result<Option<crate::StorageConfig>, crate::StorageError> {
+    ) -> Result<Option<crate::StorageConfig>, crate::SyncError> {
         let settings = coven_storage::StorageSettings::new(store_dir.clone());
         crate::task::blocking("read the storage settings", move || settings.read())
-            .await
-            .map_err(|failed| crate::StorageError::from(crate::FileError::from(failed)))?
+            .await?
+            .map_err(crate::SyncError::from)
     }
 
     /// Keep SQLite's temporary tables in `directory`, such as the app's cache
