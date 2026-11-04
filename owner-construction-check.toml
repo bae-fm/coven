@@ -562,6 +562,10 @@ table_macros = [
 # The API re-exports the database crate's `rusqlite` so a host can name the
 # types its own SQL uses.
 rusqlite_reexport = "coven-database"
+# An open write: a function or closure taking one runs inside the write its
+# caller opened, so a domain's tables are written there or in its owner's
+# methods (F.2).
+write_types = ["DatabaseConnection"]
 
 # Appendix F.2: the database's tables by the module that writes them. SQL
 # anywhere may read a table; only its domain's homes write it, in a statement

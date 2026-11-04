@@ -766,3 +766,48 @@ fn sql_reads_and_fires_on_only_its_own_and_earlier_crates() {
         ]
     );
 }
+
+/// A domain's writes run in its owner's methods, which open the write, or
+/// in functions and closures taking an open write; module-level SQL is text
+/// its users run, and tests are free.
+#[test]
+fn a_domains_writes_run_in_its_owner_or_with_an_open_write() {
+    let mut policy = domain_policy();
+    policy.database.as_mut().unwrap().write_types = vec!["Write".into()];
+    let files = [
+        RustFile::fixture(
+            "crates/app-core/src/listing/refresh.rs",
+            r#"
+            const RESET: &str = "DELETE FROM note_listing";
+            impl Listing {
+                fn refresh(&self) { self.run(|w| w.execute("INSERT INTO note_listing VALUES (1)")); }
+            }
+            fn refresh_on(write: &mut Write) { write.execute("UPDATE note_listing SET id = 1"); }
+            struct Shown;
+            impl Shown {
+                fn mark(&self) { self.pool.run(|c| c.execute("UPDATE note_listing SET id = 2")); }
+                fn mark_in(&self) { self.pool.run(|c: &mut Write| c.execute("UPDATE note_listing SET id = 3")); }
+            }
+            fn reset(pool: &Pool) { pool.execute("DELETE FROM note_search"); }
+            "#,
+        ),
+        RustFile::fixture(
+            "crates/app-core/src/listing/refresh_tests.rs",
+            r#"fn fill(pool: &Pool) { pool.execute("INSERT INTO note_listing VALUES (1)"); }"#,
+        ),
+    ];
+    let violations = find_database_boundary_violations(&CrateCode::of(&files, &[]), &policy)
+        .into_iter()
+        .map(|violation| (violation.line, violation.message))
+        .collect::<Vec<_>>();
+    let message = |scope: &str, table: &str| {
+        format!("{scope} writes {table}, which the listing domain writes in its owner Listing's methods or with an open write (Write)")
+    };
+    assert_eq!(
+        violations,
+        [
+            (9, message("a closure in Shown::mark", "note_listing")),
+            (12, message("reset", "note_search"))
+        ]
+    );
+}

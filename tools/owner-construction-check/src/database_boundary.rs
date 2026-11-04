@@ -23,7 +23,12 @@
 //!   string literal, a macro's definition included, so the code invoking a
 //!   macro writes nothing itself;
 //! - test code that writes or creates the table is the domain's tests. A
-//!   home file's tests, `<name>_tests.rs` beside it, are in its home.
+//!   home file's tests, `<name>_tests.rs` beside it, are in its home;
+//! - in the homes' production code, a write runs in a method of the domain's
+//!   owner, the plain form that opens its own write, or in a function or
+//!   closure taking an open write, one of the policy's `write_types`: the
+//!   form an operation spanning domains calls inside the write it opened. A
+//!   module-level constant or macro is text, read where its user runs.
 //!
 //! Reads are free across domains, but SQL follows the policy's
 //! `crate_order`: a domain is in the crate its homes are in, and the
@@ -49,7 +54,7 @@ use crate::module_sources::module_sources;
 use crate::policy::{describe_homes, Domain, Policy};
 use crate::schema_views::SchemaViews;
 use crate::sql_statements::{line_of, statements, Creation, Statement};
-use crate::syntax::RustFile;
+use crate::syntax::{type_name, RustFile};
 
 /// rusqlite's raw handles. Only the database crate holds one.
 pub(crate) const RAW_SQLITE_HANDLES: &[(&str, &str)] = &[
@@ -109,7 +114,7 @@ pub(crate) fn find_database_boundary_violations(code: &CrateCode, policy: &Polic
         );
     }
     for file in &code.written {
-        SqlLiterals::new(|literal: &syn::LitStr| {
+        SqlLiterals::new(|literal: &syn::LitStr, scopes: &[Scope]| {
             let (sql, line) = (literal.value(), literal.span().start().line);
             domains.check_crate_order(
                 &file.relative_path,
@@ -118,6 +123,7 @@ pub(crate) fn find_database_boundary_violations(code: &CrateCode, policy: &Polic
                 |_| line,
                 &mut violations,
             );
+            domains.check_write_paths(&file.relative_path, &sql, scopes, line, &mut violations);
         })
         .visit_file(&file.syntax);
     }
@@ -130,7 +136,7 @@ pub(crate) fn find_database_boundary_violations(code: &CrateCode, policy: &Polic
     // Writes and schema are read where their text is written, macro
     // definitions included: code invoking a macro writes nothing itself.
     for file in &code.written {
-        SqlLiterals::new(|literal: &syn::LitStr| {
+        SqlLiterals::new(|literal: &syn::LitStr, _: &[Scope]| {
             let (sql, line) = (literal.value(), literal.span().start().line);
             domains.check_writes(&file.relative_path, &sql, |_| line, &mut violations);
             domains.check_schema(&file.relative_path, &sql, |_| line, &mut violations);
@@ -138,7 +144,7 @@ pub(crate) fn find_database_boundary_violations(code: &CrateCode, policy: &Polic
         .visit_file(&file.syntax);
     }
     for file in &code.tests {
-        SqlLiterals::new(|literal: &syn::LitStr| {
+        SqlLiterals::new(|literal: &syn::LitStr, _: &[Scope]| {
             let (sql, line) = (literal.value(), literal.span().start().line);
             domains.check_writes(&file.relative_path, &sql, |_| line, &mut violations);
             domains.check_schema(&file.relative_path, &sql, |_| line, &mut violations);
@@ -159,7 +165,7 @@ fn confined_remedy(confined_to: &str) -> String {
 pub(crate) fn schema_views(code: &CrateCode) -> SchemaViews {
     let mut texts = code.sql.iter().map(|file| file.text.clone()).collect::<Vec<_>>();
     for file in &code.written {
-        SqlLiterals::new(|literal: &syn::LitStr| texts.push(literal.value()))
+        SqlLiterals::new(|literal: &syn::LitStr, _: &[Scope]| texts.push(literal.value()))
             .visit_file(&file.syntax);
     }
     SchemaViews::collect(texts.iter().map(String::as_str))
@@ -181,6 +187,8 @@ struct Domains<'a> {
     crates: BTreeMap<&'a str, (usize, &'a str)>,
     /// Each crate's place in `crate_order`.
     order: BTreeMap<&'a str, usize>,
+    /// The types an open write is.
+    write_types: BTreeSet<String>,
 }
 
 impl<'a> Domains<'a> {
@@ -236,7 +244,57 @@ impl<'a> Domains<'a> {
                 }
             }
         }
-        Self { tables, views, shared_views, schema_views, crates, order }
+        let write_types = policy
+            .database
+            .iter()
+            .flat_map(|database| database.write_types.iter().cloned())
+            .collect();
+        Self { tables, views, shared_views, schema_views, crates, order, write_types }
+    }
+
+    /// Each write `sql`, a literal at `line` of a domain's home, makes to the
+    /// domain's tables outside its owner's methods and outside every function
+    /// and closure taking an open write.
+    fn check_write_paths(
+        &self,
+        path: &str,
+        sql: &str,
+        scopes: &[Scope],
+        line: usize,
+        violations: &mut BTreeSet<Finding>,
+    ) {
+        let Some(innermost) = scopes.last() else { return };
+        if self.write_types.is_empty()
+            || scopes.iter().any(|scope| !scope.parameter_types.is_disjoint(&self.write_types))
+        {
+            return;
+        }
+        for statement in statements(sql) {
+            let mut reported = BTreeSet::new();
+            for write in &statement.writes {
+                for table in self.schema_views.tables(&write.table, write.operation) {
+                    let Some(domain) = self.tables.get(&table) else { continue };
+                    if !domain.holds(path)
+                        || scopes.iter().any(|scope| scope.owner.as_deref() == Some(&domain.owner))
+                        || !reported.insert(table.clone())
+                    {
+                        continue;
+                    }
+                    violations.insert(Finding::new(
+                        path,
+                        line,
+                        format!(
+                            "{} writes {table}, which the {} domain writes in its owner {}'s methods or with an open write ({})",
+                            innermost.name,
+                            domain.name,
+                            domain.owner,
+                            self.write_types.iter().cloned().collect::<Vec<_>>().join(", ")
+                        ),
+                        "a domain's writes go through its owner's methods, which open the write, or through functions taking the write their caller opened",
+                    ));
+                }
+            }
+        }
     }
 
     /// The domain keeping the table or view `name`, lowercase.
@@ -402,11 +460,58 @@ struct SqlLiterals<F> {
     visit: F,
     /// The enclosing loops' variables, each with the names it takes.
     loops: Vec<(String, Vec<String>)>,
+    /// The functions, methods and closures enclosing the literal, outermost
+    /// first.
+    scopes: Vec<Scope>,
+    /// The type of the `impl` block being read.
+    implemented: Option<String>,
 }
 
-impl<F: FnMut(&syn::LitStr)> SqlLiterals<F> {
+/// A function, method or closure enclosing a literal.
+pub(crate) struct Scope {
+    /// How a finding names it: `name`, `Type::name` or a closure.
+    pub(crate) name: String,
+    /// For a method, its `impl` block's type.
+    pub(crate) owner: Option<String>,
+    /// Each name in its parameters' types: `&DatabaseConnection` names
+    /// `DatabaseConnection`. A closure's untyped parameters name nothing.
+    pub(crate) parameter_types: BTreeSet<String>,
+}
+
+/// Each name in `ty`'s paths, generic arguments included.
+fn type_path_names(ty: &syn::Type) -> BTreeSet<String> {
+    struct Names(BTreeSet<String>);
+    impl<'ast> Visit<'ast> for Names {
+        fn visit_path_segment(&mut self, node: &'ast syn::PathSegment) {
+            self.0.insert(node.ident.to_string());
+            visit::visit_path_segment(self, node);
+        }
+    }
+    let mut names = Names(BTreeSet::new());
+    names.visit_type(ty);
+    names.0
+}
+
+fn parameter_types<'a>(inputs: impl IntoIterator<Item = &'a syn::FnArg>) -> BTreeSet<String> {
+    inputs
+        .into_iter()
+        .filter_map(|input| match input {
+            syn::FnArg::Typed(typed) => Some(type_path_names(&typed.ty)),
+            syn::FnArg::Receiver(_) => None,
+        })
+        .flatten()
+        .collect()
+}
+
+impl<F: FnMut(&syn::LitStr, &[Scope])> SqlLiterals<F> {
     fn new(visit: F) -> Self {
-        Self { visit, loops: Vec::new() }
+        Self { visit, loops: Vec::new(), scopes: Vec::new(), implemented: None }
+    }
+
+    fn within(&mut self, scope: Scope, visit: impl FnOnce(&mut Self)) {
+        self.scopes.push(scope);
+        visit(self);
+        self.scopes.pop();
     }
 
     fn read(&mut self, literal: &syn::LitStr) {
@@ -421,7 +526,7 @@ impl<F: FnMut(&syn::LitStr)> SqlLiterals<F> {
             }
         }
         for text in texts {
-            (self.visit)(&syn::LitStr::new(&text, literal.span()));
+            (self.visit)(&syn::LitStr::new(&text, literal.span()), &self.scopes);
         }
     }
 }
@@ -442,7 +547,59 @@ fn literal_loop(node: &syn::ExprForLoop) -> Option<(String, Vec<String>)> {
     Some((variable.ident.to_string(), names))
 }
 
-impl<'ast, F: FnMut(&syn::LitStr)> Visit<'ast> for SqlLiterals<F> {
+impl<'ast, F: FnMut(&syn::LitStr, &[Scope])> Visit<'ast> for SqlLiterals<F> {
+    fn visit_item_impl(&mut self, node: &'ast syn::ItemImpl) {
+        let outer = self.implemented.replace(type_name(&node.self_ty).unwrap_or_default());
+        visit::visit_item_impl(self, node);
+        self.implemented = outer;
+    }
+
+    fn visit_impl_item_fn(&mut self, node: &'ast syn::ImplItemFn) {
+        let owner = self.implemented.clone();
+        let scope = Scope {
+            name: format!("{}::{}", owner.as_deref().unwrap_or("<impl>"), node.sig.ident),
+            owner,
+            parameter_types: parameter_types(&node.sig.inputs),
+        };
+        self.within(scope, |visitor| visit::visit_impl_item_fn(visitor, node));
+    }
+
+    fn visit_item_fn(&mut self, node: &'ast syn::ItemFn) {
+        let scope = Scope {
+            name: node.sig.ident.to_string(),
+            owner: None,
+            parameter_types: parameter_types(&node.sig.inputs),
+        };
+        self.within(scope, |visitor| visit::visit_item_fn(visitor, node));
+    }
+
+    fn visit_trait_item_fn(&mut self, node: &'ast syn::TraitItemFn) {
+        let scope = Scope {
+            name: node.sig.ident.to_string(),
+            owner: None,
+            parameter_types: parameter_types(&node.sig.inputs),
+        };
+        self.within(scope, |visitor| visit::visit_trait_item_fn(visitor, node));
+    }
+
+    fn visit_expr_closure(&mut self, node: &'ast syn::ExprClosure) {
+        let enclosing = self.scopes.last().map_or("<item>".to_string(), |scope| scope.name.clone());
+        let scope = Scope {
+            name: format!("a closure in {enclosing}"),
+            owner: None,
+            parameter_types: node
+                .inputs
+                .iter()
+                .filter_map(|input| match input {
+                    syn::Pat::Type(typed) => Some(type_path_names(&typed.ty)),
+                    _ => None,
+                })
+                .flatten()
+                .collect(),
+        };
+        self.within(scope, |visitor| visit::visit_expr_closure(visitor, node));
+    }
+
     fn visit_expr_for_loop(&mut self, node: &'ast syn::ExprForLoop) {
         match literal_loop(node) {
             Some(binding) => {

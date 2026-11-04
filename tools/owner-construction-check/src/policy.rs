@@ -275,6 +275,12 @@ pub(crate) struct Database {
     /// The tables, grouped by the part of the workspace that writes them.
     #[serde(default)]
     pub(crate) domains: Vec<Domain>,
+    /// The types an open write is: a function taking one runs inside a write
+    /// its caller opened. A domain's tables are written only in its owner's
+    /// methods and in functions and closures taking one of these
+    /// (`database_boundary.rs`). With none, the rule reads no write path.
+    #[serde(default)]
+    pub(crate) write_types: Vec<String>,
 }
 
 /// A domain: tables whose schema and writes only its homes hold. SQL
@@ -413,6 +419,9 @@ impl Policy {
         }
         for domain in self.database.iter().flat_map(|database| &database.domains) {
             named.push(("database.domains", domain.owner.as_str()));
+        }
+        for write in self.database.iter().flat_map(|database| &database.write_types) {
+            named.push(("database.write_types", write.as_str()));
         }
         for factory in &self.capability_factories {
             named.push(("capability_factories", factory.owner.as_str()));

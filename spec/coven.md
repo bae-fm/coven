@@ -10186,7 +10186,10 @@ shared state.
   its tables alone, and the views it names. SQL follows the crate order
   (F.1): a domain is in the crate that holds its homes, and a crate's SQL
   fires triggers on, and reads, only the tables and views of its own
-  crate's domains and of the crates before it. Every table
+  crate's domains and of the crates before it. In its homes, a domain's
+  writes run in its owner's methods, which open the write, or in functions
+  and closures taking the open write, the database connection, which an
+  operation spanning domains calls inside the write it opened. Every table
   is in one domain, and a module changing another domain's table asks that
   domain's module to make the write. A second module is a home of a domain
   only where it writes the domain's tables in bulk, a table at a time, as a
