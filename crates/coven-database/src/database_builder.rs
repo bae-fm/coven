@@ -227,13 +227,7 @@ impl DatabaseBuilder {
                 // The input database holds only coven's tables, which no app setting
                 // or function reaches.
                 let input_path = self.directory.input_database_path();
-                let mut input_writer = DatabaseConnection::open(
-                    &input_path,
-                    false,
-                    SqlAuthorization::new(&[]),
-                    &crate::SqliteSettings::default(),
-                    &crate::SqlFunctions::default(),
-                )?;
+                let mut input_writer = coven_only(&input_path, false)?;
                 input_writer.enable_wal()?;
                 let version: u32 =
                     input_writer.query_row("PRAGMA application_id", [], |r| r.get(0))?;
@@ -244,13 +238,7 @@ impl DatabaseBuilder {
                     1 => (),
                     _ => return Err(DbError::DamagedDatabase.into()),
                 }
-                let mut input_reader = DatabaseConnection::open(
-                    &input_path,
-                    true,
-                    SqlAuthorization::new(&[]),
-                    &crate::SqliteSettings::default(),
-                    &crate::SqlFunctions::default(),
-                )?;
+                let mut input_reader = coven_only(&input_path, true)?;
                 input_writer.serve(observer.clone());
                 input_reader.serve(observer.clone());
                 let input_writer = Arc::new(Mutex::new(input_writer));
@@ -258,13 +246,7 @@ impl DatabaseBuilder {
                 // each on a connection of its own (§4); opening, with no reader yet,
                 // checkpointed as it committed.
                 let checkpoints = vec![crate::wal_checkpoints::WalCheckpointer::start(
-                    DatabaseConnection::open(
-                        &input_path,
-                        false,
-                        SqlAuthorization::new(&[]),
-                        &crate::SqliteSettings::default(),
-                        &crate::SqlFunctions::default(),
-                    )?,
+                    coven_only(&input_path, false)?,
                     &input_writer,
                     crate::sqlite_settings::CHECKPOINT_PAGES,
                     observer.clone(),
@@ -436,13 +418,7 @@ pub async fn discarded_operations(
     finish_blocking(
         "read the discarded operations",
         tokio::task::spawn_blocking(move || {
-            let db = DatabaseConnection::open(
-                &path,
-                true,
-                SqlAuthorization::new(&[]),
-                &crate::SqliteSettings::default(),
-                &crate::SqlFunctions::default(),
-            )?;
+            let db = coven_only(&path, true)?;
             crate::operation::read(&db)
         })
         .await,
@@ -458,13 +434,7 @@ pub async fn read_store_name(directory: StoreDir) -> CovenResult<String> {
         "read the store name",
         tokio::task::spawn_blocking(move || {
             let _lock = directory.lock_read_only()?;
-            let database = DatabaseConnection::open(
-                &directory.database_path(),
-                true,
-                SqlAuthorization::new(&[]),
-                &crate::SqliteSettings::default(),
-                &crate::SqlFunctions::default(),
-            )?;
+            let database = coven_only(&directory.database_path(), true)?;
             Ok(crate::store_state_tables::name(&database)?)
         })
         .await,
@@ -479,16 +449,23 @@ pub async fn discarded_store_name(path: std::path::PathBuf) -> Result<String, Db
     finish_blocking(
         "read the discarded store name",
         tokio::task::spawn_blocking(move || {
-            let database = DatabaseConnection::open(
-                &path,
-                true,
-                SqlAuthorization::new(&[]),
-                &crate::SqliteSettings::default(),
-                &crate::SqlFunctions::default(),
-            )?;
+            let database = coven_only(&path, true)?;
             crate::store_state_tables::name(&database)
         })
         .await,
+    )
+}
+
+/// A connection to a database of coven's own tables only, such as the input
+/// database or a discarded one: no app table, SQLite setting or function
+/// reaches it.
+fn coven_only(path: &std::path::Path, read_only: bool) -> Result<DatabaseConnection, DbError> {
+    DatabaseConnection::open(
+        path,
+        read_only,
+        SqlAuthorization::new(&[]),
+        &crate::SqliteSettings::default(),
+        &crate::SqlFunctions::default(),
     )
 }
 

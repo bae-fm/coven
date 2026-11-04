@@ -1112,6 +1112,9 @@ tables = [
     # Name reads open temporary read-only connections at the database boundary.
     "read_store_name",
     "discarded_store_name",
+    # The one open of a connection to coven's own tables only, which the
+    # input database and the discarded-database reads share.
+    "coven_only",
 ]
 "crates/coven-database/src/file_database.rs" = ["FileDatabase::new", "FileDatabase::read_only"]
 "crates/coven-database/src/file_staging.rs" = ["FileStaging::write"]
