@@ -12,7 +12,7 @@ use coven_format::{
 };
 use coven_foundation::id_source::{CircleId, DeviceId, InviteId, KeyId, MemberId};
 use coven_merge::{Audience, Slot};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// A signed routing prefix and the slot path which authenticates its anonymous box.
 #[derive(Clone)]
@@ -346,6 +346,24 @@ impl History {
             });
         }
         self.state = effect.state.clone();
+    }
+
+    /// The store's audience and every audience a key introduction names:
+    /// those whose history and snapshots the store keeps.
+    pub(crate) fn introduced_audiences(&self) -> BTreeSet<Audience> {
+        self.introduced_through(Slot(u64::MAX))
+    }
+
+    /// [`Self::introduced_audiences`] as the slots through `slot` left them.
+    pub(crate) fn introduced_through(&self, slot: Slot) -> BTreeSet<Audience> {
+        std::iter::once(Audience::Store)
+            .chain(
+                self.introductions
+                    .iter()
+                    .filter(|intro| intro.slot <= slot)
+                    .map(|intro| intro.audience.clone()),
+            )
+            .collect()
     }
 
     pub(crate) fn commitment(&self, audience: &Audience, key: KeyId) -> Option<[u8; 32]> {

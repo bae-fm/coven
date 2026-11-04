@@ -6,9 +6,7 @@
 use super::{SequenceSync, Session};
 use crate::{history::History, SyncError};
 use coven_foundation::id_source::DeviceId;
-use coven_merge::Audience;
 use coven_storage::{ObjectPrefix, StorageFailure};
-use std::collections::BTreeSet;
 
 impl SequenceSync {
     /// End the uploads `device` left, with every session at a slot this
@@ -39,10 +37,7 @@ impl SequenceSync {
         history: &History,
         device: DeviceId,
     ) -> Result<(), SyncError> {
-        let audiences: BTreeSet<_> = std::iter::once(Audience::Store)
-            .chain(history.introductions.iter().map(|intro| intro.audience.clone()))
-            .collect();
-        for audience in audiences {
+        for audience in history.introduced_audiences() {
             let folder = ObjectPrefix::device_snapshots(self.store(), audience.clone(), device);
             for object in self.storage.list(&folder).await? {
                 let id = object

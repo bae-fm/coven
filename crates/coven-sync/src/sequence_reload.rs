@@ -169,15 +169,7 @@ impl SequenceSync {
                 history,
             )?;
         }
-        let required: std::collections::BTreeSet<_> = std::iter::once(Audience::Store)
-            .chain(
-                history
-                    .introductions
-                    .iter()
-                    .filter(|intro| intro.slot.0 <= floor.header.at)
-                    .map(|intro| intro.audience.clone()),
-            )
-            .collect();
+        let required = history.introduced_through(Slot(floor.header.at));
         let mut included = std::collections::BTreeSet::new();
         let mut previous = None;
         for original in &floor.announcements {

@@ -274,9 +274,7 @@ impl SequenceSync {
     ) -> Result<Option<Retention>, SyncError> {
         // Every introduced audience needs coverage, even without data writes:
         // its membership and boundary history also crosses the floor.
-        let audiences: BTreeSet<_> = std::iter::once(Audience::Store)
-            .chain(session.history.introductions.iter().map(|intro| intro.audience.clone()))
-            .collect();
+        let audiences = session.history.introduced_audiences();
         // Two selections per audience. The floor names the newest applicable
         // snapshot, mature or not, so a new device starts from it at once.
         // `first`, which says what may be deleted, follows only snapshots past

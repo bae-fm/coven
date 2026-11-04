@@ -149,9 +149,7 @@ impl SequenceSync {
         ring: &mut StoreKeyring,
         member: &MemberIdentity,
     ) -> Result<(), SyncError> {
-        let audiences: std::collections::BTreeSet<_> =
-            session.history.introductions.iter().map(|intro| intro.audience.clone()).collect();
-        for audience in audiences {
+        for audience in session.history.introduced_audiences() {
             if crate::effects::belongs(&session.history.state, &audience, &member.member())
                 && session
                     .history
