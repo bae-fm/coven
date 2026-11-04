@@ -26,6 +26,14 @@ pub enum BootstrapDirectoryError {
     File(#[from] FileError),
 }
 
+impl BootstrapDirectoryError {
+    /// The store is already visible, and only syncing its parent directory
+    /// failed.
+    pub fn published_unsynced(&self) -> bool {
+        matches!(self, Self::Create(DirectoryCreationError::Published { .. }))
+    }
+}
+
 /// An unpublished store at its permanent path, protected by a bootstrap lease.
 /// Dropping preserves resumable work; `cancel` removes it after its database
 /// closes. Publication removes the marker without moving any open files.

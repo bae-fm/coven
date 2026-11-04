@@ -76,11 +76,9 @@ pub(super) fn commit(
     };
     let mut error = match commit() {
         Ok(()) => return Ok(None),
-        Err(
-            error @ BootstrapError::Directory(BootstrapDirectoryError::Create(
-                coven_foundation::files::DirectoryCreationError::Published { .. },
-            )),
-        ) => return Ok(Some(error)),
+        Err(BootstrapError::Directory(error)) if error.published_unsynced() => {
+            return Ok(Some(BootstrapError::Directory(error)))
+        }
         Err(error) => error,
     };
     // Attempt every rollback even if an earlier one fails. A failure is

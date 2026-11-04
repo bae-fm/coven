@@ -62,11 +62,9 @@ async fn prepare(
         });
         match result {
             Ok(()) => Ok((owners, None)),
-            Err(
-                error @ StoreCreationError::Directory(BootstrapDirectoryError::Create(
-                    coven_foundation::files::DirectoryCreationError::Published { .. },
-                )),
-            ) => Ok((owners, Some(error))),
+            Err(StoreCreationError::Directory(error)) if error.published_unsynced() => {
+                Ok((owners, Some(StoreCreationError::Directory(error))))
+            }
             Err(mut error) => {
                 // Try every compensation, retaining every failure. The marker stays hidden.
                 for cleanup in [owners.identity.forget(), owners.keychain.delete_device_id()] {

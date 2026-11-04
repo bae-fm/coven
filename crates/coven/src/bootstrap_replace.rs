@@ -2,7 +2,6 @@
 //! storage beside the old one until it is ready (§19.3).
 
 use super::*;
-use coven_foundation::files::DirectoryCreationError;
 
 /// The app's step on a restored installation before it swaps in: one bulk
 /// write of device-local tables on the loaded database (E10).
@@ -213,12 +212,10 @@ pub(super) async fn publish(
     }
     match replacement.publish() {
         Ok(()) => Ok(owners.into_handle(database, waits, configured)),
-        Err(error @ BootstrapDirectoryError::Create(DirectoryCreationError::Published { .. })) => {
-            Err(BootstrapError::Published {
-                handle: owners.into_handle(database, waits, configured),
-                source: Box::new(error.into()),
-            })
-        }
+        Err(error) if error.published_unsynced() => Err(BootstrapError::Published {
+            handle: owners.into_handle(database, waits, configured),
+            source: Box::new(error.into()),
+        }),
         Err(error) => combine(Err(error.into()), close(database).await),
     }
 }
