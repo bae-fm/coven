@@ -1,14 +1,7 @@
+use crate::tests::next;
 use crate::tests::TestStore;
 use crate::Database;
 use std::time::Duration;
-
-async fn next(query: &mut crate::LiveQuery<bool>) -> bool {
-    tokio::time::timeout(Duration::from_secs(5), query.next())
-        .await
-        .expect("the live query answers")
-        .expect("the query is open")
-        .unwrap()
-}
 
 fn write(db: &Database, sql: &str) {
     db.commit_writer(|db| db.batch(sql).unwrap());

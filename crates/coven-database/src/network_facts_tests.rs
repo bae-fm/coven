@@ -1,8 +1,8 @@
 use crate::file_write::tests::{namespaces, open, stage, tables, SCHEMA};
+use crate::tests::next;
 use crate::tests::TestStore;
 use crate::{Migration, Provenance};
 use coven_foundation::network_watch::NetworkState;
-use std::time::Duration;
 
 /// The network and the setting, as `coven_network` shows them, and whether
 /// the one queued file is held for the network, as `coven_uploads` does.
@@ -14,14 +14,6 @@ type Shown = (Option<bool>, bool, bool, Option<bool>);
 
 fn shown(row: &rusqlite::Row<'_>) -> rusqlite::Result<Shown> {
     Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
-}
-
-async fn next<T: Clone + PartialEq + Send + 'static>(query: &mut crate::LiveQuery<T>) -> T {
-    tokio::time::timeout(Duration::from_secs(5), query.next())
-        .await
-        .expect("the live query answers")
-        .expect("the live query is open")
-        .unwrap()
 }
 
 /// `coven_network` shows the network as the store's watch last said and the

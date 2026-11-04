@@ -1,3 +1,4 @@
+use crate::tests::next;
 use crate::tests::TestStore;
 use crate::write::tests::sql;
 use crate::{DbError, Migration, RowIdentity, SyncedTable};
@@ -18,15 +19,6 @@ async fn notes(store: &TestStore) -> crate::Database {
 }
 
 const INSERT: &str = "INSERT INTO notes VALUES (?1, 'title')";
-
-/// The live query's next result, failing a test it never answers.
-async fn next<T: Clone + PartialEq + Send + 'static>(query: &mut crate::LiveQuery<T>) -> T {
-    tokio::time::timeout(std::time::Duration::from_secs(5), query.next())
-        .await
-        .expect("the live query runs again")
-        .expect("the live query answers")
-        .unwrap()
-}
 
 /// An app write's statement is prepared once, then run from the cache.
 #[tokio::test]

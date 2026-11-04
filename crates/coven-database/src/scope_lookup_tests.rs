@@ -1,19 +1,12 @@
 //! A joined table's scope: the rows whose join column holds a value its
 //! partner's rows hold, which a write that changes the table looks up.
 
+use crate::tests::next;
 use crate::tests::TestStore;
 use crate::{Database, LiveQuery};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
-
-async fn next<T: Clone + PartialEq + Send + 'static>(query: &mut LiveQuery<T>) -> T {
-    tokio::time::timeout(Duration::from_secs(5), query.next())
-        .await
-        .expect("query must answer")
-        .expect("the live query answers")
-        .unwrap()
-}
 
 fn write(db: &Database, sql: &str) {
     db.commit_writer(|db| db.batch(sql).unwrap());

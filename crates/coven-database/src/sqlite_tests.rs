@@ -1,4 +1,5 @@
 use super::*;
+use crate::tests::next;
 use crate::{
     test_utils::{notes_migrations, notes_tables},
     tests::TestStore,
@@ -496,17 +497,6 @@ async fn audience_validation_looks_up_children_only_when_the_parent_moves() {
         });
     }
     db.close().await.unwrap();
-}
-
-use crate::LiveQuery;
-use std::time::Duration;
-
-async fn next<T: Clone + PartialEq + Send + 'static>(query: &mut LiveQuery<T>) -> T {
-    tokio::time::timeout(Duration::from_secs(5), query.next())
-        .await
-        .expect("query must answer")
-        .expect("the live query answers")
-        .unwrap()
 }
 
 #[tokio::test]

@@ -1,4 +1,5 @@
 use super::*;
+use crate::tests::next_result;
 use crate::DbError;
 use crate::{
     test_utils::{notes_migrations, notes_tables},
@@ -47,19 +48,12 @@ async fn reopen_after_drop_waits_only_for_a_subscriptions_active_read() {
     reopened.close().await.unwrap();
 }
 
-async fn next<T: Clone + PartialEq + Send + 'static>(query: &mut LiveQuery<T>) -> CovenResult<T> {
-    tokio::time::timeout(Duration::from_secs(3), query.next())
-        .await
-        .expect("live query did not answer")
-        .expect("the live query answers")
-}
-
 async fn next_after_equal_run<T: Clone + PartialEq + Send + std::fmt::Debug + 'static>(
     query: &mut LiveQuery<T>,
     equal_finished: tokio::sync::oneshot::Receiver<()>,
     commit: impl FnOnce(),
 ) -> CovenResult<T> {
-    let answer = next(query);
+    let answer = next_result(query);
     tokio::pin!(answer);
     tokio::select! {
         result = &mut answer => panic!("equal result was returned: {result:?}"),
@@ -79,7 +73,7 @@ impl<T> LiveQuery<T> {
 impl<Q, T> ReconfigurableLiveQuery<Q, T> {
     pub(crate) fn is_marked_for_rerun(&self) -> bool {
         // The writer publishes commits synchronously. Once a run has installed
-        // its dependencies, this flag decides whether next() will rerun it.
+        // its dependencies, this flag decides whether next_result() will rerun it.
         assert!(
             self.current.is_some() && self.running.is_none(),
             "probe requires a completed, idle query"
@@ -109,7 +103,7 @@ async fn relevant_columns_in_any_row_rerun_and_equal_results_are_suppressed() {
         }
         Ok(values)
     });
-    assert_eq!(next(&mut query).await.unwrap(), ["a"]);
+    assert_eq!(next_result(&mut query).await.unwrap(), ["a"]);
     db.commit_writer(|sql| sql.batch("UPDATE notes SET body='irrelevant'").unwrap());
     assert!(!query.is_marked_for_rerun());
     assert_eq!(calls.load(Ordering::SeqCst), 1);
@@ -131,15 +125,15 @@ async fn relevant_columns_in_any_row_rerun_and_equal_results_are_suppressed() {
     assert_eq!(calls.load(Ordering::SeqCst), 3);
     db.commit_writer(|sql| sql.batch("INSERT INTO notes VALUES ('c','Plan','')").unwrap());
     assert!(query.is_marked_for_rerun());
-    assert_eq!(next(&mut query).await.unwrap(), ["a", "b", "c"]);
+    assert_eq!(next_result(&mut query).await.unwrap(), ["a", "b", "c"]);
     assert_eq!(calls.load(Ordering::SeqCst), 4);
     db.commit_writer(|sql| sql.batch("DELETE FROM notes WHERE id='a'").unwrap());
     assert!(query.is_marked_for_rerun());
-    assert_eq!(next(&mut query).await.unwrap(), ["b", "c"]);
+    assert_eq!(next_result(&mut query).await.unwrap(), ["b", "c"]);
     assert_eq!(calls.load(Ordering::SeqCst), 5);
     db.close().await.unwrap();
     assert!(matches!(
-        next(&mut query).await,
+        next_result(&mut query).await,
         Err(crate::CovenError::Database(DbError::StoreClosed))
     ));
 }
@@ -154,9 +148,9 @@ async fn row_count_ignores_updates_and_rollback_journals_do_not_publish() {
         count.fetch_add(1, Ordering::SeqCst);
         Ok(sql.query_row("SELECT count(*) FROM notes", [], |r| r.get::<_, i64>(0))?)
     });
-    assert_eq!(next(&mut query).await.unwrap(), 0);
+    assert_eq!(next_result(&mut query).await.unwrap(), 0);
     db.commit_writer(|sql| sql.batch("INSERT INTO notes VALUES ('a','a',''); SAVEPOINT s; INSERT INTO notes VALUES ('b','b',''); ROLLBACK TO s").unwrap());
-    assert_eq!(next(&mut query).await.unwrap(), 1);
+    assert_eq!(next_result(&mut query).await.unwrap(), 1);
     db.inspect_writer(|sql| {
         let error = sql.transaction::<()>(|sql| {
             sql.batch("INSERT INTO notes VALUES ('c','c','')")?;
@@ -201,7 +195,7 @@ async fn commit_between_finished_read_and_wait_is_not_missed() {
         Ok(value)
     });
     let task = tokio::spawn(async move {
-        let value = next(&mut query).await.unwrap();
+        let value = next_result(&mut query).await.unwrap();
         (query, value)
     });
     entry.recv_timeout(Duration::from_secs(5)).unwrap();
@@ -211,7 +205,7 @@ async fn commit_between_finished_read_and_wait_is_not_missed() {
     let (mut query, value) = task.await.unwrap();
     assert_eq!(value, 0);
     assert!(query.is_marked_for_rerun());
-    assert_eq!(next(&mut query).await.unwrap(), 1);
+    assert_eq!(next_result(&mut query).await.unwrap(), 1);
     db.close().await.unwrap();
 }
 
@@ -225,15 +219,15 @@ async fn errors_are_results_and_a_later_commit_can_recover() {
         })?)
     });
     assert!(matches!(
-        next(&mut query).await,
+        next_result(&mut query).await,
         Err(crate::CovenError::Database(DbError::Sqlite(rusqlite::Error::QueryReturnedNoRows)))
     ));
     db.commit_writer(|sql| sql.batch("INSERT INTO notes VALUES ('a','Plan','')").unwrap());
-    assert_eq!(next(&mut query).await.unwrap(), "Plan");
+    assert_eq!(next_result(&mut query).await.unwrap(), "Plan");
     db.commit_writer(|sql| sql.batch("DELETE FROM notes").unwrap());
-    assert!(next(&mut query).await.is_err());
+    assert!(next_result(&mut query).await.is_err());
     db.commit_writer(|sql| sql.batch("INSERT INTO notes VALUES ('a','Plan','')").unwrap());
-    assert_eq!(next(&mut query).await.unwrap(), "Plan");
+    assert_eq!(next_result(&mut query).await.unwrap(), "Plan");
     db.close().await.unwrap();
 }
 
@@ -339,7 +333,7 @@ async fn process_compares_processed_results() {
             }
             Ok(value.len())
         });
-    assert_eq!(next(&mut query).await.unwrap(), 4);
+    assert_eq!(next_result(&mut query).await.unwrap(), 4);
     db.commit_writer(|sql| sql.batch("UPDATE notes SET title='Test'").unwrap());
     assert!(query.is_marked_for_rerun());
     assert_eq!(
@@ -370,18 +364,18 @@ async fn joins_views_generated_columns_collations_and_local_tables_are_observed(
             Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, Vec<u8>>(2)?))
         })?)
     });
-    assert_eq!(next(&mut query).await.unwrap(), [("a".into(), "A".into(), vec![1])]);
+    assert_eq!(next_result(&mut query).await.unwrap(), [("a".into(), "A".into(), vec![1])]);
     db.commit_writer(|sql| sql.batch("UPDATE local SET value='A'").unwrap());
-    assert_eq!(next(&mut query).await.unwrap(), [("A".into(), "A".into(), vec![1])]);
+    assert_eq!(next_result(&mut query).await.unwrap(), [("A".into(), "A".into(), vec![1])]);
     db.commit_writer(|sql| sql.batch("UPDATE keyed SET value=x'02'").unwrap());
-    assert_eq!(next(&mut query).await.unwrap(), [("A".into(), "A".into(), vec![2])]);
+    assert_eq!(next_result(&mut query).await.unwrap(), [("A".into(), "A".into(), vec![2])]);
     let mut generated = db.subscribe(|sql| {
         Ok(sql.query_row("SELECT upper_value FROM local", [], |r| r.get::<_, String>(0))?)
     });
-    assert_eq!(next(&mut generated).await.unwrap(), "A");
+    assert_eq!(next_result(&mut generated).await.unwrap(), "A");
     db.commit_writer(|sql| sql.batch("UPDATE local SET value='b'").unwrap());
-    assert_eq!(next(&mut generated).await.unwrap(), "B");
-    assert!(next(&mut query).await.unwrap().is_empty());
+    assert_eq!(next_result(&mut generated).await.unwrap(), "B");
+    assert!(next_result(&mut query).await.unwrap().is_empty());
     db.close().await.unwrap();
 }
 
@@ -406,8 +400,8 @@ async fn triggers_and_foreign_key_cascades_publish_their_changes() {
     let mut audit = db.subscribe(|sql| {
         Ok(sql.query("SELECT value FROM audit ORDER BY rowid", [], |r| r.get::<_, String>(0))?)
     });
-    assert_eq!(next(&mut children).await.unwrap(), 1);
-    assert!(next(&mut audit).await.unwrap().is_empty());
+    assert_eq!(next_result(&mut children).await.unwrap(), 1);
+    assert!(next_result(&mut audit).await.unwrap().is_empty());
     db.inspect_writer(|sql| {
         sql.transaction(|sql| {
             sql.app_execute("UPDATE child SET title='two'", [])?;
@@ -418,7 +412,7 @@ async fn triggers_and_foreign_key_cascades_publish_their_changes() {
     // The unkeyed child's update hook invalidates the count, which stays equal.
     assert!(children.is_marked_for_rerun());
     assert!(audit.is_marked_for_rerun());
-    assert_eq!(next(&mut audit).await.unwrap(), ["two"]);
+    assert_eq!(next_result(&mut audit).await.unwrap(), ["two"]);
     assert_eq!(
         next_after_equal_run(&mut children, equal_finished, || {
             db.commit_writer(|sql| sql.batch("DELETE FROM parent").unwrap());
@@ -442,11 +436,11 @@ async fn virtual_table_queries_observe_updates() {
             r.get::<_, String>(0)
         })?)
     });
-    assert!(next(&mut query).await.unwrap().is_empty());
+    assert!(next_result(&mut query).await.unwrap().is_empty());
     db.commit_writer(|sql| sql.batch("INSERT INTO search VALUES ('plan','body')").unwrap());
-    assert_eq!(next(&mut query).await.unwrap(), ["plan"]);
+    assert_eq!(next_result(&mut query).await.unwrap(), ["plan"]);
     db.commit_writer(|sql| sql.batch("UPDATE search SET title='changed'").unwrap());
-    assert!(next(&mut query).await.unwrap().is_empty());
+    assert!(next_result(&mut query).await.unwrap().is_empty());
     db.close().await.unwrap();
 }
 
@@ -478,7 +472,7 @@ async fn shadow_changes_invalidate_every_virtual_column_without_reading_contents
             sql.query("SELECT title FROM search WHERE rowid=1", [], |r| r.get::<_, String>(0))?;
         Ok((runs.fetch_add(1, Ordering::SeqCst), titles))
     });
-    assert_eq!(next(&mut query).await.unwrap(), (0, vec!["title".into()]));
+    assert_eq!(next_result(&mut query).await.unwrap(), (0, vec!["title".into()]));
     for run in 1..=3 {
         // FTS5 writes the new body to its shadow tables; defensive mode
         // refuses writing them directly (§4).
@@ -492,7 +486,7 @@ async fn shadow_changes_invalidate_every_virtual_column_without_reading_contents
         });
         // The unchanged title still reruns when another shadow column changes;
         // the result's run count makes that observable without timed polling.
-        assert_eq!(next(&mut query).await.unwrap(), (run, vec!["title".into()]));
+        assert_eq!(next_result(&mut query).await.unwrap(), (run, vec!["title".into()]));
     }
     db.close().await.unwrap();
 }
@@ -504,7 +498,7 @@ async fn hidden_rowid_inserts_are_observed_and_updates_are_refused() {
     let mut query = db.subscribe(|sql| {
         Ok(sql.query("SELECT rowid FROM items ORDER BY id", [], |r| r.get::<_, i64>(0))?)
     });
-    assert_eq!(next(&mut query).await.unwrap(), [7]);
+    assert_eq!(next_result(&mut query).await.unwrap(), [7]);
     for (alias, rowid, id) in [("rowid", 8, "b"), ("_rowid_", 9, "c"), ("oid", 10, "d")] {
         db.write(move |sql| {
             sql.execute(
@@ -515,7 +509,7 @@ async fn hidden_rowid_inserts_are_observed_and_updates_are_refused() {
         })
         .await
         .unwrap();
-        assert_eq!(next(&mut query).await.unwrap(), (7..=rowid).collect::<Vec<_>>());
+        assert_eq!(next_result(&mut query).await.unwrap(), (7..=rowid).collect::<Vec<_>>());
     }
     let error = db
         .write(|sql| {
@@ -552,14 +546,14 @@ async fn changing_an_integer_primary_key_through_rowid_is_observed() {
         .unwrap();
     let mut query = db
         .subscribe(|sql| Ok(sql.query_row("SELECT rowid FROM items", [], |r| r.get::<_, i64>(0))?));
-    assert_eq!(next(&mut query).await.unwrap(), 1);
+    assert_eq!(next_result(&mut query).await.unwrap(), 1);
     db.write(|sql| {
         sql.execute("UPDATE items SET rowid=2", [])?;
         Ok(())
     })
     .await
     .unwrap();
-    assert_eq!(next(&mut query).await.unwrap(), 2);
+    assert_eq!(next_result(&mut query).await.unwrap(), 2);
     db.close().await.unwrap();
 }
 
@@ -694,9 +688,9 @@ async fn an_apps_write_keeps_a_local_fts5_index_and_its_live_query() {
             |r| r.get::<_, String>(0),
         )?)
     });
-    assert!(next(&mut search).await.unwrap().is_empty());
+    assert!(next_result(&mut search).await.unwrap().is_empty());
     crate::write::tests::sql(&db, "INSERT INTO notes VALUES ('1','green apples')").await.unwrap();
-    assert_eq!(next(&mut search).await.unwrap(), ["green apples"]);
+    assert_eq!(next_result(&mut search).await.unwrap(), ["green apples"]);
     // Another device's write fires the local trigger as it applies.
     crate::tests::remote_update(
         &db,
@@ -705,7 +699,7 @@ async fn an_apps_write_keeps_a_local_fts5_index_and_its_live_query() {
         &[("title", coven_format::value::Value::Text("red apples".into()))],
     )
     .await;
-    assert_eq!(next(&mut search).await.unwrap(), ["red apples"]);
+    assert_eq!(next_result(&mut search).await.unwrap(), ["red apples"]);
     // The app's own SQL still can't read the version.
     for statement in [
         "PRAGMA data_version",

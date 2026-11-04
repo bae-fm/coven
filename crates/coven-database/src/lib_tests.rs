@@ -170,6 +170,25 @@ pub(crate) fn store_row(table: &str, id: &str) -> coven_merge::RowId {
     }
 }
 
+/// A live query's next result, failing a test it doesn't answer within five
+/// seconds or after it closes.
+pub(crate) async fn next_result<T: Clone + PartialEq + Send + 'static>(
+    query: &mut crate::LiveQuery<T>,
+) -> crate::CovenResult<T> {
+    tokio::time::timeout(std::time::Duration::from_secs(5), query.next())
+        .await
+        .expect("the live query answers in time")
+        .expect("the live query is open")
+}
+
+/// A live query's next value, failing a test it doesn't answer or answers
+/// with an error.
+pub(crate) async fn next<T: Clone + PartialEq + Send + 'static>(
+    query: &mut crate::LiveQuery<T>,
+) -> T {
+    next_result(query).await.unwrap()
+}
+
 pub(crate) fn database_error(error: CovenError) -> DbError {
     match error {
         CovenError::Database(error) => error,

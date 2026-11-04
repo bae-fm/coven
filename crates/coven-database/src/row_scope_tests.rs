@@ -9,19 +9,12 @@
 //! `COVEN_SCOPE_SEEDS` sets how many seeds run (default 40).
 
 use crate::sql_value::SqlValue;
+use crate::tests::next;
 use crate::tests::TestStore;
 use crate::{CovenResult, Database, LiveQuery, RowIdentity, SyncedTable};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-
-async fn next<T: Clone + PartialEq + Send + 'static>(query: &mut LiveQuery<T>) -> T {
-    tokio::time::timeout(Duration::from_secs(5), query.next())
-        .await
-        .expect("query must answer")
-        .expect("the live query answers")
-        .unwrap()
-}
 
 /// One write, run when awaited.
 type Pending = std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>;

@@ -1,19 +1,11 @@
 //! A subquery in FROM, a CTE or one of the app's views is read as cores of
 //! its own, and the conditions on its rows narrow its tables.
 
+use crate::tests::next;
 use crate::tests::TestStore;
-use crate::{Database, LiveQuery};
+use crate::Database;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
-
-async fn next<T: Clone + PartialEq + Send + 'static>(query: &mut LiveQuery<T>) -> T {
-    tokio::time::timeout(Duration::from_secs(5), query.next())
-        .await
-        .expect("query must answer")
-        .expect("the live query answers")
-        .unwrap()
-}
 
 fn write(db: &Database, sql: &str) {
     db.commit_writer(|db| db.batch(sql).unwrap());
