@@ -5,6 +5,7 @@
 //! so a staged snapshot waits on disk. SQLite finds a folder for itself
 //! everywhere but Android, where an app names one, such as its cache folder.
 
+use coven_foundation::locks::lock_unpoisoned;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
@@ -41,7 +42,7 @@ pub enum TemporaryDirectoryError {
 /// Keep SQLite's temporary tables in `directory`, for every store this
 /// process opens from now on. Call it before opening any store.
 pub fn set_temporary_directory(directory: &Path) -> Result<(), TemporaryDirectoryError> {
-    let mut temporary = TEMPORARY.lock().expect("temporary folder lock poisoned");
+    let mut temporary = lock_unpoisoned(&TEMPORARY);
     if let Some(named) = &temporary.directory {
         if named == directory {
             return Ok(());
@@ -96,6 +97,6 @@ pub(crate) fn opening() -> Result<(), crate::DbError> {
             });
         }
     }
-    TEMPORARY.lock().expect("temporary folder lock poisoned").opened = true;
+    lock_unpoisoned(&TEMPORARY).opened = true;
     Ok(())
 }

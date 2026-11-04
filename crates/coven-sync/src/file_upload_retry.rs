@@ -5,6 +5,7 @@
 
 use crate::{files::FilesInner, PendingReason, PendingRecord, Retry};
 use coven_database::{FileUpload, RetrySubject};
+use coven_foundation::locks::read_unpoisoned;
 use std::collections::BTreeSet;
 
 impl FilesInner {
@@ -28,8 +29,7 @@ impl FilesInner {
         &self,
         bound: &BTreeSet<i64>,
     ) -> Option<crate::retry_waits::Wake> {
-        let connected = self.storage.read().expect("storage lock poisoned").is_some()
-            && self.send.files_allowed();
+        let connected = read_unpoisoned(&self.storage).is_some() && self.send.files_allowed();
         let held = self.trailing_held();
         // A pin coven keeps waits for its own retry, uploads held or not.
         let wake = self.waits.next_wake(|subject| match subject {

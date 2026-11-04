@@ -1,9 +1,10 @@
 //! Request revisions and cancellation-safe, demand-driven live results.
 
-#[cfg(any(test, feature = "test-utils"))]
 use crate::live_query_runs::LiveQueryRuns;
 use crate::observation::CommitSubscription;
 use crate::CovenResult;
+#[cfg(any(test, feature = "test-utils"))]
+use coven_foundation::locks::lock_unpoisoned;
 use std::{
     future::Future,
     pin::Pin,
@@ -76,7 +77,7 @@ impl<Q: Clone + PartialEq> LiveQueryRequests<Q> {
     /// Equal consecutive requests share their revision. A replacement before
     /// a run supersedes the pending revision; that revision is never answered.
     pub fn set(&self, request: Q) -> Result<LiveQueryRevision, LiveQueryClosed> {
-        let mut state = self.state.requests.lock().expect("request lock poisoned");
+        let mut state = lock_unpoisoned(&self.state.requests);
         if !state.open {
             return Err(LiveQueryClosed);
         }
@@ -98,7 +99,7 @@ struct QueryLifetime<Q>(Arc<RequestState<Q>>);
 
 impl<Q> Drop for QueryLifetime<Q> {
     fn drop(&mut self) {
-        let mut state = self.0.requests.lock().expect("request lock poisoned");
+        let mut state = lock_unpoisoned(&self.0.requests);
         state.open = false;
         state.pending = None;
     }
@@ -197,7 +198,7 @@ where
         // request if it has already completed so the transformed query answers it.
         if running.is_none() {
             if let Some(request) = &current {
-                let mut requests = lifetime.0.requests.lock().expect("request lock poisoned");
+                let mut requests = lock_unpoisoned(&lifetime.0.requests);
                 if requests.pending.is_none() {
                     requests.pending = Some(request.clone());
                 }
@@ -234,8 +235,7 @@ where
                 let commits = self.commits.state();
                 let failure = commits.error();
                 let changed = commits.changed;
-                let request =
-                    self.lifetime.0.requests.lock().expect("request lock poisoned").pending.take();
+                let request = lock_unpoisoned(&self.lifetime.0.requests).pending.take();
                 let next = match (request, changed) {
                     (Some(request), true) => Some((request, LiveQueryCause::RequestAndWrite)),
                     (Some(request), false) => Some((request, LiveQueryCause::Request)),

@@ -4,6 +4,7 @@
 use super::*;
 use coven_crypto::ConfirmationNumber;
 use coven_foundation::files::StoreDir;
+use coven_foundation::locks::lock_unpoisoned;
 use coven_sync::{JoinOutcome, JoiningIdentity, NextCheck};
 
 /// A prepared join request with the provider access its invite grants.
@@ -107,7 +108,7 @@ impl Joining {
         // Each status is shown once, when the next check changes.
         let shown = std::sync::Mutex::new(None);
         let show = |next: BootstrapStatus| {
-            let mut shown = shown.lock().expect("join status lock poisoned");
+            let mut shown = lock_unpoisoned(&shown);
             if shown.as_ref() != Some(&next) {
                 status(next.clone());
                 *shown = Some(next);

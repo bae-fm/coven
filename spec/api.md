@@ -3458,8 +3458,9 @@ impl<T: Send + 'static> LiveQuery<T> {
     /// the result and returns the new one. An error is a result too, and
     /// doesn't end the query, except the one saying the store closed, the
     /// handle fails every call (`RollbackFailed`, `StatePersistence`,
-    /// `CheckpointFailed`, `WallTimer`) or a run panicked (`DbError::Bug`,
-    /// E15): after it, `None`, so a loop over the query ends.
+    /// `CheckpointFailed`, `WallTimer`, or `Bug` for state a panic left
+    /// half-changed) or a run panicked (`DbError::Bug`, E15): after it,
+    /// `None`, so a loop over the query ends.
     pub async fn next(&mut self) -> Option<CovenResult<T>>
     where
         T: Clone + PartialEq;
@@ -8337,6 +8338,35 @@ end it unseen, and the work it served would wait for it forever.
   as do stopping sync, `rotate_key` and an administrative operation's
   submission. A caller still waiting gets the bug in the call's error. Once
   none is, the bug goes to the sink, as does a bug the call's error carries.
+
+A panic can also leave state half-changed: a lock held as it unwinds is
+poisoned, and code that SQLite calls can't fail at all. What coven does
+depends on whose state it is. State of one open store that a panic may have
+left wrong fails that store's handle with the bug, `DbError::Bug`, and every
+later call and live query reports it, as for the other failures that fail a
+handle ([§4](coven.md#4-writing-locally)). State the whole process shares ends the process. Elsewhere a
+panic leaves nothing half-changed, by how the state changes.
+
+- Dan's app writes a note, and a bug in coven's SQL authorizer panics while
+  it judges the `INSERT`. SQLite's authorizer can't fail, and what the
+  authorizer was recording may be half-changed, so it refuses that statement
+  and every later one on its connection. The write fails with
+  `DbError::Bug(Bug { operation: "authorize a statement", .. })`, the handle
+  fails with the same bug, and Dan's app reopens the store.
+- A panic in a hook SQLite calls as a write's transaction changes a row,
+  which records the row for sync and for live queries, is dropped by
+  rusqlite, so the hook keeps it. The transaction rolls back with
+  `DbError::Bug` rather than committing what the hook missed, and the next
+  write goes on.
+- A panic while the handle's live-query state is held may have left a live
+  query untold of a commit, so the handle fails with the bug, and each live
+  query returns it as its last result.
+- The registry of the store locks this process holds is shared by every
+  store, and its changes check its rules as they go. A panic partway ends
+  the process: no one store's handle covers it.
+- Every other lock coven takes guards state that each change leaves whole
+  before anything in it can panic, such as a set it adds a name to or an
+  option it takes, so a poisoned lock is used as it is.
 
 Edge cases:
 

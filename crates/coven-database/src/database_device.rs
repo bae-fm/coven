@@ -3,6 +3,7 @@
 use super::{Database, DbError};
 use crate::{CovenResult, LiveQuery, NewOperation, PendingValue, ProviderChanges};
 use coven_foundation::files::DeviceReset;
+use coven_foundation::locks::read_unpoisoned;
 
 impl Database {
     /// Commit carried provider cleanup with the replacement notice before
@@ -32,7 +33,7 @@ impl Database {
 
     /// This installation's device id, or `StoreClosed` once closed.
     pub(crate) fn local_device(&self) -> Result<coven_foundation::id_source::DeviceId, DbError> {
-        let guard = self.inner.read().expect("database lock poisoned");
+        let guard = read_unpoisoned(&self.inner);
         Ok(guard.as_ref().ok_or(DbError::StoreClosed)?.access.device)
     }
 

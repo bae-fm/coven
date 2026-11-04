@@ -13,6 +13,7 @@
 use crate::{PendingReason, PendingSubject, SyncError};
 use coven_database::{Database, DbError, RetrySubject, RetryWait};
 use coven_foundation::clock::ClockRef;
+use coven_foundation::locks::lock_unpoisoned;
 use coven_storage::{retry_delay, StorageError, StorageFailure};
 use futures_util::FutureExt;
 use std::{
@@ -173,7 +174,7 @@ impl RetryWaits {
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, WaitSchedule> {
-        self.state.lock().expect("retry waits poisoned")
+        lock_unpoisoned(&self.state)
     }
 
     fn cooling(state: &WaitSchedule, elapsed: Duration) -> bool {

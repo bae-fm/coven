@@ -8,6 +8,7 @@ use crate::{
     FileUpload,
 };
 use coven_crypto::SecretBytes;
+use coven_foundation::locks::{lock_unpoisoned, read_unpoisoned};
 use coven_foundation::{
     files::{FileName, StoreDir},
     id_source::{DeviceId, FileId},
@@ -585,7 +586,7 @@ impl FileDatabase {
                         )?;
                         Ok(())
                     })?;
-                    inner.staging.lock().expect("staging lock poisoned").insert(name.clone());
+                    lock_unpoisoned(&inner.staging).insert(name.clone());
                     Ok::<_, DbError>(())
                 })?;
                 Ok(CacheReservation { database: resources, file, name, lease: Some(lease) })
@@ -741,7 +742,7 @@ impl Drop for CacheReservation {
         let Some(_lease) = self.lease.take() else {
             return;
         };
-        let slot = self.database.read().expect("database lock poisoned");
+        let slot = read_unpoisoned(&self.database);
         slot.as_ref()
             .expect("reservation holds close guard")
             .release_file_reservations(std::iter::once(&self.name));

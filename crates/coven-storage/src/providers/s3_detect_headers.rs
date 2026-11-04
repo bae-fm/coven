@@ -7,6 +7,7 @@ use aws_sdk_s3::config::{
     RuntimeComponents,
 };
 use aws_smithy_runtime_api::box_error::BoxError;
+use coven_foundation::locks::lock_unpoisoned;
 use std::sync::{Arc, Mutex};
 
 use crate::providers::s3::checksum_headers::CHECKSUMS;
@@ -25,7 +26,7 @@ struct Facts {
 struct HeaderCapture(Arc<Mutex<Facts>>);
 impl HeaderCapture {
     fn facts(&self) -> Facts {
-        *self.0.lock().expect("header facts lock")
+        *lock_unpoisoned(&self.0)
     }
 }
 impl Intercept for HeaderCapture {
@@ -39,7 +40,7 @@ impl Intercept for HeaderCapture {
         _: &mut ConfigBag,
     ) -> Result<(), BoxError> {
         let headers = context.response().headers();
-        let mut facts = self.0.lock().expect("header facts lock");
+        let mut facts = lock_unpoisoned(&self.0);
         facts.google |= headers.get("x-goog-hash").is_some();
         facts.generation |= headers.get("x-goog-generation").is_some();
         let checksum = CHECKSUMS.iter().any(|name| headers.get(*name).is_some());

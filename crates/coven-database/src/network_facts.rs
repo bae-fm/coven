@@ -7,6 +7,7 @@
 //! what it read.
 
 use crate::observation::{CommitObserver, RowChange};
+use coven_foundation::locks::lock_unpoisoned;
 use coven_foundation::network_watch::NetworkState;
 use rusqlite::functions::FunctionFlags;
 use std::sync::{Arc, Mutex};
@@ -44,7 +45,7 @@ impl NetworkFacts {
     }
 
     fn state(&self) -> std::sync::MutexGuard<'_, NetworkFact> {
-        self.state.lock().expect("network facts poisoned")
+        lock_unpoisoned(&self.state)
     }
 
     fn current(&self) -> NetworkFact {

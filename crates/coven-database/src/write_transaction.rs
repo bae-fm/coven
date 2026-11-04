@@ -7,8 +7,11 @@
 use super::DatabaseConnection;
 use crate::observation::RowChange;
 use crate::DbError;
+use coven_foundation::locks::lock_unpoisoned;
+use coven_foundation::task::Bug;
 use rusqlite::hooks::{Action, PreUpdateCase};
 use std::cell::Cell;
+use std::sync::{Arc, Mutex};
 
 pub(super) struct WriteTransaction<'a> {
     database: &'a mut DatabaseConnection,
@@ -20,6 +23,11 @@ pub(super) struct WriteTransaction<'a> {
     rows: bool,
     /// Whether it keeps coven's constants once read (`write_constants.rs`).
     constants: bool,
+    /// The first panic in one of its hooks. SQLite's hooks can't fail, and
+    /// rusqlite drops a hook's panic, so a hook call that panicked left
+    /// what it observes incomplete: the transaction rolls back with it
+    /// rather than committing what its observers missed (E15).
+    hook_panic: Arc<Mutex<Option<Bug>>>,
 }
 
 impl<'a> WriteTransaction<'a> {
@@ -37,6 +45,7 @@ impl<'a> WriteTransaction<'a> {
             operations: false,
             rows: false,
             constants: false,
+            hook_panic: Arc::new(Mutex::new(None)),
         })
     }
 
@@ -52,9 +61,25 @@ impl<'a> WriteTransaction<'a> {
     /// session takes the same hook, so none may begin meanwhile.
     pub(super) fn observe_operations(
         &mut self,
-        hook: impl FnMut(Action, &str, &str, &PreUpdateCase) + Send + 'static,
+        mut hook: impl FnMut(Action, &str, &str, &PreUpdateCase) + Send + 'static,
     ) -> Result<(), DbError> {
-        self.database.connection.preupdate_hook(Some(hook))?;
+        let panicked = self.hook_panic.clone();
+        #[cfg(test)]
+        let fault = self.database.hook_panics.clone();
+        self.database.connection.preupdate_hook(Some(
+            move |action, schema: &str, table: &str, case: &PreUpdateCase| {
+                let observed =
+                    coven_foundation::task::caught_sync("observe a row operation", || {
+                        #[cfg(test)]
+                        assert!(
+                            !fault.swap(false, std::sync::atomic::Ordering::SeqCst),
+                            "the capture lost its place"
+                        );
+                        hook(action, schema, table, case)
+                    });
+                keep_panic(&panicked, observed);
+            },
+        ))?;
         self.operations = true;
         Ok(())
     }
@@ -73,9 +98,17 @@ impl<'a> WriteTransaction<'a> {
     /// transaction ends.
     pub(super) fn observe_rows(
         &mut self,
-        hook: impl FnMut(Action, &str, &str, i64) + Send + 'static,
+        mut hook: impl FnMut(Action, &str, &str, i64) + Send + 'static,
     ) -> Result<(), DbError> {
-        self.database.connection.update_hook(Some(hook))?;
+        let panicked = self.hook_panic.clone();
+        self.database.connection.update_hook(Some(
+            move |action, schema: &str, table: &str, rowid| {
+                let observed = coven_foundation::task::caught_sync("observe a changed row", || {
+                    hook(action, schema, table, rowid)
+                });
+                keep_panic(&panicked, observed);
+            },
+        ))?;
         self.rows = true;
         Ok(())
     }
@@ -93,6 +126,11 @@ impl<'a> WriteTransaction<'a> {
         outcome: Result<(T, Vec<RowChange>), E>,
     ) -> Result<T, E> {
         let database = &*self.database;
+        let panicked = lock_unpoisoned(&self.hook_panic).clone();
+        let outcome = match panicked {
+            Some(bug) => Err(E::from(DbError::Bug(bug))),
+            None => outcome,
+        };
         let result = outcome.and_then(|(result, changes)| {
             let judged = match &database.handle {
                 Some(handle) => Some(database.judge(handle, changes)?),
@@ -123,6 +161,13 @@ impl<'a> WriteTransaction<'a> {
                 Err(rollback) => Err(operation.with_rollback(rollback)),
             },
         }
+    }
+}
+
+/// Keep a hook call's panic, the first one, for the commit to fail with.
+fn keep_panic(panicked: &Mutex<Option<Bug>>, observed: Result<(), Bug>) {
+    if let Err(bug) = observed {
+        lock_unpoisoned(panicked).get_or_insert(bug);
     }
 }
 

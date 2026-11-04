@@ -5,6 +5,7 @@
 
 use super::{read_only, FileDatabase, FileDatabaseAccess};
 use crate::{DbError, DeviceOnlyCopy, FileRef};
+use coven_foundation::locks::lock_unpoisoned;
 use coven_foundation::{
     files::{Flushed, ObservedFile},
     id_source::FileId,
@@ -96,11 +97,7 @@ impl FileDatabase {
                     })?;
                     // Registered under the writer, so no write's removal
                     // runs between the records and the registration.
-                    inner
-                        .copying
-                        .lock()
-                        .expect("copying lock poisoned")
-                        .extend(paths.iter().cloned());
+                    lock_unpoisoned(&inner.copying).extend(paths.iter().cloned());
                     Ok::<_, DbError>(())
                 })?;
                 Ok(CopyReservation { copying: inner.copying.clone(), paths })

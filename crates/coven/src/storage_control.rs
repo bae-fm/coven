@@ -1,6 +1,7 @@
 //! Connection requests, attempts and their lifetime.
 
 use super::*;
+use coven_foundation::locks::lock_unpoisoned;
 
 impl StorageConnections {
     /// Start the loop with the store keys this session holds. Without a
@@ -13,7 +14,7 @@ impl StorageConnections {
             return Err(SyncError::KeyUnavailable(key));
         }
         let previous = {
-            let mut attempts = self.attempts.lock().expect("connection attempts poisoned");
+            let mut attempts = lock_unpoisoned(&self.attempts);
             if attempts.as_ref().is_some_and(|attempt| {
                 attempt.epoch == self.epoch.load(Ordering::SeqCst) && !attempt.task.is_finished()
             }) {
@@ -48,8 +49,7 @@ impl StorageConnections {
             async move { owner.connect_started(epoch).await },
             |bug| async move { ending.attempt_panicked(bug).await },
         );
-        *self.attempts.lock().expect("connection attempts poisoned") =
-            Some(ConnectionAttempt { epoch, task });
+        *lock_unpoisoned(&self.attempts) = Some(ConnectionAttempt { epoch, task });
         Ok(())
     }
 
@@ -272,7 +272,7 @@ impl StorageConnections {
             owner.epoch.fetch_add(1, Ordering::SeqCst);
             let stopped = owner.waits.sync_stopped().await;
             owner.stopped.notify_waiters();
-            let attempt = owner.attempts.lock().expect("connection attempts poisoned").take();
+            let attempt = lock_unpoisoned(&owner.attempts).take();
             if let Some(attempt) = attempt {
                 attempt.task.ended().await;
             }
@@ -285,7 +285,7 @@ impl StorageConnections {
 
     /// Request a pass while started.
     pub(crate) fn sync_now(&self) {
-        if let Some(control) = self.control.lock().expect("loop control poisoned").as_ref() {
+        if let Some(control) = lock_unpoisoned(&self.control).as_ref() {
             #[expect(
                 clippy::let_underscore_must_use,
                 reason = "a closed loop has nothing to sync; the sync state says why"
@@ -329,7 +329,7 @@ impl StorageConnections {
         self.epoch.fetch_add(1, Ordering::SeqCst);
         let stopped = self.waits.sync_stopped().await;
         self.stopped.notify_waiters();
-        let attempts = self.attempts.lock().expect("connection attempts poisoned").take();
+        let attempts = lock_unpoisoned(&self.attempts).take();
         if let Some(attempts) = attempts {
             attempts.task.ended().await;
         }
@@ -337,11 +337,11 @@ impl StorageConnections {
         let released = self.release(&mut *self.live.lock().await).await;
         self.expiry.close().await;
         self.codes.close().await;
-        let keys = self.keys.lock().expect("store keys lock poisoned").take();
+        let keys = lock_unpoisoned(&self.keys).take();
         self.authentication.lock().await.take();
         drop(keys);
         #[cfg(test)]
-        let released = match self.close_failure.lock().expect("close failure poisoned").take() {
+        let released = match lock_unpoisoned(&self.close_failure).take() {
             Some(failure) => released.and(Err(failure)),
             None => released,
         };
@@ -351,7 +351,7 @@ impl StorageConnections {
     /// Make the next close return `failure` once it has closed.
     #[cfg(test)]
     pub(crate) fn fail_next_close(&self, failure: SyncError) {
-        *self.close_failure.lock().expect("close failure poisoned") = Some(failure);
+        *lock_unpoisoned(&self.close_failure) = Some(failure);
     }
 }
 

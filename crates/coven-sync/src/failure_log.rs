@@ -8,6 +8,7 @@
 
 use crate::{PendingReason, PendingSubject};
 use coven_database::OperationId;
+use coven_foundation::locks::lock_unpoisoned;
 use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
 use std::sync::Mutex;
@@ -24,7 +25,7 @@ impl FailureLog {
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, BTreeMap<PendingSubject, PendingReason>> {
-        self.logged.lock().expect("failure log poisoned")
+        lock_unpoisoned(&self.logged)
     }
 
     /// Log that `subject` failed with `reason` because of `error`, when the

@@ -9,6 +9,7 @@
 use super::default_network::DefaultNetwork;
 use super::{NetworkSink, NetworkWatchError};
 use crate::java_exception::{caught, JniFailure};
+use crate::locks::lock_unpoisoned;
 use jni::objects::{Global, JClass, JClassLoader, JObject, JValue};
 use jni::sys::{jboolean, jlong};
 use jni::{jni_sig, jni_str, Env, EnvUnowned, JavaVM, NativeMethod};
@@ -45,7 +46,7 @@ impl JavaWatch {
     pub(super) fn start(sink: Arc<Mutex<NetworkSink>>) -> Result<Self, NetworkWatchError> {
         let network = Arc::new(Mutex::new(DefaultNetwork::new(sink)));
         let number = {
-            let mut watches = WATCHES.lock().expect("network watches poisoned");
+            let mut watches = lock_unpoisoned(&WATCHES);
             let number = watches.next;
             watches.next += 1;
             watches.running.insert(number, Arc::downgrade(&network));
@@ -55,7 +56,7 @@ impl JavaWatch {
         match started {
             Ok((vm, watch)) => Ok(Self { vm, watch, number, _network: network }),
             Err(failure) => {
-                WATCHES.lock().expect("network watches poisoned").running.remove(&number);
+                lock_unpoisoned(&WATCHES).running.remove(&number);
                 Err(NetworkWatchError::new(format!("starting {WATCH_CLASS}: {failure}")))
             }
         }
@@ -107,7 +108,7 @@ impl Drop for JavaWatch {
         if let Err(failure) = stopped {
             tracing::error!(%failure, "stopping the network watch failed");
         }
-        WATCHES.lock().expect("network watches poisoned").running.remove(&self.number);
+        lock_unpoisoned(&WATCHES).running.remove(&self.number);
     }
 }
 
@@ -151,14 +152,9 @@ fn register(env: &mut Env, class: &JClass) -> jni::errors::Result<()> {
 
 /// Tell the running watch numbered `watch`, if it still runs.
 fn told(watch: jlong, tell: impl FnOnce(&mut DefaultNetwork)) {
-    let network = WATCHES
-        .lock()
-        .expect("network watches poisoned")
-        .running
-        .get(&watch)
-        .and_then(Weak::upgrade);
+    let network = lock_unpoisoned(&WATCHES).running.get(&watch).and_then(Weak::upgrade);
     if let Some(network) = network {
-        tell(&mut network.lock().expect("default network poisoned"));
+        tell(&mut lock_unpoisoned(&network));
     }
 }
 

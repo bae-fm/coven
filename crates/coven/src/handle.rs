@@ -40,6 +40,7 @@ mod writes;
 use crate::*;
 use coven_crypto::custody::{StoreCustody, StoreKeychain};
 use coven_database::Database;
+use coven_foundation::locks::lock_unpoisoned;
 use std::sync::{Arc, Mutex};
 
 /// A shared handle to the open store and its running work (Appendix F.4).
@@ -504,28 +505,19 @@ impl CovenHandle {
     /// store removes every listed secret even if its database is damaged.
     /// Failure may leave an extra name; retrying is safe.
     pub fn set_host_secret(&self, name: &str, value: &str) -> Result<(), KeyError> {
-        self.custody
-            .lock()
-            .expect("custody lock poisoned")
+        lock_unpoisoned(&self.custody)
             .as_ref()
             .ok_or(KeyError::StoreClosed)?
             .set_host_secret(name, value)
     }
     /// The secret, or `None` if it was never set.
     pub fn host_secret(&self, name: &str) -> Result<Option<String>, KeyError> {
-        self.custody
-            .lock()
-            .expect("custody lock poisoned")
-            .as_ref()
-            .ok_or(KeyError::StoreClosed)?
-            .host_secret(name)
+        lock_unpoisoned(&self.custody).as_ref().ok_or(KeyError::StoreClosed)?.host_secret(name)
     }
     /// Deletes the secret before its recorded name; succeeds if absent.
     /// Failure may leave an extra name; retrying is safe.
     pub fn delete_host_secret(&self, name: &str) -> Result<(), KeyError> {
-        self.custody
-            .lock()
-            .expect("custody lock poisoned")
+        lock_unpoisoned(&self.custody)
             .as_ref()
             .ok_or(KeyError::StoreClosed)?
             .delete_host_secret(name)
@@ -547,7 +539,7 @@ impl CovenHandle {
             handle.files.close().await;
             let custody = handle.custody.clone();
             let custody = crate::task::blocking("close custody", move || {
-                if let Some(custody) = custody.lock().expect("custody lock poisoned").take() {
+                if let Some(custody) = lock_unpoisoned(&custody).take() {
                     custody.close();
                 }
             })

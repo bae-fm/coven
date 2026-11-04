@@ -29,6 +29,7 @@ use crate::database::with_locked;
 use crate::observation::{CommitObserver, HandleFailure};
 use crate::sqlite::DatabaseConnection;
 use crate::{CheckpointMode, DbError, WalCheckpoint};
+use coven_foundation::locks::lock_unpoisoned;
 use std::num::NonZeroU32;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, Weak};
@@ -112,7 +113,7 @@ impl WalCheckpointer {
         let checkpointer = Self { shared, thread: Some(thread) };
         let signal = CommitSignal { thread: checkpointer.running().thread().clone() };
         {
-            let mut writer = writer.lock().expect("database connection lock poisoned");
+            let mut writer = lock_unpoisoned(writer);
             writer.batch("PRAGMA wal_autocheckpoint = 0")?;
             writer.signal_commits(signal);
         }
@@ -124,12 +125,10 @@ impl WalCheckpointer {
         self.halt();
         let shared = self.shared.clone();
         drop(self);
-        Arc::into_inner(shared)
-            .expect("only the checkpointer holds its state once its thread ends")
-            .connection
-            .into_inner()
-            .expect("checkpointer lock poisoned")
-            .close()
+        let shared = Arc::into_inner(shared)
+            .expect("only the checkpointer holds its state once its thread ends");
+        // A panic in the checkpointer ends the process (`serve`).
+        coven_foundation::locks::into_unpoisoned(shared.connection).close()
     }
 
     fn running(&self) -> &std::thread::JoinHandle<()> {
@@ -257,7 +256,7 @@ impl Checkpoints {
     /// Run the fault a test set, as the checkpoint's last step begins.
     #[cfg(test)]
     fn fault(&self) -> Result<(), DbError> {
-        self.fault.lock().expect("checkpoint fault lock poisoned").as_mut().map_or(Ok(()), |f| f())
+        lock_unpoisoned(&self.fault).as_mut().map_or(Ok(()), |f| f())
     }
 }
 

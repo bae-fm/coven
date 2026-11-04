@@ -3,6 +3,7 @@
 use super::{with_locked, Database};
 use crate::{sqlite::DatabaseConnection, DbError};
 use coven_foundation::id_source::{DeviceId, FileId, KeyId};
+use coven_foundation::locks::lock_unpoisoned;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex, Weak};
 
@@ -19,7 +20,7 @@ fn read_local<R>(
     reader: &InputConnection,
     run: impl FnOnce(&DatabaseConnection) -> Result<R, DbError>,
 ) -> Result<R, DbError> {
-    let guard = reader.lock().expect("input connection lock poisoned");
+    let guard = lock_unpoisoned(reader);
     let reader = guard.as_ref().ok_or(DbError::StoreClosed)?;
     reader.read_transaction(|| run(reader))
 }
@@ -42,7 +43,7 @@ struct InputRead {
 impl Drop for InputRead {
     fn drop(&mut self) {
         if let Some(active) = self.active.upgrade() {
-            let mut active = active.lock().expect("active input lock poisoned");
+            let mut active = lock_unpoisoned(&active);
             // A concurrent new reader may already have replaced this expired weak entry.
             if active.get(&self.id).is_some_and(|saved| saved.strong_count() == 0) {
                 active.remove(&self.id);
@@ -156,16 +157,11 @@ impl InputDatabase {
     }
     #[cfg(any(test, feature = "test-utils"))]
     pub(super) fn test_track_work(&self, counter: &crate::test_utils::WorkCounter) {
-        self.reader
-            .lock()
-            .expect("input connection lock poisoned")
+        lock_unpoisoned(&self.reader)
             .as_ref()
             .expect("open input reader")
             .test_track_work(counter.clone());
-        self.writer
-            .lock()
-            .expect("input connection lock poisoned")
-            .test_track_work(counter.clone());
+        lock_unpoisoned(&self.writer).test_track_work(counter.clone());
     }
     /// `writer` is shared with the input database's checkpointer (§4). Its
     /// temporary storage, on disk, holds prepared inputs and staged snapshots.
@@ -183,7 +179,7 @@ impl InputDatabase {
     }
 
     fn reading(&self, id: i64) -> Arc<InputRead> {
-        let mut active = self.active.lock().expect("active input lock poisoned");
+        let mut active = lock_unpoisoned(&self.active);
         if let Some(reading) = active.get(&id).and_then(Weak::upgrade) {
             return reading;
         }
@@ -197,19 +193,12 @@ impl InputDatabase {
     }
 
     pub(crate) fn close(self) -> Vec<DbError> {
-        let reader = self
-            .reader
-            .lock()
-            .expect("input connection lock poisoned")
-            .take()
-            .expect("open input reader");
+        let reader = lock_unpoisoned(&self.reader).take().expect("open input reader");
         let mut failures: Vec<DbError> = reader.close().err().into_iter().collect();
         // The checkpointer stopped before, and let go of the writer.
         match Arc::try_unwrap(self.writer) {
             Ok(writer) => {
-                if let Err(error) =
-                    writer.into_inner().expect("input connection lock poisoned").close()
-                {
+                if let Err(error) = coven_foundation::locks::into_unpoisoned(writer).close() {
                     failures.push(error);
                 }
             }
@@ -284,7 +273,7 @@ fn evict(
 ) -> Result<(), DbError> {
     // A released object can be borrowed by another consumer. Keep its bytes
     // until that consumer drops its handle, including across network awaits.
-    let active = active.lock().expect("active input lock poisoned");
+    let active = lock_unpoisoned(active);
     let before = budget(db)?;
     let mut retained = before.retained;
     let mut after = 0;

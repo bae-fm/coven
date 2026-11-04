@@ -1,5 +1,6 @@
 //! The handle's transfer limits and shared leases for response bodies.
 
+use coven_foundation::locks::lock_unpoisoned;
 use std::{
     num::NonZeroUsize,
     sync::{Arc, Mutex},
@@ -38,12 +39,12 @@ impl TransferBudget {
     }
     /// The current limits; the next upload to start checks the upload limit.
     pub fn limits(&self) -> TransferLimits {
-        self.state.lock().expect("transfer budget poisoned").limits
+        lock_unpoisoned(&self.state).limits
     }
     /// Change admission for subsequent downloads without cancelling an active
     /// response. Reducing the limit waits for enough existing bodies to end.
     pub fn set_limits(&self, limits: TransferLimits) {
-        self.state.lock().expect("transfer budget poisoned").limits = limits;
+        lock_unpoisoned(&self.state).limits = limits;
         self.changed.notify_waiters();
     }
     pub(crate) async fn download(self: &Arc<Self>) -> DownloadLease {
@@ -52,7 +53,7 @@ impl TransferBudget {
             tokio::pin!(changed);
             changed.as_mut().enable();
             {
-                let mut state = self.state.lock().expect("transfer budget poisoned");
+                let mut state = lock_unpoisoned(&self.state);
                 if state.downloads < state.limits.downloads.get() {
                     state.downloads += 1;
                     return DownloadLease(self.clone());
@@ -66,7 +67,7 @@ impl TransferBudget {
 pub(crate) struct DownloadLease(Arc<TransferBudget>);
 impl Drop for DownloadLease {
     fn drop(&mut self) {
-        self.0.state.lock().expect("transfer budget poisoned").downloads -= 1;
+        lock_unpoisoned(&self.0.state).downloads -= 1;
         self.0.changed.notify_waiters();
     }
 }

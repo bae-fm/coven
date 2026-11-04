@@ -1,6 +1,7 @@
 //! The installation's actual progress, shared with transfer workers.
 
 use crate::{DeviceIdEvidence, PendingRecord, SyncError, SyncFailure};
+use coven_foundation::locks::lock_unpoisoned;
 use coven_storage::{ObjectPath, PublicationGate, StorageError, StorageFailure};
 use std::sync::Mutex;
 use tokio::sync::watch;
@@ -112,11 +113,11 @@ impl SequenceState {
         self.status.send_replace(status);
     }
     pub(crate) fn registered(&self, registered: bool) {
-        *self.registered.lock().expect("sequence state poisoned") = registered;
+        *lock_unpoisoned(&self.registered) = registered;
     }
     pub(crate) fn files_allowed(&self) -> bool {
         matches!(&*self.status.borrow(), SequenceStatus::Synced { .. })
-            && *self.registered.lock().expect("sequence state poisoned")
+            && *lock_unpoisoned(&self.registered)
     }
     pub(crate) fn check(&self) -> Result<(), SyncError> {
         match &*self.status.borrow() {
@@ -146,8 +147,7 @@ impl PublicationGate for SequenceState {
             return Ok(());
         }
         if self.check().is_err()
-            || (path.file_id().is_some()
-                && !*self.registered.lock().expect("sequence state poisoned"))
+            || (path.file_id().is_some() && !*lock_unpoisoned(&self.registered))
         {
             Err(StorageFailure::CatchUpRequired.into())
         } else {

@@ -19,6 +19,7 @@ use super::{
     FileError, ReplacedBy, ReplacementRecord, StoreDir, StoreDirAccess, StoreLock, StoreLockError,
 };
 use crate::id_source::{IdSource, StoreId};
+use crate::locks::lock_unpoisoned;
 use std::{
     fs, io,
     path::{Path, PathBuf},
@@ -53,13 +54,13 @@ impl ReplacementStore {
 
     /// Whether the new installation has taken the store's place.
     pub fn is_swapped(&self) -> bool {
-        self.loading.lock().expect("replacement state lock poisoned").is_none()
+        lock_unpoisoned(&self.loading).is_none()
     }
 
     /// Where the new installation is: its hidden directory while it loads,
     /// then the store's own, unpublished until `publish`.
     pub fn directory(&self) -> StoreDir {
-        match &*self.loading.lock().expect("replacement state lock poisoned") {
+        match &*lock_unpoisoned(&self.loading) {
             Some(loading) => loading.directory(),
             None => StoreDir::bootstrapping(
                 self.path.clone(),
@@ -73,7 +74,7 @@ impl ReplacementStore {
     /// The replaced installation's database: in place while the new one
     /// loads, then in its archive. Only its operation journal is read.
     pub fn discarded_database_path(&self) -> PathBuf {
-        match &*self.loading.lock().expect("replacement state lock poisoned") {
+        match &*lock_unpoisoned(&self.loading) {
             Some(_) => self.path.join(super::directory::DATABASE),
             None => device_reset::discarded_database(&self.path, self.reset.old_device),
         }
@@ -86,7 +87,7 @@ impl ReplacementStore {
     /// the marker refuses other opens. The loading database must be closed. A
     /// failure undoes whatever moved and leaves the store as it was.
     pub fn swap(&self, name: String) -> Result<(), BootstrapDirectoryError> {
-        let mut loading = self.loading.lock().expect("replacement state lock poisoned");
+        let mut loading = lock_unpoisoned(&self.loading);
         if loading.is_none() {
             return Ok(());
         }
@@ -156,10 +157,7 @@ impl ReplacementStore {
     /// Remove the unswapped replacement after its database closed, leaving the
     /// store as it was. A later call starts a new one with a fresh id.
     pub fn cancel(self) -> Result<(), BootstrapDirectoryError> {
-        let loading = self
-            .loading
-            .lock()
-            .expect("replacement state lock poisoned")
+        let loading = lock_unpoisoned(&self.loading)
             .take()
             .expect("only an unswapped replacement is cancelled");
         loading.cancel()?;
@@ -168,7 +166,7 @@ impl ReplacementStore {
     }
 
     fn release_writer(&self) {
-        self.writer.lock().expect("replacement writer lock poisoned").take();
+        lock_unpoisoned(&self.writer).take();
     }
 }
 

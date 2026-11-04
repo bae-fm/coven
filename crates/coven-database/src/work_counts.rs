@@ -1,5 +1,6 @@
 //! Test-only accounting shared by a database's writer and readers.
 
+use coven_foundation::locks::lock_unpoisoned;
 use std::sync::{Arc, Mutex};
 
 /// Local database work observed at its execution boundaries.
@@ -39,10 +40,10 @@ impl WorkCounter {
 
     /// Start another measurement after the preceding work has completed.
     pub fn take(&self) -> WorkCounts {
-        std::mem::take(&mut *self.0.lock().expect("work counter poisoned"))
+        std::mem::take(&mut lock_unpoisoned(&self.0))
     }
 
     pub(crate) fn record(&self, update: impl FnOnce(&mut WorkCounts)) {
-        update(&mut self.0.lock().expect("work counter poisoned"));
+        update(&mut lock_unpoisoned(&self.0));
     }
 }

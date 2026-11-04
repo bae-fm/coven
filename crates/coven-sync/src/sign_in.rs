@@ -7,6 +7,7 @@
 use crate::{commit_credentials, CredentialKeychains, CredentialRollback, SavedName, SyncError};
 use coven_crypto::custody::{PersonEntries, StoreKeychain};
 use coven_format::codes::RestoreCode;
+use coven_foundation::locks::lock_unpoisoned;
 use coven_storage::providers::OAuthTokenRefresh;
 use coven_storage::{
     providers::OAuthExchange, ConnectionCredentials, OAuthTokens, StorageCredentials, StorageError,
@@ -46,7 +47,7 @@ impl DeviceCredentials {
         &self,
         change: impl FnOnce(&CredentialKeychains) -> Result<T, SyncError>,
     ) -> Result<T, SyncError> {
-        let _write = self.writes.lock().expect("credential writes poisoned");
+        let _write = lock_unpoisoned(&self.writes);
         change(&self.keychains)
     }
 
@@ -158,12 +159,12 @@ impl SessionSignIn {
 
     /// The provider this sign-in is for.
     pub fn provider(&self) -> coven_storage::CloudProvider {
-        self.state.lock().expect("sign-in poisoned").0.access.provider()
+        lock_unpoisoned(&self.state).0.access.provider()
     }
 
     /// The tokens a new connection starts with.
     pub fn tokens(&self) -> Result<OAuthTokens, SyncError> {
-        match &*self.state.lock().expect("sign-in poisoned") {
+        match &*lock_unpoisoned(&self.state) {
             (tokens, None) => Ok(tokens.clone()),
             (_, Some(device)) => device.tokens(),
         }
@@ -176,7 +177,7 @@ impl SessionSignIn {
         device: &Arc<DeviceCredentials>,
         commit: impl FnOnce(&CredentialKeychains, &OAuthTokens) -> Result<T, SyncError>,
     ) -> Result<T, SyncError> {
-        let mut state = self.state.lock().expect("sign-in poisoned");
+        let mut state = lock_unpoisoned(&self.state);
         let (tokens, published) = &mut *state;
         if published.is_some() {
             return Err(StorageFailure::InvalidConfiguration
@@ -191,7 +192,7 @@ impl SessionSignIn {
     /// Hold the published tokens in this session again, after the commit that
     /// published them was rolled back.
     pub fn unpublish(&self) {
-        self.state.lock().expect("sign-in poisoned").1 = None;
+        lock_unpoisoned(&self.state).1 = None;
     }
 }
 
@@ -199,7 +200,7 @@ impl SessionSignIn {
 impl TokenCustody for SessionSignIn {
     async fn replace(&self, rejected: &OAuthTokens) -> Result<OAuthTokens, StorageError> {
         let _one = self.refreshing.lock().await;
-        let held = match &*self.state.lock().expect("sign-in poisoned") {
+        let held = match &*lock_unpoisoned(&self.state) {
             (tokens, None) => Ok(tokens.clone()),
             (_, Some(device)) => Err(device.clone()),
         };
@@ -211,7 +212,7 @@ impl TokenCustody for SessionSignIn {
             return Ok(held);
         }
         let refreshed = refresh(self.oauth.as_ref(), &held).await?;
-        let device = match &mut *self.state.lock().expect("sign-in poisoned") {
+        let device = match &mut *lock_unpoisoned(&self.state) {
             // Only this refresh, serialized above, changes held tokens.
             (tokens, None) => {
                 *tokens = refreshed.clone();

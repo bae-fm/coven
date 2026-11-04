@@ -9,6 +9,7 @@
 use super::write_transaction::WriteTransaction;
 use crate::sql_value::SqlValue;
 use crate::DbError;
+use coven_foundation::locks::lock_unpoisoned;
 use rusqlite::hooks::{Action, PreUpdateCase};
 use std::sync::{Arc, Mutex};
 
@@ -33,6 +34,9 @@ struct CapturedEvents {
     local: super::pre_update_changes::PreUpdateChanges,
 }
 
+/// A panic in the hook fails the transaction it observes before it commits
+/// (`write_transaction.rs`), so what a panicking hook call left half-recorded
+/// is never committed: the capture's lock is taken as it is.
 pub(super) struct EventCapture {
     shapes: Arc<super::pre_update_changes::TableShapes>,
     events: Arc<Mutex<CapturedEvents>>,
@@ -69,15 +73,11 @@ impl EventCapture {
                 match tables.position(table) {
                     Some(position) if tables.synced(position) => {}
                     Some(position) => {
-                        recorded
-                            .lock()
-                            .expect("event capture lock poisoned")
-                            .local
-                            .record(&tables, position, case);
+                        lock_unpoisoned(&recorded).local.record(&tables, position, case);
                         return;
                     }
                     None => {
-                        recorded.lock().expect("event capture lock poisoned").local.unshaped(table);
+                        lock_unpoisoned(&recorded).local.unshaped(table);
                         return;
                     }
                 }
@@ -126,11 +126,7 @@ impl EventCapture {
                     },
                     PreUpdateCase::Unknown => return,
                 };
-                recorded
-                    .lock()
-                    .expect("event capture lock poisoned")
-                    .operations
-                    .push((depth, event));
+                lock_unpoisoned(&recorded).operations.push((depth, event));
             },
         )?;
         Ok(Self { shapes, events })
@@ -138,19 +134,12 @@ impl EventCapture {
 
     /// The device-local tables' changes, as live queries read them.
     pub(super) fn local_changes(&self) -> Vec<crate::observation::RowChange> {
-        std::mem::take(&mut self.events.lock().expect("event capture lock poisoned").local)
-            .finish(&self.shapes)
+        std::mem::take(&mut lock_unpoisoned(&self.events).local).finish(&self.shapes)
     }
 
     /// The synced tables' operations so far, in order.
     pub(super) fn events(&self) -> Vec<Event> {
-        self.events
-            .lock()
-            .expect("event capture lock poisoned")
-            .operations
-            .iter()
-            .map(|(_, event)| event.clone())
-            .collect()
+        lock_unpoisoned(&self.events).operations.iter().map(|(_, event)| event.clone()).collect()
     }
 }
 

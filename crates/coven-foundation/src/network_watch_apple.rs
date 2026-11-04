@@ -7,6 +7,7 @@
 //! no bindings), so coven declares the few C functions it calls here.
 
 use super::{NetworkSink, NetworkWatchError, UsableNetwork};
+use crate::locks::lock_unpoisoned;
 use block2::RcBlock;
 use std::ffi::{c_char, c_void, CStr};
 use std::sync::{mpsc, Arc, Mutex};
@@ -62,8 +63,8 @@ impl PathMonitor {
         let (first, described) = mpsc::channel::<()>();
         let first = Mutex::new(Some(first));
         let handler = RcBlock::new(move |path: *mut c_void| {
-            sink.lock().expect("network sink poisoned").observe(network(path));
-            if let Some(first) = first.lock().expect("first path poisoned").take() {
+            lock_unpoisoned(&sink).observe(network(path));
+            if let Some(first) = lock_unpoisoned(&first).take() {
                 // The opener waiting for it may have gone; nothing is lost.
                 #[expect(clippy::let_underscore_must_use, reason = "the opener may have gone")]
                 let _ = first.send(());
@@ -111,15 +112,12 @@ fn network(path: *mut c_void) -> Option<UsableNetwork> {
         let enumerate = block2::StackBlock::new(|interface: *mut c_void| -> u8 {
             let name = nw_interface_get_name(interface);
             if !name.is_null() {
-                names
-                    .lock()
-                    .expect("interface names poisoned")
-                    .push(CStr::from_ptr(name).to_string_lossy().into_owned());
+                lock_unpoisoned(&names).push(CStr::from_ptr(name).to_string_lossy().into_owned());
             }
             1
         });
         nw_path_enumerate_interfaces(path, &enumerate);
-        let mut names = names.into_inner().expect("interface names poisoned");
+        let mut names = crate::locks::into_unpoisoned(names);
         names.sort();
         Some(UsableNetwork {
             id: names.join(","),

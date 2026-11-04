@@ -5,6 +5,7 @@ use crate::{
     *,
 };
 use coven_crypto::custody::{KeySession, PersonEntries};
+use coven_foundation::locks::lock_unpoisoned;
 use coven_foundation::progress::ProgressReport;
 use coven_storage::{
     providers::{OAuthExchange, OAuthFlow, StorageConnector},
@@ -83,16 +84,16 @@ impl Publications {
     }
     /// Permit the provider check's own object while `scope` runs.
     async fn check<T>(&self, path: &ObjectPath, scope: impl Future<Output = T>) -> T {
-        self.checks.lock().expect("provider checks poisoned").insert(path.clone());
+        lock_unpoisoned(&self.checks).insert(path.clone());
         let result = scope.await;
-        self.checks.lock().expect("provider checks poisoned").remove(path);
+        lock_unpoisoned(&self.checks).remove(path);
         result
     }
 }
 
 impl PublicationGate for Publications {
     fn check(&self, path: &ObjectPath) -> Result<(), StorageError> {
-        if self.checks.lock().expect("provider checks poisoned").contains(path) {
+        if lock_unpoisoned(&self.checks).contains(path) {
             return Ok(());
         }
         PublicationGate::check(self.state.as_ref(), path)
@@ -348,7 +349,7 @@ impl StorageConnections {
         &self,
         use_keys: impl FnOnce(&Arc<KeySession<StoreKeyring>>) -> Result<T, KeyError>,
     ) -> Result<T, KeyError> {
-        let keys = self.keys.lock().expect("store keys lock poisoned");
+        let keys = lock_unpoisoned(&self.keys);
         use_keys(keys.as_ref().ok_or(KeyError::StoreClosed)?)
     }
 
@@ -440,7 +441,7 @@ impl StorageConnections {
         );
         let sync_loop = SyncLoop::new(sync.clone(), codes.clone());
         let started = if start { sync_loop.start().await } else { Ok(()) };
-        *self.control.lock().expect("loop control poisoned") = Some(sync_loop.clone());
+        *lock_unpoisoned(&self.control) = Some(sync_loop.clone());
         *live = ConnectionState::Active(Live { sync, sync_loop, codes });
         started
     }
@@ -480,7 +481,7 @@ impl StorageConnections {
         live: &mut ConnectionState,
     ) -> (Result<(), DbError>, Result<(), SyncError>) {
         let stopped = self.waits.sync_stopped().await;
-        self.control.lock().expect("loop control poisoned").take();
+        lock_unpoisoned(&self.control).take();
         (stopped, Self::close_live(live).await)
     }
 
@@ -809,7 +810,7 @@ impl StorageConnections {
         let relayed = std::sync::Mutex::new(&mut *progress);
         sync.subscribe_progress()
             .forward(sync.unlock(), |load| {
-                relayed.lock().expect("setup progress poisoned").relay(setup_step::loading(load))
+                lock_unpoisoned(&relayed).relay(setup_step::loading(load))
             })
             .await?;
         let state = self.database.store_state().await?;

@@ -884,3 +884,93 @@ fn bundled_sqlite_is_built_without_global_memory_statistics() {
         .unwrap();
     assert!(disabled);
 }
+
+/// The authorizer panics judging a write's statement: its state may be
+/// half-changed, so the handle fails with the bug, and every later call
+/// reports it (E15).
+#[tokio::test]
+async fn a_panicking_authorizer_fails_the_handle_with_its_bug() {
+    let store = TestStore::new();
+    let db = store.builder(notes_tables(), notes_migrations()).open().await.unwrap();
+    db.inspect_writer(|writer| writer.panic_next_authorization());
+    let failed = db
+        .write(|sql| {
+            sql.execute(
+                "INSERT INTO notes VALUES('00000000-0000-4000-8000-000000000001','first','')",
+                [],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap_err();
+    let DbError::Bug(bug) = &failed else { panic!("the write heard no bug: {failed:?}") };
+    assert_eq!(bug.operation, "authorize a statement");
+    assert_eq!(bug.message, "the authorizer's state is past repair");
+    assert!(
+        matches!(db.read(|_| Ok(())).await, Err(CovenError::Database(DbError::Bug(later))) if later == *bug),
+        "a later call reports the bug"
+    );
+    assert!(matches!(db.write(|_| Ok(())).await, Err(DbError::Bug(_))));
+}
+
+/// A write's row-operation hook panics: rusqlite drops a hook's panic, so
+/// the write rolls back with it rather than committing what its capture
+/// missed, and the next write goes on (E15).
+#[tokio::test]
+async fn a_panicking_write_hook_rolls_the_write_back_with_its_bug() {
+    let store = TestStore::new();
+    let db = store.builder(notes_tables(), notes_migrations()).open().await.unwrap();
+    db.inspect_writer(|writer| writer.panic_in_next_hook());
+    let failed = db
+        .write(|sql| {
+            sql.execute(
+                "INSERT INTO notes VALUES('00000000-0000-4000-8000-000000000001','lost','')",
+                [],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&failed, DbError::Bug(bug) if bug.message == "the capture lost its place"),
+        "{failed:?}"
+    );
+    let count = |db: &Database| {
+        db.inspect_writer(|writer| {
+            writer.query_row("SELECT count(*) FROM notes", [], |r| r.get::<_, i64>(0))
+        })
+        .unwrap()
+    };
+    assert_eq!(count(&db), 0, "the write rolled back");
+    db.write(|sql| {
+        sql.execute(
+            "INSERT INTO notes VALUES('00000000-0000-4000-8000-000000000002','kept','')",
+            [],
+        )?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+    assert_eq!(count(&db), 1);
+    db.close().await.unwrap();
+}
+
+/// A panic while the handle's live-query state was held may have left a
+/// query untold of a commit: the handle fails with the bug, and a live
+/// query hears it as its last result (E15).
+#[tokio::test]
+async fn a_panic_holding_the_live_query_state_fails_the_handle() {
+    let store = TestStore::new();
+    let db = store.builder(notes_tables(), notes_migrations()).open().await.unwrap();
+    let mut query = db.subscribe(|sql| {
+        Ok(sql.query_row("SELECT count(*) FROM notes", [], |r| r.get::<_, i64>(0))?)
+    });
+    assert_eq!(query.next().await.unwrap().unwrap(), 0);
+    db.observer.test_poison();
+    assert!(matches!(
+        db.read(|_| Ok(())).await,
+        Err(CovenError::Database(DbError::Bug(bug))) if bug.operation == "the store's live queries"
+    ));
+    assert!(matches!(query.next().await, Some(Err(CovenError::Database(DbError::Bug(_))))));
+    assert!(query.next().await.is_none());
+}

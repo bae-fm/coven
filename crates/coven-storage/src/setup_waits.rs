@@ -7,6 +7,7 @@
 
 use crate::{cooldown::throttled_wait, StorageError, StorageFailure};
 use coven_foundation::clock::Clock;
+use coven_foundation::locks::lock_unpoisoned;
 use std::{future::Future, sync::Mutex, time::Duration};
 
 /// The longest one setup call waits, in total, to send rate-limited
@@ -39,7 +40,7 @@ impl SetupWaits {
             return false;
         }
         let (wait, resends) = {
-            let mut spent = self.0.lock().expect("setup waits poisoned");
+            let mut spent = lock_unpoisoned(&self.0);
             let wait = throttled_wait(error, spent.resends);
             let waited = spent.waited.saturating_add(wait);
             if waited > SETUP_RATE_LIMIT_WAIT {

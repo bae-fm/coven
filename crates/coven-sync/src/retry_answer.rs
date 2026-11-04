@@ -34,6 +34,7 @@
 use crate::{NetworkOwner, PassFailure, RetryWaits, SyncFailure};
 use coven_database::{DbError, RetryState, RetrySync};
 use coven_foundation::clock::ClockRef;
+use coven_foundation::locks::lock_unpoisoned;
 use std::{
     future::Future,
     pin::Pin,
@@ -204,12 +205,7 @@ impl Drop for PassRequests {
         let Some(waits) = self.waits.upgrade() else {
             return;
         };
-        // Often run as a panic unwinds, so it must not panic itself: on a
-        // lock a panic poisoned the requests go, and hear `NotSyncing`.
-        let Ok(mut requests) = waits.requests.lock() else {
-            return;
-        };
-        requests.waiting.append(&mut self.taken);
+        lock_unpoisoned(&waits.requests).waiting.append(&mut self.taken);
     }
 }
 
@@ -258,9 +254,7 @@ impl RetryRequests {
 /// requests once the cooldown ends.
 fn cooldown_until(schedule: &Mutex<super::WaitSchedule>, clock: &ClockRef) -> Option<SystemTime> {
     let elapsed = clock.elapsed();
-    schedule
-        .lock()
-        .expect("retry waits poisoned")
+    lock_unpoisoned(schedule)
         .armed
         .get(&coven_database::RetrySubject::Provider)
         .filter(|armed| !armed.over(elapsed))?
@@ -330,15 +324,14 @@ impl RetryWaits {
                 let started = matches!(state.sync, RetrySync::Started { .. });
                 std::mem::replace(syncing, started) != started
             });
-            then(&waits, &mut waits.requests.lock().expect("retry requests poisoned"), state)
+            then(&waits, &mut lock_unpoisoned(&waits.requests), state)
         };
         let result = match kind {
             Step::Change => database.change_retry_state(change, then).await,
             Step::Start => database.start_retry_state(change, then).await,
         };
         if let Err(error) = &result {
-            let waiting =
-                std::mem::take(&mut self.requests.lock().expect("retry requests poisoned").waiting);
+            let waiting = std::mem::take(&mut lock_unpoisoned(&self.requests).waiting);
             answer(waiting, &failed(error));
         }
         result

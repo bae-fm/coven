@@ -2,6 +2,7 @@
 //! the writer lock. Blocking calls retain these resources after its last owner
 //! drops, while another open waits for their release.
 
+use coven_foundation::locks::{lock_unpoisoned, read_unpoisoned, write_unpoisoned};
 use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex, RwLock};
 
@@ -69,6 +70,9 @@ pub struct Database {
     /// Where a bug in the store's work that nobody waits for goes (E15).
     bugs: coven_foundation::task::BugSinkRef,
     closing: Arc<coven_foundation::files::StoreClosingGuard>,
+    /// The open store, `None` once closed. Closing takes it before anything
+    /// that can panic, so a panic while it is written leaves it `None`, a
+    /// whole state: the lock is taken as it is (E15).
     inner: Arc<RwLock<Option<DatabaseInner>>>,
     file_tasks: Arc<tokio::sync::RwLock<()>>,
 }
@@ -85,7 +89,9 @@ struct DatabaseInner {
     /// The names of copies being written, or written and waiting for the
     /// write that names them, which no write's removal takes (Appendix C.3):
     /// staged app bytes and cache files. Shared with what holds them, so
-    /// letting one go never takes the store's own lock.
+    /// letting one go never takes the store's own lock. Each change under
+    /// its lock, and `copying`'s, is whole before it can panic, so both are
+    /// taken as they are (E15).
     staging: Arc<Mutex<BTreeSet<coven_foundation::files::FileName>>>,
     /// The paths of the copies the calls making files device-only are
     /// writing now, which no other write's removal takes (§17.3).
@@ -121,14 +127,17 @@ struct DatabaseAccess<L> {
 impl<L> DatabaseAccess<L> {
     /// Refuse calls once a connection failed the handle. A failing call keeps
     /// its own error; one that succeeds while the handle fails reports it.
+    /// So does one that fails as a bug fails the handle: its own error, such
+    /// as a statement the broken authorizer refused, says less (E15).
     fn call<R, E: From<DbError>>(&self, run: impl FnOnce() -> Result<R, E>) -> Result<R, E> {
         if let Some(error) = self.observer.error() {
             return Err(error.into());
         }
-        let result = run()?;
-        match self.observer.error() {
-            Some(error) => Err(error.into()),
-            None => Ok(result),
+        let result = run();
+        match (result, self.observer.error()) {
+            (Ok(result), None) => Ok(result),
+            (Ok(_), Some(error)) | (Err(_), Some(error @ DbError::Bug(_))) => Err(error.into()),
+            (Err(error), _) => Err(error),
         }
     }
 
@@ -230,9 +239,7 @@ impl<L> DatabaseAccess<L> {
         // Each checkpointer stopped before, and let go of the writer.
         match Arc::try_unwrap(self.writer) {
             Ok(writer) => {
-                if let Err(error) =
-                    writer.into_inner().expect("database connection lock poisoned").close()
-                {
+                if let Err(error) = coven_foundation::locks::into_unpoisoned(writer).close() {
                     failures.push(error);
                 }
             }
@@ -249,17 +256,12 @@ impl<L> DatabaseAccess<L> {
     }
 }
 
-// SQLite rolls back before this catches an unwind; decoded state changes only
-// after commit. Release each lock before propagating a callback panic so the
-// next caller can still use the committed state.
-pub(crate) fn with_locked<T, R>(value: &Mutex<T>, run: impl FnOnce(&mut T) -> R) -> R {
-    let mut guard = value.lock().expect("database state lock poisoned");
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run(&mut guard)));
-    drop(guard);
-    match result {
-        Ok(result) => result,
-        Err(panic) => std::panic::resume_unwind(panic),
-    }
+/// Run `run` on `connection`, one of the store's SQLite connections. A
+/// panic while one is held leaves it whole: its open transaction rolls back
+/// as the panic unwinds (`write_transaction.rs`), and a failed rollback fails
+/// the handle. So the lock is taken as it is.
+pub(crate) fn with_locked<T, R>(connection: &Mutex<T>, run: impl FnOnce(&mut T) -> R) -> R {
+    run(&mut lock_unpoisoned(connection))
 }
 
 impl DatabaseInner {
@@ -317,7 +319,7 @@ impl DatabaseInner {
     fn remove_chosen(&self, chosen: crate::file_removals::Chosen) -> Vec<DbError> {
         #[cfg(test)]
         {
-            let gate = self.removal_gate.lock().expect("removal gate lock poisoned").clone();
+            let gate = lock_unpoisoned(&self.removal_gate).clone();
             if let Some(gate) = gate {
                 gate();
             }
@@ -342,16 +344,19 @@ fn release_reserved<'a>(
     reserved: &Mutex<BTreeSet<coven_foundation::files::FileName>>,
     names: impl IntoIterator<Item = &'a coven_foundation::files::FileName>,
 ) {
-    let mut active = reserved.lock().expect("file staging lock poisoned");
-    for name in names {
-        assert!(active.remove(name), "reserved name is registered");
-    }
+    // Every name goes before the check can panic, so no panic leaves the
+    // set half-changed and the lock is taken as it is.
+    let unregistered = {
+        let mut active = lock_unpoisoned(reserved);
+        names.into_iter().filter(|name| !active.remove(*name)).count()
+    };
+    assert_eq!(unregistered, 0, "every reserved name is registered");
 }
 
 /// Let `paths` go from the copies a store keeps out of removals, once the
 /// write that brought them has decided (§17.3).
 pub(crate) fn release_copies(copying: &Mutex<BTreeSet<String>>, paths: &[String]) {
-    let mut held = copying.lock().expect("copying lock poisoned");
+    let mut held = lock_unpoisoned(copying);
     for path in paths {
         held.remove(path);
     }
@@ -360,8 +365,8 @@ pub(crate) fn release_copies(copying: &Mutex<BTreeSet<String>>, paths: &[String]
 /// The removals the write that just ran under `writer` released, chosen
 /// with the staging and copying sets held (Appendix C.3).
 fn released(writer: &DatabaseConnection, inner: &DatabaseInner) -> crate::file_removals::Chosen {
-    let active = inner.staging.lock().expect("file staging lock poisoned");
-    let copying = inner.copying.lock().expect("copying lock poisoned");
+    let active = lock_unpoisoned(&inner.staging);
+    let copying = lock_unpoisoned(&inner.copying);
     crate::file_removals::choose(writer, &active, &copying)
 }
 
@@ -372,7 +377,7 @@ impl Database {
     pub(crate) async fn test_gate_file_removal(&self, gate: impl Fn() + Send + Sync + 'static) {
         let gate: Arc<dyn Fn() + Send + Sync> = Arc::new(gate);
         self.call(move |inner| {
-            *inner.removal_gate.lock().expect("removal gate lock poisoned") = Some(gate);
+            *lock_unpoisoned(&inner.removal_gate) = Some(gate);
             Ok::<_, DbError>(())
         })
         .await
@@ -383,7 +388,7 @@ impl Database {
     /// its commit; an error from it fails the flush.
     pub(crate) async fn test_on_file_flush(&self, hook: coven_foundation::files::FlushHook) {
         self.call(move |inner| {
-            *inner.flush_hook.lock().expect("flush hook lock poisoned") = Some(hook);
+            *lock_unpoisoned(&inner.flush_hook) = Some(hook);
             Ok::<_, DbError>(())
         })
         .await
@@ -756,7 +761,7 @@ impl Database {
 
     /// The migrations this open committed, classified individually.
     pub fn applied_migrations(&self) -> Result<Vec<MigrationOutcome>, DbError> {
-        let inner = self.inner.read().expect("database lock poisoned");
+        let inner = read_unpoisoned(&self.inner);
         let inner = inner.as_ref().ok_or(DbError::StoreClosed)?;
         if let Some(error) = inner.access.observer.error() {
             return Err(error);
@@ -777,7 +782,7 @@ impl Database {
                 "close the store",
                 tokio::task::spawn_blocking(crate::commit_scope::bind(move || {
                     let _file_tasks = file_tasks;
-                    let mut slot = database.inner.write().expect("database lock poisoned");
+                    let mut slot = write_unpoisoned(&database.inner);
                     let Some(inner) = slot.take() else {
                         return Err(DbError::StoreClosed);
                     };
@@ -791,13 +796,7 @@ impl Database {
                     // any captured transaction. A failed handle's writer may
                     // still hold a transaction, which closing rolls back.
                     if inner.access.observer.error().is_none() {
-                        if let Err(error) = inner
-                            .access
-                            .writer
-                            .lock()
-                            .expect("database connection lock poisoned")
-                            .optimize()
-                        {
+                        if let Err(error) = lock_unpoisoned(&inner.access.writer).optimize() {
                             failures.push(error);
                         }
                     }
@@ -949,7 +948,7 @@ impl DatabaseReadHandle {
         finish_blocking(
             "close the store",
             tokio::task::spawn_blocking(move || {
-                let mut slot = handle.inner.write().expect("database lock poisoned");
+                let mut slot = write_unpoisoned(&handle.inner);
                 slot.take().ok_or(DbError::StoreClosed)?.close()
             })
             .await,
@@ -967,7 +966,7 @@ where
     E: From<DbError> + Send + 'static,
 {
     tokio::task::spawn_blocking(crate::commit_scope::bind(move || {
-        let slot = inner.read().expect("database lock poisoned");
+        let slot = read_unpoisoned(&inner);
         run(slot.as_ref().ok_or(DbError::StoreClosed)?)
     }))
 }

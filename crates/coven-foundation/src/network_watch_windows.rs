@@ -5,6 +5,7 @@
 //! when it roams, or when it is over its data limit.
 
 use super::{NetworkSink, NetworkWatchError, UsableNetwork};
+use crate::locks::lock_unpoisoned;
 use std::sync::{Arc, Mutex};
 use windows::Networking::Connectivity::{
     NetworkConnectivityLevel, NetworkCostType, NetworkInformation, NetworkStatusChangedEventHandler,
@@ -22,7 +23,7 @@ impl ProfileWatch {
     pub(super) fn start(sink: Arc<Mutex<NetworkSink>>) -> Result<Self, NetworkWatchError> {
         let followed = Arc::clone(&sink);
         let handler = NetworkStatusChangedEventHandler::new(move |_| {
-            let mut sink = followed.lock().expect("network sink poisoned");
+            let mut sink = lock_unpoisoned(&followed);
             match network() {
                 Ok(network) => sink.observe(network),
                 // Coven can't tell until the next change reads again.
@@ -38,7 +39,7 @@ impl ProfileWatch {
         // Dropped on a failed read, which removes the registration.
         let watch = Self { token };
         let read = {
-            let mut sink = sink.lock().expect("network sink poisoned");
+            let mut sink = lock_unpoisoned(&sink);
             network().map(|network| sink.observe(network))
         };
         read.map_err(NetworkWatchError::new)?;

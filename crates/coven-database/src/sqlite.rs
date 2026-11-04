@@ -88,6 +88,10 @@ pub(crate) struct DatabaseConnection {
     /// tests of its classification.
     #[cfg(test)]
     judged: std::cell::RefCell<Vec<(coven_format::write::WriteRecord, crate::judge::Judgement)>>,
+    /// Panic in the next call of a write transaction's hook, as a bug in
+    /// what it captures would.
+    #[cfg(test)]
+    hook_panics: Arc<std::sync::atomic::AtomicBool>,
 }
 
 struct WriterObservation {
@@ -176,6 +180,8 @@ impl DatabaseConnection {
             merge_loads: std::sync::Mutex::new(BTreeMap::new()),
             #[cfg(test)]
             judged: std::cell::RefCell::new(Vec::new()),
+            #[cfg(test)]
+            hook_panics: Arc::default(),
         };
         db.configure(settings, read_only)?;
         db.refresh_hidden_rowids()?;
@@ -702,6 +708,7 @@ impl DatabaseConnection {
     /// Serve an open handle once opening succeeds (§4).
     pub(crate) fn serve(&mut self, handle: CommitObserver) {
         assert!(self.handle.is_none(), "a connection serves one handle");
+        self.authorization.serve(handle.clone());
         self.handle = Some(handle);
     }
 

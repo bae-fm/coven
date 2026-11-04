@@ -6,6 +6,7 @@ use super::pre_update_changes::{PreUpdateChanges, TableShapes};
 use super::write_transaction::WriteTransaction;
 use super::DatabaseConnection;
 use crate::{observation::RowChange, DbError};
+use coven_foundation::locks::lock_unpoisoned;
 use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex};
 
@@ -27,6 +28,8 @@ pub(super) enum StreamChanges {
     Tables(BTreeSet<String>),
 }
 
+/// A panic in the hook fails the transaction it observes before it commits,
+/// as for `EventCapture`, so the capture's lock is taken as it is.
 pub(super) struct StreamCapture {
     recorded: Arc<Mutex<Recorded>>,
 }
@@ -55,7 +58,7 @@ impl StreamCapture {
                 if schema != "main" {
                     return;
                 }
-                match &mut *observed.lock().expect("stream observation lock poisoned") {
+                match &mut *lock_unpoisoned(&observed) {
                     Recorded::Rows { shapes, changes } => match shapes.position(table) {
                         Some(position) => changes.record(shapes, position, case),
                         None => changes.unshaped(table),
@@ -72,7 +75,7 @@ impl StreamCapture {
     /// What the transaction changed, as the capture recorded it.
     pub(super) fn changes(&self) -> StreamChanges {
         let recorded = std::mem::replace(
-            &mut *self.recorded.lock().expect("stream observation lock poisoned"),
+            &mut *lock_unpoisoned(&self.recorded),
             Recorded::Tables(BTreeSet::new()),
         );
         match recorded {

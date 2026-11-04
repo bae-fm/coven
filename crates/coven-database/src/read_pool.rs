@@ -1,6 +1,7 @@
 //! Reader reservations keep committed reads independent of the writer.
 
 use crate::{sqlite::DatabaseConnection, DbError, SqlReadContext};
+use coven_foundation::locks::lock_unpoisoned;
 use std::sync::{Condvar, Mutex};
 
 pub(super) struct ReadPool {
@@ -15,10 +16,7 @@ impl ReadPool {
     #[cfg(any(test, feature = "test-utils"))]
     pub(super) fn test_track_work(&self, counter: &crate::test_utils::WorkCounter) {
         for reader in &self.readers {
-            reader
-                .lock()
-                .expect("reader connection lock poisoned")
-                .test_track_work(counter.clone());
+            lock_unpoisoned(reader).test_track_work(counter.clone());
         }
     }
 
@@ -35,9 +33,7 @@ impl ReadPool {
     pub(super) fn close(self) -> Vec<DbError> {
         let mut failures = Vec::new();
         for reader in self.readers {
-            if let Err(error) =
-                reader.into_inner().expect("reader connection lock poisoned").close()
-            {
+            if let Err(error) = coven_foundation::locks::into_unpoisoned(reader).close() {
                 failures.push(error);
             }
         }
@@ -45,7 +41,7 @@ impl ReadPool {
     }
 
     pub(super) fn acquire_reader(&self) -> ReaderLease<'_> {
-        let mut idle = self.idle_readers.lock().expect("reader pool poisoned");
+        let mut idle = lock_unpoisoned(&self.idle_readers);
         loop {
             if let Some(index) = idle.pop() {
                 return ReaderLease { database: self, index };
@@ -54,7 +50,7 @@ impl ReadPool {
             if let Some(waiting) = self.waiting.lock().unwrap().take() {
                 waiting.send(()).unwrap();
             }
-            idle = self.reader_ready.wait(idle).expect("reader pool poisoned");
+            idle = coven_foundation::locks::wait_unpoisoned(&self.reader_ready, idle);
         }
     }
 }
@@ -101,7 +97,7 @@ impl ReaderLease<'_> {
 
 impl Drop for ReaderLease<'_> {
     fn drop(&mut self) {
-        self.database.idle_readers.lock().expect("reader pool poisoned").push(self.index);
+        lock_unpoisoned(&self.database.idle_readers).push(self.index);
         self.database.reader_ready.notify_one();
     }
 }

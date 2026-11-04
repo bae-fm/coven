@@ -12,6 +12,7 @@ use coven_database::{
     RetrySubject,
 };
 use coven_foundation::id_source::KeyId;
+use coven_foundation::locks::lock_unpoisoned;
 use coven_merge::Audience;
 use coven_storage::ObjectPath;
 use std::collections::{BTreeMap, BTreeSet};
@@ -132,18 +133,14 @@ impl RetryWaits {
         let scope = CommitScope::new();
         if let Some(database) = &self.database {
             let commits = database.attempt_commits(scope);
-            self.evidence
-                .lock()
-                .expect("operation evidence poisoned")
-                .waits
-                .insert(id, Wait::Attempt { scope, commits });
+            lock_unpoisoned(&self.evidence).waits.insert(id, Wait::Attempt { scope, commits });
         }
         scope
     }
 
     /// The scope of the operation's running attempt, or a fresh one.
     pub(crate) fn attempt_scope(&self, id: OperationId) -> CommitScope {
-        match self.evidence.lock().expect("operation evidence poisoned").waits.get(&id) {
+        match lock_unpoisoned(&self.evidence).waits.get(&id) {
             Some(Wait::Attempt { scope, .. }) => *scope,
             _ => CommitScope::new(),
         }
@@ -164,21 +161,24 @@ impl RetryWaits {
             return;
         };
         let needs = needs(reason, reload);
-        let mut evidence = self.evidence.lock().expect("operation evidence poisoned");
-        let commits = match evidence.waits.remove(&id) {
+        // The wait is built with the lock let go, so a panic in building it
+        // leaves the operation with no evidence wait, a whole state: its
+        // retry waits for its timer.
+        let (attempt, connection) = {
+            let mut evidence = lock_unpoisoned(&self.evidence);
+            (evidence.waits.remove(&id), evidence.connection)
+        };
+        let commits = match attempt {
             Some(Wait::Attempt { commits, .. }) => commits,
             _ => database.attempt_commits(CommitScope::new()),
         };
-        let connection = needs.connection.then_some(evidence.connection);
-        evidence.waits.insert(
-            id,
-            Wait::Waiting {
-                rows: database.watch_attempt(commits, &needs.rows),
-                key: needs.key.map(|(audience, key)| (audience, key, held)),
-                connection,
-                woken: false,
-            },
-        );
+        let wait = Wait::Waiting {
+            rows: database.watch_attempt(commits, &needs.rows),
+            key: needs.key.map(|(audience, key)| (audience, key, held)),
+            connection: needs.connection.then_some(connection),
+            woken: false,
+        };
+        lock_unpoisoned(&self.evidence).waits.insert(id, wait);
     }
 
     /// What a wait for `reason` watches: its prerequisites' rows, the key it
@@ -198,15 +198,11 @@ impl RetryWaits {
     }
 
     pub(crate) fn clear_evidence(&self, id: OperationId) {
-        self.evidence.lock().expect("operation evidence poisoned").waits.remove(&id);
+        lock_unpoisoned(&self.evidence).waits.remove(&id);
     }
 
     pub(crate) fn retain_evidence(&self, live: &BTreeSet<OperationId>) {
-        self.evidence
-            .lock()
-            .expect("operation evidence poisoned")
-            .waits
-            .retain(|id, _| live.contains(id));
+        lock_unpoisoned(&self.evidence).waits.retain(|id, _| live.contains(id));
     }
 
     /// Whether what the operation's wait names changed since it began: its
@@ -217,7 +213,7 @@ impl RetryWaits {
         id: OperationId,
         holds: impl Fn(&Audience, KeyId) -> Result<bool, SyncError>,
     ) -> Result<bool, SyncError> {
-        let mut evidence = self.evidence.lock().expect("operation evidence poisoned");
+        let mut evidence = lock_unpoisoned(&self.evidence);
         let connection = evidence.connection;
         let Some(Wait::Waiting { rows, key, connection: began, woken }) =
             evidence.waits.get_mut(&id)
@@ -236,20 +232,18 @@ impl RetryWaits {
 
     /// The storage connection changed: waits for storage are woken.
     pub fn connection_changed(&self) {
-        self.evidence.lock().expect("operation evidence poisoned").connection += 1;
+        lock_unpoisoned(&self.evidence).connection += 1;
         self.rearmed.send_modify(|count| *count = count.wrapping_add(1));
     }
 
     /// The credential/connection version a connection failure waits to change.
     pub fn connection_version(&self) -> u64 {
-        self.evidence.lock().expect("operation evidence poisoned").connection
+        lock_unpoisoned(&self.evidence).connection
     }
 
     /// Wakes for waits not yet woken, when their rows commit.
     pub(crate) fn evidence_wakes(&self) -> Vec<crate::retry_waits::Wake> {
-        self.evidence
-            .lock()
-            .expect("operation evidence poisoned")
+        lock_unpoisoned(&self.evidence)
             .waits
             .values()
             .filter_map(|wait| match wait {

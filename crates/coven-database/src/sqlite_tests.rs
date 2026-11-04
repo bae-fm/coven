@@ -95,6 +95,17 @@ impl DatabaseConnection {
             .unwrap();
     }
 
+    /// Panic in the next judgment of this connection's authorizer.
+    pub(crate) fn panic_next_authorization(&self) {
+        self.authorization.panic_next();
+    }
+
+    /// Panic in the next call of a write transaction's hook on this
+    /// connection.
+    pub(crate) fn panic_in_next_hook(&self) {
+        self.hook_panics.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
     pub(crate) fn refuse_transaction_end(&mut self, refuse: bool) {
         use rusqlite::hooks::{AuthAction, AuthContext, Authorization, TransactionOperation};
         let mut authorize = self.authorization.callback();

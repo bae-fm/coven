@@ -14,21 +14,21 @@ fn poisoned_custody() -> InMemoryCustody<MemberIdentity> {
     custody
 }
 
+/// Each change to the held secret is one assignment, so a panic while it
+/// was held leaves it whole: custody goes on with it (api.md E15).
 #[test]
-#[should_panic(expected = "in-memory custody secret lock is poisoned")]
-fn unlocking_propagates_a_poisoned_secret_lock() {
-    let _keys = poisoned_custody().unlock();
-}
-
-#[test]
-#[should_panic(expected = "in-memory custody secret lock is poisoned")]
-fn persisting_propagates_a_poisoned_secret_lock() {
-    let _persisted = poisoned_custody()
-        .persist(&MemberIdentity::generate(MemberId(uuid::Uuid::from_u128(1))).unwrap());
-}
-
-#[test]
-#[should_panic(expected = "in-memory custody secret lock is poisoned")]
-fn forgetting_propagates_a_poisoned_secret_lock() {
-    let _forgotten = poisoned_custody().forget();
+fn a_poisoned_secret_lock_keeps_the_held_secret() {
+    let custody = poisoned_custody();
+    assert_eq!(
+        custody.unlock().unwrap().map(|identity| identity.member()),
+        Some(MemberId(uuid::Uuid::from_u128(1)))
+    );
+    let replaced = MemberIdentity::generate(MemberId(uuid::Uuid::from_u128(2))).unwrap();
+    custody.persist(&replaced).unwrap();
+    assert_eq!(
+        custody.unlock().unwrap().map(|identity| identity.member()),
+        Some(MemberId(uuid::Uuid::from_u128(2)))
+    );
+    custody.forget().unwrap();
+    assert!(custody.unlock().unwrap().is_none());
 }

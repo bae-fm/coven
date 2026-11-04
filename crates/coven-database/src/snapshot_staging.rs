@@ -24,6 +24,7 @@ use coven_format::{
     value::Value,
     write::WriteHeader,
 };
+use coven_foundation::locks::read_unpoisoned;
 use rusqlite::{params, params_from_iter};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -292,9 +293,7 @@ impl Drop for SnapshotStaging {
         };
         if tokio::runtime::Handle::try_current().is_ok() {
             drop(start_call(self.database.inner.clone(), remove));
-        } else if let Some(inner) =
-            self.database.inner.read().expect("database lock poisoned").as_ref()
-        {
+        } else if let Some(inner) = read_unpoisoned(&self.database.inner).as_ref() {
             let _removed = remove(inner);
         }
     }

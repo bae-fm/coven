@@ -4,6 +4,7 @@
 //! the difference.
 
 use coven_foundation::clock::ClockRef;
+use coven_foundation::locks::lock_unpoisoned;
 use std::{fmt, sync::Mutex, time::Duration};
 
 /// A kind of provider request.
@@ -137,7 +138,7 @@ impl RequestTally {
     }
 
     pub(crate) fn counts(&self) -> RequestCounts {
-        *self.totals.lock().expect("request tally poisoned")
+        *lock_unpoisoned(&self.totals)
     }
 
     /// Send one request of `kind` carrying `bytes`, counting it whether it
@@ -172,7 +173,7 @@ impl RequestTally {
     }
 
     fn add(&self, kind: RequestKind, count: u64, bytes: u64, time: Duration) {
-        let mut totals = self.totals.lock().expect("request tally poisoned");
+        let mut totals = lock_unpoisoned(&self.totals);
         let total = &mut totals.0[kind.index()];
         total.count += count;
         total.bytes += bytes;

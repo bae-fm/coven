@@ -4,6 +4,7 @@ use super::platform::NativeKeychain;
 use super::{KeyError, PersonRestoreCode, MEMBER_KEYS_ENTRY, STORE_KEYS_ENTRY};
 use crate::{wire, MaterialError, SecretBytes, SecretText};
 use coven_foundation::id_source::{DeviceId, StoreId};
+use coven_foundation::locks::lock_unpoisoned;
 use std::{
     collections::BTreeSet,
     marker::PhantomData,
@@ -261,7 +262,7 @@ impl StoreKeychain {
     /// (§13.1). The caller holds the store's deletion lock;
     /// repeating after a failure is safe, including absent listed entries.
     pub fn delete_device_entries(&self) -> Result<(), KeyError> {
-        let _guard = self.keychain.host_secrets.lock().expect("host secrets lock poisoned");
+        let _guard = lock_unpoisoned(&self.keychain.host_secrets);
         if let Some(bytes) = self.read(HOST_SECRET_NAMES_ENTRY)? {
             for name in decode_host_secret_names(bytes.as_bytes())? {
                 self.remove(&host_secret_entry(name))?;
@@ -312,7 +313,7 @@ impl StoreKeychain {
     }
 
     fn change_host_secret(&self, name: &str, value: Option<&str>) -> Result<(), KeyError> {
-        let _guard = self.keychain.host_secrets.lock().expect("host secrets lock poisoned");
+        let _guard = lock_unpoisoned(&self.keychain.host_secrets);
         let bytes = self.read(HOST_SECRET_NAMES_ENTRY)?;
         let mut names = match &bytes {
             Some(bytes) => decode_host_secret_names(bytes.as_bytes())?,

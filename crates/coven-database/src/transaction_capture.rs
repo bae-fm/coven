@@ -3,6 +3,7 @@
 use super::write_transaction::WriteTransaction;
 use super::{DatabaseConnection, WriterObservation};
 use crate::{observation::RowChange, DbError};
+use coven_foundation::locks::lock_unpoisoned;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
 
@@ -17,6 +18,8 @@ pub(super) struct ChangeCapture<'a> {
 
 /// The supplemental tables a transaction's update hook saw change: those
 /// whose rows a session can't key (`change_capture::supplemental_tables`).
+/// A panic in the hook fails the transaction before it commits, so the
+/// lock is taken as it is.
 pub(super) struct SupplementalChanges(Arc<Mutex<BTreeSet<String>>>);
 
 impl SupplementalChanges {
@@ -40,7 +43,7 @@ impl SupplementalChanges {
             if schema == "main" {
                 let table = table.to_ascii_lowercase();
                 if tables.contains_key(&table) {
-                    seen.lock().expect("update hook capture lock poisoned").insert(table);
+                    lock_unpoisoned(&seen).insert(table);
                 }
             }
         })?;
@@ -102,9 +105,7 @@ impl<'a> ChangeCapture<'a> {
             .map(crate::observation::CommitObserver::scoped_columns)
             .unwrap_or_default();
         let mut changes = crate::change_capture::changes(self.database, &copied, &scoped)?;
-        for table in std::mem::take(
-            &mut *self.hook_changes.lock().expect("update hook capture lock poisoned"),
-        ) {
+        for table in std::mem::take(&mut *lock_unpoisoned(&self.hook_changes)) {
             if let Some(parent) = &self.supplemental[&table] {
                 changes.push(RowChange {
                     table: parent.clone(),

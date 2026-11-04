@@ -9,6 +9,7 @@ use crate::write_batch::BatchFile;
 use crate::{DbError, FileSource, Place, Provenance, WriteBatch};
 use coven_foundation::files::StoreDirAccess;
 use coven_foundation::files::{FileArea, FileName, FlushBatch, Flushed};
+use coven_foundation::locks::{lock_unpoisoned, read_unpoisoned};
 use std::collections::VecDeque;
 use std::sync::{Arc, RwLock};
 use tokio::sync::OwnedRwLockReadGuard;
@@ -39,7 +40,7 @@ impl FileStaging {
         build: impl FnOnce(&mut WriteBatch<'_>) -> Result<T, E>,
     ) -> Result<(Self, T), E> {
         let (sources, value) = {
-            let slot = database.read().expect("database lock poisoned");
+            let slot = read_unpoisoned(&database);
             let inner = slot.as_ref().ok_or(DbError::StoreClosed)?;
             if let Some(error) = inner.access.observer.error() {
                 return Err(error.into());
@@ -91,10 +92,7 @@ impl FileStaging {
                 });
                 match prepared {
                     Ok((sources, value)) => {
-                        inner
-                            .staging
-                            .lock()
-                            .expect("file staging lock poisoned")
+                        lock_unpoisoned(&inner.staging)
                             .extend(sources.iter().map(|s| s.name.clone()));
                         Ok::<_, E>(Ok((sources, value)))
                     }
@@ -134,9 +132,9 @@ impl FileStaging {
         let mut batch = FlushBatch::new();
         #[cfg(test)]
         let mut batch = {
-            let slot = self.database.read().expect("database lock poisoned");
+            let slot = read_unpoisoned(&self.database);
             let inner = slot.as_ref().expect("staging holds close guard");
-            let hook = inner.flush_hook.lock().expect("flush hook lock poisoned").clone();
+            let hook = lock_unpoisoned(&inner.flush_hook).clone();
             FlushBatch::new().with_hook(hook)
         };
         while let Some(source) = self.sources.pop_front() {
@@ -148,7 +146,7 @@ impl FileStaging {
                 "create a staged copy",
                 crate::commit_scope::bind(move || {
                     let writer = (|| -> Result<_, DbError> {
-                        let slot = self.database.read().expect("database lock poisoned");
+                        let slot = read_unpoisoned(&self.database);
                         let inner = slot.as_ref().expect("staging holds close guard");
                         Ok(inner
                             .access
@@ -200,7 +198,7 @@ impl FileStaging {
     /// record for the next write or open (Appendix C.3).
     pub(super) fn discard<E: crate::WriteFailure>(mut self, error: DbError) -> E {
         let database = self.database.clone();
-        let slot = database.read().expect("database lock poisoned");
+        let slot = read_unpoisoned(&database);
         let inner = slot.as_ref().expect("staging holds close guard");
         inner.release_file_reservations(&self.names);
         self.names.clear();
@@ -223,7 +221,7 @@ impl FileStaging {
     /// decided or the files are dropped; the lease close waits for ends here.
     pub(super) fn into_staged<T>(mut self, value: T) -> StagedFiles<T> {
         let reserved = {
-            let slot = self.database.read().expect("database lock poisoned");
+            let slot = read_unpoisoned(&self.database);
             slot.as_ref().expect("staging holds close guard").staging.clone()
         };
         let _lease = self.lease.take();
@@ -241,7 +239,7 @@ impl Drop for FileStaging {
         let Some(_lease) = self.lease.take() else {
             return;
         };
-        let slot = self.database.read().expect("database lock poisoned");
+        let slot = read_unpoisoned(&self.database);
         slot.as_ref()
             .expect("reservation holds close guard")
             .release_file_reservations(&self.names);

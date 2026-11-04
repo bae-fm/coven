@@ -11,6 +11,7 @@ use crate::{
     DbError,
 };
 use coven_format::value::Value;
+use coven_foundation::locks::lock_unpoisoned;
 use coven_foundation::{
     files::FileName,
     id_source::{DeviceId, FileId, IdSource},
@@ -28,7 +29,7 @@ fn held_here<'n, T: Ord + 'n>(
     held: &std::sync::Mutex<BTreeSet<T>>,
     names: impl IntoIterator<Item = &'n T>,
 ) -> Result<(), DbError> {
-    let held = held.lock().expect("a store's held names lock poisoned");
+    let held = lock_unpoisoned(held);
     if names.into_iter().any(|name| !held.contains(name)) {
         return Err(DbError::PreparedElsewhere);
     }

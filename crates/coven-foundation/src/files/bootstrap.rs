@@ -6,6 +6,7 @@ use super::{
 };
 use crate::files::StoreDirAccess;
 use crate::id_source::{IdSource, StoreId};
+use crate::locks::lock_unpoisoned;
 use std::{
     fs, io,
     path::{Path, PathBuf},
@@ -81,7 +82,7 @@ impl BootstrapLease {
     }
 
     pub(super) fn release(&self) {
-        self.held.lock().expect("bootstrap lease lock poisoned").take();
+        lock_unpoisoned(&self.held).take();
     }
 }
 
@@ -107,7 +108,7 @@ impl BootstrapStore {
     /// Remove unpublished data and locks after all database work has closed.
     /// An absent directory succeeds; a published store cannot be cancelled.
     pub fn cancel(&self) -> Result<(), BootstrapDirectoryError> {
-        let mut held = self.lease.held.lock().expect("bootstrap lease lock poisoned");
+        let mut held = lock_unpoisoned(&self.lease.held);
         let guard = self.lock_for_deletion(&mut held)?;
         if exists("inspect bootstrap path", &self.path)? && !is_pending(&self.path)? {
             return Err(DirectoryCreationError::AlreadyExists(self.id).into());

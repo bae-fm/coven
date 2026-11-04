@@ -4,6 +4,7 @@ use super::query::Selection;
 use super::record::{native_error, Record};
 use crate::{StorageError, StorageFailure};
 use block2::RcBlock;
+use coven_foundation::locks::lock_unpoisoned;
 use objc2::{rc::Retained, AnyThread};
 use objc2_cloud_kit::{
     CKContainer, CKDatabase, CKFetchRecordsOperation, CKModifyRecordsOperation, CKQuery,
@@ -83,7 +84,7 @@ pub(super) fn completion<T: Send + 'static>(
     let (sender, receiver) = oneshot::channel();
     let sender = Mutex::new(Some(sender));
     (
-        move |result| match sender.lock().expect("CloudKit completion lock poisoned").take() {
+        move |result| match lock_unpoisoned(&sender).take() {
             Some(sender) => {
                 if sender.send(result).is_err() {
                     tracing::debug!("CloudKit caller dropped its pending operation");
@@ -276,7 +277,7 @@ fn modify_with(
                         None => Vec::new(),
                     })
                 };
-                if let Some(files) = assets.lock().expect("CloudKit assets lock poisoned").take() {
+                if let Some(files) = lock_unpoisoned(&assets).take() {
                     for file in files {
                         if let Err(error) = file.close() {
                             response = crate::transfer::with_cleanup(
@@ -350,7 +351,7 @@ pub(super) fn query<T: Send + 'static>(
                             .with_source("CloudKit query omitted matched record")),
                     }
                 };
-                matched.lock().expect("CloudKit results lock poisoned").push(response);
+                lock_unpoisoned(&matched).push(response);
             },
         );
         operation.setRecordMatchedBlock(Some(&block));
@@ -358,8 +359,7 @@ pub(super) fn query<T: Send + 'static>(
             let response = if let Some(error) = error(failure) {
                 Err(error)
             } else {
-                let entries =
-                    std::mem::take(&mut *records.lock().expect("CloudKit results lock poisoned"));
+                let entries = std::mem::take(&mut *lock_unpoisoned(&records));
                 entries
                     .into_iter()
                     .collect::<Result<Vec<_>, _>>()

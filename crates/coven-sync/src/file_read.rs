@@ -17,6 +17,7 @@ use coven_format::{
 };
 use coven_foundation::files::StoreDirAccess;
 use coven_foundation::files::{FileName, StoreReadLock};
+use coven_foundation::locks::read_unpoisoned;
 use coven_storage::{ByteProgress, ByteRange, ObjectPath};
 use std::sync::Arc;
 
@@ -741,12 +742,7 @@ async fn fetch(
     end: u64,
     received: &ByteProgress,
 ) -> Result<Vec<u8>, FileReadError> {
-    let storage = owner
-        .storage
-        .read()
-        .expect("storage lock poisoned")
-        .clone()
-        .ok_or(FileReadError::NoStorage)?;
+    let storage = read_unpoisoned(&owner.storage).clone().ok_or(FileReadError::NoStorage)?;
     // A stored file's record names it only once it is stored (§17.2):
     // confirmed absence means storage lost it, never a provider failure or
     // an upload to wait for.

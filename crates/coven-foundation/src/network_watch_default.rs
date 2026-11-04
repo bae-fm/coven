@@ -6,6 +6,7 @@
 //! settles what the watch's sink hears.
 
 use super::{NetworkSink, UsableNetwork};
+use crate::locks::lock_unpoisoned;
 use std::sync::{Arc, Mutex};
 
 /// What Android last said of the default network.
@@ -67,12 +68,12 @@ impl DefaultNetwork {
     /// Doze ended, which Android before 10 reports no other way: a usable
     /// network may work again.
     pub(crate) fn awake(&mut self) {
-        self.sink.lock().expect("network sink poisoned").network_returned();
+        lock_unpoisoned(&self.sink).network_returned();
     }
 
     fn settle(&self) {
         let usable = self.network.filter(|_| self.validated && !self.blocked);
-        self.sink.lock().expect("network sink poisoned").observe(
+        lock_unpoisoned(&self.sink).observe(
             usable.map(|network| UsableNetwork { id: network.to_string(), metered: self.metered }),
         );
     }

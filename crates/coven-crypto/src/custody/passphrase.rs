@@ -2,6 +2,7 @@
 
 use super::KeyError;
 use crate::{cipher, randomness, wire, CryptoError, SecretBytes};
+use coven_foundation::locks::lock_unpoisoned;
 use coven_foundation::{files::AtomicFile, id_source::StoreId};
 use std::{marker::PhantomData, sync::Mutex};
 use zeroize::Zeroizing;
@@ -59,7 +60,7 @@ impl<T> PassphraseCustody<T> {
     }
 
     pub(crate) fn read(&self, kind: &str) -> Result<Option<SecretBytes>, KeyError> {
-        let mut protection = self.protection.lock().expect("passphrase custody lock poisoned");
+        let mut protection = lock_unpoisoned(&self.protection);
         let Protection::Locked(passphrase) = protection.as_ref().ok_or(KeyError::StoreClosed)?
         else {
             panic!("passphrase custody must be unlocked once by its session owner");
@@ -86,7 +87,7 @@ impl<T> PassphraseCustody<T> {
     }
 
     pub(crate) fn write(&self, kind: &str, plaintext: &[u8]) -> Result<(), KeyError> {
-        let protection = self.protection.lock().expect("passphrase custody lock poisoned");
+        let protection = lock_unpoisoned(&self.protection);
         let Protection::Unlocked(sealing) = protection.as_ref().ok_or(KeyError::StoreClosed)?
         else {
             panic!("passphrase custody must be unlocked before persisting");
@@ -101,13 +102,13 @@ impl<T> PassphraseCustody<T> {
     }
 
     pub(crate) fn remove(&self) -> Result<(), KeyError> {
-        let protection = self.protection.lock().expect("passphrase custody lock poisoned");
+        let protection = lock_unpoisoned(&self.protection);
         protection.as_ref().ok_or(KeyError::StoreClosed)?;
         self.file.remove().map_err(KeyError::from)
     }
 
     pub(crate) fn release(&self) {
-        self.protection.lock().expect("passphrase custody lock poisoned").take();
+        lock_unpoisoned(&self.protection).take();
     }
 }
 

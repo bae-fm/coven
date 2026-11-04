@@ -1,5 +1,6 @@
 //! Custody for one session only (E1).
 
+use coven_foundation::locks::lock_unpoisoned;
 use std::sync::Mutex;
 
 /// In-memory custody for `StoreKeyring` or `MemberIdentity`, erased with the session.
@@ -20,16 +21,15 @@ impl<T: Clone> InMemoryCustody<T> {
 
     pub(crate) fn read(&self) -> Option<T> {
         // The custody traits return owned keys while custody keeps its copy.
-        self.secret.lock().expect("in-memory custody secret lock is poisoned").clone()
+        lock_unpoisoned(&self.secret).clone()
     }
 
     pub(crate) fn write(&self, secret: &T) {
-        *self.secret.lock().expect("in-memory custody secret lock is poisoned") =
-            Some(secret.clone());
+        *lock_unpoisoned(&self.secret) = Some(secret.clone());
     }
 
     pub(crate) fn remove(&self) {
-        *self.secret.lock().expect("in-memory custody secret lock is poisoned") = None;
+        *lock_unpoisoned(&self.secret) = None;
     }
 }
 

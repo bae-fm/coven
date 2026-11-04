@@ -2,6 +2,7 @@
 
 use super::{KeyError, MemberKeyCustody, StoreKeyCustody};
 use crate::{MemberIdentity, StoreKeyring};
+use coven_foundation::locks::lock_unpoisoned;
 use std::sync::{Arc, Mutex};
 
 /// Held keys and the capability that saves them, released together on close.
@@ -35,14 +36,14 @@ impl<T: Clone> KeySession<T> {
 
     /// Read an independent copy of the held material without custody IO.
     pub fn read(&self) -> Result<Option<T>, KeyError> {
-        let held = self.held.lock().expect("custody session lock poisoned");
+        let held = lock_unpoisoned(&self.held);
         Ok(held.as_ref().ok_or(KeyError::StoreClosed)?.keys.clone())
     }
 
     /// Save changed keys before installing them in the shared session.
     /// A failed save leaves the held material unchanged and reaches the caller.
     pub fn persist(&self, keys: &T) -> Result<(), KeyError> {
-        let mut held = self.held.lock().expect("custody session lock poisoned");
+        let mut held = lock_unpoisoned(&self.held);
         let held = held.as_mut().ok_or(KeyError::StoreClosed)?;
         held.custody.persist(keys)?;
         held.keys = Some(keys.clone());
@@ -53,7 +54,7 @@ impl<T: Clone> KeySession<T> {
     /// retains the held keys. The persistence capability lasts until close, so
     /// acquiring keys again does not require another passphrase derivation.
     pub fn forget(&self) -> Result<(), KeyError> {
-        let mut held = self.held.lock().expect("custody session lock poisoned");
+        let mut held = lock_unpoisoned(&self.held);
         let held = held.as_mut().ok_or(KeyError::StoreClosed)?;
         held.custody.forget()?;
         held.keys = None;
@@ -63,7 +64,7 @@ impl<T: Clone> KeySession<T> {
     /// Erase the held material and close custody after its users finish.
     /// Also happens when the last session owner is dropped. Performs no IO.
     pub fn close(&self) {
-        self.held.lock().expect("custody session lock poisoned").take();
+        lock_unpoisoned(&self.held).take();
     }
 }
 

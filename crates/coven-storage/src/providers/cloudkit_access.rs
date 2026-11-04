@@ -8,6 +8,7 @@ use super::{
 use crate::*;
 use block2::RcBlock;
 use coven_crypto::SecretText;
+use coven_foundation::locks::lock_unpoisoned;
 use objc2::{rc::Retained, AnyThread};
 use objc2_cloud_kit::{
     CKAcceptSharesOperation, CKContainer, CKFetchShareMetadataOperation,
@@ -166,20 +167,16 @@ fn participant(container: &CKContainer, email: &str) -> CloudKitRequest<Particip
                         .map(|value| Participant(value.copy()))
                         .ok_or_else(|| StorageFailure::Protocol.into()),
                 };
-                *fetched.lock().expect("CloudKit participant lock poisoned") = Some(response);
+                *lock_unpoisoned(&fetched) = Some(response);
             },
         );
         operation.setPerShareParticipantCompletionBlock(Some(&block));
         let block = RcBlock::new(move |failure: *mut NSError| {
             let response = match error(failure) {
                 Some(error) => Err(error),
-                None => value
-                    .lock()
-                    .expect("CloudKit participant lock poisoned")
-                    .take()
-                    .unwrap_or_else(|| {
-                        Err(StorageFailure::Protocol.with_source("CloudKit omitted participant"))
-                    }),
+                None => lock_unpoisoned(&value).take().unwrap_or_else(|| {
+                    Err(StorageFailure::Protocol.with_source("CloudKit omitted participant"))
+                }),
             };
             complete(response);
         });
@@ -214,20 +211,16 @@ fn metadata(
                         .map(|value| Metadata(value.copy()))
                         .ok_or_else(|| StorageFailure::Protocol.into()),
                 };
-                *fetched.lock().expect("CloudKit metadata lock poisoned") = Some(response);
+                *lock_unpoisoned(&fetched) = Some(response);
             },
         );
         operation.setPerShareMetadataBlock(Some(&block));
         let block = RcBlock::new(move |failure: *mut NSError| {
             let response = match error(failure) {
                 Some(error) => Err(error),
-                None => value
-                    .lock()
-                    .expect("CloudKit metadata lock poisoned")
-                    .take()
-                    .unwrap_or_else(|| {
-                        Err(StorageFailure::Protocol.with_source("CloudKit omitted share metadata"))
-                    }),
+                None => lock_unpoisoned(&value).take().unwrap_or_else(|| {
+                    Err(StorageFailure::Protocol.with_source("CloudKit omitted share metadata"))
+                }),
             };
             complete(response);
         });

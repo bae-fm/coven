@@ -14,6 +14,7 @@ use aws_sdk_s3::{
     Client,
 };
 use coven_crypto::SecretText;
+use coven_foundation::locks::{read_unpoisoned, write_unpoisoned};
 use coven_foundation::{clock::ClockRef, id_source::IdSourceRef};
 use std::fmt;
 
@@ -112,11 +113,10 @@ impl aws_credential_types::provider::ProvideCredentials for SigningCredentials {
     where
         Self: 'a,
     {
-        aws_credential_types::provider::future::ProvideCredentials::ready(Ok(self
-            .0
-            .read()
-            .expect("S3 credentials lock poisoned")
-            .clone()))
+        aws_credential_types::provider::future::ProvideCredentials::ready(Ok(read_unpoisoned(
+            &self.0,
+        )
+        .clone()))
     }
 }
 
@@ -352,8 +352,7 @@ impl ProviderOps for S3Storage {
     }
     async fn set_s3_credentials(&self, credentials: S3Credentials) -> Result<(), StorageError> {
         credentials.validate()?;
-        *self.credentials.0.write().expect("S3 credentials lock poisoned") =
-            aws_credentials(credentials);
+        *write_unpoisoned(&self.credentials.0) = aws_credentials(credentials);
         Ok(())
     }
     fn config(&self) -> StorageConfig {

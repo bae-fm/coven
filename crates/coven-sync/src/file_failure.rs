@@ -10,6 +10,7 @@ use crate::{
     PendingRecord, PendingSubject, Prerequisite,
 };
 use coven_database::{FileLocation, FilePlace, FileRef};
+use coven_foundation::locks::read_unpoisoned;
 use coven_storage::StorageFailure;
 use std::error::Error;
 
@@ -157,7 +158,7 @@ impl FilesInner {
                 if error.failure() == StorageFailure::CatchUpRequired {
                     return PendingReason::Waits(Prerequisite::SequenceCatchUp);
                 }
-                match self.storage.read().expect("storage lock poisoned").as_ref() {
+                match read_unpoisoned(&self.storage).as_ref() {
                     Some(storage) => PendingReason::Storage {
                         provider: storage.config().provider(),
                         failure: error.failure(),

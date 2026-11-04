@@ -1,7 +1,10 @@
 //! The authorizer's app boundary and prepare-time trigger target rules.
 
 use std::collections::BTreeSet;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
+
+use coven_foundation::locks::lock_unpoisoned;
+use coven_foundation::task::Bug;
 
 use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
 
@@ -22,8 +25,14 @@ pub(crate) struct AppContext {
     capturing: bool,
 }
 
+/// Every change to the state but the authorizer's own is whole before it
+/// can panic, and the authorizer catches its own panic (`callback`), so the
+/// lock is taken as it is.
 pub(crate) struct SqlAuthorization {
     state: Arc<Mutex<AuthorizationState>>,
+    /// The handle the connection serves, once it serves one, which a panic
+    /// in the authorizer fails.
+    handle: Arc<OnceLock<crate::observation::CommitObserver>>,
 }
 
 impl ChangedTables {
@@ -102,6 +111,12 @@ struct AuthorizationState {
     reads: Option<ReadCapture>,
     altering: bool,
     denied: Option<DbError>,
+    /// The authorizer panicked with this: the state may be half-changed, so
+    /// it refuses every later statement with it (E15).
+    broken: Option<Bug>,
+    /// Panic in the next judgment, as a bug in the authorizer would.
+    #[cfg(test)]
+    panic_next: bool,
     synced: BTreeSet<String>,
     shared: BTreeSet<String>,
     hidden_rowids: BTreeSet<(String, String)>,
@@ -147,6 +162,9 @@ impl SqlAuthorization {
                 reads: None,
                 altering: false,
                 denied: None,
+                broken: None,
+                #[cfg(test)]
+                panic_next: false,
                 synced: tables.iter().map(|t| t.name.to_ascii_lowercase()).collect(),
                 shared: tables
                     .iter()
@@ -158,83 +176,55 @@ impl SqlAuthorization {
                 dropping: BTreeSet::new(),
                 writer_state,
             })),
+            handle: Arc::new(OnceLock::new()),
+        }
+    }
+
+    /// Panic in the next judgment, as a bug in the authorizer would.
+    #[cfg(test)]
+    pub(crate) fn panic_next(&self) {
+        lock_unpoisoned(&self.state).panic_next = true;
+    }
+
+    /// The connection now serves `handle`, which a panic in its authorizer
+    /// fails.
+    pub(crate) fn serve(&self, handle: crate::observation::CommitObserver) {
+        if self.handle.set(handle).is_err() {
+            unreachable!("a connection serves one handle");
         }
     }
 
     pub(crate) fn callback(&self) -> impl FnMut(AuthContext<'_>) -> Authorization + Send + 'static {
         let state = Arc::clone(&self.state);
+        let handle = Arc::clone(&self.handle);
         move |context| {
-            let mut state = state.lock().expect("SQL authorization lock poisoned");
-            if context.database_name == Some("main") {
-                let changed = match context.action {
-                    AuthAction::Insert { table_name }
-                    | AuthAction::Update { table_name, .. }
-                    | AuthAction::Delete { table_name }
-                    | AuthAction::CreateIndex { table_name, .. }
-                    | AuthAction::DropIndex { table_name, .. } => Some(table_name),
-                    // The app's trigger on a table it may follow is its own
-                    // local object: making or dropping one changes no row of
-                    // coven's table and nothing that syncs, so a migration
-                    // doing it captures no synced state (§18.1).
-                    AuthAction::CreateTrigger { table_name, .. }
-                    | AuthAction::DropTrigger { table_name, .. } => {
-                        (!crate::internal_schema::followed(table_name)).then_some(table_name)
+            let mut state = lock_unpoisoned(&state);
+            if let Some(bug) = &state.broken {
+                state.denied = Some(DbError::Bug(bug.clone()));
+                return Authorization::Deny;
+            }
+            // SQLite's authorizer can't fail, and rusqlite turns its panic
+            // into an error that names no bug, so the authorizer keeps it:
+            // what it was changing may be half-changed, so the handle fails
+            // and this connection refuses every later statement (E15).
+            match coven_foundation::task::caught_sync("authorize a statement", || {
+                state.judge(context)
+            }) {
+                Ok(authorization) => authorization,
+                Err(bug) => {
+                    if let Some(handle) = handle.get() {
+                        handle.fail(crate::observation::HandleFailure::Bug(bug.clone()));
                     }
-                    _ => None,
-                };
-                if let (Some(table_name), Some(tables)) = (changed, &mut state.mutations) {
-                    tables.insert(table_name.to_ascii_lowercase());
-                }
-                if let (
-                    AuthAction::Insert { table_name }
-                    | AuthAction::Update { table_name, .. }
-                    | AuthAction::Delete { table_name },
-                    Some(tables),
-                ) = (context.action, &mut state.bulk)
-                {
-                    tables.insert(table_name.to_ascii_lowercase());
-                }
-            }
-            if let AuthAction::Read { table_name, column_name } = context.action {
-                if let Some(reads) = &mut state.reads {
-                    reads.read(table_name, column_name, context.accessor);
-                }
-                if let Some(observed) = &mut state.observed {
-                    if !column_name.is_empty() && !observed.columns.iter().any(|c| c == column_name)
-                    {
-                        observed.columns.push(column_name.into());
-                    }
-                }
-            }
-            if let AuthAction::Function { function_name } = context.action {
-                if let Some(observed) = &mut state.observed {
-                    observed.functions.insert(function_name.to_ascii_lowercase());
-                }
-            }
-            let changed = changed_table(&context);
-            if state.internal {
-                if let Some(error) = state.app_trigger_refusal(context) {
-                    state.denied = Some(error);
-                    return Authorization::Deny;
-                }
-                state.changed_tables.include(changed);
-                return Authorization::Allow;
-            }
-            match state.refusal(context) {
-                Some(error) => {
-                    state.denied = Some(error);
+                    state.denied = Some(DbError::Bug(bug.clone()));
+                    state.broken = Some(bug);
                     Authorization::Deny
-                }
-                None => {
-                    state.changed_tables.include(changed);
-                    Authorization::Allow
                 }
             }
         }
     }
 
     pub(crate) fn internal(&self) -> InternalSql<'_> {
-        let mut state = self.state.lock().expect("SQL authorization lock poisoned");
+        let mut state = lock_unpoisoned(&self.state);
         let previous = state.internal;
         state.internal = true;
         InternalSql { authorization: self, previous }
@@ -244,11 +234,11 @@ impl SqlAuthorization {
         &self,
     ) -> impl Fn(&rusqlite::functions::Context<'_>) -> rusqlite::Result<bool> + Send + 'static {
         let state = Arc::clone(&self.state);
-        move |_| Ok(state.lock().expect("SQL authorization lock poisoned").applying)
+        move |_| Ok(lock_unpoisoned(&state).applying)
     }
 
     pub(crate) fn applying(&self) -> ApplyingSql<'_> {
-        let mut state = self.state.lock().expect("SQL authorization lock poisoned");
+        let mut state = lock_unpoisoned(&self.state);
         assert!(!state.applying, "applying SQL scope cannot nest");
         state.applying = true;
         ApplyingSql(self)
@@ -259,7 +249,7 @@ impl SqlAuthorization {
     ) -> impl Fn(&rusqlite::functions::Context<'_>) -> rusqlite::Result<bool> + Send + 'static {
         let state = Arc::clone(&self.state);
         move |_| {
-            let mut state = state.lock().expect("SQL authorization lock poisoned");
+            let mut state = lock_unpoisoned(&state);
             if state.internal {
                 return Ok(true);
             }
@@ -270,14 +260,14 @@ impl SqlAuthorization {
     }
 
     pub(crate) fn observe_reads(&self) -> ObservedReads<'_> {
-        let mut state = self.state.lock().expect("SQL authorization lock poisoned");
+        let mut state = lock_unpoisoned(&self.state);
         assert!(state.observed.is_none(), "read observation cannot nest");
         state.observed = Some(StatementReads::default());
         ObservedReads(self)
     }
 
     pub(crate) fn write(&self) -> WriteSql<'_> {
-        let mut state = self.state.lock().expect("SQL authorization lock poisoned");
+        let mut state = lock_unpoisoned(&self.state);
         assert!(!state.writing, "write SQL scope cannot nest");
         state.writing = true;
         WriteSql(self)
@@ -286,7 +276,7 @@ impl SqlAuthorization {
     /// A bulk write's SQL: a write's, refused any change to a synced table,
     /// recording instead each table of `main` its statements change.
     pub(crate) fn bulk(&self) -> BulkSql<'_> {
-        let mut state = self.state.lock().expect("SQL authorization lock poisoned");
+        let mut state = lock_unpoisoned(&self.state);
         assert!(!state.writing, "write SQL scope cannot nest");
         state.writing = true;
         state.bulk = Some(BTreeSet::new());
@@ -294,14 +284,14 @@ impl SqlAuthorization {
     }
 
     pub(crate) fn step(&self) -> StepSql<'_> {
-        let mut state = self.state.lock().expect("SQL authorization lock poisoned");
+        let mut state = lock_unpoisoned(&self.state);
         assert!(!state.stepping, "SQL step scope cannot nest");
         state.stepping = true;
         StepSql(self)
     }
 
     pub(crate) fn begin_app_call(&self) {
-        let mut state = self.state.lock().expect("SQL authorization lock poisoned");
+        let mut state = lock_unpoisoned(&self.state);
         state.denied = None;
         state.altering = false;
         state.through_views.clear();
@@ -311,9 +301,7 @@ impl SqlAuthorization {
     /// The tables whose hidden rowids may have changed since this was last
     /// asked, which the caller now reads again.
     pub(crate) fn take_changed_tables(&self) -> ChangedTables {
-        std::mem::take(
-            &mut self.state.lock().expect("SQL authorization lock poisoned").changed_tables,
-        )
+        std::mem::take(&mut lock_unpoisoned(&self.state).changed_tables)
     }
 
     /// Of the tables `read`, or every table when `None`, those whose hidden
@@ -323,7 +311,7 @@ impl SqlAuthorization {
         read: Option<&BTreeSet<(String, String)>>,
         unambiguous: BTreeSet<(String, String)>,
     ) {
-        let mut state = self.state.lock().expect("SQL authorization lock poisoned");
+        let mut state = lock_unpoisoned(&self.state);
         match read {
             Some(read) => {
                 state.hidden_rowids.retain(|table| !read.contains(table));
@@ -339,7 +327,7 @@ impl SqlAuthorization {
     /// A one-shot read's SQL: it may only read, and records nothing of
     /// what it reads, since nothing runs it again.
     pub(crate) fn reading(&self) -> ReadingSql<'_> {
-        let mut state = self.state.lock().expect("SQL authorization lock poisoned");
+        let mut state = lock_unpoisoned(&self.state);
         assert!(!state.reading, "read scopes cannot nest");
         state.reading = true;
         ReadingSql(self)
@@ -349,13 +337,12 @@ impl SqlAuthorization {
     /// reads, so a commit that changes it runs the query again (§4).
     pub(crate) fn live_reading(&self) -> ReadingSql<'_> {
         let reading = self.reading();
-        self.state.lock().expect("SQL authorization lock poisoned").reads =
-            Some(ReadCapture::new());
+        lock_unpoisoned(&self.state).reads = Some(ReadCapture::new());
         reading
     }
 
     pub(crate) fn reads(&self) -> ReadSet {
-        let mut state = self.state.lock().expect("SQL authorization lock poisoned");
+        let mut state = lock_unpoisoned(&self.state);
         state.reads.as_mut().expect("active read scope").reads()
     }
 
@@ -363,7 +350,7 @@ impl SqlAuthorization {
     /// It learns that only while a statement is prepared, so such a
     /// statement must not come from the cache.
     pub(crate) fn recording(&self) -> bool {
-        let state = self.state.lock().expect("SQL authorization lock poisoned");
+        let state = lock_unpoisoned(&self.state);
         state.reads.is_some() || state.observed.is_some() || state.mutations.is_some()
     }
 
@@ -375,7 +362,7 @@ impl SqlAuthorization {
     /// a table in one step there; kept, it would empty one so under a write's
     /// hook too, unseen.
     pub(crate) fn app_context(&self) -> Option<AppContext> {
-        let state = self.state.lock().expect("SQL authorization lock poisoned");
+        let state = lock_unpoisoned(&self.state);
         if state.internal
             || state.observed.is_some()
             || state.mutations.is_some()
@@ -395,9 +382,7 @@ impl SqlAuthorization {
     /// The reads the statement being prepared recorded, so a later use of
     /// it, prepared already, records them too.
     pub(crate) fn statement_reads(&self) -> ReadFrame {
-        self.state
-            .lock()
-            .expect("SQL authorization lock poisoned")
+        lock_unpoisoned(&self.state)
             .reads
             .as_mut()
             .map(|reads| reads.statement())
@@ -407,15 +392,13 @@ impl SqlAuthorization {
     /// Record the reads an already prepared statement made when it was
     /// prepared.
     pub(crate) fn replay_reads(&self, recorded: &ReadFrame) {
-        if let Some(reads) = &mut self.state.lock().expect("SQL authorization lock poisoned").reads
-        {
+        if let Some(reads) = &mut lock_unpoisoned(&self.state).reads {
             reads.replay(recorded);
         }
     }
 
     pub(crate) fn begin_read_statement(&self) {
-        if let Some(reads) = &mut self.state.lock().expect("SQL authorization lock poisoned").reads
-        {
+        if let Some(reads) = &mut lock_unpoisoned(&self.state).reads {
             reads.begin();
         }
     }
@@ -423,18 +406,18 @@ impl SqlAuthorization {
     /// Whether the statements prepared now record what they read for a
     /// live query.
     pub(crate) fn capturing_reads(&self) -> bool {
-        self.state.lock().expect("SQL authorization lock poisoned").reads.is_some()
+        lock_unpoisoned(&self.state).reads.is_some()
     }
 
     /// Run coven's own SQL for the statement being read, as its metadata,
     /// without recording its reads for the statement.
     pub(crate) fn unrecorded<T>(&self, run: impl FnOnce() -> T) -> T {
-        let reads = self.state.lock().expect("SQL authorization lock poisoned").reads.take();
+        let reads = lock_unpoisoned(&self.state).reads.take();
         let result = {
             let _internal = self.internal();
             run()
         };
-        self.state.lock().expect("SQL authorization lock poisoned").reads = reads;
+        lock_unpoisoned(&self.state).reads = reads;
         result
     }
 
@@ -445,17 +428,17 @@ impl SqlAuthorization {
         &self,
         run: impl FnOnce() -> rusqlite::Result<T>,
     ) -> rusqlite::Result<T> {
-        let reads = self.state.lock().expect("SQL authorization lock poisoned").reads.take();
+        let reads = lock_unpoisoned(&self.state).reads.take();
         self.begin_app_call();
         let result = self.app_result(run());
-        self.state.lock().expect("SQL authorization lock poisoned").reads = reads;
+        lock_unpoisoned(&self.state).reads = reads;
         result
     }
 
     /// End the statement begun last: each table it read in the scope
     /// `scopes` gives it, or whole when `scopes` gives none.
     pub(crate) fn record_statement(&self, scopes: &Scopes) {
-        let mut state = self.state.lock().expect("SQL authorization lock poisoned");
+        let mut state = lock_unpoisoned(&self.state);
         let Some(reads) = &mut state.reads else {
             return;
         };
@@ -496,22 +479,15 @@ impl SqlAuthorization {
         &self,
         prepare: impl FnOnce() -> rusqlite::Result<T>,
     ) -> rusqlite::Result<BTreeSet<String>> {
-        self.state.lock().expect("SQL authorization lock poisoned").mutations =
-            Some(BTreeSet::new());
+        lock_unpoisoned(&self.state).mutations = Some(BTreeSet::new());
         let result = prepare();
-        let mutations = self
-            .state
-            .lock()
-            .expect("SQL authorization lock poisoned")
-            .mutations
-            .take()
-            .expect("mutation capture");
+        let mutations = lock_unpoisoned(&self.state).mutations.take().expect("mutation capture");
         result?;
         Ok(mutations)
     }
 
     pub(crate) fn app_result<T>(&self, result: rusqlite::Result<T>) -> rusqlite::Result<T> {
-        let denied = self.state.lock().expect("SQL authorization lock poisoned").denied.take();
+        let denied = lock_unpoisoned(&self.state).denied.take();
         match denied {
             Some(error) => Err(rusqlite::Error::UserFunctionError(Box::new(error))),
             None => result,
@@ -528,7 +504,7 @@ pub(crate) struct ApplyingSql<'a>(&'a SqlAuthorization);
 
 impl Drop for ApplyingSql<'_> {
     fn drop(&mut self) {
-        self.0.state.lock().expect("SQL authorization lock poisoned").applying = false;
+        lock_unpoisoned(&self.0.state).applying = false;
     }
 }
 
@@ -544,20 +520,13 @@ pub(crate) struct ObservedReads<'a>(&'a SqlAuthorization);
 
 impl ObservedReads<'_> {
     pub(crate) fn reads(&self) -> StatementReads {
-        self.0
-            .state
-            .lock()
-            .expect("SQL authorization lock poisoned")
-            .observed
-            .as_ref()
-            .expect("observing reads")
-            .clone()
+        lock_unpoisoned(&self.0.state).observed.as_ref().expect("observing reads").clone()
     }
 }
 
 impl Drop for ObservedReads<'_> {
     fn drop(&mut self) {
-        self.0.state.lock().expect("SQL authorization lock poisoned").observed = None;
+        lock_unpoisoned(&self.0.state).observed = None;
     }
 }
 
@@ -565,7 +534,7 @@ pub(crate) struct WriteSql<'a>(&'a SqlAuthorization);
 
 impl Drop for WriteSql<'_> {
     fn drop(&mut self) {
-        self.0.state.lock().expect("SQL authorization lock poisoned").writing = false;
+        lock_unpoisoned(&self.0.state).writing = false;
     }
 }
 
@@ -576,10 +545,7 @@ impl BulkSql<'_> {
     /// The tables of `main` the write's statements changed so far, as live
     /// queries name them.
     pub(crate) fn changed(&self) -> BTreeSet<String> {
-        self.0
-            .state
-            .lock()
-            .expect("SQL authorization lock poisoned")
+        lock_unpoisoned(&self.0.state)
             .bulk
             .clone()
             .expect("a bulk write records the tables it changes")
@@ -588,7 +554,7 @@ impl BulkSql<'_> {
 
 impl Drop for BulkSql<'_> {
     fn drop(&mut self) {
-        let mut state = self.0.state.lock().expect("SQL authorization lock poisoned");
+        let mut state = lock_unpoisoned(&self.0.state);
         state.writing = false;
         state.bulk = None;
     }
@@ -598,7 +564,7 @@ pub(crate) struct StepSql<'a>(&'a SqlAuthorization);
 
 impl Drop for StepSql<'_> {
     fn drop(&mut self) {
-        self.0.state.lock().expect("SQL authorization lock poisoned").stepping = false;
+        lock_unpoisoned(&self.0.state).stepping = false;
     }
 }
 
@@ -606,7 +572,7 @@ pub(crate) struct ReadingSql<'a>(&'a SqlAuthorization);
 
 impl Drop for ReadingSql<'_> {
     fn drop(&mut self) {
-        let mut state = self.0.state.lock().expect("SQL authorization lock poisoned");
+        let mut state = lock_unpoisoned(&self.0.state);
         state.reading = false;
         state.reads = None;
     }
@@ -614,12 +580,82 @@ impl Drop for ReadingSql<'_> {
 
 impl Drop for InternalSql<'_> {
     fn drop(&mut self) {
-        self.authorization.state.lock().expect("SQL authorization lock poisoned").internal =
-            self.previous;
+        lock_unpoisoned(&self.authorization.state).internal = self.previous;
     }
 }
 
 impl AuthorizationState {
+    /// Judge the statement being prepared, `context`, recording what it
+    /// reads and changes.
+    fn judge(&mut self, context: AuthContext<'_>) -> Authorization {
+        #[cfg(test)]
+        assert!(!std::mem::take(&mut self.panic_next), "the authorizer's state is past repair");
+        if context.database_name == Some("main") {
+            let changed = match context.action {
+                AuthAction::Insert { table_name }
+                | AuthAction::Update { table_name, .. }
+                | AuthAction::Delete { table_name }
+                | AuthAction::CreateIndex { table_name, .. }
+                | AuthAction::DropIndex { table_name, .. } => Some(table_name),
+                // The app's trigger on a table it may follow is its own
+                // local object: making or dropping one changes no row of
+                // coven's table and nothing that syncs, so a migration
+                // doing it captures no synced state (§18.1).
+                AuthAction::CreateTrigger { table_name, .. }
+                | AuthAction::DropTrigger { table_name, .. } => {
+                    (!crate::internal_schema::followed(table_name)).then_some(table_name)
+                }
+                _ => None,
+            };
+            if let (Some(table_name), Some(tables)) = (changed, &mut self.mutations) {
+                tables.insert(table_name.to_ascii_lowercase());
+            }
+            if let (
+                AuthAction::Insert { table_name }
+                | AuthAction::Update { table_name, .. }
+                | AuthAction::Delete { table_name },
+                Some(tables),
+            ) = (context.action, &mut self.bulk)
+            {
+                tables.insert(table_name.to_ascii_lowercase());
+            }
+        }
+        if let AuthAction::Read { table_name, column_name } = context.action {
+            if let Some(reads) = &mut self.reads {
+                reads.read(table_name, column_name, context.accessor);
+            }
+            if let Some(observed) = &mut self.observed {
+                if !column_name.is_empty() && !observed.columns.iter().any(|c| c == column_name) {
+                    observed.columns.push(column_name.into());
+                }
+            }
+        }
+        if let AuthAction::Function { function_name } = context.action {
+            if let Some(observed) = &mut self.observed {
+                observed.functions.insert(function_name.to_ascii_lowercase());
+            }
+        }
+        let changed = changed_table(&context);
+        if self.internal {
+            if let Some(error) = self.app_trigger_refusal(context) {
+                self.denied = Some(error);
+                return Authorization::Deny;
+            }
+            self.changed_tables.include(changed);
+            return Authorization::Allow;
+        }
+        match self.refusal(context) {
+            Some(error) => {
+                self.denied = Some(error);
+                Authorization::Deny
+            }
+            None => {
+                self.changed_tables.include(changed);
+                Authorization::Allow
+            }
+        }
+    }
+
     /// Coven's own statements fire the app's triggers too: those on the
     /// tables they may follow, and those on the app's tables as coven writes
     /// them. Such a trigger, and any view of the app's it reads, is judged as

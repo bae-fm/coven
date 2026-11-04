@@ -38,6 +38,12 @@ struct Registry {
 static STORES: LazyLock<Mutex<Registry>> =
     LazyLock::new(|| Mutex::new(Registry { stores: BTreeMap::new(), reserved: 0 }));
 
+/// What a lock of `STORES` names. The registry is shared by every store
+/// this process opens, and a change to it checks the registry's rules as it
+/// goes, so a panic can leave it half-changed, and no one store's handle
+/// covers it: the process ends (api.md E15).
+const REGISTRY: &str = "the process's store lock registry";
+
 /// One reservation of a lock: no other reservation in the process, of any
 /// store, has the same instance.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -67,7 +73,7 @@ impl StoreClosingGuard {
     /// A guard from a released instance never changes a replacement instance.
     pub fn begin_close(&self) {
         let Some(entry) = &self.0 else { return };
-        let registry = STORES.lock().expect("store registry lock poisoned");
+        let registry = crate::locks::lock_or_abort(&STORES, REGISTRY);
         if *entry.phase.borrow() == LockPhase::Released {
             return;
         }
@@ -147,7 +153,7 @@ impl LockRegistration {
 
 impl Drop for LockRegistration {
     fn drop(&mut self) {
-        let mut registry = STORES.lock().expect("store registry lock poisoned");
+        let mut registry = crate::locks::lock_or_abort(&STORES, REGISTRY);
         let locks = registry.stores.get_mut(&self.entry.store).expect("held lock is registered");
         let removed = locks.remove(&self.entry.kind).expect("held lock kind");
         assert!(Arc::ptr_eq(&removed, &self.entry));
@@ -177,7 +183,7 @@ pub(super) fn try_acquire(
     kind: LockKind,
 ) -> Result<RegisteredLock, StoreLockError> {
     let registration = {
-        let mut registry = STORES.lock().expect("store registry lock poisoned");
+        let mut registry = crate::locks::lock_or_abort(&STORES, REGISTRY);
         let store = (directory.to_owned(), id);
         if registry.stores.get(&store).is_some_and(|locks| locks.contains_key(&kind)) {
             return Err(StoreLockError::AlreadyOpen(id));
@@ -200,7 +206,7 @@ pub(super) async fn acquire_registered(
     let store = (directory.to_owned(), id);
     loop {
         let acquisition = {
-            let mut registry = STORES.lock().expect("store registry lock poisoned");
+            let mut registry = crate::locks::lock_or_abort(&STORES, REGISTRY);
             let locks = registry.stores.get(&store);
             // A live holder of the requested lock always refuses immediately,
             // even if a different lock on this directory is closing.
@@ -235,7 +241,7 @@ pub(super) async fn closed(directory: &Path, id: StoreId) {
     let store = (directory.to_owned(), id);
     loop {
         let mut released = {
-            let registry = STORES.lock().expect("store registry lock poisoned");
+            let registry = crate::locks::lock_or_abort(&STORES, REGISTRY);
             match registry.stores.get(&store).and_then(|locks| {
                 locks.values().find(|entry| *entry.phase.borrow() == LockPhase::Closing)
             }) {
@@ -253,7 +259,7 @@ pub(super) async fn closed(directory: &Path, id: StoreId) {
 /// Whether `instance` of the store's bootstrap lock is held, and its holder
 /// not closing: the bootstrap that took it is running.
 pub(super) fn bootstrap_running(directory: &Path, id: StoreId, instance: LockInstance) -> bool {
-    let registry = STORES.lock().expect("store registry lock poisoned");
+    let registry = crate::locks::lock_or_abort(&STORES, REGISTRY);
     registry
         .stores
         .get(&(directory.to_owned(), id))

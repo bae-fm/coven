@@ -6,6 +6,7 @@
 use super::{read_only, CacheReservation, FileDatabase, FileDatabaseAccess};
 use crate::{DbError, FileRef};
 use coven_foundation::files::FileName;
+use coven_foundation::locks::read_unpoisoned;
 use std::{
     collections::BTreeSet,
     sync::{Arc, Mutex},
@@ -36,7 +37,7 @@ impl FileDatabase {
             return Err(read_only());
         };
         let reserved = {
-            let slot = database.inner.read().expect("database lock poisoned");
+            let slot = read_unpoisoned(&database.inner);
             slot.as_ref().ok_or(DbError::StoreClosed)?.staging.clone()
         };
         let copies = copies

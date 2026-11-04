@@ -6,6 +6,7 @@
 //! tell, and says so in the log as the store opens.
 
 use super::{NetworkSink, NetworkWatchError, UsableNetwork};
+use crate::locks::lock_unpoisoned;
 use futures_lite::StreamExt;
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
@@ -86,12 +87,12 @@ impl ManagerWatch {
             manager.receive_owner_changed().await.map_err(NetworkWatchError::new)?.map(drop);
         let mut changes = changed.or(owner);
         let first = network(&manager).await.map_err(NetworkWatchError::new)?;
-        sink.lock().expect("network sink poisoned").observe(first);
+        lock_unpoisoned(&sink).observe(first);
         let (stop, stopped) = oneshot::channel::<()>();
         let following = async move {
             while changes.next().await.is_some() {
                 let read = network(&manager).await;
-                let mut sink = sink.lock().expect("network sink poisoned");
+                let mut sink = lock_unpoisoned(&sink);
                 match read {
                     Ok(network) => sink.observe(network),
                     // NetworkManager stopped, or failed to answer: coven
@@ -104,7 +105,7 @@ impl ManagerWatch {
             }
             // The bus connection closed: nothing tells coven any more.
             tracing::error!("the system bus closed: coven can't tell the device's network");
-            sink.lock().expect("network sink poisoned").cannot_tell();
+            lock_unpoisoned(&sink).cannot_tell();
         };
         let follow = std::thread::Builder::new()
             .name("coven network watch".into())

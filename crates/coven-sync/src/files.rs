@@ -31,6 +31,7 @@ mod file_upload_retry;
 use crate::SyncError;
 pub use coven_database::PinProgress;
 use coven_database::{DbError, FileDatabase};
+use coven_foundation::locks::{lock_unpoisoned, write_unpoisoned};
 use coven_foundation::{files::StoreDir, id_source::IdSourceRef};
 use coven_storage::Storage;
 pub use file_device_only::{DeviceOnlyError, DeviceOnlyStep};
@@ -230,8 +231,8 @@ impl Files {
         let _drain = self.inner.drain.lock().await;
         let _pins = self.inner.pins.lock().await;
         let _cache = self.inner.cache.write().await;
-        self.inner.app_retries.lock().expect("app retries poisoned").clear();
-        self.inner.storage.write().expect("storage lock poisoned").take();
+        lock_unpoisoned(&self.inner.app_retries).clear();
+        write_unpoisoned(&self.inner.storage).take();
     }
     /// Optionally retry recoverable uploads early: the upload worker attempts
     /// every upload that can retry, whatever its wait, and this returns once
@@ -310,8 +311,8 @@ impl Files {
         let _cache = self.inner.cache.write().await;
         self.inner.check_open()?;
         ready.await?;
-        *self.inner.storage.write().expect("storage lock poisoned") = storage;
-        self.inner.connection_waits.lock().expect("file connection waits poisoned").clear();
+        *write_unpoisoned(&self.inner.storage) = storage;
+        lock_unpoisoned(&self.inner.connection_waits).clear();
         Ok(())
     }
 }
@@ -430,15 +431,15 @@ async fn upload_worker(
 
 impl FilesInner {
     fn connection_due(&self, subject: coven_database::RetrySubject) -> bool {
-        !self.connection_waits.lock().expect("file connection waits poisoned").contains(&subject)
+        !lock_unpoisoned(&self.connection_waits).contains(&subject)
     }
 
     fn wait_for_connection(&self, subject: coven_database::RetrySubject) {
-        self.connection_waits.lock().expect("file connection waits poisoned").insert(subject);
+        lock_unpoisoned(&self.connection_waits).insert(subject);
     }
 
     fn forget_connection_wait(&self, subject: coven_database::RetrySubject) {
-        self.connection_waits.lock().expect("file connection waits poisoned").remove(&subject);
+        lock_unpoisoned(&self.connection_waits).remove(&subject);
     }
 
     /// Hold the lock on one stored object's cache entries while reading
@@ -449,7 +450,7 @@ impl FilesInner {
         location: &coven_database::FileLocation,
     ) -> tokio::sync::OwnedMutexGuard<()> {
         let lock = {
-            let mut reads = self.reads.lock().expect("file read locks poisoned");
+            let mut reads = lock_unpoisoned(&self.reads);
             reads.retain(|_, lock| lock.strong_count() != 0);
             let key = (file.namespace().to_owned(), location.object());
             match reads.get(&key).and_then(std::sync::Weak::upgrade) {

@@ -5,6 +5,8 @@ use crate::row_scope::{RowImage, RowScope};
 use crate::scope_lookup::Lookups;
 use crate::sql_value::SqlValue;
 use crate::{CommitScope, DbError};
+use coven_foundation::locks::lock_unpoisoned;
+use coven_foundation::task::Bug;
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
     sync::{Arc, Mutex, Weak},
@@ -106,6 +108,9 @@ pub(crate) enum HandleFailure {
     Checkpoint(Arc<DbError>),
     /// The handle's clock could not wait for an invite's expiry (§13.2).
     WallTimer(coven_foundation::clock::WallTimerError),
+    /// A panic while a lock on this store's state was held may have left
+    /// that state half-changed (E15).
+    Bug(Bug),
 }
 
 impl HandleFailure {
@@ -115,6 +120,7 @@ impl HandleFailure {
             Self::Rollback => DbError::RollbackFailed,
             Self::Checkpoint(cause) => DbError::CheckpointFailed(cause.clone()),
             Self::WallTimer(cause) => DbError::WallTimer(cause.clone()),
+            Self::Bug(bug) => DbError::Bug(bug.clone()),
         }
     }
 }
@@ -194,7 +200,7 @@ impl CommitSubscription {
     }
 
     pub(crate) fn begin(&self) {
-        let mut tracked = self.shared.tracking.lock().expect("observation lock poisoned");
+        let mut tracked = lock_unpoisoned(&self.shared.tracking);
         tracked.tracking = Tracking::Reading(Vec::new());
         tracked.epoch += 1;
         self.shared.state.send_modify(|state| state.changed = false);
@@ -203,7 +209,7 @@ impl CommitSubscription {
     /// Wait on nothing, whatever this subscription was doing: its query
     /// ended on a bug, so what its run read is unknown (E15).
     pub(crate) fn stop(&self) {
-        let mut tracked = self.shared.tracking.lock().expect("observation lock poisoned");
+        let mut tracked = lock_unpoisoned(&self.shared.tracking);
         tracked.tracking = Tracking::Waiting(Arc::new(Vec::new()));
         tracked.epoch += 1;
     }
@@ -237,7 +243,7 @@ impl CommitSubscription {
             // Judge without the lock, so writes go on committing; those that
             // commit meanwhile are judged on the next pass.
             let commits = {
-                let mut tracked = self.shared.tracking.lock().expect("observation lock poisoned");
+                let mut tracked = lock_unpoisoned(&self.shared.tracking);
                 let Tracking::Reading(commits) = &mut tracked.tracking else {
                     panic!("read observation was not started")
                 };
@@ -371,7 +377,28 @@ struct ObserverState {
     failure: Option<HandleFailure>,
 }
 
+/// The bug of `what`, a lock's state, which a panic while it was held may
+/// have left half-changed.
+fn half_changed(what: &'static str) -> Bug {
+    Bug {
+        operation: what,
+        message: "a panic while it was locked may have left it half-changed".into(),
+    }
+}
+
 impl ObserverState {
+    /// Fail every later call and subscription; the first failure is kept.
+    fn fail(&mut self, failure: HandleFailure) {
+        let error = self.failure.get_or_insert(failure).clone();
+        self.subscriptions.retain(|subscription| {
+            let Some(subscription) = subscription.upgrade() else {
+                return false;
+            };
+            subscription.state.send_modify(|state| state.failure = Some(error.clone()));
+            true
+        });
+    }
+
     fn close(&mut self) {
         self.closed = true;
         self.subscriptions.retain(|subscription| {
@@ -414,12 +441,13 @@ impl CommitObserver {
     /// store has closed, a new subscription reports that it closed, as a
     /// call to the store does, not the failure it may have closed with.
     pub(crate) fn subscribe_outside(&self, outside: Option<CommitScope>) -> CommitSubscription {
-        let mut state = self.state.lock().expect("observer lock poisoned");
-        let failure = if state.closed { None } else { state.failure.clone() };
-        let subscription = CommitSubscription::new(state.closed, failure, outside);
-        state.subscriptions.retain(|subscription| subscription.strong_count() != 0);
-        state.subscriptions.push(Arc::downgrade(&subscription.shared));
-        subscription
+        self.with_state(|state| {
+            let failure = if state.closed { None } else { state.failure.clone() };
+            let subscription = CommitSubscription::new(state.closed, failure, outside);
+            state.subscriptions.retain(|subscription| subscription.strong_count() != 0);
+            state.subscriptions.push(Arc::downgrade(&subscription.shared));
+            subscription
+        })
     }
 
     /// Watch `reads` from now on; `first` reports the state now as their
@@ -465,25 +493,24 @@ impl CommitObserver {
         scope: Option<CommitScope>,
         lookups: &mut Lookups<'_>,
     ) -> rusqlite::Result<Judged> {
-        let waiting: Vec<(Arc<SubscriptionState>, u64, Arc<ReadSet>)> = self
-            .state
-            .lock()
-            .expect("observer lock poisoned")
-            .subscriptions
-            .iter()
-            .filter_map(Weak::upgrade)
-            .filter(|subscription| scope.is_none() || scope != subscription.outside)
-            .filter(|subscription| !subscription.state.borrow().changed)
-            .filter_map(|subscription| {
-                let tracked = subscription.tracking.lock().expect("observation lock poisoned");
-                let Tracking::Waiting(reads) = &tracked.tracking else {
-                    return None;
-                };
-                let found = (Arc::clone(reads), tracked.epoch);
-                drop(tracked);
-                Some((subscription, found.1, found.0))
-            })
-            .collect();
+        let waiting: Vec<(Arc<SubscriptionState>, u64, Arc<ReadSet>)> = self.with_state(|state| {
+            state
+                .subscriptions
+                .iter()
+                .filter_map(Weak::upgrade)
+                .filter(|subscription| scope.is_none() || scope != subscription.outside)
+                .filter(|subscription| !subscription.state.borrow().changed)
+                .filter_map(|subscription| {
+                    let tracked = lock_unpoisoned(&subscription.tracking);
+                    let Tracking::Waiting(reads) = &tracked.tracking else {
+                        return None;
+                    };
+                    let found = (Arc::clone(reads), tracked.epoch);
+                    drop(tracked);
+                    Some((subscription, found.1, found.0))
+                })
+                .collect()
+        });
         let mut answers = Answers::default();
         let mut verdicts = Vec::with_capacity(waiting.len());
         for (subscription, epoch, reads) in waiting {
@@ -501,32 +528,35 @@ impl CommitObserver {
     /// has ended, so no lookup can read it.
     pub(crate) fn commit(&self, judged: Judged, scope: Option<CommitScope>) {
         let Judged { changes, verdicts } = judged;
-        self.state.lock().expect("observer lock poisoned").subscriptions.retain(|subscription| {
-            let Some(subscription) = subscription.upgrade() else {
-                return false;
-            };
-            if scope.is_some() && scope == subscription.outside {
-                return true;
-            }
-            let mut tracked = subscription.tracking.lock().expect("observation lock poisoned");
-            let epoch = tracked.epoch;
-            match &mut tracked.tracking {
-                Tracking::Reading(commits) => commits.push(Arc::clone(&changes)),
-                Tracking::Waiting(reads) => {
-                    let verdict = verdicts.iter().find_map(|(judged, at, found)| {
-                        (*at == epoch && std::ptr::eq(judged.as_ptr(), Arc::as_ptr(&subscription)))
+        self.with_state(|state| {
+            state.subscriptions.retain(|subscription| {
+                let Some(subscription) = subscription.upgrade() else {
+                    return false;
+                };
+                if scope.is_some() && scope == subscription.outside {
+                    return true;
+                }
+                let mut tracked = lock_unpoisoned(&subscription.tracking);
+                let epoch = tracked.epoch;
+                match &mut tracked.tracking {
+                    Tracking::Reading(commits) => commits.push(Arc::clone(&changes)),
+                    Tracking::Waiting(reads) => {
+                        let verdict = verdicts.iter().find_map(|(judged, at, found)| {
+                            (*at == epoch
+                                && std::ptr::eq(judged.as_ptr(), Arc::as_ptr(&subscription)))
                             .then_some(*found)
-                    });
-                    let found = verdict.unwrap_or_else(|| {
-                        affected(reads, &changes, &mut Answers::default(), &mut |_, _| Ok(true))
-                            .expect("judging without lookups can't fail")
-                    });
-                    if found {
-                        subscription.state.send_modify(|state| state.changed = true);
+                        });
+                        let found = verdict.unwrap_or_else(|| {
+                            affected(reads, &changes, &mut Answers::default(), &mut |_, _| Ok(true))
+                                .expect("judging without lookups can't fail")
+                        });
+                        if found {
+                            subscription.state.send_modify(|state| state.changed = true);
+                        }
                     }
                 }
-            }
-            true
+                true
+            })
         });
     }
 
@@ -535,43 +565,58 @@ impl CommitObserver {
     /// A change to any other table needs no values to wake the
     /// subscriptions that read it.
     pub(crate) fn scoped_columns(&self) -> BTreeMap<String, BTreeSet<String>> {
-        let state = self.state.lock().expect("observer lock poisoned");
-        let mut tables: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
-        for subscription in state.subscriptions.iter().filter_map(Weak::upgrade) {
-            if let Tracking::Waiting(reads) =
-                &subscription.tracking.lock().expect("observation lock poisoned").tracking
-            {
-                for read in reads.iter().filter(|read| !matches!(read.scope, RowScope::All)) {
-                    read.scope.columns(tables.entry(read.table.to_ascii_lowercase()).or_default());
+        self.with_state(|state| {
+            let mut tables: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+            for subscription in state.subscriptions.iter().filter_map(Weak::upgrade) {
+                if let Tracking::Waiting(reads) = &lock_unpoisoned(&subscription.tracking).tracking
+                {
+                    for read in reads.iter().filter(|read| !matches!(read.scope, RowScope::All)) {
+                        read.scope
+                            .columns(tables.entry(read.table.to_ascii_lowercase()).or_default());
+                    }
                 }
             }
-        }
-        tables
+            tables
+        })
     }
 
     pub(crate) fn error(&self) -> Option<DbError> {
-        self.state
-            .lock()
-            .expect("observer lock poisoned")
-            .failure
-            .as_ref()
-            .map(HandleFailure::error)
+        self.with_state(|state| state.failure.as_ref().map(HandleFailure::error))
     }
 
     /// Fail every later call and subscription; the first failure is kept.
     pub(crate) fn fail(&self, failure: HandleFailure) {
-        let mut state = self.state.lock().expect("observer lock poisoned");
-        let error = state.failure.get_or_insert(failure).clone();
-        state.subscriptions.retain(|subscription| {
-            let Some(subscription) = subscription.upgrade() else {
-                return false;
-            };
-            subscription.state.send_modify(|state| state.failure = Some(error.clone()));
-            true
-        });
+        self.with_state(|state| state.fail(failure));
     }
 
     pub(crate) fn close(&self) {
-        self.state.lock().expect("observer lock poisoned").close();
+        self.with_state(ObserverState::close);
+    }
+
+    /// Panic while holding the handle's state, as a bug in judging a commit
+    /// for live queries would.
+    #[cfg(test)]
+    pub(crate) fn test_poison(&self) {
+        std::thread::scope(|scope| {
+            let holder = scope.spawn(|| {
+                let _held = self.state.lock();
+                panic!("a live query's judgment broke");
+            });
+            assert!(holder.join().is_err());
+        });
+    }
+
+    /// Run `change` on the handle's state. A panic while it was held may
+    /// have left some subscription untold of a commit, so the handle fails
+    /// with that bug, which tells every subscription; the failure then
+    /// stands in for the poisoning (E15).
+    fn with_state<R>(&self, change: impl FnOnce(&mut ObserverState) -> R) -> R {
+        let mut state = self.state.lock().unwrap_or_else(|poisoned| {
+            let mut state = poisoned.into_inner();
+            state.fail(HandleFailure::Bug(half_changed("the store's live queries")));
+            self.state.clear_poison();
+            state
+        });
+        change(&mut state)
     }
 }

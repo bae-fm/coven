@@ -10,6 +10,7 @@
 
 use crate::observation::{CommitObserver, RowChange};
 use coven_foundation::id_source::{DeviceId, FileId};
+use coven_foundation::locks::lock_unpoisoned;
 use rusqlite::functions::FunctionFlags;
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
@@ -158,7 +159,7 @@ impl InFlight {
     }
 
     fn state(&self) -> std::sync::MutexGuard<'_, InFlightState> {
-        self.shared.state.lock().expect("transfers in flight poisoned")
+        lock_unpoisoned(&self.shared.state)
     }
 
     /// The stored objects in flight now.

@@ -6,6 +6,7 @@ use super::keychain::{EntryScope, Keychain};
 use super::KeyError;
 use crate::SecretBytes;
 use coven_foundation::id_source::StoreId;
+use coven_foundation::locks::lock_unpoisoned;
 use std::sync::{Arc, Mutex};
 
 pub(super) const RESTORE_CODE_ENTRY: &str = "restore-code";
@@ -18,7 +19,7 @@ pub(super) const S3_CREDENTIALS_ENTRY: &str = "s3-credentials";
 static CHANGES: Mutex<()> = Mutex::new(());
 
 fn changes() -> std::sync::MutexGuard<'static, ()> {
-    CHANGES.lock().expect("person entries changes lock poisoned")
+    lock_unpoisoned(&CHANGES)
 }
 
 /// What [`PersonEntries::change_restore_code`] does with the entry it read.
@@ -65,7 +66,7 @@ impl PersonEntries {
     }
     fn write(&self, name: &str, bytes: &[u8]) -> Result<(), KeyError> {
         // Held through the write, so leaving can't run in between.
-        let left = self.left.lock().expect("person entries lock poisoned");
+        let left = lock_unpoisoned(&self.left);
         if *left {
             return Err(KeyError::Left);
         }
@@ -93,7 +94,7 @@ impl PersonEntries {
         if !self.supported() || !self.keychain.person_backup_follows_writes() {
             return Ok(());
         }
-        let left = self.left.lock().expect("person entries lock poisoned");
+        let left = lock_unpoisoned(&self.left);
         if *left {
             tracing::debug!(store = %self.store, "the person left: no entries to store again");
             return Ok(());
@@ -143,7 +144,7 @@ impl PersonEntries {
         &self,
         change: impl FnOnce(Option<PersonRestoreCode>) -> Result<RestoreCodeChange, E>,
     ) -> Result<(), E> {
-        let left = self.left.lock().expect("person entries lock poisoned");
+        let left = lock_unpoisoned(&self.left);
         let _changes = changes();
         let account = self.account(RESTORE_CODE_ENTRY);
         let mut copies = self.keychain.person_copies(&account)?;
@@ -210,7 +211,7 @@ impl PersonEntries {
     /// first call on, writes return `KeyError::Left`, even if this deletion
     /// fails part way.
     pub fn delete_entries(&self) -> Result<(), KeyError> {
-        let mut left = self.left.lock().expect("person entries lock poisoned");
+        let mut left = lock_unpoisoned(&self.left);
         *left = true;
         if !self.supported() {
             return Ok(());

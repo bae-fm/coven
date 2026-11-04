@@ -36,6 +36,7 @@ mod winrt;
     target_os = "linux",
     windows
 ))]
+use crate::locks::lock_unpoisoned;
 use std::sync::{Arc, Mutex};
 use tokio::sync::watch;
 
@@ -218,7 +219,7 @@ impl NetworkWatch {
             ))]
             NetworkSource::Platform => {
                 let sink = Arc::new(Mutex::new(NetworkSink::new()));
-                let state = sink.lock().expect("network sink poisoned").subscribe();
+                let state = lock_unpoisoned(&sink).subscribe();
                 #[cfg(target_vendor = "apple")]
                 let platform = Some(apple::PathMonitor::start(sink)?);
                 #[cfg(target_os = "android")]
@@ -325,12 +326,12 @@ impl TestNetwork {
     }
 
     fn subscribe(&self) -> watch::Receiver<NetworkState> {
-        self.state.lock().expect("test network poisoned").sink.subscribe()
+        lock_unpoisoned(&self.state).sink.subscribe()
     }
 
     /// The device moves to another usable network: a network report.
     pub fn join(&self, metered: bool) {
-        let mut state = self.state.lock().expect("test network poisoned");
+        let mut state = lock_unpoisoned(&self.state);
         state.named += 1;
         let id = format!("test network {}", state.named);
         state.sink.observe(Some(UsableNetwork { id, metered }));
@@ -338,18 +339,18 @@ impl TestNetwork {
 
     /// The device loses its network: no report.
     pub fn lose(&self) {
-        self.state.lock().expect("test network poisoned").sink.observe(None);
+        lock_unpoisoned(&self.state).sink.observe(None);
     }
 
     /// The platform fails to say what the network is: coven can't tell, and
     /// calls the network metered, until the test says again.
     pub fn cannot_tell(&self) {
-        self.state.lock().expect("test network poisoned").sink.cannot_tell();
+        lock_unpoisoned(&self.state).sink.cannot_tell();
     }
 
     /// The same network turns metered or unmetered: no report.
     pub fn set_metered(&self, metered: bool) {
-        let mut state = self.state.lock().expect("test network poisoned");
+        let mut state = lock_unpoisoned(&self.state);
         let Some(id) = state.sink.current.clone() else {
             panic!("a test network turns metered only while the device is on one");
         };
