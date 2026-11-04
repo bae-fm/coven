@@ -184,10 +184,12 @@ slot 41, a copy of a Gifts key it can't open; a key that arrives in a later
 slot can't get it past 41.
 
 The app can still read its data and commit the local writes it is allowed to.
-The sync status is `Blocked` with the slot and its reason: `KeyUnavailable`,
-`UpdateRequired`, or a `Refused` cause for damaged bytes. A slot whose bytes
-haven't all arrived is a failed read, retried; only a complete object that
-fails a check is refused.
+The last pass is `LastPass::Blocked` with the slot and its reason:
+`KeyUnavailable`, `UpdateRequired`, or a `Refused` cause for damaged bytes. The
+sync state follows the reason: waiting to sync, on the slot
+(`SyncWait::Blocked`), for a key that hasn't arrived; update needed; or failed
+for damaged bytes. A slot whose bytes haven't all arrived is a failed read,
+retried; only a complete object that fails a check is refused.
 
 Two things look like blocks but aren't:
 
@@ -235,31 +237,60 @@ provider client is released, keeping keys, credentials and the storage
 location. A `start_sync` asked meanwhile starts after it.
 Neither touches what's in storage.
 
-The sync status is the one row of the `coven_sync_status` table, which coven
-writes as the status changes. A live query on it, read as `SyncStatus`, gets
-each change; the app can join it with its own tables or follow it with a local
-trigger. Only the handle that runs sync reads it: a widget's read-only handle
-can't tell whether the app that last wrote it is still running, so reading it
-there fails with `StatementForbidden`:
+A status screen shows one *sync state* and when sync last finished.
+`handle.sync_status().await?` reads them, and `handle.subscribe_sync_status()`
+follows them: its first value is the current state, so the screen needs no
+placeholder. Coven names the states; the app picks the words:
 
 ```rust
-pub enum SyncStatus {
-    Disconnected,                                  // no storage set up
-    Stopped,                                       // set up, not syncing
-    Offline { failure, error: String },            // the last attempt couldn't reach storage
-    Syncing,
-    Synced { finished_at: SystemTime },            // the pass reached the end of the sequence
-    Blocked { slot, reason, error: Option<String> }, // a slot that can't apply
-    Failed { failure: StatusFailure, error: String }, // storage refused the pass, or coven failed
+pub struct SyncStatus {
+    pub state: SyncState,
+    pub last_synced: Option<SystemTime>, // when a pass last reached the end
+}
+
+pub enum SyncState {
+    NotSynced,                    // no storage location recorded here
+    Syncing,                      // a slot or a file is moving
+    WaitingToSync(SyncWait),      // held back, and what holds it
+    Synced,                       // nothing waits
+    Offline(SyncCause),           // the last pass got no answer from storage
+    OfflineWithUnsentChanges(SyncCause), // ... and a write or a file is queued
+    SignedOut { provider: CloudProvider, cause: Option<SyncCause> },
+    NoAccess(SyncCause),
+    StorageFull(SyncCause),
+    FolderMissing(SyncCause),
+    ClockWrong(SyncCause),
+    UpdateNeeded(SyncCause),
+    Removed(SyncCause),
+    NeedsReset(SyncCause),
+    Failed(SyncCause),            // any other failure, or a file that can't upload
 }
 ```
 
-`Synced` means the pass reached the end of the sequence; files or provider work
-may still be pending. `Offline` describes the last attempt, not the
+The state is computed in each read from what coven knows: whether storage is
+set up and its credentials held, how the last pass ended, what is moving, the
+send and upload queues, the network and the pending records. When several
+facts hold, the most urgent shows: the device's own standing first, then
+signing in, then what storage said of the account, then reachability, then
+failures, then activity. The cause is the last pass or the first pending
+record that names the state.
+
+`Synced` means nothing waits: the last pass reached the end of the sequence and
+every file this device uploads is stored. A file queued with nothing moving
+waits to sync, and the state names why: sync stopped, a provider's cooldown, a
+slot that can't apply yet, the app's pause, a metered network while the app
+moves files only on unmetered ones, the file's own retry, or its turn. A pass
+held at a slot waiting for a key, or cut short by a cooldown, waits to sync
+too, though nothing is queued. `Offline` describes the last attempt, not the
 connection's history: Ana syncs, then loses Wi-Fi, and her next attempt is
-`Offline`. A provider error that denies a required read is `Failed`. One bad
-photo while the rest syncs leaves `Synced`, with a pending record for the
-photo.
+offline. A provider error that denies a required read shows no access to
+storage. One photo whose original went missing while the rest syncs shows
+failed, naming the photo, until it uploads.
+
+Only the handle that runs sync has the state: a widget's read-only handle can't
+tell whether the app that runs sync is still running, so it has no
+`sync_status`, and its SQL can't read the rows the state comes from
+(`StatementForbidden`).
 
 Anything that can't proceed has one record in `handle.pending()` (live: a
 query over the `coven_pending` view, with each record's error in its `cause`

@@ -39,9 +39,10 @@ version of SQLite or of the app's own orders and functions, takes a while, so
 `open` calls the app back with each step and how much of it is done, a
 [`Progress`](rustdoc:struct:coven::Progress) of
 [`OpenStep`](rustdoc:enum:coven::OpenStep), for a progress bar. Most opens have
-no such step and call it never. It needs no network and doesn't start syncing: a store
-with storage set up opens as `Stopped`, one without as `Disconnected`
-([Sync](/docs/sync-model#status-and-pending-work)).
+no such step and call it never. It needs no network and doesn't start syncing:
+the sync state of a store without storage set up is not synced, and one with
+storage keeps how its last pass ended, with a queued file waiting for sync to
+start ([Sync](/docs/sync-model#status-and-pending-work)).
 
 One writable handle can have a store open at a time; a second open, in this
 process or another, fails with `StoreLockError::AlreadyOpen`. Another process,

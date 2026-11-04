@@ -17,8 +17,8 @@ note. Attachments reference the user's own files.
 use coven::{
     Audience, Coven, DropboxAccess, DropboxLocation, FileColumn, InviteAccess,
     InviteDelivery, InviteTarget, MemberRole, Migration, Namespace, OAuthAccess,
-    Provenance, RowIdentity, StorageConfig, StoreLayout, SyncStatus, SyncedTable,
-    UuidText,
+    Provenance, RowIdentity, StorageConfig, StoreLayout, SyncState, SyncStatus,
+    SyncWait, SyncedTable, UuidText,
 };
 use uuid::Uuid;
 
@@ -159,27 +159,29 @@ starts syncing. Her note goes out in the next pass. On later launches,
 ## Show what sync is doing
 
 ```rust
-let mut status = handle.subscribe(|sql| {
-    Ok(sql.query_row("SELECT status FROM coven_sync_status", [], |row| {
-        row.get::<_, SyncStatus>(0)
-    })?)
-});
+let mut status = handle.subscribe_sync_status();
 while let Some(result) = status.next().await {
-    match result? {
-        SyncStatus::Synced { finished_at } => show_last_synced(finished_at),
-        SyncStatus::Offline { .. } => show_offline(),
-        SyncStatus::Blocked { reason, .. } => show_blocked(&reason),
-        SyncStatus::Failed { error, .. } => show_sync_error(&error),
-        SyncStatus::Disconnected | SyncStatus::Stopped | SyncStatus::Syncing => {}
+    let SyncStatus { state, last_synced } = result?;
+    show_last_synced(last_synced);
+    match state {
+        SyncState::Synced => show_line("Synced"),
+        SyncState::Syncing => show_line("Syncing…"),
+        SyncState::WaitingToSync(SyncWait::Metered) => show_line("Waiting for Wi-Fi"),
+        SyncState::WaitingToSync(_) => show_line("Waiting to sync"),
+        SyncState::Offline(_) | SyncState::OfflineWithUnsentChanges(_) => show_line("Offline"),
+        SyncState::SignedOut { .. } => offer_sign_in(),
+        SyncState::UpdateNeeded(_) => offer_update(),
+        other => show_sync_problem(&other),
     }
 }
 ```
 
-`Blocked` means a slot can't apply yet, most often because the app needs an
-update. Anything else that can't proceed, such as a file that can't upload or a
-provider share waiting for the folder's owner, is a record in
-`handle.pending()`, and in the `coven_pending` view
-([Sync](/docs/sync-model#status-and-pending-work)).
+The first value is the current state, and each later one a change: a note
+written offline turns offline into offline with unsent changes at once. The
+app picks the words; coven picks which state shows when several hold. Anything
+that can't proceed, such as a file that can't upload or a provider share
+waiting for the folder's owner, is also a record in `handle.pending()`, and in
+the `coven_pending` view ([Sync](/docs/sync-model#status-and-pending-work)).
 
 ## Offer back what was lost
 
