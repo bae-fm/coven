@@ -85,6 +85,7 @@ mod removal;
 mod removal_schema;
 mod removal_sql;
 mod removal_view;
+mod reserved_names;
 mod retry;
 mod stored_millis;
 pub use internal_schema::retry_effect::{RetryState, RetrySync};

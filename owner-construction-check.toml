@@ -1287,6 +1287,9 @@ tables = [
     "TransfersInFlight::new",
     "InFlight::new",
 ]
+# One per open store, which its staged files, cache reservations and
+# prepared pins share (Appendix C.3).
+"crates/coven-database/src/reserved_names.rs" = ["ReservedNames::new"]
 
 "crates/coven-storage/src/providers/connector.rs" = [
     "ProviderConnector::with_folders",

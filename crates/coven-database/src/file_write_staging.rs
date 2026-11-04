@@ -13,7 +13,7 @@ impl FileWrite<'_> {
     /// closed, aren't (`PreparedElsewhere`), and keep their names for their own
     /// store to release.
     pub(crate) fn put_staged<T>(&self, staged: crate::StagedFiles<T>) -> Result<T, DbError> {
-        super::held_here(self.files.reservations, staged.names())?;
+        self.files.reservations.held_here(staged.names())?;
         let (files, names, value) = staged.take();
         self.files.brought.borrow_mut().extend(names);
         self.files.staged.borrow_mut().extend(files);

@@ -119,7 +119,7 @@ pub(crate) struct WriteFiles<'a> {
     ids: &'a dyn IdSource,
     /// The names of copies reserved in this store, such as staged app bytes
     /// and prepared cache files, not yet committed or released.
-    reservations: &'a std::sync::Mutex<BTreeSet<FileName>>,
+    reservations: &'a crate::reserved_names::ReservedNames,
     /// The paths of copies calls making files device-only reserve in this
     /// store, not yet switched or released (§17.3).
     copying: &'a std::sync::Mutex<BTreeSet<String>>,
@@ -184,7 +184,7 @@ impl<'a> WriteFiles<'a> {
         schema: &'a WriteSchema,
         device: DeviceId,
         ids: &'a dyn IdSource,
-        reservations: &'a std::sync::Mutex<BTreeSet<FileName>>,
+        reservations: &'a crate::reserved_names::ReservedNames,
         copying: &'a std::sync::Mutex<BTreeSet<String>>,
     ) -> Self {
         Self {

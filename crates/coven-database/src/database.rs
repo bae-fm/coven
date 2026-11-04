@@ -100,7 +100,7 @@ struct DatabaseInner {
     /// letting one go never takes the store's own lock. Each change under
     /// its lock, and `copying`'s, is whole before it can panic, so both are
     /// taken as they are (E15).
-    staging: Arc<Mutex<BTreeSet<coven_foundation::files::FileName>>>,
+    staging: Arc<crate::reserved_names::ReservedNames>,
     /// The paths of the copies the calls making files device-only are
     /// writing now, which no other write's removal takes (§17.3).
     copying: Arc<Mutex<BTreeSet<String>>>,
@@ -282,7 +282,7 @@ impl DatabaseInner {
         &self,
         names: impl IntoIterator<Item = &'a coven_foundation::files::FileName>,
     ) {
-        release_reserved(&self.staging, names);
+        self.staging.release(names);
     }
 
     /// Run `operation`, a write, under the writer, then remove the files it
@@ -348,19 +348,6 @@ impl DatabaseInner {
 
 /// Let `names` go from the names a store reserves; their durable removal
 /// records remain for the next write or open (Appendix C.3).
-fn release_reserved<'a>(
-    reserved: &Mutex<BTreeSet<coven_foundation::files::FileName>>,
-    names: impl IntoIterator<Item = &'a coven_foundation::files::FileName>,
-) {
-    // Every name goes before the check can panic, so no panic leaves the
-    // set half-changed and the lock is taken as it is.
-    let unregistered = {
-        let mut active = lock_unpoisoned(reserved);
-        names.into_iter().filter(|name| !active.remove(*name)).count()
-    };
-    assert_eq!(unregistered, 0, "every reserved name is registered");
-}
-
 /// Let `paths` go from the copies a store keeps out of removals, once the
 /// write that brought them has decided (§17.3).
 pub(crate) fn release_copies(copying: &Mutex<BTreeSet<String>>, paths: &[String]) {
@@ -373,9 +360,10 @@ pub(crate) fn release_copies(copying: &Mutex<BTreeSet<String>>, paths: &[String]
 /// The removals the write that just ran under `writer` released, chosen
 /// with the staging and copying sets held (Appendix C.3).
 fn released(writer: &DatabaseConnection, inner: &DatabaseInner) -> crate::file_removals::Chosen {
-    let active = lock_unpoisoned(&inner.staging);
-    let copying = lock_unpoisoned(&inner.copying);
-    crate::file_removals::choose(writer, &active, &copying)
+    inner.staging.with_names(|active| {
+        let copying = lock_unpoisoned(&inner.copying);
+        crate::file_removals::choose(writer, active, &copying)
+    })
 }
 
 impl Database {

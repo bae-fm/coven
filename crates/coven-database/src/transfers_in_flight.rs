@@ -300,20 +300,31 @@ impl Drop for Transferring {
     fn drop(&mut self) {
         let ended = {
             let mut state = self.owner.state();
-            let entry = state
-                .files
-                .get_mut(&self.file)
-                .expect("an attempt in flight keeps its file's entry");
-            entry.attempts.retain(|(attempt, _, _)| *attempt != self.attempt);
-            let ended = entry.attempts.is_empty();
-            if ended {
-                state.files.remove(&self.file);
+            match state.files.get_mut(&self.file) {
+                Some(entry) => {
+                    entry.attempts.retain(|(attempt, _, _)| *attempt != self.attempt);
+                    let ended = entry.attempts.is_empty();
+                    if ended {
+                        state.files.remove(&self.file);
+                    }
+                    self.owner.shared.progress.send_replace(state.progress());
+                    Some(ended)
+                }
+                None => None,
             }
-            self.owner.shared.progress.send_replace(state.progress());
-            ended
         };
-        if ended {
-            self.owner.changed();
+        match ended {
+            Some(true) => self.owner.changed(),
+            Some(false) => {}
+            // An attempt in flight keeps its file's entry; without it the
+            // progress watches read is wrong. This drop may run during an
+            // unwind, so it fails the store's handle instead of panicking.
+            None => self.owner.shared.observer.fail(crate::observation::HandleFailure::Bug(
+                coven_foundation::task::Bug {
+                    operation: "end a transfer in flight",
+                    message: "an attempt in flight lost its file's entry".into(),
+                },
+            )),
         }
     }
 }

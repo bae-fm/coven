@@ -8,7 +8,7 @@ use crate::write_batch::BatchFile;
 use crate::{DbError, FileSource, Place, Provenance, WriteBatch};
 use coven_foundation::files::StoreDirAccess;
 use coven_foundation::files::{FileArea, FileName, FlushBatch, Flushed};
-use coven_foundation::locks::{lock_unpoisoned, read_unpoisoned};
+use coven_foundation::locks::read_unpoisoned;
 use std::collections::VecDeque;
 use std::sync::{Arc, RwLock};
 use tokio::sync::OwnedRwLockReadGuard;
@@ -25,6 +25,8 @@ struct StagingSource {
 
 pub(super) struct FileStaging {
     database: Arc<RwLock<Option<DatabaseInner>>>,
+    /// The names the store reserves, these among them until they go.
+    reserved: Arc<crate::reserved_names::ReservedNames>,
     // Close waits until publication or cancellation releases the reservation.
     lease: Option<OwnedRwLockReadGuard<()>>,
     names: Vec<FileName>,
@@ -38,7 +40,7 @@ impl FileStaging {
         lease: OwnedRwLockReadGuard<()>,
         build: impl FnOnce(&mut WriteBatch<'_>) -> Result<T, E>,
     ) -> Result<(Self, T), E> {
-        let (sources, value) = {
+        let (sources, value, reserved) = {
             let slot = read_unpoisoned(&database);
             let inner = slot.as_ref().ok_or(DbError::StoreClosed)?;
             if let Some(error) = inner.access.observer.error() {
@@ -84,8 +86,7 @@ impl FileStaging {
                 });
                 match prepared {
                     Ok((sources, value)) => {
-                        lock_unpoisoned(&inner.staging)
-                            .extend(sources.iter().map(|s| s.name.clone()));
+                        inner.staging.reserve(sources.iter().map(|s| s.name.clone()));
                         Ok::<_, E>(Ok((sources, value)))
                     }
                     Err(error) => Ok(Err((error, super::released(writer, inner)))),
@@ -93,12 +94,13 @@ impl FileStaging {
             })?;
             // A refused batch's recorded names go once the writer is free.
             match prepared {
-                Ok(prepared) => prepared,
+                Ok((sources, value)) => (sources, value, inner.staging.clone()),
                 Err((error, chosen)) => return inner.finish_removals(Err(error), chosen),
             }
         };
         Ok((
             Self {
+                reserved,
                 database,
                 lease: Some(lease),
                 names: sources.iter().map(|s| s.name.clone()).collect(),
@@ -126,7 +128,7 @@ impl FileStaging {
         let mut batch = {
             let slot = read_unpoisoned(&self.database);
             let inner = slot.as_ref().expect("staging holds close guard");
-            let hook = lock_unpoisoned(&inner.flush_hook).clone();
+            let hook = coven_foundation::locks::lock_unpoisoned(&inner.flush_hook).clone();
             FlushBatch::new().with_hook(hook)
         };
         while let Some(source) = self.sources.pop_front() {
@@ -212,13 +214,9 @@ impl FileStaging {
     /// puts them in rows. The names stay reserved until that write has
     /// decided or the files are dropped; the lease close waits for ends here.
     pub(super) fn into_staged<T>(mut self, value: T) -> StagedFiles<T> {
-        let reserved = {
-            let slot = read_unpoisoned(&self.database);
-            slot.as_ref().expect("staging holds close guard").staging.clone()
-        };
         let _lease = self.lease.take();
         StagedFiles {
-            reserved,
+            reserved: self.reserved.clone(),
             names: std::mem::take(&mut self.names),
             files: std::mem::take(&mut self.staged),
             value: Some(value),
@@ -231,10 +229,7 @@ impl Drop for FileStaging {
         let Some(_lease) = self.lease.take() else {
             return;
         };
-        let slot = read_unpoisoned(&self.database);
-        slot.as_ref()
-            .expect("reservation holds close guard")
-            .release_file_reservations(&self.names);
+        self.reserved.release(&self.names);
     }
 }
 
@@ -245,7 +240,7 @@ impl Drop for FileStaging {
 /// write or open removes the bytes.
 pub struct StagedFiles<T> {
     /// The names the store that staged these files reserves.
-    reserved: Arc<std::sync::Mutex<std::collections::BTreeSet<FileName>>>,
+    reserved: Arc<crate::reserved_names::ReservedNames>,
     names: Vec<FileName>,
     files: Vec<StagedFile>,
     value: Option<T>,
@@ -273,7 +268,7 @@ impl<T> std::fmt::Debug for StagedFiles<T> {
 
 impl<T> Drop for StagedFiles<T> {
     fn drop(&mut self) {
-        super::release_reserved(&self.reserved, &self.names);
+        self.reserved.release(&self.names);
     }
 }
 

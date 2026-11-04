@@ -8492,8 +8492,9 @@ Edge cases:
   further, since nothing above it would catch it.
 - Coven's own values never panic as they drop: one dropped during an
   unwind that panicked again would end the process. What a drop finds
-  wrong fails the store's handle instead, as a write transaction whose
-  hooks SQLite won't let go of does.
+  wrong fails the store's handle instead: a write transaction whose hooks
+  SQLite won't let go of, a staged or cache file's name released that no
+  holder reserved, or a transfer whose file lost its entry in flight.
 
 ```rust
 // These items are in `coven::task`, not at coven's root.

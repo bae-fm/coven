@@ -8,12 +8,11 @@ use crate::{
     FileUpload,
 };
 use coven_crypto::SecretBytes;
-use coven_foundation::locks::{lock_unpoisoned, read_unpoisoned};
 use coven_foundation::{
     files::{FileName, StoreDir},
     id_source::{DeviceId, FileId},
 };
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 
 #[path = "file_cache.rs"]
 pub(crate) mod cache;
@@ -567,7 +566,6 @@ impl FileDatabase {
             return Err(read_only());
         };
         let lease = database.file_tasks.clone().read_owned().await;
-        let resources = database.inner.clone();
         let file = file.clone();
         database
             .call(move |inner| {
@@ -583,10 +581,15 @@ impl FileDatabase {
                         crate::file_removals::record_cached(db, name.as_str())?;
                         Ok(())
                     })?;
-                    lock_unpoisoned(&inner.staging).insert(name.clone());
+                    inner.staging.reserve([name.clone()]);
                     Ok::<_, DbError>(())
                 })?;
-                Ok(CacheReservation { database: resources, file, name, lease: Some(lease) })
+                Ok(CacheReservation {
+                    reserved: inner.staging.clone(),
+                    file,
+                    name,
+                    lease: Some(lease),
+                })
             })
             .await
     }
@@ -729,7 +732,8 @@ impl FileDatabase {
 /// Bytes reserved for one file's whole encrypted cache file while it is
 /// written, until a prepared pin takes it (§17.8).
 pub struct CacheReservation {
-    database: Arc<RwLock<Option<DatabaseInner>>>,
+    /// The names the store that reserved this file reserves.
+    reserved: Arc<crate::reserved_names::ReservedNames>,
     file: FileRef,
     name: FileName,
     lease: Option<tokio::sync::OwnedRwLockReadGuard<()>>,
@@ -739,10 +743,7 @@ impl Drop for CacheReservation {
         let Some(_lease) = self.lease.take() else {
             return;
         };
-        let slot = read_unpoisoned(&self.database);
-        slot.as_ref()
-            .expect("reservation holds close guard")
-            .release_file_reservations(std::iter::once(&self.name));
+        self.reserved.release([&self.name]);
     }
 }
 /// One upload's completion (§17.9): a local write that switches the files

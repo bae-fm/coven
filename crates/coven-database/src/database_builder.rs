@@ -311,6 +311,7 @@ impl DatabaseBuilder {
             abandoned_stagings: Arc::new(Mutex::new(Vec::new())),
             inner: Arc::new(RwLock::new(Some(DatabaseInner {
                 inputs,
+                staging: Arc::new(crate::reserved_names::ReservedNames::new(observer.clone())),
                 access: DatabaseAccess {
                     writer,
                     readers: ReadPool::new(readers),
@@ -324,7 +325,6 @@ impl DatabaseBuilder {
                 migrations: outcomes,
                 clock,
                 ids,
-                staging: Arc::new(Mutex::new(BTreeSet::new())),
                 copying: Arc::new(Mutex::new(BTreeSet::new())),
                 #[cfg(test)]
                 removal_gate: Mutex::new(None),

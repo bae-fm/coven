@@ -337,3 +337,23 @@ async fn a_live_query_of_downloading_runs_again_as_a_download_starts_or_ends() {
     assert!(!sending.is_marked_for_rerun());
     db.close().await.unwrap();
 }
+
+/// An attempt that ends after its file's entry went fails the store's
+/// handle with the bug instead of panicking: it ends as it drops, perhaps
+/// during an unwind (api.md E15).
+#[test]
+fn an_attempt_whose_entry_is_gone_fails_the_handle() {
+    let handle = crate::observation::CommitObserver::new();
+    let transfers = super::TransfersInFlight::new(handle.clone());
+    let uploads = transfers.uploads();
+    let file = FileId(uuid::Uuid::from_u128(1));
+    let progress = super::TransferProgress { bytes_transferred: 0, bytes_total: 1 };
+    let attempt = uploads.start(DeviceId(1), file, vec![file], progress);
+    uploads.state().files.remove(&file);
+    drop(attempt);
+    assert!(
+        matches!(handle.error(), Some(crate::DbError::Bug(bug)) if bug.operation == "end a transfer in flight"),
+        "{:?}",
+        handle.error()
+    );
+}

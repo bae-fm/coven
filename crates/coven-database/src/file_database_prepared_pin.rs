@@ -7,17 +7,14 @@ use super::{read_only, CacheReservation, FileDatabase, FileDatabaseAccess};
 use crate::{DbError, FileRef};
 use coven_foundation::files::FileName;
 use coven_foundation::locks::read_unpoisoned;
-use std::{
-    collections::BTreeSet,
-    sync::{Arc, Mutex},
-};
+use std::sync::Arc;
 
 /// Files ready to pin in one write (§17.8). It holds nothing close waits
 /// for. Dropped uncommitted, or after the store closes, its copies' names go
 /// free, and the next write or open removes their bytes.
 pub struct PreparedPin {
     /// The names the store that prepared the pin reserves.
-    reserved: Arc<Mutex<BTreeSet<FileName>>>,
+    reserved: Arc<crate::reserved_names::ReservedNames>,
     /// Each file's whole copy, under the name reserved for it.
     copies: Vec<(FileRef, FileName)>,
     /// Files a checked whole copy of which was already kept when prepared.
@@ -93,6 +90,6 @@ impl std::fmt::Debug for PreparedPin {
 
 impl Drop for PreparedPin {
     fn drop(&mut self) {
-        crate::database::release_reserved(&self.reserved, self.copies.iter().map(|(_, name)| name));
+        self.reserved.release(self.copies.iter().map(|(_, name)| name));
     }
 }
