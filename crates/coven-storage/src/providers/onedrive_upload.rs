@@ -27,19 +27,9 @@ fn set_upload(session: &mut UploadSession, next: OneDriveUpload) -> Result<(), S
 
 /// Whether Graph named `code` as the error's own or an inner error's code.
 pub(super) fn native_code(error: &StorageError, code: &str) -> bool {
-    let StorageError::Provider { source, .. } = error else {
-        return false;
-    };
-    let Some(response) = source.downcast_ref::<http::ProviderResponse>() else {
-        return false;
-    };
-    let Ok(value) = serde_json::from_slice::<Value>(response.body()) else {
-        return false;
-    };
-    std::iter::successors(Some(&value["error"]), |error| {
-        Some(&error["innererror"]).filter(|inner| inner.is_object())
+    http::provider_json(error).is_some_and(|value| {
+        http::graph_errors(&value["error"]).any(|error| error["code"].as_str() == Some(code))
     })
-    .any(|error| error["code"].as_str() == Some(code))
 }
 
 /// Earliest byte the provider still needs after accepting a sequential fragment.

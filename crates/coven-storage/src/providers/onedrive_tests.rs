@@ -845,6 +845,25 @@ async fn replacement_during_download_does_not_return_mismatched_metadata() {
     );
 }
 
+/// Graph nests an error's details under `innerError`, or `innererror` in
+/// older responses; a native code is found under either, as the response's
+/// printed codes are.
+#[test]
+fn a_native_code_is_found_under_either_inner_error_spelling() {
+    for inner in ["innerError", "innererror"] {
+        let body = serde_json::json!({
+            "error": {"code": "invalidRequest", inner: {"code": "fragmentOverlap"}}
+        });
+        let error = http::ProviderResponse::new(
+            416,
+            reqwest::header::HeaderMap::new(),
+            body.to_string().into_bytes(),
+        )
+        .into_error(PROVIDER);
+        assert!(super::upload::native_code(&error, "fragmentOverlap"), "{inner}");
+    }
+}
+
 #[path = "onedrive_upload_tests.rs"]
 mod upload_tests;
 

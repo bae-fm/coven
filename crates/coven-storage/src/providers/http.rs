@@ -254,7 +254,7 @@ impl ProviderResponse {
             ));
         }
         if provider == CloudProvider::Dropbox {
-            let value: Value = serde_json::from_slice(self.body()).ok()?;
+            let value = self.json()?;
             return value["error"]["retry_after"]
                 .as_u64()
                 .map(|seconds| crate::RetryAfter::Wait(std::time::Duration::from_secs(seconds)));
@@ -272,6 +272,34 @@ impl ProviderResponse {
     pub fn body(&self) -> &[u8] {
         self.body.as_bytes()
     }
+    /// The body as JSON, when it is JSON.
+    pub(crate) fn json(&self) -> Option<Value> {
+        serde_json::from_slice(self.body()).ok()
+    }
+}
+
+/// The provider response behind `error`, when a provider answered.
+pub(crate) fn provider_response(error: &StorageError) -> Option<&ProviderResponse> {
+    let StorageError::Provider { source, .. } = error else {
+        return None;
+    };
+    source.downcast_ref::<ProviderResponse>()
+}
+
+/// The JSON body of the provider response behind `error`, when it has one.
+pub(crate) fn provider_json(error: &StorageError) -> Option<Value> {
+    provider_response(error)?.json()
+}
+
+/// A Graph error and each error nested in it, under `innerError` or, in
+/// older responses, `innererror`.
+pub(crate) fn graph_errors(error: &Value) -> impl Iterator<Item = &Value> {
+    std::iter::successors(Some(error).filter(|error| error.is_object()), |error| {
+        error
+            .get("innerError")
+            .or_else(|| error.get("innererror"))
+            .filter(|inner| inner.is_object())
+    })
 }
 /// Interpret HTTP retry timing using the response's clock, for both HTTP clients.
 pub(crate) fn retry_after_header(value: &str, date: Option<&str>) -> crate::RetryAfter {
@@ -300,7 +328,7 @@ impl ProviderResponse {
     /// codes. Never a message, a description or anything else in the body:
     /// those can echo credentials, paths or account names.
     fn codes(&self) -> Vec<String> {
-        let Ok(value) = serde_json::from_slice::<Value>(self.body()) else {
+        let Some(value) = self.json() else {
             return Vec::new();
         };
         let mut codes = Vec::new();
@@ -314,13 +342,8 @@ impl ProviderResponse {
         let error = &value["error"];
         push(error.as_str().and_then(fixed_word));
         push(dropbox_tags(error));
-        let mut inner = error;
-        while inner.is_object() {
+        for inner in graph_errors(error) {
             push(inner["code"].as_str().and_then(fixed_word));
-            inner = match inner.get("innerError") {
-                Some(next) => next,
-                None => &inner["innererror"],
-            };
         }
         push(error["status"].as_str().and_then(fixed_word));
         for list in [&error["errors"], &error["details"]] {

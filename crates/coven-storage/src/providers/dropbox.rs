@@ -234,16 +234,11 @@ fn upload_lookup(
     confirmed: u64,
     total: u64,
 ) -> Result<UploadLookup, StorageError> {
-    let StorageError::Provider { source, .. } = &error else {
+    // Preserve the provider failure, including a non-JSON body, for the caller.
+    let Some((response, value)) =
+        http::provider_response(&error).and_then(|response| Some((response, response.json()?)))
+    else {
         return Err(error);
-    };
-    let Some(response) = source.downcast_ref::<http::ProviderResponse>() else {
-        return Err(error);
-    };
-    let value: Value = match serde_json::from_slice(response.body()) {
-        Ok(value) => value,
-        // Preserve the provider failure, including a non-JSON body, for the caller.
-        Err(_) => return Err(error),
     };
     match value["error"][".tag"].as_str() {
         Some("not_found" | "closed") => Ok(UploadLookup::Gone),
@@ -426,18 +421,8 @@ impl ProviderOps for DropboxStorage {
             }
         } else {
             let error = http::response_error(PROVIDER, response).await;
-            let mounted = match &error {
-                StorageError::Provider { source, .. } => {
-                    match source.downcast_ref::<http::ProviderResponse>() {
-                        Some(response) => match serde_json::from_slice::<Value>(response.body()) {
-                            Ok(value) => value["error"][".tag"].as_str() == Some("already_mounted"),
-                            Err(_) => false,
-                        },
-                        None => false,
-                    }
-                }
-                _ => false,
-            };
+            let mounted = http::provider_json(&error)
+                .is_some_and(|value| value["error"][".tag"].as_str() == Some("already_mounted"));
             if !mounted {
                 return Err(error);
             }
