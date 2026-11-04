@@ -179,6 +179,10 @@ pub(crate) struct StorageConnections {
     ids: IdSourceRef,
     clock: ClockRef,
     calls: tokio::sync::Mutex<()>,
+    /// A failure the next close returns after closing, for a test of what
+    /// follows a failed close.
+    #[cfg(test)]
+    close_failure: std::sync::Mutex<Option<SyncError>>,
 }
 
 impl StorageConnections {
@@ -248,6 +252,8 @@ impl StorageConnections {
             ids,
             clock,
             calls: tokio::sync::Mutex::new(()),
+            #[cfg(test)]
+            close_failure: std::sync::Mutex::new(None),
         }
     }
 

@@ -149,7 +149,9 @@ the store and deletes it. `IfUnsent::Discard` drops the unsent work instead.
 For a store that no longer opens, `Coven::discard_store(&store_dir)` deletes it
 without opening it. Deleting removes every host secret, then the list, then
 coven's other keychain entries, then the directory. A deletion that fails partway
-is finished by running it again. Storage is never touched.
+is finished by running it again. If closing fails once the removal is published,
+`delete_store` returns `StoreDeletionError::Closing`, and
+`Coven::discard_store` finishes the deletion. Storage is never touched.
 
 ## Per-platform requirements
 

@@ -320,7 +320,18 @@ impl StorageConnections {
         let keys = self.keys.lock().expect("store keys lock poisoned").take();
         self.authentication.lock().await.take();
         drop(keys);
+        #[cfg(test)]
+        let released = match self.close_failure.lock().expect("close failure poisoned").take() {
+            Some(failure) => released.and(Err(failure)),
+            None => released,
+        };
         released.and(stopped.map_err(SyncError::from))
+    }
+
+    /// Make the next close return `failure` once it has closed.
+    #[cfg(test)]
+    pub(crate) fn fail_next_close(&self, failure: SyncError) {
+        *self.close_failure.lock().expect("close failure poisoned") = Some(failure);
     }
 }
 

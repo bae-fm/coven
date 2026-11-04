@@ -309,3 +309,38 @@ fn files_named_for(app_dir: &std::path::Path, store: StoreId) -> Vec<String> {
         .filter(|name| name.contains(&store.to_string()))
         .collect()
 }
+
+/// Closing fails once the phone's removal is published: deleting says so
+/// apart from a failed removal, nothing is deleted yet, and discarding the
+/// store finishes it. The owner lists the phone removed (§14.1, E1).
+#[tokio::test]
+async fn a_close_failing_after_the_removal_is_finished_by_discarding() {
+    let mut network = Network::new(2).await;
+    let phone = &network.devices[1];
+    let directory = phone.layout.store_dir(&phone.store);
+    let device = directory.settings().unwrap().device_id;
+    phone.handle.storage.fail_next_close(SyncError::Database(DbError::RollbackFailed));
+    let failed = phone.handle.delete_store(IfUnsent::Refuse).await;
+    assert!(
+        matches!(
+            failed,
+            Err(StoreDeletionError::Closing(SyncError::Database(DbError::RollbackFailed)))
+        ),
+        "{failed:?}"
+    );
+    assert_eq!(phone.layout.stores().await.unwrap().len(), 1);
+    phone.app.discard_store(&directory).await.unwrap();
+    assert!(phone.layout.stores().await.unwrap().is_empty());
+    network.devices.remove(1);
+    network.sync(0).await;
+    let removed = network.devices[0]
+        .handle
+        .members()
+        .await
+        .unwrap()
+        .into_iter()
+        .flat_map(|member| member.devices)
+        .any(|d| d.id == device && d.state == DeviceState::Removed);
+    assert!(removed);
+    network.close().await;
+}

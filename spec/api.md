@@ -1722,8 +1722,13 @@ pub enum StoreDeletionError {
     /// nothing was deleted.
     Unsent(UnsentWork),
     /// Reading the queue or publishing this device's removal failed, deleting
-    /// nothing; or closing failed after the removal.
+    /// nothing; this device hasn't applied its removal, and `delete_store`
+    /// again finishes it.
     Sync(SyncError),
+    /// This device's removal was published, or no storage was set up, and
+    /// closing the handle failed, deleting nothing; `Coven::discard_store`
+    /// finishes the deletion.
+    Closing(SyncError),
     /// Removing a keychain entry failed.
     Key(KeyError),
     /// Removing the store directory failed.
@@ -2145,8 +2150,10 @@ impl CovenHandle {
 
     /// Deletes this store from this device. With storage set up, it refuses
     /// unsent work unless discarding it, then publishes this device's removal
-    /// (§14.1); either failure deletes nothing. Then closes and deletes as
-    /// `Coven::discard_store`, which finishes a deletion failing after that.
+    /// (§14.1); either failure deletes nothing, as `Unsent` or `Sync`. Then
+    /// closes, a failure there being `Closing`, and deletes as
+    /// `Coven::discard_store`, which finishes a deletion failing after the
+    /// removal.
     /// Only this device leaves: the person's restore code and S3 key stay.
     pub async fn delete_store(&self, unsent: IfUnsent) -> Result<(), StoreDeletionError>;
 
@@ -7584,8 +7591,8 @@ pub trait MemberKeyCustody: Send + Sync {
   deleted member, device or circle. One the applied slots don't name yet is
   journaled, and the pass that reads on answers `TargetGone` as the
   operation's outcome if it is still absent ([§11.1](coven.md#111-the-steps)).
-  The target retains its typed id. `StoreOwner` remains a separate provider
-  constraint.
+  The target retains its typed id. `StoreOwner` remains
+  a separate provider constraint.
 - Removing someone from a circle publishes one entry. Rotation follows in a
   later sync pass; it is not part of that operation (§12.2).
 

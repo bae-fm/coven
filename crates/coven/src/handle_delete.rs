@@ -28,8 +28,10 @@ impl CovenHandle {
     /// Deletes this store from this device. With storage set up, it first
     /// refuses unsent writes and files unless `unsent` discards them, then
     /// publishes this device's removal (§14.1), which cuts off its later slots;
-    /// either failure deletes nothing. It then closes this handle and deletes
-    /// as `Coven::discard_store`, which finishes a deletion failing after that.
+    /// either failure deletes nothing, and is `Unsent` or `Sync`. It then
+    /// closes this handle, a failure there being `Closing`, and deletes as
+    /// `Coven::discard_store`, which finishes a deletion failing after the
+    /// removal.
     /// Only this device leaves: the person's restore code and S3 key in iCloud
     /// Keychain stay for their other devices (§13.1).
     pub async fn delete_store(&self, unsent: IfUnsent) -> Result<(), StoreDeletionError> {
@@ -42,7 +44,7 @@ impl CovenHandle {
             self.storage.connected().await?;
             self.storage.retire().await?;
         }
-        self.close().await?;
+        self.close().await.map_err(StoreDeletionError::Closing)?;
         let directory = self.directory.clone();
         let keychain = self.keychain.clone();
         crate::coven::blocking("delete the store", move || {

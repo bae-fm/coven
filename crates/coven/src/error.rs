@@ -62,9 +62,15 @@ pub enum StoreDeletionError {
     #[error("{} writes and {} files wait to upload", .0.writes, .0.files)]
     Unsent(coven_database::UnsentWork),
     /// Reading the queue or publishing this device's removal failed;
-    /// nothing was deleted. Closing failed after the removal was published.
+    /// nothing was deleted, and this device hasn't applied its removal.
+    /// `delete_store` again finishes it.
     #[error(transparent)]
     Sync(#[from] crate::SyncError),
+    /// This device's removal was published, or no storage was set up, and
+    /// closing the handle failed; nothing was deleted.
+    /// `Coven::discard_store` finishes the deletion.
+    #[error("closing the store failed after this device left it: {0}")]
+    Closing(#[source] crate::SyncError),
     /// Removing a keychain entry failed.
     #[error(transparent)]
     Key(#[from] KeyError),
