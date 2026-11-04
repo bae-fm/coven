@@ -295,11 +295,7 @@ async fn a_join_whose_keys_opened_never_reports_waiting_again() {
     async fn checked(owner: &Owner, request_path: &ObjectPath, control: &JoinControl) {
         let asked = owner.storage.request_trace().len();
         control.check_now();
-        while !owner.storage.request_trace()[asked..]
-            .contains(&MemoryRequest::Read(request_path.clone(), None))
-        {
-            tokio::task::yield_now().await;
-        }
+        requested(owner, asked, &MemoryRequest::Read(request_path.clone(), None)).await;
     }
     let approve = async {
         seen.wait_for(|reported| {
@@ -324,9 +320,7 @@ async fn a_join_whose_keys_opened_never_reports_waiting_again() {
         owner.handle.approve_join_request(&request).await.unwrap();
         // The pass the approval asks for claims the copy, then fails at the
         // entry.
-        while !owner.storage.request_trace().contains(&MemoryRequest::Create(entry.clone())) {
-            tokio::task::yield_now().await;
-        }
+        requested(&owner, 0, &MemoryRequest::Create(entry.clone())).await;
         // The check that loads, then one more after its wait.
         checked(&owner, &request_path, &control).await;
         checked(&owner, &request_path, &control).await;
@@ -435,11 +429,7 @@ async fn a_waiting_joins_scan_reports_its_wait() {
         control.check_now();
         // The check reads Ana's slot, finds no copy, and asks whether the
         // request is still there.
-        while !owner.storage.request_trace()[asked..]
-            .contains(&MemoryRequest::Read(request_path.clone(), None))
-        {
-            tokio::task::yield_now().await;
-        }
+        requested(&owner, asked, &MemoryRequest::Read(request_path.clone(), None)).await;
         control.cancel();
     };
     let (result, ()) = join_with_response(joining, write_and_check).await;
@@ -450,4 +440,17 @@ async fn a_waiting_joins_scan_reports_its_wait() {
         "{reported:?}"
     );
     owner.close().await;
+}
+
+/// Wait until the owner's provider has taken `request`, at or after the
+/// `from`th request it took.
+async fn requested(owner: &Owner, from: usize, request: &MemoryRequest) {
+    let mut requests = owner.storage.subscribe_requests();
+    tokio::time::timeout(HANG_GUARD, async {
+        while !owner.storage.request_trace()[from..].contains(request) {
+            requests.changed().await.expect("the provider is kept");
+        }
+    })
+    .await
+    .expect("the provider takes the request");
 }

@@ -375,15 +375,20 @@ async fn reconnect_refuses_a_bucket_marker_naming_another_store() {
     opened.handle.close().await.unwrap();
 }
 
-/// Run setup while advancing the store's clock a second at a time, so its
-/// waits for rate-limited requests pass.
+/// Run setup, setting the store's clock to the end of each wait it arms,
+/// so its waits for rate-limited requests pass.
 async fn setup_through_waits(f: &Fixture) -> Result<StorageSetup, StorageSetupError> {
     let setup = f.setup();
     tokio::pin!(setup);
+    use coven_foundation::clock::Clock as _;
+    let mut seen = f.clock.sleeps_begun();
     loop {
         tokio::select! {
             result = &mut setup => return result,
-            () = tokio::time::sleep(Duration::from_millis(5)) => f.advance(Duration::from_secs(1)),
+            (begun, deadline) = f.clock.sleep_begun_after(seen) => {
+                seen = begun;
+                f.advance(deadline.saturating_sub(f.clock.elapsed()));
+            }
         }
     }
 }

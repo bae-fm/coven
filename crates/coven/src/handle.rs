@@ -573,6 +573,36 @@ impl CovenHandle {
     /// sync loop and the upload worker, those running, have each seen what
     /// happened before this call, and what the ones before them did, and
     /// wait.
+    /// Wait until a call finds the storage call lock held and waits, after
+    /// this call.
+    #[cfg(test)]
+    pub(crate) fn test_call_waits(&self) -> impl std::future::Future<Output = ()> {
+        self.storage.call_waits_from_now()
+    }
+    /// Wait until downloads have found the store's download limit full
+    /// `count` more times than before this call.
+    #[cfg(test)]
+    pub(crate) fn test_downloads_waiting(
+        &self,
+        count: usize,
+    ) -> impl std::future::Future<Output = ()> {
+        self.storage.downloads_waiting_from_now(count)
+    }
+    /// Follow the subject's persisted retry wait as failures arm it.
+    #[cfg(test)]
+    pub(crate) fn test_follow_retry_wait(
+        &self,
+        subject: coven_database::RetrySubject,
+    ) -> coven_database::test_utils::Followed<Option<coven_database::RetryWait>> {
+        coven_database::test_utils::Followed::new(self.database.subscribe_retry_wait(subject))
+    }
+    /// Follow membership and audience state as passes apply it.
+    #[cfg(test)]
+    pub(crate) fn test_store_state(
+        &self,
+    ) -> coven_database::test_utils::Followed<coven_database::StoreState> {
+        coven_database::test_utils::Followed::new(self.database.subscribe_store_state())
+    }
     /// Wait until a pause is asked of the sync loop after this call.
     #[cfg(test)]
     pub(crate) fn test_pause_asked(&self) -> impl std::future::Future<Output = ()> {

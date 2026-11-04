@@ -121,6 +121,15 @@ impl Database {
         .await
     }
 
+    /// The same wait, live (E4), for a test waiting for a failure to arm it.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn subscribe_retry_wait(
+        &self,
+        subject: RetrySubject,
+    ) -> crate::LiveQuery<Option<RetryWait>> {
+        self.subscribe(move |sql| sql.retry_wait(subject))
+    }
+
     /// Persist `T` and `W` before the subject waits. A failure here fails the
     /// initiating work; it is never permission to retry immediately.
     pub async fn record_retry(

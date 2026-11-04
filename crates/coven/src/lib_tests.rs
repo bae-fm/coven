@@ -484,27 +484,20 @@ impl Network {
         let stale = carol.handle.restore_code().await.unwrap();
         let old = coven_sync::read_restore_code(&stale).unwrap();
         let prepared = MemberKeys::generate().unwrap();
-        self.devices[0]
+        let replaced = self.devices[0]
             .handle
             .replace_member_keys_for(&old.member, prepared.public_keys())
             .await
             .unwrap();
-        tokio::time::timeout(Duration::from_secs(10), async {
-            let mut status = carol.handle.test_sync_status();
-            status.latest().await;
-            while !matches!(
-                carol.handle.restore_code().await,
-                Err(SyncError::MemberKeysReplaced { .. })
-            ) {
-                // The fixed clock moves, so even a pass that finds nothing
-                // new leaves a status that differs from the one before.
-                self.clock.set(self.clock.now() + Duration::from_secs(1));
-                carol.handle.sync_now();
-                status.next().await;
-            }
-        })
-        .await
-        .unwrap();
+        landed(&self.devices[0].handle, replaced).await;
+        // The first pass that begins after the replacement landed reads it,
+        // and stops Carol's laptop on it.
+        self.clock.set(self.clock.now() + Duration::from_secs(1));
+        let outcome = carol.handle.retry_now().await.unwrap().await;
+        assert!(
+            matches!(carol.handle.restore_code().await, Err(SyncError::MemberKeysReplaced { .. })),
+            "the pass after the replacement ended {outcome:?}"
+        );
         carol.handle.close().await.unwrap();
         let member = old.member;
         let code = coven_format::codes::RestoreCode { member_keys: prepared, ..old }

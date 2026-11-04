@@ -370,11 +370,12 @@ async fn closing_waits_for_setup_after_its_caller_is_cancelled() {
                 result = entering => result.unwrap(),
             }
         }
+        let waiting = handle.test_call_waits();
         let close = handle.close();
         tokio::pin!(close);
         tokio::select! {
             result = &mut close => panic!("close finished before setup: {result:?}"),
-            _ = tokio::task::yield_now() => {},
+            () = waiting => {},
         }
         resume.send(()).unwrap();
         close.await.unwrap();

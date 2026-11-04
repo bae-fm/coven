@@ -60,9 +60,8 @@ async fn passed(handle: &CovenHandle) {
 }
 
 #[tokio::test]
-async fn uncached_file_bodies_and_sequence_reads_share_the_download_limit() {
+async fn an_uncached_file_body_waits_for_the_download_limit_and_a_pass_does_not() {
     use coven_storage::{test_utils::MemoryStorage, Storage};
-    use std::time::Duration;
     tokio::time::timeout(HANG_GUARD, async {
         let root = tempfile::tempdir().unwrap();
         let app = Coven::in_memory(root.path().into());
@@ -92,21 +91,23 @@ async fn uncached_file_bodies_and_sequence_reads_share_the_download_limit() {
             result = entering => result.unwrap(),
         }
         let reads = memory.reads().await.len();
+        // The second file's body waits for the held body's place under the
+        // limit.
+        let waiting = handle.test_downloads_waiting(1);
         let second = handle.read_file(&second_file);
         tokio::pin!(second);
-        handle.sync_now();
         tokio::select! {
             result = &mut second => panic!("second file bypassed the active download: {:?}", result.map(|bytes| bytes.len())),
-            _ = tokio::time::sleep(Duration::from_millis(100)) => {}
+            () = waiting => {}
         }
-        assert_eq!(memory.reads().await.len(), reads, "sequence and file requests both wait for the active response body");
+        // The sequence's own reads take no place under it (§21.1): a pass
+        // runs to its end while the held body keeps the only place.
+        passed(&handle).await;
+        assert_eq!(memory.reads().await.len(), reads, "the second file's body waits for the held one");
         resume.send(()).unwrap();
         let (first, second) = tokio::join!(first, second);
         assert_eq!(first.unwrap(), vec![0; 2048]);
         assert_eq!(second.unwrap(), vec![1; 2048]);
-        // The pass `sync_now` asked for may still run; the one after it ends
-        // synced.
-        passed(&handle).await;
         handle.close().await.unwrap();
     }).await.expect("shared downloads finished");
 }

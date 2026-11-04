@@ -280,7 +280,7 @@ impl StorageConnections {
     pub(crate) async fn stop(self: &Arc<Self>) -> Result<(), SyncError> {
         let owner = self.clone();
         let stopping = async move {
-            let _call = owner.calls.lock().await;
+            let _call = owner.lock_calls().await;
             owner.epoch.fetch_add(1, Ordering::SeqCst);
             let stopped = owner.waits.sync_stopped().await;
             owner.stopped.notify_waiters();
@@ -345,7 +345,7 @@ impl StorageConnections {
         if let Some(attempts) = attempts {
             attempts.task.ended().await;
         }
-        let _call = self.calls.lock().await;
+        let _call = self.lock_calls().await;
         let released = self.release(&mut *self.live.lock().await).await;
         self.expiry.close().await;
         self.codes.close().await;
@@ -369,6 +369,27 @@ impl StorageConnections {
 
 #[cfg(test)]
 impl StorageConnections {
+    /// Wait until a call finds the call lock held and waits, after this
+    /// call.
+    pub(crate) fn call_waits_from_now(&self) -> impl std::future::Future<Output = ()> {
+        let mut waits = self.call_waits.subscribe();
+        let now = *waits.borrow_and_update();
+        async move {
+            coven_foundation::clock::within(waits.wait_for(|waits| *waits > now))
+                .await
+                .expect("a call waits for the call lock")
+                .expect("the call lock's waits are kept");
+        }
+    }
+
+    /// Wait until downloads have found the limit full `count` more times.
+    pub(crate) fn downloads_waiting_from_now(
+        &self,
+        count: usize,
+    ) -> impl std::future::Future<Output = ()> {
+        self.transfers.downloads_waiting_from_now(count)
+    }
+
     /// Wait until a pause is asked of the connection's sync loop after
     /// this call.
     pub(crate) fn pause_asked_from_now(&self) -> impl std::future::Future<Output = ()> {

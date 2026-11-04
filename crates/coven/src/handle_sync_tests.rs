@@ -58,9 +58,10 @@ async fn a_write_racing_a_pass_retains_one_pass_and_own_commits_retain_none() {
     wait_for_sent(&device.handle).await;
     // The racing writes retain one more pass, which claims their slot.
     let counted = || passes(device).saturating_sub(before);
-    tokio::time::timeout(Duration::from_secs(10), async {
+    let mut requests = device.storage.subscribe_requests();
+    tokio::time::timeout(HANG_GUARD, async {
         while counted() < 2 {
-            tokio::time::sleep(Duration::from_millis(5)).await;
+            requests.changed().await.expect("the provider is kept");
         }
     })
     .await
@@ -510,18 +511,8 @@ async fn connection_wait(
     device: &crate::tests::Device,
     ready: impl Fn(&coven_database::RetryWait) -> bool,
 ) -> coven_database::RetryWait {
-    tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            if let Some(wait) = device.handle.test_connection_retry_wait().await {
-                if ready(&wait) {
-                    return wait;
-                }
-            }
-            tokio::time::sleep(Duration::from_millis(5)).await;
-        }
-    })
-    .await
-    .expect("the connection's wait")
+    let mut wait = device.handle.test_follow_retry_wait(coven_database::RetrySubject::Sync);
+    wait.wait_for(|wait| wait.as_ref().is_some_and(&ready)).await.expect("the connection's wait")
 }
 
 /// Ana's phone locked on a train: every pass found no network and backed off.

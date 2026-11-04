@@ -82,6 +82,16 @@ async fn covers(device: &Device) -> Vec<(String, bool)> {
 }
 
 /// Stop the device's sync, so no upload or pass starts until it resumes.
+/// Wait until `device` has applied the store audience's raise to `number`,
+/// as the passes its started sync runs on their own apply it.
+async fn raised_to(device: &Device, number: u32) {
+    device
+        .handle
+        .test_store_state()
+        .wait_for(|state| state.schema.get(&Audience::Store).is_some_and(|v| v.number == number))
+        .await;
+}
+
 async fn stopped(device: &Device) {
     device.stop_sync().await;
 }
@@ -358,14 +368,9 @@ async fn a_raise_waits_for_a_held_write_and_follows_it() {
 
     ana.storage.set_faults(Faults::none()).await;
     ana.handle.retry_uploads_now().await.unwrap();
-    for _ in 0..10 {
-        if ana.handle.test_queued_writes().await.unwrap().is_empty() {
-            break;
-        }
-        network.sync(0).await;
-    }
+    raised_to(ana, 2).await;
+    wait_for_sent(&ana.handle).await;
     assert!(ana.handle.test_queued_writes().await.unwrap().is_empty());
-    assert_eq!(ana.handle.store_state().await.schema[&Audience::Store].number, 2);
 
     let ben = &network.devices[1];
     let mut last = ben.handle.test_last_pass();
@@ -424,13 +429,8 @@ async fn a_waiting_raise_keeps_ordinary_snapshots_behind_it() {
 
     ana.storage.set_faults(Faults::none()).await;
     ana.handle.retry_uploads_now().await.unwrap();
-    for _ in 0..10 {
-        if ana.handle.test_queued_writes().await.unwrap().is_empty() {
-            break;
-        }
-        network.sync(0).await;
-    }
-    assert_eq!(ana.handle.store_state().await.schema[&Audience::Store].number, 2);
+    raised_to(ana, 2).await;
+    wait_for_sent(&ana.handle).await;
     let ben = &network.devices[1];
     let mut last = ben.handle.test_last_pass();
     ben.handle.sync_now();
@@ -516,21 +516,10 @@ async fn changes_on_a_migration_another_raise_replaced_are_lost_everywhere() {
     let [marker, edit] = [&queued[0], &queued[1]].map(|write| write.header.position);
 
     retitle(&mut network, 1).await;
-    for _ in 0..10 {
-        if !network.devices[1].handle.store_state().await.schema.is_empty() {
-            break;
-        }
-        network.sync(1).await;
-    }
-    assert_eq!(network.devices[1].handle.store_state().await.schema[&Audience::Store].number, 2);
+    raised_to(&network.devices[1], 2).await;
 
     network.devices[0].storage.set_online(true);
-    for _ in 0..10 {
-        if network.devices[0].handle.test_queued_writes().await.unwrap().is_empty() {
-            break;
-        }
-        network.sync(0).await;
-    }
+    wait_for_sent(&network.devices[0].handle).await;
     network.sync(1).await;
     network.sync(0).await;
     let (ana, ben) = (&network.devices[0], &network.devices[1]);
@@ -627,12 +616,7 @@ async fn a_device_joins_with_a_breaking_migration_declared() {
     wait_for_sent(&network.devices[0].handle).await;
     network.sync(1).await;
     retitle(&mut network, 0).await;
-    for _ in 0..10 {
-        if !network.devices[0].handle.store_state().await.schema.is_empty() {
-            break;
-        }
-        network.sync(0).await;
-    }
+    raised_to(&network.devices[0], 2).await;
     retitle(&mut network, 1).await;
     network.sync(1).await;
     network.update_app(retitled());
@@ -682,13 +666,7 @@ async fn a_device_joining_past_a_replaced_migration_loses_changes_built_on_it() 
         .unwrap();
 
     retitle(&mut network, 1).await;
-    for _ in 0..10 {
-        if !network.devices[1].handle.store_state().await.schema.is_empty() {
-            break;
-        }
-        network.sync(1).await;
-    }
-    assert_eq!(network.devices[1].handle.store_state().await.schema[&Audience::Store].number, 2);
+    raised_to(&network.devices[1], 2).await;
 
     let ana = &network.devices[0];
     let mut faults = Faults::none();
@@ -697,12 +675,10 @@ async fn a_device_joining_past_a_replaced_migration_loses_changes_built_on_it() 
         .insert(upload_path(ana, cover).await, (StorageFailure::QuotaExceeded, 507));
     ana.storage.set_faults(faults).await;
     ana.storage.set_online(true);
-    for _ in 0..10 {
-        if ana.handle.test_queued_writes().await.unwrap().len() == 1 {
-            break;
-        }
-        network.sync(0).await;
-    }
+    // Back online, Ana's passes send the marker; the edit waits on the
+    // refused upload.
+    let mut unsent = coven_database::test_utils::Followed::new(ana.handle.subscribe_unsent_work());
+    unsent.wait_for(|work| work.writes == 1).await;
     assert_eq!(ana.handle.test_queued_writes().await.unwrap().len(), 1);
     network.sync(1).await;
     let marker_slot = network.devices[1].handle.applied_slot().await;
@@ -717,12 +693,9 @@ async fn a_device_joining_past_a_replaced_migration_loses_changes_built_on_it() 
         })
         .await
         .unwrap();
-    for _ in 0..10 {
-        if crate::tests::snapshots(&ben.storage, ben.store).await.len() > before {
-            break;
-        }
-        network.sync(1).await;
-    }
+    // A pass after the write sends it, which takes Ben's sequence past
+    // the snapshot threshold, and makes a snapshot.
+    network.sync(1).await;
     assert!(crate::tests::snapshots(&ben.storage, ben.store).await.len() > before);
     network.sync(1).await;
 

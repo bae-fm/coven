@@ -238,19 +238,15 @@ async fn app_reopening_resumes_operations_and_files_using_one_storage_capability
     // A sync pass uploads the captured old prefix and marker, then the raise
     // snapshot and entry publish (§11.5).
     handle.start_sync().await.unwrap();
-    tokio::time::timeout(std::time::Duration::from_secs(20), async {
-        while handle
-            .store_state()
-            .await
-            .schema
-            .get(&coven_merge::Audience::Store)
-            .is_none_or(|version| version.number != 2)
-        {
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .unwrap();
+    handle
+        .test_store_state()
+        .wait_for(|state| {
+            state
+                .schema
+                .get(&coven_merge::Audience::Store)
+                .is_some_and(|version| version.number == 2)
+        })
+        .await;
     handle.close().await.unwrap();
     let db = database().open().await.unwrap();
     assert_eq!(db.store_state().await.unwrap().schema[&coven_merge::Audience::Store].number, 2);

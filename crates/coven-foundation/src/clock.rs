@@ -156,7 +156,12 @@ pub async fn within<F: Future>(future: F) -> Option<F::Output> {
 
 /// A clock that returns the instant supplied by a test until it is set again.
 #[cfg(feature = "test-utils")]
-pub struct FixedClock(tokio::sync::watch::Sender<FixedTime>);
+pub struct FixedClock {
+    time: tokio::sync::watch::Sender<FixedTime>,
+    /// How many sleeps have begun, and the latest one's deadline by
+    /// `elapsed`.
+    sleeps: tokio::sync::watch::Sender<(u64, Duration)>,
+}
 
 #[cfg(feature = "test-utils")]
 struct FixedTime {
@@ -168,32 +173,55 @@ struct FixedTime {
 impl FixedClock {
     /// A clock initially set to `now`.
     pub fn new(now: SystemTime) -> Self {
-        Self(tokio::sync::watch::channel(FixedTime { wall: now, elapsed: Duration::ZERO }).0)
+        Self {
+            time: tokio::sync::watch::channel(FixedTime { wall: now, elapsed: Duration::ZERO }).0,
+            sleeps: tokio::sync::watch::channel((0, Duration::ZERO)).0,
+        }
     }
 
     /// Set the time every subsequent read returns, including a backward jump.
     pub fn set(&self, now: SystemTime) {
-        self.0.send_modify(|time| {
+        self.time.send_modify(|time| {
             if let Ok(elapsed) = now.duration_since(time.wall) {
                 time.elapsed += elapsed;
             }
             time.wall = now;
         });
     }
+
+    /// How many sleeps have begun on this clock so far.
+    pub fn sleeps_begun(&self) -> u64 {
+        self.sleeps.borrow().0
+    }
+
+    /// Wait until a sleep begins after the first `seen`, and return how
+    /// many have begun and the latest one's deadline by `elapsed`, so a
+    /// test can set the clock to exactly the wait the code armed.
+    pub fn sleep_begun_after(
+        &self,
+        seen: u64,
+    ) -> impl Future<Output = (u64, Duration)> + Send + 'static {
+        let mut sleeps = self.sleeps.subscribe();
+        async move { *sleeps.wait_for(|(begun, _)| *begun > seen).await.expect("the clock is kept") }
+    }
 }
 
 #[cfg(feature = "test-utils")]
 impl Clock for FixedClock {
     fn now(&self) -> SystemTime {
-        self.0.borrow().wall
+        self.time.borrow().wall
     }
     /// Forward settings advance it, as sleep would; backward ones do not.
     fn elapsed(&self) -> Duration {
-        self.0.borrow().elapsed
+        self.time.borrow().elapsed
     }
     fn sleep(&self, duration: Duration) -> Pin<Box<dyn Future<Output = ()> + Send>> {
-        let mut time = self.0.subscribe();
+        let mut time = self.time.subscribe();
         let deadline = time.borrow().elapsed + duration;
+        self.sleeps.send_modify(|(begun, latest)| {
+            *begun += 1;
+            *latest = deadline;
+        });
         Box::pin(async move {
             time.wait_for(|time| time.elapsed >= deadline)
                 .await
@@ -206,7 +234,7 @@ impl Clock for FixedClock {
         &self,
         at: SystemTime,
     ) -> Pin<Box<dyn Future<Output = Result<(), WallTimerError>> + Send>> {
-        let mut time = self.0.subscribe();
+        let mut time = self.time.subscribe();
         Box::pin(async move {
             time.wait_for(|time| time.wall >= at).await.expect("clock owner retains its sender");
             Ok(())

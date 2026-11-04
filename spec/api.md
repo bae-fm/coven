@@ -691,6 +691,15 @@ impl FixedClock {
 
     /// Set the time every subsequent read returns, including a backward jump.
     pub fn set(&self, now: SystemTime);
+
+    /// How many sleeps have begun on this clock so far.
+    pub fn sleeps_begun(&self) -> u64;
+
+    /// Wait until a sleep begins after the first `seen`, and return how many
+    /// have begun and the latest one's deadline by `elapsed`, so a test can
+    /// set the clock to exactly the wait the code armed.
+    pub fn sleep_begun_after(&self, seen: u64)
+        -> impl Future<Output = (u64, Duration)> + Send + 'static;
 }
 
 /// Deterministic test ids, starting at one.

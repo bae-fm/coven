@@ -27,6 +27,10 @@ impl Default for TransferLimits {
 pub struct TransferBudget {
     state: Mutex<BudgetState>,
     changed: Notify,
+    /// How many times a download has found the limit full and waited, for
+    /// a test.
+    #[cfg(any(test, feature = "test-utils"))]
+    waited: tokio::sync::watch::Sender<usize>,
 }
 struct BudgetState {
     limits: TransferLimits,
@@ -35,7 +39,12 @@ struct BudgetState {
 impl TransferBudget {
     /// An unused budget with the app's configured limits.
     pub fn new(limits: TransferLimits) -> Self {
-        Self { state: Mutex::new(BudgetState { limits, downloads: 0 }), changed: Notify::new() }
+        Self {
+            state: Mutex::new(BudgetState { limits, downloads: 0 }),
+            changed: Notify::new(),
+            #[cfg(any(test, feature = "test-utils"))]
+            waited: tokio::sync::watch::channel(0).0,
+        }
     }
     /// The current limits; the next upload to start checks the upload limit.
     pub fn limits(&self) -> TransferLimits {
@@ -59,7 +68,26 @@ impl TransferBudget {
                     return DownloadLease(self.clone());
                 }
             }
+            #[cfg(any(test, feature = "test-utils"))]
+            self.waited.send_modify(|waited| *waited += 1);
             changed.await;
+        }
+    }
+
+    /// Wait until downloads have found the limit full and waited for a body
+    /// to end `count` more times than before this call.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn downloads_waiting_from_now(
+        &self,
+        count: usize,
+    ) -> impl std::future::Future<Output = ()> + Send + 'static {
+        let mut waited = self.waited.subscribe();
+        let now = *waited.borrow_and_update();
+        async move {
+            coven_foundation::clock::within(waited.wait_for(|waited| *waited >= now + count))
+                .await
+                .expect("the downloads wait")
+                .expect("the budget is kept");
         }
     }
 }

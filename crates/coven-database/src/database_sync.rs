@@ -609,6 +609,13 @@ impl Database {
         .await
     }
 
+    /// The same state, live (E4), for a test waiting for passes to change
+    /// it, such as to apply a raise.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn subscribe_store_state(&self) -> crate::LiveQuery<crate::StoreState> {
+        self.subscribe(|sql| sql.store_state())
+    }
+
     /// The store prefix whose complete effects have committed.
     pub async fn applied_slot(&self) -> Result<u64, DbError> {
         self.call(|inner| inner.access.with_committed(crate::sequence::applied)).await

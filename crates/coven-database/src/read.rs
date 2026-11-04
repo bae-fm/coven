@@ -143,6 +143,14 @@ impl<'connection> SqlReadContext<'connection> {
     pub(crate) fn store_state(&self) -> CovenResult<crate::StoreState> {
         Ok(crate::store_state_tables::read(self.database)?)
     }
+
+    #[cfg(any(test, feature = "test-utils"))]
+    pub(crate) fn retry_wait(
+        &self,
+        subject: crate::RetrySubject,
+    ) -> CovenResult<Option<crate::RetryWait>> {
+        Ok(crate::retry::find(self.database, subject)?)
+    }
 }
 
 /// A read that starts when polled and retains its store borrow until it ends.

@@ -184,6 +184,9 @@ pub(crate) struct StorageConnections {
     ids: IdSourceRef,
     clock: ClockRef,
     calls: tokio::sync::Mutex<()>,
+    /// How many times a call has found the call lock held and waited.
+    #[cfg(test)]
+    call_waits: tokio::sync::watch::Sender<usize>,
     /// A failure the next close returns after closing, for a test of what
     /// follows a failed close.
     #[cfg(test)]
@@ -257,6 +260,8 @@ impl StorageConnections {
             ids,
             clock,
             calls: tokio::sync::Mutex::new(()),
+            #[cfg(test)]
+            call_waits: tokio::sync::watch::channel(0).0,
             #[cfg(test)]
             close_failure: std::sync::Mutex::new(None),
         }
@@ -357,8 +362,19 @@ impl StorageConnections {
         use_keys(keys.as_ref().ok_or(KeyError::StoreClosed)?)
     }
 
+    /// The call lock, which one call holds at a time; a test hears each
+    /// call that finds it held and waits.
+    pub(super) async fn lock_calls(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        #[cfg(test)]
+        match self.calls.try_lock() {
+            Ok(call) => return call,
+            Err(_) => self.call_waits.send_modify(|waits| *waits += 1),
+        }
+        self.calls.lock().await
+    }
+
     async fn lock_open(&self) -> Result<tokio::sync::MutexGuard<'_, ()>, KeyError> {
-        let call = self.calls.lock().await;
+        let call = self.lock_calls().await;
         self.with_keys(|_| Ok(()))?;
         Ok(call)
     }
