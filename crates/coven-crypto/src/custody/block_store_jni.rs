@@ -10,6 +10,7 @@
 use super::block_store::{BlockStoreApi, BlockStoreFailure};
 use super::KeyError;
 use crate::SecretBytes;
+use coven_foundation::java_exception::{caught, JniFailure as Failure};
 use jni::objects::{
     Global, JByteArray, JClass, JClassLoader, JObject, JObjectArray, JString, JValue,
 };
@@ -26,8 +27,6 @@ const DELETE_BYTES_REQUEST_BUILDER: &str =
     "com.google.android.gms.auth.blockstore.DeleteBytesRequest$Builder";
 const TASKS: &str = "com.google.android.gms.tasks.Tasks";
 const GOOGLE_API_AVAILABILITY: &str = "com.google.android.gms.common.GoogleApiAvailability";
-const API_EXCEPTION: &str = "com.google.android.gms.common.api.ApiException";
-const EXECUTION_EXCEPTION: &str = "java.util.concurrent.ExecutionException";
 const COLLECTIONS: &str = "java.util.Collections";
 /// `ConnectionResult.SUCCESS`.
 const PLAY_SERVICES_AVAILABLE: i32 = 0;
@@ -40,23 +39,14 @@ pub(crate) struct JniBlockStore {
     loader: Global<JClassLoader<'static>>,
 }
 
-/// What a JNI call failed with: the JVM refused it, or a Java exception that
-/// was caught and described.
-enum Failure {
-    Jni(jni::errors::Error),
-    Java(BlockStoreFailure),
-}
-
-impl From<jni::errors::Error> for Failure {
-    fn from(error: jni::errors::Error) -> Self {
-        Self::Jni(error)
-    }
-}
-
 impl From<Failure> for BlockStoreFailure {
     fn from(failure: Failure) -> Self {
         match failure {
-            Failure::Java(failure) => failure,
+            Failure::Java(exception) => BlockStoreFailure {
+                exception: exception.exception,
+                status: exception.status,
+                message: exception.message,
+            },
             Failure::Jni(error) => BlockStoreFailure {
                 exception: "JNI".to_owned(),
                 status: None,
@@ -466,61 +456,6 @@ impl BlockStoreApi for JniBlockStore {
                 .z()?)
         })
     }
-}
-
-/// Take a pending Java exception off the thread and describe it: its class,
-/// message, and the status of the `ApiException` it is or wraps. A JNI error
-/// with no exception pending stays as it is.
-fn caught(env: &mut Env, error: jni::errors::Error) -> Failure {
-    if !matches!(error, jni::errors::Error::JavaException) {
-        return Failure::Jni(error);
-    }
-    let Some(throwable) = env.exception_occurred() else {
-        return Failure::Jni(error);
-    };
-    env.exception_clear();
-    match describe(env, &throwable) {
-        Ok(failure) => Failure::Java(failure),
-        Err(describing) => {
-            env.exception_clear();
-            Failure::Jni(describing)
-        }
-    }
-}
-
-fn describe(env: &mut Env, throwable: &JObject) -> Result<BlockStoreFailure, jni::errors::Error> {
-    let exception = class_name(env, throwable)?;
-    let cause = if exception == EXECUTION_EXCEPTION {
-        env.call_method(throwable, jni_str!("getCause"), jni_sig!(() -> java.lang.Throwable), &[])?
-            .l()?
-    } else {
-        JObject::null()
-    };
-    let api_exception = if cause.is_null() { throwable } else { &cause };
-    let status = if class_name(env, api_exception)? == API_EXCEPTION {
-        Some(
-            env.call_method(api_exception, jni_str!("getStatusCode"), jni_sig!(() -> jint), &[])?
-                .i()?,
-        )
-    } else {
-        None
-    };
-    let message = env
-        .call_method(api_exception, jni_str!("getMessage"), jni_sig!(() -> java.lang.String), &[])?
-        .l()?;
-    let message = if message.is_null() {
-        None
-    } else {
-        Some(env.cast_local::<JString>(message)?.try_to_string(env)?)
-    };
-    Ok(BlockStoreFailure { exception: class_name(env, api_exception)?, status, message })
-}
-
-fn class_name(env: &mut Env, object: &JObject) -> Result<String, jni::errors::Error> {
-    let class = env.get_object_class(object)?;
-    let name =
-        env.call_method(&class, jni_str!("getName"), jni_sig!(() -> java.lang.String), &[])?.l()?;
-    env.cast_local::<JString>(name)?.try_to_string(env)
 }
 
 fn unavailable(failure: BlockStoreFailure) -> KeyError {

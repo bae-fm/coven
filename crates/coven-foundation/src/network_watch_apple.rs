@@ -44,18 +44,18 @@ unsafe extern "C" {
 
 /// The path monitor and the serial queue it reports on, cancelled and
 /// released as the watch drops.
-pub(super) struct PlatformWatch {
+pub(super) struct PathMonitor {
     monitor: *mut c_void,
     queue: *mut c_void,
 }
 
 // Safety: Network.framework's monitor and libdispatch's queue are
 // thread-safe objects; this owner only cancels and releases them, once.
-unsafe impl Send for PlatformWatch {}
+unsafe impl Send for PathMonitor {}
 // Safety: as above; nothing reads them through a shared reference.
-unsafe impl Sync for PlatformWatch {}
+unsafe impl Sync for PathMonitor {}
 
-impl PlatformWatch {
+impl PathMonitor {
     /// Start the monitor, and return once it has described the path as it
     /// is now, which it does as it starts.
     pub(super) fn start(sink: Arc<Mutex<NetworkSink>>) -> Result<Self, NetworkWatchError> {
@@ -89,7 +89,7 @@ impl PlatformWatch {
     }
 }
 
-impl Drop for PlatformWatch {
+impl Drop for PathMonitor {
     fn drop(&mut self) {
         // Safety: both were created in `start` and are released once, here.
         unsafe {

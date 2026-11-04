@@ -6,6 +6,8 @@
 pub mod clock;
 pub mod files;
 pub mod id_source;
+#[cfg(target_os = "android")]
+pub mod java_exception;
 pub mod network_watch;
 pub mod progress;
 pub mod task;

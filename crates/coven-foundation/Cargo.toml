@@ -29,6 +29,12 @@ rustix = { workspace = true, features = ["fs", "time"] }
 libc.workspace = true
 block2.workspace = true
 
+# The network watch's Java callback and its native methods, through JNI with
+# the app's context (api.md E1, E5).
+[target.'cfg(target_os = "android")'.dependencies]
+jni.workspace = true
+ndk-context.workspace = true
+
 [target.'cfg(windows)'.dependencies]
 windows-sys = { workspace = true, features = ["Win32_Storage_FileSystem", "Win32_System_WindowsProgramming", "Wdk_System_Threading", "Win32_System_Threading"] }
 

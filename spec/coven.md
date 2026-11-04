@@ -1697,7 +1697,11 @@ leave every backoff to run out.
 - **A report is a network appearing.** When the device gains a usable
   network, or moves to another one, coven makes a *network report*. A store
   that opens on a usable network makes one too: a wait saved while the
-  phone had none ends as the app opens it. Losing
+  phone had none ends as the app opens it. Another network is what the
+  platform tells apart: on macOS and iOS that is another set of interfaces,
+  so moving from one Wi-Fi network to another on the same interface, with
+  no moment without a network between them, makes no report, and a wait
+  then ends on its timer. Losing
   the network makes none: the next attempt finds out, and the state says
   offline (§19.1). Neither does a network that only turns metered or
   unmetered: it was usable before and after.

@@ -10,11 +10,17 @@
 //! network counts and none is metered.
 
 // The platforms coven watches; elsewhere it can't tell.
+#[cfg(target_os = "android")]
+#[path = "network_watch_android.rs"]
+mod android;
 #[cfg(target_vendor = "apple")]
 #[path = "network_watch_apple.rs"]
-mod platform;
+mod apple;
+#[cfg(any(test, target_os = "android"))]
+#[path = "network_watch_default.rs"]
+mod default_network;
 
-#[cfg(any(test, feature = "test-utils", target_vendor = "apple"))]
+#[cfg(any(test, feature = "test-utils", target_vendor = "apple", target_os = "android"))]
 use std::sync::{Arc, Mutex};
 use tokio::sync::watch;
 
@@ -40,8 +46,9 @@ impl NetworkState {
 
 /// One usable network, as the platform names it.
 // Sentinel: the platforms whose watches the rest of this chain adds widen
-// these cfgs; until then only Apple's and a test's network say anything.
-#[cfg(any(test, feature = "test-utils", target_vendor = "apple"))]
+// these cfgs; until then only Apple's, Android's and a test's network say
+// anything.
+#[cfg(any(test, feature = "test-utils", target_vendor = "apple", target_os = "android"))]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct UsableNetwork {
     /// The platform's own name for the network: another name is another
@@ -53,14 +60,14 @@ pub(crate) struct UsableNetwork {
 
 /// Turns what the platform says into the watch's state, counting each
 /// network that appears.
-#[cfg(any(test, feature = "test-utils", target_vendor = "apple"))]
+#[cfg(any(test, feature = "test-utils", target_vendor = "apple", target_os = "android"))]
 pub(crate) struct NetworkSink {
     /// The usable network the device was last on.
     current: Option<String>,
     state: watch::Sender<NetworkState>,
 }
 
-#[cfg(any(test, feature = "test-utils", target_vendor = "apple"))]
+#[cfg(any(test, feature = "test-utils", target_vendor = "apple", target_os = "android"))]
 impl NetworkSink {
     fn new() -> Self {
         Self { current: None, state: watch::channel(NetworkState::UNKNOWN).0 }
@@ -94,6 +101,16 @@ impl NetworkSink {
     fn subscribe(&self) -> watch::Receiver<NetworkState> {
         self.state.subscribe()
     }
+
+    /// The platform says the network the device is on may work again
+    /// though it never changed, as Android before 10 says when Doze ends:
+    /// a network report, if the device is on a usable one.
+    #[cfg(any(test, target_os = "android"))]
+    pub(crate) fn network_returned(&mut self) {
+        if self.current.is_some() {
+            self.state.send_modify(|state| state.joined += 1);
+        }
+    }
 }
 
 /// Where the store's watch hears about the network: the platform's own, or
@@ -113,7 +130,7 @@ pub enum NetworkSource {
 #[error("coven can't watch the device's network: {0}")]
 pub struct NetworkWatchError(String);
 
-#[cfg(target_vendor = "apple")]
+#[cfg(any(target_vendor = "apple", target_os = "android"))]
 impl NetworkWatchError {
     /// The platform's failure, as its text.
     pub(crate) fn new(failure: impl std::fmt::Display) -> Self {
@@ -128,7 +145,9 @@ pub struct NetworkWatch {
     state: watch::Receiver<NetworkState>,
     /// The platform's registration, which ends as the watch drops.
     #[cfg(target_vendor = "apple")]
-    _platform: Option<platform::PlatformWatch>,
+    _platform: Option<apple::PathMonitor>,
+    #[cfg(target_os = "android")]
+    _platform: Option<android::JavaWatch>,
 }
 
 impl NetworkWatch {
@@ -136,17 +155,20 @@ impl NetworkWatch {
     /// platform says now.
     pub fn start(source: &NetworkSource) -> Result<Self, NetworkWatchError> {
         match source {
-            #[cfg(target_vendor = "apple")]
+            #[cfg(any(target_vendor = "apple", target_os = "android"))]
             NetworkSource::Platform => {
                 let sink = Arc::new(Mutex::new(NetworkSink::new()));
                 let state = sink.lock().expect("network sink poisoned").subscribe();
-                let platform = platform::PlatformWatch::start(sink)?;
+                #[cfg(target_vendor = "apple")]
+                let platform = apple::PathMonitor::start(sink)?;
+                #[cfg(target_os = "android")]
+                let platform = android::JavaWatch::start(sink)?;
                 Ok(Self { state, _platform: Some(platform) })
             }
             // Sentinel: the platforms whose watches the rest of this chain
             // adds leave this arm; until then they are ones where coven
             // can't tell.
-            #[cfg(not(target_vendor = "apple"))]
+            #[cfg(not(any(target_vendor = "apple", target_os = "android")))]
             NetworkSource::Platform => Ok(Self::unwatched()),
             #[cfg(any(test, feature = "test-utils"))]
             NetworkSource::Test(network) => Ok(Self::without_platform(network.subscribe())),
@@ -163,7 +185,7 @@ impl NetworkWatch {
     fn without_platform(state: watch::Receiver<NetworkState>) -> Self {
         Self {
             state,
-            #[cfg(target_vendor = "apple")]
+            #[cfg(any(target_vendor = "apple", target_os = "android"))]
             _platform: None,
         }
     }

@@ -487,7 +487,10 @@ Every SQLite setting, and who chooses it. Settings marked *app* are fields of
   into the app's. Coven loads the class through the app's class loader, with
   the context the app gives `ndk-context`, and registers its native methods
   itself, so the app writes no JNI. Without the library, opening fails with
-  `CovenError::NetworkWatch` naming the missing class.
+  `CovenError::NetworkWatch` naming the missing class. The library is
+  committed, and `scripts/build-android-library.py` rebuilds it from the Java
+  source beside it after that source changes; the build gives the same bytes
+  for the same source.
 - On Apple platforms coven links Network.framework; on Windows it uses
   `Windows.Networking.Connectivity`; on Linux it talks to NetworkManager over
   the system bus, and works without it (E5).
