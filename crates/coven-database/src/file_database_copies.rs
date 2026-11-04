@@ -3,7 +3,7 @@
 //! their bytes exist, the write switching the call's files to them, and the
 //! removal of what a failing call made.
 
-use super::{read_only, FileDatabase, FileDatabaseAccess};
+use super::{read_only, Database, FileDatabase, FileDatabaseAccess};
 use crate::{sqlite::DatabaseConnection, DbError, DeviceOnlyCopy, FileRef};
 use coven_foundation::locks::lock_unpoisoned;
 use coven_foundation::{
@@ -57,94 +57,32 @@ impl FileDatabase {
     }
 
     /// Record the copies one call writes, before any of their folders or
-    /// bytes exist, so a failure or a crash leaves nothing unrecorded. A path
-    /// another call is writing a copy at is `CopyPathTaken`. While the
-    /// returned reservation is held, no other write's removal takes the
-    /// copies; once it drops without the call's switch, as when the call's
-    /// future is dropped, the next write removes them (Appendix C.3).
+    /// bytes exist (`Database::record_copies`). A path another call is
+    /// writing a copy at is `CopyPathTaken`; the returned reservation keeps
+    /// the copies from other writes' removals while it is held.
     pub async fn record_copies(&self, copies: Vec<FolderCopy>) -> Result<CopyReservation, DbError> {
         let FileDatabaseAccess::Writer(database) = &self.access else {
             return Err(read_only());
         };
-        let paths = copies
-            .iter()
-            .map(|copy| text(&copy.path).map(str::to_owned))
-            .collect::<Result<Vec<_>, _>>()?;
-        database
-            .call(move |inner| {
-                inner.access.with_writer(|writer| {
-                    writer.transaction(|db: &DatabaseConnection| {
-                        for copy in &copies {
-                            let path = text(&copy.path)?;
-                            if db.internal_execute(
-                                "INSERT INTO _coven_copies(path,temporary,state) VALUES(?1,?2,'writing')
-                                 ON CONFLICT(path) DO NOTHING",
-                                params![path, text(&copy.temporary)?],
-                            )? != 1
-                            {
-                                return Err(DbError::CopyPathTaken {
-                                    path: copy.path.clone(),
-                                });
-                            }
-                            for folder in &copy.folders {
-                                db.internal_execute(
-                                    "INSERT INTO _coven_copy_folders(folder,copy) VALUES(?1,?2)",
-                                    params![text(folder)?, path],
-                                )?;
-                            }
-                        }
-                        Ok(())
-                    })?;
-                    // Registered under the writer, so no write's removal
-                    // runs between the records and the registration.
-                    lock_unpoisoned(&inner.copying).extend(paths.iter().cloned());
-                    Ok::<_, DbError>(())
-                })?;
-                Ok(CopyReservation { copying: inner.copying.clone(), paths })
-            })
-            .await
+        database.record_copies(copies).await
     }
 
     /// The call's own mkdir made `folder`: it is the call's to remove, once
     /// empty. A folder that was there already is never marked.
     pub async fn made_folder(&self, folder: &Path) -> Result<(), DbError> {
-        self.require_writer()?;
-        let folder = text(folder)?.to_owned();
-        self.run(move |db, _, _, _| {
-            db.transaction(|db: &DatabaseConnection| {
-                db.internal_execute(
-                    "UPDATE _coven_copy_folders SET made=1 WHERE folder=?1",
-                    [&folder],
-                )?;
-                Ok(())
-            })
-        })
-        .await
+        let FileDatabaseAccess::Writer(database) = &self.access else {
+            return Err(read_only());
+        };
+        database.made_folder(folder).await
     }
 
     /// A copy is whole and synced at its path, renamed there from its
     /// temporary name, with the size and modification time `observed` read.
     pub async fn place_copy(&self, observed: &ObservedFile) -> Result<(), DbError> {
-        self.require_writer()?;
-        let path = text(observed.path())?.to_owned();
-        let size = crate::sqlite::integer("file size", observed.size())?;
-        let modified_at = crate::user_file::encode_time(observed.modified_at());
-        self.run(move |db, _, _, _| {
-            db.transaction(|db: &DatabaseConnection| {
-                if db.internal_execute(
-                    "UPDATE _coven_copies SET state='placed',size=?2,modified_at=?3
-                     WHERE path=?1 AND state='writing'",
-                    params![path, size, modified_at],
-                )? != 1
-                {
-                    return Err(DbError::Invariant {
-                        what: "a copy placed is one its call is writing",
-                    });
-                }
-                Ok(())
-            })
-        })
-        .await
+        let FileDatabaseAccess::Writer(database) = &self.access else {
+            return Err(read_only());
+        };
+        database.place_copy(observed).await
     }
 
     /// The copies a call placed, ready for the write that switches their
@@ -175,7 +113,115 @@ impl FileDatabase {
         let FileDatabaseAccess::Writer(database) = &self.access else {
             return Err(read_only());
         };
-        remove_copies(database, paths).await
+        database.abandon_copies(paths).await
+    }
+}
+
+impl Database {
+    /// Record the copies one call writes, before any of their folders or
+    /// bytes exist, so a failure or a crash leaves nothing unrecorded. A path
+    /// another call is writing a copy at is `CopyPathTaken`. While the
+    /// returned reservation is held, no other write's removal takes the
+    /// copies; once it drops without the call's switch, as when the call's
+    /// future is dropped, the next write removes them (Appendix C.3).
+    pub(crate) async fn record_copies(
+        &self,
+        copies: Vec<FolderCopy>,
+    ) -> Result<CopyReservation, DbError> {
+        let paths = copies
+            .iter()
+            .map(|copy| text(&copy.path).map(str::to_owned))
+            .collect::<Result<Vec<_>, _>>()?;
+        self.call(move |inner| {
+            inner.access.with_writer(|writer| {
+                writer.transaction(|db: &DatabaseConnection| {
+                    for copy in &copies {
+                        let path = text(&copy.path)?;
+                        if db.internal_execute(
+                            "INSERT INTO _coven_copies(path,temporary,state) VALUES(?1,?2,'writing')
+                             ON CONFLICT(path) DO NOTHING",
+                            params![path, text(&copy.temporary)?],
+                        )? != 1
+                        {
+                            return Err(DbError::CopyPathTaken {
+                                path: copy.path.clone(),
+                            });
+                        }
+                        for folder in &copy.folders {
+                            db.internal_execute(
+                                "INSERT INTO _coven_copy_folders(folder,copy) VALUES(?1,?2)",
+                                params![text(folder)?, path],
+                            )?;
+                        }
+                    }
+                    Ok(())
+                })?;
+                // Registered under the writer, so no write's removal
+                // runs between the records and the registration.
+                lock_unpoisoned(&inner.copying).extend(paths.iter().cloned());
+                Ok::<_, DbError>(())
+            })?;
+            Ok(CopyReservation { copying: inner.copying.clone(), paths })
+        })
+        .await
+    }
+
+    /// The call's own mkdir made `folder`: it is the call's to remove, once
+    /// empty. A folder that was there already is never marked.
+    pub(crate) async fn made_folder(&self, folder: &Path) -> Result<(), DbError> {
+        let folder = text(folder)?.to_owned();
+        self.call(move |inner| {
+            inner.access.with_writer(|writer| {
+                writer.transaction(|db: &DatabaseConnection| {
+                    db.internal_execute(
+                        "UPDATE _coven_copy_folders SET made=1 WHERE folder=?1",
+                        [&folder],
+                    )?;
+                    Ok(())
+                })
+            })
+        })
+        .await
+    }
+
+    /// A copy is whole and synced at its path, renamed there from its
+    /// temporary name, with the size and modification time `observed` read.
+    pub(crate) async fn place_copy(&self, observed: &ObservedFile) -> Result<(), DbError> {
+        let path = text(observed.path())?.to_owned();
+        let size = crate::sqlite::integer("file size", observed.size())?;
+        let modified_at = crate::user_file::encode_time(observed.modified_at());
+        self.call(move |inner| {
+            inner.access.with_writer(|writer| {
+                writer.transaction(|db: &DatabaseConnection| {
+                    if db.internal_execute(
+                        "UPDATE _coven_copies SET state='placed',size=?2,modified_at=?3
+                         WHERE path=?1 AND state='writing'",
+                        params![path, size, modified_at],
+                    )? != 1
+                    {
+                        return Err(DbError::Invariant {
+                            what: "a copy placed is one its call is writing",
+                        });
+                    }
+                    Ok(())
+                })
+            })
+        })
+        .await
+    }
+
+    /// Remove what a failing call made: the copies at `paths` it left
+    /// unswitched, if they are as it left them, and the folders it made for
+    /// them, if they are empty, once the writer is free. A failed removal
+    /// keeps its record, and the next open removes it.
+    pub(crate) async fn abandon_copies(&self, paths: Vec<String>) -> Result<(), DbError> {
+        self.call(move |inner| {
+            let chosen = inner.access.with_writer(|writer| {
+                Ok::<_, DbError>(crate::file_removals::choose_copies(writer, &paths))
+            })?;
+            inner.finish_removals(Ok::<_, DbError>(()), chosen)
+        })
+        .await
     }
 }
 
@@ -185,7 +231,7 @@ impl FileDatabase {
 /// held, and the next write or open removes them once it drops; `abandon`
 /// removes them at once.
 pub struct PreparedDeviceOnly {
-    database: super::Database,
+    database: Database,
     reservation: CopyReservation,
     copies: Vec<DeviceOnlyCopy>,
 }
@@ -210,7 +256,7 @@ impl PreparedDeviceOnly {
         let paths = self.reservation.paths.clone();
         let database = self.database.clone();
         drop(self);
-        remove_copies(&database, paths).await
+        database.abandon_copies(paths).await
     }
 }
 
@@ -238,21 +284,6 @@ impl Drop for CopyReservation {
     }
 }
 
-/// Remove the copies at `paths` a call left unswitched, if they are as it
-/// left them, and the folders made for them, if they are empty, once the
-/// writer is free.
-async fn remove_copies(database: &super::Database, paths: Vec<String>) -> Result<(), DbError> {
-    database
-        .call(move |inner| {
-            let chosen = inner.access.with_writer(|writer| {
-                Ok::<_, DbError>(crate::file_removals::choose_copies(writer, &paths))
-            })?;
-            inner.finish_removals(Ok::<_, DbError>(()), chosen)
-        })
-        .await
-}
-
-/// A path as coven records it: valid Unicode, as planning a copy checks.
 /// The call's copy at `path` is placed and its file switched to it: the
 /// copy is an original this device records (§17.3).
 pub(crate) fn keep(db: &DatabaseConnection, path: &str) -> Result<(), DbError> {
@@ -279,6 +310,7 @@ pub(crate) fn forget(db: &DatabaseConnection, path: &str, state: &str) -> Result
     Ok(())
 }
 
+/// A path as coven records it: valid Unicode, as planning a copy checks.
 pub(crate) fn text(path: &Path) -> Result<&str, DbError> {
     path.to_str().ok_or(DbError::Invariant { what: "a copy's path is valid Unicode" })
 }
