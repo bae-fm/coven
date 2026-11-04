@@ -121,11 +121,11 @@ mod source_names_schema;
 #[path = "sql_versions_schema.rs"]
 mod sql_versions_schema;
 #[macro_use]
-#[path = "sqlite_snapshot_schema.rs"]
-mod sqlite_snapshot_schema;
-#[macro_use]
 #[path = "store_state_schema.rs"]
 mod store_state_schema;
+#[macro_use]
+#[path = "raise_capture_schema.rs"]
+mod raise_capture_schema;
 #[macro_use]
 #[path = "upload_schema.rs"]
 mod upload_schema;
@@ -234,15 +234,7 @@ macro_rules! coven_tables {
         coven_SQL_versions_tables!($visit);
         coven_store_state_tables!($visit);
         coven_write_boundaries_tables!($visit);
-        coven_snapshot_schema_tables!($visit);
-        $visit!(_coven_raise_captures, "
-            CREATE TABLE _coven_raise_captures (
-                audience TEXT PRIMARY KEY NOT NULL,
-                version INTEGER NOT NULL,
-                through BLOB NOT NULL CHECK(length(through)=8),
-                covers BLOB NOT NULL CHECK(length(covers)=8)
-            ) STRICT, WITHOUT ROWID;
-        ");
+        coven_raises_tables!($visit);
         coven_writes_tables!($visit);
         coven_write_headers_tables!($visit);
         $visit!(_coven_authored_parts, "

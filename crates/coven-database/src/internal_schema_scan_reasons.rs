@@ -15,6 +15,7 @@ pub(super) fn reason(statement: &Statement, relation: &str) -> Option<&'static s
     database_reason(statement, relation)
         .or_else(|| crate::store_state_tables::tests::scan_reason(file, template, sql, relation))
         .or_else(|| crate::published::tests::scan_reason(file, template, sql, relation))
+        .or_else(|| crate::raise_capture::tests::scan_reason(file, template, sql, relation))
 }
 
 fn database_reason(statement: &Statement, relation: &str) -> Option<&'static str> {
@@ -147,10 +148,6 @@ fn database_reason(statement: &Statement, relation: &str) -> Option<&'static str
     Some("rowid order with LIMIT 1 reads only the oldest queued write"),
 ("upload.rs", "SELECT rowid,device,number FROM _coven_uploads ORDER BY rowid", "_coven_uploads") =>
     Some("the queue reader lists every waiting write in insertion order"),
-("raise_capture.rs", "DELETE FROM _coven_raise_captures", "_coven_raise_captures") =>
-    Some("once per breaking migration: replace the previous unpublished capture"),
-("raise_capture.rs", "SELECT audience,version,through,covers FROM _coven_raise_captures ORDER BY audience", "_coven_raise_captures") =>
-    Some("one capture per readable audience; scheduling lists them all"),
 ("migration_snapshot.rs", "SELECT DISTINCT lower(table_name) FROM _coven_columns WHERE synced=1", "_coven_columns") =>
     Some("once per migration: discover every table with synced column metadata"),
 ("migration_receive.rs", "SELECT version,before_schema,after_schema,tables,columns FROM _coven_conversion_schemas ORDER BY version", "_coven_conversion_schemas") =>
@@ -188,12 +185,6 @@ fn database_reason(statement: &Statement, relation: &str) -> Option<&'static str
     Some("once per open: every record's cause names an error an earlier run met"),
 ("pending.rs", "DELETE FROM _coven_pending AS p WHERE NOT EXISTS(SELECT 1 FROM _coven_provider_access a WHERE a.operation=p.operation)", "p") =>
     Some("reset visits every condition; provider-obligation lookups remain indexed"),
-("raise_capture.rs", "UPDATE _coven_raise_captures SET version=?1,through=?2,covers=?3", "_coven_raise_captures") =>
-    Some("the new migration prefix replaces every audience capture"),
-("raise_capture.rs", "SELECT max(through) FROM _coven_raise_captures", "database") =>
-    Some("the eligible queue prefix includes every captured audience"),
-("raise_capture.rs", "SELECT audience,version,covers FROM _coven_raise_captures ORDER BY audience", "_coven_raise_captures") =>
-    Some("judgement reads every audience's unpublished raise"),
 ("reload_gate.rs", "SELECT audience FROM _coven_data_reloads", "_coven_data_reloads") =>
     Some("sync schedules every audience awaiting replacement data"),
 ("sequence.rs", "SELECT device,number,digest FROM _coven_last_claims ORDER BY device", "_coven_last_claims") =>

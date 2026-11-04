@@ -89,7 +89,6 @@ mod fixture {
      INSERT INTO coven_files SELECT 'file_' || i,audience,1,zeroblob(32),'device 1','files' FROM fixture;
      INSERT INTO _coven_file_references SELECT 'file_' || i,tab,key,'column_' || i FROM fixture;
      INSERT INTO _coven_unreferenced_files SELECT 'file_' || i FROM fixture;
-     INSERT INTO _coven_raise_captures SELECT 'audience_' || i,2,n,n FROM fixture;
      INSERT INTO _coven_authored_parts SELECT CAST(device || n AS BLOB),audience,x'00',1 FROM fixture;
      INSERT INTO _coven_authored_changes SELECT CAST(device || n AS BLOB),audience,tab,key,x'00' FROM fixture;
      INSERT INTO _coven_authored_admissions SELECT CAST(device || n AS BLOB),audience,tab,key,x'00' FROM fixture;
@@ -144,6 +143,7 @@ mod fixture {
         crate::store_state_tables::tests::fill_for_plans(&db);
         crate::published::tests::fill_for_plans(&db);
         crate::claim::tests::fill_for_plans(&db);
+        crate::raise_capture::tests::fill_for_plans(&db);
         crate::database::operation_tests::fill_for_plans(&db);
         crate::database::file_retention::tests::fill_for_plans(&db);
         crate::file_queue::tests::fill_for_plans(&db);
@@ -304,7 +304,7 @@ mod source {
                     | "claim_schema.rs"
                     | "published_schema.rs"
                     | "store_state_schema.rs"
-                    | "sqlite_snapshot_schema.rs"
+                    | "raise_capture_schema.rs"
                     | "database_operations_schema.rs"
                     | "database_file_retention_schema.rs"
                     | "sequence_schema.rs"

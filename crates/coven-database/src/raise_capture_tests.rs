@@ -546,3 +546,47 @@ async fn a_file_write_after_the_marker_survives_another_devices_raise() {
         db.close().await.unwrap();
     }
 }
+
+/// Fill this domain's tables from the rows of the plan audit's `fixture`
+/// table, inside its transaction (`internal_schema_scan_reasons_tests.rs`).
+pub(crate) fn fill_for_plans(db: &rusqlite::Connection) {
+    db.execute_batch(
+        "INSERT INTO _coven_raise_captures SELECT 'audience_' || i,2,n,n FROM fixture;",
+    )
+    .unwrap();
+}
+
+/// The scans this module's statements may make, with their reasons, for the
+/// plan audit (`internal_schema_scan_reasons.rs`): `template` is the statement as
+/// written, `sql` as run.
+pub(crate) fn scan_reason(
+    file: &str,
+    template: &str,
+    _sql: &str,
+    relation: &str,
+) -> Option<&'static str> {
+    match (file, template, relation) {
+        ("raise_capture.rs", "DELETE FROM _coven_raise_captures", "_coven_raise_captures") => {
+            Some("once per breaking migration: replace the previous unpublished capture")
+        }
+        (
+            "raise_capture.rs",
+            "SELECT audience,version,through,covers FROM _coven_raise_captures ORDER BY audience",
+            "_coven_raise_captures",
+        ) => Some("one capture per readable audience; scheduling lists them all"),
+        (
+            "raise_capture.rs",
+            "UPDATE _coven_raise_captures SET version=?1,through=?2,covers=?3",
+            "_coven_raise_captures",
+        ) => Some("the new migration prefix replaces every audience capture"),
+        ("raise_capture.rs", "SELECT max(through) FROM _coven_raise_captures", "database") => {
+            Some("the eligible queue prefix includes every captured audience")
+        }
+        (
+            "raise_capture.rs",
+            "SELECT audience,version,covers FROM _coven_raise_captures ORDER BY audience",
+            "_coven_raise_captures",
+        ) => Some("judgement reads every audience's unpublished raise"),
+        _ => None,
+    }
+}

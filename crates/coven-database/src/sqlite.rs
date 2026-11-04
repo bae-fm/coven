@@ -275,80 +275,74 @@ impl DatabaseConnection {
             crate::OpenStep::Migrating,
             migrations.iter().filter(|m| m.version > current).count() as u64,
         );
-        let result = self.with_profile(|db| db.transaction(|db| {
-            let crate::migration_run::MigrationRun { outcomes, marker } =
-                crate::migration_run::run(
-                    db,
-                    tables,
-                    migrations,
-                    current,
-                    supported,
-                    author.expect("writable migration"),
-                    &mut at,
-                    progress,
-                )?;
-            let breaking = outcomes
-                .iter()
-                .filter(|outcome| outcome.change == crate::MigrationChange::Breaking)
-                .map(|outcome| outcome.version)
-                .max();
-            let raises = if let Some(minimum) = breaking {
-                // The raise snapshots are captured through the marker before any
-                // later app write; with no store there is no shared version to
-                // raise, and an installation that loads its store has no marker.
-                let schema = crate::write_schema::WriteSchema::read(db, tables.to_vec())?;
-                let captured = match marker {
-                    Some(marker) => crate::raise_capture::capture(db, &schema, marker, supported)?,
-                    None => false,
-                };
-                if captured {
-                    db.internal_execute(
-                        "UPDATE _coven_snapshot_schema SET minimum=?1,publication=?2 WHERE singleton=1",
-                        (minimum, supported),
-                    )?;
-                } else {
-                    db.internal_execute(
-                        "UPDATE _coven_snapshot_schema SET minimum=?1 WHERE singleton=1",
-                        [minimum],
-                    )?;
-                }
-                true
-            } else {
-                // Only additions: a raise still waiting to publish moves to
-                // this version, captured again at it (§18.5).
-                let device = device.expect("writable migration");
-                let moved = crate::raise_capture::raise_to(db, tables, device, supported)?;
-                if moved {
-                    db.internal_execute(
-                        "UPDATE _coven_snapshot_schema SET publication=?1 WHERE singleton=1",
-                        [supported],
-                    )?;
-                }
-                moved
-            };
-            if raises {
-                if let Some(operation) = operation.filter(|_| publishes) {
-                    let new = operation(supported)?;
-                    let id = crate::operation::insert(db, &new)?;
-                    crate::operation::advance(
+        let result = self.with_profile(|db| {
+            db.transaction(|db| {
+                let crate::migration_run::MigrationRun { outcomes, marker } =
+                    crate::migration_run::run(
                         db,
-                        &crate::OperationUpdate {
-                            id,
-                            previous: 0,
-                            last_step: 1,
-                            data: new.data,
-                        },
+                        tables,
+                        migrations,
+                        current,
+                        supported,
+                        author.expect("writable migration"),
+                        &mut at,
+                        progress,
                     )?;
+                let breaking = outcomes
+                    .iter()
+                    .filter(|outcome| outcome.change == crate::MigrationChange::Breaking)
+                    .map(|outcome| outcome.version)
+                    .max();
+                let raises = if let Some(minimum) = breaking {
+                    // The raise snapshots are captured through the marker before any
+                    // later app write; with no store there is no shared version to
+                    // raise, and an installation that loads its store has no marker.
+                    let schema = crate::write_schema::WriteSchema::read(db, tables.to_vec())?;
+                    let captured = match marker {
+                        Some(marker) => {
+                            crate::raise_capture::capture(db, &schema, marker, supported)?
+                        }
+                        None => false,
+                    };
+                    crate::raise_capture::require(db, minimum)?;
+                    if captured {
+                        crate::raise_capture::publish_at(db, supported)?;
+                    }
+                    true
+                } else {
+                    // Only additions: a raise still waiting to publish moves to
+                    // this version, captured again at it (§18.5).
+                    let device = device.expect("writable migration");
+                    let moved = crate::raise_capture::raise_to(db, tables, device, supported)?;
+                    if moved {
+                        crate::raise_capture::publish_at(db, supported)?;
+                    }
+                    moved
+                };
+                if raises {
+                    if let Some(operation) = operation.filter(|_| publishes) {
+                        let new = operation(supported)?;
+                        let id = crate::operation::insert(db, &new)?;
+                        crate::operation::advance(
+                            db,
+                            &crate::OperationUpdate {
+                                id,
+                                previous: 0,
+                                last_step: 1,
+                                data: new.data,
+                            },
+                        )?;
+                    }
                 }
-            }
-            crate::row_queries::register_schema(
-                db,
-                &Schema::read(db, &crate::file_table::declared(tables))?,
-                tables,
-            )?;
-            db.refresh_hidden_rowids()?;
-            Ok(outcomes)
-        }));
+                crate::row_queries::register_schema(
+                    db,
+                    &Schema::read(db, &crate::file_table::declared(tables))?,
+                    tables,
+                )?;
+                db.refresh_hidden_rowids()?;
+                Ok(outcomes)
+            })
+        });
         result.map_err(|source| {
             MigrationError::Failed { version: at.version, name: at.name, source: Box::new(source) }
                 .into()

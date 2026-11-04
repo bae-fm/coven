@@ -80,10 +80,7 @@ pub(crate) fn capture_created(
         if header.disposition == coven_format::write::WriteDisposition::Migration {
             let version = db.schema_version()?;
             if capture(db, schema, marker, version)? {
-                db.internal_execute(
-                    "UPDATE _coven_snapshot_schema SET publication=?1 WHERE singleton=1",
-                    [version],
-                )?;
+                publish_at(db, version)?;
             }
             return Ok(());
         }
@@ -179,6 +176,40 @@ pub(crate) fn write<E>(
         return Err(DbError::CaptureChanged.into());
     }
     crate::snapshot_write::write(db, schema, id, begin, emit)
+}
+
+/// Read received writes from schema version `minimum` on, the version a
+/// breaking migration requires (§18.5).
+pub(crate) fn require(db: &DatabaseConnection, minimum: u32) -> Result<(), DbError> {
+    db.internal_execute(
+        "UPDATE _coven_snapshot_schema SET minimum=?1 WHERE singleton=1",
+        [minimum],
+    )?;
+    Ok(())
+}
+
+/// Wait for this installation's raise to publish at schema `version` before
+/// applying received writes past it (§18.5).
+pub(crate) fn publish_at(db: &DatabaseConnection, version: u32) -> Result<(), DbError> {
+    db.internal_execute(
+        "UPDATE _coven_snapshot_schema SET publication=?1 WHERE singleton=1",
+        [version],
+    )?;
+    Ok(())
+}
+
+/// A snapshot of `audience` loaded at schema `version` covers every capture
+/// of it at that version or before.
+pub(crate) fn loaded(
+    db: &DatabaseConnection,
+    audience: &Audience,
+    version: u32,
+) -> Result<(), DbError> {
+    db.internal_execute(
+        "DELETE FROM _coven_raise_captures WHERE audience=?1 AND version<=?2",
+        params![audience_text(audience), version],
+    )?;
+    Ok(())
 }
 
 pub(crate) fn discard(

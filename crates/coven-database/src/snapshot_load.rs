@@ -82,13 +82,7 @@ pub(crate) fn load<P: crate::PendingValue>(
                         &id.audience,
                     )?;
                     coverage.loaded(id.audience.clone(), header.covers)?;
-                    database.internal_execute(
-                        "DELETE FROM _coven_raise_captures WHERE audience=?1 AND version<=?2",
-                        params![
-                            crate::write_encoding::audience_text(&id.audience),
-                            header.schema_version
-                        ],
-                    )?;
+                    crate::raise_capture::loaded(database, &id.audience, header.schema_version)?;
                     for table in ["_coven_migration_losses", "_coven_migration_counted_losses"] {
                         database.internal_execute(
                             &format!("DELETE FROM {table} WHERE audience=?1"),

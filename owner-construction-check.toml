@@ -534,7 +534,7 @@ table_macros = [
     "coven_applied_sequence_tables",
     "coven_file_retention_tables",
     "coven_ended_requests_tables",
-    "coven_snapshot_schema_tables",
+    "coven_raises_tables",
 ]
 # The API re-exports the database crate's `rusqlite` so a host can name the
 # types its own SQL uses.
@@ -904,13 +904,14 @@ tables = [
 ]
 
 [[database.domains]]
-name = "snapshot schema"
+name = "raises"
 owner = "Database"
 homes = [
-    "crates/coven-database/src/sqlite.rs",
-    "crates/coven-database/src/sqlite_snapshot_schema.rs",
+    "crates/coven-database/src/raise_capture.rs",
+    "crates/coven-database/src/raise_capture_schema.rs",
 ]
 tables = [
+    "_coven_raise_captures",
     "_coven_snapshot_schema",
 ]
 
@@ -948,7 +949,6 @@ tables = [
     "_coven_operations",
     "_coven_pending",
     "_coven_provider_access",
-    "_coven_raise_captures",
     "_coven_references",
     "_coven_row_file_refs",
     "_coven_rows",
