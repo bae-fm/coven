@@ -606,3 +606,103 @@ async fn a_device_joins_with_a_breaking_migration_declared() {
     assert_eq!(titles(carol).await, [("n".to_owned(), "migrated".to_owned())]);
     network.close().await;
 }
+
+/// Ana's app updates offline, its migration retitling note `n`, and she
+/// edits `n`'s title in a write that also adds a cover, so the edit names
+/// her migration write as the title's setter and waits for the cover's
+/// upload. Ben's raise is established first. Ana's marker goes out, her
+/// edit waits on the refused upload, and Ben's next snapshot covers the
+/// marker's slot. Carol's phone then joins from that snapshot: it holds
+/// neither the marker nor the migration write's changes, and the edit,
+/// arriving after the snapshot, becomes the same lost value on her phone as
+/// on Ana's and Ben's instead of waiting forever (§9.5, §18.8).
+#[tokio::test]
+async fn a_device_joining_past_a_replaced_migration_loses_changes_built_on_it() {
+    let mut network = household().await;
+    note(&network.devices[0], "n").await;
+    wait_for_sent(&network.devices[0].handle).await;
+    network.sync(1).await;
+
+    network.devices[0].storage.set_online(false);
+    retitle(&mut network, 0).await;
+    let ana = &network.devices[0];
+    let cover = ana
+        .handle
+        .test_staged_write(
+            |batch| Ok(batch.put_file("files", vec![9; 4096], Place::Cloud)),
+            |sql, file| {
+                sql.execute("UPDATE notes SET title='edited' WHERE id='n'", [])?;
+                sql.execute("INSERT INTO covers(id,file) VALUES('album',?1)", [file])?;
+                Ok(file)
+            },
+        )
+        .await
+        .unwrap();
+
+    retitle(&mut network, 1).await;
+    for _ in 0..10 {
+        if !network.devices[1].handle.store_state().await.schema.is_empty() {
+            break;
+        }
+        network.sync(1).await;
+    }
+    assert_eq!(network.devices[1].handle.store_state().await.schema[&Audience::Store].number, 2);
+
+    let ana = &network.devices[0];
+    let mut faults = Faults::none();
+    faults
+        .create_failures
+        .insert(upload_path(ana, cover).await, (StorageFailure::QuotaExceeded, 507));
+    ana.storage.set_faults(faults).await;
+    ana.storage.set_online(true);
+    for _ in 0..10 {
+        if ana.handle.test_queued_writes().await.unwrap().len() == 1 {
+            break;
+        }
+        network.sync(0).await;
+    }
+    assert_eq!(ana.handle.test_queued_writes().await.unwrap().len(), 1);
+    network.sync(1).await;
+    let marker_slot = network.devices[1].handle.applied_slot().await;
+
+    let ben = &network.devices[1];
+    let before = crate::tests::snapshots(&ben.storage, ben.store).await.len();
+    let title = "x".repeat(1024 * 1024 + 1);
+    ben.handle
+        .write(move |sql| {
+            sql.execute("INSERT INTO notes(id,title) VALUES('long',?1)", [title])?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    for _ in 0..10 {
+        if crate::tests::snapshots(&ben.storage, ben.store).await.len() > before {
+            break;
+        }
+        network.sync(1).await;
+    }
+    assert!(crate::tests::snapshots(&ben.storage, ben.store).await.len() > before);
+    network.sync(1).await;
+
+    let ana = &network.devices[0];
+    ana.storage.set_faults(Faults::none()).await;
+    ana.handle.retry_uploads_now().await.unwrap();
+    wait_for_sent(&ana.handle).await;
+    network.sync(1).await;
+    assert!(network.devices[1].handle.applied_slot().await > marker_slot + 1);
+
+    network.update_app(retitled());
+    network
+        .join_as(2, InviteTarget::NewMember { role: MemberRole::Member, name: "Carol".into() })
+        .await;
+    network.sync(2).await;
+    network.sync(1).await;
+    let (ben, carol) = (&network.devices[1], &network.devices[2]);
+    assert!(carol.handle.pending().await.unwrap().is_empty());
+    assert_eq!(carol.handle.applied_slot().await, ben.handle.applied_slot().await);
+    assert_eq!(titles(carol).await, titles(ben).await);
+    let lost = ben.handle.lost_values().await.unwrap();
+    assert_eq!(lost.len(), 1, "{lost:?}");
+    assert_eq!(carol.handle.lost_values().await.unwrap(), lost);
+    network.close().await;
+}

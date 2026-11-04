@@ -71,6 +71,12 @@ pub(crate) fn original(db: &DatabaseConnection, source: &ChangeId) -> Result<Ori
 /// loading it, and no other device ever had them. Such a source was dropped
 /// (§9.5), so the change built on it is lost on every device instead of
 /// waiting forever.
+///
+/// A device that loaded a snapshot covering the migration write's slot has
+/// neither its part nor its header: the snapshot carries every change of a
+/// covered write its author held, and no device held these. That write is
+/// known only as a covered one, by its slot. Any write with a part holding
+/// the change would have brought it along, so its absence is the proof.
 pub(crate) fn uncarried(db: &DatabaseConnection, source: &ChangeId) -> Result<bool, DbError> {
     let write = merge_fields::encode_write_id(&source.write)?;
     if db.authored_part(&write, &audience_text(&source.row.audience))?.is_some() {
@@ -82,7 +88,10 @@ pub(crate) fn uncarried(db: &DatabaseConnection, source: &ChangeId) -> Result<bo
         Some(frame) => Some(frame.header),
         None => crate::upload::queued(db, source.write)?.map(|frame| frame.header),
     };
-    Ok(header.is_some_and(|header| header.disposition == WriteDisposition::Migration))
+    match header {
+        Some(header) => Ok(header.disposition == WriteDisposition::Migration),
+        None => Ok(crate::sequence::write_slot(db, source.write)?.is_some()),
+    }
 }
 
 /// The author's pre-write generation and cell setters of one row, named as
