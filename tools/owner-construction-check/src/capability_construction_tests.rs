@@ -510,6 +510,42 @@ fn a_static_listed_as_a_root_constructs_the_owner_it_holds() {
     );
 }
 
+/// A static is shared by all the code that names it, so one holding shared
+/// state, or a lock, directly or inside what it holds, shares that state with
+/// all of it: only a static listed as a root may.
+#[test]
+fn a_static_holding_shared_state_is_a_root() {
+    let path = "crates/app/src/registry.rs";
+    let source = "struct Registry { entries: Mutex<u32> } \
+        static STORES: LazyLock<Registry> = EMPTY; \
+        static NEXT: AtomicU64 = EMPTY; \
+        static GUARD: Mutex<()> = EMPTY; \
+        static INNER: Registry = EMPTY; \
+        static PLAIN: u32 = 1; \
+        fn counted() -> u64 { static COUNT: OnceLock<u64> = EMPTY; 0 }";
+    let policy = Policy::fixture(&format!(
+        "shared_state_types = [\"AtomicU64\", \"LazyLock\", \"OnceLock\"]\n\
+         private_state_types = [\"Mutex\"]\n\
+         [composition_roots]\n\"{path}\" = [\"STORES\"]"
+    ));
+    let found =
+        find_capability_construction_violations(&[RustFile::fixture(path, source)], &policy);
+    let remedy = "a static shares what it holds with all the code that names it; list it as a composition root when that scope, the process or a thread local's thread, is the state's own, or give the state to an owner";
+    assert_eq!(
+        found,
+        ["COUNT holds OnceLock", "GUARD holds Mutex", "INNER holds Mutex", "NEXT holds AtomicU64"]
+            .map(|holds| {
+                let (name, state) = holds.split_once(" holds ").expect("fixture");
+                Finding::new(
+                    path,
+                    1,
+                    format!("static {name} shares {state} outside a composition root"),
+                    remedy,
+                )
+            })
+    );
+}
+
 #[test]
 fn arbitrary_associated_factories_are_checked_at_the_use_site() {
     let definitions = r#"

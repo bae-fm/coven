@@ -12,6 +12,7 @@ use crate::capability_construction::construction_only_types;
 use crate::crate_code::CrateCode;
 use crate::crate_dependencies::{dependency_entries, dependency_package};
 use crate::database_boundary::schema_table_macros;
+use crate::macros::parse_macro_body;
 use crate::owner_graph::OwnerGraph;
 use crate::policy::{Database, Policy};
 use crate::sources::Workspace;
@@ -177,9 +178,9 @@ fn declared_methods(files: &[RustFile]) -> BTreeMap<(String, String, String), sy
     methods
 }
 
-/// Every `static` of the crates' production code, keyed by its file and its
-/// name: a root may name one whose value is an owner, such as a process-wide
-/// registry.
+/// Every `static` of the crates' production code, a thread local's among
+/// them, keyed by its file and its name: a root may name one whose value is
+/// an owner or shared state, such as a process-wide registry.
 fn declared_statics(files: &[RustFile]) -> BTreeSet<(String, String)> {
     struct StaticCollector<'a> {
         path: &'a str,
@@ -190,6 +191,13 @@ fn declared_statics(files: &[RustFile]) -> BTreeSet<(String, String)> {
         fn visit_item_static(&mut self, node: &syn::ItemStatic) {
             self.statics.insert((self.path.to_string(), node.ident.to_string()));
             visit::visit_item_static(self, node);
+        }
+
+        // A thread local's static is declared inside `thread_local!`.
+        fn visit_macro(&mut self, node: &syn::Macro) {
+            if let Some(body) = parse_macro_body(node) {
+                body.visit(self);
+            }
         }
     }
 

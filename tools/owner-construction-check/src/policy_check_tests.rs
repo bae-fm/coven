@@ -121,14 +121,14 @@ fn composition_roots_resolve_methods_trait_methods_free_functions_and_statics_ou
     let files = vec![
         RustFile::fixture(
             path,
-            "struct Builder; impl Builder { fn open() {} } fn restore() {} #[cfg(test)] fn fixture() {} trait Connector { fn connect(&self) -> Builder; } static REGISTRY: u8 = 0; #[cfg(test)] static FIXTURE: u8 = 0;",
+            "struct Builder; impl Builder { fn open() {} } fn restore() {} #[cfg(test)] fn fixture() {} trait Connector { fn connect(&self) -> Builder; } static REGISTRY: u8 = 0; #[cfg(test)] static FIXTURE: u8 = 0; thread_local! { static CURRENT: u8 = 0; }",
         ),
         RustFile::fixture("crates/app/src/bootstrap_tests.rs", "fn helper() {}"),
     ];
     let rows = format!(
         r#"
         [composition_roots]
-        "{path}" = ["Builder::open", "restore", "fixture", "Builder::close", "Other::open", "Connector::connect", "REGISTRY", "FIXTURE"]
+        "{path}" = ["Builder::open", "restore", "fixture", "Builder::close", "Other::open", "Connector::connect", "REGISTRY", "FIXTURE", "CURRENT"]
         "crates/app/src/bootstrap_tests.rs" = ["helper"]
         "#
     );

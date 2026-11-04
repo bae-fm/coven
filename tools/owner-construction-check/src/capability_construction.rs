@@ -100,6 +100,7 @@ pub(crate) fn find_capability_construction_violations(
             path: &file.relative_path,
             types: graph.identity.in_file(&file.relative_path),
             policy,
+            graph,
             capabilities: &capabilities,
             owners: &owners,
             resolver: &resolver,
@@ -149,6 +150,7 @@ struct ConstructionVisitor<'a> {
     path: &'a str,
     types: FileTypes<'a>,
     policy: &'a Policy,
+    graph: &'a OwnerGraph,
     capabilities: &'a BTreeSet<String>,
     owners: &'a BTreeSet<String>,
     resolver: &'a NameResolver,
@@ -405,6 +407,29 @@ impl ConstructionVisitor<'_> {
             .collect()
     }
 
+    /// A static is shared by all the code that names it, in the process or,
+    /// for a thread local, on its thread: one holding shared state or a lock
+    /// (`Policy::private_state_types`), by itself or inside what it holds,
+    /// shares that state so widely, which only a composition root decides.
+    fn check_static_state(&mut self, node: &syn::ItemStatic) {
+        let state = self.policy.shared_state_types.union(&self.policy.private_state_types);
+        let held = type_names(&node.ty, self.types)
+            .into_iter()
+            .flat_map(|name| {
+                let retained = self.graph.retained(&name);
+                std::iter::once(name).chain(retained)
+            })
+            .collect::<BTreeSet<_>>();
+        for state in state.filter(|state| held.contains(*state)) {
+            self.violations.insert(Finding::new(
+                self.path,
+                node.span().start().line,
+                format!("static {} shares {state} outside a composition root", node.ident),
+                "a static shares what it holds with all the code that names it; list it as a composition root when that scope, the process or a thread local's thread, is the state's own, or give the state to an owner",
+            ));
+        }
+    }
+
     fn check_default_derive(&mut self, name: &syn::Ident, attrs: &[syn::Attribute]) {
         for attribute in attrs {
             if derives_default(&attribute.meta) {
@@ -517,13 +542,16 @@ impl<'ast> Visit<'ast> for ConstructionVisitor<'_> {
         visit::visit_item_const(self, node);
     }
 
-    // A static listed as a root holds an owner the process shares, such as a
-    // registry of what every store in it has locked; its value is built there.
+    // A static listed as a root holds an owner or state the process shares,
+    // such as a registry of what every store in it has locked; its value is
+    // built there.
     fn visit_item_static(&mut self, node: &'ast syn::ItemStatic) {
-        let previous = self
-            .policy
-            .is_composition_root(self.path, "<free>", &node.ident.to_string())
-            .then(|| std::mem::replace(&mut self.scope, ConstructionScope::CompositionRoot));
+        let rooted = self.policy.is_composition_root(self.path, "<free>", &node.ident.to_string());
+        let previous =
+            rooted.then(|| std::mem::replace(&mut self.scope, ConstructionScope::CompositionRoot));
+        if !rooted {
+            self.check_static_state(node);
+        }
         self.check_item_type(&node.ty, node.span());
         visit::visit_item_static(self, node);
         if let Some(previous) = previous {

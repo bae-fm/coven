@@ -10069,8 +10069,11 @@ the database owner and the storage owner as arguments and opens neither itself.
 **Composition roots.** One authoritative list in the checker's policy names every
 place allowed to construct owners or start long-lived work. Each entry names an
 exact source file, type and method (or free function, or static), not a whole
-file or a type-name suffix. A static is listed when what it holds is shared by
-the whole process, as the registry of the stores' locks is (F.4). A trait's
+file or a type-name suffix. All the code naming a static shares what it holds,
+in the process or, for a thread local, on its thread. So a static holding an
+owner, shared state or a lock, by itself or inside what it holds, is listed
+once that scope is its state's own, as the registry of the stores' locks is the
+process's (F.4); one not listed fails the check. A trait's
 method is named where the trait declares it: the storage connector's `connect`
 makes each connection, in every connector. The roots include opening and
 bootstrap, provider connection construction, owner constructors and task

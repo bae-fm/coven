@@ -684,7 +684,12 @@ tables = [
 # progress watch holds at each reading.
 # The work one test measures, shared by its task and the blocking calls it
 # binds; the measurement in effect, and the one it replaced, are tasks.
-"crates/coven-foundation/src/test_work.rs" = ["Counter::new"]
+"crates/coven-foundation/src/test_work.rs" = [
+    "Counter::new",
+    # The measurement in effect on this thread, which the scopes a test
+    # enters set and put back: its scope is the thread.
+    "ACTIVE",
+]
 "crates/coven-foundation/src/progress.rs" = [
     "RecordingClock::new",
     # Where an owner reports each run of one kind of operation, made with
@@ -725,6 +730,9 @@ tables = [
 "crates/coven-foundation/src/network_watch_default.rs" = ["DefaultNetwork::new"]
 # Both store listings read the directory on a blocking task.
 "crates/coven-foundation/src/files/layout.rs" = ["StoreDirectories::listed"]
+# The kernel's type number for file objects, the same for every handle in
+# the process, read once.
+"crates/coven-foundation/src/files/open_files.rs" = ["FILE_TYPE"]
 "crates/coven-foundation/src/files/lock_registry.rs" = [
     # The process's registry of every store's locks: its scope is the
     # process, like the OS file locks it tracks (F.4).
@@ -757,6 +765,11 @@ tables = [
     "for_deletion",
 ]
 
+# The keychain service the app registers once for the process (E1).
+"crates/coven-crypto/src/custody/keychain.rs" = ["SERVICE_NAME"]
+# Serializes every change of the person's entries: the native keychain
+# holding them is one per process.
+"crates/coven-crypto/src/custody/person_entries.rs" = ["CHANGES"]
 "crates/coven-crypto/src/custody/key_session.rs" = [
     "KeySession::open",
     "KeySession::store",
@@ -779,6 +792,11 @@ tables = [
 
 # The work a test counts on a database, shared by its writer and readers.
 "crates/coven-database/src/work_counts.rs" = ["WorkCounter::new"]
+# The next commit scope's number, unique across the process.
+"crates/coven-database/src/commit_scope.rs" = ["NEXT"]
+# The folder SQLite keeps temporary tables in, a setting of SQLite's that
+# holds for the whole process (§21.2).
+"crates/coven-database/src/sqlite_temporary.rs" = ["TEMPORARY"]
 # A connection's authorizer, whose state its SQLite hooks share: one judging
 # for the handle that holds the writer lock, one for a read-only handle.
 "crates/coven-database/src/authorization.rs" = [
