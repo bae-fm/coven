@@ -64,6 +64,14 @@ impl StoreState {
     pub fn readable_circles(&self, member: &MemberId) -> BTreeSet<CircleId> {
         self.circles.keys().copied().filter(|circle| self.reads_circle(*circle, member)).collect()
     }
+
+    /// Every audience `member` reads: the store's, then each of
+    /// [`Self::readable_circles`] in id order.
+    pub fn readable_audiences(&self, member: &MemberId) -> Vec<Audience> {
+        std::iter::once(Audience::Store)
+            .chain(self.readable_circles(member).into_iter().map(Audience::Circle))
+            .collect()
+    }
 }
 
 /// A store's identity and current name (§10).

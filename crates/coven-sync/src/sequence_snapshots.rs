@@ -10,7 +10,6 @@ use crate::{
 use coven_crypto::{MemberIdentity, StoreKeyring};
 use coven_database::operation_kind;
 use coven_format::sequence::Purpose;
-use coven_merge::Audience;
 use std::collections::BTreeSet;
 
 /// The sealed slot bytes that request an audience's first snapshot (§16.2).
@@ -159,17 +158,7 @@ impl SequenceSync {
             .into_iter()
             .map(|capture| capture.audience)
             .collect();
-        let audiences: Vec<_> = std::iter::once(Audience::Store)
-            .chain(
-                session
-                    .history
-                    .state
-                    .readable_circles(&member.member())
-                    .into_iter()
-                    .map(Audience::Circle),
-            )
-            .collect();
-        for audience in audiences {
+        for audience in session.history.state.readable_audiences(&member.member()) {
             if pending.contains(&audience) || raising.contains(&audience) {
                 continue;
             }

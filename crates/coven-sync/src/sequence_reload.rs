@@ -610,14 +610,10 @@ impl SequenceSync {
             return release(starts, Err(error)).await;
         }
         starts.extend(
-            std::iter::once(Audience::Store)
-                .chain(
-                    history
-                        .state
-                        .readable_circles(&member.member())
-                        .into_iter()
-                        .map(Audience::Circle),
-                )
+            history
+                .state
+                .readable_audiences(&member.member())
+                .into_iter()
                 .filter(|audience| !required.contains(audience))
                 .map(ReloadStart::Current),
         );

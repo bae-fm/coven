@@ -40,9 +40,7 @@ pub(crate) fn capture(
     else {
         return Ok(false);
     };
-    for selected in std::iter::once(Audience::Store)
-        .chain(state.readable_circles(&member).into_iter().map(Audience::Circle))
-    {
+    for selected in state.readable_audiences(&member) {
         db.internal_execute("INSERT INTO _coven_raise_captures(audience,version,through,covers) VALUES(?1,?2,?3,?4)",params![audience_text(&selected),version,marker.number.to_be_bytes(),crate::sequence::applied(db)?.to_be_bytes()])?;
     }
     Ok(true)

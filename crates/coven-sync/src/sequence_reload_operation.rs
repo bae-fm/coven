@@ -21,8 +21,10 @@ impl OperationState for ReloadWork {}
 
 /// The newest usable announcement of each readable audience (§16.2).
 fn selections(history: &History, member: &MemberIdentity) -> Vec<Selection> {
-    std::iter::once(Audience::Store)
-        .chain(history.state.readable_circles(&member.member()).into_iter().map(Audience::Circle))
+    history
+        .state
+        .readable_audiences(&member.member())
+        .into_iter()
         .map(|audience| {
             match history.announcements.iter().rev().find(|(_, announcement)| {
                 announcement.snapshot.audience == audience && history.usable(announcement)
