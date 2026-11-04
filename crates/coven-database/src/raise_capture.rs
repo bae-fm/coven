@@ -59,7 +59,7 @@ pub(crate) fn raise_to(
     }
     let newest: Vec<u8> = db.query_row(
         &format!("SELECT max(number) FROM _coven_writes WHERE {WRITE_DEVICE_SQL}=?1"),
-        [device.0.to_be_bytes()],
+        [device],
         |r| r.get(0),
     )?;
     db.internal_execute(

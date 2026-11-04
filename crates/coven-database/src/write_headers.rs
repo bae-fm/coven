@@ -20,7 +20,7 @@ pub(crate) fn retain(db: &DatabaseConnection, header: &WriteHeaderFrame) -> Resu
     }
     db.internal_execute(
         "INSERT INTO _coven_write_headers(device,number,header) VALUES(?1,?2,?3)",
-        params![id.device.0.to_be_bytes(), id.number.to_be_bytes(), bytes],
+        params![id.device, id.number.to_be_bytes(), bytes],
     )?;
     Ok(())
 }
@@ -35,7 +35,7 @@ pub(crate) fn read(
 ) -> Result<Option<WriteHeaderFrame>, DbError> {
     let bytes: Option<Vec<u8>> = db.query_row(
         "SELECT (SELECT header FROM _coven_write_headers WHERE device=?1 AND number=?2)",
-        params![id.device.0.to_be_bytes(), id.number.to_be_bytes()],
+        params![id.device, id.number.to_be_bytes()],
         |row| row.get(0),
     )?;
     bytes

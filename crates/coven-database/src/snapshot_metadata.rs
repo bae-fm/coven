@@ -58,7 +58,7 @@ impl<'a> SnapshotMetadata<'a> {
         Ok(())
     }
     pub(crate) fn stage(&self, write: &AppliedWrite) -> Result<(), DbError> {
-        self.database.internal_execute("INSERT INTO temp._coven_snapshot_writes(source,device,number,timestamp,read_through,slot) VALUES(?1,?2,?3,?4,?5,?6)", params![self.source,write.id.device.0.to_be_bytes().as_slice(),write.id.number.to_be_bytes().as_slice(),encoded(merge_fields::encode_timestamp(&write.timestamp))?,write.read_through.to_be_bytes().as_slice(),write.slot.0.to_be_bytes().as_slice()])?;
+        self.database.internal_execute("INSERT INTO temp._coven_snapshot_writes(source,device,number,timestamp,read_through,slot) VALUES(?1,?2,?3,?4,?5,?6)", params![self.source,write.id.device,write.id.number.to_be_bytes().as_slice(),encoded(merge_fields::encode_timestamp(&write.timestamp))?,write.read_through.to_be_bytes().as_slice(),write.slot.0.to_be_bytes().as_slice()])?;
         Ok(())
     }
 
@@ -66,7 +66,7 @@ impl<'a> SnapshotMetadata<'a> {
         if let Some(write) = self.read.borrow().get(&id) {
             return Ok(Some(write.clone()));
         }
-        let row = self.database.query("SELECT device,number,timestamp,read_through,slot FROM temp._coven_snapshot_writes WHERE source=?1 AND device=?2 AND number=?3", params![self.source,id.device.0.to_be_bytes().as_slice(),id.number.to_be_bytes().as_slice()], applied)?;
+        let row = self.database.query("SELECT device,number,timestamp,read_through,slot FROM temp._coven_snapshot_writes WHERE source=?1 AND device=?2 AND number=?3", params![self.source,id.device,id.number.to_be_bytes().as_slice()], applied)?;
         let write = row.into_iter().next();
         if let Some(write) = &write {
             self.read.borrow_mut().insert(id, write.clone());
@@ -131,7 +131,7 @@ impl<'a> SnapshotMetadata<'a> {
 /// device, number, timestamp, read-through and slot.
 pub(crate) fn applied(r: &rusqlite::Row<'_>) -> rusqlite::Result<AppliedWrite> {
     Ok(AppliedWrite {
-        id: WriteId { device: DeviceId(counter(r.get(0)?)), number: counter(r.get(1)?) },
+        id: WriteId { device: r.get::<_, DeviceId>(0)?, number: counter(r.get(1)?) },
         timestamp: decoded(merge_fields::decode_timestamp(&r.get::<_, Vec<u8>>(2)?))?,
         read_through: counter(r.get(3)?),
         slot: coven_merge::Slot(counter(r.get(4)?)),

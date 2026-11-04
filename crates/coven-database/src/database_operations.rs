@@ -290,7 +290,7 @@ impl Database {
         self.call(move |inner| {
             inner.access.with_committed(|db| {
                 db.query("SELECT device FROM _coven_requests_ended", [], |r| {
-                    Ok(DeviceId(u64::from_be_bytes(r.get(0)?)))
+                    r.get::<_, DeviceId>(0)
                 })
             })
         })
@@ -306,7 +306,7 @@ impl Database {
                 writer.transaction(|db| {
                     db.internal_execute(
                         "INSERT INTO _coven_requests_ended(device) VALUES(?1)",
-                        [device.0.to_be_bytes()],
+                        [device],
                     )
                     .map(drop)
                 })
@@ -321,7 +321,7 @@ impl Database {
         self.call(move |inner| {
             inner.access.with_committed(|db| {
                 db.query("SELECT device FROM _coven_gone_storage_cleared", [], |r| {
-                    Ok(DeviceId(u64::from_be_bytes(r.get(0)?)))
+                    r.get::<_, DeviceId>(0)
                 })
             })
         })
@@ -339,7 +339,7 @@ impl Database {
                 writer.transaction(|db| {
                     db.internal_execute(
                         "INSERT INTO _coven_gone_storage_cleared(device) VALUES(?1) ON CONFLICT DO NOTHING",
-                        [device.0.to_be_bytes()],
+                        [device],
                     )
                     .map(drop)
                 })

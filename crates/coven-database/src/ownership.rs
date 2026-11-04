@@ -158,7 +158,7 @@ pub(crate) fn member(
 ) -> Result<Option<MemberId>, DbError> {
     let member: Option<Vec<u8>> = db.query_row(
         "SELECT (SELECT member FROM _coven_devices WHERE device=?1)",
-        [device.0.to_be_bytes().as_slice()],
+        [device],
         |r| r.get(0),
     )?;
     member

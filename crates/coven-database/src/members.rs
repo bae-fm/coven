@@ -1,9 +1,7 @@
 //! Members, devices and circles as the committed prefix has them (E9, E12).
 //! Each call and its live subscription run the same query.
 
-use crate::{
-    sqlite::DatabaseConnection, store_state::DeviceState, write_encoding::counter, DbError,
-};
+use crate::{sqlite::DatabaseConnection, store_state::DeviceState, DbError};
 use coven_crypto::{SealingKey, SigningKey};
 use coven_format::admin::{MemberPublicKeys, MemberRole};
 use coven_foundation::id_source::{CircleId, DeviceId, MemberId};
@@ -63,11 +61,7 @@ use crate::store_state_tables::{circle, member};
 /// The member using this device, once its registration has applied.
 fn me(db: &DatabaseConnection, device: DeviceId) -> Result<Option<MemberId>, DbError> {
     Ok(db
-        .query(
-            "SELECT member FROM _coven_devices WHERE device=?1",
-            [device.0.to_be_bytes().as_slice()],
-            |r| member(r, 0),
-        )?
+        .query("SELECT member FROM _coven_devices WHERE device=?1", [device], |r| member(r, 0))?
         .pop())
 }
 
@@ -106,7 +100,7 @@ pub(crate) fn members(
                 "SELECT device,name,state FROM _coven_devices WHERE member=?1 ORDER BY device",
                 [id.0.as_bytes().as_slice()],
                 |r| {
-                    let id = DeviceId(counter(r.get(0)?));
+                    let id = r.get::<_, DeviceId>(0)?;
                     Ok(DeviceInfo {
                         id,
                         is_self: id == device,

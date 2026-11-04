@@ -119,7 +119,7 @@ pub(crate) fn retain_loss(
     let mut paths = BTreeSet::new();
     loss(record, &mut paths);
     for (device, file) in &paths {
-        db.internal_execute("INSERT INTO _coven_row_file_refs(device,file,table_name,key) VALUES(?1,?2,?3,?4) ON CONFLICT DO NOTHING",params![device.0.to_be_bytes(),file.0.as_bytes(),record.row.table,record.row.key])?;
+        db.internal_execute("INSERT INTO _coven_row_file_refs(device,file,table_name,key) VALUES(?1,?2,?3,?4) ON CONFLICT DO NOTHING",params![device,file.0.as_bytes(),record.row.table,record.row.key])?;
     }
     let mut files = BTreeSet::new();
     loss_files(schema, record, |_, _| true, &mut files);
@@ -289,25 +289,20 @@ fn refresh_record(
         .query(
             "SELECT device,file FROM _coven_row_file_refs WHERE table_name=?1 AND key=?2",
             params![key.0, key.1],
-            |r| {
-                Ok((
-                    DeviceId(u64::from_be_bytes(r.get(0)?)),
-                    FileId(uuid::Uuid::from_bytes(r.get(1)?)),
-                ))
-            },
+            |r| Ok((r.get::<_, DeviceId>(0)?, FileId(uuid::Uuid::from_bytes(r.get(1)?)))),
         )?
         .into_iter()
         .collect();
     for (device, file) in previous.difference(&references) {
         db.internal_execute(
             "DELETE FROM _coven_row_file_refs WHERE device=?1 AND file=?2 AND table_name=?3 AND key=?4",
-            params![device.0.to_be_bytes(), file.0.as_bytes(), key.0, key.1],
+            params![device, file.0.as_bytes(), key.0, key.1],
         )?;
     }
     for (device, file) in references.difference(&previous) {
         db.internal_execute(
             "INSERT INTO _coven_row_file_refs(device,file,table_name,key) VALUES(?1,?2,?3,?4)",
-            params![device.0.to_be_bytes(), file.0.as_bytes(), key.0, key.1],
+            params![device, file.0.as_bytes(), key.0, key.1],
         )?;
     }
     let id = file_table::file_of_key(&key.1)?;
@@ -326,7 +321,7 @@ fn refresh_record(
             params![
                 id,
                 namespace,
-                location.uploader().0.to_be_bytes(),
+                location.uploader(),
                 location.object().0.as_bytes(),
                 crate::database::file_database::file_cache_id(location.uploader(), location.object()),
                 hash.as_bytes().as_slice()
@@ -493,7 +488,7 @@ pub(crate) fn queued(
         }
     }
     for (device, file) in references {
-        db.internal_execute("INSERT INTO _coven_queued_file_refs(device,file,writer,number) VALUES(?1,?2,?3,?4) ON CONFLICT DO NOTHING",params![device.0.to_be_bytes(),file.0.as_bytes(),record.header.position.device.0.to_be_bytes(),record.header.position.number.to_be_bytes()])?;
+        db.internal_execute("INSERT INTO _coven_queued_file_refs(device,file,writer,number) VALUES(?1,?2,?3,?4) ON CONFLICT DO NOTHING",params![device,file.0.as_bytes(),record.header.position.device,record.header.position.number.to_be_bytes()])?;
     }
     Ok(())
 }

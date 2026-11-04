@@ -163,7 +163,7 @@ fn oldest(database: &DatabaseConnection) -> Result<Option<Oldest>, DbError> {
                 Ok(Oldest {
                     rowid: r.get(0)?,
                     write: WriteId {
-                        device: DeviceId(counter(r.get(1)?)),
+                        device: r.get::<_, DeviceId>(1)?,
                         number: counter(r.get(2)?),
                     },
                     keys: r.get(3)?,
@@ -222,14 +222,11 @@ fn batch(
         "SELECT u.rowid,u.device,u.number,k.sealing_keys FROM _coven_uploads u
         LEFT JOIN _coven_upload_keys k ON k.device=u.device AND k.number=u.number
         WHERE u.device=?1 AND u.number<=?2 ORDER BY u.number",
-        params![device.0.to_be_bytes(), through.to_be_bytes()],
+        params![device, through.to_be_bytes()],
         |row| {
             Ok(Oldest {
                 rowid: row.get(0)?,
-                write: WriteId {
-                    device: DeviceId(counter(row.get(1)?)),
-                    number: counter(row.get(2)?),
-                },
+                write: WriteId { device: row.get::<_, DeviceId>(1)?, number: counter(row.get(2)?) },
                 keys: row.get(3)?,
             })
         },
@@ -266,7 +263,7 @@ pub(crate) fn prepare_batch<E: From<DbError> + From<coven_format::Error>>(
 fn keep_keys(database: &DatabaseConnection, write: WriteId, keys: &[u8]) -> Result<(), DbError> {
     database.internal_execute(
         "INSERT INTO _coven_upload_keys(device,number,sealing_keys) VALUES(?1,?2,?3)",
-        params![write.device.0.to_be_bytes(), write.number.to_be_bytes(), keys],
+        params![write.device, write.number.to_be_bytes(), keys],
     )?;
     Ok(())
 }
@@ -291,7 +288,7 @@ pub(crate) fn queued(
     let Some(rowid) = database
         .query(
             "SELECT rowid FROM _coven_uploads WHERE device=?1 AND number=?2",
-            params![write.device.0.to_be_bytes(), write.number.to_be_bytes()],
+            params![write.device, write.number.to_be_bytes()],
             |r| r.get::<_, i64>(0),
         )?
         .pop()
@@ -314,10 +311,7 @@ pub(crate) fn each_plaintext(
         |row| {
             Ok(Oldest {
                 rowid: row.get(0)?,
-                write: WriteId {
-                    device: DeviceId(counter(row.get(1)?)),
-                    number: counter(row.get(2)?),
-                },
+                write: WriteId { device: row.get::<_, DeviceId>(1)?, number: counter(row.get(2)?) },
                 keys: None,
             })
         },
@@ -366,11 +360,10 @@ pub(crate) fn sendable_through(
     db: &DatabaseConnection,
     device: DeviceId,
 ) -> Result<Option<u64>, DbError> {
-    let newest = db.query_row(
-        "SELECT max(number) FROM _coven_uploads WHERE device=?1",
-        [device.0.to_be_bytes()],
-        |r| r.get::<_, Option<Vec<u8>>>(0),
-    )?;
+    let newest =
+        db.query_row("SELECT max(number) FROM _coven_uploads WHERE device=?1", [device], |r| {
+            r.get::<_, Option<Vec<u8>>>(0)
+        })?;
     let Some(newest) = newest.map(counter) else {
         return Ok(None);
     };
@@ -391,7 +384,7 @@ pub(crate) fn unconfirmed(
         .query(
             &format!("SELECT u.number FROM _coven_uploads u JOIN _coven_writes w ON {WRITE_DEVICE_SQL}=u.device AND w.number=u.number WHERE u.device=?1 AND u.number<=?2 AND w.slot IS NULL ORDER BY u.number LIMIT 1"),
             params![
-                through.device.0.to_be_bytes().as_slice(),
+                through.device,
                 through.number.to_be_bytes().as_slice()
             ],
             |r| {

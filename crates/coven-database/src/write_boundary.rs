@@ -104,7 +104,7 @@ pub(crate) fn record(database: &DatabaseConnection, boundary: &Boundary) -> Resu
             kind,
             version,
             audience_text(&snapshot.audience),
-            snapshot.device.0.to_be_bytes().as_slice(),
+            snapshot.device,
             snapshot.number.to_be_bytes().as_slice()
         ],
     )?;
@@ -189,7 +189,7 @@ fn retained(database: &DatabaseConnection) -> Result<Vec<RetainedBoundary>, DbEr
         |row| {
             let snapshot = SnapshotId {
                 audience: audience(&row.get::<_, String>(2)?)?,
-                device: DeviceId(counter(row.get(3)?)),
+                device: row.get::<_, DeviceId>(3)?,
                 number: counter(row.get(4)?),
             };
             let entry = crate::store_state_tables::slot(row, 5)?;

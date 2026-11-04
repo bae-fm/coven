@@ -92,7 +92,7 @@ fn metadata(db: &DatabaseConnection) -> Result<Option<Claim>, DbError> {
             (None,Some(id)) => ClaimWork::Operation(OperationId(id)),
             _ => return Err(rusqlite::Error::InvalidQuery),
         };
-        Ok(Claim { device:DeviceId(counter(r.get(0)?)), number:counter(r.get(1)?), work,
+        Ok(Claim { device:r.get::<_, DeviceId>(0)?, number:counter(r.get(1)?), work,
             attempts:Vec::new(), settlement:settlement(r.get(4)?)? })
     }).map(|mut rows| rows.pop())
 }
@@ -100,7 +100,7 @@ fn metadata(db: &DatabaseConnection) -> Result<Option<Claim>, DbError> {
 pub(crate) fn current(db: &DatabaseConnection) -> Result<Option<Claim>, DbError> {
     metadata(db)?.map(|mut claim| {
         claim.attempts = db.query("SELECT path FROM _coven_claim_attempts WHERE device=?1 AND number=?2 ORDER BY attempt",
-            params![claim.device.0.to_be_bytes().as_slice(),claim.number.to_be_bytes().as_slice()], |r| {
+            params![claim.device,claim.number.to_be_bytes().as_slice()], |r| {
                 let path:String=r.get(0)?;
                 ObjectPath::parse(&path).map_err(|e|crate::write_encoding::decode_failure(0,rusqlite::types::Type::Text,e))
             })?;
@@ -111,7 +111,7 @@ pub(crate) fn current(db: &DatabaseConnection) -> Result<Option<Claim>, DbError>
 pub(crate) fn reserved(db: &DatabaseConnection, device: DeviceId) -> Result<u64, DbError> {
     let previous: Option<Vec<u8>> = db.query_row(
         "SELECT (SELECT number FROM _coven_claim_counters WHERE device=?1)",
-        [device.0.to_be_bytes().as_slice()],
+        [device],
         |r| r.get(0),
     )?;
     Ok(previous.map(counter).unwrap_or(0))
@@ -136,9 +136,9 @@ pub(crate) fn begin<R: Read>(
         ClaimWork::Operation(operation) => (None, Some(operation.0)),
     };
     db.internal_execute("INSERT INTO _coven_claim_counters(device,number) VALUES(?1,?2) ON CONFLICT(device) DO UPDATE SET number=excluded.number",
-        params![device.0.to_be_bytes().as_slice(),number.to_be_bytes().as_slice()])?;
+        params![device,number.to_be_bytes().as_slice()])?;
     db.internal_execute("INSERT INTO _coven_claim_journal(device,number,through,operation,settlement,singleton) VALUES(?1,?2,?3,?4,'unknown',1)",
-        params![device.0.to_be_bytes().as_slice(),number.to_be_bytes().as_slice(),through,operation])?;
+        params![device,number.to_be_bytes().as_slice(),through,operation])?;
     let path = prepared.attempt.path.clone();
     append(db, device, number, prepared)?;
     if let ClaimWork::Writes(through) = work {
@@ -146,11 +146,7 @@ pub(crate) fn begin<R: Read>(
             "INSERT INTO _coven_upload_claims(device,number,claim)
              SELECT device,number,?1 FROM _coven_uploads WHERE device=?2 AND number<=?3
              ON CONFLICT(device,number) DO UPDATE SET claim=excluded.claim",
-            params![
-                number.to_be_bytes().as_slice(),
-                device.0.to_be_bytes().as_slice(),
-                through.to_be_bytes().as_slice()
-            ],
+            params![number.to_be_bytes().as_slice(), device, through.to_be_bytes().as_slice()],
         )?;
     }
     Ok(Claim { device, number, work, attempts: vec![path], settlement: ClaimSettlement::Unknown })
@@ -164,10 +160,10 @@ fn append(
 ) -> Result<(), DbError> {
     let crate::claim_preparation::PreparedClaim { mut attempt, digest, size } = prepared;
     let ordinal: i64 = db.query_row("SELECT coalesce(max(attempt),0)+1 FROM _coven_claim_attempts WHERE device=?1 AND number=?2",
-        params![device.0.to_be_bytes(),number.to_be_bytes()], |r|r.get(0))?;
+        params![device,number.to_be_bytes()], |r|r.get(0))?;
     db.internal_execute(
         "INSERT INTO _coven_claim_attempts(device,number,attempt,path) VALUES(?1,?2,?3,?4)",
-        params![device.0.to_be_bytes(), number.to_be_bytes(), ordinal, attempt.path.as_str()],
+        params![device, number.to_be_bytes(), ordinal, attempt.path.as_str()],
     )?;
     for chunk in 0i64.. {
         let bytes = read_chunk(&mut attempt.bytes)?;
@@ -175,12 +171,12 @@ fn append(
             break;
         }
         db.internal_execute("INSERT INTO _coven_claim_chunks(device,number,attempt,chunk,bytes) VALUES(?1,?2,?3,?4,?5)",
-            params![device.0.to_be_bytes(),number.to_be_bytes(),ordinal,chunk,bytes])?;
+            params![device,number.to_be_bytes(),ordinal,chunk,bytes])?;
     }
     db.internal_execute(
         "UPDATE _coven_claim_attempts SET digest=?4,size=?5 WHERE device=?1 AND number=?2 AND attempt=?3",
         params![
-            device.0.to_be_bytes(),
+            device,
             number.to_be_bytes(),
             ordinal,
             digest.as_bytes(),
@@ -217,7 +213,7 @@ impl Iterator for ClaimBytes<'_> {
             return None;
         }
         let bytes = self.db.query_row("SELECT (SELECT bytes FROM _coven_claim_chunks WHERE device=?1 AND number=?2 AND attempt=?3 AND chunk=?4)",
-            params![self.device.0.to_be_bytes(),self.number.to_be_bytes(),self.attempt,self.chunk], |r|r.get::<_,Option<Vec<u8>>>(0));
+            params![self.device,self.number.to_be_bytes(),self.attempt,self.chunk], |r|r.get::<_,Option<Vec<u8>>>(0));
         match bytes {
             Ok(Some(bytes)) => {
                 self.chunk += 1;
@@ -242,7 +238,7 @@ pub(crate) fn read_attempt<T, E: From<DbError>>(
     let claim = metadata(db)?.ok_or(DbError::NoClaim)?;
     let attempt = db.query_row(
         "SELECT max(attempt) FROM _coven_claim_attempts WHERE device=?1 AND number=?2",
-        params![claim.device.0.to_be_bytes(), claim.number.to_be_bytes()],
+        params![claim.device, claim.number.to_be_bytes()],
         |r| r.get(0),
     )?;
     consume(ClaimBytes {
@@ -316,7 +312,7 @@ pub(crate) fn settle(db: &DatabaseConnection, read: ClaimRead) -> Result<ClaimSe
             } else {
                 let attempted_digest: Vec<u8> = db.query_row(
                     "SELECT digest FROM _coven_claim_attempts WHERE device=?1 AND number=?2 ORDER BY attempt DESC LIMIT 1",
-                    params![claim.device.0.to_be_bytes(), claim.number.to_be_bytes()],
+                    params![claim.device, claim.number.to_be_bytes()],
                     |r| r.get(0),
                 )?;
                 if digest.as_ref().map(|value| value.as_slice())
@@ -354,7 +350,7 @@ pub(crate) fn landed_operation(
          WHERE a.device=?1 AND a.number=?2
              AND a.attempt=(SELECT max(attempt) FROM _coven_claim_attempts
                  WHERE device=?1 AND number=?2)",
-        params![claim.device.0.to_be_bytes(), claim.number.to_be_bytes()],
+        params![claim.device, claim.number.to_be_bytes()],
         |r| r.get::<_, String>(0),
     )?;
     let Some(path) = found.into_iter().next() else {
@@ -383,7 +379,7 @@ pub(crate) fn finish(db: &DatabaseConnection) -> Result<(), DbError> {
         ClaimSettlement::Landed if matches!(claim.work, ClaimWork::Writes(_)) => {
             let unconsumed: bool = db.query_row(
                 &format!("SELECT EXISTS(SELECT 1 FROM _coven_upload_claims u LEFT JOIN _coven_writes w ON {WRITE_DEVICE_SQL}=u.device AND w.number=u.number WHERE u.device=?1 AND u.claim=?2 AND w.slot IS NULL)"),
-                params![claim.device.0.to_be_bytes(), claim.number.to_be_bytes()],
+                params![claim.device, claim.number.to_be_bytes()],
                 |r| r.get(0),
             )?;
             if unconsumed {
@@ -392,10 +388,7 @@ pub(crate) fn finish(db: &DatabaseConnection) -> Result<(), DbError> {
             db.internal_execute(
                 "DELETE FROM _coven_uploads WHERE device=?1 AND number IN
                  (SELECT number FROM _coven_upload_claims WHERE device=?1 AND claim=?2)",
-                params![
-                    claim.device.0.to_be_bytes().as_slice(),
-                    claim.number.to_be_bytes().as_slice()
-                ],
+                params![claim.device, claim.number.to_be_bytes().as_slice()],
             )?;
         }
         _ => (),
@@ -435,13 +428,13 @@ pub struct ClaimUpload {
 pub(crate) fn upload(db: &DatabaseConnection) -> Result<ClaimUpload, DbError> {
     let claim = metadata(db)?.ok_or(DbError::NoClaim)?;
     db.query_row("SELECT size,session FROM _coven_claim_attempts WHERE device=?1 AND number=?2 ORDER BY attempt DESC LIMIT 1",
-        params![claim.device.0.to_be_bytes(), claim.number.to_be_bytes()], |row| Ok(ClaimUpload {size: counter(row.get(0)?), session: row.get(1)?}))
+        params![claim.device, claim.number.to_be_bytes()], |row| Ok(ClaimUpload {size: counter(row.get(0)?), session: row.get(1)?}))
 }
 
 pub(crate) fn save_upload(db: &DatabaseConnection, session: Vec<u8>) -> Result<(), DbError> {
     let claim = metadata(db)?.ok_or(DbError::NoClaim)?;
     db.internal_execute("UPDATE _coven_claim_attempts SET session=?3 WHERE device=?1 AND number=?2 AND attempt=(SELECT max(attempt) FROM _coven_claim_attempts WHERE device=?1 AND number=?2)",
-        params![claim.device.0.to_be_bytes(), claim.number.to_be_bytes(), session])?;
+        params![claim.device, claim.number.to_be_bytes(), session])?;
     Ok(())
 }
 
@@ -457,7 +450,7 @@ pub(crate) fn range(
     let chunk_size = coven_format::chunks::CHUNK_SIZE as u64;
     let end = offset.checked_add(length as u64).ok_or(DbError::DamagedDatabase)?;
     let pieces = db.query("SELECT chunk,bytes FROM _coven_claim_chunks WHERE device=?1 AND number=?2 AND attempt=(SELECT max(attempt) FROM _coven_claim_attempts WHERE device=?1 AND number=?2) AND chunk>=?3 AND chunk<=?4 ORDER BY chunk",
-        params![claim.device.0.to_be_bytes(), claim.number.to_be_bytes(), (offset / chunk_size) as i64, ((end-1) / chunk_size) as i64],
+        params![claim.device, claim.number.to_be_bytes(), (offset / chunk_size) as i64, ((end-1) / chunk_size) as i64],
         |row| Ok((row.get::<_,i64>(0)? as u64, row.get::<_,Vec<u8>>(1)?)))?;
     let mut bytes = Vec::with_capacity(length);
     for (index, piece) in pieces {

@@ -383,7 +383,7 @@ impl<'a> MergeStore<'a> {
                 &newest_read(),
                 params![
                     record.header.read_through.to_be_bytes().as_slice(),
-                    record.header.position.device.0.to_be_bytes().as_slice(),
+                    record.header.position.device,
                     record.header.position.number.to_be_bytes().as_slice()
                 ],
                 |r| {

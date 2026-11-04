@@ -482,7 +482,7 @@ fn unordered(
     let timestamp = timestamp(latest, now, device)?;
     let previous: Option<Vec<u8>> = database.query_row(
         &format!("SELECT max(number) FROM _coven_writes WHERE {WRITE_DEVICE_SQL}=?1"),
-        [device.0.to_be_bytes().as_slice()],
+        [device],
         |r| r.get(0),
     )?;
     let number =

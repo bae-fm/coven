@@ -697,7 +697,7 @@ impl RecordStaging<'_> {
                     row.key,
                     audience_text(&row.audience),
                     earlier.to_be_bytes().as_slice(),
-                    write.device.0.to_be_bytes().as_slice(),
+                    write.device,
                     write.number.to_be_bytes().as_slice()
                 ],
             )?;

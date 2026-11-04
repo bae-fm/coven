@@ -11,12 +11,12 @@ pub(crate) fn capture(
     marker: coven_merge::WriteId,
     version: u32,
 ) -> Result<(), DbError> {
-    db.internal_execute("INSERT INTO _coven_migration_prefix(singleton,device,through,version) VALUES(1,?1,?2,?3) ON CONFLICT(singleton) DO UPDATE SET device=excluded.device,through=excluded.through,version=excluded.version",rusqlite::params![marker.device.0.to_be_bytes(),marker.number.to_be_bytes(),version])?;
+    db.internal_execute("INSERT INTO _coven_migration_prefix(singleton,device,through,version) VALUES(1,?1,?2,?3) ON CONFLICT(singleton) DO UPDATE SET device=excluded.device,through=excluded.through,version=excluded.version",rusqlite::params![marker.device,marker.number.to_be_bytes(),version])?;
     Ok(())
 }
 
 pub(crate) fn includes(db: &DatabaseConnection, header: &WriteHeader) -> Result<bool, DbError> {
-    db.query_row("SELECT EXISTS(SELECT 1 FROM _coven_migration_prefix WHERE singleton=1 AND device=?1 AND through>=?2 AND version>=?3)",rusqlite::params![header.position.device.0.to_be_bytes(),header.position.number.to_be_bytes(),header.schema_version],|r|r.get(0))
+    db.query_row("SELECT EXISTS(SELECT 1 FROM _coven_migration_prefix WHERE singleton=1 AND device=?1 AND through>=?2 AND version>=?3)",rusqlite::params![header.position.device,header.position.number.to_be_bytes(),header.schema_version],|r|r.get(0))
 }
 
 pub(crate) fn audiences(

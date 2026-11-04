@@ -97,7 +97,7 @@ pub(super) fn enqueue(
         actual: plain,
         maximum: i64::MAX as u64,
     })?;
-    let device = location.uploader().0.to_be_bytes();
+    let device = location.uploader();
     let object = location.object().0;
     let (original, modified_at, copy) = match source {
         StagedSource::Original(original) => (

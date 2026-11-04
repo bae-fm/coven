@@ -2,21 +2,16 @@
 
 use crate::{sqlite::DatabaseConnection, DbError};
 use coven_foundation::files::DeviceReset;
-use coven_foundation::id_source::DeviceId;
 
 pub(crate) fn read(database: &DatabaseConnection) -> Result<Option<DeviceReset>, DbError> {
     Ok(database
         .query(
             "SELECT old_device,new_device FROM _coven_device_reset WHERE singleton=1",
             [],
-            |row| Ok((row.get::<_, [u8; 8]>(0)?, row.get::<_, [u8; 8]>(1)?)),
+            |row| Ok(DeviceReset { old_device: row.get(0)?, new_device: row.get(1)? }),
         )?
         .into_iter()
-        .next()
-        .map(|(old, new)| DeviceReset {
-            old_device: DeviceId(u64::from_be_bytes(old)),
-            new_device: DeviceId(u64::from_be_bytes(new)),
-        }))
+        .next())
 }
 
 pub(crate) fn record(database: &DatabaseConnection, reset: &DeviceReset) -> Result<(), DbError> {
@@ -24,7 +19,7 @@ pub(crate) fn record(database: &DatabaseConnection, reset: &DeviceReset) -> Resu
         "INSERT INTO _coven_device_reset(singleton,old_device,new_device) VALUES(1,?1,?2)
          ON CONFLICT(singleton) DO UPDATE SET old_device=excluded.old_device,
          new_device=excluded.new_device",
-        (reset.old_device.0.to_be_bytes().as_slice(), reset.new_device.0.to_be_bytes().as_slice()),
+        (reset.old_device, reset.new_device),
     )?;
     Ok(())
 }

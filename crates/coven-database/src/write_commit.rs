@@ -221,7 +221,7 @@ pub(crate) fn check_membership(
                   AND NOT EXISTS(SELECT 1 FROM _coven_circle_deletions WHERE circle=c.circle)
                   AND d.state<>'removed' AND m.removed=0
             )",
-            params![circle.to_string(), device.0.to_be_bytes()],
+            params![circle.to_string(), device],
             |row| row.get(0),
         )?;
         if !member {
@@ -249,7 +249,7 @@ pub(crate) fn retain_queue(
     database.internal_execute(
         "INSERT INTO _coven_uploads(device,number,record) VALUES(?1,?2,?3)",
         params![
-            record.header.position.device.0.to_be_bytes().as_slice(),
+            record.header.position.device,
             record.header.position.number.to_be_bytes().as_slice(),
             bytes
         ],

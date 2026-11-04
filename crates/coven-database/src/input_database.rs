@@ -623,7 +623,7 @@ impl RetainedInput {
                         [id],
                         |r| {
                             Ok((
-                                DeviceId(u64::from_be_bytes(r.get(0)?)),
+                                r.get::<_, DeviceId>(0)?,
                                 FileId(uuid::Uuid::from_bytes(r.get(1)?)),
                             ))
                         },
@@ -660,7 +660,7 @@ impl RetainedInput {
                     for (device, file) in files {
                         db.internal_execute(
                             "INSERT INTO _coven_input_files(object,device,file) VALUES(?1,?2,?3)",
-                            (id, device.0.to_be_bytes().as_slice(), file.0.as_bytes().as_slice()),
+                            (id, device, file.0.as_bytes().as_slice()),
                         )?;
                     }
                 }

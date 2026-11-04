@@ -31,7 +31,7 @@ impl Database {
             let reader = inner.access.readers.acquire_reader();
             reader.with_reader(|db| db.query_row(
                 "SELECT EXISTS(SELECT 1 FROM _coven_absent_snapshots WHERE audience=?1 AND device=?2 AND number=?3)",
-                params![crate::write_encoding::audience_text(&id.audience), id.device.0.to_be_bytes(), id.number.to_be_bytes()], |row| row.get(0)))
+                params![crate::write_encoding::audience_text(&id.audience), id.device, id.number.to_be_bytes()], |row| row.get(0)))
         }).await
     }
 
@@ -45,7 +45,7 @@ impl Database {
         self.call(move |inner| inner.access.with_writer(|writer| writer.transaction(|db| {
             for (device, file) in files { insert_candidate(db, device, file)?; }
             db.internal_execute("INSERT INTO _coven_absent_snapshots(audience,device,number) VALUES(?1,?2,?3) ON CONFLICT DO NOTHING",
-                params![crate::write_encoding::audience_text(&id.audience), id.device.0.to_be_bytes(), id.number.to_be_bytes()])?;
+                params![crate::write_encoding::audience_text(&id.audience), id.device, id.number.to_be_bytes()])?;
             Ok(())
         }))).await
     }
@@ -56,7 +56,7 @@ impl Database {
             let reader = inner.access.readers.acquire_reader();
             reader.with_reader(|db| {
                 db.read_transaction(|| {
-                    let references = db.query("SELECT device,file FROM _coven_row_file_refs UNION SELECT device,file FROM _coven_published_file_refs UNION SELECT device,file FROM _coven_queued_file_refs UNION SELECT device,file FROM _coven_file_uploads", [], |r| Ok((DeviceId(u64::from_be_bytes(r.get(0)?)),FileId(uuid::Uuid::from_bytes(r.get(1)?)))))?.into_iter().collect();
+                    let references = db.query("SELECT device,file FROM _coven_row_file_refs UNION SELECT device,file FROM _coven_published_file_refs UNION SELECT device,file FROM _coven_queued_file_refs UNION SELECT device,file FROM _coven_file_uploads", [], |r| Ok((r.get::<_, DeviceId>(0)?,FileId(uuid::Uuid::from_bytes(r.get(1)?)))))?.into_iter().collect();
                     Ok(FileRetention { references })
                 })
             })
@@ -136,7 +136,7 @@ impl Database {
                     for device in uploaders {
                         candidates.extend(db.query(
                             "SELECT file,EXISTS(SELECT 1 FROM _coven_file_protection p WHERE p.device=c.device AND p.file=c.file),since FROM _coven_file_candidates c WHERE c.device=?1 ORDER BY c.file",
-                            [device.0.to_be_bytes()],
+                            [device],
                             |r| {
                                 Ok(FileCandidate {
                                     device,
@@ -172,7 +172,7 @@ impl Database {
                         if let Some(read) = db
                             .query(
                                 &format!("SELECT read_through FROM _coven_writes WHERE {WRITE_DEVICE_SQL}=?1 AND slot IS NOT NULL ORDER BY number DESC LIMIT 1"),
-                                [device.0.to_be_bytes()],
+                                [device],
                                 |r| crate::store_state_tables::slot(r, 0),
                             )?
                             .pop()
@@ -204,13 +204,13 @@ impl Database {
                     for (device, file) in protected {
                         db.internal_execute(
                             "DELETE FROM _coven_file_candidates WHERE device=?1 AND file=?2 AND EXISTS(SELECT 1 FROM _coven_file_protection WHERE device=?1 AND file=?2)",
-                            params![device.0.to_be_bytes(), file.0.as_bytes()],
+                            params![device, file.0.as_bytes()],
                         )?;
                     }
                     for (device, file) in deleted {
                         db.internal_execute(
                             "DELETE FROM _coven_file_candidates WHERE device=?1 AND file=?2",
-                            params![device.0.to_be_bytes(), file.0.as_bytes()],
+                            params![device, file.0.as_bytes()],
                         )?;
                     }
                     Ok(())
@@ -250,11 +250,9 @@ impl Database {
             let reader = inner.access.readers.acquire_reader();
             reader.with_reader(|db| {
                 Ok(db
-                    .query(
-                        "SELECT slot FROM _coven_file_scans WHERE device=?1",
-                        [device.0.to_be_bytes()],
-                        |r| crate::store_state_tables::slot(r, 0),
-                    )?
+                    .query("SELECT slot FROM _coven_file_scans WHERE device=?1", [device], |r| {
+                        crate::store_state_tables::slot(r, 0)
+                    })?
                     .pop())
             })
         })
@@ -282,7 +280,7 @@ impl Database {
                 writer.transaction(|db| {
                     let kept: bool = db.query_row(
                         "SELECT EXISTS(SELECT 1 FROM _coven_cutoffs c JOIN _coven_devices d ON d.device=?1 WHERE c.slot=?2 AND (c.device=d.device OR c.member=d.member))",
-                        params![device.0.to_be_bytes(), stop.0.to_be_bytes()],
+                        params![device, stop.0.to_be_bytes()],
                         |r| r.get(0),
                     )?;
                     if !kept {
@@ -294,7 +292,7 @@ impl Database {
                     db.internal_execute(
                         "INSERT INTO _coven_file_scans(device,slot) VALUES(?1,?2) ON CONFLICT(device) DO UPDATE SET slot=excluded.slot",
                         params![
-                            device.0.to_be_bytes(),
+                            device,
                             stop.0.to_be_bytes()
                         ],
                     )?;
@@ -328,7 +326,7 @@ fn insert_candidate(
 ) -> Result<(), DbError> {
     db.internal_execute(
         "INSERT INTO _coven_file_candidates(device,file,since) VALUES(?1,?2,(SELECT applied FROM _coven_sequence WHERE singleton=1)) ON CONFLICT DO UPDATE SET since=max(since,excluded.since)",
-        params![device.0.to_be_bytes(), file.0.as_bytes()],
+        params![device, file.0.as_bytes()],
     )?;
     Ok(())
 }

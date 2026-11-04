@@ -106,7 +106,7 @@ pub(crate) fn loss(
 pub(crate) fn ordinal(database: &DatabaseConnection, id: WriteId) -> Result<i64, DbError> {
     database.query_row(
         &format!("SELECT id FROM _coven_writes WHERE {WRITE_DEVICE_SQL}=?1 AND number=?2"),
-        params![id.device.0.to_be_bytes().as_slice(), id.number.to_be_bytes().as_slice()],
+        params![id.device, id.number.to_be_bytes().as_slice()],
         |r| r.get(0),
     )
 }

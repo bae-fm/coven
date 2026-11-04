@@ -11,7 +11,7 @@ pub(crate) fn stage(db: &DatabaseConnection, schema: &WriteSchema) -> Result<(),
             return Ok(());
         }
         let removed:bool=db.query_row("SELECT EXISTS(SELECT 1 FROM _coven_devices d JOIN _coven_members m ON m.member=d.member WHERE d.device=?1 AND (d.state<>'active' OR m.removed=1))",
-            [header.header.position.device.0.to_be_bytes().as_slice()],|r|r.get(0))?;
+            [header.header.position.device],|r|r.get(0))?;
         if removed {
             return Ok(());
         }

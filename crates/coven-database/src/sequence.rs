@@ -25,7 +25,7 @@ pub(crate) fn set_applied(db: &DatabaseConnection, slot: u64) -> Result<(), DbEr
 pub(crate) fn claims(db: &DatabaseConnection) -> Result<Vec<LastClaim>, DbError> {
     db.query("SELECT device,number,digest FROM _coven_last_claims ORDER BY device", [], |r| {
         Ok(LastClaim {
-            device: DeviceId(counter(r.get(0)?)),
+            device: r.get::<_, DeviceId>(0)?,
             number: counter(r.get(1)?),
             digest: r.get(2)?,
         })
@@ -39,7 +39,7 @@ pub(crate) fn note_record(
     through: u64,
 ) -> Result<(), DbError> {
     db.internal_execute("INSERT INTO _coven_last_claims(device,number,digest,through) VALUES(?1,?2,?3,?4) ON CONFLICT(device) DO UPDATE SET number=excluded.number,digest=excluded.digest,through=excluded.through WHERE excluded.through>=through AND excluded.number>=number",
-        params![claim.device.0.to_be_bytes(),claim.number.to_be_bytes(),claim.digest,through.to_be_bytes()])?;
+        params![claim.device,claim.number.to_be_bytes(),claim.digest,through.to_be_bytes()])?;
     Ok(())
 }
 
@@ -61,7 +61,7 @@ pub(crate) fn write_slot(db: &DatabaseConnection, write: WriteId) -> Result<Opti
         &format!(
             "SELECT (SELECT slot FROM _coven_writes WHERE {WRITE_DEVICE_SQL}=?1 AND number=?2)"
         ),
-        params![write.device.0.to_be_bytes().as_slice(), write.number.to_be_bytes().as_slice()],
+        params![write.device, write.number.to_be_bytes().as_slice()],
         |r| Ok(r.get::<_, Option<Vec<u8>>>(0)?.map(|s| Slot(counter(s)))),
     )
 }
@@ -82,9 +82,7 @@ pub(crate) fn cutoff(
 ) -> Result<(), DbError> {
     let (device, member, signing) = match change {
         StoreChange::RemoveDevice { device }
-        | StoreChange::AddDevice { replaces: Some(device), .. } => {
-            (Some(device.0.to_be_bytes().to_vec()), None, None)
-        }
+        | StoreChange::AddDevice { replaces: Some(device), .. } => (Some(*device), None, None),
         StoreChange::RemoveMember { member } => (None, Some(member.0.as_bytes().to_vec()), None),
         StoreChange::ReplaceMemberKeys { member, expected, .. } => {
             (None, Some(member.0.as_bytes().to_vec()), Some(expected.signing.as_bytes().to_vec()))
@@ -118,7 +116,7 @@ pub(crate) fn refusal(
     signer: &SigningKey,
 ) -> Result<Option<(Slot, WriteCutoff)>, DbError> {
     Ok(db.query("SELECT slot,device,signing FROM _coven_cutoffs WHERE slot<?1 AND (device=?2 OR (member=?3 AND (signing IS NULL OR signing=?4))) ORDER BY slot LIMIT 1",
-        params![slot.0.to_be_bytes().as_slice(),device.0.to_be_bytes().as_slice(),member.0.as_bytes().as_slice(),signer.as_bytes().as_slice()],
+        params![slot.0.to_be_bytes().as_slice(),device,member.0.as_bytes().as_slice(),signer.as_bytes().as_slice()],
         |r| {
             let cause = if r.get::<_,Option<Vec<u8>>>(1)?.is_some() { WriteCutoff::DeviceRemoved }
                 else if r.get::<_,Option<Vec<u8>>>(2)?.is_some() { WriteCutoff::MemberKeysReplaced }
@@ -129,7 +127,7 @@ pub(crate) fn refusal(
 
 pub(crate) fn refused(db: &DatabaseConnection, write: WriteId) -> Result<bool, DbError> {
     db.query_row(&format!("SELECT EXISTS(SELECT 1 FROM _coven_writes w JOIN _coven_write_refusals r ON r.slot=w.slot WHERE {WRITE_DEVICE_SQL}=?1 AND w.number=?2)"),
-        params![write.device.0.to_be_bytes().as_slice(),write.number.to_be_bytes().as_slice()],|r|r.get(0))
+        params![write.device,write.number.to_be_bytes().as_slice()],|r|r.get(0))
 }
 
 #[cfg(test)]

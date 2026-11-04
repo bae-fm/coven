@@ -65,7 +65,7 @@ pub(crate) fn stored_write(
         &format!(
             "SELECT id,timestamp,read_through,slot FROM _coven_writes WHERE {WRITE_DEVICE_SQL}=?1 AND number=?2"
         ),
-        params![id.device.0.to_be_bytes().as_slice(), id.number.to_be_bytes().as_slice()],
+        params![id.device, id.number.to_be_bytes().as_slice()],
         |r| {
             Ok(StoredWrite {
                 ordinal: r.get(0)?,

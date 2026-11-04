@@ -332,7 +332,7 @@ pub(crate) fn upload_id(
     Ok(db
         .query(
             "SELECT id FROM _coven_file_uploads WHERE device=?1 AND file=?2",
-            (uploader.0.to_be_bytes(), object.0.as_bytes()),
+            (uploader, object.0.as_bytes()),
             |row| row.get(0),
         )?
         .pop())
@@ -381,7 +381,7 @@ pub(crate) fn chunk_hash(
     let hash = db
         .query_row(
             "SELECT hash FROM _coven_file_chunks WHERE device=?1 AND file=?2 AND chunk=?3",
-            (location.uploader().0.to_be_bytes(), location.object().0.as_bytes(), index),
+            (location.uploader(), location.object().0.as_bytes(), index),
             |r| r.get::<_, Vec<u8>>(0),
         )
         .map_err(|error| match error {
