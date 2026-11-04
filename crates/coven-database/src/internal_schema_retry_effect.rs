@@ -19,8 +19,9 @@
 //! reads it (`authorization.rs`): a read-only handle can't tell whether the
 //! writer that last wrote it still runs.
 
+use crate::stored_millis::{since_epoch, stored_time, Round};
 use crate::DbError;
-use std::time::{Duration, SystemTime};
+use std::time::SystemTime;
 
 /// The retry effect table, which the app's triggers may follow.
 pub(crate) const RETRY_EFFECT: &str = "coven_retry_effect";
@@ -73,22 +74,9 @@ impl RetryState {
 /// before the cooldown's own. A time before the epoch or past SQLite's
 /// integers is an invariant failure.
 fn millis(time: SystemTime) -> Result<i64, DbError> {
-    let since = time.duration_since(SystemTime::UNIX_EPOCH).map_err(|_before_epoch| {
-        DbError::Invariant { what: "a cooldown ends after the Unix epoch" }
-    })?;
-    let millis = since.as_nanos().div_ceil(1_000_000);
-    i64::try_from(millis)
-        .map_err(|_too_late| DbError::Invariant { what: "a cooldown end fits SQLite" })
-}
-
-/// The time `coven_retry_effect.cooling_until` names.
-pub fn retry_effect_time(millis: i64) -> Result<SystemTime, DbError> {
-    let millis = u64::try_from(millis).map_err(|_negative| DbError::Invariant {
-        what: "a stored cooldown ends after the Unix epoch",
-    })?;
-    SystemTime::UNIX_EPOCH
-        .checked_add(Duration::from_millis(millis))
-        .ok_or(DbError::Invariant { what: "a stored cooldown end fits the clock" })
+    since_epoch(time, Round::Up).ok_or(DbError::Invariant {
+        what: "a cooldown ends between the Unix epoch and SQLite's last millisecond",
+    })
 }
 
 /// The state as the row holds it.
@@ -99,7 +87,7 @@ pub(crate) fn read(db: &crate::sqlite::DatabaseConnection) -> Result<RetryState,
         |row| Ok((row.get::<_, bool>(0)?, row.get::<_, bool>(1)?, row.get::<_, Option<i64>>(2)?)),
     )?;
     let sync = if syncing {
-        RetrySync::Started { cooling_until: cooling_until.map(retry_effect_time).transpose()? }
+        RetrySync::Started { cooling_until: cooling_until.map(stored_time).transpose()? }
     } else {
         RetrySync::Stopped
     };
@@ -132,7 +120,7 @@ pub(crate) fn stored(state: RetryState) -> Result<RetryState, DbError> {
         RetrySync::Stopped => RetrySync::Stopped,
         RetrySync::Started { cooling_until } => RetrySync::Started {
             cooling_until: cooling_until
-                .map(|until| millis(until).and_then(retry_effect_time))
+                .map(|until| millis(until).and_then(stored_time))
                 .transpose()?,
         },
     };

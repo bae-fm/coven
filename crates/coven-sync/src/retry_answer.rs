@@ -125,7 +125,7 @@ impl RetryEffect {
         Ok(match (effect.as_str(), until) {
             ("pass", None) => Self::Pass,
             ("cooling_down", Some(until)) => {
-                Self::CoolingDown { until: coven_database::retry_effect_time(until)? }
+                Self::CoolingDown { until: coven_database::stored_time(until)? }
             }
             ("failed", _) => Self::Failed,
             ("not_syncing", None) => Self::NotSyncing,

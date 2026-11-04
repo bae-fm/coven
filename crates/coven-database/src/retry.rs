@@ -50,9 +50,7 @@ impl RetryWait {
         Ok(Self {
             failures: u32::try_from(failures).map_err(|_overflow| DbError::DamagedDatabase)?,
             not_before: crate::user_file::decode_time(not_before)?,
-            wait: Duration::from_millis(
-                u64::try_from(wait).map_err(|_negative| DbError::DamagedDatabase)?,
-            ),
+            wait: crate::stored_millis::stored_wait(wait)?,
         })
     }
 }
@@ -203,13 +201,9 @@ pub(crate) fn find(
 
 /// `W` is stored in whole milliseconds, rounded up so a persisted wait never
 /// shortens the one the session armed.
-#[expect(
-    clippy::map_err_ignore,
-    reason = "a value past the target integer breaks the named invariant"
-)]
 fn millis(wait: &RetryWait) -> Result<i64, DbError> {
-    i64::try_from(wait.wait.as_nanos().div_ceil(1_000_000))
-        .map_err(|_| DbError::Invariant { what: "a retry wait fits SQLite's integer" })
+    crate::stored_millis::millis(wait.wait, crate::stored_millis::Round::Up)
+        .ok_or(DbError::Invariant { what: "a retry wait fits SQLite's integer" })
 }
 
 /// Replace the subject's wait.

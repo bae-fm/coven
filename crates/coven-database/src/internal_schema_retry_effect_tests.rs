@@ -171,3 +171,10 @@ async fn a_read_only_handle_cant_read_the_retry_effect() {
     reader.close().await.unwrap();
     writer.close().await.unwrap();
 }
+
+/// A stored cooldown end the clock can't name is a stored fact that doesn't
+/// decode (§19.3), as a stored `last_synced` is.
+#[test]
+fn a_stored_cooldown_end_before_the_epoch_is_damaged_database() {
+    assert!(matches!(crate::stored_time(-1), Err(DbError::DamagedDatabase)));
+}

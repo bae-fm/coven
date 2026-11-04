@@ -22,7 +22,7 @@
 //! read the table (`authorization.rs`).
 
 use crate::DbError;
-use std::time::{Duration, SystemTime};
+use std::time::SystemTime;
 
 /// The sync status table, which the app's triggers may follow.
 pub(crate) const SYNC_STATUS: &str = "coven_sync_status";
@@ -84,21 +84,14 @@ pub struct SyncStatusRow {
     pub last_synced: Option<SystemTime>,
 }
 
-/// Milliseconds since the Unix epoch, rounded down.
+/// Milliseconds since the Unix epoch, rounded down so a stored finish never
+/// comes after the pass's own.
 fn millis(time: SystemTime) -> Result<i64, DbError> {
-    let since = time.duration_since(SystemTime::UNIX_EPOCH).map_err(|_before_epoch| {
-        DbError::Invariant { what: "sync finishes after the Unix epoch" }
-    })?;
-    i64::try_from(since.as_millis())
-        .map_err(|_too_late| DbError::Invariant { what: "a sync's finish fits SQLite" })
-}
-
-/// The time `coven_sync_status.last_synced` names.
-fn time(millis: i64) -> Result<SystemTime, DbError> {
-    let millis = u64::try_from(millis).map_err(|_negative| DbError::DamagedDatabase)?;
-    SystemTime::UNIX_EPOCH
-        .checked_add(Duration::from_millis(millis))
-        .ok_or(DbError::DamagedDatabase)
+    crate::stored_millis::since_epoch(time, crate::stored_millis::Round::Down).ok_or(
+        DbError::Invariant {
+            what: "a sync finishes between the Unix epoch and SQLite's last millisecond",
+        },
+    )
 }
 
 /// The `storage` and `provider` columns of `location`.
@@ -136,7 +129,7 @@ pub(crate) fn read(db: &crate::sqlite::DatabaseConnection) -> Result<SyncStatusR
         location,
         last_pass,
         moving,
-        last_synced: last_synced.map(time).transpose()?,
+        last_synced: last_synced.map(crate::stored_millis::stored_time).transpose()?,
     })
 }
 
