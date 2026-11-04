@@ -49,6 +49,15 @@ capability_types = [
     "AtomicFile",
     "FileWriter",
     "FileReader",
+    # The places outside coven's directories an app's call names (F.2): a
+    # user's original, the folder the person picked for device-only copies
+    # with the copies and folders coven records there, and the folder for
+    # SQLite's temporary tables.
+    "UserOriginal",
+    "CopyFolder",
+    "RecordedCopy",
+    "MadeFolder",
+    "TemporaryFolder",
     "AssetFiles",
     "AssetFile",
     "StoreLock",
@@ -113,6 +122,11 @@ construction_only_capability_types = [
     "AssetFiles",
     "StoreDirectories",
     "FileReader",
+    "UserOriginal",
+    "CopyFolder",
+    "RecordedCopy",
+    "MadeFolder",
+    "TemporaryFolder",
     "StoreDir",
     "StoreLock",
     "StoreReadLock",
@@ -1195,7 +1209,7 @@ tables = [
 "crates/coven-database/src/commit_scope.rs" = ["NEXT"]
 # The folder SQLite keeps temporary tables in, a setting of SQLite's that
 # holds for the whole process (§21.2).
-"crates/coven-database/src/sqlite_temporary.rs" = ["TEMPORARY"]
+"crates/coven-database/src/sqlite_temporary.rs" = ["TEMPORARY", "set_temporary_directory"]
 # A connection's authorizer, whose state its SQLite hooks share: one judging
 # for the handle that holds the writer lock, one for a read-only handle.
 "crates/coven-database/src/authorization.rs" = [
@@ -1229,8 +1243,15 @@ tables = [
 "crates/coven-database/src/file_staging.rs" = ["FileStaging::write"]
 # A file's stream opens its local source: a copy in the store's directory,
 # or the user's original, which lives outside it at the path the app staged
-# it from and is opened nowhere else (§17.9).
+# it from and coven recorded, read back here (§17.9).
 "crates/coven-database/src/local_file.rs" = ["open_source", "LocalFileStream::read_at"]
+# The original the app hands in to stage (§17.3).
+"crates/coven-database/src/user_file.rs" = ["prepare_user_file"]
+# The copies and folders coven recorded in a folder the person picked, read
+# back for removal (§17.3).
+"crates/coven-database/src/file_removals.rs" = ["remove_bytes"]
+# The folder the person picked, which the app's call hands in (§17.3).
+"crates/coven-sync/src/file_device_only.rs" = ["Files::prepare_device_only"]
 "crates/coven-database/src/read_pool.rs" = ["ReadPool::new"]
 "crates/coven-database/src/input_database.rs" = ["InputDatabase::new"]
 # A reconfigurable live query makes the request state its handles share;
@@ -1505,6 +1526,12 @@ tables = [
 
 [capability_factories."crates/coven-foundation/src/files/atomic_file.rs"]
 "AtomicFile::open_reader" = "FileReader"
+
+[capability_factories."crates/coven-foundation/src/files/observed_file.rs"]
+"UserOriginal::open_reader" = "FileReader"
+
+[capability_factories."crates/coven-foundation/src/files/folder_copy.rs"]
+"CopyFolder::clone_handle" = "CopyFolder"
 
 [capability_factories."crates/coven-foundation/src/files/directory.rs"]
 "StoreDir::lock_read_only" = "StoreReadLock"

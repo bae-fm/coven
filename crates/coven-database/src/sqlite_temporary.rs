@@ -5,13 +5,14 @@
 //! so a staged snapshot waits on disk. SQLite finds a folder for itself
 //! everywhere but Android, where an app names one, such as its cache folder.
 
+use coven_foundation::files::TemporaryFolder;
 use coven_foundation::locks::lock_unpoisoned;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 /// What this process has told SQLite, and whether a connection may be using it.
 struct Temporary {
-    directory: Option<PathBuf>,
+    directory: Option<TemporaryFolder>,
     opened: bool,
 }
 
@@ -44,19 +45,17 @@ pub enum TemporaryDirectoryError {
 pub fn set_temporary_directory(directory: &Path) -> Result<(), TemporaryDirectoryError> {
     let mut temporary = lock_unpoisoned(&TEMPORARY);
     if let Some(named) = &temporary.directory {
-        if named == directory {
+        if named.path() == directory {
             return Ok(());
         }
-        return Err(TemporaryDirectoryError::AlreadyNamed { directory: named.clone() });
+        return Err(TemporaryDirectoryError::AlreadyNamed { directory: named.path().to_owned() });
     }
     if temporary.opened {
         return Err(TemporaryDirectoryError::AfterOpening);
     }
     let unusable = || TemporaryDirectoryError::NotAFolder { directory: directory.to_owned() };
-    if !coven_foundation::files::is_folder(directory) {
-        return Err(unusable());
-    }
-    let text = directory.to_str().ok_or_else(unusable)?;
+    let folder = TemporaryFolder::at(directory).ok_or_else(unusable)?;
+    let text = folder.path().to_str().ok_or_else(unusable)?;
     let text = std::ffi::CString::new(text).map_err(|_nul| unusable())?;
     // SAFETY: no connection exists yet, so nothing reads the variable while it
     // changes, and later connections only read it. SQLite requires its value
@@ -68,7 +67,7 @@ pub fn set_temporary_directory(directory: &Path) -> Result<(), TemporaryDirector
         }
         rusqlite::ffi::sqlite3_temp_directory = copy;
     }
-    temporary.directory = Some(directory.to_owned());
+    temporary.directory = Some(folder);
     Ok(())
 }
 

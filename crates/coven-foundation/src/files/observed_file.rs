@@ -1,6 +1,6 @@
 //! Observe a user's original without acquiring any ability to modify it.
 
-use super::FileError;
+use super::{FileError, FileReader};
 use std::{
     fs::Metadata,
     io,
@@ -89,10 +89,50 @@ impl ObservedFile {
     }
 }
 
+/// A user's original: a file outside coven's directories, at the path the
+/// app named for it, which coven reads and never changes (§17.3). It is made
+/// where the app's call hands the path in, or where coven reads back the path
+/// it recorded.
+#[derive(Debug)]
+pub struct UserOriginal {
+    path: PathBuf,
+}
+
+impl UserOriginal {
+    /// The original at `path`.
+    pub fn at(path: PathBuf) -> Self {
+        Self { path }
+    }
+
+    /// Its path.
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// Read it once in bounded chunks, checking its handle and path before
+    /// returning. The consumer can hash the bytes and report progress.
+    pub async fn observe(
+        &self,
+        consume: impl FnMut(&[u8]),
+    ) -> Result<ObservedFile, ObservationError> {
+        observe_file(&self.path, consume).await
+    }
+
+    /// Open it for positioned reads and check its size and modification
+    /// time, once: later reads return what's on disk.
+    pub fn open_reader(
+        &self,
+        size: u64,
+        modified: SystemTime,
+    ) -> Result<FileReader, ObservationError> {
+        FileReader::open_original(&self.path, size, modified)
+    }
+}
+
 /// Observe an original's path, size and modification time without reading
 /// its bytes: it must be a regular file, and its path must name the same file
 /// after its handle's facts are taken.
-pub async fn observe_metadata(path: &Path) -> Result<ObservedFile, ObservationError> {
+pub(super) async fn observe_metadata(path: &Path) -> Result<ObservedFile, ObservationError> {
     let file = tokio::fs::File::open(path)
         .await
         .map_err(|e| ObservationError::at("read original", path, e))?;
@@ -120,9 +160,7 @@ async fn observed(path: &Path, file: &tokio::fs::File) -> Result<ObservedFile, O
     Ok(ObservedFile { path: path.to_owned(), metadata, modified_at })
 }
 
-/// Read an original once in bounded chunks, checking its handle and path before
-/// returning. The consumer can hash the bytes and report progress.
-pub async fn observe_file(
+async fn observe_file(
     path: &Path,
     mut consume: impl FnMut(&[u8]),
 ) -> Result<ObservedFile, ObservationError> {

@@ -9,10 +9,26 @@ use crate::files::{
 };
 use crate::id_source::StoreId;
 
-/// Whether `path` names an existing folder, following symlinks. A folder
-/// this process can't inspect counts as absent.
-pub fn is_folder(path: &std::path::Path) -> bool {
-    std::fs::metadata(path).is_ok_and(|metadata| metadata.is_dir())
+/// The folder an app names for SQLite's temporary tables (§21.2), outside
+/// coven's directories. It is made where the app's call names it.
+#[derive(Debug, PartialEq, Eq)]
+pub struct TemporaryFolder {
+    path: PathBuf,
+}
+
+impl TemporaryFolder {
+    /// The folder at `path`, when it names an existing folder, following
+    /// symlinks. A folder this process can't inspect counts as absent.
+    pub fn at(path: &std::path::Path) -> Option<Self> {
+        std::fs::metadata(path)
+            .is_ok_and(|metadata| metadata.is_dir())
+            .then(|| Self { path: path.to_owned() })
+    }
+
+    /// Its path.
+    pub fn path(&self) -> &std::path::Path {
+        &self.path
+    }
 }
 
 /// The store database file, also its name in a discarded device archive.

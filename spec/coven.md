@@ -10124,9 +10124,15 @@ the clock it was given, and a test gives it a fixed one.
 A store's files on disk start from the app's store directories, which only a
 composition root builds, from the app directory the app gives its `Coven`
 (api.md E1): every store's directory, and the locks and files inside it, come
-from them. A file opened for positioned reads is one of those files, or, where
-coven opens a file's local source to read or upload it, a user's original at
-the path the app staged it from (§17.3, §17.7, §17.9).
+from them. Outside them coven touches only places an app's call names, each
+a value of its own kind, made where the call hands its path in or where coven
+reads back a path it recorded: a user's original, read where the app stages
+it and reopened where coven reads or uploads its bytes (§17.3, §17.7, §17.9);
+the folder the person picked for device-only copies, opened where the app
+asks for them, and the copies and folders coven records making there,
+removed from those records (§17.3); and the folder for SQLite's temporary
+tables, which the app names before opening a store (§21.2). A file opened for
+positioned reads is a file in a store's directory or a user's original.
 
 Shared in-memory state is a capability too. A barrier that holds each create
 until several writers arrive is changed by every one of them: whoever holds it

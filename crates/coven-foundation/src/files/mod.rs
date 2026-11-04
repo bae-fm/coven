@@ -37,22 +37,20 @@ pub use bootstrap::{BootstrapDirectoryError, BootstrapStore};
 pub use creation::DirectoryCreationError;
 pub use device_reset::{DeviceReset, ReplacedBy, ReplacementRecord};
 pub use directory::{
-    is_folder, protect_files, verify_lock, FileArea, FileName, FileNameError, StoreDir,
-    StoreDirAccess, StoreFile, WriterError,
+    protect_files, verify_lock, FileArea, FileName, FileNameError, StoreDir, StoreDirAccess,
+    StoreFile, TemporaryFolder, WriterError,
 };
 pub use file_lock::{FileLock, LockMode};
 pub use file_reader::FileReader;
 #[cfg(any(test, feature = "test-utils"))]
 pub use flush_batch::FlushHook;
 pub use flush_batch::{FlushBatch, Flushed};
-pub use folder_copy::{
-    remove_copy, remove_folder, remove_temporary, CopyFolder, CopyPathError, CopyPlan, CopyWriter,
-};
+pub use folder_copy::{CopyFolder, CopyPathError, CopyPlan, CopyWriter, MadeFolder, RecordedCopy};
 pub use layout::StoreDirectories;
 pub use lock::{
     CacheWriteLock, StoreClosingGuard, StoreDeletionLock, StoreLock, StoreLockError, StoreReadLock,
 };
-pub use observed_file::{observe_file, observe_metadata, ObservationError, ObservedFile};
+pub use observed_file::{ObservationError, ObservedFile, UserOriginal};
 #[cfg(any(test, feature = "test-utils"))]
 pub use open_files::{assert_no_open_files_under, open_files_under};
 pub use path_bytes::{path_bytes, path_bytes_text, path_from_bytes, path_text, PathBytesError};

@@ -19,7 +19,7 @@ use std::collections::BTreeSet;
 
 use crate::internal_schema::FILE_NAMED_SQL;
 use crate::{sqlite::DatabaseConnection, DbError};
-use coven_foundation::files::{FileArea, FileName, StoreDir};
+use coven_foundation::files::{FileArea, FileName, MadeFolder, RecordedCopy, StoreDir};
 
 /// The removals to perform, or the failure choosing them.
 pub(crate) type Chosen = Result<Vec<Released>, DbError>;
@@ -211,12 +211,12 @@ pub(crate) fn remove_bytes(
                 directory.file(area, name).remove()
             }
             Released::Copy { bytes: CopyBytes::Temporary(temporary), .. } => {
-                coven_foundation::files::remove_temporary(temporary)
+                RecordedCopy::writing(temporary.clone()).remove()
             }
             Released::Copy { path, bytes: CopyBytes::Placed { size, modified_at }, .. } => {
-                coven_foundation::files::remove_copy(path.as_ref(), *size, *modified_at)
+                RecordedCopy::placed(path.into(), *size, *modified_at).remove()
             }
-            Released::Folder(folder) => coven_foundation::files::remove_folder(folder.as_ref()),
+            Released::Folder(folder) => MadeFolder::at(folder.into()).remove(),
         };
         match result {
             Ok(()) => removed.push(file),

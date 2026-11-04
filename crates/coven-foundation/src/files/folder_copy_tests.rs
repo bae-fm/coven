@@ -376,17 +376,19 @@ async fn removal_takes_only_what_is_as_coven_left_it() {
     let (size, modified) = facts(&kept);
     let (_, changed_at) = facts(&changed);
     fs::write(&changed, b"the person's edit").unwrap();
-    remove_copy(&changed, size, changed_at).unwrap();
+    RecordedCopy::placed(changed.clone(), size, changed_at).remove().unwrap();
     assert_eq!(fs::read(&changed).unwrap(), b"the person's edit");
     // A folder holding anything stays.
-    remove_folder(&album).unwrap();
+    let folder = MadeFolder::at(album.clone());
+    folder.remove().unwrap();
     assert!(album.exists());
-    remove_copy(&kept, size, modified).unwrap();
+    let copy = RecordedCopy::placed(kept.clone(), size, modified);
+    copy.remove().unwrap();
     assert!(!kept.exists());
-    remove_copy(&kept, size, modified).unwrap();
+    copy.remove().unwrap();
     fs::remove_file(&changed).unwrap();
-    remove_folder(&album).unwrap();
+    folder.remove().unwrap();
     assert!(!album.exists());
-    remove_folder(&album).unwrap();
-    remove_temporary(&album.join(".coven-1.download")).unwrap();
+    folder.remove().unwrap();
+    RecordedCopy::writing(album.join(".coven-1.download")).remove().unwrap();
 }

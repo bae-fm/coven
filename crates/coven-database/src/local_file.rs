@@ -6,7 +6,7 @@ use coven_foundation::files::StoreDirAccess;
 use coven_foundation::{
     files::{
         FileArea, FileError, FileName, FileReader, ObservationError, StoreDir, StoreLockError,
-        StoreReadLock,
+        StoreReadLock, UserOriginal,
     },
     id_source::DeviceId,
 };
@@ -236,7 +236,8 @@ pub(crate) fn open_source(
     let lock = directory.lock_read_only()?;
     let (reader, original) = match source {
         LocalSource::Original { path, modified_at } => (
-            FileReader::open_original(&path, size, modified_at)
+            UserOriginal::at(path.clone())
+                .open_reader(size, modified_at)
                 .map_err(|error| observation(error, &id, true))?,
             Some(path),
         ),

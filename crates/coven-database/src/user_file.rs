@@ -2,7 +2,7 @@
 
 use crate::file_hashes::{FileHasher, FileHashes};
 use crate::DbError;
-use coven_foundation::files::{observe_file, ObservationError};
+use coven_foundation::files::{ObservationError, UserOriginal};
 use std::{
     path::{Path, PathBuf},
     time::SystemTime,
@@ -53,12 +53,13 @@ pub async fn prepare_user_file(
 ) -> Result<PreparedUserFile, DbError> {
     let mut hash = FileHasher::new();
     let mut read = 0;
-    let observed = observe_file(path, |bytes| {
-        hash.update(bytes);
-        read += bytes.len() as u64;
-        progress(read);
-    })
-    .await?;
+    let observed = UserOriginal::at(path.to_owned())
+        .observe(|bytes| {
+            hash.update(bytes);
+            read += bytes.len() as u64;
+            progress(read);
+        })
+        .await?;
     Ok(PreparedUserFile {
         original: UserFile {
             path: observed.path().to_owned(),

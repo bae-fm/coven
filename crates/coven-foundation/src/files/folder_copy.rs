@@ -16,8 +16,9 @@ use super::atomic_file::{create_new, rename_new};
 use super::atomic_file::{parent, remove, sync_file};
 #[cfg(unix)]
 use super::flush_batch::BatchFolder;
+use super::observed_file::observe_metadata;
 use super::relative_path::local_name;
-use super::{FileError, FlushBatch, RelativePath};
+use super::{FileError, FlushBatch, ObservationError, ObservedFile, RelativePath};
 use std::collections::BTreeMap;
 use std::fs;
 use std::io::{self, Write};
@@ -136,7 +137,15 @@ impl CopyFolder {
         blocking("create copy", move || folder.make_copy(temporary)).await
     }
 
-    fn clone_handle(&self) -> Self {
+    /// Observe the copy at `path`, a path below the folder, without reading
+    /// its bytes: its size and modification time, for the original it
+    /// becomes.
+    pub async fn observe(&self, path: &Path) -> Result<ObservedFile, ObservationError> {
+        self.names(path).map_err(|source| FileError::at("observe copy", path, source))?;
+        observe_metadata(path).await
+    }
+
+    fn clone_handle(&self) -> CopyFolder {
         Self {
             path: self.path.clone(),
             #[cfg(unix)]
@@ -448,53 +457,89 @@ impl CopyWriter {
     }
 }
 
-/// Remove a copy coven wrote at `path`, if it still has the size and
-/// modification time coven recorded: one that changed since is the person's,
-/// and stays. An absent copy is gone already.
-pub fn remove_copy(path: &Path, size: u64, modified_at: SystemTime) -> Result<(), FileError> {
-    let metadata = match fs::symlink_metadata(path) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            tracing::debug!(path = %path.display(), "copy is already absent");
-            return Ok(());
-        }
-        Err(source) => return Err(FileError::at("inspect copy", path, source)),
-    };
-    let modified = metadata
-        .modified()
-        .map_err(|source| FileError::at("read modification time", path, source))?;
-    if !metadata.is_file() || metadata.len() != size || modified != modified_at {
-        tracing::debug!(path = %path.display(), "leaving a copy the person changed");
-        return Ok(());
-    }
-    remove(path)
+/// A copy coven recorded writing in a folder the person picked, as its
+/// record reads back (§17.3): its bytes still at their temporary name, or
+/// placed at its path with the size and modification time they had there.
+/// It is made only where coven reads that record.
+#[derive(Debug)]
+pub struct RecordedCopy {
+    path: PathBuf,
+    placed: Option<(u64, SystemTime)>,
 }
 
-/// Remove a copy's temporary bytes; absent ones are gone already.
-pub fn remove_temporary(path: &Path) -> Result<(), FileError> {
-    remove(path)
+impl RecordedCopy {
+    /// A copy still being written, at its temporary name `temporary`.
+    pub fn writing(temporary: PathBuf) -> Self {
+        Self { path: temporary, placed: None }
+    }
+
+    /// A copy placed at `path` with `size` and `modified_at`.
+    pub fn placed(path: PathBuf, size: u64, modified_at: SystemTime) -> Self {
+        Self { path, placed: Some((size, modified_at)) }
+    }
+
+    /// Remove the copy's bytes. A placed copy goes only if it still has the
+    /// size and modification time coven recorded: one that changed since is
+    /// the person's, and stays. Absent bytes are gone already.
+    pub fn remove(&self) -> Result<(), FileError> {
+        let Some((size, modified_at)) = self.placed else {
+            return remove(&self.path);
+        };
+        let path = self.path.as_path();
+        let metadata = match fs::symlink_metadata(path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                tracing::debug!(path = %path.display(), "copy is already absent");
+                return Ok(());
+            }
+            Err(source) => return Err(FileError::at("inspect copy", path, source)),
+        };
+        let modified = metadata
+            .modified()
+            .map_err(|source| FileError::at("read modification time", path, source))?;
+        if !metadata.is_file() || metadata.len() != size || modified != modified_at {
+            tracing::debug!(path = %path.display(), "leaving a copy the person changed");
+            return Ok(());
+        }
+        remove(path)
+    }
 }
 
-/// Remove a folder coven made, if nothing is in it: a folder holding
-/// anything, the person's files included, stays. An absent one is gone.
-pub fn remove_folder(path: &Path) -> Result<(), FileError> {
-    match fs::remove_dir(path) {
-        Ok(()) => {}
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            tracing::debug!(path = %path.display(), "folder is already absent");
-            return Ok(());
-        }
-        Err(error) if error.kind() == io::ErrorKind::DirectoryNotEmpty => {
-            tracing::debug!(path = %path.display(), "leaving a folder that holds files");
-            return Ok(());
-        }
-        Err(source) => return Err(FileError::at("remove folder", path, source)),
+/// A folder coven made for copies in a folder the person picked, as its
+/// record reads back (§17.3). It is made only where coven reads that record.
+#[derive(Debug)]
+pub struct MadeFolder {
+    path: PathBuf,
+}
+
+impl MadeFolder {
+    /// The folder coven made at `path`.
+    pub fn at(path: PathBuf) -> Self {
+        Self { path }
     }
-    match sync_parent(path) {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
-        Err(source) => {
-            Err(FileError::AfterRemove { path: path.to_owned(), source: Box::new(source) })
+
+    /// Remove the folder if nothing is in it: a folder holding anything,
+    /// the person's files included, stays. An absent one is gone.
+    pub fn remove(&self) -> Result<(), FileError> {
+        let path = self.path.as_path();
+        match fs::remove_dir(path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                tracing::debug!(path = %path.display(), "folder is already absent");
+                return Ok(());
+            }
+            Err(error) if error.kind() == io::ErrorKind::DirectoryNotEmpty => {
+                tracing::debug!(path = %path.display(), "leaving a folder that holds files");
+                return Ok(());
+            }
+            Err(source) => return Err(FileError::at("remove folder", path, source)),
+        }
+        match sync_parent(path) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(source) => {
+                Err(FileError::AfterRemove { path: path.to_owned(), source: Box::new(source) })
+            }
         }
     }
 }

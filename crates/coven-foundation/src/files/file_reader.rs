@@ -17,9 +17,9 @@ pub struct FileReader {
 }
 
 impl FileReader {
-    /// Open a recorded user original and check its size and modification
-    /// time, once: later reads return what's on disk.
-    pub fn open_original(
+    /// Open a user original and check its size and modification time,
+    /// once: later reads return what's on disk.
+    pub(super) fn open_original(
         path: &Path,
         size: u64,
         modified: SystemTime,

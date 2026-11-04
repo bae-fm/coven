@@ -202,7 +202,14 @@ async fn making_the_store_file_device_only_leaves_the_circles_stored() {
         .unwrap();
     std::fs::write(&path, b"track").unwrap();
     owner
-        .place_copy(&coven_foundation::files::observe_metadata(&path).await.unwrap())
+        .place_copy(
+            &coven_foundation::files::CopyFolder::open(music.path().to_owned())
+                .await
+                .unwrap()
+                .observe(&path)
+                .await
+                .unwrap(),
+        )
         .await
         .unwrap();
     let mut hashes = crate::FileHasher::new();

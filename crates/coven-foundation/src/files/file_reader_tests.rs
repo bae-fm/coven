@@ -9,7 +9,8 @@ async fn readers_distinguish_missing_files_from_other_errors() {
             Ok(_) => panic!("invalid path opened"),
             Err(error) => error,
         };
-        let original_error = crate::files::observe_file(&path, |_| {}).await.unwrap_err();
+        let original_error =
+            crate::files::UserOriginal::at(path.clone()).observe(|_| {}).await.unwrap_err();
         for (error, expected) in [(range_error, "read file"), (original_error, "read original")] {
             if name == "missing" {
                 assert!(matches!(error, ObservationError::Missing(found) if found == path));
