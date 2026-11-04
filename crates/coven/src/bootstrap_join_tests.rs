@@ -13,10 +13,14 @@ async fn joining_refuses_an_invite_for_another_store_before_keeping_an_identity(
     code.store = StoreId(UuidIds.new_id());
     assert!(matches!(
         JoiningIdentity::prepare(&directory, &code, "New phone"),
-        Err(SyncError::WrongStore { expected, actual })
+        Err(SyncError::Code(CodeError::WrongStore { expected, actual }))
             if expected == directory.id() && actual == code.store
     ));
     assert!(directory.owned_file(StoreFile::Bootstrap).read_optional().unwrap().is_none());
+    // Through bootstrap, it is refused as the join's code, as a restore's is.
+    let refused =
+        JoiningIdentity::prepare(&directory, &code, "New phone").map_err(BootstrapError::from);
+    assert!(matches!(refused, Err(BootstrapError::Code(CodeError::WrongStore { .. }))));
     install.absent(owner.directory.id()).await;
     pending.cancel().unwrap();
     owner.close().await;

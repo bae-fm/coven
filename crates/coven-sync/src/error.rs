@@ -111,6 +111,9 @@ pub enum SyncError {
     /// This call needs a newer app schema or coven format (§18).
     #[error("an update is required: {0:?}")]
     UpdateRequired(crate::RequiredUpdate),
+    /// A code can't be used for this call, as one naming another store.
+    #[error(transparent)]
+    Code(#[from] crate::CodeError),
     /// A create-store entry named a store other than this database's store.
     #[error("create-store entry names another store")]
     WrongStore {
@@ -260,6 +263,7 @@ impl SyncError {
             | SyncError::KeyAlreadyUsed(_)
             | SyncError::DeviceIdInUse(_)
             | SyncError::WrongStore { .. }
+            | SyncError::Code(_)
             | SyncError::Shutdown(_)
             | SyncError::Bug(_) => PendingReason::Failed(error.local_failure()),
         }
@@ -298,7 +302,8 @@ impl SyncError {
             | Self::DeviceIdInUse(_)
             | Self::MemberKeysReplaced { .. }
             | Self::UpdateRequired(_)
-            | Self::WrongStore { .. } => crate::LocalFailure::Operation,
+            | Self::WrongStore { .. }
+            | Self::Code(_) => crate::LocalFailure::Operation,
             Self::Shutdown(_) => crate::LocalFailure::Shutdown,
             Self::Bug(_) => crate::LocalFailure::Bug,
         }

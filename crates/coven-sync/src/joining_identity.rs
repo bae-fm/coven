@@ -170,9 +170,7 @@ impl JoiningIdentity {
     /// The request this directory keeps for `code`, opened with the code's
     /// secret and checked against it.
     fn saved(directory: &StoreDir, code: &InviteCode) -> Result<Option<Self>, SyncError> {
-        if code.store != directory.id() {
-            return Err(SyncError::WrongStore { expected: directory.id(), actual: code.store });
-        }
+        crate::CodeError::require_store(directory.id(), code.store)?;
         let file = directory.owned_file(StoreFile::Bootstrap);
         let sealing = Sealing::new(code)?;
         let path = code.request_path();

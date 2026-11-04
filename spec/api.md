@@ -4698,6 +4698,10 @@ pub enum SyncError {
     StoreOwner,
     /// This call needs a newer app schema or coven format (§18).
     UpdateRequired(RequiredUpdate),
+    /// A code can't be used for this call, as an invite code naming another
+    /// store than the join's directory. Bootstrap reports it as
+    /// `BootstrapError::Code`.
+    Code(CodeError),
     /// A create-store entry names another store (§10.3).
     WrongStore { expected: StoreId, actual: StoreId },
     /// The requested journal row has no retryable work for this call.
@@ -6836,7 +6840,9 @@ pub enum CodeError {
     Invalid,
     /// The call needs the other kind of code.
     WrongKind { expected: CodeKind, actual: CodeKind },
-    /// A valid restore code names another store than the one being restored.
+    /// A valid code names another store than the one it is used for: a
+    /// restore code for a store being restored in place, or an invite code
+    /// saved for another store's join.
     WrongStore { expected: StoreId, actual: StoreId },
 }
 
@@ -6874,7 +6880,8 @@ pub enum BootstrapError {
     OAuth(OAuthError),
     /// Reading or keeping credentials or identity keys failed.
     SecureStorage(KeyError),
-    /// Provider admission, signed membership or snapshot loading failed.
+    /// Provider admission, signed membership or snapshot loading failed. A
+    /// code sync refuses (`SyncError::Code`) is reported as `Code` instead.
     Sync(SyncError),
     /// Cleanup failed too; neither failure is hidden.
     Cleanup { operation: Box<BootstrapError>, cleanup: Box<BootstrapError> },

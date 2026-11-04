@@ -83,7 +83,7 @@ pub enum BootstrapError {
     },
     /// Provider admission, signed membership or snapshot loading failed.
     #[error(transparent)]
-    Sync(#[from] SyncError),
+    Sync(SyncError),
     /// Provider sign-in failed.
     #[error(transparent)]
     OAuth(#[from] coven_storage::providers::OAuthError),
@@ -123,6 +123,17 @@ impl From<BootstrapDirectoryError> for BootstrapError {
         match error.device_locked() {
             Some(path) => Self::DeviceLocked { path: path.to_owned() },
             None => Self::Directory(error),
+        }
+    }
+}
+
+/// A code sync refuses is refused as the call's own code: a join's, as a
+/// restore's.
+impl From<SyncError> for BootstrapError {
+    fn from(error: SyncError) -> Self {
+        match error {
+            SyncError::Code(error) => Self::Code(error),
+            error => Self::Sync(error),
         }
     }
 }
