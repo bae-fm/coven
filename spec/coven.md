@@ -10170,8 +10170,11 @@ shared state.
   body, in string literals and in `.sql` files, where the text is written:
   a macro's definition answers for the SQL it holds, and code invoking the
   macro writes nothing itself, so a table's seed row in its domain's schema
-  is that domain's write. SQL built while the program runs names its table
-  nowhere in the source, so the checker can't see it.
+  is that domain's write. A loop over a literal list of table names,
+  `for table in ["_coven_cells", "_coven_claims"]`, writes each table its
+  SQL names through the loop's variable. Any other SQL built while the
+  program runs names its table nowhere in the source, so the checker can't
+  see it.
 
 ### F.3 Owners and tasks
 

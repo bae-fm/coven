@@ -498,6 +498,40 @@ fn a_write_in_a_macro_is_read_where_the_macro_is_written() {
     );
 }
 
+/// A loop over a literal list of table names writes each table its SQL names
+/// through the loop's variable, as the statement it runs for each one.
+#[test]
+fn a_loop_over_table_names_writes_each_table() {
+    let files = [RustFile::fixture(
+        "crates/app-sync/src/apply.rs",
+        r#"
+        fn clear(sql: Sql) {
+            for table in ["note_listing", "notes"] {
+                sql.run(&format!("DELETE FROM {table} WHERE id=?1"));
+            }
+            for other in ["notes"] {
+                sql.run(&format!("SELECT * FROM {other}"));
+            }
+        }
+        "#,
+    )];
+    assert_eq!(
+        domain_violations(&files, &[]),
+        [
+            (
+                "crates/app-sync/src/apply.rs".to_string(),
+                4,
+                "SQL writes note_listing, which only the listing domain writes, in crates/app-core/src/listing/, crates/app-core/src/listing.rs".to_string()
+            ),
+            (
+                "crates/app-sync/src/apply.rs".to_string(),
+                4,
+                "SQL writes notes, which only the records domain writes, in crates/app-database/src/".to_string()
+            ),
+        ]
+    );
+}
+
 /// A domain's tests live in its homes: a home file's `<name>_tests.rs`, and
 /// its directory's test files, may write its tables; test code elsewhere,
 /// a test-only item of another file or a SQL file under `tests/`, may not.

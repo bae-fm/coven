@@ -97,23 +97,19 @@ pub(crate) fn find_database_boundary_violations(code: &CrateCode, policy: &Polic
     // Writes and schema are read where their text is written, macro
     // definitions included: code invoking a macro writes nothing itself.
     for file in &code.written {
-        SqlLiterals {
-            visit: |literal: &syn::LitStr| {
-                let (sql, line) = (literal.value(), literal.span().start().line);
-                domains.check_writes(&file.relative_path, &sql, |_| line, &mut violations);
-                domains.check_schema(&file.relative_path, &sql, |_| line, &mut violations);
-            },
-        }
+        SqlLiterals::new(|literal: &syn::LitStr| {
+            let (sql, line) = (literal.value(), literal.span().start().line);
+            domains.check_writes(&file.relative_path, &sql, |_| line, &mut violations);
+            domains.check_schema(&file.relative_path, &sql, |_| line, &mut violations);
+        })
         .visit_file(&file.syntax);
     }
     for file in &code.tests {
-        SqlLiterals {
-            visit: |literal: &syn::LitStr| {
-                let (sql, line) = (literal.value(), literal.span().start().line);
-                domains.check_writes(&file.relative_path, &sql, |_| line, &mut violations);
-                domains.check_schema(&file.relative_path, &sql, |_| line, &mut violations);
-            },
-        }
+        SqlLiterals::new(|literal: &syn::LitStr| {
+            let (sql, line) = (literal.value(), literal.span().start().line);
+            domains.check_writes(&file.relative_path, &sql, |_| line, &mut violations);
+            domains.check_schema(&file.relative_path, &sql, |_| line, &mut violations);
+        })
         .visit_file(&file.syntax);
     }
     violations.into_iter().collect()
@@ -215,12 +211,66 @@ impl<'a> Domains<'a> {
 }
 
 /// Every string literal of a syntax tree, inside macro calls and macro
-/// definitions included.
+/// definitions included. Inside a loop over a literal list of names,
+/// `for table in ["a", "b"]`, a literal naming the loop's variable,
+/// `"DELETE FROM {table}"`, is read once for each name.
 struct SqlLiterals<F> {
     visit: F,
+    /// The enclosing loops' variables, each with the names it takes.
+    loops: Vec<(String, Vec<String>)>,
+}
+
+impl<F: FnMut(&syn::LitStr)> SqlLiterals<F> {
+    fn new(visit: F) -> Self {
+        Self { visit, loops: Vec::new() }
+    }
+
+    fn read(&mut self, literal: &syn::LitStr) {
+        let mut texts = vec![literal.value()];
+        for (variable, names) in &self.loops {
+            let placeholder = format!("{{{variable}}}");
+            if texts.iter().any(|text| text.contains(&placeholder)) {
+                texts = texts
+                    .iter()
+                    .flat_map(|text| names.iter().map(|name| text.replace(&placeholder, name)))
+                    .collect();
+            }
+        }
+        for text in texts {
+            (self.visit)(&syn::LitStr::new(&text, literal.span()));
+        }
+    }
+}
+
+/// A loop's variable and the literal names it takes, when it loops over a
+/// literal list of strings.
+fn literal_loop(node: &syn::ExprForLoop) -> Option<(String, Vec<String>)> {
+    let syn::Pat::Ident(variable) = node.pat.as_ref() else { return None };
+    let syn::Expr::Array(array) = node.expr.as_ref() else { return None };
+    let names = array
+        .elems
+        .iter()
+        .map(|element| match element {
+            syn::Expr::Lit(syn::ExprLit { lit: syn::Lit::Str(name), .. }) => Some(name.value()),
+            _ => None,
+        })
+        .collect::<Option<Vec<_>>>()?;
+    Some((variable.ident.to_string(), names))
 }
 
 impl<'ast, F: FnMut(&syn::LitStr)> Visit<'ast> for SqlLiterals<F> {
+    fn visit_expr_for_loop(&mut self, node: &'ast syn::ExprForLoop) {
+        match literal_loop(node) {
+            Some(binding) => {
+                self.visit_expr(&node.expr);
+                self.loops.push(binding);
+                self.visit_block(&node.body);
+                self.loops.pop();
+            }
+            None => visit::visit_expr_for_loop(self, node),
+        }
+    }
+
     fn visit_attribute(&mut self, node: &'ast syn::Attribute) {
         if node.path().is_ident("doc") {
             return;
@@ -233,7 +283,7 @@ impl<'ast, F: FnMut(&syn::LitStr)> Visit<'ast> for SqlLiterals<F> {
             Some(body) => body.visit(self),
             None => {
                 for string in token_strings(unparsed_tokens(node)) {
-                    (self.visit)(&string);
+                    self.read(&string);
                 }
             }
         }
@@ -241,7 +291,7 @@ impl<'ast, F: FnMut(&syn::LitStr)> Visit<'ast> for SqlLiterals<F> {
     }
 
     fn visit_lit_str(&mut self, node: &'ast syn::LitStr) {
-        (self.visit)(node);
+        self.read(node);
         visit::visit_lit_str(self, node);
     }
 }
