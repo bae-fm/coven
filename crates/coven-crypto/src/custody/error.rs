@@ -13,7 +13,7 @@ pub enum KeyError {
     StoreClosed,
     /// A filesystem operation failed; the cause says whether bytes changed.
     #[error("custody file failed: {0}")]
-    File(#[from] coven_foundation::files::FileError),
+    File(coven_foundation::files::FileError),
     /// A cryptographic service was unavailable or stored bytes failed validation.
     #[error("custody cryptography failed: {0}")]
     Crypto(#[from] crate::CryptoError),
@@ -90,7 +90,17 @@ impl coven_foundation::task::CarriesBug for KeyError {
     fn bug(&self) -> Option<&coven_foundation::task::Bug> {
         match self {
             Self::Bug(bug) => Some(bug),
+            Self::File(error) => error.bug(),
             _ => None,
+        }
+    }
+}
+
+impl From<coven_foundation::files::FileError> for KeyError {
+    fn from(error: coven_foundation::files::FileError) -> Self {
+        match error {
+            coven_foundation::files::FileError::Bug(bug) => Self::Bug(bug),
+            error => Self::File(error),
         }
     }
 }

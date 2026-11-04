@@ -16,7 +16,30 @@ pub enum IdentityError {
     Crypto(#[from] CryptoError),
     /// Reading or persisting identity custody failed.
     #[error(transparent)]
-    Custody(#[from] KeyError),
+    Custody(KeyError),
+    /// Initializing the identity panicked: a bug, which the caller reports
+    /// (E15).
+    #[error(transparent)]
+    Bug(#[from] coven_foundation::task::Bug),
+}
+
+impl From<KeyError> for IdentityError {
+    fn from(error: KeyError) -> Self {
+        match error {
+            KeyError::Bug(bug) => Self::Bug(bug),
+            error => Self::Custody(error),
+        }
+    }
+}
+
+impl coven_foundation::task::CarriesBug for IdentityError {
+    fn bug(&self) -> Option<&coven_foundation::task::Bug> {
+        match self {
+            Self::Bug(bug) => Some(bug),
+            Self::Custody(error) => error.bug(),
+            Self::AlreadyInitialized | Self::Crypto(_) => None,
+        }
+    }
 }
 
 /// The store's identity and host secrets, retaining their custody and keychain.

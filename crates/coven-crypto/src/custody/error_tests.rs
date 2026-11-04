@@ -57,3 +57,16 @@ fn apple_statuses_classify_a_locked_keychain_and_a_missing_entitlement() {
         assert!(matches!(other, KeyError::Keychain(_)), "{status}: {other:?}");
     }
 }
+
+/// A panic in custody's file work is custody's bug, and the identity's
+/// when it initializes one, not a file failure.
+#[test]
+fn a_bug_in_custody_file_work_is_custodys_bug() {
+    use coven_foundation::task::{Bug, CarriesBug};
+    let bug = Bug { operation: "write the passphrase file", message: "it panicked".into() };
+    let custody = || KeyError::from(coven_foundation::files::FileError::Bug(bug.clone()));
+    assert!(matches!(custody(), KeyError::Bug(found) if found == bug));
+    let identity = crate::custody::IdentityError::from(custody());
+    assert!(matches!(&identity, crate::custody::IdentityError::Bug(found) if *found == bug));
+    assert_eq!(identity.bug(), Some(&bug));
+}
