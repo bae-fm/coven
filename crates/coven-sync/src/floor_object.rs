@@ -27,22 +27,28 @@ pub(crate) struct FloorObject {
     pub(crate) copies: Vec<OriginalSlot>,
 }
 
-/// The floor's sealing key, first kept slot and copies routed to this member,
-/// read before any store key is held (§13). Both the scan position and keys
+/// What a floor routes to this member, read before any store key is held
+/// (§13). The scan position, the keys and the evidence of a replacement all
 /// remain unauthenticated until the floor and its history authenticate.
+pub(crate) struct FloorRouting {
+    /// The floor's sealing key.
+    pub(crate) key: coven_foundation::id_source::KeyId,
+    /// Its first kept slot.
+    pub(crate) first: coven_merge::Slot,
+    /// The keys its copies routed to this member open.
+    pub(crate) keys: Vec<snapshot_object::RoutedKey>,
+    /// Whether a copy names this member but a pair it doesn't hold: its
+    /// replacement's (§12.3).
+    pub(crate) routed_past: bool,
+}
+
+/// The floor's routing for this member, or `None` without a floor.
 pub(crate) async fn routed_keys(
     database: &Database,
     storage: &dyn Storage,
     path: &ObjectPath,
     member: &MemberIdentity,
-) -> Result<
-    Option<(
-        coven_foundation::id_source::KeyId,
-        coven_merge::Slot,
-        Vec<snapshot_object::RoutedKey>,
-    )>,
-    SyncError,
-> {
+) -> Result<Option<FloorRouting>, SyncError> {
     let response = match storage.stream_object(path, None).await {
         Ok(response) => response,
         Err(error) if error.failure() == StorageFailure::NotFound => return Ok(None),
@@ -55,15 +61,17 @@ pub(crate) async fn routed_keys(
     let key = decoder.key;
     let first = decoder.first;
     let mut keys = Vec::new();
+    let mut routed_past = false;
     while decoder.remaining() > 0 {
         let mut bytes = read_exact(&mut raw, 12, path)?;
         let length = checked(path, decoder.copy_length(&bytes))?;
         bytes.extend(read_exact(&mut raw, length - bytes.len(), path)?);
         let original = checked(path, decoder.copy(&bytes))?;
         keys.extend(snapshot_object::routed_key(&original, path.store(), member)?);
+        routed_past |= snapshot_object::routed_past(&original, path.store(), member)?;
     }
     checked(path, decoder.finish())?;
-    Ok(Some((key, first, keys)))
+    Ok(Some(FloorRouting { key, first, keys, routed_past }))
 }
 
 impl FloorObject {

@@ -542,3 +542,39 @@ async fn a_trailing_upload_stored_during_a_self_replacement_waits_for_its_pause(
     ana.files().close().await;
     ana.database().close().await.unwrap();
 }
+
+/// §12.3 and §13.1: Ana replaces her own pair, and her store's history
+/// ages until retention writes a floor past the replacement. A restore from
+/// her old code reads that floor, whose copies for her are sealed to her new
+/// pair only, and fails as replaced, as it does when it reads the slots
+/// from the first and finds the replacement there.
+#[tokio::test]
+async fn a_replaced_pair_restores_as_replaced_past_a_floor() {
+    let group = Group::new();
+    let ana = group.device(1).await;
+    group.create(&ana).await;
+    let old = ana.identity.clone();
+    ana.sync.replace_member_keys().await.unwrap();
+    for day in 1..=3 {
+        group.clock.set(
+            std::time::UNIX_EPOCH
+                + crate::sequence_sync::sequence_retention::GRACE * day
+                + std::time::Duration::from_secs(1),
+        );
+        ana.sync.pass().await.unwrap();
+    }
+    let floor = coven_storage::ObjectPath::floor(group.store);
+    assert!(
+        coven_storage::Storage::status(&group.storage, &floor).await.unwrap().is_some(),
+        "retention wrote a floor"
+    );
+    let laptop = group.newcomer(old.clone(), group.storage.for_device()).await;
+    let restored = laptop.sync.unlock().await;
+    assert!(
+        matches!(&restored, Err(SyncError::MemberKeysReplaced { member }) if *member == old.member()),
+        "{restored:?}"
+    );
+    for device in [&ana, &laptop] {
+        device.sync.database.close().await.unwrap();
+    }
+}

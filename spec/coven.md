@@ -3776,7 +3776,11 @@ Ana's new laptop scans the code from her phone and signs in to her Dropbox. Then
    can't put its keys back. That holds even when the store key was rotated after
    the replacement, so the old keys can't open the slots that follow: loading
    stops at the first such slot and reports the replacement it already applied,
-   not the key it lacks.
+   not the key it lacks. It holds too when a floor written after the
+   replacement starts the store, so the old keys find no copy they open: the
+   floor's copies for Ana name her new pair, and finding one for her that her
+   pair can't open is the replacement. The old code fails the same way whether
+   or not history has aged into a floor since.
 3. It checks the account it signed in with, or the S3 key it was given,
    against how history lets Ana reach storage. Her Dropbox account holds
    Household, so another account fails with `SyncError::StoreOwner` before the

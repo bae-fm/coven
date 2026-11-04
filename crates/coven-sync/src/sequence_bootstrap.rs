@@ -18,6 +18,10 @@ pub(crate) enum Bootstrap {
     /// The sequence exists, but no copy for this member was found; reading
     /// it needs this key.
     Missing(KeyId),
+    /// No copy this member's pair opens was found, but one for the member
+    /// sealed to another pair was: its replacement's, which this pair can't
+    /// follow (§12.3).
+    Replaced,
     /// Neither a floor nor a first slot exists.
     Empty,
 }
@@ -66,6 +70,9 @@ impl SequenceSync {
             {
                 Bootstrap::Keys(ring) => ring,
                 Bootstrap::Missing(key) => return Err(SyncError::KeyUnavailable(key)),
+                Bootstrap::Replaced => {
+                    return Err(SyncError::MemberKeysReplaced { member: member.member() })
+                }
                 Bootstrap::Empty => {
                     return Err(StorageFailure::NotFound
                         .with_source("the store has neither a floor nor a first slot")
@@ -153,6 +160,7 @@ impl SequenceSync {
         let mut bytes = 0;
         let mut keys = Vec::new();
         let mut needed = None;
+        let mut routed_past = false;
         let mut next = session.scanned.max(1);
         let mut missed = false;
         loop {
@@ -164,11 +172,12 @@ impl SequenceSync {
             )
             .await?
             {
-                Some((key, first, routed)) => {
+                Some(routing) => {
                     floors += 1;
-                    needed = Some(key);
-                    keys.extend(routed);
-                    first.0
+                    needed = Some(routing.key);
+                    keys.extend(routing.keys);
+                    routed_past |= routing.routed_past;
+                    routing.first.0
                 }
                 None => 1,
             };
@@ -188,6 +197,8 @@ impl SequenceSync {
                 let prefix = slot_object::clear_prefix(input.local_bytes().await?, &path)?;
                 needed.get_or_insert(prefix.key);
                 if let SlotKind::KeyCopy(copy) = &prefix.kind {
+                    routed_past |=
+                        copy.routing.member == member.member() && !copy.routing.held_by(member);
                     if copy.routing.held_by(member) {
                         let object = slot_object::read_exact(
                             &mut input.local_bytes().await?,
@@ -234,6 +245,7 @@ impl SequenceSync {
                 }
                 Bootstrap::Keys(ring)
             }
+            (None, _) if routed_past => Bootstrap::Replaced,
             (None, Some(key)) => Bootstrap::Missing(key),
             (None, None) => Bootstrap::Empty,
         };

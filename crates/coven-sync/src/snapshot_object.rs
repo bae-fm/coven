@@ -185,6 +185,20 @@ pub(crate) fn routed_key(
     }))
 }
 
+/// Whether `original` is a copy for this member sealed to a pair it doesn't
+/// hold: one its replacement's copies go to (§12.3).
+pub(crate) fn routed_past(
+    original: &OriginalSlot,
+    store: coven_foundation::id_source::StoreId,
+    member: &MemberIdentity,
+) -> Result<bool, SyncError> {
+    use coven_format::sealed_slot::{BoundedSlot, SlotKind};
+    let path = original.path(store);
+    let object = checked(&path, BoundedSlot::decode(&original.object))?;
+    Ok(matches!(&object.prefix.kind, SlotKind::KeyCopy(copy)
+        if copy.routing.member == member.member() && !copy.routing.held_by(member)))
+}
+
 pub(crate) fn open_routing(
     original: &OriginalSlot,
     store: coven_foundation::id_source::StoreId,
