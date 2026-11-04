@@ -8397,6 +8397,11 @@ for file work, and a `Bug` variant of each error that has a `Shutdown` one.
   in the progress reader that hears the bytes go, fails that request with
   `StorageError::Bug`. Unwound into the connection, it would end the
   exchange with what reads as a network failure, which the caller retries.
+- A panic in one of coven's own SQL functions, such as `coven_key`, fails
+  the statement that called it and the app's call with `DbError::Bug`, its
+  message kept. rusqlite alone reports such a panic as an error that says
+  only "unwinding panic". A function changes nothing, so the handle goes
+  on.
 
 An error that keeps another failure takes the bug that failure carries as
 its own `Bug`, never under a disk, lock, storage or custody label, so the

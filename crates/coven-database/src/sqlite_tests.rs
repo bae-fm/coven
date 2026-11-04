@@ -95,6 +95,12 @@ impl DatabaseConnection {
             .unwrap();
     }
 
+    /// Panic in the next call of one of coven's SQL functions on this
+    /// connection.
+    pub(crate) fn panic_next_function(&self) {
+        self.authorization.panic_next_function();
+    }
+
     /// Panic in the next judgment of this connection's authorizer.
     pub(crate) fn panic_next_authorization(&self) {
         self.authorization.panic_next();

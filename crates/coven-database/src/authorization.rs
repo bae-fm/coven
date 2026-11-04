@@ -117,6 +117,10 @@ struct AuthorizationState {
     /// Panic in the next judgment, as a bug in the authorizer would.
     #[cfg(test)]
     panic_next: bool,
+    /// Panic in the next call of one of coven's SQL functions, as a bug in
+    /// it would.
+    #[cfg(test)]
+    panic_next_function: bool,
     synced: BTreeSet<String>,
     shared: BTreeSet<String>,
     hidden_rowids: BTreeSet<(String, String)>,
@@ -165,6 +169,8 @@ impl SqlAuthorization {
                 broken: None,
                 #[cfg(test)]
                 panic_next: false,
+                #[cfg(test)]
+                panic_next_function: false,
                 synced: tables.iter().map(|t| t.name.to_ascii_lowercase()).collect(),
                 shared: tables
                     .iter()
@@ -184,6 +190,39 @@ impl SqlAuthorization {
     #[cfg(test)]
     pub(crate) fn panic_next(&self) {
         lock_unpoisoned(&self.state).panic_next = true;
+    }
+
+    /// Panic in the next call of one of coven's SQL functions.
+    #[cfg(test)]
+    pub(crate) fn panic_next_function(&self) {
+        lock_unpoisoned(&self.state).panic_next_function = true;
+    }
+
+    /// `function`, one of coven's SQL functions named `name`, as the
+    /// connection registers it. rusqlite turns a function's panic into an
+    /// error that names no bug, so the function keeps it: the statement
+    /// fails with the bug's text, and the app's call with `DbError::Bug`
+    /// (E15). A function changes nothing, so the connection goes on.
+    pub(crate) fn function<T>(
+        &self,
+        name: &'static str,
+        function: impl Fn(&rusqlite::functions::Context<'_>) -> rusqlite::Result<T> + Send + 'static,
+    ) -> impl Fn(&rusqlite::functions::Context<'_>) -> rusqlite::Result<T> + Send + 'static {
+        let state = Arc::clone(&self.state);
+        move |context| {
+            let called = coven_foundation::task::caught_sync(name, || {
+                #[cfg(test)]
+                assert!(
+                    !std::mem::take(&mut lock_unpoisoned(&state).panic_next_function),
+                    "{name} lost its argument"
+                );
+                function(context)
+            });
+            called.unwrap_or_else(|bug| {
+                lock_unpoisoned(&state).denied = Some(DbError::Bug(bug.clone()));
+                Err(rusqlite::Error::UserFunctionError(Box::new(DbError::Bug(bug))))
+            })
+        }
     }
 
     /// The connection now serves `handle`, which a panic in its authorizer

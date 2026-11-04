@@ -217,3 +217,27 @@ async fn a_time_reads_as_whole_seconds_and_nanoseconds_in_sql_and_rust() {
     }
     db.close().await.unwrap();
 }
+
+/// One of coven's SQL functions panics. rusqlite would turn the panic into
+/// an error that names no bug, so the function keeps it: the call fails
+/// with `DbError::Bug`, its message kept. A function changes nothing, so the
+/// next call goes on (E15).
+#[tokio::test]
+async fn a_panicking_sql_function_fails_the_call_with_its_bug() {
+    let store = TestStore::new();
+    let db = analyzed_keys(&store).await;
+    db.inspect_writer(|writer| writer.panic_next_function());
+    let failed = db
+        .write(|sql| Ok(sql.query_row("SELECT coven_key('a')", [], |r| r.get::<_, Vec<u8>>(0))?))
+        .await
+        .unwrap_err();
+    let DbError::Bug(bug) = &failed else { panic!("the call heard no bug: {failed:?}") };
+    assert_eq!(bug.operation, "coven_key");
+    assert_eq!(bug.message, "coven_key lost its argument");
+    let key = db
+        .write(|sql| Ok(sql.query_row("SELECT coven_key('a')", [], |r| r.get::<_, Vec<u8>>(0))?))
+        .await
+        .unwrap();
+    assert!(!key.is_empty());
+    db.close().await.unwrap();
+}
