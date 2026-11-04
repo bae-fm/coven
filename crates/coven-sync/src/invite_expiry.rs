@@ -24,6 +24,9 @@ use tokio::sync::watch;
 pub struct InviteExpiry {
     stop: watch::Sender<bool>,
     task: tokio::sync::Mutex<Option<coven_foundation::task::OwnedTask>>,
+    /// Each time the wakes have written every expiry due and wait.
+    #[cfg(any(test, feature = "test-utils"))]
+    parks: crate::Parks,
 }
 
 impl InviteExpiry {
@@ -44,13 +47,28 @@ impl InviteExpiry {
     ) -> Self {
         let (stop, stopping) = watch::channel(false);
         let bugs = database.bugs().clone();
+        let parks = crate::Parks::new();
+        #[cfg(any(test, feature = "test-utils"))]
+        let expiry_parks = parks.clone();
         let task = coven_foundation::task::spawn_owned(
             "invite expiry",
             bugs,
-            run(database, clock, waits, state, stopping),
+            run(database, clock, waits, state, stopping, parks),
             |_| async {},
         );
-        Self { stop, task: tokio::sync::Mutex::new(Some(task)) }
+        Self {
+            stop,
+            task: tokio::sync::Mutex::new(Some(task)),
+            #[cfg(any(test, feature = "test-utils"))]
+            parks: expiry_parks,
+        }
+    }
+
+    /// Each time the wakes have written every expiry the clock has reached,
+    /// and wait for the next.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn parked_from_now(&self) -> impl std::future::Future<Output = ()> + Send + 'static {
+        self.parks.parked_from_now()
     }
 
     /// Stop waking, once a write under way has finished.
@@ -68,7 +86,9 @@ async fn run(
     waits: Arc<RetryWaits>,
     state: Arc<SequenceState>,
     mut stopping: watch::Receiver<bool>,
+    parks: crate::Parks,
 ) {
+    let _running = parks.running();
     let mut journal = database.started_operations();
     loop {
         let next = match expire(&database, clock.now(), &waits, &state).await {
@@ -91,6 +111,7 @@ async fn run(
         };
         tokio::select! {
             biased;
+            never = parks.polling() => match never {},
             // Closed, or dropped with its handle.
             _ = stopping.changed() => return,
             // A closed or failed handle leaves nothing to write.
@@ -101,6 +122,7 @@ async fn run(
                 database.fail_expiry_wait(error);
                 return;
             },
+            never = parks.parked() => match never {},
         }
     }
 }

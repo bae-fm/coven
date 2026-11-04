@@ -18,6 +18,10 @@ pub struct NetworkFollow {
     _watch: NetworkWatch,
     stop: watch::Sender<bool>,
     task: tokio::sync::Mutex<Option<coven_foundation::task::OwnedTask>>,
+    /// Each time the follower has reported every change it was told of
+    /// and waits.
+    #[cfg(any(test, feature = "test-utils"))]
+    parks: crate::Parks,
 }
 
 impl NetworkFollow {
@@ -33,15 +37,21 @@ impl NetworkFollow {
         }
         let (stop, mut stopping) = watch::channel(false);
         let bugs = database.bugs().clone();
+        let parks = crate::Parks::new();
+        #[cfg(any(test, feature = "test-utils"))]
+        let follower_parks = parks.clone();
         // A panic goes to the store's bug sink, and the network stays as
         // last shown until the store closes.
         let follow = async move {
+            let _running = parks.running();
             let mut joined = first.joined;
             loop {
                 tokio::select! {
                     biased;
+                    never = parks.polling() => match never {},
                     _ = stopping.changed() => break,
                     () = network.changed() => {}
+                    never = parks.parked() => match never {},
                 }
                 let state = network.read();
                 database.record_network(state);
@@ -55,7 +65,20 @@ impl NetworkFollow {
         };
         let task =
             coven_foundation::task::spawn_owned("the network follower", bugs, follow, |_| async {});
-        Self { _watch: watched, stop, task: tokio::sync::Mutex::new(Some(task)) }
+        Self {
+            _watch: watched,
+            stop,
+            task: tokio::sync::Mutex::new(Some(task)),
+            #[cfg(any(test, feature = "test-utils"))]
+            parks: follower_parks,
+        }
+    }
+
+    /// Each time the follower has reported every network change it was
+    /// told of, and waits for the next.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn parked_from_now(&self) -> impl std::future::Future<Output = ()> + Send + 'static {
+        self.parks.parked_from_now()
     }
 
     /// Stop following; nothing reports after this returns.

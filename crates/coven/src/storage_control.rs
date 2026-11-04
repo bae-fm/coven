@@ -43,13 +43,21 @@ impl StorageConnections {
         self.waits.sync_started().await?;
         let owner = self.clone();
         let ending = self.clone();
+        let parks = coven_sync::Parks::new();
+        #[cfg(test)]
+        let attempt_parks = parks.clone();
         let task = crate::task::spawn_owned(
             "connect to storage",
             self.database.bugs().clone(),
-            async move { owner.connect_started(epoch).await },
+            async move { owner.connect_started(epoch, parks).await },
             |bug| async move { ending.attempt_panicked(bug).await },
         );
-        *lock_unpoisoned(&self.attempts) = Some(ConnectionAttempt { epoch, task });
+        *lock_unpoisoned(&self.attempts) = Some(ConnectionAttempt {
+            epoch,
+            task,
+            #[cfg(test)]
+            parks: attempt_parks,
+        });
         Ok(())
     }
 
@@ -72,7 +80,8 @@ impl StorageConnections {
     /// backoff until it connects or stopping is requested. Each attempt is
     /// the start of a pass: a failed one answers the retries it took, and a
     /// connected one leaves them to the loop's first pass (IO `RetryAnswer`).
-    async fn connect_started(self: Arc<Self>, epoch: u64) {
+    async fn connect_started(self: Arc<Self>, epoch: u64, parks: coven_sync::Parks) {
+        let _running = parks.running();
         let superseded = || self.epoch.load(Ordering::SeqCst) != epoch;
         let mut rearmed = self.waits.rearmed();
         let mut retry = match coven_sync::ConnectionRetry::open(&self.database).await {
@@ -128,10 +137,13 @@ impl StorageConnections {
                 let wake =
                     self.waits.next_wake(|subject| *subject == coven_database::RetrySubject::Sync);
                 tokio::select! {
+                    biased;
+                    never = parks.polling() => match never {},
                     () = async { if let Some(wake) = wake { wake.await } else { std::future::pending().await } } => {}
                     () = async { if let Some(cooldown) = cooldown { cooldown.await } else { std::future::pending().await } } => {}
                     () = stopped => {}
                     changed = rearmed.changed() => if changed.is_err() { return self.stopped().await },
+                    never = parks.parked() => match never {},
                 }
                 continue;
             }
@@ -357,6 +369,34 @@ impl StorageConnections {
 
 #[cfg(test)]
 impl StorageConnections {
+    /// Wait until a pause is asked of the connection's sync loop after
+    /// this call.
+    pub(crate) fn pause_asked_from_now(&self) -> impl std::future::Future<Output = ()> {
+        lock_unpoisoned(&self.control)
+            .as_ref()
+            .expect("a connection's sync loop")
+            .pause_asked_from_now()
+    }
+
+    /// Wait until the invite expiry's wakes, the connection attempt, the
+    /// connection's sync loop and the upload worker, those running, have in
+    /// turn each taken everything that was ready after the one before it
+    /// parked, and wait: whatever the caller and the earlier ones did has
+    /// been seen.
+    pub(crate) async fn parked(&self) {
+        self.expiry.parked_from_now().await;
+        let attempt =
+            lock_unpoisoned(&self.attempts).as_ref().map(|attempt| attempt.parks.parked_from_now());
+        if let Some(attempt) = attempt {
+            attempt.await;
+        }
+        let sync = lock_unpoisoned(&self.control).as_ref().map(|control| control.parked_from_now());
+        if let Some(sync) = sync {
+            sync.await;
+        }
+        self.files.uploads_parked_from_now().await;
+    }
+
     /// Hold the connection's passes, or let them run again, leaving sync
     /// as started or stopped as it is: while started, uploads run beside
     /// held passes, as during a connection change (§17.4).

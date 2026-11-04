@@ -604,7 +604,7 @@ async fn both_lanes_wait_while_sync_is_stopped() {
     let cover = stage(ana, "covers", "abbey-road", vec![1; 1024]).await;
     let photo = stage(ana, "photos", "studio", vec![2; 2048]).await;
     assert_eq!(ana.handle.retry_uploads_now().await.unwrap(), DrainOutcome::NotSyncing);
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    ana.handle.test_parked().await;
     assert!(!file_stored(ana, cover).await, "a stopped sync sent the cover");
     assert!(!file_stored(ana, photo).await, "a stopped sync sent the photo");
     ana.handle.start_sync().await.unwrap();

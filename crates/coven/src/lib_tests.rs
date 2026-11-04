@@ -915,7 +915,7 @@ mod pending_records {
         };
         let before = reads().await;
         reader.sync_now();
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        reader.test_parked().await;
         assert_eq!(reads().await, before);
         assert!(network.rows(1).await.0.is_empty());
         // The owner's own pass is unaffected.

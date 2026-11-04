@@ -115,7 +115,7 @@ async fn connection_backoff_keeps_its_deadline_and_exponent_across_reopening() {
     *f.connector.failure.lock().unwrap() = Some(attempt_failure(5));
     reopened.start_sync().await.unwrap();
     f.advance(Duration::from_secs(3));
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    reopened.test_parked().await;
     assert_eq!(*f.connector.attempts.borrow(), attempts, "four seconds remain after reopening");
     f.advance(Duration::from_secs(1));
     attempt_failed(&reopened, 5).await;
@@ -153,7 +153,7 @@ async fn connector_failures_wait_for_new_credentials_without_timers() {
         f.advance(Duration::from_secs(600));
         f.handle.sync_now();
         f.handle.start_sync().await.unwrap();
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        f.handle.test_parked().await;
         assert_eq!(
             *f.connector.attempts.borrow(),
             attempts,
@@ -186,7 +186,7 @@ async fn a_connected_pass_waits_for_new_credentials_after_authentication_failure
     let requests = f.storage.request_count();
     f.advance(Duration::from_secs(600));
     f.handle.sync_now();
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    f.handle.test_parked().await;
     assert_eq!(f.storage.request_count(), requests);
     f.storage.set_faults(Faults::none()).await;
     f.handle
@@ -588,9 +588,9 @@ async fn the_first_attempt_publishes_a_cooldowns_end_within_its_backoff() {
     f.handle.start_sync().await.unwrap();
     let until = f.clock.now() + Duration::from_secs(1);
     effect_becomes(&f, RetryEffect::CoolingDown { until }).await;
-    // Starting publishes the cooldown before the attempt plans; let it plan
-    // and wait, so the cooldown ends while it waits.
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    // Starting publishes the cooldown before the attempt plans; it plans
+    // and waits, so the cooldown ends while it waits.
+    f.handle.test_parked().await;
     let attempts = *f.connector.attempts.borrow();
     f.advance(Duration::from_secs(1));
     effect_becomes(&f, RetryEffect::Pass).await;
@@ -685,7 +685,8 @@ async fn stopping_returns_after_the_running_pass_and_the_release() {
     f.handle.sync_now();
     entering.await.unwrap();
     let stopping = crate::tests::stopping(&f.handle);
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    // Stopping's first write says sync isn't running; then it waits.
+    f.handle.test_retry_effect().wait_for(|effect| *effect == RetryEffect::NotSyncing).await;
     assert!(!stopping.is_finished(), "stopping returned while its pass ran");
     // A caller that stops waiting leaves stopping to finish.
     stopping.abort();

@@ -569,6 +569,20 @@ impl CovenHandle {
     pub(crate) async fn store_state(&self) -> coven_database::StoreState {
         self.database.store_state().await.unwrap()
     }
+    /// Wait until the network follower, then the connection attempt, the
+    /// sync loop and the upload worker, those running, have each seen what
+    /// happened before this call, and what the ones before them did, and
+    /// wait.
+    /// Wait until a pause is asked of the sync loop after this call.
+    #[cfg(test)]
+    pub(crate) fn test_pause_asked(&self) -> impl std::future::Future<Output = ()> {
+        self.storage.pause_asked_from_now()
+    }
+    #[cfg(test)]
+    pub(crate) async fn test_parked(&self) {
+        self.network.parked_from_now().await;
+        self.storage.parked().await;
+    }
     #[cfg(test)]
     pub(crate) async fn test_connection_retry_wait(&self) -> Option<coven_database::RetryWait> {
         self.database.retry_wait(coven_database::RetrySubject::Sync).await.unwrap()

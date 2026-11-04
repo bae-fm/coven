@@ -71,7 +71,7 @@ async fn a_write_racing_a_pass_retains_one_pass_and_own_commits_retain_none() {
     status.wait_for(|s| s.state == SyncState::Synced).await;
     // Applying its own slots schedules nothing more: no third pass follows
     // the retained one.
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    device.handle.test_parked().await;
     assert_eq!(counted(), 2);
     network.close().await;
 }
@@ -84,7 +84,7 @@ async fn a_stopped_loop_runs_no_pass_until_started_and_close_ends_it() {
     let before = passes(device);
     insert(&device.handle, "while stopped").await;
     device.handle.sync_now();
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    device.handle.test_parked().await;
     assert_eq!(passes(device), before);
     device.handle.start_sync().await.unwrap();
     wait_for_sent(&device.handle).await;
@@ -95,7 +95,7 @@ async fn a_stopped_loop_runs_no_pass_until_started_and_close_ends_it() {
     let storage = device.storage.clone();
     let requests = storage.request_trace().len();
     network.close().await;
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    // Closed, the store has no loop left to send it.
     assert_eq!(storage.request_trace().len(), requests);
 }
 
@@ -125,7 +125,7 @@ async fn a_retry_after_holds_passes_and_sync_now_coalesces() {
     for _ in 0..3 {
         device.handle.sync_now();
     }
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    device.handle.test_parked().await;
     assert_eq!(
         device.storage.request_trace().len(),
         requests,
@@ -134,7 +134,7 @@ async fn a_retry_after_holds_passes_and_sync_now_coalesces() {
     network.clock.set(network.clock.now() + Duration::from_secs(200));
     last.wait_for(|last| *last == Some(LastPass::Synced)).await;
     // The three requests ran one pass once the cooldown ended.
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    device.handle.test_parked().await;
     assert_eq!(passes(device) - before, 1);
     network.close().await;
 }
@@ -201,7 +201,8 @@ async fn stopping_finishes_a_held_file_upload_and_restarting_resumes_the_queue()
     let first = attach(&device.handle, "first", vec![1; 2048]).await;
     held.await.unwrap();
     let stopping = crate::tests::stopping(&device.handle);
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    // Stopping's first write says sync isn't running; then it waits.
+    device.handle.test_retry_effect().wait_for(|effect| *effect == RetryEffect::NotSyncing).await;
     // Stopping has not cut the upload in flight: it is still being sent,
     // and stopping waits for it.
     assert_eq!(device.handle.sync_status().await.unwrap().state, SyncState::Syncing);
@@ -212,7 +213,7 @@ async fn stopping_finishes_a_held_file_upload_and_restarting_resumes_the_queue()
     device.connector.clients.released().await;
     assert!(file_stored(device, first).await);
     let second = attach(&device.handle, "second", vec![2; 2048]).await;
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    // Stopped, the store has no connection to send it on.
     assert_eq!(file_creates(device), creates + 1, "a stopped connection sent a file");
     device.handle.start_sync().await.unwrap();
     wait_for_empty_queue(&device.handle).await;
@@ -253,7 +254,7 @@ async fn an_uploads_retry_after_holds_the_next_pass() {
     .unwrap();
     let requests = device.storage.request_trace().len();
     device.handle.sync_now();
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    device.handle.test_parked().await;
     assert_eq!(
         device.storage.request_trace().len(),
         requests,
@@ -387,7 +388,7 @@ async fn a_rotation_refused_outright_stalls_sync() {
     let before = passes(owner);
     owner.handle.sync_now();
     insert(&owner.handle, "after the stall").await;
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    owner.handle.test_parked().await;
     assert_eq!(passes(owner), before);
     assert!(matches!(
         owner.handle.test_last_pass().latest().await,
@@ -544,7 +545,7 @@ async fn a_network_report_ends_an_offline_backoff_and_a_pass_runs() {
     for _ in 0..3 {
         device.handle.sync_now();
     }
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    device.handle.test_parked().await;
     assert_eq!(
         device.storage.request_trace().len(),
         requests,
@@ -578,7 +579,7 @@ async fn a_network_report_leaves_a_provider_cooldown_and_an_answered_backoff() {
     let requests = device.storage.request_trace().len();
     device.app.join_network(false);
     device.app.join_network(false);
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    device.handle.test_parked().await;
     assert_eq!(
         device.storage.request_trace().len(),
         requests,
@@ -613,7 +614,7 @@ async fn network_reports_during_a_pass_coalesce_into_one_more_pass() {
     // The first failure's wait ended; the second pass's failure waits.
     let wait = connection_wait(device, |wait| wait.failures == 2).await;
     assert!(!wait.wait.is_zero());
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    device.handle.test_parked().await;
     assert_eq!(device.handle.test_connection_retry_wait().await, Some(wait));
     assert!(matches!(
         device.handle.test_last_pass().latest().await,
@@ -642,7 +643,7 @@ async fn a_network_report_ends_an_offline_backoff_kept_across_reopening() {
     let device = &network.devices[0];
     let requests = device.storage.request_trace().len();
     device.handle.start_sync().await.unwrap();
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    device.handle.test_parked().await;
     assert_eq!(device.storage.request_trace().len(), requests, "reopening discarded the backoff");
     assert_eq!(device.handle.test_connection_retry_wait().await, Some(wait));
     let mut last = device.handle.test_last_pass();
@@ -710,7 +711,7 @@ async fn a_network_report_ends_an_offline_upload_backoff() {
     .await
     .unwrap();
     device.storage.set_online(true);
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    device.handle.test_parked().await;
     assert!(!file_stored(device, photo).await, "the upload skipped its backoff");
     device.app.join_network(false);
     wait_for_empty_queue(&device.handle).await;
@@ -752,7 +753,7 @@ async fn retry_now_ends_an_answered_upload_backoff() {
     .await
     .unwrap();
     device.app.join_network(false);
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    device.handle.test_parked().await;
     assert!(!file_stored(device, photo).await, "a network report ended an answered backoff");
     device.handle.retry_now().await.unwrap();
     wait_for_empty_queue(&device.handle).await;

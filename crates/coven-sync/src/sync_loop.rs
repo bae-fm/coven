@@ -18,6 +18,12 @@ pub struct SyncLoop {
     /// fails with from then on, where a loop that ended with its store
     /// fails with `StoreClosed`.
     panicked: Arc<std::sync::OnceLock<coven_foundation::task::Bug>>,
+    /// Each time the loop has taken everything that can wake it and waits.
+    #[cfg(any(test, feature = "test-utils"))]
+    parks: crate::Parks,
+    /// How many pauses have been asked of the loop.
+    #[cfg(any(test, feature = "test-utils"))]
+    pauses: Arc<tokio::sync::watch::Sender<usize>>,
 }
 enum Command {
     Start,
@@ -45,10 +51,11 @@ impl SyncLoop {
         let owner = sync.clone();
         let panicked = Arc::new(std::sync::OnceLock::new());
         let ended = panicked.clone();
+        let parks = crate::Parks::new();
         drop(coven_foundation::task::spawn_owned(
             "the sync loop",
             sync.database.bugs().clone(),
-            run(sync, codes, receiver),
+            run(sync, codes, receiver, parks.clone()),
             |bug| async move {
                 ended.get_or_init(|| bug.clone());
                 #[expect(
@@ -61,7 +68,36 @@ impl SyncLoop {
                 }
             },
         ));
-        Self { commands, waits, panicked }
+        Self {
+            commands,
+            waits,
+            panicked,
+            #[cfg(any(test, feature = "test-utils"))]
+            parks,
+            #[cfg(any(test, feature = "test-utils"))]
+            pauses: Arc::new(tokio::sync::watch::channel(0).0),
+        }
+    }
+
+    /// Each time the loop has taken every command, change and wake that
+    /// was ready, and waits for the next.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn parked_from_now(&self) -> impl std::future::Future<Output = ()> + Send + 'static {
+        self.parks.parked_from_now()
+    }
+
+    /// Wait until a pause is asked of the loop after this call; the pause
+    /// then waits for the loop to take it, after any pass under way.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn pause_asked_from_now(&self) -> impl std::future::Future<Output = ()> + Send + 'static {
+        let mut pauses = self.pauses.subscribe();
+        let now = *pauses.borrow_and_update();
+        async move {
+            coven_foundation::clock::within(pauses.wait_for(|pauses| *pauses > now))
+                .await
+                .expect("a pause is asked")
+                .expect("the loop's pauses are kept");
+        }
     }
 
     /// Why a command found the loop gone: the bug it ended on, or the store
@@ -101,6 +137,8 @@ impl SyncLoop {
     pub async fn pause(&self) -> Result<(), SyncError> {
         let (send, receive) = oneshot::channel();
         self.commands.send(Command::Pause(send)).map_err(|_| self.gone())?;
+        #[cfg(any(test, feature = "test-utils"))]
+        self.pauses.send_modify(|pauses| *pauses += 1);
         receive.await.map_err(|_| self.gone())
     }
     /// Continue the retained loop after a failed connection or custody change.
@@ -227,7 +265,9 @@ async fn run(
     sync: Arc<SequenceSync>,
     codes: crate::RestoreCodes,
     mut commands: mpsc::UnboundedReceiver<Command>,
+    parks: crate::Parks,
 ) {
+    let _running = parks.running();
     let mut changes = sync.database.sync_changes();
     let mut rearmed = sync.waits.rearmed();
     let mut retry = match crate::ConnectionRetry::open(&sync.database).await {
@@ -317,6 +357,7 @@ async fn run(
             && sync.waits.due(RetrySubject::Sync, previous.as_ref());
         tokio::select! {
             biased;
+            never = parks.polling() => match never {},
             command = commands.recv() => match command {
                 Some(Command::Start) => {
                     if !started {
@@ -484,6 +525,7 @@ async fn run(
                 requests.answer(&outcome);
                 idle = idle_wait(&sync, idle_from, interval.current());
             }
+            never = parks.parked() => match never {},
         }
     }
     // Closing hands waiting retries to the connection that replaces this

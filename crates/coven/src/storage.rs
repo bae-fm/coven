@@ -135,6 +135,10 @@ enum ConnectionState {
 struct ConnectionAttempt {
     epoch: u64,
     task: crate::task::OwnedTask,
+    /// Each time the attempt has taken everything that can wake its
+    /// backoff and waits.
+    #[cfg(test)]
+    parks: coven_sync::Parks,
 }
 
 pub(crate) struct StorageConnections {

@@ -270,7 +270,7 @@ async fn a_removed_device_never_retries_on_a_new_connection() {
     );
     group.clock.set(std::time::UNIX_EPOCH + std::time::Duration::from_secs(600));
     worker.sync_now().unwrap();
-    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    worker.parked_from_now().await;
     // Pulling to refresh is told why at once, and runs no pass.
     let answer = tokio::time::timeout(HANG_GUARD, async {
         ben.sync.waits.retry_requested().await.unwrap().await
@@ -356,13 +356,12 @@ async fn synced_at(status: &mut Followed<SyncStatus>, seconds: u64) {
     status.wait_for(|status| status.last_synced == Some(finished)).await;
 }
 
-/// No pass starts at the clock's current time. Absence has no event to
-/// wait on, so the loop gets a fixed window in which to start one wrongly.
-async fn no_pass(device: &Device, status: &mut Followed<SyncStatus>) {
+/// No pass starts at the clock's current time: the loop, every wake
+/// polled at that time, parks without having sent a request.
+async fn no_pass(device: &Device, worker: &SyncLoop) {
     let requests = device.storage.request_count();
-    let changed = tokio::time::timeout(std::time::Duration::from_millis(200), status.next()).await;
-    assert!(changed.is_err(), "a pass ran: {changed:?}");
-    assert_eq!(device.storage.request_count(), requests);
+    worker.parked_from_now().await;
+    assert_eq!(device.storage.request_count(), requests, "a pass ran");
 }
 
 /// While an app holds a guard, idle passes come at its interval, the
@@ -387,12 +386,12 @@ async fn idle_passes_come_at_the_shortest_interval_held() {
     // The ten-second guard still holds: the next pass is 10 s after the last.
     drop(every_five);
     at(&group, 15);
-    no_pass(&ana, &mut status).await;
+    no_pass(&ana, &ana_loop).await;
     at(&group, 20);
     synced_at(&mut status, 20).await;
     drop(every_ten);
     at(&group, 49);
-    no_pass(&ana, &mut status).await;
+    no_pass(&ana, &ana_loop).await;
     at(&group, 50);
     synced_at(&mut status, 50).await;
     ana_loop.close().await.unwrap();
@@ -420,7 +419,7 @@ async fn a_held_interval_honors_the_provider_cooldown() {
         .await
         .unwrap();
     at(&group, 25);
-    no_pass(&ana, &mut status).await;
+    no_pass(&ana, &ana_loop).await;
     at(&group, 80);
     synced_at(&mut status, 80).await;
     drop(often);

@@ -158,6 +158,12 @@ non_owner_types = [
 # circles, which the app reaches through its handle.
 borrowed_facade_types = ["Circles"]
 task_types = [
+    # How often one loop has polled everything it waits on and found nothing
+    # ready, shared by its task and its owner for a test to wait on, and
+    # what the task holds while it runs.
+    "Parks",
+    "ParkCounts",
+    "LoopRunning",
     # What one S3 detection read from its responses' headers, shared with
     # the interceptor each of its requests carries (§20.7).
     "HeaderCapture",

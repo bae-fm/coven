@@ -345,8 +345,9 @@ async fn an_invite_expires_with_sync_stopped_and_while_closed() {
     assert_eq!(invites.next().await, std::slice::from_ref(&first));
     f.handle.stop_sync().await.unwrap();
     f.clock.set(first.expires_at - Duration::from_secs(1));
-    let early = tokio::time::timeout(Duration::from_millis(200), invites.next()).await;
-    assert!(early.is_err(), "the invite ended before its lifetime: {early:?}");
+    f.handle.test_parked().await;
+    let open = f.handle.test_invites().next().await;
+    assert_eq!(open, std::slice::from_ref(&first), "the invite ended before its lifetime");
     f.clock.set(first.expires_at);
     assert!(invites.next().await.is_empty());
     f.setup().await.unwrap();
@@ -641,11 +642,11 @@ async fn reconnecting_preserves_backoff_and_the_providers_cooldown() {
     // The failed connection backs off: no pass runs until its timer ends.
     let before = f.storage.request_count();
     f.handle.sync_now();
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    f.handle.test_parked().await;
     assert_eq!(f.storage.request_count(), before);
     stop(&f).await;
     f.handle.start_sync().await.unwrap();
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    f.handle.test_parked().await;
     assert_eq!(f.storage.request_count(), before);
     f.advance(Duration::from_secs(1));
     synced(&f.handle).await;
@@ -663,7 +664,7 @@ async fn reconnecting_preserves_backoff_and_the_providers_cooldown() {
     stop(&f).await;
     let before = f.storage.request_count();
     f.handle.start_sync().await.unwrap();
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    f.handle.test_parked().await;
     assert_eq!(
         f.storage.request_count(),
         before,
@@ -741,11 +742,13 @@ async fn forgetting_keys_finishes_the_active_pass_before_removing_custody() {
     f.storage.hold_next_read(ObjectPath::floor(f.directory.id()), listed, resumed).await;
     f.handle.sync_now();
     listing.await.unwrap();
+    let paused = f.handle.test_pause_asked();
     let forget = f.handle.forget_store_keys();
     tokio::pin!(forget);
+    // Forgetting asks the loop to pause, which it takes only after its pass.
     tokio::select! {
         result = &mut forget => panic!("custody was removed during an active sync: {result:?}"),
-        _ = tokio::time::sleep(Duration::from_millis(100)) => {}
+        () = paused => {}
     }
     resume.send(()).unwrap();
     forget.await.unwrap();

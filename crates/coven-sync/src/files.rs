@@ -111,6 +111,9 @@ struct FilesInner {
     pub(crate) shared_reads: tokio::sync::watch::Sender<usize>,
     /// Wakes the upload worker, or its run in progress.
     upload_wake: Arc<Notify>,
+    /// Each time the upload worker has taken everything that can wake it
+    /// and waits.
+    upload_parks: crate::Parks,
     /// One upload run at a time.
     drain: tokio::sync::Mutex<()>,
     /// The files being sent now, which coven's views show (§4, E7).
@@ -149,6 +152,15 @@ impl Drop for FileWorker {
     }
 }
 impl Files {
+    /// Each time the upload worker has taken every change, wake and due
+    /// retry that was ready, and waits for the next.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn uploads_parked_from_now(
+        &self,
+    ) -> impl std::future::Future<Output = ()> + Send + 'static {
+        self.inner.upload_parks.parked_from_now()
+    }
+
     /// Compose the file owner. Storage may be absent while uploads wait.
     pub fn new(
         database: FileDatabase,
@@ -187,6 +199,7 @@ impl Files {
             #[cfg(test)]
             shared_reads: tokio::sync::watch::channel(0).0,
             upload_wake: Arc::new(Notify::new()),
+            upload_parks: crate::Parks::new(),
             drain: tokio::sync::Mutex::new(()),
             in_flight,
             downloading,
@@ -377,6 +390,8 @@ async fn serve_uploads(
     mut changes: coven_database::DatabaseChanges,
 ) -> Option<SyncError> {
     let first = owner.upgrade()?;
+    let parks = first.upload_parks.clone();
+    let _running = parks.running();
     let wake = first.upload_wake.clone();
     // Pins coven keeps resume as the store opens (§17.8).
     wake.notify_one();
@@ -391,6 +406,7 @@ async fn serve_uploads(
     loop {
         tokio::select! {
             biased;
+            never = parks.polling() => match never {},
             _ = stopping.changed() => return None,
             result = changes.next() => if let Err(error) = result {
                 if !matches!(error, DbError::StoreClosed) {
@@ -407,6 +423,7 @@ async fn serve_uploads(
             result = reports.changed() => if result.is_err() { return Some(DbError::StoreClosed.into()) },
             () = network.changed() => {},
             () = &mut retry => {},
+            never = parks.parked() => match never {},
         }
         let owner = owner.upgrade()?;
         let bugs = owner.database.bugs();
