@@ -314,18 +314,17 @@ impl OAuthExchange {
             .client
             .as_ref()
             .map_err(|source| super::http_client::tls_failure(provider, source.clone()))?;
-        let response = client
-            .send(provider, client.request(reqwest::Method::POST, token).form(params))
-            .await?;
-        let status = response.status();
-        if !status.is_success() {
-            return Err(http::response_error(provider, response).await.into());
-        }
+        let response = http::checked(
+            provider,
+            client
+                .send(provider, client.request(reqwest::Method::POST, token).form(params))
+                .await?,
+        )
+        .await?;
         let bytes = SecretBytes::new(
             response.bytes().await.map_err(|e| http::transport(provider, e))?.to_vec(),
         );
-        let tokens: T = serde_json::from_slice(bytes.as_bytes())
-            .map_err(|error| StorageFailure::Encoding.with_source(error))?;
+        let tokens: T = crate::secret_json::decode(bytes.as_bytes())?;
         let (access_token, token_type) = bearer(&tokens);
         if access_token.as_str().is_empty() || !token_type.eq_ignore_ascii_case("bearer") {
             return Err(StorageFailure::Protocol
