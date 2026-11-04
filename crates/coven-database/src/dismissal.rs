@@ -217,7 +217,7 @@ fn cascade_deletes(
                         .get(&key.columns.0[0])
                         .and_then(|cell| cell.value.parents.get(&key))
                         .is_some_and(|parent| parent.row == row && parent.generation == generation);
-                    if !state.generation().is_multiple_of(2) && names_parent {
+                    if state.present() && names_parent {
                         if let std::collections::btree_map::Entry::Vacant(entry) =
                             changes.entry(child.clone())
                         {

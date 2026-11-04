@@ -103,7 +103,7 @@ impl Parent {
     /// Validate a written reference from `child`: it must name an odd
     /// incarnation in the child's audience or the store (§9.1, §15.3).
     pub fn validate_written(&self, child: &RowId) -> Result<(), MergeError> {
-        if self.generation.is_multiple_of(2) {
+        if !crate::generation_present(self.generation) {
             return Err(MergeError::ParentGeneration(self.generation));
         }
         validate_audience(child, &self.row)
@@ -185,7 +185,9 @@ impl<V> Change<V> {
     /// The incarnation this change belongs to: generation + 1 for an insert,
     /// generation for an update or delete. Invalid parity is a typed error.
     pub fn incarnation(&self) -> Result<u64, MergeError> {
-        if matches!(self.operation, Operation::Insert(_)) != self.generation.is_multiple_of(2) {
+        if matches!(self.operation, Operation::Insert(_))
+            == crate::generation_present(self.generation)
+        {
             return Err(MergeError::GenerationParity(self.generation));
         }
         if matches!(self.operation, Operation::Insert(_)) {

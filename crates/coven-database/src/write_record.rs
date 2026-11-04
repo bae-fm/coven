@@ -235,7 +235,7 @@ pub(crate) fn changes(
                     })
                     .collect();
                 (Operation::Update(columns(&new_values)), old_values)
-            } else if generation % 2 == 1 {
+            } else if coven_merge::generation_present(generation) {
                 (Operation::Update(columns(&synced)), removed_values(database, &row, generation)?)
             } else {
                 (Operation::Insert(columns(&synced)), BTreeMap::new())
@@ -281,7 +281,7 @@ pub(crate) fn changes(
                 (n.clone(), copied(schema, &old.table, n, &new.audience, c.value.clone(), copies))
             })
             .collect();
-        let (operation, old_values) = if generation % 2 == 1 {
+        let (operation, old_values) = if coven_merge::generation_present(generation) {
             (Operation::Update(values), removed_values(database, new, generation)?)
         } else {
             (Operation::Insert(values), BTreeMap::new())
@@ -393,7 +393,7 @@ pub(crate) fn changes(
                         Some(g) => *g,
                         None => generation(database, &parent)?,
                     };
-                    if generation % 2 != 1 {
+                    if !coven_merge::generation_present(generation) {
                         return Err(crate::file_write::unknown(table, &values, column));
                     }
                     value.parents.insert(name, Parent { row: parent, generation });

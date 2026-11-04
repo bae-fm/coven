@@ -65,7 +65,7 @@ pub(crate) fn changes(
                 let generation = crate::write_record::generation(db, &parent)?;
                 Some(Parent {
                     row: parent,
-                    generation: if generation.is_multiple_of(2) {
+                    generation: if !coven_merge::generation_present(generation) {
                         generation.checked_add(1).expect("generation exhausted")
                     } else {
                         generation

@@ -140,10 +140,10 @@ impl Tracker<'_> {
             None => self.before.row(key)?.map(|row| crate::write_rows::row_id(key, &row)),
         };
         if let Some(last) = last.filter(|last| *last != now) {
-            if self.generation(&last)? % 2 == 1 {
+            if coven_merge::generation_present(self.generation(&last)?) {
                 self.advance(&last)?;
             }
-            if self.generation(&now)? % 2 == 0 {
+            if !coven_merge::generation_present(self.generation(&now)?) {
                 self.advance(&now)?;
             }
         }
@@ -195,7 +195,7 @@ impl Tracker<'_> {
             };
             let row = self.row(&parent, &parent_values)?;
             let generation = self.generation(&row)?;
-            if generation % 2 == 0
+            if !coven_merge::generation_present(generation)
                 || (row.audience != Audience::Store && Some(&row.audience) != audience)
             {
                 continue;
@@ -303,7 +303,7 @@ pub(crate) fn capture(
                     let generation = tracker.generation(&row)?;
                     // Inserting a removed row's key updates it, setting every
                     // column (§8.4); only a deleted or new row starts an incarnation.
-                    let operation = if generation % 2 == 1 {
+                    let operation = if coven_merge::generation_present(generation) {
                         Operation::Update(columns)
                     } else {
                         tracker.advance(&row)?;

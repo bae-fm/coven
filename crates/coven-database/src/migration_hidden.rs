@@ -64,7 +64,7 @@ impl<'c> Hidden<'c> {
     ) -> Result<Option<RowChange>, DbError> {
         let state = store.row(row)?.state;
         let generation = state.generation();
-        if generation.is_multiple_of(2) {
+        if !state.present() {
             return Ok(None);
         }
         let old = state

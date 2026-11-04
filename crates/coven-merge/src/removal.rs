@@ -295,7 +295,7 @@ fn inputs<E: From<MergeError>>(
             continue;
         }
         let facts = view.row(&row)?;
-        if facts.present() == facts.generation().is_multiple_of(2) {
+        if facts.present() != crate::generation_present(facts.generation()) {
             return Err(MergeError::GenerationParity(facts.generation()).into());
         }
         if let RemovalRow::Present { references, .. } = &facts {

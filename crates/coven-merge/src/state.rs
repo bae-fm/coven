@@ -30,6 +30,13 @@ pub struct LostValue<V> {
     pub replaced_by: WriteId,
 }
 
+/// Whether a row at `generation` is present: a row starts absent at 0 and
+/// each insert or delete advances it, so an odd generation is an
+/// incarnation (§8.3).
+pub const fn generation_present(generation: u64) -> bool {
+    !generation.is_multiple_of(2)
+}
+
 /// One table, key and audience's merged state. Removed rows retain this state;
 /// a removal never advances their generation (§8.4).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -77,7 +84,7 @@ impl<V> RowState<V> {
             previous_stamp = Some(stamp);
             generation = *g;
         }
-        if generation.is_multiple_of(2) && !cells.is_empty() {
+        if !generation_present(generation) && !cells.is_empty() {
             return Err(MergeError::DeletedRowHasCells.into());
         }
         for (column, cell) in &cells {
@@ -107,7 +114,7 @@ impl<V> RowState<V> {
     ) -> Result<(), O::Error> {
         let invalid = || MergeError::InvalidLostValue(key.clone());
         let inc = value.incarnation;
-        if inc.is_multiple_of(2) || inc > self.generation {
+        if !generation_present(inc) || inc > self.generation {
             return Err(invalid().into());
         }
         let start = self.generations.get(&inc).ok_or_else(invalid)?;
@@ -144,7 +151,7 @@ impl<V> RowState<V> {
     }
     /// Whether the row is present in merged state, before removal rules.
     pub fn present(&self) -> bool {
-        !self.generation.is_multiple_of(2)
+        generation_present(self.generation)
     }
     /// The smallest-stamped write that moved the row to each generation.
     pub fn generations(&self) -> &BTreeMap<u64, WriteId> {

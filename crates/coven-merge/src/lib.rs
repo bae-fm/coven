@@ -34,7 +34,9 @@ pub use removal::{
 };
 #[cfg(any(test, feature = "test-utils"))]
 pub use removal::{removals, FullRemovalView};
-pub use state::{apply, Cell, LostChange, LostKey, LostValue, RowState, RowUpdate};
+pub use state::{
+    apply, generation_present, Cell, LostChange, LostKey, LostValue, RowState, RowUpdate,
+};
 pub use timestamp::Timestamp;
 
 #[cfg(test)]

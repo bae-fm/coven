@@ -301,7 +301,9 @@ impl<'a> MergeStore<'a> {
         let current = generations.last().map(|(ordinal, generation, _)| (*ordinal, *generation));
         let mut cells = BTreeMap::new();
         let mut loss = None;
-        if let Some((ordinal, generation)) = current.filter(|(_, g)| g % 2 == 1) {
+        if let Some((ordinal, generation)) =
+            current.filter(|(_, g)| coven_merge::generation_present(*g))
+        {
             let retained = self.database.query("SELECT id,value FROM _coven_lost WHERE table_name=?1 AND key=?2 AND audience=?3 AND generation=?4 AND column_id IS NULL AND replacement_kind='rules' AND frozen=0", params![id.table,id.key,audience,generation.to_be_bytes().as_slice()], |r| Ok((r.get::<_,i64>(0)?, decoded(merge_fields::decode_columns(&r.get::<_,Vec<u8>>(1)?))?)))?;
             assert!(retained.len() <= 1, "present row has more than one removal record: {id:?}");
             let staged = match self.values {

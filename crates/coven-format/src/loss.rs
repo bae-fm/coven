@@ -332,7 +332,7 @@ impl Loss {
         }
         if !self.cause.freezes_change() {
             require(
-                !self.generation.is_multiple_of(2),
+                coven_merge::generation_present(self.generation),
                 "loss incarnation",
                 FormatRule::Generation,
             )?;

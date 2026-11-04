@@ -199,7 +199,7 @@ impl<'a> DatabaseRemovalView<'a> {
         }
         let state = self.state(id)?;
         let generation = state.generation();
-        if generation.is_multiple_of(2) {
+        if !state.present() {
             let row = EvaluatedRow {
                 facts: RemovalRow::Absent { generation },
                 values: BTreeMap::new(),
