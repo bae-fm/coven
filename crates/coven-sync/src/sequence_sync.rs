@@ -13,6 +13,7 @@ use coven_crypto::{
     custody::{KeySession, PersonEntries},
     MemberIdentity, StoreKeyring,
 };
+use coven_database::operation_kind;
 use coven_database::{
     Database, IncomingSlot, LoadStep, NewOperation, ProviderAccessChange, SlotContent,
 };
@@ -644,9 +645,9 @@ pub(crate) fn account_change(
 ) -> Result<ProviderAccessChange, SyncError> {
     Ok(ProviderAccessChange {
         operation: NewOperation {
-            kind: "provider-access".into(),
+            kind: operation_kind::PROVIDER_ACCESS.into(),
             data: serde_json::to_vec(account)?,
-            started_by: "coven".into(),
+            started_by: operation_kind::COVEN.into(),
             pauses_writes: false,
         },
         account: account.to_owned(),

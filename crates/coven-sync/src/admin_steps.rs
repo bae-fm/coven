@@ -7,6 +7,7 @@
 use crate::sequence_sync::sequence_operations::SequenceOperation;
 use crate::{effects, OperationRejection, SequenceState, SyncError};
 use coven_crypto::MemberIdentity;
+use coven_database::operation_kind;
 use coven_database::{Journal, NewOperation, OperationId, SqlContext, StoreState};
 use coven_format::{admin::StoreChange, sequence::SlotHeader};
 use coven_foundation::id_source::{CircleId, DeviceId, IdSource, KeyId, MemberId};
@@ -122,7 +123,7 @@ pub(crate) fn journaled(
     started_by: &str,
 ) -> Result<NewOperation, SyncError> {
     Ok(NewOperation {
-        kind: "sequence".into(),
+        kind: operation_kind::SEQUENCE.into(),
         data: serde_json::to_vec(work)?,
         started_by: started_by.into(),
         pauses_writes: false,

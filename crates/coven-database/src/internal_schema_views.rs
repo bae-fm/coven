@@ -120,7 +120,9 @@ pub(super) const SCHEMA: &str = concat!(
     "CREATE VIEW coven_invites(invite,operation) AS
         SELECT o.data,o.id
         FROM _coven_operations AS o
-        WHERE o.kind='invite'
+        WHERE o.kind='",
+    crate::operation_kind::invite_kind!(),
+    "'
             AND (json_extract(CAST(o.data AS TEXT),'$.state') IN ('Requested','Grant')
                 OR json_type(CAST(o.data AS TEXT),'$.state.Waiting') IS NOT NULL
                 OR json_type(CAST(o.data AS TEXT),'$.state.Approving') IS NOT NULL);",

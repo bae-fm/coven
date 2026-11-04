@@ -8,6 +8,7 @@ use crate::{
     SyncError,
 };
 use coven_crypto::{MemberIdentity, StoreKeyring};
+use coven_database::operation_kind;
 use coven_format::sequence::Purpose;
 use coven_merge::Audience;
 use std::collections::BTreeSet;
@@ -24,9 +25,6 @@ const FIRST_SNAPSHOT_BYTES: u64 = 1024 * 1024;
 /// measured again.
 pub(crate) const SNAPSHOT_GAP_PERCENT: u64 = 100;
 
-/// The journal kind a breaking migration commits with its schema (§18.3).
-const SCHEMA_RAISE: &str = "schema-raise";
-
 impl SequenceSync {
     /// Supply to `DatabaseBuilder::migration_operation` at the composition
     /// root: the breaking migration's version commits with its schema, and
@@ -35,10 +33,10 @@ impl SequenceSync {
         version: u32,
     ) -> Result<coven_database::NewOperation, coven_database::DbError> {
         Ok(coven_database::NewOperation {
-            kind: SCHEMA_RAISE.into(),
+            kind: operation_kind::SCHEMA_RAISE.into(),
             data: serde_json::to_vec(&version)
                 .map_err(|error| coven_database::DbError::SyncStream(Box::new(error)))?,
-            started_by: "coven".into(),
+            started_by: operation_kind::COVEN.into(),
             pauses_writes: false,
         })
     }
@@ -57,7 +55,7 @@ impl SequenceSync {
             .operations()
             .await?
             .into_iter()
-            .filter(|record| record.kind == SCHEMA_RAISE)
+            .filter(|record| record.kind == operation_kind::SCHEMA_RAISE)
             .collect();
         if records.is_empty() || !self.registered(session) {
             return Ok(());
@@ -67,7 +65,7 @@ impl SequenceSync {
             .operations()
             .await?
             .into_iter()
-            .filter(|record| record.kind == "sequence")
+            .filter(|record| record.kind == operation_kind::SEQUENCE)
             .map(|record| serde_json::from_slice::<SequenceOperation>(&record.data))
             .collect::<Result<Vec<_>, _>>()?
             .into_iter()
@@ -108,7 +106,7 @@ impl SequenceSync {
                         audience: capture.audience.clone(),
                         purpose: Purpose::Raise(capture.version),
                     }),
-                    "coven",
+                    operation_kind::COVEN,
                 )
                 .await
                 .and_then(crate::operation_outcome::into_slot)
@@ -142,7 +140,7 @@ impl SequenceSync {
             .operations()
             .await?
             .into_iter()
-            .filter(|record| record.kind == "sequence")
+            .filter(|record| record.kind == operation_kind::SEQUENCE)
             .map(|record| serde_json::from_slice::<SequenceOperation>(&record.data))
             .collect::<Result<Vec<_>, _>>()?
             .into_iter()
@@ -222,7 +220,7 @@ impl SequenceSync {
                             audience: audience.clone(),
                             purpose: Purpose::Ordinary,
                         }),
-                        "coven",
+                        operation_kind::COVEN,
                     )
                     .await
                     .and_then(crate::operation_outcome::into_slot)

@@ -7,6 +7,7 @@ use crate::{
     OperationKind, SyncError,
 };
 use coven_crypto::{MemberIdentity, StoreKeyring};
+use coven_database::operation_kind;
 use coven_database::{NewOperation, OperationRecord};
 use coven_format::sequence::{Purpose, SnapshotAnnouncement};
 use coven_foundation::id_source::DeviceId;
@@ -83,7 +84,7 @@ impl SequenceSync {
         let records = self.database.operations().await?;
         let pending_floor = records
             .iter()
-            .filter(|record| record.kind == "sequence-retention")
+            .filter(|record| record.kind == operation_kind::SEQUENCE_RETENTION)
             .map(|record| serde_json::from_slice::<Retention>(&record.data))
             .collect::<Result<Vec<_>, _>>()?
             .iter()
@@ -92,9 +93,9 @@ impl SequenceSync {
             if let Some(proposal) = self.propose_floor(session, ring).await? {
                 self.database
                     .start_operation(NewOperation {
-                        kind: "sequence-retention".into(),
+                        kind: operation_kind::SEQUENCE_RETENTION.into(),
                         data: serde_json::to_vec(&proposal)?,
-                        started_by: "coven".into(),
+                        started_by: operation_kind::COVEN.into(),
                         pauses_writes: false,
                     })
                     .await?;
@@ -110,7 +111,9 @@ impl SequenceSync {
         member: &MemberIdentity,
     ) -> Result<(), SyncError> {
         for record in self.database.operations().await? {
-            if record.kind != "sequence-retention" || !self.operation_ready(&record, ring).await? {
+            if record.kind != operation_kind::SEQUENCE_RETENTION
+                || !self.operation_ready(&record, ring).await?
+            {
                 continue;
             }
             let scope = self.waits.begin_attempt(record.id);
@@ -158,7 +161,7 @@ impl SequenceSync {
         let mut pending_snapshots = Vec::new();
         let mut pending_listings = BTreeSet::new();
         for record in self.database.operations().await? {
-            if record.kind != "sequence-retention" {
+            if record.kind != operation_kind::SEQUENCE_RETENTION {
                 continue;
             }
             match serde_json::from_slice(&record.data)? {
@@ -182,9 +185,9 @@ impl SequenceSync {
             {
                 self.database
                     .start_operation(NewOperation {
-                        kind: "sequence-retention".into(),
+                        kind: operation_kind::SEQUENCE_RETENTION.into(),
                         data: serde_json::to_vec(&Retention::GoneListing(*device))?,
-                        started_by: "coven".into(),
+                        started_by: operation_kind::COVEN.into(),
                         pauses_writes: false,
                     })
                     .await?;
@@ -240,9 +243,9 @@ impl SequenceSync {
             }
             self.database
                 .start_operation(NewOperation {
-                    kind: "sequence-retention".into(),
+                    kind: operation_kind::SEQUENCE_RETENTION.into(),
                     data: serde_json::to_vec(&Retention::Snapshot(id.clone()))?,
-                    started_by: "coven".into(),
+                    started_by: operation_kind::COVEN.into(),
                     pauses_writes: false,
                 })
                 .await?;

@@ -1,5 +1,6 @@
 //! Durable operation records. Sync owns kinds and interprets their data (§11).
 
+use crate::operation_kind::INVITE;
 use crate::{sqlite::DatabaseConnection, DbError};
 
 /// The local, never reused identity of an operation.
@@ -279,10 +280,6 @@ fn end(
     }
     Ok(())
 }
-
-/// The kind of an invite's journal row, and the `started_by` of the
-/// operations it starts, as coven-sync names them.
-const INVITE: &str = "invite";
 
 /// How the applied state stops this installation for good, if it does. One
 /// whose device isn't registered yet hasn't started.

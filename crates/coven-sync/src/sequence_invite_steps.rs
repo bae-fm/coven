@@ -116,7 +116,7 @@ pub fn create_invite(
             state: InviteState::Requested,
         };
         let operation = journal.start_operation(&NewOperation {
-            kind: INVITE.into(),
+            kind: operation_kind::INVITE.into(),
             data: serde_json::to_vec(&work)?,
             started_by: "create_invite".into(),
             pauses_writes: false,
@@ -195,8 +195,11 @@ pub fn approve_join_request(
             return Err(SyncError::InvitationChanged);
         }
         let change = work.binding_change(&stored)?;
-        let binding =
-            crate::admin_steps::start(journal, SequenceOperation::change(change), INVITE)?;
+        let binding = crate::admin_steps::start(
+            journal,
+            SequenceOperation::change(change),
+            operation_kind::INVITE,
+        )?;
         work.state = InviteState::Approving { code, request: stored, binding };
         journal.advance_operation(&work.update(&record)?)?;
         Ok((record.id, binding))
@@ -286,7 +289,7 @@ fn invite_record(
     journal: &Journal<'_>,
     invite: InviteId,
 ) -> Result<(OperationRecord, InviteWork), SyncError> {
-    for record in journal.operations(INVITE)? {
+    for record in journal.operations(operation_kind::INVITE)? {
         let work = InviteWork::read(&record)?;
         if work.id == invite {
             return Ok((record, work));

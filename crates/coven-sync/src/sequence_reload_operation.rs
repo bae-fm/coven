@@ -1,6 +1,7 @@
 //! An explicit reload retains its selected bodies and common target (§16.5, E6).
 use super::*;
 use crate::sequence_sync::OperationState;
+use coven_database::operation_kind;
 use coven_database::{NewOperation, OperationRecord};
 use serde::{Deserialize, Serialize};
 
@@ -43,7 +44,7 @@ impl SequenceSync {
         }
         let member = self.member.read()?.ok_or(coven_storage::StorageFailure::MemberKeysMissing)?;
         let mut ring = self.ring(&mut session, &member).await?;
-        let record = match self.database.first_operation("sequence-reload").await? {
+        let record = match self.database.first_operation(operation_kind::SEQUENCE_RELOAD).await? {
             Some(record) => {
                 self.retry_operation(record.id).await?;
                 record
@@ -63,7 +64,7 @@ impl SequenceSync {
                     target: session.through,
                     selections,
                 })?;
-                let kind = "sequence-reload".to_owned();
+                let kind = operation_kind::SEQUENCE_RELOAD.to_owned();
                 let started_by = "reload_from_snapshot".to_owned();
                 let id = self
                     .database
@@ -87,7 +88,8 @@ impl SequenceSync {
         ring: &mut StoreKeyring,
         member: &MemberIdentity,
     ) -> Result<(), SyncError> {
-        if let Some(record) = self.database.first_operation("sequence-reload").await? {
+        if let Some(record) = self.database.first_operation(operation_kind::SEQUENCE_RELOAD).await?
+        {
             // Reload staging lives on the heap; ordinary readers and their
             // callers need not reserve its future on every stack frame.
             Box::pin(self.run_reload(session, ring, member, record)).await?;

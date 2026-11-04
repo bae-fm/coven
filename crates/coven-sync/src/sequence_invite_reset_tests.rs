@@ -90,7 +90,7 @@ async fn reset_carries_account_work_after_the_invite_journal_has_finished() {
         .await
         .unwrap();
     ana.sync.cancel_invite(invite.id).await.unwrap();
-    assert!(ana.database().first_operation(INVITE).await.unwrap().is_none());
+    assert!(ana.database().first_operation(operation_kind::INVITE).await.unwrap().is_none());
     let new = replacement(&group, &ana).await;
     carry(&ana, &new).await;
     new.sync.pass().await.unwrap();
@@ -183,7 +183,7 @@ async fn reset_keeps_an_invite_key_whose_approval_landed_before_journal_completi
         )
         .await
         .unwrap();
-    let record = ana.database().first_operation(INVITE).await.unwrap().unwrap();
+    let record = ana.database().first_operation(operation_kind::INVITE).await.unwrap().unwrap();
     let mut work = InviteWork::read(&record).unwrap();
     let keys = coven_format::test_utils::keys_from_seed(3).public_keys();
     work.state = InviteState::Approving {
@@ -237,7 +237,8 @@ async fn an_undecodable_invite_fails_reset_without_a_completion_notice() {
         .await
         .unwrap();
     let mut records = ana.database().operations().await.unwrap();
-    records.iter_mut().find(|record| record.kind == INVITE).unwrap().data = b"{".to_vec();
+    records.iter_mut().find(|record| record.kind == operation_kind::INVITE).unwrap().data =
+        b"{".to_vec();
     let new = replacement(&group, &ana).await;
     assert!(new
         .sync

@@ -6,6 +6,7 @@
 //! §21.2's unchanged-wait rate (`unchanged_rate`).
 
 use crate::{PendingReason, PendingRecord, Prerequisite, Retry, RetryWaits, SyncError};
+use coven_database::operation_kind;
 use coven_database::{
     AttemptCommits, CommitScope, DatabaseChanges, DbError, OperationId, PrerequisiteRows,
     RetrySubject,
@@ -113,9 +114,10 @@ impl RetryWaits {
             };
             if pending.retry() == Retry::Automatic {
                 let reload = match pending.reason.retry_cause() {
-                    PendingReason::Waits(Prerequisite::Reload(_)) => {
-                        database.first_operation("sequence").await?.map(|record| record.id)
-                    }
+                    PendingReason::Waits(Prerequisite::Reload(_)) => database
+                        .first_operation(operation_kind::SEQUENCE)
+                        .await?
+                        .map(|record| record.id),
                     _ => None,
                 };
                 self.arm_evidence(id, &pending.reason, None, reload);

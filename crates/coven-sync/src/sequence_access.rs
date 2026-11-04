@@ -5,6 +5,7 @@ use crate::{
     OperationKind, OperationRejection, PendingReason, PendingRecord, PendingSubject, SyncError,
 };
 use coven_crypto::{MemberIdentity, StoreKeyring};
+use coven_database::operation_kind;
 use coven_database::{OperationId, ProviderAccessChange, ProviderChanges};
 use coven_format::MemberAccess;
 use coven_foundation::id_source::MemberId;
@@ -114,7 +115,9 @@ impl SequenceSync {
         member: &MemberIdentity,
     ) -> Result<(), SyncError> {
         for record in self.database.operations().await? {
-            if record.kind != "provider-access" || !self.operation_ready(&record, ring).await? {
+            if record.kind != operation_kind::PROVIDER_ACCESS
+                || !self.operation_ready(&record, ring).await?
+            {
                 continue;
             }
             let scope = self.waits.begin_attempt(record.id);

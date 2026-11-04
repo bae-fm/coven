@@ -1,6 +1,6 @@
-use super::INVITE;
 use crate::sequence_sync::tests::*;
 use crate::*;
+use coven_database::operation_kind;
 use coven_format::{admin::MemberRole, MemberAccess};
 use coven_foundation::clock::Clock;
 use coven_storage::Storage;
@@ -745,7 +745,8 @@ async fn a_stop_for_good_ends_this_devices_invites() {
     assert!(listed(&ana).await.is_empty(), "{:?}", listed(&ana).await);
     let operations = ana.database().operations().await.unwrap();
     assert!(
-        operations.iter().all(|record| record.kind != INVITE && record.started_by != INVITE),
+        operations.iter().all(|record| record.kind != operation_kind::INVITE
+            && record.started_by != operation_kind::INVITE),
         "{operations:?}"
     );
     let outcome = ana
@@ -866,7 +867,7 @@ async fn a_request_not_signed_by_its_pair_is_refused_before_its_fields() {
         .await
         .unwrap()
         .into_iter()
-        .find(|record| record.kind == INVITE)
+        .find(|record| record.kind == operation_kind::INVITE)
         .unwrap();
     let work: super::InviteWork = serde_json::from_slice(&record.data).unwrap();
     let result = ana.sync.open_request(&work, &bytes);

@@ -223,6 +223,7 @@ pub(crate) mod tests;
 
 mod operation;
 pub use operation::{NewOperation, OperationId, OperationRecord, OperationUpdate};
+pub mod operation_kind;
 mod operation_outcome;
 pub use operation_outcome::{
     slot_json, DeviceStop, EntryTarget, OperationOutcome, OperationRejection,

@@ -7,8 +7,9 @@
 //! back its access is the ended invite's own work, which a pass does once
 //! storage is connected, as for an invite ended any other way.
 
-use super::{InviteState, InviteWork, INVITE};
+use super::{InviteState, InviteWork};
 use crate::{RetryWaits, SequenceState};
+use coven_database::operation_kind;
 use coven_database::{Database, DbError, OperationId};
 use coven_foundation::clock::ClockRef;
 use std::{sync::Arc, time::SystemTime};
@@ -111,7 +112,7 @@ async fn write(
     now: SystemTime,
 ) -> Result<(Vec<OperationId>, Option<SystemTime>), DbError> {
     database
-        .advance_operations(INVITE, move |records| {
+        .advance_operations(operation_kind::INVITE, move |records| {
             let mut updates = Vec::new();
             let mut ended = Vec::new();
             let mut next: Option<SystemTime> = None;

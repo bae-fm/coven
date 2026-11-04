@@ -1,8 +1,9 @@
 use crate::sequence_sync::sequence_invites::tests::requests;
-use crate::sequence_sync::sequence_invites::{InviteState, InviteWork, INVITE};
+use crate::sequence_sync::sequence_invites::{InviteState, InviteWork};
 use crate::sequence_sync::tests::*;
 use crate::sequence_sync::OperationState;
 use crate::*;
+use coven_database::operation_kind;
 use coven_format::{admin::MemberRole, MemberAccess};
 use coven_storage::ObjectPath;
 
@@ -402,7 +403,7 @@ async fn a_refused_access_record_ends_its_invite() {
         .await
         .unwrap();
     // The binding landed; recording Carol's new key comes next.
-    let record = ana.database().first_operation(INVITE).await.unwrap().unwrap();
+    let record = ana.database().first_operation(operation_kind::INVITE).await.unwrap().unwrap();
     let mut work = InviteWork::read(&record).unwrap();
     work.state = InviteState::Recording;
     ana.database().advance_operation(work.update(&record).unwrap()).await.unwrap();

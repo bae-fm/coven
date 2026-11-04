@@ -12,13 +12,12 @@ use crate::{
     RequiredUpdate, SyncError,
 };
 use coven_crypto::{MemberIdentity, StoreKeyring};
+use coven_database::operation_kind;
 use coven_database::{DownloadedPartStream, FileEvidence, NewOperation, Slot, UnprovenFiles};
 use coven_format::{sealed_write::WriteObjectPrefix, sequence::SnapshotAnnouncement};
 use coven_foundation::id_source::{DeviceId, FileId};
 use coven_storage::{ObjectPath, StorageFailure};
 use std::{collections::BTreeSet, sync::Arc};
-
-const SEQUENCE_FILES: &str = "sequence-files";
 
 impl SequenceSync {
     /// The uploaders whose files this device deletes: its own, and each
@@ -39,7 +38,7 @@ impl SequenceSync {
     fn unfinished_capture(
         records: &[coven_database::OperationRecord],
     ) -> Result<Option<coven_database::OperationId>, SyncError> {
-        for record in records.iter().filter(|record| record.kind == "sequence") {
+        for record in records.iter().filter(|record| record.kind == operation_kind::SEQUENCE) {
             let work: SequenceOperation = serde_json::from_slice(&record.data)?;
             let step = match work.progress {
                 OperationProgress::Running(step) | OperationProgress::Undo { step, .. } => step,
@@ -68,9 +67,9 @@ impl SequenceSync {
             None => {
                 self.database
                     .start_operation(NewOperation {
-                        kind: SEQUENCE_FILES.into(),
+                        kind: operation_kind::SEQUENCE_FILES.into(),
                         data: Vec::new(),
-                        started_by: "coven".into(),
+                        started_by: operation_kind::COVEN.into(),
                         pauses_writes: false,
                     })
                     .await?
@@ -91,7 +90,7 @@ impl SequenceSync {
         let scans = self.uploader_scans(&session.history, &uploaders, Listing::AtStop).await?;
         let candidates = self.database.file_candidates(uploaders.clone()).await?;
         let records = self.database.operations().await?;
-        let existing = records.iter().find(|record| record.kind == SEQUENCE_FILES);
+        let existing = records.iter().find(|record| record.kind == operation_kind::SEQUENCE_FILES);
         // A candidate still waiting for another device to read past it gives
         // a pass nothing to do, however long that device stays away.
         let seen = self.seen_by_all(session).await?;
@@ -158,7 +157,7 @@ impl SequenceSync {
         if let Some(capture) = Self::unfinished_capture(&records)? {
             return Err(SyncError::SnapshotPending(capture));
         }
-        let existing = records.iter().find(|record| record.kind == SEQUENCE_FILES);
+        let existing = records.iter().find(|record| record.kind == operation_kind::SEQUENCE_FILES);
         let id = self.files_operation(existing).await?;
         let result = self
             .waits

@@ -8,6 +8,7 @@ use crate::{
     slot_object, OperationOutcome, OperationRejection, SyncError,
 };
 use coven_crypto::{MemberIdentity, StoreKeyring};
+use coven_database::operation_kind;
 use coven_database::{ClaimAttempt, ClaimSettlement, ClaimWork, OperationId, OperationRecord};
 use coven_format::{
     admin::StoreChange,
@@ -246,7 +247,7 @@ impl SequenceSync {
         carries: impl Fn(&Request) -> bool,
     ) -> Result<bool, SyncError> {
         for record in self.database.operations().await? {
-            if record.kind == "sequence"
+            if record.kind == operation_kind::SEQUENCE
                 && carries(&serde_json::from_slice::<SequenceOperation>(&record.data)?.request)
             {
                 return Ok(true);
@@ -286,7 +287,7 @@ impl SequenceSync {
         let records = self.database.operations().await?;
         self.waits.retain_operations(&records.iter().map(|r| r.id).collect());
         for record in records {
-            if record.kind == "sequence"
+            if record.kind == operation_kind::SEQUENCE
                 && !parent_owned(&record)
                 && self.operation_ready(&record, ring).await?
             {
@@ -337,7 +338,7 @@ impl SequenceSync {
         started_by: &str,
     ) -> Result<Option<OperationId>, SyncError> {
         for record in self.database.operations().await? {
-            if record.kind == "sequence" && record.started_by == started_by {
+            if record.kind == operation_kind::SEQUENCE && record.started_by == started_by {
                 let work: SequenceOperation = serde_json::from_slice(&record.data)?;
                 if matches!(&work.request, Request::Change(existing) if existing == change) {
                     return Ok(Some(record.id));
@@ -856,7 +857,7 @@ mod route {
 }
 
 fn parent_owned(record: &OperationRecord) -> bool {
-    record.started_by == super::sequence_invites::INVITE
+    record.started_by == operation_kind::INVITE
 }
 
 fn required_copies(

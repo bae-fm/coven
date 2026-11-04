@@ -54,10 +54,11 @@ impl SequenceSync {
         change: StoreChange,
     ) -> Result<(Option<OperationId>, OperationOutcome), SyncError> {
         // The exact requested entry identifies this invite's unfinished claim.
-        if let Some(id) = self.pending_change(&change, INVITE).await? {
+        if let Some(id) = self.pending_change(&change, operation_kind::INVITE).await? {
             return Ok((Some(id), self.run_administration(session, ring, member, id).await?));
         }
-        self.start_child(session, ring, member, Request::Change(change), INVITE).await
+        self.start_child(session, ring, member, Request::Change(change), operation_kind::INVITE)
+            .await
     }
 }
 

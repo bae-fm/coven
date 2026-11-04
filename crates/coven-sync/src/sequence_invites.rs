@@ -10,7 +10,9 @@ use crate::{
     ProviderAccessAction, RetryWaits, SequenceState, SyncError,
 };
 use coven_crypto::{ConfirmationNumber, InviteSecret, MemberIdentity, SecretText, StoreKeyring};
-use coven_database::{Journal, NewOperation, OperationId, OperationRecord, SqlContext};
+use coven_database::{
+    operation_kind, Journal, NewOperation, OperationId, OperationRecord, SqlContext,
+};
 use coven_format::{
     admin::{MemberRole, StoreChange},
     codes::{InviteCode, InviteDeliveryKind},
@@ -24,8 +26,6 @@ use coven_storage::{
 };
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeSet, sync::Arc, time::SystemTime};
-
-pub(crate) const INVITE: &str = "invite";
 
 /// How an invited person reaches storage, as the invite's journal keeps it.
 #[derive(Serialize, Deserialize)]
@@ -351,7 +351,7 @@ impl SequenceSync {
         member: &MemberIdentity,
     ) -> Result<(), SyncError> {
         for record in self.database.operations().await? {
-            if record.kind != INVITE {
+            if record.kind != operation_kind::INVITE {
                 continue;
             }
             // Expiry takes back the grant even while a request waits for the app.
@@ -516,7 +516,7 @@ impl SequenceSync {
                         InviteDeliveryKind::InPerson => {
                             let binding = crate::admin_steps::journaled(
                                 &SequenceOperation::change(work.binding_change(&request)?),
-                                INVITE,
+                                operation_kind::INVITE,
                             )?;
                             self.database
                                 .start_operation_advancing(binding, move |binding| {

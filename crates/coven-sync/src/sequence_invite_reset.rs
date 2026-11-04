@@ -1,6 +1,7 @@
 //! A device reset keeps provider obligations, without resuming its invitations.
 
 use super::*;
+use coven_database::operation_kind;
 use coven_database::ProviderChanges;
 use coven_foundation::files::DeviceReset;
 
@@ -19,7 +20,7 @@ impl SequenceSync {
         let mut accounts = BTreeSet::new();
         for record in records {
             match record.kind.as_str() {
-                INVITE => {
+                operation_kind::INVITE => {
                     let mut work = InviteWork::read(record)?;
                     // An invite no pass has checked yet adopted no account.
                     if !matches!(work.state, InviteState::Requested) {
@@ -29,15 +30,15 @@ impl SequenceSync {
                         work.state = InviteState::Settled;
                     }
                     operations.push(NewOperation {
-                        kind: INVITE.into(),
+                        kind: operation_kind::INVITE.into(),
                         data: serde_json::to_vec(&work)?,
-                        started_by: "coven".into(),
+                        started_by: operation_kind::COVEN.into(),
                         pauses_writes: false,
                     });
                 }
                 // An ended invite may already have deleted its journal while
                 // its account's revocation is still owed.
-                "provider-access" => {
+                operation_kind::PROVIDER_ACCESS => {
                     accounts.insert(serde_json::from_slice::<String>(&record.data)?);
                 }
                 _ => (),
