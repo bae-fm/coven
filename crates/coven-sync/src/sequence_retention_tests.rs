@@ -697,21 +697,6 @@ async fn sequence_daily_retention_matches_lean() {
     daily_snapshots(true).await;
 }
 
-/// Ana's laptop, a second device of the member that set up the store.
-async fn laptop(group: &Group, ana: &Device) -> Device {
-    let (temp, _) = group.directory();
-    let laptop = group.open(temp, ana.identity.clone()).await;
-    laptop
-        .sync
-        .administer(coven_format::admin::StoreChange::AddDevice {
-            name: "Ana's laptop".into(),
-            replaces: None,
-        })
-        .await
-        .unwrap();
-    laptop
-}
-
 /// Ana's phone snapshots the store, and the phone's next pass writes a floor
 /// naming it. Ben's phone then snapshots the store, and grace passes before
 /// anyone writes a floor again. Ana's laptop removes her phone, which is now
@@ -727,7 +712,7 @@ async fn a_gone_devices_snapshot_the_floor_names_stays_until_the_floor_moves_on(
     let ben = group.device(2).await;
     group.create(&phone).await;
     group.admit(&phone, &ben).await;
-    let laptop = laptop(&group, &phone).await;
+    let laptop = group.laptop(&phone).await;
     let announced = phone.sync.snapshot(Audience::Store).await.unwrap();
     phone.sync.pass().await.unwrap();
     let floor = crate::floor_object::FloorObject::read(
@@ -793,7 +778,7 @@ async fn a_gone_devices_unannounced_snapshot_is_deleted_by_the_device_responsibl
     let ben = group.device(2).await;
     group.create(&phone).await;
     group.admit(&phone, &ben).await;
-    let laptop = laptop(&group, &phone).await;
+    let laptop = group.laptop(&phone).await;
     let announced = phone.sync.snapshot(Audience::Store).await.unwrap();
     phone.sync.pass().await.unwrap();
     let id = phone.sync.session.lock().await.history.announcements[&announced].snapshot.clone();

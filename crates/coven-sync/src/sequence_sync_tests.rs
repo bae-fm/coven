@@ -85,6 +85,22 @@ impl Group {
         );
         self.open(temp, identity).await
     }
+    /// Ana's laptop: a second device of `ana`'s member, open and
+    /// registered.
+    pub(crate) async fn laptop(&self, ana: &Device) -> Device {
+        let (temp, _) = self.directory();
+        let laptop = self.open(temp, ana.identity.clone()).await;
+        laptop
+            .sync
+            .administer(coven_format::admin::StoreChange::AddDevice {
+                name: "Ana's laptop".into(),
+                replaces: None,
+            })
+            .await
+            .unwrap();
+        laptop
+    }
+
     /// Close `device` and open it again beside a copy of its installation,
     /// device id included, as restoring a backup with intact custody does.
     pub(crate) async fn copy(&self, device: Device) -> (Device, Device) {

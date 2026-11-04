@@ -176,13 +176,7 @@ async fn only_an_admins_device_that_applied_the_stop_ends_the_requests() {
     let phone = ana.sync.device;
     ben.sync.pass().await.unwrap();
     ben.sync.administer(StoreChange::RemoveDevice { device: phone }).await.unwrap();
-    let (temp, _) = group.directory();
-    let laptop = group.open(temp, ana.identity.clone()).await;
-    laptop
-        .sync
-        .administer(StoreChange::AddDevice { name: "Ana's laptop".into(), replaces: None })
-        .await
-        .unwrap();
+    let laptop = group.laptop(&ana).await;
     let waiting = vec![carol.request.path().clone()];
     for device in [&dan, &laptop] {
         device.sync.pass().await.unwrap();

@@ -67,13 +67,7 @@ impl Case {
             .administer(StoreChange::AddDevice { name: "Ben".into(), replaces: None })
             .await
             .unwrap();
-        let (temp, _) = group.directory();
-        let laptop = group.open(temp, ana.identity.clone()).await;
-        laptop
-            .sync
-            .administer(StoreChange::AddDevice { name: "Ana's laptop".into(), replaces: None })
-            .await
-            .unwrap();
+        let laptop = group.laptop(&ana).await;
         ana.sync.pass().await.unwrap();
         ben.sync.pass().await.unwrap();
         let invite = ana

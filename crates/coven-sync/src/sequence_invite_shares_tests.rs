@@ -30,13 +30,7 @@ async fn household(group: &Group) -> (Device, Device, Device) {
         .administer(StoreChange::AddDevice { name: "Ben's phone".into(), replaces: None })
         .await
         .unwrap();
-    let (temp, _) = group.directory();
-    let laptop = group.open(temp, phone.identity.clone()).await;
-    laptop
-        .sync
-        .administer(StoreChange::AddDevice { name: "Ana's laptop".into(), replaces: None })
-        .await
-        .unwrap();
+    let laptop = group.laptop(&phone).await;
     phone.sync.pass().await.unwrap();
     ben.sync.pass().await.unwrap();
     (phone, ben, laptop)

@@ -4,18 +4,6 @@ use coven_foundation::id_source::FileId;
 use coven_merge::Audience;
 use coven_storage::{ObjectPath, Storage};
 
-/// Ana's laptop, a second device of the member that set up the store.
-async fn laptop(group: &Group, ana: &Device) -> Device {
-    let (temp, _) = group.directory();
-    let laptop = group.open(temp, ana.identity.clone()).await;
-    laptop
-        .sync
-        .administer(StoreChange::AddDevice { name: "Ana's laptop".into(), replaces: None })
-        .await
-        .unwrap();
-    laptop
-}
-
 fn photo(group: &Group, device: &Device, number: u128) -> ObjectPath {
     ObjectPath::file(group.store, device.sync.device, FileId(uuid::Uuid::from_u128(number)))
 }
@@ -32,7 +20,7 @@ async fn the_device_that_deletes_a_gone_devices_files_ends_its_uploads() {
     let ben = group.device(2).await;
     group.create(&phone).await;
     group.admit(&phone, &ben).await;
-    let laptop = laptop(&group, &phone).await;
+    let laptop = group.laptop(&phone).await;
     phone.storage.begin_upload(&photo(&group, &phone, 1), 4).await.unwrap();
     laptop.storage.begin_upload(&photo(&group, &laptop, 2), 4).await.unwrap();
     laptop.sync.administer(StoreChange::RemoveDevice { device: phone.sync.device }).await.unwrap();
@@ -59,7 +47,7 @@ async fn the_apps_cleanup_ends_what_a_gone_device_left_since() {
     let group = Group::new();
     let phone = group.device(1).await;
     group.create(&phone).await;
-    let laptop = laptop(&group, &phone).await;
+    let laptop = group.laptop(&phone).await;
     laptop.sync.administer(StoreChange::RemoveDevice { device: phone.sync.device }).await.unwrap();
     laptop.sync.pass().await.unwrap();
     let late = photo(&group, &phone, 3);
