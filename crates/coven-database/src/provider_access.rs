@@ -3,6 +3,15 @@
 use crate::{sqlite::DatabaseConnection, DbError, NewOperation, OperationId, PendingValue};
 use coven_crypto::SecretBytes;
 
+/// A provider-access operation's steps (§14.2): queued; its request's
+/// target fixed, before storage is called; and an inconclusive request
+/// reported, to be fixed again on retry.
+pub(crate) const REQUEST_QUEUED_STEP: u32 = 0;
+/// The step a provider-access operation reaches once its request's target
+/// is fixed, before storage is called.
+pub const REQUEST_FIXED_STEP: u32 = 1;
+pub(crate) const REQUEST_FAILED_STEP: u32 = 2;
+
 /// One account's intention derived from membership and this device's invitations.
 pub struct ProviderAccessChange {
     /// Provider account identity.
@@ -93,8 +102,8 @@ pub(crate) fn adopt<P: PendingValue>(
                 crate::operation::find(db, request.operation)?.ok_or(DbError::DamagedDatabase)?;
             // An in-flight completion must first account for its fixed target.
             // Unchanged membership also preserves a previously reported failure.
-            if record.last_step == 1
-                || (record.last_step == 2 && before.intended == change.intended)
+            if record.last_step == REQUEST_FIXED_STEP
+                || (record.last_step == REQUEST_FAILED_STEP && before.intended == change.intended)
             {
                 continue;
             }

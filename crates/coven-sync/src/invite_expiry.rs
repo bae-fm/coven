@@ -9,7 +9,7 @@
 
 use super::{InviteState, InviteWork, INVITE};
 use crate::{RetryWaits, SequenceState};
-use coven_database::{Database, DbError, OperationId, OperationUpdate};
+use coven_database::{Database, DbError, OperationId};
 use coven_foundation::clock::ClockRef;
 use std::{sync::Arc, time::SystemTime};
 use tokio::sync::watch;
@@ -120,15 +120,11 @@ async fn write(
                     serde_json::from_slice(&record.data).map_err(DbError::StateEncoding)?;
                 if work.expired(now) {
                     work.state = InviteState::Settled;
-                    updates.push(OperationUpdate {
-                        id: record.id,
-                        previous: record.last_step,
-                        last_step: record
-                            .last_step
-                            .checked_add(1)
-                            .ok_or(DbError::Invariant { what: "an operation's steps fit u32" })?,
-                        data: serde_json::to_vec(&work).map_err(DbError::StateEncoding)?,
-                    });
+                    updates.push(
+                        record.next_step(
+                            serde_json::to_vec(&work).map_err(DbError::StateEncoding)?,
+                        )?,
+                    );
                     ended.push(record.id);
                 } else if work.expires() {
                     next = Some(next.map_or(work.expires_at, |at| at.min(work.expires_at)));

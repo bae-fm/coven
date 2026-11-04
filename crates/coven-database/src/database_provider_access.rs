@@ -61,24 +61,33 @@ impl crate::Database {
             let state = read(db,&account)?.ok_or(DbError::OperationChanged(id))?;
             if state.request.as_ref().map(|r|r.operation) != Some(id) { return Err(DbError::OperationChanged(id)); }
             let record = crate::operation::find(db,id)?.ok_or(DbError::OperationChanged(id))?;
-            if record.last_step == 1 { return Err(DbError::OperationChanged(id)); }
+            if record.last_step == crate::provider_access::REQUEST_FIXED_STEP { return Err(DbError::OperationChanged(id)); }
             // A revoke may remove the direct share supplying acceptance tokens
             // even when other permissions remain. Retain neither confirmation.
             db.internal_execute("UPDATE _coven_provider_access SET granted=NULL,invitation=NULL,target=intended WHERE account=?1", [&account])?;
-            db.internal_execute("UPDATE _coven_operations SET last_step=1 WHERE id=?1", [id.0])?;
+            db.internal_execute("UPDATE _coven_operations SET last_step=?2 WHERE id=?1", (id.0, crate::provider_access::REQUEST_FIXED_STEP))?;
             crate::retry::clear(db, crate::RetrySubject::Operation(id))?;
             crate::pending::save(db,&P::provider_access(id,account,state.intended))?;
             Ok(state.intended)
         }))).await
     }
 
-    /// Keep an inconclusive request with its notice and unknown confirmation.
+    /// Keep an inconclusive request with its notice and unknown confirmation:
+    /// the operation `id` moves from its fixed request to a reported failure,
+    /// recording `data`.
     pub async fn fail_provider_request<P: PendingValue>(
         &self,
         account: String,
-        update: crate::OperationUpdate,
+        id: OperationId,
+        data: Vec<u8>,
         pending: P,
     ) -> Result<(), DbError> {
+        let update = crate::OperationUpdate {
+            id,
+            previous: crate::provider_access::REQUEST_FIXED_STEP,
+            last_step: crate::provider_access::REQUEST_FAILED_STEP,
+            data,
+        };
         self.call(move |inner| {
             inner.access.with_writer(|db| {
                 db.transaction(|db| {
@@ -115,7 +124,7 @@ impl crate::Database {
                 finish(db,&account,id)?;
                 Ok(true)
             } else {
-                db.internal_execute("UPDATE _coven_operations SET last_step=0 WHERE id=?1", [id.0])?;
+                db.internal_execute("UPDATE _coven_operations SET last_step=?2 WHERE id=?1", (id.0, crate::provider_access::REQUEST_QUEUED_STEP))?;
                 crate::retry::clear(db, crate::RetrySubject::Operation(id))?;
                 crate::pending::save(db,&P::provider_access(id,account,state.intended))?;
                 Ok(false)

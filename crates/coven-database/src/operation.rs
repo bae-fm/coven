@@ -23,6 +23,23 @@ pub struct OperationRecord {
     pub started_by: String,
 }
 
+impl OperationRecord {
+    /// The step past this row, recording `data`, guarded by this row's step
+    /// against a stale caller. An operation's steps fitting u32 is an
+    /// invariant.
+    pub fn next_step(&self, data: Vec<u8>) -> Result<OperationUpdate, crate::DbError> {
+        Ok(OperationUpdate {
+            id: self.id,
+            previous: self.last_step,
+            last_step: self
+                .last_step
+                .checked_add(1)
+                .ok_or(crate::DbError::Invariant { what: "an operation's steps fit u32" })?,
+            data,
+        })
+    }
+}
+
 impl std::fmt::Debug for OperationRecord {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("OperationRecord")

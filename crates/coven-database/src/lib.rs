@@ -73,7 +73,9 @@ mod scope_plan;
 mod scope_term;
 mod select_syntax;
 pub use object_removals::ObjectRemoval;
-pub use provider_access::{ProviderAccess, ProviderAccessChange, ProviderAccessRequest};
+pub use provider_access::{
+    ProviderAccess, ProviderAccessChange, ProviderAccessRequest, REQUEST_FIXED_STEP,
+};
 pub use raise_capture::RaiseCapture;
 mod cache_progress;
 mod read;

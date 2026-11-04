@@ -5,7 +5,7 @@ use crate::{
     OperationKind, OperationRejection, PendingReason, PendingRecord, PendingSubject, SyncError,
 };
 use coven_crypto::{MemberIdentity, StoreKeyring};
-use coven_database::{OperationId, OperationUpdate, ProviderAccessChange, ProviderChanges};
+use coven_database::{OperationId, ProviderAccessChange, ProviderChanges};
 use coven_format::MemberAccess;
 use coven_foundation::id_source::MemberId;
 use std::collections::BTreeSet;
@@ -152,7 +152,7 @@ impl SequenceSync {
                 }
                 .into());
             }
-            let target = if record.last_step == 1 {
+            let target = if record.last_step == coven_database::REQUEST_FIXED_STEP {
                 self.database
                     .provider_access(account.clone())
                     .await?
@@ -181,11 +181,7 @@ impl SequenceSync {
                         shares,
                     });
                     self.database
-                        .fail_provider_request(
-                            account,
-                            OperationUpdate { id, previous: 1, last_step: 2, data: record.data },
-                            pending.clone(),
-                        )
+                        .fail_provider_request(account, id, record.data, pending.clone())
                         .await?;
                     return Err(SyncError::Pending(Box::new(pending)));
                 }

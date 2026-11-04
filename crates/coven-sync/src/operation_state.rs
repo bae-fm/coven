@@ -9,11 +9,10 @@ use coven_database::{OperationRecord, OperationUpdate};
 pub(crate) trait OperationState: serde::Serialize {
     /// The transition from `record` to the next step, recording `self`.
     fn update(&self, record: &OperationRecord) -> Result<OperationUpdate, SyncError> {
-        Ok(OperationUpdate {
-            id: record.id,
-            previous: record.last_step,
-            last_step: record.last_step.checked_add(1).ok_or(SyncError::SequenceExhausted)?,
-            data: serde_json::to_vec(self)?,
-        })
+        Ok(record.next_step(serde_json::to_vec(self)?)?)
     }
 }
+
+#[cfg(test)]
+#[path = "operation_state_tests.rs"]
+mod tests;
