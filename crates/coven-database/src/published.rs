@@ -15,12 +15,7 @@ use crate::write_encoding::{audience_text, decoded, encoded};
 use crate::{
     merge_store::MergeStore, sqlite::DatabaseConnection, write_schema::WriteSchema, DbError,
 };
-use coven_format::{
-    loss::{Loss, LossCause, LossValues},
-    merge_fields,
-    snapshot_rows::MergeRow,
-    value::Value,
-};
+use coven_format::{loss::Loss, merge_fields, snapshot_rows::MergeRow, value::Value};
 use coven_merge::{RowId, RowState, RowUpdate, Rule};
 use rusqlite::params;
 use std::collections::{BTreeMap, BTreeSet};
@@ -182,18 +177,6 @@ pub(crate) fn removals(
     Ok(result.removed)
 }
 
-/// The removal loss of a present row `rules` take out: its cells as merged,
-/// held until the rules let it back (§9).
-pub(crate) fn removal_loss(state: &RowState<Value>, rules: BTreeSet<Rule>) -> Loss {
-    Loss {
-        row: state.row().clone(),
-        generation: state.generation(),
-        frozen: false,
-        values: LossValues::Row(state.cells().clone()),
-        cause: LossCause::Rules(rules),
-    }
-}
-
 /// The removal losses of the kept rows the counted projection takes out
 /// under `schema` and its synced tables' `rules`.
 pub(crate) fn removal_losses(
@@ -205,7 +188,7 @@ pub(crate) fn removal_losses(
     for (row, rules) in removals(db, schema, rules)? {
         let state = kept_state(db, &row)?
             .ok_or(DbError::Invariant { what: "a kept row's removal names a kept record" })?;
-        losses.push(removal_loss(&state, rules));
+        losses.push(Loss::removed(&state, rules));
     }
     Ok(losses)
 }
