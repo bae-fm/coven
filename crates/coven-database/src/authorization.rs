@@ -646,7 +646,7 @@ impl AuthorizationState {
             && matches!(
                 context.action,
                 Insert { table_name } | Update { table_name, .. } | Delete { table_name }
-                    if table_name.eq_ignore_ascii_case(crate::internal_schema::FILES)
+                    if crate::file_table::is_files(table_name)
             )
         {
             return None;

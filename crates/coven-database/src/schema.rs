@@ -205,7 +205,7 @@ impl Schema {
                 // goes (§17.10); a key SQLite enforces would restrict, cascade
                 // or set its rows as coven does, and coven wouldn't see it as
                 // a reference. A file column is how a row references a file.
-                if !key.file && key.target.eq_ignore_ascii_case(crate::internal_schema::FILES) {
+                if !key.file && crate::file_table::is_files(&key.target) {
                     return Err(SchemaError::FilesForeignKey {
                         table: table.name.clone(),
                         key: key.description(),
