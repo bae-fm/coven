@@ -93,16 +93,8 @@ impl<'a> ChildView<'a> {
     }
 
     pub(crate) fn apply(&mut self, step: &Step) {
-        match &step.change.operation {
-            Operation::Insert(columns) => {
-                self.cells = columns.clone();
-                self.fresh = true;
-            }
-            Operation::Update(columns) => self.cells.extend(columns.clone()),
-            Operation::Delete => {
-                self.cells.clear();
-                self.fresh = true;
-            }
+        if crate::judge::replay(&mut self.cells, &step.change.operation).is_some() {
+            self.fresh = true;
         }
     }
 

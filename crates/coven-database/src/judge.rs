@@ -33,7 +33,7 @@ use coven_format::value::Value;
 use coven_format::write::{PartRecord, Step, WriteHeader, WriteRecord};
 use coven_format::write_sources::ChangeId;
 use coven_foundation::id_source::{DeviceId, MemberId};
-use coven_merge::{Change, Operation, RowId};
+use coven_merge::{Change, ColumnValue, Operation, RowId};
 use rusqlite::params;
 use std::collections::BTreeMap;
 
@@ -332,6 +332,30 @@ pub(crate) fn judge(
     Ok(Judgement { rows })
 }
 
+/// Replay one step's operation over a row's `cells`: an insert replaces
+/// them, an update sets its columns, a delete clears them. Returns whether
+/// the row is present after a step that begins or ends an incarnation, and
+/// `None` for an update.
+pub(crate) fn replay<V: Clone>(
+    cells: &mut BTreeMap<String, ColumnValue<V>>,
+    operation: &Operation<V>,
+) -> Option<bool> {
+    match operation {
+        Operation::Insert(columns) => {
+            *cells = columns.clone();
+            Some(true)
+        }
+        Operation::Update(columns) => {
+            cells.extend(columns.clone());
+            None
+        }
+        Operation::Delete => {
+            cells.clear();
+            Some(false)
+        }
+    }
+}
+
 /// Whether a row's steps end where its net change does: the same starting
 /// generation, the same presence at the end, and every net column's value as
 /// the steps last set it. A row inserted and deleted again has no net change.
@@ -344,16 +368,8 @@ pub(crate) fn consistent(record: &OriginalRow) -> bool {
     let mut present = initially;
     let mut set = BTreeMap::new();
     for step in steps {
-        match &step.change.operation {
-            Operation::Insert(columns) => {
-                present = true;
-                set = columns.clone();
-            }
-            Operation::Update(columns) => set.extend(columns.clone()),
-            Operation::Delete => {
-                present = false;
-                set.clear();
-            }
+        if let Some(now) = replay(&mut set, &step.change.operation) {
+            present = now;
         }
     }
     let OriginalRow::Change(change) = record else {
