@@ -74,6 +74,44 @@ fn key(subject: RetrySubject) -> Key {
     }
 }
 
+/// The statements on `_coven_retries` for one subject column: read its
+/// row, insert one, end its wait and delete it, each with the subject as
+/// `?1`.
+struct KeyStatements {
+    find: &'static str,
+    insert: &'static str,
+    end: &'static str,
+    delete: &'static str,
+}
+
+const SCOPE: KeyStatements = KeyStatements {
+    find: "SELECT scope,operation,upload,pin,failures,not_before,wait FROM _coven_retries WHERE scope=?1",
+    insert: "INSERT INTO _coven_retries(scope,failures,not_before,wait) VALUES(?1,?2,?3,?4)",
+    end: "UPDATE _coven_retries SET not_before=?2,wait=0 WHERE scope=?1",
+    delete: "DELETE FROM _coven_retries WHERE scope=?1",
+};
+
+const OPERATION: KeyStatements = KeyStatements {
+    find: "SELECT scope,operation,upload,pin,failures,not_before,wait FROM _coven_retries WHERE operation=?1",
+    insert: "INSERT INTO _coven_retries(operation,failures,not_before,wait) VALUES(?1,?2,?3,?4)",
+    end: "UPDATE _coven_retries SET not_before=?2,wait=0 WHERE operation=?1",
+    delete: "DELETE FROM _coven_retries WHERE operation=?1",
+};
+
+const UPLOAD: KeyStatements = KeyStatements {
+    find: "SELECT scope,operation,upload,pin,failures,not_before,wait FROM _coven_retries WHERE upload=?1",
+    insert: "INSERT INTO _coven_retries(upload,failures,not_before,wait) VALUES(?1,?2,?3,?4)",
+    end: "UPDATE _coven_retries SET not_before=?2,wait=0 WHERE upload=?1",
+    delete: "DELETE FROM _coven_retries WHERE upload=?1",
+};
+
+const PIN: KeyStatements = KeyStatements {
+    find: "SELECT scope,operation,upload,pin,failures,not_before,wait FROM _coven_retries WHERE pin=?1",
+    insert: "INSERT INTO _coven_retries(pin,failures,not_before,wait) VALUES(?1,?2,?3,?4)",
+    end: "UPDATE _coven_retries SET not_before=?2,wait=0 WHERE pin=?1",
+    delete: "DELETE FROM _coven_retries WHERE pin=?1",
+};
+
 impl Key {
     fn value(&self) -> rusqlite::types::Value {
         match self {
@@ -83,49 +121,12 @@ impl Key {
         }
     }
 
-    fn find(&self) -> &'static str {
+    fn statements(&self) -> KeyStatements {
         match self {
-            Self::Scope(_) => "SELECT scope,operation,upload,pin,failures,not_before,wait FROM _coven_retries WHERE scope=?1",
-            Self::Operation(_) => "SELECT scope,operation,upload,pin,failures,not_before,wait FROM _coven_retries WHERE operation=?1",
-            Self::Upload(_) => "SELECT scope,operation,upload,pin,failures,not_before,wait FROM _coven_retries WHERE upload=?1",
-            Self::Pin(_) => "SELECT scope,operation,upload,pin,failures,not_before,wait FROM _coven_retries WHERE pin=?1",
-        }
-    }
-
-    fn insert(&self) -> &'static str {
-        match self {
-            Self::Scope(_) => {
-                "INSERT INTO _coven_retries(scope,failures,not_before,wait) VALUES(?1,?2,?3,?4)"
-            }
-            Self::Operation(_) => {
-                "INSERT INTO _coven_retries(operation,failures,not_before,wait) VALUES(?1,?2,?3,?4)"
-            }
-            Self::Upload(_) => {
-                "INSERT INTO _coven_retries(upload,failures,not_before,wait) VALUES(?1,?2,?3,?4)"
-            }
-            Self::Pin(_) => {
-                "INSERT INTO _coven_retries(pin,failures,not_before,wait) VALUES(?1,?2,?3,?4)"
-            }
-        }
-    }
-
-    fn end(&self) -> &'static str {
-        match self {
-            Self::Scope(_) => "UPDATE _coven_retries SET not_before=?2,wait=0 WHERE scope=?1",
-            Self::Operation(_) => {
-                "UPDATE _coven_retries SET not_before=?2,wait=0 WHERE operation=?1"
-            }
-            Self::Upload(_) => "UPDATE _coven_retries SET not_before=?2,wait=0 WHERE upload=?1",
-            Self::Pin(_) => "UPDATE _coven_retries SET not_before=?2,wait=0 WHERE pin=?1",
-        }
-    }
-
-    fn delete(&self) -> &'static str {
-        match self {
-            Self::Scope(_) => "DELETE FROM _coven_retries WHERE scope=?1",
-            Self::Operation(_) => "DELETE FROM _coven_retries WHERE operation=?1",
-            Self::Upload(_) => "DELETE FROM _coven_retries WHERE upload=?1",
-            Self::Pin(_) => "DELETE FROM _coven_retries WHERE pin=?1",
+            Self::Scope(_) => SCOPE,
+            Self::Operation(_) => OPERATION,
+            Self::Upload(_) => UPLOAD,
+            Self::Pin(_) => PIN,
         }
     }
 }
@@ -193,7 +194,7 @@ pub(crate) fn find(
     subject: RetrySubject,
 ) -> Result<Option<RetryWait>, DbError> {
     let key = key(subject);
-    db.query(key.find(), [key.value()], read_row)?
+    db.query(key.statements().find, [key.value()], read_row)?
         .pop()
         .map(|row| row.decode().map(|(_, wait)| wait))
         .transpose()
@@ -215,7 +216,7 @@ pub(crate) fn save(
     clear(db, subject)?;
     let key = key(subject);
     db.internal_execute(
-        key.insert(),
+        key.statements().insert,
         rusqlite::params![
             key.value(),
             i64::from(wait.failures),
@@ -259,7 +260,7 @@ pub(crate) fn end(
 ) -> Result<(), DbError> {
     let key = key(subject);
     db.internal_execute(
-        key.end(),
+        key.statements().end,
         rusqlite::params![key.value(), crate::user_file::encode_time(now)],
     )?;
     Ok(())
@@ -267,7 +268,7 @@ pub(crate) fn end(
 
 pub(crate) fn clear(db: &DatabaseConnection, subject: RetrySubject) -> Result<(), DbError> {
     let key = key(subject);
-    db.internal_execute(key.delete(), [key.value()])?;
+    db.internal_execute(key.statements().delete, [key.value()])?;
     Ok(())
 }
 
