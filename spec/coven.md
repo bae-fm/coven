@@ -9605,6 +9605,26 @@ the [suite 6 runs](s3-certification.md#suite-6-2026-10-28).
   suite detects its settings.
 - Never publish the env file or credentials.
 
+**A self-hosted service on this machine.** The self-hosted profiles run as one
+podman container each, in podman's libkrun machine. On macOS, from nothing:
+
+```sh
+CONTAINERS_MACHINE_PROVIDER=libkrun podman machine init --memory 2048
+CONTAINERS_MACHINE_PROVIDER=libkrun podman machine start
+podman run -d --name coven-rustfs -p 9000:9000 \
+  -e RUSTFS_ACCESS_KEY=coventest -e RUSTFS_SECRET_KEY=coventestsecret \
+  docker.io/rustfs/rustfs:latest
+podman run --rm --network container:coven-rustfs \
+  -e AWS_ACCESS_KEY_ID=coventest -e AWS_SECRET_ACCESS_KEY=coventestsecret \
+  -e AWS_DEFAULT_REGION=us-east-1 docker.io/amazon/aws-cli:latest \
+  --endpoint-url http://127.0.0.1:9000 s3 mb s3://coven
+```
+
+The env file then names bucket `coven`, region `us-east-1`, endpoint
+`http://127.0.0.1:9000` and those two keys, and `COVEN_LIVE_S3_PROFILE=RustFs`
+selects the profile. The test keys are throwaway; the env file still stays out
+of the repository. `podman rm -f coven-rustfs` and `podman machine stop` end it.
+
 **What it does.**
 
 - Runs production detection from the location's settings, or from plain S3

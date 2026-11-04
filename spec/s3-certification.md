@@ -281,6 +281,17 @@ the completion markers. No checksum was returned on HEAD or GET, with or
 without checksum mode. Under suite 1 the same server failed only that
 detection step.
 
+A full disk is a server failure there, with nothing that says the disk is
+full. On 2026-11-04, RustFS 1.0.4 (built 2026-10-25,
+`sha256:6be0def183a9`) on a 16 MiB data volume answered a PUT larger than it
+with HTTP 500, `<Code>InternalError</Code>` and the message "We encountered an
+internal error, please try again.", and no header naming a cause. Its source
+answers the same failure as 503 `ServiceUnavailable` on other paths. Coven
+reads either as a network failure and retries it; it can't tell a full disk
+from a passing failure, so it never reports `QuotaExceeded` for one. Its source
+refuses a write past a bucket quota as `InvalidRequest` (HTTP 400), which coven
+reads as refused; that wasn't run.
+
 ```text
 native signing=GoogleHmac result=Refused HTTP 400
 native signing=AwsSigV4 result=accepted
