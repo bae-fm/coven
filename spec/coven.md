@@ -6214,9 +6214,7 @@ again.
 | no storage connected | `NoStorage` | |
 | network or provider failure | the provider's `Storage` category | the next read or pin tries again |
 | storage confirms nothing at the path the record names | `FileUnavailable(Lost)` | needs the app to act |
-| the file is on this device only, uploading, and its original is missing | `Original { path, failure: Missing }`, on its move | the upload retries (§17.3) |
-| the file is on this device only, uploading, and its original changed | `Original { path, failure: Changed }`, on its move | the move fails; the app cancels it (§17.3) |
-| the file is on this device only, uploading, and coven's copy fails its check, as a read finds | `FileUnavailable(Source(Integrity))`, on the upload | the upload retries (§17.9) |
+| the file is on this device only and uploading, and its source fails the read's check | the upload's record (§17.9) | the upload retries, or its move fails (§17.9) |
 | a complete chunk fails authentication | `Refused(Decryption)` | the same bytes are never retried on their own; an applicable coven update can permit a recheck (§19.1) |
 | authenticated bytes disagree with the record's content hash | `Refused(ContentHash)` | as above |
 | writing the local cache fails | `Failed(Disk)` | |
@@ -6511,9 +6509,10 @@ provider sessions, opens the source and checks its size, and a user-provided
 original's recorded modification time, before any provider request. As it
 streams, it checks each plaintext chunk against its recorded hash before
 encrypting or sending that chunk. A missing original fails the attempt and
-its move's record says so, and the upload retries; a changed one fails the
-move (§17.3). Coven's copy failing its check records `FileUnavailable` for the
-upload's stored location, and the upload retries (§19.1). The local app sees the
+its move's record says so (`Original { path, failure: Missing }`), and the
+upload retries; a changed one fails the move (`Original { path, failure: Changed }`,
+§17.3). Coven's copy failing its check records `FileUnavailable(Source(Integrity))`
+for the upload's stored location, and the upload retries (§19.1). The local app sees the
 cause; a chunk that differs is never encrypted or sent.
 
 The reason is the encryption: a retry must encrypt the same plaintext under the
