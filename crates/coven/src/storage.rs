@@ -449,13 +449,23 @@ impl StorageConnections {
         }
     }
 
-    /// Release the current connection after its active pass and transfers.
-    /// No connection plans afterwards, so retries waiting for a pass are
-    /// answered `NotSyncing`.
-    async fn release(&self, live: &mut ConnectionState) -> Result<(), SyncError> {
+    /// End the sync loop: retries waiting for a pass are answered
+    /// `NotSyncing`, as no connection plans afterwards, and the connection's
+    /// owners close after its active pass. Answers whether the retries heard
+    /// so, then whether the owners closed.
+    async fn end_loop(
+        &self,
+        live: &mut ConnectionState,
+    ) -> (Result<(), DbError>, Result<(), SyncError>) {
         let stopped = self.waits.sync_stopped().await;
         self.control.lock().expect("loop control poisoned").take();
-        let closed = Self::close_live(live).await;
+        (stopped, Self::close_live(live).await)
+    }
+
+    /// Release the current connection after its active pass and transfers,
+    /// with the files' provider client.
+    async fn release(&self, live: &mut ConnectionState) -> Result<(), SyncError> {
+        let (stopped, closed) = self.end_loop(live).await;
         let released = self.files.set_storage(None, std::future::ready(Ok(()))).await;
         closed.and(released).and(stopped.map_err(SyncError::from))
     }
@@ -862,9 +872,7 @@ impl StorageConnections {
                     }
                     return Err(error);
                 }
-                let stopped = owner.waits.sync_stopped().await;
-                owner.control.lock().expect("loop control poisoned").take();
-                let released = Self::close_live(&mut live).await;
+                let (stopped, released) = owner.end_loop(&mut live).await;
                 // Forgetting succeeded. A worker release failure is recorded
                 // as the last pass's failure; no later custody read can turn
                 // removal into an error. Stopping writes nothing else the
