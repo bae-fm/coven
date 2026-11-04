@@ -121,6 +121,35 @@ impl S3Storage {
     /// A fresh private name proves ownership of every native upload at that
     /// exact key, including an initiation whose reply never arrived. Probes
     /// have no sequence publication; ordinary uploads retain their gate.
+    /// Abort the multipart upload `id` of `key`, counted under `publication`
+    /// when one is given. An upload already gone, completed or aborted after
+    /// it was named, leaves nothing to abort.
+    pub(super) async fn abort_multipart(
+        &self,
+        key: &str,
+        id: &str,
+        publication: Option<&PublicationRequest>,
+    ) -> Result<(), StorageError> {
+        let mut request = self
+            .client
+            .abort_multipart_upload()
+            .bucket(&self.bucket)
+            .key(key)
+            .upload_id(id)
+            .customize();
+        if let Some(publication) = publication {
+            request = request.interceptor(publication.clone());
+        }
+        match request.send().await {
+            Ok(_) => Ok(()),
+            Err(error) if error.code() == Some("NoSuchUpload") => {
+                tracing::debug!("S3 upload already absent");
+                Ok(())
+            }
+            Err(error) => Err(s3_error(error)),
+        }
+    }
+
     pub(super) async fn abort_private_uploads(
         &self,
         key: &str,
@@ -159,22 +188,7 @@ impl S3Storage {
                         continue;
                     }
                 };
-                let mut request = self
-                    .client
-                    .abort_multipart_upload()
-                    .bucket(&self.bucket)
-                    .key(key)
-                    .upload_id(id)
-                    .customize();
-                if let Some(publication) = publication {
-                    request = request.interceptor(publication.clone());
-                }
-                let aborted = match request.send().await {
-                    Ok(_) => Ok(()),
-                    Err(error) if error.code() == Some("NoSuchUpload") => Ok(()),
-                    Err(error) => Err(s3_error(error)),
-                };
-                result = with_cleanup(result, aborted);
+                result = with_cleanup(result, self.abort_multipart(key, id, publication).await);
             }
             if !response.is_truncated().unwrap_or(false) {
                 return result;

@@ -4,7 +4,6 @@
 //! whose path names the device only for its files and snapshots.
 use super::*;
 use crate::left_upload::{Left, LeftUpload};
-use aws_sdk_s3::error::ProvideErrorMetadata;
 use coven_foundation::id_source::{DeviceId, StoreId};
 
 impl S3Storage {
@@ -104,19 +103,7 @@ impl S3Storage {
     /// already completed, aborted or deleted succeeds.
     pub(super) async fn end_left(&self, upload: &LeftUpload) -> Result<(), StorageError> {
         match &upload.0 {
-            Left::S3Multipart { key, id } => match self
-                .client
-                .abort_multipart_upload()
-                .bucket(&self.bucket)
-                .key(key)
-                .upload_id(id.as_str())
-                .send()
-                .await
-            {
-                Ok(_) => Ok(()),
-                Err(error) if error.code() == Some("NoSuchUpload") => Ok(()),
-                Err(error) => Err(s3_error(error)),
-            },
+            Left::S3Multipart { key, id } => self.abort_multipart(key, id.as_str(), None).await,
             Left::Staged(key) => self.delete_key(key).await,
             // Another provider's: not this one's to end.
             #[cfg(target_vendor = "apple")]

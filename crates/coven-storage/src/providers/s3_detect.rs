@@ -462,23 +462,7 @@ impl Probes<'_> {
                 continue;
             };
             let id = id.as_str();
-            let aborted = self
-                .resend(move || async move {
-                    match s
-                        .client
-                        .abort_multipart_upload()
-                        .bucket(&s.bucket)
-                        .key(key)
-                        .upload_id(id)
-                        .send()
-                        .await
-                    {
-                        Ok(_) => Ok(()),
-                        Err(error) if error.code() == Some("NoSuchUpload") => Ok(()),
-                        Err(error) => Err(s3_error(error)),
-                    }
-                })
-                .await;
+            let aborted = self.resend(move || s.abort_multipart(key, id, None)).await;
             result = crate::transfer::with_cleanup(result, aborted);
         }
         for key in std::mem::take(&mut self.intended) {

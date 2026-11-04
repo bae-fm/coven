@@ -826,24 +826,13 @@ impl ProviderOps for S3Storage {
             }
             return crate::transfer::with_cleanup(aborted, self.delete_temporary(session).await);
         }
-        let result = match self
-            .client
-            .abort_multipart_upload()
-            .bucket(&self.bucket)
-            .key(self.session_key(session)?)
-            .upload_id(self.upload_id(session)?)
-            .customize()
-            .interceptor(publication.clone())
-            .send()
-            .await
-        {
-            Ok(_) => Ok(()),
-            Err(error) if error.code() == Some("NoSuchUpload") => {
-                tracing::debug!("S3 upload already absent");
-                Ok(())
-            }
-            Err(error) => Err(s3_error(error)),
-        };
+        let result = self
+            .abort_multipart(
+                &self.session_key(session)?,
+                self.upload_id(session)?,
+                Some(publication),
+            )
+            .await;
         if self.settings.copy_publication.multipart().is_some() {
             crate::transfer::with_cleanup(result, self.delete_temporary(session).await)
         } else {

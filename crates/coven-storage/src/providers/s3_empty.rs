@@ -83,21 +83,7 @@ impl S3Storage {
     ) -> Result<EmptiedS3Prefix, StorageError> {
         let uploads = self.unfinished_uploads(prefix).await?;
         for (key, id, _) in &uploads {
-            match self
-                .client
-                .abort_multipart_upload()
-                .bucket(&self.bucket)
-                .key(key)
-                .upload_id(id)
-                .send()
-                .await
-            {
-                Ok(_) => {}
-                Err(error) if error.code() == Some("NoSuchUpload") => {
-                    tracing::debug!("S3 upload completed or aborted after it was listed");
-                }
-                Err(error) => return Err(s3_error(error)),
-            }
+            self.abort_multipart(key, id, None).await?;
         }
         let keys = self.keys_under(prefix, listing).await?;
         for key in &keys {
