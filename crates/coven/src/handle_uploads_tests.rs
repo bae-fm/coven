@@ -388,6 +388,64 @@ async fn a_raise_waits_for_a_held_write_and_follows_it() {
     network.sync(0).await;
     network.close().await;
 }
+/// While Ana's raise waits for her held cover write, her history ages past
+/// grace, which asks for a snapshot of it. The raise's own snapshot is the
+/// next one for the store: no ordinary snapshot, written at version 2 her
+/// store's history doesn't hold yet, goes out ahead of it, so Cara, joining
+/// on the old app meanwhile, loads the store instead of finding a snapshot
+/// she can't read (§18.3, §18.5).
+#[tokio::test]
+async fn a_waiting_raise_keeps_ordinary_snapshots_behind_it() {
+    let mut network = household().await;
+    let ana = &network.devices[0];
+    stopped(ana).await;
+    let cover = stage(ana, "covers", "album", vec![5; 4096]).await;
+    let mut faults = Faults::none();
+    faults
+        .create_failures
+        .insert(upload_path(ana, cover).await, (StorageFailure::QuotaExceeded, 507));
+    ana.storage.set_faults(faults).await;
+    update(&mut network, 0).await;
+    let ana = &network.devices[0];
+    upload_failed(ana, StorageFailure::QuotaExceeded).await;
+    network.sync(0).await;
+    let before = crate::tests::snapshots(&ana.storage, ana.store).await.len();
+    network.clock.set(network.clock.now() + Duration::from_secs(31 * 24 * 3600));
+    network.sync(0).await;
+    let ana = &network.devices[0];
+    assert!(ana.handle.store_state().await.schema.is_empty());
+    assert_eq!(crate::tests::snapshots(&ana.storage, ana.store).await.len(), before);
+    let joined = network
+        .try_join_as(2, InviteTarget::NewMember { role: MemberRole::Member, name: "Cara".into() })
+        .await;
+    assert!(joined.is_ok(), "{joined:?}");
+    let ana = &network.devices[0];
+
+    ana.storage.set_faults(Faults::none()).await;
+    ana.handle.retry_uploads_now().await.unwrap();
+    for _ in 0..10 {
+        if ana.handle.test_queued_writes().await.unwrap().is_empty() {
+            break;
+        }
+        network.sync(0).await;
+    }
+    assert_eq!(ana.handle.store_state().await.schema[&Audience::Store].number, 2);
+    let ben = &network.devices[1];
+    let mut last = ben.handle.test_last_pass();
+    ben.handle.sync_now();
+    last.wait_for(|last| {
+        matches!(
+            last,
+            Some(LastPass::Blocked {
+                reason: PendingReason::UpdateRequired(RequiredUpdate::AppSchema { version: 2 }),
+                ..
+            })
+        )
+    })
+    .await;
+    network.close().await;
+}
+
 /// The household's migrations with a breaking version 2 that retitles every
 /// note.
 fn retitled() -> Vec<Migration> {

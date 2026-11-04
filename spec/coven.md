@@ -4933,6 +4933,14 @@ Deleting history (§16.6) also asks for a snapshot once the oldest slot it doesn
 cover has passed grace. That keeps a deadline on deleting history where the
 slots never reach the threshold, as in that store of renames.
 
+A device asks for no ordinary snapshot of an audience while its own raise of
+that audience waits for its captured writes to land (§18.5). The raise's
+snapshot comes next. An ordinary one taken first would carry the device's newer
+schema version before the history holds it: Cara, joining on the old app while
+Ana's raise waits for her held cover write, would find a snapshot she can't
+read instead of loading the store and stopping at Ana's raise with
+`UpdateRequired` once it lands.
+
 **Coverage only moves forward.** An announcement's coverage must not be lower
 than the coverage already announced for that audience. Of two announcements with
 equal coverage, the later one is the one devices use. There is no deadline for

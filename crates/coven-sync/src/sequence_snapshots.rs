@@ -151,6 +151,16 @@ impl SequenceSync {
                 _ => None,
             })
             .collect();
+        // A raise still waiting for its captured writes to land comes next
+        // for its audience: an ordinary snapshot now would carry this
+        // device's newer schema version before the history holds it (§18.3).
+        let raising: BTreeSet<_> = self
+            .database
+            .raise_captures()
+            .await?
+            .into_iter()
+            .map(|capture| capture.audience)
+            .collect();
         let audiences: Vec<_> = std::iter::once(Audience::Store)
             .chain(
                 session
@@ -162,7 +172,7 @@ impl SequenceSync {
             )
             .collect();
         for audience in audiences {
-            if pending.contains(&audience) {
+            if pending.contains(&audience) || raising.contains(&audience) {
                 continue;
             }
             let previous = session.history.announcements.iter().rev().find(|(_, snapshot)| {
