@@ -41,7 +41,7 @@ async fn losses_preserve_storage_classes_each_setter_and_every_replacement() {
     let db = store.builder(vec![], vec![]).open().await.unwrap();
     db.commit_writer(|sql| {
         sql.batch(
-            "INSERT INTO _coven_columns(id,table_name,column_name) VALUES (100,'notes','title')",
+            "INSERT INTO _coven_columns(id,table_name,column_name,synced) VALUES (100,'notes','title',1)",
         )
         .unwrap()
     });
@@ -274,7 +274,7 @@ async fn wrong_column_table_is_a_damaged_database() {
     let store = TestStore::new();
     let db = store.schema(vec![], "CREATE TABLE notes(title)").await.unwrap();
     db.commit_writer(|sql| {
-        sql.batch("INSERT INTO _coven_columns VALUES (100,'other_table','title')").unwrap()
+        sql.batch("INSERT INTO _coven_columns VALUES (100,'other_table','title',1)").unwrap()
     });
     insert(
         &db,
@@ -502,6 +502,61 @@ mod dropped_schema {
         assert_frozen(&fresh, &before).await;
         assert_eq!(count(&fresh, "notes"), 1);
         for db in [a, b, fresh] {
+            db.close().await.unwrap();
+        }
+    }
+
+    /// A dropped column keeps its `_coven_columns` row only while a frozen
+    /// lost value names it: dismissing the last one deletes the row in the
+    /// same write, so the old column no longer counts as synced (§18.7).
+    #[tokio::test]
+    async fn dismissing_a_dropped_columns_last_loss_deletes_its_column() {
+        let ids = SequentialIds::new();
+        let stores: Vec<_> = (0..2).map(|_| TestStore::with_ids(&ids)).collect();
+        let a = stores[0].schema(tables(&["notes"]), TAGS).await.unwrap();
+        let b = stores[1].schema(tables(&["notes"]), TAGS).await.unwrap();
+        concurrent_loss(
+            &a,
+            &b,
+            "INSERT INTO notes VALUES('n','title','first')",
+            "UPDATE notes SET body='from a'",
+            "UPDATE notes SET body='from b'",
+        )
+        .await;
+        a.close().await.unwrap();
+        let a = stores[0]
+            .builder(
+                tables(&["notes"]),
+                vec![
+                    Migration::addition(1, "tags", TAGS),
+                    Migration::breaking(
+                        2,
+                        "drop body",
+                        "ALTER TABLE notes DROP COLUMN body",
+                        crate::OldWrites::Drop,
+                    ),
+                ],
+            )
+            .open()
+            .await
+            .unwrap();
+        let body = |db: &Database| {
+            db.inspect_writer(|db| {
+                db.query_row(
+                    "SELECT count(*) FROM _coven_columns WHERE table_name='notes' AND column_name='body'",
+                    [],
+                    |r| r.get::<_, i64>(0),
+                )
+                .unwrap()
+            })
+        };
+        assert_eq!(body(&a), 1);
+        let losses = a.lost_values().await.unwrap();
+        assert_eq!(losses.len(), 1);
+        a.dismiss_lost_values(&losses).await.unwrap();
+        assert!(a.lost_values().await.unwrap().is_empty());
+        assert_eq!(body(&a), 0);
+        for db in [a, b] {
             db.close().await.unwrap();
         }
     }

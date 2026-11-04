@@ -142,9 +142,10 @@ fn rename_removed_values(
 }
 
 fn columns(db: &DatabaseConnection, names: &MigrationMatch) -> Result<(), DbError> {
-    let columns = db.query("SELECT id,table_name,column_name FROM _coven_columns", [], |r| {
-        Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?))
-    })?;
+    let columns =
+        db.query("SELECT id,table_name,column_name FROM _coven_columns WHERE synced=1", [], |r| {
+            Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?))
+        })?;
     let mut renamed = Vec::new();
     let mut removed_values = std::collections::BTreeMap::<
         String,
@@ -170,6 +171,7 @@ fn columns(db: &DatabaseConnection, names: &MigrationMatch) -> Result<(), DbErro
                 |r| r.get::<_, i64>(0),
             )?;
             freeze(db, losses)?;
+            db.internal_execute("UPDATE _coven_columns SET synced=0 WHERE id=?1", [id])?;
             db.internal_execute("DELETE FROM _coven_columns WHERE id=?1 AND NOT EXISTS(SELECT 1 FROM _coven_lost WHERE column_id=?1)",[id])?;
             continue;
         };
@@ -181,7 +183,7 @@ fn columns(db: &DatabaseConnection, names: &MigrationMatch) -> Result<(), DbErro
         let stage = format!("coven_migration_column_{id}");
         let active = if retained {
             db.internal_execute(
-                "INSERT INTO _coven_columns(table_name,column_name) VALUES(?1,?2)",
+                "INSERT INTO _coven_columns(table_name,column_name,synced) VALUES(?1,?2,1)",
                 params![stage, new_column],
             )?;
             let active = db.query_row(
@@ -190,6 +192,8 @@ fn columns(db: &DatabaseConnection, names: &MigrationMatch) -> Result<(), DbErro
                 |r| r.get(0),
             )?;
             move_column(db, id, active)?;
+            // The old name stays only for the frozen losses that name it.
+            db.internal_execute("UPDATE _coven_columns SET synced=0 WHERE id=?1", [id])?;
             active
         } else {
             db.internal_execute(
@@ -212,6 +216,7 @@ fn columns(db: &DatabaseConnection, names: &MigrationMatch) -> Result<(), DbErro
         if let Some(existing) = existing {
             move_column(db, id, existing)?;
             db.internal_execute("DELETE FROM _coven_columns WHERE id=?1", [id])?;
+            db.internal_execute("UPDATE _coven_columns SET synced=1 WHERE id=?1", [existing])?;
         } else {
             db.internal_execute(
                 "UPDATE _coven_columns SET table_name=?2,column_name=?3 WHERE id=?1",

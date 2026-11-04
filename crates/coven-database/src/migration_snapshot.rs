@@ -44,7 +44,11 @@ impl<'c> MigrationCapture<'c> {
         // Column identities survive an empty table, and identify its old synced name
         // even when the app declares only the renamed, final schema.
         let mut synced: BTreeSet<String> = db
-            .query("SELECT DISTINCT lower(table_name) FROM _coven_columns", [], |r| r.get(0))?
+            .query(
+                "SELECT DISTINCT lower(table_name) FROM _coven_columns WHERE synced=1",
+                [],
+                |r| r.get(0),
+            )?
             .into_iter()
             .collect();
         synced.extend(tables.iter().map(|t| t.name.to_ascii_lowercase()));

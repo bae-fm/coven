@@ -7163,6 +7163,11 @@ discard it.
 
 - Each affected lost value is frozen as old-shape data before its schema records
   are removed. One holding a whole row keeps the whole captured row.
+- The dropped column's record stays only as long as a frozen lost value names
+  it. When Ben dismisses "blue", the last lost value under `notes.color`, the
+  same write deletes the column's record, so nothing goes on counting `color`
+  as a synced column of `notes`, or a dropped table as a synced table. A later
+  migration that adds the column back takes up the record again.
 - A row kept aside beside unsent writes (§6.2) has a taken-out record only as
   the current rules work it out. So a migration works out the kept rows'
   taken-out records under the schema it starts from, before any of its
@@ -8701,7 +8706,9 @@ the app can't read or write them. §8 and §9 explain what each record is for.
   write's timestamp (which includes its device), the write's number, the slot that
   holds it, and its original `read_through`. The device's own earlier writes are
   implicit reads.
-- **`_coven_columns`:** one row per synced column, naming its table and column.
+- **`_coven_columns`:** one row per synced column, naming its table and column,
+  and one per dropped column a frozen lost value still names, marked as no
+  longer synced (§18.7).
 - **`_coven_rows`:** one row per generation of each synced row, naming its table,
   primary key and audience; the generation, how many times the row had been
   created, deleted or re-added; and the write that moved it there, or of several

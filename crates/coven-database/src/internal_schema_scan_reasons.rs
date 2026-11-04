@@ -151,14 +151,14 @@ fn database_reason(statement: &Statement, relation: &str) -> Option<&'static str
     Some("once per breaking migration: replace the previous unpublished capture"),
 ("raise_capture.rs", "SELECT audience,version,through,covers FROM _coven_raise_captures ORDER BY audience", "_coven_raise_captures") =>
     Some("one capture per readable audience; scheduling lists them all"),
-("migration_snapshot.rs", "SELECT DISTINCT lower(table_name) FROM _coven_columns", "_coven_columns") =>
-    Some("once per migration: discover every table with retained column metadata"),
+("migration_snapshot.rs", "SELECT DISTINCT lower(table_name) FROM _coven_columns WHERE synced=1", "_coven_columns") =>
+    Some("once per migration: discover every table with synced column metadata"),
 ("migration_receive.rs", "SELECT version,before_schema,after_schema,tables,columns FROM _coven_conversion_schemas ORDER BY version", "_coven_conversion_schemas") =>
     Some("opening retains every breaking migration's conversion schema"),
 ("migration_hidden.rs", "SELECT table_name,key,audience FROM _coven_lost WHERE frozen=0 AND replacement_kind='rules'", "_coven_lost") =>
     Some("once per migration: read every hidden row before its identity moves"),
-("migration_state.rs", "SELECT id,table_name,column_name FROM _coven_columns", "_coven_columns") =>
-    Some("once per migration: carry all column definitions through renames and drops"),
+("migration_state.rs", "SELECT id,table_name,column_name FROM _coven_columns WHERE synced=1", "_coven_columns") =>
+    Some("once per migration: carry every synced column definition through renames and drops"),
 ("migration_state.rs", "SELECT id,table_name,identity FROM _coven_foreign_keys", "_coven_foreign_keys") =>
     Some("once per migration: carry all foreign-key definitions through schema changes"),
 ("migration_state.rs", "SELECT id,table_name,identity FROM _coven_constraints", "_coven_constraints") =>
@@ -168,6 +168,8 @@ fn database_reason(statement: &Statement, relation: &str) -> Option<&'static str
     | "DELETE FROM _coven_columns WHERE id=?1"
     | "DELETE FROM _coven_columns WHERE id=?1 AND NOT EXISTS(SELECT 1 FROM _coven_lost WHERE column_id=?1)", "_coven_cells") =>
     Some("once per migration: move/drop a column and check its cell references"),
+("_coven_lost_column_deleted" | "_coven_lost_column_moved", "DELETE FROM _coven_columns WHERE id=?4 AND synced=0 AND NOT EXISTS(SELECT 1 FROM _coven_lost WHERE column_id=?4)", "_coven_cells") =>
+    Some("only a dropped column's last frozen loss deletes a row, and SQLite then checks the cells' foreign key"),
 ("migration_state.rs", "DELETE FROM _coven_lost WHERE table_name=?1 AND frozen=0", "_coven_lost") =>
     Some("once per migration: remove active losses of a dropped app table"),
 ("migration_state.rs", "DELETE FROM _coven_lost WHERE column_id=?1 AND frozen=0 AND replacement_kind='write'"

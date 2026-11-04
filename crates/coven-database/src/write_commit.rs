@@ -283,7 +283,15 @@ pub(crate) fn frozen_column(
     table: &str,
     column: &str,
 ) -> Result<i64, DbError> {
-    crate::row_queries::definition_id(database, "_coven_columns", "column_name", table, &column)
+    database.internal_execute(
+        "INSERT INTO _coven_columns(table_name,column_name,synced) VALUES(?1,?2,0) ON CONFLICT DO NOTHING",
+        rusqlite::params![table, column],
+    )?;
+    database.query_row(
+        "SELECT id FROM _coven_columns WHERE table_name=?1 AND column_name=?2",
+        rusqlite::params![table, column],
+        |r| r.get(0),
+    )
 }
 
 /// The cells a row's write sets, as one statement: each is a column id and

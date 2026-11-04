@@ -50,7 +50,13 @@ pub(crate) fn register_schema(
     for declaration in &crate::file_table::synced(tables) {
         let table = &schema.tables[&declaration.name.to_ascii_lowercase()];
         for column in &table.columns {
-            definition_id(database, "_coven_columns", "column_name", &table.name, &column.name)?;
+            // A dropped column a frozen loss still names takes up the name
+            // again when a migration brings it back (§18.7).
+            database.internal_execute(
+                "INSERT INTO _coven_columns(table_name,column_name,synced) VALUES(?1,?2,1)
+                 ON CONFLICT(table_name,column_name) DO UPDATE SET synced=1 WHERE synced=0",
+                rusqlite::params![table.name, column.name],
+            )?;
         }
         for key in &table.foreign_keys {
             definition_id(
@@ -78,7 +84,7 @@ pub(crate) fn owner_declaration_changed(
             continue;
         };
         let (registered, owner): (bool, bool) = database.query_row(
-            "SELECT EXISTS(SELECT 1 FROM _coven_columns WHERE table_name=?1),
+            "SELECT EXISTS(SELECT 1 FROM _coven_columns WHERE table_name=?1 AND synced=1),
                     EXISTS(SELECT 1 FROM _coven_owner_tables WHERE table_name=?1)",
             [&table.name],
             |r| Ok((r.get(0)?, r.get(1)?)),

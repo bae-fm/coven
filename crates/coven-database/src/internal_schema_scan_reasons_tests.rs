@@ -109,7 +109,7 @@ mod fixture {
      INSERT INTO _coven_table_origins SELECT i,tab,1,tab FROM fixture;
      INSERT INTO _coven_column_origins SELECT i,tab,'column_' || i,1,tab,'column_' || i FROM fixture;
      INSERT INTO _coven_conversion_schemas SELECT i,x'00',x'00',x'00',x'00' FROM fixture;
-     INSERT INTO _coven_columns SELECT i,tab,'column_' || i FROM fixture;
+     INSERT INTO _coven_columns SELECT i,tab,'column_' || i,1 FROM fixture;
      INSERT INTO _coven_rows SELECT i,tab,key,audience,counter(1),i FROM fixture;
      INSERT INTO _coven_cells
        SELECT (i-1)%1024+1+offset,i,i FROM fixture
@@ -393,6 +393,7 @@ mod source {
                 "table_name",
                 "key",
                 "column_name",
+                "column_id",
                 "identity",
                 // Before `file`, which it starts with.
                 "file_id",

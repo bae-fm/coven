@@ -137,7 +137,7 @@ pub(crate) fn changed(
             continue;
         };
         let known: bool = db.query_row(
-            "SELECT EXISTS(SELECT 1 FROM _coven_columns WHERE table_name=?1)",
+            "SELECT EXISTS(SELECT 1 FROM _coven_columns WHERE table_name=?1 AND synced=1)",
             [&table.name],
             |r| r.get(0),
         )?;

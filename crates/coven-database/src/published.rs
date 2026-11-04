@@ -223,9 +223,11 @@ pub(crate) fn removal_losses_before_migrating(
     }
     // Every synced table has its columns registered (§18.1).
     let mut rules = BTreeMap::new();
-    for name in db.query("SELECT DISTINCT lower(table_name) FROM _coven_columns", [], |r| {
-        r.get::<_, String>(0)
-    })? {
+    for name in
+        db.query("SELECT DISTINCT lower(table_name) FROM _coven_columns WHERE synced=1", [], |r| {
+            r.get::<_, String>(0)
+        })?
+    {
         if let Some(table) = before.tables.get(&name) {
             rules.insert(table.name.clone(), TableRules::read(db, table)?);
         }

@@ -35,7 +35,7 @@ pub(crate) fn scan_reason(
     Some("restoration visits every saved row identity"),
 ("published.rs", "SELECT table_name,key,audience FROM _coven_published_rows", "_coven_published_rows") =>
     Some("the counted removal view touches every kept row"),
-("published.rs", "SELECT DISTINCT lower(table_name) FROM _coven_columns", "_coven_columns") =>
+("published.rs", "SELECT DISTINCT lower(table_name) FROM _coven_columns WHERE synced=1", "_coven_columns") =>
     Some("once per migration while rows are kept: discover every synced table to read its rules"),
 ("published.rs", "SELECT record FROM _coven_published_rows ORDER BY audience,table_name,key", "_coven_published_rows") =>
     Some("restoration reads every preserved row"),
