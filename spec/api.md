@@ -221,6 +221,15 @@ pub enum Audience {
 - Whatever the class, a step that reads or writes this device's keychain
   entries while the device is locked, such as saving a provider sign-in it
   refreshed, fails with `KeychainTemporarilyUnavailable`.
+- While the device is locked, Apple refuses to give a file `Complete`, to make
+  a file in a `Complete` folder, and to open a closed `Complete` or
+  `CompleteUnlessOpen` file. Creating, restoring, joining, opening or replacing
+  a store that needs one of these fails with `DeviceLocked`, naming the file:
+  `CovenError::DeviceLocked`, `StoreCreationError::DeviceLocked` or
+  `BootstrapError::DeviceLocked`, from `FileError::DeviceLocked`. The app waits
+  for the device to unlock and calls again. Coven tells the lock's refusal from
+  any other `EPERM` by the class of the file, or of the folder a new one goes
+  in, which it reads without opening the file.
 - Choosing no class after choosing one doesn't undo it: the files keep the
   class they were last given until an open chooses another. A file the walk
   can't open for writing fails the call with its `DiskError`, inside
@@ -1124,6 +1133,10 @@ pub enum CovenError {
     /// The platform refused to let coven watch the device's network, such as
     /// an Android app without coven's Android library (E1, E5).
     NetworkWatch(NetworkWatchError),
+    /// The device is locked, and the class the app chose keeps the store's
+    /// files closed until it unlocks; the app waits for the unlock and opens
+    /// again (E1).
+    DeviceLocked { path: PathBuf },
 }
 
 /// Why coven can't watch the device's network (E5): the platform's own
@@ -1623,6 +1636,9 @@ pub enum FileError {
     AfterRemove { path: PathBuf, source: Box<dyn std::error::Error + Send + Sync> },
     /// Removing an unpublished temporary file failed too.
     Cleanup { operation: Box<FileError>, cleanup: Box<dyn std::error::Error + Send + Sync> },
+    /// The device is locked, and the file's protection class keeps it from
+    /// being made, opened or given its class until it unlocks (E1).
+    DeviceLocked { path: PathBuf },
     /// The operation's runtime is shutting down and dropped it unstarted (E15).
     Shutdown(Shutdown),
     /// The operation panicked on the blocking pool: a bug (E15).
@@ -1763,6 +1779,10 @@ pub enum StoreCreationError {
     Directory(BootstrapDirectoryError),
     /// Opening the database or custody failed.
     Store(CovenError),
+    /// The device is locked, and the class the app chose keeps the new
+    /// store's files from being made until it unlocks. No store was made;
+    /// the app waits for the unlock and creates it again (E1).
+    DeviceLocked { path: PathBuf },
     /// Creating or persisting the member identity failed.
     Identity(IdentityError),
     /// Closing connections or workers failed.
@@ -2295,15 +2315,27 @@ pub enum FileProtection {
 
 #[cfg(target_vendor = "apple")]
 impl FileProtection {
-    /// The class a file or folder has; `Ok(None)` for a folder with no class
-    /// of its own.
+    /// The class a file or folder has, read without opening it, so a locked
+    /// device answers too; `Ok(None)` for a folder with no class of its own.
     #[cfg(feature = "test-utils")]
     pub fn of(path: &Path) -> std::io::Result<Option<Self>>;
 
-    /// Whether a file made in `folder` can be given a class, learned by
+    /// Whether a file made in `folder` can be given a class now, learned by
     /// giving a scratch file `Complete`.
     #[cfg(feature = "test-utils")]
-    pub fn settable_in(folder: &Path) -> std::io::Result<bool>;
+    pub fn settable_in(folder: &Path) -> std::io::Result<ProtectionSupport>;
+}
+
+/// What a folder's volume does with protection classes now.
+#[cfg(all(target_vendor = "apple", feature = "test-utils"))]
+pub enum ProtectionSupport {
+    /// The volume keeps classes, and a file can be given any of them.
+    Keeps,
+    /// The volume keeps no classes; a store whose app chose one is refused.
+    KeepsNone,
+    /// The volume keeps classes, but the device is locked, so a file can't be
+    /// given `Complete` until it unlocks.
+    Locked,
 }
 
 /// SQLite settings for the store's connections; `None` keeps SQLite's default,
@@ -6770,6 +6802,10 @@ pub enum BootstrapError {
     Directory(BootstrapDirectoryError),
     /// Loading or opening the store failed.
     Store(CovenError),
+    /// The device is locked, and the class the app chose keeps the
+    /// installation's files closed until it unlocks. The unfinished
+    /// installation stays; the app waits for the unlock and calls again (E1).
+    DeviceLocked { path: PathBuf },
     /// Provider sign-in failed.
     OAuth(OAuthError),
     /// Reading or keeping credentials or identity keys failed.

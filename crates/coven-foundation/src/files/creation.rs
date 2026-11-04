@@ -40,6 +40,17 @@ pub enum DirectoryCreationError {
     },
 }
 
+impl DirectoryCreationError {
+    /// The file failure that stopped the creation, if a file operation did.
+    pub(crate) fn file(&self) -> Option<&FileError> {
+        match self {
+            Self::File(file) => Some(file),
+            Self::Rollback { operation, .. } => operation.file(),
+            Self::AlreadyExists(_) | Self::Settings(_) | Self::Published { .. } => None,
+        }
+    }
+}
+
 pub(crate) fn create(
     root: &Path,
     id: StoreId,

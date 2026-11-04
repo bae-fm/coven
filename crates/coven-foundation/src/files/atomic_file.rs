@@ -49,6 +49,15 @@ pub enum FileError {
         /// The error removing the temporary file.
         cleanup: Box<dyn std::error::Error + Send + Sync>,
     },
+    /// The device is locked, and the file's protection class keeps it from
+    /// being made, opened or given its class until the device unlocks
+    /// (api.md E1). The app waits for the unlock and retries.
+    #[error("{}: the device is locked, and the file is protected until it unlocks", path.display())]
+    DeviceLocked {
+        /// The protected file, or the file that couldn't be made in a
+        /// protected folder.
+        path: PathBuf,
+    },
     /// The operation's runtime is shutting down and dropped it unstarted
     /// (E15).
     #[error(transparent)]

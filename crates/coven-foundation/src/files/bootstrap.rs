@@ -27,6 +27,20 @@ pub enum BootstrapDirectoryError {
 }
 
 impl BootstrapDirectoryError {
+    /// The protected file the lock refused, when the device is locked and
+    /// the store's chosen class keeps its files closed (api.md E1).
+    pub fn device_locked(&self) -> Option<&std::path::Path> {
+        let file = match self {
+            Self::File(file) => file,
+            Self::Create(creation) => creation.file()?,
+            Self::Lock(_) => return None,
+        };
+        match file {
+            FileError::DeviceLocked { path } => Some(path),
+            _ => None,
+        }
+    }
+
     /// The store is already visible, and only syncing its parent directory
     /// failed.
     pub fn published_unsynced(&self) -> bool {

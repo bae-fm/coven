@@ -68,10 +68,19 @@ pub enum BootstrapError {
     Code(#[from] CodeError),
     /// Preparing, publishing or removing the unpublished directory failed.
     #[error(transparent)]
-    Directory(#[from] BootstrapDirectoryError),
+    Directory(BootstrapDirectoryError),
     /// Opening the database failed.
     #[error(transparent)]
-    Store(#[from] CovenError),
+    Store(CovenError),
+    /// The device is locked, and the protection class the app chose keeps
+    /// the installation's files closed until it unlocks (api.md E1). The
+    /// unfinished installation stays for the retry; the app waits for the
+    /// unlock and calls again.
+    #[error("{}: the device is locked, and the store's files are protected until it unlocks", path.display())]
+    DeviceLocked {
+        /// The first protected file the lock refused.
+        path: std::path::PathBuf,
+    },
     /// Provider admission, signed membership or snapshot loading failed.
     #[error(transparent)]
     Sync(#[from] SyncError),
@@ -107,6 +116,24 @@ pub enum BootstrapError {
     /// The call's work panicked: a bug, which the caller reports (E15).
     #[error(transparent)]
     Bug(#[from] crate::task::Bug),
+}
+
+impl From<BootstrapDirectoryError> for BootstrapError {
+    fn from(error: BootstrapDirectoryError) -> Self {
+        match error.device_locked() {
+            Some(path) => Self::DeviceLocked { path: path.to_owned() },
+            None => Self::Directory(error),
+        }
+    }
+}
+
+impl From<CovenError> for BootstrapError {
+    fn from(error: CovenError) -> Self {
+        match error {
+            CovenError::DeviceLocked { path } => Self::DeviceLocked { path },
+            error => Self::Store(error),
+        }
+    }
 }
 
 impl From<crate::task::TaskFailed> for BootstrapError {

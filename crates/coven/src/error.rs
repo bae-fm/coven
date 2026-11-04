@@ -9,10 +9,18 @@ use crate::{
 pub enum StoreCreationError {
     /// Preparing, publishing or removing the hidden directory failed.
     #[error(transparent)]
-    Directory(#[from] coven_foundation::files::BootstrapDirectoryError),
+    Directory(coven_foundation::files::BootstrapDirectoryError),
     /// Opening the database or custody failed.
     #[error(transparent)]
-    Store(#[from] crate::CovenError),
+    Store(crate::CovenError),
+    /// The device is locked, and the protection class the app chose keeps
+    /// the new store's files from being made until it unlocks (api.md E1).
+    /// No store was made; the app waits for the unlock and creates it again.
+    #[error("{}: the device is locked, and the store's files are protected until it unlocks", path.display())]
+    DeviceLocked {
+        /// The first protected file the lock refused.
+        path: std::path::PathBuf,
+    },
     /// Creating or persisting the member identity failed.
     #[error(transparent)]
     Identity(#[from] crate::IdentityError),
@@ -48,6 +56,24 @@ pub enum StoreCreationError {
     /// `Shutdown`, listing the stores shows whether it published the store.
     #[error(transparent)]
     Bug(#[from] crate::task::Bug),
+}
+
+impl From<coven_foundation::files::BootstrapDirectoryError> for StoreCreationError {
+    fn from(error: coven_foundation::files::BootstrapDirectoryError) -> Self {
+        match error.device_locked() {
+            Some(path) => Self::DeviceLocked { path: path.to_owned() },
+            None => Self::Directory(error),
+        }
+    }
+}
+
+impl From<crate::CovenError> for StoreCreationError {
+    fn from(error: crate::CovenError) -> Self {
+        match error {
+            crate::CovenError::DeviceLocked { path } => Self::DeviceLocked { path },
+            error => Self::Store(error),
+        }
+    }
 }
 
 impl From<crate::task::TaskFailed> for StoreCreationError {

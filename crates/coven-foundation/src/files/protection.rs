@@ -14,6 +14,13 @@
 //! reports every file at `CompleteUntilFirstUserAuthentication` and refuses
 //! any other class with `EINVAL`, so a store whose app chose a class is
 //! refused there before any file changes.
+//!
+//! While the device is locked, Apple refuses with `EPERM` to give a file
+//! `Complete`, to make a file in a `Complete` folder, and to open a closed
+//! `Complete` or `CompleteUnlessOpen` file. Coven reports each of these as
+//! `FileError::DeviceLocked`. A file's class reads without opening it, so
+//! what the lock refuses is told apart from any other `EPERM` by the class
+//! of the file, or of the folder a new file goes in.
 
 use std::ffi::c_int;
 use std::fs;
@@ -71,10 +78,11 @@ impl FileProtection {
     }
 
     /// The class a file or folder has; `Ok(None)` for a folder with no
-    /// class of its own, whose new files take the volume's default.
+    /// class of its own, whose new files take the volume's default. It reads
+    /// without opening the file, so a locked device answers too.
     #[cfg(any(test, feature = "test-utils"))]
     pub fn of(path: &Path) -> io::Result<Option<Self>> {
-        match class_number(&fs::File::open(path)?)? {
+        match class_at(path)? {
             0 => Ok(None),
             1 => Ok(Some(Self::Complete)),
             2 => Ok(Some(Self::CompleteUnlessOpen)),
@@ -87,12 +95,12 @@ impl FileProtection {
         }
     }
 
-    /// Whether a file made in `folder` can be given a class: tries to give
-    /// a scratch file `Complete`, then removes it. This learns what the
-    /// volume does, not what coven's check of it before giving a store's
-    /// files a class concludes.
+    /// Whether a file made in `folder` can be given a class now: tries to
+    /// give a scratch file `Complete`, then removes it. This learns what the
+    /// volume and the lock do, not what coven's check of the volume before
+    /// giving a store's files a class concludes.
     #[cfg(any(test, feature = "test-utils"))]
-    pub fn settable_in(folder: &Path) -> io::Result<bool> {
+    pub fn settable_in(folder: &Path) -> io::Result<ProtectionSupport> {
         let scratch = tempfile::NamedTempFile::new_in(folder)?;
         // SAFETY: the scratch file is open for the whole call, and this
         // command takes one `int` argument, the class.
@@ -105,12 +113,31 @@ impl FileProtection {
         };
         match result {
             -1 => match io::Error::last_os_error() {
-                error if error.raw_os_error() == Some(libc::EINVAL) => Ok(false),
+                error if error.raw_os_error() == Some(libc::EINVAL) => {
+                    Ok(ProtectionSupport::KeepsNone)
+                }
+                error if error.raw_os_error() == Some(libc::EPERM) => Ok(ProtectionSupport::Locked),
                 error => Err(error),
             },
-            _ => Ok(true),
+            _ => Ok(ProtectionSupport::Keeps),
         }
     }
+}
+
+/// What a folder's volume does with protection classes now, as
+/// `FileProtection::settable_in` learns it.
+#[cfg(any(test, feature = "test-utils"))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProtectionSupport {
+    /// The volume keeps classes, and a file can be given any of them.
+    Keeps,
+    /// The volume keeps no classes: every file reads as
+    /// `CompleteUntilFirstUserAuthentication`, and a store whose app chose a
+    /// class is refused there.
+    KeepsNone,
+    /// The volume keeps classes, but the device is locked, so a file can't
+    /// be given `Complete` until it unlocks.
+    Locked,
 }
 
 /// The class a layout gives its stores' files: the one the app chose, if
@@ -247,7 +274,9 @@ fn set(path: &Path, class: FileProtection, entry: Entry) -> Result<(), FileError
     let file = match opened {
         Ok(file) => file,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
-        Err(source) => return Err(FileError::at("open store file", path, source)),
+        Err(source) => {
+            return Err(locked_or(path, path, FileError::at("open store file", path, source)))
+        }
     };
     let current = class_number(&file)
         .map_err(|source| FileError::at("read file protection class", path, source))?;
@@ -257,10 +286,81 @@ fn set(path: &Path, class: FileProtection, entry: Entry) -> Result<(), FileError
     // SAFETY: `file` is open for the whole call, and this command takes
     // one `int` argument, the class.
     if unsafe { libc::fcntl(file.as_raw_fd(), F_SETPROTECTIONCLASS, class.number()) } == -1 {
-        return Err(FileError::at("set file protection class", path, io::Error::last_os_error()));
+        let source = io::Error::last_os_error();
+        // Only the lock refuses a class with `EPERM`: giving a file
+        // `Complete` while the device is locked.
+        if source.raw_os_error() == Some(libc::EPERM) {
+            return Err(FileError::DeviceLocked { path: path.to_owned() });
+        }
+        return Err(FileError::at("set file protection class", path, source));
     }
     atomic_file::sync_file(&file)
         .map_err(|source| FileError::at("sync file protection class", path, source))
+}
+
+/// `failure`, unless it is the lock's refusal of `path`: an `EPERM` where
+/// `protected`, the file itself or the folder a new one goes in, has a class
+/// the lock closes, `Complete` or `CompleteUnlessOpen`.
+fn locked_or(path: &Path, protected: &Path, failure: FileError) -> FileError {
+    let refused = match &failure {
+        FileError::Io { source, .. } => source
+            .downcast_ref::<io::Error>()
+            .is_some_and(|error| error.raw_os_error() == Some(libc::EPERM)),
+        _ => false,
+    };
+    let closes = || {
+        class_at(protected).is_ok_and(|class| {
+            class == FileProtection::Complete.number()
+                || class == FileProtection::CompleteUnlessOpen.number()
+        })
+    };
+    if refused && closes() {
+        FileError::DeviceLocked { path: path.to_owned() }
+    } else {
+        failure
+    }
+}
+
+/// The attributes `getattrlist` returns for `ATTR_CMN_DATA_PROTECT_FLAGS`:
+/// their length, then the class.
+#[repr(C)]
+struct ClassAttribute {
+    length: u32,
+    class: u32,
+}
+
+/// The class number of the file or folder at `path`, read without opening
+/// it, so the lock doesn't refuse it; 0 for a folder with no class.
+fn class_at(path: &Path) -> io::Result<c_int> {
+    use std::os::unix::ffi::OsStrExt;
+    let path = std::ffi::CString::new(path.as_os_str().as_bytes())
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+    let mut request = libc::attrlist {
+        bitmapcount: libc::ATTR_BIT_MAP_COUNT,
+        reserved: 0,
+        commonattr: libc::ATTR_CMN_DATA_PROTECT_FLAGS,
+        volattr: 0,
+        dirattr: 0,
+        fileattr: 0,
+        forkattr: 0,
+    };
+    let mut answer = ClassAttribute { length: 0, class: 0 };
+    // SAFETY: `path` is a NUL-terminated string, `request` asks for one
+    // 32-bit attribute, and `answer` holds its length word and the attribute,
+    // with its size passed.
+    let result = unsafe {
+        libc::getattrlist(
+            path.as_ptr(),
+            std::ptr::from_mut(&mut request).cast(),
+            std::ptr::from_mut(&mut answer).cast(),
+            std::mem::size_of::<ClassAttribute>(),
+            0,
+        )
+    };
+    if result == -1 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(answer.class as c_int)
 }
 
 /// The class number of an open file or folder; 0 for a folder with no class.
@@ -274,14 +374,19 @@ fn class_number(file: &fs::File) -> io::Result<c_int> {
 }
 
 fn recorded(store: &Path) -> Result<Option<FileProtection>, FileError> {
-    atomic_file::read_json(&store.join(RECORD), "read file protection record")
+    let path = store.join(RECORD);
+    atomic_file::read_json(&path, "read file protection record")
+        .map_err(|failure| locked_or(&path, &path, failure))
 }
 
 /// Made in the store's directory after it has the class, so the record
 /// has it too.
 fn record(store: &Path, class: FileProtection) -> Result<(), FileError> {
     let bytes = serde_json::to_vec(&class).expect("a protection class encodes");
-    atomic_file::replace(&store.join(RECORD), &bytes)
+    let path = store.join(RECORD);
+    // The new record is made in the store's directory, of the class just
+    // given it.
+    atomic_file::replace(&path, &bytes).map_err(|failure| locked_or(&path, store, failure))
 }
 
 #[cfg(test)]

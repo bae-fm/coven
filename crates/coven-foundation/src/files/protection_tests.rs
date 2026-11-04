@@ -1,8 +1,10 @@
-//! These run on macOS. Each test first learns whether the volume holding its
-//! temporary directory keeps protection classes, by giving a scratch file
-//! one, and asserts what coven does there: on a volume that keeps them, the
-//! class every file gets; on one that keeps none, the refusal before any file
-//! changes.
+//! These run on macOS. Each test first learns what the volume holding its
+//! temporary directory does with protection classes now, by giving a scratch
+//! file one, and asserts what coven does there: on a volume that keeps them,
+//! the class every file gets; on one that keeps none, the refusal before any
+//! file changes; and while the device is locked, the class every file it
+//! could make gets, and `DeviceLocked` wherever the lock refuses a file. A
+//! file's class reads without opening it, so a locked device answers too.
 //!
 //! macOS takes `None` but keeps such a file at
 //! `CompleteUntilFirstUserAuthentication`, which is also the class a new file
@@ -20,9 +22,35 @@ const COMPLETE: Option<FileProtection> = Some(FileProtection::Complete);
 const UNLESS_OPEN: Option<FileProtection> = Some(FileProtection::CompleteUnlessOpen);
 const ID: StoreId = StoreId(Uuid::from_u128(1));
 
-/// Whether the volume holding `folder` keeps protection classes.
-fn keeps_classes(folder: &Path) -> bool {
+/// What the volume holding `folder` does with protection classes now.
+fn support(folder: &Path) -> ProtectionSupport {
     FileProtection::settable_in(folder).unwrap()
+}
+
+/// Whether the volume holding `folder` keeps protection classes, the device
+/// locked or not.
+fn keeps_classes(folder: &Path) -> bool {
+    support(folder) != ProtectionSupport::KeepsNone
+}
+
+/// Whether the device is locked, so the lock refuses `Complete` files and
+/// closed `CompleteUnlessOpen` ones.
+fn locked(folder: &Path) -> bool {
+    support(folder) == ProtectionSupport::Locked
+}
+
+fn assert_locked<T: std::fmt::Debug>(result: Result<T, FileError>) {
+    assert!(matches!(result, Err(FileError::DeviceLocked { .. })), "{result:?}");
+}
+
+/// The store's record names `class`; while the device is locked, a record of
+/// a class the lock closes can't be read, and says so.
+fn assert_recorded(store: &Path, class: Option<FileProtection>, app_dir: &Path) {
+    if locked(app_dir) && class.is_some_and(|class| class != FileProtection::None) {
+        assert_locked(recorded(store));
+    } else {
+        assert_eq!(recorded(store).unwrap(), class);
+    }
 }
 
 /// Whether `error` is the refusal of a class on a volume that keeps none.
@@ -122,7 +150,7 @@ fn a_new_store_and_everything_made_in_it_take_the_class() {
         return;
     };
     assert_all(&store, UNLESS_OPEN);
-    assert_eq!(recorded(&store).unwrap(), UNLESS_OPEN);
+    assert_recorded(&store, UNLESS_OPEN, app_dir.path());
 }
 
 #[test]
@@ -133,6 +161,12 @@ fn opening_a_store_made_without_a_class_gives_it_to_every_file() {
     let opened = open(&plain.file_protection(FileProtection::Complete), ID);
     if !keeps_classes(app_dir.path()) {
         assert_refused(opened);
+        assert_eq!(recorded(&store).unwrap(), None);
+        return;
+    }
+    if locked(app_dir.path()) {
+        // The lock refuses `Complete` to the first file the walk reaches.
+        assert_locked(opened);
         assert_eq!(recorded(&store).unwrap(), None);
         return;
     }
@@ -151,7 +185,13 @@ fn opening_with_another_class_gives_it_to_every_file() {
     ) else {
         return;
     };
-    open(&directories().file_protection(FileProtection::Complete), ID).unwrap();
+    let opened = open(&directories().file_protection(FileProtection::Complete), ID);
+    if locked(app_dir.path()) {
+        // The record, made `CompleteUnlessOpen`, can't be opened.
+        assert_locked(opened);
+        return;
+    }
+    opened.unwrap();
     assert_all(&store, COMPLETE);
     assert_eq!(recorded(&store).unwrap(), COMPLETE);
 }
@@ -191,6 +231,10 @@ fn a_walk_that_stops_partway_is_not_recorded_and_the_next_open_finishes_it() {
         assert_refused(stopped);
         return;
     }
+    if locked(app_dir.path()) {
+        assert_locked(stopped);
+        return;
+    }
     assert!(
         matches!(&stopped, Err(FileError::Io { path, .. }) if path.ends_with("files/copy")),
         "{stopped:?}"
@@ -223,6 +267,11 @@ fn an_installation_inside_the_store_gets_its_record_rewritten() {
         assert_eq!(recorded(&loading).unwrap(), UNLESS_OPEN);
         return;
     }
+    if locked(app_dir.path()) {
+        assert_locked(opened);
+        assert_eq!(recorded(&loading).unwrap(), UNLESS_OPEN);
+        return;
+    }
     opened.unwrap();
     assert_all(&store, COMPLETE);
     assert_eq!(recorded(&loading).unwrap(), COMPLETE);
@@ -247,7 +296,7 @@ fn without_a_class_files_keep_theirs() {
     fs::rename(&elsewhere, &moved).unwrap();
     open(&directories(), ID).unwrap();
     assert_eq!(FileProtection::of(&moved).unwrap(), class);
-    assert_eq!(recorded(&store).unwrap(), UNLESS_OPEN);
+    assert_recorded(&store, UNLESS_OPEN, app_dir.path());
 }
 
 /// Without a class, a store opens on any volume, one that keeps no classes
@@ -276,6 +325,15 @@ async fn a_resumed_installation_takes_the_class() {
         assert_eq!(recorded(&store).unwrap(), None);
         return;
     }
+    if locked(app_dir.path()) {
+        assert!(
+            matches!(&resumed, Err(error) if error.device_locked().is_some()),
+            "{:?}",
+            resumed.map(drop)
+        );
+        assert_eq!(recorded(&store).unwrap(), None);
+        return;
+    }
     let resumed = resumed.unwrap();
     assert_all(&store, COMPLETE);
     assert_eq!(recorded(&store).unwrap(), COMPLETE);
@@ -299,6 +357,15 @@ async fn a_replacement_gives_the_class_to_both_installations() {
         assert_eq!(recorded(&store).unwrap(), None);
         return;
     }
+    if locked(app_dir.path()) {
+        assert!(
+            matches!(&replacement, Err(error) if error.device_locked().is_some()),
+            "{:?}",
+            replacement.map(drop)
+        );
+        assert_eq!(recorded(&store).unwrap(), None);
+        return;
+    }
     let replacement = replacement.unwrap();
     // The new installation loads beside the old one, in a folder made after
     // the store's directory took the class.
@@ -306,4 +373,31 @@ async fn a_replacement_gives_the_class_to_both_installations() {
     assert_all(&store, COMPLETE);
     assert_eq!(recorded(&store).unwrap(), COMPLETE);
     drop(replacement);
+}
+
+/// An `EPERM` is the lock's refusal only where the file, or the folder a new
+/// one goes in, has a class the lock closes; anywhere else it stays the
+/// operating system's error. Folders take a class locked or not, so this
+/// holds whether the device is locked.
+#[test]
+fn only_a_class_the_lock_closes_makes_a_refusal_device_locked() {
+    let app_dir = tempfile::tempdir().unwrap();
+    if !keeps_classes(app_dir.path()) {
+        return;
+    }
+    let refusal = |path: &Path| {
+        FileError::at("open store file", path, io::Error::from_raw_os_error(libc::EPERM))
+    };
+    let closed = app_dir.path().join("closed");
+    fs::create_dir(&closed).unwrap();
+    set(&closed, FileProtection::CompleteUnlessOpen, Entry::Folder).unwrap();
+    let file = closed.join("record");
+    assert!(matches!(
+        locked_or(&file, &closed, refusal(&file)),
+        FileError::DeviceLocked { path } if path == file
+    ));
+    let open = app_dir.path().join("open");
+    fs::create_dir(&open).unwrap();
+    let file = open.join("record");
+    assert!(matches!(locked_or(&file, &open, refusal(&file)), FileError::Io { .. }));
 }

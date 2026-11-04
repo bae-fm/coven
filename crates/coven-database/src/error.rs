@@ -66,6 +66,15 @@ pub enum CovenError {
         /// The store whose member keys are missing.
         store: coven_foundation::id_source::StoreId,
     },
+    /// The device is locked, and the protection class the app chose keeps
+    /// the store's files closed until it unlocks; opening changed nothing
+    /// the lock refused (api.md E1). The app waits for the unlock and opens
+    /// again.
+    #[error("{}: the device is locked, and the store's files are protected until it unlocks", path.display())]
+    DeviceLocked {
+        /// The first protected file the open was refused.
+        path: std::path::PathBuf,
+    },
     /// The call's runtime is shutting down and dropped coven's work for it
     /// on the blocking pool unstarted, such as opening's custody work, so
     /// that work changed nothing (E15). A database call dropped this way is

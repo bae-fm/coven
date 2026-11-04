@@ -56,6 +56,8 @@ pub use open_files::{assert_no_open_files_under, open_files_under};
 pub use path_bytes::{path_bytes, path_bytes_text, path_from_bytes, path_text, PathBytesError};
 #[cfg(target_vendor = "apple")]
 pub use protection::FileProtection;
+#[cfg(all(target_vendor = "apple", any(test, feature = "test-utils")))]
+pub use protection::ProtectionSupport;
 pub use relative_path::{windows_device, RelativePath, RelativePathError};
 pub use replacement::ReplacementStore;
 pub use settings::{SettingsError, StoreSettings};

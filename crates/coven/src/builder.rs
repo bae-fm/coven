@@ -533,7 +533,14 @@ impl CovenBuilder {
             }
             // Before the database opens, so its WAL and shared-memory files
             // are made with the class (E1).
-            coven_foundation::files::protect_files(&directory, &lock).map_err(DbError::Disk)?;
+            coven_foundation::files::protect_files(&directory, &lock).map_err(
+                |error| match error {
+                    coven_foundation::files::FileError::DeviceLocked { path } => {
+                        CovenError::DeviceLocked { path }
+                    }
+                    error => DbError::Disk(error).into(),
+                },
+            )?;
             Ok(OpeningStore { database, lock, builder, directory, keychain })
         })
         .await

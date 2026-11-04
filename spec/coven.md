@@ -377,7 +377,10 @@ Appendix G lists them.
   skips the walk: checking every file at every open would cost tens of
   microseconds a file. A volume without content protection, such as a disk
   image, keeps no classes, so there a store whose app chose one is refused
-  rather than left with files that lack it.
+  rather than left with files that lack it. While the device is locked, a
+  store whose files need a class the lock closes can't be created or opened:
+  the call fails with `DeviceLocked`, and the app tries again once the device
+  unlocks.
 - **The provider behaves as required.** Complete reads, create-once that
   publishes atomically, conditional replace, and access cut-off that is confirmed
   (§14.2, §20.1). The models assume these; they don't establish them for real

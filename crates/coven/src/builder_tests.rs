@@ -686,7 +686,8 @@ fn refused_class(error: &(dyn std::error::Error + 'static)) -> bool {
 /// another (E1). On macOS, whose APFS volumes keep the class, a new file's
 /// default is `CompleteUntilFirstUserAuthentication`, so this uses the two
 /// classes that differ from it. On a volume that keeps no classes, the
-/// creation and the open are refused instead.
+/// creation and the open are refused instead, and while the device is locked
+/// the creation fails with `DeviceLocked`.
 #[cfg(target_vendor = "apple")]
 #[tokio::test]
 async fn the_chosen_protection_class_reaches_every_file_of_the_store() {
@@ -695,7 +696,8 @@ async fn the_chosen_protection_class_reaches_every_file_of_the_store() {
     let plain =
         || app.builder().synced_tables(tables()).namespaces(namespaces()).migrations(migrations());
     let builder = |class| plain().file_protection(class);
-    if !FileProtection::settable_in(root.path()).unwrap() {
+    let support = FileProtection::settable_in(root.path()).unwrap();
+    if support == ProtectionSupport::KeepsNone {
         refused_on_a_volume_without_classes(&app, plain, builder).await;
         return;
     }
@@ -711,8 +713,20 @@ async fn the_chosen_protection_class_reaches_every_file_of_the_store() {
             assert_eq!(found, Some(class), "{}", path.display());
         }
     };
-    let handle =
-        builder(FileProtection::CompleteUnlessOpen).create_store("Household").await.unwrap();
+    let created = builder(FileProtection::CompleteUnlessOpen).create_store("Household").await;
+    if support == ProtectionSupport::Locked {
+        // While the device is locked, the store's record, made
+        // `CompleteUnlessOpen`, can't be opened again: the creation says so,
+        // and leaves no store.
+        assert!(
+            matches!(&created, Err(StoreCreationError::DeviceLocked { .. })),
+            "{:?}",
+            created.map(drop)
+        );
+        assert!(app.stores().await.unwrap().is_empty());
+        return;
+    }
+    let handle = created.unwrap();
     let id = handle.store_id();
     let store = root.path().join("stores").join(id.to_string());
     let write = |handle: CovenHandle, row: &'static str| async move {
