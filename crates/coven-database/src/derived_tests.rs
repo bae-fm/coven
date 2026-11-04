@@ -95,6 +95,26 @@ async fn a_condition_on_a_passed_column_narrows_the_table_it_comes_from() {
     db.close().await.unwrap();
 }
 
+/// A name SQLite reads in single quotes, a CTE's or an output column's,
+/// names what its bare spelling does: the condition on it narrows the same.
+#[tokio::test]
+async fn a_single_quoted_name_narrows_as_its_bare_spelling_does() {
+    let store = TestStore::new();
+    let db = store.schema(vec![], MUSIC).await.unwrap();
+    for sql in [
+        "WITH 'r' AS (SELECT id, album AS 'al' FROM releases) SELECT t.title FROM tracks t JOIN r ON t.release = r.id WHERE r.al = 'x' ORDER BY t.id",
+        "SELECT t.title FROM tracks t JOIN (SELECT id, album AS 'al' FROM releases) AS r ON t.release = r.id WHERE r.al = 'x' ORDER BY t.id",
+    ] {
+        follows(&db, sql, vec![], &[
+            ("UPDATE tracks SET title = title || '.' WHERE id = 4", false),
+            ("UPDATE releases SET album = 'z' WHERE id = 'r3'", false),
+            ("UPDATE tracks SET title = title || '.' WHERE id = 3", true),
+        ]).await;
+        write(&db, "UPDATE releases SET album = 'y' WHERE id = 'r3'; UPDATE tracks SET title = 'three' WHERE id = 3; UPDATE tracks SET title = 'four' WHERE id = 4");
+    }
+    db.close().await.unwrap();
+}
+
 /// A CTE that reads one release's row gives the rows joined to it their
 /// values, as a candidate's state gives its matches theirs; each arm of a
 /// compound view takes the condition on its own column.

@@ -177,10 +177,8 @@ pub(crate) fn term(
     column: &SourceColumn<'_>,
     expr: &Expr<'_>,
 ) -> rusqlite::Result<Option<ScopeTerm>> {
+    let expr = crate::sql::unparenthesized(expr);
     let result = match expr {
-        Expr::Parenthesized(exprs) if exprs.len() == 1 => {
-            return term(connection, column, &exprs[0])
-        }
         Expr::Binary(left, op @ (Operator::And | Operator::Or), right) => {
             match (term(connection, column, left)?, term(connection, column, right)?) {
                 (Some(left), Some(right)) => Some(if *op == Operator::And {
@@ -245,6 +243,7 @@ fn operand(
     expr: &Expr<'_>,
     affinity: Affinity,
 ) -> rusqlite::Result<Option<Operand>> {
+    let expr = crate::sql::unparenthesized(expr);
     if let Expr::Variable(index) = expr {
         return Ok(Some(Operand::Parameter(
             index.parse::<usize>().expect("parameters were numbered before parsing") - 1,
@@ -256,9 +255,6 @@ fn operand(
             UnaryOperator::Negative | UnaryOperator::Positive,
             Expr::Literal(Literal::Numeric(_)),
         ) => {}
-        Expr::Parenthesized(exprs) if exprs.len() == 1 => {
-            return operand(connection, &exprs[0], affinity)
-        }
         _ => return Ok(None),
     }
     // Let SQLite interpret escapes, hex integers, exponents and i64::MIN.

@@ -30,10 +30,6 @@ fn image_columns(
     (columns, positions)
 }
 
-fn quoted(name: &str) -> String {
-    format!("\"{}\"", name.replace('"', "\"\""))
-}
-
 struct TableColumns {
     names: Vec<(String, bool, bool)>,
     has_primary_key: bool,
@@ -269,11 +265,15 @@ fn current(
     let keys: Vec<usize> = (0..names.len()).filter(|index| pk[*index] != 0).collect();
     let sql = format!(
         "SELECT {} FROM main.{} WHERE {}",
-        wanted.iter().map(|index| quoted(names[*index])).collect::<Vec<_>>().join(","),
-        quoted(table),
+        wanted
+            .iter()
+            .map(|index| crate::sql::identifier(names[*index]))
+            .collect::<Vec<_>>()
+            .join(","),
+        crate::sql::identifier(table),
         keys.iter()
             .enumerate()
-            .map(|(slot, index)| format!("{}=?{}", quoted(names[*index]), slot + 1))
+            .map(|(slot, index)| format!("{}=?{}", crate::sql::identifier(names[*index]), slot + 1))
             .collect::<Vec<_>>()
             .join(" AND "),
     );

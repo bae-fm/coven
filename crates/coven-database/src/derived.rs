@@ -8,9 +8,9 @@
 //! failing it makes only output rows that fail it.
 
 use crate::from_item::{Column, Columns, FromItem};
-use crate::scope_plan::{is_name, read_select, unquoted, Edge, Planner, Source};
+use crate::scope_plan::{is_name, read_select, Edge, Planner, Source};
 use crate::scope_term::ScopeTerm;
-use crate::select_syntax::{parts, quoted, text, Part};
+use crate::select_syntax::{parts, text, Part};
 use rusqlite::Connection;
 use sqlite3_parser::{
     ast::{As, Cmd, CommonTableExpr, Name, OneSelect, ResultColumn, Select, Stmt, With},
@@ -34,7 +34,7 @@ impl<'a> Ctes<'a> {
         let mut visible = self.visible.clone();
         for cte in with.ctes.iter() {
             if visible.iter().any(|seen| seen.tbl_name == cte.tbl_name)
-                || crate::internal_schema::app_readable(&unquoted(cte.tbl_name.0))
+                || crate::internal_schema::app_readable(&crate::sql::name(cte.tbl_name.0))
             {
                 return None;
             }
@@ -94,13 +94,17 @@ pub(crate) fn read_derived_item<'a>(
                 .map(|(columns, derived)| (from, columns, derived))
         }
         Named::Cte(cte) => {
-            let name = unquoted(cte.tbl_name.0).to_ascii_lowercase();
+            let name = crate::sql::name(cte.tbl_name.0).to_ascii_lowercase();
             // A CTE naming itself, or one naming it, recurses.
             if ctes.reading.contains(&name) {
                 return Ok(None);
             }
             let from = parent.is_none().then(|| {
-                format!("({} SELECT * FROM {}) AS {qualifier}", ctes.clause(), quoted(&name))
+                format!(
+                    "({} SELECT * FROM {}) AS {qualifier}",
+                    ctes.clause(),
+                    crate::sql::identifier(&name)
+                )
             });
             let mut inner = ctes.clone();
             inner.reading.push(name.clone());
@@ -108,7 +112,7 @@ pub(crate) fn read_derived_item<'a>(
             let names = cte.columns.map(|columns| {
                 columns
                     .iter()
-                    .map(|column| unquoted(column.col_name.0).to_ascii_lowercase())
+                    .map(|column| crate::sql::name(column.col_name.0).to_ascii_lowercase())
                     .collect()
             });
             read_derived(connection, planner, cte.select, names, parent, &inner)?
@@ -129,13 +133,14 @@ pub(crate) fn read_derived_item<'a>(
             let names = columns.map(|columns| {
                 columns
                     .iter()
-                    .map(|column| unquoted(column.col_name.0).to_ascii_lowercase())
+                    .map(|column| crate::sql::name(column.col_name.0).to_ascii_lowercase())
                     .collect()
             });
             // A view names only the schema's tables and views.
             read_derived(connection, planner, select, names, None, &Ctes::default())?.map(
                 |(columns, derived)| {
-                    let from = Some(format!("main.{} AS {qualifier}", quoted(stored)));
+                    let from =
+                        Some(format!("main.{} AS {qualifier}", crate::sql::identifier(stored)));
                     (from, columns, derived)
                 },
             )
@@ -267,7 +272,7 @@ fn arm_columns(planner: &Planner, core: usize, body: &OneSelect<'_>) -> Option<V
                     .filter(|(item, _)| planner.items[*item].core == core);
                 let name = match alias {
                     Some(As::As(alias) | As::Elided(alias)) => {
-                        Some(unquoted(alias.0).to_ascii_lowercase())
+                        Some(crate::sql::name(alias.0).to_ascii_lowercase())
                     }
                     None => passed.as_ref().map(|(_, column)| column.clone()),
                 };

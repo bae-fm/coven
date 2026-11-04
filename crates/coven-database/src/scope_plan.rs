@@ -22,6 +22,7 @@ use crate::from_item::{read_item, Columns, FromItem};
 use crate::row_scope::Scopes;
 use crate::scope_term::{term, Affinity, ScopeTerm};
 use crate::select_syntax::{conjuncts, number_parameters, parts, window_parts, Part};
+use crate::sql::unparenthesized;
 use crate::sql_value::SqlValue as Value;
 use rusqlite::{Connection, Statement};
 use sqlite3_parser::{
@@ -628,13 +629,6 @@ pub(crate) struct Edge {
     pub(crate) value: PartnerValue,
 }
 
-fn unparenthesized<'a>(expr: &'a Expr<'a>) -> &'a Expr<'a> {
-    match expr {
-        Expr::Parenthesized(exprs) if exprs.len() == 1 => unparenthesized(&exprs[0]),
-        expr => expr,
-    }
-}
-
 /// `expr` without the `+` and CAST SQLite still reads as the column under
 /// them, when it chooses a comparison's collation.
 fn stripped<'a>(expr: &'a Expr<'a>) -> &'a Expr<'a> {
@@ -650,17 +644,6 @@ pub(crate) fn is_name(expr: &Expr<'_>) -> bool {
         unparenthesized(expr),
         Expr::Id(_) | Expr::Name(_) | Expr::Qualified(..) | Expr::DoublyQualified(..)
     )
-}
-
-/// An identifier without the quotes SQL allows around it.
-pub(crate) fn unquoted(name: &str) -> String {
-    let bytes = name.as_bytes();
-    match (bytes.first(), bytes.last()) {
-        (Some(b'"'), Some(b'"')) if name.len() > 1 => name[1..name.len() - 1].replace("\"\"", "\""),
-        (Some(b'`'), Some(b'`')) if name.len() > 1 => name[1..name.len() - 1].replace("``", "`"),
-        (Some(b'['), Some(b']')) => name[1..name.len() - 1].to_owned(),
-        _ => name.to_owned(),
-    }
 }
 
 #[cfg(test)]

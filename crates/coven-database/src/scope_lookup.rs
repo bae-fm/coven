@@ -10,7 +10,6 @@ use std::sync::Arc;
 use crate::row_scope::{RowScope, Scopes};
 use crate::scope_plan::{PartnerValue, Sources};
 use crate::scope_term::Affinity;
-use crate::select_syntax::quoted;
 use crate::sql_value::SqlValue as Value;
 
 /// Runs a lookup for one value of a changed row: whether some partner row
@@ -169,7 +168,7 @@ fn render(
 /// The value a partner's rows give, as SQL over the rows `qualifier` names.
 fn partner_value(qualifier: &str, value: &PartnerValue) -> String {
     match value {
-        PartnerValue::Column(column) => format!("{qualifier}.{}", quoted(column)),
+        PartnerValue::Column(column) => format!("{qualifier}.{}", crate::sql::identifier(column)),
         PartnerValue::Expression(sql) => format!("({sql})"),
     }
 }
@@ -193,16 +192,20 @@ fn condition(scope: &RowScope, qualifier: &str, bound: &mut Vec<Value>) -> Strin
                 (Ordering::Greater, false) => ">",
                 (Ordering::Greater, true) => ">=",
             };
-            format!("{qualifier}.{} {operator} {}", quoted(column), parameter(value, bound))
+            format!(
+                "{qualifier}.{} {operator} {}",
+                crate::sql::identifier(column),
+                parameter(value, bound)
+            )
         }
         RowScope::In { values, .. } if values.is_empty() => "0".into(),
         RowScope::In { column, values } => {
             let list: Vec<String> = values.iter().map(|value| parameter(value, bound)).collect();
-            format!("{qualifier}.{} IN ({})", quoted(column), list.join(","))
+            format!("{qualifier}.{} IN ({})", crate::sql::identifier(column), list.join(","))
         }
         RowScope::Joined { column, lookup } => format!(
             "{qualifier}.{} IN (SELECT {} FROM {} WHERE {})",
-            quoted(column),
+            crate::sql::identifier(column),
             partner_value(&lookup.qualifier, &lookup.value),
             lookup.from,
             condition(&lookup.scope, &lookup.qualifier, bound)

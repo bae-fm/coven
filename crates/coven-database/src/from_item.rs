@@ -3,9 +3,9 @@
 //! app view read as cores of its own (§4).
 
 use crate::derived::{read_derived_item, Ctes, Derived};
-use crate::scope_plan::{unquoted, Planner, Source};
+use crate::scope_plan::{Planner, Source};
 use crate::scope_term::Affinity;
-use crate::select_syntax::{parts, quoted, text, Part};
+use crate::select_syntax::{parts, text, Part};
 use rusqlite::Connection;
 use sqlite3_parser::ast::{As, Name, QualifiedName, SelectTable};
 
@@ -36,7 +36,7 @@ impl Columns {
                 .filter_map(|column| column.name.as_ref())
                 .find(|column| *name == column.as_str())
                 .cloned(),
-            Self::Unknown => Some(unquoted(name.0).to_ascii_lowercase()),
+            Self::Unknown => Some(crate::sql::name(name.0).to_ascii_lowercase()),
         }
     }
 
@@ -144,7 +144,7 @@ pub(crate) fn read_item<'a>(
             Ok(Some(item(
                 Source {
                     table: ordinary.then(|| stored.to_ascii_lowercase()),
-                    from: Some(format!("main.{} AS {qualifier}", quoted(&stored))),
+                    from: Some(format!("main.{} AS {qualifier}", crate::sql::identifier(&stored))),
                     qualifier,
                     term: None,
                     memberships: Vec::new(),
@@ -177,7 +177,7 @@ pub(crate) fn read_item<'a>(
             let qualifier = match alias {
                 Some(As::As(alias) | As::Elided(alias)) => alias.0.to_owned(),
                 // Nothing can name it; this name is coven's own.
-                None => quoted("(subquery)"),
+                None => crate::sql::identifier("(subquery)"),
             };
             read_derived_item(
                 connection,

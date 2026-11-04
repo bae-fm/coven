@@ -51,13 +51,12 @@ pub(crate) fn number_parameters(
 
 /// The conditions `expr` joins with AND, each once.
 pub(crate) fn conjuncts<'a>(expr: &'a Expr<'a>, into: &mut Vec<&'a Expr<'a>>) {
-    match expr {
+    match crate::sql::unparenthesized(expr) {
         Expr::Binary(left, Operator::And, right) => {
             conjuncts(left, into);
             conjuncts(right, into);
         }
-        Expr::Parenthesized(exprs) if exprs.len() == 1 => conjuncts(&exprs[0], into),
-        _ => into.push(expr),
+        expr => into.push(expr),
     }
 }
 
@@ -170,11 +169,6 @@ pub(crate) fn window_parts<'a>(window: &'a Window<'a>, into: &mut Vec<Part<'a>>)
             }
         }
     }
-}
-
-/// `name` as an SQL identifier.
-pub(crate) fn quoted(name: &str) -> String {
-    format!("\"{}\"", name.replace('"', "\"\""))
 }
 
 /// A parsed node written back as SQL.

@@ -83,6 +83,9 @@ pub(crate) fn identifier(name: &str) -> String {
     format!("\"{}\"", name.replace('"', "\"\""))
 }
 
+/// A name the parser read, without the quotes SQLite allows around it:
+/// double quotes, backticks, brackets, or single quotes where SQLite reads
+/// a string as a name.
 pub(crate) fn name(raw: &str) -> String {
     match raw.as_bytes()[0] {
         b'[' => raw[1..raw.len() - 1].to_owned(),
@@ -116,7 +119,8 @@ pub(crate) fn guarded_trigger(sql: &str) -> bool {
     }
 }
 
-fn unparenthesized<'a, 'b>(mut expr: &'a Expr<'b>) -> &'a Expr<'b> {
+/// `expr` without the parentheses around it, each holding one expression.
+pub(crate) fn unparenthesized<'a, 'b>(mut expr: &'a Expr<'b>) -> &'a Expr<'b> {
     while let Expr::Parenthesized(items) = expr {
         let [item] = items.as_slice() else { break };
         expr = item;
