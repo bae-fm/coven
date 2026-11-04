@@ -72,11 +72,7 @@ async fn uploads_queued_during_an_upload_fill_every_free_slot() {
     let mut paths = Vec::new();
     for file in &files {
         let location = f.location(file).await;
-        paths.push(coven_storage::ObjectPath::file(
-            f.directory.id(),
-            location.uploader(),
-            location.object(),
-        ));
+        paths.push(location.path(f.directory.id()));
     }
     until_creates(&f, 3).await;
     // Three requests are open at the provider and none has finished: the three

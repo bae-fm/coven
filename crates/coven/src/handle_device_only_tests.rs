@@ -116,9 +116,7 @@ fn cached(device: &Device) -> usize {
 
 fn stored_path(store: StoreId, file: &FileRef) -> ObjectPath {
     match file.place() {
-        FilePlace::Cloud { location, .. } => {
-            ObjectPath::file(store, location.uploader(), location.object())
-        }
+        FilePlace::Cloud { location, .. } => location.path(store),
         FilePlace::DeviceOnly { .. } => panic!("the file is not stored"),
     }
 }
@@ -782,7 +780,7 @@ async fn a_switch_ends_a_request_to_keep_the_file_and_the_keeping_in_flight() {
     };
     let queued = ana.handle.database.upload_queue().await.unwrap();
     let location = &queued.uploads[0].location;
-    let object = ObjectPath::file(ana.store, location.uploader(), location.object());
+    let object = location.path(ana.store);
     // The download keeping it is held after its first read.
     let (entered, entering) = tokio::sync::oneshot::channel();
     let (resume, resumed) = tokio::sync::oneshot::channel();

@@ -3,8 +3,10 @@
 
 use crate::DbError;
 use coven_crypto::{FileKey, SecretText};
-use coven_format::{coordinates::Coordinates, file_reference::FileReference, value::Value};
-use coven_foundation::id_source::{DeviceId, FileId, IdSource};
+use coven_format::{
+    coordinates::Coordinates, file_reference::FileReference, path::ObjectPath, value::Value,
+};
+use coven_foundation::id_source::{DeviceId, FileId, IdSource, StoreId};
 
 /// A stored file's fixed location: the uploader, the stored object's id and
 /// the file's key. Equality compares the whole text, so another object or
@@ -26,6 +28,11 @@ impl FileLocation {
     /// `<store>/files/<uploader>/<object>`.
     pub fn object(&self) -> FileId {
         self.object
+    }
+
+    /// The stored object's path in `store`.
+    pub fn path(&self, store: StoreId) -> ObjectPath {
+        ObjectPath::file(store, self.uploader, self.object)
     }
 
     /// A new location for bytes this device uploads: a random object id and

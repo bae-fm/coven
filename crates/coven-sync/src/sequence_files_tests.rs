@@ -212,7 +212,7 @@ async fn stalled_pin_downloads_leave_sequence_passes_free() {
             ana.database().pin_progress(vec![file.clone()]).await.unwrap();
         bytes_cached == bytes_total
     };
-    let object = ObjectPath::file(group.store, location.uploader(), location.object());
+    let object = location.path(group.store);
     // Hold the next response reaching the file's only chunk, whether or not
     // it carries the header; the receiver reports when it starts, the sender
     // releases it.

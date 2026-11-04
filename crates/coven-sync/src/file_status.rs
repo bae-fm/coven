@@ -11,7 +11,7 @@ use crate::{
 use coven_database::{DbError, FileLocation, FilePlace, FileRef};
 use coven_format::file::FileHeader;
 use coven_foundation::id_source::DeviceId;
-use coven_storage::{ObjectPath, StoredObject};
+use coven_storage::StoredObject;
 
 /// A file's current availability (E8).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -103,8 +103,7 @@ impl Files {
             .expect("storage lock poisoned")
             .clone()
             .ok_or(FileReadError::NoStorage)?;
-        let path =
-            ObjectPath::file(self.inner.directory.id(), location.uploader(), location.object());
+        let path = location.path(self.inner.directory.id());
         let remote = match storage.status(&path).await? {
             Some(object) => complete(&file, &object).map(|()| true),
             None => Ok(false),

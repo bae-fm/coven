@@ -148,7 +148,7 @@ async fn app_reopening_resumes_operations_and_files_using_one_storage_capability
     let FilePlace::Cloud { location, .. } = file.place() else {
         panic!("the upload stored the file");
     };
-    let path = ObjectPath::file(directory.id(), location.uploader(), location.object());
+    let path = location.path(directory.id());
     let reads = storage.reads().await.len();
     let stream = handle.open_file_stream(&file).await.unwrap();
     assert_eq!(stream.read_at(70_000, 37).await.unwrap(), vec![42; 37]);

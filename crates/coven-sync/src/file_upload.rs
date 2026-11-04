@@ -49,9 +49,9 @@ impl FilesInner {
         item: &FileUpload,
         meter: TransferMeter,
     ) -> Result<bool, TransferError> {
-        let coven_format::file_reference::FileReference { device, id, key } =
+        let coven_format::file_reference::FileReference { key, .. } =
             item.location.reference().map_err(FileReadError::from)?;
-        let path = ObjectPath::file(self.directory.id(), device, id);
+        let path = item.location.path(self.directory.id());
         let storage = self
             .storage
             .read()

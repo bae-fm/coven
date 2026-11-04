@@ -196,14 +196,7 @@ async fn a_pins_download_shows_its_bytes_arriving() {
     let at = 150_000;
     let (observed, held) = tokio::sync::oneshot::channel();
     let (resume, resumed) = tokio::sync::oneshot::channel();
-    memory
-        .hold_body_at(
-            ObjectPath::file(handle.store_id(), location.uploader(), location.object()),
-            at,
-            observed,
-            resumed,
-        )
-        .await;
+    memory.hold_body_at(location.path(handle.store_id()), at, observed, resumed).await;
     let pin = handle.pin(std::slice::from_ref(&file));
     tokio::pin!(pin);
     tokio::select! {

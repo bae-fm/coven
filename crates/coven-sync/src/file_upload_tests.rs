@@ -2,7 +2,7 @@ use super::{files_runner, Fixture, CHUNK};
 use crate::files::file_error::*;
 use coven_database::{FileLocation, FileLocationKey, FilePlace, FileRef, Provenance};
 use coven_foundation::files::StoreDirAccess;
-use coven_storage::{test_utils::Faults, ObjectPath, Storage, UploadSession};
+use coven_storage::{test_utils::Faults, Storage, UploadSession};
 use std::time::Duration;
 
 /// A meter for an attempt the test runs itself, outside the upload worker:
@@ -295,11 +295,7 @@ async fn recorded_sessions_continue_or_restart_with_the_same_encrypted_bytes() {
         let reference = location.reference().unwrap();
         assert_eq!(reference.id, id);
         assert_eq!(reference.key.to_secret_bytes().as_bytes(), key.to_secret_bytes().as_bytes());
-        let encrypted = f
-            .storage
-            .read(&ObjectPath::file(f.directory.id(), location.uploader(), id))
-            .await
-            .unwrap();
+        let encrypted = f.storage.read(&location.path(f.directory.id())).await.unwrap();
         assert_eq!(encrypted.len() as u64, expected_size);
         assert_eq!(f.files.read_file(&uploaded).await.unwrap(), vec![94; CHUNK * 5 + 18]);
         f.close().await;
@@ -422,7 +418,7 @@ async fn uploads_no_file_waits_for_are_retired_unsent() {
         assert_eq!(f.storage.request_count(), requests);
         assert!(f.files.inner.database.all_uploads().await.unwrap().is_empty());
         for location in &locations {
-            let path = ObjectPath::file(f.directory.id(), location.uploader(), location.object());
+            let path = location.path(f.directory.id());
             assert!(f.storage.status(&path).await.unwrap().is_none());
         }
         f.close().await;
@@ -437,7 +433,7 @@ async fn completing_a_replaced_files_upload_cannot_restore_it() {
     let objects =
         f.storage.list(&coven_storage::ObjectPrefix::files(f.directory.id())).await.unwrap();
     assert_eq!(objects.len(), 1);
-    assert_eq!(objects[0].path, ObjectPath::file(f.directory.id(), old.uploader(), old.object()));
+    assert_eq!(objects[0].path, old.path(f.directory.id()));
     assert_eq!(f.files.read_file(&new).await.unwrap(), vec![34; 19]);
     f.close().await;
 }
@@ -454,7 +450,7 @@ async fn deleting_a_row_during_its_upload_is_not_undone_by_completion() {
     let guard = f.files.inner.drain.lock().await;
     f.files.inner.paused.store(false, std::sync::atomic::Ordering::Release);
     let item = f.files.inner.database.uploads().await.unwrap().remove(0);
-    let path = ObjectPath::file(f.directory.id(), item.location.uploader(), item.location.object());
+    let path = item.location.path(f.directory.id());
     let mut uploading = Box::pin(f.files.inner.upload(&item, unwatched(&f, &item)));
     tokio::select! {
         result = &mut uploading => panic!("upload ended before publication: {result:?}"),
@@ -521,7 +517,7 @@ mod differential {
     use crate::files::file_error::*;
     use coven_database::{FileLocation, FilePlace, FileRef, Provenance};
     use coven_foundation::id_source::FileId;
-    use coven_storage::{ObjectPath, ObjectPrefix, Storage, StorageFailure};
+    use coven_storage::{ObjectPrefix, Storage, StorageFailure};
     use serde_json::{json, Value};
 
     fn attach(row: u64, file: u64) -> Value {
@@ -661,11 +657,7 @@ mod differential {
                         "stored" => {}
                         "error" => f.storage.set_online(false),
                         "other" => {
-                            let path = ObjectPath::file(
-                                f.directory.id(),
-                                location.uploader(),
-                                location.object(),
-                            );
+                            let path = location.path(f.directory.id());
                             f.storage.create(&path, b"other").await.unwrap();
                         }
                         remote => panic!("no Rust provider state for {remote}"),

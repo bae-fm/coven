@@ -83,7 +83,7 @@ async fn making_the_store_file_device_only_leaves_the_circles_readable() {
     let FilePlace::Cloud { location, .. } = shared.place() else {
         panic!("Gifts' file is stored");
     };
-    let object = ObjectPath::file(ana.store, location.uploader(), location.object());
+    let object = location.path(ana.store);
 
     let music = tempfile::tempdir().unwrap();
     carol
@@ -182,7 +182,7 @@ async fn stored_object(device: &Device, file: FileId) -> ObjectPath {
     let FilePlace::Cloud { location, .. } = file.place() else {
         panic!("the file is stored");
     };
-    ObjectPath::file(device.store, location.uploader(), location.object())
+    location.path(device.store)
 }
 
 /// Snapshots cover the history so far and the floor passes it, so no slot

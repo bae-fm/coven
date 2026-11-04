@@ -632,8 +632,7 @@ async fn other_bytes_at_an_own_file_path_refuse_only_that_upload() {
     let f = fixture(&clock).await;
     let file = f.attach("files", "first", b"ours".to_vec()).await;
     let location = f.location(&file).await;
-    let path =
-        coven_storage::ObjectPath::file(f.directory.id(), location.uploader(), location.object());
+    let path = location.path(f.directory.id());
     f.storage.plant(&path, b"different complete object").await.unwrap();
     assert_eq!(drained(f.files.inner.drain_uploads().await.unwrap()), 0);
     assert!(matches!(f.upload_reason(&file).await, Some(PendingReason::Refused(_))));

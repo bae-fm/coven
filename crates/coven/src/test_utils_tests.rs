@@ -418,8 +418,7 @@ async fn identical_app_files_have_distinct_stored_ciphertext() {
             panic!("the upload stored the file");
         };
         // Each file is stored at the path its staging write fixed.
-        assert!(objects.iter().any(|object| object.path
-            == ObjectPath::file(f.directory.id(), location.uploader(), location.object())));
+        assert!(objects.iter().any(|object| object.path == location.path(f.directory.id())));
         handle.evict_file(file.id()).await.unwrap();
         assert_eq!(handle.read_file(&file).await.unwrap(), content);
     }

@@ -186,7 +186,7 @@ async fn one_refused_file_upload_leaves_the_passes_alone() {
     assert!(file_stored(ana, photo).await);
     let file = ana.handle.file_ref(photo).await.unwrap();
     let FilePlace::Cloud { location, .. } = file.place() else { unreachable!("stored") };
-    let path = coven_storage::ObjectPath::file(ana.store, location.uploader(), location.object());
+    let path = location.path(ana.store);
     let creates = ana.storage.request_trace()[before..]
         .iter()
         .filter(|request| matches!(request, MemoryRequest::Create(created) if *created == path))

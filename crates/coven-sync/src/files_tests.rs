@@ -316,7 +316,7 @@ impl Fixture {
     /// The path of a stored file.
     fn path(&self, file: &FileRef) -> coven_storage::ObjectPath {
         let location = stored(file);
-        coven_storage::ObjectPath::file(self.directory.id(), location.uploader(), location.object())
+        location.path(self.directory.id())
     }
     async fn close(&self) {
         self.files.close().await;

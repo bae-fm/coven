@@ -5,9 +5,7 @@ use std::sync::Arc;
 /// The stored path of a file whose record says it is in storage.
 fn stored_path(store: StoreId, file: &FileRef) -> ObjectPath {
     match file.place() {
-        FilePlace::Cloud { location, .. } => {
-            ObjectPath::file(store, location.uploader(), location.object())
-        }
+        FilePlace::Cloud { location, .. } => location.path(store),
         FilePlace::DeviceOnly { .. } => panic!("the file is not stored"),
     }
 }
