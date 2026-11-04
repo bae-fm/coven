@@ -322,6 +322,16 @@ fn insert_candidate(
     Ok(())
 }
 
+/// Count every candidate from the applied slot `slot`, as though each lost
+/// its protection there.
+pub(crate) fn count_candidates_from(
+    db: &crate::sqlite::DatabaseConnection,
+    slot: u64,
+) -> Result<(), DbError> {
+    db.internal_execute("UPDATE _coven_file_candidates SET since=?1", [slot.to_be_bytes()])?;
+    Ok(())
+}
+
 /// Stored files named by the records and losses of the audience snapshot
 /// just read into this transaction. A location that won't decode is the
 /// snapshot's own failure.

@@ -15,6 +15,9 @@ pub(super) fn reason(statement: &Statement, relation: &str) -> Option<&'static s
     database_reason(statement, relation)
         .or_else(|| crate::store_state_tables::tests::scan_reason(file, template, sql, relation))
         .or_else(|| crate::published::tests::scan_reason(file, template, sql, relation))
+        .or_else(|| {
+            crate::database::file_retention::tests::scan_reason(file, template, sql, relation)
+        })
         .or_else(|| crate::migration_run::tests::scan_reason(file, template, sql, relation))
         .or_else(|| crate::pending::tests::scan_reason(file, template, sql, relation))
         .or_else(|| crate::raise_capture::tests::scan_reason(file, template, sql, relation))
@@ -32,8 +35,6 @@ fn database_reason(statement: &Statement, relation: &str) -> Option<&'static str
     Some("the table lists every file this device has a record of"),
 ("file_moves.rs", "SELECT m.id FROM _coven_moves AS m WHERE m.state='moving' AND NOT EXISTS(SELECT 1 FROM _coven_file_uploads AS u WHERE u.move=m.id AND u.stored=0 AND EXISTS(SELECT 1 FROM _coven_upload_files AS l WHERE l.upload=u.id))", "m") =>
     Some("the moves still moving, each with its queued uploads; a finished, failed or cancelled move is in no index entry"),
-("snapshot_load.rs", "UPDATE _coven_file_candidates SET since=?1", "_coven_file_candidates") =>
-    Some("a reload skips the slots it replaces, so every candidate counts from its target"),
 ("file_pins.rs", "SELECT file,copy FROM _coven_pin_requests ORDER BY file", "_coven_pin_requests") =>
     Some("the pins coven keeps, each until it is made: the work the upload worker does"),
 ("coven_user_files", "SELECT * FROM coven_user_files", "u") =>
@@ -175,8 +176,6 @@ fn database_reason(statement: &Statement, relation: &str) -> Option<&'static str
     | "SELECT EXISTS(SELECT 1 FROM _coven_lost WHERE column_id=?1 AND frozen=1)"
     | "UPDATE _coven_lost SET column_id=?2 WHERE column_id=?1 AND frozen=0 AND replacement_kind='write'", "_coven_lost") =>
     Some("once per migration: separate active and frozen losses when moving columns"),
-("database_file_retention.rs", "SELECT device,file FROM _coven_row_file_refs UNION SELECT device,file FROM _coven_published_file_refs UNION SELECT device,file FROM _coven_queued_file_refs UNION SELECT device,file FROM _coven_file_uploads", "_coven_row_file_refs" | "_coven_published_file_refs" | "_coven_queued_file_refs" | "_coven_file_uploads") =>
-    Some("retention enumerates every locally protected file"),
 ("reload_gate.rs", "SELECT audience FROM _coven_data_reloads", "_coven_data_reloads") =>
     Some("sync schedules every audience awaiting replacement data"),
 ("sequence.rs", "SELECT device,number,digest FROM _coven_last_claims ORDER BY device", "_coven_last_claims") =>

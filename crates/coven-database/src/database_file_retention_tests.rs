@@ -539,7 +539,26 @@ async fn a_scan_is_recorded_against_a_replacement_of_its_members_keys() {
 pub(crate) fn fill_for_plans(db: &rusqlite::Connection) {
     db.execute_batch(
         "INSERT INTO _coven_absent_snapshots SELECT audience,device,n FROM fixture;
-         INSERT INTO _coven_file_scans SELECT n,n FROM fixture;",
+         INSERT INTO _coven_file_scans SELECT n,n FROM fixture;
+         INSERT INTO _coven_file_candidates SELECT device,substr(key,17,16),n FROM fixture;",
     )
     .unwrap();
+}
+
+/// The scans this module's statements may make, with their reasons, for the
+/// plan audit (`internal_schema_scan_reasons.rs`): `template` is the statement as
+/// written, `sql` as run.
+pub(crate) fn scan_reason(
+    file: &str,
+    template: &str,
+    _sql: &str,
+    relation: &str,
+) -> Option<&'static str> {
+    match (file, template, relation) {
+("database_file_retention.rs", "UPDATE _coven_file_candidates SET since=?1", "_coven_file_candidates") =>
+    Some("a reload skips the slots it replaces, so every candidate counts from its target"),
+("database_file_retention.rs", "SELECT device,file FROM _coven_row_file_refs UNION SELECT device,file FROM _coven_published_file_refs UNION SELECT device,file FROM _coven_queued_file_refs UNION SELECT device,file FROM _coven_file_uploads", "_coven_row_file_refs" | "_coven_published_file_refs" | "_coven_queued_file_refs" | "_coven_file_uploads") =>
+    Some("retention enumerates every locally protected file"),
+        _ => None,
+    }
 }

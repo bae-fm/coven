@@ -121,10 +121,7 @@ pub(crate) fn load<P: crate::PendingValue>(
         // A reload skips the slots it replaces, and with them any change that
         // named a candidate's path and left it unnamed again, so every
         // candidate counts from the reload's target (§17.10).
-        database.internal_execute(
-            "UPDATE _coven_file_candidates SET since=?1",
-            [target.to_be_bytes()],
-        )?;
+        crate::database::file_retention::count_candidates_from(database, target)?;
         files.before_commit()?;
         if let Some(operation) = operation {
             crate::operation::advance(database, &operation)?;
