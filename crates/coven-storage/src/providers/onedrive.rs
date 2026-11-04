@@ -183,14 +183,9 @@ impl OneDriveStorage {
             let value =
                 http::json(PROVIDER, self.send(Method::GET, &url, Body::Empty).await?).await?;
             result.extend(http::array(&value, "value")?.iter().cloned());
-            match value.get("@odata.nextLink") {
+            match http::next_link(&value)? {
                 None => break,
-                Some(next) => {
-                    url = next
-                        .as_str()
-                        .ok_or(StorageFailure::Protocol.with_source("invalid OneDrive next link"))?
-                        .into()
-                }
+                Some(next) => url = next.into(),
             }
         }
         Ok(result)

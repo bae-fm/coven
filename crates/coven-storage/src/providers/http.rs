@@ -568,6 +568,14 @@ pub(crate) fn string<'a>(value: &'a Value, field: &str) -> Result<&'a str, Stora
         .filter(|s| !s.is_empty())
         .ok_or(StorageFailure::Protocol.with_source("missing string field"))
 }
+/// The next page a Graph listing names in `@odata.nextLink`: none on its
+/// last page; a link that isn't text is a protocol failure.
+pub(crate) fn next_link(value: &Value) -> Result<Option<&str>, StorageError> {
+    match value.get("@odata.nextLink") {
+        None => Ok(None),
+        Some(_) => string(value, "@odata.nextLink").map(Some),
+    }
+}
 /// An optional nullable provider field must still be text when present.
 pub(crate) fn optional_string<'a>(
     value: &'a Value,

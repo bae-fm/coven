@@ -159,8 +159,8 @@ async fn children(provider: &OneDriveStorage, parent: &str) -> Vec<Value> {
         http::same_origin(&provider.api, &url).unwrap();
         let value = native(provider, Method::GET, &url, Body::Empty).await;
         items.extend(http::array(&value, "value").unwrap().iter().cloned());
-        match value.get("@odata.nextLink") {
-            Some(_) => url = http::string(&value, "@odata.nextLink").unwrap().into(),
+        match http::next_link(&value).unwrap() {
+            Some(next) => url = next.into(),
             None => return items,
         }
     }

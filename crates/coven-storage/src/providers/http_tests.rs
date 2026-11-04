@@ -795,3 +795,19 @@ async fn the_signed_in_account_is_trimmed_and_lowercase() {
         }
     }
 }
+
+/// A Graph page's next link: none on the last page, and anything but
+/// non-empty text a protocol failure, whichever listing reads it.
+#[test]
+fn a_graph_next_link_is_absent_or_text() {
+    use serde_json::json;
+    assert_eq!(next_link(&json!({"value": []})).unwrap(), None);
+    assert_eq!(
+        next_link(&json!({"@odata.nextLink": "https://graph.microsoft.com/v1.0/next"})).unwrap(),
+        Some("https://graph.microsoft.com/v1.0/next")
+    );
+    for link in [json!(""), json!(null), json!(7)] {
+        let error = next_link(&json!({ "@odata.nextLink": link })).unwrap_err();
+        assert_eq!(error.failure(), StorageFailure::Protocol);
+    }
+}

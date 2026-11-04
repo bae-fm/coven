@@ -100,9 +100,9 @@ impl OAuthFolders {
                     folders.push(folder);
                 }
             }
-            match value.get("@odata.nextLink") {
+            match http::next_link(&value)? {
                 None => return Ok(folders),
-                Some(_) => url = http::string(&value, "@odata.nextLink")?.into(),
+                Some(next) => url = next.into(),
             }
         }
     }

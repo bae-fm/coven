@@ -155,17 +155,9 @@ impl OneDriveStorage {
                             Kind::Other => listing.skip(),
                         }
                     }
-                    match value.get("@odata.nextLink") {
+                    match http::next_link(&value)? {
                         None => break,
-                        Some(next) => {
-                            url = next
-                                .as_str()
-                                .ok_or(
-                                    StorageFailure::Protocol
-                                        .with_source("invalid OneDrive listing link"),
-                                )?
-                                .into()
-                        }
+                        Some(next) => url = next.into(),
                     }
                 }
             }
