@@ -859,6 +859,17 @@ impl AuthorizationState {
             {
                 Some("reading what is being transferred outside coven_uploads, coven_sending and coven_downloading")
             }
+            // The same holds for the network, which changes with no write.
+            Function { function_name }
+                if crate::network_facts::FUNCTIONS
+                    .iter()
+                    .any(|name| name.eq_ignore_ascii_case(function_name))
+                    && !context
+                        .accessor
+                        .is_some_and(crate::internal_schema::app_readable) =>
+            {
+                Some("reading the network outside coven_network and coven_uploads")
+            }
             Read { table_name, .. } if table_name.to_ascii_lowercase().starts_with("pragma_") => {
                 Some("PRAGMA")
             }

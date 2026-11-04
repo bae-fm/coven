@@ -310,6 +310,21 @@ impl FileRangeStream<'_> {
         Ok(Some(bytes))
     }
 }
+impl FilesInner {
+    /// A pin's whole copy of the stored file, downloaded as `keep_whole`
+    /// assembles it (§17.8), or `None` when a metered network the app keeps
+    /// files off stopped it before a request to storage: nothing failed.
+    pub(crate) async fn download_whole(
+        self: &Arc<Self>,
+        file: FileRef,
+    ) -> Result<Option<CacheReservation>, TransferError> {
+        // An empty file's header is its whole object, which opening reads.
+        if file.size() == 0 && self.downloads_held() {
+            return Ok(None);
+        }
+        UploadedFile::open(self.clone(), file).await?.keep_whole().await
+    }
+}
 impl UploadedFile {
     /// Open an uploaded file without a request when its header is cached.
     /// Otherwise the first fetch checks the header: one starting at chunk
@@ -401,8 +416,9 @@ impl UploadedFile {
     /// Assemble this file's whole encrypted cache copy, from cached and
     /// fetched chunks, check its content hash and sync it, under a reserved
     /// name: the copy a pin's write publishes (§17.8). Nothing is kept until
-    /// then.
-    pub(crate) async fn keep_whole(&self) -> Result<CacheReservation, TransferError> {
+    /// then. `None` when a metered network the app keeps files off stops it
+    /// before its next request to storage; what it had goes.
+    pub(crate) async fn keep_whole(&self) -> Result<Option<CacheReservation>, TransferError> {
         // In flight until it ends, by finishing, failing or being dropped.
         let downloading = self.owner.downloading.start(
             self.location.uploader(),
@@ -425,9 +441,14 @@ impl UploadedFile {
         let mut hash = ContentHasher::new();
         let mut index = 0;
         while index < self.header.chunk_count() {
-            let (last, chunks) = self
+            // A metered network the app keeps files off stops the download
+            // before its next request to storage (§17.8).
+            let ChunkStep::Read(last, chunks) = self
                 .chunks(index, self.header.chunk_count() - 1, ChunkDestination::WholeFile(&meter))
-                .await?;
+                .await?
+            else {
+                return Ok(None);
+            };
             for chunk in chunks {
                 hash.update(&chunk.plaintext);
                 writer.append(&chunk.ciphertext).await?;
@@ -440,7 +461,7 @@ impl UploadedFile {
             return Err(TransferError::Refused(crate::Refusal::ContentHash));
         }
         writer.finish().await?;
-        Ok(reservation)
+        Ok(Some(reservation))
     }
     fn integrity(&self) -> FileReadError {
         FileReadError::Integrity { id: self.file.id().to_string(), cause: None }
@@ -494,7 +515,9 @@ impl UploadedFile {
                 len,
                 here,
             }));
-            let (end, chunks) = self.chunks(index, last, destination).await?;
+            let ChunkStep::Read(end, chunks) = self.chunks(index, last, destination).await? else {
+                unreachable!("only a pin's download waits for the network")
+            };
             for (number, chunk) in chunks.into_iter().enumerate() {
                 let plain = chunk.plaintext;
                 let position = (index + number as u64) * size;
@@ -517,15 +540,24 @@ impl UploadedFile {
         first: u64,
         last: u64,
         destination: ChunkDestination<'_>,
-    ) -> Result<(u64, Vec<OpenedChunk>), FileReadError> {
+    ) -> Result<ChunkStep, FileReadError> {
         self.owner.check_open()?;
         let _file = self.owner.lock_file(&self.file, &self.location).await;
         let _guard = self.owner.cache.read().await;
         let cached = self.owner.database.cached(&self.file, first as i64).await?;
+        let header_here = self.cached_header().await?;
+        // A pin's download asks storage for nothing while a metered network
+        // holds it; what is here already it still takes (§17.8).
+        if matches!(destination, ChunkDestination::WholeFile(_))
+            && (cached.is_none() || !header_here)
+            && self.owner.downloads_held()
+        {
+            return Ok(ChunkStep::Held);
+        }
         // An unchecked header comes with an uncached chunk zero; any other
         // first read checks it alone (§17.7).
         let mut with_header = false;
-        if !self.cached_header().await? {
+        if !header_here {
             if first == 0 && cached.is_none() {
                 with_header = true;
             } else {
@@ -533,7 +565,7 @@ impl UploadedFile {
             }
         }
         if let Some(bytes) = cached {
-            return Ok((first, vec![self.open_cached(first, bytes)?]));
+            return Ok(ChunkStep::Read(first, vec![self.open_cached(first, bytes)?]));
         }
         let start = self.header.chunk(first).map_err(|_| self.integrity())?.offset;
         let mut end_index = first;
@@ -597,7 +629,7 @@ impl UploadedFile {
             end_index += 1;
             plain.push(self.open_cached(end_index, bytes)?);
         }
-        Ok((end_index, plain))
+        Ok(ChunkStep::Read(end_index, plain))
     }
     /// What hears a fetch of chunks `first..=last`, which starts `start`
     /// bytes into the object. A pin's meter hears the furthest through the
@@ -670,6 +702,14 @@ impl UploadedFile {
 struct OpenedChunk {
     plaintext: Vec<u8>,
     ciphertext: Vec<u8>,
+}
+
+/// What one step of reading chunks found.
+enum ChunkStep {
+    /// The chunks from the first asked for through this one.
+    Read(u64, Vec<OpenedChunk>),
+    /// A pin's download needs storage, and a metered network holds it.
+    Held,
 }
 
 async fn cache(

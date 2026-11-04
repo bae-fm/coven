@@ -79,10 +79,20 @@ struct FilesInner {
     /// The persisted pause setting as of the last upload run or app change;
     /// parts check it between sends.
     paused: AtomicBool,
-    /// Held by an app's pause change, and by an upload run from its read of
-    /// the persisted setting until it has acted on it, so neither the copy
-    /// above nor a retry's answer comes from a setting already replaced.
-    pause_change: tokio::sync::Mutex<()>,
+    /// The persisted setting to move files only on unmetered networks, as
+    /// of the last upload run or app change; parts and pins' downloads
+    /// check it, with the network, between requests (§17.9).
+    unmetered_only: AtomicBool,
+    /// Held by an app's change of either setting, and by an upload run from
+    /// its read of the persisted settings until it has acted on them, so
+    /// neither the copies above nor a retry's answer comes from a setting
+    /// already replaced.
+    hold_change: tokio::sync::Mutex<()>,
+    /// The device's network, as the store's watch says it is (§6.7).
+    network: coven_foundation::network_watch::NetworkView,
+    /// Wakes a pin's download waiting for the network as the setting
+    /// changes or the store closes.
+    hold_wake: Notify,
     /// Wakes the upload worker, or its run in progress.
     upload_wake: Arc<Notify>,
     /// One upload run at a time.
@@ -129,6 +139,7 @@ impl Files {
         ids: IdSourceRef,
         transfers: Arc<TransferBudget>,
         clock: coven_foundation::clock::ClockRef,
+        network: coven_foundation::network_watch::NetworkView,
     ) -> Self {
         let uploads_changes = database.queued_work_changes();
         let in_flight = database.uploads_in_flight();
@@ -144,7 +155,10 @@ impl Files {
             ids,
             clock,
             paused: AtomicBool::new(false),
-            pause_change: tokio::sync::Mutex::new(()),
+            unmetered_only: AtomicBool::new(false),
+            hold_change: tokio::sync::Mutex::new(()),
+            network,
+            hold_wake: Notify::new(),
             upload_wake: Arc::new(Notify::new()),
             drain: tokio::sync::Mutex::new(()),
             in_flight,
@@ -183,6 +197,8 @@ impl Files {
     /// of a file stream still open.
     pub async fn close(&self) {
         self.inner.closed.store(true, Ordering::Release);
+        // A pin's download waiting for the network fails as the store closes.
+        self.inner.hold_wake.notify_waiters();
         self.worker.stop.send_replace(true);
         for task in std::mem::take(&mut *self.worker.tasks.lock().await) {
             stopped("the upload worker", task).await;
@@ -220,11 +236,36 @@ impl Files {
         sql.after_commit(move || {
             // The write's effects run on its blocking thread, where waiting
             // for the run is allowed.
-            let change = inner.pause_change.blocking_lock();
+            let change = inner.hold_change.blocking_lock();
             inner.paused.store(paused, Ordering::Release);
             drop(change);
             if !paused {
                 inner.upload_wake.notify_one();
+            }
+        });
+        Ok(())
+    }
+    /// Persist the setting to move files only on unmetered networks, as a
+    /// step of `sql`'s write (§17.9): while the network is metered, a running
+    /// trailing upload stops between confirmed parts, as a pause stops it,
+    /// and pins' downloads wait before their next request to storage. Bound
+    /// uploads run on. Once the write commits, and before it returns, the
+    /// uploads and downloads take the new setting, as they take a pause.
+    pub fn set_unmetered_only(
+        &self,
+        sql: &coven_database::SqlContext<'_, '_>,
+        unmetered_only: bool,
+    ) -> Result<(), DbError> {
+        self.inner.check_open()?;
+        sql.set_unmetered_only(unmetered_only)?;
+        let inner = self.inner.clone();
+        sql.after_commit(move || {
+            let change = inner.hold_change.blocking_lock();
+            inner.unmetered_only.store(unmetered_only, Ordering::Release);
+            drop(change);
+            if !unmetered_only {
+                inner.upload_wake.notify_one();
+                inner.hold_wake.notify_waiters();
             }
         });
         Ok(())
@@ -288,6 +329,8 @@ async fn upload_worker(
     let mut sending = first.send.watch();
     let mut syncing = first.waits.syncing();
     let mut reports = first.waits.network_reports();
+    // The network turning unmetered lets held uploads and pins go (§17.9).
+    let mut network = first.network.clone();
     drop(first);
     // The earliest due upload retry, armed after each run (§6.7).
     let mut retry: crate::retry_waits::Wake = Box::pin(std::future::pending());
@@ -306,6 +349,7 @@ async fn upload_worker(
             // Starting sync lets uploads run (§17.4).
             result = syncing.changed() => if result.is_err() { break; },
             result = reports.changed() => if result.is_err() { break; },
+            () = network.changed() => {},
             () = &mut retry => {},
         }
         let Some(owner) = owner.upgrade() else { break };
@@ -391,8 +435,62 @@ impl FilesInner {
             Ok(())
         }
     }
-    pub(crate) fn paused(&self) -> bool {
-        self.paused.load(Ordering::Acquire)
+    /// What holds trailing uploads now (§17.4, §17.9): the app's pause, or
+    /// a metered network while the app moves files only on unmetered ones.
+    pub(crate) fn trailing_hold(&self) -> Option<TrailingHold> {
+        if self.paused.load(Ordering::Acquire) {
+            Some(TrailingHold::Paused)
+        } else if self.metered_holds(false) {
+            Some(TrailingHold::Metered)
+        } else {
+            None
+        }
+    }
+    /// Whether anything holds trailing uploads now.
+    pub(crate) fn trailing_held(&self) -> bool {
+        self.trailing_hold().is_some()
+    }
+    /// Whether the setting to move files only on unmetered networks holds a
+    /// transfer now: it is on, the network is metered, and it holds this
+    /// transfer, which for an upload depends on whether it is bound.
+    pub(crate) fn metered_holds(&self, bound: bool) -> bool {
+        self.unmetered_only.load(Ordering::Acquire)
+            && self.network.current().metered
+            && held_on_metered(bound)
+    }
+    /// Take the persisted setting to move files only on unmetered networks
+    /// as this owner's copy, as an upload run does for both settings: a pin
+    /// prepared as the store opens holds as the setting says, before any
+    /// upload run has read it.
+    pub(crate) async fn read_unmetered_only(&self) -> Result<(), DbError> {
+        let _change = self.hold_change.lock().await;
+        let unmetered_only = self.database.unmetered_only().await?;
+        self.unmetered_only.store(unmetered_only, Ordering::Release);
+        Ok(())
+    }
+    /// Whether a pin's download waits for the network now (§17.8).
+    pub(crate) fn downloads_held(&self) -> bool {
+        self.metered_holds(false)
+    }
+    /// Wait until no metered network holds a pin's download: the network
+    /// turns unmetered, or the setting goes off. Fails once the store
+    /// closes.
+    pub(crate) async fn until_downloads_unheld(&self) -> Result<(), DbError> {
+        let mut network = self.network.clone();
+        loop {
+            let woken = self.hold_wake.notified();
+            tokio::pin!(woken);
+            woken.as_mut().enable();
+            self.check_open()?;
+            network.read();
+            if !self.downloads_held() {
+                return Ok(());
+            }
+            tokio::select! {
+                () = woken => {}
+                () = network.changed() => {}
+            }
+        }
     }
     pub(crate) async fn trim(&self, namespace: &str) {
         if let Err(error) = self.database.trim_cache(namespace).await {
@@ -402,6 +500,24 @@ impl FilesInner {
         }
     }
 }
+/// What holds trailing uploads (§17.4, §17.9).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TrailingHold {
+    /// The app paused uploads.
+    Paused,
+    /// The network is metered and the app moves files only on unmetered
+    /// networks.
+    Metered,
+}
+
+/// Whether the setting to move files only on unmetered networks holds an
+/// upload on a metered network: the trailing ones, as the pause holds them,
+/// since every later write waits for a bound one (§17.4). The Lean model's
+/// `Upload.heldOnMetered`; the views' `coven_uploads.metered` says the same.
+pub(crate) fn held_on_metered(bound: bool) -> bool {
+    !bound
+}
+
 /// Wait for a background worker to end as its owner stops it. A panic in it
 /// unwinds into the owner; the runtime dropping it as it shuts down has ended
 /// it too, which is all stopping waits for.

@@ -584,7 +584,7 @@ async fn an_invite_waiting_for_a_decision_still_expires() {
 }
 
 /// An invite's request read that got no reply waits its backoff; a pass
-/// before then leaves it. The app's network report ends that wait, keeping
+/// before then leaves it. The network report ends that wait, keeping
 /// its failure count, and the next pass reads the request again (§6.7).
 #[tokio::test]
 async fn a_network_report_ends_an_offline_invite_wait() {
@@ -618,7 +618,7 @@ async fn a_network_report_ends_an_offline_invite_wait() {
     ana.storage.set_faults(coven_storage::test_utils::Faults::none()).await;
     ana.sync.pass().await.unwrap();
     assert!(reason().await.offline(), "a pass before the wait is due leaves it");
-    ana.sync.waits.network_changed();
+    ana.sync.waits.report_network();
     // The upload worker's report leaves the operation to the connection.
     ana.sync.waits.end_reported_waits(crate::NetworkOwner::Uploads).await.unwrap();
     assert_eq!(ana.database().retry_wait(subject).await.unwrap(), Some(wait));

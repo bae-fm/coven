@@ -1,4 +1,4 @@
-//! The app's network report and the connection's wait (§6.7; IO `WaitingNetwork`).
+//! The network report and the connection's wait (§6.7; IO `WaitingNetwork`).
 
 use super::*;
 use crate::retry_waits::tests::{due, Fixture};
@@ -35,7 +35,7 @@ async fn fail(
 }
 
 async fn report(waits: &RetryWaits) -> bool {
-    waits.network_changed();
+    waits.report_network();
     waits.end_reported_waits(crate::NetworkOwner::Connection).await.unwrap()
 }
 
@@ -147,7 +147,7 @@ async fn a_report_whose_end_failed_to_save_ends_the_wait_next_time() {
     fail(&mut retry, &database, &waits, false).await;
     let saved = database.retry_wait(SYNC).await.unwrap();
     database.fail_retry_ends(1).await;
-    waits.network_changed();
+    waits.report_network();
     assert!(waits.end_reported_waits(crate::NetworkOwner::Connection).await.is_err());
     assert_eq!(database.retry_wait(SYNC).await.unwrap(), saved);
     assert!(!due(&database, &waits, SYNC).await);

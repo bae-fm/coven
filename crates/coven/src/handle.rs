@@ -54,6 +54,8 @@ pub struct CovenHandle {
     _scope: Arc<HandleScope>,
     database: Database,
     files: coven_sync::Files,
+    /// Follows the store's watch of the device's network (§6.7).
+    network: Arc<coven_sync::NetworkFollow>,
     storage: Arc<crate::storage::StorageConnections>,
     custody: Arc<Mutex<Option<StoreCustody>>>,
     directory: StoreDir,
@@ -83,6 +85,7 @@ impl CovenHandle {
         database: Database,
         custody: StoreCustody,
         files: coven_sync::Files,
+        network: Arc<coven_sync::NetworkFollow>,
         storage: Arc<crate::storage::StorageConnections>,
         directory: StoreDir,
         keychain: Arc<StoreKeychain>,
@@ -92,6 +95,7 @@ impl CovenHandle {
             _scope: Arc::new(HandleScope(database.clone())),
             database,
             files,
+            network,
             storage,
             custody: Arc::new(Mutex::new(Some(custody))),
             directory,
@@ -537,6 +541,8 @@ impl CovenHandle {
         self.database.begin_close();
         let handle = self.clone();
         let closing = tokio::spawn(async move {
+            // No network report reaches the store's waits once it closes.
+            handle.network.close().await;
             let storage = handle.storage.close().await;
             handle.files.close().await;
             let custody = handle.custody.clone();

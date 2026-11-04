@@ -523,8 +523,9 @@ async fn connection_wait(
 }
 
 /// Ana's phone locked on a train: every pass found no network and backed off.
-/// Once it unlocks, `sync_now` still waits out the backoff, but the app's
-/// network report ends it and a pass runs at once (§6.7).
+/// Once it unlocks, `sync_now` still waits out the backoff, but coven sees
+/// the network come back, and its report ends the backoff and a pass runs at
+/// once (§6.7).
 #[tokio::test]
 async fn a_network_report_ends_an_offline_backoff_and_a_pass_runs() {
     let network = Network::new(1).await;
@@ -532,6 +533,7 @@ async fn a_network_report_ends_an_offline_backoff_and_a_pass_runs() {
     // Waits end only when the test moves the fixed clock, which it never does.
     network.polling.hold_waits();
     device.storage.set_online(false);
+    device.app.lose_network();
     attempt(device, |s| matches!(s, Some(LastPass::Offline { .. }))).await;
     let wait = connection_wait(device, |_| true).await;
     assert_eq!(wait.failures, 1);
@@ -548,7 +550,7 @@ async fn a_network_report_ends_an_offline_backoff_and_a_pass_runs() {
         "sync_now ran a pass inside the connection backoff"
     );
     let mut last = device.handle.test_last_pass();
-    device.handle.network_changed();
+    device.app.join_network(false);
     last.wait_for(|last| *last == Some(LastPass::Synced)).await;
     assert_eq!(device.handle.test_connection_retry_wait().await, None);
     network.close().await;
@@ -573,8 +575,8 @@ async fn a_network_report_leaves_a_provider_cooldown_and_an_answered_backoff() {
     attempt(device, |s| matches!(s, Some(LastPass::Failed { .. }))).await;
     let wait = connection_wait(device, |_| true).await;
     let requests = device.storage.request_trace().len();
-    device.handle.network_changed();
-    device.handle.network_changed();
+    device.app.join_network(false);
+    device.app.join_network(false);
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert_eq!(
         device.storage.request_trace().len(),
@@ -603,7 +605,7 @@ async fn network_reports_during_a_pass_coalesce_into_one_more_pass() {
     insert(&device.handle, "offline").await;
     reading.await.unwrap();
     for _ in 0..3 {
-        device.handle.network_changed();
+        device.app.join_network(false);
     }
     device.storage.set_online(false);
     resume.send(()).unwrap();
@@ -619,15 +621,17 @@ async fn network_reports_during_a_pass_coalesce_into_one_more_pass() {
     network.close().await;
 }
 
-/// Android stopped the app while Ana's phone was locked. The reopened store
-/// keeps the backoff, and her report still ends it while connecting: the
-/// connection's pending record says no provider answered (§6.7).
+/// Android stopped the app while Ana's phone was locked. The store reopened
+/// with no network keeps the backoff, and the network coming back still
+/// ends it while connecting: the connection's pending record says no
+/// provider answered (§6.7).
 #[tokio::test]
 async fn a_network_report_ends_an_offline_backoff_kept_across_reopening() {
     let mut network = Network::new(1).await;
     network.polling.hold_waits();
     let device = &network.devices[0];
     device.storage.set_online(false);
+    device.app.lose_network();
     attempt(device, |s| matches!(s, Some(LastPass::Offline { .. }))).await;
     let wait = connection_wait(device, |_| true).await;
     device.handle.close().await.unwrap();
@@ -641,15 +645,40 @@ async fn a_network_report_ends_an_offline_backoff_kept_across_reopening() {
     assert_eq!(device.storage.request_trace().len(), requests, "reopening discarded the backoff");
     assert_eq!(device.handle.test_connection_retry_wait().await, Some(wait));
     let mut last = device.handle.test_last_pass();
-    device.handle.network_changed();
+    device.app.join_network(false);
+    last.wait_for(|last| *last == Some(LastPass::Synced)).await;
+    assert_eq!(device.handle.test_connection_retry_wait().await, None);
+    network.close().await;
+}
+
+/// The store reopens on a usable network: the network found as it opens is
+/// a report, so the backoff saved while the phone had none ends at once
+/// (§6.7).
+#[tokio::test]
+async fn opening_on_a_usable_network_ends_an_offline_backoff() {
+    let mut network = Network::new(1).await;
+    network.polling.hold_waits();
+    let device = &network.devices[0];
+    device.storage.set_online(false);
+    device.app.lose_network();
+    attempt(device, |s| matches!(s, Some(LastPass::Offline { .. }))).await;
+    connection_wait(device, |_| true).await;
+    device.handle.close().await.unwrap();
+    device.storage.set_online(true);
+    device.app.join_network(false);
+    let handle = network.reopen(device).open(device.store, |_| ()).await.unwrap();
+    network.devices[0].handle = handle;
+    let device = &network.devices[0];
+    let mut last = device.handle.test_last_pass();
+    device.handle.start_sync().await.unwrap();
     last.wait_for(|last| *last == Some(LastPass::Synced)).await;
     assert_eq!(device.handle.test_connection_retry_wait().await, None);
     network.close().await;
 }
 
 /// Ana's photo was uploading when her phone locked: the upload found no
-/// network and waits its own backoff. Once she unlocks, the network report
-/// ends that wait too, and the photo uploads at once (§6.7).
+/// network and waits its own backoff. Once she unlocks, coven's network
+/// report ends that wait too, and the photo uploads at once (§6.7).
 #[tokio::test]
 async fn a_network_report_ends_an_offline_upload_backoff() {
     let network = file_network().await;
@@ -682,7 +711,7 @@ async fn a_network_report_ends_an_offline_upload_backoff() {
     device.storage.set_online(true);
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert!(!file_stored(device, photo).await, "the upload skipped its backoff");
-    device.handle.network_changed();
+    device.app.join_network(false);
     wait_for_empty_queue(&device.handle).await;
     assert!(file_stored(device, photo).await);
     network.close().await;
@@ -721,7 +750,7 @@ async fn retry_now_ends_an_answered_upload_backoff() {
     })
     .await
     .unwrap();
-    device.handle.network_changed();
+    device.app.join_network(false);
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert!(!file_stored(device, photo).await, "a network report ended an answered backoff");
     device.handle.retry_now().await.unwrap();

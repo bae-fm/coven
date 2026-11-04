@@ -17,13 +17,14 @@ use coven_storage::{ByteProgress, ObjectPath, UploadSession};
 impl FilesInner {
     /// Whether this attempt stored the file. A failure becomes the file's
     /// pending record, which holds its error as the cause in this process.
-    /// The pause holds a trailing upload only (§17.4).
+    /// The pause and a metered network hold a trailing upload only (§17.4,
+    /// §17.9).
     pub(super) async fn attempt_upload(
         &self,
         item: FileUpload,
         meter: TransferMeter,
     ) -> Result<bool, SyncError> {
-        if self.paused() && item.holds.is_none() {
+        if item.holds.is_none() && self.trailing_held() {
             return Ok(false);
         }
         self.forget_connection_wait(RetrySubject::Upload(item.id));
@@ -44,7 +45,7 @@ impl FilesInner {
     /// Send the file to the path and key its staging write fixed, telling
     /// `meter` how far through the encrypted object the bytes handed over
     /// reach. Confirmed storage switches its files to the cloud and retires
-    /// the queue row (§17.9). Returns false when a trailing upload is paused
+    /// the queue row (§17.9). Returns false when a trailing upload is held
     /// between parts.
     pub(super) async fn upload(
         &self,
@@ -222,6 +223,7 @@ impl crate::recorded_upload::UploadSource for FileTransfer<'_> {
         self.sent.clone()
     }
     fn keep_going(&self) -> bool {
-        (self.item.holds.is_some() || !self.owner.paused()) && self.owner.send.files_allowed()
+        (self.item.holds.is_some() || !self.owner.trailing_held())
+            && self.owner.send.files_allowed()
     }
 }

@@ -241,7 +241,7 @@ async fn a_network_report_and_the_persons_retry_end_a_kept_pins_wait() {
     f.storage.set_online(true);
     f.files.inner.keep_pinned().await.unwrap();
     assert!(!pinned(&f, file).await);
-    f.files.inner.waits.network_changed();
+    f.files.inner.waits.report_network();
     f.files.inner.keep_pinned().await.unwrap();
     assert!(pinned(&f, file).await);
 
@@ -259,13 +259,50 @@ async fn a_network_report_and_the_persons_retry_end_a_kept_pins_wait() {
         .await;
     f.files.inner.keep_pinned().await.unwrap();
     let answered = wait(&f).await.unwrap();
-    f.files.inner.waits.network_changed();
+    f.files.inner.waits.report_network();
     f.files.inner.keep_pinned().await.unwrap();
     assert_eq!(wait(&f).await.unwrap(), answered);
     assert!(!pinned(&f, other).await);
     f.files.inner.waits.retry_requested().await.unwrap();
     f.files.inner.keep_pinned().await.unwrap();
     assert!(pinned(&f, other).await);
+    f.close().await;
+}
+
+/// While the app moves files only on unmetered networks, a metered network
+/// holds a user's file kept here, which downloads, with no record and no
+/// wait; an app file kept from coven's own copy asks storage for nothing,
+/// so it is made. The user's file is made once the network is unmetered
+/// (§17.8).
+#[tokio::test]
+async fn a_metered_network_holds_a_kept_pins_download_but_not_one_from_coven_s_copy() {
+    let f = Fixture::new(Provenance::UserProvided).await;
+    f.files.stop_background_for_counts().await;
+    let song = kept_original(&f, "song", &vec![54; CHUNK]).await;
+    f.drain().await;
+    f.set_unmetered_only(true).await;
+    f.network.set_metered(true);
+    let from = f.storage.request_trace().len();
+    f.files.inner.keep_pinned().await.unwrap();
+    assert!(!pinned(&f, song).await);
+    assert_eq!(reads(&f, from), 0);
+    assert!(keep_records(&f).await.is_empty());
+    assert!(f.files.inner.database.pin_requests().await.unwrap()[0].retry.is_none());
+    f.network.set_metered(false);
+    f.files.inner.keep_pinned().await.unwrap();
+    assert!(pinned(&f, song).await);
+    f.close().await;
+
+    let f = Fixture::new(Provenance::AppProvided).await;
+    f.files.stop_background_for_counts().await;
+    let photo = kept_app_file(&f, "photo", vec![55; CHUNK]).await;
+    f.drain().await;
+    f.set_unmetered_only(true).await;
+    f.network.set_metered(true);
+    let from = f.storage.request_trace().len();
+    f.files.inner.keep_pinned().await.unwrap();
+    assert!(pinned(&f, photo).await);
+    assert_eq!(reads(&f, from), 0);
     f.close().await;
 }
 

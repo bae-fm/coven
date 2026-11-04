@@ -102,6 +102,9 @@ async fn connection_backoff_keeps_its_deadline_and_exponent_across_reopening() {
     let persisted = f.handle.test_connection_retry_wait().await.unwrap();
     f.advance(Duration::from_secs(4));
     f.handle.close().await.unwrap();
+    // The device still has no network as it reopens: opening on one would
+    // end this wait for the network (§6.7).
+    f.app.lose_network();
     let reopened = builder(
         &f.app,
         StoreLayout::new(f._root.path().into()),
@@ -663,7 +666,7 @@ async fn a_failed_pass_publishes_its_effect_before_its_status() {
     f.storage.hold_next_read(floor, entered, resumed).await;
     f.handle.sync_now();
     entering.await.unwrap();
-    f.handle.network_changed();
+    f.app.join_network(false);
     // The pass before the held one ended synced, so the failure is the held
     // pass's own.
     let mut shown = f.handle.test_last_pass();

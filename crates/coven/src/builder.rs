@@ -32,6 +32,8 @@ pub struct CovenBuilder {
     clock: ClockRef,
     connector: Option<Arc<dyn StorageConnector>>,
     transfers: Arc<coven_storage::TransferBudget>,
+    /// Where the store's watch hears about the device's network (§6.7).
+    network: coven_foundation::network_watch::NetworkSource,
     oauth: Option<OAuthClients>,
     presenter: Option<Arc<dyn OAuthPresenter>>,
     /// The latest sign-in, held for this session until bootstrap or setup
@@ -77,6 +79,7 @@ impl CovenBuilder {
             presenter: None,
             authentication: None,
             transfers: Arc::new(coven_storage::TransferBudget::new(TransferLimits::default())),
+            network: coven_foundation::network_watch::NetworkSource::Platform,
             keys: CustodyChoice::Configured(KeyCustody::Keyring),
             identity: CustodyChoice::Configured(IdentityCustody::Keyring),
             sqlite: SqliteSettings::default(),
@@ -116,6 +119,12 @@ impl CovenBuilder {
     #[cfg(any(test, feature = "test-utils"))]
     pub fn id_source(mut self, ids: IdSourceRef) -> Self {
         self.ids = ids;
+        self
+    }
+    /// Replace the platform's network with one the test drives (E5).
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn network(mut self, network: coven_foundation::network_watch::TestNetwork) -> Self {
+        self.network = coven_foundation::network_watch::NetworkSource::Test(network);
         self
     }
     /// Replace provider construction in tests while exercising setup, credential
@@ -451,6 +460,7 @@ impl CovenBuilder {
             ids,
             transfers,
             clock,
+            coven_foundation::network_watch::NetworkWatch::unwatched().view(),
         );
         Ok(CovenReadHandle::new(database, files))
     }
@@ -554,6 +564,8 @@ impl CovenBuilder {
         let identity =
             Self::make_identity(self.identity, &directory, settings.id, keychain.clone())?;
         let state = Arc::new(coven_sync::SequenceState::new());
+        let network = coven_foundation::network_watch::NetworkWatch::start(&self.network)
+            .map_err(CovenError::NetworkWatch)?;
         Ok(OpeningOwners {
             directory,
             custody: StoreCustody::new(keys.clone(), identity.clone(), keychain.clone()),
@@ -565,6 +577,7 @@ impl CovenBuilder {
             clients: self.oauth,
             authentication: self.authentication,
             transfers: self.transfers,
+            network,
             device: settings.device_id,
             keys,
             identity,
@@ -660,6 +673,8 @@ struct OpeningStore {
 
 struct OpeningOwners {
     transfers: Arc<coven_storage::TransferBudget>,
+    /// The store's watch of the device's network, from opening to closing.
+    network: coven_foundation::network_watch::NetworkWatch,
     keychain: Arc<StoreKeychain>,
     /// The person's entries, deleted when they leave the store (§14.1).
     person: Arc<PersonEntries>,
@@ -760,7 +775,10 @@ impl OpeningOwners {
             self.ids.clone(),
             self.transfers.clone(),
             self.clock.clone(),
+            self.network.view(),
         );
+        let network =
+            coven_sync::NetworkFollow::start(self.network, waits.clone(), database.clone());
         let storage = crate::storage::StorageConnections::new(
             database.clone(),
             files.clone(),
@@ -786,6 +804,7 @@ impl OpeningOwners {
             database,
             self.custody,
             files,
+            Arc::new(network),
             Arc::new(storage),
             self.directory,
             self.keychain,

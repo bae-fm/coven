@@ -468,6 +468,9 @@ RetryAnswer = "RetryWaits"
 NetworkReportWatch = "RetryWaits"
 # Each wait a failed attempt arms, so an owner plans again (§6.7).
 RearmWatch = "RetryWaits"
+# What the store's watch knows of the device's network, for each owner that
+# acts on it (§6.7, §17.9).
+NetworkView = "NetworkWatch"
 # Sync starting and stopping, for the upload worker, which runs only while
 # sync is started (§17.4).
 SyncingWatch = "RetryWaits"
@@ -650,6 +653,7 @@ tables = [
     "_coven_upload_files",
     "_coven_upload_keys",
     "_coven_upload_pause",
+    "_coven_unmetered_only",
     "_coven_uploads",
     "_coven_user_chunks",
     "_coven_user_files",
@@ -694,6 +698,15 @@ tables = [
     "reserve_bootstrap_directory",
     # One bootstrap's hold on its lock, which only that bootstrap keeps.
     "BootstrapLease::new",
+]
+# One watch of the device's network per open store, which its follower
+# keeps and stops as the store closes (§6.7); a test's network, which the
+# test drives, and the state each turns what it hears into.
+"crates/coven-foundation/src/network_watch.rs" = [
+    "NetworkWatch::start",
+    "NetworkWatch::unwatched",
+    "NetworkSink::new",
+    "TestNetwork::new",
 ]
 # Both store listings read the directory on a blocking task.
 "crates/coven-foundation/src/files/layout.rs" = ["StoreDirectories::listed"]
@@ -798,6 +811,9 @@ tables = [
     # reference.
     "CommitSubscription::new",
 ]
+# One per open store, which its connections' functions read and the
+# store's network follower tells (§4, §6.7).
+"crates/coven-database/src/network_facts.rs" = ["NetworkFacts::new"]
 # One per open store, with each way's shared state, which its handles
 # share (§4).
 "crates/coven-database/src/transfers_in_flight.rs" = [
@@ -886,6 +902,9 @@ tables = [
 # The network and retry reports that schedule's owners act on (§6.7).
 "crates/coven-sync/src/network_report.rs" = ["Reports::new"]
 "crates/coven-sync/src/sync_loop.rs" = ["SyncLoop::new"]
+# One per open store: it keeps the store's watch of the network and follows
+# it in a task of its own, which closing stops (§6.7).
+"crates/coven-sync/src/network_follow.rs" = ["NetworkFollow::start"]
 # One sequence state per opened installation, which the store's bootstrap or
 # builder makes and gives to its sequence and storage owners.
 "crates/coven-sync/src/sequence_state.rs" = ["SequenceState::new"]
@@ -954,6 +973,8 @@ tables = [
     # Builder setters replace a configured or already-unlocked custody choice.
     "CovenBuilder::key_custody",
     "CovenBuilder::identity_custody",
+    # The test's network replaces the platform's.
+    "CovenBuilder::network",
     "CovenBuilder::make_identity",
     "CovenBuilder::make_keys",
     "CovenBuilder::new",
@@ -1014,6 +1035,8 @@ tables = [
     # person deleting the keychain entry by hand does.
     "TestCoven::lose_storage_credentials",
     "TestCoven::new",
+    # Each installation's network, which its test drives.
+    "TestCoven::wifi",
     # Another of the person's devices shares only the person entries.
     "TestCoven::another_device",
     # An Android phone keeps the person entries in Block Store, and a new
@@ -1102,6 +1125,10 @@ crates = ["open"]
 [[capabilities.gates]]
 kind = "sockets"
 paths = ["std::net", "tokio::net"]
+
+[[capabilities]]
+name = "network state"
+homes = ["crates/coven-foundation/src/network_watch.rs"]
 
 [[capabilities]]
 name = "cryptography"

@@ -609,6 +609,12 @@ macro_rules! coven_tables {
                 paused INTEGER PRIMARY KEY CHECK(paused=1)
             ) STRICT;
         ");
+        // Present while the app moves files only on unmetered networks (E7).
+        $visit!(_coven_unmetered_only, "
+            CREATE TABLE _coven_unmetered_only (
+                unmetered_only INTEGER PRIMARY KEY CHECK(unmetered_only=1)
+            ) STRICT;
+        ");
         $visit!(_coven_file_chunks, "
             CREATE TABLE _coven_file_chunks (
                 device BLOB NOT NULL,

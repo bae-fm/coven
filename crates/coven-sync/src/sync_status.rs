@@ -92,6 +92,10 @@ pub enum UploadWait {
     /// The app paused uploads, and the file's reference trails
     /// (`set_uploads_paused`, §17.4).
     Paused,
+    /// The network is metered, the app moves files only on unmetered
+    /// networks (`set_unmetered_only`, §17.9), and the file's reference
+    /// trails.
+    Metered,
     /// Its last attempt failed, and it retries then, or at the person's
     /// retry (§6.7); `coven_uploads.pending` says why.
     Retrying {
@@ -360,6 +364,10 @@ pub(crate) struct Facts {
     pub(crate) sync: RetrySync,
     /// The app paused trailing uploads.
     pub(crate) paused: bool,
+    /// The app moves files only on unmetered networks.
+    pub(crate) unmetered_only: bool,
+    /// The store's watch says the device's network is metered.
+    pub(crate) metered: bool,
 }
 
 /// A state that may show, its cause made only for the one that does.
@@ -401,6 +409,11 @@ impl Facts {
                     UploadWait::Blocked
                 } else if self.paused && !upload.bound {
                     UploadWait::Paused
+                } else if self.unmetered_only
+                    && self.metered
+                    && crate::files::held_on_metered(upload.bound)
+                {
+                    UploadWait::Metered
                 } else if let Some(at) = upload.retry_at {
                     UploadWait::Retrying { at }
                 } else {
@@ -516,6 +529,8 @@ impl Facts {
                 .collect(),
             sync: facts.retry.sync,
             paused: facts.paused,
+            unmetered_only: facts.unmetered_only,
+            metered: facts.metered,
         };
         Ok((facts, row.last_synced))
     }

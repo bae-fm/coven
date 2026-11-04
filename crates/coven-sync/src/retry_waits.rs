@@ -48,7 +48,7 @@ pub struct RetryWaits {
     /// Bumped whenever a failed attempt arms a new wait, so an owner waiting
     /// on the earlier schedule plans again.
     rearmed: tokio::sync::watch::Sender<u64>,
-    /// The app's network reports, and how far each owner acted on them.
+    /// The network reports, and how far each owner acted on them.
     network: network_report::Reports,
     /// The person's retry requests waiting for a pass (`retry_answer.rs`).
     requests: Mutex<retry_answer::RetryRequests>,

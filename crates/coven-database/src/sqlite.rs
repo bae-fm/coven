@@ -424,6 +424,16 @@ impl DatabaseConnection {
         Ok(transfers.register(&self.connection)?)
     }
 
+    /// Give this connection to the store's database the device's network as
+    /// this process last heard of it, for `coven_network` and
+    /// `coven_uploads.metered` (§4).
+    pub(crate) fn serve_network(
+        &self,
+        network: &crate::network_facts::NetworkFacts,
+    ) -> Result<(), DbError> {
+        Ok(network.register(&self.connection)?)
+    }
+
     pub(crate) fn local_device(&self) -> Option<DeviceId> {
         self.observation.as_ref().map(|o| o.device)
     }

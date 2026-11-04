@@ -329,6 +329,16 @@ impl StorageConnections {
         self.files.set_uploads_paused(sql, paused)
     }
 
+    /// Move files only on unmetered networks, or on any, as a step of an
+    /// app's write (E7).
+    pub(crate) fn set_unmetered_only(
+        &self,
+        sql: &coven_database::SqlContext<'_, '_>,
+        unmetered_only: bool,
+    ) -> Result<(), DbError> {
+        self.files.set_unmetered_only(sql, unmetered_only)
+    }
+
     pub(crate) async fn storage_config(&self) -> Result<Option<StorageConfig>, SyncError> {
         let _call = self.lock_open().await?;
         self.codes.location().await

@@ -63,6 +63,9 @@ pub struct Database {
     observer: CommitObserver,
     /// The files this process is sending now, which coven's views read (§4).
     transfers: crate::transfers_in_flight::TransfersInFlight,
+    /// The device's network as this process last heard of it, which
+    /// coven's views read (§4).
+    network: crate::network_facts::NetworkFacts,
     closing: Arc<coven_foundation::files::StoreClosingGuard>,
     inner: Arc<RwLock<Option<DatabaseInner>>>,
     file_tasks: Arc<tokio::sync::RwLock<()>>,
@@ -508,6 +511,13 @@ impl Database {
     /// §17.8).
     pub fn downloads_in_flight(&self) -> crate::InFlight {
         self.transfers.downloads()
+    }
+
+    /// The store's watch says the device's network is now `network`:
+    /// coven's views show it, and a live query that read them runs again
+    /// (§4, §6.7).
+    pub fn record_network(&self, network: coven_foundation::network_watch::NetworkState) {
+        self.network.set(network);
     }
 
     /// Observe the tables and columns a query reads, and the rows its

@@ -270,12 +270,6 @@ impl StorageConnections {
         }
     }
 
-    /// The device's network changed: the connection's owner and the upload
-    /// worker each end their waits for the network (§6.7).
-    pub(crate) fn network_changed(&self) {
-        self.waits.network_changed();
-    }
-
     /// The person asked to retry everything now: the same owners end every
     /// ordinary wait they retry (§6.7), and the first pass after the request
     /// answers it, or the retry effect's row at once.

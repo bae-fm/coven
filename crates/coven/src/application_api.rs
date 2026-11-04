@@ -76,6 +76,9 @@ pub use coven_foundation::id_source::MemberId;
 pub use coven_foundation::id_source::{
     CircleId, DeviceId, FileId, IdSource, IdSourceRef, InviteId, KeyId, StoreId, UuidIds,
 };
+pub use coven_foundation::network_watch::NetworkWatchError;
+#[cfg(any(test, feature = "test-utils"))]
+pub use coven_foundation::network_watch::TestNetwork;
 pub use coven_foundation::progress::Progress;
 pub use coven_foundation::uuid_text::UuidText;
 #[cfg(any(test, feature = "test-utils"))]

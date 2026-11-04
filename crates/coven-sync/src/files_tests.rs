@@ -22,12 +22,23 @@ struct Fixture {
     files: Files,
     storage: Arc<MemoryStorage>,
     namespaces: Vec<Namespace>,
+    /// The device's network, which starts on an unmetered one.
+    network: coven_foundation::network_watch::TestNetwork,
 }
 impl Fixture {
     /// Pause trailing uploads, or resume them, in a write as the app does.
     async fn set_uploads_paused(&self, paused: bool) {
         let files = self.files.clone();
         self.database.write(move |sql| files.set_uploads_paused(&sql, paused)).await.unwrap();
+    }
+    /// Move files only on unmetered networks, or on any, in a write as the
+    /// app does.
+    async fn set_unmetered_only(&self, unmetered_only: bool) {
+        let files = self.files.clone();
+        self.database
+            .write(move |sql| files.set_unmetered_only(&sql, unmetered_only))
+            .await
+            .unwrap();
     }
     async fn new(provenance: Provenance) -> Self {
         let clock: ClockRef =
@@ -80,6 +91,7 @@ impl Fixture {
                 .with_publication_gate(send.clone())
                 .with_cooldown(waits.clone()),
         );
+        let network = coven_foundation::network_watch::TestNetwork::new(true, false);
         let files = paused_files(
             &database,
             &directory,
@@ -88,9 +100,10 @@ impl Fixture {
             waits,
             ids.clone(),
             transfers,
+            watched(&network),
         )
         .await;
-        Self { root, directory, ids, clock, send, database, files, storage, namespaces }
+        Self { root, directory, ids, clock, send, database, files, storage, namespaces, network }
     }
     async fn reopen(&mut self) {
         self.files.close().await;
@@ -120,6 +133,7 @@ impl Fixture {
             waits,
             self.ids.clone(),
             transfers,
+            watched(&self.network),
         )
         .await;
     }
@@ -464,6 +478,7 @@ async fn budgets_pins_eviction_and_second_device_reads() {
         second.ids.clone(),
         second.files.inner.transfers.clone(),
         std::sync::Arc::new(coven_foundation::clock::SystemClock),
+        coven_foundation::network_watch::NetworkWatch::unwatched().view(),
     );
     let ref2 = second.database.file_ref(file.id()).await.unwrap();
     assert_eq!(files.read_file(&ref2).await.unwrap(), bytes);
@@ -596,6 +611,7 @@ async fn whole_reads_and_pins_check_the_records_hash_after_authenticating_chunks
         b.ids.clone(),
         b.files.inner.transfers.clone(),
         std::sync::Arc::new(coven_foundation::clock::SystemClock),
+        coven_foundation::network_watch::NetworkWatch::unwatched().view(),
     );
     let file = b.database.file_ref(uploaded.id()).await.unwrap();
     let stream = files.open_file_stream(&file).await.unwrap();
@@ -776,6 +792,7 @@ async fn paused_files(
     waits: Arc<crate::RetryWaits>,
     ids: IdSourceRef,
     transfers: Arc<coven_storage::TransferBudget>,
+    network: coven_foundation::network_watch::NetworkView,
 ) -> Files {
     database.write(|sql| sql.set_uploads_paused(true)).await.unwrap();
     let files = Files::new(
@@ -787,11 +804,23 @@ async fn paused_files(
         ids,
         transfers,
         std::sync::Arc::new(coven_foundation::clock::SystemClock),
+        network,
     );
     // The owner's own copy of the setting, which parts check between sends.
     let owner = files.clone();
     database.write(move |sql| owner.set_uploads_paused(&sql, true)).await.unwrap();
     files
+}
+
+/// A view of `network`, as the store's watch would give one.
+fn watched(
+    network: &coven_foundation::network_watch::TestNetwork,
+) -> coven_foundation::network_watch::NetworkView {
+    coven_foundation::network_watch::NetworkWatch::start(
+        &coven_foundation::network_watch::NetworkSource::Test(network.clone()),
+    )
+    .unwrap()
+    .view()
 }
 
 fn ready_state() -> Arc<crate::SequenceState> {

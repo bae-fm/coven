@@ -7,8 +7,8 @@
 //! An app's early retry joins the run in progress.
 
 use crate::{
-    files::file_failure::upload_subject, files::FilesInner, retry_waits::Ending, NetworkOwner,
-    PendingRecord, Retry, SyncError,
+    files::file_failure::upload_subject, files::FilesInner, files::TrailingHold,
+    retry_waits::Ending, NetworkOwner, PendingRecord, Retry, SyncError,
 };
 use coven_database::{DbError, FileUpload, RetrySubject};
 use coven_storage::StorageFailure;
@@ -35,6 +35,10 @@ pub enum DrainOutcome {
     /// Uploads were paused: no trailing upload was tried. Each bound upload
     /// the retry covered was, since the pause holds none (§17.4).
     Paused,
+    /// The network is metered and the app moves files only on unmetered
+    /// networks: no trailing upload was tried. Each bound upload the retry
+    /// covered was, since the setting holds none (§17.9).
+    Metered,
     /// Sync is stopped: no upload was tried (§17.4).
     NotSyncing,
 }
@@ -93,8 +97,9 @@ enum Blocked {
     /// Sync is stopped, which stops both lanes (§17.4).
     NotSyncing,
     NoStorage,
-    /// The app paused uploads, and no bound upload waits.
-    Paused,
+    /// The pause or a metered network holds trailing uploads, and no bound
+    /// upload waits.
+    Held(TrailingHold),
     /// Files wait for the sequence to catch up (§5.4).
     CatchUp,
     /// The provider asked every consumer to wait this long (§6.7).
@@ -111,7 +116,8 @@ impl Blocked {
             Self::Closed => Err(DbError::StoreClosed.into()),
             Self::NotSyncing => Ok(DrainOutcome::NotSyncing),
             Self::NoStorage => Err(SyncError::NoStorage),
-            Self::Paused => Ok(DrainOutcome::Paused),
+            Self::Held(TrailingHold::Paused) => Ok(DrainOutcome::Paused),
+            Self::Held(TrailingHold::Metered) => Ok(DrainOutcome::Metered),
             Self::CatchUp => Err(StorageFailure::CatchUpRequired.into()),
             // An app retry overrides ordinary backoff, never a provider cooldown.
             Self::Cooling(remaining) => Err(StorageFailure::RateLimited
@@ -143,7 +149,7 @@ struct Run<'a> {
     /// The lane of each attempt in flight.
     lanes: BTreeMap<i64, Lane>,
     /// The bound uploads of the last read of the queue, whose retries wake
-    /// the run while uploads are paused.
+    /// the run while trailing uploads are held.
     bound: BTreeSet<i64>,
     /// A commit since that read may have queued a bound upload.
     committed: bool,
@@ -165,12 +171,12 @@ impl Run<'_> {
         self.lanes.values().filter(|of| **of == lane).count()
     }
 
-    /// Whether an upload of some lane the pause leaves open could start: a
+    /// Whether an upload of some lane a hold leaves open could start: a
     /// lane with room, and for the bound lane, a bound upload the last read
     /// found or a commit since may have queued.
-    fn room(&self, limit: usize, paused: bool) -> bool {
+    fn room(&self, limit: usize, held: bool) -> bool {
         (self.in_flight(Lane::Bound) < limit && (self.committed || !self.bound.is_empty()))
-            || (!paused && self.in_flight(Lane::Trailing) < limit)
+            || (!held && self.in_flight(Lane::Trailing) < limit)
     }
 }
 
@@ -279,6 +285,7 @@ impl FilesInner {
         let mut reports = self.waits.network_reports();
         let mut rearmed = self.waits.rearmed();
         let mut syncing = self.waits.syncing();
+        let mut network = self.network.clone();
         if let Some(blocked @ Blocked::Closed) = self.blocked() {
             return self.end_blocked(blocked, 0);
         }
@@ -293,16 +300,22 @@ impl FilesInner {
         if let Some(blocked @ (Blocked::NotSyncing | Blocked::NoStorage)) = self.blocked() {
             return self.end_blocked(blocked, 0);
         }
-        // The persisted setting governs; parts check this copy between sends.
-        // A pause change waits until this run has acted on what it read, so
-        // the run cannot answer a retry asked after a resume with the pause.
-        let change = self.pause_change.lock().await;
+        // The persisted settings govern; parts check these copies between
+        // sends. A change of either waits until this run has acted on what
+        // it read, so the run cannot answer a retry asked after a resume
+        // with the pause.
+        let change = self.hold_change.lock().await;
         let paused = self.database.uploads_paused().await?;
         self.paused.store(paused, Ordering::Release);
+        let unmetered_only = self.database.unmetered_only().await?;
+        self.unmetered_only.store(unmetered_only, Ordering::Release);
         let work = self.database.upload_work::<PendingRecord>(upload_subject).await?;
-        // The pause holds trailing uploads only (§17.4).
-        if paused && work.iter().all(|(item, _)| Lane::of(item) == Lane::Trailing) {
-            return self.end_blocked(Blocked::Paused, 0);
+        // The pause and a metered network hold trailing uploads only
+        // (§17.4, §17.9).
+        if let Some(hold) = self.trailing_hold() {
+            if work.iter().all(|(item, _)| Lane::of(item) == Lane::Trailing) {
+                return self.end_blocked(Blocked::Held(hold), 0);
+            }
         }
         drop(change);
         if work.is_empty() {
@@ -321,7 +334,7 @@ impl FilesInner {
             } else {
                 self.act_on_reports(&mut run).await;
                 let limit = self.transfers.limits().uploads.get();
-                if work.is_some() || (run.stale && run.room(limit, self.paused())) {
+                if work.is_some() || (run.stale && run.room(limit, self.trailing_held())) {
                     // The first read went stale if a report ended waits since.
                     let work = match work.take() {
                         Some(work) if !run.stale => work,
@@ -331,18 +344,19 @@ impl FilesInner {
                 }
                 self.start_ready(&mut run, limit);
                 if run.attempts.is_empty() && run.ready.is_empty() {
-                    // Paused, the run ends once nothing it read is left to
+                    // Held, the run ends once nothing it read is left to
                     // start and no bound upload could have been queued since.
-                    let paused = self.paused();
-                    if paused && (!run.stale || !run.room(limit, paused)) {
+                    let held = self.trailing_held();
+                    if held && (!run.stale || !run.room(limit, held)) {
                         #[cfg(test)]
                         self.pass_blocked_end_gate();
-                        // As with the read above, a pause change waits while
-                        // the run acts on the pause it saw; after a resume
-                        // since the check, the run serves uploads again.
-                        let _change = self.pause_change.lock().await;
-                        if self.paused() {
-                            return self.end_blocked(Blocked::Paused, run.uploaded);
+                        // As with the read above, a setting's change waits
+                        // while the run acts on the hold it saw; after a
+                        // resume since the check, the run serves uploads
+                        // again.
+                        let _change = self.hold_change.lock().await;
+                        if let Some(hold) = self.trailing_hold() {
+                            return self.end_blocked(Blocked::Held(hold), run.uploaded);
                         }
                         run.stale = true;
                         continue;
@@ -376,7 +390,7 @@ impl FilesInner {
             // A due retry matters only while an upload could start; it
             // would wake at once for a wait an attempt in flight serves.
             let open = self.blocked().is_none()
-                && run.room(self.transfers.limits().uploads.get(), self.paused());
+                && run.room(self.transfers.limits().uploads.get(), self.trailing_held());
             let retry = if open { self.next_upload_retry(&run.bound) } else { None };
             tokio::select! {
                 Some((id, result)) = run.attempts.next(), if !run.attempts.is_empty() => {
@@ -391,6 +405,7 @@ impl FilesInner {
                 _ = sending.changed() => run.stale = true,
                 _ = syncing.changed() => run.stale = true,
                 _ = reports.changed() => {}
+                () = network.changed() => run.stale = true,
                 _ = rearmed.changed() => {}
                 () = async {
                     match retry {
@@ -425,7 +440,7 @@ impl FilesInner {
     /// Take the queue just read as the run's next uploads: each one not in
     /// flight that may retry and whose wait is over, or that an app retry
     /// covers. App retries not yet taken cover every upload that may retry.
-    /// While uploads are paused, only bound ones are taken.
+    /// While trailing uploads are held, only bound ones are taken.
     fn read_ready(&self, run: &mut Run<'_>, work: Vec<(FileUpload, Option<PendingRecord>)>) {
         run.stale = false;
         run.committed = false;
@@ -434,7 +449,7 @@ impl FilesInner {
             .filter(|(item, _)| Lane::of(item) == Lane::Bound)
             .map(|(item, _)| item.id)
             .collect();
-        let paused = self.paused();
+        let held = self.trailing_held();
         let retryable: BTreeSet<i64> = work
             .iter()
             .filter(|(_, record)| {
@@ -455,7 +470,7 @@ impl FilesInner {
         run.ready.clear();
         for (item, record) in work {
             let subject = RetrySubject::Upload(item.id);
-            if !retryable.contains(&item.id) || (paused && Lane::of(&item) == Lane::Trailing) {
+            if !retryable.contains(&item.id) || (held && Lane::of(&item) == Lane::Trailing) {
                 continue;
             }
             // An upload in flight, or one an app retry starts whatever its
@@ -472,14 +487,14 @@ impl FilesInner {
     }
 
     /// Start ready uploads, oldest first, until each lane has the limit's
-    /// number in flight. A trailing upload taken before a pause began waits
-    /// for the run's next read once the pause ends.
+    /// number in flight. A trailing upload taken before a hold began waits
+    /// for the run's next read once the hold ends.
     fn start_ready<'a>(&'a self, run: &mut Run<'a>, limit: usize) {
-        let paused = self.paused();
+        let held = self.trailing_held();
         let mut waiting = VecDeque::new();
         while let Some(item) = run.ready.pop_front() {
             let lane = Lane::of(&item);
-            if lane == Lane::Trailing && paused {
+            if lane == Lane::Trailing && held {
                 continue;
             }
             if run.in_flight(lane) >= limit {

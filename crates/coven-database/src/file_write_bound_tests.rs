@@ -238,6 +238,23 @@ async fn the_pause_shows_on_trailing_uploads_only() {
     assert_eq!(paused(db.clone()).await, [(photo, false), (cover, false)]);
     db.write(|sql| sql.set_uploads_paused(true)).await.unwrap();
     assert_eq!(paused(db.clone()).await, [(photo, true), (cover, false)]);
+    // Moving files only on unmetered networks holds only the trailing one
+    // too, while the network is metered (§17.9).
+    db.write(|sql| sql.set_unmetered_only(true)).await.unwrap();
+    db.record_network(coven_foundation::network_watch::NetworkState {
+        usable: Some(true),
+        metered: true,
+        joined: 1,
+    });
+    let metered = db
+        .read(|sql| {
+            Ok(sql.query("SELECT file,metered FROM coven_uploads ORDER BY position", [], |r| {
+                Ok((r.get::<_, FileId>(0)?, r.get::<_, bool>(1)?))
+            })?)
+        })
+        .await
+        .unwrap();
+    assert_eq!(metered, [(photo, true), (cover, false)]);
     db.close().await.unwrap();
 }
 

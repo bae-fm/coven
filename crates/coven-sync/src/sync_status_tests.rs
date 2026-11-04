@@ -297,6 +297,7 @@ fn wait_name(wait: UploadWait) -> &'static str {
         UploadWait::CoolingDown { .. } => "coolingDown",
         UploadWait::Blocked => "blocked",
         UploadWait::Paused => "paused",
+        UploadWait::Metered => "metered",
         UploadWait::Retrying { .. } => "retrying",
         UploadWait::Queued => "queued",
     }
@@ -313,6 +314,8 @@ fn connected() -> Facts {
         records: Vec::new(),
         sync: RetrySync::Started { cooling_until: None },
         paused: false,
+        unmetered_only: false,
+        metered: false,
     }
 }
 
@@ -367,9 +370,8 @@ fn facts_json(facts: &Facts) -> Value {
         "running": running,
         "cooling": cooling,
         "paused": facts.paused,
-        // Coven holds no upload for a metered network yet.
-        "unmeteredOnly": false,
-        "metered": false,
+        "unmeteredOnly": facts.unmetered_only,
+        "metered": facts.metered,
         "records": records,
     })
 }
@@ -390,7 +392,8 @@ fn shown(facts: &Facts) -> Value {
 /// list, and beside a location with no credentials; every location, moving,
 /// download and upload progress combination, offline; and queued uploads
 /// under every wait, one alone or two after a stored one, so the first
-/// waiting one names the wait.
+/// waiting one names the wait, with the setting to move files only on
+/// unmetered networks on or off and the network metered or not.
 fn cases() -> Vec<Facts> {
     let mut cases = Vec::new();
     for last in passes() {
@@ -443,7 +446,14 @@ fn cases() -> Vec<Facts> {
     let blocked = Some(LastPass::Blocked { slot: Slot(7), reason: key_unavailable(), error: None });
     for sync in [RetrySync::Stopped, RetrySync::Started { cooling_until: None }, cooling] {
         for last in [None, blocked.clone()] {
-            for paused in [false, true] {
+            for (paused, unmetered_only, metered) in [
+                (false, false, false),
+                (true, false, false),
+                (false, true, false),
+                (false, false, true),
+                (false, true, true),
+                (true, true, true),
+            ] {
                 for bound in [false, true] {
                     for retrying in [false, true] {
                         let mut first = upload(Progress::Queued);
@@ -458,6 +468,8 @@ fn cases() -> Vec<Facts> {
                                 sync,
                                 last: last.clone(),
                                 paused,
+                                unmetered_only,
+                                metered,
                                 uploads,
                                 ..connected()
                             });

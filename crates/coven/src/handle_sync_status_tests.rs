@@ -4,7 +4,7 @@
 //! offline with a file or a write queued is offline with unsent changes, a
 //! location without credentials is signed out, and the last synced time
 //! survives every state and every reopen without going backward.
-use crate::tests::{upload_path, wait_for_sent, Device, Network};
+use crate::tests::{file_stored, upload_path, wait_for_sent, Device, Network};
 use crate::*;
 use coven_storage::test_utils::Faults;
 use std::time::Duration;
@@ -67,6 +67,42 @@ async fn a_paused_photo_waits_to_sync_until_it_uploads() {
     ana.handle.set_uploads_paused(false).await.unwrap();
     state(ana, |state| *state == SyncState::Synced).await;
     assert!(ana.handle.uploads().await.unwrap().files.is_empty());
+    network.close().await;
+}
+
+/// Ben moves files only on unmetered networks. On cellular his photo waits
+/// to sync, for the metered network, while his cover, bound, uploads; the
+/// app reads the same from `coven_network` and `coven_uploads`. Once his
+/// phone joins Wi-Fi the photo uploads with no call of his app's, and he is
+/// synced (§17.9, §19.1).
+#[tokio::test]
+async fn a_photo_waits_for_an_unmetered_network_and_a_cover_does_not() {
+    let network = household().await;
+    let ben = &network.devices[0];
+    ben.handle.set_unmetered_only(true).await.unwrap();
+    ben.app.join_network(true);
+    let photo = stage(ben, "photos", "beach", vec![7; 4096]).await;
+    let cover = stage(ben, "covers", "album", vec![8; 4096]).await;
+    wait_for_sent(&ben.handle).await;
+    state(ben, |state| *state == SyncState::WaitingToSync(UploadWait::Metered)).await;
+    assert!(file_stored(ben, cover).await);
+    let shown: (bool, bool, bool, bool) = ben
+        .handle
+        .read(move |sql| {
+            Ok(sql.query_row(
+                "SELECT n.usable,n.metered,n.unmetered_only,u.metered
+                 FROM coven_network AS n, coven_uploads AS u WHERE u.file=?1",
+                [photo],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )?)
+        })
+        .await
+        .unwrap();
+    assert_eq!(shown, (true, true, true, true));
+    assert_eq!(ben.handle.retry_uploads_now().await.unwrap(), DrainOutcome::Metered);
+    ben.app.join_network(false);
+    state(ben, |state| *state == SyncState::Synced).await;
+    assert!(file_stored(ben, photo).await);
     network.close().await;
 }
 

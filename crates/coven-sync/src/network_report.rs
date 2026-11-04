@@ -1,6 +1,8 @@
-//! The app's reports that ends waits early (§6.7; IO `WaitingNetwork`).
+//! The reports that end waits early (§6.7; IO `WaitingNetwork`).
 //!
-//! A network report says the device's network changed. A wait whose last
+//! A network report says the device reached a usable network: the store's
+//! watch of the network saw one appear, or the device move to another
+//! (`network_follow.rs`). A wait whose last
 //! attempt received no provider response waits for the network, so the
 //! report ends it: the connection's backoff, an operation's and a queued
 //! upload's. A wait after a provider's answer holds. A download has no wait:
@@ -64,7 +66,7 @@ pub(crate) enum Ending {
 /// Reports so far, the latest retry report among them, and the count each
 /// owner has acted on; an owner acts on a report only once the waits it
 /// ends have ended.
-/// Hears each network or retry report the app makes, for an owner that
+/// Hears each network or retry report, for an owner that
 /// waits on its own timers (`RetryWaits::network_reports`).
 pub struct NetworkReportWatch(tokio::sync::watch::Receiver<u64>);
 
@@ -135,10 +137,10 @@ fn record_for<'a>(
 }
 
 impl RetryWaits {
-    /// The app reports that the device's network changed: it became
-    /// available, or moved to another network (§6.7). Each owner acts on it
-    /// when it next plans; reports before then coalesce.
-    pub fn network_changed(&self) {
+    /// The device reached a usable network: one appeared, or it moved to
+    /// another (§6.7). Each owner acts on the report when it next plans;
+    /// reports before then coalesce.
+    pub fn report_network(&self) {
         self.report(Ending::Network);
     }
 

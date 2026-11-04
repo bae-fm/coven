@@ -480,7 +480,7 @@ Every SQLite setting, and who chooses it. Settings marked *app* are fields of
 - On Android, coven watches the device's network through
   `ConnectivityManager` (E5). A callback the platform calls must be a Java
   class, which JNI can't define, so coven ships one, compiled, as an Android
-  library: a Maven repository in coven-storage's `android/maven` folder, with
+  library: a Maven repository in coven-foundation's `android/maven` folder, with
   `fm.coven:coven-network` in it. The app adds that folder as a repository,
   found through `cargo metadata` as the verifier's is, and the library to its
   dependencies; its manifest asks for `ACCESS_NETWORK_STATE`, which merges
@@ -527,7 +527,9 @@ impl Clock for SystemClock {
     fn elapsed(&self) -> Duration;
 }
 
-/// An installation with an isolated in-memory keychain for application tests.
+/// An installation with an isolated in-memory keychain and a network the
+/// test drives, for application tests. Its network starts usable and
+/// unmetered; each installation has its own.
 #[cfg(feature = "test-utils")]
 pub struct TestCoven { /* private */ }
 
@@ -569,8 +571,18 @@ impl TestCoven {
         ids: IdSourceRef,
     ) -> Result<StoreDir, StoreCreationError>;
 
-    /// Build the production graph with this installation's keychain.
+    /// Build the production graph with this installation's keychain and
+    /// network.
     pub fn builder(&self, layout: StoreLayout) -> CovenBuilder;
+
+    /// The device moves to another usable network: a network report (E5).
+    pub fn join_network(&self, metered: bool);
+
+    /// The device loses its network: no report.
+    pub fn lose_network(&self);
+
+    /// The device's network turns metered or unmetered: no report.
+    pub fn set_network_metered(&self, metered: bool);
 
     /// Discard through the same locked directory and keychain path as `Coven`.
     pub async fn discard_store(&self, directory: &StoreDir) -> Result<(), StoreDeletionError>;
@@ -3013,7 +3025,7 @@ let moved = handle
   of the network (E5), and a live query that reads one runs again as the
   network changes. The function behind them, `_coven_network`, refuses a
   direct call in the same way. A read-only handle watches nothing: it shows
-  no usable network and none metered, with the setting as stored.
+  `usable` NULL and nothing metered, with the setting as stored.
 - Count what is being sent through `coven_sending`, which holds one row per
   upload in flight and finds each by index. Counting `sending` over
   `coven_uploads` reads every queued file.
@@ -3056,8 +3068,8 @@ let moved = handle
 | | `position` | its place in the queue, as in `coven_uploads` |
 | `coven_downloading`: each stored file this process is downloading now to keep whole, for a pin (E8); never stored | `file` | the file's id |
 | `coven_upload_pause`: whether uploads are paused, in one row, with an empty queue too | `paused` | 1 while the app has paused uploads (`set_uploads_paused`); persisted across reopening |
-| `coven_network`: the device's network as coven last heard from the platform, and the setting that holds transfers on a metered one, in one row (E5, E7) | `usable` | 1 while the device has a usable network; never stored, read from the platform as the store opens |
-| | `metered` | 1 while that network is metered; 0 with none, and where the platform can't tell; never stored |
+| `coven_network`: the device's network as coven last heard from the platform, and the setting that holds transfers on a metered one, in one row (E5, E7) | `usable` | 1 while the device has a usable network, 0 while it has none, NULL where coven can't tell; never stored, read from the platform as the store opens |
+| | `metered` | 1 while that network is metered; 0 with none, and where coven can't tell; never stored |
 | | `unmetered_only` | 1 while the app moves files only on unmetered networks (`set_unmetered_only`); persisted across reopening |
 | `coven_upload_queue`: each file waiting in this device's upload queue, as `coven_uploads` lists it; a table, which local triggers can follow | `file` | the file's id, as in `coven_uploads` |
 | | `position` | its place in the queue, as in `coven_uploads` |
@@ -3716,8 +3728,10 @@ while let Some(Ok(values)) = lost.next().await {
     coven's operations and queued uploads, whose pending records say
     `answered: false`, and it requests a pass. A backoff after a provider's
     answer, such as a server error, and a provider cooldown hold: a new
-    network changes neither. Losing the network, or a network turning metered
-    or unmetered, makes no report.
+    network changes neither. A store that opens on a usable network reports
+    it, so a backoff saved while the device had none ends at once. Losing
+    the network, or a network turning metered or unmetered, makes no
+    report.
   - Each backoff ends durably, keeping its failure count: reopening after the
     report arms none. Reports during a pass coalesce into one more pass, and
     reports during transfers are acted on after them. If the running pass or

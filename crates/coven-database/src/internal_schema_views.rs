@@ -14,11 +14,12 @@
 /// tables coven keeps for the app's triggers to follow
 /// (`internal_schema_pins.rs`, `internal_schema_upload_queue.rs`,
 /// `internal_schema_sync_status.rs`, `internal_schema_retry_effect.rs`).
-const READABLE: [&str; 17] = [
+const READABLE: [&str; 18] = [
     super::FILES,
     "coven_user_files",
     "coven_uploads",
     "coven_upload_pause",
+    "coven_network",
     "coven_sending",
     "coven_downloading",
     super::UPLOAD_QUEUE,
@@ -47,17 +48,23 @@ pub(super) const SCHEMA: &str = concat!(
     // The files waiting in this device's upload queue, as `uploads()` lists
     // them, with what each waits for and the bytes the provider confirmed.
     // Files sharing one upload share its place. The pause holds only
-    // trailing uploads (§17.4). `sending` is this process's, which no table
-    // holds (`transfers_in_flight.rs`). `move` is the upload's move, for the
-    // app to cancel, but never a bound upload's, which can't be cancelled.
-    "CREATE VIEW coven_uploads(file,position,paused,retry_at,pending,
+    // trailing uploads (§17.4), and so does the setting to move files only
+    // on unmetered networks while the network is metered (§17.9). `sending`
+    // and the network are this process's, which no table holds
+    // (`transfers_in_flight.rs`, `network_facts.rs`). `move` is the upload's
+    // move, for the app to cancel, but never a bound upload's, which can't
+    // be cancelled.
+    "CREATE VIEW coven_uploads(file,position,paused,metered,retry_at,pending,
             bytes_confirmed,bytes_total,sending,move) AS
-        SELECT l.file,u.id,z.paused IS NOT NULL AND u.holds IS NULL,_coven_unix_ms(r.not_before),e.value,
+        SELECT l.file,u.id,z.paused IS NOT NULL AND u.holds IS NULL,
+            w.unmetered_only IS NOT NULL AND _coven_network_metered() AND u.holds IS NULL,
+            _coven_unix_ms(r.not_before),e.value,
             u.bytes_confirmed,u.bytes_total,_coven_sending(u.file),
             CASE WHEN u.holds IS NULL THEN u.move END
         FROM _coven_upload_files AS l
         JOIN _coven_file_uploads AS u ON u.id=l.upload
         LEFT JOIN _coven_upload_pause AS z
+        LEFT JOIN _coven_unmetered_only AS w
         LEFT JOIN _coven_retries AS r ON r.upload=u.id
         LEFT JOIN _coven_pending AS e ON e.device=u.device AND e.file=u.file;",
     // Whether the app paused uploads, as one row whether or not anything is
@@ -65,6 +72,14 @@ pub(super) const SCHEMA: &str = concat!(
     "CREATE VIEW coven_upload_pause(paused) AS
         SELECT z.paused IS NOT NULL FROM (SELECT 1) AS one
         LEFT JOIN _coven_upload_pause AS z;",
+    // The device's network as this process last heard of it, which no table
+    // holds (`network_facts.rs`), and the setting that holds transfers on a
+    // metered one, as one row (§17.9). The setting's one row, if any, joins
+    // a constant one.
+    "CREATE VIEW coven_network(usable,metered,unmetered_only) AS
+        SELECT _coven_network_usable(),_coven_network_metered(),w.unmetered_only IS NOT NULL
+        FROM (SELECT 1) AS one
+        LEFT JOIN _coven_unmetered_only AS w;",
     // The queued files this process is sending now, by each upload in
     // flight, each found by its uploader and object: counting a window's or
     // an album's takes a lookup per file. CROSS JOIN keeps SQLite from

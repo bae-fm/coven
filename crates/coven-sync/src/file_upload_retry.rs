@@ -21,8 +21,8 @@ impl FilesInner {
 
     /// When the upload worker must next run without other wakes: the
     /// earliest due upload retry, or the end of a provider cooldown holding
-    /// the queue. While uploads are paused, only the retries of `bound`, the
-    /// bound uploads, wake it (§17.4). Resuming, connecting and a completed
+    /// the queue. While trailing uploads are held, only the retries of
+    /// `bound`, the bound uploads, wake it (§17.4, §17.9). Resuming, connecting and a completed
     /// catch-up wake it themselves.
     pub(crate) fn next_upload_retry(
         &self,
@@ -30,17 +30,17 @@ impl FilesInner {
     ) -> Option<crate::retry_waits::Wake> {
         let connected = self.storage.read().expect("storage lock poisoned").is_some()
             && self.send.files_allowed();
-        let paused = self.paused();
-        // A pin coven keeps waits for its own retry, uploads paused or not.
+        let held = self.trailing_held();
+        // A pin coven keeps waits for its own retry, uploads held or not.
         let wake = self.waits.next_wake(|subject| match subject {
             RetrySubject::Pin(_) => true,
-            RetrySubject::Upload(id) => connected && (!paused || bound.contains(id)),
+            RetrySubject::Upload(id) => connected && (!held || bound.contains(id)),
             RetrySubject::Operation(_)
             | RetrySubject::Join
             | RetrySubject::Sync
             | RetrySubject::Provider => false,
         });
-        if !connected || (paused && bound.is_empty()) {
+        if !connected || (held && bound.is_empty()) {
             return wake;
         }
         wake.or_else(|| self.waits.cooldown_wake())

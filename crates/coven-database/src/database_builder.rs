@@ -155,6 +155,7 @@ impl DatabaseBuilder {
         // migrating; the transfers in flight report their starts and ends.
         let observer = CommitObserver::new();
         let transfers = crate::transfers_in_flight::TransfersInFlight::new(observer.clone());
+        let network = crate::network_facts::NetworkFacts::new(observer.clone());
         let mut writer = DatabaseConnection::open(
             &path,
             false,
@@ -165,6 +166,7 @@ impl DatabaseBuilder {
         writer.identify_device(settings.device_id)?;
         // Before the app's migrations, which may read coven's views.
         writer.serve_transfers(&transfers)?;
+        writer.serve_network(&network)?;
         let (outcomes, write_schema, inputs, mut checkpoints, migrating, migrated, optimized) =
             writer.with_profile(|writer| -> CovenResult<_> {
                 writer.enable_wal()?;
@@ -290,12 +292,14 @@ impl DatabaseBuilder {
             )?;
             reader.identify_device(settings.device_id)?;
             reader.serve_transfers(&transfers)?;
+            reader.serve_network(&network)?;
             reader.serve(observer.clone());
             readers.push(Mutex::new(reader));
         }
         Ok(Database {
             observer: observer.clone(),
             transfers,
+            network,
             closing: Arc::new(lock.closing_guard()),
             file_tasks: Arc::new(tokio::sync::RwLock::new(())),
             inner: Arc::new(RwLock::new(Some(DatabaseInner {
@@ -336,6 +340,8 @@ impl DatabaseBuilder {
         let observer = CommitObserver::new();
         // A read-only handle transfers nothing: every file reads as waiting.
         let transfers = crate::transfers_in_flight::TransfersInFlight::new(observer.clone());
+        // Nor does it watch the network: none is known (api.md E4).
+        let network = crate::network_facts::NetworkFacts::new(observer.clone());
         let mut first = DatabaseConnection::open(
             &path,
             true,
@@ -345,6 +351,7 @@ impl DatabaseBuilder {
         )?;
         first.identify_device(settings.device_id)?;
         first.serve_transfers(&transfers)?;
+        first.serve_network(&network)?;
         // A read-only open runs no step, so nothing reaches `progress`.
         let clock = match self.clock {
             Some(clock) => clock,
@@ -372,6 +379,7 @@ impl DatabaseBuilder {
             )?;
             reader.identify_device(settings.device_id)?;
             reader.serve_transfers(&transfers)?;
+            reader.serve_network(&network)?;
             reader.serve(observer.clone());
             readers.push(Mutex::new(reader));
         }
@@ -384,6 +392,7 @@ impl DatabaseBuilder {
         )?;
         writer.identify_device(settings.device_id)?;
         writer.serve_transfers(&transfers)?;
+        writer.serve_network(&network)?;
         writer.serve(observer.clone());
         Ok(DatabaseReadHandle {
             observer: observer.clone(),

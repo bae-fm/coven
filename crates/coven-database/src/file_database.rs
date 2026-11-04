@@ -368,6 +368,11 @@ impl FileDatabase {
     pub async fn uploads_paused(&self) -> Result<bool, DbError> {
         self.read(file_queue::paused).await
     }
+    /// Whether the app moves files only on unmetered networks, as persisted
+    /// (E7).
+    pub async fn unmetered_only(&self) -> Result<bool, DbError> {
+        self.read(file_queue::unmetered_only).await
+    }
     /// Each queued upload with this device's pending record about its file,
     /// read in one committed state: the reason an earlier attempt left decides
     /// whether automatic work retries it (§17.9).

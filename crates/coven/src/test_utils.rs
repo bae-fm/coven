@@ -9,6 +9,9 @@ use std::sync::Arc;
 /// A new instance simulates another device; keep an instance to test reopen.
 pub struct TestCoven {
     keychain: Arc<Keychain>,
+    /// This installation's network, which a test drives: on an unmetered
+    /// one, until the test changes it (api.md E5).
+    network: coven_foundation::network_watch::TestNetwork,
 }
 
 #[cfg(test)]
@@ -18,7 +21,10 @@ mod tests;
 impl TestCoven {
     /// Make an installation with no device-only entries and none of the person's entries.
     pub fn new() -> Self {
-        Self { keychain: Keychain::in_memory("coven-test").expect("valid service name") }
+        Self {
+            keychain: Keychain::in_memory("coven-test").expect("valid service name"),
+            network: Self::wifi(),
+        }
     }
 
     /// Create through the production builder, then close for a reopening fixture.
@@ -46,6 +52,7 @@ impl TestCoven {
     pub fn with_block_store() -> Self {
         Self {
             keychain: Keychain::in_memory_block_store("coven-test").expect("valid service name"),
+            network: Self::wifi(),
         }
     }
 
@@ -54,20 +61,20 @@ impl TestCoven {
     /// entries, as iCloud Keychain carries a restore code and S3 key between
     /// the person's devices; with Block Store it has its own, empty.
     pub fn another_device(&self) -> Self {
-        Self { keychain: self.keychain.another_device() }
+        Self { keychain: self.keychain.another_device(), network: Self::wifi() }
     }
 
     /// A new phone set up from this one by direct transfer: nothing of this
     /// phone's own, and a copy of its Block Store entries (§13.1). Requires
     /// `with_block_store`.
     pub fn set_up_new_device(&self) -> Self {
-        Self { keychain: self.keychain.set_up_new_device() }
+        Self { keychain: self.keychain.set_up_new_device(), network: Self::wifi() }
     }
 
     /// A new phone set up from this phone's last cloud backup: the Block Store
     /// entries that backup holds (§13.1). Requires `with_block_store`.
     pub fn restore_new_device_from_cloud(&self) -> Self {
-        Self { keychain: self.keychain.restore_new_device_from_cloud() }
+        Self { keychain: self.keychain.restore_new_device_from_cloud(), network: Self::wifi() }
     }
 
     /// Google's periodic cloud backup of this phone's Block Store: the entries
@@ -83,9 +90,31 @@ impl TestCoven {
         self.keychain.set_end_to_end_encryption(available);
     }
 
-    /// Build the production graph with this installation's keychain.
+    /// A usable network that isn't metered, as a new installation's.
+    fn wifi() -> coven_foundation::network_watch::TestNetwork {
+        coven_foundation::network_watch::TestNetwork::new(true, false)
+    }
+
+    /// Build the production graph with this installation's keychain and
+    /// network.
     pub fn builder(&self, layout: StoreLayout) -> CovenBuilder {
-        Coven::builder(layout).with_keychain(self.keychain.clone())
+        Coven::builder(layout).with_keychain(self.keychain.clone()).network(self.network.clone())
+    }
+
+    /// The device moves to another usable network: a network report, as
+    /// the platform's would make (api.md E5).
+    pub fn join_network(&self, metered: bool) {
+        self.network.join(metered);
+    }
+
+    /// The device loses its network: no report.
+    pub fn lose_network(&self) {
+        self.network.lose();
+    }
+
+    /// The device's network turns metered or unmetered: no report.
+    pub fn set_network_metered(&self, metered: bool) {
+        self.network.set_metered(metered);
     }
 
     /// List this installation's saved codes through the production discovery path.

@@ -231,7 +231,8 @@ answers the state's name and, for waiting to sync, its wait.
 computes with the runner's for each pending reason, each provider failure
 answered or not, each local failure, each way a pass ends, blocked on or
 failed with each reason, and queued uploads under each wait, alone and
-behind a stored one.
+behind a stored one, with the setting to transfer only on unmetered
+networks on or off and the network metered or not.
 
 ## Work notifications
 

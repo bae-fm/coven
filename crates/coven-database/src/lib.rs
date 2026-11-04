@@ -129,6 +129,7 @@ pub use file_pins::PinRequest;
 pub use file_write::{DeviceOnlyCopy, Journal, MoveFile};
 pub use pending::{FileWork, PendingValue};
 mod file_protection;
+mod network_facts;
 mod source_names;
 mod transfer_watch;
 mod transfers_in_flight;

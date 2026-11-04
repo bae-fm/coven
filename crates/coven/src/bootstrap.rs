@@ -667,6 +667,7 @@ async fn prepare_and_load(
             builder.ids.clone(),
             builder.transfers.clone(),
             clock.clone(),
+            coven_foundation::network_watch::NetworkWatch::unwatched().view(),
         );
         let sync = SequenceSync::open(
             database.clone(),

@@ -1,12 +1,15 @@
 //! What the sync state is computed from (§19.1, api.md E5), read in one
 //! committed snapshot: `coven_sync_status`'s row, `coven_retry_effect`'s,
 //! the send queue, the upload queue with its pause and each upload's retry
-//! wait and record, the files being sent or downloaded, and the pending
+//! wait and record, the network and the setting to move files only on
+//! unmetered networks, the files being sent or downloaded, and the pending
 //! records. Sync computes the state; this reads what it needs.
 //!
 //! A live query over this read runs again whenever one of them changes: the
 //! files in flight are read through `coven_sending` and `coven_downloading`,
-//! the views their starts and ends change (`transfers_in_flight.rs`).
+//! the views their starts and ends change (`transfers_in_flight.rs`), and
+//! the network through `coven_network`, which its changes change
+//! (`network_facts.rs`).
 
 use crate::sqlite::DatabaseConnection;
 use crate::DbError;
@@ -31,6 +34,11 @@ pub struct SyncFacts<P> {
     pub records: Vec<P>,
     /// Whether the app paused trailing uploads.
     pub paused: bool,
+    /// Whether the app moves files only on unmetered networks.
+    pub unmetered_only: bool,
+    /// Whether the device's network is metered, as the store's watch last
+    /// said.
+    pub metered: bool,
 }
 
 /// One upload in the queue, as the sync state reads it.
@@ -97,6 +105,10 @@ pub(crate) fn read<P: crate::PendingValue + Clone>(
             })
         })
         .collect::<Result<_, DbError>>()?;
+    let (metered, unmetered_only) =
+        db.query_row("SELECT metered,unmetered_only FROM coven_network", [], |row| {
+            Ok((row.get::<_, bool>(0)?, row.get::<_, bool>(1)?))
+        })?;
     Ok(SyncFacts {
         row: crate::internal_schema::sync_status::read(db)?,
         retry: crate::internal_schema::retry_effect::read(db)?,
@@ -106,5 +118,7 @@ pub(crate) fn read<P: crate::PendingValue + Clone>(
             .query_row("SELECT EXISTS(SELECT 1 FROM coven_downloading)", [], |r| r.get(0))?,
         records: records.into_iter().map(|(_, record)| record).collect(),
         paused: crate::file_queue::paused(db)?,
+        unmetered_only,
+        metered,
     })
 }

@@ -48,6 +48,9 @@ mod fixture {
         )
         .register(&db)
         .unwrap();
+        crate::network_facts::NetworkFacts::new(crate::observation::CommitObserver::new())
+            .register(&db)
+            .unwrap();
         db.execute_batch("PRAGMA foreign_keys=ON; PRAGMA automatic_index=OFF;").unwrap();
         let schema = crate::internal_schema::initial_schema();
         let mut migration = Batch::new(&db, &schema);
@@ -147,6 +150,7 @@ mod fixture {
      INSERT INTO _coven_file_candidates SELECT device,substr(key,17,16),n FROM fixture;
      INSERT INTO _coven_file_scans SELECT n,n FROM fixture;
      INSERT INTO _coven_upload_pause VALUES(1);
+     INSERT INTO _coven_unmetered_only VALUES(1);
      INSERT INTO _coven_write_pause VALUES(1,1);
      INSERT INTO _coven_file_chunks SELECT device,substr(key,17,16),0,key FROM fixture;
      INSERT INTO _coven_cache(namespace,file_id,chunk,path,size,last_read,pinned,checked_hash)
@@ -201,6 +205,7 @@ mod fixture {
                 | "_coven_snapshot_schema"
                 | "_coven_device_reset"
                 | "_coven_upload_pause"
+                | "_coven_unmetered_only"
                 | "_coven_write_pause"
                 | "_coven_claim_journal" => {
                     assert_eq!(count, 1)

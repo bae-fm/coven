@@ -116,6 +116,16 @@ impl<'write> CovenWrite<'write> {
         self.storage.set_uploads_paused(&self.sql, paused)
     }
 
+    /// Moves files only on unmetered networks, or on any (§17.9). While the
+    /// network is metered, trailing uploads start no more and stop between
+    /// confirmed parts, and pins' downloads wait before their next request
+    /// to storage; bound uploads and reads run on. The setting persists, on
+    /// this device only. A retry asked after the write returns is never
+    /// answered from the setting it replaced.
+    pub fn set_unmetered_only(&self, unmetered_only: bool) -> Result<(), DbError> {
+        self.storage.set_unmetered_only(&self.sql, unmetered_only)
+    }
+
     /// Dismisses lost values the app has dealt with (§8.4): the write's
     /// record carries the acknowledgements, and the removed rows' deletes
     /// with their cascades, after the app's own changes, so every device

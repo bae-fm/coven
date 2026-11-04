@@ -153,6 +153,26 @@ pub(crate) fn paused(db: &DatabaseConnection) -> Result<bool, DbError> {
     db.query_row("SELECT EXISTS(SELECT 1 FROM _coven_upload_pause)", [], |r| r.get(0))
 }
 
+/// Whether the app moves files only on unmetered networks, as persisted.
+pub(crate) fn unmetered_only(db: &DatabaseConnection) -> Result<bool, DbError> {
+    db.query_row("SELECT EXISTS(SELECT 1 FROM _coven_unmetered_only)", [], |r| r.get(0))
+}
+
+pub(crate) fn set_unmetered_only(
+    db: &DatabaseConnection,
+    unmetered_only: bool,
+) -> Result<(), DbError> {
+    if unmetered_only {
+        db.internal_execute(
+            "INSERT INTO _coven_unmetered_only(unmetered_only) VALUES(1) ON CONFLICT DO NOTHING",
+            [],
+        )?;
+    } else {
+        db.internal_execute("DELETE FROM _coven_unmetered_only", [])?;
+    }
+    Ok(())
+}
+
 pub(crate) fn set_paused(db: &DatabaseConnection, paused: bool) -> Result<(), DbError> {
     if paused {
         db.internal_execute(

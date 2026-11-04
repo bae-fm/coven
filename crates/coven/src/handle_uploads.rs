@@ -11,8 +11,9 @@ impl CovenHandle {
     }
     /// Optionally retry recoverable uploads early; provider cooldowns still
     /// hold them and individual failures stay in pending() (§17.9). While
-    /// uploads are paused it tries only bound ones, and while sync is
-    /// stopped none, saying so (§17.4).
+    /// uploads are paused, or the network is metered and the app moves files
+    /// only on unmetered networks, it tries only bound ones, and while sync
+    /// is stopped none, saying so (§17.4, §17.9).
     pub async fn retry_uploads_now(&self) -> Result<DrainOutcome, SyncError> {
         self.files.retry_uploads_now().await
     }
@@ -20,6 +21,11 @@ impl CovenHandle {
     /// (`CovenWrite::set_uploads_paused`).
     pub async fn set_uploads_paused(&self, paused: bool) -> CovenResult<()> {
         self.write(move |write| Ok(write.set_uploads_paused(paused)?)).await
+    }
+    /// Move files only on unmetered networks, or on any, in a write of its
+    /// own (`CovenWrite::set_unmetered_only`).
+    pub async fn set_unmetered_only(&self, unmetered_only: bool) -> CovenResult<()> {
+        self.write(move |write| Ok(write.set_unmetered_only(unmetered_only)?)).await
     }
 }
 

@@ -282,6 +282,7 @@ impl Group {
             ids,
             transfers,
             std::sync::Arc::new(coven_foundation::clock::SystemClock),
+            coven_foundation::network_watch::NetworkWatch::unwatched().view(),
         );
         let sync = Arc::new(
             SequenceSync::open(

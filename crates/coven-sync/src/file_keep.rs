@@ -8,10 +8,7 @@
 
 use super::file_error::{FileReadError, TransferError};
 use super::file_failure::{stored, FileCopy, FileFailure};
-use crate::{
-    files::file_read::UploadedFile, files::FilesInner, PendingReason, PendingSubject, Prerequisite,
-    Retry, SyncError,
-};
+use crate::{files::FilesInner, PendingReason, PendingSubject, Prerequisite, Retry, SyncError};
 use coven_crypto::ContentHasher;
 use coven_database::{
     CacheReservation, DbError, FileLocationKey, FileRef, PinRequest, RetrySubject,
@@ -28,6 +25,9 @@ impl FilesInner {
         // The upload worker owns these waits: a report it has not acted on
         // ends them before they are judged (§6.7).
         self.waits.end_reported_waits(crate::NetworkOwner::Uploads).await?;
+        // The persisted setting governs whether a metered network holds
+        // their downloads (§17.8).
+        self.read_unmetered_only().await?;
         for request in self.database.pin_requests().await? {
             let subject = RetrySubject::Pin(request.file);
             if !self.waits.due(subject, request.retry.as_ref()) || !self.connection_due(subject) {
@@ -55,7 +55,11 @@ impl FilesInner {
             };
             match outcome {
                 // The write making the pin ended its request.
-                Ok(()) => self.ended_here(&file),
+                Ok(true) => self.ended_here(&file),
+                // A metered network the app keeps files off holds it; the
+                // upload worker runs again as the network or the setting
+                // changes (§17.8).
+                Ok(false) => {}
                 // The file left the bytes while they downloaded: the write
                 // taking it off them ended the request, and nothing was kept.
                 Err(TransferError::File(FileReadError::Database(DbError::NoLongerStored {
@@ -69,33 +73,37 @@ impl FilesInner {
 
     /// Prepare the file's pin, from a whole copy already kept if `kept`
     /// finds one, and otherwise from its cache copy made here, then make it
-    /// in one write that ends its request too.
+    /// in one write that ends its request too. Returns false when a metered
+    /// network the app keeps files off held its download (§17.8): nothing
+    /// was made, and nothing failed.
     async fn pin_kept(
         self: &Arc<Self>,
         file: &FileRef,
         request: &PinRequest,
         kept: bool,
-    ) -> Result<(), TransferError> {
+    ) -> Result<bool, TransferError> {
         let prepared = if kept && self.database.whole_kept(file).await? {
             self.database.prepared_pin(Vec::new(), vec![file.clone()])?
         } else {
-            let copy = self.keep(file, request).await?;
+            let Some(copy) = self.keep(file, request).await? else {
+                return Ok(false);
+            };
             self.database.prepared_pin(vec![copy], Vec::new())?
         };
         self.database.keep(prepared, file.id()).await?;
-        Ok(())
+        Ok(true)
     }
 
     /// Make the cache copy: from coven's copy while the request keeps one,
-    /// or else downloaded.
+    /// or else downloaded; `None` when a metered network held the download.
     async fn keep(
         self: &Arc<Self>,
         file: &FileRef,
         request: &PinRequest,
-    ) -> Result<CacheReservation, TransferError> {
+    ) -> Result<Option<CacheReservation>, TransferError> {
         if let Some(copy) = &request.copy {
             match self.keep_from_copy(file, copy).await {
-                Ok(reservation) => return Ok(reservation),
+                Ok(reservation) => return Ok(Some(reservation)),
                 Err(
                     error @ TransferError::File(FileReadError::Database(DbError::NoLongerStored {
                         ..
@@ -110,7 +118,7 @@ impl FilesInner {
                 }
             }
         }
-        UploadedFile::open(self.clone(), file.clone()).await?.keep_whole().await
+        self.download_whole(file.clone()).await
     }
 
     /// Write the stored object coven's copy encrypts to, chunk by checked

@@ -86,6 +86,12 @@ impl<'connection, 'write> SqlContext<'connection, 'write> {
         self.files.step(|| self.files.set_uploads_paused(paused))
     }
 
+    /// Move files only on unmetered networks, or on any, in this write
+    /// (§17.9).
+    pub fn set_unmetered_only(&self, unmetered_only: bool) -> Result<(), crate::DbError> {
+        self.files.step(|| self.files.set_unmetered_only(unmetered_only))
+    }
+
     /// Run `effect` once this write has committed, as the in-memory side of
     /// one of coven's steps: nothing runs for a write that rolls back. The
     /// write returns only once every effect has run.

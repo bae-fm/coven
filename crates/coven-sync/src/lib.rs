@@ -34,6 +34,8 @@ mod connection_retry;
 pub use connection_retry::{connection_failure, ConnectionRetry};
 mod credential_custody;
 mod files;
+mod network_follow;
+pub use network_follow::NetworkFollow;
 mod retry_waits;
 mod sequence_state;
 mod sync_often;

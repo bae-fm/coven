@@ -540,6 +540,29 @@ async fn pausing_between_parts_and_reconnecting_resume_the_recorded_session() {
     f.close().await;
 }
 
+/// Ben's phone leaves Wi-Fi while a recording's first part uploads, and
+/// his app moves files only on unmetered networks: the upload stops at the
+/// next part, keeping its session, as a pause stops it, and goes on from
+/// its confirmed part once the phone is back on Wi-Fi (§17.9).
+#[tokio::test]
+async fn a_metered_network_stops_an_upload_between_parts_and_keeps_its_session() {
+    let (f, _clock, storage) = stepping(0).await;
+    f.set_unmetered_only(true).await;
+    let file = f.attach("files", "large", three_parts()).await;
+    let network = f.network.clone();
+    *storage.on_part.lock().unwrap() = Some(Box::new(move || network.set_metered(true)));
+    assert_eq!(f.files.inner.drain_uploads().await.unwrap(), DrainOutcome::Metered);
+    assert_eq!(confirmed(&f).await, CHUNK as u64);
+    assert_eq!(f.files.inner.drain_uploads().await.unwrap(), DrainOutcome::Metered);
+    *storage.on_part.lock().unwrap() = None;
+    f.network.set_metered(false);
+    assert_eq!(drained(f.files.inner.drain_uploads().await.unwrap()), 1);
+    assert_eq!(storage.calls("resume"), 1);
+    assert_eq!(storage.calls("begin"), 1);
+    assert_eq!(f.files.read_file(&file).await.unwrap(), three_parts());
+    f.close().await;
+}
+
 /// Bytes the provider holds are progress only once its confirmation is
 /// recorded in the session: a lost part reply leaves the committed progress
 /// where it was, and the retry resumes from the provider's state (§17.9, E7).
@@ -639,7 +662,7 @@ async fn a_network_report_ends_an_offline_upload_wait() {
     }
     assert_eq!(retry(&f).await.unwrap().wait, Duration::from_secs(2));
     let waits = &f.files.inner.waits;
-    waits.network_changed();
+    waits.report_network();
     assert!(waits.end_reported_waits(crate::NetworkOwner::Uploads).await.unwrap());
     let ended = retry(&f).await.unwrap();
     assert_eq!((ended.failures, ended.not_before, ended.wait), (2, clock.now(), Duration::ZERO));
@@ -668,7 +691,7 @@ async fn a_network_report_leaves_an_answered_upload_wait_and_the_cooldown() {
     f.files.inner.drain_uploads_retrying().await.unwrap();
     let answered = retry(&f).await;
     let waits = &f.files.inner.waits;
-    waits.network_changed();
+    waits.report_network();
     waits.end_reported_waits(crate::NetworkOwner::Uploads).await.unwrap();
     assert_eq!(retry(&f).await, answered);
     let requests = f.storage.request_trace().len();
@@ -679,7 +702,7 @@ async fn a_network_report_leaves_an_answered_upload_wait_and_the_cooldown() {
     f.storage.set_faults(fail_next(StorageFailure::Network, None)).await;
     f.files.inner.drain_uploads().await.unwrap();
     coven_storage::Cooldown::record(waits.as_ref(), Duration::from_secs(600)).await.unwrap();
-    waits.network_changed();
+    waits.report_network();
     waits.end_reported_waits(crate::NetworkOwner::Uploads).await.unwrap();
     assert!(retry(&f).await.unwrap().wait.is_zero());
     let requests = f.storage.request_trace().len();
@@ -702,7 +725,7 @@ async fn a_report_whose_end_failed_to_save_ends_the_wait_next_time() {
     f.files.inner.drain_uploads_retrying().await.unwrap();
     let wait = retry(&f).await;
     let waits = &f.files.inner.waits;
-    waits.network_changed();
+    waits.report_network();
     f.database.fail_retry_ends(1).await;
     assert!(waits.end_reported_waits(crate::NetworkOwner::Uploads).await.is_err());
     assert_eq!(retry(&f).await, wait);

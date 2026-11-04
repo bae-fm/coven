@@ -1,6 +1,6 @@
 //! The upload worker keeps the upload limit's number of uploads in flight
-//! while files keep arriving, and pausing or a cooldown stops new starts
-//! (§17.9, E7).
+//! while files keep arriving, and pausing, a cooldown or a metered network
+//! the app keeps files off stops new starts (§17.9, E7).
 
 use super::*;
 use coven_storage::test_utils::MemoryRequest;
@@ -120,34 +120,80 @@ async fn uploads_queued_during_an_upload_fill_every_free_slot() {
     f.close().await;
 }
 
-/// Pausing, and a provider cooldown, let the uploads in flight finish but
-/// start no other, however many slots are free.
+/// What stops new uploads in a test.
+#[derive(Clone, Copy, Debug)]
+enum Stop {
+    Pause,
+    Cooldown,
+    /// The network turns metered while the app moves files only on
+    /// unmetered networks (§17.9).
+    Metered,
+}
+
+/// Pausing, a provider cooldown, and a metered network the app keeps files
+/// off let the uploads in flight finish but start no other, however many
+/// slots are free.
 #[tokio::test]
-async fn pausing_and_a_cooldown_start_no_new_upload() {
-    for cooldown in [false, true] {
+async fn pausing_a_cooldown_and_a_metered_network_start_no_new_upload() {
+    for stop in [Stop::Pause, Stop::Cooldown, Stop::Metered] {
         let f = Fixture::new(Provenance::AppProvided).await;
         let gate = gated(&f, 2).await;
         for id in ["a", "b", "c", "d"] {
             f.attach("files", id, photo(7)).await;
         }
+        f.set_unmetered_only(true).await;
         f.set_uploads_paused(false).await;
         until_creates(&f, 2).await;
-        if cooldown {
-            coven_storage::Cooldown::record(f.files.inner.waits.as_ref(), Duration::from_secs(600))
-                .await
-                .unwrap();
-        } else {
-            f.set_uploads_paused(true).await;
+        match stop {
+            Stop::Cooldown => coven_storage::Cooldown::record(
+                f.files.inner.waits.as_ref(),
+                Duration::from_secs(600),
+            )
+            .await
+            .unwrap(),
+            Stop::Pause => f.set_uploads_paused(true).await,
+            Stop::Metered => f.network.set_metered(true),
         }
         gate.add_permits(2);
         until_queued(&f, 2).await;
         // The run ends once its attempts did, and started nothing more.
         drop(f.files.inner.drain.lock().await);
-        assert_eq!(creates(&f).len(), 2);
+        assert_eq!(creates(&f).len(), 2, "{stop:?}");
         let queue = f.queue().await;
         assert!(queue.files.iter().all(|upload| upload.phase == UploadPhase::Waiting));
         f.close().await;
     }
+}
+
+/// Ben moves files only on unmetered networks. On cellular his photo
+/// doesn't upload, and an early retry says the network is metered; once his
+/// phone joins Wi-Fi it goes up with no call of his app's. Turning the
+/// setting off lets the next one go on cellular too (§17.9).
+#[tokio::test]
+async fn a_metered_network_holds_trailing_uploads_until_it_is_unmetered() {
+    let f = Fixture::new(Provenance::AppProvided).await;
+    f.set_unmetered_only(true).await;
+    f.network.set_metered(true);
+    f.set_uploads_paused(false).await;
+    f.attach("files", "a", photo(1)).await;
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(10), f.files.retry_uploads_now())
+            .await
+            .unwrap()
+            .unwrap(),
+        DrainOutcome::Metered
+    );
+    assert!(creates(&f).is_empty());
+    f.network.join(false);
+    until_queued(&f, 0).await;
+    assert_eq!(creates(&f).len(), 1);
+    f.network.join(true);
+    f.attach("files", "b", photo(2)).await;
+    assert_eq!(f.files.inner.drain_uploads().await.unwrap(), DrainOutcome::Metered);
+    f.set_unmetered_only(false).await;
+    until_queued(&f, 0).await;
+    assert_eq!(creates(&f).len(), 2);
+    f.close().await;
 }
 
 /// An app retry joins the run in progress rather than waiting for it: the

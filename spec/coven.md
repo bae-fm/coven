@@ -1695,7 +1695,9 @@ watch the platform on every system it runs on, and one that forgot would
 leave every backoff to run out.
 
 - **A report is a network appearing.** When the device gains a usable
-  network, or moves to another one, coven makes a *network report*. Losing
+  network, or moves to another one, coven makes a *network report*. A store
+  that opens on a usable network makes one too: a wait saved while the
+  phone had none ends as the app opens it. Losing
   the network makes none: the next attempt finds out, and the state says
   offline (§19.1). Neither does a network that only turns metered or
   unmetered: it was usable before and after.
@@ -6193,8 +6195,9 @@ can't be a step itself.
 - **A metered network holds the download.** With the setting to move files
   only on unmetered networks on (§17.9), preparing waits on a metered network
   before it asks storage for bytes, until the network is unmetered or the
-  setting goes off; a download under way waits before its next request. The
-  call doesn't fail: the wish for the bytes stands, and the app that no longer
+  setting goes off. A download under way stops before its next request, and
+  that file starts again once the network allows; files already done stay
+  done. The call doesn't fail: the wish for the bytes stands, and the app that no longer
   wants them drops the call. Bytes already here are copied without waiting.
   Which files a prepare is downloading stays in `coven_downloading`, so one
   waiting lists none.
@@ -6378,8 +6381,8 @@ his phone joins Wi-Fi, coven hears it (§6.7), and the photos go up.
   trailing upload, and a pin's download waits before it asks storage for
   bytes (§17.8). An upload in flight stops at its next part, keeping its
   provider session, as a pause stops it; a download in flight stops before
-  its next request. A bound upload runs on, as it does through a pause: every
-  later write waits for it (§17.4).
+  its next request, and starts its file again later. A bound upload runs on,
+  as it does through a pause: every later write waits for it (§17.4).
 - **What it doesn't hold.** Passes run: they carry the writes, which are
   small, and other devices wait for them. Reading a file doesn't wait: Ben
   plays a song he never pinned, and it streams, since he is waiting for it
@@ -9934,12 +9937,12 @@ document:
 
 | Crate | Owns | Sections |
 | --- | --- | --- |
-| `coven-foundation` | the clock, the id source, atomic file writes, the store's directory and its lock, turning a panic in background work into a value, and a runtime shutting down into one | §7, §10, §19.3, api.md E1, E15 |
+| `coven-foundation` | the clock, the id source, atomic file writes, the store's directory and its lock, watching the device's network, turning a panic in background work into a value, and a runtime shutting down into one | §6.7, §7, §10, §19.3, api.md E1, E15 |
 | `coven-crypto` | ciphers, sealed boxes, derived keys, file keys, member keys and their custody | §12 |
 | `coven-merge` | timestamps, the merged state, the removal rules and lost values, as functions with no I/O | §7, §8, §15 |
 | `coven-format` | the bytes in storage: slots, inner writes, snapshots, file headers and chunks, encoded, decoded and checked, using merge's and crypto's types | format.md |
 | `coven-database` | the SQLite connection, coven's internal tables, applying the merge's results, triggers, live queries, migrations | §4, §9, §18 |
-| `coven-storage` | each provider, and the operations coven needs from it, including upload sessions; watching the device's network | §6.7, §20, Appendix E |
+| `coven-storage` | each provider, and the operations coven needs from it, including upload sessions | §20, Appendix E |
 | `coven-sync` | the sequence, members, circles, snapshots, files and the cache, operations, recovery | §5, §6, §10, §11, §13 to §19 |
 | `coven` | the API, and nothing else | api.md |
 
@@ -9973,7 +9976,7 @@ disk. Each is used directly in one place only:
 
 ```
 network          coven-storage's providers
-network state    coven-storage's network watch
+network state    coven-foundation's network watch
 cryptography     coven-crypto
 SQLite           coven-database
 OS keychain      coven-crypto's custody

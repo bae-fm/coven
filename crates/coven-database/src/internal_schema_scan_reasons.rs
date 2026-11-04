@@ -23,8 +23,8 @@ fn database_reason(statement: &Statement, relation: &str) -> Option<&'static str
     match (file, sql, relation) {
 ("write_commit.rs", "INSERT INTO _coven_cells(column_id,row_id,write_id) VALUES{values} ON CONFLICT(column_id,row_id) DO UPDATE SET write_id=excluded.write_id", "2-ROW") =>
     Some("a row's cells are the statement's own values"),
-("coven_uploads", "SELECT * FROM coven_uploads", "l" | "z") =>
-    Some("the view lists every queued file, which its link to its upload enumerates; the pause table holds at most one row"),
+("coven_uploads", "SELECT * FROM coven_uploads", "l" | "z" | "w") =>
+    Some("the view lists every queued file, which its link to its upload enumerates; the pause and setting tables hold at most one row each"),
 ("coven_files", "SELECT * FROM coven_files", "coven_files") =>
     Some("the table lists every file this device has a record of"),
 ("file_moves.rs", "SELECT m.id FROM _coven_moves AS m WHERE m.state='moving' AND NOT EXISTS(SELECT 1 FROM _coven_file_uploads AS u WHERE u.move=m.id AND u.stored=0 AND EXISTS(SELECT 1 FROM _coven_upload_files AS l WHERE l.upload=u.id))", "m") =>
@@ -42,6 +42,9 @@ fn database_reason(statement: &Statement, relation: &str) -> Option<&'static str
     Some("the files being downloaded to keep whole, one per download in flight, from this process's memory"),
 ("coven_upload_pause", "SELECT * FROM coven_upload_pause", "one" | "z") =>
     Some("one constant row, and the pause table holds at most one row"),
+("coven_network", "SELECT * FROM coven_network", "one" | "w")
+| ("sync_facts.rs", "SELECT metered,unmetered_only FROM coven_network", "one" | "w") =>
+    Some("one constant row, and the setting's table holds at most one row"),
 ("coven_pins", "SELECT * FROM coven_pins", "coven_pins") =>
     Some("the table lists every pinned file"),
 ("coven_upload_queue", "SELECT * FROM coven_upload_queue", "coven_upload_queue") =>
@@ -96,6 +99,8 @@ fn database_reason(statement: &Statement, relation: &str) -> Option<&'static str
     Some("unfiltered EXISTS stops at the first row"),
 ("file_queue.rs", "SELECT EXISTS(SELECT 1 FROM _coven_upload_pause)", "_coven_upload_pause") =>
     Some("the pause table holds at most one row"),
+("file_queue.rs", "SELECT EXISTS(SELECT 1 FROM _coven_unmetered_only)", "_coven_unmetered_only") =>
+    Some("the setting's table holds at most one row"),
 ("retry.rs", "SELECT scope,operation,upload,pin,failures,not_before,wait FROM _coven_retries", "_coven_retries") =>
     Some("reopening arms every persisted retry wait"),
 ("file_removals.rs", "SELECT path,area FROM _coven_file_removals ORDER BY area,path", "_coven_file_removals") =>

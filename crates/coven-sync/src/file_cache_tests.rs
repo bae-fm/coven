@@ -101,6 +101,7 @@ async fn read_only_downloads_keep_typed_errors_without_writing_pending_records()
         f.ids.clone(),
         transfers,
         std::sync::Arc::new(coven_foundation::clock::SystemClock),
+        coven_foundation::network_watch::NetworkWatch::unwatched().view(),
     );
     f.storage.set_online(false);
     assert!(matches!(files.read_file(&file).await, Err(FileReadError::Storage(ref error))
@@ -761,5 +762,118 @@ async fn unused_headers_do_not_displace_recently_read_chunks() {
     assert!(f.files.inner.database.cached(&recent, 0).await.unwrap().is_some());
     assert!(f.files.inner.database.cached(&recent, -1).await.unwrap().is_some());
     assert!(f.files.inner.database.cached(&old, -1).await.unwrap().is_none());
+    f.close().await;
+}
+
+/// How many requests the provider has seen.
+fn requests(f: &Fixture) -> usize {
+    f.storage.request_trace().len()
+}
+
+/// Ben's phone is on cellular, and his app moves files only on unmetered
+/// networks. Pinning a song asks storage for nothing, lists no download and
+/// records nothing; a connection change goes on meanwhile, and playing the
+/// song still streams it. Once the phone joins Wi-Fi the pin downloads it
+/// (§17.8, §17.9).
+#[tokio::test]
+async fn a_metered_network_holds_a_pins_download_but_not_a_read() {
+    let f = Fixture::new(Provenance::AppProvided).await;
+    let file = f.uploaded("song", vec![5; CHUNK * 3]).await;
+    f.files.stop_background_for_counts().await;
+    f.set_unmetered_only(true).await;
+    f.network.set_metered(true);
+    let before = requests(&f);
+    let pin = f.files.pin(std::slice::from_ref(&file));
+    tokio::pin!(pin);
+    assert!(tokio::time::timeout(Duration::from_millis(50), &mut pin).await.is_err());
+    assert_eq!(requests(&f), before, "a held pin asks storage for nothing");
+    assert!(downloading(&f).await.is_empty());
+    assert!(file_records(&f).await.is_empty());
+    // The waiting pin holds no lock a connection change needs.
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        f.files.set_storage(Some(f.storage.clone()), std::future::ready(Ok(()))),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(f.files.read_file(&file).await.unwrap(), vec![5; CHUNK * 3]);
+    f.network.join(false);
+    tokio::time::timeout(Duration::from_secs(10), pin).await.unwrap().unwrap();
+    assert_eq!(f.database.files_pinned(vec![file.id()]).await.unwrap(), vec![Some(true)]);
+    f.close().await;
+}
+
+/// A pin's download under way stops before its next request once the
+/// network turns metered, and starts the file again once the setting goes
+/// off; closing the store ends a pin still waiting (§17.8).
+#[tokio::test]
+async fn a_pins_download_stops_before_its_next_request_on_a_metered_network() {
+    let f = Fixture::new(Provenance::AppProvided).await;
+    // Twenty chunks take two requests of up to 1 MiB.
+    let bytes = (0..CHUNK * 20).map(|i| (i % 251) as u8).collect::<Vec<_>>();
+    let file = f.uploaded("album", bytes.clone()).await;
+    f.files.stop_background_for_counts().await;
+    f.set_unmetered_only(true).await;
+    let (observed, held) = tokio::sync::oneshot::channel();
+    let (resume, resumed) = tokio::sync::oneshot::channel();
+    f.storage.hold_body_at(f.path(&file), 1, observed, resumed).await;
+    let pin = f.files.pin(std::slice::from_ref(&file));
+    tokio::pin!(pin);
+    tokio::select! {
+        result = &mut pin => panic!("the download was not held: {result:?}"),
+        held = held => held.unwrap(),
+    }
+    f.network.set_metered(true);
+    resume.send(()).unwrap();
+    // The first request finishes, and the download stops: the next never
+    // starts.
+    let first = requests(&f);
+    let mut listed = f.database.subscribe(|sql| {
+        Ok(sql.query_row("SELECT count(*) FROM coven_downloading", [], |r| r.get::<_, i64>(0))?)
+    });
+    tokio::select! {
+        result = &mut pin => panic!("the pin went on over a metered network: {result:?}"),
+        () = async {
+            while listed.next().await.expect("the live query answers").unwrap() != 0 {}
+        } => {}
+    }
+    assert!(tokio::time::timeout(Duration::from_millis(50), &mut pin).await.is_err());
+    assert_eq!(requests(&f), first);
+    f.set_unmetered_only(false).await;
+    tokio::time::timeout(Duration::from_secs(10), pin).await.unwrap().unwrap();
+    assert_eq!(f.files.read_file(&file).await.unwrap(), bytes);
+    // A pin waiting as the store closes ends with it.
+    let other = f.uploaded("other", vec![3; CHUNK]).await;
+    f.set_unmetered_only(true).await;
+    let waiting = f.files.pin(std::slice::from_ref(&other));
+    tokio::pin!(waiting);
+    assert!(tokio::time::timeout(Duration::from_millis(50), &mut waiting).await.is_err());
+    f.files.close().await;
+    assert!(matches!(
+        tokio::time::timeout(Duration::from_secs(10), waiting).await.unwrap(),
+        Err(FileReadError::Database(DbError::StoreClosed))
+    ));
+    f.database.close().await.unwrap();
+}
+
+/// The setting persists: a pin prepared once the store reopens on a metered
+/// network waits (§17.8).
+#[tokio::test]
+async fn a_pin_prepared_after_reopening_holds_as_the_stored_setting_says() {
+    let mut f = Fixture::new(Provenance::AppProvided).await;
+    let file = f.uploaded("song", vec![6; CHUNK]).await;
+    f.set_unmetered_only(true).await;
+    f.network.set_metered(true);
+    f.reopen().await;
+    f.files.stop_background_for_counts().await;
+    let file = f.database.file_ref(file.id()).await.unwrap();
+    let before = requests(&f);
+    let pin = f.files.pin(std::slice::from_ref(&file));
+    tokio::pin!(pin);
+    assert!(tokio::time::timeout(Duration::from_millis(50), &mut pin).await.is_err());
+    assert_eq!(requests(&f), before);
+    f.network.set_metered(false);
+    tokio::time::timeout(Duration::from_secs(10), pin).await.unwrap().unwrap();
     f.close().await;
 }

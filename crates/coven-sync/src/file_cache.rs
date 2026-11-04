@@ -1,7 +1,6 @@
 //! Pins, budgets and downloads of stored files.
 
 use crate::{
-    files::file_read::UploadedFile,
     files::{Files, FilesInner},
     FileReadError,
 };
@@ -26,42 +25,67 @@ impl Files {
     /// succeeds clears it. A file only on one device, this one included
     /// while it uploads, is refused: only stored bytes are kept. So is one
     /// whose record goes, or leaves its stored bytes, while they download
-    /// (`NoLongerStored`).
+    /// (`NoLongerStored`). While the network is metered and the app moves
+    /// files only on unmetered networks, the downloads wait before asking
+    /// storage for bytes (§17.8).
     pub async fn prepare_pin(&self, files: &[FileRef]) -> Result<PreparedPin, FileReadError> {
         self.inner.check_open()?;
-        let _pins = self.inner.pins.lock().await;
-        let mut current = Vec::new();
-        for file in files {
-            let file = self.inner.current(file).await?;
-            if let FilePlace::DeviceOnly { device } = file.place() {
-                return Err(FileReadError::DeviceOnly { file: file.id(), device });
-            }
-            current.push(file);
-        }
-        let limit = self.transfer_limits().downloads.get();
-        let prepared: Vec<PreparedFile> = futures_util::stream::iter(current)
-            .map(|file| async move {
-                let work = async {
-                    if self.inner.database.whole_kept(&file).await? {
-                        return Ok(PreparedFile::Kept(file.clone()));
-                    }
-                    let opened = UploadedFile::open(self.inner.clone(), file.clone()).await?;
-                    Ok(PreparedFile::Copy(opened.keep_whole().await?))
-                }
-                .await;
-                self.inner.complete_pin(&file, work).await
-            })
-            .buffer_unordered(limit)
-            .try_collect()
-            .await?;
         let (mut copies, mut kept) = (Vec::new(), Vec::new());
-        for file in prepared {
-            match file {
-                PreparedFile::Copy(copy) => copies.push(copy),
-                PreparedFile::Kept(file) => kept.push(file),
+        let mut waiting = files.to_vec();
+        loop {
+            // A metered network the app keeps files off holds the downloads
+            // (§17.8): the wait holds no lock, so a connection change or the
+            // store's close goes on meanwhile. A file whose download it
+            // stopped starts again here; the ones done stay done.
+            self.inner.read_unmetered_only().await?;
+            self.inner.until_downloads_unheld().await?;
+            let _pins = self.inner.pins.lock().await;
+            self.inner.check_open()?;
+            let mut current = Vec::new();
+            for file in &waiting {
+                let file = self.inner.current(file).await?;
+                if let FilePlace::DeviceOnly { device } = file.place() {
+                    return Err(FileReadError::DeviceOnly { file: file.id(), device });
+                }
+                current.push(file);
+            }
+            let limit = self.transfer_limits().downloads.get();
+            let prepared: Vec<Result<PreparedFile, FileRef>> = futures_util::stream::iter(current)
+                .map(|file| async move {
+                    let work = async {
+                        if self.inner.database.whole_kept(&file).await? {
+                            return Ok(Some(PreparedFile::Kept(file.clone())));
+                        }
+                        Ok(self.inner.download_whole(file.clone()).await?.map(PreparedFile::Copy))
+                    }
+                    .await;
+                    // A held download failed at nothing: no record, and no
+                    // condition settled.
+                    match work {
+                        Ok(None) => Ok(Err(file)),
+                        Ok(Some(prepared)) => {
+                            self.inner.complete_pin(&file, Ok(prepared)).await.map(Ok)
+                        }
+                        Err(error) => {
+                            self.inner.complete_pin::<PreparedFile>(&file, Err(error)).await.map(Ok)
+                        }
+                    }
+                })
+                .buffer_unordered(limit)
+                .try_collect()
+                .await?;
+            waiting.clear();
+            for file in prepared {
+                match file {
+                    Ok(PreparedFile::Copy(copy)) => copies.push(copy),
+                    Ok(PreparedFile::Kept(file)) => kept.push(file),
+                    Err(held) => waiting.push(held),
+                }
+            }
+            if waiting.is_empty() {
+                return Ok(self.inner.database.prepared_pin(copies, kept)?);
             }
         }
-        Ok(self.inner.database.prepared_pin(copies, kept)?)
     }
     /// Prepare a pin and commit it in a write of its own, as an app does,
     /// for tests.

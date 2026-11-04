@@ -213,7 +213,7 @@ async fn run(
     let mut idle = idle_wait(&sync, idle_from, interval.current());
     let mut closing = None;
     loop {
-        // The app's network report ends the connection's and operations'
+        // The network report ends the connection's and operations'
         // waits for the network, and the person's retry all their waits; each
         // asks for a pass. Reports during a pass are handled after it, so
         // they end the waits it failed into (§6.7).

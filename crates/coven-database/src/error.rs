@@ -72,6 +72,10 @@ pub enum CovenError {
     /// `DbError::Shutdown`.
     #[error(transparent)]
     Shutdown(#[from] coven_foundation::task::Shutdown),
+    /// The platform refused to let coven watch the device's network, such
+    /// as an Android app without coven's Android library (api.md E1, E5).
+    #[error(transparent)]
+    NetworkWatch(#[from] coven_foundation::network_watch::NetworkWatchError),
 }
 
 impl From<rusqlite::Error> for CovenError {

@@ -174,6 +174,12 @@ impl FileWrite<'_> {
         crate::file_queue::set_paused(self.database, paused)
     }
 
+    /// Persist the app's setting to move files only on unmetered networks
+    /// (§17.9).
+    pub(crate) fn set_unmetered_only(&self, unmetered_only: bool) -> Result<(), DbError> {
+        crate::file_queue::set_unmetered_only(self.database, unmetered_only)
+    }
+
     /// The app phase of the write completing upload `upload` (§17.3, §17.9):
     /// its bytes are stored, and once every upload of its move is, this
     /// write switches each file of the move to its stored bytes. A file gone
