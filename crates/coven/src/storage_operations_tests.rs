@@ -225,3 +225,40 @@ async fn removing_one_device_keeps_the_person_entries() {
     restored.close().await.unwrap();
     network.close().await;
 }
+
+/// Ana restores the store on her laptop and closes it, then removes the
+/// laptop from her phone at once, before the phone has read the laptop's
+/// registration (§14.1).
+#[tokio::test]
+async fn a_device_is_removable_right_after_its_restore_finished() {
+    let network = Network::with_schema(CloudProvider::S3, Vec::new(), Vec::new()).await;
+    let phone = &network.devices[0];
+    let laptop = phone.app.another_device();
+    let saved = crate::tests::readable(laptop.saved_restore_codes().await.unwrap());
+    let root = tempfile::tempdir().unwrap();
+    let (_, cancel) = tokio::sync::watch::channel(false);
+    let restored = restore_from_saved_code(
+        laptop
+            .builder(StoreLayout::new(root.path().into()))
+            .synced_tables(Vec::new())
+            .migrations(Vec::new())
+            .clock(std::sync::Arc::new(crate::tests::PollingClock::new(network.clock.clone())))
+            .storage_connector(std::sync::Arc::new(phone.storage.for_device())),
+        &saved[0],
+        None,
+        "Ana's laptop",
+        |_| {},
+        &cancel,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let device = restored.device_id();
+    restored.close().await.unwrap();
+    let (removal, _) = phone.handle.remove_device(device).await.unwrap();
+    crate::tests::landed(&phone.handle, removal).await;
+    // Once the phone has applied the removal, removing the laptop again is
+    // decided at once: it journals nothing.
+    assert_eq!(phone.handle.remove_device(device).await.unwrap().0, None);
+    network.close().await;
+}

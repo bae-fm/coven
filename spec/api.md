@@ -7580,9 +7580,12 @@ pub trait MemberKeyCustody: Send + Sync {
 - Circle-changing calls return `SyncError` ([E5](#e5-storage-and-sync)), as member calls
   do ([E9](#e9-members-and-devices)). Validation uses the latest applied prefix:
   `Rejected(NotAllowed)` for authority, `Rejected(NoAdminLeft)` for the
-  last-admin rule, and `Rejected(TargetGone(target))` for an absent member,
-  device or circle. The target retains its typed id. `StoreOwner` remains
-  a separate provider constraint.
+  last-admin rule, and `Rejected(TargetGone(target))` for a removed or
+  deleted member, device or circle. One the applied slots don't name yet is
+  journaled, and the pass that reads on answers `TargetGone` as the
+  operation's outcome if it is still absent ([§11.1](coven.md#111-the-steps)).
+  The target retains its typed id. `StoreOwner` remains a separate provider
+  constraint.
 - Removing someone from a circle publishes one entry. Rotation follows in a
   later sync pass; it is not part of that operation (§12.2).
 

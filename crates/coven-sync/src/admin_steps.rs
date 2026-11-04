@@ -155,7 +155,10 @@ fn journal_change(
 /// Whether the change would still change the applied state, as its next
 /// slot's entry by this device's member: what that state refuses fails
 /// with `Rejected`. Only the slots this device has applied are read; the
-/// pass validates again after catching up (§11.1).
+/// pass validates again after catching up (§11.1). A target those slots
+/// don't name yet, such as a device registered since, isn't gone: the
+/// change is journaled, and the pass decides once it has read on. One they
+/// name as removed or deleted is refused at once.
 pub(crate) fn changes(
     journal: &Journal<'_>,
     applied: &StoreState,
@@ -166,5 +169,20 @@ pub(crate) fn changes(
     let through = journal.applied_slot()?;
     let header = SlotHeader { device, claim: 1, author, after: through };
     let next = Slot(through.checked_add(1).ok_or(SyncError::SequenceExhausted)?);
-    Ok(effects::checked_change(applied, &header, next, change, &Default::default(), &[])?.is_some())
+    match effects::checked_change(applied, &header, next, change, &Default::default(), &[]) {
+        Err(OperationRejection::TargetGone(target)) if unseen(applied, &target) => Ok(true),
+        checked => Ok(checked?.is_some()),
+    }
+}
+
+/// Whether the applied state has never named `target`: not even as removed
+/// or deleted.
+fn unseen(applied: &StoreState, target: &crate::EntryTarget) -> bool {
+    match target {
+        crate::EntryTarget::Member(member) => !applied.members.contains_key(member),
+        crate::EntryTarget::Device(device) => !applied.devices.contains_key(device),
+        crate::EntryTarget::Circle(circle) => {
+            !applied.circles.contains_key(circle) && !applied.circle_deletions.contains_key(circle)
+        }
+    }
 }

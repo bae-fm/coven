@@ -3080,8 +3080,15 @@ to get it right. That path is an *operation*.
    against the slots this device has applied and journals it, offline too. A
    change that state already refuses fails the write with
    `SyncError::Rejected(OperationRejection)`; one that state already has
-   journals nothing. Making, approving, declining and cancelling an invite
-   are steps too (§13.2). Approving is the exception to checking first: its
+   journals nothing. A target those slots don't name at all isn't gone: Ana
+   restores the store on her laptop and removes it from her phone at once,
+   before the phone has read the laptop's registration. The write journals
+   the change, and the pass checks it once it has read on, ending it
+   `TargetGone` only if the target is still absent. A target the slots name
+   as removed or deleted is refused at once, and so is replacing the keys of
+   a member they don't name, since the change names the pair they bind.
+   Making, approving, declining and cancelling an invite are steps too
+   (§13.2). Approving is the exception to checking first: its
    write journals the binding whatever the applied slots say, and a refusal
    comes from the pass, as the binding's outcome. So the app is never refused
    an approval of a request it was shown waiting. The other operations, such

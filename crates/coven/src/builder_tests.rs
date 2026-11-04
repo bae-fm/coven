@@ -169,9 +169,12 @@ async fn app_reopening_resumes_operations_and_files_using_one_storage_capability
         .await;
     assert!(handle.circles().members(circle.id).await.unwrap()[0].is_self);
     let outsider = MemberId(uuid::Uuid::from_u128(0x0e));
+    // A member the applied slots don't name is journaled; the pass that
+    // reads on finds no such member.
+    let added = handle.circles().add_member(circle.id, &outsider).await.unwrap();
     assert!(matches!(
-        handle.circles().add_member(circle.id, &outsider).await,
-        Err(SyncError::Rejected(OperationRejection::TargetGone(EntryTarget::Member(id)))) if id == outsider
+        crate::tests::outcome(&handle, added).await,
+        OperationOutcome::Rejected(OperationRejection::TargetGone(EntryTarget::Member(id))) if id == outsider
     ));
     let invite = crate::tests::invite(
         &handle,
