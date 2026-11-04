@@ -144,7 +144,7 @@ impl LockRegistration {
         let closing = self.closing_guard();
         let result = crate::task::blocking("lock the store", move || self.acquire_file())
             .await
-            .map_err(|failed| StoreLockError::File(failed.into()))
+            .map_err(|failed| StoreLockError::from(crate::files::FileError::from(failed)))
             .and_then(|result| result);
         closing.disarm();
         result

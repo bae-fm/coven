@@ -96,6 +96,7 @@ impl coven_foundation::task::CarriesBug for FileReadError {
         match self {
             Self::Database(error) => error.bug(),
             Self::Disk(error) => error.bug(),
+            Self::Lock(error) => error.bug(),
             Self::Write(error) => error.bug(),
             _ => None,
         }

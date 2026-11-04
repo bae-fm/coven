@@ -185,9 +185,33 @@ pub enum StoreLockError {
     /// A supplied lock protects a different directory.
     #[error("lock does not protect store {0}")]
     WrongDirectory(StoreId),
-    /// Opening or locking the lock file failed for another reason.
+    /// Opening or locking the lock file failed for another reason, or did
+    /// not run because its runtime is shutting down (`FileError::Shutdown`).
     #[error("store lock: {0}")]
-    File(#[from] FileError),
+    File(FileError),
+    /// Taking the lock panicked on the blocking pool: a bug, which the
+    /// caller reports (E15).
+    #[error(transparent)]
+    Bug(#[from] crate::task::Bug),
+}
+
+impl From<FileError> for StoreLockError {
+    fn from(error: FileError) -> Self {
+        match error {
+            FileError::Bug(bug) => Self::Bug(bug),
+            error => Self::File(error),
+        }
+    }
+}
+
+impl crate::task::CarriesBug for StoreLockError {
+    fn bug(&self) -> Option<&crate::task::Bug> {
+        match self {
+            Self::Bug(bug) => Some(bug),
+            Self::File(error) => error.bug(),
+            _ => None,
+        }
+    }
 }
 
 fn open_lock(path: &Path) -> Result<File, FileError> {

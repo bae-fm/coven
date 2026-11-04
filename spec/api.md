@@ -1786,6 +1786,8 @@ pub enum StoreLockError {
     /// Opening or locking the lock file failed, or did not run because its
     /// runtime is shutting down (`FileError::Shutdown`).
     File(FileError),
+    /// Taking the lock panicked on the blocking pool: a bug (E15).
+    Bug(Bug),
 }
 
 /// Opening a read-only store or its saved file-storage connection failed (E1).
@@ -8321,7 +8323,10 @@ Coven's own calls turn a panic in their work into a value the same way. A
 panic is a bug, in coven or in the app's callback, and the call's error
 carries it as `Bug`: `DbError::Bug` for a database call, `FileError::Bug`
 for file work, and a `Bug` variant of each error that has a `Shutdown` one.
-`SyncError` reports it as `LocalFailure::Bug`.
+An error that keeps a file or lock failure takes the bug as its own `Bug`,
+never under a disk label: `StoreLockError::Bug` for taking a store's lock,
+and `CovenError::Bug` or `DbError::Bug` for a lock they took. `SyncError`
+reports it as `LocalFailure::Bug`.
 
 - Ana's app writes a note with `write`, and its closure panics on a note
   with no title: "note 43 has no title". The write's transaction rolls back,

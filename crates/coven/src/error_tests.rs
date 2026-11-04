@@ -118,3 +118,26 @@ fn setup_and_unlock_name_a_removal_and_a_required_update() {
         StorageSetupError::Internal(_)
     ));
 }
+
+/// A panic taking a store's lock is a bug in each error that carries the
+/// lock's failure, not a disk failure.
+#[test]
+fn a_bug_taking_a_stores_lock_is_each_errors_bug() {
+    use crate::task::{Bug, CarriesBug};
+    let bug = Bug { operation: "lock the store", message: "the lock panicked".into() };
+    let lock = || StoreLockError::from(FileError::Bug(bug.clone()));
+    assert!(matches!(lock(), StoreLockError::Bug(found) if found == bug));
+    assert!(
+        matches!(crate::CovenError::from(lock()), crate::CovenError::Bug(found) if found == bug)
+    );
+    assert!(matches!(crate::DbError::from(lock()), crate::DbError::Bug(found) if found == bug));
+    assert!(matches!(SyncError::from(lock()), SyncError::Bug(found) if found == bug));
+    assert!(
+        matches!(StoreDeletionError::from(lock()), StoreDeletionError::Bug(found) if found == bug)
+    );
+    let in_cleanup = StoreLockError::File(FileError::Cleanup {
+        operation: Box::new(FileError::Bug(bug.clone())),
+        cleanup: Box::new(std::io::Error::from(std::io::ErrorKind::Interrupted)),
+    });
+    assert_eq!(crate::CovenError::from(in_cleanup).bug(), Some(&bug));
+}

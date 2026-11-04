@@ -106,7 +106,7 @@ impl StoreCreationError {
 pub enum StoreDeletionError {
     /// The store is open or its lock could not be taken.
     #[error(transparent)]
-    Lock(#[from] StoreLockError),
+    Lock(StoreLockError),
     /// Writes or files wait to upload; nothing was deleted.
     #[error("{} writes and {} files wait to upload", .0.writes, .0.files)]
     Unsent(coven_database::UnsentWork),
@@ -140,10 +140,20 @@ impl crate::task::CarriesBug for StoreDeletionError {
     fn bug(&self) -> Option<&crate::task::Bug> {
         match self {
             Self::Bug(bug) => Some(bug),
+            Self::Lock(error) => error.bug(),
             Self::Sync(error) | Self::Closing(error) => error.bug(),
             Self::Key(error) => error.bug(),
             Self::File(error) => error.bug(),
             _ => None,
+        }
+    }
+}
+
+impl From<StoreLockError> for StoreDeletionError {
+    fn from(error: StoreLockError) -> Self {
+        match error {
+            StoreLockError::Bug(bug) => Self::Bug(bug),
+            error => Self::Lock(error),
         }
     }
 }

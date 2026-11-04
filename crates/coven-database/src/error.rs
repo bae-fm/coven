@@ -45,7 +45,7 @@ pub enum CovenError {
     Settings(#[from] SettingsError),
     /// The writer's lock could not be acquired.
     #[error(transparent)]
-    Lock(#[from] StoreLockError),
+    Lock(StoreLockError),
     /// A required builder choice was not supplied (E1).
     #[error("opening requires {field}")]
     MissingConfiguration {
@@ -99,6 +99,7 @@ impl CarriesBug for CovenError {
             Self::Bug(bug) => Some(bug),
             Self::Database(error) => error.bug(),
             Self::Key(error) => error.bug(),
+            Self::Lock(error) => error.bug(),
             Self::Rollback { operation, .. } => operation.bug(),
             Self::FileCleanup { write, failures } => {
                 write.bug().or_else(|| failures.iter().find_map(DbError::bug))
@@ -115,6 +116,7 @@ impl CarriesBug for DbError {
         match self {
             Self::Bug(bug) => Some(bug),
             Self::Disk(error) => error.bug(),
+            Self::Lock(error) => error.bug(),
             Self::StatePersistence(cause) | Self::CheckpointFailed(cause) => cause.bug(),
             Self::Rollback { operation, .. } => operation.bug(),
             Self::FileCleanup { write, failures } => write
@@ -127,6 +129,15 @@ impl CarriesBug for DbError {
             }
             Self::Closing { failures } => failures.iter().find_map(DbError::bug),
             _ => None,
+        }
+    }
+}
+
+impl From<StoreLockError> for CovenError {
+    fn from(error: StoreLockError) -> Self {
+        match error {
+            StoreLockError::Bug(bug) => Self::Bug(bug),
+            error => Self::Lock(error),
         }
     }
 }
@@ -732,7 +743,7 @@ pub enum DbError {
     FileKey(#[source] coven_crypto::CryptoError),
     /// Retaining the store while staging file bytes failed.
     #[error(transparent)]
-    Lock(#[from] StoreLockError),
+    Lock(StoreLockError),
     /// File cleanup failed, retaining every failure: on opening (`Ok`), or
     /// after a failed write, whose error it keeps (Appendix C.3).
     #[error("file cleanup failed: {failures:?}; write outcome: {write:?}")]
@@ -796,10 +807,19 @@ impl From<coven_foundation::task::TaskFailed> for DbError {
     }
 }
 
+impl From<StoreLockError> for DbError {
+    fn from(error: StoreLockError) -> Self {
+        match error {
+            StoreLockError::Bug(bug) => Self::Bug(bug),
+            error => Self::Lock(error),
+        }
+    }
+}
+
 impl From<coven_foundation::files::WriterError> for DbError {
     fn from(error: coven_foundation::files::WriterError) -> Self {
         match error {
-            coven_foundation::files::WriterError::Lock(error) => Self::Lock(error),
+            coven_foundation::files::WriterError::Lock(error) => error.into(),
             coven_foundation::files::WriterError::File(error) => Self::Disk(error),
         }
     }

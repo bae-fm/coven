@@ -370,7 +370,10 @@ impl From<coven_foundation::files::WriterError> for SyncError {
 
 impl From<StoreLockError> for SyncError {
     fn from(error: StoreLockError) -> Self {
-        Self::disk(error)
+        match error {
+            StoreLockError::Bug(bug) => Self::Bug(bug),
+            error => Self::disk(error),
+        }
     }
 }
 
