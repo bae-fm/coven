@@ -33,9 +33,7 @@ impl Folders {
                     Method::POST,
                     &format!("{parent}/children"),
                     &[],
-                    Body::Json(
-                        json!({"name":name,"folder":{},"@microsoft.graph.conflictBehavior":"fail"}),
-                    ),
+                    Body::Json(crate::providers::onedrive_item::new_folder(name)),
                     true,
                 )
                 .await?,

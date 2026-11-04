@@ -71,7 +71,7 @@ impl ObjectListing {
     /// objects, so a recursive listing descends into it. A folder outside
     /// D10's directories holds none and is skipped with its contents.
     pub(crate) fn object_folder(&mut self, name: &str) -> Result<bool, StorageError> {
-        if name == self.prefix.as_str().trim_end_matches('/') {
+        if name == self.prefix.folder() {
             // A recursive listing can include the requested folder itself.
             return Ok(true);
         }

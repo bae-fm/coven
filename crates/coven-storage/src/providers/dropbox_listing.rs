@@ -41,7 +41,7 @@ impl DropboxStorage {
         mut visit: impl FnMut(&serde_json::Value) -> Result<(), StorageError> + Send,
     ) -> Result<(), StorageError> {
         let mut method = "files/list_folder";
-        let mut request = json!({"path":format!("/{}", prefix.as_str().trim_end_matches('/')),"recursive":true,"include_deleted":false,"limit":2000});
+        let mut request = json!({"path":format!("/{}", prefix.folder()),"recursive":true,"include_deleted":false,"limit":2000});
         let mut seen = Pagination::new();
         loop {
             let value = match self.rpc(method, request).await {

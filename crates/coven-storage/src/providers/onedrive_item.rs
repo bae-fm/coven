@@ -11,6 +11,11 @@ pub(super) enum Kind {
 
 /// An item's facet. A facet that is not an object, or both facets at once,
 /// is the provider's error.
+/// The body that creates the folder `name`, refused if the name is taken.
+pub(super) fn new_folder(name: &str) -> serde_json::Value {
+    serde_json::json!({"name": name, "folder": {}, "@microsoft.graph.conflictBehavior": "fail"})
+}
+
 pub(super) fn item_kind(item: &serde_json::Value) -> Result<Kind, StorageError> {
     let facet = |name: &str| match item.get(name) {
         None | Some(serde_json::Value::Null) => Ok(false),

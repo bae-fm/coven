@@ -208,6 +208,11 @@ impl ObjectPrefix {
     pub fn as_str(&self) -> &str {
         &self.0
     }
+    /// The folder this prefix names, without its closing slash, as a
+    /// provider with folders names it.
+    pub fn folder(&self) -> &str {
+        self.0.trim_end_matches('/')
+    }
     /// Whether a validated path is under this prefix.
     pub fn contains(&self, path: &ObjectPath) -> bool {
         path.0.starts_with(&self.0)

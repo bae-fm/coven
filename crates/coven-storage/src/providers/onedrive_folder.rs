@@ -32,19 +32,17 @@ impl OneDriveStorage {
             let (start, mut id) = (0..=parts.len())
                 .rev()
                 .find_map(|count| {
-                    known.get(&parts[..count].join("/"))
-                        .map(|id| (count, id.clone()))
+                    known.get(&parts[..count].join("/")).map(|id| (count, id.clone()))
                 })
                 .expect("validated configured folder");
             for (index, name) in parts.iter().enumerate().skip(start) {
                 let value = http::json(
                     PROVIDER,
-                    self.publish(publication,
+                    self.publish(
+                        publication,
                         Method::POST,
                         &self.item(&id, &["children"])?,
-                        Body::Json(
-                            json!({"name":name,"folder":{},"@microsoft.graph.conflictBehavior":"fail"}),
-                        ),
+                        Body::Json(crate::providers::onedrive_item::new_folder(name)),
                     )
                     .await?,
                 )
@@ -68,7 +66,8 @@ impl OneDriveStorage {
                 known.insert(parts[..=index].join("/"), id.clone());
             }
             Ok(id)
-        }.await;
+        }
+        .await;
         drop(known);
         self.checked_folder_operation(result).await
     }
@@ -77,7 +76,7 @@ impl OneDriveStorage {
         listing: &mut ObjectListing,
     ) -> Result<(), StorageError> {
         let prefix = listing.prefix().clone();
-        let directory = prefix.as_str().trim_end_matches('/');
+        let directory = prefix.folder();
         let mut known = self.folder_ids.lock().await;
         let result = async {
             if known.is_empty() {

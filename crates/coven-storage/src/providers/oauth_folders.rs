@@ -120,9 +120,7 @@ impl OAuthFolders {
             .request(
                 Method::POST,
                 &url,
-                Body::Json(json!({
-                    "name": name, "folder": {}, "@microsoft.graph.conflictBehavior": "fail"
-                })),
+                Body::Json(crate::providers::onedrive_item::new_folder(name)),
             )
             .await?;
         if item_kind(&value)? != Kind::Folder {

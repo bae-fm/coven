@@ -1017,6 +1017,10 @@ impl ObjectPrefix {
     /// The prefix supplied to the provider.
     pub fn as_str(&self) -> &str;
 
+    /// The folder this prefix names, without its closing slash, as a
+    /// provider with folders names it.
+    pub fn folder(&self) -> &str;
+
     /// All objects belonging to this store.
     pub fn all(store: StoreId) -> Self;
 
