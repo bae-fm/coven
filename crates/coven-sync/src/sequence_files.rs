@@ -421,10 +421,7 @@ impl SequenceSync {
             if object.prefix().covers != announcement.covers
                 || object.prefix().purpose != announcement.purpose
             {
-                return Err(crate::write_object::damaged(
-                    &path,
-                    crate::Refusal::WrongIdentity { cause: None },
-                ));
+                return Err(crate::write_object::wrong_identity(&path));
             }
             let staging = self
                 .database
@@ -464,10 +461,7 @@ impl SequenceSync {
                 )
                 .await?;
             if body.header.id != announcement.snapshot {
-                return Err(crate::write_object::damaged(
-                    path,
-                    crate::Refusal::WrongIdentity { cause: None },
-                ));
+                return Err(crate::write_object::wrong_identity(path));
             }
             staging
                 .finish()

@@ -354,7 +354,7 @@ impl SignedDigest {
         expected: Option<&[u8; 32]>,
     ) -> Result<[u8; 32], SyncError> {
         if expected.is_some_and(|expected| *expected != self.complete) {
-            return Err(damaged(path, Refusal::WrongIdentity { cause: None }));
+            return Err(crate::write_object::wrong_identity(path));
         }
         signer
             .verify_object(path.as_str(), &self.signed, &self.signature)

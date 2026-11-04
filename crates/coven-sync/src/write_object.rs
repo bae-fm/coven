@@ -56,3 +56,8 @@ pub(crate) fn checked<T>(
 pub(crate) fn damaged(path: &ObjectPath, failure: Refusal) -> SyncError {
     DamagedObject { path: path.as_str().to_owned(), failure }.into()
 }
+
+/// The object at `path` is not the one its name or announcement promised.
+pub(crate) fn wrong_identity(path: &ObjectPath) -> SyncError {
+    damaged(path, Refusal::WrongIdentity { cause: None })
+}

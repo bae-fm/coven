@@ -175,10 +175,7 @@ impl SequenceSync {
     ) -> Result<(), SyncError> {
         for copy in &floor.copies {
             if copy.slot.0 > floor.header.at {
-                return Err(crate::write_object::damaged(
-                    &ObjectPath::floor(self.store()),
-                    Refusal::WrongIdentity { cause: None },
-                ));
+                return Err(crate::write_object::wrong_identity(&ObjectPath::floor(self.store())));
             }
             snapshot_object::open_routing(copy, self.store(), ring, member)?;
             slot_object::open_bounded(
@@ -210,19 +207,13 @@ impl SequenceSync {
                 || history.announcements.get(&original.slot) != Some(&announcement)
                 || !history.usable_at(&announcement, floor.header.at)
             {
-                return Err(crate::write_object::damaged(
-                    &ObjectPath::floor(self.store()),
-                    Refusal::WrongIdentity { cause: None },
-                ));
+                return Err(crate::write_object::wrong_identity(&ObjectPath::floor(self.store())));
             }
             included.insert(audience.clone());
             previous = Some(audience.clone());
         }
         if included != required {
-            return Err(crate::write_object::damaged(
-                &ObjectPath::floor(self.store()),
-                Refusal::WrongIdentity { cause: None },
-            ));
+            return Err(crate::write_object::wrong_identity(&ObjectPath::floor(self.store())));
         }
         floor.authenticate(history)
     }
@@ -238,10 +229,7 @@ impl SequenceSync {
         if object.prefix().covers != announcement.covers
             || object.prefix().purpose != announcement.purpose
         {
-            return Err(crate::write_object::damaged(
-                &path,
-                Refusal::WrongIdentity { cause: None },
-            ));
+            return Err(crate::write_object::wrong_identity(&path));
         }
         Ok(object)
     }
@@ -268,10 +256,7 @@ impl SequenceSync {
             (Err(error), Err(cleanup)) => return Err(SyncError::cleanup(error, cleanup)),
         };
         if body.header.id != announcement.snapshot {
-            return Err(crate::write_object::damaged(
-                object.path(),
-                Refusal::WrongIdentity { cause: None },
-            ));
+            return Err(crate::write_object::wrong_identity(object.path()));
         }
         tracing::info!(
             audience = ?announcement.snapshot.audience,
@@ -331,10 +316,7 @@ impl SequenceSync {
             unreachable!("floor announcement kind");
         };
         if announcement.snapshot.audience != Audience::Store {
-            return Err(crate::write_object::damaged(
-                &ObjectPath::floor(self.store()),
-                Refusal::WrongIdentity { cause: None },
-            ));
+            return Err(crate::write_object::wrong_identity(&ObjectPath::floor(self.store())));
         }
         Ok(announcement)
     }

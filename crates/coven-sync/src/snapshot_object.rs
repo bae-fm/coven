@@ -99,7 +99,7 @@ impl SnapshotObject {
     ) -> Result<coven_foundation::id_source::MemberId, SyncError> {
         let path = &self.input.object().path;
         if self.prefix.audience != id.audience {
-            return Err(damaged(path, Refusal::WrongIdentity { cause: None }));
+            return Err(crate::write_object::wrong_identity(path));
         }
         let (author, signer) =
             history.owner(id.device, self.prefix.covers).map_err(|cause| damaged(path, cause))?;

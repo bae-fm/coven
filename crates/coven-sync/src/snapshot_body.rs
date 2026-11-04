@@ -101,7 +101,7 @@ impl SnapshotObject {
         }
         let digest = body.digest.finish(signature);
         if digest.complete() != announced {
-            return Err(damaged(path, Refusal::WrongIdentity { cause: None }));
+            return Err(crate::write_object::wrong_identity(path));
         }
         if let Some(refused) = refused {
             return Err(refused);
