@@ -643,25 +643,14 @@ impl DatabaseConnection {
         params: P,
         map: impl FnOnce(&Row<'_>) -> rusqlite::Result<T>,
     ) -> rusqlite::Result<T> {
-        self.authorization.check_sql(sql)?;
-        self.begin_app_statement()?;
-        self.authorization.begin_read_statement();
-        let result = (|| {
-            let mut statement = self.app_statement(sql)?;
-            let parameters = crate::sql_value::parameters(&self.connection, &statement, params)?;
-            let plan = self.live_scope_plan(sql, &statement)?;
-            let result = self.counting_steps(&mut statement, ReadSteps::App, |statement| {
-                let mut rows = statement.query(rusqlite::params_from_iter(&parameters))?;
-                let row = {
-                    let _scope = self.authorization.step();
-                    self.authorization.app_result(rows.next())?
-                };
-                map(row.ok_or(rusqlite::Error::QueryReturnedNoRows)?)
-            });
-            self.record_app_statement(plan.as_deref(), &parameters);
-            result
-        })();
-        self.authorization.app_result(result)
+        let mut map = Some(map);
+        let mut value = None;
+        self.app_rows(sql, params, |row| {
+            let map = map.take().expect("the first row ends the read");
+            value = Some(map(row)?);
+            Ok(false)
+        })?;
+        value.ok_or(rusqlite::Error::QueryReturnedNoRows)
     }
 
     pub(crate) fn app_query<T, P: Params>(
@@ -670,6 +659,23 @@ impl DatabaseConnection {
         params: P,
         mut map: impl FnMut(&Row<'_>) -> rusqlite::Result<T>,
     ) -> rusqlite::Result<Vec<T>> {
+        let mut values = Vec::new();
+        self.app_rows(sql, params, |row| {
+            values.push(map(row)?);
+            Ok(true)
+        })?;
+        Ok(values)
+    }
+
+    /// Run an app statement and hand `each` its rows in order, under the
+    /// authorizer's read and step scopes, until the rows end or `each`
+    /// answers false.
+    fn app_rows<P: Params>(
+        &self,
+        sql: &str,
+        params: P,
+        mut each: impl FnMut(&Row<'_>) -> rusqlite::Result<bool>,
+    ) -> rusqlite::Result<()> {
         self.authorization.check_sql(sql)?;
         self.begin_app_statement()?;
         self.authorization.begin_read_statement();
@@ -679,16 +685,16 @@ impl DatabaseConnection {
             let plan = self.live_scope_plan(sql, &statement)?;
             let result = self.counting_steps(&mut statement, ReadSteps::App, |statement| {
                 let mut rows = statement.query(rusqlite::params_from_iter(&parameters))?;
-                let mut values = Vec::new();
                 loop {
                     let row = {
                         let _scope = self.authorization.step();
                         self.authorization.app_result(rows.next())?
                     };
-                    let Some(row) = row else { break };
-                    values.push(map(row)?);
+                    let Some(row) = row else { return Ok(()) };
+                    if !each(row)? {
+                        return Ok(());
+                    }
                 }
-                Ok(values)
             });
             self.record_app_statement(plan.as_deref(), &parameters);
             result
