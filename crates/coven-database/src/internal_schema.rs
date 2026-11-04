@@ -113,6 +113,9 @@ mod object_removals_schema;
 #[path = "operation_schema.rs"]
 mod operation_schema;
 #[macro_use]
+#[path = "ownership_schema.rs"]
+mod ownership_schema;
+#[macro_use]
 #[path = "pending_schema.rs"]
 mod pending_schema;
 #[macro_use]

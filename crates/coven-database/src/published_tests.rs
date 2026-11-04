@@ -41,8 +41,6 @@ pub(crate) fn scan_reason(
     Some("restoration reads every preserved row"),
 ("published.rs", "SELECT record FROM _coven_published_losses ORDER BY id", "_coven_published_losses") =>
     Some("restoration reads every preserved loss"),
-("published.rs", "INSERT INTO _coven_creations SELECT * FROM _coven_published_creations", "_coven_published_creations") =>
-    Some("restoration installs every preserved creation"),
 ("published_migration.rs", "CREATE TEMP TABLE _coven_carried_rows AS SELECT * FROM _coven_published_rows; DELETE FROM _coven_published_rows", "_coven_published_rows") =>
     Some("a migration carries every preserved row through schema changes"),
 _ => None,

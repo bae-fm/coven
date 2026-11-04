@@ -92,8 +92,9 @@ async fn a_captured_transaction_skips_tables_no_live_query_reads() {
             writer
                 .batch(&format!(
                     "INSERT INTO notes VALUES ('1','a');
-                     INSERT INTO _coven_creations VALUES('notes',x'01','store',zeroblob(16),x'00');
+                     {};
                      {};",
+                    crate::ownership::tests::CREATED,
                     crate::file_queue::tests::PAUSE
                 ))
                 .unwrap();

@@ -270,12 +270,13 @@ pub(crate) fn restore(
     for row in rows {
         let audience = audience_text(&row.audience);
         crate::write_commit::delete_children(db, &crate::write_commit::StoredRows::Row(&row))?;
-        for table in ["_coven_rows", "_coven_lost", "_coven_creations"] {
+        for table in ["_coven_rows", "_coven_lost"] {
             db.internal_execute(
                 &format!("DELETE FROM {table} WHERE table_name=?1 AND key=?2 AND audience=?3"),
                 params![row.table, row.key, audience],
             )?;
         }
+        crate::ownership::forget_row(db, &row)?;
         if schema.schema.tables.contains_key(&row.table.to_ascii_lowercase()) {
             touched.insert(row);
         }
@@ -321,10 +322,7 @@ pub(crate) fn restore(
         let loss = decoded(merge_fields::decode_loss(&r.get::<_, Vec<u8>>(0)?))?;
         crate::loss_record::keep(db, schema, &loss)
     })?;
-    db.internal_execute(
-        "INSERT INTO _coven_creations SELECT * FROM _coven_published_creations",
-        [],
-    )?;
+    crate::ownership::restore_published(db)?;
     clear(db)?;
     Ok(touched)
 }

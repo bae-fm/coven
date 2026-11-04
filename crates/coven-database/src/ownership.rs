@@ -107,6 +107,31 @@ pub(crate) fn put(
     Ok(())
 }
 
+/// A loaded snapshot's creation, as `snapshot_install` copies each from the
+/// staged snapshot after `clear_audience` removed the audience's earlier ones.
+pub(crate) const LOADED: &str =
+    "INSERT INTO _coven_creations(table_name,key,audience,write_id,creator) VALUES(?1,?2,?3,?4,?5)";
+
+/// Put back the creations the counted projection kept of the rows it
+/// preserved (`published`).
+pub(crate) fn restore_published(db: &DatabaseConnection) -> Result<(), DbError> {
+    db.internal_execute(
+        "INSERT INTO _coven_creations SELECT * FROM _coven_published_creations",
+        [],
+    )?;
+    Ok(())
+}
+
+/// Forget `row`'s creation, which a restoration puts back from what the
+/// counted projection kept.
+pub(crate) fn forget_row(db: &DatabaseConnection, row: &RowId) -> Result<(), DbError> {
+    db.internal_execute(
+        "DELETE FROM _coven_creations WHERE table_name=?1 AND key=?2 AND audience=?3",
+        params![row.table, row.key, audience_text(&row.audience)],
+    )?;
+    Ok(())
+}
+
 /// Forget an audience's creations before a loaded snapshot supplies them.
 pub(crate) fn clear_audience(db: &DatabaseConnection, audience: &Audience) -> Result<(), DbError> {
     db.internal_execute(
@@ -171,4 +196,4 @@ pub(crate) fn forget_table(db: &DatabaseConnection, table: &str) -> Result<(), D
 
 #[cfg(test)]
 #[path = "ownership_tests.rs"]
-mod tests;
+pub(crate) mod tests;

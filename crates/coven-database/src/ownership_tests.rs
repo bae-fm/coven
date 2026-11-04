@@ -145,3 +145,35 @@ async fn a_table_rename_keeps_the_original_creation() {
     assert_eq!(selected(&db, &row(0)), None);
     db.close().await.unwrap();
 }
+
+/// An internal write of a creation, for tests that run one beside the app's.
+pub(crate) const CREATED: &str =
+    "INSERT INTO _coven_creations VALUES('notes',x'01','store',zeroblob(16),x'00')";
+
+/// The scans this module's statements may make, with their reasons, for the
+/// plan audit (`internal_schema_scan_reasons.rs`): `template` is the statement as
+/// written, `sql` as run.
+pub(crate) fn scan_reason(
+    file: &str,
+    template: &str,
+    _sql: &str,
+    relation: &str,
+) -> Option<&'static str> {
+    match (file, template, relation) {
+        (
+            "ownership.rs",
+            "INSERT INTO _coven_creations SELECT * FROM _coven_published_creations",
+            "_coven_published_creations",
+        ) => Some("restoration installs every preserved creation"),
+        _ => None,
+    }
+}
+
+/// Fill this domain's tables from the rows of the plan audit's `fixture`
+/// table, inside its transaction (`internal_schema_scan_reasons_tests.rs`).
+pub(crate) fn fill_for_plans(db: &rusqlite::Connection) {
+    db.execute_batch(
+        "INSERT INTO _coven_creations SELECT tab,key,audience,CAST(device || n AS BLOB),x'00' FROM fixture;",
+    )
+    .unwrap();
+}

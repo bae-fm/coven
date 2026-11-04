@@ -610,7 +610,7 @@ pub(crate) fn creations(
             "SELECT table_name,key,audience,write_id,creator FROM {} ORDER BY rowid",
             prepared.table("creations")
         ),
-        "INSERT INTO _coven_creations(table_name,key,audience,write_id,creator) VALUES(?1,?2,?3,?4,?5)",
+        crate::ownership::LOADED,
     )
 }
 
