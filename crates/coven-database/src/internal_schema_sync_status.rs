@@ -54,6 +54,11 @@ pub enum RecordedLocation<P> {
 }
 
 impl<P> RecordedLocation<P> {
+    /// A location is recorded and this device holds its credentials.
+    pub fn is_connected(&self) -> bool {
+        matches!(self, Self::Connected(_))
+    }
+
     /// The same location, with its provider as `name` gives it.
     pub fn map<Q>(self, name: impl FnOnce(P) -> Q) -> RecordedLocation<Q> {
         match self {

@@ -748,7 +748,7 @@ impl OpeningStore {
             .credentials
             .location(&coven_storage::StorageSettings::new(owners.directory.clone()))
             .map_err(sync_error)?;
-        let configured = matches!(location, coven_database::RecordedLocation::Connected(_));
+        let configured = location.is_connected();
         // Boxed, so `open`'s future stays as small as an app's stack needs
         // (`application_api_tests.rs`).
         Box::pin(crate::storage::record_opened(&database, &owners.clock, location, None))

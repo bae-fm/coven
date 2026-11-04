@@ -287,10 +287,7 @@ impl StorageConnections {
         location: coven_database::RecordedLocation<CloudProvider>,
         finished: Option<std::time::SystemTime>,
     ) -> Result<(), SyncError> {
-        self.configured.store(
-            matches!(location, coven_database::RecordedLocation::Connected(_)),
-            Ordering::SeqCst,
-        );
+        self.configured.store(location.is_connected(), Ordering::SeqCst);
         coven_sync::record_location(&self.database, location, finished)
             .await
             .map_err(SyncError::from)

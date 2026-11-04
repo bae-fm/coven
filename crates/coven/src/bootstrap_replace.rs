@@ -205,7 +205,7 @@ pub(super) async fn publish(
     location: coven_database::RecordedLocation<CloudProvider>,
     finished: Option<std::time::SystemTime>,
 ) -> Result<CovenHandle, BootstrapError> {
-    let configured = matches!(location, coven_database::RecordedLocation::Connected(_));
+    let configured = location.is_connected();
     if let Err(error) =
         crate::storage::record_opened(&database, &owners.clock, location, finished).await
     {
