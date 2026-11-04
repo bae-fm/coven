@@ -78,7 +78,7 @@ pub(crate) fn carry(
     })?;
     db.batch("DROP TABLE temp._coven_carried_losses")?;
     for loss in removed.iter().filter(|loss| !names.tables.contains_key(&loss.row.table)) {
-        let loss = crate::migration_state::frozen(loss.clone());
+        let loss = loss.clone().freeze();
         crate::published::put_loss(db, &loss)?;
         frozen.push(loss);
     }
@@ -103,7 +103,7 @@ fn carry_loss(
     };
     if !names.columns.contains_key(&(old.clone(), name.clone())) {
         loss.values = LossValues::Cell { column: name, cell };
-        return Ok(crate::migration_state::frozen(loss));
+        return Ok(loss.freeze());
     }
     loss.row.table = names.tables[&old].clone();
     let (name, value) = column(names, schema, &old, name, cell.value).expect("surviving column");

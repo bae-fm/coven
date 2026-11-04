@@ -97,17 +97,14 @@ impl<'c> Hidden<'c> {
             Some((original, state)) => (original.clone(), state.clone()),
             None => (row.clone(), store.row_without_losses(row)?.state),
         };
-        let mut cells = state.cells().clone();
-        for cell in cells.values_mut() {
-            cell.value.parents.clear();
-        }
         let loss = Loss {
             row: original,
             generation: state.generation(),
-            frozen: true,
-            values: LossValues::Row(cells),
+            frozen: false,
+            values: LossValues::Row(state.cells().clone()),
             cause: LossCause::Excluded { write: migration, version },
-        };
+        }
+        .freeze();
         let db = self.database;
         db.internal_execute(
             "INSERT INTO _coven_migration_losses(write_id,audience,record) VALUES(?1,?2,?3)",

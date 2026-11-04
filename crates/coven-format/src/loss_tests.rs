@@ -20,11 +20,7 @@ fn raw(loss: &Loss) -> Vec<u8> {
 
 #[test]
 fn frozen_change_decoding_refuses_parent_maps() {
-    let mut original = test_utils::excluded_loss();
-    let LossValues::Row(cells) = &mut original.values else { unreachable!() };
-    for cell in cells.values_mut() {
-        cell.value.parents.clear();
-    }
+    let original = test_utils::excluded_loss().freeze();
     let write = test_utils::write().header.position;
     for cause in [
         LossCause::Dependency {
@@ -59,6 +55,10 @@ fn frozen_change_decoding_refuses_parent_maps() {
         assert!(crate::merge_fields::decode_loss(&bytes.bytes).is_err(), "{:?}", loss.cause);
         let (_, mut decoder) = encoder(1);
         assert!(decoder.frame(&raw(&loss), &test_utils::oracle()).is_err());
+        // Freezing drops the live parent links a frozen record refuses.
+        let refrozen = loss.freeze();
+        let bytes = crate::merge_fields::encode_loss(&refrozen).unwrap();
+        assert_eq!(crate::merge_fields::decode_loss(&bytes).unwrap(), refrozen);
     }
 }
 

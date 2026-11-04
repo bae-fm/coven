@@ -234,6 +234,21 @@ impl Loss {
         }
     }
 
+    /// This loss frozen outside merge: it keeps its written values, setters,
+    /// names and cause, without live parent links (D7).
+    pub fn freeze(mut self) -> Self {
+        self.frozen = true;
+        match &mut self.values {
+            LossValues::Cell { cell, .. } => cell.value.parents.clear(),
+            LossValues::Row(cells) => {
+                for cell in cells.values_mut() {
+                    cell.value.parents.clear();
+                }
+            }
+        }
+        self
+    }
+
     /// Project a row removed by rules into the common record.
     pub fn removed(state: &coven_merge::RowState<Value>, rules: BTreeSet<Rule>) -> Self {
         Self {

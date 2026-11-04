@@ -69,7 +69,7 @@ pub(crate) fn freeze(db: &DatabaseConnection, ids: Vec<i64>) -> Result<(), DbErr
             [id],
             crate::loss_record::read,
         )?;
-        let loss = frozen(loss);
+        let loss = loss.freeze();
         db.internal_execute(
             "INSERT INTO temp._coven_migration_frozen(audience,record) VALUES(?1,?2)",
             params![
@@ -80,20 +80,6 @@ pub(crate) fn freeze(db: &DatabaseConnection, ids: Vec<i64>) -> Result<(), DbErr
         crate::loss_record::put(db, &loss, Some(id))?;
     }
     Ok(())
-}
-
-/// The frozen form of a loss record.
-pub(crate) fn frozen(mut loss: coven_format::loss::Loss) -> coven_format::loss::Loss {
-    loss.frozen = true;
-    match &mut loss.values {
-        coven_format::loss::LossValues::Cell { cell, .. } => cell.value.parents.clear(),
-        coven_format::loss::LossValues::Row(cells) => {
-            for cell in cells.values_mut() {
-                cell.value.parents.clear();
-            }
-        }
-    }
-    loss
 }
 
 fn rename_table(db: &DatabaseConnection, old: &str, new: &str) -> Result<(), DbError> {

@@ -395,7 +395,7 @@ fn freeze(
     change: &RowChange,
     cause: LossCause,
 ) -> Result<(), DbError> {
-    let mut values = match &change.change.operation {
+    let values = match &change.change.operation {
         Operation::Insert(values) | Operation::Update(values) => values.clone(),
         Operation::Delete => change
             .old
@@ -405,14 +405,10 @@ fn freeze(
             })
             .collect(),
     };
-    // Frozen display values have no live parent links (D5).
-    for value in values.values_mut() {
-        value.parents.clear();
-    }
     let loss = coven_format::loss::Loss {
         row: change.row.clone(),
         generation: change.change.generation,
-        frozen: true,
+        frozen: false,
         values: coven_format::loss::LossValues::Row(
             values
                 .into_iter()
@@ -420,6 +416,7 @@ fn freeze(
                 .collect(),
         ),
         cause,
-    };
+    }
+    .freeze();
     crate::loss_record::keep(database, schema, &loss)
 }
