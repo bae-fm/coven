@@ -173,7 +173,7 @@ pub(crate) fn put_table(
     let (column, value, setter) = match &loss.values {
         LossValues::Cell { column, cell } => (
             Some(if loss.frozen {
-                crate::write_commit::frozen_column(database, &loss.row.table, column)?
+                crate::row_queries::frozen_column(database, &loss.row.table, column)?
             } else {
                 database.column_id(&loss.row.table, column)?
             }),

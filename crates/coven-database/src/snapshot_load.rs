@@ -180,7 +180,7 @@ pub(crate) fn read(
             let synced = schema.declarations.iter().any(|declaration| declaration.name == table)
                 && schema.table(&table).columns.iter().any(|c| c.name == column);
             if !synced {
-                crate::write_commit::frozen_column(database, &table, &column)?;
+                crate::row_queries::frozen_column(database, &table, &column)?;
             }
             database.internal_execute(
                 "INSERT INTO temp._coven_snapshot_columns(table_name,column_name) VALUES(?1,?2)",

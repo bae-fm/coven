@@ -296,25 +296,6 @@ pub(crate) fn plaintext(
     Ok(bytes)
 }
 
-/// The row of a column a frozen loss names. Frozen values keep columns a
-/// breaking migration dropped (§18.7); such a column no longer syncs, so it
-/// has a row only once a frozen loss names it. A synced column is registered.
-pub(crate) fn frozen_column(
-    database: &DatabaseConnection,
-    table: &str,
-    column: &str,
-) -> Result<i64, DbError> {
-    database.internal_execute(
-        "INSERT INTO _coven_columns(table_name,column_name,synced) VALUES(?1,?2,0) ON CONFLICT DO NOTHING",
-        rusqlite::params![table, column],
-    )?;
-    database.query_row(
-        "SELECT id FROM _coven_columns WHERE table_name=?1 AND column_name=?2",
-        rusqlite::params![table, column],
-        |r| r.get(0),
-    )
-}
-
 /// The cells a row's write sets, as one statement: each is a column id and
 /// the write's ordinal. SQLite takes up to 32,766 parameters a statement.
 fn store_cells(

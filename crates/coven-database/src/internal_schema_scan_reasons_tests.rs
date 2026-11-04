@@ -75,7 +75,6 @@ mod fixture {
             CAST(printf('%032d',i) AS BLOB) AS key,
             CAST(printf('%016d',i) AS BLOB) AS member FROM numbers;
      INSERT INTO coven_files SELECT 'file_' || i,audience,1,zeroblob(32),'device 1','files' FROM fixture;
-     INSERT INTO _coven_columns SELECT i,tab,'column_' || i,1 FROM fixture;
      INSERT INTO _coven_rows SELECT i,tab,key,audience,counter(1),i FROM fixture;
      INSERT INTO _coven_cells
        SELECT (i-1)%1024+1+offset,i,i FROM fixture

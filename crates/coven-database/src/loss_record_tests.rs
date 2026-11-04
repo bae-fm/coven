@@ -42,15 +42,11 @@ fn insert(
 async fn losses_preserve_storage_classes_each_setter_and_every_replacement() {
     let store = TestStore::new();
     let db = store.builder(vec![], vec![]).open().await.unwrap();
-    db.commit_writer(|sql| {
-        sql.batch(
-            "INSERT INTO _coven_columns(id,table_name,column_name,synced) VALUES (100,'notes','title',1)",
-        )
-        .unwrap()
-    });
+    let title =
+        db.commit_writer(|sql| crate::row_queries::frozen_column(sql, "notes", "title").unwrap());
     insert(
         &db,
-        Some(100),
+        Some(title),
         encode_column_value(&cell(WireValue::Blob(vec![0, 255]))).unwrap(),
         encode_write_id(&setter(u64::MAX)).unwrap(),
         "write",
@@ -276,12 +272,12 @@ async fn corrupt_values_fail_typed_and_live_losses_recover_after_repair() {
 async fn wrong_column_table_is_a_damaged_database() {
     let store = TestStore::new();
     let db = store.schema(vec![], "CREATE TABLE notes(title)").await.unwrap();
-    db.commit_writer(|sql| {
-        sql.batch("INSERT INTO _coven_columns VALUES (100,'other_table','title',1)").unwrap()
+    let column = db.commit_writer(|sql| {
+        crate::row_queries::frozen_column(sql, "other_table", "title").unwrap()
     });
     insert(
         &db,
-        Some(100),
+        Some(column),
         encode_column_value(&cell(WireValue::Null)).unwrap(),
         encode_write_id(&setter(1)).unwrap(),
         "write",

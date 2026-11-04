@@ -15,6 +15,7 @@ pub(super) fn reason(statement: &Statement, relation: &str) -> Option<&'static s
     database_reason(statement, relation)
         .or_else(|| crate::store_state_tables::tests::scan_reason(file, template, sql, relation))
         .or_else(|| crate::published::tests::scan_reason(file, template, sql, relation))
+        .or_else(|| crate::row_queries::tests::scan_reason(file, template, sql, relation))
         .or_else(|| crate::write_sources::tests::scan_reason(file, template, sql, relation))
         .or_else(|| crate::ownership::tests::scan_reason(file, template, sql, relation))
         .or_else(|| crate::file_removals::tests::scan_reason(file, template, sql, relation))
@@ -157,12 +158,8 @@ fn database_reason(statement: &Statement, relation: &str) -> Option<&'static str
 ("migration_state.rs", "SELECT id,table_name,identity FROM _coven_constraints", "_coven_constraints") =>
     Some("once per migration: carry all unique constraints through schema changes"),
 ("migration_state.rs", "DELETE FROM _coven_cells WHERE column_id=?1"
-    | "UPDATE {table} SET column_id=?2 WHERE column_id=?1"
-    | "DELETE FROM _coven_columns WHERE id=?1"
-    | "DELETE FROM _coven_columns WHERE id=?1 AND NOT EXISTS(SELECT 1 FROM _coven_lost WHERE column_id=?1)", "_coven_cells") =>
+    | "UPDATE {table} SET column_id=?2 WHERE column_id=?1", "_coven_cells") =>
     Some("once per migration: move/drop a column and check its cell references"),
-("_coven_lost_column_deleted" | "_coven_lost_column_moved", "DELETE FROM _coven_columns WHERE id=?4 AND synced=0 AND NOT EXISTS(SELECT 1 FROM _coven_lost WHERE column_id=?4)", "_coven_cells") =>
-    Some("only a dropped column's last frozen loss deletes a row, and SQLite then checks the cells' foreign key"),
 ("reload_gate.rs", "SELECT audience FROM _coven_data_reloads", "_coven_data_reloads") =>
     Some("sync schedules every audience awaiting replacement data"),
 ("sequence.rs", "SELECT device,number,digest FROM _coven_last_claims ORDER BY device", "_coven_last_claims") =>

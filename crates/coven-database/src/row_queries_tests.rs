@@ -134,9 +134,29 @@ async fn every_synced_column_and_foreign_key_is_registered_before_any_write_name
 /// table, inside its transaction (`internal_schema_scan_reasons_tests.rs`).
 pub(crate) fn fill_for_plans(db: &rusqlite::Connection) {
     db.execute_batch(
-        "INSERT INTO _coven_constraints SELECT i,tab,n FROM fixture;
+        "INSERT INTO _coven_columns SELECT i,tab,'column_' || i,1 FROM fixture;
+         INSERT INTO _coven_constraints SELECT i,tab,n FROM fixture;
          INSERT INTO _coven_foreign_keys SELECT i,tab,n FROM fixture;
          INSERT INTO _coven_owner_tables SELECT DISTINCT 'table_' || i FROM fixture;",
     )
     .unwrap();
+}
+
+/// The scans this module's statements may make, with their reasons, for the
+/// plan audit (`internal_schema_scan_reasons.rs`): `template` is the statement as
+/// written, `sql` as run.
+pub(crate) fn scan_reason(
+    file: &str,
+    template: &str,
+    _sql: &str,
+    relation: &str,
+) -> Option<&'static str> {
+    match (file, template, relation) {
+("row_queries.rs", "DELETE FROM _coven_columns WHERE id=?1"
+    | "DELETE FROM _coven_columns WHERE id=?1 AND NOT EXISTS(SELECT 1 FROM _coven_lost WHERE column_id=?1)", "_coven_cells") =>
+    Some("once per migration: drop a column, and SQLite then checks the cells' foreign key"),
+("_coven_lost_column_deleted" | "_coven_lost_column_moved", "DELETE FROM _coven_columns WHERE id=?4 AND synced=0 AND NOT EXISTS(SELECT 1 FROM _coven_lost WHERE column_id=?4)", "_coven_cells") =>
+    Some("only a dropped column's last frozen loss deletes a row, and SQLite then checks the cells' foreign key"),
+        _ => None,
+    }
 }

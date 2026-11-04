@@ -70,6 +70,103 @@ pub(crate) fn register_schema(
     Ok(())
 }
 
+/// The row of a column a frozen loss names. Frozen values keep columns a
+/// breaking migration dropped (§18.7); such a column no longer syncs, so it
+/// has a row only once a frozen loss names it. A synced column is registered.
+pub(crate) fn frozen_column(
+    database: &DatabaseConnection,
+    table: &str,
+    column: &str,
+) -> Result<i64, DbError> {
+    database.internal_execute(
+        "INSERT INTO _coven_columns(table_name,column_name,synced) VALUES(?1,?2,0) ON CONFLICT DO NOTHING",
+        rusqlite::params![table, column],
+    )?;
+    database.query_row(
+        "SELECT id FROM _coven_columns WHERE table_name=?1 AND column_name=?2",
+        rusqlite::params![table, column],
+        |r| r.get(0),
+    )
+}
+
+/// The table name a migration parks a column under while it moves columns
+/// between tables, so two can trade names (§18).
+const COLUMN_STAGED: &str = "coven_migration_column_";
+
+/// Column `id`, which a migration dropped, no longer syncs. Its row stays
+/// only while a frozen loss names it (§18.7).
+pub(crate) fn drop_column(database: &DatabaseConnection, id: i64) -> Result<(), DbError> {
+    retire_column(database, id)?;
+    database.internal_execute(
+        "DELETE FROM _coven_columns WHERE id=?1 AND NOT EXISTS(SELECT 1 FROM _coven_lost WHERE column_id=?1)",
+        [id],
+    )?;
+    Ok(())
+}
+
+/// Column `id` keeps its old name only for the frozen losses that name it,
+/// while a migration moves its cells to another column.
+pub(crate) fn retire_column(database: &DatabaseConnection, id: i64) -> Result<(), DbError> {
+    database.internal_execute("UPDATE _coven_columns SET synced=0 WHERE id=?1", [id])?;
+    Ok(())
+}
+
+/// Park column `id` under its staged table name with its new name `column`,
+/// until the migration gives it its new table.
+pub(crate) fn stage_column(
+    database: &DatabaseConnection,
+    id: i64,
+    column: &str,
+) -> Result<(), DbError> {
+    rename_column(database, id, &format!("{COLUMN_STAGED}{id}"), column)
+}
+
+/// A new synced column, parked under the staged table name of column `id`
+/// with the name `column`, to take over `id`'s cells while `id` stays for
+/// the frozen losses that name it; its row id.
+pub(crate) fn stage_successor(
+    database: &DatabaseConnection,
+    id: i64,
+    column: &str,
+) -> Result<i64, DbError> {
+    let staged = format!("{COLUMN_STAGED}{id}");
+    database.internal_execute(
+        "INSERT INTO _coven_columns(table_name,column_name,synced) VALUES(?1,?2,1)",
+        params![staged, column],
+    )?;
+    database.query_row(
+        "SELECT id FROM _coven_columns WHERE table_name=?1 AND column_name=?2",
+        params![staged, column],
+        |r| r.get(0),
+    )
+}
+
+/// Give column `id` the table and name it has after the migration.
+pub(crate) fn rename_column(
+    database: &DatabaseConnection,
+    id: i64,
+    table: &str,
+    column: &str,
+) -> Result<(), DbError> {
+    database.internal_execute(
+        "UPDATE _coven_columns SET table_name=?2,column_name=?3 WHERE id=?1",
+        params![id, table, column],
+    )?;
+    Ok(())
+}
+
+/// Column `id`, whose cells the migration moved to `into`, goes; `into`,
+/// a dropped column a frozen loss kept, syncs again.
+pub(crate) fn merge_column(
+    database: &DatabaseConnection,
+    id: i64,
+    into: i64,
+) -> Result<(), DbError> {
+    database.internal_execute("DELETE FROM _coven_columns WHERE id=?1", [id])?;
+    database.internal_execute("UPDATE _coven_columns SET synced=1 WHERE id=?1", [into])?;
+    Ok(())
+}
+
 /// The first registered synced table whose `owner_only` declaration differs
 /// from the one last registered. A table never registered has no earlier
 /// declaration to change.

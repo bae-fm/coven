@@ -206,7 +206,7 @@ async fn internal_schema_migrations_roll_back_on_failure() {
     let store = TestStore::new();
     let raw = Connection::open(store.database_path()).unwrap();
     raw.execute_batch(
-        "CREATE TABLE _coven_columns(sentinel TEXT); INSERT INTO _coven_columns VALUES('kept')",
+        "CREATE TABLE coven_files(sentinel TEXT); INSERT INTO coven_files VALUES('kept')",
     )
     .unwrap();
     drop(raw);
@@ -219,8 +219,7 @@ async fn internal_schema_migrations_roll_back_on_failure() {
         1
     );
     assert_eq!(
-        raw.query_row("SELECT sentinel FROM _coven_columns", [], |r| r.get::<_, String>(0))
-            .unwrap(),
+        raw.query_row("SELECT sentinel FROM coven_files", [], |r| r.get::<_, String>(0)).unwrap(),
         "kept"
     );
 }

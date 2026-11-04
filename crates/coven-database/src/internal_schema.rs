@@ -196,18 +196,6 @@ macro_rules! coven_tables {
         coven_claim_tables!($visit);
         coven_conversion_schemas_tables!($visit);
         coven_source_names_tables!($visit);
-        // A synced column, or a column a breaking migration dropped, which
-        // has a row only while a frozen lost value names it (§18.7): the
-        // deletion or move of the last one deletes it.
-        $visit!(_coven_columns, "
-            CREATE TABLE _coven_columns (
-                id INTEGER PRIMARY KEY,
-                table_name TEXT NOT NULL,
-                column_name TEXT NOT NULL,
-                synced INTEGER NOT NULL CHECK(synced IN (0,1)),
-                UNIQUE(table_name, column_name)
-            ) STRICT;
-        ");
         $visit!(_coven_rows, "
             CREATE TABLE _coven_rows (
                 id INTEGER PRIMARY KEY,
@@ -288,6 +276,7 @@ pub(crate) fn initial_schema() -> String {
         };
     }
     coven_tables!(append);
+    sql.push_str(row_queries_schema::COLUMN_RELEASE);
     sql.push_str(files::SCHEMA);
     sql.push_str(&pins::schema());
     sql.push_str(upload_queue::SCHEMA);
