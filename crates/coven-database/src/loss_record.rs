@@ -1,7 +1,7 @@
 //! The common durable loss record and its snapshot projection.
 
 use crate::sqlite::DatabaseConnection;
-use crate::write_encoding::{audience_text, counter, encoded};
+use crate::write_encoding::{audience_text, counter, damaged, decoded, encoded};
 use crate::DbError;
 use coven_format::value::Value;
 use coven_format::{
@@ -75,12 +75,12 @@ pub(crate) fn visit_table<E: From<DbError>>(
 
 pub(crate) fn read(r: &rusqlite::Row<'_>) -> rusqlite::Result<Loss> {
     let row = crate::row_queries::read_identity(r)?;
-    let generation = counter(r.get(3)?);
+    let generation = counter(r.get(3)?)?;
     let column: Option<String> = r.get(4)?;
     let column_id: Option<i64> = r.get(10)?;
     let column_table: Option<String> = r.get(11)?;
     if column_id.is_some() && (column.is_none() || column_table.as_ref() != Some(&row.table)) {
-        return Err(damaged());
+        return Err(damaged(0, rusqlite::types::Type::Blob));
     }
     let value: Vec<u8> = r.get(5)?;
     let setter: Vec<u8> = r.get(6)?;
@@ -100,12 +100,14 @@ pub(crate) fn read(r: &rusqlite::Row<'_>) -> rusqlite::Result<Loss> {
             let cells = columns
                 .into_iter()
                 .map(|(name, value)| {
-                    let write = setters.remove(&name).ok_or_else(damaged)?;
+                    let write = setters
+                        .remove(&name)
+                        .ok_or_else(|| damaged(0, rusqlite::types::Type::Blob))?;
                     Ok((name, Cell { write, value }))
                 })
                 .collect::<rusqlite::Result<_>>()?;
             if !setters.is_empty() {
-                return Err(damaged());
+                return Err(damaged(0, rusqlite::types::Type::Blob));
             }
             LossValues::Row(cells)
         }
@@ -125,7 +127,7 @@ pub(crate) fn read(r: &rusqlite::Row<'_>) -> rusqlite::Result<Loss> {
             let (write, reason) = decoded(merge_fields::decode_unauthorized(&replacement))?;
             LossCause::NotAuthorized { write, reason }
         }
-        _ => return Err(damaged()),
+        _ => return Err(damaged(0, rusqlite::types::Type::Blob)),
     };
     if !matches!(
         (&values, &cause),
@@ -138,7 +140,7 @@ pub(crate) fn read(r: &rusqlite::Row<'_>) -> rusqlite::Result<Loss> {
                     | LossCause::NotAuthorized { .. }
             )
     ) {
-        return Err(damaged());
+        return Err(damaged(0, rusqlite::types::Type::Blob));
     }
     Ok(Loss { row, generation, frozen: r.get(9)?, values, cause })
 }
@@ -342,7 +344,7 @@ pub(crate) fn rename_removed_values(
         [table],
         |r| Ok((r.get::<_, i64>(0)?, r.get::<_, Vec<u8>>(1)?)),
     )? {
-        let values = crate::write_encoding::decoded(merge_fields::decode_columns(&bytes))?;
+        let values = decoded(merge_fields::decode_columns(&bytes))?;
         let renamed: BTreeMap<_, _> = values
             .into_iter()
             .filter_map(|(column, value)| match columns.get(&column) {
@@ -378,7 +380,7 @@ pub(crate) fn carry_cell_values(
 ) -> Result<(), DbError> {
     database.for_each::<_, DbError>("SELECT id,value FROM _coven_lost WHERE table_name=?1 AND frozen=0 AND replacement_kind='write'",[table],|r| {
         let id: i64 = r.get(0)?;
-        let old = crate::write_encoding::decoded(merge_fields::decode_column_value(&r.get::<_,Vec<u8>>(1)?))?;
+        let old = decoded(merge_fields::decode_column_value(&r.get::<_,Vec<u8>>(1)?))?;
         let value = carry(old.clone());
         if value != old {
             database.internal_execute("UPDATE _coven_lost SET value=?2 WHERE id=?1",params![id,encoded(merge_fields::encode_column_value(&value))?])?;
@@ -457,7 +459,7 @@ pub(crate) fn removed(
         |r| {
             Ok(RemovedRow {
                 loss: r.get(0)?,
-                columns: crate::write_encoding::decoded(merge_fields::decode_columns(
+                columns: decoded(merge_fields::decode_columns(
                     &r.get::<_, Vec<u8>>(1)?,
                 ))?,
             })
@@ -467,17 +469,6 @@ pub(crate) fn removed(
         return Err(DbError::DamagedDatabase);
     }
     Ok(removed.pop())
-}
-
-fn damaged() -> rusqlite::Error {
-    rusqlite::Error::UserFunctionError(Box::new(DbError::DamagedDatabase))
-}
-#[expect(
-    clippy::map_err_ignore,
-    reason = "stored bytes that fail to decode are damage, which damaged() names"
-)]
-fn decoded<T>(result: Result<T, coven_format::Error>) -> rusqlite::Result<T> {
-    result.map_err(|_| damaged())
 }
 
 #[cfg(test)]

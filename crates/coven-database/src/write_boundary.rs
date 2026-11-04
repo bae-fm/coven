@@ -190,7 +190,7 @@ fn retained(database: &DatabaseConnection) -> Result<Vec<RetainedBoundary>, DbEr
             let snapshot = SnapshotId {
                 audience: audience(&row.get::<_, String>(2)?)?,
                 device: row.get::<_, DeviceId>(3)?,
-                number: counter(row.get(4)?),
+                number: counter(row.get(4)?)?,
             };
             let entry = crate::store_state_tables::slot(row, 5)?;
             let boundary = match (row.get::<_, String>(0)?.as_str(), row.get::<_, Option<u32>>(1)?) {
@@ -198,7 +198,7 @@ fn retained(database: &DatabaseConnection) -> Result<Vec<RetainedBoundary>, DbEr
                 ("reset", None) => Boundary::Reset { entry, snapshot },
                 _ => return Err(rusqlite::Error::InvalidQuery),
             };
-            let included = row.get::<_, Option<Vec<u8>>>(6)?.map(counter);
+            let included = row.get::<_, Option<Vec<u8>>>(6)?.map(counter).transpose()?;
             Ok(RetainedBoundary { boundary, included, applied: row.get(7)? })
         },
     )

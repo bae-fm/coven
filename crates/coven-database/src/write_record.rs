@@ -513,7 +513,7 @@ pub(crate) fn generation(database: &DatabaseConnection, row: &RowId) -> Result<u
         |r| r.get(0),
     )?;
     Ok(match generation {
-        Some(generation) => counter(generation),
+        Some(generation) => counter(generation)?,
         None => 0,
     })
 }

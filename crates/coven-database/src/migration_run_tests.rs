@@ -78,7 +78,7 @@ async fn migrations_leave_unrelated_merge_rows_unloaded_in_a_ten_thousand_row_st
 
 fn setters(db: &Database, table: &str, key: &str) -> BTreeMap<String, u64> {
     let key = crate::tests::text_key(key);
-    db.inspect_writer(|db| db.query("SELECT c.column_name,w.number FROM _coven_cells v JOIN _coven_columns c ON c.id=v.column_id JOIN _coven_writes w ON w.id=v.write_id JOIN _coven_rows r ON r.id=v.row_id WHERE r.table_name=?1 AND r.key=?2 ORDER BY c.column_name", rusqlite::params![table,key], |r| Ok((r.get(0)?, crate::write_encoding::counter(r.get(1)?)))).unwrap().into_iter().collect())
+    db.inspect_writer(|db| db.query("SELECT c.column_name,w.number FROM _coven_cells v JOIN _coven_columns c ON c.id=v.column_id JOIN _coven_writes w ON w.id=v.write_id JOIN _coven_rows r ON r.id=v.row_id WHERE r.table_name=?1 AND r.key=?2 ORDER BY c.column_name", rusqlite::params![table,key], |r| Ok((r.get(0)?, crate::write_encoding::counter(r.get(1)?)?))).unwrap().into_iter().collect())
 }
 
 async fn seeded(store: &TestStore) -> Database {
@@ -420,7 +420,7 @@ async fn renames_keep_reference_generations_and_a_migration_insert_uses_the_merg
     assert_eq!(setters(&db, "children", "new")["root"], 2);
     assert_eq!(count(&db, "_coven_references"), 2);
     db.inspect_writer(|db| {
-        let references = db.query("SELECT f.identity,v.parent_table,v.parent_generation FROM _coven_references v JOIN _coven_foreign_keys f ON f.id=v.foreign_key_id",[],|r|Ok((coven_format::merge_fields::decode_foreign_key(&r.get::<_,Vec<u8>>(0)?).unwrap(),r.get::<_,String>(1)?,crate::write_encoding::counter(r.get(2)?)))).unwrap();
+        let references = db.query("SELECT f.identity,v.parent_table,v.parent_generation FROM _coven_references v JOIN _coven_foreign_keys f ON f.id=v.foreign_key_id",[],|r|Ok((coven_format::merge_fields::decode_foreign_key(&r.get::<_,Vec<u8>>(0)?).unwrap(),r.get::<_,String>(1)?,crate::write_encoding::counter(r.get(2)?)?))).unwrap();
         for (key,table,generation) in references {
             assert_eq!(key,coven_merge::ForeignKey::new(["root"],"roots",["key"]));
             assert_eq!(table,"roots");
@@ -527,7 +527,7 @@ async fn new_foreign_keys_set_existing_cells_and_name_the_new_parent_generation(
     assert_eq!(
         db.inspect_writer(|db| db
             .query_row("SELECT parent_generation FROM _coven_references", [], |r| {
-                Ok(crate::write_encoding::counter(r.get(0)?))
+                crate::write_encoding::counter(r.get(0)?)
             })
             .unwrap()),
         1
@@ -573,7 +573,7 @@ async fn changing_primary_key_arity_deletes_old_rows_and_inserts_new_ones() {
             .query(
                 "SELECT w.number FROM _coven_cells c JOIN _coven_writes w ON w.id=c.write_id",
                 [],
-                |r| Ok(crate::write_encoding::counter(r.get(0)?)),
+                |r| crate::write_encoding::counter(r.get(0)?),
             )
             .unwrap();
         assert_eq!(numbers, vec![3; 8]);

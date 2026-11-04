@@ -129,7 +129,7 @@ pub(crate) fn write<E>(
     if audience == Audience::Store {
         for kind in ["admin", "key", "announcement"] {
             db.for_each("SELECT slot,record FROM _coven_slot_records WHERE kind=?1 AND slot<=?2 ORDER BY slot",rusqlite::params![kind,covers.to_be_bytes()],|r| {
-                let original=coven_format::floor::OriginalSlot {slot:coven_merge::Slot(counter(r.get(0).map_err(DbError::from)?)),object:r.get(1).map_err(DbError::from)?};
+                let original=coven_format::floor::OriginalSlot {slot:coven_merge::Slot(counter(r.get(0).map_err(DbError::from)?).map_err(DbError::from)?),object:r.get(1).map_err(DbError::from)?};
                 record(match kind {"admin"=>SnapshotRecord::Admin(original),"key"=>SnapshotRecord::KeyCopy(original),_=>SnapshotRecord::Announcement(original)})
             })?;
         }
@@ -144,10 +144,10 @@ pub(crate) fn write<E>(
 pub(crate) fn read_write(r: &rusqlite::Row<'_>) -> rusqlite::Result<AppliedWrite> {
     let timestamp = decoded(merge_fields::decode_timestamp(&r.get::<_, Vec<u8>>(0)?))?;
     Ok(AppliedWrite {
-        id: WriteId { device: timestamp.device(), number: counter(r.get(1)?) },
+        id: WriteId { device: timestamp.device(), number: counter(r.get(1)?)? },
         timestamp,
-        read_through: counter(r.get(2)?),
-        slot: coven_merge::Slot(counter(r.get(3)?)),
+        read_through: counter(r.get(2)?)?,
+        slot: coven_merge::Slot(counter(r.get(3)?)?),
     })
 }
 

@@ -161,7 +161,7 @@ impl QueueEntry {
     fn read(row: &rusqlite::Row<'_>) -> rusqlite::Result<Self> {
         Ok(Self {
             rowid: row.get(0)?,
-            write: WriteId { device: row.get::<_, DeviceId>(1)?, number: counter(row.get(2)?) },
+            write: WriteId { device: row.get::<_, DeviceId>(1)?, number: counter(row.get(2)?)? },
             keys: row.get(3)?,
         })
     }
@@ -385,7 +385,7 @@ pub(crate) fn sendable_through(
         db.query_row("SELECT max(number) FROM _coven_uploads WHERE device=?1", [device], |r| {
             r.get::<_, Option<Vec<u8>>>(0)
         })?;
-    let Some(newest) = newest.map(counter) else {
+    let Some(newest) = newest.map(counter).transpose()? else {
         return Ok(None);
     };
     let captured = crate::raise_capture::captured_through(db)?;
@@ -411,7 +411,7 @@ pub(crate) fn unconfirmed(
             |r| {
                 Ok(WriteId {
                     device: through.device,
-                    number: counter(r.get(0)?),
+                    number: counter(r.get(0)?)?,
                 })
             },
         )?

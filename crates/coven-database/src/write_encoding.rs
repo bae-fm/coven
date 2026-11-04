@@ -18,8 +18,20 @@ pub(crate) fn encoded<T>(result: Result<T, coven_format::Error>) -> Result<T, Db
     })
 }
 
+/// A stored fact at `column` that doesn't decode: the database is damaged
+/// (§19.3).
+pub(crate) fn damaged(column: usize, kind: Type) -> rusqlite::Error {
+    decode_failure(column, kind, DbError::DamagedDatabase)
+}
+
+/// Stored bytes as coven wrote them, decoded; bytes that fail to decode are
+/// damage (§19.3).
+#[expect(
+    clippy::map_err_ignore,
+    reason = "stored bytes that fail to decode are damage, which damaged() names"
+)]
 pub(crate) fn decoded<T>(result: Result<T, coven_format::Error>) -> rusqlite::Result<T> {
-    result.map_err(|error| decode_failure(0, Type::Blob, error))
+    result.map_err(|_| damaged(0, Type::Blob))
 }
 
 pub(crate) fn decode_failure(
@@ -92,12 +104,17 @@ pub(crate) fn canonical_audience(text: &str) -> Option<Audience> {
     text.parse().ok()
 }
 
+/// A stored audience; text no audience is spelled as is damage (§19.3).
 pub(crate) fn audience(text: &str) -> rusqlite::Result<Audience> {
-    text.parse().map_err(|error| decode_failure(0, Type::Text, error))
+    text.parse().map_err(|_not_an_audience: coven_merge::InvalidAudience| damaged(0, Type::Text))
 }
 
-pub(crate) fn counter(bytes: Vec<u8>) -> u64 {
-    u64::from_be_bytes(bytes.try_into().expect("stored counter is exactly eight bytes"))
+/// A stored counter, eight big-endian bytes; any other length is damage
+/// (§19.3).
+pub(crate) fn counter(bytes: Vec<u8>) -> rusqlite::Result<u64> {
+    let bytes: [u8; 8] =
+        bytes.try_into().map_err(|_not_eight_bytes: Vec<u8>| damaged(0, Type::Blob))?;
+    Ok(u64::from_be_bytes(bytes))
 }
 
 #[cfg(test)]

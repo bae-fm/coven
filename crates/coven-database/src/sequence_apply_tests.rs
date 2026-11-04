@@ -280,7 +280,7 @@ fn project(db: &Database, claims: &BTreeMap<coven_merge::WriteId, (u64, u64)>) -
             .query(
                 "SELECT slot FROM _coven_write_refusals ORDER BY slot",
                 [],
-                |r| Ok(crate::write_encoding::counter(r.get(0)?)),
+                |r| crate::write_encoding::counter(r.get(0)?),
             )
             .unwrap();
         json!({"winners":winners,"owners":owners,"refused":refused,"through":crate::sequence::applied(c).unwrap()})

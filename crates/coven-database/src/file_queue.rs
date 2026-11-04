@@ -307,7 +307,7 @@ fn decode_uploads(
                 retry,
                 of,
                 stored,
-                holds: holds.map(crate::write_encoding::counter),
+                holds: holds.map(crate::write_encoding::counter).transpose()?,
                 session,
                 progress,
                 bytes_total,
@@ -320,13 +320,13 @@ fn decode_uploads(
 /// for one (§17.4): no write from it on may be sent. An upload no file waits
 /// for holds nothing, since nothing a write names waits for its bytes.
 pub(crate) fn first_held(db: &DatabaseConnection) -> Result<Option<u64>, DbError> {
-    db.query_row(
+    let holds = db.query_row(
         "SELECT min(u.holds) FROM _coven_file_uploads AS u WHERE u.holds IS NOT NULL
          AND EXISTS(SELECT 1 FROM _coven_upload_files AS l WHERE l.upload=u.id)",
         [],
         |r| r.get::<_, Option<Vec<u8>>>(0),
-    )
-    .map(|holds| holds.map(crate::write_encoding::counter))
+    )?;
+    Ok(holds.map(crate::write_encoding::counter).transpose()?)
 }
 
 /// The queued upload of this stored object, by its unique identity index.

@@ -10,7 +10,7 @@ use rusqlite::params;
 
 pub(crate) fn applied(db: &DatabaseConnection) -> Result<u64, DbError> {
     db.query_row("SELECT applied FROM _coven_sequence WHERE singleton=1", [], |r| {
-        Ok(counter(r.get(0)?))
+        counter(r.get(0)?)
     })
 }
 
@@ -26,7 +26,7 @@ pub(crate) fn claims(db: &DatabaseConnection) -> Result<Vec<LastClaim>, DbError>
     db.query("SELECT device,number,digest FROM _coven_last_claims ORDER BY device", [], |r| {
         Ok(LastClaim {
             device: r.get::<_, DeviceId>(0)?,
-            number: counter(r.get(1)?),
+            number: counter(r.get(1)?)?,
             digest: r.get(2)?,
         })
     })
@@ -69,7 +69,7 @@ pub(crate) fn write_slot(db: &DatabaseConnection, write: WriteId) -> Result<Opti
             "SELECT (SELECT slot FROM _coven_writes WHERE {WRITE_DEVICE_SQL}=?1 AND number=?2)"
         ),
         params![write.device, write.number.to_be_bytes().as_slice()],
-        |r| Ok(r.get::<_, Option<Vec<u8>>>(0)?.map(|s| Slot(counter(s)))),
+        |r| Ok(r.get::<_, Option<Vec<u8>>>(0)?.map(counter).transpose()?.map(Slot)),
     )
 }
 
@@ -141,7 +141,7 @@ pub(crate) fn refusal(
             let cause = if r.get::<_,Option<Vec<u8>>>(1)?.is_some() { WriteCutoff::DeviceRemoved }
                 else if r.get::<_,Option<Vec<u8>>>(2)?.is_some() { WriteCutoff::MemberKeysReplaced }
                 else { WriteCutoff::MemberRemoved };
-            Ok((Slot(counter(r.get(0)?)), cause))
+            Ok((Slot(counter(r.get(0)?)?), cause))
         })?.pop())
 }
 

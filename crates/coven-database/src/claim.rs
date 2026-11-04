@@ -88,11 +88,11 @@ fn settlement(text: String) -> rusqlite::Result<ClaimSettlement> {
 fn metadata(db: &DatabaseConnection) -> Result<Option<Claim>, DbError> {
     db.query("SELECT device,number,through,operation,settlement FROM _coven_claim_journal WHERE singleton=1", [], |r| {
         let work = match (r.get::<_,Option<Vec<u8>>>(2)?, r.get::<_,Option<i64>>(3)?) {
-            (Some(n),None) => ClaimWork::Writes(counter(n)),
+            (Some(n),None) => ClaimWork::Writes(counter(n)?),
             (None,Some(id)) => ClaimWork::Operation(OperationId(id)),
             _ => return Err(rusqlite::Error::InvalidQuery),
         };
-        Ok(Claim { device:r.get::<_, DeviceId>(0)?, number:counter(r.get(1)?), work,
+        Ok(Claim { device:r.get::<_, DeviceId>(0)?, number:counter(r.get(1)?)?, work,
             attempts:Vec::new(), settlement:settlement(r.get(4)?)? })
     }).map(|mut rows| rows.pop())
 }
@@ -114,7 +114,7 @@ pub(crate) fn reserved(db: &DatabaseConnection, device: DeviceId) -> Result<u64,
         [device],
         |r| r.get(0),
     )?;
-    Ok(previous.map(counter).unwrap_or(0))
+    Ok(previous.map(counter).transpose()?.unwrap_or(0))
 }
 
 pub(crate) fn begin<R: Read>(
@@ -426,7 +426,7 @@ pub struct ClaimUpload {
 pub(crate) fn upload(db: &DatabaseConnection) -> Result<ClaimUpload, DbError> {
     let claim = metadata(db)?.ok_or(DbError::NoClaim)?;
     db.query_row("SELECT size,session FROM _coven_claim_attempts WHERE device=?1 AND number=?2 ORDER BY attempt DESC LIMIT 1",
-        params![claim.device, claim.number.to_be_bytes()], |row| Ok(ClaimUpload {size: counter(row.get(0)?), session: row.get(1)?}))
+        params![claim.device, claim.number.to_be_bytes()], |row| Ok(ClaimUpload {size: counter(row.get(0)?)?, session: row.get(1)?}))
 }
 
 pub(crate) fn save_upload(db: &DatabaseConnection, session: Vec<u8>) -> Result<(), DbError> {

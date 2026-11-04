@@ -851,3 +851,24 @@ pub(crate) fn scan_reason(
         _ => None,
     }
 }
+
+/// §19.3: a stored write's timestamp that doesn't decode is damage: the
+/// next local write, which reads the latest timestamp, fails with
+/// `DamagedDatabase`.
+#[tokio::test]
+async fn a_stored_timestamp_that_does_not_decode_is_damaged_database() {
+    let store = TestStore::new();
+    let database =
+        store.builder(notes(), vec![Migration::addition(1, "notes", NOTES)]).open().await.unwrap();
+    sql(&database, "INSERT INTO notes VALUES('42','Grocery list','')").await.unwrap();
+    database.inspect_writer(|db| {
+        db.batch(
+            "PRAGMA ignore_check_constraints=ON; UPDATE _coven_writes SET timestamp=x'00';
+             PRAGMA ignore_check_constraints=OFF;",
+        )
+        .unwrap()
+    });
+    let result = sql(&database, "UPDATE notes SET title='Weekly groceries'").await;
+    assert!(matches!(result, Err(crate::DbError::DamagedDatabase)), "{result:?}");
+    database.close().await.unwrap();
+}

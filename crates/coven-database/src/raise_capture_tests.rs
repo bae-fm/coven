@@ -48,7 +48,7 @@ fn index(version: u32, old_writes: crate::OldWrites) -> Migration {
 fn queue(db: &Database) -> Vec<(u64, Vec<u8>, Option<Vec<u8>>)> {
     db.inspect_writer(|db| {
         db.query("SELECT u.number,u.record,k.sealing_keys FROM _coven_uploads u LEFT JOIN _coven_upload_keys k USING(device,number) ORDER BY u.number", [], |r| {
-            Ok((crate::write_encoding::counter(r.get(0)?), r.get(1)?, r.get(2)?))
+            Ok((crate::write_encoding::counter(r.get(0)?)?, r.get(1)?, r.get(2)?))
         })
         .unwrap()
     })

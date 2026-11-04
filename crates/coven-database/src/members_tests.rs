@@ -230,6 +230,24 @@ async fn a_stored_member_fact_that_does_not_decode_is_damaged_database() {
     }
 }
 
+/// §19.3: a stored circle, audience or slot that doesn't decode is damage,
+/// as a member fact's is, never a query error or a panic.
+#[tokio::test]
+async fn a_stored_circle_or_slot_that_does_not_decode_is_damaged_database() {
+    use crate::store_state_tables::tests::{damage, CIRCLE_DAMAGE};
+    for broken in CIRCLE_DAMAGE {
+        let store = TestStore::new();
+        let db = store.builder(vec![], vec![]).open().await.unwrap();
+        fixture(&db).await;
+        db.inspect_writer(|sql| damage(sql, broken));
+        let read = db.store_state().await;
+        assert!(
+            matches!(read, Err(crate::CovenError::Database(DbError::DamagedDatabase))),
+            "{broken}: {read:?}"
+        );
+    }
+}
+
 #[tokio::test]
 async fn retired_local_registration_still_identifies_this_installation() {
     let store = TestStore::new();

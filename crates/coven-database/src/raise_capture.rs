@@ -67,7 +67,7 @@ pub(crate) fn capture_created(
     let queued = db.query(
         "SELECT number FROM _coven_uploads WHERE device=?1 ORDER BY number DESC",
         [device],
-        |r| Ok(counter(r.get::<_, Vec<u8>>(0)?)),
+        |r| counter(r.get::<_, Vec<u8>>(0)?),
     )?;
     for number in queued {
         let marker = WriteId { device, number };
@@ -122,7 +122,7 @@ pub(crate) fn prepare(
 
 pub(crate) fn captured_through(db: &DatabaseConnection) -> Result<Option<u64>, DbError> {
     db.query_row("SELECT max(through) FROM _coven_raise_captures", [], |r| {
-        Ok(r.get::<_, Option<Vec<u8>>>(0)?.map(counter))
+        r.get::<_, Option<Vec<u8>>>(0)?.map(counter).transpose()
     })
 }
 
@@ -130,7 +130,7 @@ pub(crate) fn provisional(db: &DatabaseConnection) -> Result<Vec<(Audience, u32,
     db.query(
         "SELECT audience,version,covers FROM _coven_raise_captures ORDER BY audience",
         [],
-        |r| Ok((audience(&r.get::<_, String>(0)?)?, r.get(1)?, counter(r.get(2)?))),
+        |r| Ok((audience(&r.get::<_, String>(0)?)?, r.get(1)?, counter(r.get(2)?)?)),
     )
 }
 
@@ -145,8 +145,8 @@ pub(crate) fn captures(
             Ok(RaiseCapture {
                 audience: audience(&r.get::<_, String>(0)?)?,
                 version: r.get(1)?,
-                through: WriteId { device, number: counter(r.get(2)?) },
-                covers: counter(r.get(3)?),
+                through: WriteId { device, number: counter(r.get(2)?)? },
+                covers: counter(r.get(3)?)?,
             })
         },
     )

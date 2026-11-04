@@ -29,6 +29,15 @@ pub(crate) const MEMBER_DAMAGE: [&str; 6] = [
     "UPDATE _coven_devices SET member=x'00'",
 ];
 
+/// Each way damaged storage can break a stored circle or slot past the
+/// tables' constraints: a circle stored as the store, an audience no
+/// spelling names, and a slot counter that isn't eight bytes.
+pub(crate) const CIRCLE_DAMAGE: [&str; 3] = [
+    "UPDATE _coven_circles SET circle='store' WHERE name='Old'",
+    "UPDATE _coven_circle_members SET circle='Gifts'",
+    "UPDATE _coven_circle_deletions SET slot=x'01'",
+];
+
 /// Damage the membership tables with one of [`MEMBER_DAMAGE`], as broken
 /// storage would, for tests of what reading members does.
 pub(crate) fn damage(db: &crate::sqlite::DatabaseConnection, damage: &str) {

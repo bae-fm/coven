@@ -626,7 +626,7 @@ impl Database {
             inner.access.with_committed(|db| {
                 db.query("SELECT slot,record FROM _coven_slot_records ORDER BY slot", [], |row| {
                     Ok(coven_format::floor::OriginalSlot {
-                        slot: coven_merge::Slot(crate::write_encoding::counter(row.get(0)?)),
+                        slot: coven_merge::Slot(crate::write_encoding::counter(row.get(0)?)?),
                         object: row.get(1)?,
                     })
                 })

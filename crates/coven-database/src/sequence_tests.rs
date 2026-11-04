@@ -325,7 +325,7 @@ pub(crate) async fn reload<R: std::io::Read, W>(
                         .unwrap();
                     included.map(|included| crate::BoundaryCoverage {
                         boundary,
-                        included: crate::write_encoding::counter(included),
+                        included: crate::write_encoding::counter(included).unwrap(),
                     })
                 })
                 .collect(),

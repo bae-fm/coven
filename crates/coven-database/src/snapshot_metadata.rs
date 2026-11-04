@@ -139,10 +139,10 @@ impl<'a> SnapshotMetadata<'a> {
 /// [`STAGED_WRITES`] selects it.
 pub(crate) fn applied(r: &rusqlite::Row<'_>) -> rusqlite::Result<AppliedWrite> {
     Ok(AppliedWrite {
-        id: WriteId { device: r.get::<_, DeviceId>(0)?, number: counter(r.get(1)?) },
+        id: WriteId { device: r.get::<_, DeviceId>(0)?, number: counter(r.get(1)?)? },
         timestamp: decoded(merge_fields::decode_timestamp(&r.get::<_, Vec<u8>>(2)?))?,
-        read_through: counter(r.get(3)?),
-        slot: coven_merge::Slot(counter(r.get(4)?)),
+        read_through: counter(r.get(3)?)?,
+        slot: coven_merge::Slot(counter(r.get(4)?)?),
     })
 }
 

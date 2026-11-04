@@ -2,7 +2,7 @@
 use crate::{
     sqlite::DatabaseConnection,
     store_state::*,
-    write_encoding::{audience, counter, decode_failure},
+    write_encoding::{audience, counter, damaged},
     DbError,
 };
 use coven_crypto::{MemberPublicKeys, SealingKey, SigningKey};
@@ -13,13 +13,7 @@ use rusqlite::{params, types::Type, Row};
 use std::collections::{BTreeMap, BTreeSet};
 
 pub(crate) fn slot(row: &Row<'_>, column: usize) -> rusqlite::Result<Slot> {
-    Ok(Slot(counter(row.get(column)?)))
-}
-
-/// A stored membership fact that doesn't decode: the database is damaged
-/// (§19.3).
-fn damaged(column: usize, kind: Type) -> rusqlite::Error {
-    decode_failure(column, kind, DbError::DamagedDatabase)
+    Ok(Slot(counter(row.get(column)?)?))
 }
 
 /// The value at `column`, which the membership tables' constraints keep
@@ -95,7 +89,7 @@ pub(crate) fn device_state(row: &Row<'_>, column: usize) -> rusqlite::Result<Dev
 pub(crate) fn circle(text: String) -> rusqlite::Result<CircleId> {
     match audience(&text)? {
         Audience::Circle(circle) => Ok(circle),
-        Audience::Store => Err(rusqlite::Error::InvalidQuery),
+        Audience::Store => Err(damaged(0, Type::Text)),
     }
 }
 

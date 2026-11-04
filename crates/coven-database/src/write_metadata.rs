@@ -66,7 +66,7 @@ pub(crate) fn newest_number(
         [device],
         |r| r.get(0),
     )?;
-    Ok(newest.map(counter))
+    Ok(newest.map(counter).transpose()?)
 }
 
 /// `id`'s row in `_coven_writes`, if coven has stored it.
@@ -85,8 +85,8 @@ pub(crate) fn stored_write(
                 timestamp: decoded(coven_format::merge_fields::decode_timestamp(
                     &r.get::<_, Vec<u8>>(1)?,
                 ))?,
-                read_through: counter(r.get(2)?),
-                slot: r.get::<_, Option<Vec<u8>>>(3)?.map(|s| Slot(counter(s))),
+                read_through: counter(r.get(2)?)?,
+                slot: r.get::<_, Option<Vec<u8>>>(3)?.map(counter).transpose()?.map(Slot),
             })
         },
     )?;
