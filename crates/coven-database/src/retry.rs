@@ -153,7 +153,8 @@ impl RawRow {
                 (None, None, Some(id), None) => RetrySubject::Upload(id),
                 (None, None, None, Some(file)) => {
                     RetrySubject::Pin(coven_foundation::id_source::FileId(
-                        uuid::Uuid::parse_str(file).map_err(|_| DbError::DamagedDatabase)?,
+                        coven_foundation::id_source::canonical_uuid(file)
+                            .map_err(|_| DbError::DamagedDatabase)?,
                     ))
                 }
                 (Some("join"), None, None, None) => RetrySubject::Join,

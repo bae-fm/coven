@@ -30,8 +30,8 @@ impl FileReference {
         let (device, rest) = rest.split_once(' ').ok_or_else(invalid)?;
         let (id, key) = rest.split_once(' ').ok_or_else(invalid)?;
         let number: u64 = device.parse().map_err(|_| invalid())?;
-        let uuid: uuid::Uuid = id.parse().map_err(|_| invalid())?;
-        if number.to_string() != device || uuid.to_string() != id {
+        let uuid = coven_foundation::id_source::canonical_uuid(id).map_err(|_| invalid())?;
+        if number.to_string() != device {
             return Err(invalid());
         }
         let mut bytes = Zeroizing::new([0; 32]);

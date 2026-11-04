@@ -68,10 +68,7 @@ impl std::str::FromStr for MemberId {
     /// Only the canonical lowercase hyphenated spelling (D10); a member
     /// spelling never encodes a public key.
     fn from_str(value: &str) -> Result<Self, Self::Err> {
-        match Uuid::try_parse(value) {
-            Ok(id) if id.hyphenated().to_string() == value => Ok(Self(id)),
-            _ => Err(InvalidMemberId),
-        }
+        canonical_uuid(value).map(Self).map_err(|_not_canonical| InvalidMemberId)
     }
 }
 
@@ -86,6 +83,20 @@ impl std::fmt::Display for InvalidMemberId {
 }
 
 impl std::error::Error for InvalidMemberId {}
+
+/// The UUID `text` spells in its one canonical form, lowercase and
+/// hyphenated (D10). Any other spelling of the same UUID names nothing.
+pub fn canonical_uuid(text: &str) -> Result<Uuid, NotCanonicalUuid> {
+    match Uuid::try_parse(text) {
+        Ok(id) if id.hyphenated().to_string() == text => Ok(id),
+        _ => Err(NotCanonicalUuid),
+    }
+}
+
+/// Text that is not a UUID's canonical lowercase hyphenated spelling (D10).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+#[error("not a canonical lowercase hyphenated UUID")]
+pub struct NotCanonicalUuid;
 
 /// An invitation's identity, independent of its one-time secret (§13.2).
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Serialize, Deserialize)]

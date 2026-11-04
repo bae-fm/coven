@@ -4,8 +4,6 @@ use std::fs;
 use std::io;
 use std::path::PathBuf;
 
-use uuid::Uuid;
-
 #[cfg(any(test, feature = "test-utils"))]
 use crate::files::DirectoryCreationError;
 
@@ -122,8 +120,8 @@ impl StoreDirectories {
                 continue;
             }
             let name = entry.file_name();
-            let id = match name.to_str().map(Uuid::parse_str) {
-                Some(Ok(id)) if name == std::ffi::OsStr::new(&id.to_string()) => StoreId(id),
+            let id = match name.to_str().map(crate::id_source::canonical_uuid) {
+                Some(Ok(id)) => StoreId(id),
                 _ => {
                     tracing::debug!(path = %path.display(), "directory name is not a store id");
                     continue;

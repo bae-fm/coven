@@ -105,3 +105,20 @@ fn member_identity_is_an_independent_uuid_with_one_spelling() {
         assert_eq!(other.parse::<MemberId>(), Err(InvalidMemberId), "{other}");
     }
 }
+
+#[test]
+fn only_the_lowercase_hyphenated_spelling_is_a_canonical_uuid() {
+    let text = "00112233-4455-6677-8899-aabbccddeeff";
+    assert_eq!(canonical_uuid(text), Ok(Uuid::from_u128(0x00112233_4455_6677_8899_aabbccddeeff)));
+    for other in [
+        "00112233-4455-6677-8899-AABBCCDDEEFF",
+        "00112233445566778899aabbccddeeff",
+        "{00112233-4455-6677-8899-aabbccddeeff}",
+        "urn:uuid:00112233-4455-6677-8899-aabbccddeeff",
+        " 00112233-4455-6677-8899-aabbccddeeff",
+        "",
+    ] {
+        assert_eq!(canonical_uuid(other), Err(NotCanonicalUuid), "{other}");
+        assert!(other.parse::<MemberId>().is_err(), "{other}");
+    }
+}

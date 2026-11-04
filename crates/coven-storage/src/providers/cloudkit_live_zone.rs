@@ -66,8 +66,7 @@ enum Verdict {
 
 /// The store a zone name belongs to, when it is the canonical `coven-<store>`.
 fn store_zone(name: &str) -> Option<StoreId> {
-    let store = StoreId(uuid::Uuid::parse_str(name.strip_prefix("coven-")?).ok()?);
-    (format!("coven-{store}") == name).then_some(store)
+    coven_foundation::id_source::canonical_uuid(name.strip_prefix("coven-")?).ok().map(StoreId)
 }
 
 /// Decides a `coven-<store>` zone from its record named [`MARKER_NAME`], or

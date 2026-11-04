@@ -2,6 +2,7 @@ use super::*;
 use crate::files::StoreDirAccess;
 use crate::files::StoreSettings;
 use crate::id_source::UuidIds;
+use uuid::Uuid;
 
 #[tokio::test]
 async fn an_absent_layout_lists_no_stores_without_creating_it() {

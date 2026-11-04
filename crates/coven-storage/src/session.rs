@@ -406,11 +406,8 @@ pub(crate) fn s3_part_size(total: u64) -> Result<usize, StorageError> {
         .map_err(|error| StorageFailure::InvalidPart.with_source(error))
 }
 pub(crate) fn check_cloudkit_id(value: &str) -> Result<(), StorageError> {
-    let id = uuid::Uuid::parse_str(value)
+    coven_foundation::id_source::canonical_uuid(value)
         .map_err(|error| StorageFailure::SessionMismatch.with_source(error))?;
-    if id.to_string() != value {
-        return Err(StorageFailure::SessionMismatch.into());
-    }
     Ok(())
 }
 fn nonempty(id: &SecretText) -> Result<(), StorageError> {

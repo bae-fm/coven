@@ -256,12 +256,9 @@ impl std::fmt::Debug for PersonRestoreCode {
 ))]
 pub(crate) fn restore_code_store(account: &str) -> Result<Option<StoreId>, KeyError> {
     match account.split_once(':') {
-        Some((RESTORE_CODE_ENTRY, id)) => uuid::Uuid::parse_str(id)
-            .ok()
-            .map(StoreId)
-            .filter(|store| store.to_string() == id)
-            .map(Some)
-            .ok_or(KeyError::RestoreCodeStoreId),
+        Some((RESTORE_CODE_ENTRY, id)) => coven_foundation::id_source::canonical_uuid(id)
+            .map(|id| Some(StoreId(id)))
+            .map_err(|_not_canonical| KeyError::RestoreCodeStoreId),
         _ => {
             tracing::debug!(account, "skipping person entry that is not a restore code");
             Ok(None)

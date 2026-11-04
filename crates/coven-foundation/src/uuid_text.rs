@@ -26,17 +26,11 @@ impl ToSql for UuidText {
     }
 }
 
-#[derive(Debug, thiserror::Error)]
-#[error("not a canonical lowercase hyphenated UUID")]
-struct InvalidUuidText;
-
 impl FromSql for UuidText {
     fn column_result(value: ValueRef<'_>) -> FromSqlResult<Self> {
-        let text = value.as_str()?;
-        match Uuid::try_parse(text) {
-            Ok(id) if id.to_string() == text => Ok(Self(id)),
-            _ => Err(FromSqlError::Other(Box::new(InvalidUuidText))),
-        }
+        crate::id_source::canonical_uuid(value.as_str()?)
+            .map(Self)
+            .map_err(|error| FromSqlError::Other(Box::new(error)))
     }
 }
 

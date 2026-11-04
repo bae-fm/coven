@@ -265,10 +265,7 @@ fn decimal(part: &str, nonzero: bool) -> bool {
     }
 }
 fn canonical_uuid(value: &str) -> bool {
-    match uuid::Uuid::parse_str(value) {
-        Ok(id) => id.to_string() == value,
-        Err(_) => false,
-    }
+    coven_foundation::id_source::canonical_uuid(value).is_ok()
 }
 
 /// A path is outside the canonical object layout.

@@ -174,7 +174,7 @@ pub(crate) fn id(value: &Value) -> Option<FileId> {
     let Value::Text(text) = value else {
         return None;
     };
-    uuid::Uuid::try_parse(text).ok().filter(|id| id.to_string() == *text).map(FileId)
+    coven_foundation::id_source::canonical_uuid(text).ok().map(FileId)
 }
 
 /// Check an incoming record's cells (§17.2). A new record carries all of

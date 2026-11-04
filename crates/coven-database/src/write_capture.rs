@@ -95,11 +95,12 @@ pub(crate) fn validate_key(
     if schema.declaration(&table.name).identity == RowIdentity::IndependentUuid {
         let columns = key_columns(table);
         let has_uuid = columns.iter().any(|column| match &values[&column.name] {
-            Value::Text(text) => uuid::Uuid::parse_str(text).is_ok_and(|id| {
-                matches!(id.get_version_num(), 4 | 7)
-                    && id.get_variant() == uuid::Variant::RFC4122
-                    && id.to_string() == *text
-            }),
+            Value::Text(text) => {
+                coven_foundation::id_source::canonical_uuid(text).is_ok_and(|id| {
+                    matches!(id.get_version_num(), 4 | 7)
+                        && id.get_variant() == uuid::Variant::RFC4122
+                })
+            }
             _ => false,
         });
         if !has_uuid {

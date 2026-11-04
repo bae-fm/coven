@@ -12,7 +12,7 @@ impl S3Storage {
         device: DeviceId,
         token: &SecretText,
     ) -> Result<String, StorageError> {
-        let id = uuid::Uuid::parse_str(token.as_str())
+        let id = coven_foundation::id_source::canonical_uuid(token.as_str())
             .map_err(|source| StorageFailure::SessionMismatch.with_source(source))?;
         Ok(format!(
             "{}{}/{id}",
