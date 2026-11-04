@@ -511,13 +511,14 @@ fn sync_parent(path: &Path) -> io::Result<()> {
     Ok(())
 }
 
-/// Run `run`, file work named `operation`, on the blocking pool; the pool
-/// dropping it unstarted is `FileError::Shutdown`.
+/// Run `run`, file work named `operation`, on the blocking pool; a panic in
+/// it is `FileError::Bug`, and the pool dropping it unstarted
+/// `FileError::Shutdown`.
 async fn blocking<T: Send + 'static, E: From<FileError> + Send + 'static>(
     operation: &'static str,
     run: impl FnOnce() -> Result<T, E> + Send + 'static,
 ) -> Result<T, E> {
-    crate::unwinding::run_blocking(operation, run).await.map_err(FileError::from)?
+    crate::task::blocking(operation, run).await.map_err(FileError::from)?
 }
 
 #[cfg(test)]

@@ -344,7 +344,7 @@ impl Database {
                 // Reserve a reader before locking the writer: snapshot consumers
                 // may be waiting for a commit before releasing their readers.
                 let reader = inner.access.readers.acquire_reader();
-                let loaded = inner.with_files(|writer, files| {
+                let loaded = inner.with_files("load a snapshot", |writer, files| {
                     reader.with_reader(|reader| {
                         reader.read_transaction(|| {
                             crate::write_schema::prepare_evaluators(

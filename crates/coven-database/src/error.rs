@@ -72,10 +72,21 @@ pub enum CovenError {
     /// `DbError::Shutdown`.
     #[error(transparent)]
     Shutdown(#[from] coven_foundation::task::Shutdown),
+    /// Coven's work for the call panicked on the blocking pool, such as
+    /// opening's custody work: a bug, which the caller reports (E15). A
+    /// database call that panicked is `DbError::Bug`.
+    #[error(transparent)]
+    Bug(#[from] coven_foundation::task::Bug),
     /// The platform refused to let coven watch the device's network, such
     /// as an Android app without coven's Android library (api.md E1, E5).
     #[error(transparent)]
     NetworkWatch(#[from] coven_foundation::network_watch::NetworkWatchError),
+}
+
+impl From<coven_foundation::task::TaskFailed> for CovenError {
+    fn from(failed: coven_foundation::task::TaskFailed) -> Self {
+        failed.into_error()
+    }
 }
 
 impl From<rusqlite::Error> for CovenError {
@@ -157,6 +168,12 @@ pub enum DbError {
     /// have closed some connections (`ShutdownOutcome::Unknown`).
     #[error(transparent)]
     Shutdown(#[from] coven_foundation::task::Shutdown),
+    /// The call's work panicked: a bug in coven or in the app's callback,
+    /// which the caller reports (E15). A write that panicked rolled back,
+    /// and the bytes it released or staged are removed as after any failed
+    /// write.
+    #[error(transparent)]
+    Bug(#[from] coven_foundation::task::Bug),
     /// SQLite refused or failed a statement, preserving its error.
     #[error(transparent)]
     Sqlite(rusqlite::Error),
@@ -716,6 +733,12 @@ pub enum DbError {
         #[source]
         rollback: rusqlite::Error,
     },
+}
+
+impl From<coven_foundation::task::TaskFailed> for DbError {
+    fn from(failed: coven_foundation::task::TaskFailed) -> Self {
+        failed.into_error()
+    }
 }
 
 impl From<coven_foundation::files::WriterError> for DbError {

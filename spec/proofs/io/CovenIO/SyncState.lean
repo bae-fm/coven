@@ -142,7 +142,7 @@ def Failure.byItself : Failure → Bool
 
 /-- A local failure, as `LocalFailure` names it. -/
 inductive Local
-  | database | disk | keyCustody | crypto | operation | shutdown
+  | database | disk | keyCustody | crypto | operation | shutdown | bug
   deriving DecidableEq, Repr
 
 /-- A pending record's reason, as `PendingReason` names it. -/

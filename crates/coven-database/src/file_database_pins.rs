@@ -25,7 +25,7 @@ impl FileDatabase {
         database
             .call(move |inner| {
                 // The released copy goes once the writer is free (§21.2).
-                inner.with_files(|writer, _| {
+                inner.with_files("end a pin request", |writer, _| {
                     writer.state_transaction(|db| crate::file_pins::end(db, file))
                 })
             })
@@ -52,7 +52,7 @@ impl FileDatabase {
         };
         database
             .call(move |inner| {
-                inner.with_files(|writer, _| {
+                inner.with_files("drop a pin's copy", |writer, _| {
                     writer.transaction(|db| crate::file_pins::drop_copy(db, file))
                 })
             })

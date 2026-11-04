@@ -18,7 +18,6 @@ use crate::{BootstrapError, StorageConfig, StoreId};
     feature = "test-utils"
 ))]
 use coven_crypto::custody::{Keychain, PersonEntries, PersonRestoreCode};
-use coven_foundation::unwinding::run_blocking;
 use coven_sync::UnreadableSavedCode;
 #[cfg(any(
     target_os = "macos",
@@ -82,7 +81,7 @@ impl SavedRestoreEntry {
 pub async fn saved_restore_codes() -> Result<Vec<SavedRestoreEntry>, BootstrapError> {
     #[cfg(any(target_os = "macos", target_os = "ios", target_os = "android"))]
     {
-        run_blocking("list saved restore codes", || list(Keychain::registered()?)).await?
+        crate::task::blocking("list saved restore codes", || list(Keychain::registered()?)).await?
     }
     #[cfg(not(any(target_os = "macos", target_os = "ios", target_os = "android")))]
     {
@@ -102,7 +101,7 @@ pub async fn saved_restore_codes() -> Result<Vec<SavedRestoreEntry>, BootstrapEr
 pub async fn forget_saved_restore_code(store: StoreId) -> Result<(), BootstrapError> {
     #[cfg(any(target_os = "macos", target_os = "ios", target_os = "android"))]
     {
-        run_blocking("forget the saved restore code", move || {
+        crate::task::blocking("forget the saved restore code", move || {
             forget(Keychain::registered()?, store)
         })
         .await?

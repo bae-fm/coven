@@ -43,27 +43,14 @@ impl FileStaging {
             if let Some(error) = inner.access.observer.error() {
                 return Err(error.into());
             }
-            let built = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            // A panic in the batch fails the staging with `DbError::Bug`, as
+            // a refused batch fails it.
+            let built = coven_foundation::task::caught_sync("stage files", || {
                 let mut batch = WriteBatch::new(inner.ids.as_ref());
                 let value = build(&mut batch)?;
                 Ok::<_, E>((batch, value))
-            }));
-            let built = match built {
-                Ok(built) => built,
-                Err(panic) => {
-                    let chosen = inner
-                        .access
-                        .with_writer(|writer| Ok::<_, DbError>(super::released(writer, inner)));
-                    let failures = match chosen {
-                        Ok(chosen) => inner.remove_chosen(chosen),
-                        Err(error) => vec![error],
-                    };
-                    if !failures.is_empty() {
-                        panic!("file cleanup after batch panic failed: {failures:?}");
-                    }
-                    std::panic::resume_unwind(panic)
-                }
-            };
+            })
+            .unwrap_or_else(|bug| Err(E::from(DbError::Bug(bug))));
             let prepared = inner.access.with_writer(|writer| {
                 let prepared = built.and_then(|(batch, value)| {
                     if batch.files.is_empty() {
@@ -143,13 +130,14 @@ impl FileStaging {
     /// Write each app source to coven's copy of it, each synced with a plain
     /// sync, then flush the batch: the folder and the drive's cache, once,
     /// so every copy is on the drive before the commit that records it
-    /// (Appendix C.3). A failed flush fails the write. Only the runtime
-    /// shutting down ends the staging here: the pool dropped the creation of
-    /// a copy unstarted, and with it this staging, whose drop releases its
-    /// names; their recorded removals take any bytes written before (E15).
+    /// (Appendix C.3). A failed flush fails the write. Only the creation of
+    /// a copy failing on the blocking pool ends the staging here: a panic in
+    /// it, or the pool dropping it unstarted as its runtime shuts down. The
+    /// staging went with it, and its drop released its names; their recorded
+    /// removals take any bytes written before (E15).
     pub(super) async fn write(
         mut self,
-    ) -> Result<(Self, Result<Flushed, DbError>), coven_foundation::task::Shutdown> {
+    ) -> Result<(Self, Result<Flushed, DbError>), coven_foundation::task::TaskFailed> {
         #[cfg(not(test))]
         let mut batch = FlushBatch::new();
         #[cfg(test)]
@@ -164,17 +152,21 @@ impl FileStaging {
             // Creation owns the staging guard until it finishes. Cancellation
             // cannot remove a name before this blocking call creates its bytes.
             let file_name = name.clone();
-            let joined = tokio::task::spawn_blocking(crate::commit_scope::bind(move || {
-                let writer = (|| -> Result<_, DbError> {
-                    let slot = self.database.read().expect("database lock poisoned");
-                    let inner = slot.as_ref().expect("staging holds close guard");
-                    Ok(inner.access.directory.create_writer(FileArea::AppProvided, &file_name)?)
-                })();
-                (self, writer)
-            }))
-            .await;
-            let (next, writer) =
-                coven_foundation::unwinding::blocking("create a staged copy", joined)?;
+            let (next, writer) = coven_foundation::task::blocking(
+                "create a staged copy",
+                crate::commit_scope::bind(move || {
+                    let writer = (|| -> Result<_, DbError> {
+                        let slot = self.database.read().expect("database lock poisoned");
+                        let inner = slot.as_ref().expect("staging holds close guard");
+                        Ok(inner
+                            .access
+                            .directory
+                            .create_writer(FileArea::AppProvided, &file_name)?)
+                    })();
+                    (self, writer)
+                }),
+            )
+            .await?;
             self = next;
             let writer = match writer {
                 Ok(writer) => writer,

@@ -106,6 +106,7 @@ fn local_name(failure: LocalFailure) -> &'static str {
         LocalFailure::Crypto => "crypto",
         LocalFailure::Operation => "operation",
         LocalFailure::Shutdown => "shutdown",
+        LocalFailure::Bug => "bug",
     }
 }
 
@@ -202,6 +203,7 @@ fn reasons() -> Vec<PendingReason> {
             LocalFailure::Crypto,
             LocalFailure::Operation,
             LocalFailure::Shutdown,
+            LocalFailure::Bug,
         ]
         .map(PendingReason::Failed),
     );

@@ -160,13 +160,9 @@ async fn process_releases_all_reader_leases_and_store_borrows() {
 async fn a_panicking_read_releases_its_snapshot_and_keeps_the_reader_usable() {
     let store = TestStore::new();
     let db = store.builder(vec![], vec![]).open().await.unwrap();
-    let clone = db.clone();
-    let panic = tokio::spawn(async move {
-        clone.read(|_| -> crate::CovenResult<()> { panic!("app read panic") }).await
-    })
-    .await
-    .unwrap_err();
-    assert_eq!(*panic.into_panic().downcast::<&str>().unwrap(), "app read panic");
+    let error =
+        db.read(|_| -> crate::CovenResult<()> { panic!("app read panic") }).await.unwrap_err();
+    assert!(read_bug(&error, "app read panic"), "{error:?}");
     assert_eq!(
         db.read(|sql| Ok(sql.query_row("SELECT 42", [], |r| r.get::<_, i64>(0))?)).await.unwrap(),
         42
@@ -174,18 +170,19 @@ async fn a_panicking_read_releases_its_snapshot_and_keeps_the_reader_usable() {
     db.close().await.unwrap();
 
     let ro = store.builder(vec![], vec![]).open_read_only().await.unwrap();
-    let clone = ro.clone();
-    let panic = tokio::spawn(async move {
-        clone.read(|_| -> crate::CovenResult<()> { panic!("read-only panic") }).await
-    })
-    .await
-    .unwrap_err();
-    assert_eq!(*panic.into_panic().downcast::<&str>().unwrap(), "read-only panic");
+    let error =
+        ro.read(|_| -> crate::CovenResult<()> { panic!("read-only panic") }).await.unwrap_err();
+    assert!(read_bug(&error, "read-only panic"), "{error:?}");
     assert_eq!(
         ro.read(|sql| Ok(sql.query_row("SELECT 42", [], |r| r.get::<_, i64>(0))?)).await.unwrap(),
         42
     );
     ro.close().await.unwrap();
+}
+
+/// Whether `error` is the bug of a read whose closure panicked with `message`.
+fn read_bug(error: &CovenError, message: &str) -> bool {
+    matches!(error, CovenError::Database(DbError::Bug(bug)) if bug.operation == "read" && bug.message == message)
 }
 
 fn rollback_failed<T>(result: crate::CovenResult<T>) -> bool {
@@ -232,17 +229,13 @@ async fn a_failed_snapshot_rollback_fails_the_handle_until_reopen() {
 }
 
 #[tokio::test]
-async fn a_panicking_read_whose_rollback_fails_still_panics_and_fails_the_handle() {
+async fn a_panicking_read_whose_rollback_fails_keeps_its_bug_and_fails_the_handle() {
     let store = TestStore::new();
     let db = store.builder(vec![], vec![]).open().await.unwrap();
     db.inspect_readers(|reader| reader.refuse_transaction_end(true));
-    let clone = db.clone();
-    let panic = tokio::spawn(async move {
-        clone.read(|_| -> crate::CovenResult<()> { panic!("app read panic") }).await
-    })
-    .await
-    .unwrap_err();
-    assert_eq!(*panic.into_panic().downcast::<&str>().unwrap(), "app read panic");
+    let error =
+        db.read(|_| -> crate::CovenResult<()> { panic!("app read panic") }).await.unwrap_err();
+    assert!(read_bug(&error, "app read panic"), "{error:?}");
     assert!(rollback_failed(db.read(|_| Ok(())).await));
     db.close().await.unwrap();
 }

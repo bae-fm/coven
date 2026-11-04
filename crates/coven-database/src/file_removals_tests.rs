@@ -317,9 +317,9 @@ async fn a_failed_rollback_cannot_release_bytes_using_uncommitted_records() {
         .await
         .unwrap_err();
     assert!(original.exists(), "the committed row still owns its bytes");
-    assert!(
-        matches!(error, DbError::FileCleanup {write: Err(error), ..} if matches!(*error, DbError::Rollback { .. }))
-    );
+    // No removal is chosen from the writer's uncommitted state: the records
+    // wait for the next open.
+    assert!(matches!(error, DbError::Rollback { .. }), "{error:?}");
     // Another attempted write must not delete from the same uncommitted state.
     assert!(matches!(db.write(|_| Ok(())).await, Err(DbError::RollbackFailed)));
     assert_eq!(std::fs::read(&original).unwrap(), b"original");

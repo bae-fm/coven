@@ -486,7 +486,8 @@ impl SequenceSync {
             | SyncError::Removed
             | SyncError::DeviceIdInUse(_)
             | SyncError::WrongStore { .. }
-            | SyncError::Shutdown(_) => PendingReason::Failed(error.local_failure()),
+            | SyncError::Shutdown(_)
+            | SyncError::Bug(_) => PendingReason::Failed(error.local_failure()),
         };
         let subject = PendingSubject::Slot(slot);
         self.waits.log_failure(&subject, &reason, error.cause());

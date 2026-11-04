@@ -677,9 +677,6 @@ tables = [
 # Runs its caller's work on a blocking task and waits for it, so the work's
 # panic comes back to the caller as a value (api.md E15).
 "crates/coven-foundation/src/task.rs" = ["blocking"]
-# Runs coven's own work on a blocking task and waits for it; a panic in the
-# work unwinds into the caller (E15).
-"crates/coven-foundation/src/unwinding.rs" = ["run_blocking"]
 # A test clock that keeps time by the clock it is given and records what one
 # progress watch holds at each reading.
 # The work one test measures, shared by its task and the blocking calls it

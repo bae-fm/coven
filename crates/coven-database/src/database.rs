@@ -273,14 +273,17 @@ impl DatabaseInner {
         release_reserved(&self.staging, names);
     }
 
-    /// Run a write under the writer, then remove the files it released once
-    /// the writer is free (Appendix C.3), and run what its steps asked to
-    /// follow its commit.
+    /// Run `operation`, a write, under the writer, then remove the files it
+    /// released once the writer is free (Appendix C.3), and run what its
+    /// steps asked to follow its commit. A panic in it fails it with
+    /// `DbError::Bug` once its transaction has rolled back, and its released
+    /// files go as after any failed write.
     fn with_files<R, E: crate::WriteFailure>(
         &self,
+        operation: &'static str,
         run: impl FnOnce(&mut DatabaseConnection, &crate::file_write::WriteFiles<'_>) -> Result<R, E>,
     ) -> Result<R, E> {
-        let (outcome, chosen, committed) = self.access.with_writer(|writer| {
+        let (result, chosen, committed) = self.access.with_writer(|writer| {
             let files = crate::file_write::WriteFiles::new(
                 &self.access.write_schema,
                 self.access.device,
@@ -288,33 +291,23 @@ impl DatabaseInner {
                 &self.staging,
                 &self.copying,
             );
-            let outcome =
-                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run(writer, &files)));
+            let result = coven_foundation::task::caught_sync(operation, || run(writer, &files))
+                .unwrap_or_else(|bug| Err(E::from(DbError::Bug(bug))));
             // After a failed rollback the writer may still hold this write;
             // removal records wait for the next open (Appendix C.3).
             let usable = !matches!(self.access.observer.error(), Some(DbError::RollbackFailed));
-            let chosen = (outcome.is_ok() || usable).then(|| released(writer, self));
-            Ok::<_, E>((outcome, chosen, files.take_committed()))
+            let chosen = usable.then(|| released(writer, self));
+            Ok::<_, E>((result, chosen, files.take_committed()))
         })?;
-        match outcome {
-            Ok(result) => {
-                let result = self.finish_removals(result, chosen.expect("chosen after a write"));
-                // A write that returns success has committed.
-                if result.is_ok() {
-                    committed.into_iter().for_each(|effect| effect());
-                }
-                result
-            }
-            Err(panic) => {
-                if let Some(chosen) = chosen {
-                    let failures = self.remove_chosen(chosen);
-                    if !failures.is_empty() {
-                        panic!("file cleanup after callback panic failed: {failures:?}");
-                    }
-                }
-                std::panic::resume_unwind(panic)
-            }
+        let result = match chosen {
+            Some(chosen) => self.finish_removals(result, chosen),
+            None => result,
+        };
+        // A write that returns success has committed.
+        if result.is_ok() {
+            committed.into_iter().for_each(|effect| effect());
         }
+        result
     }
 
     /// Remove what `chosen` names, after the writer that chose it is
@@ -613,8 +606,8 @@ impl Database {
         E: crate::WriteFailure + Send + 'static,
     {
         self.call(move |inner| {
-            inner.with_files(|writer, files| {
-                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            inner.with_files("write", |writer, files| {
+                let result = coven_foundation::task::caught_sync("write", || {
                     writer.local_write(
                         &inner.access.write_schema,
                         inner.access.device,
@@ -622,7 +615,7 @@ impl Database {
                         files,
                         sql,
                     )
-                }));
+                });
                 // Staged files the write brought in go free once it has
                 // decided: a write that rolled back leaves their bytes to the
                 // removals its cleanup chooses.
@@ -630,10 +623,7 @@ impl Database {
                 release_copies(&inner.copying, &files.take_held_copies());
                 #[cfg(any(test, feature = "test-utils"))]
                 writer.checkpoint(crate::test_utils::WriteCheckpoint::StagingReleased);
-                match result {
-                    Ok(result) => result,
-                    Err(panic) => std::panic::resume_unwind(panic),
-                }
+                result.unwrap_or_else(|bug| Err(E::from(DbError::Bug(bug))))
             })
         })
         .await
@@ -661,7 +651,7 @@ impl Database {
             .await,
         )?;
         let (staging, flushed) =
-            staging.write().await.map_err(|shutdown| E::from(DbError::Shutdown(shutdown)))?;
+            staging.write().await.map_err(|failed| E::from(DbError::from(failed)))?;
         match flushed {
             Ok(_flushed) => Ok(staging.into_staged(value)),
             // A failed copy or flush removes what the staging wrote.
@@ -767,7 +757,7 @@ impl Database {
         let database = self.clone();
         // Closing runs as its own task so that a caller dropping this future
         // doesn't stop it partway; the runtime dropping that task can.
-        coven_foundation::unwinding::task(
+        coven_foundation::task::joined(
             "close the store",
             tokio::spawn(async move {
                 let file_tasks = database.file_tasks.clone().write_owned().await;
@@ -814,9 +804,10 @@ impl Database {
                     }))
                     .await,
                 )
-            })
-            .await,
-        )?
+            }),
+        )
+        .await
+        .map_err(DbError::from)?
     }
 }
 
@@ -963,15 +954,18 @@ where
 }
 
 /// The result of a database call run on the blocking pool as `operation`. A
-/// panic in it unwinds into the caller; the pool dropping it unstarted, as it
-/// does once its runtime begins shutting down, is `DbError::Shutdown`, and
-/// the call changed nothing (E15).
+/// panic in it is `DbError::Bug`; the pool dropping it unstarted, as it does
+/// once its runtime begins shutting down, is `DbError::Shutdown`, and the
+/// call changed nothing (E15).
 pub(crate) fn finish_blocking<R, E: From<DbError>>(
     operation: &'static str,
     joined: Result<Result<R, E>, tokio::task::JoinError>,
 ) -> Result<R, E> {
-    coven_foundation::unwinding::blocking(operation, joined)
-        .map_err(|shutdown| E::from(DbError::Shutdown(shutdown)))?
+    joined.map_err(|error| {
+        E::from(DbError::from(coven_foundation::task::TaskFailed::of_blocking_join(
+            operation, error,
+        )))
+    })?
 }
 
 pub(crate) async fn process<F, T>(process: F) -> CovenResult<T>

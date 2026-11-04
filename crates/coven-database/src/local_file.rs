@@ -85,8 +85,8 @@ impl LocalFileStream {
     /// Read a positioned range on a blocking worker, retaining this open handle.
     pub async fn read_at(&self, offset: u64, len: u64) -> Result<Vec<u8>, LocalFileError> {
         let file = self.file.clone();
-        let joined = tokio::task::spawn_blocking(move || file.read_at(offset, len)).await;
-        coven_foundation::unwinding::blocking("read the local file", joined)
+        coven_foundation::task::blocking("read the local file", move || file.read_at(offset, len))
+            .await
             .map_err(FileError::from)?
     }
 

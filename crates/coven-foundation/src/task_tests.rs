@@ -24,10 +24,10 @@ async fn blocking_turns_a_panic_into_panicked_with_its_message() {
         .expect_err("a panicking closure gives no value");
     assert_eq!(
         failed,
-        TaskFailed::Panicked {
+        TaskFailed::Panicked(Bug {
             operation: "read the journal",
             message: "journal is empty".to_string(),
-        }
+        })
     );
     assert_eq!(failed.to_string(), "read the journal panicked: journal is empty");
 }
@@ -79,10 +79,10 @@ async fn joined_carries_a_formatted_panic_message() {
     let failed = joined("fill the read-ahead", task).await.expect_err("panicked");
     assert_eq!(
         failed,
-        TaskFailed::Panicked {
+        TaskFailed::Panicked(Bug {
             operation: "fill the read-ahead",
             message: "no window 7".to_string(),
-        }
+        })
     );
 }
 
@@ -97,8 +97,8 @@ async fn caught_fails_the_work_and_its_held_cleanup_runs() {
     })
     .await
     .expect_err("the work panicked");
-    assert_eq!(failed.operation(), "apply one slot");
-    assert!(failed.is_panic());
+    assert_eq!(failed.operation, "apply one slot");
+    assert_eq!(failed.message, "row count went negative");
     assert!(cleaned.load(Ordering::SeqCst), "the work's drop guard ran");
 }
 
@@ -137,21 +137,15 @@ async fn caught_keeps_a_panicking_drop_of_the_failed_work_from_unwinding() {
     let failed = caught("decode", PanicsTwice).await;
     assert_eq!(
         failed,
-        Err(TaskFailed::Panicked {
-            operation: "decode",
-            message: "decoder state is wrong".to_string(),
-        })
+        Err(Bug { operation: "decode", message: "decoder state is wrong".to_string() })
     );
 }
 
 #[test]
-fn caught_sync_turns_a_panic_into_panicked() {
+fn caught_sync_turns_a_panic_into_its_bug() {
     let failed =
         caught_sync("read callback", || -> i32 { panic!("buffer gone") }).expect_err("panicked");
-    assert_eq!(
-        failed,
-        TaskFailed::Panicked { operation: "read callback", message: "buffer gone".to_string() }
-    );
+    assert_eq!(failed, Bug { operation: "read callback", message: "buffer gone".to_string() });
     assert_eq!(caught_sync("read callback", || 5), Ok(5));
 }
 
@@ -177,7 +171,7 @@ fn caught_sync_keeps_a_payload_whose_drop_panics_from_unwinding() {
         caught_sync("seek callback", || -> i32 { std::panic::panic_any(PanicsWhenDropped) });
     assert_eq!(
         failed,
-        Err(TaskFailed::Panicked {
+        Err(Bug {
             operation: "seek callback",
             message: "a panic whose payload is not text".to_string(),
         })
@@ -190,9 +184,9 @@ async fn joined_keeps_a_payload_whose_drop_panics_from_unwinding() {
     let failed = joined("upload a file", task).await;
     assert_eq!(
         failed,
-        Err(TaskFailed::Panicked {
+        Err(TaskFailed::Panicked(Bug {
             operation: "upload a file",
             message: "a panic whose payload is not text".to_string(),
-        })
+        }))
     );
 }

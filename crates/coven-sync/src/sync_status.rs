@@ -266,7 +266,8 @@ impl PendingReason {
                 | LocalFailure::Disk
                 | LocalFailure::KeyCustody
                 | LocalFailure::Crypto
-                | LocalFailure::Operation,
+                | LocalFailure::Operation
+                | LocalFailure::Bug,
             ) => Some(Named::Failed),
             Self::Cleanup { cleanup, .. } => cleanup.names(),
             Self::Missing { .. }

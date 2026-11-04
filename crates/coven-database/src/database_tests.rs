@@ -558,25 +558,29 @@ fn read_only_process() {
 }
 
 #[tokio::test]
-#[expect(
-    clippy::let_underscore_must_use,
-    reason = "the migration panics, so opening never returns; the task carries the panic"
-)]
-async fn a_panicking_migration_preserves_its_panic_payload() {
-    let call = tokio::spawn(async {
-        let store = TestStore::new();
-        let _ = store
-            .builder(
-                vec![],
-                vec![Migration::addition_with(1, "panic", |_| {
-                    std::panic::panic_any(123_u64);
-                })],
-            )
-            .open()
-            .await;
-    });
-    let panic = call.await.expect_err("opening must propagate the migration panic");
-    assert_eq!(*panic.into_panic().downcast::<u64>().unwrap(), 123);
+async fn a_panicking_migration_fails_the_open_with_its_message() {
+    let store = TestStore::new();
+    let opened = store
+        .builder(
+            vec![],
+            vec![Migration::addition_with(1, "panic", |_| {
+                panic!("the notes table is missing");
+            })],
+        )
+        .open()
+        .await;
+    let Err(error) = opened else { panic!("a panicking migration opens nothing") };
+    assert!(
+        matches!(
+            &error,
+            CovenError::Database(DbError::Bug(bug))
+                if bug.operation == "open the store" && bug.message == "the notes table is missing"
+        ),
+        "{error:?}"
+    );
+    // The panic released the store's lock: the next open takes it.
+    let db = store.builder(vec![], vec![]).open().await.unwrap();
+    db.close().await.unwrap();
 }
 
 #[tokio::test]
@@ -584,17 +588,13 @@ async fn callback_panics_release_the_writer_and_reserve_nothing() {
     for work in [crate::ClaimWork::Writes(1), crate::ClaimWork::Operation(crate::OperationId(1))] {
         let store = TestStore::new();
         let db = store.builder(vec![], vec![]).open().await.unwrap();
-        let call = db.clone();
-        let panic = tokio::spawn(async move {
-            call.begin_claim(work, |_| -> Result<crate::ClaimAttempt<std::io::Empty>, DbError> {
-                std::panic::panic_any(123u64)
+        let error = db
+            .begin_claim(work, |_| -> Result<crate::ClaimAttempt<std::io::Empty>, DbError> {
+                panic!("no slot bytes")
             })
             .await
-            .unwrap();
-        })
-        .await
-        .unwrap_err();
-        assert_eq!(*panic.into_panic().downcast::<u64>().unwrap(), 123);
+            .unwrap_err();
+        assert!(matches!(&error, DbError::Bug(bug) if bug.message == "no slot bytes"), "{error:?}");
         assert!(db.current_claim().await.unwrap().is_none());
         let claim = db
             .begin_claim(crate::ClaimWork::Writes(1), |_| {
@@ -701,23 +701,19 @@ async fn finished_operation_ids_cannot_address_a_new_operation_after_reopening()
 }
 
 #[tokio::test]
-async fn a_panicking_write_whose_rollback_fails_still_panics_and_fails_the_handle() {
+async fn a_panicking_write_whose_rollback_fails_keeps_its_bug_and_fails_the_handle() {
     let store = TestStore::new();
     let open = || store.builder(notes_tables(), notes_migrations()).open();
     let db = open().await.unwrap();
     db.inspect_writer(|writer| writer.refuse_transaction_end(true));
-    let clone = db.clone();
-    let panic = tokio::spawn(async move {
-        clone
-            .write(|sql| -> Result<(), DbError> {
-                sql.execute("INSERT INTO notes VALUES('n','held','')", [])?;
-                panic!("app write panic")
-            })
-            .await
-    })
-    .await
-    .unwrap_err();
-    assert_eq!(*panic.into_panic().downcast::<&str>().unwrap(), "app write panic");
+    let error = db
+        .write(|sql| -> Result<(), DbError> {
+            sql.execute("INSERT INTO notes VALUES('n','held','')", [])?;
+            panic!("app write panic")
+        })
+        .await
+        .unwrap_err();
+    assert!(matches!(&error, DbError::Bug(bug) if bug.message == "app write panic"), "{error:?}");
     let held = |db: &Database| {
         db.inspect_writer(|writer| {
             writer.query_row("SELECT count(*) FROM notes", [], |r| r.get::<_, i64>(0))

@@ -53,6 +53,16 @@ pub enum FileError {
     /// (E15).
     #[error(transparent)]
     Shutdown(#[from] crate::task::Shutdown),
+    /// The operation panicked on the blocking pool: a bug, which the caller
+    /// reports (E15).
+    #[error(transparent)]
+    Bug(#[from] crate::task::Bug),
+}
+
+impl From<crate::task::TaskFailed> for FileError {
+    fn from(failed: crate::task::TaskFailed) -> Self {
+        failed.into_error()
+    }
 }
 
 impl FileError {
@@ -266,11 +276,10 @@ impl FileWriter {
         // The owned guard carries the OS handle and store lock into the task.
         let mut file = self.file.clone().lock_owned().await;
         let path = self.path.clone();
-        let joined = tokio::task::spawn_blocking(move || {
+        crate::task::blocking(operation, move || {
             run(&mut file, &path).map_err(|source| FileError::at(operation, &path, source))
         })
-        .await;
-        crate::unwinding::blocking(operation, joined)?
+        .await?
     }
 }
 

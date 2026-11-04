@@ -104,6 +104,15 @@ pub enum BootstrapError {
     /// before it started, so nothing changed (E15).
     #[error(transparent)]
     Shutdown(#[from] crate::task::Shutdown),
+    /// The call's work panicked: a bug, which the caller reports (E15).
+    #[error(transparent)]
+    Bug(#[from] crate::task::Bug),
+}
+
+impl From<crate::task::TaskFailed> for BootstrapError {
+    fn from(failed: crate::task::TaskFailed) -> Self {
+        failed.into_error()
+    }
 }
 
 /// Restore this person's store on a new device, returning its open handle.

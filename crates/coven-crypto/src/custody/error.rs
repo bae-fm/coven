@@ -86,6 +86,16 @@ pub enum KeyError {
     /// it changed in custody is unknown (E15).
     #[error(transparent)]
     Shutdown(#[from] coven_foundation::task::Shutdown),
+    /// The call's custody work panicked: a bug, which the caller reports
+    /// (E15). What it changed in custody is unknown.
+    #[error(transparent)]
+    Bug(#[from] coven_foundation::task::Bug),
+}
+
+impl From<coven_foundation::task::TaskFailed> for KeyError {
+    fn from(failed: coven_foundation::task::TaskFailed) -> Self {
+        failed.into_error()
+    }
 }
 
 /// A native keychain error whose diagnostic output never includes secret bytes.

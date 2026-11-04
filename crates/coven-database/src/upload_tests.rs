@@ -220,13 +220,12 @@ async fn consumer_failure_and_panic_release_the_reader() {
             db.read_oldest_upload(|_| Err::<(), _>("sink failed")).await,
             Err(UploadReadError::Consumer("sink failed"))
         ));
-        let cloned = db.clone();
-        let panic = tokio::spawn(async move {
-            cloned.read_oldest_upload(|_| -> Result<(), DbError> { panic!("sink panicked") }).await
-        })
-        .await
-        .unwrap_err();
-        assert!(panic.is_panic());
+        let panicked =
+            db.read_oldest_upload(|_| -> Result<(), DbError> { panic!("sink panicked") }).await;
+        assert!(
+            matches!(&panicked, Err(UploadReadError::Database(DbError::Bug(bug))) if bug.message == "sink panicked"),
+            "{panicked:?}"
+        );
     }
     assert_eq!(selected(&db).await.0.number, 1);
     db.close().await.unwrap();
@@ -274,13 +273,11 @@ async fn a_panicking_key_selector_releases_the_writer() {
     let store = TestStore::new();
     let db = store.schema(notes(), NOTES).await.unwrap();
     sql(&db, "INSERT INTO notes VALUES('1','title','body')").await.unwrap();
-    let clone = db.clone();
-    assert!(tokio::spawn(async move {
-        clone.prepare_upload(|_, _, _| panic!("selector panicked")).await
-    })
-    .await
-    .unwrap_err()
-    .is_panic());
+    let panicked = db.prepare_upload(|_, _, _| panic!("selector panicked")).await;
+    assert!(
+        matches!(&panicked, Err(DbError::Bug(bug)) if bug.message == "selector panicked"),
+        "{panicked:?}"
+    );
     let (id, keys) = selected(&db).await;
     assert!(keys.is_none());
     assert_eq!(attempt(&db, 17).await.unwrap(), Some(id));

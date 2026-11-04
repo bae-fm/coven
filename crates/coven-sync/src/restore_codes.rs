@@ -154,7 +154,7 @@ impl RestoreCodes {
                 .await?
                 .expect("the initiating replacement owns code completion"))
         });
-        coven_foundation::unwinding::task("replace member keys", joined.await)?
+        coven_foundation::task::joined("replace member keys", joined).await?
     }
 
     /// Finish the code step of a self-replacement resumed by a sync pass (§11.5).
@@ -196,7 +196,7 @@ impl RestoreCodes {
                 .await?;
             Ok(())
         });
-        coven_foundation::unwinding::task("replace the access key", joined.await)?
+        coven_foundation::task::joined("replace the access key", joined).await?
     }
 
     /// Keep this member's separately supplied S3 key without changing identity,
@@ -213,7 +213,7 @@ impl RestoreCodes {
             let owner = guard.as_ref().ok_or(DbError::StoreClosed)?;
             owner.install_s3(S3Credentials { access_key_id, secret_access_key }, false).await
         });
-        coven_foundation::unwinding::task("update credentials", joined.await)?
+        coven_foundation::task::joined("update credentials", joined).await?
     }
 
     /// Read committed provider data without exposing custody or a connection.

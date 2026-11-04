@@ -136,9 +136,9 @@ impl LockRegistration {
 
     async fn open_on_worker(self) -> Result<RegisteredLock, StoreLockError> {
         let closing = self.closing_guard();
-        let joined = tokio::task::spawn_blocking(move || self.acquire_file()).await;
-        let result = crate::unwinding::blocking("lock the store", joined)
-            .map_err(|shutdown| StoreLockError::File(shutdown.into()))
+        let result = crate::task::blocking("lock the store", move || self.acquire_file())
+            .await
+            .map_err(|failed| StoreLockError::File(failed.into()))
             .and_then(|result| result);
         closing.disarm();
         result

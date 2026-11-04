@@ -3,7 +3,6 @@
 use crate::{CovenBuilder, StoreDeletionError, StoreDir, StoreLayout};
 use coven_crypto::custody::{KeyError, Keychain, StoreKeychain};
 use coven_foundation::files::StoreDirAccess;
-use coven_foundation::unwinding::run_blocking;
 
 /// Creating, opening and deleting stores on this device (E1).
 pub struct Coven;
@@ -15,9 +14,9 @@ impl Coven {
         store_dir: &StoreDir,
     ) -> Result<Option<crate::StorageConfig>, crate::StorageError> {
         let settings = coven_storage::StorageSettings::new(store_dir.clone());
-        run_blocking("read the storage settings", move || settings.read())
+        crate::task::blocking("read the storage settings", move || settings.read())
             .await
-            .map_err(|shutdown| crate::StorageError::from(crate::FileError::from(shutdown)))?
+            .map_err(|failed| crate::StorageError::from(crate::FileError::from(failed)))?
     }
 
     /// Keep SQLite's temporary tables in `directory`, such as the app's cache
@@ -66,7 +65,7 @@ pub(crate) async fn discard(
 ) -> Result<(), StoreDeletionError> {
     store_dir.closed().await?;
     let directory = store_dir.clone();
-    run_blocking("discard the store", move || delete(&directory, &keys()?)).await?
+    crate::task::blocking("discard the store", move || delete(&directory, &keys()?)).await?
 }
 
 pub(crate) fn delete(directory: &StoreDir, keys: &StoreKeychain) -> Result<(), StoreDeletionError> {
@@ -76,17 +75,6 @@ pub(crate) fn delete(directory: &StoreDir, keys: &StoreKeychain) -> Result<(), S
         lock.remove_directory()?;
     }
     Ok(())
-}
-
-/// Wait for `task`, spawned so the call named `operation` finishes even when
-/// its caller stops waiting. A panic in it unwinds into the caller; the
-/// runtime dropping it as it shuts down is a `Shutdown` that may have run in
-/// part.
-pub(crate) async fn completion<T>(
-    operation: &'static str,
-    task: tokio::task::JoinHandle<T>,
-) -> Result<T, crate::task::Shutdown> {
-    coven_foundation::unwinding::task(operation, task.await)
 }
 
 #[cfg(test)]

@@ -44,6 +44,16 @@ pub enum StoreCreationError {
     /// runtime dropped is `NotRun`.
     #[error(transparent)]
     Shutdown(#[from] crate::task::Shutdown),
+    /// Creation panicked: a bug, which the caller reports (E15). As with
+    /// `Shutdown`, listing the stores shows whether it published the store.
+    #[error(transparent)]
+    Bug(#[from] crate::task::Bug),
+}
+
+impl From<crate::task::TaskFailed> for StoreCreationError {
+    fn from(failed: crate::task::TaskFailed) -> Self {
+        failed.into_error()
+    }
 }
 
 impl StoreCreationError {
@@ -81,6 +91,16 @@ pub enum StoreDeletionError {
     /// started, so nothing was deleted (E15).
     #[error(transparent)]
     Shutdown(#[from] crate::task::Shutdown),
+    /// The deletion panicked: a bug, which the caller reports (E15).
+    /// Retrying finishes a deletion that stopped partway.
+    #[error(transparent)]
+    Bug(#[from] crate::task::Bug),
+}
+
+impl From<crate::task::TaskFailed> for StoreDeletionError {
+    fn from(failed: crate::task::TaskFailed) -> Self {
+        failed.into_error()
+    }
 }
 
 /// Opening a read-only store or its saved file-storage connection failed.
@@ -122,6 +142,16 @@ pub enum StoreKeyUnlockError {
     /// whether it saved the keys it opened is unknown (E15).
     #[error(transparent)]
     Shutdown(#[from] crate::task::Shutdown),
+    /// Unlocking panicked: a bug, which the caller reports (E15). Whether
+    /// it saved the keys it opened is unknown.
+    #[error(transparent)]
+    Bug(#[from] crate::task::Bug),
+}
+
+impl From<crate::task::TaskFailed> for StoreKeyUnlockError {
+    fn from(failed: crate::task::TaskFailed) -> Self {
+        failed.into_error()
+    }
 }
 
 /// What setup and unlock report by name: a removal or a required update,
@@ -155,6 +185,8 @@ pub(crate) fn setup_error(error: SyncError) -> StorageSetupError {
         SyncError::SecureStorage(error) => StorageSetupError::SecureStorage(error),
         SyncError::Storage(error) => StorageSetupError::Storage(error),
         SyncError::StoreOwner => StorageSetupError::StoreOwner,
+        SyncError::Shutdown(shutdown) => StorageSetupError::Shutdown(shutdown),
+        SyncError::Bug(bug) => StorageSetupError::Bug(bug),
         error => StorageSetupError::Internal(Box::new(error)),
     }
 }
@@ -172,6 +204,8 @@ pub(crate) fn unlock_error(error: SyncError) -> StoreKeyUnlockError {
         SyncError::SecureStorage(error) => StoreKeyUnlockError::SecureStorage(error),
         SyncError::Crypto(error) => StoreKeyUnlockError::Crypto(error),
         SyncError::Storage(error) => StoreKeyUnlockError::Storage(error),
+        SyncError::Shutdown(shutdown) => StoreKeyUnlockError::Shutdown(shutdown),
+        SyncError::Bug(bug) => StoreKeyUnlockError::Bug(bug),
         error => StoreKeyUnlockError::Other(Box::new(error)),
     }
 }

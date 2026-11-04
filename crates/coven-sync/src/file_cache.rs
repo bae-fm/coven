@@ -113,17 +113,17 @@ impl FilesInner {
         let directory = self.directory.clone();
         // Cleanup cannot release the name while creation still runs after a
         // cancelled await; the blocking task retains its reservation.
-        let joined = tokio::task::spawn_blocking(move || {
-            let writer =
-                directory.create_writer(FileArea::Cache, &name).map_err(FileReadError::from);
-            (reservation, writer)
-        })
-        .await;
-        // The pool dropping the creation unstarted drops the reservation
-        // with it, which leaves the name to its recorded removal.
+        // A panic in the creation, or the pool dropping it unstarted, drops
+        // the reservation with it, which leaves the name to its recorded
+        // removal.
         let (reservation, writer) =
-            coven_foundation::unwinding::blocking("create a cache file", joined)
-                .map_err(coven_foundation::files::FileError::from)?;
+            coven_foundation::task::blocking("create a cache file", move || {
+                let writer =
+                    directory.create_writer(FileArea::Cache, &name).map_err(FileReadError::from);
+                (reservation, writer)
+            })
+            .await
+            .map_err(coven_foundation::files::FileError::from)?;
         Ok((reservation, writer?))
     }
 }

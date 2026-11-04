@@ -17,17 +17,24 @@ use std::task::{Context, Poll};
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum TaskFailed {
     /// The work panicked: a bug, which the caller reports.
-    #[error("{operation} panicked: {message}")]
-    Panicked {
-        /// What the work was doing, as its caller named it.
-        operation: &'static str,
-        /// The text the panic carried ([`panic_message`]).
-        message: String,
-    },
+    #[error(transparent)]
+    Panicked(Bug),
     /// The runtime it ran on is shutting down and dropped it before it
     /// finished. Not a bug: the process is ending the work.
     #[error(transparent)]
     Shutdown(Shutdown),
+}
+
+/// Work that panicked: a bug in it, not a failure its caller can act on
+/// (E15). The caller reports it wherever it reports its own bugs, and the
+/// call that ran the work returns it as its error.
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+#[error("{operation} panicked: {message}")]
+pub struct Bug {
+    /// What the work was doing, as its caller named it.
+    pub operation: &'static str,
+    /// The text the panic carried ([`panic_message`]).
+    pub message: String,
 }
 
 /// Work its runtime dropped as it shut down, before the work finished. Not a
@@ -68,13 +75,29 @@ impl std::fmt::Display for ShutdownOutcome {
 impl TaskFailed {
     /// The failure of `operation` whose panic carried `payload`.
     pub fn panicked(operation: &'static str, payload: &(dyn Any + Send)) -> Self {
-        Self::Panicked { operation, message: panic_message(payload) }
+        Self::Panicked(Bug { operation, message: panic_message(payload) })
     }
 
     /// The failure a joined task's `error` stands for. A task the runtime
     /// dropped may have run in part: `ShutdownOutcome::Unknown`.
     pub fn of_join(operation: &'static str, error: tokio::task::JoinError) -> Self {
         Self::of_dropped(operation, ShutdownOutcome::Unknown, error)
+    }
+
+    /// The failure a join of a closure on the blocking pool stands for. The
+    /// pool can't stop a closure once it has started, so one it dropped
+    /// never ran: `ShutdownOutcome::NotRun`.
+    pub fn of_blocking_join(operation: &'static str, error: tokio::task::JoinError) -> Self {
+        Self::of_dropped(operation, ShutdownOutcome::NotRun, error)
+    }
+
+    /// This failure as the error of the call whose work it ended: its
+    /// `Bug` for a panic, its `Shutdown` for the runtime dropping the work.
+    pub fn into_error<E: From<Bug> + From<Shutdown>>(self) -> E {
+        match self {
+            Self::Panicked(bug) => E::from(bug),
+            Self::Shutdown(shutdown) => E::from(shutdown),
+        }
     }
 
     /// `error`'s failure, where a task the runtime dropped got as far as
@@ -94,7 +117,7 @@ impl TaskFailed {
     /// What the failed work was doing, as its caller named it.
     pub fn operation(&self) -> &'static str {
         match self {
-            Self::Panicked { operation, .. } | Self::Shutdown(Shutdown { operation, .. }) => {
+            Self::Panicked(Bug { operation, .. }) | Self::Shutdown(Shutdown { operation, .. }) => {
                 operation
             }
         }
@@ -102,7 +125,7 @@ impl TaskFailed {
 
     /// Whether the work panicked, rather than being dropped by its runtime.
     pub fn is_panic(&self) -> bool {
-        matches!(self, Self::Panicked { .. })
+        matches!(self, Self::Panicked(_))
     }
 }
 
@@ -127,7 +150,7 @@ pub async fn blocking<T: Send + 'static>(
 ) -> Result<T, TaskFailed> {
     tokio::task::spawn_blocking(work)
         .await
-        .map_err(|error| TaskFailed::of_dropped(operation, ShutdownOutcome::NotRun, error))
+        .map_err(|error| TaskFailed::of_blocking_join(operation, error))
 }
 
 /// Wait for a task already spawned. Its panic, or the runtime cancelling it,
@@ -141,15 +164,13 @@ pub async fn joined<T: Send + 'static>(
 
 /// Run `work` inline, catching a panic in any of its polls. For one message of
 /// a long-lived loop: the panic fails that message and the loop serves the
-/// next.
+/// next. Run inline, the work can't be dropped by its runtime, so a panic is
+/// its only failure.
 ///
 /// After a panic `work` is dropped at once, inside a catch of its own, so a
 /// drop that panics on what the first panic left behind does not unwind into
 /// the caller either.
-pub async fn caught<T>(
-    operation: &'static str,
-    work: impl Future<Output = T>,
-) -> Result<T, TaskFailed> {
+pub async fn caught<T>(operation: &'static str, work: impl Future<Output = T>) -> Result<T, Bug> {
     Caught { operation, work: Some(Box::pin(work)) }.await
 }
 
@@ -157,15 +178,20 @@ pub async fn caught<T>(
 /// body, a `Drop`. Unwinding out of an `extern "C"` function aborts the
 /// process, so such a function catches here and answers with its own failure
 /// value.
-pub fn caught_sync<T>(operation: &'static str, work: impl FnOnce() -> T) -> Result<T, TaskFailed> {
-    catch_unwind(AssertUnwindSafe(work)).map_err(|payload| failed_with(operation, payload))
+pub fn caught_sync<T>(operation: &'static str, work: impl FnOnce() -> T) -> Result<T, Bug> {
+    catch_unwind(AssertUnwindSafe(work)).map_err(|payload| bug_of(operation, payload))
 }
 
-/// The failure a caught panic's `payload` stands for. The payload is dropped
+/// The failure a joined panic's `payload` stands for.
+fn failed_with(operation: &'static str, payload: Box<dyn Any + Send>) -> TaskFailed {
+    TaskFailed::Panicked(bug_of(operation, payload))
+}
+
+/// The bug a caught panic's `payload` stands for. The payload is dropped
 /// here inside a catch of its own: a payload whose `Drop` panics would
 /// otherwise unwind out of the helper that caught the first panic.
-fn failed_with(operation: &'static str, payload: Box<dyn Any + Send>) -> TaskFailed {
-    let failed = TaskFailed::panicked(operation, payload.as_ref());
+fn bug_of(operation: &'static str, payload: Box<dyn Any + Send>) -> Bug {
+    let bug = Bug { operation, message: panic_message(payload.as_ref()) };
     if let Err(again) = catch_unwind(AssertUnwindSafe(move || drop(payload))) {
         tracing::error!(
             operation,
@@ -176,7 +202,7 @@ fn failed_with(operation: &'static str, payload: Box<dyn Any + Send>) -> TaskFai
         // the unwind from reaching the caller.
         std::mem::forget(again);
     }
-    failed
+    bug
 }
 
 struct Caught<F: Future> {
@@ -186,7 +212,7 @@ struct Caught<F: Future> {
 }
 
 impl<F: Future> Future for Caught<F> {
-    type Output = Result<F::Output, TaskFailed>;
+    type Output = Result<F::Output, Bug>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let operation = self.operation;
@@ -200,7 +226,7 @@ impl<F: Future> Future for Caught<F> {
                 Poll::Ready(Ok(value))
             }
             Err(payload) => {
-                let failed = failed_with(operation, payload);
+                let bug = bug_of(operation, payload);
                 let work = self.work.take();
                 if let Err(payload) = catch_unwind(AssertUnwindSafe(move || drop(work))) {
                     tracing::error!(
@@ -210,7 +236,7 @@ impl<F: Future> Future for Caught<F> {
                     );
                     std::mem::forget(payload);
                 }
-                Poll::Ready(Err(failed))
+                Poll::Ready(Err(bug))
             }
         }
     }

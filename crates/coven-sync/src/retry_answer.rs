@@ -228,7 +228,8 @@ fn cooldown_until(schedule: &Mutex<super::WaitSchedule>, clock: &ClockRef) -> Op
 /// error the step's caller gets, never its text (F.5), or `NotSyncing` once
 /// the store closed. A step fails only as its handle does, whose failure
 /// every later call reports from one shared cause, so the answer carries that
-/// same failure; or as its runtime shuts down, saying how far it got.
+/// same failure; as its runtime shuts down, saying how far it got; or as it
+/// panics, with the bug.
 fn failed(error: &DbError) -> RetryOutcome {
     let failure = match error {
         DbError::StoreClosed => return RetryOutcome::NotSyncing,
@@ -236,6 +237,7 @@ fn failed(error: &DbError) -> RetryOutcome {
         DbError::RollbackFailed => DbError::RollbackFailed,
         DbError::CheckpointFailed(cause) => DbError::CheckpointFailed(cause.clone()),
         DbError::Shutdown(shutdown) => DbError::Shutdown(*shutdown),
+        DbError::Bug(bug) => DbError::Bug(bug.clone()),
         _ => DbError::Invariant { what: "a retry step fails only as its handle or runtime does" },
     };
     PassFailure::Failed { error: SyncFailure::Other(Arc::new(failure)) }.into()

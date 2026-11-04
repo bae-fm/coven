@@ -406,17 +406,17 @@ async fn output_errors_and_panics_release_the_reader_transaction() {
     let result =
         database.write_snapshot(id(Audience::Store), |_| Ok(()), |_| Err("consumer refused")).await;
     assert!(matches!(result, Err(SnapshotWriteError::Output("consumer refused"))));
-    let clone = database.clone();
-    let task = tokio::spawn(async move {
-        clone
-            .write_snapshot(
-                id(Audience::Store),
-                |_| Ok(()),
-                |_| -> Result<(), ()> { panic!("consumer panic") },
-            )
-            .await
-    });
-    assert!(task.await.unwrap_err().is_panic());
+    let panicked = database
+        .write_snapshot(
+            id(Audience::Store),
+            |_| Ok(()),
+            |_| -> Result<(), ()> { panic!("consumer panic") },
+        )
+        .await;
+    assert!(
+        matches!(&panicked, Err(SnapshotWriteError::Database(DbError::Bug(bug))) if bug.message == "consumer panic"),
+        "{panicked:?}"
+    );
     sql(&database, "INSERT INTO notes VALUES('n','still open','')").await.unwrap();
     assert_eq!(decode(&frames(&database, Audience::Store).await).0.counts[section::SYNCED], 1);
     database.close().await.unwrap();

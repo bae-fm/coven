@@ -297,6 +297,16 @@ pub enum StorageSetupError {
     /// of it was saved is unknown (E15).
     #[error(transparent)]
     Shutdown(#[from] coven_foundation::task::Shutdown),
+    /// Setup panicked: a bug, which the caller reports (E15). How much of it
+    /// was saved is unknown.
+    #[error(transparent)]
+    Bug(#[from] coven_foundation::task::Bug),
+}
+
+impl From<coven_foundation::task::TaskFailed> for StorageSetupError {
+    fn from(failed: coven_foundation::task::TaskFailed) -> Self {
+        failed.into_error()
+    }
 }
 
 impl StorageFailure {

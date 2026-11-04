@@ -258,13 +258,11 @@ async fn a_panicking_authenticator_rolls_back_without_poisoning_the_writer() {
     sql(&a, "INSERT INTO notes VALUES('one','first','')").await.unwrap();
     let record = records(&a).remove(0);
     let input = stream(&record);
-    let clone = b.clone();
-    assert!(tokio::spawn(async move {
-        clone.receive_stream(input, || panic!("authenticator panicked")).await
-    })
-    .await
-    .unwrap_err()
-    .is_panic());
+    let panicked = b.receive_stream(input, || panic!("authenticator panicked")).await;
+    assert!(
+        matches!(&panicked, Err(DbError::Bug(bug)) if bug.message == "authenticator panicked"),
+        "{panicked:?}"
+    );
     assert_eq!(count(&b, "notes"), 0);
     b.receive_stream(stream(&record), || Ok(())).await.unwrap();
     assert_eq!(count(&b, "notes"), 1);

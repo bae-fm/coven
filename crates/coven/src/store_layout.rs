@@ -6,7 +6,6 @@ use coven_foundation::files::{
     StoreDirectoriesAccess,
 };
 use coven_foundation::id_source::IdSource;
-use coven_foundation::unwinding::run_blocking;
 use std::path::PathBuf;
 
 /// The stores under an app directory, one directory each (E1).
@@ -72,7 +71,7 @@ impl StoreLayout {
             let failed = |source: CovenError| StoreLayoutError::Store { store: id, source };
             let unfinished = {
                 let directory = directory.clone();
-                run_blocking("read the replacement record", move || {
+                crate::task::blocking("read the replacement record", move || {
                     directory.unfinished_replacement()
                 })
                 .await

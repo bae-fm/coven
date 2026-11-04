@@ -114,7 +114,7 @@ impl Database {
                 let incoming = incoming.prepare(inputs)?;
                 let prepared = inner.clock.elapsed();
                 let reader = inner.access.readers.acquire_reader();
-                let applied = inner.with_files(|writer, files| {
+                let applied = inner.with_files("apply a slot", |writer, files| {
                     reader.with_reader(|reader| {
                         reader.read_transaction(|| {
                             crate::write_schema::prepare_evaluators(

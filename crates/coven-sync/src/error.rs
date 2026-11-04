@@ -125,6 +125,16 @@ pub enum SyncError {
     /// do, may have stopped partway.
     #[error(transparent)]
     Shutdown(#[from] coven_foundation::task::Shutdown),
+    /// The call's work panicked: a bug in coven, which the caller reports
+    /// (E15). Its category is `LocalFailure::Bug`.
+    #[error(transparent)]
+    Bug(#[from] coven_foundation::task::Bug),
+}
+
+impl From<coven_foundation::task::TaskFailed> for SyncError {
+    fn from(failed: coven_foundation::task::TaskFailed) -> Self {
+        failed.into_error()
+    }
 }
 
 impl From<coven_database::CovenError> for SyncError {
@@ -132,6 +142,7 @@ impl From<coven_database::CovenError> for SyncError {
         match error {
             coven_database::CovenError::Database(error) => error.into(),
             coven_database::CovenError::Shutdown(shutdown) => Self::Shutdown(shutdown),
+            coven_database::CovenError::Bug(bug) => Self::Bug(bug),
             error => {
                 Self::Failed { failure: crate::LocalFailure::Database, source: Arc::new(error) }
             }
@@ -147,6 +158,7 @@ impl From<SyncError> for coven_database::CovenError {
         match error {
             SyncError::Database(error) => Self::Database(error),
             SyncError::Shutdown(shutdown) => Self::Database(DbError::Shutdown(shutdown)),
+            SyncError::Bug(bug) => Self::Database(DbError::Bug(bug)),
             error => Self::Database(DbError::SyncStream(Box::new(error))),
         }
     }
@@ -155,14 +167,18 @@ impl From<SyncError> for coven_database::CovenError {
 impl From<DbError> for SyncError {
     fn from(error: DbError) -> Self {
         match error {
-            // The database refusing sync's own requests out of order or
-            // against changed state is an internal invariant, not a database
-            // failure an app can act on.
-            error @ (DbError::OperationChanged(_) | DbError::Invariant { .. }) => {
+            // The database refusing sync's own requests against changed state
+            // is not a database failure an app can act on.
+            error @ DbError::OperationChanged(_) => {
                 Self::Failed { failure: crate::LocalFailure::Database, source: Arc::new(error) }
+            }
+            // Coven broke its own rule: a bug, as a panic is.
+            error @ DbError::Invariant { .. } => {
+                Self::Failed { failure: crate::LocalFailure::Bug, source: Arc::new(error) }
             }
             // The process is ending the call; the database did not fail.
             DbError::Shutdown(shutdown) => Self::Shutdown(shutdown),
+            DbError::Bug(bug) => Self::Bug(bug),
             DbError::StagingCleanup { operation, cleanup } => Self::Cleanup {
                 operation: Box::new((*operation).into()),
                 cleanup: Box::new((*cleanup).into()),
@@ -223,7 +239,8 @@ impl SyncError {
             | SyncError::KeyAlreadyUsed(_)
             | SyncError::DeviceIdInUse(_)
             | SyncError::WrongStore { .. }
-            | SyncError::Shutdown(_) => PendingReason::Failed(error.local_failure()),
+            | SyncError::Shutdown(_)
+            | SyncError::Bug(_) => PendingReason::Failed(error.local_failure()),
         }
     }
 
@@ -262,6 +279,7 @@ impl SyncError {
             | Self::UpdateRequired(_)
             | Self::WrongStore { .. } => crate::LocalFailure::Operation,
             Self::Shutdown(_) => crate::LocalFailure::Shutdown,
+            Self::Bug(_) => crate::LocalFailure::Bug,
         }
     }
 
@@ -272,7 +290,11 @@ impl SyncError {
     pub(crate) fn local_failure_clears_by_itself(&self) -> bool {
         matches!(
             self,
-            Self::Database(_) | Self::SecureStorage(_) | Self::Failed { .. } | Self::Shutdown(_)
+            Self::Database(_)
+                | Self::SecureStorage(_)
+                | Self::Failed { .. }
+                | Self::Shutdown(_)
+                | Self::Bug(_)
         ) && crate::PendingReason::Failed(self.local_failure()).clears()
             == Some(crate::pending::Clears::ByItself)
     }

@@ -87,8 +87,9 @@ impl StoreDirectories {
         installations: Installations,
     ) -> Result<Vec<StoreId>, StoreDirectoriesError> {
         let layout = self.clone();
-        let joined = tokio::task::spawn_blocking(move || layout.list_stores(installations)).await;
-        crate::unwinding::blocking("list stores", joined).map_err(FileError::from)?
+        crate::task::blocking("list stores", move || layout.list_stores(installations))
+            .await
+            .map_err(FileError::from)?
     }
 
     fn list_stores(

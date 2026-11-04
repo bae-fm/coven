@@ -128,8 +128,7 @@ impl FlushBatch {
         if self.files == 0 {
             return Ok(Flushed(()));
         }
-        let joined = tokio::task::spawn_blocking(move || self.flush_now()).await;
-        crate::unwinding::blocking("flush the batch", joined)?
+        crate::task::blocking("flush the batch", move || self.flush_now()).await?
     }
 
     fn flush_now(self) -> Result<Flushed, FileError> {

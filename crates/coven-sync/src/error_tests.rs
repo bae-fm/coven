@@ -77,16 +77,20 @@ fn object_validation_keeps_causes_and_local_failures_stay_local() {
 
 #[test]
 fn refusals_of_syncs_own_requests_fail_internally_and_keep_their_native_cause() {
+    // A broken rule of coven's own is a bug; a changed operation a database
+    // failure an app can't act on.
     let internal = [
-        DbError::Invariant { what: "a broken rule of coven's own code" },
-        DbError::OperationChanged(coven_database::OperationId(4)),
+        (
+            DbError::Invariant { what: "a broken rule of coven's own code" },
+            crate::LocalFailure::Bug,
+        ),
+        (DbError::OperationChanged(coven_database::OperationId(4)), crate::LocalFailure::Database),
     ];
-    for refusal in internal {
+    for (refusal, category) in internal {
         let expected = refusal.to_string();
         let error = SyncError::from(refusal);
-        let SyncError::Failed { failure: crate::LocalFailure::Database, source } = &error else {
-            panic!("{error:?}")
-        };
+        let SyncError::Failed { failure, source } = &error else { panic!("{error:?}") };
+        assert_eq!(*failure, category);
         assert_eq!(source.downcast_ref::<DbError>().unwrap().to_string(), expected);
     }
     // Conditions an app can see stay database failures.
@@ -169,13 +173,13 @@ fn stored_damage_an_invariant_and_a_remote_refusal_stay_distinct() {
         SyncError::from(DbError::DamagedDatabase),
         SyncError::Database(DbError::DamagedDatabase)
     ));
-    // Coven's own rule broke: a local failure keeping the rule, never damage.
+    // Coven's own rule broke: a bug keeping the rule, never damage.
     let SyncError::Failed { failure, source } =
         SyncError::from(DbError::Invariant { what: "a completed upload is queued" })
     else {
         panic!("an invariant is a local failure")
     };
-    assert_eq!(failure, crate::LocalFailure::Database);
+    assert_eq!(failure, crate::LocalFailure::Bug);
     assert!(matches!(
         source.downcast_ref::<DbError>(),
         Some(DbError::Invariant { what: "a completed upload is queued" })

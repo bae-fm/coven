@@ -1102,9 +1102,11 @@ how the app receives them.
   transactions names a row's key and the columns an update changed, not the
   others. When a waiting live query narrows by one of those others, coven reads
   its value from the row before the transaction commits.
-- **A callback panics.** Database callbacks give their connections back before
-  the panic continues. The unfinished transaction rolls back, and later calls can
-  use the writer and the readers again.
+- **A callback panics.** The unfinished transaction rolls back, the callback
+  gives its connection back, and the call fails with `DbError::Bug`, the
+  panic's text kept (api.md E15). A write's staged and released bytes go as
+  after any failed write, and later calls use the writer and the readers
+  again.
 - **A rollback fails.** Then the connection may still be inside the transaction.
   The writer would treat its uncommitted changes as committed in its own later
   reads and writes, and a reader would keep reading its old snapshot of the
@@ -1116,8 +1118,8 @@ how the app receives them.
     failures.
   - A read ends by rolling back. If only that rollback fails, the read reports
     it; a read that had already failed keeps its own cause.
-  - If a callback panicked, the panic still continues, and the failed rollback is
-    logged.
+  - If a callback panicked, the call fails with its `Bug`, and the failed
+    rollback is logged.
 - **A view and the tables behind it.** A statement that reads a view may also
   name one of the tables the view reads, as long as it reads none of that
   table's columns, such as `SELECT count(*) FROM coven_members, _coven_members`.
@@ -8984,6 +8986,10 @@ pins) consistent with its database across crashes.
 - Owed local deletions run after writes and on opening. A failure keeps the
   record. A committed write still returns its result; opening reports the cleanup
   failure.
+- A write whose rollback failed runs none: its writer may still hold the
+  write's uncommitted records, and deleting by them could take bytes a
+  committed row names. They wait for the next open, as every call on that
+  handle fails until then (§4).
 - **Copies in the person's folders** follow the same rules. Each copy coven
   writes to make a file device-only, and each folder it makes for one, is
   recorded before it exists (§17.3), and a folder counts as coven's only once
@@ -10622,6 +10628,7 @@ the constraint or foreign key (§9, §15.1, §15.2, Appendix A).
 | `Failed(Disk)`, `Failed(Database)` | writing the local cache failed; the database failed | §17.7 |
 | `Failed(LocalFailure::Database)` | a database failure, with its cause on the call: `DbError::DamagedDatabase` for a damaged database | §19.1 |
 | `Failed(LocalFailure::Shutdown)` | the runtime shut down and dropped the work, which the next process runs again | api.md E15 |
+| `Failed(LocalFailure::Bug)` | coven's own code broke its rule or panicked; the work retries under backoff and fails again until the bug is fixed | api.md E15 |
 | `Waiting` | an upload sent in one request, until confirmed completion removes it | §17.9 |
 | `Automatic`, `AppAction`, `Never` | how a storage failure retries: under backoff, when credentials or the connection change, or not at all | §17.9 |
 | `SessionIdentityUnknown` | an S3 upload session's native id can't be recovered | E.10 |

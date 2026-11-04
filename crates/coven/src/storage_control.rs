@@ -256,7 +256,7 @@ impl StorageConnections {
             let published = owner.publish_released(released).await;
             stopped.map_err(SyncError::from).and(published)
         });
-        crate::coven::completion("stop sync", stopping).await?
+        crate::task::joined("stop sync", stopping).await?
     }
 
     /// Request a pass while started.
@@ -335,7 +335,7 @@ impl StorageConnections {
 /// waiter; the runtime dropping it as it shuts down has ended it too, which
 /// is all the waiter needs.
 async fn attempt_ended(task: tokio::task::JoinHandle<()>) {
-    if let Err(shutdown) = crate::coven::completion("connect to storage", task).await {
+    if let Err(shutdown) = coven_foundation::unwinding::task("connect to storage", task.await) {
         tracing::debug!("{shutdown}");
     }
 }

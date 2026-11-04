@@ -169,6 +169,10 @@ pub enum LocalFailure {
     /// The work's runtime is shutting down and dropped it: the process is
     /// ending, and the next one runs the work again (E15).
     Shutdown,
+    /// Coven's own code broke its rule or panicked: a bug, which the call
+    /// reports. The work retries under backoff, as a database failure does,
+    /// and fails again until the bug is fixed (E15).
+    Bug,
 }
 
 /// The provider's intended sharing change.
@@ -441,7 +445,8 @@ impl PendingReason {
                 LocalFailure::Database
                 | LocalFailure::Disk
                 | LocalFailure::KeyCustody
-                | LocalFailure::Shutdown,
+                | LocalFailure::Shutdown
+                | LocalFailure::Bug,
             ) => Some(Clears::ByItself),
             Self::Failed(LocalFailure::Crypto | LocalFailure::Operation) => Some(Clears::Never),
             Self::Storage { failure, .. } => Some(storage_clears(*failure)),

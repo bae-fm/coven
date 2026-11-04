@@ -73,6 +73,6 @@ impl CovenReadHandle {
             handle.files.close().await;
             handle.database.close().await
         });
-        crate::coven::completion("close the read-only store", closing).await?
+        crate::task::joined("close the read-only store", closing).await?
     }
 }

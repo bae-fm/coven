@@ -268,7 +268,8 @@ private def reasons : List (String × Reason) := [
 
 private def locals : List (String × Local) := [
     ("database", .database), ("disk", .disk), ("keyCustody", .keyCustody),
-    ("crypto", .crypto), ("operation", .operation), ("shutdown", .shutdown)]
+    ("crypto", .crypto), ("operation", .operation), ("shutdown", .shutdown),
+    ("bug", .bug)]
 
 private def named {α : Type} (table : List (String × α)) (what name : String) : Except String α :=
   match table.lookup name with

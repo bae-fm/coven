@@ -167,18 +167,17 @@ async fn app_errors_and_panics_roll_back_and_leave_the_writer_usable() {
         Err::<(), _>(DbError::ClockOutOfRange)
     }).await.unwrap_err();
     assert!(matches!(error, DbError::ClockOutOfRange));
-    let clone = database.clone();
-    let panic = tokio::spawn(async move {
-        clone
-            .write(|context| -> Result<(), DbError> {
-                context.execute("INSERT INTO notes VALUES('43','Hardware store','')", [])?;
-                std::panic::panic_any(43u64)
-            })
-            .await
-    })
-    .await
-    .unwrap_err();
-    assert_eq!(*panic.into_panic().downcast::<u64>().unwrap(), 43);
+    let error = database
+        .write(|context| -> Result<(), DbError> {
+            context.execute("INSERT INTO notes VALUES('43','Hardware store','')", [])?;
+            panic!("note 43 has no title")
+        })
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&error, DbError::Bug(bug) if bug.operation == "write" && bug.message == "note 43 has no title"),
+        "{error:?}"
+    );
     for table in
         ["notes", "local_rows", "_coven_writes", "_coven_uploads", "_coven_rows", "_coven_cells"]
     {

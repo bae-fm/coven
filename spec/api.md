@@ -1111,6 +1111,10 @@ pub enum CovenError {
     /// unstarted, such as opening's custody work; a dropped database call is
     /// `DbError::Shutdown` (E15).
     Shutdown(Shutdown),
+    /// Coven's work for the call panicked, such as opening's custody work: a
+    /// bug, which the caller reports; a database call that panicked is
+    /// `DbError::Bug` (E15).
+    Bug(Bug),
     /// The platform refused to let coven watch the device's network, such as
     /// an Android app without coven's Android library (E1, E5).
     NetworkWatch(NetworkWatchError),
@@ -1184,6 +1188,11 @@ pub enum DbError {
     /// call changed nothing (`NotRun`); closing may have stopped partway
     /// (`Unknown`).
     Shutdown(Shutdown),
+    /// The call's work panicked: a bug in coven or in the app's callback,
+    /// which the caller reports (E15). A write that panicked rolled back,
+    /// and the bytes it released or staged are removed as after any failed
+    /// write.
+    Bug(Bug),
     /// SQLite refused or failed a statement, preserving its error.
     Sqlite(rusqlite::Error),
     /// A statement met damage SQLite reports (`SQLITE_CORRUPT`,
@@ -1191,7 +1200,7 @@ pub enum DbError {
     DamagedDatabase,
     /// Coven's own code broke a rule it relies on, such as a caller's contract
     /// or a step its state machine cannot reach: a bug, never stored damage.
-    /// Sync reports it as `Failed(LocalFailure::Database)` (§19.1).
+    /// Sync reports it as `Failed(LocalFailure::Bug)` (§19.1).
     Invariant { what: &'static str },
     /// The directory's store id disagrees with the creation entry when it
     /// is prepared, applied or read at opening (§10). Names are not compared.
@@ -1585,6 +1594,8 @@ pub enum FileError {
     Cleanup { operation: Box<FileError>, cleanup: Box<dyn std::error::Error + Send + Sync> },
     /// The operation's runtime is shutting down and dropped it unstarted (E15).
     Shutdown(Shutdown),
+    /// The operation panicked on the blocking pool: a bug (E15).
+    Bug(Bug),
 }
 
 impl FileError {
@@ -1738,6 +1749,9 @@ pub enum StoreCreationError {
     /// `Unknown` it may have stopped before or after publishing the store;
     /// listing the stores shows which.
     Shutdown(Shutdown),
+    /// Creation panicked: a bug (E15). As with `Shutdown`, listing the
+    /// stores shows whether it published the store.
+    Bug(Bug),
 }
 
 /// The folder for temporary tables could not be named (E1).
@@ -1772,6 +1786,9 @@ pub enum StoreDeletionError {
     /// The deletion's runtime is shutting down and dropped it unstarted;
     /// nothing was deleted (E15).
     Shutdown(Shutdown),
+    /// The deletion panicked: a bug (E15). Retrying finishes a deletion
+    /// that stopped partway.
+    Bug(Bug),
 }
 
 /// Unlocking, keeping or forgetting keys or host secrets failed (E1, E11).
@@ -1828,6 +1845,9 @@ pub enum KeyError {
     RestoreCodeStoreId,
     /// The call's runtime is shutting down and dropped it partway (E15).
     Shutdown(Shutdown),
+    /// The call's custody work panicked: a bug (E15). What it changed in
+    /// custody is unknown.
+    Bug(Bug),
 }
 
 /// Secret bytes crossing custody or code boundaries, erased when dropped (§12.4, §13).
@@ -4464,6 +4484,8 @@ pub enum StorageSetupError {
     /// Setup's runtime is shutting down and dropped it partway, so how much
     /// of it was saved is unknown (E15).
     Shutdown(Shutdown),
+    /// Setup panicked: a bug (E15). How much of it was saved is unknown.
+    Bug(Bug),
 }
 
 /// The provider operation checked before setup commits anything (E5).
@@ -4511,6 +4533,9 @@ pub enum StoreKeyUnlockError {
     /// Unlocking's runtime is shutting down and dropped it partway, so
     /// whether it kept the keys it opened is unknown (E15).
     Shutdown(Shutdown),
+    /// Unlocking panicked: a bug (E15). Whether it kept the keys it opened
+    /// is unknown.
+    Bug(Bug),
 }
 
 /// Sync or an administrative operation failed (§10, §14, §18, E5).
@@ -4587,6 +4612,9 @@ pub enum SyncError {
     /// task, as closing and replacing credentials do, may have stopped
     /// partway. Its category is `LocalFailure::Shutdown`.
     Shutdown(Shutdown),
+    /// The call's work panicked: a bug in coven, which the caller reports
+    /// (E15). Its category is `LocalFailure::Bug`.
+    Bug(Bug),
 }
 
 impl SyncError {
@@ -4722,6 +4750,10 @@ pub enum LocalFailure {
     /// The work's runtime is shutting down; the next process runs it again,
     /// so it clears by itself (E15).
     Shutdown,
+    /// Coven's own code broke its rule or panicked: a bug. The work retries
+    /// under backoff, as a database failure does, and fails again until the
+    /// bug is fixed (E15).
+    Bug,
 }
 
 pub enum ProviderAccessAction {
@@ -6734,6 +6766,8 @@ pub enum BootstrapError {
     /// The saved restore codes' keychain work did not run: its runtime is
     /// shutting down (E15).
     Shutdown(Shutdown),
+    /// The call's work panicked: a bug (E15).
+    Bug(Bug),
 }
 
 /// Opens sign-in and returns the provider's complete redirect URL. Coven holds
@@ -8062,17 +8096,17 @@ pub async fn empty_s3_prefix(
 - Ana's music app reads an album's tags on the blocking pool with
   `blocking("read the tags", ...)` while it imports the album. The tag reader
   panics on a damaged file with "tag table is empty". The call returns
-  `Err(TaskFailed::Panicked { operation: "read the tags", message: "tag table
-  is empty" })`. The import removes its staged files, as on any other error,
+  `Err(TaskFailed::Panicked(Bug { operation: "read the tags", message: "tag
+  table is empty" }))`. The import removes its staged files, as on any other error,
   and the app reports the bug. Had the panic been re-raised, it would have
   unwound through the import and left the staged files behind.
 - `blocking` runs a closure on the blocking pool. `joined` waits for a task
   already spawned. `caught` runs a future inline and catches a panic in any
-  of its polls: one message of a long-lived loop fails, and the loop serves
-  the next. `caught_sync` does the same for a synchronous call, such as a
-  callback foreign code calls. Unwinding out of an `extern "C"` function ends
-  the process, so such a callback catches the panic and answers with its own
-  failure value.
+  of its polls: one message of a long-lived loop fails with its `Bug`, and
+  the loop serves the next. `caught_sync` does the same for a synchronous
+  call, such as a callback foreign code calls. Unwinding out of an
+  `extern "C"` function ends the process, so such a callback catches the
+  panic and answers with its own failure value.
 
 A runtime that shuts down drops the work it has not finished, and coven's own
 calls run work the same way: database calls and file work on the blocking
@@ -8108,9 +8142,26 @@ so such a call ends with a `Shutdown` in its error instead of a panic.
   `Shutdown` as its own and reports it as `LocalFailure::Shutdown`, which
   clears by itself: the next process runs the work again, and a slot whose
   application it stopped is not blocked (§19.1).
-- A panic in coven's own background work still unwinds into the caller that
-  waits for it, as if the work had run inline. A database call gives an app
-  closure's panic back the same way.
+
+Coven's own calls turn a panic in their work into a value the same way. A
+panic is a bug, in coven or in the app's callback, and the call's error
+carries it as `Bug`: `DbError::Bug` for a database call, `FileError::Bug`
+for file work, and a `Bug` variant of each error that has a `Shutdown` one.
+`SyncError` reports it as `LocalFailure::Bug`.
+
+- Ana's app writes a note with `write`, and its closure panics on a note
+  with no title: "note 43 has no title". The write's transaction rolls back,
+  the bytes it staged are removed as after any failed write, and `write`
+  returns `Err(DbError::Bug(Bug { operation: "write", message: "note 43 has
+  no title" }))`. The next write runs on the same writer. Had the panic
+  unwound, it would have ended the app's task that called `write`, skipping
+  the cleanup the app does on an error.
+- A file removal that fails after such a write joins the bug as
+  `DbError::FileCleanup`, as it joins any failed write's error, so neither
+  failure is lost.
+- A panic in one of a store's long-lived workers, which nobody waits on as
+  it runs, still unwinds into the owner that stops it: the upload worker,
+  the invite expiry, the network follower and a connection attempt.
 
 Edge cases:
 
@@ -8136,16 +8187,20 @@ Edge cases:
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum TaskFailed {
     /// The work panicked: a bug, which the caller reports.
-    /// Shown as "{operation} panicked: {message}".
-    Panicked {
-        /// What the work was doing, as its caller named it.
-        operation: &'static str,
-        /// The text the panic carried (`panic_message`).
-        message: String,
-    },
+    Panicked(Bug),
     /// The runtime it ran on is shutting down and dropped it before it
     /// finished. Not a bug: the process is ending the work.
     Shutdown(Shutdown),
+}
+
+/// Work that panicked: a bug in it, not a failure its caller can act on
+/// (E15). Shown as "{operation} panicked: {message}".
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+pub struct Bug {
+    /// What the work was doing, as its caller named it.
+    pub operation: &'static str,
+    /// The text the panic carried (`panic_message`).
+    pub message: String,
 }
 
 /// Work its runtime dropped as it shut down, before the work finished (E15).
@@ -8180,6 +8235,14 @@ impl TaskFailed {
     /// panic, `Shutdown` with `ShutdownOutcome::Unknown` for a cancelled task.
     pub fn of_join(operation: &'static str, error: tokio::task::JoinError) -> Self;
 
+    /// The failure a join of a closure on the blocking pool stands for:
+    /// `Shutdown` with `ShutdownOutcome::NotRun` for one the pool dropped.
+    pub fn of_blocking_join(operation: &'static str, error: tokio::task::JoinError) -> Self;
+
+    /// This failure as the error of the call whose work it ended: its `Bug`
+    /// for a panic, its `Shutdown` for the runtime dropping the work.
+    pub fn into_error<E: From<Bug> + From<Shutdown>>(self) -> E;
+
     /// What the failed work was doing, as its caller named it.
     pub fn operation(&self) -> &'static str;
 
@@ -8206,14 +8269,12 @@ pub async fn joined<T: Send + 'static>(
     task: tokio::task::JoinHandle<T>,
 ) -> Result<T, TaskFailed>;
 
-/// Run `work` inline, catching a panic in any of its polls. After a panic
-/// `work` is dropped at once, inside a catch of its own.
-pub async fn caught<T>(
-    operation: &'static str,
-    work: impl Future<Output = T>,
-) -> Result<T, TaskFailed>;
+/// Run `work` inline, catching a panic in any of its polls. Run inline, the
+/// work can't be dropped by its runtime, so a panic is its only failure.
+/// After a panic `work` is dropped at once, inside a catch of its own.
+pub async fn caught<T>(operation: &'static str, work: impl Future<Output = T>) -> Result<T, Bug>;
 
 /// `caught` for a synchronous call: an FFI callback, a dedicated thread's
 /// body, a `Drop`.
-pub fn caught_sync<T>(operation: &'static str, work: impl FnOnce() -> T) -> Result<T, TaskFailed>;
+pub fn caught_sync<T>(operation: &'static str, work: impl FnOnce() -> T) -> Result<T, Bug>;
 ```
