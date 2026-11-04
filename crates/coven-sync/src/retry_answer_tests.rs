@@ -456,8 +456,10 @@ async fn io_differential_retry_answer() {
             }
             let waiting: Vec<u64> =
                 waits.requests.lock().unwrap().waiting.iter().map(|(number, _)| *number).collect();
-            let in_pass: Vec<u64> =
-                taken.iter().flat_map(|pass| pass.0.iter().map(|(number, _)| *number)).collect();
+            let in_pass: Vec<u64> = taken
+                .iter()
+                .flat_map(|pass| pass.taken.iter().map(|(number, _)| *number))
+                .collect();
             let requests: Vec<&str> = (1..=waits.network_reported())
                 .map(|number| match asked.iter().find(|(asked, ..)| *asked == number) {
                     None => "unasked",
