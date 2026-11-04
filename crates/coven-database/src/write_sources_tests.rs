@@ -648,3 +648,32 @@ async fn authored_sources_differential() {
         }
     }
 }
+
+/// Fill this domain's tables from the rows of the plan audit's `fixture`
+/// table, inside its transaction (`internal_schema_scan_reasons_tests.rs`).
+pub(crate) fn fill_for_plans(db: &rusqlite::Connection) {
+    db.execute_batch(
+        "INSERT INTO _coven_authored_parts SELECT CAST(device || n AS BLOB),audience,x'00',1 FROM fixture;
+         INSERT INTO _coven_authored_changes SELECT CAST(device || n AS BLOB),audience,tab,key,x'00' FROM fixture;
+         INSERT INTO _coven_authored_admissions SELECT CAST(device || n AS BLOB),audience,tab,key,x'00' FROM fixture;",
+    )
+    .unwrap();
+}
+
+/// The scans this module's statements may make, with their reasons, for the
+/// plan audit (`internal_schema_scan_reasons.rs`): `template` is the statement as
+/// written, `sql` as run.
+pub(crate) fn scan_reason(
+    file: &str,
+    template: &str,
+    _sql: &str,
+    relation: &str,
+) -> Option<&'static str> {
+    match (file, template, relation) {
+("write_sources.rs", sql, relation)
+    if (relation == "s" || relation.starts_with("temp._coven_install_"))
+        && (sql.contains("temp._coven_install_parts") || sql.contains("temp._coven_install_authored")) =>
+    Some("installing writes every source record of the snapshot once; each lookup of the device's own is indexed"),
+        _ => None,
+    }
+}

@@ -15,6 +15,7 @@ pub(super) fn reason(statement: &Statement, relation: &str) -> Option<&'static s
     database_reason(statement, relation)
         .or_else(|| crate::store_state_tables::tests::scan_reason(file, template, sql, relation))
         .or_else(|| crate::published::tests::scan_reason(file, template, sql, relation))
+        .or_else(|| crate::write_sources::tests::scan_reason(file, template, sql, relation))
         .or_else(|| crate::ownership::tests::scan_reason(file, template, sql, relation))
         .or_else(|| crate::file_removals::tests::scan_reason(file, template, sql, relation))
         .or_else(|| crate::file_protection::tests::scan_reason(file, template, sql, relation))

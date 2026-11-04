@@ -545,41 +545,7 @@ pub(crate) fn sources(
     )? {
         return Err(invalid("original source change changed"));
     }
-    db.internal_execute(
-        "INSERT INTO _coven_authored_parts(write_id,audience,header,complete)
-         SELECT write_id,audience,header,0 FROM temp._coven_install_parts s WHERE s.audience=?1
-         AND NOT EXISTS(SELECT 1 FROM _coven_authored_parts p WHERE p.write_id=s.write_id AND p.audience=s.audience)",
-        params![audience],
-    )?;
-    db.internal_execute(
-        "INSERT INTO _coven_authored_changes(write_id,audience,table_name,key,record)
-         SELECT write_id,audience,table_name,key,record FROM temp._coven_install_authored WHERE audience=?1
-         ON CONFLICT(write_id,audience,table_name,key) DO NOTHING",
-        params![audience],
-    )?;
-    // The snapshot's verdict replaces this device's, an unjudged one too.
-    db.internal_execute(
-        "DELETE FROM _coven_authored_admissions WHERE (write_id,audience,table_name,key) IN
-         (SELECT write_id,audience,table_name,key FROM temp._coven_install_authored WHERE audience=?1 AND admission IS NULL)",
-        params![audience],
-    )?;
-    db.internal_execute(
-        "INSERT INTO _coven_authored_admissions(write_id,audience,table_name,key,admission)
-         SELECT write_id,audience,table_name,key,admission FROM temp._coven_install_authored WHERE audience=?1 AND admission IS NOT NULL
-         ON CONFLICT(write_id,audience,table_name,key) DO UPDATE SET admission=excluded.admission",
-        params![audience],
-    )?;
-    Ok(())
-}
-
-/// Mark the parts the snapshot holds whole, once all their changes are in.
-pub(crate) fn complete_parts(db: &DatabaseConnection, audience: &Audience) -> Result<(), DbError> {
-    db.internal_execute(
-        "UPDATE _coven_authored_parts SET complete=1 WHERE complete=0 AND (write_id,audience) IN (
-           SELECT write_id,audience FROM temp._coven_install_parts WHERE audience=?1 AND complete=1)",
-        params![audience_text(audience)],
-    )?;
-    Ok(())
+    crate::write_sources::install(db, &audience)
 }
 
 /// Whether the snapshot carries the source record of this change.

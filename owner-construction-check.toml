@@ -542,6 +542,7 @@ table_macros = [
     "coven_file_removals_tables",
     "coven_cache_tables",
     "coven_creations_tables",
+    "coven_authored_sources_tables",
 ]
 # The API re-exports the database crate's `rusqlite` so a host can name the
 # types its own SQL uses.
@@ -1033,13 +1034,23 @@ tables = [
 ]
 
 [[database.domains]]
-name = "database"
+name = "authored sources"
 owner = "Database"
-homes = ["crates/coven-database/src/"]
+homes = [
+    "crates/coven-database/src/write_sources.rs",
+    "crates/coven-database/src/write_sources_schema.rs",
+]
 tables = [
     "_coven_authored_admissions",
     "_coven_authored_changes",
     "_coven_authored_parts",
+]
+
+[[database.domains]]
+name = "database"
+owner = "Database"
+homes = ["crates/coven-database/src/"]
+tables = [
     "_coven_cells",
     "_coven_claims",
     "_coven_columns",

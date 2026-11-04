@@ -75,9 +75,6 @@ mod fixture {
             CAST(printf('%032d',i) AS BLOB) AS key,
             CAST(printf('%016d',i) AS BLOB) AS member FROM numbers;
      INSERT INTO coven_files SELECT 'file_' || i,audience,1,zeroblob(32),'device 1','files' FROM fixture;
-     INSERT INTO _coven_authored_parts SELECT CAST(device || n AS BLOB),audience,x'00',1 FROM fixture;
-     INSERT INTO _coven_authored_changes SELECT CAST(device || n AS BLOB),audience,tab,key,x'00' FROM fixture;
-     INSERT INTO _coven_authored_admissions SELECT CAST(device || n AS BLOB),audience,tab,key,x'00' FROM fixture;
      INSERT INTO _coven_columns SELECT i,tab,'column_' || i,1 FROM fixture;
      INSERT INTO _coven_rows SELECT i,tab,key,audience,counter(1),i FROM fixture;
      INSERT INTO _coven_cells
@@ -102,6 +99,7 @@ mod fixture {
         crate::store_state_tables::tests::fill_for_plans(&db);
         crate::published::tests::fill_for_plans(&db);
         crate::claim::tests::fill_for_plans(&db);
+        crate::write_sources::tests::fill_for_plans(&db);
         crate::ownership::tests::fill_for_plans(&db);
         crate::database::file_database::cache::tests::fill_for_plans(&db);
         crate::file_removals::tests::fill_for_plans(&db);
@@ -271,6 +269,7 @@ mod source {
                     | "claim_schema.rs"
                     | "published_schema.rs"
                     | "store_state_schema.rs"
+                    | "write_sources_schema.rs"
                     | "ownership_schema.rs"
                     | "file_cache_schema.rs"
                     | "file_removals_schema.rs"

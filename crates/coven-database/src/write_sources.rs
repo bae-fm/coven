@@ -513,6 +513,53 @@ pub(crate) fn complete(
     Ok(())
 }
 
+/// Install a snapshot's source records for `audience` from the copies its
+/// install staged in `temp._coven_install_parts` and
+/// `temp._coven_install_authored`, once they are checked against this
+/// device's: a part the device lacks starts incomplete, an original the
+/// device holds stays, and the snapshot's verdict replaces the device's, an
+/// unjudged one too.
+pub(crate) fn install(db: &DatabaseConnection, audience: &str) -> Result<(), DbError> {
+    db.internal_execute(
+        "INSERT INTO _coven_authored_parts(write_id,audience,header,complete)
+         SELECT write_id,audience,header,0 FROM temp._coven_install_parts s WHERE s.audience=?1
+         AND NOT EXISTS(SELECT 1 FROM _coven_authored_parts p WHERE p.write_id=s.write_id AND p.audience=s.audience)",
+        params![audience],
+    )?;
+    db.internal_execute(
+        "INSERT INTO _coven_authored_changes(write_id,audience,table_name,key,record)
+         SELECT write_id,audience,table_name,key,record FROM temp._coven_install_authored WHERE audience=?1
+         ON CONFLICT(write_id,audience,table_name,key) DO NOTHING",
+        params![audience],
+    )?;
+    db.internal_execute(
+        "DELETE FROM _coven_authored_admissions WHERE (write_id,audience,table_name,key) IN
+         (SELECT write_id,audience,table_name,key FROM temp._coven_install_authored WHERE audience=?1 AND admission IS NULL)",
+        params![audience],
+    )?;
+    db.internal_execute(
+        "INSERT INTO _coven_authored_admissions(write_id,audience,table_name,key,admission)
+         SELECT write_id,audience,table_name,key,admission FROM temp._coven_install_authored WHERE audience=?1 AND admission IS NOT NULL
+         ON CONFLICT(write_id,audience,table_name,key) DO UPDATE SET admission=excluded.admission",
+        params![audience],
+    )?;
+    Ok(())
+}
+
+/// Mark the parts the installed snapshot holds whole, once all their changes
+/// are in.
+pub(crate) fn complete_installed(
+    db: &DatabaseConnection,
+    audience: &coven_merge::Audience,
+) -> Result<(), DbError> {
+    db.internal_execute(
+        "UPDATE _coven_authored_parts SET complete=1 WHERE complete=0 AND (write_id,audience) IN (
+           SELECT write_id,audience FROM temp._coven_install_parts WHERE audience=?1 AND complete=1)",
+        params![audience_text(audience)],
+    )?;
+    Ok(())
+}
+
 /// Record this device's current interpretation under the original identity,
 /// replacing an earlier one when a reload judges the original under its new data.
 /// NULL means unjudged; receiving covered bytes alone never judges them.
@@ -677,4 +724,4 @@ pub(crate) fn forget_own_migration(
 
 #[cfg(test)]
 #[path = "write_sources_tests.rs"]
-mod tests;
+pub(crate) mod tests;
