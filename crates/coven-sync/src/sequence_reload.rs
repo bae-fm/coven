@@ -147,6 +147,25 @@ impl ReloadStart {
 }
 
 impl SequenceSync {
+    /// The store's floor as storage holds it now; `previous` is the one
+    /// last read, reused while the object is unchanged.
+    pub(crate) async fn read_floor(
+        &self,
+        previous: Option<&FloorObject>,
+        ring: &mut StoreKeyring,
+        member: &MemberIdentity,
+    ) -> Result<Option<FloorObject>, SyncError> {
+        FloorObject::read(
+            &self.database,
+            self.storage.as_ref(),
+            &ObjectPath::floor(self.store()),
+            previous,
+            ring,
+            member,
+        )
+        .await
+    }
+
     pub(crate) async fn authenticate_floor(
         &self,
         floor: &FloorObject,
@@ -727,15 +746,7 @@ impl SequenceSync {
             };
             slots.push(incoming);
         }
-        let floor = FloorObject::read(
-            &self.database,
-            self.storage.as_ref(),
-            &ObjectPath::floor(self.store()),
-            previous_floor,
-            ring,
-            member,
-        )
-        .await?;
+        let floor = self.read_floor(previous_floor, ring, member).await?;
         if floor.as_ref().is_some_and(|floor| floor.header.first.0 > first + 1) {
             return Ok(floor);
         }

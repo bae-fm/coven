@@ -17,7 +17,7 @@ use coven_format::{
     sequence::SlotHeader,
 };
 use coven_merge::Audience;
-use coven_storage::{ObjectPath, StorageFailure, UploadSession};
+use coven_storage::{StorageFailure, UploadSession};
 use std::io::{Cursor, Read};
 
 struct ClaimSource {
@@ -65,15 +65,7 @@ impl SequenceSync {
             return Ok(Some(ClaimSettlement::Landed));
         }
         let input = self.fetch(path).await?;
-        let floor = FloorObject::read(
-            &self.database,
-            self.storage.as_ref(),
-            &ObjectPath::floor(self.store()),
-            session.floor.as_ref(),
-            ring,
-            member,
-        )
-        .await?;
+        let floor = self.read_floor(session.floor.as_ref(), ring, member).await?;
         let result = if floor
             .as_ref()
             .is_some_and(|floor| floor.header.first > path.slot_number().expect("claim slot"))
@@ -190,15 +182,7 @@ impl SequenceSync {
         if !created {
             return Ok(self.settle_open(session, ring, member).await?.expect("open journal"));
         }
-        let floor = FloorObject::read(
-            &self.database,
-            self.storage.as_ref(),
-            &ObjectPath::floor(self.store()),
-            session.floor.as_ref(),
-            ring,
-            member,
-        )
-        .await?;
+        let floor = self.read_floor(session.floor.as_ref(), ring, member).await?;
         let result = if floor
             .as_ref()
             .is_some_and(|floor| floor.header.first > path.slot_number().expect("claim slot"))

@@ -2,14 +2,11 @@
 //! then the floor, before applying any of them (§6.1, §6.2).
 
 use super::{SequenceSync, Session, SlotReading, SlotReads};
-use crate::{
-    floor_object::FloorObject, slot_object, PendingRecord, Refusal, SequenceStatus, SyncError,
-};
+use crate::{slot_object, PendingRecord, Refusal, SequenceStatus, SyncError};
 use coven_crypto::{MemberIdentity, StoreKeyring};
 use coven_database::{LoadStep, SlotContent};
 use coven_foundation::progress::ProgressReport;
 use coven_merge::Slot;
-use coven_storage::ObjectPath;
 
 impl SequenceSync {
     /// Exponential existence checks bracket the end; binary checks narrow it.
@@ -74,15 +71,7 @@ impl SequenceSync {
         // A new installation starts from the floor's snapshots whenever a
         // floor exists, even while `first` is still slot 1 (§16.4).
         if session.through == 0 {
-            let floor = FloorObject::read(
-                &self.database,
-                self.storage.as_ref(),
-                &ObjectPath::floor(self.store()),
-                session.floor.as_ref(),
-                ring,
-                member,
-            )
-            .await?;
+            let floor = self.read_floor(session.floor.as_ref(), ring, member).await?;
             if let Some(floor) = floor {
                 self.reload_floor(session, floor, ring, member, progress.as_deref_mut()).await?;
             }
@@ -182,15 +171,8 @@ impl SequenceSync {
                 // floor written after the ending miss may name new slots: read
                 // them before deciding that a hole or signer is missing.
                 let reading_floor = self.clock.elapsed();
-                let floor = FloorObject::read(
-                    &self.database,
-                    self.storage.as_ref(),
-                    &ObjectPath::floor(self.store()),
-                    session.floor.as_ref(),
-                    &mut tentative_ring,
-                    member,
-                )
-                .await?;
+                let floor =
+                    self.read_floor(session.floor.as_ref(), &mut tentative_ring, member).await?;
                 timing.floor += self.clock.elapsed() - reading_floor;
                 if floor.as_ref().is_some_and(|floor| floor.header.first.0 > first) {
                     break floor;

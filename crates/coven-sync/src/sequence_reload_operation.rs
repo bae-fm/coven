@@ -151,15 +151,7 @@ impl SequenceSync {
                 self.database.finish_operation(record.id).await?;
                 return Ok(());
             };
-            let floor = FloorObject::read(
-                &self.database,
-                self.storage.as_ref(),
-                &ObjectPath::floor(self.store()),
-                session.floor.as_ref(),
-                ring,
-                member,
-            )
-            .await?;
+            let floor = self.read_floor(session.floor.as_ref(), ring, member).await?;
             let first = chosen
                 .iter()
                 .map(|selection| match selection {

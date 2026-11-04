@@ -1,7 +1,6 @@
 //! A confirmed conditional floor write authorizes each journaled deletion.
 use crate::sequence_sync::OperationState;
 use crate::{
-    floor_object::FloorObject,
     object_input::ObjectInput,
     sequence_sync::{SequenceSync, Session},
     OperationKind, SyncError,
@@ -389,15 +388,7 @@ impl SequenceSync {
             if record.last_step > 1 {
                 // A sent conditional request may have committed despite its
                 // missing reply. This observation alone authorizes deletion.
-                let current = FloorObject::read(
-                    &self.database,
-                    self.storage.as_ref(),
-                    &ObjectPath::floor(self.store()),
-                    session.floor.as_ref(),
-                    ring,
-                    member,
-                )
-                .await?;
+                let current = self.read_floor(session.floor.as_ref(), ring, member).await?;
                 if let Some(floor) = &current {
                     self.authenticate_floor(floor, &session.history, ring, member).await?;
                 }
