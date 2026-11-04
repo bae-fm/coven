@@ -41,6 +41,19 @@ pub(crate) enum TlsSetupError {
     AndroidVerifier(#[source] jni::errors::Error),
 }
 
+/// A request to `provider` that can't be sent because the client's TLS setup
+/// failed: the device's configuration, with every cause behind it.
+pub(crate) fn tls_failure(
+    provider: crate::CloudProvider,
+    source: std::sync::Arc<TlsSetupError>,
+) -> crate::StorageError {
+    crate::StorageError::Provider {
+        provider,
+        failure: crate::StorageFailure::InvalidConfiguration,
+        source: Box::new(super::error_text::WithCauses(source)),
+    }
+}
+
 /// Start Android's certificate verifier, once per process, with the JVM and
 /// the app's `Context` the app gives `ndk-context`, before any client is
 /// built: the verifier asks the JVM for each certificate, and one never

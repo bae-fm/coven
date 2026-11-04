@@ -161,7 +161,7 @@ impl ProviderConnector {
         let http = self
             .http
             .clone()
-            .map_err(|source| tls_failure(crate::CloudProvider::S3, source))
+            .map_err(|source| super::http_client::tls_failure(crate::CloudProvider::S3, source))
             .map_err(super::EmptyS3PrefixError::Storage)?;
         super::empty_s3_prefix(config, credentials, self.clock.clone(), self.ids.clone(), http)
             .await
@@ -189,7 +189,9 @@ impl ProviderConnector {
             tokens,
             custody,
             self.clock.clone(),
-            self.http.clone().map_err(|source| tls_failure(access.provider(), source))?,
+            self.http
+                .clone()
+                .map_err(|source| super::http_client::tls_failure(access.provider(), source))?,
         )?;
         request(OAuthFolders::new(session, access, api, cooldown)).await
     }
@@ -282,7 +284,10 @@ impl StorageConnector for ProviderConnector {
         crate::ConnectionCredentials { location: config.clone(), credentials: auth.credentials() }
             .validate()?;
         let provider = config.provider();
-        let http = self.http.clone().map_err(|source| tls_failure(provider, source))?;
+        let http = self
+            .http
+            .clone()
+            .map_err(|source| super::http_client::tls_failure(provider, source))?;
         let session = |tokens, custody| {
             OAuthSession::new(provider, tokens, custody, self.clock.clone(), http.clone())
         };
@@ -346,7 +351,9 @@ impl StorageConnector for ProviderConnector {
             store,
             self.clock.clone(),
             self.ids.clone(),
-            self.http.clone().map_err(|source| tls_failure(crate::CloudProvider::S3, source))?,
+            self.http.clone().map_err(|source| {
+                super::http_client::tls_failure(crate::CloudProvider::S3, source)
+            })?,
             waits,
         )
         .await
@@ -369,7 +376,9 @@ impl StorageConnector for ProviderConnector {
             store,
             self.clock.clone(),
             self.ids.clone(),
-            self.http.clone().map_err(|source| tls_failure(crate::CloudProvider::S3, source))?,
+            self.http.clone().map_err(|source| {
+                super::http_client::tls_failure(crate::CloudProvider::S3, source)
+            })?,
             waits,
         )
         .await
@@ -378,16 +387,6 @@ impl StorageConnector for ProviderConnector {
 
 /// Why `provider`'s requests can't be sent: the connector's HTTP client could
 /// not set up TLS.
-fn tls_failure(
-    provider: crate::CloudProvider,
-    source: Arc<super::http_client::TlsSetupError>,
-) -> StorageError {
-    StorageError::Provider {
-        provider,
-        failure: StorageFailure::InvalidConfiguration,
-        source: Box::new(super::error_text::WithCauses(source)),
-    }
-}
 
 #[cfg(all(test, not(target_vendor = "apple")))]
 #[path = "connector_tests.rs"]

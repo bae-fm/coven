@@ -310,12 +310,10 @@ impl OAuthExchange {
             Some(url) => url.as_str(),
             None => token,
         };
-        let client = self.client.as_ref().map_err(|source| StorageError::Provider {
-            provider,
-            // The client could not be built: TLS setup failed.
-            failure: crate::StorageFailure::InvalidConfiguration,
-            source: Box::new(super::error_text::WithCauses(source.clone())),
-        })?;
+        let client = self
+            .client
+            .as_ref()
+            .map_err(|source| super::http_client::tls_failure(provider, source.clone()))?;
         let response = client
             .send(provider, client.request(reqwest::Method::POST, token).form(params))
             .await?;
