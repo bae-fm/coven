@@ -8,8 +8,12 @@ use coven_foundation::clock::HANG_GUARD;
 use std::sync::Arc;
 
 /// A wall clock a person sets by hand, as on a phone: its elapsed time and
-/// its sleeps never move, and its wall waits are the shared clock's.
-struct HandSetClock(Arc<coven_foundation::clock::FixedClock>);
+/// its sleeps never move, and its wall waits are the shared clock's. It
+/// tells the instant of each wall wait it is handed.
+struct HandSetClock(
+    Arc<coven_foundation::clock::FixedClock>,
+    tokio::sync::watch::Sender<Vec<std::time::SystemTime>>,
+);
 
 impl Clock for HandSetClock {
     fn now(&self) -> std::time::SystemTime {
@@ -33,6 +37,7 @@ impl Clock for HandSetClock {
                 + Send,
         >,
     > {
+        self.1.send_modify(|armed| armed.push(at));
         self.0.sleep_until(at)
     }
 }
@@ -49,18 +54,23 @@ async fn the_expiry_wake_follows_a_clock_set_by_hand() {
     let ana = group.device(1).await;
     group.create(&ana).await;
     let invite = invite(&ana).await;
+    let (armed, mut arming) = tokio::sync::watch::channel(Vec::new());
     let expiry = InviteExpiry::start(
         ana.sync.database.clone(),
-        Arc::new(HandSetClock(group.clock.clone())),
+        Arc::new(HandSetClock(group.clock.clone(), armed)),
         ana.sync.waits.clone(),
         ana.sync.state.clone(),
     );
     let mut open = ana.sync.database.subscribe(|sql| Ok(Invite::list(sql)?.len()));
     assert_eq!(open.next().await.unwrap().unwrap(), 1);
+    // The handle waits for the wall clock to reach the expiry; only a setting
+    // at or past it ends that wait.
+    tokio::time::timeout(HANG_GUARD, arming.wait_for(|armed| armed.contains(&invite.expires_at)))
+        .await
+        .expect("the handle waits for the invite's expiry")
+        .unwrap();
     group.clock.set(group.clock.now() - Duration::from_secs(86_400));
     group.clock.set(invite.expires_at - Duration::from_secs(1));
-    let early = tokio::time::timeout(Duration::from_millis(200), open.next()).await;
-    assert!(early.is_err(), "the invite ended before its expiry: {early:?}");
     group.clock.set(invite.expires_at);
     let ended = tokio::time::timeout(HANG_GUARD, open.next()).await;
     assert_eq!(ended.expect("the handle woke at the expiry").unwrap().unwrap(), 0);

@@ -102,6 +102,13 @@ struct FilesInner {
     /// Wakes a pin's download waiting for the network as the setting
     /// changes or the store closes.
     hold_wake: Notify,
+    /// How many pins' downloads wait for the network now, for a test.
+    #[cfg(test)]
+    pub(crate) held_downloads: tokio::sync::watch::Sender<usize>,
+    /// How many reads have found another read of the same stored bytes
+    /// holding their lock, for a test.
+    #[cfg(test)]
+    pub(crate) shared_reads: tokio::sync::watch::Sender<usize>,
     /// Wakes the upload worker, or its run in progress.
     upload_wake: Arc<Notify>,
     /// One upload run at a time.
@@ -175,6 +182,10 @@ impl Files {
             hold_change: tokio::sync::Mutex::new(()),
             network,
             hold_wake: Notify::new(),
+            #[cfg(test)]
+            held_downloads: tokio::sync::watch::channel(0).0,
+            #[cfg(test)]
+            shared_reads: tokio::sync::watch::channel(0).0,
             upload_wake: Arc::new(Notify::new()),
             drain: tokio::sync::Mutex::new(()),
             in_flight,
@@ -473,7 +484,11 @@ impl FilesInner {
             reads.retain(|_, lock| lock.strong_count() != 0);
             let key = (file.namespace().to_owned(), location.object());
             match reads.get(&key).and_then(std::sync::Weak::upgrade) {
-                Some(lock) => lock,
+                Some(lock) => {
+                    #[cfg(test)]
+                    self.shared_reads.send_modify(|shared| *shared += 1);
+                    lock
+                }
                 None => {
                     let lock = Arc::new(tokio::sync::Mutex::new(()));
                     reads.insert(key, Arc::downgrade(&lock));
@@ -562,6 +577,8 @@ impl FilesInner {
             if !self.downloads_held() {
                 return Ok(());
             }
+            #[cfg(test)]
+            let _held = HeldDownload::new(&self.held_downloads);
             tokio::select! {
                 () = woken => {}
                 () = network.changed() => {}
@@ -576,6 +593,25 @@ impl FilesInner {
         }
     }
 }
+/// A pin's download counted as waiting for the network while it waits.
+#[cfg(test)]
+struct HeldDownload<'a>(&'a tokio::sync::watch::Sender<usize>);
+
+#[cfg(test)]
+impl<'a> HeldDownload<'a> {
+    fn new(held: &'a tokio::sync::watch::Sender<usize>) -> Self {
+        held.send_modify(|held| *held += 1);
+        Self(held)
+    }
+}
+
+#[cfg(test)]
+impl Drop for HeldDownload<'_> {
+    fn drop(&mut self) {
+        self.0.send_modify(|held| *held -= 1);
+    }
+}
+
 /// What holds trailing uploads (§17.4, §17.9).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum TrailingHold {

@@ -541,21 +541,18 @@ async fn sequential_reading_starts_read_ahead_and_streams_a_whole_hash_check() {
 async fn cancelling_a_pin_releases_partial_budget_exemptions() {
     let mut f = Fixture::new(Provenance::AppProvided).await;
     let file = f.uploaded("cancel-pin", vec![70; CHUNK * 40]).await;
-    f.storage
-        .set_faults(coven_storage::test_utils::Faults {
-            delay: Duration::from_millis(100),
-            ..coven_storage::test_utils::Faults::none()
-        })
-        .await;
-    let mut requests = f.storage.subscribe_requests();
-    let before = requests.current();
+    // The storage holds the pin's range download two chunks in, past the
+    // 11-byte header, until the task is aborted.
+    let (observed, downloading) = tokio::sync::oneshot::channel();
+    let (_resume, held) = tokio::sync::oneshot::channel::<()>();
+    let partway = 11 + 2 * (CHUNK as u64 + 16);
+    f.storage.hold_body_at(f.path(&file), partway, observed, held).await;
     let files = f.files.clone();
     let reference = file.clone();
     let task = tokio::spawn(async move { files.pin(&[reference]).await });
-    // A range download has started for the whole-file pin.
-    tokio::time::timeout(HANG_GUARD, requests.wait_for(|count| *count > before + 1))
+    tokio::time::timeout(HANG_GUARD, downloading)
         .await
-        .unwrap()
+        .expect("a range download starts for the whole-file pin")
         .unwrap();
     task.abort();
     assert!(task.await.unwrap_err().is_cancelled());

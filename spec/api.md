@@ -661,6 +661,8 @@ impl Coven {
 /// MemoryRequest records the attempted calls. Storage supplies reads and listings.
 /// hold_creations, gate_creations and gate_parts take the test's barrier or
 /// semaphore, which holds each create or part until the test releases it.
+/// The hold_next_* calls and hold_body_at stop one request, or one body at
+/// an offset, tell the test it arrived, and wait for the test to resume it.
 #[cfg(feature = "test-utils")]
 pub use coven_storage::test_utils::{
     BodyFailure, Faults, MemoryProvider, MemoryRequest, MemoryStorage,

@@ -313,6 +313,22 @@ async fn a_failed_history_read_does_not_lose_the_scans_tentative_keys() {
     }
 }
 
+/// What `due` reports as it begins or changes its wait, driving it there;
+/// it must not end first.
+async fn reported_while_waiting(
+    due: &mut std::pin::Pin<Box<impl std::future::Future<Output = Result<(), crate::SyncError>>>>,
+    reported: &mut tokio::sync::mpsc::UnboundedReceiver<crate::NextCheck>,
+) -> crate::NextCheck {
+    tokio::time::timeout(HANG_GUARD, async {
+        tokio::select! {
+            ended = due.as_mut() => panic!("the poll came due: {ended:?}"),
+            next = reported.recv() => next.expect("the wait reports"),
+        }
+    })
+    .await
+    .expect("the wait reports")
+}
+
 /// Asking to check now ends the join's own wait at once, keeping its failure
 /// count, but not a provider cooldown, which the wait reports instead
 /// (§13.2, §6.7).
@@ -331,12 +347,15 @@ async fn check_now_ends_the_joins_wait_but_not_a_provider_cooldown() {
     let failures = wait().await.failures;
     let now = group.clock.now();
     let (asking, mut asked) = tokio::sync::watch::channel(0u64);
-    let reported = std::sync::Mutex::new(Vec::new());
+    let (report, mut reported) = tokio::sync::mpsc::unbounded_channel();
     let mut due = Box::pin(sync.join_poll_due(&mut asked, |next| {
-        reported.lock().unwrap().push(next);
+        report.send(next).expect("the test hears every report");
     }));
-    assert!(tokio::time::timeout(Duration::from_millis(100), &mut due).await.is_err());
-    assert_eq!(*reported.lock().unwrap(), [NextCheck::At(now + Duration::from_secs(300))]);
+    // Once the wait reports, only the fixed clock or asking ends it.
+    assert_eq!(
+        reported_while_waiting(&mut due, &mut reported).await,
+        NextCheck::At(now + Duration::from_secs(300))
+    );
     asking.send_modify(|asked| *asked += 1);
     tokio::time::timeout(HANG_GUARD, due).await.unwrap().unwrap();
     let ended = wait().await;
@@ -345,18 +364,15 @@ async fn check_now_ends_the_joins_wait_but_not_a_provider_cooldown() {
     // The next wait is 300 seconds again; a 600-second cooldown outlasts it.
     sync.join_poll_waiting().await.unwrap();
     coven_storage::Cooldown::record(sync.waits.as_ref(), Duration::from_secs(600)).await.unwrap();
-    reported.lock().unwrap().clear();
     let mut due = Box::pin(sync.join_poll_due(&mut asked, |next| {
-        reported.lock().unwrap().push(next);
+        report.send(next).expect("the test hears every report");
     }));
-    assert!(tokio::time::timeout(Duration::from_millis(100), &mut due).await.is_err());
     let cooling = NextCheck::CoolingDown(now + Duration::from_secs(600));
-    assert_eq!(*reported.lock().unwrap(), [cooling]);
+    assert_eq!(reported_while_waiting(&mut due, &mut reported).await, cooling);
     asking.send_modify(|asked| *asked += 1);
-    assert!(tokio::time::timeout(Duration::from_millis(100), &mut due).await.is_err());
     // The join's own wait ended; the cooldown still holds the check.
+    assert_eq!(reported_while_waiting(&mut due, &mut reported).await, cooling);
     assert_eq!(wait().await.wait, Duration::ZERO);
-    assert_eq!(*reported.lock().unwrap(), [cooling, cooling]);
     group.clock.set(now + Duration::from_secs(600));
     tokio::time::timeout(HANG_GUARD, due).await.unwrap().unwrap();
     for device in [&ana, &carol.device] {

@@ -160,13 +160,13 @@ async fn the_worker_wakes_for_a_due_retry_without_another_commit() {
         while retry(&f).await.is_none() {
             uploads.next().await.expect("the live query answers").unwrap();
         }
-        // The worker arms the persisted wait's timer after committing it.
-        while retry_in(&f).is_none() {
-            tokio::time::sleep(Duration::from_millis(5)).await;
-        }
     })
     .await
     .unwrap();
+    // The worker arms the persisted wait's timer after committing it, and
+    // releases the drain only after arming it.
+    drop(f.files.inner.drain.lock().await);
+    assert!(retry_in(&f).is_some(), "the drain armed the persisted wait");
     advance(&clock, 1);
     tokio::time::timeout(HANG_GUARD, async {
         while f.queued(&file).await {

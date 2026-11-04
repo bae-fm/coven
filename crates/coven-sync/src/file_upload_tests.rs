@@ -4,7 +4,6 @@ use coven_database::{FileLocation, FileLocationKey, FilePlace, FileRef, Provenan
 use coven_foundation::clock::HANG_GUARD;
 use coven_foundation::files::StoreDirAccess;
 use coven_storage::{test_utils::Faults, Storage, UploadSession};
-use std::time::Duration;
 
 /// A meter for an attempt the test runs itself, outside the upload worker:
 /// its attempt is already over, so it tells no one.
@@ -69,22 +68,20 @@ async fn same_size_edits_with_restored_mtime_send_no_changed_chunks() {
             }
             let modified = std::fs::metadata(&path).unwrap().modified().unwrap();
             f.storage
-                .set_faults(Faults {
-                    delay: Duration::from_millis(100),
-                    expire_uploads: resume == Some(true),
-                    ..Faults::none()
-                })
+                .set_faults(Faults { expire_uploads: resume == Some(true), ..Faults::none() })
                 .await;
             let before = f.storage.transferred().await.0;
             let before_requests = f.storage.request_count();
             let guard = f.files.inner.drain.lock().await;
             f.files.inner.paused.store(false, std::sync::atomic::Ordering::Release);
             let item = f.files.inner.database.uploads().await.unwrap().remove(0);
-            let mut requests = f.storage.subscribe_requests();
+            let (started, starting) = tokio::sync::oneshot::channel();
+            let (resume_request, held) = tokio::sync::oneshot::channel();
+            f.storage.hold_next_request(started, held).await;
             let mut upload = Box::pin(f.files.inner.upload(&item, unwatched(&f, &item)));
             tokio::select! {
                 result = &mut upload => panic!("upload ended before its first request: {result:?}"),
-                result = tokio::time::timeout(HANG_GUARD, requests.changed()) => result.unwrap().unwrap(),
+                result = tokio::time::timeout(HANG_GUARD, starting) => result.unwrap().unwrap(),
             }
             let mut changed = bytes.clone();
             changed[0] = 42;
@@ -95,6 +92,7 @@ async fn same_size_edits_with_restored_mtime_send_no_changed_chunks() {
                 .unwrap()
                 .set_times(std::fs::FileTimes::new().set_modified(modified))
                 .unwrap();
+            resume_request.send(()).unwrap();
             let result = upload.await;
             f.files.inner.paused.store(true, std::sync::atomic::Ordering::Release);
             drop(guard);
@@ -161,12 +159,13 @@ async fn an_upload_reader_retains_the_store_after_its_database_closes() {
     f.attach("files", "held", vec![45; CHUNK * 2]).await;
 
     let item = f.files.inner.database.uploads().await.unwrap().remove(0);
-    f.storage.set_faults(Faults { delay: Duration::from_secs(30), ..Faults::none() }).await;
-    let mut requests = f.storage.subscribe_requests();
+    let (started, starting) = tokio::sync::oneshot::channel();
+    let (_resume, held) = tokio::sync::oneshot::channel::<()>();
+    f.storage.hold_next_request(started, held).await;
     let mut upload = Box::pin(f.files.inner.upload(&item, unwatched(&f, &item)));
     tokio::select! {
         result = &mut upload => panic!("upload finished before its storage request: {result:?}"),
-        result = tokio::time::timeout(HANG_GUARD, requests.changed()) => result.unwrap().unwrap(),
+        result = tokio::time::timeout(HANG_GUARD, starting) => result.unwrap().unwrap(),
     }
     f.database.close().await.unwrap();
     assert!(matches!(

@@ -567,13 +567,14 @@ async fn overlapping_readers_fetch_each_byte_once() {
     let file = f.uploaded("shared", bytes.clone()).await;
     let first = f.files.open_file_stream(&file).await.unwrap();
     let second = f.files.open_file_stream(&file).await.unwrap();
-    f.storage
-        .set_faults(coven_storage::test_utils::Faults {
-            delay: Duration::from_millis(50),
-            ..coven_storage::test_utils::Faults::none()
-        })
-        .await;
     let path = f.path(&file);
+    // The first reader's range is held past its header until the second
+    // reader waits on the first's lock.
+    let (observed, reading) = tokio::sync::oneshot::channel();
+    let (resume, held) = tokio::sync::oneshot::channel();
+    f.storage.hold_body_at(path.clone(), 11 + CHUNK as u64, observed, held).await;
+    let mut shared = f.files.inner.shared_reads.subscribe();
+    let shared_before = *shared.borrow_and_update();
     let before: u64 = f
         .storage
         .reads()
@@ -582,9 +583,19 @@ async fn overlapping_readers_fetch_each_byte_once() {
         .filter(|(read, _, _)| *read == path)
         .map(|(_, _, length)| *length)
         .sum();
-    let (a, b) = tokio::join!(
+    let release = async {
+        tokio::time::timeout(HANG_GUARD, async {
+            reading.await.expect("the first reader's range reaches storage");
+            shared.wait_for(|shared| *shared > shared_before).await.unwrap();
+        })
+        .await
+        .expect("the second reader waits on the first's transfer");
+        resume.send(()).unwrap();
+    };
+    let (a, b, ()) = tokio::join!(
         first.read_at(0, 3 * CHUNK as u64),
-        second.read_at(CHUNK as u64, 3 * CHUNK as u64)
+        second.read_at(CHUNK as u64, 3 * CHUNK as u64),
+        release
     );
     assert_eq!(a.unwrap(), bytes[..3 * CHUNK]);
     assert_eq!(b.unwrap(), bytes[CHUNK..]);
@@ -608,15 +619,17 @@ async fn a_cancelled_range_leaves_no_bytes() {
     let mut f = Fixture::new(Provenance::AppProvided).await;
     let file = f.uploaded("cancelled", vec![62; CHUNK * 2]).await;
     let stream = f.files.open_file_stream(&file).await.unwrap();
-    f.storage
-        .set_faults(coven_storage::test_utils::Faults {
-            delay: Duration::from_millis(200),
-            ..coven_storage::test_utils::Faults::none()
-        })
-        .await;
-    assert!(tokio::time::timeout(Duration::from_millis(50), stream.read_at(0, 1)).await.is_err());
+    // The storage holds the range's read until the test has dropped it.
+    let (observed, reading) = tokio::sync::oneshot::channel();
+    let (_resume, held) = tokio::sync::oneshot::channel::<()>();
+    f.storage.hold_next_read(f.path(&file), observed, held).await;
+    tokio::select! {
+        read = stream.read_at(0, 1) => panic!("the held read ended: {read:?}"),
+        reading = tokio::time::timeout(HANG_GUARD, reading) => {
+            reading.expect("the range's read reaches storage").unwrap();
+        }
+    }
     drop(stream);
-    f.storage.set_faults(coven_storage::test_utils::Faults::none()).await;
     f.reopen().await;
     // The header travels with the cancelled range, so nothing is cached.
     assert_eq!(cache_files(&f), 0);
@@ -766,6 +779,27 @@ async fn unused_headers_do_not_displace_recently_read_chunks() {
     f.close().await;
 }
 
+/// Drive `pin` until its download waits for the network to stop holding
+/// it, which only the network or the setting changing, or the store
+/// closing, ends.
+async fn until_held<P>(f: &Fixture, pin: &mut std::pin::Pin<&mut P>)
+where
+    P: std::future::Future,
+    P::Output: std::fmt::Debug,
+{
+    let mut held = f.files.inner.held_downloads.subscribe();
+    tokio::time::timeout(HANG_GUARD, async {
+        tokio::select! {
+            result = pin.as_mut() => panic!("the pin was not held: {result:?}"),
+            held = held.wait_for(|held| *held > 0) => {
+                held.expect("the store holds the count");
+            }
+        }
+    })
+    .await
+    .expect("the pin waits for the network");
+}
+
 /// How many requests the provider has seen.
 fn requests(f: &Fixture) -> usize {
     f.storage.request_trace().len()
@@ -786,7 +820,7 @@ async fn a_metered_network_holds_a_pins_download_but_not_a_read() {
     let before = requests(&f);
     let pin = f.files.pin(std::slice::from_ref(&file));
     tokio::pin!(pin);
-    assert!(tokio::time::timeout(Duration::from_millis(50), &mut pin).await.is_err());
+    until_held(&f, &mut pin).await;
     assert_eq!(requests(&f), before, "a held pin asks storage for nothing");
     assert!(downloading(&f).await.is_empty());
     assert!(file_records(&f).await.is_empty());
@@ -839,7 +873,7 @@ async fn a_pins_download_stops_before_its_next_request_on_a_metered_network() {
             while listed.next().await.expect("the live query answers").unwrap() != 0 {}
         } => {}
     }
-    assert!(tokio::time::timeout(Duration::from_millis(50), &mut pin).await.is_err());
+    until_held(&f, &mut pin).await;
     assert_eq!(requests(&f), first);
     f.set_unmetered_only(false).await;
     tokio::time::timeout(HANG_GUARD, pin).await.unwrap().unwrap();
@@ -849,7 +883,7 @@ async fn a_pins_download_stops_before_its_next_request_on_a_metered_network() {
     f.set_unmetered_only(true).await;
     let waiting = f.files.pin(std::slice::from_ref(&other));
     tokio::pin!(waiting);
-    assert!(tokio::time::timeout(Duration::from_millis(50), &mut waiting).await.is_err());
+    until_held(&f, &mut waiting).await;
     f.files.close().await;
     assert!(matches!(
         tokio::time::timeout(HANG_GUARD, waiting).await.unwrap(),
@@ -872,7 +906,7 @@ async fn a_pin_prepared_after_reopening_holds_as_the_stored_setting_says() {
     let before = requests(&f);
     let pin = f.files.pin(std::slice::from_ref(&file));
     tokio::pin!(pin);
-    assert!(tokio::time::timeout(Duration::from_millis(50), &mut pin).await.is_err());
+    until_held(&f, &mut pin).await;
     assert_eq!(requests(&f), before);
     f.network.set_metered(false);
     tokio::time::timeout(HANG_GUARD, pin).await.unwrap().unwrap();

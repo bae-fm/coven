@@ -100,6 +100,7 @@ impl MemoryStorageBuilder {
                 held_read: None,
                 held_body: None,
                 held_creation: None,
+                held_request: None,
                 held_access: None,
                 rejected_tokens: Default::default(),
             })),

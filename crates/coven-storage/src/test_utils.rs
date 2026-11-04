@@ -86,6 +86,7 @@ struct MemoryState {
     held_read: Option<memory_reads::HeldRead>,
     held_body: Option<memory_reads::HeldBody>,
     held_creation: Option<HeldRequest>,
+    held_request: Option<HeldNext>,
     held_access: Option<memory_requests::HeldAccess>,
     rejected_tokens: std::collections::BTreeSet<String>,
 }
@@ -140,6 +141,12 @@ impl RequestWatch {
     ) -> Result<(), tokio::sync::watch::error::RecvError> {
         self.0.wait_for(reached).await.map(drop)
     }
+}
+
+/// The next request of any kind, held once it is recorded.
+struct HeldNext {
+    started: tokio::sync::oneshot::Sender<()>,
+    resume: tokio::sync::oneshot::Receiver<()>,
 }
 
 struct HeldRequest {
@@ -414,6 +421,13 @@ impl MemoryProvider {
         self.peak_requests.fetch_max(active, std::sync::atomic::Ordering::SeqCst);
         self.request_trace.lock().expect("request trace poisoned").push(request.clone());
         self.requests.send_modify(|count| *count += 1);
+        let held = self.state.lock().await.held_request.take();
+        if let Some(held) = held {
+            held.started
+                .send(())
+                .map_err(|()| StorageFailure::Protocol.with_source("request observer dropped"))?;
+            held.resume.await.map_err(|closed| StorageFailure::Protocol.with_source(closed))?;
+        }
         if !self.online.load(std::sync::atomic::Ordering::SeqCst) {
             return Err(StorageFailure::Network
                 .with_source(std::io::Error::from(std::io::ErrorKind::NotConnected)));

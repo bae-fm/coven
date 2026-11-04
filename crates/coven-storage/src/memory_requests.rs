@@ -40,6 +40,17 @@ impl MemoryStorage {
         assert!(state.held_listing.is_none(), "a listing is already held");
         state.held_listing = Some(HeldRequest { prefix, listed, resume });
     }
+    /// Hold the next request, whatever it is, once it is recorded: tell
+    /// `started`, then wait for `resume`.
+    pub async fn hold_next_request(
+        &self,
+        started: tokio::sync::oneshot::Sender<()>,
+        resume: tokio::sync::oneshot::Receiver<()>,
+    ) {
+        let mut state = self.provider.state.lock().await;
+        assert!(state.held_request.is_none(), "a request is already held");
+        state.held_request = Some(HeldNext { started, resume });
+    }
     /// Hold a single-request creation before publication, notifying its observer.
     pub async fn hold_next_creation(
         &self,

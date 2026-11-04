@@ -261,6 +261,7 @@ task_types = [
     "HeldRead",
     "HeldBody",
     "HeldRequest",
+    "HeldNext",
     "HeldAccess",
     # The retry requests one pass took, answered when it ends.
     "PassRequests",
