@@ -14,12 +14,7 @@ pub fn s3_request_hash(bytes: &[u8]) -> [u8; 32] {
 /// Date and region are the exact credential-scope components in the request.
 /// Intermediate signing keys and the prefixed secret are erased on drop.
 pub fn gcs_request_signature(secret: &str, date: &str, region: &str, message: &[u8]) -> [u8; 32] {
-    let secret = Zeroizing::new(format!("GOOG4{secret}"));
-    let mut key = hmac(secret.as_bytes(), date.as_bytes());
-    for part in [region, "storage", "goog4_request"] {
-        key = hmac(key.as_ref(), part.as_bytes());
-    }
-    *hmac(key.as_ref(), message)
+    v4_signature(("GOOG4", "goog4_request"), secret, [date, region, "storage"], message)
 }
 
 /// AWS Signature Version 4 over a request's string to sign. The signing key
@@ -32,9 +27,21 @@ pub fn aws_request_signature(
     service: &str,
     message: &[u8],
 ) -> [u8; 32] {
-    let secret = Zeroizing::new(format!("AWS4{secret}"));
-    let mut key = hmac(secret.as_bytes(), date.as_bytes());
-    for part in [region, service, "aws4_request"] {
+    v4_signature(("AWS4", "aws4_request"), secret, [date, region, service], message)
+}
+
+/// The V4 scheme both services share: the signing key chains an HMAC from
+/// the prefixed secret through each scope part and the scope's terminator,
+/// then signs `message`. Only the prefix and terminator name the service.
+fn v4_signature(
+    (prefix, terminator): (&str, &str),
+    secret: &str,
+    scope: [&str; 3],
+    message: &[u8],
+) -> [u8; 32] {
+    let secret = Zeroizing::new(format!("{prefix}{secret}"));
+    let mut key = hmac(secret.as_bytes(), scope[0].as_bytes());
+    for part in [scope[1], scope[2], terminator] {
         key = hmac(key.as_ref(), part.as_bytes());
     }
     *hmac(key.as_ref(), message)
