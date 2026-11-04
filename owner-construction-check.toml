@@ -524,7 +524,7 @@ table_macros = [
     "coven_data_reloads_tables",
     "coven_conversion_schemas_tables",
     "coven_migration_prefix_tables",
-    "coven_owner_tables_tables",
+    "coven_schema_definitions_tables",
     "coven_device_only_copies_tables",
     "coven_file_protection_tables",
     "coven_writes_tables",
@@ -797,13 +797,15 @@ tables = [
 ]
 
 [[database.domains]]
-name = "owner tables"
+name = "schema definitions"
 owner = "Database"
 homes = [
     "crates/coven-database/src/row_queries.rs",
     "crates/coven-database/src/row_queries_schema.rs",
 ]
 tables = [
+    "_coven_constraints",
+    "_coven_foreign_keys",
     "_coven_owner_tables",
 ]
 
@@ -1029,9 +1031,7 @@ tables = [
     "_coven_cells",
     "_coven_claims",
     "_coven_columns",
-    "_coven_constraints",
     "_coven_creations",
-    "_coven_foreign_keys",
     "_coven_lost",
     "_coven_references",
     "_coven_rows",

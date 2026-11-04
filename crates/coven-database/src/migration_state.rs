@@ -256,20 +256,28 @@ fn references(
         losses.insert(table.clone());
         if let Some((table, key)) = target {
             refresh.insert(table.clone());
-            db.internal_execute(
-                "UPDATE _coven_foreign_keys SET table_name=?2 WHERE id=?1",
-                params![id, format!("coven_migration_fk_{id}")],
+            crate::row_queries::stage_definition(
+                db,
+                crate::row_queries::Definition::ForeignKey,
+                id,
             )?;
             renamed.push((id, table, key));
         } else {
             db.internal_execute("DELETE FROM _coven_references WHERE foreign_key_id=?1", [id])?;
-            db.internal_execute("DELETE FROM _coven_foreign_keys WHERE id=?1", [id])?;
+            crate::row_queries::forget_definition(
+                db,
+                crate::row_queries::Definition::ForeignKey,
+                id,
+            )?;
         }
     }
     for (id, table, key) in renamed {
-        db.internal_execute(
-            "UPDATE _coven_foreign_keys SET table_name=?2,identity=?3 WHERE id=?1",
-            params![id, table, encoded(merge_fields::encode_foreign_key(&key))?],
+        crate::row_queries::rename_definition(
+            db,
+            crate::row_queries::Definition::ForeignKey,
+            id,
+            table,
+            &encoded(merge_fields::encode_foreign_key(&key))?,
         )?;
         db.internal_execute("UPDATE _coven_references SET parent_table=?2 WHERE foreign_key_id=?1 AND parent_table<>?2",params![id,key.parent])?;
     }
@@ -322,22 +330,30 @@ fn constraints(
             continue;
         }
         if let Some((table, key)) = target {
-            db.internal_execute(
-                "UPDATE _coven_constraints SET table_name=?2 WHERE id=?1",
-                params![id, format!("coven_migration_constraint_{id}")],
+            crate::row_queries::stage_definition(
+                db,
+                crate::row_queries::Definition::Constraint,
+                id,
             )?;
             renamed.push((id, table, key));
         } else {
             // A dropped constraint's claims go with it. Definitions that no
             // longer exist must not be reused by a later incarnation.
             db.internal_execute("DELETE FROM _coven_claims WHERE constraint_id=?1", [id])?;
-            db.internal_execute("DELETE FROM _coven_constraints WHERE id=?1", [id])?;
+            crate::row_queries::forget_definition(
+                db,
+                crate::row_queries::Definition::Constraint,
+                id,
+            )?;
         }
     }
     for (id, table, key) in renamed {
-        db.internal_execute(
-            "UPDATE _coven_constraints SET table_name=?2,identity=?3 WHERE id=?1",
-            params![id, table, encoded(merge_fields::encode_unique_constraint(&key))?],
+        crate::row_queries::rename_definition(
+            db,
+            crate::row_queries::Definition::Constraint,
+            id,
+            table,
+            &encoded(merge_fields::encode_unique_constraint(&key))?,
         )?;
     }
     Ok(())

@@ -18,6 +18,6 @@ macro_rules! coven_ownership_tables {
         "
         );
         coven_authorship_tables!($visit);
-        coven_owner_tables_tables!($visit);
+        coven_schema_definitions_tables!($visit);
     };
 }

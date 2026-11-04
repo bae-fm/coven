@@ -133,6 +133,10 @@ async fn every_synced_column_and_foreign_key_is_registered_before_any_write_name
 /// Fill this domain's tables from the rows of the plan audit's `fixture`
 /// table, inside its transaction (`internal_schema_scan_reasons_tests.rs`).
 pub(crate) fn fill_for_plans(db: &rusqlite::Connection) {
-    db.execute_batch("INSERT INTO _coven_owner_tables SELECT DISTINCT 'table_' || i FROM fixture;")
-        .unwrap();
+    db.execute_batch(
+        "INSERT INTO _coven_constraints SELECT i,tab,n FROM fixture;
+         INSERT INTO _coven_foreign_keys SELECT i,tab,n FROM fixture;
+         INSERT INTO _coven_owner_tables SELECT DISTINCT 'table_' || i FROM fixture;",
+    )
+    .unwrap();
 }

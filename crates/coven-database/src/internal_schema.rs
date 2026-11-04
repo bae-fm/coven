@@ -270,28 +270,6 @@ macro_rules! coven_tables {
             CREATE INDEX _coven_references_column ON _coven_references(column_id,row_id);
             CREATE INDEX _coven_references_key ON _coven_references(foreign_key_id,row_id);
         ");
-        $visit!(
-            _coven_constraints,
-            "
-            CREATE TABLE _coven_constraints (
-                id INTEGER PRIMARY KEY,
-                table_name TEXT NOT NULL,
-                identity BLOB NOT NULL,
-                UNIQUE(table_name, identity)
-            ) STRICT;
-        "
-        );
-        $visit!(
-            _coven_foreign_keys,
-            "
-            CREATE TABLE _coven_foreign_keys (
-                id INTEGER PRIMARY KEY,
-                table_name TEXT NOT NULL,
-                identity BLOB NOT NULL,
-                UNIQUE(table_name, identity)
-            ) STRICT;
-        "
-        );
         $visit!(_coven_claims, "
             CREATE TABLE _coven_claims (
                 row_id INTEGER NOT NULL REFERENCES _coven_rows(id),

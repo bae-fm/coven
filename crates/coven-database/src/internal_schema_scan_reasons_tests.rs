@@ -97,8 +97,6 @@ mod fixture {
      INSERT INTO _coven_install_before SELECT tab,key,audience,i%2 FROM fixture;
      INSERT INTO _coven_install_region SELECT tab,key,audience FROM fixture WHERE i%16=0;
      INSERT INTO _coven_download_replaced SELECT DISTINCT audience FROM fixture WHERE i<=4;
-     INSERT INTO _coven_constraints SELECT i,tab,n FROM fixture;
-     INSERT INTO _coven_foreign_keys SELECT i,tab,n FROM fixture;
 "
     ).unwrap();
         // Each domain fills its own tables from the same rows.

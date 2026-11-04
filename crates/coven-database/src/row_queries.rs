@@ -122,24 +122,92 @@ pub(crate) fn read_identity(r: &rusqlite::Row<'_>) -> rusqlite::Result<RowId> {
     Ok(RowId { table: r.get(0)?, key: r.get(1)?, audience: audience(&r.get::<_, String>(2)?)? })
 }
 
-/// A table-scoped metadata definition's statements: record it once, and
-/// read its stable row id.
+/// A table-scoped metadata definition's statements: record it once, read
+/// its stable row id, move it to another table and identity, and forget it.
 struct Definitions {
     insert: &'static str,
     id: &'static str,
+    rename: &'static str,
+    forget: &'static str,
+    /// The table name a migration parks a definition under while it moves
+    /// definitions between tables, so two can trade names (§18).
+    staged: &'static str,
 }
 
 const FOREIGN_KEYS: Definitions = Definitions {
     insert:
         "INSERT INTO _coven_foreign_keys(table_name,identity) VALUES(?1,?2) ON CONFLICT DO NOTHING",
     id: "SELECT id FROM _coven_foreign_keys WHERE table_name=?1 AND identity=?2",
+    rename:
+        "UPDATE _coven_foreign_keys SET table_name=?2,identity=coalesce(?3,identity) WHERE id=?1",
+    forget: "DELETE FROM _coven_foreign_keys WHERE id=?1",
+    staged: "coven_migration_fk_",
 };
 
 const CONSTRAINTS: Definitions = Definitions {
     insert:
         "INSERT INTO _coven_constraints(table_name,identity) VALUES(?1,?2) ON CONFLICT DO NOTHING",
     id: "SELECT id FROM _coven_constraints WHERE table_name=?1 AND identity=?2",
+    rename:
+        "UPDATE _coven_constraints SET table_name=?2,identity=coalesce(?3,identity) WHERE id=?1",
+    forget: "DELETE FROM _coven_constraints WHERE id=?1",
+    staged: "coven_migration_constraint_",
 };
+
+/// A definition a migration carries: a foreign key or a unique constraint.
+#[derive(Clone, Copy)]
+pub(crate) enum Definition {
+    ForeignKey,
+    Constraint,
+}
+
+impl Definition {
+    fn statements(self) -> Definitions {
+        match self {
+            Definition::ForeignKey => FOREIGN_KEYS,
+            Definition::Constraint => CONSTRAINTS,
+        }
+    }
+}
+
+/// Park `definition` `id` under its staged table name, keeping its
+/// identity, until the migration gives it its new one.
+pub(crate) fn stage_definition(
+    database: &DatabaseConnection,
+    definition: Definition,
+    id: i64,
+) -> Result<(), DbError> {
+    let statements = definition.statements();
+    database.internal_execute(
+        statements.rename,
+        params![id, format!("{}{id}", statements.staged), None::<Vec<u8>>],
+    )?;
+    Ok(())
+}
+
+/// Give `definition` `id` the table and encoded identity it has after the
+/// migration.
+pub(crate) fn rename_definition(
+    database: &DatabaseConnection,
+    definition: Definition,
+    id: i64,
+    table: &str,
+    identity: &[u8],
+) -> Result<(), DbError> {
+    database.internal_execute(definition.statements().rename, params![id, table, identity])?;
+    Ok(())
+}
+
+/// Forget `definition` `id`, which the migration dropped: no later
+/// incarnation reuses it.
+pub(crate) fn forget_definition(
+    database: &DatabaseConnection,
+    definition: Definition,
+    id: i64,
+) -> Result<(), DbError> {
+    database.internal_execute(definition.statements().forget, [id])?;
+    Ok(())
+}
 
 /// Insert a table-scoped metadata definition once and return its stable row id.
 fn definition_id(
