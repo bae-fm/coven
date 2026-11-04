@@ -13,19 +13,15 @@ use coven_merge::Audience;
 use std::collections::BTreeMap;
 use std::io::Cursor;
 
-/// The rows a snapshot's author showed are only what its author's rules
-/// gave: a device runs the rules itself. A body that shows the rows its
-/// author took out, without their losses, has them taken out here again.
-#[tokio::test]
-async fn rows_a_snapshot_shows_are_taken_out_by_this_devices_rules() {
-    let ids = SequentialIds::new();
-    let [a_store, b_store, c_store] = [(); 3].map(|()| TestStore::with_ids(&ids));
-    let a = open(&a_store).await;
-    let b = open(&b_store).await;
-    let c = open(&c_store).await;
-    concurrent_library(&a, &b).await;
-    let snapshot = frames(&a, Audience::Store).await;
-    let bytes = edited(&snapshot, |header, records| {
+/// `snapshot` with its author's removals undone: no rules loss, and each row
+/// its author's rules took out shown as synced, as a body that only lists its
+/// author's rows would show it. The loading device's own rules must find them.
+/// Also returns how many rows its author's rules took out.
+fn without_rule_losses(
+    snapshot: &crate::snapshot_write::tests::SnapshotFrames,
+) -> (Vec<u8>, usize) {
+    let mut taken_out = 0;
+    let bytes = edited(snapshot, |header, records| {
         let merged: BTreeMap<_, _> = records
             .iter()
             .filter_map(|record| match record {
@@ -44,10 +40,10 @@ async fn rows_a_snapshot_shows_are_taken_out_by_this_devices_rules() {
                 _ => None,
             })
             .collect();
-        assert!(!removed.is_empty());
+        taken_out = removed.len();
         records.retain(|record| {
-            !matches!(record, SnapshotRecord::Loss(loss) if matches!(loss.cause, coven_format::loss::LossCause::Rules(_)))
-        });
+                !matches!(record, SnapshotRecord::Loss(loss) if matches!(loss.cause, coven_format::loss::LossCause::Rules(_)))
+            });
         header.counts[coven_format::snapshot::section::LOSS] -= removed.len() as u64;
         for row in removed {
             let state = &merged[&row];
@@ -73,6 +69,23 @@ async fn rows_a_snapshot_shows_are_taken_out_by_this_devices_rules() {
         });
         records.extend(indexed.into_iter().map(|(_, record)| record));
     });
+    (bytes, taken_out)
+}
+
+/// The rows a snapshot's author showed are only what its author's rules
+/// gave: a device runs the rules itself. A body that shows the rows its
+/// author took out, without their losses, has them taken out here again.
+#[tokio::test]
+async fn rows_a_snapshot_shows_are_taken_out_by_this_devices_rules() {
+    let ids = SequentialIds::new();
+    let [a_store, b_store, c_store] = [(); 3].map(|()| TestStore::with_ids(&ids));
+    let a = open(&a_store).await;
+    let b = open(&b_store).await;
+    let c = open(&c_store).await;
+    concurrent_library(&a, &b).await;
+    let snapshot = frames(&a, Audience::Store).await;
+    let (bytes, taken_out) = without_rule_losses(&snapshot);
+    assert!(taken_out > 0);
     load_one(&c, id(Audience::Store), snapshot.prefix.clone(), Cursor::new(bytes)).await.unwrap();
     assert_installed(&a, &c, &[Audience::Store]).await;
     for db in [a, b, c] {
@@ -340,4 +353,102 @@ async fn a_table_referencing_itself_installs_parents_first() {
     for db in [a, c] {
         db.close().await.unwrap();
     }
+}
+
+/// Random concurrent histories of the library on two devices: deletes whose
+/// children the other device kept writing, CHECKs that fail only once both
+/// sides' cells merge, positions and paths two rows claim, covers naming
+/// deleted releases. Each installs on a new device as the snapshot holds it,
+/// and again with every removal its author made undone, so this device's own
+/// seeds (`snapshot_conflicts::rows`) and `recompute`'s closure must find each
+/// row with a reason of its own, both rows of every rival claim, and each row
+/// referencing them (proofs/merge.md B20's `Region`). Every install shows
+/// what its author shows, and running the rules over every row changes
+/// nothing it left.
+#[tokio::test]
+async fn random_histories_install_what_replay_gives() {
+    let mut seed = 0x853c_49e6_748f_ea9bu64;
+    let mut pick = move |n: u64| {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        seed % n
+    };
+    let mut removals = 0;
+    for _ in 0..16 {
+        let ids = SequentialIds::new();
+        let [a_store, b_store, c_store, d_store] = [(); 4].map(|()| TestStore::with_ids(&ids));
+        let a = open(&a_store).await;
+        let b = open(&b_store).await;
+        sql(
+            &a,
+            "INSERT INTO releases VALUES('r1','One',NULL,NULL),('r2','Two',1,NULL),('r3','Three',NULL,5);
+             INSERT INTO tracks(id,release_id,position,title,cover) VALUES('t1','r1',1,'a','r2'),('t2','r1',2,'b',NULL),('t3','r2',1,'c','r3'),('t4','r3',1,'d',NULL);
+             INSERT INTO files(id,track_id,path) VALUES('f1','t1','/1'),('f2','t2','/2'),('f3','t3','/3')",
+        )
+        .await
+        .unwrap();
+        publish(&a, &[&a, &b]).await;
+        for (device, name) in [(&a, "a"), (&b, "b")] {
+            for n in 0..14 {
+                let release = format!("r{}", 1 + pick(3));
+                let track = format!("t{}", 1 + pick(4));
+                let statement = match pick(9) {
+                    // New tracks and files often claim a position or a path
+                    // the other device's new row claims too.
+                    0 => format!(
+                        "INSERT INTO tracks(id,release_id,position,title) VALUES('{name}t{n}','{release}',{},'new')",
+                        3 + pick(2)
+                    ),
+                    1 => format!(
+                        "INSERT INTO files(id,track_id,path) VALUES('{name}f{n}','{track}','/{}')",
+                        4 + pick(2)
+                    ),
+                    2 => format!("DELETE FROM releases WHERE id='{release}'"),
+                    // Device a raises first and b lowers last, so the merged
+                    // cells often fail the CHECK neither device's own did.
+                    3 | 4 if name == "a" => {
+                        format!("UPDATE releases SET first={} WHERE id='{release}'", 3 + pick(3))
+                    }
+                    3 | 4 => format!("UPDATE releases SET last={} WHERE id='{release}'", pick(3)),
+                    5 => format!("UPDATE tracks SET position={} WHERE id='{track}'", 1 + pick(3)),
+                    6 => format!("UPDATE tracks SET cover='{release}' WHERE id='{track}'"),
+                    7 => format!("UPDATE tracks SET release_id='{release}' WHERE id='{track}'"),
+                    _ => format!("DELETE FROM tracks WHERE id='{track}'"),
+                };
+                // A statement this device's own state refuses is no write.
+                let _refused = device
+                    .write(move |context| {
+                        context.execute_batch(&statement)?;
+                        Ok(())
+                    })
+                    .await;
+            }
+        }
+        publish(&a, &[&a]).await;
+        publish(&b, &[&a]).await;
+        let snapshot = frames(&a, Audience::Store).await;
+        let (undone, taken_out) = without_rule_losses(&snapshot);
+        removals += usize::from(taken_out > 0);
+        let installed = open(&c_store).await;
+        load_one(
+            &installed,
+            id(Audience::Store),
+            snapshot.prefix.clone(),
+            Cursor::new(snapshot.concat()),
+        )
+        .await
+        .unwrap();
+        assert_installed(&a, &installed, &[Audience::Store]).await;
+        let found = open(&d_store).await;
+        load_one(&found, id(Audience::Store), snapshot.prefix.clone(), Cursor::new(undone))
+            .await
+            .unwrap();
+        assert_installed(&a, &found, &[Audience::Store]).await;
+        for db in [a, b, installed, found] {
+            db.close().await.unwrap();
+        }
+    }
+    // Most histories leave rows the rules take out.
+    assert!(removals >= 8, "only {removals} histories had removals");
 }

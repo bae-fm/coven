@@ -1106,5 +1106,14 @@ and both rivals are needed, and a row's reasons alone are not enough.
 references, CHECK results and claims are in B7. `snapshot_conflicts::rows`
 selects the rows with a reason in SQL, and `coven_merge::recompute` reaches
 their children, parents and rivals; that the result meets `Region` is the
-implementation's obligation. The copy of the merge records and the
-snapshot's soundness are as in B11.
+implementation's obligation, which tests check rather than prove.
+`snapshot_conflicts::tests::random_histories_install_what_replay_gives`
+installs random concurrent histories of a library on a new device, once as
+the snapshot holds them and once with every removal its author made undone,
+so the device's own seeds and closure must find every row the rules take out:
+deletes whose children the other device kept writing, CHECKs that fail only
+once both devices' cells merge, positions and paths two rows claim. Each
+install must show what its author shows, and running the rules over every row
+must change nothing it left. Without the reference, CHECK or unique seeds it
+fails. The copy of the merge records and the snapshot's soundness are as in
+B11.
