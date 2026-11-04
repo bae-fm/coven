@@ -203,7 +203,17 @@ pub(crate) fn refresh_received(
     schema: &WriteSchema,
     key: &AppKey,
 ) -> Result<(), DbError> {
-    for file in refresh(db, schema, key)? {
+    await_own_write(db, refresh(db, schema, key)?)
+}
+
+/// Each of `released`, files left with no reference, whose record this
+/// device still has, waits for this device's next write of its own to
+/// delete that record (§17.2).
+pub(crate) fn await_own_write(
+    db: &DatabaseConnection,
+    released: BTreeSet<FileId>,
+) -> Result<(), DbError> {
+    for file in released {
         if file_table::Record::read(db, file)?.is_some() {
             db.internal_execute(
                 "INSERT INTO _coven_unreferenced_files(file) VALUES(?1) ON CONFLICT DO NOTHING",

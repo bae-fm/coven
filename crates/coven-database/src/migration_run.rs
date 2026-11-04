@@ -218,14 +218,10 @@ pub(crate) fn run<'a>(
     }
     // A file a dropped column or table referenced last waits for this
     // device's next write of its own to delete its record (§17.2).
-    for file in crate::file_protection::migrate(database, tables)? {
-        if crate::file_table::Record::read(database, file)?.is_some() {
-            database.internal_execute(
-                "INSERT INTO _coven_unreferenced_files(file) VALUES(?1) ON CONFLICT DO NOTHING",
-                [file],
-            )?;
-        }
-    }
+    crate::file_protection::await_own_write(
+        database,
+        crate::file_protection::migrate(database, tables)?,
+    )?;
     Ok(MigrationRun { outcomes, marker })
 }
 
