@@ -42,8 +42,7 @@ impl StorageConfig {
     /// Decode the settings file's location; unknown fields and credential
     /// payloads fail.
     pub(crate) fn decode(bytes: &[u8]) -> Result<Self, StorageError> {
-        let location: Self = serde_json::from_slice(bytes)
-            .map_err(|error| crate::StorageFailure::Encoding.with_source(error))?;
+        let location: Self = crate::secret_json::decode(bytes)?;
         location.validate()?;
         Ok(location)
     }

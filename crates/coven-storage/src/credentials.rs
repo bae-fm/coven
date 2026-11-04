@@ -22,8 +22,7 @@ impl S3Credentials {
 
     /// Read a key saved beside a saved restore code.
     pub fn decode(bytes: &[u8]) -> Result<Self, crate::StorageError> {
-        let keys: Self = serde_json::from_slice(bytes)
-            .map_err(|error| crate::StorageFailure::Encoding.with_source(error))?;
+        let keys: Self = crate::secret_json::decode(bytes)?;
         keys.validate()?;
         Ok(keys)
     }
@@ -88,8 +87,7 @@ impl StorageCredentials {
     }
     /// Decode credentials obtained from device custody.
     pub fn decode(bytes: &[u8]) -> Result<Self, crate::StorageError> {
-        serde_json::from_slice(bytes)
-            .map_err(|error| crate::StorageFailure::Encoding.with_source(error))
+        crate::secret_json::decode(bytes)
     }
 }
 

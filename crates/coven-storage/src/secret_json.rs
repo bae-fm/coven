@@ -19,6 +19,14 @@ pub(crate) fn encode(value: &impl Serialize) -> Result<SecretBytes, crate::Stora
     Ok(SecretBytes::new(std::mem::take(&mut *bytes)))
 }
 
+/// Read a value [`encode`] wrote; bytes that aren't one are `Encoding`.
+pub(crate) fn decode<T: serde::de::DeserializeOwned>(
+    bytes: &[u8],
+) -> Result<T, crate::StorageError> {
+    serde_json::from_slice(bytes)
+        .map_err(|error| crate::StorageFailure::Encoding.with_source(error))
+}
+
 struct CountingWriter(usize);
 impl Write for CountingWriter {
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {

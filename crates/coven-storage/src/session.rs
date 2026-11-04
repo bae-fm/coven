@@ -254,8 +254,7 @@ impl UploadSession {
     /// counts and sizes, and confirmed byte offset; replacement requires a floor.
     /// The adapter also checks that it names the adapter's location before any request.
     pub fn decode(bytes: &[u8]) -> Result<Self, StorageError> {
-        let value: RecordedUploadSession = serde_json::from_slice(bytes)
-            .map_err(|error| StorageFailure::Encoding.with_source(error))?;
+        let value: RecordedUploadSession = crate::secret_json::decode(bytes)?;
         value.try_into()
     }
     fn validate(&self) -> Result<(), StorageError> {

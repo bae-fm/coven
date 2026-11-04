@@ -95,7 +95,7 @@ impl StorageInvitation {
     }
     /// Decode and validate an invitation the database recorded.
     pub fn decode(bytes: &[u8]) -> Result<Self, StorageError> {
-        serde_json::from_slice(bytes).map_err(|error| StorageFailure::Encoding.with_source(error))
+        crate::secret_json::decode(bytes)
     }
     /// Pack the location, then how the recipient accepts it, into an invite
     /// code's storage part (format.md D13). The location's provider fixes
