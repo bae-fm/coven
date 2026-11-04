@@ -3,7 +3,6 @@
 
 use super::DatabaseAccess;
 use crate::{sqlite::DatabaseConnection, DbError, FileRef};
-use coven_crypto::FILE_CHUNK_TAG_LEN;
 use coven_foundation::files::StoreDirAccess;
 
 pub(super) use crate::internal_schema::{
@@ -84,7 +83,7 @@ fn within(file: &FileRef, first: i64, index: i64) -> Result<(u64, usize), DbErro
     };
     let target = chunk(index)?;
     let base = if first == COMPLETE_FILE { 0 } else { chunk(first)?.offset };
-    Ok((target.offset - base, target.plaintext_length + FILE_CHUNK_TAG_LEN))
+    Ok((target.offset - base, target.stored_length()))
 }
 /// The cached bytes of chunk `index`, or the header (-1). The entry is
 /// looked up, and its read recorded, under the writer; its bytes are read

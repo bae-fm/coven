@@ -55,6 +55,23 @@ fn header_bytes_limits_offsets_and_empty_files_are_exact() {
 }
 
 #[test]
+fn a_stored_position_finds_the_chunk_that_holds_it() {
+    let header = FileHeader::new(65_537);
+    let second = 11 + 65_536 + 16;
+    assert!(header.chunk_at(0).is_err());
+    assert!(header.chunk_at(10).is_err());
+    assert_eq!(header.chunk_at(11).unwrap(), header.chunk(0).unwrap());
+    assert_eq!(header.chunk_at(second - 1).unwrap(), header.chunk(0).unwrap());
+    assert_eq!(header.chunk_at(second).unwrap(), header.chunk(1).unwrap());
+    assert_eq!(header.chunk_at(second + 16).unwrap(), header.chunk(1).unwrap());
+    assert!(header.chunk_at(second + 17).is_err());
+    assert_eq!(header.chunk(1).unwrap().end(), header.encrypted_size().unwrap());
+    assert_eq!(header.chunk(1).unwrap().stored_length(), 17);
+    assert_eq!(header.chunk(1).unwrap().plaintext_start(), 65_536);
+    assert!(FileHeader::new(0).chunk_at(11).is_err());
+}
+
+#[test]
 fn each_chunk_opens_independently_and_requires_its_exact_length() {
     for size in [0, 1, 65_535, 65_536, 65_537, 131_072, 196_637] {
         let (key, plain, stored) = example(size);

@@ -48,6 +48,7 @@ pub mod writes_slot;
 pub mod test_utils;
 
 pub use error::Error;
+pub use sealed::STORED_CHUNK_OVERHEAD;
 pub use version::{FormatVersion, RequiredUpdate};
 
 use admin::StoreChange;

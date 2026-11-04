@@ -567,19 +567,18 @@ impl UploadedFile {
         if let Some(bytes) = cached {
             return Ok(ChunkStep::Read(first, vec![self.open_cached(first, bytes)?]));
         }
-        let start = self.header.chunk(first).map_err(|_| self.integrity())?.offset;
+        let first_chunk = self.header.chunk(first).map_err(|_| self.integrity())?;
+        let start = first_chunk.offset;
         let mut end_index = first;
         // The fetch stops at the first cached chunk after the ones it needs.
         // That chunk's bytes, read here, finish this step, so it is read once
         // and counts as read before the trim that follows caching the fetched
         // range.
         let mut stop = None;
-        let mut end = start
-            + (self.header.chunk(first).map_err(|_| self.integrity())?.plaintext_length + 16)
-                as u64;
+        let mut end = first_chunk.end();
         while end_index < last {
             let next = self.header.chunk(end_index + 1).map_err(|_| self.integrity())?;
-            let next_end = next.offset + (next.plaintext_length + 16) as u64;
+            let next_end = next.end();
             let request_start = if with_header { 0 } else { start };
             if next_end - request_start > REQUEST_BYTES {
                 break;
@@ -606,8 +605,7 @@ impl UploadedFile {
         let mut plain = Vec::new();
         let mut cursor = 0;
         for index in first..=end_index {
-            let length =
-                self.header.chunk(index).map_err(|_| self.integrity())?.plaintext_length + 16;
+            let length = self.header.chunk(index).map_err(|_| self.integrity())?.stored_length();
             let sealed = bytes.get(cursor..cursor + length).ok_or_else(|| self.integrity())?;
             let opened = self
                 .header
@@ -661,13 +659,12 @@ impl UploadedFile {
             }
             ChunkDestination::Cache(None) => Ok(ByteProgress::unread()),
             ChunkDestination::Cache(Some(range)) => {
-                let size = CHUNK_SIZE as u64;
                 // Each fetched chunk's place in the object, its plaintext
                 // length, and the part of the range it holds.
                 let mut chunks = Vec::new();
                 for index in first..=last {
                     let chunk = self.header.chunk(index).map_err(|_| self.integrity())?;
-                    let plain_start = index * size;
+                    let plain_start = chunk.plaintext_start();
                     let from = range.offset.max(plain_start) - plain_start;
                     let to = (range.offset + range.len)
                         .min(plain_start + chunk.plaintext_length as u64)

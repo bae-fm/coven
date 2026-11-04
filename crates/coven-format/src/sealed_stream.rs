@@ -76,7 +76,7 @@ impl StreamObjectLayout {
 
 /// Recover plaintext size from a complete stream's encrypted size.
 pub fn plaintext_length(sealed: u64) -> Result<u64, Error> {
-    let overhead = (4 + SEALED_OBJECT_CHUNK_OVERHEAD) as u64;
+    let overhead = crate::STORED_CHUNK_OVERHEAD as u64;
     let full = CHUNK_SIZE as u64 + overhead;
     require(sealed > 0, "stream chunks", Rule::Required)?;
     let chunks = sealed.div_ceil(full);

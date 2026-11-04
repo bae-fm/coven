@@ -1,6 +1,6 @@
 //! Piecewise sealed write layout. Crypto supplies and authenticates the bytes.
 
-use crate::chunks::CHUNK_SIZE;
+use crate::chunks::{chunk_count, chunk_length};
 use crate::error::{bound, exact_length, require, Error, Rule};
 use crate::sealed;
 use crate::wire::{Decoder, Encoder, Wire, MAX_ITEMS, MAX_OBJECT};
@@ -11,15 +11,14 @@ use coven_foundation::id_source::KeyId;
 /// contents. Header and part lengths come from the validated plaintext codec.
 pub fn sealed_length(header_length: usize, part_lengths: &[u64]) -> Result<u64, Error> {
     validate_lengths(header_length, part_lengths)?;
-    let overhead = (4 + SEALED_OBJECT_CHUNK_OVERHEAD) as u64;
+    let overhead = crate::STORED_CHUNK_OVERHEAD as u64;
     let mut length = WriteObjectPrefix::encoded_length(part_lengths.len())? as u64
         + header_length as u64
         + overhead
         + WriteObjectPrefix::tail_length(part_lengths.len()) as u64
         + SIGNATURE_LEN as u64;
     for part in part_lengths {
-        length = part
-            .div_ceil(CHUNK_SIZE as u64)
+        length = chunk_count(*part)
             .checked_mul(overhead)
             .and_then(|n| n.checked_add(*part))
             .and_then(|n| n.checked_add(length))
@@ -66,8 +65,7 @@ impl WriteObjectPrefix {
     /// and header signature (D1/D2, D9).
     pub const MAX_HEADER_END: usize = 23
         + 16 * MAX_ITEMS
-        + 4
-        + SEALED_OBJECT_CHUNK_OVERHEAD
+        + crate::STORED_CHUNK_OVERHEAD
         + MAX_OBJECT
         + 32 * MAX_ITEMS
         + SIGNATURE_LEN;
@@ -141,7 +139,7 @@ impl WriteObjectPrefix {
     pub fn header_chunk_length(prefix: &[u8]) -> Result<usize, Error> {
         let length = sealed::chunk_length(prefix, MAX_OBJECT)?;
         require(
-            length >= crate::FRAME_PREFIX_LEN + 4 + SEALED_OBJECT_CHUNK_OVERHEAD,
+            length >= crate::FRAME_PREFIX_LEN + crate::STORED_CHUNK_OVERHEAD,
             "sealed header frame",
             Rule::Chunk,
         )?;
@@ -243,12 +241,11 @@ impl WriteObjectLayout {
                 plaintext_length: self.header_length,
             })
         } else {
-            let left = self.part_lengths[section - 1] - index * CHUNK_SIZE as u64;
             Some(ObjectChunk {
                 key: self.prefix.part_keys[section - 1],
                 section: section as u64,
                 index,
-                plaintext_length: left.min(CHUNK_SIZE as u64) as usize,
+                plaintext_length: chunk_length(self.part_lengths[section - 1], index),
             })
         }
     }
@@ -258,7 +255,7 @@ impl WriteObjectLayout {
         let chunk = self.next_chunk().ok_or(Error::TrailingBytes)?;
         let length = sealed::chunk_length(prefix, chunk.plaintext_length)?;
         require(
-            length == 4 + SEALED_OBJECT_CHUNK_OVERHEAD + chunk.plaintext_length,
+            length == crate::STORED_CHUNK_OVERHEAD + chunk.plaintext_length,
             "sealed write chunk length",
             Rule::Chunk,
         )?;
@@ -344,7 +341,7 @@ impl WriteObjectLayout {
         };
         if section == 0 {
             self.position = Position::Tail;
-        } else if index + 1 < self.part_lengths[section - 1].div_ceil(CHUNK_SIZE as u64) {
+        } else if index + 1 < chunk_count(self.part_lengths[section - 1]) {
             self.position = Position::Chunk { section, index: index + 1 };
         } else if section < self.part_lengths.len() {
             self.position = Position::Chunk { section: section + 1, index: 0 };

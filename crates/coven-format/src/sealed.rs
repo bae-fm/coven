@@ -4,6 +4,10 @@ use crate::error::{bound, exact_length, require, Error, Rule};
 
 use coven_crypto::{SEALED_OBJECT_CHUNK_OVERHEAD, SIGNATURE_LEN};
 
+/// Bytes a stored sealed chunk adds to its plaintext: the 4-byte length
+/// prefix, then the nonce and tag.
+pub const STORED_CHUNK_OVERHEAD: usize = 4 + SEALED_OBJECT_CHUNK_OVERHEAD;
+
 pub(crate) fn signature(bytes: &[u8]) -> Result<coven_crypto::Signature, Error> {
     exact_length(bytes.len(), SIGNATURE_LEN)?;
     Ok(coven_crypto::Signature::from_bytes(bytes.try_into().expect("a signature's length")))
@@ -23,7 +27,7 @@ pub(crate) fn chunk_length(prefix: &[u8], maximum: usize) -> Result<usize, Error
     let length = u32::from_be_bytes(bytes) as usize;
     bound(length, maximum, "sealed chunk")?;
     require(length > 0, "sealed chunk", Rule::Chunk)?;
-    Ok(length + 4 + SEALED_OBJECT_CHUNK_OVERHEAD)
+    Ok(length + STORED_CHUNK_OVERHEAD)
 }
 
 pub(crate) fn chunk(bytes: &[u8], maximum: usize) -> Result<&[u8], Error> {

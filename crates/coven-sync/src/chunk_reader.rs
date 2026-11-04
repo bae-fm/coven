@@ -2,13 +2,15 @@
 
 use crate::slot_object::DigestStream;
 use coven_crypto::DerivedKeys;
-use coven_format::{chunks::CHUNK_SIZE, sealed_stream::StreamObjectLayout};
+use coven_format::{
+    chunks::{chunk_count, chunk_length, chunk_start, CHUNK_SIZE},
+    sealed_stream::StreamObjectLayout,
+    STORED_CHUNK_OVERHEAD,
+};
 use std::{
     io::{self, Read, Seek, SeekFrom},
     sync::Arc,
 };
-
-pub(crate) const CHUNK_OVERHEAD: usize = 4 + coven_crypto::SEALED_OBJECT_CHUNK_OVERHEAD;
 
 /// A section's authenticated coordinates and bounded decrypted cache. Cloning
 /// makes another cursor without copying a cached plaintext chunk, and
@@ -81,7 +83,7 @@ impl<R> ChunkReader<R> {
     /// The digest of every sealed chunk, once this cursor has read all of
     /// them in order; `None` if it skipped one or wasn't hashing.
     pub(crate) fn digest(&mut self) -> Option<DigestStream> {
-        let chunks = self.length.div_ceil(CHUNK_SIZE as u64);
+        let chunks = chunk_count(self.length);
         self.hashing.take().filter(|hashing| hashing.next == chunks).map(|hashing| hashing.digest)
     }
     pub(crate) fn len(&self) -> u64 {
@@ -96,12 +98,11 @@ impl<R: Read + Seek> Read for ChunkReader<R> {
         }
         let index = self.position / CHUNK_SIZE as u64;
         if self.cached.as_ref().is_none_or(|(cached, _)| *cached != index) {
-            let plain_length =
-                (self.length - index * CHUNK_SIZE as u64).min(CHUNK_SIZE as u64) as usize;
+            let plain_length = chunk_length(self.length, index);
             self.input.seek(SeekFrom::Start(
-                self.offset + index * (CHUNK_SIZE + CHUNK_OVERHEAD) as u64,
+                self.offset + index * (CHUNK_SIZE + STORED_CHUNK_OVERHEAD) as u64,
             ))?;
-            let mut bytes = vec![0; plain_length + CHUNK_OVERHEAD];
+            let mut bytes = vec![0; plain_length + STORED_CHUNK_OVERHEAD];
             self.input.read_exact(&mut bytes)?;
             if let Some(hashing) = &mut self.hashing {
                 if index == hashing.next {
@@ -120,7 +121,7 @@ impl<R: Read + Seek> Read for ChunkReader<R> {
             self.cached = Some((index, zeroize::Zeroizing::new(plain)));
         }
         let (_, plain) = self.cached.as_ref().expect("loaded chunk");
-        let offset = (self.position % CHUNK_SIZE as u64) as usize;
+        let offset = (self.position - chunk_start(index)) as usize;
         let length = output.len().min(plain.len() - offset);
         output[..length].copy_from_slice(&plain[offset..offset + length]);
         self.position += length as u64;

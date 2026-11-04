@@ -1,6 +1,6 @@
 //! The cleartext file header, indexed ciphertext chunks and authenticated ranges.
 
-use crate::chunks::CHUNK_SIZE;
+use crate::chunks::{chunk_length, chunk_start, CHUNK_SIZE};
 use crate::error::{exact_length, require, Error, Rule};
 use coven_crypto::{CryptoError, FileKey, FILE_CHUNK_TAG_LEN};
 
@@ -42,7 +42,7 @@ impl FileHeader {
 
     /// How many chunks follow this header; an empty file has none.
     pub fn chunk_count(&self) -> u64 {
-        self.size.div_ceil(CHUNK_SIZE as u64)
+        crate::chunks::chunk_count(self.size)
     }
 
     /// Full stored size, refusing an offset that cannot be represented in u64.
@@ -61,12 +61,18 @@ impl FileHeader {
             .checked_mul((CHUNK_SIZE + FILE_CHUNK_TAG_LEN) as u64)
             .and_then(|n| n.checked_add(FILE_HEADER_LEN as u64))
             .ok_or_else(offset_error)?;
-        let plaintext_length =
-            (self.size - index * CHUNK_SIZE as u64).min(CHUNK_SIZE as u64) as usize;
-        offset
-            .checked_add((plaintext_length + FILE_CHUNK_TAG_LEN) as u64)
-            .ok_or_else(offset_error)?;
-        Ok(FileChunk { index, offset, plaintext_length })
+        let chunk = FileChunk { index, offset, plaintext_length: chunk_length(self.size, index) };
+        offset.checked_add(chunk.stored_length() as u64).ok_or_else(offset_error)?;
+        Ok(chunk)
+    }
+
+    /// The chunk whose stored bytes hold the object's byte `position`; a
+    /// position in the header or past the last chunk has none.
+    pub fn chunk_at(&self, position: u64) -> Result<FileChunk, Error> {
+        let past_header = position.checked_sub(FILE_HEADER_LEN as u64).ok_or_else(offset_error)?;
+        let chunk = self.chunk(past_header / (CHUNK_SIZE + FILE_CHUNK_TAG_LEN) as u64)?;
+        require(position < chunk.end(), "file chunk position", Rule::Chunk)?;
+        Ok(chunk)
     }
 
     /// Validate a chunk's plaintext length, then seal it under the file's key.
@@ -91,7 +97,7 @@ impl FileHeader {
         bytes: &[u8],
     ) -> Result<Vec<u8>, FileError> {
         let chunk = self.chunk(index)?;
-        exact_length(bytes.len(), chunk.plaintext_length + FILE_CHUNK_TAG_LEN)?;
+        exact_length(bytes.len(), chunk.stored_length())?;
         Ok(key.open_chunk(path, &self.encode(), index, bytes)?)
     }
 }
@@ -105,6 +111,22 @@ pub struct FileChunk {
     pub offset: u64,
     /// Exact plaintext length; the stored length adds a 16-byte tag.
     pub plaintext_length: usize,
+}
+impl FileChunk {
+    /// Where the chunk's plaintext begins in the file.
+    pub fn plaintext_start(&self) -> u64 {
+        chunk_start(self.index)
+    }
+
+    /// Its stored length: the plaintext and the 16-byte tag.
+    pub fn stored_length(&self) -> usize {
+        self.plaintext_length + FILE_CHUNK_TAG_LEN
+    }
+
+    /// The stored object's byte just past this chunk.
+    pub fn end(&self) -> u64 {
+        self.offset + self.stored_length() as u64
+    }
 }
 
 fn offset_error() -> Error {

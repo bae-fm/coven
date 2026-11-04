@@ -32,7 +32,7 @@ impl PartHeader {
 
     /// Number of sealed chunks required by this part's plaintext length.
     pub fn chunk_count(&self) -> u64 {
-        self.plaintext_length.div_ceil(CHUNK_SIZE as u64)
+        crate::chunks::chunk_count(self.plaintext_length)
     }
 }
 

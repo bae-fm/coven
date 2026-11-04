@@ -4,14 +4,11 @@
 use crate::{
     files::file_error::*, files::file_failure::upload_subject, files::FilesInner, SyncError,
 };
-use coven_crypto::{FileKey, FILE_CHUNK_TAG_LEN};
+use coven_crypto::FileKey;
 use coven_database::FileLocationKey;
 use coven_database::TransferMeter;
 use coven_database::{DbError, FileUpload, LocalFileStream, RetrySubject};
-use coven_format::{
-    chunks::CHUNK_SIZE,
-    file::{FileHeader, FILE_HEADER_LEN},
-};
+use coven_format::file::{FileHeader, FILE_HEADER_LEN};
 use coven_storage::{ByteProgress, ObjectPath, UploadSession};
 
 impl FilesInner {
@@ -175,20 +172,15 @@ impl FileTransfer<'_> {
             position = next;
         }
         while position < end {
-            let index =
-                (position - FILE_HEADER_LEN as u64) / (CHUNK_SIZE + FILE_CHUNK_TAG_LEN) as u64;
-            let chunk = header.chunk(index).map_err(|_| DbError::Invariant {
+            let chunk = header.chunk_at(position).map_err(|_| DbError::Invariant {
                 what: "an upload part's chunks exist in the file",
             })?;
+            let index = chunk.index;
             let expected =
                 self.owner.database.upload_chunk_hash(&self.item.location, index).await?;
             let plain = self
                 .source
-                .read_verified_at(
-                    index * CHUNK_SIZE as u64,
-                    chunk.plaintext_length as u64,
-                    expected,
-                )
+                .read_verified_at(chunk.plaintext_start(), chunk.plaintext_length as u64, expected)
                 .await?;
             // The exact buffer checked above is the only input to encryption.
             // Re-reading after checking would permit a source change between them.

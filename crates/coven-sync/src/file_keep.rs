@@ -13,7 +13,7 @@ use coven_crypto::ContentHasher;
 use coven_database::{
     CacheReservation, DbError, FileLocationKey, FileRef, PinRequest, RetrySubject,
 };
-use coven_format::{chunks::CHUNK_SIZE, file::FileHeader};
+use coven_format::file::FileHeader;
 use coven_foundation::files::FileName;
 use coven_storage::ObjectPath;
 use std::sync::Arc;
@@ -145,11 +145,7 @@ impl FilesInner {
             })?;
             let expected = self.database.copy_chunk_hash(copy, index).await?;
             let plain = source
-                .read_verified_at(
-                    index * CHUNK_SIZE as u64,
-                    chunk.plaintext_length as u64,
-                    expected,
-                )
+                .read_verified_at(chunk.plaintext_start(), chunk.plaintext_length as u64, expected)
                 .await
                 .map_err(FileReadError::from)?;
             hash.update(&plain);

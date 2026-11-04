@@ -6,6 +6,22 @@ use crate::{frame_length, FRAME_PREFIX_LEN};
 /// Plaintext bytes in a full file, write-part or snapshot chunk.
 pub const CHUNK_SIZE: usize = 64 * 1024;
 
+/// How many chunks `length` plaintext bytes cut into; none when empty.
+pub fn chunk_count(length: u64) -> u64 {
+    length.div_ceil(CHUNK_SIZE as u64)
+}
+
+/// Where chunk `index` begins in the plaintext.
+pub fn chunk_start(index: u64) -> u64 {
+    index * CHUNK_SIZE as u64
+}
+
+/// The plaintext length of chunk `index` of `length` bytes: full, except a
+/// shorter last chunk. The caller keeps `index` below the chunk count.
+pub fn chunk_length(length: u64, index: u64) -> usize {
+    (length - chunk_start(index)).min(CHUNK_SIZE as u64) as usize
+}
+
 /// Cut a sequence of bounded byte pieces into fixed-size chunks, retaining at most one frame
 /// and one output chunk. Only the last chunk may be shorter than [`CHUNK_SIZE`].
 pub struct PlaintextChunks<I> {
