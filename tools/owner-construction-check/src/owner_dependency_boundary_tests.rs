@@ -228,6 +228,37 @@ fn a_value_the_method_makes_is_not_the_one_its_owner_holds() {
     );
 }
 
+/// A macro passes a callback on when its arguments name it as a value,
+/// whether they parse as code or are read as tokens. A field the macro
+/// names before `=`, as in `error!(construct = count)`, is no value: the
+/// value is what follows the `=`.
+#[test]
+fn a_macro_passes_a_callback_on_only_where_it_names_its_value() {
+    let source = "struct Owner { clock: Clock } impl Owner { \
+        pub fn field(&self, construct: impl FnOnce(Clock)) { tracing::error!(construct = 1, \"made\"); construct(Clock::new()) } \
+        pub fn field_in_tokens(&self, construct: impl FnOnce(Clock)) { tracing::error!(construct = 1, %count, \"made\"); construct(Clock::new()) } \
+        pub fn dotted_field(&self, construct: impl FnOnce(Clock)) { tracing::error!(construct.kind = 1, \"made\"); construct(Clock::new()) } \
+        pub fn dotted_field_in_tokens(&self, construct: impl FnOnce(Clock)) { tracing::error!(construct.kind = 1, %count); construct(Clock::new()) } \
+        pub fn compared(&self, construct: impl FnOnce(Clock)) { check!(construct == other); construct(Clock::new()) } \
+        pub fn passed(&self, construct: impl FnOnce(Clock)) { spawn!(construct) } \
+        pub fn value(&self, construct: impl FnOnce(Clock)) { tracing::error!(work = construct, \"made\"); construct(Clock::new()) } \
+        pub fn value_in_tokens(&self, construct: impl FnOnce(Clock)) { tracing::error!(work = construct, %count); construct(Clock::new()) } \
+        pub fn shown(&self, construct: impl FnOnce(Clock)) { tracing::error!(%construct); construct(Clock::new()) } }";
+    assert_eq!(
+        leaks(PATH, source),
+        findings(
+            PATH,
+            &[
+                "Owner::compared hands its callback retained dependency Clock",
+                "Owner::passed hands its callback retained dependency Clock",
+                "Owner::shown hands its callback retained dependency Clock",
+                "Owner::value hands its callback retained dependency Clock",
+                "Owner::value_in_tokens hands its callback retained dependency Clock",
+            ]
+        )
+    );
+}
+
 #[test]
 fn a_listed_root_can_return_the_graph_it_constructs() {
     let source = "struct Child { clock: Clock } struct Owner { child: Child } impl Owner { pub fn open(&self) -> Child { todo!() } }";

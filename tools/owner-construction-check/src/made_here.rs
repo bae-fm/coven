@@ -11,6 +11,8 @@ use std::collections::BTreeSet;
 
 use syn::visit::{self, Visit};
 
+use crate::macros::{parse_macro_body, token_paths, unparsed_tokens};
+
 /// Whether every value `body` returns is made in it.
 pub(crate) fn returns_made_here(body: Option<&syn::Block>) -> bool {
     let Some(body) = body else {
@@ -210,15 +212,63 @@ impl<'ast> Visit<'ast> for CallbackCalls<'_, 'ast> {
     }
 
     fn visit_macro(&mut self, node: &'ast syn::Macro) {
-        self.passed_on |= names(node.tokens.clone(), self.parameter);
+        self.passed_on |= names_value(node, self.parameter);
     }
 }
 
-/// Whether a macro's tokens name `parameter`, at any depth.
-fn names(tokens: proc_macro2::TokenStream, parameter: &str) -> bool {
-    tokens.into_iter().any(|token| match token {
-        proc_macro2::TokenTree::Ident(name) => name == parameter,
-        proc_macro2::TokenTree::Group(group) => names(group.stream(), parameter),
+/// Whether a macro's arguments name `parameter` as a value, a call of it
+/// included: what a macro gives a callback it calls is unknown, so it may be
+/// anything. A field name before `=`, as in `tracing::error!(name = value)`,
+/// is no value of it.
+fn names_value(node: &syn::Macro, parameter: &str) -> bool {
+    match parse_macro_body(node) {
+        Some(body) => {
+            let mut values = Values { parameter, found: false };
+            body.visit(&mut values);
+            values.found
+        }
+        None => token_paths(unparsed_tokens(node)).iter().any(|path| {
+            !path.after_dot
+                && !path.leading_colon
+                && !path.type_position
+                && !path.assigned
+                && path.segments == [parameter]
+        }),
+    }
+}
+
+/// Whether parsed macro arguments name `parameter` as a value.
+struct Values<'p> {
+    parameter: &'p str,
+    found: bool,
+}
+
+impl<'ast> Visit<'ast> for Values<'_> {
+    fn visit_expr_path(&mut self, node: &'ast syn::ExprPath) {
+        if node.qself.is_none() && node.path.is_ident(self.parameter) {
+            self.found = true;
+        }
+        visit::visit_expr_path(self, node);
+    }
+
+    /// What an assignment writes to, a name or its fields, is no value.
+    fn visit_expr_assign(&mut self, node: &'ast syn::ExprAssign) {
+        if !is_place(&node.left) {
+            self.visit_expr(&node.left);
+        }
+        self.visit_expr(&node.right);
+    }
+
+    fn visit_macro(&mut self, node: &'ast syn::Macro) {
+        self.found |= names_value(node, self.parameter);
+    }
+}
+
+/// A name, or a field of one at any depth.
+fn is_place(expression: &syn::Expr) -> bool {
+    match expression {
+        syn::Expr::Path(path) => path.qself.is_none() && path.path.get_ident().is_some(),
+        syn::Expr::Field(field) => is_place(&field.base),
         _ => false,
-    })
+    }
 }

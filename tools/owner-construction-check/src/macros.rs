@@ -122,6 +122,11 @@ pub(crate) struct TokenPath {
     pub(crate) leading_colon: bool,
     /// Whether the path names a type rather than a value (`type_position`).
     pub(crate) type_position: bool,
+    /// Whether the path, alone or with field names after it, is what a single
+    /// `=` assigns to: `name = value`, `name.field = value`. A macro such as
+    /// `tracing::error!` reads it as the name of a field, and the value is
+    /// what follows the `=`.
+    pub(crate) assigned: bool,
 }
 
 /// Every path in `tokens`, nested groups included. A leading `::` is recorded
@@ -324,6 +329,7 @@ fn collect_token_paths(tokens: TokenStream, context: Context, paths: &mut Vec<To
                     Context::Literal
                 };
                 last_path = Some((cursor, group));
+                let assigned = !after_dot && assigned_at(&trees, cursor);
                 paths.push(TokenPath {
                     segments,
                     span: ident.span(),
@@ -332,12 +338,25 @@ fn collect_token_paths(tokens: TokenStream, context: Context, paths: &mut Vec<To
                     receiver,
                     leading_colon,
                     type_position,
+                    assigned,
                 });
                 index = cursor;
             }
             _ => index += 1,
         }
     }
+}
+
+/// Whether the tokens from `index` are field names, each after a `.`, and
+/// then a single `=`, not the first of `==` or `=>`.
+fn assigned_at(trees: &[TokenTree], mut index: usize) -> bool {
+    while matches!(trees.get(index), Some(TokenTree::Punct(dot)) if dot.as_char() == '.')
+        && matches!(trees.get(index + 1), Some(TokenTree::Ident(_)))
+    {
+        index += 2;
+    }
+    matches!(trees.get(index), Some(TokenTree::Punct(equals))
+        if equals.as_char() == '=' && equals.spacing() == proc_macro2::Spacing::Alone)
 }
 
 /// The identifier at `index + 2` when the tokens at `index` are `:: ident`.

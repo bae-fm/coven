@@ -10248,7 +10248,9 @@ of the same type. The checker tells the two apart in the method's body: a value
 is made there when what hands it out reads nothing of `self`, by itself or
 through a local bound from what does; a macro's value, a closure's argument and
 a callback passed on to other code could be anything, so they count as the
-owner's. A task taken whole, or mutably, may hand on by value a task it holds,
+owner's. A macro passes a callback on where its arguments name it as a value,
+not where they name a field after it, as `error!(operation = name)` does. A
+task taken whole, or mutably, may hand on by value a task it holds,
 as one step of an operation hands its product to the next, or a run of slot
 reads hands each slot it read to its reader: it no longer has it. Nothing
 outside `coven-database` gets the
