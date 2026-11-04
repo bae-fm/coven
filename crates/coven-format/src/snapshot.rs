@@ -26,6 +26,36 @@ pub struct SnapshotHeader {
 }
 /// The number of record sections (D7).
 pub const SECTIONS: usize = 12;
+
+/// Each record section's place in the stream, and its count's in the
+/// header (D7).
+pub mod section {
+    /// Synced rows.
+    pub const SYNCED: usize = 0;
+    /// Applied writes.
+    pub const WRITE: usize = 1;
+    /// Columns.
+    pub const COLUMN: usize = 2;
+    /// Merged rows.
+    pub const MERGE: usize = 3;
+    /// Losses.
+    pub const LOSS: usize = 4;
+    /// Authored changes.
+    pub const AUTHORED: usize = 5;
+    /// Creations.
+    pub const CREATION: usize = 6;
+    /// Write evidence.
+    pub const EVIDENCE: usize = 7;
+    /// Original admin slots, the first of the three sections a history
+    /// read decodes.
+    pub const ADMIN: usize = 8;
+    /// Original key-copy slots.
+    pub const KEY_COPY: usize = 9;
+    /// Original announcement slots.
+    pub const ANNOUNCEMENT: usize = 10;
+    /// Each device's last included claim.
+    pub const CLAIM: usize = 11;
+}
 impl Wire for [u64; SECTIONS] {
     fn put(&self, out: &mut Encoder) -> Result<(), Error> {
         for n in self {
@@ -122,7 +152,7 @@ impl SnapshotRecord {
     }
 
     pub(crate) fn put(&self, out: &mut Encoder) -> Result<(), Error> {
-        self.section().put(out)?;
+        u8::try_from(self.section()).expect("twelve sections").put(out)?;
         match self {
             Self::Synced(v) => v.put(out),
             Self::Write(v) => v.put(out),
@@ -164,20 +194,21 @@ impl SnapshotRecord {
     where
         O::Error: From<Error>,
     {
-        match u8::get(input)? {
-            0 => Ok(Self::Synced(Wire::get(input)?)),
-            1 => Ok(Self::Write(Wire::get(input)?)),
-            2 => Ok(Self::Column(Wire::get(input)?)),
-            3 => Ok(Self::Merge(MergeRow::get(input, oracle)?)),
-            4 => Ok(Self::Loss(Wire::get(input)?)),
-            5 => Ok(Self::Authored(Wire::get(input)?)),
-            6 => Ok(Self::Creation(Wire::get(input)?)),
-            7 => Ok(Self::Evidence(Wire::get(input)?)),
-            8 => Ok(Self::Admin(Wire::get(input)?)),
-            9 => Ok(Self::KeyCopy(Wire::get(input)?)),
-            10 => Ok(Self::Announcement(Wire::get(input)?)),
-            11 => Ok(Self::Claim(Wire::get(input)?)),
-            tag => Err(Error::UnknownTag { field: "snapshot section", tag }.into()),
+        let tag = u8::get(input)?;
+        match usize::from(tag) {
+            section::SYNCED => Ok(Self::Synced(Wire::get(input)?)),
+            section::WRITE => Ok(Self::Write(Wire::get(input)?)),
+            section::COLUMN => Ok(Self::Column(Wire::get(input)?)),
+            section::MERGE => Ok(Self::Merge(MergeRow::get(input, oracle)?)),
+            section::LOSS => Ok(Self::Loss(Wire::get(input)?)),
+            section::AUTHORED => Ok(Self::Authored(Wire::get(input)?)),
+            section::CREATION => Ok(Self::Creation(Wire::get(input)?)),
+            section::EVIDENCE => Ok(Self::Evidence(Wire::get(input)?)),
+            section::ADMIN => Ok(Self::Admin(Wire::get(input)?)),
+            section::KEY_COPY => Ok(Self::KeyCopy(Wire::get(input)?)),
+            section::ANNOUNCEMENT => Ok(Self::Announcement(Wire::get(input)?)),
+            section::CLAIM => Ok(Self::Claim(Wire::get(input)?)),
+            _ => Err(Error::UnknownTag { field: "snapshot section", tag }.into()),
         }
     }
     pub(crate) fn validate(&self) -> Result<(), Error> {
@@ -201,20 +232,21 @@ impl SnapshotRecord {
             }
         }
     }
-    fn section(&self) -> u8 {
+    /// The section the record belongs to.
+    pub fn section(&self) -> usize {
         match self {
-            Self::Synced(_) => 0,
-            Self::Write(_) => 1,
-            Self::Column(_) => 2,
-            Self::Merge(_) => 3,
-            Self::Loss(_) => 4,
-            Self::Authored(_) => 5,
-            Self::Creation(_) => 6,
-            Self::Evidence(_) => 7,
-            Self::Admin(_) => 8,
-            Self::KeyCopy(_) => 9,
-            Self::Announcement(_) => 10,
-            Self::Claim(_) => 11,
+            Self::Synced(_) => section::SYNCED,
+            Self::Write(_) => section::WRITE,
+            Self::Column(_) => section::COLUMN,
+            Self::Merge(_) => section::MERGE,
+            Self::Loss(_) => section::LOSS,
+            Self::Authored(_) => section::AUTHORED,
+            Self::Creation(_) => section::CREATION,
+            Self::Evidence(_) => section::EVIDENCE,
+            Self::Admin(_) => section::ADMIN,
+            Self::KeyCopy(_) => section::KEY_COPY,
+            Self::Announcement(_) => section::ANNOUNCEMENT,
+            Self::Claim(_) => section::CLAIM,
         }
     }
     fn key(&self) -> RecordKey {
@@ -341,7 +373,7 @@ enum RecordKey {
 struct SnapshotStreamState {
     header: SnapshotHeader,
     remaining: [u64; SECTIONS],
-    previous: Option<(u8, RecordKey)>,
+    previous: Option<(usize, RecordKey)>,
     ended: bool,
 }
 impl SnapshotStreamState {
@@ -352,7 +384,7 @@ impl SnapshotStreamState {
         record.check_header(&self.header)?;
         let section = record.section();
         require(
-            !self.ended && self.remaining.iter().position(|n| *n > 0) == Some(section as usize),
+            !self.ended && self.remaining.iter().position(|n| *n > 0) == Some(section),
             "snapshot section/count",
             Rule::SnapshotSequence,
         )?;
@@ -364,7 +396,7 @@ impl SnapshotStreamState {
                 Rule::Order,
             )?;
         }
-        self.remaining[section as usize] -= 1;
+        self.remaining[section] -= 1;
         self.previous = Some((section, key));
         Ok(())
     }
@@ -433,23 +465,23 @@ impl SnapshotDecoder {
             return Ok(None);
         }
         require(kind == 6, "snapshot record kind", Rule::Kind)?;
-        let section = u8::get(&mut input)?;
-        if section < 8 {
+        let tag = u8::get(&mut input)?;
+        let at = usize::from(tag);
+        if at < section::ADMIN {
             require(
-                !self.0.ended
-                    && self.0.remaining.iter().position(|n| *n > 0) == Some(section as usize),
+                !self.0.ended && self.0.remaining.iter().position(|n| *n > 0) == Some(at),
                 "snapshot section/count",
                 Rule::SnapshotSequence,
             )?;
-            self.0.remaining[section as usize] -= 1;
+            self.0.remaining[at] -= 1;
             return Ok(None);
         }
-        let record = match section {
-            8 => SnapshotRecord::Admin(Wire::get(&mut input)?),
-            9 => SnapshotRecord::KeyCopy(Wire::get(&mut input)?),
-            10 => SnapshotRecord::Announcement(Wire::get(&mut input)?),
-            11 => SnapshotRecord::Claim(Wire::get(&mut input)?),
-            tag => return Err(Error::UnknownTag { field: "snapshot section", tag }),
+        let record = match at {
+            section::ADMIN => SnapshotRecord::Admin(Wire::get(&mut input)?),
+            section::KEY_COPY => SnapshotRecord::KeyCopy(Wire::get(&mut input)?),
+            section::ANNOUNCEMENT => SnapshotRecord::Announcement(Wire::get(&mut input)?),
+            section::CLAIM => SnapshotRecord::Claim(Wire::get(&mut input)?),
+            _ => return Err(Error::UnknownTag { field: "snapshot section", tag }),
         };
         input.finish()?;
         record.validate()?;

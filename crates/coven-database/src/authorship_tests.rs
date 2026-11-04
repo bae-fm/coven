@@ -82,7 +82,7 @@ fn evidence(snapshot: &SnapshotFrames) -> Vec<WriteEvidence> {
 fn edited(snapshot: &SnapshotFrames, edit: impl FnOnce(&mut Vec<SnapshotRecord>)) -> Vec<u8> {
     let (mut header, mut records) = decode(snapshot);
     edit(&mut records);
-    header.counts[7] =
+    header.counts[coven_format::snapshot::section::EVIDENCE] =
         records.iter().filter(|record| matches!(record, SnapshotRecord::Evidence(_))).count()
             as u64;
     let (mut encoder, mut bytes) = SnapshotEncoder::start(header).unwrap();

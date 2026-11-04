@@ -602,23 +602,6 @@ pub(crate) fn edited(
     bytes
 }
 
-pub(crate) fn section(record: &SnapshotRecord) -> usize {
-    match record {
-        SnapshotRecord::Synced(_) => 0,
-        SnapshotRecord::Write(_) => 1,
-        SnapshotRecord::Column(_) => 2,
-        SnapshotRecord::Merge(_) => 3,
-        SnapshotRecord::Loss(_) => 4,
-        SnapshotRecord::Authored(_) => 5,
-        SnapshotRecord::Creation(_) => 6,
-        SnapshotRecord::Evidence(_) => 7,
-        SnapshotRecord::Admin(_) => 8,
-        SnapshotRecord::KeyCopy(_) => 9,
-        SnapshotRecord::Announcement(_) => 10,
-        SnapshotRecord::Claim(_) => 11,
-    }
-}
-
 /// Drop the first record `which` selects, keeping the header's counts.
 fn without(
     header: &mut SnapshotHeader,
@@ -626,7 +609,7 @@ fn without(
     which: impl Fn(&SnapshotRecord) -> bool,
 ) {
     let at = records.iter().position(which).unwrap();
-    header.counts[section(&records[at])] -= 1;
+    header.counts[records[at].section()] -= 1;
     records.remove(at);
 }
 
@@ -658,7 +641,7 @@ fn is_track(record: &SnapshotRecord, kind: usize, key: &str) -> bool {
         SnapshotRecord::Merge(row) => row.state.row(),
         _ => return false,
     };
-    section(record) == kind
+    record.section() == kind
         && row.table == "tracks"
         && row.key
             == coven_format::key::encode_key(&[coven_format::value::Value::Text(key.into())])

@@ -5,7 +5,7 @@ use crate::{sqlite::DatabaseConnection, write_schema::WriteSchema, DbError};
 use coven_format::{
     admin::SnapshotId,
     merge_fields,
-    snapshot::{SnapshotEncoder, SnapshotHeader, SnapshotRecord, SECTIONS},
+    snapshot::{section, SnapshotEncoder, SnapshotHeader, SnapshotRecord, SECTIONS},
     snapshot_rows::{AppliedWrite, SyncedColumn},
 };
 use coven_merge::{Audience, WriteId};
@@ -38,32 +38,32 @@ pub(crate) fn write<E>(
     let mut counts = [0; SECTIONS];
     let mut columns = BTreeSet::new();
     crate::snapshot_view::rows(db, schema, &removed, &audience, |row, synced| {
-        counts[3] += 1;
-        counts[0] += u64::from(synced.is_some());
+        counts[section::MERGE] += 1;
+        counts[section::SYNCED] += u64::from(synced.is_some());
         columns.extend(
             row.state.cells().keys().map(|column| (row.state.row().table.clone(), column.clone())),
         );
         Ok::<_, DbError>(())
     })?;
     crate::snapshot_view::losses(db, &removed, &audience, |loss| {
-        counts[4] += 1;
+        counts[section::LOSS] += 1;
         if let coven_format::loss::LossValues::Cell { column, .. } = &loss.values {
             columns.insert((loss.row.table.clone(), column.clone()));
         }
         Ok::<_, DbError>(())
     })?;
-    counts[1] = db.query_row(
+    counts[section::WRITE] = db.query_row(
         "SELECT count(*) FROM _coven_writes WHERE slot<=?1",
         [covers.to_be_bytes()],
         |r| r.get::<_, i64>(0).map(|n| n as u64),
     )?;
-    counts[2] = columns.len() as u64;
+    counts[section::COLUMN] = columns.len() as u64;
     crate::write_sources::visit_evidence(db, &audience, covers, |_| {
-        counts[5] += 1;
+        counts[section::AUTHORED] += 1;
         Ok::<_, DbError>(())
     })?;
     crate::snapshot_view::creations(db, &audience, |_| {
-        counts[6] += 1;
+        counts[section::CREATION] += 1;
         Ok::<_, DbError>(())
     })?;
     let evidence = crate::authorship::evidence(
@@ -76,10 +76,14 @@ pub(crate) fn write<E>(
             member: crate::ownership::member(db, id.device)?,
         },
     )?;
-    counts[7] = evidence.len() as u64;
+    counts[section::EVIDENCE] = evidence.len() as u64;
     if audience == Audience::Store {
-        for (section, kind) in [(8, "admin"), (9, "key"), (10, "announcement")] {
-            counts[section] = db.query_row(
+        for (at, kind) in [
+            (section::ADMIN, "admin"),
+            (section::KEY_COPY, "key"),
+            (section::ANNOUNCEMENT, "announcement"),
+        ] {
+            counts[at] = db.query_row(
                 "SELECT count(*) FROM _coven_slot_records WHERE kind=?1 AND slot<=?2",
                 rusqlite::params![kind, covers.to_be_bytes()],
                 |r| r.get::<_, i64>(0).map(|n| n as u64),
@@ -87,7 +91,7 @@ pub(crate) fn write<E>(
         }
     }
     let claims = crate::sequence::claims(db)?;
-    counts[11] = claims.len() as u64;
+    counts[section::CLAIM] = claims.len() as u64;
     let (mut encoder, header) = SnapshotEncoder::start(SnapshotHeader {
         id,
         schema_version: db.schema_version()?,

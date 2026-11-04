@@ -18,7 +18,7 @@ fn single_header(section: usize, audience: Audience, count: u64) -> SnapshotHead
 }
 fn round_trip(record: SnapshotRecord, audience: Audience) {
     let (mut writer, first) =
-        SnapshotEncoder::start(single_header(record.section() as usize, audience, 1)).unwrap();
+        SnapshotEncoder::start(single_header(record.section(), audience, 1)).unwrap();
     let mut reader =
         SnapshotDecoder::start(&first, &test_utils::snapshot_prefix(writer.header())).unwrap();
     assert_eq!(
@@ -480,15 +480,8 @@ fn original_slot_sections_refuse_other_audiences_and_future_slots() {
         )
     }) {
         for header in [
-            single_header(
-                record.section() as usize,
-                Audience::Circle(CircleId(Uuid::from_u128(1))),
-                1,
-            ),
-            SnapshotHeader {
-                covers: 0,
-                ..single_header(record.section() as usize, Audience::Store, 1)
-            },
+            single_header(record.section(), Audience::Circle(CircleId(Uuid::from_u128(1))), 1),
+            SnapshotHeader { covers: 0, ..single_header(record.section(), Audience::Store, 1) },
         ] {
             let (mut writer, first) = SnapshotEncoder::start(header).unwrap();
             let mut reader =

@@ -17,7 +17,7 @@ use coven_merge::Audience;
 /// A store snapshot of `claims` last-claim records, about 57 bytes each.
 fn claims_snapshot(id: &SnapshotId, covers: u64, claims: u64) -> Vec<u8> {
     let mut counts = [0; SECTIONS];
-    counts[11] = claims;
+    counts[coven_format::snapshot::section::CLAIM] = claims;
     let (mut encoder, mut bytes) = SnapshotEncoder::start(SnapshotHeader {
         id: id.clone(),
         schema_version: 1,

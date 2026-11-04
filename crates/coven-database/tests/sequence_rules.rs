@@ -542,7 +542,7 @@ async fn snapshot_claim_digests_survive_loading_and_writing() {
         LastClaim { device: DeviceId(20), number: 0, digest: None },
     ];
     let mut counts = [0; SECTIONS];
-    counts[11] = claims.len() as u64;
+    counts[coven_format::snapshot::section::CLAIM] = claims.len() as u64;
     let (mut encoder, mut bytes) = SnapshotEncoder::start(SnapshotHeader {
         id: id.clone(),
         schema_version: 1,

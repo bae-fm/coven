@@ -48,7 +48,7 @@ async fn rows_a_snapshot_shows_are_taken_out_by_this_devices_rules() {
         records.retain(|record| {
             !matches!(record, SnapshotRecord::Loss(loss) if matches!(loss.cause, coven_format::loss::LossCause::Rules(_)))
         });
-        header.counts[4] -= removed.len() as u64;
+        header.counts[coven_format::snapshot::section::LOSS] -= removed.len() as u64;
         for row in removed {
             let state = &merged[&row];
             records.push(SnapshotRecord::Synced(coven_format::snapshot_rows::SyncedRow {
@@ -59,11 +59,11 @@ async fn rows_a_snapshot_shows_are_taken_out_by_this_devices_rules() {
                     .map(|(name, cell)| (name.clone(), cell.value.clone()))
                     .collect(),
             }));
-            header.counts[0] += 1;
+            header.counts[coven_format::snapshot::section::SYNCED] += 1;
         }
         let order = |record: &SnapshotRecord| match record {
-            SnapshotRecord::Synced(row) => (section(record), Some(row.row.clone())),
-            _ => (section(record), None),
+            SnapshotRecord::Synced(row) => (record.section(), Some(row.row.clone())),
+            _ => (record.section(), None),
         };
         // Synced rows in row order, every other section as it was.
         let mut indexed: Vec<_> = records.drain(..).enumerate().collect();

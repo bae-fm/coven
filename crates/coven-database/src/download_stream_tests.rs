@@ -153,7 +153,7 @@ async fn streamed_excluded_rows_use_the_common_snapshot_loss_section() {
     assert_eq!(count(&b, "_coven_lost"), 2);
     let snapshot = crate::snapshot_write::tests::frames(&b, Audience::Store).await;
     let (header, records) = crate::snapshot_write::tests::decode(&snapshot);
-    assert_eq!(header.counts[4], 2);
+    assert_eq!(header.counts[coven_format::snapshot::section::LOSS], 2);
     assert_eq!(
         records
             .iter()

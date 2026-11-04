@@ -58,7 +58,7 @@ async fn active_loss_records_require_their_merge_history_and_removed_rows_can_re
         match damage {
             0 => {
                 records.retain(|r| !matches!(r, SnapshotRecord::Merge(_)));
-                header.counts[3] -= 1;
+                header.counts[coven_format::snapshot::section::MERGE] -= 1;
             }
             1..=3 => {
                 let loss = records
@@ -103,7 +103,7 @@ async fn active_loss_records_require_their_merge_history_and_removed_rows_can_re
             }
             6 => {
                 records.retain(|r| !matches!(r,SnapshotRecord::Loss(loss) if matches!(loss.values,LossValues::Row(_))));
-                header.counts[4] -= 1;
+                header.counts[coven_format::snapshot::section::LOSS] -= 1;
             }
             _ => unreachable!(),
         }

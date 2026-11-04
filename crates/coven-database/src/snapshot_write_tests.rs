@@ -3,6 +3,7 @@ use crate::tests::TestStore;
 use crate::write::tests::{count, notes, records, sql, NOTES};
 use crate::write_boundary::tests::version_two;
 use crate::{Database, RowIdentity, SyncedTable};
+use coven_format::snapshot::section;
 use coven_format::snapshot::SnapshotDecoder;
 use coven_format::value::Value;
 use coven_foundation::id_source::{CircleId, DeviceId, SequentialIds};
@@ -349,7 +350,7 @@ async fn snapshot_frames_keep_one_committed_state_while_the_writer_commits() {
     assert_eq!(during, before);
     let after = decode(&frames(&database, Audience::Store).await);
     assert_ne!(after, before);
-    assert_eq!(after.0.counts[0], 2);
+    assert_eq!(after.0.counts[section::SYNCED], 2);
     database.close().await.unwrap();
 }
 
@@ -368,8 +369,8 @@ async fn circle_snapshot_has_only_its_rows_and_reference_metadata() {
         uuid::Uuid::parse_str("00000000-0000-4000-8000-00000000000a").unwrap(),
     ));
     let (header, snapshot) = decode(&frames(&database, circle.clone()).await);
-    assert_eq!(header.counts[0], 1);
-    assert_eq!(header.counts[3], 1);
+    assert_eq!(header.counts[section::SYNCED], 1);
+    assert_eq!(header.counts[section::MERGE], 1);
     for record in snapshot {
         match record {
             SnapshotRecord::Synced(row) => {
@@ -420,7 +421,7 @@ async fn output_errors_and_panics_release_the_reader_transaction() {
     });
     assert!(task.await.unwrap_err().is_panic());
     sql(&database, "INSERT INTO notes VALUES('n','still open','')").await.unwrap();
-    assert_eq!(decode(&frames(&database, Audience::Store).await).0.counts[0], 1);
+    assert_eq!(decode(&frames(&database, Audience::Store).await).0.counts[section::SYNCED], 1);
     database.close().await.unwrap();
 }
 
@@ -486,8 +487,8 @@ async fn a_migration_deletes_removed_rows_and_snapshots_their_losses() {
     assert!(matches!(retained[0].target, crate::lost::LossTarget::Acknowledgements(_)));
     let (header, snapshot) = decode(&frames(&a, Audience::Store).await);
     assert_eq!(header.schema_version, 2);
-    assert_eq!(header.counts[3], 2, "the deleted row keeps its merge record");
-    assert_eq!(header.counts[4], 1);
+    assert_eq!(header.counts[section::MERGE], 2, "the deleted row keeps its merge record");
+    assert_eq!(header.counts[section::LOSS], 1);
     let retained: Vec<_> = snapshot
         .into_iter()
         .filter_map(|record| match record {
@@ -539,10 +540,10 @@ async fn a_migration_deletes_removed_rows_and_snapshots_their_losses() {
         .collect();
     a.dismiss_lost_values(&cells).await.unwrap();
     assert_loaded_losses(&a, &d).await;
-    assert_eq!(decode(&frames(&d, Audience::Store).await).0.counts[4], 1);
+    assert_eq!(decode(&frames(&d, Audience::Store).await).0.counts[section::LOSS], 1);
     a.dismiss_lost_values(&a.lost_values().await.unwrap()).await.unwrap();
     assert_loaded_losses(&a, &d).await;
-    assert_eq!(decode(&frames(&d, Audience::Store).await).0.counts[4], 0);
+    assert_eq!(decode(&frames(&d, Audience::Store).await).0.counts[section::LOSS], 0);
     assert_eq!(count(&d, "notes"), 2);
     for database in [a, b, c, d] {
         database.close().await.unwrap();
@@ -653,7 +654,7 @@ async fn excluded_snapshots_keep_only_undismissed_cells_and_rows() {
         }
         receiver.receive(dismissal.into()).await.unwrap();
         let (header, snapshot) = decode(&frames(&receiver, Audience::Store).await);
-        assert_eq!(header.counts[4], 2);
+        assert_eq!(header.counts[section::LOSS], 2);
         let rows: Vec<_> = snapshot
             .into_iter()
             .filter_map(|r| match r {
@@ -677,7 +678,7 @@ async fn excluded_snapshots_keep_only_undismissed_cells_and_rows() {
         assert_loaded_losses(&receiver, &target).await;
         receiver.dismiss_lost_values(&receiver.lost_values().await.unwrap()).await.unwrap();
         let (header, snapshot) = decode(&frames(&receiver, Audience::Store).await);
-        assert_eq!(header.counts[4], 0);
+        assert_eq!(header.counts[section::LOSS], 0);
         assert!(!snapshot.iter().any(|record| matches!(record, SnapshotRecord::Loss(_))));
         assert_loaded_losses(&receiver, &target).await;
         target.close().await.unwrap();
@@ -737,7 +738,7 @@ async fn excluded_deletions_without_old_values_keep_distinct_write_identities() 
     .unwrap();
     receiver.receive(deletion.clone().into()).await.unwrap();
     let (header, snapshot) = decode(&frames(&receiver, Audience::Store).await);
-    assert_eq!(header.counts[4], 2);
+    assert_eq!(header.counts[section::LOSS], 2);
     let writes: Vec<_> = snapshot
         .into_iter()
         .filter_map(|record| match record {
