@@ -532,6 +532,24 @@ pub trait Clock: Send + Sync {
     fn sleep(&self, duration: Duration) -> Pin<Box<dyn Future<Output = ()> + Send>> {
         Box::pin(tokio::time::sleep(duration))
     }
+    /// Wait until the wall clock reads `at` or later, by running or by being
+    /// set past it; a time already reached ends the wait at once, and a
+    /// clock set back moves the wait's end with it. The clock itself says
+    /// when it reaches `at`: nothing reads it again on a timer. A clock that
+    /// can't say fails the wait (§13.2). Required: every clock answers it.
+    fn sleep_until(
+        &self,
+        at: SystemTime,
+    ) -> Pin<Box<dyn Future<Output = Result<(), WallTimerError>> + Send>>;
+}
+
+/// A clock couldn't wait for a wall-clock time (§13.2): the system refused
+/// its timer, or the clock has none. `new` keeps the cause's text, for an
+/// app's own clock to report its failure.
+pub struct WallTimerError { /* private fields */ }
+
+impl WallTimerError {
+    pub fn new(failure: impl Display) -> Self;
 }
 
 /// A shared clock supplied when opening a store (Appendix F.2).
@@ -543,6 +561,17 @@ pub struct SystemClock;
 impl Clock for SystemClock {
     fn now(&self) -> SystemTime;
     fn elapsed(&self) -> Duration;
+    /// The system's own timer for an absolute wall-clock time, which the
+    /// system moves when its clock is set: a timerfd on `CLOCK_REALTIME`
+    /// with `TFD_TIMER_ABSTIME` on Linux and Android, a libdispatch timer
+    /// started at a `dispatch_walltime` on Apple platforms, and a waitable
+    /// timer with an absolute due time on Windows. Elsewhere, as on the
+    /// BSDs, the wait fails. A time at or before the epoch has passed and
+    /// arms no timer.
+    fn sleep_until(
+        &self,
+        at: SystemTime,
+    ) -> Pin<Box<dyn Future<Output = Result<(), WallTimerError>> + Send>>;
 }
 
 /// Installations for application tests, built in place of `Coven::new`: an
@@ -668,6 +697,12 @@ impl Clock for FixedClock {
     fn now(&self) -> SystemTime;
     fn elapsed(&self) -> Duration;
     fn sleep(&self, duration: Duration) -> Pin<Box<dyn Future<Output = ()> + Send>>;
+    /// Ends when a setting reaches `at`; settings before it, forward or
+    /// back, leave it waiting.
+    fn sleep_until(
+        &self,
+        at: SystemTime,
+    ) -> Pin<Box<dyn Future<Output = Result<(), WallTimerError>> + Send>>;
 }
 
 #[cfg(feature = "test-utils")]
@@ -1424,6 +1459,12 @@ pub enum DbError {
     /// Rather than stay open while its WAL grows without bound, this handle
     /// and every live query fail with this same cause until reopened (§4).
     CheckpointFailed(Arc<DbError>),
+    /// The handle's clock could not wait for an open invite's expiry, so
+    /// the invite would outlive its lifetime. Rather than stay open
+    /// without writing expiries, this handle and every live query fail with
+    /// this same cause until reopened, and opening writes each expiry
+    /// already past (§13.2).
+    WallTimer(WallTimerError),
     /// The system refused the thread that checkpoints the store's WAL, so
     /// the store did not open (§4).
     CheckpointerThread(std::io::Error),
@@ -3407,7 +3448,7 @@ impl<T: Send + 'static> LiveQuery<T> {
     /// the result and returns the new one. An error is a result too, and
     /// doesn't end the query, except the one saying the store closed or the
     /// handle fails every call (`RollbackFailed`, `StatePersistence`,
-    /// `CheckpointFailed`): after it, `None`, so a loop
+    /// `CheckpointFailed`, `WallTimer`): after it, `None`, so a loop
     /// over the query ends.
     pub async fn next(&mut self) -> Option<CovenResult<T>>
     where

@@ -55,7 +55,7 @@ pub use coven_format::chunks::CHUNK_SIZE;
 pub use coven_format::codes::InviteDeliveryKind;
 pub use coven_format::value::StorageTime;
 pub use coven_format::MemberAccess;
-pub use coven_foundation::clock::{Clock, ClockRef, SystemClock};
+pub use coven_foundation::clock::{Clock, ClockRef, SystemClock, WallTimerError};
 pub use coven_foundation::files::FileError as DiskError;
 #[cfg(target_vendor = "apple")]
 pub use coven_foundation::files::FileProtection;

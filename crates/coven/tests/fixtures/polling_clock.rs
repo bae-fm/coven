@@ -46,4 +46,15 @@ impl Clock for PollingClock {
             duration
         }))
     }
+    fn sleep_until(
+        &self,
+        at: std::time::SystemTime,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = Result<(), coven_foundation::clock::WallTimerError>>
+                + Send,
+        >,
+    > {
+        self.clock.sleep_until(at)
+    }
 }

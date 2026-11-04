@@ -140,6 +140,16 @@ impl Clock for BenchClock {
     fn elapsed(&self) -> Duration {
         self.origin.elapsed()
     }
+    fn sleep_until(
+        &self,
+        _at: std::time::SystemTime,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<(), coven::WallTimerError>> + Send>,
+    > {
+        Box::pin(std::future::ready(Err(coven::WallTimerError::new(
+            "the bench's clock has no timer for its readings",
+        ))))
+    }
 }
 
 /// A builder for a device of `library`.

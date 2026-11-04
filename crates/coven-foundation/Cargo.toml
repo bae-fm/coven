@@ -35,6 +35,11 @@ block2.workspace = true
 jni.workspace = true
 ndk-context.workspace = true
 
+# The wall-clock deadline's timerfd, which the runtime's reactor waits on
+# (§13.2).
+[target.'cfg(any(target_os = "linux", target_os = "android"))'.dependencies]
+tokio = { workspace = true, features = ["net"] }
+
 # The network watch's NetworkManager, on the system bus, followed on a
 # thread of the watch's own (api.md E5).
 [target.'cfg(target_os = "linux")'.dependencies]
@@ -45,7 +50,9 @@ futures-lite = { workspace = true, features = ["std"] }
 # The network watch's internet connection profile, a WinRT API, which
 # windows-sys doesn't bind (api.md E5).
 windows = { workspace = true, features = ["std", "Networking_Connectivity"] }
-windows-sys = { workspace = true, features = ["Win32_Storage_FileSystem", "Win32_System_WindowsProgramming", "Wdk_System_Threading", "Win32_System_Threading"] }
+# The wall-clock deadline's waitable timer needs Win32_Foundation's handles
+# and Win32_Security's declaration of CreateWaitableTimerExW (§13.2).
+windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_WindowsProgramming", "Wdk_System_Threading", "Win32_System_Threading"] }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt"] }

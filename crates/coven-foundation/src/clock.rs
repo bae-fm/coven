@@ -1,8 +1,20 @@
 //! The wall clock that timestamps use (§7.2); the only reader of system time.
 
 use std::sync::Arc;
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use std::{future::Future, pin::Pin};
+
+// The system's wall-clock deadline timer, one per platform; elsewhere a
+// wait for a wall-clock time fails.
+#[cfg(target_vendor = "apple")]
+#[path = "clock_apple.rs"]
+mod wall_timer;
+#[cfg(any(target_os = "linux", target_os = "android"))]
+#[path = "clock_linux.rs"]
+mod wall_timer;
+#[cfg(windows)]
+#[path = "clock_windows.rs"]
+mod wall_timer;
 
 /// The wall clock that timestamps use (§7.2).
 ///
@@ -20,6 +32,28 @@ pub trait Clock: Send + Sync {
     fn sleep(&self, duration: Duration) -> Pin<Box<dyn Future<Output = ()> + Send>> {
         Box::pin(tokio::time::sleep(duration))
     }
+    /// Wait until the wall clock reads `at` or later, however it gets
+    /// there: by running, or by being set past it (§13.2). A time already
+    /// reached ends the wait at once, and a clock set back moves the wait's
+    /// end with it. The clock itself says when it reaches `at`; nothing reads
+    /// it again on a timer. A clock that can't say fails the wait.
+    fn sleep_until(
+        &self,
+        at: SystemTime,
+    ) -> Pin<Box<dyn Future<Output = Result<(), WallTimerError>> + Send>>;
+}
+
+/// A clock couldn't wait for a wall-clock time (§13.2): the system refused
+/// its timer, or the clock has none.
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+#[error("coven can't wait for a wall-clock time: {0}")]
+pub struct WallTimerError(String);
+
+impl WallTimerError {
+    /// The failure, as its text.
+    pub fn new(failure: impl std::fmt::Display) -> Self {
+        Self(failure.to_string())
+    }
 }
 
 /// A shared wall clock, supplied when the store opens.
@@ -35,6 +69,37 @@ impl Clock for SystemClock {
     fn elapsed(&self) -> Duration {
         boot_time()
     }
+    /// The system's own timer for an absolute wall-clock time, which the
+    /// system moves when its clock is set. A time at or before the epoch
+    /// has passed: no timer is armed for it, since Linux's timer can't hold
+    /// one.
+    fn sleep_until(
+        &self,
+        at: SystemTime,
+    ) -> Pin<Box<dyn Future<Output = Result<(), WallTimerError>> + Send>> {
+        if at <= UNIX_EPOCH {
+            return Box::pin(std::future::ready(Ok(())));
+        }
+        wall_timer_sleep(at)
+    }
+}
+
+#[cfg(any(target_vendor = "apple", target_os = "linux", target_os = "android", windows))]
+fn wall_timer_sleep(
+    at: SystemTime,
+) -> Pin<Box<dyn Future<Output = Result<(), WallTimerError>> + Send>> {
+    Box::pin(wall_timer::sleep_until(at))
+}
+
+/// Elsewhere, as on the BSDs, coven has no timer the system moves with its
+/// clock, and fails the wait rather than read the clock again on a timer.
+#[cfg(not(any(target_vendor = "apple", target_os = "linux", target_os = "android", windows)))]
+fn wall_timer_sleep(
+    _at: SystemTime,
+) -> Pin<Box<dyn Future<Output = Result<(), WallTimerError>> + Send>> {
+    Box::pin(std::future::ready(Err(WallTimerError::new(
+        "this platform has no wall-clock timer coven uses",
+    ))))
 }
 
 /// Linux and Android count suspension only in `CLOCK_BOOTTIME`.
@@ -128,6 +193,18 @@ impl Clock for FixedClock {
                 .expect("clock owner retains its sender");
         })
     }
+    /// Wakes when a setting reaches `at`; one before it, forward or back,
+    /// does not.
+    fn sleep_until(
+        &self,
+        at: SystemTime,
+    ) -> Pin<Box<dyn Future<Output = Result<(), WallTimerError>> + Send>> {
+        let mut time = self.0.subscribe();
+        Box::pin(async move {
+            time.wait_for(|time| time.wall >= at).await.expect("clock owner retains its sender");
+            Ok(())
+        })
+    }
 }
 
 /// A clock that calls a supplied function on every read.
@@ -145,6 +222,15 @@ impl<F: Fn() -> SystemTime + Send + Sync> Clock for ClosureClock<F> {
     /// A supplied wall reading has no monotonic counterpart: it never advances.
     fn elapsed(&self) -> Duration {
         Duration::ZERO
+    }
+    /// Nothing says when the function's reading reaches a time.
+    fn sleep_until(
+        &self,
+        _at: SystemTime,
+    ) -> Pin<Box<dyn Future<Output = Result<(), WallTimerError>> + Send>> {
+        Box::pin(std::future::ready(Err(WallTimerError::new(
+            "a closure clock has no timer for its readings",
+        ))))
     }
 }
 

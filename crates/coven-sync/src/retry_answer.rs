@@ -244,6 +244,7 @@ fn failed(error: &DbError) -> RetryOutcome {
         DbError::StatePersistence(cause) => DbError::StatePersistence(cause.clone()),
         DbError::RollbackFailed => DbError::RollbackFailed,
         DbError::CheckpointFailed(cause) => DbError::CheckpointFailed(cause.clone()),
+        DbError::WallTimer(cause) => DbError::WallTimer(cause.clone()),
         DbError::Shutdown(shutdown) => DbError::Shutdown(*shutdown),
         DbError::Bug(bug) => DbError::Bug(bug.clone()),
         _ => DbError::Invariant { what: "a retry step fails only as its handle or runtime does" },

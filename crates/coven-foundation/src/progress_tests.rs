@@ -19,6 +19,16 @@ impl Clock for SteppedClock {
     fn elapsed(&self) -> Duration {
         *self.0.lock().unwrap()
     }
+    fn sleep_until(
+        &self,
+        _at: std::time::SystemTime,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<(), crate::clock::WallTimerError>> + Send>,
+    > {
+        Box::pin(std::future::ready(Err(crate::clock::WallTimerError::new(
+            "a stepped clock has no timer for its readings",
+        ))))
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

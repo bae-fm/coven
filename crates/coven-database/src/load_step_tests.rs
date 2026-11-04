@@ -24,6 +24,19 @@ impl Clock for Stepping {
         *elapsed += REPORT_INTERVAL;
         *elapsed
     }
+    fn sleep_until(
+        &self,
+        _at: std::time::SystemTime,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = Result<(), coven_foundation::clock::WallTimerError>>
+                + Send,
+        >,
+    > {
+        Box::pin(std::future::ready(Err(coven_foundation::clock::WallTimerError::new(
+            "a stepping clock has no timer for its readings",
+        ))))
+    }
 }
 
 fn at(step: LoadStep, done: u64, total: u64) -> Progress<LoadStep> {

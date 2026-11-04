@@ -299,6 +299,13 @@ impl<S: Clone + PartialEq + Send + Sync> crate::clock::Clock for RecordingClock<
     fn sleep(&self, duration: Duration) -> std::pin::Pin<Box<dyn Future<Output = ()> + Send>> {
         self.clock.sleep(duration)
     }
+    fn sleep_until(
+        &self,
+        at: std::time::SystemTime,
+    ) -> std::pin::Pin<Box<dyn Future<Output = Result<(), crate::clock::WallTimerError>> + Send>>
+    {
+        self.clock.sleep_until(at)
+    }
 }
 
 #[cfg(test)]

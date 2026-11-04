@@ -1,11 +1,13 @@
 //! An invite's expiry, a write like approving, declining or cancelling it
 //! (§13.2). The handle that holds the store's writer writes it, with or
 //! without a storage connection: opening writes each expiry already past,
-//! and the handle then wakes at the earliest open invite's expiry, by this
-//! device's clock, and writes it. The write ends the invite in the journal,
-//! which takes it out of `coven_invites`. Deleting its request and taking
-//! back its access is the ended invite's own work, which a pass does once
-//! storage is connected, as for an invite ended any other way.
+//! and the handle then wakes when this device's wall clock reaches the
+//! earliest open invite's expiry, by running or by being set past it, and
+//! writes it. A clock that can't wait for it fails the handle. The write
+//! ends the invite in the journal, which takes it out of `coven_invites`.
+//! Deleting its request and taking back its access is the ended invite's
+//! own work, which a pass does once storage is connected, as for an invite
+//! ended any other way.
 
 use super::{InviteState, InviteWork};
 use crate::{RetryWaits, SequenceState};
@@ -70,8 +72,10 @@ async fn run(
                 return;
             }
         };
+        // The clock says when it reaches the expiry, by running or by being
+        // set past it; a clock set back moves the wake later.
         let wake = match next {
-            Some(at) => clock.sleep(at.duration_since(clock.now()).unwrap_or_default()),
+            Some(at) => clock.sleep_until(at),
             None => Box::pin(std::future::pending()),
         };
         tokio::select! {
@@ -80,7 +84,12 @@ async fn run(
             _ = stopping.changed() => return,
             // A closed or failed handle leaves nothing to write.
             changed = journal.next() => if changed.is_err() { return },
-            () = wake => {}
+            woke = wake => if let Err(error) = woke {
+                // An invite this handle can't end in time fails the handle,
+                // which every call and live query then reports.
+                database.fail_expiry_wait(error);
+                return;
+            },
         }
     }
 }
@@ -135,3 +144,7 @@ async fn write(
         })
         .await
 }
+
+#[cfg(test)]
+#[path = "invite_expiry_tests.rs"]
+mod tests;

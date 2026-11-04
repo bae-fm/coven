@@ -158,6 +158,13 @@ pub enum DbError {
     /// and every live query fail with this same cause until reopened (§4).
     #[error("a WAL checkpoint failed: {0}")]
     CheckpointFailed(#[source] std::sync::Arc<DbError>),
+    /// The handle's clock could not wait for an open invite's expiry, so
+    /// the invite would outlive its lifetime. Rather than stay open
+    /// without writing expiries, this handle and every live query fail with
+    /// this same cause until reopened, and opening writes each expiry
+    /// already past (§13.2).
+    #[error(transparent)]
+    WallTimer(coven_foundation::clock::WallTimerError),
     /// The system refused the thread that checkpoints the store's WAL, so
     /// the store did not open (§4).
     #[error("the WAL checkpoint thread could not start: {0}")]

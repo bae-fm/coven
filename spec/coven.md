@@ -4226,15 +4226,23 @@ an active member or another open invite share still uses the account (§14.2):
 Dan's, once approval adds him. For an approval, the end comes after the entry
 adding Dan, so his account is never unshared in between. On S3 there is
 nothing to take back: the person deletes Dan's key in the provider's console,
-and coven forgets it (§14.3). An invite expires at the time
-fixed when it was made, by the inviting device's clock. Expiry is a write, like
-approving, declining or cancelling: Ana's phone wakes at the earliest open
-invite's expiry and writes it then, with its storage disconnected, offline or
-with sync stopped too; opening writes one that ended while the store was
-closed. Approving, declining or cancelling once the time has passed fails and
-writes nothing, since ending the invite is the expiry's write. The invite
-leaves her list in that write; its request is deleted and the access goes back
-in a pass, once her phone is connected and online.
+and coven forgets it (§14.3). An invite expires at the time fixed when it was
+made, by the inviting device's clock. Expiry is a write, like approving,
+declining or cancelling: Ana's phone wakes when its clock reaches the earliest
+open invite's expiry and writes it then, with its storage disconnected, offline
+or with sync stopped too; opening writes one that ended while the store was
+closed. The wake follows the wall clock, not time passed: Ana sets her phone's
+clock forward past the expiry by hand, and the invite ends at once; she sets it
+back, and the wake moves later with it. The system says when its clock reaches
+the time, through a timer it moves when the clock is set (api.md
+`Clock::sleep_until`); coven reads the clock again only when that timer fires.
+Where the system has no such timer, or refuses one, the handle fails with
+`DbError::WallTimer` rather than leave the invite open past its lifetime, and
+opening again writes each expiry already past. Approving, declining or
+cancelling once the time has passed fails and writes nothing, since ending the
+invite is the expiry's write. The invite leaves her list in that write; its
+request is deleted and the access goes back in a pass, once her phone is
+connected and online.
 
 **Taking back a gone phone's shares.** A share that Ana's phone recorded
 stays open until the phone ends it, and a phone gone for good never will. So

@@ -1020,6 +1020,9 @@ tables = [
 ]
 # What Android has said of the default network, which its watch keeps.
 "crates/coven-foundation/src/network_watch_default.rs" = ["DefaultNetwork::new"]
+# One wall-clock wait's timer and the notice its callback gives, which
+# that wait keeps until it ends (§13.2).
+"crates/coven-foundation/src/clock_windows.rs" = ["sleep_until", "WaitableTimer::arm"]
 # Both store listings read the directory on a blocking task.
 "crates/coven-foundation/src/files/layout.rs" = ["StoreDirectories::listed"]
 # The kernel's type number for file objects, the same for every handle in

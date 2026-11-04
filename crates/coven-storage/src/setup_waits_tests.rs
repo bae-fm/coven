@@ -15,6 +15,19 @@ impl Clock for Waits {
         self.0.lock().unwrap().push(duration);
         Box::pin(std::future::ready(()))
     }
+    fn sleep_until(
+        &self,
+        _at: std::time::SystemTime,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = Result<(), coven_foundation::clock::WallTimerError>>
+                + Send,
+        >,
+    > {
+        Box::pin(std::future::ready(Err(coven_foundation::clock::WallTimerError::new(
+            "a clock fixed at the epoch never reaches a later time",
+        ))))
+    }
 }
 
 fn limited() -> StorageError {

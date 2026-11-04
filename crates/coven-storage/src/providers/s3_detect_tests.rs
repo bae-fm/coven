@@ -393,6 +393,17 @@ impl coven_foundation::clock::Clock for Pauses {
         self.0.lock().unwrap().push(duration);
         Box::pin(std::future::ready(()))
     }
+    fn sleep_until(
+        &self,
+        at: std::time::SystemTime,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = Result<(), coven_foundation::clock::WallTimerError>>
+                + Send,
+        >,
+    > {
+        SystemClock.sleep_until(at)
+    }
 }
 
 #[tokio::test]
@@ -495,6 +506,17 @@ impl coven_foundation::clock::Clock for WaitedPauses {
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
         self.0.lock().unwrap().push(duration);
         Box::pin(tokio::time::sleep(duration))
+    }
+    fn sleep_until(
+        &self,
+        at: std::time::SystemTime,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = Result<(), coven_foundation::clock::WallTimerError>>
+                + Send,
+        >,
+    > {
+        SystemClock.sleep_until(at)
     }
 }
 

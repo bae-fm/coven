@@ -75,6 +75,17 @@ impl coven_foundation::clock::Clock for RecordingWaits {
         self.waits.lock().unwrap().push(duration);
         Box::pin(std::future::ready(()))
     }
+    fn sleep_until(
+        &self,
+        at: std::time::SystemTime,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = Result<(), coven_foundation::clock::WallTimerError>>
+                + Send,
+        >,
+    > {
+        self.clock.sleep_until(at)
+    }
 }
 
 #[tokio::test]

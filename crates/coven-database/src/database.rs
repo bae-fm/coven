@@ -423,6 +423,13 @@ impl Database {
         self.table_changes(&["_coven_operations"], true, true)
     }
 
+    /// The handle's clock could not wait for an invite's expiry: every
+    /// later call and live query fails with `DbError::WallTimer` until the
+    /// store is reopened (§13.2).
+    pub fn fail_expiry_wait(&self, error: coven_foundation::clock::WallTimerError) {
+        self.observer.fail(crate::observation::HandleFailure::WallTimer(error));
+    }
+
     /// `first` reports the initial state as a change; `inserted_only`
     /// ignores updates and deletions.
     fn table_changes(
