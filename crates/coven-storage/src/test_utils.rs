@@ -568,10 +568,8 @@ impl ProviderOps for MemoryProvider {
         })
     }
     async fn set_s3_credentials(&self, credentials: S3Credentials) -> Result<(), StorageError> {
-        if self.config.provider() != CloudProvider::S3
-            || credentials.access_key_id.is_empty()
-            || credentials.secret_access_key.as_str().is_empty()
-        {
+        credentials.validate()?;
+        if self.config.provider() != CloudProvider::S3 {
             return Err(StorageFailure::InvalidConfiguration.with_source("invalid S3 key"));
         }
         *self.s3_key.lock().await = Some(credentials);

@@ -45,7 +45,8 @@ impl S3Credentials {
         Ok(keys)
     }
 
-    pub(crate) fn validate(&self) -> Result<(), crate::StorageError> {
+    /// Refuse a key whose id or secret is empty: S3 needs both.
+    pub fn validate(&self) -> Result<(), crate::StorageError> {
         if self.access_key_id.is_empty() || self.secret_access_key.as_str().is_empty() {
             return Err(crate::StorageFailure::InvalidConfiguration
                 .with_source("S3 requires an access key id and secret"));

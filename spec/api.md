@@ -7175,6 +7175,10 @@ impl S3Credentials {
 
     /// Read a key saved beside a saved restore code.
     pub fn decode(bytes: &[u8]) -> Result<Self, StorageError>;
+
+    /// Refuse a key whose id or secret is empty (`InvalidConfiguration`):
+    /// S3 needs both.
+    pub fn validate(&self) -> Result<(), StorageError>;
 }
 
 /// Opens the store on a new device from the person's restore code, scanned

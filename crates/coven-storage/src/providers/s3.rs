@@ -162,10 +162,7 @@ impl S3Storage {
                 StorageFailure::InvalidConfiguration.with_source("expected S3 configuration")
             );
         };
-        if credentials.access_key_id.is_empty() || credentials.secret_access_key.as_str().is_empty()
-        {
-            return Err(StorageFailure::InvalidConfiguration.with_source("empty S3 key"));
-        }
+        credentials.validate()?;
         let credentials = SigningCredentials(std::sync::Arc::new(std::sync::RwLock::new(
             aws_credentials(credentials),
         )));
@@ -360,10 +357,7 @@ impl ProviderOps for S3Storage {
         self.bucket_claim_bytes().await
     }
     async fn set_s3_credentials(&self, credentials: S3Credentials) -> Result<(), StorageError> {
-        if credentials.access_key_id.is_empty() || credentials.secret_access_key.as_str().is_empty()
-        {
-            return Err(StorageFailure::InvalidConfiguration.with_source("empty S3 key"));
-        }
+        credentials.validate()?;
         *self.credentials.0.write().expect("S3 credentials lock poisoned") =
             aws_credentials(credentials);
         Ok(())

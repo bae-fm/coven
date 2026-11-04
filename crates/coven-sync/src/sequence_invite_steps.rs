@@ -146,17 +146,14 @@ fn invite_grant(access: InviteAccess, provider: CloudProvider) -> Result<InviteG
             Ok(InviteGrant::Account { email })
         }
         InviteAccess::S3AccessKey { access_key_id, secret_access_key } => {
-            if access_key_id.is_empty() || secret_access_key.as_str().is_empty() {
-                return Err(StorageFailure::InvalidConfiguration
-                    .with_source("invite access key is empty")
-                    .into());
-            }
+            let credentials = S3Credentials { access_key_id, secret_access_key };
+            credentials.validate()?;
             if provider != CloudProvider::S3 {
                 return Err(StorageFailure::InvalidConfiguration
                     .with_source("an access-key invitation requires S3")
                     .into());
             }
-            Ok(InviteGrant::S3Key(S3Credentials { access_key_id, secret_access_key }))
+            Ok(InviteGrant::S3Key(credentials))
         }
     }
 }
