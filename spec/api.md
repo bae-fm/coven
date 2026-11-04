@@ -3748,8 +3748,8 @@ while let Some(Ok(values)) = lost.next().await {
     | macOS, iOS | Network.framework's path monitor | the path is satisfied; another set of interfaces is another network | the path is expensive (cellular, a phone's hotspot) or constrained (Low Data Mode) |
     | Android | `ConnectivityManager`'s default-network callback, through coven's Android library (E1) | the default network is validated and not blocked for the app, as Doze and App Standby block it; another default network is another network. Before Android 10 a blocked network isn't reported, so the end of Doze counts as the network coming back | the network has neither `NOT_METERED` nor `TEMPORARILY_NOT_METERED` |
     | Windows | `NetworkInformation`'s internet connection profile, and its `NetworkStatusChanged` event | the profile has internet access; another profile is another network | the profile's cost is fixed or variable, roaming, or over its data limit |
-    | Linux | NetworkManager, on the system bus | its connectivity is full; another primary connection is another network | its `Metered` says yes, or guesses yes |
-    | Linux without NetworkManager | nothing | never reported | never |
+    | Linux | NetworkManager, on the system bus | its connectivity is full, or, where it checks none, it is connected globally; another primary connection is another network | its `Metered` says yes, or guesses yes |
+    | Linux without NetworkManager as the store opens, or without a system bus | nothing, and the log says so | never reported | never |
 
     Where coven asks nothing, it makes no report, and no network is metered,
     so the setting to move files only on unmetered networks holds nothing
@@ -3759,7 +3759,9 @@ while let Some(Ok(values)) = lost.next().await {
     Android that is most often an app that didn't package coven's Android
     library. Windows and Linux read the network again at each change; a
     read that fails after opening logs an error and says coven can't tell,
-    so `coven_network.usable` is NULL, until the next read succeeds.
+    so `coven_network.usable` is NULL, until the next read succeeds. On
+    Linux that includes NetworkManager stopping, until it starts again, and
+    the system bus closing, for as long as the store stays open.
     Meanwhile coven calls the network metered, since it may be:
     `coven_network.metered` says 1, and the setting holds what it holds on
     a metered network, with `UploadWait::Metered` (E7).

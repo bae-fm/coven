@@ -21,6 +21,9 @@ mod apple;
 #[cfg(any(test, target_os = "android"))]
 #[path = "network_watch_default.rs"]
 mod default_network;
+#[cfg(target_os = "linux")]
+#[path = "network_watch_linux.rs"]
+mod linux;
 #[cfg(windows)]
 #[path = "network_watch_windows.rs"]
 mod winrt;
@@ -30,6 +33,7 @@ mod winrt;
     feature = "test-utils",
     target_vendor = "apple",
     target_os = "android",
+    target_os = "linux",
     windows
 ))]
 use std::sync::{Arc, Mutex};
@@ -57,10 +61,15 @@ impl NetworkState {
 }
 
 /// One usable network, as the platform names it.
-// Sentinel: the platforms whose watches the rest of this chain adds widen
-// these cfgs; until then only Apple's, Android's, Windows' and a test's
-// network say anything.
-#[cfg(any(test, feature = "test-utils", target_vendor = "apple", target_os = "android", windows))]
+// Only the platforms coven watches, and a test's network, say anything.
+#[cfg(any(
+    test,
+    feature = "test-utils",
+    target_vendor = "apple",
+    target_os = "android",
+    target_os = "linux",
+    windows
+))]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct UsableNetwork {
     /// The platform's own name for the network: another name is another
@@ -72,14 +81,28 @@ pub(crate) struct UsableNetwork {
 
 /// Turns what the platform says into the watch's state, counting each
 /// network that appears.
-#[cfg(any(test, feature = "test-utils", target_vendor = "apple", target_os = "android", windows))]
+#[cfg(any(
+    test,
+    feature = "test-utils",
+    target_vendor = "apple",
+    target_os = "android",
+    target_os = "linux",
+    windows
+))]
 pub(crate) struct NetworkSink {
     /// The usable network the device was last on.
     current: Option<String>,
     state: watch::Sender<NetworkState>,
 }
 
-#[cfg(any(test, feature = "test-utils", target_vendor = "apple", target_os = "android", windows))]
+#[cfg(any(
+    test,
+    feature = "test-utils",
+    target_vendor = "apple",
+    target_os = "android",
+    target_os = "linux",
+    windows
+))]
 impl NetworkSink {
     fn new() -> Self {
         Self { current: None, state: watch::channel(NetworkState::UNKNOWN).0 }
@@ -116,7 +139,7 @@ impl NetworkSink {
     /// files only on unmetered networks moves them only on one known to be
     /// unmetered. The network the device was last on stays its last, so
     /// that network read again is no report: nothing said it changed.
-    #[cfg(any(test, feature = "test-utils", windows))]
+    #[cfg(any(test, feature = "test-utils", target_os = "linux", windows))]
     pub(crate) fn cannot_tell(&mut self) {
         self.state.send_if_modified(|state| {
             let next = NetworkState { usable: None, metered: true, joined: state.joined };
@@ -158,7 +181,7 @@ pub enum NetworkSource {
 #[error("coven can't watch the device's network: {0}")]
 pub struct NetworkWatchError(String);
 
-#[cfg(any(target_vendor = "apple", target_os = "android", windows))]
+#[cfg(any(target_vendor = "apple", target_os = "android", target_os = "linux", windows))]
 impl NetworkWatchError {
     /// The platform's failure, as its text.
     pub(crate) fn new(failure: impl std::fmt::Display) -> Self {
@@ -176,6 +199,8 @@ pub struct NetworkWatch {
     _platform: Option<apple::PathMonitor>,
     #[cfg(target_os = "android")]
     _platform: Option<android::JavaWatch>,
+    #[cfg(target_os = "linux")]
+    _platform: Option<linux::ManagerWatch>,
     #[cfg(windows)]
     _platform: Option<winrt::ProfileWatch>,
 }
@@ -185,22 +210,34 @@ impl NetworkWatch {
     /// platform says now.
     pub fn start(source: &NetworkSource) -> Result<Self, NetworkWatchError> {
         match source {
-            #[cfg(any(target_vendor = "apple", target_os = "android", windows))]
+            #[cfg(any(
+                target_vendor = "apple",
+                target_os = "android",
+                target_os = "linux",
+                windows
+            ))]
             NetworkSource::Platform => {
                 let sink = Arc::new(Mutex::new(NetworkSink::new()));
                 let state = sink.lock().expect("network sink poisoned").subscribe();
                 #[cfg(target_vendor = "apple")]
-                let platform = apple::PathMonitor::start(sink)?;
+                let platform = Some(apple::PathMonitor::start(sink)?);
                 #[cfg(target_os = "android")]
-                let platform = android::JavaWatch::start(sink)?;
+                let platform = Some(android::JavaWatch::start(sink)?);
                 #[cfg(windows)]
-                let platform = winrt::ProfileWatch::start(sink)?;
-                Ok(Self { state, _platform: Some(platform) })
+                let platform = Some(winrt::ProfileWatch::start(sink)?);
+                // None without NetworkManager: the state stays can't tell.
+                #[cfg(target_os = "linux")]
+                let platform = linux::ManagerWatch::start(sink)?;
+                Ok(Self { state, _platform: platform })
             }
-            // Sentinel: the platforms whose watches the rest of this chain
-            // adds leave this arm; until then they are ones where coven
-            // can't tell.
-            #[cfg(not(any(target_vendor = "apple", target_os = "android", windows)))]
+            // Elsewhere, as on the BSDs, coven asks nothing and can't tell
+            // (api.md E5).
+            #[cfg(not(any(
+                target_vendor = "apple",
+                target_os = "android",
+                target_os = "linux",
+                windows
+            )))]
             NetworkSource::Platform => Ok(Self::unwatched()),
             #[cfg(any(test, feature = "test-utils"))]
             NetworkSource::Test(network) => Ok(Self::without_platform(network.subscribe())),
@@ -217,7 +254,12 @@ impl NetworkWatch {
     fn without_platform(state: watch::Receiver<NetworkState>) -> Self {
         Self {
             state,
-            #[cfg(any(target_vendor = "apple", target_os = "android", windows))]
+            #[cfg(any(
+                target_vendor = "apple",
+                target_os = "android",
+                target_os = "linux",
+                windows
+            ))]
             _platform: None,
         }
     }

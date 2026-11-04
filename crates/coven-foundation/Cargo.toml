@@ -35,6 +35,12 @@ block2.workspace = true
 jni.workspace = true
 ndk-context.workspace = true
 
+# The network watch's NetworkManager, on the system bus, followed on a
+# thread of the watch's own (api.md E5).
+[target.'cfg(target_os = "linux")'.dependencies]
+zbus = { workspace = true, features = ["async-io"] }
+futures-lite = { workspace = true, features = ["std"] }
+
 [target.'cfg(windows)'.dependencies]
 # The network watch's internet connection profile, a WinRT API, which
 # windows-sys doesn't bind (api.md E5).

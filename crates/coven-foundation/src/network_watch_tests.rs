@@ -75,16 +75,21 @@ async fn a_view_hears_each_change_and_an_unwatched_one_never_does() {
 }
 
 /// Where coven watches, the watch holds what the platform says as it
-/// starts, usable or not, and lets the platform's registration go as it
-/// drops: Network.framework's path monitor on macOS and iOS, the internet
-/// connection profile's event handler on Windows.
-#[cfg(any(target_vendor = "apple", windows))]
+/// starts, and lets the platform's registration go as it drops:
+/// Network.framework's path monitor on macOS and iOS, the internet
+/// connection profile's event handler on Windows, the thread following
+/// NetworkManager on Linux. Linux without NetworkManager can't tell.
+#[cfg(any(target_vendor = "apple", target_os = "linux", windows))]
 #[test]
 fn the_platform_watch_knows_the_network_as_it_starts() {
     for _ in 0..3 {
         let watch = NetworkWatch::start(&NetworkSource::Platform).unwrap();
         let state = watch.view().current();
+        #[cfg(not(target_os = "linux"))]
         assert!(state.usable.is_some(), "{state:?}");
+        if state.usable.is_none() {
+            assert_eq!(state, NetworkState::UNKNOWN);
+        }
         assert_eq!(state.joined, u64::from(state.usable == Some(true)));
         drop(watch);
     }

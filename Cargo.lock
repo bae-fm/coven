@@ -1003,6 +1003,7 @@ name = "coven-foundation"
 version = "0.1.0"
 dependencies = [
  "block2",
+ "futures-lite",
  "icu_casemap",
  "icu_normalizer",
  "icu_segmenter",
@@ -1020,6 +1021,7 @@ dependencies = [
  "uuid",
  "windows",
  "windows-sys 0.61.2",
+ "zbus",
 ]
 
 [[package]]
