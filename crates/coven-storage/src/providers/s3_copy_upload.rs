@@ -96,10 +96,7 @@ impl S3Storage {
             .send()
             .await
             .map_err(s3_error)?;
-        let id = response
-            .upload_id()
-            .filter(|id| !id.is_empty())
-            .ok_or(StorageFailure::Protocol.with_source("S3 omitted upload id"))?;
+        let id = super::metadata::required(response.upload_id(), "S3 omitted upload id")?;
         Ok(SecretText::new(id.into()))
     }
 

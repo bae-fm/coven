@@ -53,8 +53,8 @@ impl S3Storage {
             .ok_or(StorageFailure::Protocol.with_source("S3 omitted page completion"))?
         {
             Some(
-                next.filter(|value| !value.is_empty())
-                    .ok_or(StorageFailure::Protocol.with_source("S3 omitted continuation token"))?,
+                super::metadata::required(next.as_deref(), "S3 omitted continuation token")?
+                    .to_owned(),
             )
         } else {
             None

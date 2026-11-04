@@ -617,11 +617,7 @@ impl ProviderOps for S3Storage {
                     .size()
                     .and_then(|n| u64::try_from(n).ok())
                     .ok_or(StorageFailure::Protocol.with_source("S3 omitted part size"))?;
-                let etag = part
-                    .e_tag()
-                    .filter(|value| !value.is_empty())
-                    .ok_or(StorageFailure::Protocol.with_source("S3 omitted part ETag"))?
-                    .to_owned();
+                let etag = metadata::required(part.e_tag(), "S3 omitted part ETag")?.to_owned();
                 confirmed = confirmed.checked_add(size).ok_or(StorageFailure::InvalidPart)?;
                 let part = S3Part { number, size, etag };
                 if !part.follows(parts.len(), confirmed, session.total, session.part_size) {
@@ -635,11 +631,9 @@ impl ProviderOps for S3Storage {
             {
                 break;
             }
-            let next = response
-                .next_part_number_marker()
-                .filter(|value| !value.is_empty())
-                .ok_or(StorageFailure::Protocol.with_source("S3 omitted part marker"))?
-                .to_owned();
+            let next =
+                metadata::required(response.next_part_number_marker(), "S3 omitted part marker")?
+                    .to_owned();
             seen.check(&next)?;
             marker = Some(next);
         }
@@ -698,11 +692,7 @@ impl ProviderOps for S3Storage {
             .send()
             .await
             .map_err(s3_error)?;
-        let etag = response
-            .e_tag()
-            .filter(|value| !value.is_empty())
-            .ok_or(StorageFailure::Protocol.with_source("S3 omitted uploaded ETag"))?
-            .to_owned();
+        let etag = metadata::required(response.e_tag(), "S3 omitted uploaded ETag")?.to_owned();
         if let SessionState::S3 { parts, .. } = &mut session.state {
             parts.push(S3Part { number, size: bytes.len() as u64, etag });
         }
