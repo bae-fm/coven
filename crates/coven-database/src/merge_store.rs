@@ -296,8 +296,7 @@ impl<'a> MergeStore<'a> {
         if let Some((ordinal, generation)) =
             current.filter(|(_, g)| coven_merge::generation_present(*g))
         {
-            let retained = self.database.query("SELECT id,value FROM _coven_lost WHERE table_name=?1 AND key=?2 AND audience=?3 AND generation=?4 AND column_id IS NULL AND replacement_kind='rules' AND frozen=0", params![id.table,id.key,audience,generation.to_be_bytes().as_slice()], |r| Ok((r.get::<_,i64>(0)?, decoded(merge_fields::decode_columns(&r.get::<_,Vec<u8>>(1)?))?)))?;
-            assert!(retained.len() <= 1, "present row has more than one removal record: {id:?}");
+            let retained = crate::loss_record::removed(self.database, id, generation)?;
             let staged = match self.values {
                 RowValues::Staged(schema) => {
                     crate::download_stage::values(self.database, schema, id)?
@@ -306,11 +305,11 @@ impl<'a> MergeStore<'a> {
             };
             let raw_staged = staged.is_some();
             let mut values = if let Some(values) = staged {
-                loss = retained.first().map(|(ordinal, _)| *ordinal);
+                loss = retained.as_ref().map(|removed| removed.loss);
                 values
-            } else if let Some((ordinal, columns)) = retained.into_iter().next() {
-                loss = Some(ordinal);
-                columns.into_iter().map(|(n, v)| (n, v.value)).collect()
+            } else if let Some(removed) = retained {
+                loss = Some(removed.loss);
+                removed.columns.into_iter().map(|(n, v)| (n, v.value)).collect()
             } else {
                 match self.values {
                     RowValues::App(app) => {

@@ -3,12 +3,14 @@
 use crate::sqlite::DatabaseConnection;
 use crate::write_encoding::{audience_text, counter, encoded};
 use crate::DbError;
+use coven_format::value::Value;
 use coven_format::{
     loss::{Loss, LossCause, LossValues},
     merge_fields,
 };
-use coven_merge::{Audience, Cell};
+use coven_merge::{Audience, Cell, ColumnValue};
 use rusqlite::params;
+use std::collections::BTreeMap;
 
 pub(crate) const SELECT: &str = "SELECT l.table_name,l.key,l.audience,l.generation,c.column_name,l.value,l.set_by,l.replacement_kind,l.replaced_by,l.frozen,l.column_id,c.table_name FROM _coven_lost l LEFT JOIN _coven_columns c ON c.id=l.column_id";
 
@@ -220,6 +222,37 @@ fn sort_name(bytes: &mut Vec<u8>, name: &str) {
         bytes.extend_from_slice(&[1, byte]);
     }
     bytes.push(0);
+}
+
+/// A row removal rules took out, as its active loss holds it.
+pub(crate) struct RemovedRow {
+    /// The loss's id.
+    pub(crate) loss: i64,
+    /// The row's values when the rules took it out.
+    pub(crate) columns: BTreeMap<String, ColumnValue<Value>>,
+}
+
+/// The row removal rules took out of `row` at `generation`: none while the
+/// rules leave it shown. A row has at most one (format.md D7.2).
+pub(crate) fn removed(
+    database: &DatabaseConnection,
+    row: &coven_merge::RowId,
+    generation: u64,
+) -> Result<Option<RemovedRow>, DbError> {
+    let mut removed = database.query(
+        "SELECT id,value FROM _coven_lost WHERE table_name=?1 AND key=?2 AND audience=?3 AND generation=?4 AND column_id IS NULL AND replacement_kind='rules' AND frozen=0",
+        params![row.table, row.key, audience_text(&row.audience), generation.to_be_bytes().as_slice()],
+        |r| {
+            Ok(RemovedRow {
+                loss: r.get(0)?,
+                columns: crate::write_encoding::decoded(merge_fields::decode_columns(
+                    &r.get::<_, Vec<u8>>(1)?,
+                ))?,
+            })
+        },
+    )?;
+    assert!(removed.len() <= 1, "present row has more than one removal record: {row:?}");
+    Ok(removed.pop())
 }
 
 fn damaged() -> rusqlite::Error {

@@ -26,6 +26,13 @@ pub(crate) const CACHE_HEADER: i64 = -1;
 pub(crate) const CACHE_COMPLETE_FILE: i64 = -2;
 // D2 timestamps contain six clock bytes, two counter bytes, then the device id.
 pub(crate) const WRITE_DEVICE_SQL: &str = "substr(timestamp,9,8)";
+/// Whether removal rules took out the merge row `r` names, through its
+/// `r.table_name`, `r.key` and `r.audience`: an active rules loss holds its
+/// values. An active one is always at the row's current generation
+/// (format.md D7.2), so the predicate needs no generation.
+pub(crate) const RULES_REMOVED_SQL: &str = "(EXISTS(SELECT 1 FROM _coven_lost AS removed
+    WHERE removed.table_name=r.table_name AND removed.key=r.key AND removed.audience=r.audience
+      AND removed.frozen=0 AND removed.replacement_kind='rules'))";
 /// Whether the files-area path `?1` is named: by a file on this device
 /// only, or as the copy of a queued upload or a pin request (Appendix C.3).
 pub(crate) const FILE_NAMED_SQL: &str = "(EXISTS(SELECT 1 FROM _coven_device_files WHERE path=?1)

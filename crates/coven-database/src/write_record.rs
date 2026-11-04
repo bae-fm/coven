@@ -2,12 +2,11 @@
 use crate::internal_schema::WRITE_DEVICE_SQL;
 use crate::merge_store::MergeStore;
 use crate::sqlite::DatabaseConnection;
-use crate::write_encoding::{audience_text, counter, decoded, timestamp};
+use crate::write_encoding::{audience_text, counter, timestamp};
 use crate::write_rows::{column_name, reference_error, row_id, AppKey, AppValues, AppView};
 use crate::write_schema::WriteSchema;
 use crate::DbError;
 use coven_format::{
-    merge_fields,
     value::Value,
     write::{RowChange, RowExecution, WriteDisposition, WriteHeader, WritePart, WriteRecord},
 };
@@ -528,19 +527,9 @@ fn removed_values(
     row: &RowId,
     generation: u64,
 ) -> Result<AppValues, DbError> {
-    let rows = database.query(
-        "SELECT value FROM _coven_lost WHERE table_name=?1 AND key=?2 AND audience=?3 AND generation=?4 AND column_id IS NULL AND replacement_kind='rules' AND frozen=0",
-        params![row.table, row.key, audience_text(&row.audience), generation.to_be_bytes().as_slice()],
-        |r| { let bytes: Vec<u8> = r.get(0)?; decoded(merge_fields::decode_columns(&bytes)) },
-    )?;
-    assert!(rows.len() == 1, "removed row must have exactly one stored value: {row:?}");
-    Ok(rows
-        .into_iter()
-        .next()
-        .expect("one removed row")
-        .into_iter()
-        .map(|(column, value)| (column, value.value))
-        .collect())
+    let removed = crate::loss_record::removed(database, row, generation)?
+        .expect("a removed row has its stored values");
+    Ok(removed.columns.into_iter().map(|(column, value)| (column, value.value)).collect())
 }
 
 /// A moved row's cell, naming the new file the move made in the row's new

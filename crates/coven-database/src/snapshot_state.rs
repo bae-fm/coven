@@ -1,5 +1,6 @@
 //! Replace one audience's records inside the loading transaction.
 
+use crate::internal_schema::RULES_REMOVED_SQL;
 use crate::internal_schema::WRITE_DEVICE_SQL;
 use crate::snapshot_error::invalid;
 use crate::sqlite::DatabaseConnection;
@@ -18,11 +19,12 @@ use std::collections::BTreeSet;
 pub(crate) fn begin(database: &DatabaseConnection, audience: &Audience) -> Result<(), DbError> {
     let audience = audience_text(audience);
     database.internal_execute(
-        "INSERT INTO temp._coven_install_before(table_name,key,audience,shown)
-         SELECT r.table_name,r.key,r.audience,
-           instr('13579BDF',substr(hex(max(r.generation)),16,1))>0
-           AND NOT EXISTS(SELECT 1 FROM _coven_lost l WHERE l.table_name=r.table_name AND l.key=r.key AND l.audience=r.audience AND l.frozen=0 AND l.replacement_kind='rules')
-         FROM _coven_rows r WHERE r.audience=?1 GROUP BY r.table_name,r.key,r.audience",
+        &format!(
+            "INSERT INTO temp._coven_install_before(table_name,key,audience,shown)
+             SELECT r.table_name,r.key,r.audience,
+               instr('13579BDF',substr(hex(max(r.generation)),16,1))>0 AND NOT {RULES_REMOVED_SQL}
+             FROM _coven_rows r WHERE r.audience=?1 GROUP BY r.table_name,r.key,r.audience"
+        ),
         [&audience],
     )?;
     database.internal_execute(
