@@ -876,6 +876,8 @@ homes = [
     "crates/coven-database/src/sequence_schema.rs",
 ]
 tables = [
+    "_coven_cutoffs",
+    "_coven_last_claims",
     "_coven_sequence",
 ]
 
@@ -934,14 +936,12 @@ tables = [
     "_coven_copies",
     "_coven_copy_chunks",
     "_coven_creations",
-    "_coven_cutoffs",
     "_coven_device_files",
     "_coven_file_candidates",
     "_coven_file_references",
     "_coven_file_removals",
     "_coven_file_uploads",
     "_coven_foreign_keys",
-    "_coven_last_claims",
     "_coven_lost",
     "_coven_migration_counted_losses",
     "_coven_migration_losses",

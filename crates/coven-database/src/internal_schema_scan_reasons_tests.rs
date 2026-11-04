@@ -133,16 +133,15 @@ mod fixture {
      INSERT INTO _coven_store VALUES(1,zeroblob(16),'fixture',x'0000000000000001',1);
      INSERT INTO _coven_migration_losses SELECT CAST(device || n AS BLOB),audience,key FROM fixture;
      INSERT INTO _coven_migration_counted_losses SELECT CAST(device || n AS BLOB),audience,key FROM fixture;
-     INSERT INTO _coven_last_claims SELECT n,n,key,n FROM fixture;
      INSERT INTO _coven_constraints SELECT i,tab,n FROM fixture;
      INSERT INTO _coven_foreign_keys SELECT i,tab,n FROM fixture;
-     INSERT INTO _coven_cutoffs SELECT n,CASE WHEN i%3=0 THEN device END,CASE WHEN i%3<>0 THEN member END,CASE WHEN i%3=2 THEN key END FROM fixture;
 "
     ).unwrap();
         // Each domain fills its own tables from the same rows.
         crate::store_state_tables::tests::fill_for_plans(&db);
         crate::published::tests::fill_for_plans(&db);
         crate::claim::tests::fill_for_plans(&db);
+        crate::sequence::tests::fill_for_plans(&db);
         crate::raise_capture::tests::fill_for_plans(&db);
         crate::database::operation_tests::fill_for_plans(&db);
         crate::database::file_retention::tests::fill_for_plans(&db);

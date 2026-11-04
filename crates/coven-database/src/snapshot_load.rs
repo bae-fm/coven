@@ -40,13 +40,10 @@ pub(crate) fn load<P: crate::PendingValue>(
         }
         crate::store_state_tables::replace(database, &state)?;
         crate::provider_access::adopt::<P>(database, &provider.accounts)?;
-        database.internal_execute("DELETE FROM _coven_cutoffs", [])?;
-        for (slot, change) in cutoffs {
-            if slot.0 > target {
-                return Err(invalid("cut-off exceeds reload target"));
-            }
-            crate::sequence::cutoff(database, slot, &change)?;
+        if cutoffs.iter().any(|(slot, _)| slot.0 > target) {
+            return Err(invalid("cut-off exceeds reload target"));
         }
+        crate::sequence::replace_cutoffs(database, cutoffs)?;
         let resets = crate::write_boundary::replace(database, boundaries)?;
         if !resets.is_empty() {
             crate::pending::reset(database)?;

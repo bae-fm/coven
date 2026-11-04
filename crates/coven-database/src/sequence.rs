@@ -43,6 +43,13 @@ pub(crate) fn note_record(
     Ok(())
 }
 
+/// A device the store's state names starts with no claim: number zero,
+/// through slot zero. A device with a claim keeps it.
+pub(crate) fn note_device(db: &DatabaseConnection, device: DeviceId) -> Result<(), DbError> {
+    db.internal_execute("INSERT INTO _coven_last_claims(device,number,digest,through) VALUES(?1,zeroblob(8),NULL,zeroblob(8)) ON CONFLICT(device) DO NOTHING",[device])?;
+    Ok(())
+}
+
 pub(crate) fn note_claim(
     db: &DatabaseConnection,
     header: &SlotHeader,
@@ -93,6 +100,19 @@ pub(crate) fn cutoff(
         "INSERT INTO _coven_cutoffs(slot,device,member,signing) VALUES(?1,?2,?3,?4)",
         params![slot.0.to_be_bytes().as_slice(), device, member, signing],
     )?;
+    Ok(())
+}
+
+/// Replace every recorded cut-off with `cutoffs`, as a reload's state
+/// settles them.
+pub(crate) fn replace_cutoffs(
+    db: &DatabaseConnection,
+    cutoffs: Vec<(Slot, StoreChange)>,
+) -> Result<(), DbError> {
+    db.internal_execute("DELETE FROM _coven_cutoffs", [])?;
+    for (slot, change) in cutoffs {
+        cutoff(db, slot, &change)?;
+    }
     Ok(())
 }
 
