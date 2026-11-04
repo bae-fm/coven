@@ -101,11 +101,17 @@ mod file_write_uploads_schema;
 #[path = "migration_receive_schema.rs"]
 mod migration_receive_schema;
 #[macro_use]
+#[path = "object_removals_schema.rs"]
+mod object_removals_schema;
+#[macro_use]
 #[path = "operation_schema.rs"]
 mod operation_schema;
 #[macro_use]
 #[path = "published_schema.rs"]
 mod published_schema;
+#[macro_use]
+#[path = "raise_capture_schema.rs"]
+mod raise_capture_schema;
 #[macro_use]
 #[path = "reload_gate_schema.rs"]
 mod reload_gate_schema;
@@ -130,9 +136,6 @@ mod sql_versions_schema;
 #[macro_use]
 #[path = "store_state_schema.rs"]
 mod store_state_schema;
-#[macro_use]
-#[path = "raise_capture_schema.rs"]
-mod raise_capture_schema;
 #[macro_use]
 #[path = "upload_schema.rs"]
 mod upload_schema;
@@ -651,16 +654,7 @@ macro_rules! coven_tables {
             CREATE INDEX _coven_operations_kind ON _coven_operations(kind);
         ");
         coven_operation_state_tables!($visit);
-        // Objects this device put in storage for a while, each with the
-        // time, in seconds since the Unix epoch, after which a pass deletes
-        // it: an ended invite's marker (§13.2). Nothing references them.
-        $visit!(_coven_object_removals, "
-            CREATE TABLE _coven_object_removals (
-                path TEXT PRIMARY KEY,
-                after INTEGER NOT NULL CHECK(after>=0)
-            ) STRICT, WITHOUT ROWID;
-            CREATE INDEX _coven_object_removals_after ON _coven_object_removals(after);
-        ");
+        coven_object_removals_tables!($visit);
         coven_ended_requests_tables!($visit);
         // The operations the app's writes journaled, each with its kind as
         // coven-sync names it and, once it has finished, its outcome as

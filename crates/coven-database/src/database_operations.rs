@@ -262,10 +262,7 @@ impl Database {
     pub async fn object_removed(&self, path: String) -> Result<(), DbError> {
         self.call(move |inner| {
             inner.access.with_writer(|writer| {
-                writer.transaction(|db| {
-                    db.internal_execute("DELETE FROM _coven_object_removals WHERE path=?1", [&path])
-                        .map(drop)
-                })
+                writer.transaction(|db| crate::object_removals::removed(db, &path))
             })
         })
         .await

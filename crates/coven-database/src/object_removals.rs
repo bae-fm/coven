@@ -24,3 +24,13 @@ pub(crate) fn record(db: &DatabaseConnection, removal: &ObjectRemoval) -> Result
     )?;
     Ok(())
 }
+
+/// The object at `path` is gone from storage: no deletion is owed.
+pub(crate) fn removed(db: &DatabaseConnection, path: &str) -> Result<(), DbError> {
+    db.internal_execute("DELETE FROM _coven_object_removals WHERE path=?1", [path])?;
+    Ok(())
+}
+
+#[cfg(test)]
+#[path = "object_removals_tests.rs"]
+pub(crate) mod tests;

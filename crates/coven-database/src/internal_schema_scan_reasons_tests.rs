@@ -76,7 +76,6 @@ mod fixture {
             CAST(printf('%016d',i) AS BLOB) AS member FROM numbers;
      INSERT INTO _coven_operations(id,kind,last_step,data,started_by)
        SELECT i,'kind_' || (i%32),1,x'00','app' FROM fixture;
-     INSERT INTO _coven_object_removals SELECT 'path_' || i,i FROM fixture;
      INSERT INTO _coven_app_operations SELECT i,'Kind' || (i%32),CASE WHEN i%2=0 THEN x'00' END FROM fixture;
      INSERT INTO _coven_provider_access SELECT 'account_' || i,i%2,NULL,NULL,i,i%2 FROM fixture;
      INSERT INTO _coven_pending(subject,value,operation,object,work,device,file,coven_version)
@@ -140,6 +139,7 @@ mod fixture {
         crate::store_state_tables::tests::fill_for_plans(&db);
         crate::published::tests::fill_for_plans(&db);
         crate::claim::tests::fill_for_plans(&db);
+        crate::object_removals::tests::fill_for_plans(&db);
         crate::sequence::tests::fill_for_plans(&db);
         crate::raise_capture::tests::fill_for_plans(&db);
         crate::database::operation_tests::fill_for_plans(&db);
@@ -302,6 +302,7 @@ mod source {
                     | "claim_schema.rs"
                     | "published_schema.rs"
                     | "store_state_schema.rs"
+                    | "object_removals_schema.rs"
                     | "raise_capture_schema.rs"
                     | "database_operations_schema.rs"
                     | "database_file_retention_schema.rs"
