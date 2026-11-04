@@ -291,15 +291,15 @@ fn state_name(state: &SyncState) -> &'static str {
 }
 
 #[deny(clippy::wildcard_enum_match_arm)]
-fn wait_name(wait: UploadWait) -> &'static str {
+fn wait_name(wait: SyncWait) -> &'static str {
     match wait {
-        UploadWait::NotSyncing => "notSyncing",
-        UploadWait::CoolingDown { .. } => "coolingDown",
-        UploadWait::Blocked => "blocked",
-        UploadWait::Paused => "paused",
-        UploadWait::Metered => "metered",
-        UploadWait::Retrying { .. } => "retrying",
-        UploadWait::Queued => "queued",
+        SyncWait::NotSyncing => "notSyncing",
+        SyncWait::CoolingDown { .. } => "coolingDown",
+        SyncWait::Blocked => "blocked",
+        SyncWait::Paused => "paused",
+        SyncWait::Metered => "metered",
+        SyncWait::Retrying { .. } => "retrying",
+        SyncWait::Queued => "queued",
     }
 }
 
@@ -393,7 +393,9 @@ fn shown(facts: &Facts) -> Value {
 /// download and upload progress combination, offline; and queued uploads
 /// under every wait, one alone or two after a stored one, so the first
 /// waiting one names the wait, with the setting to move files only on
-/// unmetered networks on or off and the network metered or not.
+/// unmetered networks on or off and the network metered or not; and a pass
+/// held at a slot or by a cooldown, with nothing queued, under each way sync
+/// can be held.
 fn cases() -> Vec<Facts> {
     let mut cases = Vec::new();
     for last in passes() {
@@ -444,7 +446,14 @@ fn cases() -> Vec<Facts> {
     }
     let cooling = RetrySync::Started { cooling_until: Some(UNIX_EPOCH + Duration::from_secs(60)) };
     let blocked = Some(LastPass::Blocked { slot: Slot(7), reason: key_unavailable(), error: None });
+    let limited = Some(LastPass::Failed {
+        failure: StatusFailure::Storage(StorageFailure::RateLimited),
+        error: "slow down".into(),
+    });
     for sync in [RetrySync::Stopped, RetrySync::Started { cooling_until: None }, cooling] {
+        for last in [blocked.clone(), limited.clone()] {
+            cases.push(Facts { sync, last, ..connected() });
+        }
         for last in [None, blocked.clone()] {
             for (paused, unmetered_only, metered) in [
                 (false, false, false),
@@ -570,7 +579,33 @@ fn a_wait_carries_its_time() {
     let mut retrying = upload(Progress::Queued);
     retrying.retry_at = Some(at);
     let facts = Facts { uploads: vec![retrying], ..connected() };
-    assert_eq!(facts.state(), SyncState::WaitingToSync(UploadWait::Retrying { at }));
+    assert_eq!(facts.state(), SyncState::WaitingToSync(SyncWait::Retrying { at }));
     let facts = Facts { sync: RetrySync::Started { cooling_until: Some(until) }, ..facts };
-    assert_eq!(facts.state(), SyncState::WaitingToSync(UploadWait::CoolingDown { until }));
+    assert_eq!(facts.state(), SyncState::WaitingToSync(SyncWait::CoolingDown { until }));
+}
+
+/// Synced means nothing waits. A pass blocked at a slot for a wait, as for
+/// a key another device hasn't delivered, and a pass a provider's cooldown
+/// cut short, wait to sync though no file is queued, naming what holds
+/// them: sync stopped, the cooldown, the slot, or the pass's turn once the
+/// cooldown is over (§19.1).
+#[test]
+fn a_waiting_pass_is_never_synced() {
+    let until = UNIX_EPOCH + Duration::from_secs(60);
+    let stopped = RetrySync::Stopped;
+    let started = RetrySync::Started { cooling_until: None };
+    let cooling = RetrySync::Started { cooling_until: Some(until) };
+    let blocked = LastPass::Blocked { slot: Slot(7), reason: key_unavailable(), error: None };
+    let limited = LastPass::Failed {
+        failure: StatusFailure::Storage(StorageFailure::RateLimited),
+        error: "slow down".into(),
+    };
+    let shown =
+        |last: &LastPass, sync| Facts { last: Some(last.clone()), sync, ..connected() }.state();
+    assert_eq!(shown(&blocked, started), SyncState::WaitingToSync(SyncWait::Blocked));
+    assert_eq!(shown(&blocked, stopped), SyncState::WaitingToSync(SyncWait::NotSyncing));
+    assert_eq!(shown(&blocked, cooling), SyncState::WaitingToSync(SyncWait::CoolingDown { until }));
+    assert_eq!(shown(&limited, cooling), SyncState::WaitingToSync(SyncWait::CoolingDown { until }));
+    assert_eq!(shown(&limited, started), SyncState::WaitingToSync(SyncWait::Queued));
+    assert_eq!(shown(&limited, stopped), SyncState::WaitingToSync(SyncWait::NotSyncing));
 }

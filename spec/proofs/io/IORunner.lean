@@ -317,7 +317,7 @@ def stateName : State → String
   | .clockWrong => "clockWrong"
   | .failed => "failed"
 
-def waitName : UploadWait → String
+def waitName : SyncWait → String
   | .notSyncing => "notSyncing"
   | .coolingDown => "coolingDown"
   | .blocked => "blocked"
@@ -341,7 +341,8 @@ private def upload (j : Json) : Except String Upload := do
 `connected`), `last` (`synced` or `{"failed": pass failure}`), `moving`,
 `downloading`, `uploads`, `unsent`, `running`, `cooling`, `paused`,
 `unmeteredOnly`, `metered` and the pending `records`' reasons. Reports the state's name as `state`, and, for
-waiting to sync, what the first waiting upload waits for as `wait`. -/
+waiting to sync, what it waits for as `wait`: the held-back pass's wait, else
+the first waiting upload's. -/
 def run (j : Json) : Except String Json := do
   let storage ← named [("none", Storage.none), ("signedOut", .signedOut), ("connected", .connected)]
     "storage" (← j.getObjValAs? String "storage")

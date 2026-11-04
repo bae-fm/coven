@@ -37,11 +37,13 @@ pub enum SyncState {
     /// A running pass has read or claimed a slot, or a file is being sent
     /// or downloaded.
     Syncing,
-    /// A file waits in the upload queue and nothing moves: what the first
-    /// such file waits for.
-    WaitingToSync(UploadWait),
-    /// The last pass reached storage, every file this device uploads is
-    /// stored, and nothing below holds.
+    /// Nothing moves, and the last pass was held back, at a slot that can't
+    /// apply yet or by a provider's cooldown, or a file waits in the upload
+    /// queue: what the pass waits for, else what the first such file waits
+    /// for.
+    WaitingToSync(SyncWait),
+    /// The last pass reached the end of the sequence, every file this device
+    /// uploads is stored, and nothing below holds: nothing waits.
     Synced,
     /// The last pass got no provider response.
     Offline(SyncCause),
@@ -74,11 +76,11 @@ pub enum SyncState {
     Failed(SyncCause),
 }
 
-/// What a file waiting in the upload queue waits for, as `WaitingToSync`
-/// names it for the first such file: what holds every upload first, then
-/// what holds that file (§19.1).
+/// What waiting to sync waits for, as `WaitingToSync` names it: what holds
+/// every transfer, the pass's and each file's alike, first; then, for a
+/// file waiting in the upload queue, what holds that file (§19.1).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum UploadWait {
+pub enum SyncWait {
     /// Sync isn't running (`start_sync`, `stop_sync`).
     NotSyncing,
     /// The provider asked every request to wait until then (§6.7).
@@ -86,8 +88,8 @@ pub enum UploadWait {
         /// When the cooldown ends, by the store's clock.
         until: SystemTime,
     },
-    /// The last pass is blocked at a slot, and no file goes out until it
-    /// applies (§5.4).
+    /// A slot can't apply yet; nothing goes out or comes in until it does
+    /// (§5.4).
     Blocked,
     /// The app paused uploads, and the file's reference trails
     /// (`set_uploads_paused`, §17.4).
@@ -103,7 +105,8 @@ pub enum UploadWait {
         /// When its backoff ends, by the store's clock.
         at: SystemTime,
     },
-    /// Its turn hasn't come.
+    /// Its turn hasn't come: a file's, or the next pass's once a cooldown
+    /// that held the last one is over.
     Queued,
 }
 
@@ -299,19 +302,22 @@ impl StatusFailure {
 
 impl LastPass {
     /// What this pass says, with no slot moving (the model's `Facts.ended`):
-    /// a wait counts as synced, since the pass reached storage; offline is
-    /// offline with unsent changes while a write or a file waits to go out.
-    fn ended(&self, unsent: bool, provider: CloudProvider) -> SyncState {
+    /// a pass held back by a wait, at a slot or by a provider's cooldown,
+    /// waits to sync, for what `held` says holds every transfer, else its
+    /// turn; offline is offline with unsent changes while a write or a file
+    /// waits to go out.
+    fn ended(&self, unsent: bool, held: Option<SyncWait>, provider: CloudProvider) -> SyncState {
         let cause = || SyncCause::Pass(self.clone());
+        let waiting = || SyncState::WaitingToSync(held.unwrap_or(SyncWait::Queued));
         match self {
             Self::Synced => SyncState::Synced,
             Self::Offline { .. } if unsent => SyncState::OfflineWithUnsentChanges(cause()),
             Self::Offline { .. } => SyncState::Offline(cause()),
             Self::Blocked { reason, .. } => {
-                reason.names().map_or(SyncState::Synced, |named| named.state(cause(), provider))
+                reason.names().map_or_else(waiting, |named| named.state(cause(), provider))
             }
             Self::Failed { failure, .. } => {
-                failure.names().map_or(SyncState::Synced, |named| named.state(cause(), provider))
+                failure.names().map_or_else(waiting, |named| named.state(cause(), provider))
             }
         }
     }
@@ -399,28 +405,35 @@ impl Facts {
         self.unsent || !self.uploads.is_empty()
     }
 
-    /// What one queued upload waits for: what holds every upload first, then
-    /// what holds this one (the model's `Facts.uploadWait`).
-    fn upload_wait(&self, upload: &Upload) -> UploadWait {
+    /// What holds every transfer, the pass's and each upload's alike: sync
+    /// stopped, a provider's cooldown, or a slot that can't apply yet (the
+    /// model's `Facts.heldAll`).
+    fn held_all(&self) -> Option<SyncWait> {
         match self.sync {
-            RetrySync::Stopped => UploadWait::NotSyncing,
-            RetrySync::Started { cooling_until: Some(until) } => UploadWait::CoolingDown { until },
-            RetrySync::Started { cooling_until: None } => {
-                if matches!(self.last, Some(LastPass::Blocked { .. })) {
-                    UploadWait::Blocked
-                } else if self.paused && !upload.bound {
-                    UploadWait::Paused
-                } else if self.unmetered_only
-                    && self.metered
-                    && crate::files::held_on_metered(upload.bound)
-                {
-                    UploadWait::Metered
-                } else if let Some(at) = upload.retry_at {
-                    UploadWait::Retrying { at }
-                } else {
-                    UploadWait::Queued
-                }
+            RetrySync::Stopped => Some(SyncWait::NotSyncing),
+            RetrySync::Started { cooling_until: Some(until) } => {
+                Some(SyncWait::CoolingDown { until })
             }
+            RetrySync::Started { cooling_until: None } => {
+                matches!(self.last, Some(LastPass::Blocked { .. })).then_some(SyncWait::Blocked)
+            }
+        }
+    }
+
+    /// What one queued upload waits for: what holds every transfer first,
+    /// then what holds this one (the model's `Facts.uploadWait`).
+    fn upload_wait(&self, upload: &Upload) -> SyncWait {
+        if let Some(held) = self.held_all() {
+            held
+        } else if self.paused && !upload.bound {
+            SyncWait::Paused
+        } else if self.unmetered_only && self.metered && crate::files::held_on_metered(upload.bound)
+        {
+            SyncWait::Metered
+        } else if let Some(at) = upload.retry_at {
+            SyncWait::Retrying { at }
+        } else {
+            SyncWait::Queued
         }
     }
 
@@ -447,8 +460,8 @@ impl Facts {
     /// highest-ranked candidate. Among candidates of one state the first
     /// shows, so the cause is the last pass, or else the first record, in
     /// the order they arose, that names the state, and waiting to sync names
-    /// the first waiting upload's wait. Signed out with no credentials comes
-    /// first of all, with no cause.
+    /// the held-back pass's wait, else the first waiting upload's. Signed out
+    /// with no credentials comes first of all, with no cause.
     pub(crate) fn state(&self) -> SyncState {
         let (provider, credentials) = match self.location {
             RecordedLocation::None => return SyncState::NotSynced,
@@ -462,7 +475,7 @@ impl Facts {
         } else {
             match &self.last {
                 None => SyncState::Synced,
-                Some(last) => last.ended(self.unsent_work(), provider),
+                Some(last) => last.ended(self.unsent_work(), self.held_all(), provider),
             }
         });
         let records = self

@@ -120,7 +120,7 @@ pub use coven_sync::{
     NextCheck, OperationError, OperationId, OperationKind, OperationOutcome, OperationRejection,
     PassFailure, PendingReason, PendingRecord, PendingSubject, Prerequisite, ProviderAccessAction,
     Refusal, RequiredUpdate, Retry, RetryAnswer, RetryEffect, RetryOutcome, StatusFailure,
-    SyncCause, SyncError, SyncFailure, SyncOftenGuard, SyncState, SyncStatus, UploadWait,
+    SyncCause, SyncError, SyncFailure, SyncOftenGuard, SyncState, SyncStatus, SyncWait,
     WriteCutoff,
 };
 pub use coven_sync::{

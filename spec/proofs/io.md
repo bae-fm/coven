@@ -191,14 +191,17 @@ goes backward, even when the clock does, and `last_synced_kept` that only a
 pass reaching the read end changes it: every other event, reopening
 included, keeps it.
 
-Synced means this device's data and files are in storage.
+Synced means nothing waits: this device's data and files are in storage.
 `synced_files_stored` proves synced shows only while every upload in the
-queue has its bytes stored: none moving, queued or failed. An upload queued
-with nothing moving names waiting to sync, and `waiting_not_moving` proves
-that state shows only while no slot and no file moves, with a wait to name:
-what the first waiting upload waits for, by `Facts.uploadWait`, which takes
-what holds every upload first (sync not running, a provider's cooldown, a
-blocked pass), then what holds this one (the pause, for a trailing upload,
+queue has its bytes stored: none moving, queued or failed, and
+`failed_pass_not_synced` that it shows only after a pass that ended synced.
+A pass held back by a wait, and an upload queued with nothing moving, name
+waiting to sync, and `waiting_not_moving` proves that state shows only while
+no slot and no file moves, with a wait to name: the pass's, by
+`Facts.passWait`, else the first waiting upload's, by `Facts.uploadWait`.
+Both take what holds every transfer first, `Facts.heldAll` (sync not
+running, a provider's cooldown, a blocked pass); the pass then waits its
+turn, and an upload what holds it alone (the pause, for a trailing upload,
 then a metered network the setting to transfer only on unmetered networks
 holds it on, then its backoff), else its turn.
 
@@ -219,8 +222,8 @@ reachability. A file that can't be uploaded or read names failed
 failing its check, stored bytes lost or refused. `bad_file_fails` proves
 such a record keeps the state at failed or what outranks it. A pass held
 on a wait, such as a slot waiting on another device's key or a provider's
-cooldown, reached storage, so it counts as synced without moving the time
-of the last finished sync (`waiting_pass_synced`).
+cooldown, is no failure either: it waits to sync (`waiting_pass_waits`),
+without moving the time of the last finished sync.
 
 The model takes the facts as given: that the loop records how each pass
 ended and whether it moved a slot, that opening records whether storage is

@@ -124,7 +124,8 @@ import CovenIO
 #print axioms CovenIO.SyncState.write_while_offline
 #print axioms CovenIO.SyncState.waits_name_no_state
 #print axioms CovenIO.SyncState.file_failures_name_failed
-#print axioms CovenIO.SyncState.waiting_pass_synced
+#print axioms CovenIO.SyncState.failed_pass_not_synced
+#print axioms CovenIO.SyncState.waiting_pass_waits
 #print axioms CovenIO.SyncState.metered_holds
 #print axioms CovenIO.SyncState.metered_only_held
 #print axioms CovenIO.SyncState.network_keeps_state

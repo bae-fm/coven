@@ -3764,7 +3764,7 @@ while let Some(Ok(values)) = lost.next().await {
     the system bus closing, for as long as the store stays open.
     Meanwhile coven calls the network metered, since it may be:
     `coven_network.metered` says 1, and the setting holds what it holds on
-    a metered network, with `UploadWait::Metered` (E7).
+    a metered network, with `SyncWait::Metered` (E7).
   - `retry_now` is the person asking to retry everything now, such as by
     pulling to refresh. `sync_now` leaves every backoff in place; `retry_now`
     ends every ordinary one, answered or not: the connection's, operations',
@@ -3841,10 +3841,12 @@ while let Some(Ok(values)) = lost.next().await {
     changes in that transaction. With several candidates, the first in
     §19.1's order shows; Appendix H.3 of coven.md lists which state each
     fact names.
-  - Synced means data and files: while a file waits in the upload queue the
-    state is syncing as files move, waiting to sync while none does, with
-    what the first waiting file waits for (`UploadWait`), or failed when its
-    source failed, naming it.
+  - Synced means nothing waits, data or files: a pass held back at a slot
+    that can't apply yet or by a provider's cooldown waits to sync, with what
+    holds it (`SyncWait`); while a file waits in the upload queue the state
+    is syncing as files move, waiting to sync while none does, with what the
+    first waiting file waits for, or failed when its source failed, naming
+    it.
   - Syncing shows only while a pass has read or claimed a slot, or a file is
     moving. A pass that finds nothing writes nothing the state reads until it
     ends, and then only the last synced time when it ends synced again, so
@@ -3896,9 +3898,9 @@ while let Some(Ok(values)) = lost.next().await {
   the pass: no access to storage. One bad photo while the rest syncs leaves
   the last pass synced; its upload's pending record makes the state failed,
   with that record as the cause. Paused uploads with photos queued make it
-  `WaitingToSync(UploadWait::Paused)`; photos queued on cellular while the
+  `WaitingToSync(SyncWait::Paused)`; photos queued on cellular while the
   app moves files only on unmetered networks make it
-  `WaitingToSync(UploadWait::Metered)`.
+  `WaitingToSync(SyncWait::Metered)`.
 - A device that isn't connected still reads and writes
   ([§2.1](coven.md#21-local-writes)); its writes wait in `_coven_uploads`.
 - `start_sync` starts the loop; its first pass builds the provider client from
@@ -4994,11 +4996,13 @@ pub enum SyncState {
     /// A running pass has read or claimed a slot, or a file is being sent
     /// or downloaded.
     Syncing,
-    /// A file waits in the upload queue and nothing moves: what the first
-    /// such file waits for.
-    WaitingToSync(UploadWait),
-    /// The last pass reached storage, every file this device uploads is
-    /// stored, and nothing below holds.
+    /// Nothing moves, and the last pass was held back, at a slot that can't
+    /// apply yet or by a provider's cooldown, or a file waits in the upload
+    /// queue: what the pass waits for, else what the first such file waits
+    /// for.
+    WaitingToSync(SyncWait),
+    /// The last pass reached the end of the sequence, every file this device
+    /// uploads is stored, and nothing below holds: nothing waits.
     Synced,
     /// The last pass got no provider response.
     Offline(SyncCause),
@@ -5023,16 +5027,16 @@ pub enum SyncState {
     Failed(SyncCause),
 }
 
-/// What a file waiting in the upload queue waits for, as `WaitingToSync`
-/// names it for the first such file: what holds every upload first, then
-/// what holds that file (§19.1).
-pub enum UploadWait {
+/// What waiting to sync waits for, as `WaitingToSync` names it: what holds
+/// every transfer, the pass's and each file's alike, first; then, for a
+/// file waiting in the upload queue, what holds that file (§19.1).
+pub enum SyncWait {
     /// Sync isn't running (`start_sync`, `stop_sync`).
     NotSyncing,
     /// The provider asked every request to wait until then (§6.7).
     CoolingDown { until: SystemTime },
-    /// The last pass is blocked at a slot, and no file goes out until it
-    /// applies (§5.4).
+    /// A slot can't apply yet; nothing goes out or comes in until it does
+    /// (§5.4).
     Blocked,
     /// The app paused uploads, and the file's reference trails
     /// (`set_uploads_paused`, §17.4).
@@ -5045,7 +5049,8 @@ pub enum UploadWait {
     /// Its last attempt failed, and it retries then, or at the person's
     /// retry (§6.7); `coven_uploads.pending` says why.
     Retrying { at: SystemTime },
-    /// Its turn hasn't come.
+    /// Its turn hasn't come: a file's, or the next pass's once a cooldown
+    /// that held the last one is over.
     Queued,
 }
 
@@ -5432,7 +5437,7 @@ impl CovenHandle {
   its session, and pins' downloads wait before their next request to storage
   (E8). Bound uploads, reads and `prepare_device_only` run on. The setting
   persists and is this device's alone, never synced; `coven_network` shows
-  it beside the network, and the sync state's `UploadWait::Metered` names it
+  it beside the network, and the sync state's `SyncWait::Metered` names it
   ([§17.9](coven.md#179-uploads)).
 - Upload attempts open the source again, checking its size, and an
   original's modification time, before transfer, and the first-read hash of

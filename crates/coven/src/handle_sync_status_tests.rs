@@ -63,7 +63,7 @@ async fn a_paused_photo_waits_to_sync_until_it_uploads() {
     ana.handle.set_uploads_paused(true).await.unwrap();
     stage(ana, "photos", "beach", vec![7; 4096]).await;
     wait_for_sent(&ana.handle).await;
-    state(ana, |state| *state == SyncState::WaitingToSync(UploadWait::Paused)).await;
+    state(ana, |state| *state == SyncState::WaitingToSync(SyncWait::Paused)).await;
     ana.handle.set_uploads_paused(false).await.unwrap();
     state(ana, |state| *state == SyncState::Synced).await;
     assert!(ana.handle.uploads().await.unwrap().files.is_empty());
@@ -84,7 +84,7 @@ async fn a_photo_waits_for_an_unmetered_network_and_a_cover_does_not() {
     let photo = stage(ben, "photos", "beach", vec![7; 4096]).await;
     let cover = stage(ben, "covers", "album", vec![8; 4096]).await;
     wait_for_sent(&ben.handle).await;
-    state(ben, |state| *state == SyncState::WaitingToSync(UploadWait::Metered)).await;
+    state(ben, |state| *state == SyncState::WaitingToSync(SyncWait::Metered)).await;
     assert!(file_stored(ben, cover).await);
     let shown: (bool, bool, bool, bool) = ben
         .handle
@@ -118,7 +118,7 @@ async fn a_photo_waits_while_coven_cannot_tell_the_network() {
     ben.app.network_cannot_tell();
     let photo = stage(ben, "photos", "beach", vec![7; 4096]).await;
     wait_for_sent(&ben.handle).await;
-    state(ben, |state| *state == SyncState::WaitingToSync(UploadWait::Metered)).await;
+    state(ben, |state| *state == SyncState::WaitingToSync(SyncWait::Metered)).await;
     let shown: (Option<bool>, bool) = ben
         .handle
         .read(|sql| {
@@ -146,15 +146,15 @@ async fn a_bound_file_waits_on_its_retry_while_uploads_are_paused() {
     ana.handle.stop_sync().await.unwrap();
     ana.handle.set_uploads_paused(true).await.unwrap();
     let cover = stage(ana, "covers", "album", vec![6; 4096]).await;
-    state(ana, |state| *state == SyncState::WaitingToSync(UploadWait::NotSyncing)).await;
+    state(ana, |state| *state == SyncState::WaitingToSync(SyncWait::NotSyncing)).await;
     let mut faults = Faults::none();
     faults.create_failures.insert(upload_path(ana, cover).await, (StorageFailure::Network, 503));
     ana.storage.set_faults(faults).await;
     ana.handle.start_sync().await.unwrap();
     let waiting =
-        state(ana, |state| matches!(state, SyncState::WaitingToSync(UploadWait::Retrying { .. })))
+        state(ana, |state| matches!(state, SyncState::WaitingToSync(SyncWait::Retrying { .. })))
             .await;
-    let SyncState::WaitingToSync(UploadWait::Retrying { at }) = waiting.state else {
+    let SyncState::WaitingToSync(SyncWait::Retrying { at }) = waiting.state else {
         unreachable!("waited for a retry")
     };
     assert!(at > network.clock.now(), "it retries after its backoff: {at:?}");

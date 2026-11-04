@@ -651,12 +651,16 @@ async fn reconnecting_preserves_backoff_and_the_providers_cooldown() {
         before,
         "a reconnected pass ran inside the provider's cooldown"
     );
-    // Sync is running, held by the cooldown, which names no state.
+    // Sync is running, held by the cooldown, which the pass waits on: it
+    // didn't get everything in or out, so it isn't synced (§19.1).
     f.handle
         .test_retry_effect()
         .wait_for(|effect| *effect == RetryEffect::CoolingDown { until })
         .await;
-    assert_eq!(f.handle.test_sync_status().latest().await.state, SyncState::Synced);
+    assert_eq!(
+        f.handle.test_sync_status().latest().await.state,
+        SyncState::WaitingToSync(SyncWait::CoolingDown { until })
+    );
     f.advance(Duration::from_secs(600));
     synced(&f.handle).await;
     f.handle.close().await.unwrap();

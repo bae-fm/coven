@@ -82,7 +82,7 @@ pub use sequence_sync::{retry_pending_operation, SequenceSync};
 pub use sign_in::{DeviceCredentials, SessionSignIn};
 pub use sync_status::{
     record_location, record_opened, subscribe_sync_status, sync_status, SyncCause, SyncState,
-    SyncStatus, UploadWait,
+    SyncStatus, SyncWait,
 };
 
 #[cfg(test)]
