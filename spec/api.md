@@ -151,8 +151,10 @@ pub enum Audience {
   The complete store stays on disk; the app can call `open(store)` with its
   usual custody choices. Keeping the error cannot keep the store locked.
 - Creation writes the member identity and the device id before it
-  publishes the store. A failure before publication removes both, and a
-  panic does too, as `StoreCreationError::Bug` (E15). A panic while
+  publishes the store. A failure before publication removes what it
+  wrote of them, and a panic does too, as `StoreCreationError::Bug` (E15).
+  It removes only what it wrote: an identity the custody already held is
+  refused before anything is written, so no failure takes it away. A panic while
   publishing leaves unknown whether the store became visible, so coven
   reads its marker: a store already published keeps both and returns
   `PublishedButNotSynced` with the bug as its source. Without that check, a

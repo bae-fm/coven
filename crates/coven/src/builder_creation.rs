@@ -52,23 +52,27 @@ async fn prepare(
             builder.keychain().map_err(CovenError::from)?,
             directory.id(),
         ));
-        let mut owners = builder.owners(directory, keychain)?;
+        let owners = builder.owners(directory, keychain)?;
         // Each step catches its panic, so a panic undoes custody as any
-        // failure before publication does (E15).
+        // failure before publication does (E15). Making the identity writes
+        // nothing, and refuses one custody already holds, so a failure there
+        // has nothing to undo; the undo takes back only what this creation
+        // wrote.
         let member = MemberId(owners.ids.new_id());
-        let result = caught_sync("create the member identity", || {
-            owners.custody.initialize_identity(member)
-        })
-        .unwrap_or_else(|bug| Err(IdentityError::Bug(bug)));
-        if matches!(result, Err(IdentityError::AlreadyInitialized)) {
-            return Err(IdentityError::AlreadyInitialized.into());
-        }
-        let result = result.map_err(StoreCreationError::from).and_then(|_| {
-            caught_sync("record the device id", || owners.keychain.set_device_id(owners.device))
+        let identity =
+            caught_sync("make the member identity", || owners.custody.new_identity(member))
+                .unwrap_or_else(|bug| Err(IdentityError::Bug(bug)))?;
+        let result = caught_sync("save the member identity", || owners.identity.persist(&identity))
+            .unwrap_or_else(|bug| Err(KeyError::Bug(bug)))
+            .map_err(|error| StoreCreationError::from(IdentityError::from(error)))
+            .and_then(|()| {
+                caught_sync("record the device id", || {
+                    owners.keychain.set_device_id(owners.device)
+                })
                 .unwrap_or_else(|bug| Err(KeyError::Bug(bug)))
                 .map_err(CovenError::from)?;
-            Ok(published(&pending, publish))
-        });
+                Ok(published(&pending, publish))
+            });
         let mut error = match result {
             Ok(Publication::Done) => return Ok((owners, None)),
             Ok(Publication::Failed(error)) => return Ok((owners, Some(error))),

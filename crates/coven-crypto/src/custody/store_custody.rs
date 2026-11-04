@@ -67,15 +67,16 @@ impl StoreCustody {
     }
 
     /// Makes this member's two key pairs for the independently generated
-    /// `member` and puts both in identity custody, for the person creating a
-    /// store. Fails if custody already holds keys. Joining and restoring put
-    /// their identity there themselves.
-    pub fn initialize_identity(&mut self, member: MemberId) -> Result<MemberId, IdentityError> {
+    /// `member`, for the person creating a store, who then puts them in
+    /// identity custody. Fails if custody already holds keys. It writes
+    /// nothing, so a creation that fails here has nothing of its own to
+    /// take back. Joining and restoring put their identity there
+    /// themselves.
+    pub fn new_identity(&self, member: MemberId) -> Result<MemberIdentity, IdentityError> {
         if self.identity.read()?.is_some() {
             return Err(IdentityError::AlreadyInitialized);
         }
-        self.identity.persist(&MemberIdentity::generate(member)?)?;
-        Ok(member)
+        Ok(MemberIdentity::generate(member)?)
     }
 
     /// Records the name before saving the value in its own device-only entry,
@@ -96,3 +97,7 @@ impl StoreCustody {
         self.keychain.delete_host_secret(name)
     }
 }
+
+#[cfg(test)]
+#[path = "store_custody_tests.rs"]
+mod tests;
