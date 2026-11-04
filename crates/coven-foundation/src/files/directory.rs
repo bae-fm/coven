@@ -84,7 +84,7 @@ impl FileName {
     /// Validate a single filename before it is joined to an owned directory.
     pub fn new(name: impl Into<String>) -> Result<Self, FileNameError> {
         let name = name.into();
-        if name.is_empty() || name.len() > 255 {
+        if name.is_empty() || name.len() > super::relative_path::NAME_LIMIT {
             return Err(FileNameError::Length);
         }
         if name.starts_with('.')

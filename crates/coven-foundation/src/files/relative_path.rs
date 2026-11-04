@@ -65,7 +65,7 @@ impl fmt::Display for RelativePath {
 /// units than UTF-8 bytes. HFS+ counts 255 UTF-16 units of the name
 /// decomposed, where `Ǖ`, two bytes of UTF-8, takes three, so that counts
 /// too.
-const NAME_LIMIT: usize = 255;
+pub(super) const NAME_LIMIT: usize = 255;
 
 /// The name coven writes for `name`, the same on every platform, since what
 /// a name may hold is the volume's rule, not the platform's (§17.3):
