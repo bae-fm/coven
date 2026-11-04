@@ -55,7 +55,7 @@ pub(crate) fn merge(
         }
     }
     cascade_deletes(database, schema, store, device, &mut deletes)?;
-    let after = steps.values().flatten().map(|step| step.sequence + 1).max().unwrap_or(0);
+    let after = coven_format::write::Step::after(steps.values().flatten());
     for (row, mut change) in deletes {
         if changes.contains_key(&row) || steps.contains_key(&row) {
             return Err(DbError::DismissedRowChanged {

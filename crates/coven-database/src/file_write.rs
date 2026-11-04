@@ -381,7 +381,7 @@ impl<'a> FileWrite<'a> {
             *self.files.deleted.borrow_mut() = Some(unreferenced);
             return Ok(Some(record));
         }
-        let sequence = steps.values().flatten().map(|step| step.sequence + 1).max().unwrap_or(0);
+        let sequence = coven_format::write::Step::after(steps.values().flatten());
         for (change, step) in references::deletions(db, store, &unreferenced, sequence)? {
             if changes.contains_key(&change.row) || steps.contains_key(&change.row) {
                 return Err(DbError::Invariant {

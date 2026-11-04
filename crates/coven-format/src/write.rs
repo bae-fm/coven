@@ -239,6 +239,14 @@ pub struct Step {
     /// keys follow their ON UPDATE actions, not ON DELETE (§9.2).
     pub key_update: bool,
 }
+impl Step {
+    /// The position after every one of `steps`, where an operation the
+    /// write adds after them goes: 0 with none.
+    pub fn after<'a>(steps: impl IntoIterator<Item = &'a Step>) -> u32 {
+        steps.into_iter().map(|step| step.sequence + 1).max().unwrap_or(0)
+    }
+}
+
 impl crate::wire::Wire for Step {
     fn put(&self, out: &mut crate::wire::Encoder) -> Result<(), Error> {
         self.sequence.put(out)?;
