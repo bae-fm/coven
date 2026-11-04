@@ -5,6 +5,58 @@ use std::{
     time::{Duration, UNIX_EPOCH},
 };
 
+/// Wait until the last pass, as the app's SQL reads it, is one `expected`
+/// accepts.
+pub(crate) async fn last_pass(
+    handle: &CovenHandle,
+    expected: impl FnMut(&Option<LastPass>) -> bool,
+) -> Option<LastPass> {
+    handle.test_last_pass().wait_for(expected).await
+}
+
+/// Wait for a pass to end synced, where the last pass before it was none,
+/// a failure, or the first after setup.
+pub(crate) async fn synced(handle: &CovenHandle) {
+    last_pass(handle, |last| *last == Some(LastPass::Synced)).await;
+}
+
+/// How many cache files the device keeps.
+pub(crate) fn cached(device: &Device) -> usize {
+    use coven_foundation::files::StoreDirAccess;
+    let cache = device.app.store_dir(&device.store).database_path().parent().unwrap().join("cache");
+    std::fs::read_dir(cache).map_or(0, Iterator::count)
+}
+
+/// The stored path of a file whose record says it is in storage.
+pub(crate) fn stored_path(store: StoreId, file: &FileRef) -> coven_storage::ObjectPath {
+    match file.place() {
+        FilePlace::Cloud { location, .. } => location.path(store),
+        FilePlace::DeviceOnly { .. } => panic!("the file is not stored"),
+    }
+}
+
+/// Stage `bytes` in the app's `files` namespace for the cloud, in row `id`
+/// of `table`.
+pub(crate) async fn stage(
+    device: &Device,
+    table: &'static str,
+    id: &str,
+    bytes: Vec<u8>,
+) -> FileId {
+    let id = id.to_owned();
+    device
+        .handle
+        .test_staged_write(
+            move |batch| Ok(batch.put_file("files", bytes, Place::Cloud)),
+            move |sql, file| {
+                sql.execute(&format!("INSERT INTO {table}(id,file) VALUES(?1,?2)"), (&id, file))?;
+                Ok(file)
+            },
+        )
+        .await
+        .unwrap()
+}
+
 /// Wait for committed writes to land. A pass that captured its queue before
 /// the write can finish afterward, so its finish time cannot confirm upload:
 /// the upload queue itself is followed.

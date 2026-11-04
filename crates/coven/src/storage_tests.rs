@@ -1,5 +1,5 @@
 use super::*;
-use crate::tests::wait_for_sent;
+use crate::tests::{last_pass, synced, wait_for_sent};
 use coven_foundation::progress::RecordingClock;
 use coven_storage::{
     test_utils::{Faults, MemoryStorage},
@@ -316,21 +316,6 @@ fn builder(app: &Coven, clock: ClockRef, storage: Arc<dyn StorageConnector>) -> 
             "notes",
             "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY,body TEXT NOT NULL)",
         )])
-}
-
-/// Wait until the last pass, as the app's SQL reads it, is one `expected`
-/// accepts.
-async fn last_pass(
-    handle: &CovenHandle,
-    expected: impl FnMut(&Option<LastPass>) -> bool,
-) -> Option<LastPass> {
-    handle.test_last_pass().wait_for(expected).await
-}
-
-/// Wait for a pass to end synced, where the last pass before it was none
-/// or a failure.
-async fn synced(handle: &CovenHandle) {
-    last_pass(handle, |last| *last == Some(LastPass::Synced)).await;
 }
 
 /// Wait for a pass that ended synced at `at` or later, by the store's

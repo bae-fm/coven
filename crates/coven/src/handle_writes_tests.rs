@@ -5,7 +5,7 @@
 //! still reads them after the first file's delete, since stored bytes stay
 //! until every other active device has written past the delete or switch
 //! that left them unnamed (§17.10).
-use crate::tests::{wait_for_empty_queue, Device, Network};
+use crate::tests::{cached, wait_for_empty_queue, Device, Network};
 use crate::*;
 use coven_storage::Storage;
 
@@ -20,13 +20,6 @@ fn tables() -> Vec<SyncedTable> {
 
 const SCHEMA: &str = "CREATE TABLE tracks(id TEXT NOT NULL PRIMARY KEY, file TEXT);
     CREATE TABLE gifts(id TEXT NOT NULL PRIMARY KEY, file TEXT, audience TEXT NOT NULL);";
-
-/// How many cache files the device keeps.
-fn cached(device: &Device) -> usize {
-    use coven_foundation::files::StoreDirAccess;
-    let cache = device.app.store_dir(&device.store).database_path().parent().unwrap().join("cache");
-    std::fs::read_dir(cache).map_or(0, Iterator::count)
-}
 
 /// Ana imports a track to the store, then puts it in a Gifts row as a new
 /// file over its bytes. Carol, outside Gifts, makes the store's track

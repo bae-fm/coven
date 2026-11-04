@@ -3,9 +3,8 @@
 //! call leaves, what other devices drop when the switch arrives, the stored
 //! bytes becoming deletion candidates, and two devices making one file
 //! device-only at once.
-use crate::tests::{wait_for_empty_queue, Device, Network};
+use crate::tests::{cached, stored_path, wait_for_empty_queue, Device, Network};
 use crate::*;
-use coven_foundation::files::StoreDirAccess;
 use coven_storage::Storage;
 use std::path::Path;
 use tokio::sync::watch;
@@ -105,19 +104,6 @@ fn names(folder: &Path) -> Vec<String> {
         .collect();
     names.sort();
     names
-}
-
-/// How many cache files the device keeps.
-fn cached(device: &Device) -> usize {
-    let cache = device.app.store_dir(&device.store).database_path().parent().unwrap().join("cache");
-    std::fs::read_dir(cache).map_or(0, Iterator::count)
-}
-
-fn stored_path(store: StoreId, file: &FileRef) -> ObjectPath {
-    match file.place() {
-        FilePlace::Cloud { location, .. } => location.path(store),
-        FilePlace::DeviceOnly { .. } => panic!("the file is not stored"),
-    }
 }
 
 async fn member(device: &Device) -> MemberId {

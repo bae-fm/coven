@@ -4,7 +4,7 @@
 //! trailing one does, and the app's pause leaves it running. The app finds
 //! each trailing upload's move in `coven_uploads` and can cancel it, but
 //! never a bound upload's (§17.3).
-use crate::tests::{file_stored, upload_path, wait_for_sent, Device, Network};
+use crate::tests::{file_stored, stage, upload_path, wait_for_sent, Device, Network};
 use crate::*;
 use coven_storage::test_utils::Faults;
 use std::time::Duration;
@@ -38,23 +38,6 @@ async fn household() -> Network {
     network.sync(0).await;
     network.sync(1).await;
     network
-}
-
-/// Stage `bytes` in the app's `files` namespace for the cloud, in row `id`
-/// of `table`.
-async fn stage(device: &Device, table: &'static str, id: &str, bytes: Vec<u8>) -> FileId {
-    let id = id.to_owned();
-    device
-        .handle
-        .test_staged_write(
-            move |batch| Ok(batch.put_file("files", bytes, Place::Cloud)),
-            move |sql, file| {
-                sql.execute(&format!("INSERT INTO {table}(id,file) VALUES(?1,?2)"), (&id, file))?;
-                Ok(file)
-            },
-        )
-        .await
-        .unwrap()
 }
 
 async fn note(device: &Device, id: &str) {

@@ -1,5 +1,5 @@
 use super::*;
-use crate::tests::{held, wait_for_sent};
+use crate::tests::{held, last_pass, synced, wait_for_sent};
 use coven_storage::{
     test_utils::{MemoryRequest, MemoryStorage},
     Storage,
@@ -63,20 +63,6 @@ fn builder(
             "notes",
             "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY,body TEXT NOT NULL)",
         )])
-}
-
-/// Wait until the last pass, as the app's SQL reads it, is one `expected`
-/// accepts.
-async fn last_pass(
-    handle: &CovenHandle,
-    expected: impl FnMut(&Option<LastPass>) -> bool,
-) -> Option<LastPass> {
-    handle.test_last_pass().wait_for(expected).await
-}
-
-/// Wait for the first pass after setup to end synced.
-async fn synced(handle: &CovenHandle) {
-    last_pass(handle, |last| *last == Some(LastPass::Synced)).await;
 }
 
 async fn uploaded(f: &Fixture, id: &'static str) {

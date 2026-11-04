@@ -1,14 +1,7 @@
+use crate::tests::stored_path;
 use crate::*;
 use coven_foundation::files::StoreDirAccess;
 use std::sync::Arc;
-
-/// The stored path of a file whose record says it is in storage.
-fn stored_path(store: StoreId, file: &FileRef) -> ObjectPath {
-    match file.place() {
-        FilePlace::Cloud { location, .. } => location.path(store),
-        FilePlace::DeviceOnly { .. } => panic!("the file is not stored"),
-    }
-}
 
 /// One synced table whose rows reference app-provided files.
 fn files_table() -> Vec<SyncedTable> {
