@@ -592,7 +592,7 @@ tables = [
 ]
 
 [[database.domains]]
-name = "membership and audiences"
+name = "store state"
 owner = "Database"
 homes = [
     "crates/coven-database/src/store_state_tables.rs",
@@ -605,6 +605,7 @@ tables = [
     "_coven_circles",
     "_coven_devices",
     "_coven_members",
+    "_coven_store",
 ]
 
 [[database.domains]]
@@ -952,7 +953,6 @@ tables = [
     "_coven_references",
     "_coven_row_file_refs",
     "_coven_rows",
-    "_coven_store",
     "_coven_stored_files",
     "_coven_unreferenced_files",
     "_coven_upload_files",

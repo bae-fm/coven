@@ -128,6 +128,21 @@ pub(crate) fn named(database: &DatabaseConnection) -> Result<(String, Slot), DbE
         .ok_or(DbError::DamagedDatabase)
 }
 
+/// Save the name chosen for a local store, which slot 1 will set (§10.3).
+/// Once the applied history has created the store, its name is the one the
+/// slots set.
+pub(crate) fn name_local_creation(
+    database: &DatabaseConnection,
+    store: StoreId,
+    name: &str,
+) -> Result<(), DbError> {
+    database.internal_execute(
+        "INSERT INTO _coven_store(singleton,store,name,named_at,created) VALUES(1,?1,?2,?3,0) ON CONFLICT(singleton) DO UPDATE SET name=excluded.name WHERE created=0",
+        params![store.0.as_bytes().as_slice(), name, 1u64.to_be_bytes().as_slice()],
+    )?;
+    Ok(())
+}
+
 /// Whether the applied history has created the store.
 pub(crate) fn created(database: &DatabaseConnection) -> Result<bool, DbError> {
     database.query_row(

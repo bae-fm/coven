@@ -1,7 +1,17 @@
-//! The tables of committed membership and audience state (§10, §15).
+//! The tables of the store's committed state: its identity and name (§10.3),
+//! membership and audiences (§10, §15).
 
 macro_rules! coven_store_state_tables {
     ($visit:ident) => {
+        $visit!(_coven_store, "
+            CREATE TABLE _coven_store (
+                singleton INTEGER PRIMARY KEY CHECK(singleton=1),
+                store BLOB NOT NULL CHECK(length(store)=16),
+                name TEXT NOT NULL,
+                named_at BLOB NOT NULL CHECK(length(named_at)=8 AND named_at>x'0000000000000000'),
+                created INTEGER NOT NULL CHECK(created IN (0,1))
+            ) STRICT;
+        ");
         $visit!(
             _coven_members,
             "

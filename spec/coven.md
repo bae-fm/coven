@@ -10165,9 +10165,10 @@ shared state.
   module, its `CREATE TABLE` and indexes in a file beside it. The sequence
   claims (§5.1) belong to the claim module, the remote observations committed
   beside app writes to the input database, the published merge state to its
-  own module, and membership and audiences (§10, §15) to the store's state
-  tables. A table only one other module writes is that module's, in a
-  domain of its own, such as the retry deadlines (§6.7) the retry module's.
+  own module, and the store's identity and name, its membership and its
+  audiences (§10, §15) to the store's state tables. A table only one other
+  module writes is that module's, in a domain of its own, such as the retry
+  deadlines (§6.7) the retry module's.
   The tables several modules write, the merge store's rows and cells among
   them, and the cache's, whose triggers keep the pins table, form the
   database's own domain, which every module may write. Each

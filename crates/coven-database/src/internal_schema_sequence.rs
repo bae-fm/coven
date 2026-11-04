@@ -1,17 +1,8 @@
-//! The applied sequence prefix, the store, the migration's losses and what
-//! the sequence settles.
+//! The applied sequence prefix, the migration's losses and what the sequence
+//! settles.
 
 macro_rules! coven_sequence_tables {
     ($visit:ident) => {
-        $visit!(_coven_store, "
-            CREATE TABLE _coven_store (
-                singleton INTEGER PRIMARY KEY CHECK(singleton=1),
-                store BLOB NOT NULL CHECK(length(store)=16),
-                name TEXT NOT NULL,
-                named_at BLOB NOT NULL CHECK(length(named_at)=8 AND named_at>x'0000000000000000'),
-                created INTEGER NOT NULL CHECK(created IN (0,1))
-            ) STRICT;
-        ");
         coven_migration_prefix_tables!($visit);
         $visit!(_coven_migration_losses, "
             CREATE TABLE _coven_migration_losses (

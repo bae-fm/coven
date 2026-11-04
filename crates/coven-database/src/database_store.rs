@@ -10,14 +10,15 @@ impl Database {
         self.call(move |inner| {
             inner.access.with_writer(|writer| {
                 writer.transaction(|db| {
-                    db.internal_execute(
-                        "INSERT INTO _coven_store(singleton,store,name,named_at,created) VALUES(1,?1,?2,?3,0) ON CONFLICT(singleton) DO UPDATE SET name=excluded.name WHERE created=0",
-                        rusqlite::params![inner.access.directory.id().0.as_bytes().as_slice(), name, 1u64.to_be_bytes().as_slice()],
-                    )?;
-                    Ok(())
+                    crate::store_state_tables::name_local_creation(
+                        db,
+                        inner.access.directory.id(),
+                        &name,
+                    )
                 })
             })
-        }).await
+        })
+        .await
     }
 
     /// The name in this device's committed state, including a local creation (E9).
