@@ -67,6 +67,10 @@ struct Checkpoints {
     /// A test's fault, run as each checkpoint's last step begins.
     #[cfg(test)]
     fault: Mutex<Option<Fault>>,
+    /// Where a test hears what each checkpoint's last step did, told while
+    /// the checkpoint still holds the writer.
+    #[cfg(test)]
+    restarts: Mutex<Option<tokio::sync::mpsc::UnboundedSender<WalCheckpoint>>>,
 }
 
 #[cfg(test)]
@@ -102,6 +106,8 @@ impl WalCheckpointer {
             threshold,
             #[cfg(test)]
             fault: Mutex::new(None),
+            #[cfg(test)]
+            restarts: Mutex::new(None),
         });
         let serving = Serving { shared: shared.clone(), handle };
         let thread = std::thread::Builder::new()
@@ -246,7 +252,10 @@ impl Checkpoints {
             let restarted = with_locked(&writer, |_writes| {
                 #[cfg(test)]
                 self.fault()?;
-                connection.wal_checkpoint(CheckpointMode::Restart)
+                let restarted = connection.wal_checkpoint(CheckpointMode::Restart)?;
+                #[cfg(test)]
+                self.report(restarted);
+                Ok::<_, DbError>(restarted)
             })?;
             tracing::debug!(frames = log_frames, ?restarted, "checkpointed the WAL");
             Ok(())
@@ -257,6 +266,18 @@ impl Checkpoints {
     #[cfg(test)]
     fn fault(&self) -> Result<(), DbError> {
         lock_unpoisoned(&self.fault).as_mut().map_or(Ok(()), |f| f())
+    }
+
+    /// Tell a test that asked what the checkpoint's last step did.
+    #[cfg(test)]
+    fn report(&self, restarted: WalCheckpoint) {
+        if let Some(restarts) = lock_unpoisoned(&self.restarts).as_ref() {
+            #[expect(
+                clippy::let_underscore_must_use,
+                reason = "a test that stopped listening has no use for it"
+            )]
+            let _ = restarts.send(restarted);
+        }
     }
 }
 

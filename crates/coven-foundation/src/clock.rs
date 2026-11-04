@@ -139,6 +139,13 @@ fn boot_time() -> Duration {
     Duration::from_nanos(ticks.saturating_mul(100))
 }
 
+/// How long a test waits on an event before failing instead of hanging.
+/// Every wait it bounds ends on the code's own event, so only code that never
+/// sends it reaches this. It is not a measure of speed, so it sits far above
+/// what any step takes on a loaded machine.
+#[cfg(any(test, feature = "test-utils"))]
+pub const HANG_GUARD: Duration = Duration::from_secs(300);
+
 /// `future`'s output, or `None` once `limit` of real time passes first: a
 /// test waiting on the system fails instead of hanging, whatever clock the
 /// store under it reads.

@@ -3,10 +3,10 @@ use crate::{
     CheckpointMode, CovenError, DbError, Migration, SqliteSettings, WalAutocheckpoint,
     WalCheckpoint,
 };
+use coven_foundation::clock::HANG_GUARD;
 use std::num::NonZeroU32;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::Arc;
-use std::time::Duration;
+use std::sync::{Condvar, Mutex};
+use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver};
 
 impl super::WalCheckpointer {
     /// Visit the checkpointer's connection, after any checkpoint in progress.
@@ -25,6 +25,14 @@ impl super::WalCheckpointer {
     /// Run `fault` as each checkpoint takes the writer.
     pub(crate) fn fault(&self, fault: impl FnMut() -> Result<(), crate::DbError> + Send + 'static) {
         *self.shared.fault.lock().unwrap() = Some(Box::new(fault));
+    }
+
+    /// What each checkpoint's last step does from now on, told while the
+    /// checkpoint still holds the writer.
+    pub(crate) fn report_restarts(&self) -> UnboundedReceiver<WalCheckpoint> {
+        let (restarts, reported) = unbounded_channel();
+        *self.shared.restarts.lock().unwrap() = Some(restarts);
+        reported
     }
 }
 
@@ -76,35 +84,75 @@ async fn frames(db: &crate::Database) -> u32 {
     }
 }
 
+/// The frames `checkpointed_at_100_pages` lets the WAL hold not yet copied
+/// before coven checkpoints it.
+const THRESHOLD: u32 = 100;
+
+/// Commit until the WAL holds `THRESHOLD` frames not yet copied, then wait
+/// for what coven's checkpointer tells `told` as it checkpoints them, off
+/// the commit path. The checkpointer tells it while holding the writer, so
+/// whatever `told` holds while the test holds the writer came from an earlier
+/// checkpoint, and the checkpoint the last commit woke tells it next.
+async fn checkpointed<T>(db: &crate::Database, told: &mut UnboundedReceiver<T>) -> T {
+    loop {
+        add(db).await;
+        let past = db.inspect_writer(|writer| {
+            let WalCheckpoint::Ran { log_frames, checkpointed_frames, .. } =
+                writer.wal_checkpoint(CheckpointMode::Noop).unwrap()
+            else {
+                panic!("a NOOP checkpoint between writes reads the WAL");
+            };
+            while told.try_recv().is_ok() {}
+            log_frames - checkpointed_frames >= THRESHOLD
+        });
+        if past {
+            break;
+        }
+    }
+    tokio::time::timeout(HANG_GUARD, told.recv())
+        .await
+        .expect("the checkpointer checkpoints a WAL past its threshold")
+        .expect("the checkpointer runs while the store is open")
+}
+
 /// The writer never checkpoints as it commits; coven's checkpointer does,
 /// off the commit path, once the WAL passes the threshold, and the WAL then
 /// starts over from its beginning, a live query rerunning or not (§4).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn coven_checkpoints_the_wal_past_its_threshold() {
     let store = TestStore::new();
-    let settings = SqliteSettings {
-        wal_autocheckpoint: Some(WalAutocheckpoint::Pages(NonZeroU32::new(100).unwrap())),
-        ..SqliteSettings::default()
-    };
-    let db = blobs(&store, settings).open().await.unwrap();
+    let db = blobs(&store, checkpointed_at_100_pages()).open().await.unwrap();
     db.inspect_writer(|writer| {
         let pages: i64 = writer.query_row("PRAGMA wal_autocheckpoint", [], |r| r.get(0)).unwrap();
         assert_eq!(pages, 0, "the writer never checkpoints as it commits");
     });
+    let mut restarts = db.report_checkpoints();
     let mut query = db.subscribe(|sql| {
         Ok(sql.query_row("SELECT count(*) FROM blobs", [], |r| r.get::<_, i64>(0))?)
     });
     let reader = tokio::spawn(async move { while let Some(Ok(_)) = query.next().await {} });
-    let mut largest = 0;
-    for _ in 0..1000 {
-        add(&db).await;
-        largest = largest.max(frames(&db).await);
-    }
+    tokio::time::timeout(HANG_GUARD, async {
+        let mut started_over = 0;
+        while started_over < 3 {
+            let restarted = checkpointed(&db, &mut restarts).await;
+            let WalCheckpoint::Ran { busy, log_frames, .. } = restarted else {
+                panic!("holding the writer, the checkpoint reads the WAL: {restarted:?}");
+            };
+            assert!(log_frames >= THRESHOLD, "checkpointed at {log_frames} frames");
+            // A rerun that held its snapshot past the readers' wait leaves
+            // the WAL copied, to start over once it grows by the threshold
+            // again.
+            if busy {
+                continue;
+            }
+            add(&db).await;
+            assert!(frames(&db).await < THRESHOLD, "the next commit starts the WAL over");
+            started_over += 1;
+        }
+    })
+    .await
+    .expect("the WAL starts over");
     reader.abort();
-    // 1,000 commits of about 5 frames each would be 5,000 frames without
-    // it. Commits go on while each checkpoint runs, so the WAL passes the
-    // threshold by what they add meanwhile.
-    assert!(largest < 500, "the WAL grew to {largest} frames");
     db.close().await.unwrap();
 }
 
@@ -117,10 +165,10 @@ async fn off_leaves_checkpoints_to_the_app() {
         ..SqliteSettings::default()
     };
     let db = blobs(&store, settings).open().await.unwrap();
+    assert!(!db.checkpoints_its_database(), "no checkpointer runs for the store's database");
     for _ in 0..100 {
         add(&db).await;
     }
-    tokio::time::sleep(Duration::from_millis(50)).await;
     assert!(frames(&db).await >= 400);
     let done = db.checkpoint(CheckpointMode::Truncate).await.unwrap();
     assert!(matches!(done, WalCheckpoint::Ran { busy: false, .. }), "{done:?}");
@@ -162,18 +210,37 @@ fn sqlite_error(code: std::ffi::c_int) -> DbError {
     DbError::Sqlite(rusqlite::Error::SqliteFailure(rusqlite::ffi::Error::new(code), None))
 }
 
-/// Write past the threshold until the checkpointer's failure refuses a
-/// write; then the error a live query reports, after which it ends.
-async fn checkpointer_failure(db: &crate::Database) -> CovenError {
+/// Run `fault` as each checkpoint takes the writer, telling the returned
+/// receiver as it does.
+fn faulted(
+    db: &crate::Database,
+    mut fault: impl FnMut() -> Result<(), DbError> + Send + 'static,
+) -> UnboundedReceiver<()> {
+    let (tried, tries) = unbounded_channel();
+    db.fault_checkpoints(move || {
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "a test that stopped listening has no use for it"
+        )]
+        let _ = tried.send(());
+        fault()
+    });
+    tries
+}
+
+/// Write past the threshold until the checkpoint `fault` fails; then the
+/// error a live query reports, after which it ends, and the write the
+/// failure refuses.
+async fn checkpointer_failure(
+    db: &crate::Database,
+    fault: impl FnMut() -> Result<(), DbError> + Send + 'static,
+) -> CovenError {
+    let mut tries = faulted(db, fault);
     let mut query = db.subscribe(|sql| {
         Ok(sql.query_row("SELECT count(*) FROM blobs", [], |r| r.get::<_, i64>(0))?)
     });
-    let mut writes = 0;
-    while insert(db).await.is_ok() {
-        writes += 1;
-        assert!(writes < 1000, "no checkpoint failed the handle");
-    }
-    let failure = tokio::time::timeout(Duration::from_secs(10), async {
+    checkpointed(db, &mut tries).await;
+    let failure = tokio::time::timeout(HANG_GUARD, async {
         loop {
             match query.next().await {
                 Some(Ok(_)) => (),
@@ -185,6 +252,7 @@ async fn checkpointer_failure(db: &crate::Database) -> CovenError {
     .await
     .expect("the live query reports the failure");
     assert!(query.next().await.is_none(), "the live query ends after the failure");
+    assert!(insert(db).await.is_err(), "the failed handle refuses a write");
     failure
 }
 
@@ -205,10 +273,12 @@ fn panicking_checkpoint_store() {
     runtime.block_on(async {
         let db =
             blobs_in(layout.store_dir(&store), checkpointed_at_100_pages()).open().await.unwrap();
-        db.fault_checkpoints(|| panic!("the checkpoint broke"));
-        for _ in 0..1000 {
-            add(&db).await;
-        }
+        let mut tries = faulted(&db, || panic!("the checkpoint broke"));
+        checkpointed(&db, &mut tries).await;
+        // The panic ends the process before this wait does.
+        tokio::time::timeout(HANG_GUARD, std::future::pending::<()>())
+            .await
+            .expect_err("a pending future never ends");
         panic!("the store stayed open with no checkpointer");
     });
 }
@@ -243,8 +313,8 @@ fn a_panicking_checkpoint_ends_the_process() {
 async fn a_failed_checkpoint_fails_the_handle_with_its_cause() {
     let store = TestStore::new();
     let db = blobs(&store, checkpointed_at_100_pages()).open().await.unwrap();
-    db.fault_checkpoints(|| Err(sqlite_error(rusqlite::ffi::SQLITE_IOERR)));
-    let failure = checkpointer_failure(&db).await;
+    let failure =
+        checkpointer_failure(&db, || Err(sqlite_error(rusqlite::ffi::SQLITE_IOERR))).await;
     let CovenError::Database(DbError::CheckpointFailed(cause)) = &failure else {
         panic!("{failure:?}");
     };
@@ -266,34 +336,49 @@ async fn a_failed_checkpoint_fails_the_handle_with_its_cause() {
 async fn a_busy_checkpoint_is_tried_again() {
     let store = TestStore::new();
     let db = blobs(&store, checkpointed_at_100_pages()).open().await.unwrap();
-    let tries = Arc::new(AtomicUsize::new(0));
-    let counted = tries.clone();
-    db.fault_checkpoints(move || match counted.fetch_add(1, Ordering::SeqCst) {
-        0 => Err(sqlite_error(rusqlite::ffi::SQLITE_BUSY)),
-        1 => Err(sqlite_error(rusqlite::ffi::SQLITE_LOCKED)),
-        _ => Ok(()),
+    let mut tried = 0;
+    let mut tries = faulted(&db, move || {
+        tried += 1;
+        match tried {
+            1 => Err(sqlite_error(rusqlite::ffi::SQLITE_BUSY)),
+            2 => Err(sqlite_error(rusqlite::ffi::SQLITE_LOCKED)),
+            _ => Ok(()),
+        }
     });
-    let mut writes = 0;
-    while tries.load(Ordering::SeqCst) < 3 {
-        add(&db).await;
-        writes += 1;
-        assert!(writes < 1000, "the checkpoint was not tried again");
+    // Each try after the first is the checkpoint tried again.
+    for _ in 0..3 {
+        checkpointed(&db, &mut tries).await;
     }
     db.read(|sql| Ok(sql.query_row("SELECT 1", [], |r| r.get::<_, i64>(0))?)).await.unwrap();
     db.close().await.unwrap();
 }
 
-/// Set once the connection holding SQLite's checkpoint lock waits in its
-/// busy handler; the test sets the second to let it give up.
-static HOLDING: AtomicBool = AtomicBool::new(false);
-static RELEASED: AtomicBool = AtomicBool::new(false);
+/// Where the connection holding SQLite's checkpoint lock stands, as its
+/// busy handler, its thread and the test tell each other through `HOLDER`
+/// and `HOLDER_MOVED`.
+struct Holder {
+    /// Its busy handler is waiting: it holds the lock.
+    holding: bool,
+    /// Its checkpoint returned.
+    finished: bool,
+    /// The test lets its busy handler give up.
+    released: bool,
+}
+
+static HOLDER: Mutex<Holder> =
+    Mutex::new(Holder { holding: false, finished: false, released: false });
+static HOLDER_MOVED: Condvar = Condvar::new();
+
+/// Change where the holder stands, and wake whoever waits on it.
+fn move_holder(change: impl FnOnce(&mut Holder)) {
+    change(&mut HOLDER.lock().unwrap());
+    HOLDER_MOVED.notify_all();
+}
 
 /// A busy handler that waits until the test releases it, then gives up.
 fn wait_for_release(_tries: i32) -> bool {
-    HOLDING.store(true, Ordering::SeqCst);
-    while !RELEASED.load(Ordering::SeqCst) {
-        std::thread::sleep(Duration::from_millis(1));
-    }
+    move_holder(|holder| holder.holding = true);
+    drop(HOLDER_MOVED.wait_while(HOLDER.lock().unwrap(), |holder| !holder.released).unwrap());
     false
 }
 
@@ -303,16 +388,25 @@ fn wait_for_release(_tries: i32) -> bool {
 /// own checkpointer holding the lock gives up at once, so it tries again.
 async fn hold_the_checkpoint_lock(store: &TestStore) -> std::thread::JoinHandle<i64> {
     loop {
+        move_holder(|holder| holder.finished = false);
         let path = store.database_path();
         let holder = std::thread::spawn(move || {
             let mut connection = rusqlite::Connection::open(path).unwrap();
             connection.busy_handler(Some(wait_for_release)).unwrap();
-            connection.query_row("PRAGMA wal_checkpoint(RESTART)", [], |r| r.get(0)).unwrap()
+            let busy =
+                connection.query_row("PRAGMA wal_checkpoint(RESTART)", [], |r| r.get(0)).unwrap();
+            move_holder(|holder| holder.finished = true);
+            busy
         });
-        while !HOLDING.load(Ordering::SeqCst) && !holder.is_finished() {
-            tokio::time::sleep(Duration::from_millis(1)).await;
-        }
-        if HOLDING.load(Ordering::SeqCst) {
+        let holding = tokio::task::spawn_blocking(|| {
+            HOLDER_MOVED
+                .wait_while(HOLDER.lock().unwrap(), |holder| !holder.holding && !holder.finished)
+                .unwrap()
+                .holding
+        })
+        .await
+        .unwrap();
+        if holding {
             return holder;
         }
         holder.join().unwrap();
@@ -328,6 +422,7 @@ async fn hold_the_checkpoint_lock(store: &TestStore) -> std::thread::JoinHandle<
 async fn a_checkpoint_another_connection_holds_off_is_tried_again() {
     let store = TestStore::new();
     let db = blobs(&store, checkpointed_at_100_pages()).open().await.unwrap();
+    let mut restarts = db.report_checkpoints();
     // A reader whose snapshot keeps every later frame in the WAL, so the WAL
     // stays past the threshold however often coven checkpoints.
     let reader = rusqlite::Connection::open(store.database_path()).unwrap();
@@ -344,16 +439,14 @@ async fn a_checkpoint_another_connection_holds_off_is_tried_again() {
     // copying it, which finds the lock held.
     db.checkpoint_now().unwrap();
 
-    RELEASED.store(true, Ordering::SeqCst);
+    move_holder(|holder| holder.released = true);
     assert_eq!(holder.join().unwrap(), 1, "the other checkpoint gave up waiting for the reader");
     reader.execute_batch("COMMIT").unwrap();
     drop(reader);
-    let mut writes = 0;
-    while frames(&db).await >= 100 {
-        add(&db).await;
-        writes += 1;
-        assert!(writes < 100, "coven's checkpoints stopped");
-    }
+    let restarted = checkpointed(&db, &mut restarts).await;
+    assert!(matches!(restarted, WalCheckpoint::Ran { busy: false, .. }), "{restarted:?}");
+    add(&db).await;
+    assert!(frames(&db).await < THRESHOLD, "coven's checkpoints go on");
     db.close().await.unwrap();
 }
 
@@ -365,17 +458,14 @@ fn a_store_outliving_its_opening_runtime_still_checkpoints() {
     let store = TestStore::new();
     let opening = tokio::runtime::Runtime::new().unwrap();
     let db = opening.block_on(blobs(&store, checkpointed_at_100_pages()).open()).unwrap();
+    let mut restarts = db.report_checkpoints();
     drop(opening);
     let runtime = tokio::runtime::Runtime::new().unwrap();
     runtime.block_on(async {
-        let mut writes = 0;
-        // Past the threshold the WAL holds over 100 frames; a checkpoint
-        // starts it over.
-        while writes < 40 || frames(&db).await >= 100 {
-            add(&db).await;
-            writes += 1;
-            assert!(writes < 300, "the WAL grew to {} frames unchecked", frames(&db).await);
-        }
+        let restarted = checkpointed(&db, &mut restarts).await;
+        assert!(matches!(restarted, WalCheckpoint::Ran { busy: false, .. }), "{restarted:?}");
+        add(&db).await;
+        assert!(frames(&db).await < THRESHOLD, "the next commit starts the WAL over");
         db.close().await.unwrap();
     });
 }
