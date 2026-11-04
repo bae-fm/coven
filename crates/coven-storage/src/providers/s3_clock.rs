@@ -99,9 +99,8 @@ impl aws_smithy_async::time::TimeSource for SigningClock {
 }
 
 fn server_time(response: &HttpResponse) -> Option<SystemTime> {
-    use aws_sdk_s3::primitives::{DateTime, DateTimeFormat};
     let date = response.headers().get("date")?;
-    SystemTime::try_from(DateTime::from_str(date.trim(), DateTimeFormat::HttpDate).ok()?).ok()
+    SystemTime::try_from(crate::providers::http::http_date(date)?).ok()
 }
 
 /// The `Code` of an S3 XML error body.

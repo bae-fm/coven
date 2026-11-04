@@ -301,6 +301,12 @@ pub(crate) fn graph_errors(error: &Value) -> impl Iterator<Item = &Value> {
             .filter(|inner| inner.is_object())
     })
 }
+/// An HTTP-date header's time (RFC 9110 §5.6.7), as `Date` and
+/// `Retry-After` give it.
+pub(crate) fn http_date(value: &str) -> Option<aws_sdk_s3::primitives::DateTime> {
+    use aws_sdk_s3::primitives::{DateTime, DateTimeFormat};
+    DateTime::from_str(value.trim(), DateTimeFormat::HttpDate).ok()
+}
 /// Interpret HTTP retry timing using the response's clock, for both HTTP clients.
 pub(crate) fn retry_after_header(value: &str, date: Option<&str>) -> crate::RetryAfter {
     use crate::RetryAfter;
@@ -308,10 +314,7 @@ pub(crate) fn retry_after_header(value: &str, date: Option<&str>) -> crate::Retr
     if let Ok(seconds) = value.trim().parse::<u64>() {
         return RetryAfter::Wait(Duration::from_secs(seconds));
     }
-    let parse = |value: &str| {
-        use aws_sdk_s3::primitives::{DateTime, DateTimeFormat};
-        DateTime::from_str(value.trim(), DateTimeFormat::HttpDate).ok().map(|time| time.secs())
-    };
+    let parse = |value: &str| http_date(value).map(|time| time.secs());
     match (parse(value), date.and_then(parse)) {
         (Some(retry), Some(basis)) => {
             RetryAfter::Wait(Duration::from_secs(retry.saturating_sub(basis).max(0) as u64))
