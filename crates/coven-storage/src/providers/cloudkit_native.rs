@@ -279,14 +279,10 @@ fn modify_with(
                 if let Some(files) = assets.lock().expect("CloudKit assets lock poisoned").take() {
                     for file in files {
                         if let Err(error) = file.close() {
-                            let cleanup = StorageFailure::File.with_source(error);
-                            response = Err(match response {
-                                Ok(_) => cleanup,
-                                Err(operation) => StorageError::Cleanup {
-                                    operation: Box::new(operation),
-                                    cleanup: Box::new(cleanup),
-                                },
-                            });
+                            response = crate::transfer::with_cleanup(
+                                response,
+                                Err(StorageFailure::File.with_source(error)),
+                            );
                         }
                     }
                 }

@@ -92,18 +92,12 @@ pub async fn check_provider(
         }
     }
     .await;
-    let source = match (result, cleanup) {
-        (Ok(()), Ok(())) => return Ok(()),
-        (Ok(()), Err(error)) => {
-            check = StorageCheck::Delete;
-            error
-        }
-        (Err(error), Ok(())) => error,
-        (Err(operation), Err(cleanup)) => {
-            StorageError::Cleanup { operation: Box::new(operation), cleanup: Box::new(cleanup) }
-        }
-    };
-    Err(StorageSetupError::ProviderCheck { check, source })
+    // A check that passed and failed only to delete its object failed deleting.
+    if result.is_ok() && cleanup.is_err() {
+        check = StorageCheck::Delete;
+    }
+    crate::transfer::with_cleanup(result, cleanup)
+        .map_err(|source| StorageSetupError::ProviderCheck { check, source })
 }
 
 #[cfg(test)]
