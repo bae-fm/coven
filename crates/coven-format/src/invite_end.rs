@@ -14,15 +14,14 @@ pub struct InviteEnd {
     pub kept_until: u64,
 }
 
-const KIND: u8 = 37;
+const KIND: u8 = crate::kinds::ENDED_INVITE;
 const LENGTH: usize = 3 + 8;
 
 impl InviteEnd {
     /// The marker's complete bytes: its kind, format and time.
     pub fn encode(&self) -> Vec<u8> {
         let mut bytes = Vec::with_capacity(LENGTH);
-        bytes.push(KIND);
-        bytes.extend_from_slice(&crate::FormatVersion::CURRENT.number().to_be_bytes());
+        bytes.extend_from_slice(&crate::FormatVersion::CURRENT.prefix(KIND));
         bytes.extend_from_slice(&self.kept_until.to_be_bytes());
         bytes
     }

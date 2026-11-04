@@ -17,8 +17,7 @@ impl FloorPrefixEncoder {
     pub fn start(key: KeyId, first: Slot, copies: u32) -> Result<(Self, Vec<u8>), Error> {
         bound(copies as usize, MAX_ITEMS, "floor key copies")?;
         let mut out = Encoder::new();
-        39u8.put(&mut out)?;
-        crate::FORMAT_VERSION.put(&mut out)?;
+        out.bytes(&crate::FormatVersion::CURRENT.prefix(crate::kinds::FLOOR))?;
         key.put(&mut out)?;
         first.put(&mut out)?;
         copies.put(&mut out)?;
@@ -53,7 +52,7 @@ impl FloorPrefixDecoder {
     pub const HEADER_LENGTH: usize = 31;
     /// Read exactly the initial routing and bounded copy count.
     pub fn start(bytes: &[u8]) -> Result<Self, Error> {
-        crate::sealed::prefix(bytes, 39)?;
+        crate::sealed::prefix(bytes, crate::kinds::FLOOR)?;
         let mut input = Decoder::new(&bytes[3..])?;
         let key = KeyId::get(&mut input)?;
         let first = Slot::get(&mut input)?;

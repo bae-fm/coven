@@ -12,16 +12,13 @@ use crate::error::{exact_length, Error};
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DeviceGone;
 
-const KIND: u8 = 40;
+const KIND: u8 = crate::kinds::GONE_DEVICE;
 const LENGTH: usize = 3;
 
 impl DeviceGone {
     /// The marker's complete bytes: its kind and format.
     pub fn encode(&self) -> Vec<u8> {
-        let mut bytes = Vec::with_capacity(LENGTH);
-        bytes.push(KIND);
-        bytes.extend_from_slice(&crate::FormatVersion::CURRENT.number().to_be_bytes());
-        bytes
+        crate::FormatVersion::CURRENT.prefix(KIND).to_vec()
     }
 
     /// Read a marker. Bytes of another kind, such as a join request or an

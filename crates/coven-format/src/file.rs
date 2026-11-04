@@ -7,7 +7,7 @@ use coven_crypto::{CryptoError, FileKey, FILE_CHUNK_TAG_LEN};
 /// Bytes before the first file chunk: kind, version and file size.
 pub const FILE_HEADER_LEN: usize = 11;
 
-/// Validated kind-38 cleartext header. It is authenticated by every file chunk.
+/// Validated cleartext header. It is authenticated by every file chunk.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct FileHeader {
     size: u64,
@@ -21,7 +21,7 @@ impl FileHeader {
 
     /// Decode exactly the 11-byte header, without reading any ciphertext.
     pub fn decode(bytes: &[u8]) -> Result<Self, Error> {
-        crate::sealed::prefix(bytes, 38)?;
+        crate::sealed::prefix(bytes, crate::kinds::FILE)?;
         exact_length(bytes.len(), FILE_HEADER_LEN)?;
         Ok(Self::new(u64::from_be_bytes(bytes[3..11].try_into().expect("eight bytes"))))
     }
@@ -29,8 +29,7 @@ impl FileHeader {
     /// Encode kind, version and size, all integers big-endian.
     pub fn encode(&self) -> [u8; FILE_HEADER_LEN] {
         let mut bytes = [0; FILE_HEADER_LEN];
-        bytes[0] = 38;
-        bytes[1..3].copy_from_slice(&crate::FORMAT_VERSION.to_be_bytes());
+        bytes[..3].copy_from_slice(&crate::FormatVersion::CURRENT.prefix(crate::kinds::FILE));
         bytes[3..].copy_from_slice(&self.size.to_be_bytes());
         bytes
     }

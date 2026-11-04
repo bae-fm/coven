@@ -106,8 +106,7 @@ impl WriteObjectPrefix {
     pub fn encode(&self) -> Result<Vec<u8>, Error> {
         let crate::FormatVersion::V1 = self.format;
         let mut out = Encoder::new();
-        32u8.put(&mut out)?;
-        self.format.number().put(&mut out)?;
+        out.bytes(&self.format.prefix(crate::kinds::INNER_WRITE))?;
         self.store_key.put(&mut out)?;
         self.part_keys.put(&mut out)?;
         Ok(out.bytes)
@@ -116,7 +115,7 @@ impl WriteObjectPrefix {
     /// Determine the complete prefix size from its first 23 bytes, before
     /// allocating the counted key list. This is not a plaintext frame prefix.
     pub fn length(bytes: &[u8]) -> Result<usize, Error> {
-        sealed::prefix(bytes, 32)?;
+        sealed::prefix(bytes, crate::kinds::INNER_WRITE)?;
         let count = bytes.get(19..23).ok_or(Error::Truncated)?;
         let count = u32::from_be_bytes(count.try_into().expect("four bytes")) as usize;
         Self::encoded_length(count)

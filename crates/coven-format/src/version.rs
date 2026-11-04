@@ -20,6 +20,12 @@ impl FormatVersion {
         }
     }
 
+    /// The three clear bytes that start every stored object: `kind | version`.
+    pub(crate) const fn prefix(self, kind: u8) -> [u8; 3] {
+        let [high, low] = self.number().to_be_bytes();
+        [kind, high, low]
+    }
+
     /// Read the format from a clear `kind | version` prefix, before parsing
     /// version-specific fields. The object's decoder checks the kind separately.
     pub fn decode(prefix: &[u8]) -> Result<Self, Error> {

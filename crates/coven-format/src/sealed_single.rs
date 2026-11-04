@@ -18,7 +18,7 @@ impl SingleChunkPrefix {
     }
     /// Encode in the recorded format.
     pub fn encode_in(&self, format: crate::FormatVersion) -> Result<Vec<u8>, Error> {
-        Ok(vec![36, (format.number() >> 8) as u8, format.number() as u8])
+        Ok(format.prefix(crate::kinds::JOIN_REQUEST).to_vec())
     }
     /// Frame one sealed plaintext frame, before its signature.
     pub fn encode_chunk(&self, chunk: &[u8]) -> Result<Vec<u8>, Error> {
@@ -51,7 +51,7 @@ pub enum SingleChunkObject<'a> {
 impl<'a> SingleChunkObject<'a> {
     /// Decode exactly one join-request envelope.
     pub fn decode(bytes: &'a [u8]) -> Result<Self, Error> {
-        sealed::prefix(bytes, 36)?;
+        sealed::prefix(bytes, crate::kinds::JOIN_REQUEST)?;
         let body = &bytes[3..];
         let length = sealed::chunk_length(body, MAX_OBJECT)?;
         let chunk = body.get(4..length).ok_or(Error::Truncated)?;

@@ -284,9 +284,15 @@ pub fn decode_write_header(bytes: &[u8]) -> Result<crate::write::WriteHeader, Er
 /// Decoding with `WriteFrame::decode` checks it again before it is reapplied.
 pub fn encode_write_frame(value: &crate::dismissal::WriteFrame) -> Result<Vec<u8>, Error> {
     match value {
-        crate::dismissal::WriteFrame::Change(row) => crate::encode_frame(2, row),
-        crate::dismissal::WriteFrame::Execution(execution) => crate::encode_frame(13, execution),
-        crate::dismissal::WriteFrame::Dismissal(dismissal) => crate::encode_frame(3, dismissal),
+        crate::dismissal::WriteFrame::Change(row) => {
+            crate::encode_frame(crate::kinds::ROW_CHANGE, row)
+        }
+        crate::dismissal::WriteFrame::Execution(execution) => {
+            crate::encode_frame(crate::kinds::ROW_EXECUTION, execution)
+        }
+        crate::dismissal::WriteFrame::Dismissal(dismissal) => {
+            crate::encode_frame(crate::kinds::DISMISSAL, dismissal)
+        }
     }
 }
 

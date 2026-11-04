@@ -36,8 +36,7 @@ impl SnapshotObjectPrefix {
     /// Encode kind, format, routing, coverage and purpose.
     pub fn encode(&self) -> Result<Vec<u8>, Error> {
         let mut out = Encoder::new();
-        34u8.put(&mut out)?;
-        crate::FORMAT_VERSION.put(&mut out)?;
+        out.bytes(&crate::FormatVersion::CURRENT.prefix(crate::kinds::SNAPSHOT))?;
         self.audience.put(&mut out)?;
         self.key.put(&mut out)?;
         self.covers.put(&mut out)?;
@@ -46,7 +45,7 @@ impl SnapshotObjectPrefix {
     }
     /// Determine the bounded prefix length without allocation.
     pub fn length(bytes: &[u8]) -> Result<usize, Error> {
-        sealed::prefix(bytes, 34)?;
+        sealed::prefix(bytes, crate::kinds::SNAPSHOT)?;
         let purpose = match *bytes.get(3).ok_or(Error::Truncated)? {
             0 => 28,
             1 => 44,

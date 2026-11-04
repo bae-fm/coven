@@ -290,15 +290,13 @@ impl StoreChange {
     /// Encode the one bounded kind-4 admin frame (D6).
     pub fn encode(&self) -> Result<Vec<u8>, Error> {
         self.validate()?;
-        crate::encode_frame(4, self)
+        crate::encode_frame(crate::kinds::ADMIN, self)
     }
 
     /// Decode exactly one admin frame. Slot-dependent authorization is separate.
     pub fn decode(bytes: &[u8]) -> Result<Self, Error> {
-        let (kind, mut input) = crate::wire::decode_frame(bytes)?;
-        require(kind == 4, "admin frame", Rule::Kind)?;
-        let change = Self::get(&mut input)?;
-        input.finish()?;
+        let change: Self =
+            crate::wire::decode_frame_value(bytes, crate::kinds::ADMIN, "admin frame")?;
         change.validate()?;
         Ok(change)
     }

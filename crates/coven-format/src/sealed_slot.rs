@@ -82,8 +82,7 @@ impl SlotObjectPrefix {
     }
     fn start(&self) -> Result<Encoder, Error> {
         let mut out = Encoder::new();
-        33u8.put(&mut out)?;
-        self.format.number().put(&mut out)?;
+        out.bytes(&self.format.prefix(crate::kinds::SEQUENCE_SLOT))?;
         self.kind.tag().put(&mut out)?;
         self.key.put(&mut out)?;
         Ok(out)
@@ -96,8 +95,7 @@ impl SlotObjectPrefix {
         routing: &KeyCopyPrefix,
     ) -> Result<Vec<u8>, Error> {
         let mut out = Encoder::new();
-        33u8.put(&mut out)?;
-        format.number().put(&mut out)?;
+        out.bytes(&format.prefix(crate::kinds::SEQUENCE_SLOT))?;
         2u8.put(&mut out)?;
         key.put(&mut out)?;
         1u8.put(&mut out)?;
@@ -107,7 +105,7 @@ impl SlotObjectPrefix {
     /// Bound the clear prefix before reading its box. No length supplied by a
     /// peer can enlarge the fixed store/circle box sizes.
     pub fn length(bytes: &[u8]) -> Result<usize, Error> {
-        sealed::prefix(bytes, 33)?;
+        sealed::prefix(bytes, crate::kinds::SEQUENCE_SLOT)?;
         let kind = *bytes.get(3).ok_or(Error::Truncated)?;
         require(kind <= 3, "slot kind", Rule::Kind)?;
         let copy = *bytes.get(Self::FIXED_LEN - 1).ok_or(Error::Truncated)?;

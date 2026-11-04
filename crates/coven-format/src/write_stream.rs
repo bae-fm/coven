@@ -3,7 +3,7 @@
 use crate::chunks::{FrameDecoder, PlaintextChunks, CHUNK_SIZE};
 use crate::dismissal::WriteFrame;
 use crate::error::{require, Error, Rule};
-use crate::wire::{decode_frame, wire_struct, Wire};
+use crate::wire::{decode_frame_value, wire_struct};
 use crate::write::{WriteHeader, WriteRecord};
 use crate::{encode_frame, FRAME_PREFIX_LEN};
 use coven_merge::{Audience, RowId, WriteId};
@@ -49,15 +49,13 @@ impl WriteHeaderFrame {
     /// Validate and encode the bounded header frame.
     pub fn encode(&self) -> Result<Vec<u8>, Error> {
         self.validate()?;
-        encode_frame(1, self)
+        encode_frame(crate::kinds::WRITE_HEADER, self)
     }
 
     /// Decode exactly one header, refusing trailing bytes and invalid counts.
     pub fn decode(bytes: &[u8]) -> Result<Self, Error> {
-        let (kind, mut input) = decode_frame(bytes)?;
-        require(kind == 1, "write header kind", Rule::Kind)?;
-        let header = Self::get(&mut input)?;
-        input.finish()?;
+        let header: Self =
+            decode_frame_value(bytes, crate::kinds::WRITE_HEADER, "write header kind")?;
         header.validate()?;
         Ok(header)
     }

@@ -4,7 +4,7 @@ use crate::admin::{SnapshotId, StoreChange};
 use crate::error::{require, Error, Rule};
 use crate::path::ObjectPath;
 use crate::value::{positive, Slot};
-use crate::wire::{decode_frame, wire_struct, Decoder, Encoder, Wire};
+use crate::wire::{decode_frame, decode_frame_value, wire_struct, Decoder, Encoder, Wire};
 use coven_foundation::id_source::{DeviceId, MemberId};
 
 /// Complete limit for an admin, key-copy or announcement slot (D2).
@@ -31,15 +31,12 @@ impl SlotHeader {
     /// Encode the kind-14 frame, checking its path binding.
     pub fn encode(&self, path: &ObjectPath) -> Result<Vec<u8>, Error> {
         self.validate_at(path)?;
-        crate::encode_frame(14, self)
+        crate::encode_frame(crate::kinds::SLOT_HEADER, self)
     }
 
     /// Decode exactly the kind-14 frame and check its path binding.
     pub fn decode(bytes: &[u8], path: &ObjectPath) -> Result<Self, Error> {
-        let (kind, mut input) = decode_frame(bytes)?;
-        require(kind == 14, "slot header", Rule::Kind)?;
-        let header = Self::get(&mut input)?;
-        input.finish()?;
+        let header: Self = decode_frame_value(bytes, crate::kinds::SLOT_HEADER, "slot header")?;
         header.validate_at(path)?;
         Ok(header)
     }
@@ -122,14 +119,15 @@ impl SnapshotAnnouncement {
     /// Encode the announcement at its claimed slot.
     pub fn encode(&self, slot: Slot) -> Result<Vec<u8>, Error> {
         self.validate_at(slot)?;
-        crate::encode_frame(15, self)
+        crate::encode_frame(crate::kinds::SNAPSHOT_ANNOUNCEMENT, self)
     }
     /// Decode exactly one announcement and check coverage precedes its slot.
     pub fn decode(bytes: &[u8], slot: Slot) -> Result<Self, Error> {
-        let (kind, mut input) = decode_frame(bytes)?;
-        require(kind == 15, "snapshot announcement", Rule::Kind)?;
-        let announcement = Self::get(&mut input)?;
-        input.finish()?;
+        let announcement: Self = decode_frame_value(
+            bytes,
+            crate::kinds::SNAPSHOT_ANNOUNCEMENT,
+            "snapshot announcement",
+        )?;
         announcement.validate_at(slot)?;
         Ok(announcement)
     }
@@ -160,7 +158,7 @@ impl SlotFrame {
                 check_admin(change, header, path)?;
                 change.encode()?
             }
-            Self::KeyCopy => crate::encode_frame_with(16, |_| Ok(()))?,
+            Self::KeyCopy => crate::encode_frame_with(crate::kinds::KEY_COPY_ACK, |_| Ok(()))?,
             Self::Announcement(announcement) => announcement.encode(slot)?,
         };
         bytes.extend_from_slice(&frame);
@@ -174,16 +172,15 @@ impl SlotFrame {
         let frame = bytes.get(length..).ok_or(Error::Truncated)?;
         let (kind, input) = decode_frame(frame)?;
         let body = match kind {
-            4 => {
+            crate::kinds::ADMIN => {
                 let change = StoreChange::decode(frame)?;
                 check_admin(&change, &header, path)?;
                 Self::Admin(change)
             }
-            15 => Self::Announcement(SnapshotAnnouncement::decode(
-                frame,
-                path.slot_number().expect("checked path"),
-            )?),
-            16 => {
+            crate::kinds::SNAPSHOT_ANNOUNCEMENT => Self::Announcement(
+                SnapshotAnnouncement::decode(frame, path.slot_number().expect("checked path"))?,
+            ),
+            crate::kinds::KEY_COPY_ACK => {
                 input.finish()?;
                 Self::KeyCopy
             }

@@ -19,6 +19,7 @@ pub mod file_reference;
 pub mod floor;
 pub mod invite_end;
 pub mod key;
+mod kinds;
 pub mod loss;
 pub mod merge_fields;
 mod merge_wire;
@@ -83,11 +84,10 @@ impl Object {
         self.validate()?;
         let FormatVersion::V1 = format;
         match self {
-            Self::Admin(v) => {
-                let bytes = encode_frame_in(4, format, |out| v.put(out))?;
-                Ok(bytes)
+            Self::Admin(v) => encode_frame_in(kinds::ADMIN, format, |out| v.put(out)),
+            Self::JoinRequest(v) => {
+                encode_frame_in(kinds::JOIN_REQUEST_FRAME, format, |out| v.put(out))
             }
-            Self::JoinRequest(v) => encode_frame_in(9, format, |out| v.put(out)),
         }
     }
     /// Decodes exactly one bounded frame, refusing unknown tags/versions, trailing
@@ -96,8 +96,8 @@ impl Object {
     pub fn decode(bytes: &[u8]) -> Result<Self, Error> {
         let (kind, mut input) = decode_frame(bytes)?;
         let object = match kind {
-            4 => Self::Admin(Wire::get(&mut input)?),
-            9 => Self::JoinRequest(Wire::get(&mut input)?),
+            kinds::ADMIN => Self::Admin(Wire::get(&mut input)?),
+            kinds::JOIN_REQUEST_FRAME => Self::JoinRequest(Wire::get(&mut input)?),
             tag => return Err(Error::UnknownTag { field: "object kind", tag }),
         };
         input.finish()?;
@@ -117,7 +117,7 @@ impl Object {
 /// are ignored here; [`Object::decode`] requires exactly one complete frame.
 pub fn frame_length(prefix: &[u8]) -> Result<usize, Error> {
     let bytes = prefix.get(..3).ok_or(Error::Truncated)?;
-    if !matches!(bytes[0], 1..=7 | 9..=17) {
+    if !kinds::is_frame(bytes[0]) {
         return Err(Error::UnknownTag { field: "object kind", tag: bytes[0] });
     }
     let FormatVersion::V1 = FormatVersion::decode(bytes)?;
@@ -138,15 +138,24 @@ pub(crate) fn encode_frame_with(
     encode_frame_in(kind, FormatVersion::CURRENT, put)
 }
 
+/// The seven clear bytes that start a frame: `kind | version | payload length`.
+pub(crate) fn frame_prefix(
+    kind: u8,
+    format: FormatVersion,
+    payload: u32,
+) -> [u8; FRAME_PREFIX_LEN] {
+    let [a, b, c] = format.prefix(kind);
+    let [d, e, f, g] = payload.to_be_bytes();
+    [a, b, c, d, e, f, g]
+}
+
 fn encode_frame_in(
     kind: u8,
     format: FormatVersion,
     put: impl FnOnce(&mut Encoder) -> Result<(), Error>,
 ) -> Result<Vec<u8>, Error> {
     let mut out = Encoder::new();
-    kind.put(&mut out)?;
-    format.number().put(&mut out)?;
-    0u32.put(&mut out)?;
+    out.bytes(&frame_prefix(kind, format, 0))?;
     put(&mut out)?;
     let size = (out.bytes.len() - FRAME_PREFIX_LEN) as u32;
     out.bytes[3..7].copy_from_slice(&size.to_be_bytes());

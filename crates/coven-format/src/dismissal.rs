@@ -2,7 +2,7 @@
 
 use crate::error::{require, Error, Rule};
 use crate::value::{name, positive, row};
-use crate::wire::{decode_frame, wire_struct, Decoder, Encoder, Wire};
+use crate::wire::{decode_frame, decode_frame_value, wire_struct, Decoder, Encoder, Wire};
 use coven_merge::{RowId, WriteId, WritePast};
 
 /// What the author acknowledged. Empty frozen rows have no cell to name.
@@ -49,15 +49,12 @@ impl Dismissal {
     /// Encode a bounded kind-3 dismissal frame.
     pub fn encode(&self) -> Result<Vec<u8>, Error> {
         self.validate()?;
-        crate::encode_frame(3, self)
+        crate::encode_frame(crate::kinds::DISMISSAL, self)
     }
 
     /// Decode exactly one dismissal, checking names and write identity.
     pub fn decode(bytes: &[u8]) -> Result<Self, Error> {
-        let (kind, mut input) = decode_frame(bytes)?;
-        require(kind == 3, "dismissal kind", Rule::Kind)?;
-        let dismissal = Self::get(&mut input)?;
-        input.finish()?;
+        let dismissal: Self = decode_frame_value(bytes, crate::kinds::DISMISSAL, "dismissal kind")?;
         dismissal.validate()?;
         Ok(dismissal)
     }
@@ -102,9 +99,11 @@ impl WriteFrame {
     pub fn decode(bytes: &[u8]) -> Result<Self, Error> {
         let (kind, _) = decode_frame(bytes)?;
         match kind {
-            2 => crate::write::RowChange::decode(bytes).map(Self::Change),
-            3 => Dismissal::decode(bytes).map(Self::Dismissal),
-            13 => crate::write::RowExecution::decode(bytes).map(Self::Execution),
+            crate::kinds::ROW_CHANGE => crate::write::RowChange::decode(bytes).map(Self::Change),
+            crate::kinds::DISMISSAL => Dismissal::decode(bytes).map(Self::Dismissal),
+            crate::kinds::ROW_EXECUTION => {
+                crate::write::RowExecution::decode(bytes).map(Self::Execution)
+            }
             tag => Err(Error::UnknownTag { field: "write record kind", tag }),
         }
     }

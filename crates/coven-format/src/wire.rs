@@ -77,6 +77,30 @@ pub(crate) fn decode_frame(bytes: &[u8]) -> Result<(u8, Decoder<'_>), Error> {
     Ok((bytes[0], Decoder::new(&bytes[crate::FRAME_PREFIX_LEN..])?))
 }
 
+/// Decode one frame that must be of `kind` and return its payload reader;
+/// `what` names the frame in the refusal.
+pub(crate) fn decode_frame_of<'a>(
+    bytes: &'a [u8],
+    kind: u8,
+    what: &'static str,
+) -> Result<Decoder<'a>, Error> {
+    let (found, input) = decode_frame(bytes)?;
+    require(found == kind, what, Rule::Kind)?;
+    Ok(input)
+}
+
+/// Decode one frame of `kind` holding exactly one `T`.
+pub(crate) fn decode_frame_value<T: Wire>(
+    bytes: &[u8],
+    kind: u8,
+    what: &'static str,
+) -> Result<T, Error> {
+    let mut input = decode_frame_of(bytes, kind, what)?;
+    let value = T::get(&mut input)?;
+    input.finish()?;
+    Ok(value)
+}
+
 macro_rules! integer {
     ($($ty:ty),*) => { $(
         impl Wire for $ty {

@@ -4,7 +4,9 @@ use crate::error::{require, Error, Rule};
 use crate::path::ObjectPath;
 use crate::sequence::MAX_BOUNDED_SLOT;
 use crate::value::Slot;
-use crate::wire::{decode_frame, get_blob, put_blob, wire_struct, Decoder, Encoder, Wire};
+use crate::wire::{
+    decode_frame, decode_frame_value, get_blob, put_blob, wire_struct, Decoder, Encoder, Wire,
+};
 use coven_foundation::id_source::{DeviceId, StoreId};
 use std::collections::BTreeSet;
 use std::num::NonZeroU64;
@@ -72,14 +74,11 @@ impl FloorHeader {
     /// Encode the kind-12 header frame.
     pub fn encode(&self) -> Result<Vec<u8>, Error> {
         self.validate()?;
-        crate::encode_frame(12, self)
+        crate::encode_frame(crate::kinds::FLOOR_HEADER, self)
     }
     /// Decode exactly the kind-12 header frame.
     pub fn decode(bytes: &[u8]) -> Result<Self, Error> {
-        let (kind, mut input) = decode_frame(bytes)?;
-        require(kind == 12, "floor header", Rule::Kind)?;
-        let header = Self::get(&mut input)?;
-        input.finish()?;
+        let header: Self = decode_frame_value(bytes, crate::kinds::FLOOR_HEADER, "floor header")?;
         header.validate()?;
         Ok(header)
     }
@@ -119,7 +118,7 @@ impl FloorFrames {
     }
     /// Encode the next original announcement, checking header order.
     pub fn announcement(&mut self, slot: &OriginalSlot) -> Result<Vec<u8>, Error> {
-        let bytes = crate::encode_frame(6, slot)?;
+        let bytes = crate::encode_frame(crate::kinds::SNAPSHOT_RECORD, slot)?;
         self.accept(slot)?;
         Ok(bytes)
     }
@@ -131,12 +130,12 @@ impl FloorFrames {
             Rule::SnapshotSequence,
         )?;
         self.ended = true;
-        crate::encode_frame_with(7, |_| Ok(()))
+        crate::encode_frame_with(crate::kinds::SNAPSHOT_END, |_| Ok(()))
     }
     /// Decode one announcement or the end marker, preserving exact evidence.
     pub fn frame(&mut self, bytes: &[u8]) -> Result<Option<OriginalSlot>, Error> {
         let (kind, mut input) = decode_frame(bytes)?;
-        if kind == 7 {
+        if kind == crate::kinds::SNAPSHOT_END {
             input.finish()?;
             require(
                 !self.ended && self.next == self.header.snapshots.len(),
@@ -146,7 +145,7 @@ impl FloorFrames {
             self.ended = true;
             return Ok(None);
         }
-        require(kind == 6, "floor announcement", Rule::Kind)?;
+        require(kind == crate::kinds::SNAPSHOT_RECORD, "floor announcement", Rule::Kind)?;
         let slot = OriginalSlot::get(&mut input)?;
         input.finish()?;
         self.accept(&slot)?;

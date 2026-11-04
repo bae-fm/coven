@@ -2,9 +2,10 @@
 
 use crate::code_fields::MAX_STORAGE;
 use crate::error::{bound, require, Error, Rule};
+use crate::kinds;
 use crate::value::name;
-use crate::wire::{decode_frame, Decoder, Wire};
-use crate::{FORMAT_VERSION, FRAME_PREFIX_LEN};
+use crate::wire::{decode_frame_of, Decoder, Wire};
+use crate::{frame_prefix, FormatVersion, FRAME_PREFIX_LEN};
 use coven_crypto::{InviteSecret, MemberKeys, SecretBytes};
 use coven_foundation::id_source::{DeviceId, InviteId, KeyId, MemberId, StoreId};
 use zeroize::Zeroizing;
@@ -35,7 +36,7 @@ impl RestoreCode {
     pub fn to_bytes(&self) -> Result<Zeroizing<Vec<u8>>, Error> {
         let keys = self.member_keys.to_secret_bytes();
         encode_code(
-            10,
+            kinds::RESTORE_CODE,
             self.store,
             &[
                 self.member.0.as_bytes(),
@@ -48,8 +49,7 @@ impl RestoreCode {
     /// Decode a borrowed frame; every owned copy of private material erases on drop.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, Error> {
         bound(bytes.len() + 4, MAX_CODE_BYTES, "code bytes")?;
-        let (kind, mut input) = decode_frame(bytes)?;
-        require(kind == 10, "restore code kind", Rule::Kind)?;
+        let mut input = decode_frame_of(bytes, kinds::RESTORE_CODE, "restore code kind")?;
         let store = Wire::get(&mut input)?;
         let member = Wire::get(&mut input)?;
         let keys_len = u32::get(&mut input)? as usize;
@@ -103,9 +103,11 @@ impl KeychainRestoreCode {
         let size = FRAME_PREFIX_LEN + 4 + label.len() + 8 + 4 + code.len();
         let mut bytes = Zeroizing::new(Vec::new());
         bytes.try_reserve_exact(size)?;
-        bytes.push(17);
-        bytes.extend_from_slice(&FORMAT_VERSION.to_be_bytes());
-        bytes.extend_from_slice(&((size - FRAME_PREFIX_LEN) as u32).to_be_bytes());
+        bytes.extend_from_slice(&frame_prefix(
+            kinds::SAVED_RESTORE_CODE,
+            FormatVersion::CURRENT,
+            (size - FRAME_PREFIX_LEN) as u32,
+        ));
         bytes.extend_from_slice(&(label.len() as u32).to_be_bytes());
         bytes.extend_from_slice(label.as_bytes());
         bytes.extend_from_slice(&named_at.to_be_bytes());
@@ -117,8 +119,8 @@ impl KeychainRestoreCode {
     /// Decode a borrowed frame; every owned copy of private material erases on drop.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, Error> {
         bound(bytes.len(), MAX_KEYCHAIN_BYTES, "saved code bytes")?;
-        let (kind, mut input) = decode_frame(bytes)?;
-        require(kind == 17, "saved restore code kind", Rule::Kind)?;
+        let mut input =
+            decode_frame_of(bytes, kinds::SAVED_RESTORE_CODE, "saved restore code kind")?;
         let label = crate::wire::get_name(&mut input)?;
         let named_at = u64::get(&mut input)?;
         require(named_at > 0, "name slot", Rule::Required)?;
@@ -217,7 +219,7 @@ impl InviteCode {
             None => vec![0],
         };
         encode_code(
-            11,
+            kinds::INVITE_CODE,
             self.store,
             &[
                 &(self.name.len() as u32).to_be_bytes(),
@@ -238,8 +240,7 @@ impl InviteCode {
     /// Decode a borrowed frame; every owned secret buffer erases on drop.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, Error> {
         bound(bytes.len() + 4, MAX_CODE_BYTES, "code bytes")?;
-        let (kind, mut input) = decode_frame(bytes)?;
-        require(kind == 11, "invite code kind", Rule::Kind)?;
+        let mut input = decode_frame_of(bytes, kinds::INVITE_CODE, "invite code kind")?;
         let store = Wire::get(&mut input)?;
         let label = crate::wire::get_name(&mut input)?;
         let invitee = match u8::get(&mut input)? {
@@ -311,9 +312,11 @@ fn encode_code(
     bound(size + 4, MAX_CODE_BYTES, "code bytes")?;
     let mut bytes = Zeroizing::new(Vec::new());
     bytes.try_reserve_exact(size)?;
-    bytes.push(kind);
-    bytes.extend_from_slice(&FORMAT_VERSION.to_be_bytes());
-    bytes.extend_from_slice(&((size - FRAME_PREFIX_LEN) as u32).to_be_bytes());
+    bytes.extend_from_slice(&frame_prefix(
+        kind,
+        FormatVersion::CURRENT,
+        (size - FRAME_PREFIX_LEN) as u32,
+    ));
     bytes.extend_from_slice(store.0.as_bytes());
     for part in material {
         bytes.extend_from_slice(part);

@@ -4,10 +4,11 @@
 use crate::admin::SnapshotId;
 use crate::encode_frame_with;
 use crate::error::{require, Error, Rule};
+use crate::kinds;
 use crate::loss::{Loss, LossCause, LossIdentity};
 use crate::snapshot_rows::*;
 use crate::value::{name, positive, Slot};
-use crate::wire::{decode_frame, Decoder, Encoder, Wire};
+use crate::wire::{decode_frame, decode_frame_of, Decoder, Encoder, Wire};
 use coven_merge::{RowId, WriteId, WriteOracle};
 
 /// Snapshot metadata assembled from its plaintext header and sealed prefix.
@@ -183,8 +184,7 @@ impl SnapshotRecord {
     where
         O::Error: From<Error>,
     {
-        let (kind, mut input) = decode_frame(frame)?;
-        require(kind == 6, "snapshot record kind", Rule::Kind)?;
+        let mut input = decode_frame_of(frame, kinds::SNAPSHOT_RECORD, "snapshot record kind")?;
         let record = Self::read(&mut input, oracle)?;
         input.finish()?;
         Ok(record)
@@ -421,7 +421,7 @@ impl SnapshotEncoder {
     /// Start a snapshot and return its header frame.
     pub fn start(header: SnapshotHeader) -> Result<(Self, Vec<u8>), Error> {
         header.validate()?;
-        let bytes = encode_frame_with(5, |out| {
+        let bytes = encode_frame_with(kinds::SNAPSHOT_HEADER, |out| {
             header.id.put(out)?;
             header.schema_version.put(out)?;
             header.counts.put(out)
@@ -431,13 +431,13 @@ impl SnapshotEncoder {
     /// Validate and encode a record. Failure leaves the cursor unchanged.
     pub fn record(&mut self, record: SnapshotRecord) -> Result<Vec<u8>, Error> {
         record.validate()?;
-        let bytes = encode_frame_with(6, |out| record.put(out))?;
+        let bytes = encode_frame_with(kinds::SNAPSHOT_RECORD, |out| record.put(out))?;
         self.0.accept(&record)?;
         Ok(bytes)
     }
     /// Emit the required end marker after all declared records.
     pub fn finish(&mut self) -> Result<Vec<u8>, Error> {
-        let bytes = encode_frame_with(7, |_| Ok(()))?;
+        let bytes = encode_frame_with(kinds::SNAPSHOT_END, |_| Ok(()))?;
         self.0.end()?;
         Ok(bytes)
     }
@@ -459,12 +459,12 @@ impl SnapshotDecoder {
     /// authenticated snapshot with `frame` before installing its data.
     pub fn history_frame(&mut self, bytes: &[u8]) -> Result<Option<SnapshotRecord>, Error> {
         let (kind, mut input) = decode_frame(bytes)?;
-        if kind == 7 {
+        if kind == kinds::SNAPSHOT_END {
             input.finish()?;
             self.0.end()?;
             return Ok(None);
         }
-        require(kind == 6, "snapshot record kind", Rule::Kind)?;
+        require(kind == kinds::SNAPSHOT_RECORD, "snapshot record kind", Rule::Kind)?;
         let tag = u8::get(&mut input)?;
         let at = usize::from(tag);
         if at < section::ADMIN {
@@ -494,8 +494,7 @@ impl SnapshotDecoder {
         frame: &[u8],
         prefix: &crate::sealed_snapshot::SnapshotObjectPrefix,
     ) -> Result<Self, Error> {
-        let (kind, mut input) = decode_frame(frame)?;
-        require(kind == 5, "snapshot header kind", Rule::Kind)?;
+        let mut input = decode_frame_of(frame, kinds::SNAPSHOT_HEADER, "snapshot header kind")?;
         let header = SnapshotHeader {
             id: Wire::get(&mut input)?,
             schema_version: Wire::get(&mut input)?,
@@ -530,12 +529,12 @@ impl SnapshotDecoder {
         O::Error: From<Error>,
     {
         let (kind, mut input) = decode_frame(bytes)?;
-        if kind == 7 {
+        if kind == kinds::SNAPSHOT_END {
             input.finish()?;
             self.0.end()?;
             return Ok(None);
         }
-        require(kind == 6, "snapshot record kind", Rule::Kind)?;
+        require(kind == kinds::SNAPSHOT_RECORD, "snapshot record kind", Rule::Kind)?;
         let record = SnapshotRecord::get(&mut input, oracle)?;
         input.finish()?;
         record.validate()?;
