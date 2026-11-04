@@ -546,14 +546,14 @@ impl<'a> FileWrite<'a> {
             released.extend(crate::file_protection::refresh(db, self.files.schema, key)?);
         }
         for file in released {
-            if !referenced(db, file)? && Record::read(db, file)?.is_some() {
+            if !crate::file_protection::referenced(db, file)? && Record::read(db, file)?.is_some() {
                 return Err(DbError::Invariant {
                     what: "a write removing a file's last reference deletes its record",
                 });
             }
         }
         for file in deleted {
-            if referenced(db, *file)? {
+            if crate::file_protection::referenced(db, *file)? {
                 return Err(DbError::Invariant {
                     what: "a write deletes only a record nothing references",
                 });
@@ -670,13 +670,6 @@ impl<'a> FileWrite<'a> {
         }
         Ok(())
     }
-}
-
-/// Whether any row names `file`.
-fn referenced(db: &DatabaseConnection, file: FileId) -> Result<bool, DbError> {
-    db.query_row("SELECT EXISTS(SELECT 1 FROM _coven_file_references WHERE file=?1)", [file], |r| {
-        r.get::<_, bool>(0)
-    })
 }
 
 /// A file referenced again, or whose record is gone, no longer waits for

@@ -297,12 +297,9 @@ impl FileWrite<'_> {
             let Some(record) = Record::read(db, file)? else {
                 continue;
             };
-            let referenced: bool = db.query_row(
-                "SELECT EXISTS(SELECT 1 FROM _coven_file_references WHERE file=?1)",
-                [file],
-                |r| r.get(0),
-            )?;
-            if !referenced && !crate::reload_gate::reloading(db, &record.audience)? {
+            if !crate::file_protection::referenced(db, file)?
+                && !crate::reload_gate::reloading(db, &record.audience)?
+            {
                 crate::file_table::delete(db, file)?;
             }
         }

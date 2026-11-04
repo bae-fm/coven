@@ -15,6 +15,13 @@ use rusqlite::params;
 use std::collections::BTreeSet;
 
 /// The column naming a stored path: a record's coordinates.
+/// Whether any row names `file`.
+pub(crate) fn referenced(db: &DatabaseConnection, file: FileId) -> Result<bool, DbError> {
+    db.query_row("SELECT EXISTS(SELECT 1 FROM _coven_file_references WHERE file=?1)", [file], |r| {
+        r.get::<_, bool>(0)
+    })
+}
+
 pub(crate) fn location(table: &str) -> Option<&'static str> {
     file_table::is_files(table).then_some(COORDINATES)
 }
@@ -172,11 +179,7 @@ pub(crate) fn refresh(
              WHERE file=?1 AND table_name=?2 AND key=?3 AND column_name=?4",
             params![file, key.0, key.1, column],
         )?;
-        if !db.query_row(
-            "SELECT EXISTS(SELECT 1 FROM _coven_file_references WHERE file=?1)",
-            [file],
-            |r| r.get::<_, bool>(0),
-        )? {
+        if !referenced(db, *file)? {
             released.insert(*file);
         }
     }
