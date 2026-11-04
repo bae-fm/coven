@@ -56,6 +56,19 @@ pub(crate) struct StoredWrite {
     pub(crate) slot: Option<Slot>,
 }
 
+/// The number of `device`'s newest write in `_coven_writes`, if it has one.
+pub(crate) fn newest_number(
+    db: &DatabaseConnection,
+    device: coven_foundation::id_source::DeviceId,
+) -> Result<Option<u64>, DbError> {
+    let newest: Option<Vec<u8>> = db.query_row(
+        &format!("SELECT max(number) FROM _coven_writes WHERE {WRITE_DEVICE_SQL}=?1"),
+        [device],
+        |r| r.get(0),
+    )?;
+    Ok(newest.map(counter))
+}
+
 /// `id`'s row in `_coven_writes`, if coven has stored it.
 pub(crate) fn stored_write(
     db: &DatabaseConnection,

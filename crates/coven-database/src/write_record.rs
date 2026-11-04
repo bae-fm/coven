@@ -1,5 +1,4 @@
 //! Session changes, audience moves, and one causal write record.
-use crate::internal_schema::WRITE_DEVICE_SQL;
 use crate::merge_store::MergeStore;
 use crate::sqlite::DatabaseConnection;
 use crate::write_encoding::{audience_text, counter, timestamp};
@@ -475,13 +474,10 @@ fn unordered(
 ) -> Result<WriteRecord, DbError> {
     let latest = crate::write_encoding::latest_timestamp(database)?;
     let timestamp = timestamp(latest, now, device)?;
-    let previous: Option<Vec<u8>> = database.query_row(
-        &format!("SELECT max(number) FROM _coven_writes WHERE {WRITE_DEVICE_SQL}=?1"),
-        [device],
-        |r| r.get(0),
-    )?;
-    let number =
-        previous.map(counter).unwrap_or(0).checked_add(1).ok_or(DbError::WriteNumberExhausted)?;
+    let number = crate::write_metadata::newest_number(database, device)?
+        .unwrap_or(0)
+        .checked_add(1)
+        .ok_or(DbError::WriteNumberExhausted)?;
     let header = WriteHeader {
         position: WriteId { device, number },
         timestamp,

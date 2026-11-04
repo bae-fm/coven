@@ -3,7 +3,6 @@
 //! A capture fixes eligibility through its marker. Snapshot bytes are made from
 //! the counted base only after that prefix has acquired slots; later local
 //! originals remain outside it.
-use crate::internal_schema::WRITE_DEVICE_SQL;
 use crate::write_encoding::{audience, audience_text, counter};
 use crate::{sqlite::DatabaseConnection, write_schema::WriteSchema, DbError};
 use coven_format::{admin::SnapshotId, snapshot::SnapshotHeader};
@@ -95,14 +94,12 @@ pub(crate) fn raise_to(
     if captures(db, device)?.is_empty() {
         return Ok(false);
     }
-    let newest: Vec<u8> = db.query_row(
-        &format!("SELECT max(number) FROM _coven_writes WHERE {WRITE_DEVICE_SQL}=?1"),
-        [device],
-        |r| r.get(0),
-    )?;
+    // A capture is made through one of this device's writes, which stays.
+    let newest = crate::write_metadata::newest_number(db, device)?
+        .ok_or(DbError::Invariant { what: "a raise capture's device has a write" })?;
     db.internal_execute(
         "UPDATE _coven_raise_captures SET version=?1,through=?2,covers=?3",
-        params![version, newest, crate::sequence::applied(db)?.to_be_bytes()],
+        params![version, newest.to_be_bytes(), crate::sequence::applied(db)?.to_be_bytes()],
     )?;
     Ok(true)
 }
