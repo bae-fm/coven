@@ -118,7 +118,13 @@ clock and the wait's persisted wall deadline `T`, and gives each reopen the
 per attempt or cut, whether it was due and the persisted failure count
 afterward (`evidence_due_once`, `evidence_keeps_backoff`,
 `racing_commit_wakes`, `unrelated_commit_ignored`, `reopen_within_wait`,
-`reopen_mid_attempt_restarts`). -/
+`reopen_mid_attempt_restarts`).
+
+`WaitingNetwork` adds the reports, which an owner acts on between attempts:
+a `signal` is the network report, ending a wait for the network
+(`Waiting.network`), and a `retry` the person's retry, ending any wait. Each
+saves the wait it ends with no full wait left, so a later reopen arms none. A
+report that arrives during an attempt is a report right after it. -/
 private def evidence (j : Json) : Except String Json := do
   let actions ← j.getObjValAs? (Array Json) "actions"
   let mut s : Waiting.Session := ⟨0, 0, none, none⟩
@@ -142,6 +148,8 @@ private def evidence (j : Json) : Except String Json := do
         wall := wall + seconds
     | "back" => wall := wall - (← action.getObjValAs? Nat "seconds")
     | "commit" => events := [.event (.commit (← action.getObjValAs? Nat "prereq"))]
+    | "signal" => events := [.event (.report false)]
+    | "retry" => events := [.event (.report true)]
     | "attempt" =>
         let prereq ← action.getObjValAs? Nat "prereq"
         if !started.isEmpty then events := started ++ [.event (.finish prereq)]
@@ -151,6 +159,8 @@ private def evidence (j : Json) : Except String Json := do
     let some next := Waiting.live s events | throw "invalid wait transition"
     if op == "attempt" && !started.isEmpty then
       persisted := wall + ((next.armed.map Waiting.Armed.wait).getD 0)
+    if (op == "signal" || op == "retry") && next.armed != s.armed then
+      persisted := wall
     if op == "attempt" || op == "cut" then
       out := out.push (Json.mkObj [("due", toJson s.ready),
         ("failures", toJson ((next.armed.map (·.failures)).getD 0))])

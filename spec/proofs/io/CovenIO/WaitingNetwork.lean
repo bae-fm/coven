@@ -11,11 +11,16 @@ Every wait names what its failed attempt lacked (`WaitingEvidence`'s
 `Armed.prereq`). An attempt that received no provider response lacked a
 usable network, so its wait names `network`. An attempt the provider
 answered, with a refusal or a server error, names something else: nothing the
-device's network does changes that answer. The report that the network
-changed is a commit changing `network`: evidence against a wait that names
-it, and none against any other wait. Each wait is its own session; one report
-is one commit to each of them. A `commit` below is any evidence its wait
-names: a report, or for an operation's wait another change it names.
+device's network does changes that answer. Each wait is its own session; one
+report is one `report` event to each of them. The network report names a wait
+for the network, and the person's retry names every wait.
+
+An owner acts on reports between attempts: the connection after the pass in
+flight, the upload worker as the attempt ends. So a report that arrives while
+an attempt runs is a `report` right after that attempt's `finish`. A report
+ends a wait it names that its timer hasn't ended yet, and Rust saves the end:
+the wait's deadline `T = now` with full wait `W = 0`, and the failure count
+kept (`endWait`). A wait the timer already ended needs no end.
 
 Proved here: a report ends a wait for the network at once
 (`signal_ends_network_wait`) and keeps its backoff (`signal_keeps_backoff`).
@@ -24,46 +29,55 @@ It leaves a wait for an answered failure as it was
 (`signal_keeps_cooldown`). Repeated reports coalesce: a second report to a
 wait already ended changes nothing (`signals_coalesce`). A report while an
 attempt runs ends the wait that attempt fails into
-(`signal_during_attempt_wakes`). Every start after the first is paid for by a
-full delay or by a commit, so in t seconds a wait starts at most
-1 + commits + ⌊t / d⌋ times (`signal_rate`), and n waits sharing the reports
-at most n times that (`signal_waits_rate`).
-
-Rust ends a wait durably: it saves the wait with deadline `T = now` and full
-wait `W = 0`, keeping the failure count, so a reopen arms no wait under any
-wall clock (`ended_reopens_due`). Keeping `W` would not do: once the wall
-clock moves back, a reopen arms the old wait again (`kept_wait_returns`). -/
+(`signal_during_attempt_wakes`). The ended wait is saved ended: reopened under
+any wall clock, it is due at once (`report_survives_reopen`); keeping its full
+wait would bring it back once the wall clock moved back (`kept_wait_returns`).
+Every start after the first is paid for by a full delay, a commit or a report,
+so in t seconds a wait starts at most 1 + commits + ⌊t / d⌋ times
+(`signal_rate`), and n waits sharing the reports at most n times that
+(`signal_waits_rate`). -/
 
 namespace CovenIO.Waiting
 
-/-- What the wait of an attempt that received no provider response names. -/
-def network : Nat := 0
-
-/-- A signal ends an idle wait for the network: the next attempt may start. -/
+/-- The network report ends an idle wait for the network: the next attempt
+may start. -/
 theorem signal_ends_network_wait (s : Session) (a : Armed) (armed : s.armed = some a)
     (idle : s.running = none) (names : a.prereq = network) :
-    (step s (.commit network)).map (·.ready) = some true := by
-  cases woken : a.woken <;>
-    simp [step, idle, wake, armed, names, woken, Session.ready, Armed.due]
+    (step s (.report false)).map (·.ready) = some true := by
+  by_cases pending : s.now < a.deadline
+  · simp [step, idle, endWait, armed, names, pending, Session.ready, Armed.due]
+  · simp [step, idle, endWait, armed, names, pending, Session.ready, Armed.due]
+    omega
 
-/-- A wait for an answered failure ignores the signal. -/
+/-- A wait for an answered failure ignores the network report. -/
 theorem signal_keeps_answered_wait (s : Session) (a : Armed) (armed : s.armed = some a)
     (idle : s.running = none) (answered : a.prereq ≠ network) :
-    step s (.commit network) = some s :=
-  unrelated_commit_ignored s a network armed idle answered
+    step s (.report false) = some s := by
+  simp [step, idle, endWait, armed, answered]
 
-/-- A second signal to a wait the first one ended changes nothing. -/
-theorem signals_coalesce (s : Session) (a : Armed) (armed : s.armed = some a)
-    (idle : s.running = none) :
-    run s [.commit network, .commit network] = run s [.commit network] := by
-  cases woken : a.woken <;> by_cases names : a.prereq = network <;>
-    simp [run, step, idle, wake, armed, woken, names]
+/-- A second report to a wait the first one ended changes nothing. -/
+theorem signals_coalesce (s : Session) (every : Bool) :
+    run s [.report every, .report every] = run s [.report every] := by
+  cases idle : s.running with
+  | some l => simp [run, step, idle]
+  | none =>
+      cases armed : s.armed with
+      | none => simp [run, step, idle, endWait, armed]
+      | some a =>
+          by_cases cond : (every = true ∨ a.prereq = network) ∧ s.now < a.deadline
+          · simp [run, step, idle, endWait, armed, cond]
+          · simp [run, step, idle, endWait, armed, cond]
 
-/-- A signal while an attempt runs ends the wait it fails into for want of
-the network. -/
+/-- A report while an attempt runs, acted on as the attempt ends, ends the
+wait the attempt fails into for want of the network. -/
 theorem signal_during_attempt_wakes {s t : Session}
-    (h : run s [.start, .commit network, .finish network] = some t) : t.ready = true :=
-  racing_commit_wakes network h
+    (h : run s [.start, .finish network, .report false] = some t) : t.ready = true := by
+  cases ready : s.ready
+  · simp [run, step, ready] at h
+  · have positive (f : Nat) : 0 < delay f := delay_positive f
+    cases armed : s.armed <;>
+      simp [run, step, ready, endWait, rearm, armed, positive] at h <;>
+      (subst h; simp [Session.ready, Armed.due])
 
 /-- The wait after the next failure continues the count. -/
 theorem signal_keeps_backoff (a : Armed) (now : Nat) (raced : Bool) :
@@ -76,44 +90,56 @@ theorem signal_keeps_cooldown (t : Timer) (now : Nat)
     (ready : due (appRetry t now) now = true) : t.provider ≤ now :=
   app_retry_keeps_cooldown t now ready
 
+/-- A report saves the wait it ends: reopened under any wall clock, the wait
+is due at once, with its failure count. -/
+theorem report_survives_reopen {s t : Session} {every : Bool} {a : Armed} (jump : Int)
+    (armed : s.armed = some a) (names : every = true ∨ a.prereq = network)
+    (pending : s.now < a.deadline) (h : step s (.report every) = some t) :
+    (t.reopen jump).ready = true ∧ (t.reopen jump).armed.map (·.failures) = some a.failures := by
+  have cond : (every = true ∨ a.prereq = network) ∧ s.now < a.deadline := ⟨names, pending⟩
+  simp only [step] at h
+  split at h
+  · simp at h; subst h
+    simp [endWait, armed, cond, Session.reopen, reopened, restartArm, restart, Armed.wait,
+      Session.ready, Armed.due]
+    omega
+  · simp at h
+
 /-! ## The person's retry
 
 `retry_now` is the person asking to retry everything now, such as by pulling
 to refresh. Rust reports it to every owner as it reports a network change,
 and each owner ends every ordinary wait it retries, whatever the wait names:
-to each wait, the retry is a commit changing what that wait names. So it ends
-every idle wait (`retry_ends_wait`), keeps its failure count
-(`retry_keeps_backoff`), ends the wait an attempt running meanwhile fails
-into (`retry_during_attempt_wakes`), and never ends a provider cooldown
-(`retry_keeps_cooldown`). Being a commit, it adds at most one start to each
-wait, as a report does (`signal_rate`). -/
-
-/-- The person's retry, to one wait: a commit changing what the wait names. -/
-def retryAll (s : Session) : Session :=
-  match s.armed with
-  | some a => wake s a.prereq
-  | none => s
+a `report` with `every`. So it ends every idle wait (`retry_ends_wait`), keeps
+its failure count (`retry_keeps_backoff`), ends the wait an attempt running
+meanwhile fails into (`retry_during_attempt_wakes`), saves the end as a
+network report does (`report_survives_reopen`), and never ends a provider
+cooldown (`retry_keeps_cooldown`). It adds at most one start to each wait, as
+a network report does (`signal_rate`). -/
 
 /-- The person's retry ends an idle wait, whatever it names. -/
 theorem retry_ends_wait (s : Session) (a : Armed) (armed : s.armed = some a)
-    (idle : s.running = none) : (retryAll s).ready = true := by
-  cases woken : a.woken <;>
-    simp [retryAll, wake, armed, idle, woken, Session.ready, Armed.due]
+    (idle : s.running = none) : (step s (.report true)).map (·.ready) = some true := by
+  by_cases pending : s.now < a.deadline
+  · simp [step, idle, endWait, armed, pending, Session.ready, Armed.due]
+  · simp [step, idle, endWait, armed, pending, Session.ready, Armed.due]
+    omega
 
 /-- It keeps the failure count, so a retry that fails again waits the next
 delay rather than starting the backoff over. -/
-theorem retry_keeps_backoff (s : Session) :
-    (retryAll s).armed.map (·.failures) = s.armed.map (·.failures) := by
-  unfold retryAll
-  cases armed : s.armed with
-  | none => simp [armed]
-  | some a =>
-      cases woken : a.woken <;> simp [wake, armed, woken]
+theorem retry_keeps_backoff (s : Session) (idle : s.running = none) :
+    (step s (.report true)).map (·.armed.map (·.failures)) = some (s.armed.map (·.failures)) := by
+  simp [step, idle, endWait_failures]
 
 /-- During an attempt, it ends the wait the attempt fails into. -/
 theorem retry_during_attempt_wakes (p : Nat) {s t : Session}
-    (h : run s [.start, .commit p, .finish p] = some t) : t.ready = true :=
-  racing_commit_wakes p h
+    (h : run s [.start, .finish p, .report true] = some t) : t.ready = true := by
+  cases ready : s.ready
+  · simp [run, step, ready] at h
+  · have positive (f : Nat) : 0 < delay f := delay_positive f
+    cases armed : s.armed <;>
+      simp [run, step, ready, endWait, rearm, armed, positive] at h <;>
+      (subst h; simp [Session.ready, Armed.due])
 
 /-- It never ends a provider cooldown: an attempt it lets start is past it. -/
 theorem retry_keeps_cooldown (t : Timer) (now : Nat)
@@ -122,10 +148,11 @@ theorem retry_keeps_cooldown (t : Timer) (now : Nat)
 
 /-! ## Each commit pays for at most one start -/
 
-/-- The commits in a run: reports, and other evidence its wait names. -/
+/-- The commits and reports in a run. -/
 def commits : List Event → Nat
   | [] => 0
   | .commit _ :: es => commits es + 1
+  | .report _ :: es => commits es + 1
   | _ :: es => commits es
 
 /-- Commits a running attempt has seen and not yet paid for. -/
@@ -171,6 +198,17 @@ theorem paid_step {s t : Session} {e : Event} (h : step s e = some t) :
           · have : 0 < l.length := List.length_pos_of_mem hm
             simp [hm]; omega
           · simp [hm]
+  | report every =>
+      simp only [step] at h
+      split at h
+      · rename_i idle
+        simp at h; subst h
+        have running : s.running = none := by simpa using idle
+        simp only [Session.credit, endWait_running, running, commits]
+        unfold endWait; split
+        · split <;> simp
+        · simp
+      · simp at h
 
 theorem paid_run {s t : Session} {es : List Event} (h : run s es = some t) :
     t.paid + t.credit ≤ s.paid + s.credit + commits es := by
@@ -243,20 +281,20 @@ namespace Examples
 
 /-- Ana's phone, locked on a train: its connection wait is capped at 300
 seconds and names the network. -/
-def locked : Session := ⟨0, 0, some ⟨9, 300, network, false⟩, none⟩
+def locked : Session := ⟨0, 0, some ⟨9, 300, network, false, false⟩, none⟩
 
 /-- She unlocks it after 20 seconds and coven reports twice: the first report
 ends the wait, the second adds nothing, and one attempt starts at once. -/
 theorem unlocked_starts_at_once :
-    (run locked [.tick 20, .commit network, .commit network, .start]).map (·.paid) =
+    (run locked [.tick 20, .report false, .report false, .start]).map (·.paid) =
       some 1 := by
   decide
 
 /-- The same signal leaves a wait for a provider's answer, here a server
 error, at its 300 seconds. -/
 theorem answered_keeps_waiting :
-    run ⟨0, 0, some ⟨9, 300, 1, false⟩, none⟩
-      [.tick 20, .commit network, .commit network, .start] = none := by
+    run ⟨0, 0, some ⟨9, 300, 1, false, false⟩, none⟩
+      [.tick 20, .report false, .report false, .start] = none := by
   decide
 
 end Examples

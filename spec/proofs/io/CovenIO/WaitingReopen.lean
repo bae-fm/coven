@@ -8,7 +8,9 @@ A wait persists its wall-clock deadline `T` and its full wait `W`, the delay
 the attempt before it armed. Reopening arms `max 0 (min (T - now) W)` on the
 monotonic clock, keeps the failure count and the prerequisite the wait names,
 and watches that prerequisite from the reopen on: a commit before it is never
-seen, so a wait woken before closing is not woken after. An attempt that was
+seen, so a wait woken before closing is not woken after. A wait a report
+ended was saved with no full wait left, so it reopens due (`WaitingNetwork`'s
+`report_survives_reopen`). An attempt that was
 running when the store closed is lost; its operation's previous wait comes
 back. `jump` is how far the wall clock moved beyond the monotonic clock since
 the wait was armed: negative when it was set back.
@@ -26,8 +28,9 @@ none (`idle_reopen_keeps_count`). A forward jump can end a wait early
 namespace CovenIO.Waiting
 
 /-- The full wait `W` persisted with a wait: the delay its attempt armed,
-`delay (failures - 1)` (`retry_waits.rs` `next`). -/
-def Armed.wait (a : Armed) : Nat := delay (a.failures - 1)
+`delay (failures - 1)` (`retry_waits.rs` `next`), or none once a report ended
+it (`WaitingNetwork`). -/
+def Armed.wait (a : Armed) : Nat := if a.ended then 0 else delay (a.failures - 1)
 
 /-- The restart arm: `max 0 (min (T - wall) W)`, where `T - wall` is
 `deadline - now - jump` on the monotonic clock. -/
@@ -55,6 +58,10 @@ def Session.reopen (s : Session) (jump : Int) : Session :=
     (reopened a now jump).prereq = a.prereq := rfl
 @[simp] theorem reopened_woken (a : Armed) (now : Nat) (jump : Int) :
     (reopened a now jump).woken = false := rfl
+@[simp] theorem reopened_ended (a : Armed) (now : Nat) (jump : Int) :
+    (reopened a now jump).ended = a.ended := rfl
+@[simp] theorem reopened_wait (a : Armed) (now : Nat) (jump : Int) :
+    (reopened a now jump).wait = a.wait := rfl
 
 theorem reopen_floor (s : Session) (jump : Int) : (s.reopen jump).floor = s.floor := by
   cases ha : s.armed <;> simp [Session.reopen, Session.floor, ha]
@@ -128,13 +135,25 @@ theorem fresh_step {s t : Session} {e : Event} (fresh : Fresh s) (h : step s e =
           simp [step, hr] at h; subst h
           intro a ha; simp at ha; subst ha
           simp [rearm, Armed.wait]
+  | report every =>
+      simp only [step] at h
+      split at h
+      · simp at h; subst h
+        unfold endWait
+        split
+        · rename_i a ha
+          split
+          · intro b hb; simp at hb; subst hb; simp [Armed.wait]
+          · exact fresh
+        · exact fresh
+      · simp at h
 
 theorem fresh_reopen {s : Session} (jump : Int) : Fresh (s.reopen jump) := by
   intro b hb
   simp only [Session.reopen, Option.map_eq_some_iff] at hb
   obtain ⟨a, _, rfl⟩ := hb
   have := restart_bounded (a.deadline : Int) ((s.now : Int) + jump) a.wait
-  simp only [reopened_deadline, reopen_now, Armed.wait, reopened_failures, restartArm] at *
+  simp only [reopened_deadline, reopen_now, reopened_wait, restartArm] at *
   omega
 
 /-- With the wall clock not moved forward, a reopened deadline is no earlier
@@ -167,7 +186,7 @@ theorem reopen_within_wait (s : Session) (jump : Int) (a : Armed) (armed : s.arm
 /-- Ticks and commits from an idle session keep its wait's deadline and
 advance its clock: commits only wake. -/
 theorem quiet_run {s t : Session} {es : List Event} (idle : s.running = none)
-    (noStart : Event.start ∉ es) (h : run s es = some t) :
+    (noStart : Event.start ∉ es) (noReport : ∀ b, Event.report b ∉ es) (h : run s es = some t) :
     t.running = none ∧ t.now = s.now + ticks es ∧
       (s.armed.map (·.deadline)) = (t.armed.map (·.deadline)) := by
   induction es generalizing s with
@@ -176,6 +195,7 @@ theorem quiet_run {s t : Session} {es : List Event} (idle : s.running = none)
       simp only [run, Option.bind_eq_some_iff] at h
       obtain ⟨next, hs, hr⟩ := h
       have rest : Event.start ∉ es := fun m => noStart (List.mem_cons_of_mem _ m)
+      have quiet : ∀ b, Event.report b ∉ es := fun b m => noReport b (List.mem_cons_of_mem _ m)
       have keeps : next.running = none ∧ next.now = s.now + ticks [e] ∧
           (s.armed.map (·.deadline)) = (next.armed.map (·.deadline)) := by
         cases e with
@@ -189,7 +209,8 @@ theorem quiet_run {s t : Session} {es : List Event} (idle : s.running = none)
             · simp [idle, ticks]
         | start => exact absurd List.mem_cons_self noStart
         | finish p => simp [step, idle] at hs
-      obtain ⟨r, n', d⟩ := ih keeps.1 rest hr
+        | report b => exact absurd List.mem_cons_self (noReport b)
+      obtain ⟨r, n', d⟩ := ih keeps.1 rest quiet hr
       have split : ticks (e :: es) = ticks [e] + ticks es := by
         cases e <;> simp [ticks] <;> omega
       refine ⟨r, by rw [n', keeps.2.1, split]; omega, ?_⟩
@@ -198,11 +219,12 @@ theorem quiet_run {s t : Session} {es : List Event} (idle : s.running = none)
 /-- A wait whose prerequisite was satisfied before the reopen, so that no
 commit after it wakes it, is due once its full wait has passed: whatever the
 wall clock, and whatever ticks and commits follow, with no attempt in
-between. -/
+between. A report could only end it sooner. -/
 theorem reopened_due {s t : Session} {jump : Int} {es : List Event}
-    (noStart : Event.start ∉ es) (waited : s.fullWait ≤ ticks es)
+    (noStart : Event.start ∉ es) (noReport : ∀ b, Event.report b ∉ es)
+    (waited : s.fullWait ≤ ticks es)
     (h : run (s.reopen jump) es = some t) : t.ready = true := by
-  obtain ⟨idle, now, deadline⟩ := quiet_run (by simp [Session.reopen]) noStart h
+  obtain ⟨idle, now, deadline⟩ := quiet_run (by simp [Session.reopen]) noStart noReport h
   cases armed : s.armed with
   | none =>
       have : t.armed = none := by
@@ -287,6 +309,11 @@ theorem lifeInv_event {d n0 p0 : Nat} {s t : Session} {k r : Nat} {e : Event}
       cases hr : s.running with
       | none => simp [step, hr] at h
       | some l => simp [step, hr] at h; subst h; simp at none
+  | report every =>
+      simp only [step] at h
+      split at h
+      · simp at h; subst h; simpa [starts] using first (endWait_none none)
+      · simp at h
 
 theorem lifeInv_reopen {d n0 p0 : Nat} {s : Session} {k r : Nat} {jump : Int}
     (inv : LifeInv d n0 p0 s k r) (back : jump ≤ 0) :
@@ -381,7 +408,8 @@ def LifeUnchanged (unrelated : Nat → Bool) (s : Session) (ls : List Life) : Pr
   (∀ a, s.armed = some a → unrelated a.prereq = false) ∧
   (∀ l, s.running = some l → ∀ q ∈ l, unrelated q = true) ∧
   (∀ q, Life.event (.commit q) ∈ ls → unrelated q = true) ∧
-  (∀ p, Life.event (.finish p) ∈ ls → unrelated p = false)
+  (∀ p, Life.event (.finish p) ∈ ls → unrelated p = false) ∧
+  (∀ b, Life.event (.report b) ∉ ls)
 
 theorem lifeUnchanged_paid {u : Nat → Bool} {s t : Session} {ls : List Life}
     (un : LifeUnchanged u s ls) (h : live s ls = some t) : t.paid = s.paid := by
@@ -390,27 +418,29 @@ theorem lifeUnchanged_paid {u : Nat → Bool} {s t : Session} {ls : List Life}
   | cons l ls ih =>
       simp only [live, Option.bind_eq_some_iff] at h
       obtain ⟨next, hs, hr⟩ := h
-      obtain ⟨ha, hl, hc, hf⟩ := un
+      obtain ⟨ha, hl, hc, hf, hq⟩ := un
       have hc' : ∀ q, Life.event (.commit q) ∈ ls → u q = true :=
         fun q m => hc q (List.mem_cons_of_mem _ m)
       have hf' : ∀ p, Life.event (.finish p) ∈ ls → u p = false :=
         fun p m => hf p (List.mem_cons_of_mem _ m)
+      have hq' : ∀ b, Life.event (.report b) ∉ ls := fun b m => hq b (List.mem_cons_of_mem _ m)
       cases l with
       | reopen j =>
           simp [lifeStep] at hs; subst hs
           have keeps : LifeUnchanged u (s.reopen j) ls := by
-            refine ⟨fun b hb => ?_, fun l r => by simp [Session.reopen] at r, hc', hf'⟩
+            refine ⟨fun b hb => ?_, fun l r => by simp [Session.reopen] at r, hc', hf', hq'⟩
             simp only [Session.reopen, Option.map_eq_some_iff] at hb
             obtain ⟨a, ha', rfl⟩ := hb
             exact ha a ha'
           rw [ih keeps hr]; rfl
       | event e =>
           have one : Unchanged u s [e] := by
-            refine ⟨ha, hl, fun q m => ?_, fun p m => ?_⟩
+            refine ⟨ha, hl, fun q m => ?_, fun p m => ?_, fun b m => ?_⟩
             · simp at m; subst m; exact hc q List.mem_cons_self
             · simp at m; subst m; exact hf p List.mem_cons_self
-          obtain ⟨⟨ha', hl', _, _⟩, paid⟩ := unchanged_step one hs
-          rw [ih ⟨ha', hl', hc', hf'⟩ hr, paid]
+            · simp at m; subst m; exact hq b List.mem_cons_self
+          obtain ⟨⟨ha', hl', _, _, _⟩, paid⟩ := unchanged_step one hs
+          rw [ih ⟨ha', hl', hc', hf', hq'⟩ hr, paid]
 
 /-- §21.2's bound for an unchanged wait across reopens: at most one start,
 plus one per reopen, plus the elapsed time over `d`. Within one
@@ -438,7 +468,7 @@ namespace Examples
 
 /-- A capped wait on prerequisite 1, armed at time 0 for its full 300
 seconds after ten failures. -/
-def armedCapped : Session := ⟨0, 0, some ⟨10, 300, 1, false⟩, none⟩
+def armedCapped : Session := ⟨0, 0, some ⟨10, 300, 1, false, false⟩, none⟩
 
 /-- Ben's positions change before Ana closes: the wait is due at once. She
 reopens: that commit is unseen, and the wait runs the rest of its delay, then

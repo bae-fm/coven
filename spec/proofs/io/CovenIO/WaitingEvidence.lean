@@ -32,14 +32,20 @@ theorem delay_mono {a b : Nat} (h : a ≤ b) : delay a ≤ delay b := by
   omega
 
 /-- An armed wait: the persisted failure count, the monotonic deadline, the
-prerequisite it names, and whether a commit changing that prerequisite
-arrived since it began. -/
+prerequisite it names, whether a commit changing that prerequisite arrived
+since it began, and whether a report ended it and saved it so, with no full
+wait left (`WaitingNetwork`). -/
 structure Armed where
   failures : Nat
   deadline : Nat
   prereq : Nat
   woken : Bool
+  ended : Bool
   deriving DecidableEq, Repr
+
+/-- What the wait of an attempt that received no provider response names: a
+usable network. -/
+def network : Nat := 0
 
 /-- Due by its timer, or by a commit changing its prerequisite. -/
 def Armed.due (a : Armed) (now : Nat) : Bool :=
@@ -52,7 +58,7 @@ def rearm (previous : Option Armed) (now p : Nat) (raced : Bool) : Armed :=
   let failures := match previous with
     | some a => a.failures
     | none => 0
-  ⟨failures + 1, now + delay failures, p, raced⟩
+  ⟨failures + 1, now + delay failures, p, raced, false⟩
 
 structure Session where
   now : Nat
@@ -69,6 +75,9 @@ inductive Event
   | commit (prereq : Nat)
   | start
   | finish (prereq : Nat)
+  /-- A report the wait's owner acts on between attempts: the network report,
+  or with `every` the person's retry (`WaitingNetwork`). -/
+  | report (every : Bool)
   deriving DecidableEq, Repr
 
 /-- No wait yet, or the armed wait is due; never while an attempt runs. -/
@@ -84,6 +93,16 @@ def wake (s : Session) (q : Nat) : Session :=
       { s with armed := some { a with woken := true }, paid := s.paid + 1 } else s
   | none => s
 
+/-- A report ends a wait it names that its timer has not yet ended, and saves
+it ended: deadline now, no full wait left, the failure count kept. The network
+report names a wait for the network; the person's retry names every wait. -/
+def endWait (s : Session) (every : Bool) : Session :=
+  match s.armed with
+  | some a => if (every = true ∨ a.prereq = network) ∧ s.now < a.deadline then
+      { s with armed := some { a with deadline := s.now, ended := true }, paid := s.paid + 1 }
+    else s
+  | none => s
+
 def step (s : Session) : Event → Option Session
   | .tick n => some { s with now := s.now + n }
   | .commit q => some (match s.running with
@@ -93,6 +112,7 @@ def step (s : Session) : Event → Option Session
   | .finish p => s.running.map fun l =>
       { s with running := none, armed := some (rearm s.armed s.now p (l.contains p)),
                paid := s.paid + if l.contains p then 1 else 0 }
+  | .report every => if s.running.isNone then some (endWait s every) else none
 
 def run (s : Session) : List Event → Option Session
   | [] => some s
@@ -119,6 +139,29 @@ theorem wake_now (s : Session) (q : Nat) : (wake s q).now = s.now := by
   · split <;> rfl
   · rfl
 
+theorem endWait_now (s : Session) (every : Bool) : (endWait s every).now = s.now := by
+  unfold endWait; split
+  · split <;> rfl
+  · rfl
+
+theorem endWait_running (s : Session) (every : Bool) :
+    (endWait s every).running = s.running := by
+  unfold endWait; split
+  · split <;> rfl
+  · rfl
+
+theorem endWait_failures (s : Session) (every : Bool) :
+    (endWait s every).armed.map (·.failures) = s.armed.map (·.failures) := by
+  unfold endWait; split
+  · rename_i a ha; split <;> simp [ha]
+  · rfl
+
+theorem endWait_none {s : Session} {every : Bool} (none : (endWait s every).armed = Option.none) :
+    s.armed = Option.none := by
+  unfold endWait at none; split at none
+  · split at none <;> simp_all
+  · assumption
+
 theorem run_now {s t : Session} {es : List Event} (h : run s es = some t) :
     t.now = s.now + ticks es := by
   induction es generalizing s with
@@ -141,6 +184,11 @@ theorem run_now {s t : Session} {es : List Event} (h : run s es = some t) :
           cases hr : s.running with
           | none => simp [step, hr] at hs
           | some l => simp [step, hr] at hs; subst hs; simpa [ticks] using this
+      | report every =>
+          simp only [step] at hs
+          split at hs
+          · simp at hs; subst hs; rw [endWait_now] at this; simpa [ticks] using this
+          · simp at hs
 
 /-- The accounting behind the bound, for `k` starts so far from a session whose
 clock read `n0` and paid count `p0`: every start after the first is paid by
@@ -169,6 +217,23 @@ theorem inv_wake {d n0 p0 : Nat} {s : Session} {k : Nat} (q : Nat)
         have shift : d * k = d * (k - 1) + d := by
           rw [← Nat.mul_succ]; congr 1; omega
         simp [Nat.mul_add]; omega
+    · exact ⟨fl, hn, hp, hA, hB⟩
+  · exact ⟨fl, hn, hp, hA, hB⟩
+
+theorem inv_end {d n0 p0 : Nat} {s : Session} {k : Nat} (every : Bool)
+    (inv : Inv d n0 p0 s k) : Inv d n0 p0 (endWait s every) k := by
+  obtain ⟨fl, hn, hp, hA, hB⟩ := inv
+  unfold endWait
+  split
+  · rename_i a ha
+    split
+    · refine ⟨by simpa [Session.floor, ha] using fl, hn, by simp; omega, ?_, ?_⟩
+      · intro k1; have := hA k1; simp [Nat.mul_add]; omega
+      · intro k1 _
+        have := hA k1
+        have shift : d * k = d * (k - 1) + d := by
+          rw [← Nat.mul_succ]; congr 1; omega
+        refine ⟨_, rfl, by simp [Nat.mul_add]; omega, fun _ => by simp [Nat.mul_add]; omega⟩
     · exact ⟨fl, hn, hp, hA, hB⟩
   · exact ⟨fl, hn, hp, hA, hB⟩
 
@@ -238,6 +303,12 @@ theorem inv_step {d n0 p0 : Nat} {s t : Session} {k : Nat} {e : Event}
               have hm : p ∈ l := by simpa [rearm] using woken
               simp only [hm, ite_true, Nat.mul_add, Nat.mul_one]
               omega
+  | report every =>
+      simp only [step] at h
+      split at h
+      · simp at h; subst h
+        simpa [starts] using inv_end every inv
+      · simp at h
 
 theorem inv_run {d n0 p0 : Nat} {s t : Session} {k : Nat} {es : List Event}
     (inv : Inv d n0 p0 s k) (h : run s es = some t) :
@@ -283,37 +354,39 @@ theorem evidence_rate {d : Nat} {s t : Session} {es : List Event} (positive : 0 
 /-! ## Unchanged waits -/
 
 /-- The run's commits change only prerequisites in `unrelated`, its waits name
-none of them, and the session's own wait and running attempt name none and
-saw none: no wait in it ever changes (§21.2's wait whose prerequisite nothing
-changes). -/
+none of them, the session's own wait and running attempt name none and saw
+none, and no report arrives: no wait in it ever changes (§21.2's wait whose
+prerequisite nothing changes). -/
 def Unchanged (unrelated : Nat → Bool) (s : Session) (es : List Event) : Prop :=
   (∀ a, s.armed = some a → unrelated a.prereq = false) ∧
   (∀ l, s.running = some l → ∀ q ∈ l, unrelated q = true) ∧
   (∀ q, Event.commit q ∈ es → unrelated q = true) ∧
-  (∀ p, Event.finish p ∈ es → unrelated p = false)
+  (∀ p, Event.finish p ∈ es → unrelated p = false) ∧
+  (∀ b, Event.report b ∉ es)
 
 theorem unchanged_step {u : Nat → Bool} {s t : Session} {e : Event} {es : List Event}
     (un : Unchanged u s (e :: es)) (h : step s e = some t) :
     Unchanged u t es ∧ t.paid = s.paid := by
-  obtain ⟨ha, hl, hc, hf⟩ := un
+  obtain ⟨ha, hl, hc, hf, hr⟩ := un
   have hc' : ∀ q, Event.commit q ∈ es → u q = true :=
     fun q m => hc q (List.mem_cons_of_mem _ m)
   have hf' : ∀ p, Event.finish p ∈ es → u p = false :=
     fun p m => hf p (List.mem_cons_of_mem _ m)
+  have hr' : ∀ b, Event.report b ∉ es := fun b m => hr b (List.mem_cons_of_mem _ m)
   cases e with
-  | tick n => simp [step] at h; subst h; exact ⟨⟨ha, hl, hc', hf'⟩, rfl⟩
+  | tick n => simp [step] at h; subst h; exact ⟨⟨ha, hl, hc', hf', hr'⟩, rfl⟩
   | commit q =>
       have uq := hc q List.mem_cons_self
       simp only [step, Option.some.injEq] at h; subst h
-      cases hr : s.running with
+      cases hrun : s.running with
       | some l =>
           dsimp only
-          refine ⟨⟨ha, fun l' r => ?_, hc', hf'⟩, by simp⟩
+          refine ⟨⟨ha, fun l' r => ?_, hc', hf', hr'⟩, by simp⟩
           simp at r; subst r
           intro x hx
           rcases List.mem_cons.mp hx with rfl | hx
           · exact uq
-          · exact hl l hr x hx
+          · exact hl l hrun x hx
       | none =>
           dsimp only
           unfold wake
@@ -322,27 +395,28 @@ theorem unchanged_step {u : Nat → Bool} {s t : Session} {e : Event} {es : List
             have named := ha a hs
             split
             · rename_i hit; rw [hit.1] at named; rw [named] at uq; cases uq
-            · exact ⟨⟨ha, hl, hc', hf'⟩, rfl⟩
-          · exact ⟨⟨ha, hl, hc', hf'⟩, rfl⟩
+            · exact ⟨⟨ha, hl, hc', hf', hr'⟩, rfl⟩
+          · exact ⟨⟨ha, hl, hc', hf', hr'⟩, rfl⟩
   | start =>
       simp only [step] at h
       split at h
       · simp at h; subst h
-        exact ⟨⟨ha, fun l r => by simp at r; subst r; simp, hc', hf'⟩, rfl⟩
+        exact ⟨⟨ha, fun l r => by simp at r; subst r; simp, hc', hf', hr'⟩, rfl⟩
       · simp at h
   | finish p =>
       have up := hf p List.mem_cons_self
-      cases hr : s.running with
-      | none => simp [step, hr] at h
+      cases hrun : s.running with
+      | none => simp [step, hrun] at h
       | some l =>
-          simp [step, hr] at h; subst h
+          simp [step, hrun] at h; subst h
           have absent : l.contains p = false := by
             cases hx : l.contains p
             · rfl
-            · have := hl l hr p (by simpa using hx); rw [this] at up; cases up
+            · have := hl l hrun p (by simpa using hx); rw [this] at up; cases up
           have outside : p ∉ l := by simpa using absent
-          refine ⟨⟨fun a r => ?_, fun l r => by simp at r, hc', hf'⟩, by simp [outside]⟩
+          refine ⟨⟨fun a r => ?_, fun l r => by simp at r, hc', hf', hr'⟩, by simp [outside]⟩
           simp at r; subst r; exact up
+  | report every => exact absurd List.mem_cons_self (hr every)
 
 theorem unchanged_paid {u : Nat → Bool} {s t : Session} {es : List Event}
     (un : Unchanged u s es) (h : run s es = some t) : t.paid = s.paid := by
@@ -437,7 +511,7 @@ namespace Examples
 
 /-- A capped wait (nine failures) on prerequisite 1 that has just armed 300
 seconds. -/
-def capped : Session := ⟨0, 0, some ⟨9, 300, 1, false⟩, none⟩
+def capped : Session := ⟨0, 0, some ⟨9, 300, 1, false, false⟩, none⟩
 
 /-- Three commits at one instant changing other prerequisites, for example
 three other operations advancing in one drive: the capped wait stays waiting,

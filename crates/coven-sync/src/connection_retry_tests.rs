@@ -157,3 +157,184 @@ async fn a_report_whose_end_failed_to_save_ends_the_wait_next_time() {
     assert!(!waits.end_reported_waits(crate::NetworkOwner::Connection).await.unwrap());
     database.close().await.unwrap();
 }
+
+/// One step of the connection's wait for the IO `WaitingNetwork` comparison.
+#[derive(Clone, Copy)]
+enum Step {
+    Advance(u64),
+    Back(u64),
+    /// A pass when it is due, failing with no provider response (`false`) or
+    /// after the provider answered (`true`); a report may arrive while it
+    /// runs, or, when no pass is due, in its place.
+    Attempt {
+        answered: bool,
+        during: Option<Report>,
+    },
+    Report(Report),
+    Reopen,
+}
+
+#[derive(Clone, Copy)]
+enum Report {
+    Network,
+    Retry,
+}
+
+impl Report {
+    fn send(self, waits: &RetryWaits) {
+        match self {
+            Self::Network => waits.report_network(),
+            Self::Retry => {
+                waits.report(crate::retry_waits::Ending::Every);
+            }
+        }
+    }
+
+    fn op(self) -> &'static str {
+        match self {
+            Self::Network => "signal",
+            Self::Retry => "retry",
+        }
+    }
+}
+
+/// The model's actions for `steps`: the connection acts on a report that
+/// arrives during a pass after the pass, so the model hears it right after.
+fn model_actions(steps: &[Step]) -> Vec<serde_json::Value> {
+    use serde_json::json;
+    let mut actions = Vec::new();
+    for step in steps {
+        match *step {
+            Step::Advance(seconds) => actions.push(json!({"op":"advance","seconds":seconds})),
+            Step::Back(seconds) => actions.push(json!({"op":"back","seconds":seconds})),
+            Step::Attempt { answered, during } => {
+                actions.push(json!({"op":"attempt","prereq":u8::from(answered),"raced":[]}));
+                if let Some(report) = during {
+                    actions.push(json!({"op": report.op()}));
+                }
+            }
+            Step::Report(report) => actions.push(json!({"op": report.op()})),
+            Step::Reopen => actions.push(json!({"op":"reopen"})),
+        }
+    }
+    actions
+}
+
+/// Run `steps` on the connection's wait, and report each attempt's due and
+/// the saved failure count after it.
+async fn connection_history(steps: &[Step]) -> serde_json::Value {
+    let fixture = Fixture::new();
+    let (mut database, mut waits) = fixture.open().await;
+    let mut retry = ConnectionRetry::Automatic;
+    let mut observed = Vec::new();
+    for step in steps {
+        match *step {
+            Step::Advance(seconds) => fixture.advance(seconds),
+            Step::Back(seconds) => {
+                fixture.clock.set(fixture.clock.now() - Duration::from_secs(seconds));
+            }
+            Step::Attempt { answered, during } => {
+                let ready = due(&database, &waits, SYNC).await;
+                if ready {
+                    if let Some(report) = during {
+                        report.send(&waits);
+                    }
+                    fail(&mut retry, &database, &waits, answered).await;
+                } else if let Some(report) = during {
+                    // No pass ran, so the report arrives between passes.
+                    report.send(&waits);
+                }
+                waits.end_reported_waits(crate::NetworkOwner::Connection).await.unwrap();
+                let failures =
+                    database.retry_wait(SYNC).await.unwrap().map_or(0, |wait| wait.failures);
+                observed.push(serde_json::json!({"due": ready, "failures": failures}));
+            }
+            Step::Report(report) => {
+                report.send(&waits);
+                waits.end_reported_waits(crate::NetworkOwner::Connection).await.unwrap();
+            }
+            Step::Reopen => {
+                database.close().await.unwrap();
+                (database, waits) = fixture.open().await;
+                retry = ConnectionRetry::open(&database).await.unwrap();
+            }
+        }
+    }
+    database.close().await.unwrap();
+    serde_json::json!(observed)
+}
+
+/// IO `WaitingNetwork` through the connection's wait: offline and answered
+/// failures, network reports and the person's retry between passes and
+/// during them, time passing, the wall clock set back, and reopening after a
+/// report ended a wait. Compares, after each attempted pass, whether it was
+/// due and the saved failure count with the IO model's `evidence` case.
+#[tokio::test]
+#[ignore = "requires COVEN_IO_LEAN"]
+async fn io_differential_network_reports() {
+    use Report::{Network, Retry};
+    use Step::{Advance, Attempt, Back, Reopen, Report as Reported};
+    let offline = |during| Attempt { answered: false, during };
+    let answered = |during| Attempt { answered: true, during };
+    let mut histories = vec![vec![
+        offline(None),
+        offline(None),
+        Reported(Network),
+        offline(None),
+        Reported(Network),
+        Reported(Network),
+        Back(100),
+        Reopen,
+        offline(None),
+        offline(Some(Network)),
+        offline(None),
+        answered(None),
+        Reported(Network),
+        answered(None),
+        Advance(16),
+        answered(None),
+        answered(Some(Network)),
+        answered(None),
+        Reported(Retry),
+        answered(None),
+        answered(Some(Retry)),
+        Back(1_000),
+        Reopen,
+        answered(None),
+        Advance(300),
+        offline(None),
+        Back(50),
+        Reopen,
+        offline(None),
+    ]];
+    // Pseudo-random histories over the same steps.
+    let mut seed = 0x2545_f491_4f6c_dd1du64;
+    let mut pick = |n: u64| {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        seed % n
+    };
+    for _ in 0..6 {
+        let mut steps = Vec::new();
+        for _ in 0..40 {
+            let report = |choice| [None, Some(Network), Some(Retry)][choice as usize];
+            steps.push(match pick(8) {
+                0 => Advance(pick(400)),
+                1 => Back(pick(400)),
+                2 => Reported(if pick(2) == 0 { Network } else { Retry }),
+                3 => Reopen,
+                4 | 5 => offline(report(pick(3))),
+                _ => answered(report(pick(3))),
+            });
+        }
+        histories.push(steps);
+    }
+    let mut actual = Vec::new();
+    let mut inputs = Vec::new();
+    for steps in &histories {
+        actual.push(connection_history(steps).await);
+        inputs.push(serde_json::json!({"check": "evidence", "actions": model_actions(steps)}));
+    }
+    assert_eq!(actual, crate::tests::io_runner(&inputs), "{inputs:?}");
+}
