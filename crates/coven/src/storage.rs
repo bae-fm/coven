@@ -452,8 +452,10 @@ impl StorageConnections {
 
     /// Run `work` with the active connection's passes held: uploads run
     /// beside them, as during a connection change (§17.4). Work that fails
-    /// lets the passes run again, keeping a failure to resume them as
-    /// cleanup; work that succeeds leaves them held for the caller to end.
+    /// or panics lets the passes run again, keeping a failure to resume them
+    /// as cleanup; work that succeeds leaves them held for the caller to
+    /// end. Unwound, a panic would leave them held for as long as the store
+    /// stays open (E15).
     async fn with_passes_held<T>(
         live: &ConnectionState,
         work: impl std::future::Future<Output = Result<T, SyncError>>,
@@ -462,7 +464,10 @@ impl StorageConnections {
             return work.await;
         };
         previous.sync_loop.pause().await?;
-        work.await.map_err(|error| match previous.sync_loop.resume() {
+        let done = crate::task::caught("work with the passes held", work)
+            .await
+            .unwrap_or_else(|bug| Err(SyncError::Bug(bug)));
+        done.map_err(|error| match previous.sync_loop.resume() {
             Ok(()) => error,
             Err(cleanup) => SyncError::cleanup(error, cleanup),
         })

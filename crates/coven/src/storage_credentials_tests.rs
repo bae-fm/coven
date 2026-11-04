@@ -68,6 +68,27 @@ async fn failed_setup_claim_keeps_the_running_connection() {
     f.handle.close().await.unwrap();
 }
 
+/// Setup's claim panics while the running connection's passes are held:
+/// setup fails with the bug, and the passes run again, as after any failed
+/// setup (E15).
+#[tokio::test]
+async fn a_setup_whose_claim_panics_lets_the_held_passes_run_again() {
+    let f = Fixture::new().await;
+    f.setup().await.unwrap();
+    synced(&f.handle).await;
+    f.storage
+        .set_faults(Faults {
+            read_panics: [ObjectPath::floor(f.directory.id())].into(),
+            ..Faults::none()
+        })
+        .await;
+    let failed = f.setup().await.unwrap_err();
+    f.storage.set_faults(Faults::none()).await;
+    assert!(matches!(&failed, StorageSetupError::Bug(_)), "{failed:?}");
+    assert_original_connection_uploads(&f).await;
+    f.handle.close().await.unwrap();
+}
+
 #[tokio::test]
 async fn failed_setup_custody_commit_keeps_the_running_connection() {
     let f = Fixture::new().await;

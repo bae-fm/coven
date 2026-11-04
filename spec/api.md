@@ -8427,6 +8427,10 @@ for file work, and a `Bug` variant of each error that has a `Shutdown` one.
   message kept. rusqlite alone reports such a panic as an error that says
   only "unwinding panic". A function changes nothing, so the handle goes
   on.
+- Setting up storage and forgetting the store keys hold the running
+  connection's passes while they work. A panic in that work fails the call
+  with the bug and lets the passes run again, as a failure does. Unwound,
+  it would leave sync held until the store closes.
 
 An error that keeps another failure takes the bug that failure carries as
 its own `Bug`, never under a disk, lock, storage or custody label, so the
