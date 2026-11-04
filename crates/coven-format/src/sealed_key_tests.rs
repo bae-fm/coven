@@ -108,7 +108,16 @@ fn key_boxes_bind_slot_store_key_and_every_recipient_routing_field() {
         };
         let bytes = prefix.encode().unwrap();
         assert_eq!(SlotObjectPrefix::decode(&bytes).unwrap(), prefix);
+        let expected = match audience {
+            Audience::Store => 21 + 65 + 56 + 4 + 48 + 16,
+            Audience::Circle(_) => 21 + 81 + 56 + 4 + 64 + 16,
+        };
+        assert_eq!(bytes.len(), expected);
+        assert_eq!(SlotObjectPrefix::length(&bytes).unwrap(), expected);
         assert!(bytes.len() <= SlotObjectPrefix::MAX_LENGTH);
+        if matches!(audience, Audience::Circle(_)) {
+            assert_eq!(bytes.len(), SlotObjectPrefix::MAX_LENGTH);
+        }
         for end in 0..bytes.len() {
             assert!(SlotObjectPrefix::decode(&bytes[..end]).is_err());
         }

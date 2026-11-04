@@ -342,6 +342,7 @@ fn anonymous_store_boxes_bind_recipient_path_and_all_ciphertext_bytes() {
         seal_store_key(&store, &member.public_keys().sealing, &path, b"clear routing prefix")
             .unwrap();
     assert_eq!(sealed.len(), 120);
+    assert_eq!(sealed.len(), KEY_BOX_HEAD_LEN + StoreKey::ENCODED_LEN + KEY_BOX_TAG_LEN);
     let repeated =
         seal_store_key(&store, &member.public_keys().sealing, &path, b"clear routing prefix")
             .unwrap();
@@ -405,6 +406,8 @@ fn anonymous_circle_boxes_preserve_circle_and_id() {
         b"clear routing prefix",
     )
     .unwrap();
+    assert_eq!(sealed.len(), 136);
+    assert_eq!(sealed.len(), KEY_BOX_HEAD_LEN + CircleKey::ENCODED_LEN + KEY_BOX_TAG_LEN);
     let opened = member
         .open_circle_key(
             "10101010-1010-1010-1010-101010101010/seq/9",

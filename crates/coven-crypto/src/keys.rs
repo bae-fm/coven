@@ -21,6 +21,9 @@ pub struct StoreKey {
 }
 
 impl StoreKey {
+    /// The encoded key a box or custody holds: its id, then its 32 bytes.
+    pub const ENCODED_LEN: usize = 16 + 32;
+
     /// Make random key material for an identity supplied by the id source.
     pub fn generate(id: KeyId) -> Result<Self, CryptoError> {
         Ok(Self { id, bytes: randomness::secret_bytes()? })
@@ -81,6 +84,10 @@ pub struct CircleKey {
 }
 
 impl CircleKey {
+    /// The encoded key a box or custody holds: its circle, then its store-key
+    /// encoding.
+    pub const ENCODED_LEN: usize = 16 + StoreKey::ENCODED_LEN;
+
     /// Make a circle key using the operating system's randomness.
     pub fn generate(circle: CircleId, id: KeyId) -> Result<Self, CryptoError> {
         Ok(Self { circle, key: StoreKey::generate(id)? })
@@ -198,7 +205,11 @@ impl StoreKeyring {
     pub fn to_secret_bytes(&self) -> SecretBytes {
         // Allocate once: growing a secret Vec would abandon an unerased copy.
         let mut bytes = Zeroizing::new(Vec::with_capacity(
-            21 + self.stores.len() * 48 + self.circles.len() * 64,
+            KEYRING_MAGIC.len()
+                + 8
+                + self.stores.len() * StoreKey::ENCODED_LEN
+                + 8
+                + self.circles.len() * CircleKey::ENCODED_LEN,
         ));
         bytes.extend_from_slice(KEYRING_MAGIC);
         bytes.extend_from_slice(&(self.stores.len() as u64).to_le_bytes());
@@ -216,7 +227,7 @@ impl StoreKeyring {
     pub fn from_secret_bytes(mut bytes: &[u8]) -> Result<Self, MaterialError> {
         wire::prefix(&mut bytes, KEYRING_MAGIC)?;
         let count = wire::number(&mut bytes)?;
-        if count == 0 || count > (bytes.len() / 48) as u64 {
+        if count == 0 || count > (bytes.len() / StoreKey::ENCODED_LEN) as u64 {
             return Err(MaterialError::Encoding);
         }
         let mut stores = BTreeMap::new();
@@ -227,7 +238,7 @@ impl StoreKeyring {
             }
         }
         let count = wire::number(&mut bytes)?;
-        if count > (bytes.len() / 64) as u64 {
+        if count > (bytes.len() / CircleKey::ENCODED_LEN) as u64 {
             return Err(MaterialError::Encoding);
         }
         let mut circles = BTreeMap::new();

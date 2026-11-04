@@ -5,7 +5,10 @@ use crate::sealed;
 use crate::sealed_key::{CopyBox, KeyCopyPrefix};
 use crate::sequence::{SlotFrame, MAX_BOUNDED_SLOT};
 use crate::wire::{Decoder, Encoder, Wire};
-use coven_crypto::{Signature, SEALED_OBJECT_CHUNK_OVERHEAD, SIGNATURE_LEN};
+use coven_crypto::{
+    CircleKey, Signature, StoreKey, KEY_BOX_HEAD_LEN, KEY_BOX_TAG_LEN,
+    SEALED_OBJECT_CHUNK_OVERHEAD, SIGNATURE_LEN,
+};
 use coven_foundation::id_source::KeyId;
 
 /// Slot kind and the routing which exists only for key-copy slots.
@@ -57,7 +60,14 @@ pub struct SlotObjectPrefix {
 }
 impl SlotObjectPrefix {
     /// Longest prefix, including a circle key copy.
-    pub const MAX_LENGTH: usize = 21 + 81 + 56 + 4 + 64 + 16;
+    pub const MAX_LENGTH: usize = Self::FIXED_LEN
+        + KeyCopyPrefix::CIRCLE_LEN
+        + KEY_BOX_HEAD_LEN
+        + 4
+        + CircleKey::ENCODED_LEN
+        + KEY_BOX_TAG_LEN;
+    /// Kind, version, slot kind, key and the copy flag, before any box.
+    const FIXED_LEN: usize = 1 + 2 + 1 + 16 + 1;
     /// Encode the exact associated-data prefix, including any anonymous box.
     pub fn encode(&self) -> Result<Vec<u8>, Error> {
         let mut out = self.start()?;
@@ -100,24 +110,24 @@ impl SlotObjectPrefix {
         sealed::prefix(bytes, 33)?;
         let kind = *bytes.get(3).ok_or(Error::Truncated)?;
         require(kind <= 3, "slot kind", Rule::Kind)?;
-        let copy = *bytes.get(20).ok_or(Error::Truncated)?;
+        let copy = *bytes.get(Self::FIXED_LEN - 1).ok_or(Error::Truncated)?;
         require(copy == u8::from(kind == 2), "slot copy routing", Rule::Kind)?;
         if kind != 2 {
-            return Ok(21);
+            return Ok(Self::FIXED_LEN);
         }
-        let (routing, ciphertext) = match *bytes.get(21).ok_or(Error::Truncated)? {
-            0 => (65, 48),
-            1 => (81, 64),
+        let (routing, ciphertext) = match *bytes.get(Self::FIXED_LEN).ok_or(Error::Truncated)? {
+            0 => (KeyCopyPrefix::STORE_LEN, StoreKey::ENCODED_LEN),
+            1 => (KeyCopyPrefix::CIRCLE_LEN, CircleKey::ENCODED_LEN),
             tag => return Err(Error::UnknownTag { field: "audience", tag }),
         };
-        let offset = 21 + routing + 56;
+        let offset = Self::FIXED_LEN + routing + KEY_BOX_HEAD_LEN;
         let declared = bytes.get(offset..offset + 4).ok_or(Error::Truncated)?;
         require(
-            u32::from_be_bytes(declared.try_into().expect("four bytes")) == ciphertext,
+            u32::from_be_bytes(declared.try_into().expect("four bytes")) as usize == ciphertext,
             "key box ciphertext",
             Rule::StreamLength,
         )?;
-        Ok(offset + 4 + ciphertext as usize + 16)
+        Ok(offset + 4 + ciphertext + KEY_BOX_TAG_LEN)
     }
     /// Decode exactly the prefix, without authenticating routing.
     pub fn decode(bytes: &[u8]) -> Result<Self, Error> {

@@ -2,7 +2,10 @@
 
 use crate::error::{require, Error, Rule};
 use crate::wire::{put_blob, wire_struct, Decoder, Encoder, Wire};
-use coven_crypto::{CircleKey, CryptoError, MemberIdentity, MemberKeys, SealingKey, StoreKey};
+use coven_crypto::{
+    CircleKey, CryptoError, MemberIdentity, MemberKeys, SealingKey, StoreKey, KEY_BOX_HEAD_LEN,
+    KEY_BOX_TAG_LEN,
+};
 use coven_foundation::id_source::{KeyId, MemberId};
 use coven_merge::Audience;
 
@@ -24,10 +27,16 @@ impl KeyCopyPrefix {
     pub fn held_by(&self, member: &MemberIdentity) -> bool {
         self.member == member.member() && member.credential(&self.sealing).is_some()
     }
+    /// The encoded routing of a store copy: audience tag, key, member and
+    /// sealing key.
+    pub(crate) const STORE_LEN: usize = 1 + 16 + 16 + 32;
+    /// A circle copy's routing adds the circle id to the audience.
+    pub(crate) const CIRCLE_LEN: usize = Self::STORE_LEN + 16;
+
     pub(crate) fn material_length(&self) -> usize {
         match self.audience {
-            Audience::Store => 48,
-            Audience::Circle(_) => 64,
+            Audience::Store => StoreKey::ENCODED_LEN,
+            Audience::Circle(_) => CircleKey::ENCODED_LEN,
         }
     }
 }
@@ -44,24 +53,26 @@ impl Wire for CopyBox {
     fn put(&self, out: &mut Encoder) -> Result<(), Error> {
         self.validate()?;
         self.routing.put(out)?;
-        out.bytes(&self.sealed[..56])?;
-        put_blob(&self.sealed[56..self.sealed.len() - 16], out)?;
-        out.bytes(&self.sealed[self.sealed.len() - 16..])
+        let tag = self.sealed.len() - KEY_BOX_TAG_LEN;
+        out.bytes(&self.sealed[..KEY_BOX_HEAD_LEN])?;
+        put_blob(&self.sealed[KEY_BOX_HEAD_LEN..tag], out)?;
+        out.bytes(&self.sealed[tag..])
     }
     fn get(input: &mut Decoder<'_>) -> Result<Self, Error> {
         let routing = KeyCopyPrefix::get(input)?;
-        let mut sealed = input.take(56)?.to_vec();
+        let mut sealed = input.take(KEY_BOX_HEAD_LEN)?.to_vec();
         let length = u32::get(input)? as usize;
         require(length == routing.material_length(), "key box ciphertext", Rule::StreamLength)?;
         sealed.extend_from_slice(input.take(length)?);
-        sealed.extend_from_slice(input.take(16)?);
+        sealed.extend_from_slice(input.take(KEY_BOX_TAG_LEN)?);
         Ok(Self { routing, sealed })
     }
 }
 impl CopyBox {
     pub(crate) fn validate(&self) -> Result<(), Error> {
         require(
-            self.sealed.len() == 72 + self.routing.material_length(),
+            self.sealed.len()
+                == KEY_BOX_HEAD_LEN + self.routing.material_length() + KEY_BOX_TAG_LEN,
             "key box length",
             Rule::StreamLength,
         )

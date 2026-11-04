@@ -9,9 +9,11 @@ use chacha20poly1305::{
 /// Bytes added to a file chunk: its authentication tag, without a stored nonce.
 pub const FILE_CHUNK_TAG_LEN: usize = <XChaCha20Poly1305 as AeadCore>::TagSize::USIZE;
 
+/// A random nonce, stored before the ciphertext it seals.
+pub(crate) const NONCE_LEN: usize = <XChaCha20Poly1305 as AeadCore>::NonceSize::USIZE;
+
 /// Bytes added to each sealed object chunk: its stored nonce and authentication tag.
-pub const SEALED_OBJECT_CHUNK_OVERHEAD: usize =
-    <XChaCha20Poly1305 as AeadCore>::NonceSize::USIZE + FILE_CHUNK_TAG_LEN;
+pub const SEALED_OBJECT_CHUNK_OVERHEAD: usize = NONCE_LEN + FILE_CHUNK_TAG_LEN;
 
 pub(crate) fn storage_path(path: &str) -> &[u8] {
     assert!(!path.is_empty(), "storage paths must be nonempty");
@@ -61,7 +63,7 @@ pub(crate) fn seal_random(
     aad: &[u8],
     plaintext: &[u8],
 ) -> Result<Vec<u8>, CryptoError> {
-    let mut nonce = [0; 24];
+    let mut nonce = [0; NONCE_LEN];
     randomness::fill(&mut nonce)?;
     let mut sealed = nonce.to_vec();
     sealed.extend(seal(key, &nonce, aad, plaintext));
@@ -73,7 +75,8 @@ pub(crate) fn open_random(
     aad: &[u8],
     sealed: &[u8],
 ) -> Result<Vec<u8>, CryptoError> {
-    let (nonce, ciphertext) = sealed.split_first_chunk::<24>().ok_or(CryptoError::Malformed)?;
+    let (nonce, ciphertext) =
+        sealed.split_first_chunk::<NONCE_LEN>().ok_or(CryptoError::Malformed)?;
     open(key, nonce, aad, ciphertext)
 }
 

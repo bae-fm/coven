@@ -227,7 +227,7 @@ impl MemberKeys {
         prefix: &[u8],
         sealed: &[u8],
     ) -> Result<StoreKey, CryptoError> {
-        let plaintext = self.open_box(b"store", 48, path, prefix, sealed)?;
+        let plaintext = self.open_box(b"store", StoreKey::ENCODED_LEN, path, prefix, sealed)?;
         let mut bytes = plaintext.as_slice();
         let key = StoreKey::decode(&mut bytes)?;
         wire::end(bytes)?;
@@ -244,7 +244,7 @@ impl MemberKeys {
         prefix: &[u8],
         sealed: &[u8],
     ) -> Result<CircleKey, CryptoError> {
-        let plaintext = self.open_box(b"circle", 64, path, prefix, sealed)?;
+        let plaintext = self.open_box(b"circle", CircleKey::ENCODED_LEN, path, prefix, sealed)?;
         let mut bytes = plaintext.as_slice();
         let key = CircleKey::decode(&mut bytes)?;
         wire::end(bytes)?;
@@ -259,7 +259,7 @@ impl MemberKeys {
         prefix: &[u8],
         sealed: &[u8],
     ) -> Result<Zeroizing<Vec<u8>>, CryptoError> {
-        if sealed.len() != 32 + plaintext_length + cipher::SEALED_OBJECT_CHUNK_OVERHEAD {
+        if sealed.len() != KEY_BOX_HEAD_LEN + plaintext_length + KEY_BOX_TAG_LEN {
             return Err(CryptoError::Malformed);
         }
         let sender: [u8; 32] = sealed[..32].try_into().expect("checked box length");
@@ -389,7 +389,11 @@ impl MemberIdentity {
     pub fn to_secret_bytes(&self) -> SecretBytes {
         // Allocate once so growth cannot leave an unerased copy of the seeds.
         let pairs = 1 + self.retained.len() + usize::from(self.candidate.is_some());
-        let mut bytes = Zeroizing::new(Vec::with_capacity(30 + pairs * MEMBER_KEYS_LENGTH));
+        // Magic, id, the active pair, the retired count and pairs, and the
+        // candidate's flag and pair.
+        let mut bytes = Zeroizing::new(Vec::with_capacity(
+            IDENTITY_MAGIC.len() + 16 + 8 + 1 + pairs * MEMBER_KEYS_LENGTH,
+        ));
         bytes.extend_from_slice(IDENTITY_MAGIC);
         bytes.extend_from_slice(self.member.0.as_bytes());
         bytes.extend_from_slice(self.keys.to_secret_bytes().as_bytes());
@@ -455,6 +459,12 @@ impl fmt::Debug for MemberIdentity {
     }
 }
 
+/// A key box's bytes before its ciphertext: the ephemeral public key, then
+/// the nonce.
+pub const KEY_BOX_HEAD_LEN: usize = 32 + cipher::NONCE_LEN;
+/// A key box's authentication tag, after its ciphertext.
+pub const KEY_BOX_TAG_LEN: usize = cipher::FILE_CHUNK_TAG_LEN;
+
 /// Seal a store key anonymously, authenticating its path and exact clear prefix (D11).
 /// Returns ephemeral key, nonce, ciphertext and tag; format supplies the prefix.
 /// Panics if the storage path is empty.
@@ -464,7 +474,7 @@ pub fn seal_store_key(
     path: &str,
     prefix: &[u8],
 ) -> Result<Vec<u8>, CryptoError> {
-    let mut bytes = Zeroizing::new(Vec::with_capacity(48));
+    let mut bytes = Zeroizing::new(Vec::with_capacity(StoreKey::ENCODED_LEN));
     key.encode_into(&mut bytes);
     seal_box(b"store", recipient, path, prefix, &bytes)
 }
@@ -478,7 +488,7 @@ pub fn seal_circle_key(
     path: &str,
     prefix: &[u8],
 ) -> Result<Vec<u8>, CryptoError> {
-    let mut bytes = Zeroizing::new(Vec::with_capacity(64));
+    let mut bytes = Zeroizing::new(Vec::with_capacity(CircleKey::ENCODED_LEN));
     key.encode_into(&mut bytes);
     seal_box(b"circle", recipient, path, prefix, &bytes)
 }
