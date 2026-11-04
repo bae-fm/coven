@@ -245,10 +245,7 @@ pub struct CopyReservation {
 
 impl Drop for CopyReservation {
     fn drop(&mut self) {
-        let mut copying = self.copying.lock().expect("copying lock poisoned");
-        for path in &self.paths {
-            copying.remove(path);
-        }
+        crate::database::release_copies(&self.copying, &self.paths);
     }
 }
 

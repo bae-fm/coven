@@ -348,7 +348,7 @@ fn release_reserved<'a>(
 
 /// Let `paths` go from the copies a store keeps out of removals, once the
 /// write that brought them has decided (§17.3).
-fn release_copies(copying: &Mutex<BTreeSet<String>>, paths: &[String]) {
+pub(crate) fn release_copies(copying: &Mutex<BTreeSet<String>>, paths: &[String]) {
     let mut held = copying.lock().expect("copying lock poisoned");
     for path in paths {
         held.remove(path);
