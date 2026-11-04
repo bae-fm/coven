@@ -18,7 +18,7 @@ Links: [the problem](#1-the-problem), [rules](format.md#d1-rules),
 
 ### 1. The problem
 
-A body citation: [`kept_once`](proofs/model/Claim.lean).
+A body citation: [`kept_once`](proofs/model/Model/Claim.lean).
 
 #### 1.1 A part
 
@@ -30,8 +30,8 @@ Text.
 
 | Claim | Theorems | File | Section |
 |---|---|---|---|
-| *Body.* A claim lands once | `kept_once` | `proofs/model/Claim.lean` | §1 |
-| A listed claim | `listed_only` | `proofs/model/Claim.lean` | §1.1 |
+| *Body.* A claim lands once | `kept_once` | `proofs/model/Model/Claim.lean` | §1 |
+| A listed claim | `listed_only` | `proofs/model/Model/Claim.lean` | §1.1 |
 """
 
 FORMAT = """\
@@ -49,11 +49,47 @@ API = """\
 """
 
 
-def run(coven=COVEN, format_md=FORMAT):
+CLAIM = """\
+/- A comment naming `namespace Hidden`, which opens nothing.
+   /- nested -/ theorem hidden_in_a_comment : True := trivial -/
+namespace Model
+
+theorem kept_once : True := trivial -- the body's citation
+
+namespace Claim
+theorem listed_only : True := trivial
+end Claim
+
+section
+theorem read_through : True := trivial
+end
+
+end Model
+"""
+
+AXIOMS = """\
+import Model
+open Model
+
+#print axioms kept_once
+#print axioms Model.Claim.listed_only
+#print axioms read_through
+"""
+
+WRITEUP = """\
+# Model
+
+[Claim.lean](model/Model/Claim.lean) proves `read_through`; `not_a_theorem` is code.
+"""
+
+
+def run(coven=COVEN, format_md=FORMAT, claim=CLAIM, axioms=AXIOMS, writeup=WRITEUP):
     with tempfile.TemporaryDirectory() as tmp:
         spec = Path(tmp) / "spec"
-        (spec / "proofs" / "model").mkdir(parents=True)
-        (spec / "proofs" / "model" / "Claim.lean").write_text("theorem kept_once : True := trivial\n")
+        (spec / "proofs" / "model" / "Model").mkdir(parents=True)
+        (spec / "proofs" / "model" / "Model" / "Claim.lean").write_text(claim)
+        (spec / "proofs" / "model" / "Model" / "Axioms.lean").write_text(axioms)
+        (spec / "proofs" / "model.md").write_text(writeup)
         (spec / "coven.md").write_text(coven)
         (spec / "format.md").write_text(format_md)
         (spec / "api.md").write_text(API)
@@ -81,11 +117,27 @@ class CheckSpec(unittest.TestCase):
             self.assertIn(expected, out)
 
     def test_body_proof_links_must_be_listed_as_body_rows(self):
-        status, out = run(COVEN.replace("Text.", "[`listed_only`](proofs/model/Claim.lean)."))
+        status, out = run(COVEN.replace("Text.", "[`listed_only`](proofs/model/Model/Claim.lean)."))
         self.assertEqual(status, 1)
         self.assertIn("body cites `listed_only`, which no *Body.* row of Appendix G lists", out)
-        status, out = run(COVEN.replace("Text.", "[the model](proofs/model/Claim.lean)."))
+        status, out = run(COVEN.replace("Text.", "[the model](proofs/model/Model/Claim.lean)."))
         self.assertIn("names no theorem", out)
+
+    def test_cited_theorems_are_declared_where_cited_and_audited(self):
+        status, out = run(axioms=AXIOMS.replace("#print axioms Model.Claim.listed_only\n", ""))
+        self.assertEqual(status, 1)
+        self.assertIn("spec/coven.md:22: cites `Model.Claim.listed_only`, which "
+                      "proofs/model/Model/Axioms.lean has no `#print axioms` line for", out)
+        status, out = run(axioms=AXIOMS.replace("#print axioms read_through\n", ""))
+        self.assertEqual(status, 1)
+        self.assertIn("spec/proofs/model.md:3: cites `Model.read_through`", out)
+        status, out = run(COVEN.replace("`listed_only`", "`hidden_in_a_comment`"))
+        self.assertEqual(status, 1)
+        self.assertIn("cites `hidden_in_a_comment`, which proofs/model/Model/Claim.lean "
+                      "declares no theorem of that name", out)
+        status, out = run(claim=CLAIM.replace("namespace Claim\n", "").replace("end Claim\n", ""))
+        self.assertEqual(status, 1)
+        self.assertIn("cites `Model.listed_only`", out)
 
     def test_long_prose_lines_fail_but_tables_code_and_links_do_not(self):
         long_prose = "word " * 21
@@ -95,7 +147,7 @@ class CheckSpec(unittest.TestCase):
             "code " * 30,
             "```",
             "  ([`kept_once`, `also_kept_once_with_a_name_long_enough_to_pass_the_limit_by_itself`]"
-            "(proofs/model/Claim.lean)).",
+            "(proofs/model/Model/Claim.lean)).",
         ])
         status, out = run(COVEN.replace("Text.", exempt))
         self.assertEqual(out.count("characters; wrap prose"), 0, out)

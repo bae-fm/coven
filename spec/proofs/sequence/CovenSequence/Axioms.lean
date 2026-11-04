@@ -148,6 +148,8 @@ import SequenceApply
 #print axioms CovenSequence.QueueReload.unread_reset_excludes
 #print axioms CovenSequence.QueueReload.permission_same_view
 #print axioms CovenSequence.QueueReload.changed_binding_cannot_send
+#print axioms CovenSequence.Reload.newest_mem
+#print axioms CovenSequence.Reload.newest_latest
 #print axioms CovenSequence.QueueReloadExamples.reset_counterexample
 #print axioms CovenSequence.QueueReloadExamples.breaking_raise_counterexample
 #print axioms CovenSequence.QueueReloadExamples.newly_readable_counterexample
@@ -289,6 +291,8 @@ import SequenceApply
 #print axioms CovenSequence.InviteLifecycle.finding_current
 #print axioms CovenSequence.InviteLifecycle.commit_acts_on_read
 #print axioms CovenSequence.InviteLifecycle.settles
+#print axioms CovenSequence.InviteLifecycle.progress
+#print axioms CovenSequence.InviteLifecycle.share_recorded
 #print axioms CovenSequence.InviteLifecycle.forward
 #print axioms CovenSequence.InviteLifecycle.offered_accepted
 #print axioms CovenSequence.InviteLifecycle.approval_runs_binding
@@ -300,6 +304,8 @@ import SequenceApply
 #print axioms CovenSequence.InviteLifecycle.forgetful_stop_runs_forever
 #print axioms CovenSequence.InviteLifecycle.reclaim_binds_twice
 #print axioms CovenSequence.InviteLifecycle.approval_shown_as_waiting
+#print axioms CovenSequence.InviteLifecycle.unrecorded_share_strands
 #print axioms CovenSequence.JoinStatus.phases_forward
+#print axioms CovenSequence.JoinStatus.opened_never_waits
 #print axioms CovenSequence.JoinStatus.resumed_waits_again
 #print axioms CovenSequence.JoinStatus.scan_shown_as_loading

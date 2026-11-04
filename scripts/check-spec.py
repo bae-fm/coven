@@ -12,6 +12,10 @@ a machine can see:
   GitHub's heading anchors;
 - every link into proofs/ before coven.md's Appendix G names theorems listed
   in a row of Appendix G marked *Body.*, so body citations are deliberate;
+- every theorem a row of Appendix G cites is declared in a Lean file that row
+  names, and every theorem Appendix G or a proof write-up (proofs/<package>.md)
+  cites has its own `#print axioms` line in its package's Axioms.lean, so the
+  proof check audits it by name;
 - no prose line is longer than 100 characters (tables, code blocks and lines
   that hold only links are exempt);
 - no paragraph or list is broken by two blank lines in a row.
@@ -217,6 +221,138 @@ def check_body_citations(coven, findings):
                                  + ", ".join(sorted(listed[theorem]))))
 
 
+LEAN_SCOPE = re.compile(r"^(namespace|section|mutual|end)\b[ \t]*(\S*)")
+LEAN_DECLARATION = re.compile(
+    r"^\s*(?:@\[[^\]]*\]\s*)?(?:noncomputable\s+)?(?:protected\s+)?(theorem|def|abbrev)\s+([^\s(:{\[]+)")
+
+
+def lean_code(text):
+    """Lean source with its comments blanked, line breaks kept; string literals are left alone."""
+    out, depth, i = [], 0, 0
+    while i < len(text):
+        if depth == 0 and text[i] == '"':
+            end = i + 1
+            while end < len(text) and text[end] != '"':
+                end += 2 if text[end] == "\\" else 1
+            out.append(text[i:end + 1])
+            i = end + 1
+        elif text.startswith("/-", i):
+            depth += 1
+            i += 2
+        elif depth and text.startswith("-/", i):
+            depth -= 1
+            i += 2
+        elif depth == 0 and text.startswith("--", i):
+            while i < len(text) and text[i] != "\n":
+                i += 1
+        else:
+            out.append(text[i] if depth == 0 or text[i] == "\n" else " ")
+            i += 1
+    return "".join(out)
+
+
+def lean_declarations(path):
+    """A Lean file's public theorems and definitions: full name -> (kind, line)."""
+    declared, scopes = {}, []
+    for number, line in enumerate(lean_code(path.read_text(encoding="utf-8")).split("\n"), 1):
+        scope = LEAN_SCOPE.match(line)
+        if scope:
+            if scope.group(1) == "end":
+                if scopes:
+                    scopes.pop()
+            else:
+                scopes.append(scope.group(2) if scope.group(1) == "namespace" else "")
+            continue
+        match = LEAN_DECLARATION.match(line)
+        if match:
+            name = ".".join([part for part in scopes if part] + [match.group(2)])
+            declared[name] = ("theorem" if match.group(1) == "theorem" else "def", number)
+    return declared
+
+
+class ProofPackage:
+    """One Lean package under proofs/: what its files declare and which theorems Axioms.lean audits."""
+
+    def __init__(self, directory, axioms):
+        self.directory = directory
+        self.axioms = axioms.resolve()
+        self.files = {}
+        for path in sorted(directory.rglob("*.lean")):
+            if ".lake" not in path.relative_to(directory).parts:
+                self.files[path.resolve()] = lean_declarations(path)
+        names = {name for declared in self.files.values() for name in declared}
+        text = lean_code(axioms.read_text(encoding="utf-8"))
+        opened = [name for line in re.findall(r"^open\s+(.+)$", text, re.M) for name in line.split()]
+        self.audited = set()
+        for printed in re.findall(r"^#print\s+axioms\s+(\S+)", text, re.M):
+            for candidate in [printed] + [f"{namespace}.{printed}" for namespace in opened]:
+                if candidate in names:
+                    self.audited.add(candidate)
+                    break
+
+    def theorems(self, cited, files=None):
+        """The full names of the theorems `cited` can name, in `files` or anywhere in the package."""
+        return sorted(name for path, declared in self.files.items()
+                      if files is None or path in files
+                      for name, (kind, _) in declared.items()
+                      if kind == "theorem" and (name == cited or name.endswith("." + cited)))
+
+
+def proof_packages(spec):
+    packages = {}
+    proofs = spec / "proofs"
+    for directory in sorted(proofs.iterdir()) if proofs.is_dir() else []:
+        axioms = sorted(directory.glob("*/Axioms.lean")) if directory.is_dir() else []
+        if axioms:
+            packages[directory.name] = ProofPackage(directory, axioms[0])
+    return packages
+
+
+def check_audits(coven, writeups, packages, findings):
+    """Each theorem Appendix G or a write-up cites is declared where cited and audited by name."""
+    proofs = (coven.path.parent / "proofs").resolve()
+
+    def unaudited(document, line, package, names):
+        for name in names:
+            if name not in package.audited:
+                findings.append((document, line, f"cites `{name}`, which "
+                                 f"{package.axioms.relative_to(proofs.parent)} has no "
+                                 "`#print axioms` line for"))
+
+    start = next((n for n, title in coven.headings if title.startswith("Appendix G.")), None)
+    end = next((n for n, title in coven.headings
+                if start and n > start and title.startswith("Appendix ")
+                and not title.startswith("Appendix G")), len(coven.lines) + 1)
+    for number in range(start or len(coven.lines), end - 1):
+        line = coven.lines[number]
+        cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
+        if not line.lstrip().startswith("|") or len(cells) < 3:
+            continue
+        files = {(coven.path.parent / path).resolve()
+                 for path in re.findall(r"proofs/[\w./-]+\.lean", cells[2])}
+        if not files:
+            continue
+        package = packages.get(next(iter(files)).relative_to(proofs).parts[0])
+        if package is None:
+            findings.append((coven, number + 1, "cites a proof package with no Axioms.lean"))
+            continue
+        for cited in re.findall(r"`([^`]+)`", cells[1]):
+            names = package.theorems(cited, files)
+            if not names:
+                findings.append((coven, number + 1, f"cites `{cited}`, which "
+                                 + ", ".join(sorted(str(path.relative_to(proofs.parent))
+                                                    for path in files))
+                                 + " declares no theorem of that name"))
+            unaudited(coven, number + 1, package, names)
+    for name, document in writeups.items():
+        package = packages.get(name)
+        if package is None:
+            continue
+        for match in re.finditer(r"`([A-Za-z_][\w.']*)`", document.text):
+            unaudited(document, document.line_of(match.start()), package,
+                      package.theorems(match.group(1)))
+
+
 def only_links(line):
     """Whether a line holds nothing but links (whole, or the ends of one wrapped from a neighbour)."""
     rest = LINK.sub("", line)
@@ -264,6 +400,9 @@ def main(argv):
         check_links(document, documents, findings)
         check_layout(document, findings)
     check_body_citations(coven, findings)
+    writeups = {path.stem: Document(path.resolve())
+                for path in sorted((spec / "proofs").glob("*.md"))}
+    check_audits(coven, writeups, proof_packages(spec), findings)
     for document, line, message in sorted(findings, key=lambda f: (str(f[0].path), f[1])):
         print(f"{document.path.relative_to(spec.resolve().parent)}:{line}: {message}")
     return 1 if findings else 0

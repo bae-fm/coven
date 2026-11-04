@@ -3,10 +3,16 @@ import CovenIO
 #print axioms CovenIO.Downloads.first_unmet
 #print axioms CovenIO.Keep.copy_reads_no_storage
 #print axioms CovenIO.Keep.original_never_read
+#print axioms CovenIO.Keep.failed_copy_downloads
+#print axioms CovenIO.Keep.user_downloads
 #print axioms CovenIO.Downloads.one_pending
 #print axioms CovenIO.Downloads.pending_replaced
 #print axioms CovenIO.Downloads.failure_atomic
 #print axioms CovenIO.Downloads.failed_read_records_nothing
+#print axioms CovenIO.Downloads.prepare_retains_nothing
+#print axioms CovenIO.Downloads.prepared_settles
+#print axioms CovenIO.Downloads.commit_pins
+#print axioms CovenIO.Downloads.unnamed_commit_keeps_nothing
 #print axioms CovenIO.Downloads.progress_never_decreases
 #print axioms CovenIO.Downloads.committed_ranges_unique
 #print axioms CovenIO.Downloads.completion_has_all_ranges
@@ -24,6 +30,7 @@ import CovenIO
 #print axioms CovenIO.Retired.failed_listing_records_nothing
 #print axioms CovenIO.Retired.listing_finds_every_file
 #print axioms CovenIO.retained_never_fetched
+#print axioms CovenIO.uncommitted_never_retained
 #print axioms CovenIO.shared_in_flight
 #print axioms CovenIO.reopen_retains_bytes
 #print axioms CovenIO.cache_keeps_unless_evicted
@@ -84,6 +91,10 @@ import CovenIO
 #print axioms CovenIO.Waiting.kept_wait_returns
 #print axioms CovenIO.Waiting.Examples.unlocked_starts_at_once
 #print axioms CovenIO.Waiting.Examples.answered_keeps_waiting
+#print axioms CovenIO.Waiting.retry_ends_wait
+#print axioms CovenIO.Waiting.retry_during_attempt_wakes
+#print axioms CovenIO.Waiting.retry_keeps_backoff
+#print axioms CovenIO.Waiting.retry_keeps_cooldown
 #print axioms CovenIO.RetryAnswer.answer_final
 #print axioms CovenIO.RetryAnswer.answer_final_run
 #print axioms CovenIO.RetryAnswer.inv_run

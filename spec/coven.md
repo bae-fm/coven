@@ -10442,8 +10442,11 @@ the same on any platform.
 10. The spec's own checks (`scripts/check-spec.py`): in coven.md and format.md,
     every section reference and link resolves, every proof link in the body is a
     *Body.* row of Appendix G, prose lines stay within 100 characters, and no
-    paragraph is split by two blank lines. spec/WRITING.md is the standard they
-    help keep.
+    paragraph is split by two blank lines. Every theorem a row of Appendix G
+    cites is declared in a file that row names, and every theorem Appendix G or a
+    proof write-up cites has its own `#print axioms` line in its package's
+    `Axioms.lean`, so check 9 audits it by name. spec/WRITING.md is the standard
+    they help keep.
 
 The checker is the first thing built, before any crate, so every rule holds from
 the first line of code.

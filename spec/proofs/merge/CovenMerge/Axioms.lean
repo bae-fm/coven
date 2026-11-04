@@ -213,6 +213,7 @@ open CovenMerge
 #print axioms Ownership.Admission.result_converges
 #print axioms Ownership.Admission.replay_restores_row
 #print axioms Ownership.Admission.no_rejection_cycle
+#print axioms close_normal
 #print axioms Ownership.Examples.concurrent_child_blocks
 #print axioms Ownership.Examples.concurrent_membership_blocks
 #print axioms Ownership.Examples.hidden_child_still_blocks

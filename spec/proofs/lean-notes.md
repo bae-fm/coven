@@ -8,7 +8,7 @@ imports its retained modules; its `Axioms.lean` names results for the audit.
 axioms in the proof libraries. Each theorem a write-up or Appendix G cites
 needs its own `#print axioms` line in its package's `Axioms.lean`: a cited
 theorem that an audited result only imports or uses along the way is not
-audited by name.
+audited by name. `scripts/check-spec.py` refuses a cited theorem without one.
 
 The sequence package models the shared store sequence: ordered application,
 claim settlement, device-copy detection, authority, cut-off, first-slot claims,
