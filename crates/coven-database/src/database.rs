@@ -613,7 +613,7 @@ impl Database {
                         inner.access.device,
                         inner.clock.now(),
                         files,
-                        sql,
+                        |files| sql(crate::SqlContext::new(files)),
                     )
                 });
                 // Staged files the write brought in go free once it has

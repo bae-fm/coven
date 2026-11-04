@@ -136,8 +136,8 @@ pub(crate) fn copy_rows(
             &format!(
                 "SELECT {} FROM {} AS m FULL JOIN {} AS s ON s.{key}=m.{key} AND s.{audience}=m.{audience} ORDER BY 1,2",
                 joined.join(","),
-                table.staged(prepared.staging, Staged::Merged),
-                table.staged(prepared.staging, Staged::Synced),
+                table.staged(prepared.staging(), Staged::Merged),
+                table.staged(prepared.staging(), Staged::Synced),
                 key = table.column("key"),
                 audience = table.column("audience"),
             ),
@@ -181,8 +181,8 @@ pub(crate) fn compare_rows(
     for table in &layout.tables {
         let joined = format!(
             "{} AS m JOIN {} AS s ON s.{key}=m.{key} AND s.{audience}=m.{audience}",
-            table.staged(prepared.staging, Staged::Merged),
-            table.staged(prepared.staging, Staged::Synced),
+            table.staged(prepared.staging(), Staged::Merged),
+            table.staged(prepared.staging(), Staged::Synced),
             key = table.column("key"),
             audience = table.column("audience"),
         );

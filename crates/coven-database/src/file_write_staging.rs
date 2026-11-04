@@ -14,14 +14,14 @@ impl FileWrite<'_> {
     /// store to release.
     pub(crate) fn put_staged<T>(&self, staged: crate::StagedFiles<T>) -> Result<T, DbError> {
         {
-            let reserved = self.reservations.lock().expect("file staging lock poisoned");
+            let reserved = self.files.reservations.lock().expect("file staging lock poisoned");
             if staged.names().iter().any(|name| !reserved.contains(name)) {
                 return Err(DbError::PreparedElsewhere);
             }
         }
         let (files, names, value) = staged.take();
-        self.brought.borrow_mut().extend(names);
-        self.staged.borrow_mut().extend(files);
+        self.files.brought.borrow_mut().extend(names);
+        self.files.staged.borrow_mut().extend(files);
         Ok(value)
     }
 
@@ -34,6 +34,7 @@ impl FileWrite<'_> {
         place: Place,
     ) -> Result<FileId, DbError> {
         let declared = self
+            .files
             .schema
             .namespace(namespace)
             .ok_or_else(|| DbError::UndeclaredNamespace { namespace: namespace.to_owned() })?;
@@ -43,8 +44,8 @@ impl FileWrite<'_> {
                 namespace: namespace.to_owned(),
             });
         }
-        let id = FileId(self.ids.new_id());
-        self.staged.borrow_mut().push(StagedFile {
+        let id = FileId(self.files.ids.new_id());
+        self.files.staged.borrow_mut().push(StagedFile {
             id,
             namespace: namespace.to_owned(),
             size: original.original.size,
@@ -57,8 +58,8 @@ impl FileWrite<'_> {
 
     /// Stage a new file over an existing file's bytes, and return its new id.
     pub(crate) fn existing_file(&self, from: FileId) -> FileId {
-        let id = FileId(self.ids.new_id());
-        self.existing.borrow_mut().push(ExistingFile { id, from });
+        let id = FileId(self.files.ids.new_id());
+        self.files.existing.borrow_mut().push(ExistingFile { id, from });
         id
     }
 }

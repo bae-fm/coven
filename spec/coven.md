@@ -10136,7 +10136,10 @@ of the same type. The checker tells the two apart in the method's body: a value
 is made there when what hands it out reads nothing of `self`, by itself or
 through a local bound from what does; a macro's value, a closure's argument and
 a callback passed on to other code could be anything, so they count as the
-owner's. Nothing outside `coven-database` gets the
+owner's. A task taken whole, or mutably, may hand on by value a task it holds,
+as one step of an operation hands its product to the next, or a run of slot
+reads hands each slot it read to its reader: it no longer has it. Nothing
+outside `coven-database` gets the
 SQLite connection; it asks the database owner to run a write. A struct
 built only to be taken apart again, with every field public and no methods, isn't
 used to pass collaborators; they are passed by name.

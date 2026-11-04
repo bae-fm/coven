@@ -141,64 +141,9 @@ non_owner_types = [
     "LookupLimit",
     "LookupState",
 ]
-# Writes borrow the database's retained connection and id source; app
-# SQL receives none of those dependencies.
-borrowed_facade_types = [
-    "SnapshotMetadata",
-    # A run of slot reads borrows the sequence owner and hands each slot's
-    # bytes to its reader in order.
-    "SlotReads",
-    # These readers borrow a connection for one committed read or transaction.
-    "DatabaseMetadata",
-    "PreparedBytes",
-    "PreparedInputs",
-    "PreparedRecords",
-    "PreparedWrite",
-    "PreparedPart",
-    "PreparedSnapshot",
-    # One batch of a snapshot's staging writes its records through the
-    # input connection's transaction for that batch.
-    "RecordStaging",
-    "ClaimBytes",
-    "Circles",
-    "FileWrite",
-    # One write call's files borrow the store's id source and its
-    # reservations; each transaction of the call works on them.
-    "WriteFiles",
-    # A write's batch borrows the store's id source while the app
-    # stages its files, giving each a new id.
-    "WriteBatch",
-    "SqlReadContext",
-    "Read",
-    "ReadOwner",
-    "ChangeCapture",
-    "StreamCapture",
-    "SupplementalChanges",
-    "Observing",
-    "MigrationContext",
-    "SqlContext",
-    # An app's write borrows the store's operation owner, whose steps
-    # run in it, for that one transaction.
-    "CovenWrite",
-    # A bulk write's SQL borrows the writer connection for its one
-    # transaction, as a write's does.
-    "BulkSqlContext",
-    "SqlTransaction",
-    # A write transaction holds the writer from BEGIN to its end and sets
-    # and removes the hooks that observe it.
-    "WriteTransaction",
-    "ReaderLease",
-    "AppView",
-    "MergeStore",
-    "WriteMetadata",
-    "DatabaseRemovalView",
-    "WriteApply",
-    # A local write's operation hook and its capture borrow
-    # the writer connection for one transaction.
-    "EventCapture",
-    "Tracker",
-    "PreWrite",
-]
+# An API namespace that borrows an owner without becoming one: a store's
+# circles, which the app reaches through its handle.
+borrowed_facade_types = ["Circles"]
 task_types = [
     # What one S3 detection read from its responses' headers, shared with
     # the interceptor each of its requests carries (§20.7).
@@ -383,6 +328,66 @@ task_types = [
     "ConnectionAttempt",
     # A database being built for one open or create, which it ends.
     "DatabaseBuilder",
+    # One read's, one write's and one transaction's values, each borrowing
+    # the connection or the owner it works on for that operation, and the
+    # parts they are made of: a merge's row values, a removal view's states
+    # and a write's journal for sync's steps.
+    "RowValues",
+    "States",
+    "Journal",
+    "SnapshotMetadata",
+    # A run of slot reads borrows the sequence owner and hands each slot's
+    # bytes to its reader in order.
+    "SlotReads",
+    # Readers that borrow a connection for one committed read or transaction.
+    "DatabaseMetadata",
+    "PreparedBytes",
+    "PreparedInputs",
+    "PreparedRecords",
+    "PreparedWrite",
+    "PreparedPart",
+    "PreparedSnapshot",
+    # One batch of a snapshot's staging writes its records through the
+    # input connection's transaction for that batch.
+    "RecordStaging",
+    "ClaimBytes",
+    "FileWrite",
+    # One write call's files borrow the store's id source and its
+    # reservations; each transaction of the call works on them.
+    "WriteFiles",
+    # A write's batch borrows the store's id source while the app
+    # stages its files, giving each a new id.
+    "WriteBatch",
+    "SqlReadContext",
+    "Read",
+    "ReadOwner",
+    "ChangeCapture",
+    "StreamCapture",
+    "SupplementalChanges",
+    "Observing",
+    "MigrationContext",
+    "SqlContext",
+    # An app's write borrows the store's operation owner, whose steps
+    # run in it, for that one transaction.
+    "CovenWrite",
+    # A bulk write's SQL borrows the writer connection for its one
+    # transaction, as a write's does.
+    "BulkSqlContext",
+    "SqlTransaction",
+    # A write transaction holds the writer from BEGIN to its end and sets
+    # and removes the hooks that observe it.
+    "WriteTransaction",
+    "ReaderLease",
+    "AppView",
+    "MergeStore",
+    "WriteMetadata",
+    "DatabaseRemovalView",
+    "WriteApply",
+    # A local write's operation hook and its capture borrow
+    # the writer connection for one transaction.
+    "EventCapture",
+    "Tracker",
+    "PreWrite",
 ]
 # The shared in-memory state the runtime and the standard library declare.
 external_types = [

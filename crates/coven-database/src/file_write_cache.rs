@@ -38,7 +38,7 @@ impl FileWrite<'_> {
     pub(crate) fn pin(&self, prepared: crate::PreparedPin) -> Result<(), DbError> {
         let db = self.database;
         {
-            let reserved = self.reservations.lock().expect("file staging lock poisoned");
+            let reserved = self.files.reservations.lock().expect("file staging lock poisoned");
             if prepared.names().any(|name| !reserved.contains(name)) {
                 return Err(DbError::PreparedElsewhere);
             }
@@ -46,7 +46,7 @@ impl FileWrite<'_> {
         let (copies, kept) = prepared.take();
         // The names go free once the write has decided, whatever the rest
         // of it does.
-        self.brought.borrow_mut().extend(copies.iter().map(|(_, name)| name.clone()));
+        self.files.brought.borrow_mut().extend(copies.iter().map(|(_, name)| name.clone()));
         for (file, name) in copies {
             if !crate::database::file_database::publish_cached(db, &file, &name, true)? {
                 return Err(DbError::NoLongerStored { file: file.id() });

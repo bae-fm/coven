@@ -23,13 +23,15 @@ impl FileWrite<'_> {
         &self,
         captured: &BTreeMap<AppKey, crate::write_capture::CapturedRow>,
     ) -> Result<(), DbError> {
-        if self.existing.borrow().is_empty() {
+        if self.files.existing.borrow().is_empty() {
             return Ok(());
         }
         let db = self.database;
-        let mut audiences =
-            self.audiences(captured, &self.existing.borrow().iter().map(|file| file.id).collect())?;
-        for file in self.existing.borrow().iter() {
+        let mut audiences = self.audiences(
+            captured,
+            &self.files.existing.borrow().iter().map(|file| file.id).collect(),
+        )?;
+        for file in self.files.existing.borrow().iter() {
             let record =
                 Record::read(db, file.from)?.ok_or(DbError::FileAbsent { file: file.from })?;
             let Some(audience) = audiences.remove(&file.id) else {
@@ -54,23 +56,23 @@ impl FileWrite<'_> {
     ) -> Result<Copies, DbError> {
         let db = self.database;
         let mut copies = Copies::default();
-        let before = AppView::before(db, self.schema, captured)?;
-        let after = AppView::after(db, self.schema);
+        let before = AppView::before(db, self.files.schema, captured)?;
+        let after = AppView::after(db, self.files.schema);
         let store = crate::merge_store::MergeStore::new(db, &before);
         let (moved, _) = crate::write_record::moved(
             db,
-            self.schema,
+            self.files.schema,
             &before,
             &after,
             &store,
             captured.keys().cloned(),
         )?;
         for (old, new) in moved {
-            let columns = self.schema.file_columns(&old.table);
+            let columns = self.files.schema.file_columns(&old.table);
             if columns.is_empty() {
                 continue;
             }
-            let table = self.schema.table(&old.table);
+            let table = self.files.schema.table(&old.table);
             let state = store.row(&old)?;
             let shown = state.loss.is_none();
             let values: AppValues = if shown {
@@ -128,7 +130,7 @@ impl FileWrite<'_> {
 
     /// A new file in `audience` over `record`'s bytes, given a new id.
     fn copy(&self, record: &Record, audience: Audience) -> Result<FileId, DbError> {
-        let id = FileId(self.ids.new_id());
+        let id = FileId(self.files.ids.new_id());
         self.make_copy(id, record, audience)?;
         Ok(id)
     }
@@ -142,18 +144,18 @@ impl FileWrite<'_> {
     /// them and queues their upload.
     fn make_copy(&self, id: FileId, record: &Record, audience: Audience) -> Result<(), DbError> {
         let db = self.database;
-        crate::write_commit::check_membership(db, self.device, &audience)?;
+        crate::write_commit::check_membership(db, self.files.device, &audience)?;
         match record.place {
-            Place::DeviceOnly(device) if device != self.device => {
+            Place::DeviceOnly(device) if device != self.files.device => {
                 return Err(DbError::NotThisDevice { file: record.id });
             }
             _ => {}
         }
         file_table::insert(db, &Record { id, audience, ..record.clone() })?;
         let bytes = self.staged_bytes(record.id);
-        if self.staged.borrow().iter().any(|file| file.id == bytes) {
-            self.copies.borrow_mut().entry(bytes).or_default().push(id);
-        } else if record.place == Place::DeviceOnly(self.device) {
+        if self.files.staged.borrow().iter().any(|file| file.id == bytes) {
+            self.files.copies.borrow_mut().entry(bytes).or_default().push(id);
+        } else if record.place == Place::DeviceOnly(self.files.device) {
             super::uploads::share(db, record.id, id)?;
         }
         Ok(())
@@ -162,7 +164,8 @@ impl FileWrite<'_> {
     /// The file this write stages whose bytes `file` is: itself, or the one
     /// it made `file` over.
     pub(super) fn staged_bytes(&self, file: FileId) -> FileId {
-        self.copies
+        self.files
+            .copies
             .borrow()
             .iter()
             .find(|(_, copies)| copies.contains(&file))

@@ -148,8 +148,8 @@ fn public_database_parameters_and_mutating_receiver_parameters_are_rejected() {
 }
 
 #[test]
-fn consuming_tasks_can_transfer_products_but_cannot_lend_or_expose_raw_handles() {
-    let found = leaks(PATH, "struct Plan { permit: Permit } impl Plan { fn into_permit(self) -> Permit { todo!() } fn borrow(&self) -> &Permit { todo!() } fn borrow_consumed(self) -> &'static Permit { todo!() } fn raw(self) -> Connection { todo!() } }");
+fn tasks_taken_whole_or_mutably_can_transfer_products_but_cannot_lend_or_expose_raw_handles() {
+    let found = leaks(PATH, "struct Plan { permit: Permit } impl Plan { fn into_permit(self) -> Permit { todo!() } fn next(&mut self) -> Permit { todo!() } fn copy(&self) -> Permit { todo!() } fn borrow(&self) -> &Permit { todo!() } fn borrow_consumed(self) -> &'static Permit { todo!() } fn raw(self) -> Connection { todo!() } }");
     assert_eq!(
         found,
         findings(
@@ -157,6 +157,7 @@ fn consuming_tasks_can_transfer_products_but_cannot_lend_or_expose_raw_handles()
             &[
                 "Plan::borrow returns retained dependency Permit",
                 "Plan::borrow_consumed returns retained dependency Permit",
+                "Plan::copy returns retained dependency Permit",
                 "Plan::raw returns retained dependency Connection",
             ]
         )

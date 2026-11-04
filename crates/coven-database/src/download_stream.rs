@@ -65,9 +65,9 @@ pub enum DownloadedPartStream<R> {
 }
 
 pub(crate) struct PreparedWrite<'a> {
-    pub(crate) header: WriteHeaderFrame,
+    header: WriteHeaderFrame,
     parts: Vec<Option<PreparedPart<'a>>>,
-    pub(crate) signer: coven_crypto::SigningKey,
+    signer: coven_crypto::SigningKey,
     evidence: crate::HeaderEvidence,
 }
 pub(crate) struct PreparedPart<'a> {
@@ -110,6 +110,14 @@ impl<R: Read> DownloadedWriteStream<R> {
     }
 }
 impl PreparedWrite<'_> {
+    /// The write's header frame.
+    pub(crate) fn header(&self) -> &WriteHeaderFrame {
+        &self.header
+    }
+    /// The key the write was signed with.
+    pub(crate) fn signer(&self) -> &coven_crypto::SigningKey {
+        &self.signer
+    }
     /// The audiences of parts this installation could not open.
     pub(crate) fn unopened_audiences(&self) -> impl Iterator<Item = &coven_merge::Audience> {
         self.header

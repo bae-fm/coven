@@ -11,7 +11,7 @@ use tokio::io::AsyncRead;
 /// puts the id in the rows that reference the file.
 pub struct WriteBatch<'a> {
     ids: &'a dyn IdSource,
-    pub(crate) files: Vec<BatchFile>,
+    files: Vec<BatchFile>,
 }
 
 /// A new file over an existing file's bytes: its new id, and the file whose
@@ -48,6 +48,11 @@ pub enum Place {
 impl<'a> WriteBatch<'a> {
     pub(crate) fn new(ids: &'a dyn IdSource) -> Self {
         Self { ids, files: Vec::new() }
+    }
+
+    /// The files staged, for the staging that copies them in.
+    pub(crate) fn into_files(self) -> Vec<BatchFile> {
+        self.files
     }
 
     /// Stage app bytes as a new file in an app namespace, kept in coven's

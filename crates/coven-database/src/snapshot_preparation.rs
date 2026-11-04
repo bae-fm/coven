@@ -16,8 +16,8 @@ pub(crate) struct PreparedEvidence {
 /// staged order; its other records stay on the input connection.
 pub(crate) struct PreparedSnapshot<'a> {
     db: &'a DatabaseConnection,
-    pub(crate) staging: i64,
-    pub(crate) header: SnapshotHeader,
+    staging: i64,
+    header: SnapshotHeader,
     evidence: VecDeque<PreparedEvidence>,
     /// The first record staging found failing the loader's checks, and its
     /// section.
@@ -59,6 +59,16 @@ pub(crate) fn prepare<'a>(
 }
 
 impl PreparedSnapshot<'_> {
+    /// The staging its records are in.
+    pub(crate) fn staging(&self) -> i64 {
+        self.staging
+    }
+
+    /// The header its stream carried.
+    pub(crate) fn header(&self) -> &SnapshotHeader {
+        &self.header
+    }
+
     /// Refuse the body for the first record staging found failing the
     /// loader's checks, once installing reaches that record's section, in
     /// the order the checks that need the writer would have met it.

@@ -157,15 +157,15 @@ pub(crate) fn stage_writes<P: crate::PendingValue>(
     )?;
     let mut previous = None;
     for write in writes {
-        header.check_write(&write.header.header)?;
-        if previous.is_some_and(|number| number >= write.header.header.position.number) {
+        header.check_write(&write.header().header)?;
+        if previous.is_some_and(|number| number >= write.header().header.position.number) {
             return Err(crate::snapshot_error::invalid(
                 "slot writes are not in original number order",
             ));
         }
-        previous = Some(write.header.header.position.number);
+        previous = Some(write.header().header.position.number);
         let cutoff =
-            crate::sequence::refusal(db, slot, header.device, header.author, &write.signer)?;
+            crate::sequence::refusal(db, slot, header.device, header.author, write.signer())?;
         if let Some((cutoff, cause)) = cutoff {
             db.internal_execute("INSERT INTO _coven_write_refusals(slot,cutoff) VALUES(?1,?2) ON CONFLICT(slot) DO NOTHING",
                 rusqlite::params![slot.0.to_be_bytes(), cutoff.0.to_be_bytes()])?;

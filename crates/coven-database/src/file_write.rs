@@ -164,13 +164,6 @@ pub(crate) struct FileWrite<'a> {
     files: &'a WriteFiles<'a>,
 }
 
-impl<'a> std::ops::Deref for FileWrite<'a> {
-    type Target = WriteFiles<'a>;
-    fn deref(&self) -> &WriteFiles<'a> {
-        self.files
-    }
-}
-
 impl<'a> WriteFiles<'a> {
     pub(crate) fn new(
         schema: &'a WriteSchema,
@@ -229,12 +222,12 @@ impl<'a> FileWrite<'a> {
     }
     /// Dismiss these lost values in this write (§8.4).
     pub(crate) fn dismiss(&self, values: &[crate::LostValue]) {
-        self.dismissing.borrow_mut().extend_from_slice(values);
+        self.files.dismissing.borrow_mut().extend_from_slice(values);
     }
 
     /// The lost values this write dismisses.
     pub(crate) fn take_dismissals(&self) -> Vec<crate::LostValue> {
-        std::mem::take(&mut self.dismissing.borrow_mut())
+        std::mem::take(&mut self.files.dismissing.borrow_mut())
     }
 
     /// Run one of coven's steps (§4). A failed step may have made part of
@@ -261,14 +254,14 @@ impl<'a> FileWrite<'a> {
     }
 
     fn fail(&self, part: FailedPart) {
-        if self.failed.get().is_none() {
-            self.failed.set(Some(part));
+        if self.files.failed.get().is_none() {
+            self.files.failed.set(Some(part));
         }
     }
 
     /// Refuse to commit a write one of whose statements or steps failed (§4).
     pub(crate) fn check_parts(&self) -> Result<(), DbError> {
-        match self.failed.get() {
+        match self.files.failed.get() {
             None => Ok(()),
             Some(FailedPart::Step) => Err(DbError::StepFailed),
             Some(FailedPart::Statement) => Err(DbError::StatementFailed),
@@ -277,7 +270,7 @@ impl<'a> FileWrite<'a> {
 
     /// Run `effect` once this write has committed.
     pub(crate) fn after_commit(&self, effect: Box<dyn FnOnce()>) {
-        self.committed.borrow_mut().push(effect);
+        self.files.committed.borrow_mut().push(effect);
     }
 
     pub(crate) fn execute<P: rusqlite::Params>(
@@ -313,7 +306,7 @@ impl<'a> FileWrite<'a> {
     /// The new files the write's moves made for rows removal rules took out,
     /// which their inserts name (§17.2).
     pub(crate) fn taken_out_copies(&self) -> Copied {
-        self.taken_out.borrow().clone()
+        self.files.taken_out.borrow().clone()
     }
 
     /// Coven's part of a local write, after its SQL and while its row
@@ -329,15 +322,15 @@ impl<'a> FileWrite<'a> {
         events: impl Fn() -> Vec<crate::sqlite::Event>,
     ) -> Result<(), DbError> {
         self.finish_uploads()?;
-        let captured = crate::write_capture::capture(self.schema, &events())?;
+        let captured = crate::write_capture::capture(self.files.schema, &events())?;
         self.check_write_once(&captured)?;
         self.make_staged(&captured)?;
         self.make_existing(&captured)?;
         self.check_bound(&captured)?;
-        let captured = crate::write_capture::capture(self.schema, &events())?;
+        let captured = crate::write_capture::capture(self.files.schema, &events())?;
         let copies = self.copy_moved(&captured)?;
-        self.taken_out.borrow_mut().clone_from(&copies.taken_out);
-        let captured = crate::write_capture::capture(self.schema, &events())?;
+        self.files.taken_out.borrow_mut().clone_from(&copies.taken_out);
+        let captured = crate::write_capture::capture(self.files.schema, &events())?;
         self.check_references(&captured)
     }
 
@@ -358,18 +351,18 @@ impl<'a> FileWrite<'a> {
     ) -> Result<Option<coven_format::write::WriteRecord>, DbError> {
         let db = self.database;
         let Some(record) = build(changes.clone(), steps.clone())? else {
-            *self.deleted.borrow_mut() = Some(BTreeSet::new());
+            *self.files.deleted.borrow_mut() = Some(BTreeSet::new());
             return Ok(None);
         };
-        let unreferenced = references::unreferenced(db, self.schema, store, &record)?;
+        let unreferenced = references::unreferenced(db, self.files.schema, store, &record)?;
         // The copy a switch keeps as a file's original would name no file.
         if let Some(copy) =
-            self.local.borrow().iter().find(|copy| unreferenced.contains(&copy.file))
+            self.files.local.borrow().iter().find(|copy| unreferenced.contains(&copy.file))
         {
             return Err(DbError::DeviceOnlyUnreferenced { file: copy.file });
         }
         if unreferenced.is_empty() {
-            *self.deleted.borrow_mut() = Some(unreferenced);
+            *self.files.deleted.borrow_mut() = Some(unreferenced);
             return Ok(Some(record));
         }
         let sequence = steps.values().flatten().map(|step| step.sequence + 1).max().unwrap_or(0);
@@ -382,7 +375,7 @@ impl<'a> FileWrite<'a> {
             steps.insert(change.row.clone(), vec![step]);
             changes.insert(change.row.clone(), change);
         }
-        *self.deleted.borrow_mut() = Some(unreferenced);
+        *self.files.deleted.borrow_mut() = Some(unreferenced);
         build(changes, steps)
     }
 
@@ -392,14 +385,14 @@ impl<'a> FileWrite<'a> {
         captured: &BTreeMap<AppKey, crate::write_capture::CapturedRow>,
     ) -> Result<(), DbError> {
         for (key, row) in captured {
-            for file in &self.schema.declaration(&key.0).files {
+            for file in &self.files.schema.declaration(&key.0).files {
                 if !file.write_once {
                     continue;
                 }
                 let Some(old) = row.old.get(&file.column).filter(|v| **v != Value::Null) else {
                     continue;
                 };
-                let table = self.schema.table(&key.0);
+                let table = self.files.schema.table(&key.0);
                 let new = crate::write_rows::read_values(self.database, table, &key.1)?;
                 if new.as_ref().and_then(|values| values.get(&file.column)) != Some(old) {
                     return Err(DbError::FileWriteOnce {
@@ -419,20 +412,22 @@ impl<'a> FileWrite<'a> {
         &self,
         captured: &BTreeMap<AppKey, crate::write_capture::CapturedRow>,
     ) -> Result<(), DbError> {
-        if self.staged.borrow().is_empty() {
+        if self.files.staged.borrow().is_empty() {
             return Ok(());
         }
         let db = self.database;
-        let mut audiences =
-            self.audiences(captured, &self.staged.borrow().iter().map(|file| file.id).collect())?;
-        for file in self.staged.borrow().iter() {
+        let mut audiences = self.audiences(
+            captured,
+            &self.files.staged.borrow().iter().map(|file| file.id).collect(),
+        )?;
+        for file in self.files.staged.borrow().iter() {
             let Some(audience) = audiences.remove(&file.id) else {
                 return Err(DbError::FileUnreferenced {
                     namespace: file.namespace.clone(),
                     file: file.id,
                 });
             };
-            crate::write_commit::check_membership(db, self.device, &audience)?;
+            crate::write_commit::check_membership(db, self.files.device, &audience)?;
             file_table::insert(
                 db,
                 &Record {
@@ -440,11 +435,11 @@ impl<'a> FileWrite<'a> {
                     audience,
                     size: file.size,
                     hash: None,
-                    place: Place::DeviceOnly(self.device),
+                    place: Place::DeviceOnly(self.files.device),
                     namespace: file.namespace.clone(),
                 },
             )?;
-            self.made.borrow_mut().insert(file.id);
+            self.files.made.borrow_mut().insert(file.id);
         }
         Ok(())
     }
@@ -457,14 +452,14 @@ impl<'a> FileWrite<'a> {
         files: &BTreeSet<FileId>,
     ) -> Result<BTreeMap<FileId, Audience>, DbError> {
         let db = self.database;
-        let view = AppView::after(db, self.schema);
+        let view = AppView::after(db, self.files.schema);
         let mut audiences = BTreeMap::<FileId, Audience>::new();
         for key in captured.keys() {
-            let columns = self.schema.file_columns(&key.0);
+            let columns = self.files.schema.file_columns(&key.0);
             if columns.is_empty() {
                 continue;
             }
-            let table = self.schema.table(&key.0);
+            let table = self.files.schema.table(&key.0);
             let Some(values) = crate::write_rows::read_values(db, table, &key.1)? else {
                 continue;
             };
@@ -497,15 +492,15 @@ impl<'a> FileWrite<'a> {
         captured: &BTreeMap<AppKey, crate::write_capture::CapturedRow>,
     ) -> Result<(), DbError> {
         let db = self.database;
-        let view = AppView::after(db, self.schema);
+        let view = AppView::after(db, self.files.schema);
         // Coven's own moves rewrote their shown rows' references, so each
         // such row is among the write's rows.
         for key in captured.keys() {
-            let columns = self.schema.file_columns(&key.0);
+            let columns = self.files.schema.file_columns(&key.0);
             if columns.is_empty() {
                 continue;
             }
-            let table = self.schema.table(&key.0);
+            let table = self.files.schema.table(&key.0);
             let Some(values) = crate::write_rows::read_values(db, table, &key.1)? else {
                 continue;
             };
@@ -536,10 +531,10 @@ impl<'a> FileWrite<'a> {
     /// own deletes that record.
     pub(crate) fn retain_rows(&self, keys: BTreeSet<AppKey>) -> Result<(), DbError> {
         let db = self.database;
-        let deleted = self.deleted.borrow();
+        let deleted = self.files.deleted.borrow();
         let Some(deleted) = deleted.as_ref() else {
             for key in &keys {
-                crate::file_protection::refresh_received(db, self.schema, key)?;
+                crate::file_protection::refresh_received(db, self.files.schema, key)?;
             }
             return settle_unreferenced(db);
         };
@@ -548,7 +543,7 @@ impl<'a> FileWrite<'a> {
         // references say whether it removed a file's last one.
         let mut released = BTreeSet::new();
         for key in &keys {
-            released.extend(crate::file_protection::refresh(db, self.schema, key)?);
+            released.extend(crate::file_protection::refresh(db, self.files.schema, key)?);
         }
         for file in released {
             if !referenced(db, file)? && Record::read(db, file)?.is_some() {
@@ -571,12 +566,12 @@ impl<'a> FileWrite<'a> {
     /// devices' changes, which deletes no record of its own; settle the
     /// files left unreferenced once every row is done.
     pub(crate) fn retain_received(&self, key: &AppKey) -> Result<(), DbError> {
-        if self.deleted.borrow().is_some() {
+        if self.files.deleted.borrow().is_some() {
             return Err(DbError::Invariant {
                 what: "a transaction applying received changes deletes no record of its own",
             });
         }
-        crate::file_protection::refresh_received(self.database, self.schema, key)
+        crate::file_protection::refresh_received(self.database, self.files.schema, key)
     }
 
     /// Settle the files the rows `retain_received` visited left unreferenced.
@@ -599,14 +594,14 @@ impl<'a> FileWrite<'a> {
     ) -> Result<(), DbError> {
         let db = self.database;
         let mut group = None;
-        for file in self.staged.borrow().iter() {
-            if !self.made.borrow().contains(&file.id) {
+        for file in self.files.staged.borrow().iter() {
+            if !self.files.made.borrow().contains(&file.id) {
                 continue;
             }
             // The files over these bytes whose records the write leaves: a
             // file made and deleted in this one write keeps nothing.
             let mut holders = Vec::new();
-            let copies = self.copies.borrow().get(&file.id).cloned().unwrap_or_default();
+            let copies = self.files.copies.borrow().get(&file.id).cloned().unwrap_or_default();
             for id in std::iter::once(file.id).chain(copies) {
                 if Record::read(db, id)?.is_some() {
                     holders.push(id);
@@ -625,7 +620,7 @@ impl<'a> FileWrite<'a> {
             let hashes = &file.hashes;
             // The trailing files one write stages for the cloud are one
             // move; a bound file switches on its own, with its held write.
-            let holds = if self.held.borrow().contains(&file.id) {
+            let holds = if self.files.held.borrow().contains(&file.id) {
                 let write = write.ok_or(DbError::Invariant {
                     what: "a write setting a bound reference is recorded",
                 })?;
@@ -638,7 +633,7 @@ impl<'a> FileWrite<'a> {
                 (None, Some(of)) => of,
                 (None, None) => *group.insert(crate::file_moves::create(db)?),
             };
-            let location = FileLocation::new(self.device, self.ids)?;
+            let location = FileLocation::new(self.files.device, self.files.ids)?;
             uploads::enqueue(
                 db,
                 uploads::Queued {
@@ -663,14 +658,14 @@ impl<'a> FileWrite<'a> {
 
     pub(crate) fn before_commit(&self) -> Result<(), DbError> {
         let db = self.database;
-        for file in self.staged.borrow().iter() {
+        for file in self.files.staged.borrow().iter() {
             if let StagedSource::Copy(name) = &file.source {
-                self.obsolete.borrow_mut().insert(name.clone());
+                self.files.obsolete.borrow_mut().insert(name.clone());
             }
         }
         // A staged copy's cleanup record went as its file came to name it;
         // a copy nothing names goes.
-        for name in self.obsolete.borrow().iter() {
+        for name in self.files.obsolete.borrow().iter() {
             crate::file_queue::release_copy(db, name.as_str())?;
         }
         Ok(())

@@ -65,11 +65,12 @@ impl FileWrite<'_> {
             }
             let record = Record::read(db, id)?.ok_or(DbError::FileAbsent { file: id })?;
             match record.place {
-                Place::DeviceOnly(device) if device == self.device => {}
+                Place::DeviceOnly(device) if device == self.files.device => {}
                 Place::DeviceOnly(_) => return Err(DbError::NotThisDevice { file: id }),
                 Place::Cloud(_) => return Err(DbError::NotDeviceOnlyHere { file: id }),
             }
             let moving = self
+                .files
                 .moving
                 .borrow()
                 .iter()
@@ -113,7 +114,7 @@ impl FileWrite<'_> {
             }
         }
         let id = file_moves::create(db)?;
-        self.moving.borrow_mut().push(Moving { id, uploads });
+        self.files.moving.borrow_mut().push(Moving { id, uploads });
         Ok(id)
     }
 
@@ -132,7 +133,7 @@ impl FileWrite<'_> {
                 Err(DbError::MoveBound { id })
             }
             Some(MoveState::Moving | MoveState::Failed) => {
-                self.moving.borrow_mut().retain(|moving| moving.id != id);
+                self.files.moving.borrow_mut().retain(|moving| moving.id != id);
                 file_moves::end_unswitched(db, id, MoveState::Cancelled)?;
                 file_moves::clear_pending(db, id)
             }
@@ -144,13 +145,13 @@ impl FileWrite<'_> {
     /// has nothing to switch, and ends.
     pub(super) fn queue_moves(&self, now: std::time::SystemTime) -> Result<(), DbError> {
         let db = self.database;
-        for moving in self.moving.take() {
+        for moving in self.files.moving.take() {
             let mut queued = false;
             for upload in moving.uploads {
                 let mut files = Vec::new();
                 for (file, keep) in upload.files {
                     if Record::read(db, file)?
-                        .is_some_and(|record| record.place == Place::DeviceOnly(self.device))
+                        .is_some_and(|record| record.place == Place::DeviceOnly(self.files.device))
                     {
                         files.push((file, keep));
                     }
@@ -158,7 +159,7 @@ impl FileWrite<'_> {
                 if files.is_empty() {
                     continue;
                 }
-                let location = FileLocation::new(self.device, self.ids)?;
+                let location = FileLocation::new(self.files.device, self.files.ids)?;
                 super::uploads::enqueue(
                     db,
                     super::uploads::Queued {

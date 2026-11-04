@@ -205,7 +205,7 @@ impl FileWrite<'_> {
                 }
                 error => error,
             })?;
-        let mut completion = self.completion.borrow_mut();
+        let mut completion = self.files.completion.borrow_mut();
         let completion = completion.get_or_insert_with(Completion::default);
         completion.after.push(after);
         completion.bound |= bound;
@@ -227,7 +227,7 @@ impl FileWrite<'_> {
         subject: impl Fn(&FileLocation) -> S,
     ) -> Result<Vec<i64>, DbError> {
         let mut retired = Vec::new();
-        let mut completion = self.completion.borrow_mut();
+        let mut completion = self.files.completion.borrow_mut();
         let completion = completion.get_or_insert_with(Completion::default);
         for (id, location) in crate::file_queue::retirable(self.database)? {
             if in_flight.contains(&location.object()) {
@@ -263,7 +263,9 @@ impl FileWrite<'_> {
                     |r| r.get::<_, FileId>(0),
                 )? {
                     let shown = Record::read(db, file)?;
-                    if shown.is_some_and(|record| record.place == Place::DeviceOnly(self.device)) {
+                    if shown
+                        .is_some_and(|record| record.place == Place::DeviceOnly(self.files.device))
+                    {
                         crate::file_table::store(db, file, &location, hash)?;
                     }
                 }
@@ -272,7 +274,8 @@ impl FileWrite<'_> {
             crate::file_moves::finish(db, id)?;
         }
         if !switched.is_empty() {
-            self.completion
+            self.files
+                .completion
                 .borrow_mut()
                 .get_or_insert_with(Completion::default)
                 .switched
@@ -310,13 +313,13 @@ impl FileWrite<'_> {
     /// pause lets it through: the write the upload holds is one the
     /// replacement must send first (§12.3, §17.4).
     pub(crate) fn completes_bound(&self) -> bool {
-        self.completion.borrow().as_ref().is_some_and(|completion| completion.bound)
+        self.files.completion.borrow().as_ref().is_some_and(|completion| completion.bound)
     }
 
     /// The app phase's end for a write completing or retiring uploads:
     /// switch every move now complete.
     pub(crate) fn finish_uploads(&self) -> Result<(), DbError> {
-        if self.completion.borrow().is_some() {
+        if self.files.completion.borrow().is_some() {
             self.switch_moves()?;
         }
         Ok(())
@@ -327,7 +330,7 @@ impl FileWrite<'_> {
     /// their stored paths become deletion candidates unless a record names
     /// them.
     pub(super) fn finish_completion(&self) -> Result<(), DbError> {
-        let Some(completion) = self.completion.borrow_mut().take() else {
+        let Some(completion) = self.files.completion.borrow_mut().take() else {
             return Ok(());
         };
         for upload in completion.switched {

@@ -170,7 +170,7 @@ pub(crate) fn read(
     author: Option<coven_foundation::id_source::MemberId>,
     progress: &mut ProgressReport<LoadStep>,
 ) -> Result<SnapshotHeader, DbError> {
-    let header = prepared.header.clone();
+    let header = prepared.header().clone();
     let expected = &header.id;
     let audience = &expected.audience;
     prepared.refuse(0)?;
@@ -180,7 +180,7 @@ pub(crate) fn read(
     let metadata = SnapshotMetadata::new(database);
     prepared.each(
         "SELECT device,number,timestamp,read_through,slot FROM temp._coven_snapshot_writes WHERE source=?1 ORDER BY device,number",
-        [prepared.staging],
+        [prepared.staging()],
         |r| metadata.put(&crate::snapshot_metadata::applied(r)?),
     )?;
     prepared.each(

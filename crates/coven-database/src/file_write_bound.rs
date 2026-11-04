@@ -25,9 +25,10 @@ impl FileWrite<'_> {
         captured: &BTreeMap<AppKey, crate::write_capture::CapturedRow>,
     ) -> Result<(), DbError> {
         let db = self.database;
-        let view = AppView::after(db, self.schema);
+        let view = AppView::after(db, self.files.schema);
         for (key, row) in captured {
             let bound: Vec<(&str, u64)> = self
+                .files
                 .schema
                 .declaration(&key.0)
                 .files
@@ -40,7 +41,7 @@ impl FileWrite<'_> {
             if bound.is_empty() {
                 continue;
             }
-            let table = self.schema.table(&key.0);
+            let table = self.files.schema.table(&key.0);
             let Some(values) = crate::write_rows::read_values(db, table, &key.1)? else {
                 continue;
             };
@@ -62,6 +63,7 @@ impl FileWrite<'_> {
                     continue;
                 }
                 let kind = &self
+                    .files
                     .schema
                     .namespace(&record.namespace)
                     .ok_or_else(|| DbError::UndeclaredNamespace {
@@ -86,10 +88,10 @@ impl FileWrite<'_> {
                 match record.place {
                     Place::Cloud(_) => {}
                     Place::DeviceOnly(_) if self.stages_for_cloud(bytes) => {
-                        self.held.borrow_mut().insert(bytes);
+                        self.files.held.borrow_mut().insert(bytes);
                     }
                     Place::DeviceOnly(device)
-                        if device == self.device
+                        if device == self.files.device
                             && crate::file_queue::held_upload_of(db, record.id)? => {}
                     Place::DeviceOnly(_) => {
                         return Err(DbError::DeviceOnly { file: record.id });
@@ -102,7 +104,8 @@ impl FileWrite<'_> {
 
     /// Whether this write stages `file` for the cloud.
     fn stages_for_cloud(&self, file: coven_foundation::id_source::FileId) -> bool {
-        self.staged
+        self.files
+            .staged
             .borrow()
             .iter()
             .any(|staged| staged.id == file && staged.place != crate::Place::DeviceOnly)

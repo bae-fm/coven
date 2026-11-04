@@ -49,18 +49,18 @@ impl FileStaging {
             let built = coven_foundation::task::caught_sync("stage files", || {
                 let mut batch = WriteBatch::new(inner.ids.as_ref());
                 let value = build(&mut batch)?;
-                Ok::<_, E>((batch, value))
+                Ok::<_, E>((batch.into_files(), value))
             })
             .unwrap_or_else(|bug| Err(E::from(DbError::Bug(bug))));
             let prepared = inner.access.with_writer(|writer| {
-                let prepared = built.and_then(|(batch, value)| {
-                    if batch.files.is_empty() {
+                let prepared = built.and_then(|(files, value)| {
+                    if files.is_empty() {
                         return Ok((VecDeque::new(), value));
                     }
                     writer
                         .transaction(|db| {
                             let mut sources = VecDeque::new();
-                            for BatchFile { id, namespace, source, place } in batch.files {
+                            for BatchFile { id, namespace, source, place } in files {
                                 let declared =
                                     inner.access.write_schema.namespace(&namespace).ok_or_else(
                                         || DbError::UndeclaredNamespace {

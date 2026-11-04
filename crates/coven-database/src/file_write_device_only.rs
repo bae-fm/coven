@@ -83,13 +83,13 @@ impl FileWrite<'_> {
         prepared: crate::PreparedDeviceOnly,
     ) -> Result<(), DbError> {
         {
-            let copying = self.copying.lock().expect("copying lock poisoned");
+            let copying = self.files.copying.lock().expect("copying lock poisoned");
             if prepared.paths().iter().any(|path| !copying.contains(path)) {
                 return Err(DbError::PreparedElsewhere);
             }
         }
         let (copies, paths) = prepared.take();
-        self.held_copies.borrow_mut().extend(paths);
+        self.files.held_copies.borrow_mut().extend(paths);
         self.make_device_only(copies)
     }
 
@@ -100,12 +100,12 @@ impl FileWrite<'_> {
     fn make_device_only(&self, copies: Vec<DeviceOnlyCopy>) -> Result<(), DbError> {
         let db = self.database;
         for copy in copies {
-            let record = permitted(db, self.schema, self.device, copy.file)?;
+            let record = permitted(db, self.files.schema, self.files.device, copy.file)?;
             if record.place != Place::Cloud(copy.location.clone()) {
                 return Err(DbError::NotInCloud { file: copy.file });
             }
-            crate::file_table::device_only(db, copy.file, self.device)?;
-            self.local.borrow_mut().push(copy);
+            crate::file_table::device_only(db, copy.file, self.files.device)?;
+            self.files.local.borrow_mut().push(copy);
         }
         Ok(())
     }
@@ -121,7 +121,7 @@ impl FileWrite<'_> {
     )]
     pub(super) fn keep_device_only(&self) -> Result<(), DbError> {
         let db = self.database;
-        for copy in self.local.take() {
+        for copy in self.files.local.take() {
             let path = crate::database::file_database::copies::text(&copy.path)?;
             let (size, modified_at) = db
                 .query(

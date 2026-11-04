@@ -251,15 +251,20 @@ const HANDLE_REMEDY: &str =
 const SHARED_STATE_REMEDY: &str =
     "shared state leaves its owner only inside a handle the policy names with that owner";
 
-/// A consumed task can hand its owned permit or prepared result to the next
-/// task. Borrowed getters and wrappers exposing raw dependencies
-/// still answer to the ordinary leak rules.
+/// A task taken whole or mutably can hand on, by value, a task it holds: its
+/// owned permit or prepared result to the next task, or the next of the
+/// results its pending work produces, which it then no longer has. A task it
+/// lends only by `&self` would still be its own, so borrowed getters, values
+/// from `&self` and wrappers exposing raw dependencies still answer to the
+/// ordinary leak rules.
 fn transfers_task(method: &OwnerMethod, route: Route, output: &str, policy: &Policy) -> bool {
     let borrows = match route {
         Route::Return => method.borrows_output,
         Route::Callback => method.borrows_callback_output,
     };
-    method.consumes_owner && !borrows && policy.task_types.contains(output)
+    (method.consumes_owner || method.mutates_owner)
+        && !borrows
+        && policy.task_types.contains(output)
 }
 
 fn collect_retained_service_owner_fields(

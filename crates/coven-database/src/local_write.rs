@@ -21,7 +21,7 @@ impl DatabaseConnection {
     ) -> Result<R, E>
     where
         E: crate::WriteFailure,
-        F: FnOnce(crate::SqlContext<'_, '_>) -> Result<R, E>,
+        F: FnOnce(&crate::file_write::FileWrite<'_>) -> Result<R, E>,
     {
         self.with_profile(|db| {
             db.local_transaction(
@@ -29,7 +29,7 @@ impl DatabaseConnection {
                     let files = &crate::file_write::FileWrite::new(database, files);
                     let deleted_circles = crate::store_state_tables::deleted_circles(database)?;
                     let _scope = database.authorization.write();
-                    let result = sql(crate::SqlContext::new(files))?;
+                    let result = sql(files)?;
                     // SQLite ending the transaction says more than the
                     // statement that ended it.
                     database.require_transaction()?;
