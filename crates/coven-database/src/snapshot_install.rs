@@ -83,7 +83,13 @@ fn copy(
 /// Whether the row's synced record, in the table `alias` names, has
 /// column `j`.
 fn synced_has(layout: &TableLayout, alias: &str, j: usize, has: bool) -> String {
-    format!("substr({alias}{},{},1)='{}'", layout.column("synced"), j + 1, if has { 1 } else { 0 })
+    synced_mask_has(&format!("{alias}{}", layout.column("synced")), j, has)
+}
+
+/// Whether the synced record whose column mask `mask` gives has column `j`:
+/// the mask holds a `1` at each column the record has.
+fn synced_mask_has(mask: &str, j: usize, has: bool) -> String {
+    format!("substr({mask},{},1)='{}'", j + 1, if has { 1 } else { 0 })
 }
 
 /// Copy the snapshot's rows and earlier generations: each row's synced
@@ -123,8 +129,8 @@ pub(crate) fn copy_rows(
         for (j, name) in table.columns.iter().enumerate() {
             columns.push(identifier(name));
             values.push(format!(
-                "CASE WHEN substr(?{synced},{},1)='1' OR (?{synced} IS NULL AND ?{} IS NOT NULL) THEN ?{} ELSE {} END",
-                j + 1,
+                "CASE WHEN {} OR (?{synced} IS NULL AND ?{} IS NOT NULL) THEN ?{} ELSE {} END",
+                synced_mask_has(&format!("?{synced}"), j, true),
                 table.setter_at(j) + 1,
                 table.value_at(j) + 1,
                 table.defaults[j].as_deref().unwrap_or("NULL")
