@@ -185,7 +185,7 @@ pub(super) async fn replace_installation(
         };
     }
     if by == ReplacedBy::Restore {
-        if let Err(error) = replacement.remove_replaced() {
+        if let Err(error) = replacement.remove_replaced().await {
             return combine(Err(error.into()), close(database).await);
         }
     }

@@ -7114,7 +7114,9 @@ pub enum BootstrapStatus {
     Registering,
     /// Keeping the member's keys and the device's credentials in custody and
     /// publishing the store, the last work before the handle opens. A
-    /// replacement's swap and reopening, reported as `Opening`, come first.
+    /// replacement's swap and reopening, reported as `Opening`, come first;
+    /// `restore_device` also removes the installation it replaced, on the
+    /// blocking pool, with no count.
     Committing,
     Pending(Vec<PendingRecord>),
 }

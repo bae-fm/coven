@@ -122,11 +122,19 @@ impl ReplacementStore {
     }
 
     /// Remove the swapped-out installation's archive before publication: a
-    /// restore keeps no old copy. A failure leaves the swap for the next call
-    /// to finish.
-    pub fn remove_replaced(&self) -> Result<(), BootstrapDirectoryError> {
+    /// restore keeps no old copy. The archive holds the old installation's
+    /// files and cache, of any size, so the removal runs on the blocking pool
+    /// (§21.2). A failure leaves the swap for the next call to finish.
+    pub async fn remove_replaced(&self) -> Result<(), BootstrapDirectoryError> {
         assert!(self.is_swapped(), "the old installation is removed after the swap");
-        Ok(device_reset::discard(&self.path, self.reset.old_device)?)
+        let path = self.path.clone();
+        let old = self.reset.old_device;
+        crate::task::blocking("remove the replaced installation", move || {
+            device_reset::discard(&path, old)
+        })
+        .await
+        .map_err(FileError::from)??;
+        Ok(())
     }
 
     /// Publish the swapped installation: remove the hidden directory, then

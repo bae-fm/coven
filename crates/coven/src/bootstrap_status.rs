@@ -36,7 +36,8 @@ pub enum BootstrapStatus {
     /// Keeping the member's keys and the device's credentials in custody and
     /// publishing the store, the last work before the handle opens (§13.1).
     /// A replacement's swap and its reopening, reported as `Opening`, come
-    /// before it.
+    /// before it; `restore_device` also removes the installation it
+    /// replaced, a folder of any size, which has no count either.
     Committing,
     /// The join waits on these first unmet conditions, the records
     /// `pending()` returns once the store is open (§19.1).
