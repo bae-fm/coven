@@ -3124,6 +3124,18 @@ let moved = handle
   rows it read. Its errors are results and don't end it, except the one saying
   the store closed or its handle fails every call: after that one, `next()`
   returns `None`, and never repeats it.
+- Each screen is one live query over the local database, its SQL returning the
+  rows the screen draws in the order it draws them, with their counts
+  ([§4.1](coven.md#41-showing-data)). Writes go to the database and live
+  queries carry them to every screen; the app keeps no second copy of rows to
+  sort, filter or count. A value computed across tables that a screen sorts or
+  filters by lives in a local table that local triggers keep in the same write.
+  Only values with no table, such as progress, stay in memory, each on its own
+  stream.
+- The closure passed to `read` or `subscribe` runs SQL while it holds its read
+  snapshot and a reader connection; `process` maps the result to the app's types
+  after the connection is released. A rerun after a write that returns the same
+  result isn't delivered.
 - Table-backed built-in reads work offline. Each `subscribe_x()` counterpart reports the same
   committed data and later changes as its corresponding one-shot read.
 - Upload progress counts provider-confirmed parts; file progress counts verified bytes
@@ -3739,12 +3751,10 @@ impl CovenReadHandle {
 Example:
 
 ```rust
-let titles: Vec<String> = handle
-    .read(|sql| Ok(sql.query("SELECT title FROM notes", [], |row| row.get(0))?))
-    .process(|mut titles| {
-        titles.sort();
-        Ok(titles)
-    })
+// The order is the query's; process only builds the app's types.
+let titles: Vec<Title> = handle
+    .read(|sql| Ok(sql.query("SELECT title FROM notes ORDER BY title", [], |row| row.get(0))?))
+    .process(|titles: Vec<String>| Ok(titles.into_iter().map(Title::new).collect()))
     .await?;
 
 let mut notes = handle.subscribe(|sql| {

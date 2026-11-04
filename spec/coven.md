@@ -1189,6 +1189,86 @@ how the app receives them.
   with SQLite's constraint error. The open fails and the rebuild rolls back
   whole, so the old version still opens.
 
+#### 4.1 Showing data
+
+The database on the device is what the app knows, and everything a screen shows
+comes from it by a query. Three things make that the natural way to build an
+app on coven:
+
+- **One source of truth: the local database.** Every row a screen shows, their
+  order, which ones a filter keeps, how many there are and which group each sits
+  in, is in the store's database or follows from it by a query. The app keeps no
+  second copy of rows to sort, filter or count in its own code.
+- **Data flows one way.** The app writes to the database, and live queries carry
+  each change to every screen that shows it. A screen never patches its own copy
+  after a write, and a write never pushes values into a screen. When a write
+  commits, on this device or applied from another, coven reruns each live query
+  that read what it changed, and the screen draws the new result.
+- **SQLite is fast, local and the app's own.** There is no server to wait on and
+  no round trip, so each screen is exactly the query it needs. Its SQL returns
+  the rows the screen draws, in the order it draws them, with the counts beside
+  them. The app's code turns those rows into its types and does nothing else
+  with them.
+
+Ben's music app lists the 20,000 album folders it has scanned for import. Each
+row sits on a tab, to do, done or skipped, with a state such as "needs you" or
+"importing", inside a group, in the order Ben picked. Tab, state, group and
+order come from a dozen tables: the scans, Ben's edits, lookups and their
+matches, failures, imported releases. Computed in the app's code, every write to
+any of those tables cost 254 ms to compute again (115 ms at 10,000 folders). As
+one SQL statement over the dozen tables it still cost about 170 ms, since every
+run computed every folder's place. The app instead keeps each list row's tab,
+state, group and sort keys in a local table, indexed in the list's order, and
+local triggers (§9.4) rewrite a folder's row in the same write that changes
+any of its inputs, for about 0.5 ms. The list's live query reads only that
+table: a window of rows takes about 0.1 ms, and the counts for every tab under a
+millisecond.
+
+Which commits run a live query again is §4's: what its statements read,
+narrowed by their conditions and joins.
+
+**Making each screen one query.**
+
+- *One live query per screen.* `subscribe` serves a fixed screen and
+  `subscribe_reconfigurable` one with parameters, such as a window, a filter, a
+  sort or an id; replacing them reruns the same subscription
+  ([api.md E4](api.md#e4-reading)).
+- *Do the work in SQL:* joins, rules as `CASE`, filters, sorts, counts with
+  `GROUP BY`, positions with `row_number()`, windows with `LIMIT` and `OFFSET`
+  or by key. The query's closure only runs SQL, and holds its read snapshot and
+  a reader connection while it runs. `process` maps rows to the app's types after
+  the snapshot is released.
+- *Read only what the screen draws.* Every table and column a query reads is a
+  reason to rerun it, and a query that reads a whole table to show fifty rows
+  pays for the whole table on every rerun.
+- *Index what the WHERE and ORDER BY name,* so a window touches about the window.
+- *Keep a value computed across tables in a local table.* When a screen sorts or
+  filters by a value that several tables decide, as the import list's tab and
+  order are, a local table holds it, indexed, and local triggers keep it in the
+  same write that changes its inputs. It is never stale, because it commits with
+  that write, and on every device, because local triggers run for applied
+  writes too.
+- *Keep reruns cheap.* A checkpoint can't start the WAL over while a read
+  snapshot is open, so expensive reruns back to back keep the WAL growing (§4).
+
+**Memory holds only values with no table:** progress, bytes per second, a
+playback position between saves, what the person has scrolled to or folded shut.
+Each goes on its own stream, keyed by what it belongs to, to the part of the
+screen that draws it. Such a value never decides which rows a list shows, their
+order, or a count. If it would, it belongs in a table. Coven follows the same
+rule for its own state (§4's views).
+
+**Orders and filters SQLite lacks** are the app's own collations and functions
+(§4). A list sorted so "Disc 9" comes before "Disc 10" names a natural-order
+collation, and a search that finds "École" for "école" compares a Unicode case
+fold. Both can back an index, so the sort or filter reads it like any other.
+
+**Edge cases.**
+
+- **An optional key.** `WHERE ?1 IS NULL OR id = ?1` depends on the whole table,
+  and SQLite can't use the key's index for it. Two statements, one for each
+  case, read by key.
+
 ### 5. The sequence
 
 All of a store's history is one numbered sequence of objects in storage:
