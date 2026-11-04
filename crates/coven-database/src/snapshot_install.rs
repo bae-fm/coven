@@ -80,12 +80,6 @@ fn copy(
     })
 }
 
-/// A typed comparison of two SQL values: the same storage class and the same
-/// bytes, as `Value` compares them.
-fn same(a: &str, b: &str) -> String {
-    format!("(typeof({a})=typeof({b}) AND {a} IS {b} COLLATE BINARY)")
-}
-
 /// Whether the row's synced record, in the table `alias` names, has
 /// column `j`.
 fn synced_has(layout: &TableLayout, alias: &str, j: usize, has: bool) -> String {
@@ -209,7 +203,10 @@ pub(crate) fn compare_rows(
                 .collect();
             let mut differs = vec![format!(
                 "NOT {}",
-                same(&format!("s.{}", table.value(j)), &format!("m.{}", table.value(j)))
+                crate::sql::same_value(
+                    &format!("s.{}", table.value(j)),
+                    &format!("m.{}", table.value(j))
+                )
             )];
             differs.extend(pairs.iter().map(|q| {
                 let parent = |column: String| format!("s.{column} IS m.{column}");
@@ -259,7 +256,7 @@ pub(crate) fn check_synced(
                 format!(
                     "({} AND NOT {})",
                     synced_has(table, "", j, true),
-                    same(&table.value(j), &identifier(&table.columns[j]))
+                    crate::sql::same_value(&table.value(j), &identifier(&table.columns[j]))
                 )
             })
             .collect();
@@ -325,7 +322,7 @@ pub(crate) fn check_merged(
                     "({} AND {} IS NOT NULL AND NOT {})",
                     synced_has(table, "", j, false),
                     table.setter_device(j),
-                    same(&table.value(j), &identifier(&table.columns[j]))
+                    crate::sql::same_value(&table.value(j), &identifier(&table.columns[j]))
                 )
             })
             .collect();
@@ -351,7 +348,7 @@ pub(crate) fn check_merged(
                 "({} AND {} IS NULL AND NOT {})",
                 synced_has(table, "", j, true),
                 table.setter_device(j),
-                same(&identifier(name), &format!("?{}", parameters.len()))
+                crate::sql::same_value(&identifier(name), &format!("?{}", parameters.len()))
             ));
         }
         if exists(

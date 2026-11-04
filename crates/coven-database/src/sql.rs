@@ -78,6 +78,12 @@ pub(crate) fn stored_statement<'a>(bump: &'a Bump, sql: &'a str) -> Stmt<'a> {
     stmt
 }
 
+/// SQL that holds when `a` and `b` are the same value: the same storage
+/// class and the same bytes, as `Value` compares them.
+pub(crate) fn same_value(a: &str, b: &str) -> String {
+    format!("(typeof({a})=typeof({b}) AND {a} IS {b} COLLATE BINARY)")
+}
+
 /// Quote an identifier, never a value or SQL fragment.
 pub(crate) fn identifier(name: &str) -> String {
     format!("\"{}\"", name.replace('"', "\"\""))

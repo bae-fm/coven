@@ -340,9 +340,11 @@ impl<'c> MigrationSnapshot<'c> {
                     }
                     match snapshot.and_then(|s| s.columns.get(&column.name)) {
                         Some(slot) => format!(
-                            "(typeof(a.{0})<>typeof(b.{1}) OR NOT (a.{0} IS b.{1} COLLATE BINARY))",
-                            identifier(&column.name),
-                            identifier(slot)
+                            "NOT {}",
+                            crate::sql::same_value(
+                                &format!("a.{}", identifier(&column.name)),
+                                &format!("b.{}", identifier(slot))
+                            )
                         ),
                         None => "1".into(),
                     }

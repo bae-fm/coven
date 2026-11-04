@@ -131,7 +131,12 @@ fn update(
     let columns = written_columns(table);
     let differs: Vec<_> = columns
         .iter()
-        .map(|column| format!("NOT (typeof(i.{column})=typeof(a.{column}) AND i.{column} IS a.{column} COLLATE BINARY)"))
+        .map(|column| {
+            format!(
+                "NOT {}",
+                crate::sql::same_value(&format!("i.{column}"), &format!("a.{column}"))
+            )
+        })
         .collect();
     db.internal_execute(
         &format!(
