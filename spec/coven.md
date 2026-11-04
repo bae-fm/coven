@@ -10111,7 +10111,13 @@ field, or as an argument a caller's callback can keep; callers ask the owner to
 do the work. A callback lent what it holds for one call, as one taking
 `&DatabaseConnection` with no lifetime of its own is, can use it while it runs
 and keep none of it; one taking the connection for the lifetime its holder
-borrows it for has been given it. Nothing outside `coven-database` gets the
+borrows it for has been given it. A value the method makes, such as a new
+cancellation token, is no part of what it holds, even when the owner holds one
+of the same type. The checker tells the two apart in the method's body: a value
+is made there when what hands it out reads nothing of `self`, by itself or
+through a local bound from what does; a macro's value, a closure's argument and
+a callback passed on to other code could be anything, so they count as the
+owner's. Nothing outside `coven-database` gets the
 SQLite connection; it asks the database owner to run a write. A struct
 built only to be taken apart again, with every field public and no methods, isn't
 used to pass collaborators; they are passed by name.

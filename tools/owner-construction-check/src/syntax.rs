@@ -150,6 +150,17 @@ pub(crate) fn supplied_type_names(ty: &syn::Type, types: FileTypes<'_>) -> BTree
     names.names
 }
 
+/// One argument a callback can keep of what its callable gives it
+/// (`kept_callback_arguments`).
+pub(crate) struct KeptArgument<'ast> {
+    /// The parameter holding the callback, when one parameter does: its
+    /// type is the callback's, or a generic the callback bounds.
+    pub(crate) parameter: Option<String>,
+    /// The argument's place among the callback's.
+    pub(crate) index: usize,
+    pub(crate) ty: &'ast syn::Type,
+}
+
 /// What a signature's callbacks can keep of what the callable gives them:
 /// each argument type of a callback its parameters' types or its generics'
 /// bounds name, `impl FnOnce(&'a Connection)` or `fn(Permit)`, except one
@@ -158,21 +169,83 @@ pub(crate) fn supplied_type_names(ty: &syn::Type, types: FileTypes<'_>) -> BTree
 /// `for<…>` is lent so: `impl FnOnce(&Connection)` lets the callback use
 /// the connection while it runs and keep none of it. An argument the
 /// callback can keep is handed out, as a returned value is.
-pub(crate) fn kept_callback_arguments(signature: &syn::Signature) -> Vec<&syn::Type> {
-    let mut arguments = KeptCallbackArguments { bound: Vec::new(), kept: Vec::new() };
+pub(crate) fn kept_callback_arguments(signature: &syn::Signature) -> Vec<KeptArgument<'_>> {
+    let mut arguments =
+        KeptCallbackArguments { bound: Vec::new(), origin: Origin::Unknown, kept: Vec::new() };
+    let mut typed = Vec::new();
     for input in &signature.inputs {
         if let syn::FnArg::Typed(input) = input {
+            let name = match input.pat.as_ref() {
+                syn::Pat::Ident(name) => Some(name.ident.to_string()),
+                _ => None,
+            };
+            arguments.origin = name.clone().map_or(Origin::Unknown, Origin::Parameter);
             arguments.visit_type(&input.ty);
+            typed.push((name, input.ty.as_ref()));
         }
     }
-    arguments.visit_generics(&signature.generics);
-    arguments.kept
+    for parameter in &signature.generics.params {
+        if let syn::GenericParam::Type(parameter) = parameter {
+            arguments.origin = Origin::Generic(parameter.ident.to_string());
+            for bound in &parameter.bounds {
+                arguments.visit_type_param_bound(bound);
+            }
+        }
+    }
+    for predicate in signature.generics.where_clause.iter().flat_map(|clause| &clause.predicates) {
+        if let syn::WherePredicate::Type(predicate) = predicate {
+            arguments.origin = generic_name(&predicate.bounded_ty)
+                .map_or(Origin::Unknown, |name| Origin::Generic(name.to_string()));
+            arguments.visit_predicate_type(predicate);
+        }
+    }
+    arguments
+        .kept
+        .into_iter()
+        .map(|(origin, index, ty)| {
+            let parameter = match origin {
+                Origin::Parameter(name) => Some(name),
+                Origin::Generic(generic) => {
+                    let mut holders = typed
+                        .iter()
+                        .filter(|(_, ty)| generic_name(ty).is_some_and(|name| *name == generic));
+                    match (holders.next(), holders.next()) {
+                        (Some((name, _)), None) => name.clone(),
+                        _ => None,
+                    }
+                }
+                Origin::Unknown => None,
+            };
+            KeptArgument { parameter, index, ty }
+        })
+        .collect()
+}
+
+/// The generic a type names, by itself or behind a reference: `F`, `&F` or
+/// `&mut F`.
+fn generic_name(ty: &syn::Type) -> Option<&syn::Ident> {
+    match ty {
+        syn::Type::Reference(reference) => generic_name(&reference.elem),
+        syn::Type::Paren(inner) => generic_name(&inner.elem),
+        syn::Type::Path(path) if path.qself.is_none() => path.path.get_ident(),
+        _ => None,
+    }
+}
+
+/// Where a callback's type is written: a parameter's type, or a generic's
+/// bounds.
+#[derive(Clone)]
+enum Origin {
+    Parameter(String),
+    Generic(String),
+    Unknown,
 }
 
 struct KeptCallbackArguments<'ast> {
     /// The lifetimes the enclosing `for<…>` binders bind.
     bound: Vec<&'ast syn::Lifetime>,
-    kept: Vec<&'ast syn::Type>,
+    origin: Origin,
+    kept: Vec<(Origin, usize, &'ast syn::Type)>,
 }
 
 impl<'ast> KeptCallbackArguments<'ast> {
@@ -196,9 +269,9 @@ impl<'ast> KeptCallbackArguments<'ast> {
     /// arguments and result carry flows between the callback and its
     /// caller, not out of the callable.
     fn arguments(&mut self, arguments: impl IntoIterator<Item = &'ast syn::Type>) {
-        for argument in arguments {
+        for (index, argument) in arguments.into_iter().enumerate() {
             if !self.lent(argument) {
-                self.kept.push(argument);
+                self.kept.push((self.origin.clone(), index, argument));
             }
         }
     }

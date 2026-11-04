@@ -23,6 +23,7 @@ mod finding;
 mod macro_expansion;
 mod macro_rules;
 mod macros;
+mod made_here;
 mod module_sources;
 mod name_resolution;
 mod owner_dependency_boundary;

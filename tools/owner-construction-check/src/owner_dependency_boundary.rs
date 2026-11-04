@@ -17,7 +17,8 @@
 //! The rules here read the declared types transitively: what an owner
 //! retains is every type its fields reach. A method that returns a retained
 //! internal dependency, a wrapper that itself exposes one, or a service the
-//! owner retains, leaks it — unless the method consumes a task and hands
+//! owner retains, leaks it — unless the method made the value rather than
+//! taking it from the owner (`made_here.rs`), or consumes a task and hands
 //! its product on to the next one. It reads no test code (`test_code.rs`).
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -27,6 +28,7 @@ use syn::visit::Visit;
 
 use crate::database_boundary::RAW_SQLITE_HANDLES;
 use crate::finding::Finding;
+use crate::made_here::{callback_argument_made_here, returns_made_here};
 use crate::owner_graph::OwnerGraph;
 use crate::policy::Policy;
 use crate::syntax::{
@@ -53,6 +55,12 @@ struct OwnerMethod {
     borrows_output: bool,
     /// Whether a kept callback argument is a reference or a pointer.
     borrows_callback_output: bool,
+    /// Whether every value the method returns is made in it, not taken from
+    /// its owner (`made_here.rs`).
+    returns_made_here: bool,
+    /// The types every kept callback argument naming them is made in the
+    /// method.
+    callback_made_here: BTreeSet<String>,
     public: bool,
 }
 
@@ -74,6 +82,16 @@ impl OwnerMethod {
                 .filter(|output| !self.output.contains(*output))
                 .map(|output| (output, Route::Callback)),
         )
+    }
+
+    /// Whether `output`, handed out by `route`, may be what the owner holds:
+    /// the owner holds that type, and the method does not make the value.
+    fn takes(&self, held: &BTreeSet<String>, output: &str, route: Route) -> bool {
+        held.contains(output)
+            && match route {
+                Route::Return => !self.returns_made_here,
+                Route::Callback => !self.callback_made_here.contains(output),
+            }
     }
 }
 
@@ -158,23 +176,25 @@ pub(crate) fn find_owner_dependency_leaks(
                     }
                     continue;
                 }
+                let taken = method.takes(held, output, route);
                 let retained_service = services.contains(output)
-                    && held.contains(output)
+                    && taken
                     && !transfers_task(method, route, output, policy);
                 let new_service = method.public
                     && graph.owners.contains(output)
                     && !policy.task_types.contains(output)
                     && !capabilities.contains(output);
                 let leaks_directly = raw.contains(output)
-                    || (internal.contains(output) && held.contains(output))
+                    || (internal.contains(output) && taken)
                     || (services.contains(&method.owner)
                         && !rooted
                         && (retained_service || new_service));
+                // What a value made in the method exposes is its own.
                 let nested = before
                     .get(output)
                     .into_iter()
                     .flatten()
-                    .filter(|name| held.contains(*name))
+                    .filter(|name| method.takes(held, name, route))
                     .cloned()
                     .collect::<BTreeSet<_>>();
                 if leaks_directly || nested.iter().any(|name| raw.contains(name) || !rooted) {
@@ -530,6 +550,7 @@ fn collect_owner_methods_in_items(
                         path,
                         &owner,
                         &method.sig,
+                        Some(&method.block),
                         visibility_crosses_owner(&method.vis),
                         pointers,
                         identity,
@@ -542,7 +563,15 @@ fn collect_owner_methods_in_items(
                     let syn::TraitItem::Fn(method) = item else {
                         continue;
                     };
-                    methods.push(owner_method(path, &owner, &method.sig, true, pointers, identity));
+                    methods.push(owner_method(
+                        path,
+                        &owner,
+                        &method.sig,
+                        method.default.as_ref(),
+                        true,
+                        pointers,
+                        identity,
+                    ));
                 }
             }
             syn::Item::Mod(item) => {
@@ -559,6 +588,7 @@ fn owner_method(
     path: &str,
     owner: &str,
     signature: &syn::Signature,
+    body: Option<&syn::Block>,
     public: bool,
     pointers: &BTreeSet<String>,
     identity: &TypeIdentity,
@@ -570,16 +600,21 @@ fn owner_method(
             shared_type_names(output, pointers, identity.in_file(path)),
         ),
     };
-    let kept = kept_callback_arguments(signature);
     let mut callback_output = BTreeSet::new();
+    let mut taken_by_callback = BTreeSet::new();
     let mut borrows_callback_output = false;
-    for argument in kept {
-        callback_output.extend(type_names(argument, identity.in_file(path)));
-        shared_output.extend(shared_type_names(argument, pointers, identity.in_file(path)));
+    for argument in kept_callback_arguments(signature) {
+        let names = type_names(argument.ty, identity.in_file(path));
+        if !callback_argument_made_here(body, argument.parameter.as_deref(), argument.index) {
+            taken_by_callback.extend(names.iter().cloned());
+        }
+        callback_output.extend(names);
+        shared_output.extend(shared_type_names(argument.ty, pointers, identity.in_file(path)));
         let mut borrowed = BorrowedOutput(false);
-        borrowed.visit_type(argument);
+        borrowed.visit_type(argument.ty);
         borrows_callback_output |= borrowed.0;
     }
+    let callback_made_here = callback_output.difference(&taken_by_callback).cloned().collect();
     for names in [&mut output, &mut callback_output] {
         names.remove("Self");
         names.remove(owner);
@@ -616,6 +651,8 @@ fn owner_method(
         callback_output,
         shared_output,
         borrows_callback_output,
+        returns_made_here: returns_made_here(body),
+        callback_made_here,
         parameters,
     }
 }

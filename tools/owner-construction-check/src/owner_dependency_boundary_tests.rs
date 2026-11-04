@@ -170,15 +170,15 @@ fn consuming_tasks_can_transfer_products_but_cannot_lend_or_expose_raw_handles()
 #[test]
 fn a_callback_that_can_keep_a_retained_dependency_is_handed_it() {
     let source = "struct Inputs<'a> { db: &'a DatabaseConnection } impl<'a> Inputs<'a> { \
-        pub fn run<T>(&self, work: impl FnOnce(&'a DatabaseConnection) -> T) -> T { todo!() } \
-        pub fn bound<T, F: FnOnce(&'a DatabaseConnection) -> T>(&self, work: F) -> T { todo!() } \
-        pub fn pointer(&self, work: fn(&'a DatabaseConnection)) { todo!() } \
-        pub fn owned(self, work: &mut dyn FnMut(DatabaseConnection)) { todo!() } \
-        pub fn lend<T>(&self, work: impl FnOnce(&DatabaseConnection) -> T) -> T { todo!() } \
-        pub fn lend_bound<T>(&self, work: impl for<'r> FnOnce(&'r DatabaseConnection) -> T) -> T { todo!() } \
-        pub fn lend_where<T, F>(&self, work: F) -> T where F: for<'r> Fn(&'r DatabaseConnection) -> T { todo!() } \
-        pub fn lend_view(&self, work: impl FnOnce(View<'_>)) { todo!() } \
-        pub fn supplied(&self, work: impl FnOnce() -> &'a DatabaseConnection) { todo!() } }";
+        pub fn run<T>(&self, work: impl FnOnce(&'a DatabaseConnection) -> T) -> T { work(self.db) } \
+        pub fn bound<T, F: FnOnce(&'a DatabaseConnection) -> T>(&self, work: F) -> T { work(self.db) } \
+        pub fn pointer(&self, work: fn(&'a DatabaseConnection)) { work(self.db) } \
+        pub fn owned(self, work: &mut dyn FnMut(DatabaseConnection)) { work(self.db) } \
+        pub fn lend<T>(&self, work: impl FnOnce(&DatabaseConnection) -> T) -> T { work(self.db) } \
+        pub fn lend_bound<T>(&self, work: impl for<'r> FnOnce(&'r DatabaseConnection) -> T) -> T { work(self.db) } \
+        pub fn lend_where<T, F>(&self, work: F) -> T where F: for<'r> Fn(&'r DatabaseConnection) -> T { work(self.db) } \
+        pub fn lend_view(&self, work: impl FnOnce(View<'_>)) { work(self.db) } \
+        pub fn supplied(&self, work: impl FnOnce() -> &'a DatabaseConnection) { work(self.db) } }";
     assert_eq!(
         leaks(PATH, source),
         findings(
@@ -188,6 +188,40 @@ fn a_callback_that_can_keep_a_retained_dependency_is_handed_it() {
                 "Inputs::owned hands its callback retained dependency DatabaseConnection",
                 "Inputs::pointer hands its callback retained dependency DatabaseConnection",
                 "Inputs::run hands its callback retained dependency DatabaseConnection",
+            ]
+        )
+    );
+}
+
+/// A value the method makes, by itself or through locals bound from what
+/// reads nothing of the owner, is not the one the owner holds, returned or
+/// given to a callback. What reads `self`, a closure's argument, a macro's
+/// value and a callback passed on may be the held one.
+#[test]
+fn a_value_the_method_makes_is_not_the_one_its_owner_holds() {
+    let source = "struct Owner { clock: Clock } impl Owner { \
+        pub fn fresh(&self) -> Clock { let clock = Clock::new(); clock } \
+        pub fn held(&self) -> Clock { self.clock.clone() } \
+        pub fn through_local(&self) -> Clock { let clock = self.clock.clone(); clock } \
+        pub fn early(&self, late: bool) -> Clock { if late { return self.clock.clone(); } Clock::new() } \
+        pub fn macro_made(&self) -> Clock { clock!() } \
+        pub fn start(&self, construct: impl FnOnce(Clock, u64)) { let clock = Clock::new(); let count = self.count(); construct(clock, count) } \
+        pub fn generic<F: FnOnce(Clock)>(&self, construct: F) { construct(Clock::new()) } \
+        pub fn give(&self, construct: impl FnOnce(Clock)) { let clock = self.clock.clone(); construct(clock) } \
+        pub fn pass_on(&self, construct: impl FnOnce(Clock)) { forward(construct) } \
+        pub fn in_closure(&self, construct: impl FnOnce(Clock)) { self.with(|clock| construct(clock)) } }";
+    assert_eq!(
+        leaks(PATH, source),
+        findings(
+            PATH,
+            &[
+                "Owner::early returns retained dependency Clock",
+                "Owner::give hands its callback retained dependency Clock",
+                "Owner::held returns retained dependency Clock",
+                "Owner::in_closure hands its callback retained dependency Clock",
+                "Owner::macro_made returns retained dependency Clock",
+                "Owner::pass_on hands its callback retained dependency Clock",
+                "Owner::through_local returns retained dependency Clock",
             ]
         )
     );
