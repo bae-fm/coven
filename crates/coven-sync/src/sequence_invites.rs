@@ -671,19 +671,14 @@ impl SequenceSync {
     ) -> Result<(), SyncError> {
         let me = member.member();
         let state = &session.history.state;
-        if !self.registered(session)
-            || !state
-                .members
-                .get(&me)
-                .is_some_and(|value| !value.removed && value.role == MemberRole::Admin)
-        {
+        if !self.registered(session) || !state.active_admin(&me) {
             return Err(SyncError::Rejected(OperationRejection::NotAllowed));
         }
         if !session.history.owns_storage(me) {
             return Err(StorageFailure::NotStoreOwner.into());
         }
         if let InviteBinding::Replace { expected } = work.binding {
-            match state.members.get(&work.member).filter(|value| !value.removed) {
+            match state.active_member(&work.member) {
                 None => {
                     return Err(SyncError::Rejected(OperationRejection::TargetGone(
                         crate::EntryTarget::Member(work.member),

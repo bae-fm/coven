@@ -46,11 +46,7 @@ impl History {
             self.state.devices.iter().any(|(id, value)| {
                 value.member == device.member && self.gone_for_good(*id).is_none()
             });
-        device.member == member
-            || (!member_left
-                && self.state.members.get(&member).is_some_and(|value| {
-                    !value.removed && value.role == coven_format::admin::MemberRole::Admin
-                }))
+        device.member == member || (!member_left && self.state.active_admin(&member))
     }
 
     /// The latest counted entry that stopped `device` for good (§14.1).

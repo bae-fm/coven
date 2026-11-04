@@ -24,7 +24,7 @@ pub(crate) fn member_code(
     storage: &RestoreStorage,
 ) -> Result<RestoreCode, SyncError> {
     let store = state.store.as_ref().ok_or(SyncError::NoStorage)?;
-    let current = crate::effects::member(state, &identity.member()).ok_or(SyncError::Removed)?.keys;
+    let current = state.active_member(&identity.member()).ok_or(SyncError::Removed)?.keys;
     // A kept self-replacement's candidate is current before custody
     // installs it; a retired pair never is.
     let selected = identity

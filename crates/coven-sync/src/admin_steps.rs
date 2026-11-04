@@ -48,7 +48,8 @@ pub fn replace_member_keys_for(
         if member == author {
             return Err(SyncError::Rejected(OperationRejection::NotAllowed));
         }
-        let expected = effects::member(applied, &member)
+        let expected = applied
+            .active_member(&member)
             .ok_or(SyncError::Rejected(OperationRejection::TargetGone(
                 crate::EntryTarget::Member(member),
             )))?
@@ -92,7 +93,7 @@ pub(crate) fn registered(
     held: &MemberIdentity,
 ) -> Result<MemberId, SyncError> {
     let member = applied.devices.get(&device).filter(|registered| registered.active()).and_then(
-        |registered| effects::member(applied, &registered.member).map(|m| (registered.member, m)),
+        |registered| applied.active_member(&registered.member).map(|m| (registered.member, m)),
     );
     let Some((id, member)) = member else {
         return Err(SyncError::Rejected(OperationRejection::NotAllowed));

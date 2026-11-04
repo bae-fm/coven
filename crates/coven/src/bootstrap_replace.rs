@@ -50,10 +50,7 @@ pub(crate) async fn restore_device(
         let database = builder.database(directory)?.open_read_only().await?;
         let state = database.store_state().await;
         database.close().await.map_err(CovenError::from)?;
-        let bound = state?
-            .members
-            .get(&code.member)
-            .is_some_and(|member| !member.removed && member.keys == pair);
+        let bound = state?.active_member(&code.member).is_some_and(|member| member.keys == pair);
         if bound {
             return Ok(builder
                 .open(store, |progress| status(BootstrapStatus::Opening(progress)))

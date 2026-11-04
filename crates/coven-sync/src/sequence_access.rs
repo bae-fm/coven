@@ -8,7 +8,7 @@ use coven_crypto::{MemberIdentity, StoreKeyring};
 use coven_database::{
     NewOperation, OperationId, OperationUpdate, ProviderAccessChange, ProviderChanges,
 };
-use coven_format::{admin::MemberRole, MemberAccess};
+use coven_format::MemberAccess;
 use coven_foundation::id_source::MemberId;
 use std::collections::BTreeSet;
 
@@ -25,8 +25,7 @@ impl History {
     pub(crate) fn owns_storage(&self, member: MemberId) -> bool {
         match self.store_access() {
             Some(MemberAccess::ProviderAccount(_)) => self.holds_store(member),
-            Some(MemberAccess::S3AccessKey { .. }) => crate::effects::member(&self.state, &member)
-                .is_some_and(|current| current.role == MemberRole::Admin),
+            Some(MemberAccess::S3AccessKey { .. }) => self.state.active_admin(&member),
             None => false,
         }
     }
@@ -38,7 +37,8 @@ impl History {
         let Some(created @ MemberAccess::ProviderAccount(_)) = self.store_access() else {
             return false;
         };
-        crate::effects::member(&self.state, &member)
+        self.state
+            .active_member(&member)
             .is_some_and(|current| created.same_credential(&current.access))
     }
 

@@ -6,7 +6,7 @@
 use super::{SequenceSync, Session};
 use crate::SyncError;
 use coven_crypto::MemberIdentity;
-use coven_format::{admin::MemberRole, device_gone::DeviceGone};
+use coven_format::device_gone::DeviceGone;
 use coven_foundation::id_source::DeviceId;
 use coven_storage::{ObjectPath, ObjectPrefix, StorageFailure};
 
@@ -26,12 +26,7 @@ impl SequenceSync {
         member: &MemberIdentity,
     ) -> Result<(), SyncError> {
         let history = &session.history;
-        if !history
-            .state
-            .members
-            .get(&member.member())
-            .is_some_and(|value| !value.removed && value.role == MemberRole::Admin)
-        {
+        if !history.state.active_admin(&member.member()) {
             return Ok(());
         }
         let added = history.added(self.device).expect("a registered device was added");

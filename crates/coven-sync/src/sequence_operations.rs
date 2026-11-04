@@ -226,8 +226,7 @@ impl SequenceSync {
                     .is_some_and(|device| device.active() && device.member == member.member())
                     || (request.purpose == Purpose::Reset
                         && request.audience == Audience::Store
-                        && session.history.state.members[&member.member()].role
-                            != coven_format::admin::MemberRole::Admin)
+                        && !session.history.state.active_admin(&member.member()))
                 {
                     return Err(OperationRejection::NotAllowed);
                 }

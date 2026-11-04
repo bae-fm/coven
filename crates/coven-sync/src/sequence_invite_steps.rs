@@ -70,11 +70,7 @@ pub fn create_invite(
     let made = sql.journal_step(|journal| {
         let applied = journal.store_state()?;
         let me = crate::admin_steps::registered(&applied, device, held)?;
-        if !applied
-            .members
-            .get(&me)
-            .is_some_and(|value| !value.removed && value.role == MemberRole::Admin)
-        {
+        if !applied.active_admin(&me) {
             return Err(SyncError::Rejected(OperationRejection::NotAllowed));
         }
         let (member, binding, invitee) = match target {
@@ -82,8 +78,7 @@ pub fn create_invite(
                 (MemberId(ids.new_id()), InviteBinding::Add { role }, Some(name))
             }
             InviteTarget::ReplaceMemberKeys { member: target } => {
-                let Some(existing) = applied.members.get(&target).filter(|value| !value.removed)
-                else {
+                let Some(existing) = applied.active_member(&target) else {
                     return Err(SyncError::Rejected(OperationRejection::TargetGone(
                         crate::EntryTarget::Member(target),
                     )));

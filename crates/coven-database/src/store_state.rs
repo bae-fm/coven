@@ -36,10 +36,20 @@ pub struct StoreState {
 }
 
 impl StoreState {
+    /// The member, unless a kept removal removed it.
+    pub fn active_member(&self, id: &MemberId) -> Option<&StoreMember> {
+        self.members.get(id).filter(|member| !member.removed)
+    }
+
+    /// Whether `id` is a member who has not been removed and holds the admin role.
+    pub fn active_admin(&self, id: &MemberId) -> bool {
+        self.active_member(id).is_some_and(|member| member.role == MemberRole::Admin)
+    }
+
     /// Whether `member` remains in the store and in `circle`, which exists and
     /// is not deleted (§15.5).
     pub fn reads_circle(&self, circle: CircleId, member: &MemberId) -> bool {
-        self.members.get(member).is_some_and(|m| !m.removed)
+        self.active_member(member).is_some()
             && !self.circle_deletions.contains_key(&circle)
             && self.circles.get(&circle).is_some_and(|c| c.members.contains(member))
     }

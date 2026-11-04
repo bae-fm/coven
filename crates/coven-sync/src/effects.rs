@@ -13,25 +13,17 @@ use coven_foundation::id_source::MemberId;
 use coven_merge::{Audience, Slot};
 use std::collections::BTreeMap;
 
-pub(crate) fn member<'a>(state: &'a StoreState, id: &MemberId) -> Option<&'a StoreMember> {
-    state.members.get(id).filter(|member| !member.removed)
-}
-
 /// Whether this member's removal has applied: the person left the store (§14.1).
 pub(crate) fn left(state: &StoreState, id: &MemberId) -> bool {
     state.members.get(id).is_some_and(|member| member.removed)
 }
 
 pub(crate) fn belongs(state: &StoreState, audience: &Audience, id: &MemberId) -> bool {
-    member(state, id).is_some()
+    state.active_member(id).is_some()
         && match audience {
             Audience::Store => true,
             Audience::Circle(id_circle) => state.reads_circle(*id_circle, id),
         }
-}
-
-fn admin(state: &StoreState, id: &MemberId) -> bool {
-    member(state, id).is_some_and(|member| member.role == MemberRole::Admin)
 }
 
 fn fresh(state: &StoreState, keys: &coven_crypto::MemberPublicKeys) -> bool {
@@ -84,8 +76,8 @@ pub(crate) fn checked_change(
     let author = &header.author;
     let writer = header.device;
     let boundary = boundary(change, slot, announcements)?;
-    let active = member(state, author).is_some();
-    let is_admin = admin(state, author);
+    let active = state.active_member(author).is_some();
+    let is_admin = state.active_admin(author);
     let permitted = match change {
         CreateStore { .. } => slot == Slot(1) && state.store.is_none(),
         AddDevice { .. } => active,
@@ -246,7 +238,7 @@ pub(crate) fn checked_change(
             target.access = access.clone();
         }
         ReplaceMemberKeys { member: id, expected, keys } => {
-            let target = member(state, id).ok_or(TargetGone(EntryTarget::Member(*id)))?;
+            let target = state.active_member(id).ok_or(TargetGone(EntryTarget::Member(*id)))?;
             if target.keys != *expected {
                 return Err(OperationRejection::MemberKeysChanged(*id));
             }
@@ -302,7 +294,7 @@ pub(crate) fn checked_change(
             next.circle_deletions.insert(*circle, slot);
         }
         AddCircleMember { circle, member: id } => {
-            if member(state, id).is_none() {
+            if state.active_member(id).is_none() {
                 return Err(TargetGone(EntryTarget::Member(*id)));
             }
             if !next.circles.get_mut(circle).expect("authorized circle").members.insert(*id) {
