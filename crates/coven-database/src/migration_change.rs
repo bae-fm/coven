@@ -79,9 +79,7 @@ impl RowChange {
             .collect::<Result<_, DbError>>()?;
         Ok(Self {
             table: row.row.table.clone(),
-            key: RowKey(
-                coven_format::key::decode_key(&row.row.key)?.iter().map(sql_value).collect(),
-            ),
+            key: RowKey::decode(&row.row.key)?,
             op,
             columns,
             original: row.clone(),

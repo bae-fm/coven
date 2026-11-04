@@ -9,6 +9,15 @@ const ANA: &str = "00000000-0000-4000-8000-00000000000a";
 const BEN: &str = "00000000-0000-4000-8000-00000000000b";
 const NOTE: &str = "00000000-0000-4000-8000-000000000042";
 
+/// A stored key coven can't decode is damage, however the key is read:
+/// as a row's reported key or as the values that select its row.
+#[test]
+fn an_undecodable_stored_key_is_damaged_database() {
+    let key = [0xff];
+    assert!(matches!(crate::RowKey::decode(&key), Err(DbError::DamagedDatabase)));
+    assert!(matches!(super::key_parameters(&key), Err(DbError::DamagedDatabase)));
+}
+
 #[test]
 fn ordered_key_component_and_byte_limits_keep_the_exact_boundary() {
     use coven_format::value::Value;

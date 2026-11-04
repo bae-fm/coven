@@ -319,7 +319,7 @@ pub(crate) fn read_values(
     table: &TableSchema,
     key: &[u8],
 ) -> Result<Option<AppValues>, DbError> {
-    let components = crate::write_encoding::decoded(coven_format::key::decode_key(key))?;
+    let components = key_parameters(key)?;
     // A migration can replace the primary key. A key of the old arity cannot
     // identify a row in the new table, even while its deletion is being merged.
     if components.len() != key_columns(table).len() {
@@ -331,10 +331,7 @@ pub(crate) fn read_values(
         identifier(&table.name),
         key_predicate(table)
     );
-    let rows =
-        database.query(&lookup, params_from_iter(components.iter().map(sql_value)), |r| {
-            read_row(table, r)
-        })?;
+    let rows = database.query(&lookup, params_from_iter(components), |r| read_row(table, r))?;
     assert!(rows.len() <= 1, "primary-key lookup returned multiple rows");
     Ok(rows.into_iter().next())
 }
@@ -446,10 +443,7 @@ pub(crate) fn app_row_key(key: &AppKey) -> Result<RowKey, DbError> {
 
 /// The SQL values of an encoded key, in key order.
 pub(crate) fn key_parameters(key: &[u8]) -> Result<Vec<rusqlite::types::Value>, DbError> {
-    Ok(crate::write_encoding::decoded(coven_format::key::decode_key(key))?
-        .iter()
-        .map(sql_value)
-        .collect())
+    Ok(RowKey::decode(key)?.0)
 }
 
 /// `column=? AND …` over the table's key columns, in key order.
