@@ -47,7 +47,7 @@ pub enum DeviceOnlyError {
     },
     /// A copy can't go where the app named it.
     #[error(transparent)]
-    Path(#[from] CopyPathError),
+    Path(CopyPathError),
     /// This device may not make a file device-only, or the write switching
     /// them failed: no record of the file here (`FileAbsent`), as for a
     /// file of a circle this member was never in; one not in the cloud
@@ -55,7 +55,7 @@ pub enum DeviceOnlyError {
     /// this member has left (`NotInCircle`); or another member's row of an
     /// `owner_only` table referencing it (`NotOwner`).
     #[error(transparent)]
-    Database(#[from] DbError),
+    Database(DbError),
     /// Downloading a file failed.
     #[error("downloading file {file} failed: {error}")]
     Download {
@@ -67,7 +67,7 @@ pub enum DeviceOnlyError {
     },
     /// Writing a folder or a copy failed.
     #[error(transparent)]
-    Disk(#[from] DiskError),
+    Disk(DiskError),
     /// The app cancelled the call before its files switched.
     #[error("cancelled")]
     Cancelled,
@@ -85,13 +85,59 @@ pub enum DeviceOnlyError {
         #[source]
         cleanup: DbError,
     },
+    /// The call's work panicked: a bug, which the caller reports (E15).
+    #[error(transparent)]
+    Bug(#[from] coven_foundation::task::Bug),
+}
+
+impl From<CopyPathError> for DeviceOnlyError {
+    fn from(error: CopyPathError) -> Self {
+        match error {
+            CopyPathError::Bug(bug) => Self::Bug(bug),
+            error => Self::Path(error),
+        }
+    }
+}
+
+impl From<DbError> for DeviceOnlyError {
+    fn from(error: DbError) -> Self {
+        match error {
+            DbError::Bug(bug) => Self::Bug(bug),
+            error => Self::Database(error),
+        }
+    }
+}
+
+impl From<DiskError> for DeviceOnlyError {
+    fn from(error: DiskError) -> Self {
+        match error {
+            DiskError::Bug(bug) => Self::Bug(bug),
+            error => Self::Disk(error),
+        }
+    }
+}
+
+impl coven_foundation::task::CarriesBug for DeviceOnlyError {
+    fn bug(&self) -> Option<&coven_foundation::task::Bug> {
+        match self {
+            Self::Bug(bug) => Some(bug),
+            Self::Path(error) => error.bug(),
+            Self::Database(error) => error.bug(),
+            Self::Download { error, .. } => error.bug(),
+            Self::Disk(error) => error.bug(),
+            Self::Write(error) => error.bug(),
+            Self::Cleanup { error, cleanup } => error.bug().or_else(|| cleanup.bug()),
+            Self::RepeatedFile { .. } | Self::Cancelled => None,
+        }
+    }
 }
 
 /// A failure of the write switching the files, as the call reports it.
 impl From<coven_database::CovenError> for DeviceOnlyError {
     fn from(error: coven_database::CovenError) -> Self {
         match error {
-            coven_database::CovenError::Database(error) => Self::Database(error),
+            coven_database::CovenError::Database(error) => error.into(),
+            coven_database::CovenError::Bug(bug) => Self::Bug(bug),
             error => Self::Write(Box::new(error)),
         }
     }

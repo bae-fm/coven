@@ -6098,6 +6098,8 @@ pub enum CopyPathError {
     NotUnicode(PathBuf),
     /// Inspecting a path failed.
     File(DiskError),
+    /// Inspecting the paths panicked on the blocking pool: a bug (E15).
+    Bug(Bug),
 }
 
 /// Cloud files downloaded to copies in the person's folder, ready for one
@@ -6156,6 +6158,8 @@ pub enum DeviceOnlyError {
     Write(Box<CovenError>),
     /// Removing what the call made failed too; the next open removes it.
     Cleanup { error: Box<DeviceOnlyError>, cleanup: DbError },
+    /// The call's work panicked: a bug (E15).
+    Bug(Bug),
 }
 
 /// A stored file's fixed location: the uploader and the stored object's id,
@@ -6269,6 +6273,9 @@ pub enum FileReadError {
     /// The write committing a prepared pin failed other than in the
     /// database, as in a failed rollback, keeping its cause (§17.8).
     Write(Box<CovenError>),
+    /// The read's work panicked: a bug (E15). A record of it fails as
+    /// `LocalFailure::Bug`.
+    Bug(Bug),
 }
 ```
 
@@ -8363,8 +8370,9 @@ never under a disk label: `StoreLockError::Bug` for taking a store's lock,
 custody's file work, `LocalFileError::Bug` for reading a file on this
 device and `StorageError::Bug` for a provider request's local work. An error that keeps another call's error routes that error's `Bug`
 to its own, such as `IdentityError::Bug` for custody's, `CovenError::Bug`
-for custody's or a lock's, and `SyncError::Bug` or `StorageSetupError::Bug`
-for storage's or custody's. `CovenError` keeps a database call's as
+for custody's or a lock's, `SyncError::Bug` or `StorageSetupError::Bug`
+for storage's or custody's, and `FileReadError::Bug`, `CopyPathError::Bug`
+or `DeviceOnlyError::Bug` for a file read's or a device-only copy's. `CovenError` keeps a database call's as
 `CovenError::Database(DbError::Bug)`, as for its other failures. `SyncError`
 reports it as `LocalFailure::Bug`.
 

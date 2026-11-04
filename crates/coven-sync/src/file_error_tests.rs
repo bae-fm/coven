@@ -47,3 +47,37 @@ fn upload_failures_keep_native_storage_causes_from_reads_and_writes() {
         }
     }
 }
+
+/// A panic in a file read's or a device-only copy's work is the call's bug,
+/// whichever error first carried it, not a disk, lock, database or storage
+/// failure.
+#[test]
+fn a_bug_in_file_work_is_the_calls_bug() {
+    use coven_foundation::files::CopyPathError;
+    use coven_foundation::task::{Bug, CarriesBug};
+    let bug = Bug { operation: "read the file", message: "it panicked".into() };
+    let reads = [
+        FileReadError::from(DiskError::Bug(bug.clone())),
+        FileReadError::from(StoreLockError::Bug(bug.clone())),
+        FileReadError::from(StorageError::Bug(bug.clone())),
+        FileReadError::from(DbError::Bug(bug.clone())),
+        FileReadError::from(coven_database::CovenError::Bug(bug.clone())),
+        FileReadError::from(LocalFileError::Bug(bug.clone())),
+    ];
+    for read in reads {
+        assert!(matches!(&read, FileReadError::Bug(found) if *found == bug), "{read:?}");
+        assert_eq!(read.bug(), Some(&bug));
+    }
+    let path = CopyPathError::from(DiskError::Bug(bug.clone()));
+    assert!(matches!(&path, CopyPathError::Bug(found) if *found == bug));
+    let copies = [
+        crate::DeviceOnlyError::from(path),
+        crate::DeviceOnlyError::from(DbError::Bug(bug.clone())),
+        crate::DeviceOnlyError::from(DiskError::Bug(bug.clone())),
+        crate::DeviceOnlyError::from(coven_database::CovenError::Bug(bug.clone())),
+    ];
+    for copy in copies {
+        assert!(matches!(&copy, crate::DeviceOnlyError::Bug(found) if *found == bug), "{copy:?}");
+        assert_eq!(copy.bug(), Some(&bug));
+    }
+}

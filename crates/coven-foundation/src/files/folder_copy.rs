@@ -68,7 +68,30 @@ pub enum CopyPathError {
     NotUnicode(PathBuf),
     /// Inspecting a path failed.
     #[error(transparent)]
-    File(#[from] FileError),
+    File(FileError),
+    /// Inspecting the paths panicked on the blocking pool: a bug, which the
+    /// caller reports (E15).
+    #[error(transparent)]
+    Bug(#[from] crate::task::Bug),
+}
+
+impl From<FileError> for CopyPathError {
+    fn from(error: FileError) -> Self {
+        match error {
+            FileError::Bug(bug) => Self::Bug(bug),
+            error => Self::File(error),
+        }
+    }
+}
+
+impl crate::task::CarriesBug for CopyPathError {
+    fn bug(&self) -> Option<&crate::task::Bug> {
+        match self {
+            Self::Bug(bug) => Some(bug),
+            Self::File(error) => error.bug(),
+            _ => None,
+        }
+    }
 }
 
 /// The folder the person picked, open for the copies one call makes.

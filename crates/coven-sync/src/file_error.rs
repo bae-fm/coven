@@ -79,24 +79,53 @@ pub enum FileReadError {
     Database(DbError),
     /// A disk failure, retaining its cause.
     #[error(transparent)]
-    Disk(#[from] DiskError),
+    Disk(DiskError),
     /// The store cannot be retained while opening its file.
     #[error(transparent)]
-    Lock(#[from] StoreLockError),
+    Lock(StoreLockError),
     /// A provider failure, retaining its classification and native cause.
     #[error(transparent)]
-    Storage(#[from] StorageError),
+    Storage(StorageError),
     /// The write committing a prepared pin failed other than in the
     /// database, as in a failed rollback, keeping its cause (§17.8).
     #[error(transparent)]
     Write(Box<coven_database::CovenError>),
+    /// The read's work panicked: a bug, which the caller reports (E15).
+    #[error(transparent)]
+    Bug(#[from] coven_foundation::task::Bug),
+}
+impl From<DiskError> for FileReadError {
+    fn from(error: DiskError) -> Self {
+        match error {
+            DiskError::Bug(bug) => Self::Bug(bug),
+            error => Self::Disk(error),
+        }
+    }
+}
+impl From<StoreLockError> for FileReadError {
+    fn from(error: StoreLockError) -> Self {
+        match error {
+            StoreLockError::Bug(bug) => Self::Bug(bug),
+            error => Self::Lock(error),
+        }
+    }
+}
+impl From<StorageError> for FileReadError {
+    fn from(error: StorageError) -> Self {
+        match error {
+            StorageError::Bug(bug) => Self::Bug(bug),
+            error => Self::Storage(error),
+        }
+    }
 }
 impl coven_foundation::task::CarriesBug for FileReadError {
     fn bug(&self) -> Option<&coven_foundation::task::Bug> {
         match self {
+            Self::Bug(bug) => Some(bug),
             Self::Database(error) => error.bug(),
             Self::Disk(error) => error.bug(),
             Self::Lock(error) => error.bug(),
+            Self::Storage(error) => error.bug(),
             Self::Write(error) => error.bug(),
             _ => None,
         }
@@ -106,6 +135,7 @@ impl From<coven_database::CovenError> for FileReadError {
     fn from(error: coven_database::CovenError) -> Self {
         match error {
             coven_database::CovenError::Database(error) => error.into(),
+            coven_database::CovenError::Bug(bug) => Self::Bug(bug),
             error => Self::Write(Box::new(error)),
         }
     }
@@ -124,6 +154,7 @@ impl From<DbError> for FileReadError {
         match error {
             DbError::Disk(error) => Self::Disk(error),
             DbError::Lock(error) => Self::Lock(error),
+            DbError::Bug(bug) => Self::Bug(bug),
             error => Self::Database(error),
         }
     }
@@ -154,7 +185,7 @@ impl From<LocalFileError> for FileReadError {
             LocalFileError::Database(error) => error.into(),
             LocalFileError::Disk(error) => Self::Disk(error),
             LocalFileError::Lock(error) => Self::Lock(error),
-            LocalFileError::Bug(bug) => DbError::Bug(bug).into(),
+            LocalFileError::Bug(bug) => Self::Bug(bug),
         }
     }
 }

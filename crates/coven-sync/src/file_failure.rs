@@ -176,6 +176,7 @@ impl FilesInner {
             (_, FileReadError::Disk(_) | FileReadError::Lock(_)) => {
                 PendingReason::Failed(LocalFailure::Disk)
             }
+            (_, FileReadError::Bug(_)) => PendingReason::Failed(LocalFailure::Bug),
             // A file only on another device is refused before any work it
             // could record, so these name a local invariant failing.
             (
