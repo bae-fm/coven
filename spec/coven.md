@@ -2396,11 +2396,11 @@ after migrating, and refuses with an error naming the table and foreign key:
 
 | Refused | Why |
 |---|---|
-| `ON DELETE SET DEFAULT` or `ON UPDATE SET DEFAULT` on a foreign key of a synced table, or from a local table into a synced one | the default parent merges like any row and can itself be gone (Appendix A.8) |
+| `ON DELETE SET DEFAULT` or `ON UPDATE SET DEFAULT` on a foreign key of a synced table, or from a local table into a synced one | the default parent merges like any row and can itself be gone (*Set default*, below) |
 | set null on a `NOT NULL` column, in any table | SQLite could never apply it: no device could delete the parent, and coven couldn't take the child out |
 | set null on a primary-key column | nulling a key column changes the row's key: a delete plus an insert no write recorded |
 | a foreign key that includes a generated column, in any table (`SchemaError::GeneratedForeignKey`) | below |
-| a foreign key of a synced table that doesn't reference the parent's whole primary key: a `UNIQUE` non-key column, part of a composite key, or a repeated target column (`SchemaError::ForeignKeyNotPrimaryKey`) | a row's identity and generation can't track a value that changes (Appendix A.9). An explicit column list may reorder the key's columns; an omitted list means primary-key order |
+| a foreign key of a synced table that doesn't reference the parent's whole primary key: a `UNIQUE` non-key column, part of a composite key, or a repeated target column (`SchemaError::ForeignKeyNotPrimaryKey`) | a row's identity and generation can't track a value that changes: depending on arrival order, a child inserted against the old value would either make `COMMIT` fail or let SQLite rewrite a synced child with `ON UPDATE CASCADE`. An explicit column list may reorder the key's columns; an omitted list means primary-key order |
 | a foreign key from a local table into a synced table, or into a local table one of those reaches, whose delete action isn't cascade, or set null on a column that allows NULL | below |
 | a foreign key from a local table into a synced table's non-key column whose update action isn't cascade or set null (`SchemaError::LocalChildUpdate`, naming the table and column) | below |
 
@@ -2416,6 +2416,25 @@ only this device has, in local tables, so a local foreign key must never stop it
 `pins(note_id REFERENCES notes ON DELETE RESTRICT)` is refused: Ben's phone,
 holding a pin, couldn't take out a note that Ana's phone could, and the two would
 differ.
+
+*Set default.* The default parent is a second parent that merges like any row
+and can itself be gone. Supporting it would need restrict-like removal while that
+parent is gone, tracking its current generation, and handling rows that can't be
+deleted because their defaults fail a CHECK. So `SET DEFAULT` is refused, for
+delete and update actions, on foreign keys of synced tables and on foreign keys
+from local tables into synced tables. It appears in so few SQL files that
+refusing it affects almost nobody. Counts of SQL files on GitHub using each
+action, from GitHub's REST code search (`GET /search/code`, query
+`"ON DELETE <action>" language:SQL`, its `total_count`), retrieved 2026-10-07;
+approximate, across all SQL dialects:
+
+| Action | SQL files |
+| --- | --- |
+| `ON DELETE CASCADE` | ~1,714,000 |
+| `ON DELETE SET NULL` | ~646,000 |
+| `ON DELETE RESTRICT` | ~496,000 |
+| `ON DELETE NO ACTION` | ~115,000 |
+| `ON DELETE SET DEFAULT` | ~2,200 |
 
 Coven applies another device's change to a synced non-key column as an `UPDATE`,
 so a local foreign key must follow that update too. A local column such a key
@@ -8604,130 +8623,24 @@ every migration.
 
 | Feature | Status |
 |---|---|
-| Keys SQLite chooses itself (integer rowid aliases) | refused; integer keys derived from the content are allowed (A.1) |
-| Tables without a primary key | refused (A.2) |
-| Primary-key columns that allow NULL | refused (A.3) |
-| Independent keys with no text column for the UUID | refused (A.3) |
-| Unique constraints besides the key | allowed; first slot wins (A.4, §9.2); must not cross audiences (§15.2) |
-| `RESTRICT` / `NO ACTION` foreign keys | allowed; a merged child of a deleted parent is taken out (A.5, §9.1) |
+| Keys SQLite chooses itself (integer rowid aliases) | refused; integer keys derived from the content are allowed (§9.2) |
+| Tables without a primary key | refused (§9.2) |
+| Primary-key columns that allow NULL | refused (§9.2) |
+| Independent keys with no text column for the UUID | refused (§9.2) |
+| Unique constraints besides the key | allowed; first slot wins (§9.2); must not cross audiences (§15.2) |
+| `RESTRICT` / `NO ACTION` foreign keys | allowed; a merged child of a deleted parent is taken out (§9.1) |
 | `SET NULL` foreign keys | allowed; a merged child of a deleted parent reads null (§9.1) |
 | `SET NULL` on a `NOT NULL` or key column | refused (§9.1) |
-| `SET DEFAULT` actions | refused (A.8) |
-| References to non-key columns | refused; foreign keys reference the parent's whole primary key (A.9) |
+| `SET DEFAULT` actions | refused (§9.1) |
+| References to non-key columns | refused; foreign keys reference the parent's whole primary key (§9.1) |
 | Generated columns | allowed; never synced: each device computes them from the merged columns (§8.1) |
 | Foreign keys on generated columns | refused (§9.1) |
 | A generated root audience column | refused (§15.1) |
 | Local foreign keys into synced tables | delete action must be cascade or set null; update action into a non-key column must be cascade or set null (§9.1) |
-| CHECK constraints | allowed; a row failing after a merge is taken out (A.6, §9.3) |
-| Triggers that write synced tables | must be declared shared (A.7, §9.4) |
-| Collations on key, unique and foreign-key columns (and the parent columns those keys reference) | must be `BINARY`, comparing text by bytes (A.10) |
-| Schema changes | additions or breaking changes (A.11, §18) |
-
-### A.1 Integer primary keys
-
-- **Problem:** keys SQLite chooses itself, integer rowid aliases, can collide
-  offline: two devices pick the same id for different rows, and coven would treat
-  them as one row.
-- **Status:** refused. An integer key derived from the row's content is allowed,
-  like any key derived from the content (§9.2).
-
-### A.2 Tables with no primary key
-
-- **Problem:** coven can't tell which row a change belongs to, and SQLite's hidden
-  rowid collides across devices like an integer key.
-- **Status:** refused (§9.2).
-
-### A.3 Key columns that can be empty, and independent keys without a UUID column
-
-- **Problem:** SQLite lets a non-integer key column hold NULL unless it is
-  declared `NOT NULL`, and a key with a NULL in it names no row. An independent
-  key needs a text column to hold its UUID.
-- **Status:** both refused (§9.2).
-
-### A.4 Unique constraints besides the primary key
-
-- **Problem:** two offline devices can each insert a row with the same value.
-- **Status:** the row with the first slot claim keeps the value; the other row is
-  taken out while it conflicts, and recorded as lost (§9.2). A unique constraint
-  must include the audience column, or the foreign key that fixes the audience, so
-  it doesn't cross audiences (§15.2).
-
-### A.5 Restrict and no-action foreign keys
-
-- **Problem:** a device can delete a parent while another adds a child it hasn't
-  seen.
-- **Status:** the child is taken out while its parent is gone, and recorded as
-  lost (§9.1).
-
-### A.6 CHECK constraints
-
-- **Problem:** two concurrent edits that each pass can merge into a row that
-  fails, such as one device setting `start` and another `end`.
-- **Status:** a row that fails after a merge is taken out until it passes, and
-  recorded as lost (§9.3).
-
-### A.7 Triggers that write synced tables
-
-- **Problem:** a trigger that runs again while coven applies another device's
-  write would repeat what the original device already sent.
-- **Status:** allowed as shared triggers, which run only on the device making the
-  write (§9.4).
-
-### A.8 SET DEFAULT foreign keys
-
-- **Problem:** the default parent is a second parent that merges like any row and
-  can itself be gone. Supporting it would need restrict-like removal while that
-  parent is gone, tracking its current generation, and handling rows that can't be
-  deleted because their defaults fail a CHECK.
-- **Status:** refused on foreign keys of synced tables and on foreign keys from
-  local tables into synced tables, for both delete and update actions (§9.1).
-  `SET DEFAULT` appears in so few SQL files that refusing it affects almost
-  nobody. Counts of SQL files on GitHub using each action, from GitHub's REST
-  code search (`GET /search/code`, query `"ON DELETE <action>" language:SQL`,
-  its `total_count`), retrieved 2026-10-07; approximate, across all SQL
-  dialects:
-
-  | Action | SQL files |
-  | --- | --- |
-  | `ON DELETE CASCADE` | ~1,714,000 |
-  | `ON DELETE SET NULL` | ~646,000 |
-  | `ON DELETE RESTRICT` | ~496,000 |
-  | `ON DELETE NO ACTION` | ~115,000 |
-  | `ON DELETE SET DEFAULT` | ~2,200 |
-
-### A.9 References to non-key columns
-
-- **Problem:** a parent can change a `UNIQUE` non-key value while another device
-  inserts a child referring to the old value. The parent's row identity and
-  generation can't track that changing value. Depending on arrival order, the
-  child would either make `COMMIT` fail or let SQLite rewrite a synced child with
-  `ON UPDATE CASCADE`.
-- **Status:** refused for foreign keys of synced tables, with
-  `SchemaError::ForeignKeyNotPrimaryKey`; the target must be the parent's complete
-  primary key (§9.1). Local children keep SQLite's behaviour, subject to the
-  local foreign-key rules: a local key into a synced non-key column follows its
-  updates with cascade or set null.
-
-### A.10 Collations on keys
-
-- **Problem:** a key or unique column with `COLLATE NOCASE` or `RTRIM` makes
-  SQLite treat different spellings as one value, while each device's write records
-  the spelling it used. Two devices adding "Urgent" and "urgent" would make two
-  rows to coven where SQLite can hold one, and two claims of one unique value that
-  coven sees as different.
-- **Status:** refused on open and after every migration. These columns must
-  compare by bytes (`BINARY`): a synced table's primary-key columns and the
-  columns of its unique constraints and unique indexes (a unique index term may
-  not declare another collation either); the columns of every foreign key of a
-  synced table, and of every foreign key from a local table into a synced table;
-  and the parent columns those foreign keys reference (§9.2). Other columns may
-  use any collation, the app's own included (§4).
-
-### A.11 Schema changes
-
-- **Problem:** devices running different app versions hold different schemas.
-- **Status:** additions sync with no change of version; any other change raises
-  the store's version, and every device updates and reloads (§18).
+| CHECK constraints | allowed; a row failing after a merge is taken out (§9.3) |
+| Triggers that write synced tables | must be declared shared (§9.4) |
+| Collations on key, unique and foreign-key columns (and the parent columns those keys reference) | must be `BINARY`, comparing text by bytes (§9.2) |
+| Schema changes | additions or breaking changes (§18) |
 
 ---
 
@@ -10693,7 +10606,7 @@ maps them are with each provider in Appendix E.
 | `AlreadyOpen` | the store is still open in this process, or locked by another process | F.4 |
 | `BootstrapPending` | a first installation, by restore or join, is unfinished; only that call resumes it | §13.4 |
 | `ReplacementUnfinished` | a reset or restore in place swapped the new installation in but did not finish; names the call that finishes it, and refuses the other | §13.1, §19.3 |
-| `SchemaError::ForeignKeyNotPrimaryKey` | a synced table's foreign key doesn't reference the parent's whole primary key | §9.1, A.9 |
+| `SchemaError::ForeignKeyNotPrimaryKey` | a synced table's foreign key doesn't reference the parent's whole primary key | §9.1 |
 | `SchemaError::LocalChildUpdate` | a local foreign key into a synced non-key column has an update action other than cascade or set null | §9.1 |
 | `DbError::FileUnknown` | a reference names no file this device has a record of in the row's audience, including a restored lost value naming a deleted file | §17.2 |
 | `DbError::FileUnreferenced` | a file the write staged is referenced by none of its rows | §17.3 |

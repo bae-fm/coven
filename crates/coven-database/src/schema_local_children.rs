@@ -1,4 +1,4 @@
-//! Rules for local tables whose foreign keys reach synced data (§9.1, A.9).
+//! Rules for local tables whose foreign keys reach synced data (§9.1).
 //!
 //! Local rows exist only on this device, so no write accounts for them: a
 //! local key must follow whatever coven does to its parent, never stop it.

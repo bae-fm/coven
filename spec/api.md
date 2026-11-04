@@ -384,7 +384,7 @@ Every SQLite setting, and who chooses it. Settings marked *app* are fields of
 | `ignore_check_constraints` | coven: off | a row failing a CHECK after a merge is taken out on every device (§9.3) |
 | `legacy_alter_table` | coven: off | it changes what a rename does to triggers and views, so one migration would leave different schemas on different devices |
 | `case_sensitive_like` | coven: off | it changes what `LIKE` returns, so the same trigger or CHECK could decide differently on two devices |
-| `encoding` | coven: UTF-8 | key comparison compares stored bytes, which differ between encodings (A.10) |
+| `encoding` | coven: UTF-8 | key comparison compares stored bytes, which differ between encodings (§9.2) |
 | `max_page_count` | coven: unlimited | other members' writes would fill it, and this device could no longer apply slots |
 | `lock_proxy_file` | coven: none | it changes how other processes lock the file |
 | `reverse_unordered_selects` | coven: off | a testing aid that reorders results without `ORDER BY` |
