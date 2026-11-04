@@ -53,12 +53,9 @@ impl Database {
     #[cfg(test)]
     pub(crate) async fn retained_files(&self) -> Result<FileRetention, DbError> {
         self.call(move |inner| {
-            let reader = inner.access.readers.acquire_reader();
-            reader.with_reader(|db| {
-                db.read_transaction(|| {
-                    let references = db.query("SELECT device,file FROM _coven_row_file_refs UNION SELECT device,file FROM _coven_published_file_refs UNION SELECT device,file FROM _coven_queued_file_refs UNION SELECT device,file FROM _coven_file_uploads", [], |r| Ok((r.get::<_, DeviceId>(0)?,FileId(uuid::Uuid::from_bytes(r.get(1)?)))))?.into_iter().collect();
-                    Ok(FileRetention { references })
-                })
+            inner.access.with_committed(|db| {
+                let references = db.query("SELECT device,file FROM _coven_row_file_refs UNION SELECT device,file FROM _coven_published_file_refs UNION SELECT device,file FROM _coven_queued_file_refs UNION SELECT device,file FROM _coven_file_uploads", [], |r| Ok((r.get::<_, DeviceId>(0)?,FileId(uuid::Uuid::from_bytes(r.get(1)?)))))?.into_iter().collect();
+                Ok(FileRetention { references })
             })
         })
         .await
@@ -129,26 +126,23 @@ impl Database {
         uploaders: BTreeSet<DeviceId>,
     ) -> Result<Vec<FileCandidate>, DbError> {
         self.call(move |inner| {
-            let reader = inner.access.readers.acquire_reader();
-            reader.with_reader(|db| {
-                db.read_transaction(|| {
-                    let mut candidates = Vec::new();
-                    for device in uploaders {
-                        candidates.extend(db.query(
-                            "SELECT file,EXISTS(SELECT 1 FROM _coven_file_protection p WHERE p.device=c.device AND p.file=c.file),since FROM _coven_file_candidates c WHERE c.device=?1 ORDER BY c.file",
-                            [device],
-                            |r| {
-                                Ok(FileCandidate {
-                                    device,
-                                    file: FileId(uuid::Uuid::from_bytes(r.get(0)?)),
-                                    protected: r.get(1)?,
-                                    since: crate::store_state_tables::slot(r, 2)?,
-                                })
-                            },
-                        )?);
-                    }
-                    Ok(candidates)
-                })
+            inner.access.with_committed(|db| {
+                let mut candidates = Vec::new();
+                for device in uploaders {
+                    candidates.extend(db.query(
+                        "SELECT file,EXISTS(SELECT 1 FROM _coven_file_protection p WHERE p.device=c.device AND p.file=c.file),since FROM _coven_file_candidates c WHERE c.device=?1 ORDER BY c.file",
+                        [device],
+                        |r| {
+                            Ok(FileCandidate {
+                                device,
+                                file: FileId(uuid::Uuid::from_bytes(r.get(0)?)),
+                                protected: r.get(1)?,
+                                since: crate::store_state_tables::slot(r, 2)?,
+                            })
+                        },
+                    )?);
+                }
+                Ok(candidates)
             })
         })
         .await
@@ -164,24 +158,21 @@ impl Database {
         devices: BTreeSet<DeviceId>,
     ) -> Result<BTreeMap<DeviceId, Slot>, DbError> {
         self.call(move |inner| {
-            let reader = inner.access.readers.acquire_reader();
-            reader.with_reader(|db| {
-                db.read_transaction(|| {
-                    let mut reads = BTreeMap::new();
-                    for device in devices {
-                        if let Some(read) = db
-                            .query(
-                                &format!("SELECT read_through FROM _coven_writes WHERE {WRITE_DEVICE_SQL}=?1 AND slot IS NOT NULL ORDER BY number DESC LIMIT 1"),
-                                [device],
-                                |r| crate::store_state_tables::slot(r, 0),
-                            )?
-                            .pop()
-                        {
-                            reads.insert(device, read);
-                        }
+            inner.access.with_committed(|db| {
+                let mut reads = BTreeMap::new();
+                for device in devices {
+                    if let Some(read) = db
+                        .query(
+                            &format!("SELECT read_through FROM _coven_writes WHERE {WRITE_DEVICE_SQL}=?1 AND slot IS NOT NULL ORDER BY number DESC LIMIT 1"),
+                            [device],
+                            |r| crate::store_state_tables::slot(r, 0),
+                        )?
+                        .pop()
+                    {
+                        reads.insert(device, read);
                     }
-                    Ok(reads)
-                })
+                }
+                Ok(reads)
             })
         })
         .await

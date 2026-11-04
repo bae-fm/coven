@@ -56,10 +56,8 @@ impl Database {
         F: FnMut(crate::WaitingUpload<'_>) -> Result<(), E> + Send + 'static,
     {
         self.call(move |inner| {
-            inner.access.readers.acquire_reader().with_reader(|reader| {
-                reader.read_transaction(|| {
-                    crate::upload::read_batch(reader, inner.access.device, through, consume)
-                })
+            inner.access.with_committed(|reader| {
+                crate::upload::read_batch(reader, inner.access.device, through, consume)
             })
         })
         .await

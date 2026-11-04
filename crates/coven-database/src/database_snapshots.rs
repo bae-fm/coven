@@ -18,8 +18,7 @@ impl Database {
         after: u64,
     ) -> Result<u64, DbError> {
         self.call(move |inner| {
-            let reader = inner.access.readers.acquire_reader();
-            reader.with_reader(|db| db.read_transaction(|| {
+            inner.access.with_committed(|db| {
                 let too_large = || DbError::TooLarge {
                     field: "snapshot slot bytes", actual: u64::MAX, maximum: u64::MAX - 1,
                 };
@@ -41,7 +40,7 @@ impl Database {
                     bytes = u64::try_from(records).ok().and_then(|records| bytes.checked_add(records)).ok_or_else(too_large)?;
                 }
                 Ok(bytes)
-            }))
+            })
         }).await
     }
 
@@ -51,16 +50,13 @@ impl Database {
         &self,
     ) -> Result<Vec<coven_format::write_stream::WriteHeaderFrame>, DbError> {
         self.call(move |inner| {
-            let reader = inner.access.readers.acquire_reader();
-            reader.with_reader(|db| {
-                db.read_transaction(|| {
-                    let mut headers = Vec::new();
-                    crate::upload::each_plaintext(db, |header, _| {
-                        headers.push(header);
-                        Ok(())
-                    })?;
-                    Ok(headers)
-                })
+            inner.access.with_committed(|db| {
+                let mut headers = Vec::new();
+                crate::upload::each_plaintext(db, |header, _| {
+                    headers.push(header);
+                    Ok(())
+                })?;
+                Ok(headers)
             })
         })
         .await
@@ -135,18 +131,9 @@ impl Database {
         E: Send + 'static,
     {
         self.call(move |inner| {
-            let reader = inner.access.readers.acquire_reader();
-            reader.with_reader(|reader| {
-                reader.read_transaction(|| {
-                    crate::write_schema::prepare_evaluators(reader, &inner.access.write_schema)?;
-                    crate::snapshot_write::write(
-                        reader,
-                        &inner.access.write_schema,
-                        id,
-                        begin,
-                        emit,
-                    )
-                })
+            inner.access.with_committed(|reader| {
+                crate::write_schema::prepare_evaluators(reader, &inner.access.write_schema)?;
+                crate::snapshot_write::write(reader, &inner.access.write_schema, id, begin, emit)
             })
         })
         .await
@@ -219,19 +206,16 @@ impl Database {
         E: Send + 'static,
     {
         self.call(move |inner| {
-            let reader = inner.access.readers.acquire_reader();
-            reader.with_reader(|reader| {
-                reader.read_transaction(|| {
-                    crate::write_schema::prepare_evaluators(reader, &inner.access.write_schema)?;
-                    crate::raise_capture::write(
-                        reader,
-                        &inner.access.write_schema,
-                        id,
-                        version,
-                        begin,
-                        emit,
-                    )
-                })
+            inner.access.with_committed(|reader| {
+                crate::write_schema::prepare_evaluators(reader, &inner.access.write_schema)?;
+                crate::raise_capture::write(
+                    reader,
+                    &inner.access.write_schema,
+                    id,
+                    version,
+                    begin,
+                    emit,
+                )
             })
         })
         .await
