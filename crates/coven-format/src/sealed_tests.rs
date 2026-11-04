@@ -576,6 +576,99 @@ mod sequence {
         }
     }
 
+    /// D14: a mutation that changes an inner write's authored view, its header's
+    /// `read_through`, while every outer seal and signature stays valid, is
+    /// refused by the inner write's own header signature.
+    #[test]
+    fn writes_slot_refuses_a_changed_authored_view() {
+        use crate::sealed_write::WriteObjectPrefix;
+        let outer = hex(include_str!("../fixtures/sealed-writes-slot.hex"));
+        let outer_prefix_length = SlotObjectPrefix::length(&outer).unwrap();
+        let outer_prefix = &outer[..outer_prefix_length];
+        let outer_path = f::slot_path(6);
+        let plain = open_stream(&outer, outer_prefix_length, outer_path.as_str()).unwrap();
+        // The outer seal and signature, made again over any plaintext.
+        let reseal = |plain: &[u8]| {
+            let mut layout = StreamObjectLayout::new();
+            let mut bytes = outer_prefix.to_vec();
+            for (index, chunk) in plain.chunks(crate::chunks::CHUNK_SIZE).enumerate() {
+                let sealed = f::store_key().derive().reseal_object_chunk(
+                    outer_path.as_str(),
+                    outer_prefix,
+                    0,
+                    index as u64,
+                    chunk,
+                );
+                bytes.extend(layout.encode_chunk(&sealed).unwrap());
+            }
+            let mut hash = ObjectHasher::new();
+            hash.update(&bytes);
+            let signature = f::member_keys().sign_object(outer_path.as_str(), &hash.finish());
+            bytes.extend_from_slice(signature.as_bytes());
+            bytes
+        };
+        assert_eq!(reseal(&plain), outer);
+
+        // The first inner write and its header chunk.
+        let inner = hex(include_str!("../fixtures/sealed-write.hex"));
+        let slot = f::slot_header(6, 5);
+        let inner_at = crate::writes_slot::encode_head(&slot, &outer_path, 2).unwrap().len() + 8;
+        assert_eq!(&plain[inner_at..inner_at + inner.len()], inner);
+        let prefix_length = WriteObjectPrefix::length(&inner).unwrap();
+        let prefix_bytes = &inner[..prefix_length];
+        let prefix = WriteObjectPrefix::decode(prefix_bytes).unwrap();
+        let length = WriteObjectPrefix::header_chunk_length(&inner[prefix_length..]).unwrap();
+        let header_piece = &inner[prefix_length..prefix_length + length];
+        let id =
+            coven_merge::WriteId { device: coven_foundation::id_source::DeviceId(1), number: 3 };
+        let path = crate::writes_slot::identity(f::STORE_ID, id).unwrap();
+        let keys = f::store_key().derive();
+        let opened = keys
+            .open_object_chunk(
+                &path,
+                prefix_bytes,
+                0,
+                0,
+                WriteObjectPrefix::header_chunk(header_piece).unwrap(),
+            )
+            .unwrap();
+        let tail_at = prefix_length + length;
+        let tail = prefix
+            .decode_tail(&inner[tail_at..tail_at + WriteObjectPrefix::tail_length(2)])
+            .unwrap();
+        let verify = |piece: &[u8]| {
+            f::member().signing.verify_write_header(
+                &path,
+                prefix_bytes,
+                piece,
+                &tail.roots,
+                &tail.signature,
+            )
+        };
+        verify(header_piece).unwrap();
+
+        // The same header with `read_through` one higher, sealed again so the chunk opens.
+        let mut header = crate::write_stream::WriteHeaderFrame::decode(&opened).unwrap();
+        header.header.read_through += 1;
+        let changed =
+            keys.reseal_object_chunk(&path, prefix_bytes, 0, 0, &header.encode().unwrap());
+        let changed_piece = crate::sealed::encode_chunk(&changed).unwrap();
+        assert_eq!(changed_piece.len(), header_piece.len());
+        assert_ne!(changed_piece, header_piece);
+        assert!(matches!(verify(&changed_piece), Err(coven_crypto::CryptoError::Signature)));
+
+        // Inside a writes slot sealed and signed again around the changed write, the
+        // outer object is valid and only the inner signature refuses the change.
+        let mut changed_plain = plain.clone();
+        changed_plain[inner_at + prefix_length..inner_at + tail_at].copy_from_slice(&changed_piece);
+        let changed_outer = reseal(&changed_plain);
+        assert_ne!(changed_outer, outer);
+        assert_eq!(
+            open_stream(&changed_outer, outer_prefix_length, outer_path.as_str()).unwrap(),
+            changed_plain
+        );
+    }
+
     fn migration_header() -> crate::write::WriteHeader {
         use crate::sealed_write::{WriteObjectLayout, WriteObjectPrefix};
         let bytes = hex(include_str!("../fixtures/sealed-migration-write.hex"));
