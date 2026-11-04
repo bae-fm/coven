@@ -148,19 +148,10 @@ pub(crate) fn record(
 /// The content hash and chunk hashes recorded with `file`'s original here,
 /// if it has one. Its chunk hashes are kept only while the file is on this
 /// device only: they go once it is stored (§17.3).
-#[expect(
-    clippy::map_err_ignore,
-    reason = "a stored value that won't convert or decode is DamagedDatabase"
-)]
 pub(crate) fn hashes(
     db: &crate::sqlite::DatabaseConnection,
     file: coven_foundation::id_source::FileId,
 ) -> Result<Option<FileHashes>, DbError> {
-    let decode = |bytes: Vec<u8>| -> Result<coven_crypto::ContentHash, DbError> {
-        Ok(coven_crypto::ContentHash::from_bytes(
-            bytes.try_into().map_err(|_| DbError::DamagedDatabase)?,
-        ))
-    };
     let Some(content) = db
         .query("SELECT hash FROM _coven_user_files WHERE file=?1", [file], |r| {
             r.get::<_, Vec<u8>>(0)
@@ -169,14 +160,12 @@ pub(crate) fn hashes(
     else {
         return Ok(None);
     };
-    let chunks = db
-        .query("SELECT hash FROM _coven_user_chunks WHERE file=?1 ORDER BY chunk", [file], |r| {
-            r.get::<_, Vec<u8>>(0)
-        })?
-        .into_iter()
-        .map(decode)
-        .collect::<Result<Vec<_>, _>>()?;
-    Ok(Some(FileHashes::from_parts(decode(content)?, chunks)))
+    let chunks = db.query(
+        "SELECT hash FROM _coven_user_chunks WHERE file=?1 ORDER BY chunk",
+        [file],
+        |r| r.get::<_, Vec<u8>>(0),
+    )?;
+    Ok(Some(FileHashes::stored(content, chunks)?))
 }
 
 /// The user's original this device recorded for `file`, if it has one.

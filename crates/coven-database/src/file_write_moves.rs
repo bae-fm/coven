@@ -10,7 +10,6 @@ use crate::{
     file_table::Record,
     DbError, MoveId, Provenance,
 };
-use coven_crypto::ContentHash;
 use coven_foundation::{files::FileName, id_source::FileId};
 use std::collections::BTreeSet;
 
@@ -214,19 +213,13 @@ fn copy(
     else {
         return Ok(None);
     };
-    let decode = |bytes: Vec<u8>| -> Result<ContentHash, DbError> {
-        Ok(ContentHash::from_bytes(bytes.try_into().map_err(|_| DbError::DamagedDatabase)?))
-    };
-    let chunks = db
-        .query("SELECT hash FROM _coven_copy_chunks WHERE path=?1 ORDER BY chunk", [&path], |r| {
-            r.get::<_, Vec<u8>>(0)
-        })?
-        .into_iter()
-        .map(decode)
-        .collect::<Result<Vec<_>, _>>()?;
-    let content = decode(content)?;
+    let chunks = db.query(
+        "SELECT hash FROM _coven_copy_chunks WHERE path=?1 ORDER BY chunk",
+        [&path],
+        |r| r.get::<_, Vec<u8>>(0),
+    )?;
     Ok(Some((
         FileName::new(path).map_err(|_| DbError::DamagedDatabase)?,
-        FileHashes::from_parts(content, chunks),
+        FileHashes::stored(content, chunks)?,
     )))
 }

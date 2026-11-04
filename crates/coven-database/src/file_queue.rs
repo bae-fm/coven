@@ -289,9 +289,7 @@ fn decode_uploads(
                 id,
                 location: FileLocation::decode(&location)?,
                 size,
-                content_hash: ContentHash::from_bytes(
-                    hash.try_into().map_err(|_| DbError::DamagedDatabase)?,
-                ),
+                content_hash: crate::file_hashes::stored_hash(hash)?,
                 files: db.query(
                     "SELECT file FROM _coven_upload_files WHERE upload=?1 ORDER BY file",
                     [id],
@@ -388,7 +386,7 @@ pub(crate) fn chunk_hash(
             DbError::Sqlite(rusqlite::Error::QueryReturnedNoRows) => DbError::DamagedDatabase,
             error => error,
         })?;
-    Ok(ContentHash::from_bytes(hash.try_into().map_err(|_| DbError::DamagedDatabase)?))
+    crate::file_hashes::stored_hash(hash)
 }
 
 /// Queued uploads no file waits for any more and no provider session

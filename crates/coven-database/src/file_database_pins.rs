@@ -115,9 +115,7 @@ impl FileDatabase {
                 )?
                 .pop()
                 .ok_or(DbError::DamagedDatabase)?;
-            Ok(coven_crypto::ContentHash::from_bytes(
-                hash.try_into().map_err(|_| DbError::DamagedDatabase)?,
-            ))
+            crate::file_hashes::stored_hash(hash)
         })
         .await
     }

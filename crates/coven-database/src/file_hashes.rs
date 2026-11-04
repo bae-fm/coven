@@ -1,5 +1,6 @@
 //! Whole-file and plaintext-chunk hashes captured from the same first read.
 
+use crate::DbError;
 use coven_crypto::{ContentHash, ContentHasher};
 use coven_format::chunks::CHUNK_SIZE;
 
@@ -10,6 +11,12 @@ use coven_format::chunks::CHUNK_SIZE;
 pub struct FileHashes {
     pub(crate) content: ContentHash,
     chunks: Vec<ContentHash>,
+}
+
+/// A hash coven stored; one that isn't 32 bytes is damage.
+pub(crate) fn stored_hash(bytes: Vec<u8>) -> Result<ContentHash, DbError> {
+    let bytes = <[u8; 32]>::try_from(bytes).map_err(|_wrong_size| DbError::DamagedDatabase)?;
+    Ok(ContentHash::from_bytes(bytes))
 }
 
 /// Hashes a file's bytes as they pass, in order, into its `FileHashes`.
@@ -62,9 +69,13 @@ impl FileHasher {
 }
 
 impl FileHashes {
-    /// Hashes a first read recorded, as kept with coven's copy.
-    pub(crate) fn from_parts(content: ContentHash, chunks: Vec<ContentHash>) -> Self {
-        Self { content, chunks }
+    /// Hashes as coven stored them: the content hash, then each chunk's in
+    /// order.
+    pub(crate) fn stored(content: Vec<u8>, chunks: Vec<Vec<u8>>) -> Result<Self, DbError> {
+        Ok(Self {
+            content: stored_hash(content)?,
+            chunks: chunks.into_iter().map(stored_hash).collect::<Result<_, _>>()?,
+        })
     }
 
     /// One hash per 64-KiB plaintext chunk, the last possibly shorter.

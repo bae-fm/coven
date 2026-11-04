@@ -285,9 +285,7 @@ impl Record {
         };
         let hash = match values.get(HASH) {
             Some(Value::Null) => None,
-            Some(Value::Blob(bytes)) => {
-                Some(ContentHash::from_bytes(bytes.as_slice().try_into().map_err(|_| damaged())?))
-            }
+            Some(Value::Blob(bytes)) => Some(crate::file_hashes::stored_hash(bytes.clone())?),
             _ => return Err(damaged()),
         };
         let place = Place::decode(values.get(COORDINATES).ok_or_else(damaged)?)?;

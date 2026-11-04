@@ -8,7 +8,6 @@ use crate::{
     sqlite::DatabaseConnection,
     DbError,
 };
-use coven_crypto::ContentHash;
 use coven_format::file::FileHeader;
 use coven_foundation::id_source::FileId;
 use rusqlite::params;
@@ -257,9 +256,7 @@ impl FileWrite<'_> {
                     |r| Ok((r.get(0)?, r.get(1)?)),
                 )?;
                 let location = FileLocation::decode(&location)?;
-                let hash = ContentHash::from_bytes(
-                    hash.try_into().map_err(|_wrong_size| DbError::DamagedDatabase)?,
-                );
+                let hash = crate::file_hashes::stored_hash(hash)?;
                 for file in db.query(
                     "SELECT file FROM _coven_upload_files WHERE upload=?1 ORDER BY file",
                     [upload],
