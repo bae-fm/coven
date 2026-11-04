@@ -124,7 +124,6 @@ impl Live<'_> {
     }
     async fn assert_temporaries_deleted(&self) {
         let provider = &self.storage.provider();
-        let root = provider.item(&provider.folder, &[]).unwrap();
         assert!(!self.uploads.is_empty());
         for (_, recorded) in self.uploads.iter() {
             let SessionState::OneDrive { temporary, .. } = &recorded.state else {
@@ -133,10 +132,15 @@ impl Live<'_> {
             let response = provider
                 .send(
                     Method::GET,
-                    &format!(
-                        "{root}:/{}/{temporary}:",
-                        coven_format::path::device_uploads(self.store, recorded.device)
-                    ),
+                    &provider
+                        .under(
+                            &provider.folder,
+                            &format!(
+                                "{}/{temporary}",
+                                coven_format::path::device_uploads(self.store, recorded.device)
+                            ),
+                        )
+                        .unwrap(),
                     Body::Empty,
                 )
                 .await

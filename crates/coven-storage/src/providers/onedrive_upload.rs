@@ -79,12 +79,14 @@ impl OneDriveStorage {
     /// The session's temporary, in the reserved folder of the device that
     /// began it (D10).
     fn temporary_url(&self, session: &UploadSession) -> Result<String, StorageError> {
-        Ok(format!(
-            "{}:/{}/{}:",
-            self.item(&self.folder, &[])?,
-            coven_format::path::device_uploads(session.path().store(), session.device),
-            temporary(session)?
-        ))
+        self.under(
+            &self.folder,
+            &format!(
+                "{}/{}",
+                coven_format::path::device_uploads(session.path().store(), session.device),
+                temporary(session)?
+            ),
+        )
     }
     async fn delete_temporary(
         &self,
@@ -106,7 +108,7 @@ impl OneDriveStorage {
         device: coven_foundation::id_source::DeviceId,
     ) -> Result<Vec<crate::LeftUpload>, StorageError> {
         let folder = coven_format::path::device_uploads(store, device);
-        let url = format!("{}:/{folder}:", self.item(&self.folder, &[])?);
+        let url = self.under(&self.folder, &folder)?;
         let response = self.send(Method::GET, &url, Body::Empty).await?;
         if !self.found(response).await? {
             return Ok(Vec::new());
@@ -119,7 +121,7 @@ impl OneDriveStorage {
         let crate::left_upload::Left::Staged(folder) = &upload.0 else {
             return Err(StorageFailure::SessionMismatch.into());
         };
-        let url = format!("{}:/{folder}:", self.item(&self.folder, &[])?);
+        let url = self.under(&self.folder, folder)?;
         let response = self.send(Method::DELETE, &url, Body::Empty).await?;
         self.found(response).await?;
         // A remembered id of the deleted folder would send an upload into it.

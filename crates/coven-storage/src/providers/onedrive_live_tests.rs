@@ -489,9 +489,13 @@ fn onedrive_live_conditional_copy() {
             .unwrap();
         let marker = provider.metadata(&live.path(2)).await.unwrap();
         let parent = http::string(&marker["parentReference"], "id").unwrap();
-        let root = provider.item(&provider.folder, &[]).unwrap();
-        let store =
-            native(provider, Method::GET, &format!("{root}:/{}:", live.store), Body::Empty).await;
+        let store = native(
+            provider,
+            Method::GET,
+            &provider.under(&provider.folder, &live.store.to_string()).unwrap(),
+            Body::Empty,
+        )
+        .await;
         let temporary_folder = native(
             provider,
             Method::POST,
@@ -500,8 +504,7 @@ fn onedrive_live_conditional_copy() {
         ).await;
         let temporary_parent = http::string(&temporary_folder, "id").unwrap();
         let temporary_name = UuidIds.new_id().to_string();
-        let temporary_url =
-            format!("{}:/{temporary_name}:", provider.item(temporary_parent, &[]).unwrap());
+        let temporary_url = provider.under(temporary_parent, &temporary_name).unwrap();
         let session = native(
             provider,
             Method::POST,

@@ -63,9 +63,13 @@ impl OneDriveStorage {
         parts.extend_from_slice(suffix);
         http::endpoint(&self.api, &parts, &[])
     }
+    /// The item at `relative`, a slash-separated path below the folder
+    /// `parent`, as Graph addresses it: `items/{parent}:/{relative}:`.
+    pub(super) fn under(&self, parent: &str, relative: &str) -> Result<String, StorageError> {
+        Ok(format!("{}:/{relative}:", self.item(parent, &[])?))
+    }
     fn by_path(&self, path: &ObjectPath, suffix: &str) -> Result<String, StorageError> {
-        let root = self.item(&self.folder, &[])?;
-        Ok(format!("{root}:{}:{suffix}", path.absolute()))
+        Ok(format!("{}{suffix}", self.under(&self.folder, path.as_str())?))
     }
     async fn send(
         &self,

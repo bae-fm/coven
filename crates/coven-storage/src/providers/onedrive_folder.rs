@@ -52,11 +52,10 @@ impl OneDriveStorage {
                 let value = match value {
                     Ok(value) => value,
                     Err(error) if error.failure() == StorageFailure::AlreadyExists => {
-                        let base = self.item(&id, &[])?;
+                        let url = self.under(&id, name)?;
                         http::json(
                             PROVIDER,
-                            self.publish(publication, Method::GET, &format!("{base}:/{name}:"), Body::Empty)
-                                .await?,
+                            self.publish(publication, Method::GET, &url, Body::Empty).await?,
                         )
                         .await?
                     }
@@ -88,7 +87,7 @@ impl OneDriveStorage {
             let id = match known.get(directory) {
                 Some(id) => id.clone(),
                 None => {
-                    let url = format!("{}:/{directory}:", self.item(&self.folder, &[])?);
+                    let url = self.under(&self.folder, directory)?;
                     let value = match http::json(
                         PROVIDER,
                         self.send(Method::GET, &url, Body::Empty).await?,
