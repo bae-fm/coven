@@ -38,6 +38,21 @@ pub(crate) fn member_code(
     })
 }
 
+/// The restore code that names `identity`'s held pair and the store's
+/// `location`, with no credentials (§13.1).
+pub fn location_code(
+    store: coven_foundation::id_source::StoreId,
+    identity: &MemberIdentity,
+    location: StorageConfig,
+) -> Result<RestoreCode, SyncError> {
+    Ok(RestoreCode {
+        store,
+        member: identity.member(),
+        member_keys: identity.keys().clone(),
+        storage: RestoreStorage::location_only(location).encode()?,
+    })
+}
+
 /// Owns code generation and credential changes for one open handle. Closing
 /// waits for updates holding the lock, even when their app futures were dropped.
 #[derive(Clone)]
@@ -224,12 +239,7 @@ impl RestoreCodes {
         let identity =
             owner.identity.read()?.ok_or(coven_storage::StorageFailure::MemberKeysMissing)?;
         // The code names the stable id its unchanged private-pair blob belongs to (D13).
-        let code = RestoreCode {
-            store: owner.store,
-            member: identity.member(),
-            member_keys: identity.keys().clone(),
-            storage: RestoreStorage::location_only(data.location.clone()).encode()?,
-        };
+        let code = location_code(owner.store, &identity, data.location.clone())?;
         let text = SecretText::new(code.to_text()?.to_string());
         // The creation slot will publish the name chosen locally (§13.1).
         let (name, named_at) = owner.database.named_store().await?;
@@ -290,15 +300,8 @@ impl RestoreCodesInner {
         identity: &MemberIdentity,
         store: &coven_database::StoreIdentity,
     ) -> Result<SecretText, SyncError> {
-        let code = RestoreCode {
-            store: store.id,
-            member: identity.member(),
-            member_keys: identity.keys().clone(),
-            storage: RestoreStorage::location_only(
-                self.settings.read()?.ok_or(SyncError::NoStorage)?,
-            )
-            .encode()?,
-        };
+        let code =
+            location_code(store.id, identity, self.settings.read()?.ok_or(SyncError::NoStorage)?)?;
         let text = SecretText::new(code.to_text()?.to_string());
         self.credentials.write(|keychains| {
             keychains.refresh_restore_code(&code, &crate::SavedName::of(store))

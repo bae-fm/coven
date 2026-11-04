@@ -75,14 +75,7 @@ pub(crate) async fn reset_device(
         .status(&coven_storage::ObjectPath::slot(store, std::num::NonZeroU64::MIN))
         .await
         .map_err(SyncError::from)?;
-    let code = RestoreCode {
-        store,
-        member: member.member(),
-        member_keys: member.keys().clone(),
-        storage: RestoreStorage::location_only(data.location.clone())
-            .encode()
-            .map_err(SyncError::from)?,
-    };
+    let code = coven_sync::location_code(store, &member, data.location.clone())?;
     let (_, never) = watch::channel(false);
     // Saved keys that history has replaced are refused before the swap.
     replace::replace_installation(

@@ -68,7 +68,7 @@ pub use pending::{
     PendingSubject, Prerequisite, ProviderAccessAction, RequiredUpdate, Retry,
 };
 pub use refusal::Refusal;
-pub use restore_codes::{read_connection, RestoreCodes};
+pub use restore_codes::{location_code, read_connection, RestoreCodes};
 pub use saved_code::{
     follow_name, read_saved_code, replacement_code, SavedName, UnreadableSavedCode,
 };

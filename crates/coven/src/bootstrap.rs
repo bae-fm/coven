@@ -780,14 +780,7 @@ async fn prepare_and_load(
         }
         let ring = ring.read()?.ok_or(SyncError::from(StorageFailure::MemberKeysMissing))?;
         Ok(Some((
-            RestoreCode {
-                store: settings.id,
-                member: member.member(),
-                member_keys: member.keys().clone(),
-                storage: RestoreStorage::location_only(data.location.clone())
-                    .encode()
-                    .map_err(SyncError::from)?,
-            },
+            coven_sync::location_code(settings.id, &member, data.location.clone())?,
             data.credentials,
             ring,
         )))
