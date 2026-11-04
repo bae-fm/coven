@@ -31,6 +31,13 @@ aws-smithy-runtime-api = { workspace = true, features = ["client", "http-1x"] }
 hex.workspace = true
 base64.workspace = true
 
+# Android's certificate verifier asks the JVM, through the context the app
+# gives ndk-context (api.md E1).
+[target.'cfg(target_os = "android")'.dependencies]
+jni.workspace = true
+ndk-context.workspace = true
+rustls-platform-verifier.workspace = true
+
 [target.'cfg(target_vendor = "apple")'.dependencies]
 objc2.workspace = true
 block2.workspace = true

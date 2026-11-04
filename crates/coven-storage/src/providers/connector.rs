@@ -128,7 +128,7 @@ pub struct ProviderConnector {
     ids: IdSourceRef,
     /// Building it fails only when TLS cannot be set up; each call needing it
     /// then returns that failure.
-    http: Result<HttpClient, Arc<reqwest::Error>>,
+    http: Result<HttpClient, Arc<super::http_client::TlsSetupError>>,
     #[cfg(any(test, feature = "test-utils"))]
     folder_api: Option<String>,
 }
@@ -382,7 +382,10 @@ impl StorageConnector for ProviderConnector {
 
 /// Why `provider`'s requests can't be sent: the connector's HTTP client could
 /// not set up TLS.
-fn tls_failure(provider: crate::CloudProvider, source: Arc<reqwest::Error>) -> StorageError {
+fn tls_failure(
+    provider: crate::CloudProvider,
+    source: Arc<super::http_client::TlsSetupError>,
+) -> StorageError {
     StorageError::Provider {
         provider,
         failure: StorageFailure::InvalidConfiguration,

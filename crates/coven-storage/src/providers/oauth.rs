@@ -205,7 +205,7 @@ pub struct OAuthClients {
 pub struct OAuthExchange {
     clients: OAuthClients,
     clock: ClockRef,
-    client: Result<super::http_client::HttpClient, Arc<reqwest::Error>>,
+    client: Result<super::http_client::HttpClient, Arc<super::http_client::TlsSetupError>>,
 }
 
 impl OAuthExchange {

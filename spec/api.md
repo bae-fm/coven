@@ -475,13 +475,13 @@ Every SQLite setting, and who chooses it. Settings marked *app* are fields of
   (`rustls-platform-verifier`). So coven trusts what the device trusts, the
   same for every provider ([Appendix F.1](coven.md#f1-crates)). A verifier that
   cannot start is `StorageFailure::InvalidConfiguration`.
-- On Android the verifier asks the JVM, so the app initializes it before any
-  storage call: it passes its `Context` to
-  `rustls_platform_verifier::android::init_with_env` and packages the
-  verifier's Android classes. The verifier crate offers no way to ask whether
-  this was done: when it wasn't, the first HTTPS connection panics inside it.
-  Coven could initialize the verifier itself from the JVM and `Context`, which
-  would turn that panic into a typed error; it leaves this to the app.
+- On Android the verifier asks the JVM. Coven starts it itself, once per
+  process, before it builds the HTTPS client, from the JVM and the `Context` the
+  app gives `ndk-context`, as the network watch and Block Store use them; the
+  app packages the verifier's Android classes and calls nothing. A verifier
+  that can't start fails the storage call with
+  `StorageFailure::InvalidConfiguration`, its JNI cause kept, where an
+  uninitialized verifier would have panicked at the first HTTPS connection.
 - On Android, coven keeps the person's saved restore codes in Google's Block
   Store ([§13.1](coven.md#131-a-persons-new-device-the-restore-code)), calling
   Google Play services through JNI with the context the app gives `ndk-context`

@@ -28,6 +28,38 @@ pub(crate) const STALL_WINDOW: Duration = Duration::from_secs(60);
 /// window's, and the bytes a caller's `ByteProgress` hears.
 const UPLOAD_STEP: usize = 64 * 1024;
 
+/// Why the HTTPS client could not be built: its TLS setup failed.
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum TlsSetupError {
+    /// reqwest refused to build the client.
+    #[error(transparent)]
+    Client(#[from] reqwest::Error),
+    /// Android's certificate verifier, which asks the JVM, could not start
+    /// (api.md E1).
+    #[cfg(target_os = "android")]
+    #[error("starting Android's certificate verifier: {0}")]
+    AndroidVerifier(#[source] jni::errors::Error),
+}
+
+/// Start Android's certificate verifier, once per process, with the JVM and
+/// the app's `Context` the app gives `ndk-context`, before any client is
+/// built: the verifier asks the JVM for each certificate, and one never
+/// started panics at the first handshake.
+#[cfg(target_os = "android")]
+fn start_android_verifier() -> Result<(), TlsSetupError> {
+    use jni::objects::JObject;
+    let android = ndk_context::android_context();
+    // Safety: ndk-context holds the process's JavaVM pointer, set by the app.
+    let vm = unsafe { jni::JavaVM::from_raw(android.vm().cast()) };
+    vm.attach_current_thread_for_scope(|env| -> Result<(), jni::errors::Error> {
+        // Safety: ndk-context holds a global reference to the app's context
+        // for the life of the process.
+        let context = unsafe { JObject::from_raw(env, android.context().cast()) };
+        rustls_platform_verifier::android::init_with_env(env, context)
+    })
+    .map_err(TlsSetupError::AndroidVerifier)
+}
+
 /// A reqwest client with the clock its stall window is measured by.
 #[derive(Clone)]
 pub(crate) struct HttpClient {
@@ -45,7 +77,9 @@ impl HttpClient {
     /// Build the client. A TLS setup failure, such as a platform verifier
     /// that cannot start, is returned, never a panic.
     #[allow(clippy::disallowed_methods, reason = "the one place a reqwest client is built")]
-    pub(crate) fn new(clock: ClockRef) -> Result<Self, reqwest::Error> {
+    pub(crate) fn new(clock: ClockRef) -> Result<Self, TlsSetupError> {
+        #[cfg(target_os = "android")]
+        start_android_verifier()?;
         let client = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
             .retry(reqwest::retry::never())
