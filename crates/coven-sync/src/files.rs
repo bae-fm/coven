@@ -42,7 +42,7 @@ pub use file_upload_queue::{QueuedUpload, UploadPhase, UploadProgress, UploadQue
 use std::{
     collections::{BTreeMap, BTreeSet},
     sync::{
-        atomic::{AtomicBool, AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
         Arc, Mutex,
     },
 };
@@ -86,6 +86,11 @@ struct FilesInner {
     /// Whether a self-replacement pauses this device's writes, as of the last
     /// read of the upload queue or a completion it refused (§12.3).
     writes_paused: AtomicBool,
+    /// How many app retries had been asked when the write pause was last
+    /// read: only those can be answered that it holds writes.
+    writes_paused_read_after: AtomicU64,
+    /// How many app retries have been asked.
+    retries_asked: AtomicU64,
     /// Held by an app's change of either setting, and by an upload run from
     /// its read of the persisted settings until it has acted on them, so
     /// neither the copies above nor a retry's answer comes from a setting
@@ -160,6 +165,8 @@ impl Files {
             paused: AtomicBool::new(false),
             unmetered_only: AtomicBool::new(false),
             writes_paused: AtomicBool::new(false),
+            writes_paused_read_after: AtomicU64::new(0),
+            retries_asked: AtomicU64::new(0),
             hold_change: tokio::sync::Mutex::new(()),
             network,
             hold_wake: Notify::new(),
@@ -455,9 +462,15 @@ impl FilesInner {
     }
     /// Read whether a self-replacement pauses this device's writes.
     pub(crate) async fn read_writes_paused(&self) -> Result<(), DbError> {
+        let asked = self.retries_asked.load(Ordering::Acquire);
         let paused = self.database.writes_paused().await?;
         self.writes_paused.store(paused, Ordering::Release);
+        self.writes_paused_read_after.store(asked, Ordering::Release);
         Ok(())
+    }
+    /// How many app retries had been asked when the write pause was last read.
+    pub(crate) fn writes_paused_read_after(&self) -> u64 {
+        self.writes_paused_read_after.load(Ordering::Acquire)
     }
     /// A trailing upload's completion was refused: the pause holds the lane
     /// until a read of the queue finds it ended.

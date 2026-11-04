@@ -5999,7 +5999,9 @@ covers are in flight.
   stops between parts, and one whose file is stored meanwhile records no
   failure: it stays queued, and the first run after the pause finds its bytes
   stored and completes it. `retry_uploads_now` meanwhile tries only bound
-  uploads and returns `MemberKeysChanging`, as an app write does.
+  uploads and returns `MemberKeysChanging`, as an app write does. A retry
+  asked once the pause has ended is never answered so, even by a run that
+  read the pause before it ended.
 - **Both lanes stop** for the stuck-device stop (§5.4), the removal cut-off
   (§14.1), a provider cooldown, a connection change and stopping sync, as writes
   do.

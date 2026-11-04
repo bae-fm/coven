@@ -55,6 +55,9 @@ pub(super) struct AppRetry {
     covers: Option<BTreeSet<i64>>,
     /// How many covered uploads were stored.
     uploaded: usize,
+    /// Its place among the retries asked, which says whether a read of the
+    /// write pause came after it.
+    asked: u64,
     reply: oneshot::Sender<Result<DrainOutcome, SyncError>>,
 }
 
@@ -196,7 +199,8 @@ impl FilesInner {
             // so a retry queued here is either cleared or refused.
             let mut retries = self.app_retries.lock().expect("app retries poisoned");
             self.check_open()?;
-            retries.push(AppRetry { covers: None, uploaded: 0, reply });
+            let asked = self.retries_asked.fetch_add(1, Ordering::AcqRel);
+            retries.push(AppRetry { covers: None, uploaded: 0, asked, reply });
         }
         self.upload_wake.notify_one();
         Ok(UploadRetryAnswer(answer))
@@ -272,8 +276,35 @@ impl FilesInner {
     }
 
     fn end_blocked(&self, blocked: Blocked, uploaded: usize) -> Result<DrainOutcome, SyncError> {
-        self.answer_retries(|| blocked.retry_answer());
+        if let Blocked::Held(TrailingHold::MemberKeysChanging) = blocked {
+            self.answer_paused_writes();
+        } else {
+            self.answer_retries(|| blocked.retry_answer());
+        }
         blocked.run_outcome(uploaded)
+    }
+
+    /// Answer `MemberKeysChanging` to each app retry asked before the read
+    /// that found writes paused. One asked since may come after the pause
+    /// ended, so it waits for the next run, which reads the pause again.
+    fn answer_paused_writes(&self) {
+        let read_after = self.writes_paused_read_after();
+        let mut retries = self.app_retries.lock().expect("app retries poisoned");
+        let (answered, kept): (Vec<_>, Vec<_>) =
+            retries.drain(..).partition(|retry| retry.asked < read_after);
+        *retries = kept;
+        let waiting = !retries.is_empty();
+        drop(retries);
+        for retry in answered {
+            #[expect(
+                clippy::let_underscore_must_use,
+                reason = "a retry whose caller stopped waiting needs no answer"
+            )]
+            let _ = retry.reply.send(Err(DbError::MemberKeysChanging.into()));
+        }
+        if waiting {
+            self.upload_wake.notify_one();
+        }
     }
 
     #[cfg(test)]
