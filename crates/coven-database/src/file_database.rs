@@ -548,7 +548,7 @@ impl FileDatabase {
         let FileDatabaseAccess::Writer(database) = &self.access else {
             return Err(read_only());
         };
-        let subject = serde_json::to_vec(&subject).map_err(DbError::StateEncoding)?;
+        let subject = crate::pending::SubjectKey::of(&subject)?;
         database.call(move |inner| complete(inner, id, subject)).await
     }
     /// Reserve a whole cache file of `file` while it is written and checked.
@@ -746,7 +746,11 @@ impl Drop for CacheReservation {
 }
 /// One upload's completion (§17.9): a local write that switches the files
 /// the upload stores to the cloud, then retires the upload.
-fn complete(inner: &DatabaseInner, id: i64, subject: Vec<u8>) -> Result<(), DbError> {
+fn complete(
+    inner: &DatabaseInner,
+    id: i64,
+    subject: crate::pending::SubjectKey,
+) -> Result<(), DbError> {
     inner.with_files("complete an upload", |writer, files| {
         writer.local_write(
             &inner.access.write_schema,
@@ -756,7 +760,7 @@ fn complete(inner: &DatabaseInner, id: i64, subject: Vec<u8>) -> Result<(), DbEr
             |files| {
                 files.complete_upload(
                     id,
-                    Box::new(move |db| crate::pending::clear_encoded(db, subject)),
+                    Box::new(move |db| crate::pending::clear_key(db, &subject)),
                 )
             },
         )

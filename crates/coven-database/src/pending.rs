@@ -59,13 +59,36 @@ pub trait PendingValue: Serialize + DeserializeOwned + Send + 'static {
     fn with_cause(self, cause: Option<String>) -> Self;
 }
 
+/// A subject as `_coven_pending.subject` keys its record: the subject's
+/// JSON, which sync's types give one spelling.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct SubjectKey(Vec<u8>);
+
+impl SubjectKey {
+    pub(crate) fn of<S: Serialize>(subject: &S) -> Result<Self, DbError> {
+        serde_json::to_vec(subject).map(Self).map_err(DbError::StateEncoding)
+    }
+}
+
+impl rusqlite::ToSql for SubjectKey {
+    fn to_sql(&self) -> rusqlite::Result<rusqlite::types::ToSqlOutput<'_>> {
+        self.0.to_sql()
+    }
+}
+
+impl rusqlite::types::FromSql for SubjectKey {
+    fn column_result(value: rusqlite::types::ValueRef<'_>) -> rusqlite::types::FromSqlResult<Self> {
+        Vec::column_result(value).map(Self)
+    }
+}
+
 const SELECT: &str =
     "SELECT subject,value,operation,object,work,device,file,coven_version,move,pin,cause,id FROM _coven_pending";
 
 struct StoredRecord {
     /// Its place in the order the records arose.
     position: i64,
-    subject: Vec<u8>,
+    subject: SubjectKey,
     value: Vec<u8>,
     operation: Option<i64>,
     object: Option<Vec<u8>>,
@@ -100,7 +123,7 @@ impl StoredRecord {
     }
     fn decode<P: PendingValue>(&self) -> Result<P, DbError> {
         let record: P = serde_json::from_slice(&self.value).map_err(DbError::StateEncoding)?;
-        if serde_json::to_vec(record.subject()).map_err(DbError::StateEncoding)? != self.subject
+        if SubjectKey::of(record.subject())? != self.subject
             || record.operation().map(|id| id.0) != self.operation
             || record.move_of().map(|id| id.0) != self.moved
             || record.pin_of().map(|file| file.to_string()) != self.pin
@@ -136,7 +159,7 @@ pub(crate) fn positioned<P: PendingValue>(
 
 pub(crate) fn save<P: PendingValue>(db: &DatabaseConnection, record: &P) -> Result<(), DbError> {
     db.pending_change(|| {
-        let subject = serde_json::to_vec(record.subject()).map_err(DbError::StateEncoding)?;
+        let subject = SubjectKey::of(record.subject())?;
         let value = serde_json::to_vec(record).map_err(DbError::StateEncoding)?;
         let (work, device, file) = match stored_file(record) {
             Some((work, device, file)) => (Some(work), Some(device), Some(file)),
@@ -166,13 +189,13 @@ pub(crate) fn forget_causes(db: &DatabaseConnection) -> Result<(), DbError> {
 }
 
 pub(crate) fn clear<S: Serialize>(db: &DatabaseConnection, subject: &S) -> Result<(), DbError> {
-    clear_encoded(db, serde_json::to_vec(subject).map_err(DbError::StateEncoding)?)
+    clear_key(db, &SubjectKey::of(subject)?)
 }
 
 /// Clear the record of a subject already encoded for its key.
-pub(crate) fn clear_encoded(db: &DatabaseConnection, subject: Vec<u8>) -> Result<(), DbError> {
+pub(crate) fn clear_key(db: &DatabaseConnection, subject: &SubjectKey) -> Result<(), DbError> {
     db.pending_change(|| {
-        db.internal_execute("DELETE FROM _coven_pending WHERE subject=?1", [&subject])?;
+        db.internal_execute("DELETE FROM _coven_pending WHERE subject=?1", [subject])?;
         Ok(())
     })
 }
@@ -204,9 +227,23 @@ pub(crate) fn recorded<S: Serialize>(
 ) -> Result<bool, DbError> {
     db.query_row(
         "SELECT EXISTS(SELECT 1 FROM _coven_pending WHERE subject=?1)",
-        [serde_json::to_vec(subject).map_err(DbError::StateEncoding)?],
+        [SubjectKey::of(subject)?],
         |r| r.get(0),
     )
+}
+
+/// A subject's stored record, if it has one.
+fn stored<S: Serialize>(
+    db: &DatabaseConnection,
+    subject: &S,
+) -> Result<Option<StoredRecord>, DbError> {
+    Ok(db
+        .query(
+            &format!("{SELECT} WHERE subject=?1"),
+            [SubjectKey::of(subject)?],
+            StoredRecord::read,
+        )?
+        .pop())
 }
 
 /// The current local record for a subject, if any.
@@ -214,28 +251,14 @@ pub(crate) fn find<P: PendingValue>(
     db: &DatabaseConnection,
     subject: &P::Subject,
 ) -> Result<Option<P>, DbError> {
-    db.query(
-        &format!("{SELECT} WHERE subject=?1"),
-        [serde_json::to_vec(subject).map_err(DbError::StateEncoding)?],
-        StoredRecord::read,
-    )?
-    .pop()
-    .map(|stored| stored.decode())
-    .transpose()
+    stored(db, subject)?.map(|stored| stored.decode()).transpose()
 }
 
 pub(crate) fn retry<P: PendingValue>(
     db: &DatabaseConnection,
     subject: &P::Subject,
 ) -> Result<bool, DbError> {
-    let record = db
-        .query(
-            &format!("{SELECT} WHERE subject=?1"),
-            [serde_json::to_vec(subject).map_err(DbError::StateEncoding)?],
-            StoredRecord::read,
-        )?
-        .pop();
-    match record {
+    match stored(db, subject)? {
         None => Ok(true),
         Some(stored) => {
             Ok(stored.decode::<P>()?.can_retry(&stored.coven_version, db.schema_version()?))

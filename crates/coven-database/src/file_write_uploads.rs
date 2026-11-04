@@ -233,9 +233,8 @@ impl FileWrite<'_> {
             if in_flight.contains(&location.object()) {
                 continue;
             }
-            let subject =
-                serde_json::to_vec(&subject(&location)).map_err(DbError::StateEncoding)?;
-            completion.after.push(Box::new(move |db| crate::pending::clear_encoded(db, subject)));
+            let subject = crate::pending::SubjectKey::of(&subject(&location))?;
+            completion.after.push(Box::new(move |db| crate::pending::clear_key(db, &subject)));
             completion.retired.push(id);
             retired.push(id);
         }
