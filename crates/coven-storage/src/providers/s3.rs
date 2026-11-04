@@ -210,7 +210,7 @@ impl S3Storage {
             settings,
             floor_sessions_dated: false,
             #[cfg(test)]
-            single_request_limit: 5 * 1024 * 1024 * 1024,
+            single_request_limit: crate::session::S3_REQUEST_LIMIT,
         })
     }
     async fn put(
@@ -366,7 +366,7 @@ impl ProviderOps for S3Storage {
         }
         #[cfg(not(test))]
         {
-            5 * 1024 * 1024 * 1024
+            crate::session::S3_REQUEST_LIMIT
         }
     }
     async fn create(
@@ -676,11 +676,11 @@ impl ProviderOps for S3Storage {
         let SessionState::S3 { parts, .. } = &session.state else {
             return Err(StorageFailure::SessionMismatch.into());
         };
-        let number = i32::try_from(parts.len() + 1)
-            .map_err(|error| StorageFailure::InvalidPart.with_source(error))?;
-        if number > 10_000 {
+        if parts.len() >= crate::session::S3_MAX_PARTS {
             return Err(StorageFailure::InvalidPart.into());
         }
+        let number = i32::try_from(parts.len() + 1)
+            .map_err(|error| StorageFailure::InvalidPart.with_source(error))?;
         let response = self
             .client
             .upload_part()

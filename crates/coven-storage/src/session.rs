@@ -7,6 +7,13 @@ use serde::{Deserialize, Serialize};
 pub(crate) const CLOUDKIT_PART_SIZE: usize = 8 * 1024 * 1024;
 pub(crate) const DROPBOX_PART_SIZE: usize = 8 * 1024 * 1024;
 pub(crate) const ONEDRIVE_PART_SIZE: usize = 24 * 320 * 1024;
+/// The most parts one S3 multipart upload holds.
+pub(crate) const S3_MAX_PARTS: usize = 10_000;
+/// The largest body one S3 request carries: a whole object's PUT, one part,
+/// or the object one `CopyObject` copies.
+pub(crate) const S3_REQUEST_LIMIT: u64 = 5 * 1024 * 1024 * 1024;
+/// S3 part sizes are whole multiples of this.
+const S3_PART_UNIT: u64 = 8 * 1024 * 1024;
 
 /// The one condition under which all uploaded bytes may become visible.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -266,7 +273,7 @@ impl UploadSession {
             SessionState::S3 { id, token, parts } if provider == CloudProvider::S3 => {
                 nonempty(id)?;
                 nonempty(token)?;
-                if parts.len() > 10_000 {
+                if parts.len() > S3_MAX_PARTS {
                     return Err(StorageFailure::InvalidPart.into());
                 }
                 let mut confirmed = 0u64;
@@ -394,11 +401,11 @@ impl UploadSession {
 }
 
 pub(crate) fn s3_part_size(total: u64) -> Result<usize, StorageError> {
-    let unit = 8 * 1024 * 1024;
-    if total == 0 || total > 10_000 * 5 * 1024u64.pow(3) {
+    let parts = S3_MAX_PARTS as u64;
+    if total == 0 || total > parts * S3_REQUEST_LIMIT {
         return Err(StorageFailure::InvalidPart.into());
     }
-    usize::try_from(total.div_ceil(10_000).div_ceil(unit) * unit)
+    usize::try_from(total.div_ceil(parts).div_ceil(S3_PART_UNIT) * S3_PART_UNIT)
         .map_err(|error| StorageFailure::InvalidPart.with_source(error))
 }
 pub(crate) fn check_cloudkit_id(value: &str) -> Result<(), StorageError> {

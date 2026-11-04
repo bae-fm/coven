@@ -50,15 +50,15 @@ impl S3Revision {
         }
     }
 }
-/// S3's `CopyObject` copies at most 5 GiB in one atomic request.
-const SINGLE_COPY_LIMIT: u64 = 5 * 1024 * 1024 * 1024;
 impl S3CopyCondition {
     /// The largest object one conditional copy publishes. S3's `CopyObject`
     /// (AWS, SeaweedFS, R2's extension) is limited; GCS's XML copy is a
     /// different operation with no such limit here.
     pub(super) fn single_copy_limit(self) -> Option<u64> {
         match self {
-            Self::IfNoneMatch | Self::CloudflareIfNoneMatch => Some(SINGLE_COPY_LIMIT),
+            Self::IfNoneMatch | Self::CloudflareIfNoneMatch => {
+                Some(crate::session::S3_REQUEST_LIMIT)
+            }
             Self::GenerationMatch => None,
         }
     }
