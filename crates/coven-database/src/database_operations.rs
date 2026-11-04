@@ -179,13 +179,7 @@ impl Database {
     ) -> Result<(), DbError> {
         self.call(move |inner| {
             inner.access.with_writer(|writer| {
-                writer.transaction(|db| {
-                    db.internal_execute(
-                        "UPDATE _coven_app_operations SET outcome=?2 WHERE operation=?1",
-                        (id.0, outcome.encode()),
-                    )?;
-                    crate::operation::finish(db, id).map(drop)
-                })
+                writer.transaction(|db| crate::operation::finish_with_outcome(db, id, &outcome))
             })
         })
         .await
@@ -227,14 +221,7 @@ impl Database {
             inner.access.with_writer(|writer| {
                 writer.transaction(|db| {
                     crate::operation::advance(db, &parent)?;
-                    db.internal_execute(
-                        "UPDATE _coven_app_operations SET outcome=?2 WHERE operation=?1",
-                        (child.0, outcome.encode()),
-                    )?;
-                    if crate::operation::finish(db, child)? != 1 {
-                        return Err(DbError::OperationChanged(child));
-                    }
-                    Ok(())
+                    crate::operation::finish_with_outcome(db, child, &outcome)
                 })
             })
         })

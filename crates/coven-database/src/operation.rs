@@ -182,6 +182,27 @@ pub(crate) fn advance(db: &DatabaseConnection, update: &OperationUpdate) -> Resu
 }
 
 /// Delete the row and its condition, returning how many rows were deleted.
+/// End the running operation `id` with `outcome`, which `coven_operations`
+/// lists for an operation the app's write journaled. An outcome is final:
+/// an operation that no longer runs fails with `OperationChanged` and keeps
+/// the outcome it ended with (§11.4). The outcome is written first, as the
+/// journal row's end requires; the caller's transaction undoes it when the
+/// operation had already ended.
+pub(crate) fn finish_with_outcome(
+    db: &DatabaseConnection,
+    id: OperationId,
+    outcome: &crate::OperationOutcome,
+) -> Result<(), DbError> {
+    db.internal_execute(
+        "UPDATE _coven_app_operations SET outcome=?2 WHERE operation=?1",
+        (id.0, outcome.encode()),
+    )?;
+    if finish(db, id)? != 1 {
+        return Err(DbError::OperationChanged(id));
+    }
+    Ok(())
+}
+
 pub(crate) fn finish(db: &DatabaseConnection, id: OperationId) -> Result<usize, DbError> {
     crate::pending::clear_operation(db, id)?;
     db.internal_execute("DELETE FROM _coven_operations WHERE id=?1", [id.0])
@@ -248,12 +269,8 @@ fn end(
             Some((entry, slot)) if entry == id => crate::OperationOutcome::Landed(slot),
             _ => crate::OperationOutcome::Stopped(stop),
         };
-        db.internal_execute(
-            "UPDATE _coven_app_operations SET outcome=?2 WHERE operation=?1",
-            (id.0, outcome.encode()),
-        )?;
         crate::claim::drop_operation(db, id)?;
-        finish(db, id)?;
+        finish_with_outcome(db, id, &outcome)?;
     }
     for id in invites {
         crate::claim::drop_operation(db, id)?;

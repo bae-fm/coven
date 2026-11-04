@@ -64,6 +64,33 @@ async fn an_app_operation_ends_with_its_outcome_and_stays_listed_until_acknowled
     db.close().await.unwrap();
 }
 
+/// An outcome is final: ending an operation that already ended, with
+/// another outcome, fails and leaves the one it ended with (§11.4).
+#[tokio::test]
+async fn an_ended_operation_keeps_the_outcome_it_ended_with() {
+    let store = TestStore::new();
+    let db = store.builder(Vec::new(), Vec::new()).open().await.unwrap();
+    let id = db
+        .write(|sql| {
+            sql.journal_step(|journal| journal.start_app_operation(&operation(), "RenameStore"))
+        })
+        .await
+        .unwrap();
+    db.finish_operation_with_outcome(id, crate::OperationOutcome::Satisfied).await.unwrap();
+    let again = db
+        .finish_operation_with_outcome(
+            id,
+            crate::OperationOutcome::Rejected(crate::OperationRejection::NoAdminLeft),
+        )
+        .await;
+    assert!(matches!(again, Err(DbError::OperationChanged(found)) if found == id), "{again:?}");
+    assert_eq!(
+        listed(&db).await,
+        [(id.0, "RenameStore".to_owned(), Some(b"\"Satisfied\"".to_vec()))]
+    );
+    db.close().await.unwrap();
+}
+
 /// An operation a write's step journals starts like any other: the
 /// observation of started operations, which the handle's invite expiry
 /// follows, sees it in that write's commit (§13.2).
