@@ -142,7 +142,7 @@ impl CredentialRollback {
             let result = entry.replace(keychain, bytes.as_ref());
             if let Err(error) = result {
                 failure = Some(match failure {
-                    Some(operation) => cleanup_error(operation, error),
+                    Some(operation) => SyncError::cleanup(operation, error),
                     None => error,
                 });
             }
@@ -217,15 +217,11 @@ fn apply(
         if let Err(operation) = update.apply(entry, keychain) {
             return Err(match previous.restore(keychain) {
                 Ok(()) => operation,
-                Err(cleanup) => cleanup_error(operation, cleanup),
+                Err(cleanup) => SyncError::cleanup(operation, cleanup),
             });
         }
     }
     Ok(previous)
-}
-
-pub(crate) fn cleanup_error(operation: SyncError, cleanup: SyncError) -> SyncError {
-    SyncError::Cleanup { operation: Box::new(operation), cleanup: Box::new(cleanup) }
 }
 
 #[cfg(test)]

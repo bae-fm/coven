@@ -179,10 +179,9 @@ impl From<DbError> for SyncError {
             // The process is ending the call; the database did not fail.
             DbError::Shutdown(shutdown) => Self::Shutdown(shutdown),
             DbError::Bug(bug) => Self::Bug(bug),
-            DbError::StagingCleanup { operation, cleanup } => Self::Cleanup {
-                operation: Box::new((*operation).into()),
-                cleanup: Box::new((*cleanup).into()),
-            },
+            DbError::StagingCleanup { operation, cleanup } => {
+                Self::cleanup((*operation).into(), (*cleanup).into())
+            }
             // Sync's own failure inside a database call comes back as itself.
             DbError::SyncStream(error) => match error.downcast::<SyncError>() {
                 Ok(error) => *error,
@@ -194,6 +193,12 @@ impl From<DbError> for SyncError {
 }
 
 impl SyncError {
+    /// `operation` failed, and a later step (a rollback, closing another
+    /// owner) failed too; neither failure is hidden.
+    pub fn cleanup(operation: SyncError, cleanup: SyncError) -> Self {
+        Self::Cleanup { operation: Box::new(operation), cleanup: Box::new(cleanup) }
+    }
+
     /// The durable reason for a failed request, without losing its typed cause here.
     /// Every variant is matched by name, so a new one is classified here.
     #[deny(clippy::wildcard_enum_match_arm)]

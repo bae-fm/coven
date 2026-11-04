@@ -123,13 +123,8 @@ impl ConnectionRetry {
         let wait = match saved {
             Ok(wait) => wait,
             Err((cleanup, held)) => {
-                let failure = PassFailure::Failed {
-                    error: SyncError::Cleanup {
-                        operation: Box::new(error),
-                        cleanup: Box::new(cleanup),
-                    }
-                    .into(),
-                };
+                let failure =
+                    PassFailure::Failed { error: SyncError::cleanup(error, cleanup).into() };
                 if held {
                     waits.hold(RetrySubject::Sync);
                     *self =

@@ -266,13 +266,13 @@ fn combine<T>(
         (Ok(_), Err(crate::SyncError::Database(error))) => Err(error.into()),
         (Ok(_), Err(error)) => Err(DbError::SyncStream(Box::new(error)).into()),
         (Err(operation), Err(cleanup)) => {
-            Err(DbError::SyncStream(Box::new(crate::SyncError::Cleanup {
-                operation: Box::new(crate::SyncError::Failed {
+            Err(DbError::SyncStream(Box::new(crate::SyncError::cleanup(
+                crate::SyncError::Failed {
                     failure: crate::LocalFailure::Operation,
                     source: std::sync::Arc::new(operation),
-                }),
-                cleanup: Box::new(cleanup),
-            }))
+                },
+                cleanup,
+            )))
             .into())
         }
     }

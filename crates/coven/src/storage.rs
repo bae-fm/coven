@@ -713,10 +713,7 @@ impl StorageConnections {
             Err(mut error) => {
                 if let ConnectionState::Active(previous) = &*live {
                     if let Err(cleanup) = previous.sync_loop.resume() {
-                        error = SyncError::Cleanup {
-                            operation: Box::new(error),
-                            cleanup: Box::new(cleanup),
-                        };
+                        error = SyncError::cleanup(error, cleanup);
                     }
                 }
                 return Err(setup_error(error));
@@ -894,10 +891,7 @@ impl StorageConnections {
                 {
                     if let ConnectionState::Active(previous) = &*live {
                         if let Err(cleanup) = previous.sync_loop.resume() {
-                            error = SyncError::Cleanup {
-                                operation: Box::new(error),
-                                cleanup: Box::new(cleanup),
-                            };
+                            error = SyncError::cleanup(error, cleanup);
                         }
                     }
                     return Err(error);

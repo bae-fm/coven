@@ -9,10 +9,9 @@ pub(crate) fn database_failure(path: &ObjectPath, error: coven_database::DbError
     use coven_database::{DbError, SnapshotError};
     use coven_merge::MergeError;
     match error {
-        DbError::StagingCleanup { operation, cleanup } => crate::credential_custody::cleanup_error(
-            database_failure(path, *operation),
-            (*cleanup).into(),
-        ),
+        DbError::StagingCleanup { operation, cleanup } => {
+            SyncError::cleanup(database_failure(path, *operation), (*cleanup).into())
+        }
         DbError::WriteFormat(error) | DbError::Snapshot(SnapshotError::Format(error))
             if crate::error::newer_format(&error) =>
         {

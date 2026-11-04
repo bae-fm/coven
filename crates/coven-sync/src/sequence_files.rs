@@ -482,7 +482,7 @@ impl SequenceSync {
             Err(error) => {
                 return Err(match staging.discard().await {
                     Ok(()) => error,
-                    Err(cleanup) => crate::credential_custody::cleanup_error(error, cleanup.into()),
+                    Err(cleanup) => SyncError::cleanup(error, cleanup.into()),
                 })
             }
         };

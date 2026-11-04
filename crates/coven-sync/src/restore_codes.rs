@@ -1,9 +1,6 @@
 //! Restore-code generation and credential replacement (§13.1, E9).
 
-use crate::{
-    commit_credentials, credential_custody::cleanup_error, CredentialRollback, DeviceCredentials,
-    SessionSignIn, SyncError,
-};
+use crate::{commit_credentials, CredentialRollback, DeviceCredentials, SessionSignIn, SyncError};
 use coven_crypto::{
     custody::{KeySession, StoreKeychain},
     MemberIdentity, SecretText,
@@ -276,7 +273,7 @@ impl RestoreCodes {
                 if let Err(error) = owner.settings.commit(&data.location) {
                     return Err(match rollback(owner, previous) {
                         Ok(()) => error.into(),
-                        Err(cleanup) => cleanup_error(error.into(), cleanup),
+                        Err(cleanup) => SyncError::cleanup(error.into(), cleanup),
                     });
                 }
                 Ok(Box::new(move || {
@@ -322,7 +319,7 @@ impl RestoreCodesInner {
         .map_err(SyncError::from);
         match (credentials, location) {
             (Ok(()), result) | (result, Ok(())) => result,
-            (Err(operation), Err(cleanup)) => Err(cleanup_error(operation, cleanup)),
+            (Err(operation), Err(cleanup)) => Err(SyncError::cleanup(operation, cleanup)),
         }
     }
 

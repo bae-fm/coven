@@ -499,9 +499,7 @@ impl SequenceSync {
         self.state.set(SequenceStatus::Blocked(Box::new(record.clone())));
         match self.database.record_pending(record).await {
             Ok(()) => error,
-            Err(cleanup) => {
-                SyncError::Cleanup { operation: Box::new(error), cleanup: Box::new(cleanup.into()) }
-            }
+            Err(cleanup) => SyncError::cleanup(error, cleanup.into()),
         }
     }
 }

@@ -2,7 +2,6 @@
 
 use crate::{
     chunk_reader::PartPlaintext,
-    credential_custody::cleanup_error,
     floor_object::FloorObject,
     history::History,
     sequence_sync::{SequenceSync, Session},
@@ -102,7 +101,7 @@ async fn release<T>(
             if let Err(cleanup) = selected.discard().await {
                 result = Err(match result {
                     Ok(_) => cleanup,
-                    Err(error) => cleanup_error(error, cleanup),
+                    Err(error) => SyncError::cleanup(error, cleanup),
                 });
             }
         }
@@ -255,7 +254,7 @@ impl SequenceSync {
             (Ok(body), Ok(())) => body,
             (Ok(_), Err(cleanup)) => return Err(cleanup),
             (Err(error), Ok(())) => return Err(error),
-            (Err(error), Err(cleanup)) => return Err(cleanup_error(error, cleanup)),
+            (Err(error), Err(cleanup)) => return Err(SyncError::cleanup(error, cleanup)),
         };
         if body.header.id != announcement.snapshot {
             return Err(crate::write_object::damaged(
@@ -303,7 +302,7 @@ impl SequenceSync {
         };
         Err(match staging.discard().await {
             Ok(()) => failed,
-            Err(cleanup) => cleanup_error(failed, cleanup.into()),
+            Err(cleanup) => SyncError::cleanup(failed, cleanup.into()),
         })
     }
 

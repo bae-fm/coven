@@ -35,10 +35,7 @@ impl SequenceSync {
                     .map_err(SyncError::from),
             ] {
                 if let Err(cleanup) = result {
-                    error = SyncError::Cleanup {
-                        operation: Box::new(error),
-                        cleanup: Box::new(cleanup),
-                    };
+                    error = SyncError::cleanup(error, cleanup);
                 }
             }
             return Err(error);

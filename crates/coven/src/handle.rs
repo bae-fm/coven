@@ -561,10 +561,7 @@ impl CovenHandle {
             [storage, custody.map_err(SyncError::from), database.map_err(SyncError::from)]
                 .into_iter()
                 .filter_map(Result::err)
-                .reduce(|operation, cleanup| SyncError::Cleanup {
-                    operation: Box::new(operation),
-                    cleanup: Box::new(cleanup),
-                })
+                .reduce(SyncError::cleanup)
                 .map_or(Ok(()), Err)
         });
         crate::task::joined("close the store", closing).await?
