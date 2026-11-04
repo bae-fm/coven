@@ -134,6 +134,35 @@ impl<P: ProviderOps + ?Sized> StorageConnection<P> {
         Ok(request)
     }
 
+    /// The publication a session's next request goes under, once the session
+    /// is confirmed to name this location: none for a session already
+    /// complete, which has no request left to send.
+    fn unfinished_publication(
+        &self,
+        session: &UploadSession,
+    ) -> Result<Option<PublicationRequest>, StorageError> {
+        session.check(&self.config())?;
+        if session.is_complete() {
+            return Ok(None);
+        }
+        self.publication(session.path()).map(Some)
+    }
+
+    /// An account change: grants and revocations wait out a provider's
+    /// cooldown and are counted, except on S3, whose answers are console
+    /// instructions that make no request.
+    async fn account_change<T>(
+        &self,
+        change: impl std::future::Future<Output = Result<T, StorageError>>,
+    ) -> Result<T, StorageError> {
+        if self.config().provider() == CloudProvider::S3 {
+            return change.await;
+        }
+        self.cooling()?;
+        let result = self.send(RequestKind::Account, 0, change).await;
+        self.observed(result).await
+    }
+
     /// Record a requested cooldown before any consumer sees the response
     /// that asked for it (§6.7).
     pub(crate) async fn observed<T>(
@@ -314,11 +343,9 @@ impl<P: ProviderOps + ?Sized> StorageConnection<P> {
         &self,
         session: &mut UploadSession,
     ) -> Result<(), StorageError> {
-        session.check(&self.config())?;
-        if session.is_complete() {
+        let Some(publication) = self.unfinished_publication(session)? else {
             return Ok(());
-        }
-        let publication = self.publication(session.path())?;
+        };
         let result = self
             .send(RequestKind::Upload, 0, self.provider.finish_upload(&publication, session))
             .await;
@@ -328,11 +355,9 @@ impl<P: ProviderOps + ?Sized> StorageConnection<P> {
         &self,
         session: &UploadSession,
     ) -> Result<(), StorageError> {
-        session.check(&self.config())?;
-        if session.is_complete() {
+        let Some(publication) = self.unfinished_publication(session)? else {
             return Ok(());
-        }
-        let publication = self.publication(session.path())?;
+        };
         self.send(RequestKind::Upload, 0, self.provider.abort_upload(&publication, session)).await
     }
 }
@@ -493,29 +518,10 @@ impl<P: ProviderOps + ?Sized> Storage for StorageConnection<P> {
         self.end_left(&left).await
     }
     async fn grant_access(&self, account: &str) -> Result<AccessGrant, StorageError> {
-        if self.config().provider() != CloudProvider::S3 {
-            self.cooling()?;
-        }
-        // S3 returns console instructions without making a provider request.
-        if self.config().provider() == CloudProvider::S3 {
-            self.provider.grant_access(account).await
-        } else {
-            let result =
-                self.send(RequestKind::Account, 0, self.provider.grant_access(account)).await;
-            self.observed(result).await
-        }
+        self.account_change(self.provider.grant_access(account)).await
     }
     async fn revoke_access(&self, account: &str) -> Result<Vec<RetainedAccess>, StorageError> {
-        if self.config().provider() != CloudProvider::S3 {
-            self.cooling()?;
-        }
-        if self.config().provider() == CloudProvider::S3 {
-            self.provider.revoke_access(account).await
-        } else {
-            let result =
-                self.send(RequestKind::Account, 0, self.provider.revoke_access(account)).await;
-            self.observed(result).await
-        }
+        self.account_change(self.provider.revoke_access(account)).await
     }
     async fn join(
         &self,
@@ -571,11 +577,9 @@ impl<P: ProviderOps + ?Sized> Storage for StorageConnection<P> {
     async fn resume_upload(&self, session: &mut UploadSession) -> Result<(), StorageError> {
         self.cooling()?;
         let result = async {
-            session.check(&self.config())?;
-            if session.is_complete() {
+            let Some(publication) = self.unfinished_publication(session)? else {
                 return Ok(());
-            }
-            let publication = self.publication(session.path())?;
+            };
             let result = self
                 .send(RequestKind::Upload, 0, self.provider.resume_upload(&publication, session))
                 .await;
