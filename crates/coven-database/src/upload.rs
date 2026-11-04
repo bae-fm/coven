@@ -147,35 +147,40 @@ impl UploadParts<'_> {
     }
 }
 
-struct Oldest {
+/// A write waiting in `_coven_uploads`: its row, its id, and the keys its
+/// first attempt fixed, when that is known.
+struct QueueEntry {
     rowid: i64,
     write: WriteId,
     keys: Option<Vec<u8>>,
 }
 
+impl QueueEntry {
+    /// An entry selected as `rowid,device,number` from `_coven_uploads`,
+    /// then its upload keys' `sealing_keys`, or NULL for none known.
+    fn read(row: &rusqlite::Row<'_>) -> rusqlite::Result<Self> {
+        Ok(Self {
+            rowid: row.get(0)?,
+            write: WriteId { device: row.get::<_, DeviceId>(1)?, number: counter(row.get(2)?) },
+            keys: row.get(3)?,
+        })
+    }
+}
+
 #[cfg(any(test, feature = "test-utils"))]
-fn oldest(database: &DatabaseConnection) -> Result<Option<Oldest>, DbError> {
+fn oldest(database: &DatabaseConnection) -> Result<Option<QueueEntry>, DbError> {
     Ok(database
         .query(
             "SELECT u.rowid,u.device,u.number,k.sealing_keys FROM _coven_uploads u LEFT JOIN _coven_upload_keys k ON k.device=u.device AND k.number=u.number ORDER BY u.rowid LIMIT 1",
             [],
-            |r| {
-                Ok(Oldest {
-                    rowid: r.get(0)?,
-                    write: WriteId {
-                        device: r.get::<_, DeviceId>(1)?,
-                        number: counter(r.get(2)?),
-                    },
-                    keys: r.get(3)?,
-                })
-            },
+            QueueEntry::read,
         )?
         .pop())
 }
 
 fn plaintext<'a>(
     database: &'a DatabaseConnection,
-    entry: &Oldest,
+    entry: &QueueEntry,
 ) -> Result<(WriteHeaderFrame, Vec<u8>, UploadBytes<'a>), DbError> {
     let mut bytes = database.upload_plaintext(entry.rowid)?;
     let prefix = bytes.read(0, coven_format::FRAME_PREFIX_LEN)?;
@@ -204,7 +209,7 @@ pub(crate) fn read<R, E>(
 
 fn read_entry<'a>(
     database: &'a DatabaseConnection,
-    entry: &Oldest,
+    entry: &QueueEntry,
 ) -> Result<WaitingUpload<'a>, DbError> {
     let (header, header_frame, bytes) = plaintext(database, entry)?;
     let keys =
@@ -217,19 +222,13 @@ fn batch(
     database: &DatabaseConnection,
     device: DeviceId,
     through: u64,
-) -> Result<Vec<Oldest>, DbError> {
+) -> Result<Vec<QueueEntry>, DbError> {
     database.query(
         "SELECT u.rowid,u.device,u.number,k.sealing_keys FROM _coven_uploads u
         LEFT JOIN _coven_upload_keys k ON k.device=u.device AND k.number=u.number
         WHERE u.device=?1 AND u.number<=?2 ORDER BY u.number",
         params![device, through.to_be_bytes()],
-        |row| {
-            Ok(Oldest {
-                rowid: row.get(0)?,
-                write: WriteId { device: row.get::<_, DeviceId>(1)?, number: counter(row.get(2)?) },
-                keys: row.get(3)?,
-            })
-        },
+        QueueEntry::read,
     )
 }
 
@@ -295,7 +294,7 @@ pub(crate) fn queued(
     else {
         return Ok(None);
     };
-    let entry = Oldest { rowid, write, keys: None };
+    let entry = QueueEntry { rowid, write, keys: None };
     Ok(Some(plaintext(database, &entry)?.0))
 }
 
@@ -306,15 +305,9 @@ pub(crate) fn each_plaintext(
     mut consume: impl FnMut(WriteHeaderFrame, UploadParts<'_>) -> Result<(), DbError>,
 ) -> Result<(), DbError> {
     let entries = database.query(
-        "SELECT rowid,device,number FROM _coven_uploads ORDER BY rowid",
+        "SELECT rowid,device,number,NULL FROM _coven_uploads ORDER BY rowid",
         [],
-        |row| {
-            Ok(Oldest {
-                rowid: row.get(0)?,
-                write: WriteId { device: row.get::<_, DeviceId>(1)?, number: counter(row.get(2)?) },
-                keys: None,
-            })
-        },
+        QueueEntry::read,
     )?;
     for entry in entries {
         let (header, _, bytes) = plaintext(database, &entry)?;
