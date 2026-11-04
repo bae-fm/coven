@@ -92,7 +92,9 @@ async fn a_live_query_that_reads_no_sending_state_stays_idle() {
     assert!(sending_list.next().await.unwrap().unwrap().is_empty());
     let _sending = db.uploads_in_flight().start(uploader, object, vec![file], PROGRESS);
     assert_eq!(sending_list.next().await.unwrap().unwrap(), [file.to_string()]);
-    assert!(tokio::time::timeout(Duration::from_millis(100), queued.next()).await.is_err());
+    // The start marked the sending query as it committed; it marked this one
+    // too only if this one reads what sending changes.
+    assert!(!queued.is_marked_for_rerun());
     assert_eq!(runs.load(Ordering::SeqCst), 1);
     db.close().await.unwrap();
 }
@@ -330,7 +332,8 @@ async fn a_live_query_of_downloading_runs_again_as_a_download_starts_or_ends() {
         .await
         .unwrap();
     assert_eq!(listed, 0);
-    // Downloading sends nothing.
-    assert!(tokio::time::timeout(Duration::from_millis(100), sending.next()).await.is_err());
+    // Downloading sends nothing: no download start or end marked the
+    // sending query.
+    assert!(!sending.is_marked_for_rerun());
     db.close().await.unwrap();
 }

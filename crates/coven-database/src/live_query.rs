@@ -160,6 +160,18 @@ where
         self.runs
     }
 
+    /// Whether a commit since this idle query's last result changes what it
+    /// reads, so asking for its next result runs it again. A commit marks the
+    /// queries it changes as it commits, so this answers with no waiting.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn is_marked_for_rerun(&self) -> bool {
+        assert!(
+            self.current.is_some() && self.running.is_none(),
+            "probe requires a completed, idle query"
+        );
+        self.commits.state().changed
+    }
+
     /// Obtain a cloneable handle for replacing this query's request.
     pub fn requests(&self) -> LiveQueryRequests<Q> {
         LiveQueryRequests { state: Arc::clone(&self.lifetime.0) }
@@ -337,6 +349,13 @@ impl<T: Send + 'static> LiveQuery<T> {
     #[cfg(any(test, feature = "test-utils"))]
     pub fn runs(&self) -> LiveQueryRuns {
         self.inner.runs()
+    }
+
+    /// Whether a commit since this idle query's last result changes what it
+    /// reads, so asking for its next result runs it again, with no waiting.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn is_marked_for_rerun(&self) -> bool {
+        self.inner.is_marked_for_rerun()
     }
 
     /// Process each value on a worker after its connection has been released.

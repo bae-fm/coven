@@ -3501,6 +3501,12 @@ impl<T: Send + 'static> LiveQuery<T> {
     /// How often this query has run so far, its processed form's runs too.
     #[cfg(feature = "test-utils")]
     pub fn runs(&self) -> LiveQueryRuns;
+
+    /// Whether a commit since this idle query's last result changes what it
+    /// reads, so `next` runs it again. A commit marks the queries it changes
+    /// as it commits, so this answers at once.
+    #[cfg(feature = "test-utils")]
+    pub fn is_marked_for_rerun(&self) -> bool;
 }
 
 impl<Q, T> ReconfigurableLiveQuery<Q, T>
@@ -3523,6 +3529,11 @@ where
     /// How often this query has run so far, its processed form's runs too.
     #[cfg(feature = "test-utils")]
     pub fn runs(&self) -> LiveQueryRuns;
+
+    /// Whether a commit since this idle query's last result changes what it
+    /// reads, so `next` runs it again, answered at once.
+    #[cfg(feature = "test-utils")]
+    pub fn is_marked_for_rerun(&self) -> bool;
 
     /// The next result, with the request and revision that produced it, and
     /// whether a new request, a write, or both caused it; `None` after the

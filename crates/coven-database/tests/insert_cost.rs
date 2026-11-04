@@ -203,18 +203,15 @@ async fn write_releases(db: &Database, files: bool, releases: std::ops::Range<us
 /// which no measured write changes: every write judges its rows for each
 /// of them, and none runs again.
 async fn import(files: bool, live: bool) -> Duration {
-    use std::sync::atomic::{AtomicUsize, Ordering};
     let directory = tempfile::tempdir().unwrap();
     let db = open_library(&directory).await;
-    let runs = std::sync::Arc::new(AtomicUsize::new(0));
     let mut queries = Vec::new();
     if live {
         let watched = WRITES * RELEASES;
         write_releases(&db, files, watched..watched + 1).await;
         for sql in JOINED {
-            let (runs, album) = (runs.clone(), uuid(1, watched));
+            let album = uuid(1, watched);
             let mut query = db.subscribe(move |read| {
-                runs.fetch_add(1, Ordering::SeqCst);
                 Ok(read.query(sql, [&album], |r| r.get::<_, coven_database::types::Value>(0))?)
             });
             assert!(!query.next().await.unwrap().unwrap().is_empty(), "{sql}");
@@ -227,13 +224,10 @@ async fn import(files: bool, live: bool) -> Duration {
         write_releases(&db, files, write * RELEASES..(write + 1) * RELEASES).await;
         times.push(started.elapsed());
     }
-    // A query the writes marked would run again as it's asked for its next
-    // result.
-    let ran = runs.load(Ordering::SeqCst);
-    for query in &mut queries {
-        assert!(tokio::time::timeout(Duration::from_millis(100), query.next()).await.is_err());
+    // A query the writes changed is marked to run again as they commit.
+    for query in &queries {
+        assert!(!query.is_marked_for_rerun());
     }
-    assert_eq!(runs.load(Ordering::SeqCst), ran);
     drop(queries);
     let indexed: i64 = db
         .read(|sql| {

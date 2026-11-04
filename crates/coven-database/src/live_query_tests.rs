@@ -62,24 +62,6 @@ async fn next_after_equal_run<T: Clone + PartialEq + Send + std::fmt::Debug + 's
     answer.await
 }
 
-impl<T> LiveQuery<T> {
-    pub(crate) fn is_marked_for_rerun(&self) -> bool {
-        self.inner.is_marked_for_rerun()
-    }
-}
-
-impl<Q, T> ReconfigurableLiveQuery<Q, T> {
-    pub(crate) fn is_marked_for_rerun(&self) -> bool {
-        // The writer publishes commits synchronously. Once a run has installed
-        // its dependencies, this flag decides whether next_result() will rerun it.
-        assert!(
-            self.current.is_some() && self.running.is_none(),
-            "probe requires a completed, idle query"
-        );
-        self.commits.state().changed
-    }
-}
-
 #[tokio::test]
 async fn relevant_columns_in_any_row_rerun_and_equal_results_are_suppressed() {
     let store = TestStore::new();

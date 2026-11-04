@@ -178,13 +178,14 @@ async fn read_connections_are_read_only_and_run_concurrently() {
     }
     let (tx, rx) = std::sync::mpsc::channel();
     let clone = database.clone();
+    let waiting = database.observe_next_reader_wait();
     let fifth = tokio::spawn(async move {
         tx.send(clone.schema_version().await).unwrap();
     });
-    assert!(matches!(
-        rx.recv_timeout(std::time::Duration::from_millis(200)),
-        Err(std::sync::mpsc::RecvTimeoutError::Timeout)
-    ));
+    // The fifth call found every reader held and waits for one; only a
+    // release ends that wait.
+    tokio::time::timeout(HANG_GUARD, waiting).await.unwrap().unwrap();
+    assert!(matches!(rx.try_recv(), Err(std::sync::mpsc::TryRecvError::Empty)));
     let (release, worker) = held.pop().unwrap();
     release.send(()).unwrap();
     worker.join().unwrap();

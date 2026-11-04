@@ -130,7 +130,9 @@ async fn authentication_failure_rolls_back_rows_slot_losses_and_observation() {
     assert_eq!(count(&b, "_coven_writes"), 0);
     assert_eq!(b.applied_slot().await.unwrap(), 0);
     assert_eq!(crate::tests::data(&b, Audience::Store), before);
-    assert!(tokio::time::timeout(Duration::from_millis(20), observed.next()).await.is_err());
+    // A commit marks the queries it changes as it commits; the rolled-back
+    // receive marked none.
+    assert!(!observed.is_marked_for_rerun());
     b.receive_stream(stream(&record), || Ok(())).await.unwrap();
     assert_eq!(
         observed.next().await.expect("the live query answers").unwrap(),
