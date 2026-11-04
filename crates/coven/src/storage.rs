@@ -441,6 +441,24 @@ impl StorageConnections {
         started
     }
 
+    /// Run `work` with the active connection's passes held: uploads run
+    /// beside them, as during a connection change (§17.4). Work that fails
+    /// lets the passes run again, keeping a failure to resume them as
+    /// cleanup; work that succeeds leaves them held for the caller to end.
+    async fn with_passes_held<T>(
+        live: &ConnectionState,
+        work: impl std::future::Future<Output = Result<T, SyncError>>,
+    ) -> Result<T, SyncError> {
+        let ConnectionState::Active(previous) = live else {
+            return work.await;
+        };
+        previous.sync_loop.pause().await?;
+        work.await.map_err(|error| match previous.sync_loop.resume() {
+            Ok(()) => error,
+            Err(cleanup) => SyncError::cleanup(error, cleanup),
+        })
+    }
+
     /// Leave the connection released, closing its owners if it was active.
     async fn close_live(live: &mut ConnectionState) -> Result<(), SyncError> {
         match std::mem::replace(live, ConnectionState::Released) {
@@ -690,10 +708,7 @@ impl StorageConnections {
         let mut live = self.live.lock().await;
         // The old provider remains installed until every fallible setup step
         // succeeds. Its stopped or started state survives a rejected candidate.
-        if let ConnectionState::Active(previous) = &*live {
-            previous.sync_loop.pause().await.map_err(setup_error)?;
-        }
-        let prepared = async {
+        let prepared = Self::with_passes_held(&live, async {
             let (commit, restore_code) = self
                 .codes
                 .prepare_setup(
@@ -710,19 +725,9 @@ impl StorageConnections {
             // inside the transfer exclusion needed to replace their provider.
             self.files.set_storage(Some(storage), async { commit().map(drop) }).await?;
             Ok::<_, SyncError>((sync, restore_code))
-        }
+        })
         .await;
-        let (sync, restore_code) = match prepared {
-            Ok(prepared) => prepared,
-            Err(mut error) => {
-                if let ConnectionState::Active(previous) = &*live {
-                    if let Err(cleanup) = previous.sync_loop.resume() {
-                        error = SyncError::cleanup(error, cleanup);
-                    }
-                }
-                return Err(setup_error(error));
-            }
-        };
+        let (sync, restore_code) = prepared.map_err(setup_error)?;
         let released = Self::close_live(&mut live).await;
         let started = self.activate(&mut live, sync, true).await;
         // Custody and provider are committed, and setup read the store to its
@@ -857,21 +862,13 @@ impl StorageConnections {
         self.call(|owner| async move {
             let mut live = owner.live.lock().await;
             let result = async {
-                if let ConnectionState::Active(previous) = &*live {
-                    previous.sync_loop.pause().await?;
-                }
-                if let Err(mut error) = owner
-                    .files
-                    .set_storage(None, async { owner.forget_keys().map_err(SyncError::from) })
-                    .await
-                {
-                    if let ConnectionState::Active(previous) = &*live {
-                        if let Err(cleanup) = previous.sync_loop.resume() {
-                            error = SyncError::cleanup(error, cleanup);
-                        }
-                    }
-                    return Err(error);
-                }
+                Self::with_passes_held(
+                    &live,
+                    owner
+                        .files
+                        .set_storage(None, async { owner.forget_keys().map_err(SyncError::from) }),
+                )
+                .await?;
                 let (stopped, released) = owner.end_loop(&mut live).await;
                 // Forgetting succeeded. A worker release failure is recorded
                 // as the last pass's failure; no later custody read can turn
