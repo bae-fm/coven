@@ -193,7 +193,8 @@ impl SyncState {
 }
 
 /// The state a provider failure names: what storage said of this account or
-/// location that a person must see (the model's `Failure.named`).
+/// location that a person must see, or coven's own bug (the model's
+/// `Failure.named`).
 #[deny(clippy::wildcard_enum_match_arm)]
 fn storage_names(failure: StorageFailure) -> Option<Named> {
     use StorageFailure::*;
@@ -203,6 +204,8 @@ fn storage_names(failure: StorageFailure) -> Option<Named> {
         QuotaExceeded => Some(Named::StorageFull),
         ContainerNotFound => Some(Named::FolderMissing),
         ClockSkew => Some(Named::ClockWrong),
+        // Its work retries, as a local bug's does, and shows failed meanwhile.
+        Bug => Some(Named::Failed),
         ProviderUnavailable
         | AccessNotRegistered { .. }
         | DropboxAppFolderNotShareable
@@ -232,8 +235,7 @@ fn storage_names(failure: StorageFailure) -> Option<Named> {
         | CopyTooLarge { .. }
         | Encoding
         | File
-        | MemberKeysMissing
-        | Bug => None,
+        | MemberKeysMissing => None,
     }
 }
 

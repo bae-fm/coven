@@ -4523,7 +4523,8 @@ pub enum StorageFailure {
     /// This installation has no member keys in custody.
     MemberKeysMissing,
     /// Coven's work for the request panicked: a bug (E15). `StorageError::Bug`
-    /// carries it. Like a local failure's `Bug`, it retries under backoff.
+    /// carries it. Like a local failure's `Bug`, it retries under backoff and
+    /// shows failed meanwhile (§19.1).
     Bug,
 
     /// The installation must complete membership and key-copy catch-up before sending.

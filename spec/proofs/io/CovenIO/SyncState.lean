@@ -125,13 +125,15 @@ inductive Failure
   deriving DecidableEq, Repr
 
 /-- The state a provider failure names: what storage said of this account or
-location that a person must see. -/
+location that a person must see, or coven's own bug, which shows failed
+while its work retries. -/
 def Failure.named : Failure → Option State
   | .authentication => some .signedOut
   | .permissionDenied | .accessNotGranted => some .noAccess
   | .quotaExceeded => some .storageFull
   | .containerNotFound => some .folderMissing
   | .clockSkew => some .clockWrong
+  | .bug => some .failed
   | _ => none
 
 /-- The failures that clear by themselves (`Clears::ByItself`). -/

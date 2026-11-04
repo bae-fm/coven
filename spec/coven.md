@@ -10826,6 +10826,7 @@ recorded, comes before them all.
 | ... with `QuotaExceeded` | storage full |
 | ... with `ContainerNotFound` | storage folder missing |
 | ... with `ClockSkew` | clock wrong |
+| ... with `Bug`, coven's own, whose work retries | failed |
 | ... with a failure that clears by itself (a record) | none |
 | ... with any other `StorageFailure` | failed |
 | the last pass `UpdateRequired`; a record's `UpdateRequired` | update needed |

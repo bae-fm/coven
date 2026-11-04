@@ -613,3 +613,21 @@ fn a_waiting_pass_is_never_synced() {
     assert_eq!(shown(&limited, started), SyncState::WaitingToSync(SyncWait::Queued));
     assert_eq!(shown(&limited, stopped), SyncState::WaitingToSync(SyncWait::NotSyncing));
 }
+
+/// A bug stays failed while its work retries: a record of storage's bug
+/// names failed, as one of a local bug does, never nothing (§19.1, E15).
+#[test]
+fn a_bug_names_failed_while_its_work_retries() {
+    for reason in [
+        PendingReason::Storage {
+            provider: CloudProvider::S3,
+            failure: StorageFailure::Bug,
+            answered: false,
+        },
+        PendingReason::Failed(LocalFailure::Bug),
+    ] {
+        let bugged = upload_record(1, reason);
+        let facts = Facts { records: vec![bugged.clone()], ..connected() };
+        assert_eq!(facts.state(), SyncState::Failed(SyncCause::Pending(bugged)));
+    }
+}
