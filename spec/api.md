@@ -4828,6 +4828,8 @@ pub enum PendingReason {
     /// and the move failed (§17.3).
     Original { path: PathBuf, failure: FileSourceFailure },
     Failed(LocalFailure),
+    /// Never a slot's: a slot isn't this device's own request, so a
+    /// rejection there blocks it as `Failed(Operation)`.
     Rejected(OperationRejection),
     /// Both causes stay visible; the cleanup cause determines retry (§11.3).
     Cleanup { operation: Box<PendingReason>, cleanup: Box<PendingReason> },

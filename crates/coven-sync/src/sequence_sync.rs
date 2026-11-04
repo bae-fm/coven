@@ -454,44 +454,7 @@ impl SequenceSync {
             self.state.set(SequenceStatus::Stopped(crate::SyncFailure::Removed));
             return error;
         }
-        let reason = match &error {
-            SyncError::Pending(record) => record.reason.clone(),
-            SyncError::KeyUnavailable(key) => {
-                PendingReason::KeyUnavailable { audience: Audience::Store, key: *key }
-            }
-            SyncError::UpdateRequired(update) => PendingReason::UpdateRequired(*update),
-            SyncError::Damaged(object) => PendingReason::Refused(object.failure.clone()),
-            SyncError::Storage(error) => PendingReason::Storage {
-                provider: self.storage.config().provider(),
-                failure: error.failure(),
-                answered: error.answered(),
-            },
-            SyncError::MemberKeysReplaced { member } => {
-                PendingReason::MemberKeysReplaced { member: *member }
-            }
-            SyncError::Failed { .. }
-            | SyncError::Cleanup { .. }
-            | SyncError::NoStorage
-            | SyncError::StoreOwner
-            | SyncError::InvitationChanged
-            | SyncError::NotPending(_)
-            | SyncError::ReloadPending(_)
-            | SyncError::SnapshotPending(_)
-            | SyncError::OperationData(_)
-            | SyncError::SequenceExhausted
-            | SyncError::Database(_)
-            | SyncError::SecureStorage(_)
-            | SyncError::Crypto(_)
-            | SyncError::Format(_)
-            | SyncError::Key(_)
-            | SyncError::KeyAlreadyUsed(_)
-            | SyncError::Rejected(_)
-            | SyncError::Removed
-            | SyncError::DeviceIdInUse(_)
-            | SyncError::WrongStore { .. }
-            | SyncError::Shutdown(_)
-            | SyncError::Bug(_) => PendingReason::Failed(error.local_failure()),
-        };
+        let reason = slot_block_reason(&error, self.storage.config().provider());
         let subject = PendingSubject::Slot(slot);
         self.waits.log_failure(&subject, &reason, error.cause());
         let cause = blocked_cause(session, &subject, &error);
@@ -508,6 +471,17 @@ impl SequenceSync {
 /// The cause a blocked slot's record keeps: the text of the error that
 /// blocked it. A pass that stops at the same wait again has no error of its
 /// own, so the record keeps the one this run met for it, if any.
+/// Why a slot blocks on `error`: the reason it gives any request, except a
+/// rejection. A slot's block isn't this device's own request, so a
+/// rejection there isn't the app's to answer, and `Never` would leave the
+/// sequence with no recourse; it stays a local operation failure (§19.1).
+fn slot_block_reason(error: &SyncError, provider: coven_storage::CloudProvider) -> PendingReason {
+    match error {
+        SyncError::Rejected(_) => PendingReason::Failed(crate::LocalFailure::Operation),
+        error => error.pending_reason(provider),
+    }
+}
+
 fn blocked_cause(session: &Session, slot: &PendingSubject, error: &SyncError) -> Option<String> {
     if let SyncError::Pending(wait) = error {
         if wait.subject == *slot {

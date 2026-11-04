@@ -947,3 +947,18 @@ async fn a_replacement_connection_keeps_progress_when_the_original_continues() {
     assert_eq!(rows(ana.database()).await.len(), 2);
     ana.database().close().await.unwrap();
 }
+
+/// A slot blocks with the reason its error gives any request, cleanup
+/// included, except a rejection: a slot's block isn't this device's own
+/// request, so it stays a local operation failure (§19.1).
+#[test]
+fn a_blocked_slot_records_the_reason_its_error_gives() {
+    let provider = coven_storage::CloudProvider::S3;
+    let cleanup = SyncError::cleanup(SyncError::NoStorage, SyncError::SequenceExhausted);
+    assert_eq!(super::slot_block_reason(&cleanup, provider), cleanup.pending_reason(provider));
+    assert!(matches!(super::slot_block_reason(&cleanup, provider), PendingReason::Cleanup { .. }));
+    assert_eq!(
+        super::slot_block_reason(&SyncError::Rejected(OperationRejection::NotAllowed), provider),
+        PendingReason::Failed(LocalFailure::Operation)
+    );
+}
