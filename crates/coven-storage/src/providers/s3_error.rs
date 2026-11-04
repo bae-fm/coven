@@ -106,7 +106,10 @@ fn s3_service_failure(
         Some("OverQuota" | "QuotaExceeded" | "InsufficientStorage") => {
             StorageFailure::QuotaExceeded
         }
-        Some("RequestTimeout") => StorageFailure::Network,
+        // S3 can answer a copy or a multipart completion with status 200 and
+        // one of these, once it has begun replying: the code says what the
+        // status would have (§20.6).
+        Some("RequestTimeout" | "InternalError" | "ServiceUnavailable") => StorageFailure::Network,
         Some("InvalidObjectState") => StorageFailure::Refused,
         Some("InvalidRange") => StorageFailure::InvalidRange,
         // The SDK also wraps XML decoding failures in ServiceError. A parsed

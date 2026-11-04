@@ -77,6 +77,9 @@ struct Remote {
     refuse_delete: bool,
     deletions: usize,
     fail_completion_reply: bool,
+    /// The next copy or multipart completion fails, answered as S3 may
+    /// answer either: status 200, with an error document for its body.
+    error_in_ok: Option<&'static str>,
     broken_check: Option<StorageCheck>,
     forced_error: Option<(&'static str, u16)>,
     held_copy: Option<gcs::HeldCopy>,
@@ -183,6 +186,12 @@ fn respond(
             return response(200, format!("<ListPartsResult>{next}{part}</ListPartsResult>"));
         }
         if method == Method::POST {
+            if let Some(code) = state.error_in_ok.take() {
+                return response(
+                    200,
+                    format!("<Error><Code>{code}</Code><Message>failed</Message></Error>"),
+                );
+            }
             if !key.contains("/.coven-uploads/") && !gcs::condition_holds(&state, &key, &headers) {
                 return response(412, "<Error><Code>PreconditionFailed</Code></Error>");
             }
@@ -209,6 +218,12 @@ fn respond(
         state.copies += 1;
         if state.refuse_copy {
             return response(403, "<Error><Code>AccessDenied</Code></Error>");
+        }
+        if let Some(code) = state.error_in_ok.take() {
+            return response(
+                200,
+                format!("<Error><Code>{code}</Code><Message>failed</Message></Error>"),
+            );
         }
         let source = source.to_str().unwrap().strip_prefix("/bucket/").unwrap();
         let Some(bytes) = state.objects.get(source).cloned() else {
@@ -593,6 +608,27 @@ async fn duplicate_listing_entries_merge_or_fail_before_fetching_another_page() 
         }
         assert_eq!(requests.load(Ordering::SeqCst), expected_requests);
     }
+}
+
+/// S3 can answer a multipart completion with status 200 and an error
+/// document, once it has begun replying and only then finds the completion
+/// failed. Coven takes that as the failure it names: the object isn't
+/// there, and the session completes on the next try.
+#[tokio::test]
+async fn a_completion_answered_200_with_an_error_fails() {
+    let state = Arc::new(Mutex::new(Remote::default()));
+    let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
+    let storage = provider(&server.url);
+    let path = ObjectPath::slot(STORE_ID, std::num::NonZeroU64::MIN);
+    let mut upload = storage.begin_upload(&path, 4).await.unwrap();
+    storage.upload_part(&mut upload, b"data").await.unwrap();
+    state.lock().unwrap().error_in_ok = Some("InternalError");
+    let failed = storage.finish_upload(&mut upload).await.unwrap_err();
+    assert_eq!(failed.failure(), StorageFailure::Network, "{failed:?}");
+    assert!(!upload.is_complete());
+    assert!(!state.lock().unwrap().objects.contains_key(&format!("bucket/{}", path.as_str())));
+    storage.finish_upload(&mut upload).await.unwrap();
+    assert_eq!(storage.read(&path).await.unwrap(), b"data");
 }
 
 #[tokio::test]

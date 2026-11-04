@@ -397,6 +397,22 @@ async fn every_object_copy_publishes_single_request_creates_by_conditional_copy(
     assert_eq!(listed.len(), 3);
 }
 
+/// S3 can answer a copy with status 200 and an error document. A publishing
+/// copy answered so published nothing: the create fails with what the
+/// document names, and its temporary is gone; the next create publishes.
+#[tokio::test]
+async fn a_publishing_copy_answered_200_with_an_error_fails() {
+    let (_server, state, storage) = every_object_provider().await;
+    let path = ObjectPath::slot(STORE_ID, std::num::NonZeroU64::MIN);
+    state.lock().unwrap().error_in_ok = Some("InternalError");
+    let failed = storage.create(&path, b"original").await.unwrap_err();
+    assert_eq!(failed.failure(), StorageFailure::Network, "{failed:?}");
+    assert_eq!(storage.status(&path).await.unwrap(), None);
+    assert_eq!(temporaries(&state), 0);
+    storage.create(&path, b"original").await.unwrap();
+    assert_eq!(storage.read(&path).await.unwrap(), b"original");
+}
+
 /// A lost copy reply: the copy landed, and the create settles by this
 /// attempt's marker at the destination, not as another object's occupation.
 #[tokio::test]

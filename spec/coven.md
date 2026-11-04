@@ -1643,7 +1643,11 @@ status says this by itself, so it holds whatever the body is. A load balancer
 or proxy in front of S3 often answers with a page of its own instead of S3's
 XML; read as a malformed reply, a passing 503 would hold every pass until the
 person reconnected. An error code in the provider's own body, such as S3's
-`SlowDown`, still decides first.
+`SlowDown`, still decides first. S3 can answer a copy or a multipart completion
+with status 200 and an error document, once it has begun replying and only then
+finds the request failed. That reply is the failure its code names: an
+`InternalError` or `ServiceUnavailable` is a network failure there too, and
+nothing was copied or completed.
 
 **How far a body has gone.** Coven hands a request body to the connection 64 KiB
 at a time; each step is what the stall window sees move. The caller sending an
