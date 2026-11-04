@@ -8486,6 +8486,10 @@ Edge cases:
   its panic goes to the bug sink.
 - A bug sink whose `report` panics is logged at error; its panic goes no
   further, since nothing above it would catch it.
+- Coven's own values never panic as they drop: one dropped during an
+  unwind that panicked again would end the process. What a drop finds
+  wrong fails the store's handle instead, as a write transaction whose
+  hooks SQLite won't let go of does.
 
 ```rust
 // These items are in `coven::task`, not at coven's root.

@@ -441,6 +441,16 @@ impl DatabaseConnection {
         run().map_err(|error| self.pending_failure(error))
     }
 
+    /// Fail the handle when removing a transaction's `hook` failed: what the
+    /// connection would call next is unknown. Removal never panics, since it
+    /// runs as a transaction drops, perhaps during an unwind.
+    pub(crate) fn removed_hook(&self, hook: &'static str, removed: rusqlite::Result<()>) {
+        if let Err(error) = removed {
+            tracing::error!(hook, %error, "removing a transaction's hook failed");
+            let _failed = self.pending_failure(error.into());
+        }
+    }
+
     fn pending_failure(&self, error: DbError) -> DbError {
         if matches!(error, DbError::StatePersistence(_)) {
             return error;

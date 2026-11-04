@@ -178,7 +178,8 @@ fn keep_failure(failed: &Mutex<Option<DbError>>, observed: Result<Result<(), DbE
 /// A transaction still open as it drops is one whose callback panicked,
 /// while a second panic would abort the process: it rolls back, and a
 /// failed rollback is logged and fails the handle, so every later call
-/// reports it. Its hooks go either way.
+/// reports it. Its hooks go either way; one SQLite won't let go fails the
+/// handle too, since the connection's hooks are then unknown.
 impl Drop for WriteTransaction<'_> {
     fn drop(&mut self) {
         self.database.streaming.set(false);
@@ -191,16 +192,15 @@ impl Drop for WriteTransaction<'_> {
             }
         }
         if self.operations {
-            self.database
+            let removed = self
+                .database
                 .connection
-                .preupdate_hook(None::<fn(Action, &str, &str, &PreUpdateCase)>)
-                .expect("remove a transaction's pre-update hook");
+                .preupdate_hook(None::<fn(Action, &str, &str, &PreUpdateCase)>);
+            self.database.removed_hook("the pre-update hook", removed);
         }
         if self.rows {
-            self.database
-                .connection
-                .update_hook(None::<fn(Action, &str, &str, i64)>)
-                .expect("remove a transaction's update hook");
+            let removed = self.database.connection.update_hook(None::<fn(Action, &str, &str, i64)>);
+            self.database.removed_hook("the update hook", removed);
         }
     }
 }
