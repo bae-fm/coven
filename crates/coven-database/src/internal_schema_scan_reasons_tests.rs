@@ -5,6 +5,9 @@
 //! that schema was filled.
 
 use super::{reason, Statement};
+
+#[path = "internal_schema_scan_literals.rs"]
+mod literals;
 use rusqlite::Connection;
 use std::collections::BTreeSet;
 
@@ -194,7 +197,6 @@ mod source {
         path::Path,
     };
 
-    use proc_macro2::{TokenStream, TokenTree};
     use rusqlite::Connection;
     use syn::{spanned::Spanned, visit::Visit};
     struct Source {
@@ -447,7 +449,7 @@ mod source {
             {
                 let text = std::fs::read_to_string(&path).unwrap();
                 let mut source = Source { strings: Vec::new(), table_loops: Vec::new() };
-                literals(text.parse().unwrap(), &mut source.strings);
+                super::literals::literals(text.parse().unwrap(), &mut source.strings);
                 source.visit_file(&syn::parse_file(&text).unwrap());
                 sources.insert(name.to_owned(), source);
             }
@@ -490,22 +492,6 @@ mod source {
             }
         }
         sql
-    }
-
-    fn literals(tokens: TokenStream, strings: &mut Vec<(usize, String)>) {
-        for token in tokens {
-            match token {
-                TokenTree::Group(group) => literals(group.stream(), strings),
-                TokenTree::Literal(literal) => {
-                    if let Ok(syn::Lit::Str(string)) =
-                        syn::parse_str::<syn::Lit>(&literal.to_string())
-                    {
-                        strings.push((literal.span().start().line, string.value()));
-                    }
-                }
-                _ => {}
-            }
-        }
     }
 
     fn select_constant(strings: &[(usize, String)], prefix: &str) -> String {
