@@ -745,3 +745,47 @@ async fn every_start_counts_even_one_held_for_the_reason_the_last_was() {
     assert_eq!(starts_and_last_pass(&f).await, (before + 2, held));
     f.handle.close().await.unwrap();
 }
+
+/// Each `(last_pass, effect)` an app's live query over `coven_sync_status`
+/// and `coven_retry_effect` reports, as one row.
+fn status_and_effect(
+    f: &Fixture,
+) -> coven_database::test_utils::Followed<(Option<Vec<u8>>, String)> {
+    coven_database::test_utils::Followed::new(f.handle.subscribe(|sql| {
+        Ok(sql.query_row(
+            "SELECT s.last_pass,e.effect FROM coven_sync_status AS s,coven_retry_effect AS e",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?)
+    }))
+}
+
+/// Eve's connection last failed for an update of her app, which no retry
+/// clears, and her app stopped after the failure was saved but before the
+/// status showed it, so the status still says synced. When she starts sync
+/// again, the connection's first attempt shows the failure, and publishes
+/// that a retry would fail before it does: no moment of the start shows the
+/// failure while a retry still says sync isn't running.
+#[tokio::test]
+async fn a_held_start_publishes_its_effect_before_its_status() {
+    let f = stopped_fixture().await;
+    let update = RequiredUpdate::CovenFormat { version: u16::MAX };
+    f.handle
+        .test_record_pending(coven_sync::PendingRecord::new(
+            coven_sync::PendingSubject::Connection,
+            coven_sync::PendingReason::UpdateRequired(update),
+        ))
+        .await;
+    let mut followed = status_and_effect(&f);
+    let (before, effect) = followed.next().await;
+    assert_eq!(effect, "not_syncing");
+    f.handle.start_sync().await.unwrap();
+    loop {
+        let (last_pass, effect) = followed.next().await;
+        if last_pass != before {
+            assert_eq!(effect, "failed", "{last_pass:?}");
+            break;
+        }
+    }
+    f.handle.close().await.unwrap();
+}

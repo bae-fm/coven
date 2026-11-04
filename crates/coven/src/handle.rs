@@ -580,6 +580,12 @@ impl CovenHandle {
     pub(crate) async fn test_connection_retry_wait(&self) -> Option<coven_database::RetryWait> {
         self.database.retry_wait(coven_database::RetrySubject::Sync).await.unwrap()
     }
+    /// Record `record` as a failure saved before a process stopped, without
+    /// the status that shows it.
+    #[cfg(test)]
+    pub(crate) async fn test_record_pending(&self, record: coven_sync::PendingRecord) {
+        self.database.record_pending(record).await.unwrap();
+    }
 
     /// Count the work the store's connections run into `counter`, in
     /// application tests: its reads' SQLite steps, the app's and coven's
