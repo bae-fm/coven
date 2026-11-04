@@ -10,9 +10,7 @@ pub struct FileKey(Zeroizing<[u8; 32]>);
 impl FileKey {
     /// Generate a file key independently of store and circle keys.
     pub fn generate() -> Result<Self, CryptoError> {
-        let mut bytes = Zeroizing::new([0; 32]);
-        randomness::fill(bytes.as_mut())?;
-        Ok(Self(bytes))
+        Ok(Self(randomness::secret_bytes()?))
     }
 
     /// Import the key carried in a row's where-column.

@@ -140,10 +140,8 @@ pub struct MemberKeys {
 impl MemberKeys {
     /// Make both member key pairs using the operating system's randomness.
     pub fn generate() -> Result<Self, CryptoError> {
-        let mut signing = Zeroizing::new([0; 32]);
-        let mut sealing = Zeroizing::new([0; 32]);
-        randomness::fill(signing.as_mut())?;
-        randomness::fill(sealing.as_mut())?;
+        let signing = randomness::secret_bytes()?;
+        let sealing = randomness::secret_bytes()?;
         Ok(Self {
             signing: ed25519_dalek::SigningKey::from_bytes(&signing),
             sealing: StaticSecret::from(*sealing),
@@ -524,8 +522,7 @@ fn seal_box(
     prefix: &[u8],
     plaintext: &[u8],
 ) -> Result<Vec<u8>, CryptoError> {
-    let mut seed = Zeroizing::new([0; 32]);
-    randomness::fill(seed.as_mut())?;
+    let seed = randomness::secret_bytes()?;
     let ephemeral = StaticSecret::from(*seed);
     let sender = PublicKey::from(&ephemeral).to_bytes();
     let shared = ephemeral.diffie_hellman(&PublicKey::from(recipient.0));

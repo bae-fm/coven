@@ -23,9 +23,7 @@ pub struct StoreKey {
 impl StoreKey {
     /// Make random key material for an identity supplied by the id source.
     pub fn generate(id: KeyId) -> Result<Self, CryptoError> {
-        let mut bytes = Zeroizing::new([0; 32]);
-        randomness::fill(bytes.as_mut())?;
-        Ok(Self { id, bytes })
+        Ok(Self { id, bytes: randomness::secret_bytes()? })
     }
 
     /// Import a store key opened from custody or a member's sealed copy (§12.1).
@@ -247,9 +245,7 @@ pub struct InviteSecret(Zeroizing<[u8; 32]>);
 impl InviteSecret {
     /// Make an invite secret using the operating system's randomness.
     pub fn generate() -> Result<Self, CryptoError> {
-        let mut bytes = Zeroizing::new([0; 32]);
-        randomness::fill(bytes.as_mut())?;
-        Ok(Self(bytes))
+        Ok(Self(randomness::secret_bytes()?))
     }
 
     /// Import the secret carried by a scanned invite (§13.2).
