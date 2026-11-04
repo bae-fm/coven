@@ -259,11 +259,11 @@ fn inferred_default_construction_is_prevented_at_its_implementation() {
 }
 
 #[test]
-fn one_exact_list_entry_allows_construction_and_task_starts() {
+fn one_exact_list_entry_allows_construction_and_background_starts() {
     const PATH: &str = "crates/app-sync/src/fixture.rs";
     let mut rooted = policy(r#"capability_types = ["Clock"]"#);
     rooted.composition_roots.push(root(PATH, "Worker", "open"));
-    rooted.task_starts = Policy::gated_fixture().task_starts;
+    rooted.background_starts = Policy::gated_fixture().background_starts;
     for (path, owner, method, allowed) in [
         (PATH, "Worker", "open", true),
         (PATH, "Worker", "other", false),
@@ -287,8 +287,8 @@ fn unrooted_worker(path: &str, caller: &str) -> Vec<Finding> {
     vec![
         Finding::new(path, 1, format!("{caller} constructs owner Worker outside a composition root"),
             "construct owners and capabilities explicitly at the listed roots; inject them elsewhere; do not implement or derive Default"),
-        Finding::new(path, 1, "thread or task spawn outside a composition root",
-            "start long-lived work only at a listed root, which must retain and stop it"),
+        Finding::new(path, 1, "thread or future spawn outside a composition root",
+            "start background work only at a listed root, which must keep and stop it"),
     ]
 }
 

@@ -42,14 +42,14 @@ fn capability_factories_are_listed_by_file_as_receiver_methods_and_products() {
 fn gate_paths_are_rust_paths() {
     let policy = Policy::fixture(
         r#"
-        [[task_starts]]
+        [[background_starts]]
         kind = "spawn"
         paths = ["tokio::spawn", "OsRng"]
         methods = ["spawn"]
         "#,
     );
-    assert_eq!(policy.task_starts[0].path_patterns, [vec!["tokio", "spawn"], vec!["OsRng"]]);
-    assert_eq!(policy.task_starts[0].method_patterns, ["spawn"]);
+    assert_eq!(policy.background_starts[0].path_patterns, [vec!["tokio", "spawn"], vec!["OsRng"]]);
+    assert_eq!(policy.background_starts[0].method_patterns, ["spawn"]);
 }
 
 #[test]
@@ -58,7 +58,7 @@ fn malformed_rows_and_unknown_keys_are_refused() {
         "[composition_roots]\n\"a.rs\" = [\"Type::method::extra\"]",
         "[composition_roots]\n\"a.rs\" = [\"Type::\"]",
         "[capability_factories.\"a.rs\"]\n\"method\" = \"Product\"",
-        "[[task_starts]]\nkind = \"spawn\"\npaths = [\"tokio::\"]",
+        "[[background_starts]]\nkind = \"spawn\"\npaths = [\"tokio::\"]",
         "rules = [\"no-such-rule\"]",
         "capability_type = [\"Clock\"]",
         "[database]\ncapability = \"SQLite\"\nhomes = []",

@@ -1,5 +1,5 @@
 # The fixture policy the rule tests share: a workspace of `app-*` crates under
-# crates/, its capability table and its task starts.
+# crates/, its capability table and its background work starts.
 
 rules = [
     "crate-dependencies",
@@ -17,16 +17,16 @@ capability_traits = ["Clock", "IdSource"]
 [database]
 capability = "SQLite"
 
-[[task_starts]]
+[[background_starts]]
 kind = "runtime construction"
 paths = ["Runtime::new", "Builder::new_current_thread", "Builder::new_multi_thread"]
 
-[[task_starts]]
+[[background_starts]]
 kind = "ambient runtime acquisition"
 paths = ["Handle::current", "Handle::try_current"]
 
-[[task_starts]]
-kind = "thread or task spawn"
+[[background_starts]]
+kind = "thread or future spawn"
 paths = ["tokio::spawn", "task::spawn", "task::spawn_blocking", "task::spawn_local", "thread::spawn"]
 methods = ["spawn", "spawn_blocking", "spawn_local"]
 

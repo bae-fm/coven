@@ -662,7 +662,7 @@ tables = [
     "_coven_written_values",
 ]
 
-# One list for owner construction, runtime acquisition and task starts.
+# One list for owner construction, runtime acquisition and background work starts.
 # Owner constructors include their private representations; names grant no
 # exemption.
 [composition_roots]
@@ -1096,16 +1096,16 @@ tables = [
 "StoreDir::owned_file" = "AtomicFile"
 "StoreDir::file" = "AtomicFile"
 
-[[task_starts]]
+[[background_starts]]
 kind = "runtime construction"
 paths = ["Runtime::new", "Builder::new_current_thread", "Builder::new_multi_thread"]
 
-[[task_starts]]
+[[background_starts]]
 kind = "ambient runtime acquisition"
 paths = ["Handle::current", "Handle::try_current"]
 
-[[task_starts]]
-kind = "thread or task spawn"
+[[background_starts]]
+kind = "thread or future spawn"
 paths = ["tokio::spawn", "task::spawn", "task::spawn_blocking", "task::spawn_local", "thread::spawn"]
 methods = ["spawn", "spawn_blocking", "spawn_local"]
 

@@ -10070,7 +10070,7 @@ may use real ones. The checker's policy lists as shared state `Barrier`,
 `Semaphore`, the atomics (`AtomicBool`, `AtomicI64`, `AtomicU64`,
 `AtomicUsize`), `OnceLock` and `LazyLock`, which the first of their holders to
 reach them sets for all the others, `Notify`, which wakes whichever holder
-waits on it, a task's `JoinHandle`, which can abort or await the task, and
+waits on it, a spawned future's `JoinHandle`, which can abort or await it, and
 the ends of a channel, `Sender`, `UnboundedSender`, `Receiver` and
 `UnboundedReceiver`, each of which shares the channel with the other. A lock,
 `Mutex`, its `Condvar` or `RwLock`, is shared state once it is shared: held through an
@@ -10109,13 +10109,21 @@ lives while the store is open. The database owner holds the SQLite connection;
 the sync owner holds the database owner and the storage owner. A *task* is a
 value that lives for one piece of work and is then dropped, such as one sync pass
 or one step of an operation (§11). A task borrows the owners it needs for that
-work, and holds nothing past it.
+work, and holds nothing past it. *Background work* is something running, not a
+value: a thread, or a future spawned onto the runtime, that runs beside the
+owner that started it, such as the sync loop.
+
+The values that open a store, such as the builder, the store being opened, a
+restored store waiting to be published and the owners being put together for
+it, live for one opening but are not tasks: what they make is the open store's
+owners, which outlive them, and they hand those on to the store's handle. Each
+is built and taken apart at listed composition roots.
 
 **Owners receive their collaborators when they are built.** The sync owner takes
 the database owner and the storage owner as arguments and opens neither itself.
 
 **Composition roots.** One authoritative list in the checker's policy names every
-place allowed to construct owners or start long-lived work. Each entry names an
+place allowed to construct owners or start background work. Each entry names an
 exact source file, type and method (or free function, or static), not a whole
 file or a type-name suffix. All the code naming a static shares what it holds,
 in the process or, for a thread local, on its thread. So a static holding an
@@ -10124,21 +10132,22 @@ once that scope is its state's own, as the registry of the stores' locks is the
 process's (F.4); one not listed fails the check. A trait's
 method is named where the trait declares it: the storage connector's `connect`
 makes each connection, in every connector. The roots include opening and
-bootstrap, provider connection construction, owner constructors and task
-starts.
+bootstrap, provider connection construction, owner constructors and the
+places that start background work.
 
 - The checker infers owners from retained capabilities and other owners.
 - Any owner construction outside a listed root fails the check, including
   construction of an owner's private representation. A pattern that names an
   owner's unit variant, in a `match`, an `if let` or `matches!`, matches a value
   and constructs none.
-- Runtime acquisition and thread or task spawning use the same list.
+- Building or reaching a runtime, and spawning a thread or a future, use the
+  same list.
 - A legitimate new place must be added deliberately; returning an owner grants no
   permission to construct one.
 - Test-only sources and items may assemble their own graphs.
 
-**Long-lived tasks.** Each has one owner responsible for starting and stopping
-it, including when that owner is dropped. Its start sites are on the same list;
+**Background work.** Each piece has one owner responsible for starting and
+stopping it, including when that owner is dropped. Its start sites are on the same list;
 there is no separate list of lifetime authorities. Only the sync owner starts the
 sync loop, so closing the store stops it, and nothing else can leave one running.
 
@@ -10174,7 +10183,7 @@ built only to be taken apart again, with every field public and no methods, isn'
 used to pass collaborators; they are passed by name.
 
 **A handle is what an owner hands out on purpose.** A reconfigurable live query
-(api.md E4) waits for its next result on one task while the app replaces its
+(api.md E4) waits for its next result in one call while the app replaces its
 request from another. The query's `requests()` returns a `LiveQueryRequests`,
 which shares the query's pending request and the signal that wakes it. Such a
 value is an owner's *handle*, not to be confused with the store's handle the app

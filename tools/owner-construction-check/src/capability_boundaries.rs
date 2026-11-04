@@ -70,20 +70,20 @@ impl<'p> CapabilityBoundaryVisitor<'_, 'p> {
         ));
     }
 
-    fn record_task_start(&mut self, gate: &Gate, span: Span) {
+    fn record_background_start(&mut self, gate: &Gate, span: Span) {
         self.violations.insert(Finding::new(
             self.path,
             span.start().line,
             format!("{} outside a composition root", gate.kind),
-            "start long-lived work only at a listed root, which must retain and stop it",
+            "start background work only at a listed root, which must keep and stop it",
         ));
     }
 
     fn check_method(&mut self, name: &str, span: Span) {
         if !self.rooted {
-            for gate in &self.policy.task_starts {
+            for gate in &self.policy.background_starts {
                 if gate.method_patterns.iter().any(|method| method == name) {
-                    self.record_task_start(gate, span);
+                    self.record_background_start(gate, span);
                 }
             }
         }
@@ -100,9 +100,9 @@ impl<'p> CapabilityBoundaryVisitor<'_, 'p> {
     /// item and must not match a gated crate of the same name.
     fn check_segments(&mut self, segments: &[String], is_import: bool, span: Span) {
         if !self.rooted {
-            for gate in &self.policy.task_starts {
+            for gate in &self.policy.background_starts {
                 if gate_matches(gate, segments, is_import) {
-                    self.record_task_start(gate, span);
+                    self.record_background_start(gate, span);
                 }
             }
         }

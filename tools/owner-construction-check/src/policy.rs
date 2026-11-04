@@ -26,7 +26,7 @@ pub(crate) enum Rule {
     /// workspace (`crate_dependencies.rs`).
     CrateDependencies,
     /// Appendix F.2: each capability used directly only in its homes, and
-    /// task starts only at composition roots (`capability_boundaries.rs`).
+    /// background work starts only at composition roots (`capability_boundaries.rs`).
     CapabilityBoundaries,
     /// Appendix F.2: raw SQLite handles and SQL on the database's internal
     /// tables stay in the database's homes, and each domain's tables are
@@ -102,16 +102,16 @@ pub(crate) struct Policy {
     pub(crate) capabilities: Vec<Capability>,
     #[serde(default)]
     pub(crate) database: Option<Database>,
-    /// Every callable allowed to construct owners or start tasks (Appendix F.3),
+    /// Every callable allowed to construct owners or start background work (Appendix F.3),
     /// including owner constructors and feature-gated fixtures. The file lists
     /// them by source file: `Type::method`, or a free function's or a
     /// static's name; a static's value is built at the root it names.
     #[serde(default, deserialize_with = "composition_roots")]
     pub(crate) composition_roots: Vec<CompositionRoot>,
-    /// Runtime acquisition and task starts require an entry in
+    /// Runtime acquisition and background work starts require an entry in
     /// `composition_roots`.
     #[serde(default)]
-    pub(crate) task_starts: Vec<Gate>,
+    pub(crate) background_starts: Vec<Gate>,
     /// Receiver methods through which an owner may derive a capability from the
     /// one it was given, such as a directory naming one of its files. The file
     /// lists them by source file: `"Type::method" = "Product"`.
@@ -200,7 +200,7 @@ pub(crate) struct Policy {
 }
 
 /// `(source file, type, method)`: a callable allowed to construct owners or
-/// start tasks. A free function or a static has `<free>` in the type position.
+/// start background work. A free function or a static has `<free>` in the type position.
 #[derive(Debug, Clone, Eq, PartialEq, Ord, PartialOrd)]
 pub(crate) struct CompositionRoot {
     pub(crate) path: String,
@@ -422,7 +422,7 @@ impl Policy {
     }
 
     /// The fixture policy the rule tests share: every rule, and the
-    /// capability table and task starts of a workspace of `app-*` crates.
+    /// capability table and background work starts of a workspace of `app-*` crates.
     #[cfg(test)]
     pub(crate) fn gated_fixture() -> Policy {
         Policy::fixture(include_str!("policy_fixture.toml"))

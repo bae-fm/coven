@@ -167,7 +167,7 @@ fn runtime_construction_is_rejected_outside_composition_roots() {
         "crates/app-sync/src/transfer.rs",
         &[3, 7],
         "runtime construction outside a composition root",
-        "start long-lived work only at a listed root, which must retain and stop it",
+        "start background work only at a listed root, which must keep and stop it",
     );
 }
 
@@ -199,7 +199,7 @@ fn a_lifetime_authority_starts_its_work() {
             .collect::<BTreeSet<_>>();
     assert_eq!(
         elsewhere,
-        BTreeSet::from(["runtime construction", "thread or task spawn"].map(str::to_string))
+        BTreeSet::from(["runtime construction", "thread or future spawn"].map(str::to_string))
     );
 }
 
@@ -240,8 +240,8 @@ fn spawning_work_is_rejected_outside_composition_roots() {
         &violations,
         "crates/app-sync/src/upload.rs",
         &[3, 4, 5],
-        "thread or task spawn outside a composition root",
-        "start long-lived work only at a listed root, which must retain and stop it",
+        "thread or future spawn outside a composition root",
+        "start background work only at a listed root, which must keep and stop it",
     );
 }
 
@@ -267,7 +267,7 @@ fn runtime_handles_are_injectable_but_not_ambiently_acquired() {
         "crates/app-sync/src/workflow.rs",
         &[1],
         "ambient runtime acquisition outside a composition root",
-        "start long-lived work only at a listed root, which must retain and stop it",
+        "start background work only at a listed root, which must keep and stop it",
     );
 }
 
@@ -424,7 +424,7 @@ fn nested_macro_calls_and_method_calls_inside_them_are_read() {
             }
             "#,
         ),
-        BTreeSet::from(["system clock", "thread or task spawn"].map(str::to_string))
+        BTreeSet::from(["system clock", "thread or future spawn"].map(str::to_string))
     );
 }
 
@@ -444,7 +444,7 @@ fn a_macro_rules_body_is_read_where_it_is_invoked() {
     let found = violations("crates/app-sync/src/macros.rs", &invoked);
     assert_eq!(
         found.iter().map(kind).collect::<BTreeSet<_>>(),
-        BTreeSet::from(["filesystem", "system clock", "thread or task spawn"])
+        BTreeSet::from(["filesystem", "system clock", "thread or future spawn"])
     );
     assert!(found.iter().all(|finding| finding.line == 7), "{found:?}");
 }
