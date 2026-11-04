@@ -711,6 +711,7 @@ tables = [
 ]
 # Each platform's registration, which the watch keeps until it drops.
 "crates/coven-foundation/src/network_watch_apple.rs" = ["PathMonitor::start"]
+"crates/coven-foundation/src/network_watch_windows.rs" = ["ProfileWatch::start"]
 "crates/coven-foundation/src/network_watch_android.rs" = [
     # The process's registry of running watches, which Android's callbacks
     # find theirs in: its scope is the process, like the native methods it
@@ -1145,6 +1146,7 @@ homes = [
     "crates/coven-foundation/src/network_watch_apple.rs",
     "crates/coven-foundation/src/network_watch_android.rs",
     "crates/coven-foundation/src/network_watch_default.rs",
+    "crates/coven-foundation/src/network_watch_windows.rs",
 ]
 
 [[capabilities]]

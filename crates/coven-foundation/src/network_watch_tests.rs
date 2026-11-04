@@ -59,11 +59,13 @@ async fn a_view_hears_each_change_and_an_unwatched_one_never_does() {
     assert!(waited.is_err(), "an unwatched network never changes");
 }
 
-/// On macOS and iOS the watch holds what Network.framework says of the path
-/// as it starts, usable or not, and lets the monitor go as it drops.
-#[cfg(target_vendor = "apple")]
+/// Where coven watches, the watch holds what the platform says as it
+/// starts, usable or not, and lets the platform's registration go as it
+/// drops: Network.framework's path monitor on macOS and iOS, the internet
+/// connection profile's event handler on Windows.
+#[cfg(any(target_vendor = "apple", windows))]
 #[test]
-fn the_apple_watch_knows_the_path_as_it_starts() {
+fn the_platform_watch_knows_the_network_as_it_starts() {
     for _ in 0..3 {
         let watch = NetworkWatch::start(&NetworkSource::Platform).unwrap();
         let state = watch.view().current();
