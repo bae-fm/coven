@@ -232,6 +232,30 @@ pub(crate) fn save(
     Ok(())
 }
 
+/// Record a failed attempt's pending `record` with the subject's next wait,
+/// or with none, in the caller's transaction.
+pub(crate) fn save_failure<P: crate::PendingValue>(
+    db: &DatabaseConnection,
+    record: &P,
+    subject: RetrySubject,
+    wait: Option<&RetryWait>,
+) -> Result<(), DbError> {
+    crate::pending::save(db, record)?;
+    set(db, subject, wait)
+}
+
+/// Replace the subject's wait, or end it when there is none.
+pub(crate) fn set(
+    db: &DatabaseConnection,
+    subject: RetrySubject,
+    wait: Option<&RetryWait>,
+) -> Result<(), DbError> {
+    match wait {
+        Some(wait) => save(db, subject, wait),
+        None => clear(db, subject),
+    }
+}
+
 /// End the subject's wait at `now` in place: `T = now`, `W = 0`, keeping its
 /// failure count.
 pub(crate) fn end(

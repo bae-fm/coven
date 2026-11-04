@@ -26,10 +26,7 @@ impl Database {
                     } else {
                         crate::pending::clear(db, &connection)?;
                     }
-                    match wait {
-                        Some(wait) => retry::save(db, RetrySubject::Sync, &wait),
-                        None => retry::clear(db, RetrySubject::Sync),
-                    }
+                    retry::set(db, RetrySubject::Sync, wait.as_ref())
                 })
             })
         })
@@ -72,7 +69,9 @@ impl Database {
                 .operation()
                 .ok_or(DbError::Invariant { what: "an operation retry names its journal row" })?;
             inner.access.with_writer(|writer| {
-                writer.state_transaction(|db| save_operation_retry(db, id, &record, wait))
+                writer.state_transaction(|db| {
+                    retry::save_failure(db, &record, RetrySubject::Operation(id), wait.as_ref())
+                })
             })
         })
         .await
@@ -100,7 +99,8 @@ impl Database {
                     if crate::operation::find(db, id)?.is_none_or(|row| row.last_step != step) {
                         return Ok(false);
                     }
-                    save_operation_retry(db, id, &record, wait).map(|()| true)
+                    retry::save_failure(db, &record, RetrySubject::Operation(id), wait.as_ref())
+                        .map(|()| true)
                 })
             })
         })
@@ -212,19 +212,5 @@ impl Database {
             inner.access.with_writer(|writer| writer.transaction(|db| retry::clear(db, subject)))
         })
         .await
-    }
-}
-
-/// Save the operation's pending record with its retry wait, or with none.
-fn save_operation_retry<P: crate::PendingValue>(
-    db: &crate::sqlite::DatabaseConnection,
-    id: crate::OperationId,
-    record: &P,
-    wait: Option<RetryWait>,
-) -> Result<(), DbError> {
-    crate::pending::save(db, record)?;
-    match wait {
-        Some(wait) => retry::save(db, RetrySubject::Operation(id), &wait),
-        None => retry::clear(db, RetrySubject::Operation(id)),
     }
 }

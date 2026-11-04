@@ -82,12 +82,12 @@ impl FileDatabase {
                 )? {
                     return Ok(());
                 }
-                crate::pending::save(db, &record)?;
-                let subject = crate::RetrySubject::Pin(file);
-                match &retry {
-                    Some(wait) => crate::retry::save(db, subject, wait),
-                    None => crate::retry::clear(db, subject),
-                }
+                crate::retry::save_failure(
+                    db,
+                    &record,
+                    crate::RetrySubject::Pin(file),
+                    retry.as_ref(),
+                )
             })
         })
         .await
