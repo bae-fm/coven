@@ -261,11 +261,8 @@ pub(crate) fn finish_at_open(
     directory: &StoreDir,
 ) -> Result<(), DbError> {
     abandon_cache_writes(writer, directory)?;
-    let released = writer.read_transaction(|| {
-        let mut released = pending(writer, &BTreeSet::new())?;
-        released.extend(copies(writer, &Copies::Settled(&BTreeSet::new()))?);
-        Ok::<_, DbError>(released)
-    })?;
+    // Nothing is staging or copying before the first write runs.
+    let released = choose(writer, &BTreeSet::new(), &BTreeSet::new())?;
     let (removed, mut failures) = remove_bytes(directory, released);
     if !removed.is_empty() {
         if let Err(error) = writer.transaction(|db| forget(db, &removed)) {
