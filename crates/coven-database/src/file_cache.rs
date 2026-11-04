@@ -124,7 +124,7 @@ pub(super) fn read<L>(
     let (offset, length) = within(file, first, index)?;
     let bytes = reader.read_at(offset, length).map_err(observation)?;
     access.with_writer(|db| {
-        db.transaction(|db| {
+        db.transaction(|db: &DatabaseConnection| {
             db.internal_execute(
                 "UPDATE _coven_cache SET last_read=?2 WHERE path=?1",
                 (&path, tick(db)?),
@@ -155,7 +155,7 @@ pub(super) fn put<L>(
     }
     let _writing = access.directory.lock_cache_write()?;
     let recorded = access.with_writer(|db| {
-        db.transaction(|db| {
+        db.transaction(|db: &DatabaseConnection| {
             if db.query_row(&format!("SELECT {CACHE_NAME_USED_SQL}"), [name.as_str()], |r| {
                 r.get::<_, bool>(0)
             })? {
@@ -251,7 +251,7 @@ fn publish_range(
 /// removed by the next open.
 fn release<L>(access: &DatabaseAccess<L>, name: &FileName) -> Vec<DbError> {
     let recorded = access.with_writer(|db| {
-        db.transaction(|db| {
+        db.transaction(|db: &DatabaseConnection| {
             if db.internal_execute(
                 "DELETE FROM _coven_cache_writes WHERE path=?1",
                 [name.as_str()],

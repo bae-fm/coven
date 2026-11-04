@@ -4,7 +4,7 @@
 //! removal of what a failing call made.
 
 use super::{read_only, FileDatabase, FileDatabaseAccess};
-use crate::{DbError, DeviceOnlyCopy, FileRef};
+use crate::{sqlite::DatabaseConnection, DbError, DeviceOnlyCopy, FileRef};
 use coven_foundation::locks::lock_unpoisoned;
 use coven_foundation::{
     files::{Flushed, ObservedFile},
@@ -73,7 +73,7 @@ impl FileDatabase {
         database
             .call(move |inner| {
                 inner.access.with_writer(|writer| {
-                    writer.transaction(|db| {
+                    writer.transaction(|db: &DatabaseConnection| {
                         for copy in &copies {
                             let path = text(&copy.path)?;
                             if db.internal_execute(
@@ -111,7 +111,7 @@ impl FileDatabase {
         self.require_writer()?;
         let folder = text(folder)?.to_owned();
         self.run(move |db, _, _, _| {
-            db.transaction(|db| {
+            db.transaction(|db: &DatabaseConnection| {
                 db.internal_execute(
                     "UPDATE _coven_copy_folders SET made=1 WHERE folder=?1",
                     [&folder],
@@ -130,7 +130,7 @@ impl FileDatabase {
         let size = crate::sqlite::integer("file size", observed.size())?;
         let modified_at = crate::user_file::encode_time(observed.modified_at());
         self.run(move |db, _, _, _| {
-            db.transaction(|db| {
+            db.transaction(|db: &DatabaseConnection| {
                 if db.internal_execute(
                     "UPDATE _coven_copies SET state='placed',size=?2,modified_at=?3
                      WHERE path=?1 AND state='writing'",
@@ -255,7 +255,7 @@ async fn remove_copies(database: &super::Database, paths: Vec<String>) -> Result
 /// A path as coven records it: valid Unicode, as planning a copy checks.
 /// The call's copy at `path` is placed and its file switched to it: the
 /// copy is an original this device records (§17.3).
-pub(crate) fn keep(db: &crate::sqlite::DatabaseConnection, path: &str) -> Result<(), DbError> {
+pub(crate) fn keep(db: &DatabaseConnection, path: &str) -> Result<(), DbError> {
     db.internal_execute("UPDATE _coven_copies SET state='kept' WHERE path=?1", [path])?;
     Ok(())
 }
@@ -263,11 +263,7 @@ pub(crate) fn keep(db: &crate::sqlite::DatabaseConnection, path: &str) -> Result
 /// The kept copy at the original's `path` lost its switch to another
 /// device's, unless another of this device's files is recorded there: it is
 /// recorded for removal (Appendix C.3).
-pub(crate) fn lose(
-    db: &crate::sqlite::DatabaseConnection,
-    path: &[u8],
-    file: FileId,
-) -> Result<(), DbError> {
+pub(crate) fn lose(db: &DatabaseConnection, path: &[u8], file: FileId) -> Result<(), DbError> {
     db.internal_execute(
         "UPDATE _coven_copies SET state='lost' WHERE path=CAST(?1 AS TEXT) AND state='kept'
          AND NOT EXISTS(SELECT 1 FROM _coven_user_files WHERE path=?1 AND file!=?2)",
@@ -278,11 +274,7 @@ pub(crate) fn lose(
 
 /// The copy at `path`, recorded as `state`, is removed; its folder links go
 /// with it.
-pub(crate) fn forget(
-    db: &crate::sqlite::DatabaseConnection,
-    path: &str,
-    state: &str,
-) -> Result<(), DbError> {
+pub(crate) fn forget(db: &DatabaseConnection, path: &str, state: &str) -> Result<(), DbError> {
     db.internal_execute("DELETE FROM _coven_copies WHERE path=?1 AND state=?2", (path, state))?;
     Ok(())
 }

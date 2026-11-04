@@ -317,7 +317,7 @@ impl Database {
         let (reader, reading, length) = self.call(|inner| {
             inner.access.with_committed(|source| {
                 let upload = crate::claim::upload(source)?;
-                let id = inner.inputs.write(|db| {
+                let id = inner.inputs.write(|db: &DatabaseConnection| {
                     db.internal_execute("DELETE FROM _coven_input_objects WHERE path='local-claim'", [])?;
                     db.query_row("INSERT INTO _coven_input_objects(path,identity,observation) VALUES('local-claim',x'',x'') RETURNING id", [], |row| row.get(0))
                 })?;
@@ -364,7 +364,7 @@ impl Database {
                 Some(_) if !replaceable => return Ok(None),
                 _ => (),
             }
-            inner.inputs.write(|db| {
+            inner.inputs.write(|db: &DatabaseConnection| {
                 match observation(db, &path)? {
                     Some((id, saved)) if saved == identity => return Ok(Some(id)),
                     Some(_) if !replaceable => return Ok(None),
@@ -394,7 +394,7 @@ impl Database {
             if previous.maximum == maximum {
                 return Ok(previous);
             }
-            inner.inputs.write(|db| {
+            inner.inputs.write(|db: &DatabaseConnection| {
                 db.internal_execute(
                     "UPDATE _coven_input_budget SET maximum=?1 WHERE singleton=1",
                     [sql_offset(maximum)?],
@@ -549,7 +549,7 @@ impl RetainedInput {
         let offset = sql_offset(offset)?;
         let end = sql_offset(end)?;
         let id = self.id;
-        self.database.call(move |inner| inner.inputs.write(|db| {
+        self.database.call(move |inner| inner.inputs.write(|db: &DatabaseConnection| {
             if !bytes.is_empty() {
                 db.internal_execute("INSERT INTO _coven_input_ranges(object,start,end,bytes) VALUES(?1,?2,?3,?4)", (id,offset,end,bytes))?;
             }
@@ -632,7 +632,7 @@ impl RetainedInput {
         if self.files().await?.as_ref() == Some(&files) {
             return Ok(());
         }
-        self.write(move |db, id| {
+        self.write(move |db: &DatabaseConnection, id| {
             db.internal_execute("DELETE FROM _coven_input_files WHERE object=?1", [id])?;
             db.internal_execute("DELETE FROM _coven_input_unread WHERE object=?1", [id])?;
             let (complete, schema) = match &files {
