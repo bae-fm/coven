@@ -44,15 +44,13 @@ fn database_reason(statement: &Statement, relation: &str) -> Option<&'static str
     Some("the pins coven keeps, each until it is made: the work the upload worker does"),
 ("coven_user_files", "SELECT * FROM coven_user_files", "u") =>
     Some("the view lists every user original this device records"),
-("coven_sending", "SELECT * FROM coven_sending", "j")
-| ("file_queue.rs", "SELECT file FROM coven_sending", "j") =>
+("coven_sending", "SELECT * FROM coven_sending", "j") =>
     Some("the files being sent, one per upload in flight, from this process's memory"),
 ("coven_downloading", "SELECT * FROM coven_downloading", "j") =>
     Some("the files being downloaded to keep whole, one per download in flight, from this process's memory"),
 ("coven_upload_pause", "SELECT * FROM coven_upload_pause", "one" | "z") =>
     Some("one constant row, and the pause table holds at most one row"),
-("coven_network", "SELECT * FROM coven_network", "one" | "w")
-| ("sync_facts.rs", "SELECT metered,unmetered_only FROM coven_network", "one" | "w") =>
+("coven_network", "SELECT * FROM coven_network", "one" | "w") =>
     Some("one constant row, and the setting's table holds at most one row"),
 ("coven_pins", "SELECT * FROM coven_pins", "coven_pins") =>
     Some("the table lists every pinned file"),
@@ -77,8 +75,6 @@ fn database_reason(statement: &Statement, relation: &str) -> Option<&'static str
     Some("the view lists every circle's members, reached from the memberships or from the members they name"),
 ("database_sync.rs", "SELECT slot,record FROM _coven_slot_records ORDER BY slot", "_coven_slot_records") =>
     Some("opening reconstructs authenticated administrative history once; passes retain the result"),
-("sql_versions.rs", "SELECT kind,name,version FROM _coven_sql_versions WHERE kind IN ('collation','function')", "_coven_sql_versions") =>
-    Some("opening compares every recorded version with the app's registered ones"),
 ("members.rs", "SELECT member,signing,sealing,role,removed,access FROM _coven_members WHERE removed=0 ORDER BY member", "_coven_members") =>
     Some("the member list returns every current member"),
 ("download.rs", "SELECT (SELECT publication FROM _coven_snapshot_schema WHERE EXISTS(SELECT 1 FROM _coven_members))", "_coven_snapshot_schema" | "_coven_members") =>
@@ -117,7 +113,7 @@ fn database_reason(statement: &Statement, relation: &str) -> Option<&'static str
     Some("operations() returns every unfinished journal entry"),
 ("operation.rs", "SELECT id FROM _coven_operations WHERE kind=?1 OR started_by=?1 ORDER BY id", "_coven_operations") =>
     Some("the transaction that stops this device for good ends every invite and every operation an invite started, among the unfinished journal entries"),
-("snapshot_conflicts.rs" | "snapshot_materialize.rs", _, "i" | "b") =>
+("snapshot_conflicts.rs", _, "i" | "b") =>
     Some("a reload visits each row it installed, or had before, once; each lookup of the device's own records is indexed"),
 ("snapshot_files.rs", _, "c" | "p" | "d" | "temp._coven_install_stored" | "temp._coven_install_references") =>
     Some("a reload visits each row it changed once, and each file reference and stored file those rows hold; each lookup of the device's own records is indexed"),

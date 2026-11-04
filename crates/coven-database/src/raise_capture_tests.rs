@@ -566,9 +566,6 @@ pub(crate) fn scan_reason(
     relation: &str,
 ) -> Option<&'static str> {
     match (file, template, relation) {
-        ("raise_capture.rs", "DELETE FROM _coven_raise_captures", "_coven_raise_captures") => {
-            Some("once per breaking migration: replace the previous unpublished capture")
-        }
         (
             "raise_capture.rs",
             "SELECT audience,version,through,covers FROM _coven_raise_captures ORDER BY audience",

@@ -1,6 +1,8 @@
 //! Every internal statement's query plan, against a populated schema, scans
-//! only what `internal_schema_scan_reasons.rs` names; and the tables coven's
-//! triggers keep agree with what they keep, however that schema was filled.
+//! only what `internal_schema_scan_reasons.rs` names, and each reason it
+//! names, every alternative of its pattern included, still allows a scan;
+//! and the tables coven's triggers keep agree with what they keep, however
+//! that schema was filled.
 
 use super::{reason, Statement};
 use rusqlite::Connection;
@@ -702,6 +704,7 @@ fn internal_query_plans() {
         .collect::<rusqlite::Result<_>>()
         .unwrap();
     let mut failures = Vec::new();
+    let mut answered = Answered::new();
     // A freshly opened store has no statistics. Also check populated/analyzed
     // stores, so neither skip-scans nor one accidental join order hide a gap.
     for analyzed in [false, true] {
@@ -717,7 +720,7 @@ fn internal_query_plans() {
                         .map(str::to_owned),
                 );
             }
-            if plans.iter().any(|plan| unapproved_scan(statement, plan)) {
+            if plans.iter().any(|plan| unapproved_scan(statement, plan, &mut answered)) {
                 failures.push(format!(
                     "{}:{} (analyzed={analyzed}): {}\n{}",
                     statement.file,
@@ -738,7 +741,7 @@ fn internal_query_plans() {
                     // VM counters have no relation name. Only a statement
                     // listed for "database" may walk unnamed entries.
                     if read.get_status(rusqlite::StatementStatus::FullscanStep) != 0
-                        && reason(statement, "database").is_none()
+                        && answered.reason(statement, "database").is_none()
                     {
                         failures.push(format!(
                             "{}:{}: hidden scan in {}",
@@ -752,6 +755,7 @@ fn internal_query_plans() {
     for index in indexes.difference(&used) {
         failures.push(format!("unused secondary index: {index}"));
     }
+    failures.extend(arms::unmatched(&answered));
     assert!(failures.is_empty(), "{}", failures.join("\n\n"));
 }
 
@@ -768,7 +772,7 @@ fn plans(db: &Connection, statement: &Statement) -> Vec<String> {
     plans
 }
 
-fn unapproved_scan(statement: &Statement, plan: &str) -> bool {
+fn unapproved_scan(statement: &Statement, plan: &str, answered: &mut Answered) -> bool {
     let Some(scan) = plan.strip_prefix("SCAN ") else {
         return false;
     };
@@ -777,7 +781,184 @@ fn unapproved_scan(statement: &Statement, plan: &str) -> bool {
         return false;
     }
     let relation = scan.split_whitespace().next().unwrap();
-    reason(statement, relation).is_none()
+    answered.reason(statement, relation).is_none()
+}
+
+/// Each scan a reason allowed: the statement's file and template, the
+/// relation scanned, and the reason.
+struct Answered(BTreeSet<(String, String, String, &'static str)>);
+
+impl Answered {
+    fn new() -> Self {
+        Self(BTreeSet::new())
+    }
+
+    /// The reason for `statement` scanning `relation`, kept when there is one.
+    fn reason(&mut self, statement: &Statement, relation: &str) -> Option<&'static str> {
+        let found = reason(statement, relation);
+        if let Some(found) = found {
+            self.0.insert((
+                statement.file.clone(),
+                statement.template.clone(),
+                relation.to_owned(),
+                found,
+            ));
+        }
+        found
+    }
+}
+
+/// The scan reasons as their sources write them: each arm of
+/// `internal_schema_scan_reasons.rs`'s `database_reason` and of each
+/// domain's `scan_reason`, so a reason whose statement or scan is gone is
+/// found.
+mod arms {
+    use super::Answered;
+    use std::path::Path;
+
+    /// One element of an arm's `(file, template, relation)` pattern: the
+    /// literals it names, or none when it takes any value.
+    type Names = Option<Vec<String>>;
+
+    struct Arm {
+        file: String,
+        line: usize,
+        reason: String,
+        alternatives: Vec<[Names; 3]>,
+    }
+
+    /// Each arm no audited scan answered, and each literal alternative of an
+    /// arm no audited scan matched.
+    pub(super) fn unmatched(answered: &Answered) -> Vec<String> {
+        let mut failures = Vec::new();
+        for arm in arms() {
+            if !answered.0.iter().any(|(_, _, _, reason)| *reason == arm.reason) {
+                failures.push(format!(
+                    "{}:{}: no scan needs the reason \"{}\"",
+                    arm.file, arm.line, arm.reason
+                ));
+                continue;
+            }
+            for [file, template, relation] in &arm.alternatives {
+                for file in each(file) {
+                    for template in each(template) {
+                        for relation in each(relation) {
+                            let matched = answered.0.iter().any(|(f, t, r, reason)| {
+                                *reason == arm.reason
+                                    && file.is_none_or(|file| file == f)
+                                    && template.is_none_or(|template| template == t)
+                                    && relation.is_none_or(|relation| relation == r)
+                            });
+                            if !matched {
+                                failures.push(format!(
+                                    "{}:{}: no scan of {} by {}'s {} needs its reason",
+                                    arm.file,
+                                    arm.line,
+                                    relation.unwrap_or("any relation"),
+                                    file.unwrap_or("any file"),
+                                    template.unwrap_or("statements"),
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        failures
+    }
+
+    /// Each literal `names` holds, or one `None` when it takes any value.
+    fn each(names: &Names) -> Vec<Option<&str>> {
+        match names {
+            Some(names) => names.iter().map(|name| Some(name.as_str())).collect(),
+            None => vec![None],
+        }
+    }
+
+    fn arms() -> Vec<Arm> {
+        let mut arms = Vec::new();
+        let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        for entry in std::fs::read_dir(&src).unwrap() {
+            let path = entry.unwrap().path();
+            let name = path.file_name().unwrap().to_str().unwrap().to_owned();
+            let function = match name.as_str() {
+                "internal_schema_scan_reasons.rs" => "database_reason",
+                _ if name.ends_with("_tests.rs") => "scan_reason",
+                _ => continue,
+            };
+            let file = syn::parse_file(&std::fs::read_to_string(&path).unwrap()).unwrap();
+            for item in &file.items {
+                let syn::Item::Fn(item) = item else { continue };
+                if item.sig.ident != function {
+                    continue;
+                }
+                let Some(syn::Stmt::Expr(syn::Expr::Match(matched), None)) =
+                    item.block.stmts.last()
+                else {
+                    panic!("{name}: {function} ends in its match");
+                };
+                for arm in &matched.arms {
+                    if matches!(arm.pat, syn::Pat::Wild(_)) {
+                        continue;
+                    }
+                    arms.push(Arm {
+                        file: name.clone(),
+                        line: syn::spanned::Spanned::span(&arm.pat).start().line,
+                        reason: reason(&arm.body)
+                            .unwrap_or_else(|| panic!("{name}: an arm's reason is a literal")),
+                        alternatives: alternatives(&arm.pat, &name),
+                    });
+                }
+            }
+        }
+        arms
+    }
+
+    /// The literal an arm's `Some("…")` gives.
+    fn reason(body: &syn::Expr) -> Option<String> {
+        if let syn::Expr::Block(block) = body {
+            let [syn::Stmt::Expr(body, None)] = block.block.stmts.as_slice() else { return None };
+            return reason(body);
+        }
+        let syn::Expr::Call(call) = body else { return None };
+        let [syn::Expr::Lit(syn::ExprLit { lit: syn::Lit::Str(reason), .. })] =
+            call.args.iter().collect::<Vec<_>>()[..]
+        else {
+            return None;
+        };
+        Some(reason.value())
+    }
+
+    /// Each `(file, template, relation)` tuple of an arm's pattern.
+    fn alternatives(pattern: &syn::Pat, name: &str) -> Vec<[Names; 3]> {
+        match pattern {
+            syn::Pat::Or(or) => or.cases.iter().flat_map(|case| alternatives(case, name)).collect(),
+            syn::Pat::Paren(paren) => alternatives(&paren.pat, name),
+            syn::Pat::Guard(guarded) => alternatives(&guarded.pat, name),
+            syn::Pat::Tuple(tuple) => {
+                let elements: Vec<Names> = tuple.elems.iter().map(names).collect();
+                let [file, template, relation] = <[Names; 3]>::try_from(elements)
+                    .unwrap_or_else(|_| panic!("{name}: a reason's pattern is a triple"));
+                vec![[file, template, relation]]
+            }
+            _ => panic!(
+                "{name}:{}: a reason's pattern is a triple or an or-pattern of triples",
+                syn::spanned::Spanned::span(pattern).start().line
+            ),
+        }
+    }
+
+    fn names(pattern: &syn::Pat) -> Names {
+        match pattern {
+            syn::Pat::Lit(syn::PatLit { lit: syn::Lit::Str(literal), .. }) => {
+                Some(vec![literal.value()])
+            }
+            syn::Pat::Or(or) => {
+                Some(or.cases.iter().flat_map(|case| names(case).unwrap_or_default()).collect())
+            }
+            _ => None,
+        }
+    }
 }
 
 #[test]
@@ -788,7 +969,8 @@ fn an_allowed_enumeration_does_not_hide_a_scanning_join() {
         .iter()
         .find(|s| s.file == "queued_writes.rs" && s.sql.contains("JOIN _coven_writes"))
         .unwrap();
-    assert!(plans(&db, statement).iter().all(|plan| !unapproved_scan(statement, plan)));
+    let answered = &mut Answered::new();
+    assert!(plans(&db, statement).iter().all(|plan| !unapproved_scan(statement, plan, answered)));
     db.execute_batch("DROP INDEX _coven_write_identity; DROP INDEX _coven_write_slot").unwrap();
-    assert!(plans(&db, statement).iter().any(|plan| unapproved_scan(statement, plan)));
+    assert!(plans(&db, statement).iter().any(|plan| unapproved_scan(statement, plan, answered)));
 }
