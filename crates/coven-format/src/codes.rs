@@ -59,13 +59,15 @@ impl RestoreCode {
         input.finish()?;
         Ok(Self { store, member, member_keys, storage })
     }
+    /// How a restore code's text starts: its kind and version.
+    pub const TEXT_PREFIX: &'static str = "CVR1-";
     /// Canonical uppercase base32, with CRC-32C, erased on drop.
     pub fn to_text(&self) -> Result<Zeroizing<String>, Error> {
-        text_encode("CVR1-", &self.to_bytes()?)
+        text_encode(Self::TEXT_PREFIX, &self.to_bytes()?)
     }
     /// Decode borrowed text without retaining any unerased private copies.
     pub fn from_text(text: &str) -> Result<Self, Error> {
-        Self::from_bytes(&text_decode("CVR1-", text)?)
+        Self::from_bytes(&text_decode(Self::TEXT_PREFIX, text)?)
     }
 }
 
@@ -266,13 +268,15 @@ impl InviteCode {
             storage,
         })
     }
+    /// How an invite code's text starts: its kind and version.
+    pub const TEXT_PREFIX: &'static str = "CVI1-";
     /// Canonical uppercase base32, with CRC-32C, erased on drop.
     pub fn to_text(&self) -> Result<Zeroizing<String>, Error> {
-        text_encode("CVI1-", &self.to_bytes()?)
+        text_encode(Self::TEXT_PREFIX, &self.to_bytes()?)
     }
     /// Decode borrowed text without retaining any unerased private copies.
     pub fn from_text(text: &str) -> Result<Self, Error> {
-        Self::from_bytes(&text_decode("CVI1-", text)?)
+        Self::from_bytes(&text_decode(Self::TEXT_PREFIX, text)?)
     }
 }
 

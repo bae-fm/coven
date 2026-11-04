@@ -153,13 +153,13 @@ enum DecodedCode {
     reason = "a code that does not decode is Invalid, whichever field failed"
 )]
 fn decode(text: &str) -> Result<(DecodedCode, StorageConfig, bool), CodeError> {
-    if text.starts_with("CVR1-") {
+    if text.starts_with(RestoreCode::TEXT_PREFIX) {
         let code = RestoreCode::from_text(text).map_err(|_| CodeError::Invalid)?;
         let storage =
             RestoreStorage::decode(code.storage.as_bytes()).map_err(|_| CodeError::Invalid)?;
         let carries_s3_key = storage.s3_key.is_some();
         Ok((DecodedCode::Restore(code), storage.location, carries_s3_key))
-    } else if text.starts_with("CVI1-") {
+    } else if text.starts_with(InviteCode::TEXT_PREFIX) {
         let code = InviteCode::from_text(text).map_err(|_| CodeError::Invalid)?;
         // Decoding checks that an S3 invite, and only one, carries a whole key.
         let (invitation, carries_s3_key) =
