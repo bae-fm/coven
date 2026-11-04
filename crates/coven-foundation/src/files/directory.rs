@@ -35,6 +35,18 @@ pub enum StoreFile {
     Bootstrap,
 }
 
+impl StoreFile {
+    /// The file's name in the store's directory.
+    pub(super) const fn name(self) -> &'static str {
+        match self {
+            Self::StorageSettings => "storage.json",
+            Self::StoreKeys => "store-keys.sealed",
+            Self::MemberKeys => "member-keys.sealed",
+            Self::Bootstrap => "bootstrap.sealed",
+        }
+    }
+}
+
 /// The two places coven keeps file bytes inside a store (E1).
 #[derive(Clone, Copy, Debug)]
 pub enum FileArea {
@@ -301,13 +313,7 @@ impl StoreDirAccess for StoreDir {
         lock::closed(&self.path, self.id).await
     }
     fn owned_file(&self, file: StoreFile) -> AtomicFile {
-        let name = match file {
-            StoreFile::StorageSettings => "storage.json",
-            StoreFile::StoreKeys => "store-keys.sealed",
-            StoreFile::MemberKeys => "member-keys.sealed",
-            StoreFile::Bootstrap => "bootstrap.sealed",
-        };
-        AtomicFile::new(self.path.join(name))
+        AtomicFile::new(self.path.join(file.name()))
     }
     fn file(&self, area: FileArea, name: &FileName) -> AtomicFile {
         let area = match area {

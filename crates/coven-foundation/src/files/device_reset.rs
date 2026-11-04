@@ -15,7 +15,9 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use super::{atomic_file, bootstrap, settings, DirectoryCreationError, FileError, SettingsError};
+use super::{
+    atomic_file, bootstrap, settings, DirectoryCreationError, FileError, SettingsError, StoreFile,
+};
 use crate::id_source::{DeviceId, StoreId};
 
 pub(crate) const RECORD: &str = "device-reset.json";
@@ -24,7 +26,8 @@ const ARCHIVE_PREFIX: &str = "discarded-device-";
 pub(super) const AREA: &str = ".coven-replacement";
 /// Files describing the store's location and this installation's custody,
 /// which the replacement keeps in place. Everything else is local state.
-const KEPT: [&str; 3] = ["storage.json", "store-keys.sealed", "member-keys.sealed"];
+const KEPT: [StoreFile; 3] =
+    [StoreFile::StorageSettings, StoreFile::StoreKeys, StoreFile::MemberKeys];
 
 /// A replacement of this installation, not a membership removal (E5).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -199,7 +202,7 @@ pub(super) fn discard(directory: &Path, old_device: DeviceId) -> Result<(), File
 /// files the replacement keeps, the settings, which change last, the swap's
 /// own record and marker, the replacement's area and earlier archives.
 fn stays(name: &str) -> bool {
-    KEPT.contains(&name)
+    KEPT.iter().any(|file| file.name() == name)
         || name == settings::SETTINGS_FILE
         || name == RECORD
         || name == bootstrap::MARKER
