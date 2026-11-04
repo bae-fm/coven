@@ -1067,7 +1067,7 @@ impl ByteRange {
     pub fn is_empty(self) -> bool;
 }
 
-/// A provider time: Unix seconds and a nanosecond fraction (D2). It keeps
+/// A provider time: Unix seconds and a nanosecond fraction. It keeps
 /// every digit the provider returned on every platform, which `SystemTime`
 /// cannot: Windows counts it in 100 ns intervals (§20.5). Ordered by time.
 pub struct StorageTime(/* seconds: u64, nanos: u32 */);

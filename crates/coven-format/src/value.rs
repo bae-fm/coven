@@ -201,16 +201,6 @@ impl std::ops::Sub<std::time::Duration> for StorageTime {
     }
 }
 
-impl Wire for StorageTime {
-    fn put(&self, out: &mut Encoder) -> Result<(), Error> {
-        self.seconds.put(out)?;
-        self.nanos.put(out)
-    }
-    fn get(input: &mut Decoder<'_>) -> Result<Self, Error> {
-        Self::new(Wire::get(input)?, Wire::get(input)?)
-    }
-}
-
 pub(crate) fn positive(number: u64) -> Result<(), Error> {
     require(number > 0, "positive number", Rule::Required)
 }
