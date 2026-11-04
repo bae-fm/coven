@@ -1,5 +1,6 @@
 //! Reapply eligible original queue records once over counted state.
 
+use crate::internal_schema::WRITE_DEVICE_SQL;
 use crate::{sqlite::DatabaseConnection, write_schema::WriteSchema, DbError};
 use coven_merge::RowId;
 use std::collections::BTreeSet;
@@ -70,7 +71,7 @@ pub(crate) fn stage(db: &DatabaseConnection, schema: &WriteSchema) -> Result<(),
 }
 
 pub(crate) fn present(db: &DatabaseConnection) -> Result<bool, DbError> {
-    db.query_row("SELECT EXISTS(SELECT 1 FROM _coven_uploads u JOIN _coven_writes w ON substr(w.timestamp,9,8)=u.device AND w.number=u.number WHERE w.slot IS NULL)",[],|r|r.get(0))
+    db.query_row(&format!("SELECT EXISTS(SELECT 1 FROM _coven_uploads u JOIN _coven_writes w ON {WRITE_DEVICE_SQL}=u.device AND w.number=u.number WHERE w.slot IS NULL)"),[],|r|r.get(0))
 }
 
 /// After an applied slot, fold the unclaimed queue over the counted state

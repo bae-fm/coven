@@ -1,5 +1,6 @@
 //! Durable identity and exact attempted bytes for one sequence claim (§5.1).
 
+use crate::internal_schema::WRITE_DEVICE_SQL;
 use crate::{sqlite::DatabaseConnection, write_encoding::counter, DbError, OperationId};
 use coven_format::path::ObjectPath;
 use coven_foundation::id_source::DeviceId;
@@ -381,7 +382,7 @@ pub(crate) fn finish(db: &DatabaseConnection) -> Result<(), DbError> {
         ClaimSettlement::Unknown | ClaimSettlement::Retry => return Err(DbError::ClaimUnsettled),
         ClaimSettlement::Landed if matches!(claim.work, ClaimWork::Writes(_)) => {
             let unconsumed: bool = db.query_row(
-                "SELECT EXISTS(SELECT 1 FROM _coven_upload_claims u LEFT JOIN _coven_writes w ON substr(w.timestamp,9,8)=u.device AND w.number=u.number WHERE u.device=?1 AND u.claim=?2 AND w.slot IS NULL)",
+                &format!("SELECT EXISTS(SELECT 1 FROM _coven_upload_claims u LEFT JOIN _coven_writes w ON {WRITE_DEVICE_SQL}=u.device AND w.number=u.number WHERE u.device=?1 AND u.claim=?2 AND w.slot IS NULL)"),
                 params![claim.device.0.to_be_bytes(), claim.number.to_be_bytes()],
                 |r| r.get(0),
             )?;

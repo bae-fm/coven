@@ -1,5 +1,6 @@
 //! Original authored plaintext, with format and keys fixed by its first upload attempt.
 
+use crate::internal_schema::WRITE_DEVICE_SQL;
 use crate::sqlite::DatabaseConnection;
 use crate::write_encoding::{counter, encoded};
 use crate::DbError;
@@ -388,7 +389,7 @@ pub(crate) fn unconfirmed(
 ) -> Result<Option<WriteId>, DbError> {
     Ok(db
         .query(
-            "SELECT u.number FROM _coven_uploads u JOIN _coven_writes w ON substr(w.timestamp,9,8)=u.device AND w.number=u.number WHERE u.device=?1 AND u.number<=?2 AND w.slot IS NULL ORDER BY u.number LIMIT 1",
+            &format!("SELECT u.number FROM _coven_uploads u JOIN _coven_writes w ON {WRITE_DEVICE_SQL}=u.device AND w.number=u.number WHERE u.device=?1 AND u.number<=?2 AND w.slot IS NULL ORDER BY u.number LIMIT 1"),
             params![
                 through.device.0.to_be_bytes().as_slice(),
                 through.number.to_be_bytes().as_slice()

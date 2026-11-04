@@ -389,10 +389,12 @@ pub(crate) fn persist_rows(
 ) -> Result<(), DbError> {
     let audience = audience_text(audience);
     db.internal_execute(
-        "INSERT INTO _coven_rows(table_name,key,audience,generation,write_id)
-         SELECT g.table_name,g.key,g.audience,g.generation,
-           (SELECT id FROM _coven_writes WHERE substr(timestamp,9,8)=g.device AND number=g.number)
-         FROM temp._coven_install_generations AS g WHERE g.audience=?1",
+        &format!(
+            "INSERT INTO _coven_rows(table_name,key,audience,generation,write_id)
+             SELECT g.table_name,g.key,g.audience,g.generation,
+               (SELECT id FROM _coven_writes WHERE {WRITE_DEVICE_SQL}=g.device AND number=g.number)
+             FROM temp._coven_install_generations AS g WHERE g.audience=?1"
+        ),
         params![audience],
     )?;
     for table in &layout.tables {

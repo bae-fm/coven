@@ -1,6 +1,7 @@
 //! Snapshot streams and atomic reload through the database owner.
 
 use super::Database;
+use crate::internal_schema::WRITE_DEVICE_SQL;
 use crate::DbError;
 use coven_foundation::progress::ProgressReport;
 
@@ -24,7 +25,7 @@ impl Database {
                 };
                 // A slot holding several of the audience's writes counts once.
                 let mut slots = std::collections::BTreeMap::new();
-                db.for_each("SELECT w.slot,s.size,h.header FROM _coven_writes w JOIN _coven_write_slots s ON s.slot=w.slot JOIN _coven_write_headers h ON h.device=substr(w.timestamp,9,8) AND h.number=w.number WHERE w.slot>?1",
+                db.for_each(&format!("SELECT w.slot,s.size,h.header FROM _coven_writes w JOIN _coven_write_slots s ON s.slot=w.slot JOIN _coven_write_headers h ON h.device={WRITE_DEVICE_SQL} AND h.number=w.number WHERE w.slot>?1"),
                     [after.to_be_bytes()], |row| {
                         let header = coven_format::write_stream::WriteHeaderFrame::decode(&row.get::<_, Vec<u8>>(2)?)?;
                         if header.parts.iter().any(|part| part.audience == audience) {
