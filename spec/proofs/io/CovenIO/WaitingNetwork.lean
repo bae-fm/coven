@@ -1,7 +1,8 @@
 import CovenIO.WaitingReopen
 
-/-! The app's network report (§6.7, "Waiting and retrying"; api.md E5
-`network_changed`), and the person's retry (`retry_now`), as
+/-! The network report, which coven makes as it sees the device reach a usable
+network (§6.7, "Waiting and retrying"; api.md E5 "The device's network"), and
+the person's retry (`retry_now`), as
 `RetryWaits::end_reported_waits` runs them for the connection's wait and for
 each operation's and upload's wait. A download has no wait: only the app's
 next read or pin tries it again (`Downloads.canRetry`).
@@ -10,7 +11,7 @@ Every wait names what its failed attempt lacked (`WaitingEvidence`'s
 `Armed.prereq`). An attempt that received no provider response lacked a
 usable network, so its wait names `network`. An attempt the provider
 answered, with a refusal or a server error, names something else: nothing the
-device's network does changes that answer. The app's report that the network
+device's network does changes that answer. The report that the network
 changed is a commit changing `network`: evidence against a wait that names
 it, and none against any other wait. Each wait is its own session; one report
 is one commit to each of them. A `commit` below is any evidence its wait
@@ -244,7 +245,7 @@ namespace Examples
 seconds and names the network. -/
 def locked : Session := ⟨0, 0, some ⟨9, 300, network, false⟩, none⟩
 
-/-- She unlocks it after 20 seconds and the app signals twice: the first signal
+/-- She unlocks it after 20 seconds and coven reports twice: the first report
 ends the wait, the second adds nothing, and one attempt starts at once. -/
 theorem unlocked_starts_at_once :
     (run locked [.tick 20, .commit network, .commit network, .start]).map (·.paid) =

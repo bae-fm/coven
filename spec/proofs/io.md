@@ -77,8 +77,9 @@ waiting and during an attempt. It compares readiness and persisted failure
 counts after each attempted retry, including capped waits and a backward
 wall-clock change.
 
-WaitingNetwork.lean treats the app's network report as a commit changing the
-network, the prerequisite of any wait whose attempt got no provider response:
+WaitingNetwork.lean treats the network report, which coven makes as its watch
+of the device's network sees a usable network appear or change, as a commit
+changing the network, the prerequisite of any wait whose attempt got no provider response:
 the connection's, an operation's or an upload's. A wait after a
 provider's answer names something else, so the report leaves it alone. The
 person's retry (`retry_now`) is a commit changing whatever each wait names, so
@@ -198,7 +199,16 @@ that state shows only while no slot and no file moves, with a wait to name:
 what the first waiting upload waits for, by `Facts.uploadWait`, which takes
 what holds every upload first (sync not running, a provider's cooldown, a
 blocked pass), then what holds this one (the pause, for a trailing upload,
-then its backoff), else its turn.
+then a metered network the setting to transfer only on unmetered networks
+holds it on, then its backoff), else its turn.
+
+Which uploads that setting holds is one definition, `Upload.heldOnMetered`:
+the trailing ones, as the pause holds them. `metered_holds` proves that with
+the setting on and the network metered, every upload it holds waits for
+something before its backoff and its turn, and `metered_only_held` that an
+upload waits for the network only then. `network_keeps_state` proves that a
+change of network never changes which state shows: the state doesn't read
+the network, only what a waiting upload waits for does.
 
 `Reason.state` maps each pending reason to one state or none, as a
 function. A wait names none (`waits_name_no_state`), and so does a verdict

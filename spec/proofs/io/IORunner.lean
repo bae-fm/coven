@@ -322,6 +322,7 @@ def waitName : UploadWait → String
   | .coolingDown => "coolingDown"
   | .blocked => "blocked"
   | .paused => "paused"
+  | .metered => "metered"
   | .retrying => "retrying"
   | .queued => "queued"
 
@@ -338,8 +339,8 @@ private def upload (j : Json) : Except String Upload := do
 
 /-- `SyncState.state` of one set of facts: `storage` (`none`, `signedOut`,
 `connected`), `last` (`synced` or `{"failed": pass failure}`), `moving`,
-`downloading`, `uploads`, `unsent`, `running`, `cooling`, `paused` and the
-pending `records`' reasons. Reports the state's name as `state`, and, for
+`downloading`, `uploads`, `unsent`, `running`, `cooling`, `paused`,
+`unmeteredOnly`, `metered` and the pending `records`' reasons. Reports the state's name as `state`, and, for
 waiting to sync, what the first waiting upload waits for as `wait`. -/
 def run (j : Json) : Except String Json := do
   let storage ← named [("none", Storage.none), ("signedOut", .signedOut), ("connected", .connected)]
@@ -357,7 +358,9 @@ def run (j : Json) : Except String Json := do
     unsent := ← j.getObjValAs? Bool "unsent"
     running := ← j.getObjValAs? Bool "running"
     cooling := ← j.getObjValAs? Bool "cooling"
-    paused := ← j.getObjValAs? Bool "paused" }
+    paused := ← j.getObjValAs? Bool "paused"
+    unmeteredOnly := ← j.getObjValAs? Bool "unmeteredOnly"
+    metered := ← j.getObjValAs? Bool "metered" }
   let shown := state facts
   let wait := match shown, facts.waits with
     | .waitingToSync, w :: _ => toJson (waitName w)

@@ -90,7 +90,7 @@ def PassEnd.outcome : PassEnd → Outcome
   | .stopped => .notSyncing
 
 /-- Where one report number's request stands. Numbers of other reports, such
-as `network_changed`, and numbers not reached yet stay `unasked`. -/
+as the network report, and numbers not reached yet stay `unasked`. -/
 inductive Phase
   | unasked
   | waiting
@@ -113,7 +113,7 @@ structure Loop where
 inductive Event
   /-- `retry_now`: answered at once as the effect says, or waiting. -/
   | ask
-  /-- Another report: `network_changed`. -/
+  /-- Another report: the device reached a usable network. -/
   | report
   /-- `start_sync`, or setup starting a new connection's loop. -/
   | start

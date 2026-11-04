@@ -14,6 +14,12 @@ uploading shows syncing; one queued with nothing moving shows waiting to
 sync, with what it waits for (`UploadWait`); one whose source failed shows
 failed, naming the file.
 
+Coven watches the device's network. With the setting to transfer only on
+unmetered networks on, a metered network holds the uploads the setting holds
+(`Upload.heldOnMetered`): they wait, named `metered`, until the network is
+unmetered or the setting goes off. Which network the device is on changes
+what an upload waits for, never which state shows (`network_keeps_state`).
+
 The state is computed, never stored, from facts that are each true on their
 own: whether a location is recorded and this device holds credentials for it
 (`Storage`), how the last pass that reached storage ended (`LastPass`),
@@ -50,7 +56,9 @@ this device's in storage (`synced_files_stored`); a file whose source failed
 shows failed or what outranks it (`bad_file_fails`); a quiet pass keeps the
 state (`quiet_pass_keeps`); the time of the last finished sync never goes
 backward and only a pass reaching the read end changes it
-(`last_synced_never_back`, `last_synced_kept`). Each pending reason maps to
+(`last_synced_never_back`, `last_synced_kept`); a metered network with the
+setting on names `metered` for every upload it holds unless something before
+it does, and only then (`metered_holds`, `metered_only_held`). Each pending reason maps to
 one state or none by `Reason.state`, a function; waits map to none
 (`waits_name_no_state`), and a file that can't be uploaded maps to failed
 (`file_failures_name_failed`). -/
@@ -260,6 +268,9 @@ inductive UploadWait
   | blocked
   /-- The app paused uploads, and this one trails. -/
   | paused
+  /-- The device's network is metered, the setting to transfer only on
+  unmetered networks is on, and the setting holds this upload. -/
+  | metered
   /-- Its last attempt failed; it retries after its backoff. -/
   | retrying
   /-- Its turn hasn't come. -/
@@ -268,7 +279,9 @@ inductive UploadWait
 
 /-- What the state is computed from. `last`, `lastSynced`, `records`, the
 queues and the settings survive reopening; `passing`, `moving`,
-`downloading` and an upload's moving are this process's. -/
+`downloading` and an upload's moving are this process's, and so is
+`metered`, which the process reads from the platform as the store opens and
+whenever the network changes. -/
 structure Facts where
   storage : Storage
   last : LastPass
@@ -284,6 +297,10 @@ structure Facts where
   cooling : Bool
   /-- The app paused uploads. -/
   paused : Bool
+  /-- The setting to transfer only on unmetered networks is on. -/
+  unmeteredOnly : Bool
+  /-- The platform says the device's network is metered. -/
+  metered : Bool
   /-- The time of the last pass that reached the read end. -/
   lastSynced : Option Nat
   deriving DecidableEq, Repr
@@ -347,13 +364,26 @@ def Facts.blocked (f : Facts) : Bool :=
   | .failed (.blocked _) => true
   | _ => false
 
+/-- The uploads the setting to transfer only on unmetered networks holds
+while the network is metered: the trailing ones, as the pause holds them.
+Whether it holds bound ones too is a choice of this one definition. -/
+def Upload.heldOnMetered (u : Upload) : Bool := !u.bound
+
+/-- The setting holds this upload now: it is on, the network is metered,
+and the upload is one it holds. -/
+def Facts.meteredHolds (f : Facts) (u : Upload) : Bool :=
+  f.unmeteredOnly && f.metered && u.heldOnMetered
+
 /-- What one queued upload waits for: what holds every upload first, then
-what holds this one. -/
+what holds this one. The pause comes before the network, which doesn't
+matter while it holds; the network before the backoff, since an upload
+whose backoff ends still can't go out on it. -/
 def Facts.uploadWait (f : Facts) (u : Upload) : UploadWait :=
   if !f.running then .notSyncing
   else if f.cooling then .coolingDown
   else if f.blocked then .blocked
   else if f.paused && !u.bound then .paused
+  else if f.meteredHolds u then .metered
   else if u.retrying then .retrying
   else .queued
 
@@ -363,8 +393,8 @@ def Facts.waits (f : Facts) : List UploadWait :=
   f.uploads.filterMap fun u =>
     if u.candidate = some .waitingToSync then some (f.uploadWait u) else none
 
-/-- What the state reads; `passing`, the settings and `lastSynced` it
-doesn't. -/
+/-- What the state reads; `passing`, the settings, the network and
+`lastSynced` it doesn't. -/
 def Facts.view (f : Facts) :=
   (f.storage, f.last, f.moving, f.downloading, f.uploads, f.unsent, f.records)
 
@@ -737,8 +767,11 @@ inductive Event
   /-- Opening, setup or forgetting records whether storage is set up here. -/
   | storage (s : Storage)
   /-- Sync starts or stops, a cooldown begins or ends, the app pauses or
-  resumes uploads. -/
-  | settings (running cooling paused : Bool)
+  resumes uploads, or turns the setting to transfer only on unmetered
+  networks on or off. -/
+  | settings (running cooling paused unmeteredOnly : Bool)
+  /-- The platform says the device's network is now metered, or not. -/
+  | network (metered : Bool)
   /-- The process ends and the store opens again. -/
   | reopen
   deriving DecidableEq, Repr
@@ -766,7 +799,8 @@ def step (f : Facts) : Event → Option Facts
   | .queue u => some { f with unsent := u }
   | .pending rs => some { f with records := rs }
   | .storage s => some { f with storage := s }
-  | .settings r c p => some { f with running := r, cooling := c, paused := p }
+  | .settings r c p m => some { f with running := r, cooling := c, paused := p, unmeteredOnly := m }
+  | .network m => some { f with metered := m }
   | .reopen =>
       some { f with passing := false, moving := false, downloading := false,
                     uploads := f.uploads.map Upload.reopened, running := false,
@@ -915,10 +949,45 @@ theorem waiting_pass_synced (f : Facts) (r : Reason) (wait : r.state = none) :
       ({ f with last := .failed (.storage .rateLimited) } : Facts).ended = .synced := by
   simp [Facts.ended, PassFailure.state, wait, Failure.named]
 
+/-! ## Waiting for an unmetered network -/
+
+/-- With the setting on and the network metered, an upload the setting holds
+waits for what holds every upload, for the pause, or for the network: never
+for its backoff or its turn. -/
+theorem metered_holds (f : Facts) (u : Upload) (on : f.unmeteredOnly = true)
+    (metered : f.metered = true) (held : u.heldOnMetered = true) :
+    f.uploadWait u ≠ .retrying ∧ f.uploadWait u ≠ .queued := by
+  have hm : f.meteredHolds u = true := by simp [Facts.meteredHolds, on, metered, held]
+  unfold Facts.uploadWait
+  by_cases r : f.running = true <;> by_cases c : f.cooling = true <;>
+    by_cases b : f.blocked = true <;> by_cases p : (f.paused && !u.bound) = true <;>
+    simp [r, c, b, p, hm]
+
+/-- An upload waits for the network only while the setting is on, the
+network is metered and the setting holds it. -/
+theorem metered_only_held (f : Facts) (u : Upload) (h : f.uploadWait u = .metered) :
+    f.unmeteredOnly = true ∧ f.metered = true ∧ u.heldOnMetered = true := by
+  have hm : f.meteredHolds u = true := by
+    apply Classical.byContradiction
+    intro hm
+    unfold Facts.uploadWait at h
+    by_cases r : f.running = true <;> by_cases c : f.cooling = true <;>
+      by_cases b : f.blocked = true <;> by_cases p : (f.paused && !u.bound) = true <;>
+      by_cases t : u.retrying = true <;> simp [r, c, b, p, hm, t] at h
+  simpa [Facts.meteredHolds, Bool.and_eq_true, and_assoc] using hm
+
+/-- A change of network never changes which state shows, only what a
+waiting upload waits for: the state doesn't read it. -/
+theorem network_keeps_state (f : Facts) (m : Bool) :
+    (step f (.network m)).map state = some (state f) := by
+  simp only [step, Option.map_some, Option.some.injEq]
+  exact state_view (by simp [Facts.view])
+
 namespace Examples
 
 def connected : Facts :=
-  ⟨.connected, .synced, false, false, false, [], false, [], true, false, false, some 100⟩
+  ⟨.connected, .synced, false, false, false, [], false, [], true, false, false, false, false,
+    some 100⟩
 
 def photo (progress : Progress) : Upload := ⟨progress, false, false, none⟩
 
@@ -944,9 +1013,22 @@ example : (run connected [.begin, .finish (.failed .offline) 140, .uploads [phot
 /-- Carol's photo uploads: syncing while it moves, waiting to sync once she
 pauses uploads with it queued, and synced only once it is stored. -/
 example : (run connected [.uploads [photo .moving]]).map state = some .syncing := by decide
-example : (run connected [.settings true false true, .uploads [photo .queued]]).map
+example : (run connected [.settings true false true false, .uploads [photo .queued]]).map
     (fun f => (state f, f.waits)) = some (.waitingToSync, [.paused]) := by decide
 example : (run connected [.uploads [photo .stored]]).map state = some .synced := by decide
+
+/-- Ben's phone transfers only on unmetered networks. On cellular his photo
+waits for Wi-Fi, even once a failed attempt's backoff ends; on Wi-Fi it waits
+only its turn. A bound upload, the setting doesn't hold. -/
+example : (run connected [.settings true false false true, .network true,
+    .uploads [⟨.queued, false, true, none⟩]]).map (fun f => (state f, f.waits)) =
+    some (.waitingToSync, [.metered]) := by decide
+example : (run connected [.settings true false false true, .network true, .network false,
+    .uploads [photo .queued]]).map (fun f => (state f, f.waits)) =
+    some (.waitingToSync, [.queued]) := by decide
+example : (run connected [.settings true false false true, .network true,
+    .uploads [⟨.queued, true, false, none⟩]]).map (fun f => f.waits) =
+    some [.queued] := by decide
 
 /-- Ben's photo upload got a server error and waits out its backoff: waiting
 to sync, retrying; the server error itself names nothing. -/

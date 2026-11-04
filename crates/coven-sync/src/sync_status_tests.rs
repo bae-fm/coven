@@ -367,6 +367,9 @@ fn facts_json(facts: &Facts) -> Value {
         "running": running,
         "cooling": cooling,
         "paused": facts.paused,
+        // Coven holds no upload for a metered network yet.
+        "unmeteredOnly": false,
+        "metered": false,
         "records": records,
     })
 }
