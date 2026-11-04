@@ -424,18 +424,10 @@ impl CovenBuilder {
         let database = self.database(directory.clone())?;
         // Before the swap's marker exists, only the record shows that a
         // replacement is moving the files a reader would open (§19.3).
-        if let Some(record) = directory.unfinished_replacement().map_err(CovenError::from)? {
-            return Err(CovenError::from(StoreLockError::ReplacementUnfinished {
-                store,
-                by: record.by,
-            })
-            .into());
-        }
+        refuse_unfinished_replacement(&directory, store)?;
         let database = database.open_read_only().await?;
         if let Some(identity) = database.store_state().await?.store {
-            identity
-                .check_settings(&directory.settings().map_err(CovenError::from)?)
-                .map_err(CovenError::from)?;
+            check_store_settings(&identity, &directory)?;
         }
         let settings = coven_storage::StorageSettings::new(directory.clone());
         let device = directory.settings().map_err(CovenError::from)?.device_id;
@@ -514,13 +506,7 @@ impl CovenBuilder {
             let keychain = Arc::new(StoreKeychain::new(builder.keychain()?, settings.id));
             // An interrupted replacement resumes only through the call that
             // began it (§19.3).
-            if let Some(record) = directory.unfinished_replacement()? {
-                return Err(StoreLockError::ReplacementUnfinished {
-                    store: settings.id,
-                    by: record.by,
-                }
-                .into());
-            }
+            refuse_unfinished_replacement(&directory, settings.id)?;
             // A copy restored without its non-backed-up custody id, or a
             // keychain that no longer names it, changes nothing (§19.3).
             if keychain.device_id()? != Some(settings.device_id) {
@@ -708,7 +694,7 @@ impl OpeningStore {
         let database = self.database.open_locked(self.lock).await?;
         let state = database.store_state().await?;
         if let Some(identity) = &state.store {
-            identity.check_settings(&self.directory.settings()?)?;
+            check_store_settings(identity, &self.directory)?;
         }
         let waits = Arc::new(
             coven_sync::RetryWaits::open(database.clone(), self.builder.clock.clone()).await?,
@@ -759,6 +745,27 @@ impl OpeningStore {
 }
 
 /// A sync failure while opening, as the opening call reports it.
+/// An interrupted replacement resumes only through the call that began it
+/// (§19.3).
+fn refuse_unfinished_replacement(
+    directory: &impl StoreDirAccess,
+    store: StoreId,
+) -> CovenResult<()> {
+    match directory.unfinished_replacement()? {
+        Some(record) => Err(StoreLockError::ReplacementUnfinished { store, by: record.by }.into()),
+        None => Ok(()),
+    }
+}
+
+/// The store's identity names the store its directory's settings were
+/// written for.
+fn check_store_settings(
+    identity: &coven_database::StoreIdentity,
+    directory: &impl StoreDirAccess,
+) -> CovenResult<()> {
+    Ok(identity.check_settings(&directory.settings()?)?)
+}
+
 /// The device-custody credentials of `store`'s installation.
 pub(crate) fn device_credentials(
     keychain: Arc<Keychain>,
