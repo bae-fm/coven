@@ -9,7 +9,12 @@
 //! counts nothing. Where the platform can't tell, the watch says so: no
 //! network counts and none is metered.
 
-#[cfg(any(test, feature = "test-utils"))]
+// The platforms coven watches; elsewhere it can't tell.
+#[cfg(target_vendor = "apple")]
+#[path = "network_watch_apple.rs"]
+mod platform;
+
+#[cfg(any(test, feature = "test-utils", target_vendor = "apple"))]
 use std::sync::{Arc, Mutex};
 use tokio::sync::watch;
 
@@ -34,9 +39,9 @@ impl NetworkState {
 }
 
 /// One usable network, as the platform names it.
-// Sentinel: only a test's network says what network the device is on until
-// the platform watches arrive, later in this chain; each widens these cfgs.
-#[cfg(any(test, feature = "test-utils"))]
+// Sentinel: the platforms whose watches the rest of this chain adds widen
+// these cfgs; until then only Apple's and a test's network say anything.
+#[cfg(any(test, feature = "test-utils", target_vendor = "apple"))]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct UsableNetwork {
     /// The platform's own name for the network: another name is another
@@ -48,14 +53,14 @@ pub(crate) struct UsableNetwork {
 
 /// Turns what the platform says into the watch's state, counting each
 /// network that appears.
-#[cfg(any(test, feature = "test-utils"))]
+#[cfg(any(test, feature = "test-utils", target_vendor = "apple"))]
 pub(crate) struct NetworkSink {
     /// The usable network the device was last on.
     current: Option<String>,
     state: watch::Sender<NetworkState>,
 }
 
-#[cfg(any(test, feature = "test-utils"))]
+#[cfg(any(test, feature = "test-utils", target_vendor = "apple"))]
 impl NetworkSink {
     fn new() -> Self {
         Self { current: None, state: watch::channel(NetworkState::UNKNOWN).0 }
@@ -108,11 +113,22 @@ pub enum NetworkSource {
 #[error("coven can't watch the device's network: {0}")]
 pub struct NetworkWatchError(String);
 
+#[cfg(target_vendor = "apple")]
+impl NetworkWatchError {
+    /// The platform's failure, as its text.
+    pub(crate) fn new(failure: impl std::fmt::Display) -> Self {
+        Self(failure.to_string())
+    }
+}
+
 /// One open store's watch of the device's network (§6.7): it starts as the
 /// store opens, already holding what the platform says, and stops as it
 /// closes. Each owner that acts on the network holds a view of it.
 pub struct NetworkWatch {
     state: watch::Receiver<NetworkState>,
+    /// The platform's registration, which ends as the watch drops.
+    #[cfg(target_vendor = "apple")]
+    _platform: Option<platform::PlatformWatch>,
 }
 
 impl NetworkWatch {
@@ -120,19 +136,36 @@ impl NetworkWatch {
     /// platform says now.
     pub fn start(source: &NetworkSource) -> Result<Self, NetworkWatchError> {
         match source {
-            // Sentinel: each platform's own watch replaces this, one commit
-            // per platform, in the chain that adds coven's network watch.
-            // Until then every platform is one where coven can't tell.
+            #[cfg(target_vendor = "apple")]
+            NetworkSource::Platform => {
+                let sink = Arc::new(Mutex::new(NetworkSink::new()));
+                let state = sink.lock().expect("network sink poisoned").subscribe();
+                let platform = platform::PlatformWatch::start(sink)?;
+                Ok(Self { state, _platform: Some(platform) })
+            }
+            // Sentinel: the platforms whose watches the rest of this chain
+            // adds leave this arm; until then they are ones where coven
+            // can't tell.
+            #[cfg(not(target_vendor = "apple"))]
             NetworkSource::Platform => Ok(Self::unwatched()),
             #[cfg(any(test, feature = "test-utils"))]
-            NetworkSource::Test(network) => Ok(Self { state: network.subscribe() }),
+            NetworkSource::Test(network) => Ok(Self::without_platform(network.subscribe())),
         }
     }
 
     /// A watch that hears nothing, for work that transfers no file the
     /// network holds: a read-only handle's, and loading's (api.md E4).
     pub fn unwatched() -> Self {
-        Self { state: watch::channel(NetworkState::UNKNOWN).1 }
+        Self::without_platform(watch::channel(NetworkState::UNKNOWN).1)
+    }
+
+    /// A watch of `state` with no platform registration.
+    fn without_platform(state: watch::Receiver<NetworkState>) -> Self {
+        Self {
+            state,
+            #[cfg(target_vendor = "apple")]
+            _platform: None,
+        }
     }
 
     /// A view of the network, for an owner that acts on it.

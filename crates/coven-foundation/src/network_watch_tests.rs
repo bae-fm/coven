@@ -58,3 +58,17 @@ async fn a_view_hears_each_change_and_an_unwatched_one_never_does() {
     let waited = tokio::time::timeout(std::time::Duration::from_millis(10), view.changed()).await;
     assert!(waited.is_err(), "an unwatched network never changes");
 }
+
+/// On macOS and iOS the watch holds what Network.framework says of the path
+/// as it starts, usable or not, and lets the monitor go as it drops.
+#[cfg(target_vendor = "apple")]
+#[test]
+fn the_apple_watch_knows_the_path_as_it_starts() {
+    for _ in 0..3 {
+        let watch = NetworkWatch::start(&NetworkSource::Platform).unwrap();
+        let state = watch.view().current();
+        assert!(state.usable.is_some(), "{state:?}");
+        assert_eq!(state.joined, u64::from(state.usable == Some(true)));
+        drop(watch);
+    }
+}

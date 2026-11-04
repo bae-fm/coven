@@ -705,6 +705,7 @@ tables = [
 "crates/coven-foundation/src/network_watch.rs" = [
     "NetworkWatch::start",
     "NetworkWatch::unwatched",
+    "NetworkWatch::without_platform",
     "NetworkSink::new",
     "TestNetwork::new",
 ]
