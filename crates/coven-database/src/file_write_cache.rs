@@ -37,12 +37,7 @@ impl FileWrite<'_> {
     /// and a kept copy evicted since is `PinChanged`.
     pub(crate) fn pin(&self, prepared: crate::PreparedPin) -> Result<(), DbError> {
         let db = self.database;
-        {
-            let reserved = self.files.reservations.lock().expect("file staging lock poisoned");
-            if prepared.names().any(|name| !reserved.contains(name)) {
-                return Err(DbError::PreparedElsewhere);
-            }
-        }
+        super::held_here(self.files.reservations, prepared.names())?;
         let (copies, kept) = prepared.take();
         // The names go free once the write has decided, whatever the rest
         // of it does.

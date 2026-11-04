@@ -21,6 +21,20 @@ use std::{
     collections::{BTreeMap, BTreeSet},
 };
 
+/// Refuse prepared work unless this store still holds each name it
+/// brings: work prepared by another open store, or by this one before it
+/// closed, isn't held here (`PreparedElsewhere`).
+fn held_here<'n, T: Ord + 'n>(
+    held: &std::sync::Mutex<BTreeSet<T>>,
+    names: impl IntoIterator<Item = &'n T>,
+) -> Result<(), DbError> {
+    let held = held.lock().expect("a store's held names lock poisoned");
+    if names.into_iter().any(|name| !held.contains(name)) {
+        return Err(DbError::PreparedElsewhere);
+    }
+    Ok(())
+}
+
 #[path = "file_write_references.rs"]
 mod references;
 

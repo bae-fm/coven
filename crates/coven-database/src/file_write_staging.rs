@@ -13,12 +13,7 @@ impl FileWrite<'_> {
     /// closed, aren't (`PreparedElsewhere`), and keep their names for their own
     /// store to release.
     pub(crate) fn put_staged<T>(&self, staged: crate::StagedFiles<T>) -> Result<T, DbError> {
-        {
-            let reserved = self.files.reservations.lock().expect("file staging lock poisoned");
-            if staged.names().iter().any(|name| !reserved.contains(name)) {
-                return Err(DbError::PreparedElsewhere);
-            }
-        }
+        super::held_here(self.files.reservations, staged.names())?;
         let (files, names, value) = staged.take();
         self.files.brought.borrow_mut().extend(names);
         self.files.staged.borrow_mut().extend(files);
