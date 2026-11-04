@@ -158,3 +158,67 @@ async fn local_table_writes_against_plain_sqlite() {
         );
     }
 }
+
+/// A read of a pre-update value: a virtual generated column keeps none, and
+/// SQLite answers `SQLITE_RANGE` for it; any other failure is a failed read,
+/// never a missing value.
+#[test]
+fn only_a_virtual_generated_column_reads_as_absent() {
+    use crate::sqlite::pre_update_changes::column_value;
+    let failure = |code| Err(rusqlite::Error::SqliteFailure(rusqlite::ffi::Error::new(code), None));
+    assert_eq!(column_value(failure(rusqlite::ffi::SQLITE_RANGE)).unwrap(), None);
+    assert!(column_value(failure(rusqlite::ffi::SQLITE_MISUSE)).is_err());
+    assert!(column_value(failure(rusqlite::ffi::SQLITE_NOMEM)).is_err());
+    let value = rusqlite::types::ValueRef::Integer(7);
+    assert_eq!(column_value(Ok(value)).unwrap(), Some(value));
+}
+
+/// An update of a row with generated columns: the virtual one reads as
+/// absent before and after, the stored one with its values.
+#[tokio::test]
+async fn a_virtual_generated_column_is_recorded_absent() {
+    const GENERATED: &str = "CREATE TABLE parent(id TEXT NOT NULL PRIMARY KEY, n INTEGER,
+        doubled INTEGER GENERATED ALWAYS AS (n*2) VIRTUAL,
+        tripled INTEGER GENERATED ALWAYS AS (n*3) STORED);";
+    let store = TestStore::new();
+    let db = store
+        .schema(vec![SyncedTable::new("parent", RowIdentity::SharedKey)], GENERATED)
+        .await
+        .unwrap();
+    crate::write::tests::sql(&db, "INSERT INTO parent(id,n) VALUES('p',1)").await.unwrap();
+    let events = db.inspect_writer(|c| {
+        let mut transaction = WriteTransaction::begin(c, false).unwrap();
+        let capture = EventCapture::begin(&mut transaction).unwrap();
+        transaction.within(|db| db.batch("UPDATE parent SET n=2")).unwrap();
+        capture.events()
+    });
+    let integer = |n| Some(SqlValue::from(rusqlite::types::ValueRef::Integer(n)));
+    let text = |s: &str| Some(SqlValue::from(rusqlite::types::ValueRef::Text(s.as_bytes())));
+    assert_eq!(events[0].old, [text("p"), integer(1), None, integer(3)]);
+    assert_eq!(events[0].new, [text("p"), integer(2), None, integer(6)]);
+    db.close().await.unwrap();
+}
+
+/// A hook that fails, as a read of the row it observes can, fails the
+/// transaction with that failure: nothing it missed commits.
+#[tokio::test]
+async fn a_failing_hook_rolls_its_transaction_back() {
+    let store = TestStore::new();
+    let db = store.schema(tables(), SCHEMA).await.unwrap();
+    db.inspect_writer(|c| {
+        let mut transaction = WriteTransaction::begin(c, false).unwrap();
+        transaction
+            .observe_operations(|_, _, _, _| {
+                Err(DbError::Invariant { what: "the row's old value could be read" })
+            })
+            .unwrap();
+        transaction.within(|db| db.batch("INSERT INTO parent VALUES('p')")).unwrap();
+        let committed = transaction.commit(Ok::<_, DbError>(((), Vec::new())));
+        assert!(matches!(committed, Err(DbError::Invariant { .. })), "{committed:?}");
+    });
+    let count = db.inspect_writer(|c| {
+        c.query_row("SELECT count(*) FROM parent", [], |r| r.get::<_, i64>(0)).unwrap()
+    });
+    assert_eq!(count, 0);
+    db.close().await.unwrap();
+}

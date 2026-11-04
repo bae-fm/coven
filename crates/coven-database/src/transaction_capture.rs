@@ -46,6 +46,7 @@ impl SupplementalChanges {
                     lock_unpoisoned(&seen).insert(table);
                 }
             }
+            Ok(())
         })?;
         Ok(Self(changes))
     }

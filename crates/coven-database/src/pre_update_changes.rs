@@ -116,20 +116,59 @@ pub(crate) struct ImageColumns {
 }
 
 impl ImageColumns {
-    fn before(&self, old: &PreUpdateOldValueAccessor) -> RowImage {
-        self.image(|index| old.get_old_column_value(at(index)).ok())
+    fn before(&self, old: &PreUpdateOldValueAccessor) -> Result<RowImage, DbError> {
+        self.image(|index| old_value(old, index))
     }
 
-    fn after(&self, new: &PreUpdateNewValueAccessor) -> RowImage {
-        self.image(|index| new.get_new_column_value(at(index)).ok())
+    fn after(&self, new: &PreUpdateNewValueAccessor) -> Result<RowImage, DbError> {
+        self.image(|index| new_value(new, index))
     }
 
-    fn image<'a>(&self, value: impl Fn(usize) -> Option<ValueRef<'a>>) -> RowImage {
-        RowImage::new(
-            Arc::clone(&self.names),
-            self.positions.iter().map(|index| value(*index).map(SqlValue::from)).collect(),
-        )
+    fn image<'a>(
+        &self,
+        value: impl Fn(usize) -> Result<Option<ValueRef<'a>>, DbError>,
+    ) -> Result<RowImage, DbError> {
+        let values = self
+            .positions
+            .iter()
+            .map(|index| Ok(value(*index)?.map(SqlValue::from)))
+            .collect::<Result<_, DbError>>()?;
+        Ok(RowImage::new(Arc::clone(&self.names), values))
     }
+}
+
+/// The value a pre-update read gives: `None` for a virtual generated column,
+/// which keeps no value and for which SQLite answers `SQLITE_RANGE`. Any
+/// other failure is a failed read, which fails the write, so no capture
+/// takes it for a value that isn't there.
+pub(crate) fn column_value(
+    read: rusqlite::Result<ValueRef<'_>>,
+) -> Result<Option<ValueRef<'_>>, DbError> {
+    match read {
+        Ok(value) => Ok(Some(value)),
+        Err(rusqlite::Error::SqliteFailure(error, _))
+            if error.code == rusqlite::ErrorCode::ParameterOutOfRange =>
+        {
+            Ok(None)
+        }
+        Err(error) => Err(error.into()),
+    }
+}
+
+/// The row's value in column `index` before the operation.
+pub(crate) fn old_value(
+    old: &PreUpdateOldValueAccessor,
+    index: usize,
+) -> Result<Option<ValueRef<'_>>, DbError> {
+    column_value(old.get_old_column_value(at(index)))
+}
+
+/// The row's value in column `index` after the operation.
+pub(crate) fn new_value(
+    new: &PreUpdateNewValueAccessor,
+    index: usize,
+) -> Result<Option<ValueRef<'_>>, DbError> {
+    column_value(new.get_new_column_value(at(index)))
 }
 
 /// One transaction's row changes, as its pre-update hook reports them.
@@ -167,10 +206,15 @@ impl PreUpdateChanges {
     }
 
     /// Record one row operation on the table at `position`.
-    pub(crate) fn record(&mut self, shapes: &TableShapes, position: usize, case: &PreUpdateCase) {
+    pub(crate) fn record(
+        &mut self,
+        shapes: &TableShapes,
+        position: usize,
+        case: &PreUpdateCase,
+    ) -> Result<(), DbError> {
         let shape = &shapes.shapes[position];
         let before = self.rows.len();
-        self.record_rows(shape, position, case);
+        self.record_rows(shape, position, case)?;
         let kept = self.kept.entry(position).or_default();
         *kept += self.rows.len() - before;
         if *kept > ROWS_PER_TABLE && self.scoped.remove(&position).is_some() {
@@ -186,41 +230,45 @@ impl PreUpdateChanges {
         if shape.parent.is_some() {
             self.shadows.insert(position);
         }
+        Ok(())
     }
 
-    fn record_rows(&mut self, shape: &TableShape, position: usize, case: &PreUpdateCase) {
+    fn record_rows(
+        &mut self,
+        shape: &TableShape,
+        position: usize,
+        case: &PreUpdateCase,
+    ) -> Result<(), DbError> {
         let image = self.scoped.get(&position);
         match case {
             PreUpdateCase::Insert(new) => match image {
-                Some(image) => self.rows.push(whole(shape, None, Some(image.after(new)))),
+                Some(image) => self.rows.push(whole(shape, None, Some(image.after(new)?))),
                 None => {
                     self.columns.insert((position, ROW));
                     self.inserted.insert(position);
                 }
             },
             PreUpdateCase::Delete(old) => match image {
-                Some(image) => self.rows.push(whole(shape, Some(image.before(old)), None)),
+                Some(image) => self.rows.push(whole(shape, Some(image.before(old)?), None)),
                 None => {
                     self.columns.insert((position, ROW));
                 }
             },
             PreUpdateCase::Update { old_value_accessor: old, new_value_accessor: new } => {
-                let value = |index: usize| {
-                    (
-                        old.get_old_column_value(at(index)).ok(),
-                        new.get_new_column_value(at(index)).ok(),
-                    )
+                let changed = |index: usize| -> Result<bool, DbError> {
+                    Ok(old_value(old, index)? != new_value(new, index)?)
                 };
-                let key_changed = shape.columns.iter().enumerate().any(|(index, (_, key, _))| {
-                    *key && {
-                        let (before, after) = value(index);
-                        before != after
+                let mut key_changed = false;
+                for (index, (_, key, _)) in shape.columns.iter().enumerate() {
+                    if *key && changed(index)? {
+                        key_changed = true;
+                        break;
                     }
-                });
+                }
                 if shape.whole || key_changed {
                     match image {
                         Some(image) => {
-                            let (before, after) = (image.before(old), image.after(new));
+                            let (before, after) = (image.before(old)?, image.after(new)?);
                             self.rows.push(whole(shape, Some(before), None));
                             self.rows.push(whole(shape, None, Some(after)));
                         }
@@ -228,17 +276,15 @@ impl PreUpdateChanges {
                             self.columns.insert((position, ROW));
                         }
                     }
-                    return;
+                    return Ok(());
                 }
-                let rows = image.map(|image| (Some(image.before(old)), Some(image.after(new))));
+                let rows = match image {
+                    Some(image) => Some((Some(image.before(old)?), Some(image.after(new)?))),
+                    None => None,
+                };
                 for (index, (name, key, hidden)) in shape.columns.iter().enumerate() {
                     // Sessions omit generated columns; they can change with their inputs.
-                    if *key
-                        || (!*hidden && {
-                            let (before, after) = value(index);
-                            before == after
-                        })
-                    {
+                    if *key || (!*hidden && !changed(index)?) {
                         continue;
                     }
                     match &rows {
@@ -255,6 +301,7 @@ impl PreUpdateChanges {
             }
             PreUpdateCase::Unknown => {}
         }
+        Ok(())
     }
 
     /// The live-query changes the operations recorded made.

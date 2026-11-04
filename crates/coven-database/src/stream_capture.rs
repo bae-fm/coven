@@ -56,17 +56,18 @@ impl StreamCapture {
         transaction.observe_operations(
             move |_, schema: &str, table: &str, case: &rusqlite::hooks::PreUpdateCase| {
                 if schema != "main" {
-                    return;
+                    return Ok(());
                 }
                 match &mut *lock_unpoisoned(&observed) {
                     Recorded::Rows { shapes, changes } => match shapes.position(table) {
-                        Some(position) => changes.record(shapes, position, case),
+                        Some(position) => return changes.record(shapes, position, case),
                         None => changes.unshaped(table),
                     },
                     Recorded::Tables(tables) => {
                         tables.insert(table.to_ascii_lowercase());
                     }
                 }
+                Ok(())
             },
         )?;
         Ok(Self { recorded })

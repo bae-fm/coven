@@ -6,6 +6,7 @@
 //! session runs until it ends. Only a synced table's operations are kept
 //! whole; a device-local table's are kept as live queries need them.
 
+use super::pre_update_changes::{new_value, old_value};
 use super::write_transaction::WriteTransaction;
 use crate::sql_value::SqlValue;
 use crate::DbError;
@@ -21,7 +22,7 @@ pub(crate) struct Event {
     /// Insert, update or delete.
     pub(crate) action: Action,
     /// Every column before the operation, in declaration order; `None` for a
-    /// virtual generated column. Empty for an insert.
+    /// virtual generated column, which keeps no value. Empty for an insert.
     pub(crate) old: Vec<Option<SqlValue>>,
     /// Every column after the operation; empty for a delete.
     pub(crate) new: Vec<Option<SqlValue>>,
@@ -68,17 +69,16 @@ impl EventCapture {
         transaction.observe_operations(
             move |action: Action, schema: &str, table: &str, case: &PreUpdateCase| {
                 if schema != "main" {
-                    return;
+                    return Ok(());
                 }
                 match tables.position(table) {
                     Some(position) if tables.synced(position) => {}
                     Some(position) => {
-                        lock_unpoisoned(&recorded).local.record(&tables, position, case);
-                        return;
+                        return lock_unpoisoned(&recorded).local.record(&tables, position, case);
                     }
                     None => {
                         lock_unpoisoned(&recorded).local.unshaped(table);
-                        return;
+                        return Ok(());
                     }
                 }
                 let depth = match case {
@@ -87,46 +87,48 @@ impl EventCapture {
                     PreUpdateCase::Update { new_value_accessor, .. } => {
                         new_value_accessor.get_query_depth()
                     }
-                    PreUpdateCase::Unknown => return,
+                    PreUpdateCase::Unknown => return Ok(()),
                 };
+                let count = |columns: i32| 0..usize::try_from(columns).unwrap_or(0);
                 let old = |accessor: &rusqlite::hooks::PreUpdateOldValueAccessor| {
-                    (0..accessor.get_column_count())
-                        .map(|i| accessor.get_old_column_value(i).ok().map(SqlValue::from))
-                        .collect::<Vec<_>>()
+                    count(accessor.get_column_count())
+                        .map(|i| Ok(old_value(accessor, i)?.map(SqlValue::from)))
+                        .collect::<Result<Vec<_>, DbError>>()
                 };
                 let new = |accessor: &rusqlite::hooks::PreUpdateNewValueAccessor| {
-                    (0..accessor.get_column_count())
-                        .map(|i| accessor.get_new_column_value(i).ok().map(SqlValue::from))
-                        .collect::<Vec<_>>()
+                    count(accessor.get_column_count())
+                        .map(|i| Ok(new_value(accessor, i)?.map(SqlValue::from)))
+                        .collect::<Result<Vec<_>, DbError>>()
                 };
                 let event = match case {
                     PreUpdateCase::Insert(accessor) => Event {
                         table: table.to_owned(),
                         action,
                         old: Vec::new(),
-                        new: new(accessor),
+                        new: new(accessor)?,
                         rowids: (accessor.get_new_row_id(), accessor.get_new_row_id()),
                     },
                     PreUpdateCase::Delete(accessor) => Event {
                         table: table.to_owned(),
                         action,
-                        old: old(accessor),
+                        old: old(accessor)?,
                         new: Vec::new(),
                         rowids: (accessor.get_old_row_id(), accessor.get_old_row_id()),
                     },
                     PreUpdateCase::Update { old_value_accessor, new_value_accessor } => Event {
                         table: table.to_owned(),
                         action,
-                        old: old(old_value_accessor),
-                        new: new(new_value_accessor),
+                        old: old(old_value_accessor)?,
+                        new: new(new_value_accessor)?,
                         rowids: (
                             old_value_accessor.get_old_row_id(),
                             new_value_accessor.get_new_row_id(),
                         ),
                     },
-                    PreUpdateCase::Unknown => return,
+                    PreUpdateCase::Unknown => return Ok(()),
                 };
                 lock_unpoisoned(&recorded).operations.push((depth, event));
+                Ok(())
             },
         )?;
         Ok(Self { shapes, events })

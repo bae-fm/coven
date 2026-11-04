@@ -8356,11 +8356,13 @@ panic leaves nothing half-changed, by how the state changes.
   and every later one on its connection. The write fails with
   `DbError::Bug(Bug { operation: "authorize a statement", .. })`, the handle
   fails with the same bug, and Dan's app reopens the store.
-- A panic in a hook SQLite calls as a write's transaction changes a row,
-  which records the row for sync and for live queries, is dropped by
-  rusqlite, so the hook keeps it. The transaction rolls back with
-  `DbError::Bug` rather than committing what the hook missed, and the next
-  write goes on.
+- A hook SQLite calls as a write's transaction changes a row, which
+  records the row for sync and for live queries, can't fail. A panic in it,
+  which rusqlite drops, and a read of the row's values that fails are kept
+  by the hook, and the transaction rolls back with `DbError::Bug` or the
+  read's error rather than committing what the hook missed. The next write
+  goes on. Only a virtual generated column, which keeps no value, reads as
+  absent.
 - A panic while the handle's live-query state is held may have left a live
   query untold of a commit, so the handle fails with the bug, and each live
   query returns it as its last result.

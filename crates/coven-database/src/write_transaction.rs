@@ -23,11 +23,12 @@ pub(super) struct WriteTransaction<'a> {
     rows: bool,
     /// Whether it keeps coven's constants once read (`write_constants.rs`).
     constants: bool,
-    /// The first panic in one of its hooks. SQLite's hooks can't fail, and
-    /// rusqlite drops a hook's panic, so a hook call that panicked left
-    /// what it observes incomplete: the transaction rolls back with it
-    /// rather than committing what its observers missed (E15).
-    hook_panic: Arc<Mutex<Option<Bug>>>,
+    /// The first failure of one of its hooks: a read of the row that
+    /// failed, or a panic. SQLite's hooks can't fail, and rusqlite drops a
+    /// hook's panic, so a hook call that failed left what it observes
+    /// incomplete: the transaction rolls back with it rather than committing
+    /// what its observers missed (E15).
+    hook_failure: Arc<Mutex<Option<DbError>>>,
 }
 
 impl<'a> WriteTransaction<'a> {
@@ -45,7 +46,7 @@ impl<'a> WriteTransaction<'a> {
             operations: false,
             rows: false,
             constants: false,
-            hook_panic: Arc::new(Mutex::new(None)),
+            hook_failure: Arc::new(Mutex::new(None)),
         })
     }
 
@@ -61,9 +62,9 @@ impl<'a> WriteTransaction<'a> {
     /// session takes the same hook, so none may begin meanwhile.
     pub(super) fn observe_operations(
         &mut self,
-        mut hook: impl FnMut(Action, &str, &str, &PreUpdateCase) + Send + 'static,
+        mut hook: impl FnMut(Action, &str, &str, &PreUpdateCase) -> Result<(), DbError> + Send + 'static,
     ) -> Result<(), DbError> {
-        let panicked = self.hook_panic.clone();
+        let failed = self.hook_failure.clone();
         #[cfg(test)]
         let fault = self.database.hook_panics.clone();
         self.database.connection.preupdate_hook(Some(
@@ -77,7 +78,7 @@ impl<'a> WriteTransaction<'a> {
                         );
                         hook(action, schema, table, case)
                     });
-                keep_panic(&panicked, observed);
+                keep_failure(&failed, observed);
             },
         ))?;
         self.operations = true;
@@ -98,15 +99,15 @@ impl<'a> WriteTransaction<'a> {
     /// transaction ends.
     pub(super) fn observe_rows(
         &mut self,
-        mut hook: impl FnMut(Action, &str, &str, i64) + Send + 'static,
+        mut hook: impl FnMut(Action, &str, &str, i64) -> Result<(), DbError> + Send + 'static,
     ) -> Result<(), DbError> {
-        let panicked = self.hook_panic.clone();
+        let failed = self.hook_failure.clone();
         self.database.connection.update_hook(Some(
             move |action, schema: &str, table: &str, rowid| {
                 let observed = coven_foundation::task::caught_sync("observe a changed row", || {
                     hook(action, schema, table, rowid)
                 });
-                keep_panic(&panicked, observed);
+                keep_failure(&failed, observed);
             },
         ))?;
         self.rows = true;
@@ -126,9 +127,9 @@ impl<'a> WriteTransaction<'a> {
         outcome: Result<(T, Vec<RowChange>), E>,
     ) -> Result<T, E> {
         let database = &*self.database;
-        let panicked = lock_unpoisoned(&self.hook_panic).clone();
-        let outcome = match panicked {
-            Some(bug) => Err(E::from(DbError::Bug(bug))),
+        let failed = lock_unpoisoned(&self.hook_failure).take();
+        let outcome = match failed {
+            Some(error) => Err(E::from(error)),
             None => outcome,
         };
         let result = outcome.and_then(|(result, changes)| {
@@ -164,11 +165,14 @@ impl<'a> WriteTransaction<'a> {
     }
 }
 
-/// Keep a hook call's panic, the first one, for the commit to fail with.
-fn keep_panic(panicked: &Mutex<Option<Bug>>, observed: Result<(), Bug>) {
-    if let Err(bug) = observed {
-        lock_unpoisoned(panicked).get_or_insert(bug);
-    }
+/// Keep a hook call's failure, the first one, for the commit to fail with.
+fn keep_failure(failed: &Mutex<Option<DbError>>, observed: Result<Result<(), DbError>, Bug>) {
+    let failure = match observed {
+        Ok(Ok(())) => return,
+        Ok(Err(error)) => error,
+        Err(bug) => DbError::Bug(bug),
+    };
+    lock_unpoisoned(failed).get_or_insert(failure);
 }
 
 /// A transaction still open as it drops is one whose callback panicked,
