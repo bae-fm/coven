@@ -14,11 +14,21 @@ impl S3Storage {
     ) -> Result<String, StorageError> {
         let id = coven_foundation::id_source::canonical_uuid(token.as_str())
             .map_err(|source| StorageFailure::SessionMismatch.with_source(source))?;
-        Ok(format!(
-            "{}{}/{id}",
+        Ok(format!("{}{id}", self.uploads_folder(store, device)))
+    }
+
+    /// The key prefix of `device`'s reserved folder, which holds the
+    /// temporaries of its copy uploads (D10).
+    pub(super) fn uploads_folder(
+        &self,
+        store: coven_foundation::id_source::StoreId,
+        device: DeviceId,
+    ) -> String {
+        format!(
+            "{}{}/",
             self.prefix.key_prefix(),
             coven_format::path::device_uploads(store, device)
-        ))
+        )
     }
 
     /// Where a session's native upload lives: its destination, or on a copy

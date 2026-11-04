@@ -17,7 +17,7 @@ impl S3Storage {
         device: DeviceId,
     ) -> Result<Vec<LeftUpload>, StorageError> {
         let base = self.prefix.key_prefix();
-        let folder = format!("{base}{}/", coven_format::path::device_uploads(store, device));
+        let folder = self.uploads_folder(store, device);
         let mut left = Vec::new();
         for prefix in [
             folder.clone(),
