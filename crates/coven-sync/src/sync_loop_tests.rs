@@ -305,7 +305,7 @@ fn at(group: &Group, seconds: u64) {
 
 /// Follow the sync state, as an app does.
 fn follow(device: &Device) -> Followed<SyncStatus> {
-    Followed::new(crate::subscribe_sync_status(&device.sync.database))
+    Followed::new(device.sync.database.subscribe_sync_facts(SyncStatus::computed))
 }
 
 /// Wait for the pass that finishes `seconds` after the epoch.

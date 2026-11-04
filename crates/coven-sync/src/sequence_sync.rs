@@ -299,7 +299,7 @@ impl SequenceSync {
         received: &ReceivedSlot,
         path: &ObjectPath,
     ) -> Result<(), SyncError> {
-        let received = &received.envelope;
+        let received = received.envelope();
         if received.header.device == self.device
             && !self
                 .database

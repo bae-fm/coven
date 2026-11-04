@@ -108,15 +108,10 @@ capability_traits = [
 ]
 construction_only_capability_types = [
     "AssetFiles",
-    "AssetFile",
-    "BootstrapStore",
-    "ReplacementStore",
     "StoreDir",
     "StoreLock",
     "StoreReadLock",
-    "StoreDeletionLock",
     "AtomicFile",
-    "FileWriter",
     "ClockRef",
     "IdSourceRef",
     "Keychain",
@@ -127,9 +122,6 @@ construction_only_capability_types = [
     "DatabaseConnection",
 ]
 non_owner_types = [
-    # A cursor over retained provider bytes names the input connection,
-    # whose lifetime the database owns: closing it invalidates the cursor.
-    "RetainedBytes",
     # Failure transport may carry a published handle; it does not own store lifetime.
     "BootstrapError",
     "StoreCreationError",
@@ -141,14 +133,9 @@ non_owner_types = [
     # connection and admin call as the reqwest client inside it is. It
     # holds the connector's clock only to time the stall window (§6.7).
     "HttpClient",
-    # When one HTTP exchange last moved bytes; it lives for that exchange.
-    "ExchangeProgress",
     # A connection's request totals. It holds the connection's clock
     # only to time each request, and lives with that connection.
     "RequestTally",
-    # One long operation's progress reports. It holds the operation's
-    # clock only to pace them, and lives for that operation.
-    "ProgressReport",
     # What stops a connection's lookups that run too long, shared with
     # that connection's progress handler; it lives with the connection.
     "LookupLimit",
@@ -248,7 +235,6 @@ task_types = [
     # until the flush before that commit (Appendix C.3).
     "FlushBatch",
     "BatchFolder",
-    "Circles",
     "CacheReservation",
     # App bytes one staging wrote, until the write that takes them
     # (§17.3).
@@ -275,8 +261,6 @@ task_types = [
     "RetainedInput",
     "ObjectInput",
     "InputStream",
-    # One run of consecutive slot reads.
-    "SlotReads",
     # One floor observation, snapshot read or upload source.
     "FloorObject",
     "SnapshotObject",
@@ -293,27 +277,14 @@ task_types = [
     "FloorUploadSource",
     "FileTransfer",
     "FileRangeStream",
-    "FileWorker",
     "LocalFileStream",
     "FileStream",
     # An open file's read position and the read ahead it started, which
     # its stream aborts when dropped.
     "FileStreamState",
     "FileStaging",
-    "FileWrite",
-    "WriteFiles",
-    "CovenWrite",
-    "SqlReadContext",
-    "Read",
-    "ReadOwner",
     # A read's call on the blocking pool, awaited by its read.
     "RunningRead",
-    "ChangeCapture",
-    "StreamCapture",
-    "SupplementalChanges",
-    "Observing",
-    "LiveQuery",
-    "ReconfigurableLiveQuery",
     # A test's follow of one live query's results, while it follows them.
     "Followed",
     # One read's response body, holding that read's place under the
@@ -333,21 +304,6 @@ task_types = [
     "HeldBody",
     "HeldRequest",
     "HeldAccess",
-    "SqlTransaction",
-    # A write transaction holds the writer from BEGIN to its end and sets
-    # and removes the hooks that observe it.
-    "WriteTransaction",
-    "ReaderLease",
-    "AppView",
-    "MergeStore",
-    "WriteMetadata",
-    "DatabaseRemovalView",
-    "WriteApply",
-    # A local write's operation hook and its capture borrow
-    # the writer connection for one transaction.
-    "EventCapture",
-    "Tracker",
-    "PreWrite",
     # The retry requests one pass took, answered when it ends.
     "PassRequests",
     # An app's early retry of its uploads, waiting for its answer.
@@ -395,6 +351,38 @@ task_types = [
     # One join's request and the bootstrap file that keeps it, from preparing
     # or resuming the request until the join ends (§13.2).
     "JoiningIdentity",
+    # One read's or write's open file, one CloudKit request's asset, and one
+    # deletion's locks, which the owner of the store's files makes for that
+    # operation.
+    "FileReader",
+    "FileWriter",
+    "AssetFile",
+    "StoreDeletionLock",
+    # When one HTTP exchange last moved bytes; it lives for that exchange.
+    "ExchangeProgress",
+    # One long operation's progress reports, paced by the operation's clock.
+    "ProgressReport",
+    # A cursor over one input object's retained bytes on the input
+    # connection, and what one received slot decodes from them: its
+    # plaintext, each part's, its body, and the slot itself.
+    "RetainedBytes",
+    "SlotPlaintext",
+    "PartPlaintext",
+    "SlotBody",
+    "ReceivedSlot",
+    # One HTTP exchange's request and response bodies.
+    "UploadBody",
+    "DownloadBody",
+    # One scan of the sequence for the keys of a join or a reload.
+    "KeyScan",
+    # One join's bootstrap file, one folder request's sign-in, one S3
+    # detection's probes and one connection attempt (§13.2, §20.7).
+    "Joining",
+    "OAuthFolders",
+    "Probes",
+    "ConnectionAttempt",
+    # A database being built for one open or create, which it ends.
+    "DatabaseBuilder",
 ]
 # The shared in-memory state the runtime and the standard library declare.
 external_types = [
@@ -442,6 +430,10 @@ closed_session_types = [
 # the owner makes one; it, and the owners holding it, return a fresh one; a
 # holder receives it when it is built.
 [handles]
+# A live query the database makes from its readers and commit observer for
+# the app, which keeps it as long as it follows the results (api.md E4).
+LiveQuery = "Database"
+ReconfigurableLiveQuery = "Database"
 # Replaces a live query's request from another task while the query waits
 # for its next result (api.md E4).
 LiveQueryRequests = "ReconfigurableLiveQuery"
@@ -1078,30 +1070,22 @@ tables = [
 
 # These methods derive a scoped capability from their injected directory.
 # They do not acquire an unrelated directory or file for another owner.
-[capability_factories."crates/coven-foundation/src/files/asset_files.rs"]
-"AssetFiles::stage" = "AssetFile"
-
 [capability_factories."crates/coven-foundation/src/files/layout.rs"]
-"StoreDirectories::begin_bootstrap" = "BootstrapStore"
-"StoreDirectories::begin_replacement" = "ReplacementStore"
 "StoreDirectories::store_dir" = "StoreDir"
 "StoreDirectories::create_store_dir" = "StoreDir"
 
 [capability_factories."crates/coven-foundation/src/files/bootstrap.rs"]
 "BootstrapStore::directory" = "StoreDir"
-"BootstrapStore::lock_for_deletion" = "StoreDeletionLock"
 
 [capability_factories."crates/coven-foundation/src/files/replacement.rs"]
 "ReplacementStore::directory" = "StoreDir"
 
 [capability_factories."crates/coven-foundation/src/files/directory.rs"]
-"StoreDir::lock_for_deletion" = "StoreDeletionLock"
 "StoreDir::lock_read_only" = "StoreReadLock"
 "StoreDir::lock_exclusive" = "StoreLock"
 "StoreDir::lock_for_open" = "StoreLock"
 "StoreDir::owned_file" = "AtomicFile"
 "StoreDir::file" = "AtomicFile"
-"StoreDir::create_writer" = "FileWriter"
 
 [[task_starts]]
 kind = "runtime construction"

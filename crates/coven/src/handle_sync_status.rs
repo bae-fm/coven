@@ -12,7 +12,7 @@ impl CovenHandle {
     /// The same pre-built query, live (E4): its first value is the current
     /// state.
     pub fn subscribe_sync_status(&self) -> LiveQuery<SyncStatus> {
-        coven_sync::subscribe_sync_status(&self.database)
+        self.database.subscribe_sync_facts(coven_sync::SyncStatus::computed)
     }
     /// Follow the sync state with `subscribe_sync_status`, as an app does (E5).
     #[cfg(any(test, feature = "test-utils"))]

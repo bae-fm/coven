@@ -10140,9 +10140,11 @@ opens (api.md E1): its owner makes it from its own state to be shared. Only its
 owner makes one, and a clone is one more share of the same state. The handle
 passes up through the owners that hold its owner, at any depth: the store's
 handle answers an app asking for more frequent sync with a guard its sync
-state's intervals make, each layer asking the one below for a fresh one. No
-owner returns a handle it holds itself; one its handle's owner keeps is that
-owner's.
+state's intervals make, each layer asking the one below for a fresh one. A live
+query is the database owner's handle too: the database makes it from its
+readers and the commit observer, the store's handle asks it for one for the
+app, and the app keeps it as long as it follows the results. No owner returns a
+handle it holds itself; one its handle's owner keeps is that owner's.
 Like any capability, a handle flows only into what is being built: a
 holder receives it when it is built, or a free function as an argument, never
 another method, and no holder passes it on. So each holder of a handle was

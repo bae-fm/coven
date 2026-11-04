@@ -81,8 +81,7 @@ pub use sequence_sync::sequence_join::{JoinOutcome, NextCheck};
 pub use sequence_sync::{retry_pending_operation, SequenceSync};
 pub use sign_in::{DeviceCredentials, SessionSignIn};
 pub use sync_status::{
-    record_location, record_opened, subscribe_sync_status, sync_status, SyncCause, SyncState,
-    SyncStatus, SyncWait,
+    record_location, record_opened, sync_status, SyncCause, SyncState, SyncStatus, SyncWait,
 };
 
 #[cfg(test)]

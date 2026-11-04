@@ -14,7 +14,7 @@ use coven_storage::{CloudProvider, StorageFailure};
 use std::time::SystemTime;
 
 /// What a status screen shows (E5, §19.1): the sync state and when sync
-/// last finished, as `sync_status()` reads it and `subscribe_sync_status()`
+/// last finished, as `sync_status()` reads it and the handle's live query
 /// follows it.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SyncStatus {
@@ -552,7 +552,10 @@ impl Facts {
 }
 
 impl SyncStatus {
-    fn computed(facts: coven_database::SyncFacts<PendingRecord>) -> CovenResult<Self> {
+    /// The sync state and when sync last finished, from what one committed
+    /// snapshot of coven's rows holds (§19.1): what `Database::sync_facts`
+    /// reads once and `Database::subscribe_sync_facts` follows.
+    pub fn computed(facts: coven_database::SyncFacts<PendingRecord>) -> CovenResult<Self> {
         let (facts, last_synced) = Facts::read(facts)?;
         Ok(Self { state: facts.state(), last_synced })
     }
@@ -562,13 +565,6 @@ impl SyncStatus {
 /// knows in one committed snapshot (§19.1).
 pub async fn sync_status(database: &coven_database::Database) -> CovenResult<SyncStatus> {
     database.sync_facts(SyncStatus::computed).await
-}
-
-/// The same pre-built query, live: its first value is the current state.
-pub fn subscribe_sync_status(
-    database: &coven_database::Database,
-) -> coven_database::LiveQuery<SyncStatus> {
-    database.subscribe_sync_facts(SyncStatus::computed)
 }
 
 /// The name `coven_sync_status.provider` gives a provider: its own.

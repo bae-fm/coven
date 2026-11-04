@@ -26,7 +26,7 @@ use std::{
 
 /// An authenticated slot: its signed envelope and its decoded body.
 pub(crate) struct ReceivedSlot {
-    pub(crate) envelope: SlotEnvelope,
+    envelope: SlotEnvelope,
     body: SlotBody,
 }
 /// Where a slot lives, its sealed header and routing, and its complete digest.
@@ -37,6 +37,9 @@ pub(crate) struct SlotEnvelope {
     pub(crate) digest: [u8; 32],
 }
 impl ReceivedSlot {
+    pub(crate) fn envelope(&self) -> &SlotEnvelope {
+        &self.envelope
+    }
     pub(crate) fn writes(&self) -> bool {
         matches!(self.body, SlotBody::Writes { .. })
     }
