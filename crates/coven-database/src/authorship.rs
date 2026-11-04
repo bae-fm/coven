@@ -46,7 +46,7 @@ pub struct HeaderEvidence {
     /// Every part's root, in header order.
     pub roots: Vec<[u8; 32]>,
     /// The header signature.
-    pub signature: [u8; 64],
+    pub signature: [u8; coven_crypto::SIGNATURE_LEN],
 }
 
 pub(crate) fn retain_header(

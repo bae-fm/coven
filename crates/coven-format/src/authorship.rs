@@ -551,7 +551,7 @@ pub struct WriteEvidence {
     /// Every part's root, in header order.
     pub roots: Vec<[u8; 32]>,
     /// The header signature over these bytes (D9).
-    pub signature: [u8; 64],
+    pub signature: [u8; coven_crypto::SIGNATURE_LEN],
     /// The openings in the snapshot audience's part.
     pub proof: Multiproof,
 }

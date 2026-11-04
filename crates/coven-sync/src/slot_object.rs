@@ -6,7 +6,7 @@ use crate::{
     write_object::{checked, damaged},
     Refusal, SyncError,
 };
-use coven_crypto::{MemberIdentity, ObjectHasher, Signature, StoreKeyring};
+use coven_crypto::{MemberIdentity, ObjectHasher, Signature, StoreKeyring, SIGNATURE_LEN};
 use coven_database::{
     DownloadedPartStream, DownloadedWriteStream, HeaderEvidence, RetainedBytes, WriteAuthorship,
 };
@@ -150,7 +150,7 @@ pub(crate) fn open(
         return open_bounded(bytes, path, ring, history);
     }
     let sealed_length = size
-        .checked_sub(length as u64 + 64)
+        .checked_sub(length as u64 + SIGNATURE_LEN as u64)
         .ok_or_else(|| damaged(path, Refusal::from(coven_format::Error::Truncated)))?;
     let plaintext_length =
         checked(path, coven_format::sealed_stream::plaintext_length(sealed_length))?;
@@ -215,8 +215,11 @@ pub(crate) fn open(
     let digest = plain.digest().ok_or(coven_database::DbError::Invariant {
         what: "opening a writes slot reads each of its chunks once, in order",
     })?;
-    input.seek(SeekFrom::Start(size - 64)).map_err(|error| read_error(path, error))?;
-    let signature: [u8; 64] = read_exact(&mut input, 64, path)?.try_into().expect("64 bytes");
+    input
+        .seek(SeekFrom::Start(size - SIGNATURE_LEN as u64))
+        .map_err(|error| read_error(path, error))?;
+    let signature: [u8; SIGNATURE_LEN] =
+        read_exact(&mut input, SIGNATURE_LEN, path)?.try_into().expect("a signature's length");
     let digest = digest.finish(signature).verify(
         path,
         &writes.first().expect("positive batch count").signer,
@@ -252,7 +255,7 @@ pub(crate) fn open_bounded(
     }
     let signer = history.signer(&header, Some(&frame)).map_err(|failure| damaged(path, failure))?;
     let mut digest = DigestStream::new();
-    digest.update(&bytes[..bytes.len() - 64]);
+    digest.update(&bytes[..bytes.len() - SIGNATURE_LEN]);
     let digest = digest.finish(*object.signature.as_bytes()).verify(path, &signer, None)?;
     let prefix = object.prefix;
     Ok(ReceivedSlot {
@@ -310,8 +313,8 @@ impl DigestStream {
     pub(crate) fn update(&mut self, bytes: &[u8]) {
         self.signed.update(bytes);
     }
-    /// The object's last 64 bytes.
-    pub(crate) fn finish(self, signature: [u8; 64]) -> SignedDigest {
+    /// The object's last bytes, its signature.
+    pub(crate) fn finish(self, signature: [u8; SIGNATURE_LEN]) -> SignedDigest {
         let mut complete = self.signed.clone();
         complete.update(&signature);
         SignedDigest {
@@ -327,7 +330,7 @@ impl SignedDigest {
         input.seek(SeekFrom::Start(0)).map_err(SyncError::disk)?;
         let mut left = input
             .len()
-            .checked_sub(64)
+            .checked_sub(SIGNATURE_LEN as u64)
             .ok_or_else(|| damaged(path, Refusal::from(coven_format::Error::Truncated)))?;
         let mut digest = DigestStream::new();
         while left > 0 {
@@ -339,7 +342,8 @@ impl SignedDigest {
             digest.update(&bytes);
             left -= bytes.len() as u64;
         }
-        let signature: [u8; 64] = read_exact(&mut input, 64, path)?.try_into().expect("64 bytes");
+        let signature: [u8; SIGNATURE_LEN] =
+            read_exact(&mut input, SIGNATURE_LEN, path)?.try_into().expect("a signature's length");
         Ok(digest.finish(signature))
     }
 
@@ -480,7 +484,8 @@ fn inner(
         checked(path, layout.decode_chunk(&bytes))?;
         hash.update(&bytes);
     }
-    let signature = checked(path, layout.read_signature(&read_inner(&mut input, 64, path)?))?;
+    let signature =
+        checked(path, layout.read_signature(&read_inner(&mut input, SIGNATURE_LEN, path)?))?;
     checked(path, layout.finish(&[]))?;
     signer
         .verify_object(&identity, &hash.finish(), &signature)

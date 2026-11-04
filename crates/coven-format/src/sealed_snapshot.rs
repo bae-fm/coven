@@ -4,7 +4,7 @@ use crate::error::{exact_length, Error};
 use crate::sealed;
 use crate::sequence::Purpose;
 use crate::wire::{Decoder, Encoder, Wire};
-use coven_crypto::Signature;
+use coven_crypto::{Signature, SIGNATURE_LEN};
 use coven_foundation::id_source::KeyId;
 use coven_merge::Audience;
 
@@ -22,10 +22,10 @@ pub struct SnapshotObjectPrefix {
 }
 impl SnapshotObjectPrefix {
     /// Greatest signed prefix end, including a circle and raised version.
-    pub const MAX_SIGNED_PREFIX: usize = 3 + 17 + 16 + 8 + 5 + 64;
+    pub const MAX_SIGNED_PREFIX: usize = 3 + 17 + 16 + 8 + 5 + SIGNATURE_LEN;
     /// Bytes through the prefix signature.
     pub fn signed_length(bytes: &[u8]) -> Result<usize, Error> {
-        Ok(Self::length(bytes)? + 64)
+        Ok(Self::length(bytes)? + SIGNATURE_LEN)
     }
     /// Plaintext size from the complete encrypted object size.
     pub fn plaintext_length(&self, object_length: u64) -> Result<u64, Error> {

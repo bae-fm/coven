@@ -2,11 +2,11 @@
 
 use crate::error::{bound, exact_length, require, Error, Rule};
 
-use coven_crypto::SEALED_OBJECT_CHUNK_OVERHEAD;
+use coven_crypto::{SEALED_OBJECT_CHUNK_OVERHEAD, SIGNATURE_LEN};
 
 pub(crate) fn signature(bytes: &[u8]) -> Result<coven_crypto::Signature, Error> {
-    exact_length(bytes.len(), 64)?;
-    Ok(coven_crypto::Signature::from_bytes(bytes.try_into().expect("64 bytes")))
+    exact_length(bytes.len(), SIGNATURE_LEN)?;
+    Ok(coven_crypto::Signature::from_bytes(bytes.try_into().expect("a signature's length")))
 }
 
 pub(crate) fn prefix(bytes: &[u8], kind: u8) -> Result<(), Error> {

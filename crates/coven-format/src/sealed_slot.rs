@@ -5,7 +5,7 @@ use crate::sealed;
 use crate::sealed_key::{CopyBox, KeyCopyPrefix};
 use crate::sequence::{SlotFrame, MAX_BOUNDED_SLOT};
 use crate::wire::{Decoder, Encoder, Wire};
-use coven_crypto::{Signature, SEALED_OBJECT_CHUNK_OVERHEAD};
+use coven_crypto::{Signature, SEALED_OBJECT_CHUNK_OVERHEAD, SIGNATURE_LEN};
 use coven_foundation::id_source::KeyId;
 
 /// Slot kind and the routing which exists only for key-copy slots.
@@ -143,7 +143,7 @@ impl SlotObjectPrefix {
         let length =
             chunk.len().checked_sub(SEALED_OBJECT_CHUNK_OVERHEAD).ok_or(Error::Truncated)?;
         require(length >= 2 * crate::FRAME_PREFIX_LEN, "slot frames", Rule::Chunk)?;
-        bound(bytes.len() + 4 + chunk.len() + 64, MAX_BOUNDED_SLOT, "slot object")?;
+        bound(bytes.len() + 4 + chunk.len() + SIGNATURE_LEN, MAX_BOUNDED_SLOT, "slot object")?;
         bytes.extend_from_slice(&sealed::encode_chunk(chunk)?);
         Ok(bytes)
     }

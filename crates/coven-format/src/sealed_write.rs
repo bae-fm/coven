@@ -4,7 +4,7 @@ use crate::chunks::CHUNK_SIZE;
 use crate::error::{bound, exact_length, require, Error, Rule};
 use crate::sealed;
 use crate::wire::{Decoder, Encoder, Wire, MAX_ITEMS, MAX_OBJECT};
-use coven_crypto::{Signature, SEALED_OBJECT_CHUNK_OVERHEAD};
+use coven_crypto::{Signature, SEALED_OBJECT_CHUNK_OVERHEAD, SIGNATURE_LEN};
 use coven_foundation::id_source::KeyId;
 
 /// The exact stored size, independent of key identities, nonces and signature
@@ -16,7 +16,7 @@ pub fn sealed_length(header_length: usize, part_lengths: &[u64]) -> Result<u64, 
         + header_length as u64
         + overhead
         + WriteObjectPrefix::tail_length(part_lengths.len()) as u64
-        + 64;
+        + SIGNATURE_LEN as u64;
     for part in part_lengths {
         length = part
             .div_ceil(CHUNK_SIZE as u64)
@@ -64,8 +64,13 @@ pub struct WriteObjectPrefix {
 impl WriteObjectPrefix {
     /// Greatest permitted end of the clear prefix, sealed header, part roots
     /// and header signature (D1/D2, D9).
-    pub const MAX_HEADER_END: usize =
-        23 + 16 * MAX_ITEMS + 4 + SEALED_OBJECT_CHUNK_OVERHEAD + MAX_OBJECT + 32 * MAX_ITEMS + 64;
+    pub const MAX_HEADER_END: usize = 23
+        + 16 * MAX_ITEMS
+        + 4
+        + SEALED_OBJECT_CHUNK_OVERHEAD
+        + MAX_OBJECT
+        + 32 * MAX_ITEMS
+        + SIGNATURE_LEN;
 
     /// Exact end of the header and its tail once its length field is
     /// available. A truncated prefix requires the caller's second bounded
@@ -79,7 +84,7 @@ impl WriteObjectPrefix {
 
     /// Bytes of the part roots and header signature for this many parts.
     pub fn tail_length(parts: usize) -> usize {
-        32 * parts + 64
+        32 * parts + SIGNATURE_LEN
     }
 
     /// Read exactly the part roots and header signature that follow the
@@ -307,7 +312,7 @@ impl WriteObjectLayout {
     }
 
     /// Write a signature only after every declared chunk.
-    pub fn signature(&mut self, signature: &Signature) -> Result<[u8; 64], Error> {
+    pub fn signature(&mut self, signature: &Signature) -> Result<[u8; SIGNATURE_LEN], Error> {
         require(
             matches!(self.position, Position::Signature),
             "write signature position",

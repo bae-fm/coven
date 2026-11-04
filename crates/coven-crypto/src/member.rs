@@ -110,17 +110,20 @@ pub struct MemberPublicKeys {
     pub sealing: SealingKey,
 }
 
+/// The bytes of a detached Ed25519 signature.
+pub const SIGNATURE_LEN: usize = 64;
+
 /// A detached Ed25519 signature on bytes authored by a member (§12).
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct Signature([u8; 64]);
+pub struct Signature([u8; SIGNATURE_LEN]);
 
 impl Signature {
     /// Read a detached signature; authenticity is checked by `SigningKey::verify`.
-    pub fn from_bytes(bytes: [u8; 64]) -> Self {
+    pub fn from_bytes(bytes: [u8; SIGNATURE_LEN]) -> Self {
         Self(bytes)
     }
     /// The signature bytes written beside the signed message.
-    pub fn as_bytes(&self) -> &[u8; 64] {
+    pub fn as_bytes(&self) -> &[u8; SIGNATURE_LEN] {
         &self.0
     }
 }

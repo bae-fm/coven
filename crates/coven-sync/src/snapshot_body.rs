@@ -7,7 +7,7 @@ use crate::{
     write_object::{checked, damaged, database_failure},
     Refusal, SyncError,
 };
-use coven_crypto::{DerivedKeys, StoreKeyring};
+use coven_crypto::{DerivedKeys, StoreKeyring, SIGNATURE_LEN};
 use coven_database::{LoadStep, SnapshotStaging};
 use coven_format::{
     chunks::CHUNK_SIZE,
@@ -55,7 +55,7 @@ impl SnapshotObject {
         let path = &self.input.object().path;
         let size = self.input.object().size;
         let plaintext = checked(path, self.prefix.plaintext_length(size))?;
-        let start = self.prefix_bytes.len() as u64 + 64;
+        let start = (self.prefix_bytes.len() + SIGNATURE_LEN) as u64;
         let key = crate::write_seal::derive(ring, &self.prefix.audience, self.prefix.key)?;
         let mut digest = DigestStream::new();
         digest.update(&self.prefix_bytes);
@@ -63,7 +63,7 @@ impl SnapshotObject {
         let mut body = HashedBody {
             response: self.input.stream_from(storage, start).await?,
             digest,
-            remaining: size - start - 64,
+            remaining: size - start - SIGNATURE_LEN as u64,
             path,
         };
         let mut opening = Opening {
@@ -88,10 +88,11 @@ impl SnapshotObject {
             }
             // Everything but the final signature and what is still to come.
             if let Some(progress) = progress.as_deref_mut() {
-                progress.done(size - 64 - body.remaining);
+                progress.done(size - SIGNATURE_LEN as u64 - body.remaining);
             }
         }
-        let signature: [u8; 64] = body.read(64).await?.try_into().expect("64 bytes");
+        let signature: [u8; SIGNATURE_LEN] =
+            body.read(SIGNATURE_LEN).await?.try_into().expect("a signature's length");
         if let Some(progress) = progress {
             progress.done(size);
         }

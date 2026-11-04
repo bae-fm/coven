@@ -7,7 +7,7 @@ use crate::{
     write_object::{checked, damaged},
     Refusal, SyncError,
 };
-use coven_crypto::{MemberIdentity, Signature, StoreKeyring};
+use coven_crypto::{MemberIdentity, Signature, StoreKeyring, SIGNATURE_LEN};
 use coven_database::Database;
 use coven_format::{
     admin::SnapshotId, floor::OriginalSlot, path::ObjectPath, sealed_snapshot::SnapshotObjectPrefix,
@@ -88,7 +88,7 @@ impl SnapshotObject {
             )
             .await?;
         let (prefix, signature) = checked(path, SnapshotObjectPrefix::decode_signed(&bytes))?;
-        let prefix_bytes = bytes[..bytes.len() - 64].to_vec();
+        let prefix_bytes = bytes[..bytes.len() - SIGNATURE_LEN].to_vec();
         Ok(Self { input, prefix, signature, prefix_bytes })
     }
 
