@@ -13,7 +13,7 @@
 use super::{DropboxStorage, PROVIDER};
 use crate::providers::http::{self, Body, OAuthSession};
 use crate::providers::tests::read_live_settings;
-use crate::providers::{DropboxClients, OAuthClients, OAuthTokenRefresh};
+use crate::providers::{DropboxClients, OAuthClients, OAuthExchange, OAuthTokenRefresh};
 use crate::*;
 use coven_format::value::StorageTime;
 use coven_foundation::{
@@ -48,9 +48,8 @@ async fn tokens(variable: &str, clock: ClockRef) -> OAuthTokens {
             settings.take("DROPBOX_REFRESH_TOKEN"),
         )
     });
-    let clients = OAuthClients::new(
-        Some(DropboxClients::FullDropbox { app_key: client_id.clone() }),
-        None,
+    let clients = OAuthExchange::new(
+        OAuthClients::new(Some(DropboxClients::FullDropbox { app_key: client_id.clone() }), None),
         clock,
     );
     clients

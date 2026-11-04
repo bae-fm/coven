@@ -7,7 +7,7 @@ use crate::{
 use coven_crypto::custody::{KeySession, PersonEntries};
 use coven_foundation::progress::ProgressReport;
 use coven_storage::{
-    providers::{OAuthClients, OAuthFlow, StorageConnector},
+    providers::{OAuthExchange, OAuthFlow, StorageConnector},
     ConnectionCredentials, ProviderAuth, PublicationGate, SetupWaits, Storage, StorageConnection,
     StorageCredentials,
 };
@@ -156,7 +156,7 @@ pub(crate) struct StorageConnections {
     connector: Arc<dyn StorageConnector>,
     oauth: Option<OAuthFlow>,
     /// The app's clients, which refresh a session sign-in.
-    clients: Option<OAuthClients>,
+    clients: Option<OAuthExchange>,
     /// The latest sign-in, held for this session until setup publishes it.
     authentication: tokio::sync::Mutex<Option<Arc<SessionSignIn>>>,
     /// The connection, if any; held while it changes or works.
@@ -199,7 +199,7 @@ impl StorageConnections {
         keys: Arc<KeySession<StoreKeyring>>,
         connector: Arc<dyn StorageConnector>,
         oauth: Option<OAuthFlow>,
-        clients: Option<OAuthClients>,
+        clients: Option<OAuthExchange>,
         authentication: Option<Arc<SessionSignIn>>,
         storage: Option<Arc<StorageConnection>>,
         configured: bool,

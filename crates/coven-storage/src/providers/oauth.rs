@@ -155,46 +155,187 @@ impl AuthorizeRequest {
     }
 }
 
-/// The sign-in and refresh service used by coven's composition roots. Apps
-/// configure `OAuthClients` and `OAuthPresenter`; only coven receives tokens.
+/// The sign-in service used by coven's composition roots. Apps configure
+/// `OAuthClients` and `OAuthPresenter`; only coven receives tokens.
 #[derive(Clone)]
 pub struct OAuthFlow {
-    clients: OAuthClients,
+    exchange: OAuthExchange,
     presenter: Arc<dyn OAuthPresenter>,
 }
 
 impl OAuthFlow {
     /// Compose the provider protocol with the app's presentation capability.
-    pub fn new(clients: OAuthClients, presenter: Arc<dyn OAuthPresenter>) -> Self {
-        Self { clients, presenter }
+    pub fn new(exchange: OAuthExchange, presenter: Arc<dyn OAuthPresenter>) -> Self {
+        Self { exchange, presenter }
     }
 
     /// Exchange a checked redirect. Dropping this future cancels presentation;
     /// no detached task survives it. The caller commits tokens to custody.
     pub async fn authenticate(&self, access: OAuthAccess) -> Result<OAuthTokens, OAuthError> {
         let provider = access.provider();
-        let request =
-            self.clients.build_authorize_request(access, self.presenter.redirect_uri(provider))?;
+        let request = self
+            .exchange
+            .clients
+            .build_authorize_request(access, self.presenter.redirect_uri(provider))?;
         let flow = async {
             let redirect = self.presenter.present(&request.auth_url).await?;
-            self.clients.exchange_redirect(access, &request, redirect).await
+            self.exchange.exchange_redirect(access, &request, redirect).await
         };
         tokio::select! {
             result = flow => result,
-            _ = self.clients.clock.sleep(Duration::from_secs(300)) => Err(OAuthError::Timeout),
+            _ = self.exchange.clock.sleep(Duration::from_secs(300)) => Err(OAuthError::Timeout),
         }
     }
 }
 
-/// The app's OAuth client ids and injected clock (E10).
+/// The app's OAuth client ids (E10).
 #[derive(Clone)]
 pub struct OAuthClients {
     dropbox: Option<DropboxClients>,
     onedrive: Option<String>,
-    clock: ClockRef,
-    client: Result<super::http_client::HttpClient, Arc<reqwest::Error>>,
     #[cfg(any(test, feature = "test-utils"))]
     token_override: Option<String>,
+}
+
+/// The app's OAuth clients with what coven sends their token requests
+/// through: the store's clock and an HTTP client of its own (§20.2).
+/// Building the client fails only when TLS cannot be set up; each request
+/// then returns that failure.
+#[derive(Clone)]
+pub struct OAuthExchange {
+    clients: OAuthClients,
+    clock: ClockRef,
+    client: Result<super::http_client::HttpClient, Arc<reqwest::Error>>,
+}
+
+impl OAuthExchange {
+    /// Send `clients`' token requests timed by `clock`.
+    pub fn new(clients: OAuthClients, clock: ClockRef) -> Self {
+        Self {
+            clients,
+            client: super::http_client::HttpClient::new(clock.clone()).map_err(Arc::new),
+            clock,
+        }
+    }
+    /// Redirect token requests to an HTTP fake while retaining the real protocol.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn with_token_endpoint(mut self, endpoint: String) -> Self {
+        self.clients = self.clients.with_token_endpoint(endpoint);
+        self
+    }
+    async fn exchange_redirect(
+        &self,
+        access: OAuthAccess,
+        request: &AuthorizeRequest,
+        callback: SecretText,
+    ) -> Result<OAuthTokens, OAuthError> {
+        let code = OAuthClients::redirect_code(access.provider(), request, callback)?;
+        let (client_id, _, _, _) = self.clients.config(access)?;
+        self.tokens(
+            access,
+            &[
+                ("grant_type", "authorization_code"),
+                ("code", code.as_str()),
+                ("redirect_uri", request.redirect.as_str()),
+                ("client_id", client_id),
+                ("code_verifier", request.verifier.as_str()),
+            ],
+            None,
+        )
+        .await
+    }
+    /// Obtain replacement tokens. Omitted refresh tokens retain the previous
+    /// token as specified by OAuth.
+    async fn refresh_grant(
+        &self,
+        client_id: &str,
+        access: OAuthAccess,
+        refresh_token: &SecretText,
+    ) -> Result<OAuthTokens, OAuthError> {
+        let (id, _, _, _) = self.clients.config(access)?;
+        if id != client_id {
+            return Err(StorageFailure::InvalidConfiguration
+                .with_source("refresh client differs from the held authorization")
+                .into());
+        }
+        self.tokens(
+            access,
+            &[
+                ("grant_type", "refresh_token"),
+                ("refresh_token", refresh_token.as_str()),
+                ("client_id", id),
+            ],
+            Some(refresh_token),
+        )
+        .await
+    }
+    /// Request tokens; a reply omitting its refresh token keeps `held`.
+    async fn tokens(
+        &self,
+        access: OAuthAccess,
+        params: &[(&str, &str)],
+        held: Option<&SecretText>,
+    ) -> Result<OAuthTokens, OAuthError> {
+        let provider = access.provider();
+        let (client_id, _, token, _) = self.clients.config(access)?;
+        #[derive(serde::Deserialize)]
+        struct Tokens {
+            access_token: SecretText,
+            refresh_token: Option<SecretText>,
+            token_type: String,
+            scope: Option<String>,
+        }
+        let tokens = self
+            .token_response(provider, token, params, |tokens: &Tokens| {
+                (&tokens.access_token, tokens.token_type.as_str())
+            })
+            .await?;
+        let refresh_token = tokens.refresh_token.or_else(|| held.cloned());
+        Ok(OAuthTokens {
+            client_id: client_id.to_owned(),
+            access: access.granted(tokens.scope.as_deref(), refresh_token.is_some())?,
+            access_token: tokens.access_token,
+            refresh_token,
+        })
+    }
+    async fn token_response<T: serde::de::DeserializeOwned>(
+        &self,
+        provider: CloudProvider,
+        token: &str,
+        params: &[(&str, &str)],
+        bearer: impl FnOnce(&T) -> (&SecretText, &str),
+    ) -> Result<T, OAuthError> {
+        #[cfg(any(test, feature = "test-utils"))]
+        let token = match &self.clients.token_override {
+            Some(url) => url.as_str(),
+            None => token,
+        };
+        let client = self.client.as_ref().map_err(|source| StorageError::Provider {
+            provider,
+            // The client could not be built: TLS setup failed.
+            failure: crate::StorageFailure::InvalidConfiguration,
+            source: Box::new(super::error_text::WithCauses(source.clone())),
+        })?;
+        let response = client
+            .send(provider, client.request(reqwest::Method::POST, token).form(params))
+            .await?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(http::response_error(provider, response).await.into());
+        }
+        let bytes = SecretBytes::new(
+            response.bytes().await.map_err(|e| http::transport(provider, e))?.to_vec(),
+        );
+        let tokens: T = serde_json::from_slice(bytes.as_bytes())
+            .map_err(|error| StorageFailure::Encoding.with_source(error))?;
+        let (access_token, token_type) = bearer(&tokens);
+        if access_token.as_str().is_empty() || !token_type.eq_ignore_ascii_case("bearer") {
+            return Err(StorageFailure::Protocol
+                .with_source("invalid OAuth token response")
+                .into());
+        }
+        Ok(tokens)
+    }
 }
 
 /// The app's Dropbox registrations, with an explicit access choice when both exist.
@@ -221,16 +362,10 @@ pub enum DropboxClients {
 
 impl OAuthClients {
     /// Configure client ids, `None` for sign-ins the app does not offer.
-    pub fn new(
-        dropbox: Option<DropboxClients>,
-        onedrive_client_id: Option<String>,
-        clock: ClockRef,
-    ) -> Self {
+    pub fn new(dropbox: Option<DropboxClients>, onedrive_client_id: Option<String>) -> Self {
         Self {
             dropbox,
             onedrive: onedrive_client_id,
-            client: super::http_client::HttpClient::new(clock.clone()).map_err(Arc::new),
-            clock,
             #[cfg(any(test, feature = "test-utils"))]
             token_override: None,
         }
@@ -294,27 +429,6 @@ impl OAuthClients {
             },
         )
     }
-    async fn exchange_redirect(
-        &self,
-        access: OAuthAccess,
-        request: &AuthorizeRequest,
-        callback: SecretText,
-    ) -> Result<OAuthTokens, OAuthError> {
-        let code = Self::redirect_code(access.provider(), request, callback)?;
-        let (client_id, _, _, _) = self.config(access)?;
-        self.tokens(
-            access,
-            &[
-                ("grant_type", "authorization_code"),
-                ("code", code.as_str()),
-                ("redirect_uri", request.redirect.as_str()),
-                ("client_id", client_id),
-                ("code_verifier", request.verifier.as_str()),
-            ],
-            None,
-        )
-        .await
-    }
     /// The authorization code of a checked redirect: its origin and path, its
     /// state, and either a code or the provider's error.
     #[expect(clippy::map_err_ignore, reason = "a redirect that does not parse is InvalidRedirect")]
@@ -362,98 +476,6 @@ impl OAuthClients {
             .ok_or(OAuthError::MissingCode)
     }
 
-    /// Obtain replacement tokens. Omitted refresh tokens retain the previous
-    /// token as specified by OAuth.
-    async fn refresh_grant(
-        &self,
-        client_id: &str,
-        access: OAuthAccess,
-        refresh_token: &SecretText,
-    ) -> Result<OAuthTokens, OAuthError> {
-        let (id, _, _, _) = self.config(access)?;
-        if id != client_id {
-            return Err(StorageFailure::InvalidConfiguration
-                .with_source("refresh client differs from the held authorization")
-                .into());
-        }
-        self.tokens(
-            access,
-            &[
-                ("grant_type", "refresh_token"),
-                ("refresh_token", refresh_token.as_str()),
-                ("client_id", id),
-            ],
-            Some(refresh_token),
-        )
-        .await
-    }
-    /// Request tokens; a reply omitting its refresh token keeps `held`.
-    async fn tokens(
-        &self,
-        access: OAuthAccess,
-        params: &[(&str, &str)],
-        held: Option<&SecretText>,
-    ) -> Result<OAuthTokens, OAuthError> {
-        let provider = access.provider();
-        let (client_id, _, token, _) = self.config(access)?;
-        #[derive(serde::Deserialize)]
-        struct Tokens {
-            access_token: SecretText,
-            refresh_token: Option<SecretText>,
-            token_type: String,
-            scope: Option<String>,
-        }
-        let tokens = self
-            .token_response(provider, token, params, |tokens: &Tokens| {
-                (&tokens.access_token, tokens.token_type.as_str())
-            })
-            .await?;
-        let refresh_token = tokens.refresh_token.or_else(|| held.cloned());
-        Ok(OAuthTokens {
-            client_id: client_id.to_owned(),
-            access: access.granted(tokens.scope.as_deref(), refresh_token.is_some())?,
-            access_token: tokens.access_token,
-            refresh_token,
-        })
-    }
-    async fn token_response<T: serde::de::DeserializeOwned>(
-        &self,
-        provider: CloudProvider,
-        token: &str,
-        params: &[(&str, &str)],
-        bearer: impl FnOnce(&T) -> (&SecretText, &str),
-    ) -> Result<T, OAuthError> {
-        #[cfg(any(test, feature = "test-utils"))]
-        let token = match &self.token_override {
-            Some(url) => url.as_str(),
-            None => token,
-        };
-        let client = self.client.as_ref().map_err(|source| StorageError::Provider {
-            provider,
-            // The client could not be built: TLS setup failed.
-            failure: crate::StorageFailure::InvalidConfiguration,
-            source: Box::new(super::error_text::WithCauses(source.clone())),
-        })?;
-        let response = client
-            .send(provider, client.request(reqwest::Method::POST, token).form(params))
-            .await?;
-        let status = response.status();
-        if !status.is_success() {
-            return Err(http::response_error(provider, response).await.into());
-        }
-        let bytes = SecretBytes::new(
-            response.bytes().await.map_err(|e| http::transport(provider, e))?.to_vec(),
-        );
-        let tokens: T = serde_json::from_slice(bytes.as_bytes())
-            .map_err(|error| StorageFailure::Encoding.with_source(error))?;
-        let (access_token, token_type) = bearer(&tokens);
-        if access_token.as_str().is_empty() || !token_type.eq_ignore_ascii_case("bearer") {
-            return Err(StorageFailure::Protocol
-                .with_source("invalid OAuth token response")
-                .into());
-        }
-        Ok(tokens)
-    }
     /// Redirect token requests to an HTTP fake while retaining the real protocol.
     #[cfg(any(test, feature = "test-utils"))]
     pub fn with_token_endpoint(mut self, endpoint: String) -> Self {
@@ -474,7 +496,7 @@ pub trait OAuthTokenRefresh: Sized {
     ) -> impl std::future::Future<Output = Result<OAuthTokens, StorageError>> + Send;
 }
 
-impl OAuthTokenRefresh for OAuthClients {
+impl OAuthTokenRefresh for OAuthExchange {
     async fn refresh(&self, tokens: &OAuthTokens) -> Result<OAuthTokens, StorageError> {
         let provider = tokens.access.provider();
         let refreshed = match &tokens.refresh_token {

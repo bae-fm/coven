@@ -158,18 +158,13 @@ impl ProviderConnector {
         config: StorageConfig,
         credentials: S3Credentials,
     ) -> Result<super::EmptiedS3Prefix, super::EmptyS3PrefixError> {
-        let http =
-            self.http(crate::CloudProvider::S3).map_err(super::EmptyS3PrefixError::Storage)?;
+        let http = self
+            .http
+            .clone()
+            .map_err(|source| tls_failure(crate::CloudProvider::S3, source))
+            .map_err(super::EmptyS3PrefixError::Storage)?;
         super::empty_s3_prefix(config, credentials, self.clock.clone(), self.ids.clone(), http)
             .await
-    }
-    /// The HTTP client, or why TLS could not be set up.
-    fn http(&self, provider: crate::CloudProvider) -> Result<HttpClient, StorageError> {
-        self.http.clone().map_err(|source| StorageError::Provider {
-            provider,
-            failure: StorageFailure::InvalidConfiguration,
-            source: Box::new(super::error_text::WithCauses(source)),
-        })
     }
     async fn with_folders<T, F, Fut>(
         &self,
@@ -198,7 +193,7 @@ impl ProviderConnector {
             tokens,
             custody,
             self.clock.clone(),
-            self.http(access.provider())?,
+            self.http.clone().map_err(|source| tls_failure(access.provider(), source))?,
         )?;
         request(OAuthFolders::new(session, access, api, cooldown)).await
     }
@@ -291,7 +286,7 @@ impl StorageConnector for ProviderConnector {
         crate::ConnectionCredentials { location: config.clone(), credentials: auth.credentials() }
             .validate()?;
         let provider = config.provider();
-        let http = self.http(provider)?;
+        let http = self.http.clone().map_err(|source| tls_failure(provider, source))?;
         let session = |tokens, custody| {
             OAuthSession::new(provider, tokens, custody, self.clock.clone(), http.clone())
         };
@@ -355,7 +350,7 @@ impl StorageConnector for ProviderConnector {
             store,
             self.clock.clone(),
             self.ids.clone(),
-            self.http(crate::CloudProvider::S3)?,
+            self.http.clone().map_err(|source| tls_failure(crate::CloudProvider::S3, source))?,
             waits,
         )
         .await
@@ -378,10 +373,20 @@ impl StorageConnector for ProviderConnector {
             store,
             self.clock.clone(),
             self.ids.clone(),
-            self.http(crate::CloudProvider::S3)?,
+            self.http.clone().map_err(|source| tls_failure(crate::CloudProvider::S3, source))?,
             waits,
         )
         .await
+    }
+}
+
+/// Why `provider`'s requests can't be sent: the connector's HTTP client could
+/// not set up TLS.
+fn tls_failure(provider: crate::CloudProvider, source: Arc<reqwest::Error>) -> StorageError {
+    StorageError::Provider {
+        provider,
+        failure: StorageFailure::InvalidConfiguration,
+        source: Box::new(super::error_text::WithCauses(source)),
     }
 }
 

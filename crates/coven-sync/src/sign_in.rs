@@ -9,7 +9,7 @@ use coven_crypto::custody::{PersonEntries, StoreKeychain};
 use coven_format::codes::RestoreCode;
 use coven_storage::providers::OAuthTokenRefresh;
 use coven_storage::{
-    providers::OAuthClients, ConnectionCredentials, OAuthTokens, StorageCredentials, StorageError,
+    providers::OAuthExchange, ConnectionCredentials, OAuthTokens, StorageCredentials, StorageError,
     StorageFailure, StorageSettings, TokenCustody,
 };
 use std::sync::{Arc, Mutex};
@@ -19,7 +19,7 @@ use std::sync::{Arc, Mutex};
 /// while custody still holds the tokens the provider rejected.
 pub struct DeviceCredentials {
     keychains: CredentialKeychains,
-    oauth: Option<OAuthClients>,
+    oauth: Option<OAuthExchange>,
     writes: Mutex<()>,
     refreshing: tokio::sync::Mutex<()>,
 }
@@ -31,7 +31,7 @@ impl DeviceCredentials {
     pub fn new(
         keychain: Arc<StoreKeychain>,
         person: Arc<PersonEntries>,
-        oauth: Option<OAuthClients>,
+        oauth: Option<OAuthExchange>,
     ) -> Self {
         Self {
             keychains: CredentialKeychains::new(keychain, person),
@@ -142,13 +142,13 @@ pub struct SessionSignIn {
     /// The tokens this session holds, or published; with the device custody
     /// holding them since publication.
     state: Mutex<(OAuthTokens, Option<Arc<DeviceCredentials>>)>,
-    oauth: Option<OAuthClients>,
+    oauth: Option<OAuthExchange>,
     refreshing: tokio::sync::Mutex<()>,
 }
 
 impl SessionSignIn {
     /// Hold tokens from a completed sign-in.
-    pub fn new(tokens: OAuthTokens, oauth: Option<OAuthClients>) -> Arc<Self> {
+    pub fn new(tokens: OAuthTokens, oauth: Option<OAuthExchange>) -> Arc<Self> {
         Arc::new(Self {
             state: Mutex::new((tokens, None)),
             oauth,
@@ -226,7 +226,7 @@ impl TokenCustody for SessionSignIn {
 }
 
 async fn refresh(
-    oauth: Option<&OAuthClients>,
+    oauth: Option<&OAuthExchange>,
     held: &OAuthTokens,
 ) -> Result<OAuthTokens, StorageError> {
     oauth

@@ -28,7 +28,7 @@ pub(crate) async fn reset_device(
     // publishes it, like any bootstrap's (§20.2).
     let sign_in = match &data.credentials {
         StorageCredentials::OAuth(tokens) => {
-            Some(coven_sync::SessionSignIn::new(tokens.clone(), builder.oauth.clone()))
+            Some(coven_sync::SessionSignIn::new(tokens.clone(), builder.oauth_exchange()))
         }
         _ => None,
     };

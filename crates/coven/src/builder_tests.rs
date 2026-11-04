@@ -300,7 +300,7 @@ mod recovery {
             let directory =
                 app.create_closed_store(&layout, "Recovery", Arc::new(UuidIds)).await.unwrap();
             let clock = Arc::new(FixedClock::new(UNIX_EPOCH));
-            let sign_in = crate::authentication::SignIn::new(clock.clone()).await;
+            let sign_in = crate::authentication::SignIn::new().await;
             let storage = Arc::new(
                 MemoryStorage::builder()
                     .location(config.clone())

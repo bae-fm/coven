@@ -11,7 +11,9 @@ pub(super) fn account_sign_in(
     builder: &CovenBuilder,
     provider: CloudProvider,
 ) -> Result<Arc<SessionSignIn>, BootstrapError> {
-    builder.oauth_flow().ok_or(OAuthError::Unavailable(provider))?;
+    if !builder.signs_in() {
+        return Err(OAuthError::Unavailable(provider).into());
+    }
     let held = builder.authentication.as_ref().ok_or(OAuthError::Reauthorize(provider))?;
     crate::authentication::check_provider(held, provider)?;
     Ok(held.clone())
@@ -74,14 +76,14 @@ pub(super) fn join_sign_in(
     let credentials = Arc::new(DeviceCredentials::new(
         Arc::new(StoreKeychain::new(keychain.clone(), store)),
         Arc::new(PersonEntries::new(keychain, store)),
-        builder.oauth.clone(),
+        builder.oauth_exchange(),
     ));
     let kept = builder.authentication.is_none();
     let tokens = if kept {
         if credentials.write(|keychains| keychains.storage_credentials())?.is_none() {
-            return Err(match builder.oauth_flow() {
-                Some(_) => OAuthError::Reauthorize(provider),
-                None => OAuthError::Unavailable(provider),
+            return Err(match builder.signs_in() {
+                true => OAuthError::Reauthorize(provider),
+                false => OAuthError::Unavailable(provider),
             }
             .into());
         }

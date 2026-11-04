@@ -224,7 +224,7 @@ impl Network {
         .migrations(migrations.clone());
         let (builder, sign_in) =
             if matches!(provider, CloudProvider::Dropbox | CloudProvider::OneDrive) {
-                let sign_in = crate::authentication::SignIn::new(clock.clone()).await;
+                let sign_in = crate::authentication::SignIn::new().await;
                 let mut builder = sign_in.configure(builder);
                 builder.authenticate(storage.config().oauth_access().unwrap()).await.unwrap();
                 (builder, Some(sign_in))

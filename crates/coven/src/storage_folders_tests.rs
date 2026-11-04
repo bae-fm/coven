@@ -168,7 +168,7 @@ impl Fixture {
         let root = tempfile::tempdir().unwrap();
         let app = TestCoven::new();
         let clock = Arc::new(FixedClock::new(std::time::UNIX_EPOCH));
-        let sign_in = SignIn::new(clock.clone()).await;
+        let sign_in = SignIn::new().await;
         let fake = Fake::new().await;
         let storage = Arc::new(
             MemoryStorage::builder().location(location).clock(clock.clone()).build().unwrap(),

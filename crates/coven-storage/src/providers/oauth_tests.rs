@@ -56,10 +56,12 @@ impl OAuthPresenter for Presenter {
         Ok(SecretText::new(self.reply.replace("STATE", &params["state"])))
     }
 }
-fn clients(clock: Arc<FixedClock>) -> OAuthClients {
-    OAuthClients::new(
-        Some(DropboxClients::FullDropbox { app_key: "dropbox".into() }),
-        Some("onedrive".into()),
+fn clients(clock: Arc<FixedClock>) -> OAuthExchange {
+    OAuthExchange::new(
+        OAuthClients::new(
+            Some(DropboxClients::FullDropbox { app_key: "dropbox".into() }),
+            Some("onedrive".into()),
+        ),
         clock,
     )
 }
@@ -157,7 +159,7 @@ async fn presenter_flow_binds_state_redirect_and_pkce_for_each_provider() {
         if provider == CloudProvider::OneDrive {
             assert_eq!(url.path(), "/common/oauth2/v2.0/authorize");
             assert_eq!(
-                flow.clients.config(full_access(provider)).unwrap().2,
+                flow.exchange.clients.config(full_access(provider)).unwrap().2,
                 "https://login.microsoftonline.com/common/oauth2/v2.0/token"
             );
         }
@@ -227,7 +229,7 @@ async fn refresh_retains_unrotated_token() {
         access_token: SecretText::new("old".into()),
         refresh_token: Some(SecretText::new("refresh".into())),
     };
-    let refreshed = flow.clients.refresh(&previous).await.unwrap();
+    let refreshed = flow.exchange.refresh(&previous).await.unwrap();
     assert_eq!(refreshed.refresh_token.unwrap().as_str(), "refresh");
 }
 
@@ -243,7 +245,7 @@ async fn token_errors_retain_the_original_response_during_sign_in_and_refresh() 
 
     for provider in [CloudProvider::Dropbox, CloudProvider::OneDrive] {
         let previous = OAuthTokens {
-            client_id: flow.clients.config(full_access(provider)).unwrap().0.into(),
+            client_id: flow.exchange.clients.config(full_access(provider)).unwrap().0.into(),
             access: full_access(provider),
             access_token: SecretText::new("old".into()),
             refresh_token: Some(SecretText::new("refresh".into())),
@@ -272,7 +274,7 @@ async fn token_errors_retain_the_original_response_during_sign_in_and_refresh() 
                 Err(OAuthError::Storage(error)) => error,
                 result => panic!("{provider:?}: {code}: {:?}", result.err()),
             };
-            let refreshed = flow.clients.refresh(&previous).await.err().unwrap();
+            let refreshed = flow.exchange.refresh(&previous).await.err().unwrap();
             for error in [signed_in, refreshed] {
                 assert!(!format!("{error} {error:?}").contains("secret"));
                 assert!(
@@ -337,12 +339,14 @@ mod access_tests {
         let presenter = presenter("https://callback.example?code=code&state=STATE");
         let clock = Arc::new(FixedClock::new(SystemTime::UNIX_EPOCH));
         let flow = OAuthFlow::new(
-            OAuthClients::new(
-                Some(DropboxClients::Both {
-                    app_folder_key: "folder-key".into(),
-                    full_dropbox_key: "full-key".into(),
-                }),
-                None,
+            OAuthExchange::new(
+                OAuthClients::new(
+                    Some(DropboxClients::Both {
+                        app_folder_key: "folder-key".into(),
+                        full_dropbox_key: "full-key".into(),
+                    }),
+                    None,
+                ),
                 clock.clone(),
             )
             .with_token_endpoint(server.url.clone()),
@@ -357,7 +361,7 @@ mod access_tests {
             assert_eq!(tokens.access, access);
             assert_eq!(tokens.client_id, key);
             tokens.refresh_token = Some(SecretText::new("refresh".into()));
-            assert_eq!(flow.clients.refresh(&tokens).await.unwrap().access, access);
+            assert_eq!(flow.exchange.refresh(&tokens).await.unwrap().access, access);
             let requests = std::mem::take(&mut state.lock().unwrap().requests);
             assert_eq!(requests.len(), 2);
             assert!(requests.iter().all(|request| request["client_id"] == key));
@@ -374,7 +378,7 @@ mod access_tests {
             (DropboxClients::FullDropbox { app_key: "full-key".into() }, DropboxAccess::AppFolder),
         ] {
             let flow = OAuthFlow::new(
-                OAuthClients::new(Some(registered), None, clock.clone()),
+                OAuthExchange::new(OAuthClients::new(Some(registered), None), clock.clone()),
                 presenter.clone(),
             );
             let required = OAuthAccess::Dropbox(absent);
@@ -407,12 +411,12 @@ mod access_tests {
                 access_token: SecretText::new("old".into()),
                 refresh_token: Some(refresh.clone()),
             };
-            let tokens = flow.clients.refresh(&held).await.unwrap();
+            let tokens = flow.exchange.refresh(&held).await.unwrap();
             assert_eq!(tokens.access, access);
             assert_eq!(tokens.client_id, client);
             state.lock().unwrap().scope = Some(reduced.into());
             assert!(matches!(
-                flow.clients.refresh(&held).await,
+                flow.exchange.refresh(&held).await,
                 Err(error) if error.failure() == StorageFailure::AccessNotGranted { required: access }
             ));
         }
@@ -434,7 +438,7 @@ mod access_tests {
             refresh_token: Some(SecretText::new("refresh".into())),
         };
         assert!(
-            matches!(flow.clients.refresh(&tokens).await, Err(error) if error.failure() == StorageFailure::InvalidConfiguration)
+            matches!(flow.exchange.refresh(&tokens).await, Err(error) if error.failure() == StorageFailure::InvalidConfiguration)
         );
         assert!(state.lock().unwrap().requests.is_empty());
     }
@@ -457,7 +461,7 @@ async fn refresh_without_a_refresh_token_or_client_names_the_needed_action() {
         Some(OAuthError::Reauthorize(CloudProvider::OneDrive))
     ));
     held.refresh_token = Some(SecretText::new("refresh".into()));
-    let unconfigured = OAuthClients::new(None, None, clients.clock.clone());
+    let unconfigured = OAuthExchange::new(OAuthClients::new(None, None), clients.clock.clone());
     assert_eq!(
         unconfigured.refresh(&held).await.err().unwrap().failure(),
         StorageFailure::InvalidConfiguration
@@ -581,11 +585,11 @@ async fn onedrive_accepts_microsofts_reply_and_refuses_insufficient_grants() {
         let tokens = flow.authenticate(OAuthAccess::OneDrive).await.unwrap();
         assert_eq!(tokens.access, OAuthAccess::OneDrive, "{scope}");
         assert_eq!(tokens.refresh_token.unwrap().as_str(), "graph-refresh");
-        let refreshed = flow.clients.refresh(&held("held")).await.unwrap();
+        let refreshed = flow.exchange.refresh(&held("held")).await.unwrap();
         assert_eq!(refreshed.refresh_token.unwrap().as_str(), "graph-refresh");
         // A refresh reply without a new refresh token keeps the held one.
         state.lock().unwrap().error_response = Some((200, reply(scope, false)));
-        let refreshed = flow.clients.refresh(&held("held")).await.unwrap();
+        let refreshed = flow.exchange.refresh(&held("held")).await.unwrap();
         assert_eq!(refreshed.refresh_token.unwrap().as_str(), "held");
         assert!(matches!(
             flow.authenticate(OAuthAccess::OneDrive).await,
@@ -605,7 +609,7 @@ async fn onedrive_accepts_microsofts_reply_and_refuses_insufficient_grants() {
         );
         assert!(
             matches!(
-                flow.clients.refresh(&held("held")).await,
+                flow.exchange.refresh(&held("held")).await,
                 Err(error)
                     if error.failure() == StorageFailure::AccessNotGranted { required: OAuthAccess::OneDrive }
             ),

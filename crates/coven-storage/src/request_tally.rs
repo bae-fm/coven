@@ -136,11 +136,6 @@ impl RequestTally {
         Self { clock, totals: Mutex::new(RequestCounts::default()) }
     }
 
-    /// The clock that times this connection's requests, and its waits.
-    pub(crate) fn clock(&self) -> &ClockRef {
-        &self.clock
-    }
-
     pub(crate) fn counts(&self) -> RequestCounts {
         *self.totals.lock().expect("request tally poisoned")
     }

@@ -14,7 +14,10 @@ pub struct StorageConnection<P: ?Sized = dyn ProviderOps> {
     publications: Arc<dyn PublicationGate>,
     cooldown: Arc<dyn Cooldown>,
     transfers: Arc<TransferBudget>,
-    /// Every request this connection sent, timed by the store's clock.
+    /// The store's clock, which times this connection's requests and its
+    /// waits.
+    clock: coven_foundation::clock::ClockRef,
+    /// Every request this connection sent, timed by that clock.
     requests: crate::request_tally::RequestTally,
     /// For the connection a setup call makes for its own requests, what the
     /// call has left of its minute: rate-limited requests are sent again in
@@ -50,7 +53,8 @@ impl<P: ProviderOps + ?Sized> StorageConnection<P> {
             publications,
             cooldown,
             transfers,
-            requests: crate::request_tally::RequestTally::new(clock),
+            requests: crate::request_tally::RequestTally::new(clock.clone()),
+            clock,
             setup: None,
         }
     }
@@ -70,7 +74,8 @@ impl<P: ProviderOps + ?Sized> StorageConnection<P> {
             publications: self.publications.clone(),
             cooldown: self.cooldown.clone(),
             transfers: self.transfers.clone(),
-            requests: crate::request_tally::RequestTally::new(self.requests.clock().clone()),
+            requests: crate::request_tally::RequestTally::new(self.clock.clone()),
+            clock: self.clock.clone(),
             setup: Some(waits),
         }
     }
@@ -84,7 +89,7 @@ impl<P: ProviderOps + ?Sized> StorageConnection<P> {
     /// waited: only on a setup call's own connection.
     pub(crate) async fn resend_after(&self, error: &StorageError) -> bool {
         match &self.setup {
-            Some(waits) => waits.wait_to_resend(self.requests.clock().as_ref(), error).await,
+            Some(waits) => waits.wait_to_resend(self.clock.as_ref(), error).await,
             None => false,
         }
     }
@@ -97,7 +102,7 @@ impl<P: ProviderOps + ?Sized> StorageConnection<P> {
         mut request: impl FnMut() -> F,
     ) -> Result<T, StorageError> {
         match &self.setup {
-            Some(waits) => waits.resend(self.requests.clock().as_ref(), request).await,
+            Some(waits) => waits.resend(self.clock.as_ref(), request).await,
             None => request().await,
         }
     }

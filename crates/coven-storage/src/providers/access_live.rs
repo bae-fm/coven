@@ -4,7 +4,7 @@ use super::{
     http::{self, Body},
     DropboxClients, OAuthClients, OAuthSession, ProviderConnector, StorageConnector,
 };
-use crate::providers::OAuthTokenRefresh;
+use crate::providers::{OAuthExchange, OAuthTokenRefresh};
 use crate::*;
 use coven_foundation::{
     clock::{ClockRef, SystemClock},
@@ -25,9 +25,8 @@ async fn provider_access_live_dropbox_app_folder() {
             )
         });
     let clock: ClockRef = Arc::new(SystemClock);
-    let tokens = OAuthClients::new(
-        Some(DropboxClients::AppFolder { app_key: client_id.clone() }),
-        None,
+    let tokens = OAuthExchange::new(
+        OAuthClients::new(Some(DropboxClients::AppFolder { app_key: client_id.clone() }), None),
         clock.clone(),
     )
     .refresh(&crate::providers::tests::refresh_only(

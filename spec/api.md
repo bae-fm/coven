@@ -7298,12 +7298,9 @@ impl CovenBuilder {
 }
 
 impl OAuthClients {
-    /// Registers the access the app offers; None disables a sign-in.
-    pub fn new(
-        dropbox: Option<DropboxClients>,
-        onedrive_client_id: Option<String>,
-        clock: ClockRef,
-    ) -> Self;
+    /// Registers the access the app offers; None disables a sign-in. Coven
+    /// sends the token requests with the builder's clock.
+    pub fn new(dropbox: Option<DropboxClients>, onedrive_client_id: Option<String>) -> Self;
 
     /// Redirect token requests to an HTTP fake while retaining the real protocol.
     // Enabled by coven/test-utils.

@@ -1,7 +1,7 @@
 use super::*;
 use coven_crypto::{custody::Keychain, SecretBytes, SecretText};
 use coven_foundation::{clock::FixedClock, id_source::StoreId};
-use coven_storage::OAuthAccess;
+use coven_storage::{providers::OAuthClients, OAuthAccess};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// A token endpoint answering `access-N`; it holds each reply until released
@@ -41,13 +41,11 @@ impl TokenServer {
         let task = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
         Self { url, requests, entered, release, task }
     }
-    fn clients(&self) -> OAuthClients {
-        OAuthClients::new(
-            None,
-            Some("onedrive".into()),
+    fn clients(&self) -> OAuthExchange {
+        OAuthExchange::new(
+            OAuthClients::new(None, Some("onedrive".into())).with_token_endpoint(self.url.clone()),
             Arc::new(FixedClock::new(std::time::UNIX_EPOCH)),
         )
-        .with_token_endpoint(self.url.clone())
     }
     fn requests(&self) -> usize {
         self.requests.load(Ordering::SeqCst)

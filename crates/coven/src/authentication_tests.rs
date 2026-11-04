@@ -37,13 +37,12 @@ struct TokenServerState {
 
 pub(crate) struct SignIn {
     endpoint: String,
-    clock: ClockRef,
     presenter: Arc<Presenter>,
     server: Arc<TokenServerState>,
     task: tokio::task::JoinHandle<()>,
 }
 impl SignIn {
-    pub(crate) async fn new(clock: ClockRef) -> Self {
+    pub(crate) async fn new() -> Self {
         let server = Arc::new(TokenServerState { requests: AtomicUsize::new(0) });
         let router = Router::new().fallback(|State(server): State<Arc<TokenServerState>>| async move {
             let n = server.requests.fetch_add(1, Ordering::SeqCst);
@@ -56,7 +55,6 @@ impl SignIn {
         });
         Self {
             endpoint,
-            clock,
             presenter: Arc::new(Presenter {
                 cancel: AtomicBool::new(false),
                 calls: AtomicUsize::new(0),
@@ -82,7 +80,6 @@ impl SignIn {
                 full_dropbox_key: "dropbox".into(),
             }),
             Some("onedrive".into()),
-            self.clock.clone(),
         )
         .with_token_endpoint(self.endpoint.clone())
     }
@@ -116,7 +113,7 @@ async fn handle_sign_in_setup_refresh_and_reopen_keep_tokens_in_coven() {
     let layout = StoreLayout::new(root.path().into());
     let keychain = Keychain::in_memory("oauth-custody").unwrap();
     let clock = Arc::new(FixedClock::new(std::time::SystemTime::UNIX_EPOCH));
-    let sign_in = SignIn::new(clock.clone()).await;
+    let sign_in = SignIn::new().await;
     let storage = Arc::new(
         MemoryStorage::builder()
             .provider(coven_storage::CloudProvider::Dropbox)
@@ -238,7 +235,7 @@ async fn builder_sign_in_is_provider_bound_and_refreshes_when_setup_is_rejected(
     let layout = StoreLayout::new(root.path().into());
     let keychain = Keychain::in_memory("oauth-builder").unwrap();
     let clock = Arc::new(FixedClock::new(std::time::SystemTime::UNIX_EPOCH));
-    let sign_in = SignIn::new(clock.clone()).await;
+    let sign_in = SignIn::new().await;
     let storage = Arc::new(
         MemoryStorage::builder()
             .provider(coven_storage::CloudProvider::Dropbox)
@@ -294,7 +291,7 @@ mod provider_access_tests {
             let layout = StoreLayout::new(root.path().into());
             let keychain = Keychain::in_memory("provider-access").unwrap();
             let clock: ClockRef = Arc::new(FixedClock::new(std::time::UNIX_EPOCH));
-            let sign_in = SignIn::new(clock.clone()).await;
+            let sign_in = SignIn::new().await;
             let storage = Arc::new(
                 MemoryStorage::builder().location(location).clock(clock.clone()).build().unwrap(),
             );

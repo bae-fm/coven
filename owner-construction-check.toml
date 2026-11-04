@@ -69,6 +69,10 @@ capability_types = [
     "OAuthPresenter",
     "OAuthSession",
     "DatabaseConnection",
+    # The reqwest client every HTTPS request goes through, with the clock its
+    # stall window is timed by (§6.7, F.1): the provider connector holds one
+    # and the sign-in exchange another, each built where its holder is.
+    "HttpClient",
 ]
 # Shared in-memory state (F.2): whoever holds one shares it with the others
 # that do, so it is shared on purpose, by an owner, and leaves that owner only
@@ -120,6 +124,7 @@ construction_only_capability_types = [
     "OAuthClients",
     "OAuthSession",
     "DatabaseConnection",
+    "HttpClient",
 ]
 non_owner_types = [
     # Failure transport may carry a published handle; it does not own store lifetime.
@@ -129,13 +134,6 @@ non_owner_types = [
     "IdentityCustody",
     "Command",
     "Request",
-    # A handle on the providers' one HTTP client, cloned into each
-    # connection and admin call as the reqwest client inside it is. It
-    # holds the connector's clock only to time the stall window (§6.7).
-    "HttpClient",
-    # A connection's request totals. It holds the connection's clock
-    # only to time each request, and lives with that connection.
-    "RequestTally",
     # What stops a connection's lookups that run too long, shared with
     # that connection's progress handler; it lives with the connection.
     "LookupLimit",
@@ -388,6 +386,8 @@ task_types = [
     "EventCapture",
     "Tracker",
     "PreWrite",
+    # One read's body, counted in its connection's request totals.
+    "CountedBody",
 ]
 # The shared in-memory state the runtime and the standard library declare.
 external_types = [
@@ -895,7 +895,18 @@ tables = [
 ]
 "crates/coven-storage/src/providers/cloudkit.rs" = ["CloudKitStorage::new"]
 "crates/coven-storage/src/providers/dropbox.rs" = ["DropboxStorage::new"]
-"crates/coven-storage/src/providers/oauth.rs" = ["OAuthFlow::new"]
+"crates/coven-storage/src/providers/oauth.rs" = [
+    "OAuthFlow::new",
+    # The app's sign-in clients with the HTTP client coven sends their token
+    # requests through.
+    "OAuthExchange::new",
+]
+# The one function that builds a reqwest client (F.1).
+"crates/coven-storage/src/providers/http_client.rs" = ["HttpClient::new"]
+# The S3 SDK's HTTP client, sending through one connection's HttpClient.
+"crates/coven-storage/src/providers/s3_http.rs" = ["S3HttpClient::new"]
+# One connection's request totals, built with the connection.
+"crates/coven-storage/src/request_tally.rs" = ["RequestTally::new"]
 # An OAuth connection composes the tokens it sends, which it alone replaces.
 "crates/coven-storage/src/providers/http.rs" = ["OAuthSession::new"]
 "crates/coven-storage/src/token_custody.rs" = ["HeldTokens::new"]
@@ -1005,6 +1016,7 @@ tables = [
     "CovenBuilder::make_identity",
     "CovenBuilder::make_keys",
     "CovenBuilder::new",
+    "CovenBuilder::oauth_exchange",
     "CovenBuilder::oauth_flow",
     "CovenBuilder::open",
     "CovenBuilder::open_graph",

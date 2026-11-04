@@ -6,7 +6,7 @@ async fn restore_and_keychain_restore_use_builder_sign_in_without_returning_toke
     for from_keychain in [false, true] {
         let owner = Owner::new(CloudProvider::Dropbox, false).await;
         let install = Installation::new();
-        let sign_in = SignIn::new(owner.clock.clone()).await;
+        let sign_in = SignIn::new().await;
         let mut builder = sign_in.configure(install.builder(&owner, owner.storage.clone()));
         builder
             .authenticate(coven_storage::OAuthAccess::Dropbox(
@@ -64,7 +64,7 @@ async fn restore_and_keychain_restore_use_builder_sign_in_without_returning_toke
 async fn bootstrap_requires_explicit_sign_in_and_never_presents_ui() {
     let owner = Owner::new(CloudProvider::OneDrive, false).await;
     let install = Installation::new();
-    let sign_in = SignIn::new(owner.clock.clone()).await;
+    let sign_in = SignIn::new().await;
     let builder = sign_in.configure(install.builder(&owner, owner.storage.clone()));
     let (_, cancel) = watch::channel(false);
     assert!(matches!(
@@ -82,7 +82,7 @@ async fn join_requires_the_shared_folder_access_before_contacting_storage() {
     let owner = Owner::new(CloudProvider::Dropbox, false).await;
     let invite = owner.invite().await;
     let install = Installation::new();
-    let sign_in = SignIn::new(owner.clock.clone()).await;
+    let sign_in = SignIn::new().await;
     let recipient = Arc::new(owner.recipient().for_device());
     let mut builder = sign_in.configure(install.builder(&owner, recipient.clone()));
     builder.authenticate(OAuthAccess::Dropbox(DropboxAccess::AppFolder)).await.unwrap();
@@ -105,7 +105,7 @@ async fn a_join_waiting_past_its_token_refreshes_on_rejection_and_publishes_the_
     let owner = Owner::new(CloudProvider::Dropbox, false).await;
     let invite = owner.invite().await;
     let install = Installation::new();
-    let sign_in = SignIn::new(owner.clock.clone()).await;
+    let sign_in = SignIn::new().await;
     let (sleeping, mut asleep) = watch::channel(false);
     let (resume, resumed) = watch::channel(false);
     let clock = Arc::new(JoinClock {
@@ -231,7 +231,7 @@ async fn a_closed_join_on_dropbox_resumes_with_the_sign_in_it_kept() {
     // It still names the access a new sign-in needs, should Dropbox refuse
     // the kept one.
     assert_eq!(listed.metadata.oauth_access, owner.storage.config().oauth_access());
-    let sign_in = SignIn::new(owner.clock.clone()).await;
+    let sign_in = SignIn::new().await;
     let builder = sign_in.configure(install.builder(&owner, owner.recipient()));
     let control = JoinControl::new();
     let resumed = builder.resume_join(store, |_| {}, &control);
@@ -258,7 +258,7 @@ async fn a_refresh_while_waiting_is_kept_for_the_resumed_join() {
     let invite = owner.invite().await;
     let install = Installation::new();
     let store = owner.directory.id();
-    let sign_in = SignIn::new(owner.clock.clone()).await;
+    let sign_in = SignIn::new().await;
     let (sleeping, mut asleep) = watch::channel(false);
     let (resume, resumed) = watch::channel(false);
     let clock = Arc::new(JoinClock {
@@ -320,7 +320,7 @@ async fn a_new_sign_in_replaces_the_kept_one_only_with_the_locations_access() {
     let invite = owner.invite().await;
     let install = Installation::new();
     let store = owner.directory.id();
-    let sign_in = SignIn::new(owner.clock.clone()).await;
+    let sign_in = SignIn::new().await;
     let signed_in = |access| {
         let mut builder = sign_in.configure(install.builder(&owner, owner.recipient()));
         async move {
@@ -367,7 +367,7 @@ async fn a_refused_kept_sign_in_asks_for_a_new_one_and_keeps_the_join() {
         .set_storage_credentials(&StorageCredentials::OAuth(refused).encode().unwrap())
         .unwrap();
     owner.storage.reject_access_token("refused-access").await;
-    let sign_in = SignIn::new(owner.clock.clone()).await;
+    let sign_in = SignIn::new().await;
     let control = JoinControl::new();
     let result = sign_in
         .configure(install.builder(&owner, owner.recipient()))
@@ -424,7 +424,7 @@ async fn a_join_that_fails_to_end_still_lists_and_the_next_call_ends_it() {
         let builder = install.builder(&owner, owner.recipient());
         assert_eq!(builder.unfinished_joins().await.unwrap().len(), 1);
         assert_eq!(install.only_kept_sign_in(store).await.is_none(), sign_in_removed);
-        let sign_in = SignIn::new(owner.clock.clone()).await;
+        let sign_in = SignIn::new().await;
         let control = JoinControl::new();
         let mut builder = sign_in.configure(builder);
         if sign_in_removed {

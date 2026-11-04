@@ -12,7 +12,7 @@ use coven_foundation::progress::Progress;
 #[cfg(test)]
 use coven_foundation::progress::RecordingClock;
 use coven_storage::{
-    providers::{OAuthFlow, StorageConnector},
+    providers::{OAuthExchange, OAuthFlow, StorageConnector},
     Storage,
 };
 use std::sync::Arc;
@@ -160,14 +160,30 @@ impl CovenBuilder {
     /// Sign in and keep tokens in session custody for restore, join or opening.
     /// Replaces the prior sign-in only on success. Dropping the future cancels it.
     pub async fn authenticate(&mut self, access: OAuthAccess) -> Result<(), OAuthError> {
-        let flow = self.oauth_flow().ok_or(OAuthError::Unavailable(access.provider()))?;
+        let exchange = self.oauth_exchange();
+        let flow = Self::oauth_flow(exchange.clone(), self.presenter.clone())
+            .ok_or(OAuthError::Unavailable(access.provider()))?;
         let tokens = flow.authenticate(access).await?;
-        self.authentication = Some(coven_sync::SessionSignIn::new(tokens, self.oauth.clone()));
+        self.authentication = Some(coven_sync::SessionSignIn::new(tokens, exchange));
         Ok(())
     }
 
-    fn oauth_flow(&self) -> Option<OAuthFlow> {
-        Some(OAuthFlow::new(self.oauth.clone()?, self.presenter.clone()?))
+    /// The app's sign-in clients, sending their token requests with this
+    /// builder's clock and a client of their own.
+    fn oauth_exchange(&self) -> Option<OAuthExchange> {
+        Some(OAuthExchange::new(self.oauth.clone()?, self.clock.clone()))
+    }
+
+    /// Whether the app configured sign-in: its clients and its presenter.
+    fn signs_in(&self) -> bool {
+        self.oauth.is_some() && self.presenter.is_some()
+    }
+
+    fn oauth_flow(
+        exchange: Option<OAuthExchange>,
+        presenter: Option<Arc<dyn OAuthPresenter>>,
+    ) -> Option<OAuthFlow> {
+        Some(OAuthFlow::new(exchange?, presenter?))
     }
 
     /// Limit file uploads running together; defaults to one.
@@ -427,7 +443,7 @@ impl CovenBuilder {
         }
         let settings = coven_storage::StorageSettings::new(directory.clone());
         let device = directory.settings().map_err(CovenError::from)?.device_id;
-        let oauth = self.oauth.clone();
+        let oauth = self.oauth_exchange();
         let (credentials, data) = crate::task::blocking("read the saved credentials", move || {
             let keychain = self.keychain()?;
             let credentials = Arc::new(coven_sync::DeviceCredentials::new(
@@ -558,13 +574,14 @@ impl CovenBuilder {
         directory: StoreDir,
         keychain: Arc<StoreKeychain>,
     ) -> CovenResult<OpeningOwners> {
-        let oauth = self.oauth_flow();
+        let clients = self.oauth_exchange();
+        let oauth = Self::oauth_flow(clients.clone(), self.presenter.clone());
         let settings = directory.settings()?;
         let person = Arc::new(PersonEntries::new(self.keychain()?, settings.id));
         let credentials = Arc::new(coven_sync::DeviceCredentials::new(
             keychain.clone(),
             person.clone(),
-            self.oauth.clone(),
+            clients.clone(),
         ));
         let connector = self.connector();
         let keys = Self::make_keys(self.keys, &directory, settings.id, keychain.clone())?;
@@ -581,7 +598,7 @@ impl CovenBuilder {
             credentials,
             connector,
             oauth,
-            clients: self.oauth,
+            clients,
             authentication: self.authentication,
             transfers: self.transfers,
             network,
@@ -688,7 +705,7 @@ struct OpeningOwners {
     credentials: Arc<coven_sync::DeviceCredentials>,
     connector: Arc<dyn StorageConnector>,
     oauth: Option<OAuthFlow>,
-    clients: Option<OAuthClients>,
+    clients: Option<OAuthExchange>,
     authentication: Option<Arc<coven_sync::SessionSignIn>>,
     device: DeviceId,
     directory: StoreDir,

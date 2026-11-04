@@ -167,7 +167,7 @@ impl Installation {
         let mut builder = self.builder(owner, storage);
         let provider = owner.storage.config().provider();
         if matches!(provider, CloudProvider::Dropbox | CloudProvider::OneDrive) {
-            let sign_in = crate::authentication::SignIn::new(owner.clock.clone()).await;
+            let sign_in = crate::authentication::SignIn::new().await;
             builder = sign_in.configure(builder);
             builder.authenticate(owner.storage.config().oauth_access().unwrap()).await.unwrap();
         }

@@ -5,7 +5,7 @@
 use super::*;
 use crate::providers::{
     tests::listing_lag::{observe, report, TRIALS},
-    OAuthClients, OAuthTokenRefresh,
+    OAuthClients, OAuthExchange, OAuthTokenRefresh,
 };
 use coven_foundation::{
     clock::SystemClock,
@@ -27,7 +27,7 @@ async fn tokens(variable: &str, clock: ClockRef) -> OAuthTokens {
         crate::providers::tests::read_live_settings(variable, |settings| {
             (settings.take("ONEDRIVE_CLIENT_ID"), settings.take("ONEDRIVE_REFRESH_TOKEN"))
         });
-    OAuthClients::new(None, Some(client_id.as_str().to_owned()), clock)
+    OAuthExchange::new(OAuthClients::new(None, Some(client_id.as_str().to_owned())), clock)
         .refresh(&crate::providers::tests::refresh_only(
             client_id.as_str(),
             crate::OAuthAccess::OneDrive,
