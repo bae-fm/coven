@@ -4094,6 +4094,9 @@ impl CloudProvider {
     /// This depends on the provider kind, not on a connected account or request.
     /// None on S3, where a member's devices share one key.
     pub fn sign_out(self) -> Option<ProviderSignOut>;
+    /// Whether a person signs in to it in a browser (OAuth): Dropbox and
+    /// OneDrive.
+    pub fn signs_in_with_oauth(self) -> bool;
 }
 
 /// A store's location, with credentials kept separately (§20.3, E5).

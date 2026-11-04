@@ -547,7 +547,7 @@ impl StorageConnections {
             let mut progress = ProgressReport::new(progress, owner.clock.clone());
             let waits = SetupWaits::default();
             let provider = storage.provider();
-            if !matches!(provider, CloudProvider::Dropbox | CloudProvider::OneDrive) {
+            if !provider.signs_in_with_oauth() {
                 return Err(OAuthError::Unavailable(provider).into());
             }
             owner.check_location(&storage).await?;

@@ -26,6 +26,12 @@ impl CloudProvider {
             provider => Some(crate::ProviderSignOut::RemoveAppAccess { provider }),
         }
     }
+
+    /// Whether a person signs in to it in a browser (OAuth): Dropbox and
+    /// OneDrive.
+    pub fn signs_in_with_oauth(self) -> bool {
+        matches!(self, Self::Dropbox | Self::OneDrive)
+    }
 }
 
 /// The store's location; credentials are kept separately in key custody.

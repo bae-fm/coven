@@ -579,7 +579,7 @@ impl ProviderOps for MemoryProvider {
         self.config.clone()
     }
     async fn set_oauth_tokens(&self, tokens: OAuthTokens) -> Result<(), StorageError> {
-        if !matches!(self.config.provider(), CloudProvider::Dropbox | CloudProvider::OneDrive) {
+        if !self.config.provider().signs_in_with_oauth() {
             return Err(
                 StorageFailure::InvalidConfiguration.with_source("provider does not use OAuth")
             );

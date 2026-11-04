@@ -139,7 +139,7 @@ async fn join_accepts_provider_access_and_approval_then_loads_the_store() {
             &cancel,
             |_| {},
         );
-        let oauth = matches!(provider, CloudProvider::Dropbox | CloudProvider::OneDrive);
+        let oauth = provider.signs_in_with_oauth();
         let kept = std::sync::Mutex::new(None);
         let (result, member) = join_and_approve(&owner.handle, joining, |request| {
             assert_eq!(request.device_name, "New phone");

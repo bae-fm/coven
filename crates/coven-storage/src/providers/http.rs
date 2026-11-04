@@ -28,7 +28,7 @@ impl OAuthSession {
         clock: ClockRef,
         client: super::http_client::HttpClient,
     ) -> Result<Self, StorageError> {
-        if !matches!(provider, CloudProvider::Dropbox | CloudProvider::OneDrive) {
+        if !provider.signs_in_with_oauth() {
             return Err(
                 StorageFailure::InvalidConfiguration.with_source("provider does not use OAuth")
             );
