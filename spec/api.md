@@ -3478,8 +3478,10 @@ impl CovenReadHandle {
     /// The SQLite settings this handle's connections have in effect (E1).
     pub async fn sqlite_settings(&self) -> Result<SqliteSettingsInEffect, DbError>;
 
-    /// Closes read and cache connections on all clones and releases their store lock.
-    /// Reports connection-close failures; cancellation does not stop closing.
+    /// Closes read and cache connections on all clones, releases their
+    /// storage client and their store lock, while the app still holds the
+    /// handle. Reports connection-close failures; cancellation does not stop
+    /// closing.
     pub async fn close(&self) -> Result<(), DbError>;
 
     pub fn read<F, R>(&self, read: F) -> Read<'_, F>

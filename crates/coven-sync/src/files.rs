@@ -177,8 +177,10 @@ impl Files {
         self.inner.transfers.set_limits(limits);
         self.inner.upload_wake.notify_one();
     }
-    /// Stop background work and wait for in-flight database and transfer work.
-    /// An app retry still waiting fails as the store closes.
+    /// Stop background work, wait for in-flight database and transfer work,
+    /// then release the storage client, while clones of this owner live on.
+    /// An app retry still waiting fails as the store closes, as does a read
+    /// of a file stream still open.
     pub async fn close(&self) {
         self.inner.closed.store(true, Ordering::Release);
         self.worker.stop.send_replace(true);
@@ -189,6 +191,7 @@ impl Files {
         let _pins = self.inner.pins.lock().await;
         let _cache = self.inner.cache.write().await;
         self.inner.app_retries.lock().expect("app retries poisoned").clear();
+        self.inner.storage.write().expect("storage lock poisoned").take();
     }
     /// Optionally retry recoverable uploads early: the upload worker attempts
     /// every upload that can retry, whatever its wait, and this returns once

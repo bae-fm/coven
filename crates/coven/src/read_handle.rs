@@ -64,8 +64,9 @@ impl CovenReadHandle {
     pub async fn open_file_stream(&self, file: &FileRef) -> Result<FileStream, FileReadError> {
         self.files.open_file_stream(file).await
     }
-    /// Closes read and cache connections on all clones and releases their shared
-    /// store lock. File streams retain their own locks.
+    /// Closes read and cache connections on all clones and releases their
+    /// storage client and shared store lock, while the app still holds the
+    /// handle. File streams retain their own locks.
     pub async fn close(&self) -> Result<(), DbError> {
         let handle = self.clone();
         let closing = tokio::spawn(async move {

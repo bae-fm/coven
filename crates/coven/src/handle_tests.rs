@@ -780,9 +780,6 @@ mod store_rename {
             network.reopen(&network.devices[0]).open_read_only(owner.store_id()).await.unwrap();
         assert_eq!(reader.store_name().await.unwrap(), "家庭 recipes");
         reader.close().await.unwrap();
-        // Its storage client goes with the handle, before the owner's
-        // release is awaited below.
-        drop(reader);
 
         let member_id = member.members().await.unwrap().into_iter().find(|m| m.is_self).unwrap().id;
         landed(owner, owner.set_member_role(&member_id, MemberRole::Admin).await.unwrap()).await;
@@ -807,4 +804,18 @@ mod store_rename {
         assert_eq!(owner.store_name().await.unwrap(), "Latest name");
         network.close().await;
     }
+}
+
+/// Closing a read-only handle releases its storage client, while the app
+/// still holds the handle (E1).
+#[tokio::test]
+async fn closing_a_read_only_handle_releases_its_storage_client() {
+    let network = crate::tests::Network::new(1).await;
+    let device = &network.devices[0];
+    device.stop_sync().await;
+    let reader = network.reopen(device).open_read_only(device.store).await.unwrap();
+    reader.close().await.unwrap();
+    device.connector.clients.released().await;
+    drop(reader);
+    network.close().await;
 }
