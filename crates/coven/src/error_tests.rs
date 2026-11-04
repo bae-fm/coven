@@ -152,3 +152,64 @@ fn a_bug_listing_the_stores_is_the_listings_bug() {
     assert!(matches!(&listing, StoreListError::Bug(found) if *found == bug));
     assert_eq!(listing.bug(), Some(&bug));
 }
+
+/// A bug in any error coven's own calls keep is the call's bug: creation's,
+/// deletion's, bootstrap's, unlocking's and a read-only open's.
+#[test]
+fn a_bug_in_what_coven_calls_keep_is_the_calls_bug() {
+    use crate::task::{Bug, CarriesBug};
+    use crate::{BootstrapError, CovenError, IdentityError, ReadOnlyOpenError};
+    use coven_foundation::files::BootstrapDirectoryError;
+    let bug = Bug { operation: "create the store", message: "it panicked".into() };
+    let directory = || BootstrapDirectoryError::from(FileError::Bug(bug.clone()));
+    assert!(matches!(directory(), BootstrapDirectoryError::Bug(found) if found == bug));
+    let locked = BootstrapDirectoryError::from(StoreLockError::Bug(bug.clone()));
+    assert!(matches!(locked, BootstrapDirectoryError::Bug(found) if found == bug));
+    for creation in [
+        StoreCreationError::from(directory()),
+        StoreCreationError::from(CovenError::Bug(bug.clone())),
+        StoreCreationError::from(IdentityError::Bug(bug.clone())),
+        StoreCreationError::from(SyncError::Bug(bug.clone())),
+    ] {
+        assert!(
+            matches!(&creation, StoreCreationError::Bug(found) if *found == bug),
+            "{creation:?}"
+        );
+    }
+    for bootstrap in [
+        BootstrapError::from(directory()),
+        BootstrapError::from(CovenError::Bug(bug.clone())),
+        BootstrapError::from(SyncError::Bug(bug.clone())),
+        BootstrapError::from(KeyError::Bug(bug.clone())),
+        BootstrapError::from(coven_storage::providers::OAuthError::Storage(StorageError::Bug(
+            bug.clone(),
+        ))),
+    ] {
+        assert!(matches!(&bootstrap, BootstrapError::Bug(found) if *found == bug), "{bootstrap:?}");
+        assert_eq!(bootstrap.bug(), Some(&bug));
+    }
+    for deletion in [
+        StoreDeletionError::from(SyncError::Bug(bug.clone())),
+        StoreDeletionError::from(KeyError::Bug(bug.clone())),
+        StoreDeletionError::from(FileError::Bug(bug.clone())),
+    ] {
+        assert!(
+            matches!(&deletion, StoreDeletionError::Bug(found) if *found == bug),
+            "{deletion:?}"
+        );
+    }
+    for unlock in [
+        StoreKeyUnlockError::from(StorageError::Bug(bug.clone())),
+        StoreKeyUnlockError::from(KeyError::Bug(bug.clone())),
+        unlock_error(SyncError::Storage(StorageError::Bug(bug.clone()))),
+    ] {
+        assert!(matches!(&unlock, StoreKeyUnlockError::Bug(found) if *found == bug), "{unlock:?}");
+    }
+    for open in [
+        ReadOnlyOpenError::from(CovenError::Bug(bug.clone())),
+        ReadOnlyOpenError::from(SyncError::Bug(bug.clone())),
+    ] {
+        assert!(matches!(&open, ReadOnlyOpenError::Bug(found) if *found == bug), "{open:?}");
+        assert_eq!(open.bug(), Some(&bug));
+    }
+}

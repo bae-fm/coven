@@ -1807,6 +1807,8 @@ pub enum ReadOnlyOpenError {
     Local(CovenError),
     /// Saved settings, credential custody or provider construction failed.
     Storage(SyncError),
+    /// Opening panicked: a bug (E15).
+    Bug(Bug),
 }
 
 /// Listing the app's stores failed (E1).
@@ -6916,6 +6918,8 @@ pub enum BootstrapDirectoryError {
     Lock(StoreLockError),
     /// A filesystem operation failed.
     File(FileError),
+    /// The work panicked on the blocking pool: a bug (E15).
+    Bug(Bug),
 }
 
 /// Opening a store on a new device failed (§13, E10).
@@ -8363,18 +8367,7 @@ Coven's own calls turn a panic in their work into a value the same way. A
 panic is a bug, in coven or in the app's callback, and the call's error
 carries it as `Bug`: `DbError::Bug` for a database call, `FileError::Bug`
 for file work, and a `Bug` variant of each error that has a `Shutdown` one.
-An error that keeps a file or lock failure takes the bug as its own `Bug`,
-never under a disk label: `StoreLockError::Bug` for taking a store's lock,
-`DbError::Bug` for file work or a lock a database call ran,
-`StoreListError::Bug` for listing the stores, `KeyError::Bug` for
-custody's file work, `LocalFileError::Bug` for reading a file on this
-device and `StorageError::Bug` for a provider request's local work. An error that keeps another call's error routes that error's `Bug`
-to its own, such as `IdentityError::Bug` for custody's, `CovenError::Bug`
-for custody's or a lock's, `SyncError::Bug` or `StorageSetupError::Bug`
-for storage's or custody's, and `FileReadError::Bug`, `CopyPathError::Bug`
-or `DeviceOnlyError::Bug` for a file read's or a device-only copy's. `CovenError` keeps a database call's as
-`CovenError::Database(DbError::Bug)`, as for its other failures. `SyncError`
-reports it as `LocalFailure::Bug`.
+`SyncError` reports it as `LocalFailure::Bug`.
 
 - Ana's app writes a note with `write`, and its closure panics on a note
   with no title: "note 43 has no title". The write's transaction rolls back,
@@ -8386,6 +8379,24 @@ reports it as `LocalFailure::Bug`.
 - A file removal that fails after such a write joins the bug as
   `DbError::FileCleanup`, as it joins any failed write's error, so neither
   failure is lost.
+
+An error that keeps another failure takes the bug that failure carries as
+its own `Bug`, never under a disk, lock, storage or custody label, so the
+call's own error says it was a bug.
+
+- File and lock work: `StoreLockError::Bug` for taking a store's lock,
+  `StoreListError::Bug` for listing the stores, `KeyError::Bug` for
+  custody's file work, `LocalFileError::Bug` for reading a file on this
+  device, and `StorageError::Bug`, whose failure is `StorageFailure::Bug`,
+  for a provider request's local work.
+- Each error that keeps one of those, or another call's error, does the
+  same: `DbError`, `IdentityError`, `CovenError`, `SyncError`,
+  `StorageSetupError`, `FileReadError`, `CopyPathError`, `DeviceOnlyError`,
+  `BootstrapDirectoryError`, `BootstrapError`, `StoreCreationError`,
+  `StoreDeletionError`, `StoreKeyUnlockError` and `ReadOnlyOpenError`.
+- `CovenError` keeps a database call's bug as
+  `CovenError::Database(DbError::Bug)`, as it keeps the call's other
+  failures.
 
 Work nobody waits for has no caller to return its bug to. A store's
 long-lived workers run that way: its sync loop, a connection attempt, the

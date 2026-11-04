@@ -21,10 +21,43 @@ pub enum BootstrapDirectoryError {
     Create(#[from] DirectoryCreationError),
     /// Another bootstrap or an open database prevents this operation.
     #[error(transparent)]
-    Lock(#[from] StoreLockError),
+    Lock(StoreLockError),
     /// A filesystem operation failed.
     #[error(transparent)]
-    File(#[from] FileError),
+    File(FileError),
+    /// The work panicked on the blocking pool: a bug, which the caller
+    /// reports (E15).
+    #[error(transparent)]
+    Bug(#[from] crate::task::Bug),
+}
+
+impl From<StoreLockError> for BootstrapDirectoryError {
+    fn from(error: StoreLockError) -> Self {
+        match error {
+            StoreLockError::Bug(bug) => Self::Bug(bug),
+            error => Self::Lock(error),
+        }
+    }
+}
+
+impl From<FileError> for BootstrapDirectoryError {
+    fn from(error: FileError) -> Self {
+        match error {
+            FileError::Bug(bug) => Self::Bug(bug),
+            error => Self::File(error),
+        }
+    }
+}
+
+impl crate::task::CarriesBug for BootstrapDirectoryError {
+    fn bug(&self) -> Option<&crate::task::Bug> {
+        match self {
+            Self::Bug(bug) => Some(bug),
+            Self::File(error) => error.bug(),
+            Self::Create(creation) => creation.file().and_then(|error| error.bug()),
+            Self::Lock(error) => error.bug(),
+        }
+    }
 }
 
 impl BootstrapDirectoryError {
@@ -34,7 +67,7 @@ impl BootstrapDirectoryError {
         let file = match self {
             Self::File(file) => file,
             Self::Create(creation) => creation.file()?,
-            Self::Lock(_) => return None,
+            Self::Lock(_) | Self::Bug(_) => return None,
         };
         match file {
             FileError::DeviceLocked { path } => Some(path),

@@ -23,10 +23,10 @@ pub enum StoreCreationError {
     },
     /// Creating or persisting the member identity failed.
     #[error(transparent)]
-    Identity(#[from] crate::IdentityError),
+    Identity(crate::IdentityError),
     /// Closing the database or its workers failed.
     #[error(transparent)]
-    Sync(#[from] SyncError),
+    Sync(SyncError),
     /// Closing or rollback also failed; both causes remain available.
     #[error("{operation}; cleanup failed: {cleanup}")]
     Cleanup {
@@ -60,6 +60,9 @@ pub enum StoreCreationError {
 
 impl From<coven_foundation::files::BootstrapDirectoryError> for StoreCreationError {
     fn from(error: coven_foundation::files::BootstrapDirectoryError) -> Self {
+        if let coven_foundation::files::BootstrapDirectoryError::Bug(bug) = error {
+            return Self::Bug(bug);
+        }
         match error.device_locked() {
             Some(path) => Self::DeviceLocked { path: path.to_owned() },
             None => Self::Directory(error),
@@ -71,7 +74,26 @@ impl From<crate::CovenError> for StoreCreationError {
     fn from(error: crate::CovenError) -> Self {
         match error {
             crate::CovenError::DeviceLocked { path } => Self::DeviceLocked { path },
+            crate::CovenError::Bug(bug) => Self::Bug(bug),
             error => Self::Store(error),
+        }
+    }
+}
+
+impl From<crate::IdentityError> for StoreCreationError {
+    fn from(error: crate::IdentityError) -> Self {
+        match error {
+            crate::IdentityError::Bug(bug) => Self::Bug(bug),
+            error => Self::Identity(error),
+        }
+    }
+}
+
+impl From<SyncError> for StoreCreationError {
+    fn from(error: SyncError) -> Self {
+        match error {
+            SyncError::Bug(bug) => Self::Bug(bug),
+            error => Self::Sync(error),
         }
     }
 }
@@ -80,7 +102,9 @@ impl crate::task::CarriesBug for StoreCreationError {
     fn bug(&self) -> Option<&crate::task::Bug> {
         match self {
             Self::Bug(bug) => Some(bug),
+            Self::Directory(error) => error.bug(),
             Self::Store(error) => error.bug(),
+            Self::Identity(error) => error.bug(),
             Self::Sync(error) => error.bug(),
             Self::Cleanup { operation, cleanup } => operation.bug().or_else(|| cleanup.bug()),
             Self::PublishedButNotSynced { source, .. } => source.bug(),
@@ -114,7 +138,7 @@ pub enum StoreDeletionError {
     /// nothing was deleted, and this device hasn't applied its removal.
     /// `delete_store` again finishes it.
     #[error(transparent)]
-    Sync(#[from] crate::SyncError),
+    Sync(crate::SyncError),
     /// This device's removal was published, or no storage was set up, and
     /// closing the handle failed; nothing was deleted.
     /// `Coven::discard_store` finishes the deletion.
@@ -122,10 +146,10 @@ pub enum StoreDeletionError {
     Closing(#[source] crate::SyncError),
     /// Removing a keychain entry failed.
     #[error(transparent)]
-    Key(#[from] KeyError),
+    Key(KeyError),
     /// Removing the store directory failed.
     #[error(transparent)]
-    File(#[from] FileError),
+    File(FileError),
     /// The deletion's runtime is shutting down and dropped it before it
     /// started, so nothing was deleted (E15).
     #[error(transparent)]
@@ -145,6 +169,33 @@ impl crate::task::CarriesBug for StoreDeletionError {
             Self::Key(error) => error.bug(),
             Self::File(error) => error.bug(),
             _ => None,
+        }
+    }
+}
+
+impl From<crate::SyncError> for StoreDeletionError {
+    fn from(error: crate::SyncError) -> Self {
+        match error {
+            crate::SyncError::Bug(bug) => Self::Bug(bug),
+            error => Self::Sync(error),
+        }
+    }
+}
+
+impl From<KeyError> for StoreDeletionError {
+    fn from(error: KeyError) -> Self {
+        match error {
+            KeyError::Bug(bug) => Self::Bug(bug),
+            error => Self::Key(error),
+        }
+    }
+}
+
+impl From<FileError> for StoreDeletionError {
+    fn from(error: FileError) -> Self {
+        match error {
+            FileError::Bug(bug) => Self::Bug(bug),
+            error => Self::File(error),
         }
     }
 }
@@ -169,10 +220,41 @@ impl From<crate::task::TaskFailed> for StoreDeletionError {
 pub enum ReadOnlyOpenError {
     /// The database or store directory could not be opened.
     #[error(transparent)]
-    Local(#[from] crate::CovenError),
+    Local(crate::CovenError),
     /// Saved settings, credential custody or provider construction failed.
     #[error(transparent)]
-    Storage(#[from] crate::SyncError),
+    Storage(crate::SyncError),
+    /// Opening panicked: a bug, which the caller reports (E15).
+    #[error(transparent)]
+    Bug(#[from] crate::task::Bug),
+}
+
+impl From<crate::CovenError> for ReadOnlyOpenError {
+    fn from(error: crate::CovenError) -> Self {
+        match error {
+            crate::CovenError::Bug(bug) => Self::Bug(bug),
+            error => Self::Local(error),
+        }
+    }
+}
+
+impl From<crate::SyncError> for ReadOnlyOpenError {
+    fn from(error: crate::SyncError) -> Self {
+        match error {
+            crate::SyncError::Bug(bug) => Self::Bug(bug),
+            error => Self::Storage(error),
+        }
+    }
+}
+
+impl crate::task::CarriesBug for ReadOnlyOpenError {
+    fn bug(&self) -> Option<&crate::task::Bug> {
+        match self {
+            Self::Bug(bug) => Some(bug),
+            Self::Local(error) => error.bug(),
+            Self::Storage(error) => error.bug(),
+        }
+    }
 }
 
 /// Opening this member's sealed store keys failed.
@@ -183,13 +265,13 @@ pub enum StoreKeyUnlockError {
     NoStorage,
     /// The provider refused or failed a request.
     #[error(transparent)]
-    Storage(#[from] StorageError),
+    Storage(StorageError),
     /// An authenticated key could not be opened.
     #[error(transparent)]
     Crypto(#[from] CryptoError),
     /// Custody refused to read or persist keys.
     #[error(transparent)]
-    SecureStorage(#[from] KeyError),
+    SecureStorage(KeyError),
     /// This device or its member was removed from the store (§14.1).
     #[error("this device or its member was removed")]
     Removed,
@@ -213,8 +295,27 @@ impl crate::task::CarriesBug for StoreKeyUnlockError {
     fn bug(&self) -> Option<&crate::task::Bug> {
         match self {
             Self::Bug(bug) => Some(bug),
+            Self::Storage(error) => error.bug(),
             Self::SecureStorage(error) => error.bug(),
             _ => None,
+        }
+    }
+}
+
+impl From<StorageError> for StoreKeyUnlockError {
+    fn from(error: StorageError) -> Self {
+        match error {
+            StorageError::Bug(bug) => Self::Bug(bug),
+            error => Self::Storage(error),
+        }
+    }
+}
+
+impl From<KeyError> for StoreKeyUnlockError {
+    fn from(error: KeyError) -> Self {
+        match error {
+            KeyError::Bug(bug) => Self::Bug(bug),
+            error => Self::SecureStorage(error),
         }
     }
 }
@@ -253,8 +354,8 @@ pub(crate) fn setup_error(error: SyncError) -> StorageSetupError {
         None => {}
     }
     match error {
-        SyncError::SecureStorage(error) => StorageSetupError::SecureStorage(error),
-        SyncError::Storage(error) => StorageSetupError::Storage(error),
+        SyncError::SecureStorage(error) => error.into(),
+        SyncError::Storage(error) => error.into(),
         SyncError::StoreOwner => StorageSetupError::StoreOwner,
         SyncError::Shutdown(shutdown) => StorageSetupError::Shutdown(shutdown),
         SyncError::Bug(bug) => StorageSetupError::Bug(bug),
@@ -272,9 +373,9 @@ pub(crate) fn unlock_error(error: SyncError) -> StoreKeyUnlockError {
     }
     match error {
         SyncError::NoStorage => StoreKeyUnlockError::NoStorage,
-        SyncError::SecureStorage(error) => StoreKeyUnlockError::SecureStorage(error),
+        SyncError::SecureStorage(error) => error.into(),
         SyncError::Crypto(error) => StoreKeyUnlockError::Crypto(error),
-        SyncError::Storage(error) => StoreKeyUnlockError::Storage(error),
+        SyncError::Storage(error) => error.into(),
         SyncError::Shutdown(shutdown) => StoreKeyUnlockError::Shutdown(shutdown),
         SyncError::Bug(bug) => StoreKeyUnlockError::Bug(bug),
         error => StoreKeyUnlockError::Other(Box::new(error)),

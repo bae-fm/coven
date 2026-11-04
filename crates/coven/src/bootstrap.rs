@@ -86,10 +86,10 @@ pub enum BootstrapError {
     Sync(SyncError),
     /// Provider sign-in failed.
     #[error(transparent)]
-    OAuth(#[from] coven_storage::providers::OAuthError),
+    OAuth(coven_storage::providers::OAuthError),
     /// Final custody could not be read or written.
     #[error(transparent)]
-    SecureStorage(#[from] KeyError),
+    SecureStorage(KeyError),
     /// Cleanup failed too; retry can inspect both failures.
     #[error("{operation}; cleanup failed: {cleanup}")]
     Cleanup {
@@ -120,6 +120,9 @@ pub enum BootstrapError {
 
 impl From<BootstrapDirectoryError> for BootstrapError {
     fn from(error: BootstrapDirectoryError) -> Self {
+        if let BootstrapDirectoryError::Bug(bug) = error {
+            return Self::Bug(bug);
+        }
         match error.device_locked() {
             Some(path) => Self::DeviceLocked { path: path.to_owned() },
             None => Self::Directory(error),
@@ -133,6 +136,7 @@ impl From<SyncError> for BootstrapError {
     fn from(error: SyncError) -> Self {
         match error {
             SyncError::Code(error) => Self::Code(error),
+            SyncError::Bug(bug) => Self::Bug(bug),
             error => Self::Sync(error),
         }
     }
@@ -142,7 +146,42 @@ impl From<CovenError> for BootstrapError {
     fn from(error: CovenError) -> Self {
         match error {
             CovenError::DeviceLocked { path } => Self::DeviceLocked { path },
+            CovenError::Bug(bug) => Self::Bug(bug),
             error => Self::Store(error),
+        }
+    }
+}
+
+impl From<coven_storage::providers::OAuthError> for BootstrapError {
+    fn from(error: coven_storage::providers::OAuthError) -> Self {
+        match error {
+            coven_storage::providers::OAuthError::Storage(StorageError::Bug(bug)) => Self::Bug(bug),
+            error => Self::OAuth(error),
+        }
+    }
+}
+
+impl From<KeyError> for BootstrapError {
+    fn from(error: KeyError) -> Self {
+        match error {
+            KeyError::Bug(bug) => Self::Bug(bug),
+            error => Self::SecureStorage(error),
+        }
+    }
+}
+
+impl crate::task::CarriesBug for BootstrapError {
+    fn bug(&self) -> Option<&crate::task::Bug> {
+        match self {
+            Self::Bug(bug) => Some(bug),
+            Self::Directory(error) => error.bug(),
+            Self::Store(error) => error.bug(),
+            Self::Sync(error) => error.bug(),
+            Self::OAuth(error) => error.bug(),
+            Self::SecureStorage(error) => error.bug(),
+            Self::Cleanup { operation, cleanup } => operation.bug().or_else(|| cleanup.bug()),
+            Self::Published { source, .. } => source.bug(),
+            _ => None,
         }
     }
 }
