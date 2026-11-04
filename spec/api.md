@@ -150,6 +150,13 @@ pub enum Audience {
   returning `StoreCreationError::PublishedButNotSynced { store, source }`.
   The complete store stays on disk; the app can call `open(store)` with its
   usual custody choices. Keeping the error cannot keep the store locked.
+- Creation writes the member identity and the device id before it
+  publishes the store. A failure before publication removes both, and a
+  panic does too, as `StoreCreationError::Bug` (E15). A panic while
+  publishing leaves unknown whether the store became visible, so coven
+  reads its marker: a store already published keeps both and returns
+  `PublishedButNotSynced` with the bug as its source. Without that check, a
+  published store would lose its identity and could never open.
 - Provider access is chosen when storage is first attached (E5), not when the
   device-local directory is created. Dropbox's required `DropboxLocation`
   selects not-shared (`AppFolder`) or shared-capable (`SharedFolder`); it has

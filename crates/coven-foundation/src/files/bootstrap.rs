@@ -138,6 +138,12 @@ impl BootstrapStore {
         result
     }
 
+    /// Whether the store is published: its marker is gone. After a panic
+    /// in a publication, this says how far it got.
+    pub fn is_published(&self) -> Result<bool, FileError> {
+        Ok(!is_pending(&self.path)?)
+    }
+
     /// Remove unpublished data and locks after all database work has closed.
     /// An absent directory succeeds; a published store cannot be cancelled.
     pub fn cancel(&self) -> Result<(), BootstrapDirectoryError> {

@@ -271,3 +271,68 @@ async fn creation_does_not_replace_an_existing_custom_identity() {
     );
     assert!(app.stores().await.unwrap().is_empty());
 }
+
+/// Creation's publish step panics before it removes the marker. The store
+/// was never published, so creation undoes its custody as after any failure
+/// before publication: no store, no member identity, no device id (E15).
+#[tokio::test]
+async fn a_panic_before_publication_undoes_the_stores_custody() {
+    let root = tempfile::tempdir().unwrap();
+    let keychain = Keychain::in_memory("creation-panic").unwrap();
+    let app = Coven::with_keychain(root.path().into(), keychain.clone());
+    let expected = StoreId(SequentialIds::new().new_id());
+    let error = super::create(
+        app.builder()
+            .id_source(Arc::new(SequentialIds::new()))
+            .synced_tables(vec![])
+            .migrations(vec![]),
+        "Household".into(),
+        |_pending: &coven_foundation::files::BootstrapStore| panic!("the marker is held open"),
+    )
+    .await
+    .unwrap_err();
+    let StoreCreationError::Bug(bug) = &error else { panic!("{error:?}") };
+    assert_eq!(bug.message, "the marker is held open");
+    assert!(app.stores().await.unwrap().is_empty());
+    assert!(!app.store_dir(&expected).database_path().exists());
+    let store_keychain = Arc::new(coven_crypto::custody::StoreKeychain::new(keychain, expected));
+    assert!(store_keychain.device_id().unwrap().is_none());
+    let identity = coven_crypto::custody::KeyringCustody::new(store_keychain);
+    assert!(MemberKeyCustody::unlock(&identity).unwrap().is_none());
+}
+
+/// Creation's publish step panics after it removed the marker: the store
+/// is published, so creation keeps its custody and says so, as when
+/// syncing the directory fails after publication (E15).
+#[tokio::test]
+async fn a_panic_after_publication_keeps_the_published_store() {
+    let root = tempfile::tempdir().unwrap();
+    let app = Coven::in_memory(root.path().into());
+    let builder = || app.builder().synced_tables(vec![]).migrations(vec![]);
+    let expected = StoreId(SequentialIds::new().new_id());
+    let error = super::create(
+        builder().id_source(Arc::new(SequentialIds::new())),
+        "Household".into(),
+        |pending: &coven_foundation::files::BootstrapStore| {
+            pending.publish()?;
+            panic!("the directory's sync is lost")
+        },
+    )
+    .await
+    .unwrap_err();
+    let StoreCreationError::PublishedButNotSynced { store, source } = &error else {
+        panic!("{error:?}")
+    };
+    assert_eq!(*store, expected);
+    assert!(
+        matches!(source.as_ref(), StoreCreationError::Bug(bug) if bug.message == "the directory's sync is lost"),
+        "{source:?}"
+    );
+    assert_eq!(
+        app.stores().await.unwrap(),
+        [StoreInfo { id: expected, name: "Household".into(), unfinished_replacement: None }]
+    );
+    let reopened = builder().open(expected, |_| ()).await.unwrap();
+    reopened.close().await.unwrap();
+    app.discard_store(&app.store_dir(&expected)).await.unwrap();
+}

@@ -2,6 +2,7 @@
 
 use super::*;
 use coven_foundation::files::{BootstrapDirectoryError, BootstrapStore};
+use coven_foundation::task::caught_sync;
 
 pub(super) async fn create(
     builder: CovenBuilder,
@@ -52,29 +53,35 @@ async fn prepare(
             directory.id(),
         ));
         let mut owners = builder.owners(directory, keychain)?;
-        let result = owners.custody.initialize_identity(MemberId(owners.ids.new_id()));
+        // Each step catches its panic, so a panic undoes custody as any
+        // failure before publication does (E15).
+        let member = MemberId(owners.ids.new_id());
+        let result = caught_sync("create the member identity", || {
+            owners.custody.initialize_identity(member)
+        })
+        .unwrap_or_else(|bug| Err(IdentityError::Bug(bug)));
         if matches!(result, Err(IdentityError::AlreadyInitialized)) {
             return Err(IdentityError::AlreadyInitialized.into());
         }
         let result = result.map_err(StoreCreationError::from).and_then(|_| {
-            owners.keychain.set_device_id(owners.device).map_err(CovenError::from)?;
-            publish(&pending).map_err(StoreCreationError::from)
+            caught_sync("record the device id", || owners.keychain.set_device_id(owners.device))
+                .unwrap_or_else(|bug| Err(KeyError::Bug(bug)))
+                .map_err(CovenError::from)?;
+            Ok(published(&pending, publish))
         });
-        match result {
-            Ok(()) => Ok((owners, None)),
-            Err(StoreCreationError::Directory(error)) if error.published_unsynced() => {
-                Ok((owners, Some(StoreCreationError::Directory(error))))
-            }
-            Err(mut error) => {
-                // Try every compensation, retaining every failure. The marker stays hidden.
-                for cleanup in [owners.identity.forget(), owners.keychain.delete_device_id()] {
-                    if let Err(cleanup) = cleanup {
-                        error = error.with_cleanup(CovenError::from(cleanup).into());
-                    }
-                }
-                Err(error)
+        let mut error = match result {
+            Ok(Publication::Done) => return Ok((owners, None)),
+            Ok(Publication::Failed(error)) => return Ok((owners, Some(error))),
+            Ok(Publication::Unknown(error)) => return Err(error),
+            Ok(Publication::Refused(error)) | Err(error) => error,
+        };
+        // Try every compensation, retaining every failure. The marker stays hidden.
+        for cleanup in [owners.identity.forget(), owners.keychain.delete_device_id()] {
+            if let Err(cleanup) = cleanup {
+                error = error.with_cleanup(CovenError::from(cleanup).into());
             }
         }
+        Err(error)
     })
     .await
     .unwrap_or_else(|shutdown| Err(shutdown.into()));
@@ -102,6 +109,44 @@ async fn prepare(
                 Err(cleanup) => source.with_cleanup(cleanup.into()),
             };
             Err(StoreCreationError::PublishedButNotSynced { store, source: Box::new(source) })
+        }
+    }
+}
+
+/// How far publishing the new store got.
+enum Publication {
+    /// The store is published.
+    Done,
+    /// The store is published, but the step failed after its marker went,
+    /// as syncing the directory does: its custody stays.
+    Failed(StoreCreationError),
+    /// The store isn't published: its custody is undone.
+    Refused(StoreCreationError),
+    /// Publishing panicked, and the marker that says how far it got couldn't
+    /// be read: custody stays, and listing the stores shows which (E15).
+    Unknown(StoreCreationError),
+}
+
+/// Publish the store with `publish`. Its panic leaves it unknown whether
+/// the marker went, so the marker says: creation keeps custody for a
+/// published store and undoes it for one that isn't (E15).
+fn published(
+    pending: &BootstrapStore,
+    publish: impl FnOnce(&BootstrapStore) -> Result<(), BootstrapDirectoryError>,
+) -> Publication {
+    let bug = match caught_sync("publish the store", || publish(pending)) {
+        Ok(Ok(())) => return Publication::Done,
+        Ok(Err(error)) if error.published_unsynced() => {
+            return Publication::Failed(StoreCreationError::Directory(error))
+        }
+        Ok(Err(error)) => return Publication::Refused(error.into()),
+        Err(bug) => StoreCreationError::Bug(bug),
+    };
+    match pending.is_published() {
+        Ok(true) => Publication::Failed(bug),
+        Ok(false) => Publication::Refused(bug),
+        Err(read) => {
+            Publication::Unknown(bug.with_cleanup(BootstrapDirectoryError::from(read).into()))
         }
     }
 }
