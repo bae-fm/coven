@@ -26,7 +26,7 @@ pub enum LastPass {
     /// This slot invokes §5.4's stuck-device rule.
     Blocked {
         /// The slot that cannot apply.
-        #[serde(with = "crate::pending_encoding::slot")]
+        #[serde(with = "coven_database::slot_json")]
         slot: coven_merge::Slot,
         /// Why it cannot apply.
         reason: crate::PendingReason,

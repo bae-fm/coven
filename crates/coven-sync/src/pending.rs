@@ -65,7 +65,7 @@ pub enum PendingSubject {
     /// A numbered write.
     Write(#[serde(with = "encoding::write")] WriteId),
     /// A position in the store sequence.
-    Slot(#[serde(with = "encoding::slot")] Slot),
+    Slot(#[serde(with = "coven_database::slot_json")] Slot),
     /// A sealed key addressed to a member.
     KeyCopy {
         /// The key's audience.
@@ -235,7 +235,7 @@ pub enum PendingReason {
     /// Writes consumed after a permanent lower-slot cut-off.
     WritesRefused {
         /// The removal or replacement slot.
-        #[serde(with = "encoding::slot")]
+        #[serde(with = "coven_database::slot_json")]
         cutoff: Slot,
         /// The event that excluded the original author.
         cause: coven_database::WriteCutoff,

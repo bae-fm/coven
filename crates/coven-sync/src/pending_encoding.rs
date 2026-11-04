@@ -41,21 +41,6 @@ macro_rules! write_id {
     };
 }
 write_id!(write, coven_merge::WriteId);
-pub(crate) mod slot {
-    use super::*;
-    pub(crate) fn serialize<S: serde::Serializer>(
-        value: &coven_merge::Slot,
-        s: S,
-    ) -> Result<S::Ok, S::Error> {
-        value.0.serialize(s)
-    }
-    pub(crate) fn deserialize<'de, D: serde::Deserializer<'de>>(
-        d: D,
-    ) -> Result<coven_merge::Slot, D::Error> {
-        Ok(coven_merge::Slot(u64::deserialize(d)?))
-    }
-}
-
 pub(crate) mod audience {
     use super::*;
     pub(crate) fn serialize<S: serde::Serializer>(

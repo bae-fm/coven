@@ -11,7 +11,7 @@ pub enum DeviceIdEvidence {
     /// This copy never attempted the bytes signed by its device at this slot.
     UnattemptedSlot {
         /// The occupied slot.
-        #[serde(with = "crate::pending_encoding::slot")]
+        #[serde(with = "coven_database::slot_json")]
         slot: Slot,
     },
     /// A counted registration replaces this installation.

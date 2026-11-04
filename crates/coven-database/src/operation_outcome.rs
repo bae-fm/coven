@@ -42,7 +42,7 @@ pub enum OperationRejection {
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum OperationOutcome {
     /// Its entry landed at this slot, which this device has applied.
-    Landed(#[serde(with = "slot")] coven_merge::Slot),
+    Landed(#[serde(with = "slot_json")] coven_merge::Slot),
     /// The applied state already had what it asked for, so it claimed no
     /// slot (§11.2).
     Satisfied,
@@ -84,15 +84,19 @@ impl rusqlite::types::FromSql for OperationOutcome {
     }
 }
 
-mod slot {
+/// A slot as the JSON coven keeps it in: its number. For
+/// `#[serde(with = "coven_database::slot_json")]`.
+pub mod slot_json {
     use serde::{Deserialize, Serialize};
-    pub(super) fn serialize<S: serde::Serializer>(
+    /// Write the slot's number.
+    pub fn serialize<S: serde::Serializer>(
         value: &coven_merge::Slot,
         output: S,
     ) -> Result<S::Ok, S::Error> {
         value.0.serialize(output)
     }
-    pub(super) fn deserialize<'de, D: serde::Deserializer<'de>>(
+    /// Read a slot from its number.
+    pub fn deserialize<'de, D: serde::Deserializer<'de>>(
         input: D,
     ) -> Result<coven_merge::Slot, D::Error> {
         Ok(coven_merge::Slot(u64::deserialize(input)?))
