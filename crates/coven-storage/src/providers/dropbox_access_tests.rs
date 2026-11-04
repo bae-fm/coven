@@ -455,3 +455,18 @@ async fn asynchronous_removal_times_out_without_hiding_remaining_access() {
     storage.revoke_access("member").await.unwrap();
     assert!(!state.lock().unwrap().members.contains_key("member"));
 }
+
+/// Dropbox writes an absent optional field as null too: a members page whose
+/// cursor is null is the last, as it is for the shared-folder listing.
+#[tokio::test]
+async fn a_null_members_cursor_ends_the_listing() {
+    let mut remote = Remote::default();
+    remote.members.insert("member".into(), "editor".into());
+    remote.members.insert("other".into(), "editor".into());
+    remote.null_member_cursor = true;
+    remote.removal_job =
+        Some(RemovalJob { member: "member".into(), statuses: [json!({".tag":"complete"})].into() });
+    let state = Arc::new(Mutex::new(remote));
+    let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
+    provider(&server.url).revoke_access("member").await.unwrap();
+}

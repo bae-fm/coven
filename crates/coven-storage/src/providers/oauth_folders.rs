@@ -151,14 +151,9 @@ impl OAuthFolders {
                 storage.validate().map_err(|error| StorageFailure::Protocol.with_source(error))?;
                 folders.push(StorageFolder { name: http::string(item, "name")?.into(), storage });
             }
-            match http::optional_string(&value, "cursor")? {
+            match http::page_cursor(&value)? {
                 None => return Ok(folders),
                 Some(cursor) => {
-                    if cursor.is_empty() {
-                        return Err(
-                            StorageFailure::Protocol.with_source("empty Dropbox page cursor")
-                        );
-                    }
                     pages.check(cursor)?;
                     url = http::endpoint(&self.api, &["sharing", "list_folders", "continue"], &[])?;
                     body = json!({"cursor": cursor});

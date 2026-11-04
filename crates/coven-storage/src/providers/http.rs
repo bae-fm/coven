@@ -594,6 +594,15 @@ pub(crate) fn string<'a>(value: &'a Value, field: &str) -> Result<&'a str, Stora
         .filter(|s| !s.is_empty())
         .ok_or(StorageFailure::Protocol.with_source("missing string field"))
 }
+/// The cursor a Dropbox page names for the next: none, absent or null, on
+/// its last page; an empty one or one that isn't text is a protocol
+/// failure.
+pub(crate) fn page_cursor(value: &Value) -> Result<Option<&str>, StorageError> {
+    match optional_string(value, "cursor")? {
+        Some("") => Err(StorageFailure::Protocol.with_source("empty Dropbox page cursor")),
+        cursor => Ok(cursor),
+    }
+}
 /// The next page a Graph listing names in `@odata.nextLink`: none on its
 /// last page; a link that isn't text is a protocol failure.
 pub(crate) fn next_link(value: &Value) -> Result<Option<&str>, StorageError> {

@@ -171,10 +171,9 @@ impl DropboxStorage {
         loop {
             let value = self.rpc(method, request).await?;
             members.append(&value, email, inherited)?;
-            let Some(_) = value.get("cursor") else {
+            let Some(cursor) = http::page_cursor(&value)? else {
                 return Ok(members);
             };
-            let cursor = http::string(&value, "cursor")?;
             seen.check(cursor)?;
             method = "sharing/list_folder_members/continue";
             request = json!({"cursor":cursor});

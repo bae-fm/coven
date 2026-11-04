@@ -53,6 +53,9 @@ pub(super) struct Remote {
     pub(super) folders: BTreeSet<String>,
     list_prefix: String,
     list_recursive: bool,
+    /// Whether the last page of members says `"cursor": null` rather than
+    /// leaving the cursor out.
+    null_member_cursor: bool,
 }
 pub(super) fn file_metadata(path: &str, bytes: &[u8], state: &Remote) -> Value {
     json!({".tag":"file", "path_lower":path, "size":bytes.len(), "id":format!("id:{path}"),
@@ -316,6 +319,8 @@ pub(super) async fn endpoint(
             if start + 1 < all.len() {
                 value["cursor"] =
                     json!(format!("{}:{}", if inherited { "parent" } else { "direct" }, start + 1));
+            } else if state.null_member_cursor {
+                value["cursor"] = Value::Null;
             }
             reply(value)
         }
