@@ -54,7 +54,9 @@ impl SequenceSync {
     /// Replace an audience key through the administrative journal.
     pub async fn rotate_key(self: &Arc<Self>, audience: Audience) -> Result<(), SyncError> {
         let owner = self.clone();
-        tokio::spawn(async move {
+        // The owned task survives cancellation of the app's waiter, as an
+        // operation's submission does.
+        let rotating = async move {
             let mut session = owner.session.lock().await;
             let member =
                 owner.member.read()?.ok_or(coven_storage::StorageFailure::MemberKeysMissing)?;
@@ -63,9 +65,13 @@ impl SequenceSync {
             owner.settle_open(&mut session, &mut ring, &member).await?;
             owner.resume_administration(&mut session, &mut ring, &member).await?;
             owner.install_key(&mut session, &mut ring, &member, audience).await
-        })
-        .await
-        .map_err(|error| SyncError::disk(std::io::Error::other(error)))?
+        };
+        coven_foundation::task::spawn_completing(
+            "rotate a key",
+            self.database.bugs().clone(),
+            rotating,
+        )
+        .await?
     }
     async fn install_key(
         &self,

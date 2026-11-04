@@ -17,7 +17,7 @@ use tokio::sync::watch;
 pub struct NetworkFollow {
     _watch: NetworkWatch,
     stop: watch::Sender<bool>,
-    task: tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
+    task: tokio::sync::Mutex<Option<coven_foundation::task::OwnedTask>>,
 }
 
 impl NetworkFollow {
@@ -32,7 +32,10 @@ impl NetworkFollow {
             waits.report_network();
         }
         let (stop, mut stopping) = watch::channel(false);
-        let task = tokio::spawn(async move {
+        let bugs = database.bugs().clone();
+        // A panic goes to the store's bug sink, and the network stays as
+        // last shown until the store closes.
+        let follow = async move {
             let mut joined = first.joined;
             loop {
                 tokio::select! {
@@ -49,7 +52,9 @@ impl NetworkFollow {
                     waits.report_network();
                 }
             }
-        });
+        };
+        let task =
+            coven_foundation::task::spawn_owned("the network follower", bugs, follow, |_| async {});
         Self { _watch: watched, stop, task: tokio::sync::Mutex::new(Some(task)) }
     }
 
@@ -57,7 +62,7 @@ impl NetworkFollow {
     pub async fn close(&self) {
         self.stop.send_replace(true);
         if let Some(task) = self.task.lock().await.take() {
-            crate::files::stopped("the network follower", task).await;
+            task.ended().await;
         }
     }
 }

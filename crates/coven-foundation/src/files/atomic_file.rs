@@ -68,6 +68,16 @@ pub enum FileError {
     Bug(#[from] crate::task::Bug),
 }
 
+impl crate::task::CarriesBug for FileError {
+    fn bug(&self) -> Option<&crate::task::Bug> {
+        match self {
+            Self::Bug(bug) => Some(bug),
+            Self::Cleanup { operation, .. } => operation.bug(),
+            _ => None,
+        }
+    }
+}
+
 impl From<crate::task::TaskFailed> for FileError {
     fn from(failed: crate::task::TaskFailed) -> Self {
         failed.into_error()

@@ -43,6 +43,8 @@ pub struct CovenBuilder {
     identity: CustodyChoice<IdentityCustody, MemberIdentity>,
     sqlite: SqliteSettings,
     sql_functions: coven_database::SqlFunctions,
+    /// Where a bug in the store's work that nobody waits for goes (E15).
+    bugs: crate::task::BugSinkRef,
     /// Stop a replacement right after its swap, as if the process ended there.
     #[cfg(test)]
     interrupt_after_swap: bool,
@@ -87,6 +89,7 @@ impl CovenBuilder {
             identity: CustodyChoice::Configured(IdentityCustody::Keyring),
             sqlite: SqliteSettings::default(),
             sql_functions: coven_database::SqlFunctions::default(),
+            bugs: Arc::new(crate::task::LoggedBugs),
             #[cfg(test)]
             interrupt_after_swap: false,
             #[cfg(test)]
@@ -282,17 +285,27 @@ impl CovenBuilder {
         self
     }
 
+    /// Where a bug in the store's work that nobody waits for goes (E15): a
+    /// panic in its sync loop, upload worker or another worker of its own,
+    /// and one in work whose caller stopped waiting for it. The app passes
+    /// its crash reporter. Unset, each bug is logged at error.
+    pub fn bug_sink(mut self, bugs: crate::task::BugSinkRef) -> Self {
+        self.bugs = bugs;
+        self
+    }
+
     /// Create and open a store, initializing its member in the chosen custody
     /// before publication. Cancellation does not interrupt creation or rollback.
     /// Errors carry no handle; a published store is closed before returning.
     pub async fn create_store(self, name: &str) -> Result<CovenHandle, StoreCreationError> {
         let name = name.to_owned();
-        let creating = tokio::spawn(creation::create(
-            self,
-            name,
-            coven_foundation::files::BootstrapStore::publish,
-        ));
-        crate::task::joined("create the store", creating).await?
+        let bugs = self.bugs.clone();
+        crate::task::spawn_completing(
+            "create the store",
+            bugs,
+            creation::create(self, name, coven_foundation::files::BootstrapStore::publish),
+        )
+        .await?
     }
 
     /// Opens the store for reading and writing, taking the store's lock.
@@ -488,7 +501,8 @@ impl CovenBuilder {
             .clock(self.clock.clone())
             .id_source(self.ids.clone())
             .sqlite_settings(self.sqlite.clone())
-            .sql_functions(self.sql_functions.clone()))
+            .sql_functions(self.sql_functions.clone())
+            .bug_sink(self.bugs.clone()))
     }
 
     fn keychain(&self) -> Result<Arc<Keychain>, KeyError> {

@@ -14,6 +14,10 @@ pub struct SyncLoop {
     commands: mpsc::UnboundedSender<Command>,
     /// Where the person's retry requests wait for this loop's passes.
     waits: Arc<RetryWaits>,
+    /// The bug the loop ended on, if it panicked: what a command to it
+    /// fails with from then on, where a loop that ended with its store
+    /// fails with `StoreClosed`.
+    panicked: Arc<std::sync::OnceLock<coven_foundation::task::Bug>>,
 }
 enum Command {
     Start,
@@ -25,17 +29,48 @@ enum Command {
 }
 #[expect(
     clippy::map_err_ignore,
-    reason = "a command fails only when the loop has ended, which StoreClosed names"
+    reason = "a command fails only when the loop has ended, and `gone` says why"
 )]
 impl SyncLoop {
     /// Compose a stopped loop for an open, connected sequence owner.
     /// `codes` completes member-key replacement and installs delivered S3 keys
     /// on this device after each pass (§11.5, §14.3).
+    /// A panic in the loop goes to the store's bug sink, and ends the loop
+    /// as a failure: the last pass is recorded failed with the bug, sync
+    /// stops, and the retries waiting, those the panicking pass took among
+    /// them, are answered with the bug (E15).
     pub fn new(sync: Arc<SequenceSync>, codes: crate::RestoreCodes) -> Self {
         let (commands, receiver) = mpsc::unbounded_channel();
         let waits = sync.waits.clone();
-        tokio::spawn(run(sync, codes, receiver));
-        Self { commands, waits }
+        let owner = sync.clone();
+        let panicked = Arc::new(std::sync::OnceLock::new());
+        let ended = panicked.clone();
+        drop(coven_foundation::task::spawn_owned(
+            "the sync loop",
+            sync.database.bugs().clone(),
+            run(sync, codes, receiver),
+            |bug| async move {
+                ended.get_or_init(|| bug.clone());
+                #[expect(
+                    clippy::let_underscore_must_use,
+                    reason = "the loop has ended either way; a failed write has failed the handle, which reports it"
+                )]
+                let _ = show(&owner, LastPass::failed(SyncError::Bug(bug.clone()))).await;
+                if let Err(error) = owner.waits.sync_panicked(bug).await {
+                    tracing::debug!("stopping sync on a failed handle: {error}");
+                }
+            },
+        ));
+        Self { commands, waits, panicked }
+    }
+
+    /// Why a command found the loop gone: the bug it ended on, or the store
+    /// closing.
+    fn gone(&self) -> SyncError {
+        match self.panicked.get() {
+            Some(bug) => SyncError::Bug(bug.clone()),
+            None => DbError::StoreClosed.into(),
+        }
     }
     /// Start and request an immediate pass. From now on the person's retry
     /// requests wait for this loop's passes.
@@ -43,13 +78,13 @@ impl SyncLoop {
         self.waits.sync_started().await?;
         if self.commands.send(Command::Start).is_err() {
             self.waits.sync_stopped().await?;
-            return Err(DbError::StoreClosed.into());
+            return Err(self.gone());
         }
         Ok(())
     }
     /// Retain one pass request, including while a pass is running.
     pub fn sync_now(&self) -> Result<(), SyncError> {
-        self.commands.send(Command::Now).map_err(|_| DbError::StoreClosed.into())
+        self.commands.send(Command::Now).map_err(|_| self.gone())
     }
     /// Queue stopping after the active pass and this connection's transfers.
     /// Stopping writes nothing the sync state reads; a release failure is
@@ -58,26 +93,26 @@ impl SyncLoop {
     /// loop stops even when writing that fails, which has failed the handle.
     pub async fn stop(&self) -> Result<(), SyncError> {
         let stopped = self.waits.sync_stopped().await;
-        self.commands.send(Command::Stop).map_err(|_| DbError::StoreClosed)?;
+        self.commands.send(Command::Stop).map_err(|_| self.gone())?;
         Ok(stopped?)
     }
     /// Wait for the active pass, retaining its started state, pending work and
     /// retry schedule while the owner prepares a connection or custody change.
     pub async fn pause(&self) -> Result<(), SyncError> {
         let (send, receive) = oneshot::channel();
-        self.commands.send(Command::Pause(send)).map_err(|_| DbError::StoreClosed)?;
-        receive.await.map_err(|_| DbError::StoreClosed.into())
+        self.commands.send(Command::Pause(send)).map_err(|_| self.gone())?;
+        receive.await.map_err(|_| self.gone())
     }
     /// Continue the retained loop after a failed connection or custody change.
     pub fn resume(&self) -> Result<(), SyncError> {
-        self.commands.send(Command::Resume).map_err(|_| DbError::StoreClosed.into())
+        self.commands.send(Command::Resume).map_err(|_| self.gone())
     }
     /// Finish active work and this connection's transfers, then end this
     /// loop. The store's owner closes its transfers and database.
     pub async fn close(&self) -> Result<(), SyncError> {
         let (send, receive) = oneshot::channel();
-        self.commands.send(Command::Close(send)).map_err(|_| DbError::StoreClosed)?;
-        receive.await.map_err(|_| DbError::StoreClosed)?
+        self.commands.send(Command::Close(send)).map_err(|_| self.gone())?;
+        receive.await.map_err(|_| self.gone())?
     }
 }
 /// Coven's own operation whose last attempt failed, if any, with the cause
@@ -127,6 +162,12 @@ fn failed(sync: &SequenceSync, error: SyncError) -> PassFailure {
         return crate::connection_failure(error);
     };
     PassFailure::Blocked { slot, reason: record.reason, error: record.cause }
+}
+
+/// `error`, once a bug it carries has gone to the store's bug sink: nobody
+/// waits for the loop, so its failures reach no caller (E15).
+fn reported(sync: &SequenceSync, error: impl Into<SyncError>) -> SyncError {
+    coven_foundation::task::reported(sync.database.bugs().as_ref(), error.into())
 }
 
 /// Write how sync last failed outside a pass's end, in the step that fails.
@@ -225,7 +266,7 @@ async fn run(
                         clippy::let_underscore_must_use,
                         reason = "the loop ends either way; a failed write has failed the handle, which reports it"
                     )]
-                    let _ = show(&sync, LastPass::failed(error)).await;
+                    let _ = show(&sync, LastPass::failed(reported(&sync, error))).await;
                     break;
                 }
             }
@@ -267,7 +308,7 @@ async fn run(
                     clippy::let_underscore_must_use,
                     reason = "the loop ends either way; a failed write has failed the handle, which reports it"
                 )]
-                let _ = show(&sync, LastPass::failed(SyncError::from(error))).await;
+                let _ = show(&sync, LastPass::failed(reported(&sync, error))).await;
                 break;
             }
         };
@@ -288,7 +329,7 @@ async fn run(
                             }
                             Err(error) => {
                                 stopped(&sync.waits).await;
-                                if show(&sync, LastPass::failed(error)).await.is_err() { break; }
+                                if show(&sync, LastPass::failed(reported(&sync, error))).await.is_err() { break; }
                             }
                         }
                     }
@@ -309,7 +350,7 @@ async fn run(
                     // No caller waits for stopping; a failure is recorded
                     // as the last pass's.
                     if let Err(error) = sync.files.set_storage(None, std::future::ready(Ok(()))).await {
-                        if show(&sync, LastPass::failed(error)).await.is_err() { break; }
+                        if show(&sync, LastPass::failed(reported(&sync, error))).await.is_err() { break; }
                     }
                 }
                 // Transfers outlive this connection's loop; the store's
@@ -341,7 +382,7 @@ async fn run(
                 Err(error) => {
                     started = false;
                     stopped(&sync.waits).await;
-                    if show(&sync, LastPass::failed(SyncError::from(error))).await.is_err() { break; }
+                    if show(&sync, LastPass::failed(reported(&sync, error))).await.is_err() { break; }
                 }
             },
             () = interval.changed() => idle = idle_wait(&sync, idle_from, interval.current()),
@@ -360,7 +401,7 @@ async fn run(
                 pending = false;
                 if let Err(error) = changes.take_changed() {
                     #[expect(clippy::let_underscore_must_use, reason = "the loop ends either way; a failed write has failed the handle, which reports it")]
-                    let _ = show(&sync, LastPass::failed(SyncError::from(error))).await;
+                    let _ = show(&sync, LastPass::failed(reported(&sync, error))).await;
                     break;
                 }
                 // The pass answers the retries acted on before it began
@@ -379,7 +420,7 @@ async fn run(
                 let connection_version = sync.waits.connection_version();
                 let (passed, moving) = moving_pass(&sync, &codes).await;
                 if let Err(error) = moving {
-                    requests.answer(&PassFailure::Failed { error: SyncError::from(error).into() }.into());
+                    requests.answer(&PassFailure::Failed { error: reported(&sync, error).into() }.into());
                     break;
                 }
                 // The idle interval counts from the pass's end, before the
@@ -391,7 +432,7 @@ async fn run(
                             None => {
                                 let finished_at = sync.clock.now();
                                 if let Err(error) = LastPass::Synced.record_end(&sync.database, finished_at).await {
-                                    requests.answer(&PassFailure::Failed { error: SyncError::from(error).into() }.into());
+                                    requests.answer(&PassFailure::Failed { error: reported(&sync, error).into() }.into());
                                     break;
                                 }
                                 RetryOutcome::Synced { finished_at }
@@ -406,10 +447,11 @@ async fn run(
                         },
                         Err(error) => {
                             started = false;
-                            PassFailure::Failed { error: error.into() }.into()
+                            PassFailure::Failed { error: reported(&sync, error).into() }.into()
                         }
                     },
                     Err(error) => {
+                        let error = reported(&sync, error);
                         let reason = sync.error_reason(&error);
                         match retry.failed(&sync.database, &sync.waits, reason, connection_version, error, |error| failed(&sync, error)).await {
                             Ok(failure) => {
@@ -427,7 +469,7 @@ async fn run(
                 // with sync stopping, before the row records it or the
                 // person hears it.
                 if let Err(error) = sync.waits.holds(retry.held(&sync.waits)).await {
-                    requests.answer(&PassFailure::Failed { error: SyncError::from(error).into() }.into());
+                    requests.answer(&PassFailure::Failed { error: reported(&sync, error).into() }.into());
                     break;
                 }
                 if !started {
@@ -435,7 +477,7 @@ async fn run(
                 }
                 if let RetryOutcome::Failed(failure) = &outcome {
                     if let Err(error) = ended(&sync, failure.clone().into()).await {
-                        requests.answer(&PassFailure::Failed { error: SyncError::from(error).into() }.into());
+                        requests.answer(&PassFailure::Failed { error: reported(&sync, error).into() }.into());
                         break;
                     }
                 }

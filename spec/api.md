@@ -2150,6 +2150,12 @@ impl CovenBuilder {
         F: Fn(&FunctionArguments<'_>) -> SqliteResult<T> + Send + Sync + 'static,
         T: Into<types::Value>;
 
+    /// Where a bug in the store's work that nobody waits for goes (E15): a
+    /// panic in its sync loop, upload worker or another worker of its own,
+    /// and one in work whose caller stopped waiting for it. The app passes
+    /// its crash reporter. Unset, each bug is logged at error.
+    pub fn bug_sink(self, bugs: coven::task::BugSinkRef) -> Self;
+
     /// Creates an open store and its member in the chosen custody before
     /// publication; cancellation does not interrupt creation or rollback.
     /// Errors carry no handle; a published store is closed before returning.
@@ -3446,10 +3452,10 @@ where
 impl<T: Send + 'static> LiveQuery<T> {
     /// The first result at once; after that, waits for a write that changes
     /// the result and returns the new one. An error is a result too, and
-    /// doesn't end the query, except the one saying the store closed or the
+    /// doesn't end the query, except the one saying the store closed, the
     /// handle fails every call (`RollbackFailed`, `StatePersistence`,
-    /// `CheckpointFailed`, `WallTimer`): after it, `None`, so a loop
-    /// over the query ends.
+    /// `CheckpointFailed`, `WallTimer`) or a run panicked (`DbError::Bug`,
+    /// E15): after it, `None`, so a loop over the query ends.
     pub async fn next(&mut self) -> Option<CovenResult<T>>
     where
         T: Clone + PartialEq;
@@ -3489,8 +3495,8 @@ where
 
     /// The next result, with the request and revision that produced it, and
     /// whether a new request, a write, or both caused it; `None` after the
-    /// result saying the store closed or the handle failed, as for
-    /// `LiveQuery::next`.
+    /// result saying the store closed, the handle failed or a run panicked,
+    /// as for `LiveQuery::next`.
     pub async fn next(&mut self) -> Option<ReconfigurableLiveQueryEvent<Q, T>>
     where
         T: Clone + PartialEq;
@@ -8220,8 +8226,9 @@ pub async fn empty_s3_prefix(
   at the join with `std::panic::resume_unwind` skips every cleanup the caller
   wrote for `Err`.
 - `coven::task` turns such a panic into a `TaskFailed` value at the nearest
-  join, so the caller's `Err` path runs. Coven has no bug reporter of its own:
-  the caller reports a `Panicked` wherever it reports its own bugs. A
+  join, so the caller's `Err` path runs. The caller reports a `Panicked`
+  wherever it reports its own bugs; work nobody waits for reports to the
+  app's bug sink instead, as the end of this section describes. A
   `Shutdown` is not a bug. The runtime dropped the work because the process
   is ending it.
 - Ana's music app reads an album's tags on the blocking pool with
@@ -8290,9 +8297,42 @@ for file work, and a `Bug` variant of each error that has a `Shutdown` one.
 - A file removal that fails after such a write joins the bug as
   `DbError::FileCleanup`, as it joins any failed write's error, so neither
   failure is lost.
-- A panic in one of a store's long-lived workers, which nobody waits on as
-  it runs, still unwinds into the owner that stops it: the upload worker,
-  the invite expiry, the network follower and a connection attempt.
+
+Work nobody waits for has no caller to return its bug to. A store's
+long-lived workers run that way: its sync loop, a connection attempt, the
+upload worker, the invite expiry, the network follower and a read-ahead. So
+does work a call runs as its own task once its caller stops waiting, such as
+closing a store. Such a bug goes to the app's bug sink, which the app passes
+with `CovenBuilder::bug_sink`, usually its crash reporter; without one,
+`LoggedBugs` logs each bug at error. Without the sink a worker's panic would
+end it unseen, and the work it served would wait for it forever.
+
+- Ben pulls to refresh the Household store on his phone, and the sync loop's
+  pass panics reading slot 412 with "a chunk runs past the slot's end". The
+  app's bug sink hears `Bug { operation: "the sync loop", message: "a chunk
+  runs past the slot's end" }`. The last pass is recorded failed with the
+  bug, so the sync status shows it, and sync stops. Ben's retry is answered
+  `Failed` with the bug, and a later `start_sync` fails with it.
+- Each worker's owner ends the work it served, so nothing waits on a worker
+  that is gone. The sync loop and a connection attempt do as above, and
+  answer every waiting retry with the bug, those the panicking pass took
+  among them. The upload worker answers each waiting `retry_uploads_now`
+  with the bug, and each later one too. The invite expiry, the network
+  follower and a read-ahead only report: the next open writes the expiries
+  that passed, the network shows as last heard until the store closes, and
+  the next read fetches what the read-ahead would have.
+- A failure such a worker records, or answers a retry with, may carry a bug:
+  a database call in the loop's pass that panicked returns `DbError::Bug`,
+  and the loop records it as the pass's failure. No caller hears of it, so
+  that bug goes to the sink too. `CarriesBug::bug` finds the bug an error
+  carries, itself or through the failure it keeps.
+- A live query whose run panics returns its `DbError::Bug` once, then
+  `None`, as for a closed store. What the run read is unknown, so no commit
+  could tell whether to run it again.
+- The calls that run as their own task, above, run with `spawn_completing`,
+  as do stopping sync, `rotate_key` and an administrative operation's
+  submission. A caller still waiting gets the bug in the call's error. Once
+  none is, the bug goes to the sink, as does a bug the call's error carries.
 
 Edge cases:
 
@@ -8310,6 +8350,10 @@ Edge cases:
   dropped have stopped, which is all closing waits for: closing goes on.
 - Dropping the future `blocking` or `joined` returns does not stop work
   already spawned: it runs to its end, and its result or panic is dropped.
+  Dropping a `spawn_completing` future does not stop its work either, and
+  its panic goes to the bug sink.
+- A bug sink whose `report` panics is logged at error; its panic goes no
+  further, since nothing above it would catch it.
 
 ```rust
 // These items are in `coven::task`, not at coven's root.
@@ -8408,4 +8452,78 @@ pub async fn caught<T>(operation: &'static str, work: impl Future<Output = T>) -
 /// `caught` for a synchronous call: an FFI callback, a dedicated thread's
 /// body, a `Drop`.
 pub fn caught_sync<T>(operation: &'static str, work: impl FnOnce() -> T) -> Result<T, Bug>;
+
+/// Where a bug in work nobody waits for goes: a store's long-lived workers
+/// and work whose caller stopped waiting for it. The app passes its own
+/// crash reporter with `CovenBuilder::bug_sink`.
+pub trait BugSink: Send + Sync {
+    /// Report `bug`, which no caller hears of otherwise.
+    fn report(&self, bug: &Bug);
+}
+
+/// A shared `BugSink`.
+pub type BugSinkRef = std::sync::Arc<dyn BugSink>;
+
+/// Logs each bug at error: the sink of a store whose app names none.
+pub struct LoggedBugs;
+
+/// An error that may carry a bug: work its call ran panicked, and the
+/// call's error says so. Implemented by `Bug`, `TaskFailed` and every coven
+/// error with a `Bug` variant.
+pub trait CarriesBug {
+    /// The bug this error carries, itself or through the failure it keeps.
+    fn bug(&self) -> Option<&Bug>;
+}
+
+/// Hand `bug` to `bugs`. A sink that panics too is logged, and its panic
+/// goes no further.
+pub fn report(bugs: &dyn BugSink, bug: &Bug);
+
+/// Hand the bug `error` carries, if it carries one, to `bugs`. Whether it
+/// carried one, so the work logs an error that carried none.
+pub fn report_carried(bugs: &dyn BugSink, error: &impl CarriesBug) -> bool;
+
+/// `error`, once the bug it carries, if any, has gone to `bugs`.
+pub fn reported<E: CarriesBug>(bugs: &dyn BugSink, error: E) -> E;
+
+/// Run `work` as its own task that nobody waits for: a worker its owner
+/// stops. A panic in it goes to `bugs`, then `ended` runs with the bug, so
+/// the owner ends what the work served in a way its readers see. A panic in
+/// `ended` goes to `bugs` too, and no further.
+pub fn spawn_owned<E, F>(
+    operation: &'static str,
+    bugs: BugSinkRef,
+    work: impl Future<Output = ()> + Send + 'static,
+    ended: E,
+) -> OwnedTask
+where
+    E: FnOnce(Bug) -> F + Send + 'static,
+    F: Future<Output = ()> + Send;
+
+/// A task `spawn_owned` started. Dropping it leaves the task running.
+pub struct OwnedTask { /* private */ }
+
+impl OwnedTask {
+    /// End the work at its next wait. Its `ended` does not run.
+    pub fn abort(&self);
+    /// Whether the work has ended.
+    pub fn is_finished(&self) -> bool;
+    /// Wait until the work has ended: finished, panicked and reported, or
+    /// dropped by its runtime as it shuts down.
+    pub async fn ended(self);
+}
+
+/// Run `work` as its own task, so it finishes even when its caller stops
+/// waiting. Its panic comes back as `TaskFailed::Panicked` to a caller still
+/// waiting. Once none is, the panic goes to `bugs`, as does a bug its error
+/// carries.
+pub fn spawn_completing<T: Send + 'static, E: CarriesBug + Send + 'static>(
+    operation: &'static str,
+    bugs: BugSinkRef,
+    work: impl Future<Output = Result<T, E>> + Send + 'static,
+) -> CompletingTask<Result<T, E>>;
+
+/// The result of work `spawn_completing` runs, a future of
+/// `Result<T, TaskFailed>`. Dropping it leaves the work running.
+pub struct CompletingTask<T> { /* private */ }
 ```

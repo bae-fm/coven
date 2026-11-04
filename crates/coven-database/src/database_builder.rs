@@ -19,6 +19,7 @@ pub struct DatabaseBuilder {
     sqlite: crate::SqliteSettings,
     functions: crate::SqlFunctions,
     progress: ProgressChannel<OpenStep>,
+    bugs: coven_foundation::task::BugSinkRef,
 }
 
 impl DatabaseBuilder {
@@ -36,7 +37,15 @@ impl DatabaseBuilder {
             sqlite: crate::SqliteSettings::default(),
             functions: crate::SqlFunctions::default(),
             progress: ProgressChannel::new(),
+            bugs: Arc::new(coven_foundation::task::LoggedBugs),
         }
+    }
+
+    /// Where a bug in the store's work that nobody waits for goes (E15).
+    /// Unset, each is logged at error.
+    pub fn bug_sink(mut self, bugs: coven_foundation::task::BugSinkRef) -> Self {
+        self.bugs = bugs;
+        self
     }
 
     /// The steps a writable open reports as it runs them, each with how
@@ -293,6 +302,7 @@ impl DatabaseBuilder {
             observer: observer.clone(),
             transfers,
             network,
+            bugs: self.bugs,
             closing: Arc::new(lock.closing_guard()),
             file_tasks: Arc::new(tokio::sync::RwLock::new(())),
             inner: Arc::new(RwLock::new(Some(DatabaseInner {
@@ -384,6 +394,7 @@ impl DatabaseBuilder {
         Ok(DatabaseReadHandle {
             observer: observer.clone(),
             transfers,
+            bugs: self.bugs,
             inner: Arc::new(RwLock::new(Some(DatabaseAccess {
                 writer: Arc::new(Mutex::new(writer)),
                 readers: ReadPool::new(readers),

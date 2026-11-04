@@ -133,7 +133,7 @@ enum ConnectionState {
 
 struct ConnectionAttempt {
     epoch: u64,
-    task: tokio::task::JoinHandle<()>,
+    task: crate::task::OwnedTask,
 }
 
 pub(crate) struct StorageConnections {
@@ -366,15 +366,19 @@ impl StorageConnections {
     ) -> Result<T, E>
     where
         T: Send + 'static,
-        E: From<KeyError> + From<crate::task::TaskFailed> + Send + 'static,
+        E: From<KeyError>
+            + From<crate::task::TaskFailed>
+            + crate::task::CarriesBug
+            + Send
+            + 'static,
         F: Future<Output = Result<T, E>> + Send,
     {
         let owner = self.clone();
-        let call = tokio::spawn(async move {
+        let call = async move {
             let _call = owner.lock_open().await?;
             run(owner.clone()).await
-        });
-        crate::task::joined("storage call", call).await?
+        };
+        crate::task::spawn_completing("storage call", self.database.bugs().clone(), call).await?
     }
 
     /// Compose a sequence owner, its loop and its credential owner on

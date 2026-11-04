@@ -1,7 +1,7 @@
 //! Coven's clock, id source, atomic file writes, store directories and locks,
-//! the watch of the device's network, the helpers that turn a panic in
-//! background work into a value, and the joins of coven's own work that
-//! return its runtime shutting down as one.
+//! the watch of the device's network, and the helpers that run coven's own
+//! work apart from its caller, turning a panic in it into a value or a report
+//! to the app's bug sink, and its runtime shutting down into a value.
 
 pub mod clock;
 pub mod files;
@@ -11,7 +11,6 @@ pub mod java_exception;
 pub mod network_watch;
 pub mod progress;
 pub mod task;
-pub mod unwinding;
 pub mod uuid_text;
 
 #[cfg(any(test, feature = "test-utils"))]

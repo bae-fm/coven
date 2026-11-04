@@ -47,7 +47,7 @@ enum OpenFile {
 struct FileStreamState {
     end: Option<u64>,
     hash: Option<ContentHasher>,
-    ahead: Option<tokio::task::JoinHandle<()>>,
+    ahead: Option<coven_foundation::task::OwnedTask>,
 }
 impl Drop for FileStreamState {
     fn drop(&mut self) {
@@ -257,12 +257,19 @@ impl FileStream {
                     }
                     let ahead = file.clone();
                     let start = offset + len;
-                    state.ahead = Some(tokio::spawn(async move {
-                        let length = (ahead.header.size() - start).min(REQUEST_BYTES);
-                        let result =
-                            ahead.range(start, length, None).await.map_err(TransferError::from);
-                        ahead.owner.finish_read_ahead(&ahead.file, result).await;
-                    }));
+                    // Nobody waits for it: a panic in it goes to the store's
+                    // bug sink, and the next read fetches what it would have.
+                    state.ahead = Some(coven_foundation::task::spawn_owned(
+                        "a read-ahead",
+                        file.owner.database.bugs().clone(),
+                        async move {
+                            let length = (ahead.header.size() - start).min(REQUEST_BYTES);
+                            let result =
+                                ahead.range(start, length, None).await.map_err(TransferError::from);
+                            ahead.owner.finish_read_ahead(&ahead.file, result).await;
+                        },
+                        |_| async {},
+                    ));
                 }
                 file.owner.complete_read(&file.file, Ok(bytes), whole).await
             }

@@ -22,7 +22,10 @@
 //! it ends; a request made after the owner last acted waits for a later
 //! pass. When a failure or cooldown begins to hold the pass, the owner's
 //! next plan answers the requests it acted on at once. Stopping sync
-//! answers every waiting request `NotSyncing`.
+//! answers every waiting request `NotSyncing`. A pass that ends without
+//! answering the requests it took, because it panicked or was dropped,
+//! leaves them waiting again; an owner that panicked stops sync and answers
+//! every waiting request with its bug (E15).
 //!
 //! A failed write has failed the store's handle, which every call and live
 //! query then reports, and no later step can commit; the requests waiting
@@ -34,7 +37,7 @@ use coven_foundation::clock::ClockRef;
 use std::{
     future::Future,
     pin::Pin,
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, Weak},
     task::{Context, Poll},
     time::SystemTime,
 };
@@ -162,20 +165,51 @@ impl Future for RetryAnswer {
     }
 }
 
-/// Requests a pass took when it began, answered when it ends.
+/// Retry requests by report number, each with where its answer goes.
+type Waiting = Vec<(u64, oneshot::Sender<RetryOutcome>)>;
+
+/// Answer every request in `requests` with `outcome`.
+fn answer(requests: Waiting, outcome: &RetryOutcome) {
+    for (_, request) in requests {
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "a person who stopped waiting needs no answer"
+        )]
+        let _ = request.send(outcome.clone());
+    }
+}
+
+/// Requests a pass took when it began, answered when it ends. A pass that
+/// panicked, or was dropped, before answering them leaves them waiting
+/// again, for its owner's ending to answer.
 #[must_use = "the pass answers its requests when it ends"]
-pub struct PassRequests(Vec<(u64, oneshot::Sender<RetryOutcome>)>);
+pub struct PassRequests {
+    taken: Waiting,
+    /// The schedule they wait in again, unless it is gone.
+    waits: Weak<RetryWaits>,
+}
 
 impl PassRequests {
     /// Answer every request with how the pass ended.
-    pub fn answer(self, outcome: &RetryOutcome) {
-        for (_, request) in self.0 {
-            #[expect(
-                clippy::let_underscore_must_use,
-                reason = "a person who stopped waiting needs no answer"
-            )]
-            let _ = request.send(outcome.clone());
+    pub fn answer(mut self, outcome: &RetryOutcome) {
+        answer(std::mem::take(&mut self.taken), outcome);
+    }
+}
+
+impl Drop for PassRequests {
+    fn drop(&mut self) {
+        if self.taken.is_empty() {
+            return;
         }
+        let Some(waits) = self.waits.upgrade() else {
+            return;
+        };
+        // Often run as a panic unwinds, so it must not panic itself: on a
+        // lock a panic poisoned the requests go, and hear `NotSyncing`.
+        let Ok(mut requests) = waits.requests.lock() else {
+            return;
+        };
+        requests.waiting.append(&mut self.taken);
     }
 }
 
@@ -185,7 +219,7 @@ impl PassRequests {
 /// go with commits.
 pub(crate) struct RetryRequests {
     held: Option<PassFailure>,
-    waiting: Vec<(u64, oneshot::Sender<RetryOutcome>)>,
+    waiting: Waiting,
 }
 
 impl RetryRequests {
@@ -207,13 +241,14 @@ impl RetryRequests {
         }
     }
 
-    /// The waiting requests the connection's owner has acted on.
-    fn acted_on(&mut self, handled: u64) -> PassRequests {
+    /// The waiting requests the connection's owner has acted on, which
+    /// wait in `waits` again if a pass drops them unanswered.
+    fn acted_on(&mut self, waits: &Arc<RetryWaits>, handled: u64) -> PassRequests {
         let (taken, later) = std::mem::take(&mut self.waiting)
             .into_iter()
             .partition::<Vec<_>, _>(|(number, _)| *number <= handled);
         self.waiting = later;
-        PassRequests(taken)
+        PassRequests { taken, waits: Arc::downgrade(waits) }
     }
 }
 
@@ -272,7 +307,7 @@ impl RetryWaits {
     async fn step<T: Send + 'static>(
         self: &Arc<Self>,
         change: impl FnOnce(RetryState) -> RetryState + Send + 'static,
-        then: impl FnOnce(&RetryWaits, &mut RetryRequests, RetryState) -> T + Send + 'static,
+        then: impl FnOnce(&Arc<RetryWaits>, &mut RetryRequests, RetryState) -> T + Send + 'static,
     ) -> Result<T, DbError> {
         self.step_as(Step::Change, change, then).await
     }
@@ -282,7 +317,7 @@ impl RetryWaits {
         self: &Arc<Self>,
         kind: Step,
         change: impl FnOnce(RetryState) -> RetryState + Send + 'static,
-        then: impl FnOnce(&RetryWaits, &mut RetryRequests, RetryState) -> T + Send + 'static,
+        then: impl FnOnce(&Arc<RetryWaits>, &mut RetryRequests, RetryState) -> T + Send + 'static,
     ) -> Result<T, DbError> {
         let Some(database) = &self.database else {
             return Err(DbError::Invariant { what: "only a handle that writes the store syncs" });
@@ -304,7 +339,7 @@ impl RetryWaits {
         if let Err(error) = &result {
             let waiting =
                 std::mem::take(&mut self.requests.lock().expect("retry requests poisoned").waiting);
-            PassRequests(waiting).answer(&failed(error));
+            answer(waiting, &failed(error));
         }
         result
     }
@@ -369,10 +404,28 @@ impl RetryWaits {
         let stopped = self
             .step(
                 |state| RetryState { sync: RetrySync::Stopped, ..state },
-                |_, requests, _| PassRequests(std::mem::take(&mut requests.waiting)),
+                |_, requests, _| std::mem::take(&mut requests.waiting),
             )
             .await?;
-        stopped.answer(&RetryOutcome::NotSyncing);
+        answer(stopped, &RetryOutcome::NotSyncing);
+        Ok(())
+    }
+
+    /// The connection's owner panicked with `bug`, so no pass follows a
+    /// waiting request: sync stops, and each request, those the panicking
+    /// pass took among them, is answered `Failed` with the bug (E15).
+    pub async fn sync_panicked(
+        self: &Arc<Self>,
+        bug: coven_foundation::task::Bug,
+    ) -> Result<(), DbError> {
+        let waiting = self
+            .step(
+                |state| RetryState { sync: RetrySync::Stopped, ..state },
+                |_, requests, _| std::mem::take(&mut requests.waiting),
+            )
+            .await?;
+        let error = crate::SyncError::Bug(bug).into();
+        answer(waiting, &PassFailure::Failed { error }.into());
         Ok(())
     }
 
@@ -385,7 +438,7 @@ impl RetryWaits {
             |state| state,
             |waits, requests, state| {
                 (RetryEffect::from(state) == RetryEffect::Pass)
-                    .then(|| requests.acted_on(waits.handled(NetworkOwner::Connection)))
+                    .then(|| requests.acted_on(waits, waits.handled(NetworkOwner::Connection)))
             },
         )
         .await
@@ -426,7 +479,7 @@ impl RetryWaits {
                     // With no answer at once, a pass runs and answers them.
                     let outcome = requests.at_once(state)?;
                     let handled = waits.handled(NetworkOwner::Connection);
-                    Some((requests.acted_on(handled), outcome, RetryEffect::from(state)))
+                    Some((requests.acted_on(waits, handled), outcome, RetryEffect::from(state)))
                 },
             )
             .await?;
@@ -435,9 +488,9 @@ impl RetryWaits {
         };
         // No pass runs for these requests, so nothing else says what came of
         // the person's retry.
-        if !acted_on.0.is_empty() {
+        if !acted_on.taken.is_empty() {
             tracing::info!(
-                requests = acted_on.0.len(),
+                requests = acted_on.taken.len(),
                 ?effect,
                 "no pass runs for the person's retry; answering it at once"
             );
@@ -449,13 +502,13 @@ impl RetryWaits {
     /// The connection's first attempt connected: its requests wait for the
     /// loop's first pass, or are answered `NotSyncing` if sync stopped
     /// meanwhile.
-    pub async fn return_requests(self: &Arc<Self>, taken: PassRequests) -> Result<(), DbError> {
+    pub async fn return_requests(self: &Arc<Self>, mut taken: PassRequests) -> Result<(), DbError> {
         let stopped = self
             .step(
                 |state| state,
                 move |_, requests, state| match state.sync {
                     RetrySync::Started { .. } => {
-                        requests.waiting.extend(taken.0);
+                        requests.waiting.append(&mut taken.taken);
                         None
                     }
                     RetrySync::Stopped => Some(taken),

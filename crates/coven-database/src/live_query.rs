@@ -119,8 +119,8 @@ pub struct ReconfigurableLiveQuery<Q, T> {
     current: Option<(Q, LiveQueryRevision)>,
     running: Option<Running<Q, T>>,
     previous: Option<T>,
-    /// The store closed or its handle failed, and a result said so: the
-    /// query has ended, and answers nothing more.
+    /// The store closed, its handle failed or a run panicked, and a result
+    /// said so: the query has ended, and answers nothing more.
     ended: bool,
     #[cfg(any(test, feature = "test-utils"))]
     runs: LiveQueryRuns,
@@ -219,7 +219,9 @@ where
     /// Return the next result and its request. Cancelling this wait retains the
     /// in-flight run, so its request revision is not lost. Once the store is
     /// closed, or the handle fails every call, one result reports why and
-    /// every later call returns `None`.
+    /// every later call returns `None`. So does a run that panicked, with
+    /// `DbError::Bug`: what it read is unknown, so no commit could tell
+    /// whether to run it again (E15).
     pub async fn next(&mut self) -> Option<ReconfigurableLiveQueryEvent<Q, T>>
     where
         T: Clone + PartialEq,
@@ -252,7 +254,7 @@ where
                         Box::pin(async move { Err(error.into()) })
                     } else {
                         self.commits.begin();
-                        (self.query)(request.clone())
+                        caught_run((self.query)(request.clone()))
                     };
                     self.running = Some(Running { request, revision, cause, run });
                 } else {
@@ -284,8 +286,13 @@ where
                 continue;
             }
             // A failure while the store is closed or the handle failed is the
-            // last result: answering again would only repeat it.
-            self.ended = result.is_err() && self.commits.state().error().is_some();
+            // last result: answering again would only repeat it. So is a bug,
+            // after which the query watches nothing more.
+            let bug = matches!(&result, Err(crate::CovenError::Database(crate::DbError::Bug(_))));
+            if bug {
+                self.commits.stop();
+            }
+            self.ended = bug || (result.is_err() && self.commits.state().error().is_some());
             return Some(ReconfigurableLiveQueryEvent {
                 request: running.request,
                 revision: running.revision,
@@ -294,6 +301,16 @@ where
             });
         }
     }
+}
+
+/// `run`, which ends with its `DbError::Bug` if it panics, so `next` never
+/// polls it again after the panic.
+fn caught_run<T: Send + 'static>(run: Run<T>) -> Run<T> {
+    Box::pin(async move {
+        coven_foundation::task::caught("live query", run)
+            .await
+            .unwrap_or_else(|bug| Err(crate::DbError::Bug(bug).into()))
+    })
 }
 
 /// A subscription's results and lifetime; dropping it ends future runs.
@@ -308,7 +325,7 @@ impl<T: Send + 'static> LiveQuery<T> {
 
     /// The first result at once; then only changed results. Errors remain
     /// results and don't end the query, except the one reporting that the
-    /// store closed or the handle failed: after it, `None`.
+    /// store closed, the handle failed or a run panicked: after it, `None`.
     pub async fn next(&mut self) -> Option<CovenResult<T>>
     where
         T: Clone + PartialEq,

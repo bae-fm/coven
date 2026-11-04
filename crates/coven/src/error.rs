@@ -76,6 +76,19 @@ impl From<crate::CovenError> for StoreCreationError {
     }
 }
 
+impl crate::task::CarriesBug for StoreCreationError {
+    fn bug(&self) -> Option<&crate::task::Bug> {
+        match self {
+            Self::Bug(bug) => Some(bug),
+            Self::Store(error) => error.bug(),
+            Self::Sync(error) => error.bug(),
+            Self::Cleanup { operation, cleanup } => operation.bug().or_else(|| cleanup.bug()),
+            Self::PublishedButNotSynced { source, .. } => source.bug(),
+            _ => None,
+        }
+    }
+}
+
 impl From<crate::task::TaskFailed> for StoreCreationError {
     fn from(failed: crate::task::TaskFailed) -> Self {
         failed.into_error()
@@ -121,6 +134,18 @@ pub enum StoreDeletionError {
     /// Retrying finishes a deletion that stopped partway.
     #[error(transparent)]
     Bug(#[from] crate::task::Bug),
+}
+
+impl crate::task::CarriesBug for StoreDeletionError {
+    fn bug(&self) -> Option<&crate::task::Bug> {
+        match self {
+            Self::Bug(bug) => Some(bug),
+            Self::Sync(error) | Self::Closing(error) => error.bug(),
+            Self::Key(error) => error.bug(),
+            Self::File(error) => error.bug(),
+            _ => None,
+        }
+    }
 }
 
 impl From<crate::task::TaskFailed> for StoreDeletionError {
@@ -172,6 +197,16 @@ pub enum StoreKeyUnlockError {
     /// it saved the keys it opened is unknown.
     #[error(transparent)]
     Bug(#[from] crate::task::Bug),
+}
+
+impl crate::task::CarriesBug for StoreKeyUnlockError {
+    fn bug(&self) -> Option<&crate::task::Bug> {
+        match self {
+            Self::Bug(bug) => Some(bug),
+            Self::SecureStorage(error) => error.bug(),
+            _ => None,
+        }
+    }
 }
 
 impl From<crate::task::TaskFailed> for StoreKeyUnlockError {

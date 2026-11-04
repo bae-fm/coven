@@ -56,6 +56,8 @@ pub fn location_code(
 pub struct RestoreCodes {
     inner: Arc<tokio::sync::Mutex<Option<RestoreCodesInner>>>,
     credentials: Arc<DeviceCredentials>,
+    /// Where a bug in a replacement its caller stopped waiting for goes.
+    bugs: coven_foundation::task::BugSinkRef,
 }
 struct RestoreCodesInner {
     store: coven_foundation::id_source::StoreId,
@@ -86,6 +88,7 @@ impl RestoreCodes {
         sync: Option<Arc<crate::SequenceSync>>,
     ) -> Self {
         Self {
+            bugs: database.bugs().clone(),
             inner: Arc::new(tokio::sync::Mutex::new(Some(RestoreCodesInner {
                 store,
                 database,
@@ -139,7 +142,7 @@ impl RestoreCodes {
     /// Credential changes and close wait for this owned operation.
     pub async fn replace_member_keys(&self) -> Result<SecretText, SyncError> {
         let inner = self.inner.clone();
-        let joined = tokio::spawn(async move {
+        let replacing = async move {
             let guard = inner.lock().await;
             let owner = guard.as_ref().ok_or(DbError::StoreClosed)?;
             // Reject missing location before publishing a new binding.
@@ -150,8 +153,13 @@ impl RestoreCodes {
                 .finish_member_keys(true, |identity, store| owner.refresh_code(identity, store))
                 .await?
                 .expect("the initiating replacement owns code completion"))
-        });
-        coven_foundation::task::joined("replace member keys", joined).await?
+        };
+        coven_foundation::task::spawn_completing(
+            "replace member keys",
+            self.bugs.clone(),
+            replacing,
+        )
+        .await?
     }
 
     /// Finish the code step of a self-replacement resumed by a sync pass (§11.5).
@@ -176,7 +184,7 @@ impl RestoreCodes {
         secret_access_key: SecretText,
     ) -> Result<(), SyncError> {
         let inner = self.inner.clone();
-        let joined = tokio::spawn(async move {
+        let replacing = async move {
             let guard = inner.lock().await;
             let owner = guard.as_ref().ok_or(DbError::StoreClosed)?;
             owner
@@ -192,8 +200,13 @@ impl RestoreCodes {
                 .record_access_key(access_key_id)
                 .await?;
             Ok(())
-        });
-        coven_foundation::task::joined("replace the access key", joined).await?
+        };
+        coven_foundation::task::spawn_completing(
+            "replace the access key",
+            self.bugs.clone(),
+            replacing,
+        )
+        .await?
     }
 
     /// Keep this member's separately supplied S3 key without changing identity,
@@ -205,12 +218,13 @@ impl RestoreCodes {
         secret_access_key: SecretText,
     ) -> Result<(), SyncError> {
         let inner = self.inner.clone();
-        let joined = tokio::spawn(async move {
+        let updating = async move {
             let guard = inner.lock().await;
             let owner = guard.as_ref().ok_or(DbError::StoreClosed)?;
             owner.install_s3(S3Credentials { access_key_id, secret_access_key }, false).await
-        });
-        coven_foundation::task::joined("update credentials", joined).await?
+        };
+        coven_foundation::task::spawn_completing("update credentials", self.bugs.clone(), updating)
+            .await?
     }
 
     /// Read committed provider data without exposing custody or a connection.

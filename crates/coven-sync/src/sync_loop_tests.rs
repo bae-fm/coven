@@ -298,6 +298,57 @@ async fn a_removed_device_never_retries_on_a_new_connection() {
     }
 }
 
+/// A pass that panics ends the loop as a failure the person sees: the last
+/// pass is recorded failed with the bug, the retry the pass took is
+/// answered with it, and a later start fails with it (E15).
+#[tokio::test]
+async fn a_panicking_pass_fails_sync_and_answers_its_retry_with_the_bug() {
+    let group = Group::new();
+    let ana = group.device(1).await;
+    let ben = group.device(2).await;
+    group.create(&ana).await;
+    group.admit(&ana, &ben).await;
+    ben.sync.pass().await.unwrap();
+    let mut last = LastPass::follow(&ben.sync.database);
+    let (ben_codes, _) = codes(&ben, Keychain::in_memory("sync-loop-ben").unwrap());
+    let ben_loop = SyncLoop::new(ben.sync.clone(), ben_codes);
+    ben_loop.start().await.unwrap();
+    last.wait_for(|last| matches!(last, Some(LastPass::Synced))).await;
+    let before = ben.database().applied_slot().await.unwrap();
+    insert(ana.database(), "a", "read by a panicking pass").await;
+    ana.sync.pass().await.unwrap();
+    let mut faults = coven_storage::test_utils::Faults::none();
+    faults.read_panics.insert(ana.sync.path(before + 1).unwrap());
+    ben.storage.set_faults(faults).await;
+    let answer = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        ben.sync.waits.retry_requested().await.unwrap().await
+    })
+    .await
+    .unwrap();
+    let RetryOutcome::Failed(PassFailure::Failed { error: SyncFailure::Other(error) }) = &answer
+    else {
+        panic!("the retry heard no failure: {answer:?}");
+    };
+    let bug = match error.downcast_ref::<SyncError>() {
+        Some(SyncError::Bug(bug)) => bug.clone(),
+        _ => panic!("the retry heard no bug: {error:?}"),
+    };
+    assert_eq!(bug.operation, "the sync loop");
+    assert!(bug.message.starts_with("a read of"), "{bug:?}");
+    let shown = last.wait_for(|last| matches!(last, Some(LastPass::Failed { .. }))).await;
+    let Some(LastPass::Failed { error: shown, .. }) = shown else {
+        panic!("the last pass shows no failure: {shown:?}");
+    };
+    assert!(shown.contains(&bug.message), "{shown}");
+    assert!(
+        matches!(ben_loop.start().await, Err(SyncError::Bug(heard)) if heard == bug),
+        "a later start hears the bug"
+    );
+    for device in [&ana, &ben] {
+        device.database().close().await.unwrap();
+    }
+}
+
 /// Set the group's clock `seconds` after the epoch.
 fn at(group: &Group, seconds: u64) {
     group.clock.set(std::time::UNIX_EPOCH + std::time::Duration::from_secs(seconds));

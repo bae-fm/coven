@@ -539,7 +539,8 @@ impl CovenHandle {
     pub async fn close(&self) -> Result<(), SyncError> {
         self.database.begin_close();
         let handle = self.clone();
-        let closing = tokio::spawn(async move {
+        let bugs = self.database.bugs().clone();
+        let closing = async move {
             // No network report reaches the store's waits once it closes.
             handle.network.close().await;
             let storage = handle.storage.close().await;
@@ -563,8 +564,8 @@ impl CovenHandle {
                 .filter_map(Result::err)
                 .reduce(SyncError::cleanup)
                 .map_or(Ok(()), Err)
-        });
-        crate::task::joined("close the store", closing).await?
+        };
+        crate::task::spawn_completing("close the store", bugs, closing).await?
     }
     /// The last slot this installation applied.
     #[cfg(test)]

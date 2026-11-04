@@ -765,3 +765,30 @@ async fn a_failed_handles_query_reports_once_then_ends() {
     assert!(query.next().await.is_none());
     db.close().await.unwrap();
 }
+
+/// A run that panics: the query reports its bug once and ends, and the
+/// writes after it neither wake it nor wait on it.
+#[tokio::test]
+async fn a_panicking_query_reports_its_bug_once_then_ends() {
+    let store = TestStore::new();
+    let db = store.builder(notes_tables(), notes_migrations()).open().await.unwrap();
+    let mut query = db.subscribe(|sql| {
+        let count = count_notes(sql)?;
+        assert!(count == 0, "the notes table has {count} rows");
+        Ok(count)
+    });
+    assert_eq!(query.next().await.unwrap().unwrap(), 0);
+    db.commit_writer(|sql| sql.batch("INSERT INTO notes VALUES ('n','first','')").unwrap());
+    let ended = query.next().await;
+    assert!(
+        matches!(
+            &ended,
+            Some(Err(crate::CovenError::Database(DbError::Bug(bug))))
+                if bug.message == "the notes table has 1 rows"
+        ),
+        "{ended:?}"
+    );
+    db.commit_writer(|sql| sql.batch("INSERT INTO notes VALUES ('m','second','')").unwrap());
+    assert!(query.next().await.is_none());
+    db.close().await.unwrap();
+}

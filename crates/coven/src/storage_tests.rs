@@ -20,7 +20,19 @@ struct Fixture {
     /// whose watch a test hands it.
     recorder: Arc<RecordingClock<StorageSetupStep>>,
     directory: StoreDir,
+    /// The app's bug sink, which keeps every bug it hears of.
+    bugs: Arc<HeardBugs>,
     _root: tempfile::TempDir,
+}
+
+/// Keeps every bug it hears of, as an app's crash reporter would.
+#[derive(Default)]
+struct HeardBugs(std::sync::Mutex<Vec<crate::task::Bug>>);
+
+impl crate::task::BugSink for HeardBugs {
+    fn report(&self, bug: &crate::task::Bug) {
+        self.0.lock().unwrap().push(bug.clone());
+    }
 }
 
 impl Fixture {
@@ -42,17 +54,20 @@ impl Fixture {
             credentials: std::sync::Mutex::new(Vec::new()),
             providers: std::sync::Mutex::new(Vec::new()),
             failure: std::sync::Mutex::new(None),
+            panics: AtomicBool::new(false),
             attempts: tokio::sync::watch::channel(0).0,
             counted: crate::tests::Clients::new(),
             held: tokio::sync::Mutex::new(None),
         });
         let recorder = Arc::new(RecordingClock::new(clock.clone()));
+        let bugs = Arc::new(HeardBugs::default());
         let handle = builder(&app, recorder.clone(), connector.clone())
+            .bug_sink(bugs.clone())
             .open(directory.id(), |_| ())
             .await
             .unwrap();
 
-        Self { app, handle, storage, connector, clock, recorder, directory, _root: root }
+        Self { app, handle, storage, connector, clock, recorder, directory, bugs, _root: root }
     }
 
     async fn setup(&self) -> Result<StorageSetup, StorageSetupError> {
@@ -90,6 +105,8 @@ struct TrackingConnector {
     credentials: std::sync::Mutex<Vec<StorageCredentials>>,
     providers: std::sync::Mutex<Vec<MemoryStorage>>,
     failure: std::sync::Mutex<Option<StorageError>>,
+    /// Panic in the next attempt, as a bug in connecting would.
+    panics: AtomicBool,
     attempts: tokio::sync::watch::Sender<usize>,
     /// The same clients, counted as they are made and dropped.
     counted: crate::tests::Clients,
@@ -114,6 +131,7 @@ impl StorageConnector for TrackingConnector {
             entered.send(()).unwrap();
             resume.await.unwrap();
         }
+        assert!(!self.panics.swap(false, Ordering::SeqCst), "connecting panicked");
         if let Some(error) = self.failure.lock().unwrap().take() {
             return Err(error);
         }
@@ -233,6 +251,44 @@ async fn stop_queued_while_the_first_pass_connects_releases_the_new_client() {
     f.advance(Duration::from_secs(1));
     f.handle.start_sync().await.unwrap();
     synced_since(&f.handle, f.clock.now()).await;
+    f.handle.close().await.unwrap();
+}
+
+/// The first pass's connection panics while the person's retry waits for
+/// it: the app's bug sink hears the bug, the last pass shows it, and the
+/// retry is answered with it (E15).
+#[tokio::test]
+async fn a_panicking_connection_attempt_reaches_the_apps_bug_sink() {
+    let f = Fixture::new().await;
+    f.setup().await.unwrap();
+    synced(&f.handle).await;
+    stop(&f).await;
+    let (entered, entering) = tokio::sync::oneshot::channel();
+    let (resume, resumed) = tokio::sync::oneshot::channel();
+    *f.connector.held.lock().await = Some((entered, resumed));
+    f.handle.start_sync().await.unwrap();
+    entering.await.unwrap();
+    let answer = f.handle.retry_now().await.unwrap();
+    f.connector.panics.store(true, Ordering::SeqCst);
+    resume.send(()).unwrap();
+    let answer = tokio::time::timeout(Duration::from_secs(10), answer).await.unwrap();
+    let bug =
+        crate::task::Bug { operation: "connect to storage", message: "connecting panicked".into() };
+    let coven_sync::RetryOutcome::Failed(coven_sync::PassFailure::Failed {
+        error: coven_sync::SyncFailure::Other(error),
+    }) = &answer
+    else {
+        panic!("the retry heard no failure: {answer:?}");
+    };
+    assert!(
+        matches!(error.downcast_ref::<SyncError>(), Some(SyncError::Bug(heard)) if *heard == bug),
+        "{error:?}"
+    );
+    assert_eq!(*f.bugs.0.lock().unwrap(), std::slice::from_ref(&bug));
+    last_pass(&f.handle, |last| {
+        matches!(last, Some(LastPass::Failed { error, .. }) if error.contains("connecting panicked"))
+    })
+    .await;
     f.handle.close().await.unwrap();
 }
 

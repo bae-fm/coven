@@ -105,12 +105,19 @@ impl FilesInner {
         file: &FileRef,
         result: Result<Vec<u8>, TransferError>,
     ) {
+        // Nobody waits for a read-ahead: a bug in it reaches only the
+        // store's bug sink.
+        let bugs = self.database.bugs();
         if let Err(error) = result {
-            tracing::debug!(file = %file.id(), "a read-ahead failed: {error}");
+            if !coven_foundation::task::report_carried(bugs.as_ref(), &error) {
+                tracing::debug!(file = %file.id(), "a read-ahead failed: {error}");
+            }
             return;
         }
         if let Err(error) = self.finish_download(file, None, false).await {
-            tracing::warn!(file = %file.id(), "recording a read-ahead's outcome failed: {error}");
+            if !coven_foundation::task::report_carried(bugs.as_ref(), &error) {
+                tracing::warn!(file = %file.id(), "recording a read-ahead's outcome failed: {error}");
+            }
         }
     }
 

@@ -4,8 +4,9 @@
 //!
 //! A panic turned into an `Err` at the nearest join lets the caller's own
 //! failure path run: the rollback or cleanup it does on `Err`, which an unwind
-//! would skip. The caller reports the panic as a bug; this module has no bug
-//! reporter of its own.
+//! would skip. The caller reports the panic as a bug. Work nobody waits for,
+//! a long-lived worker or work its caller stopped waiting for, reports its
+//! panic to a [`BugSink`] instead, the app's own reporter.
 
 use std::any::Any;
 use std::future::Future;
@@ -180,6 +181,183 @@ pub async fn caught<T>(operation: &'static str, work: impl Future<Output = T>) -
 /// value.
 pub fn caught_sync<T>(operation: &'static str, work: impl FnOnce() -> T) -> Result<T, Bug> {
     catch_unwind(AssertUnwindSafe(work)).map_err(|payload| bug_of(operation, payload))
+}
+
+/// Where a bug in work nobody waits for goes (E15): a store's long-lived
+/// workers, such as its sync loop and upload worker, and work whose caller
+/// stopped waiting for it. The app passes its own crash reporter with
+/// `CovenBuilder::bug_sink`.
+pub trait BugSink: Send + Sync {
+    /// Report `bug`, which no caller hears of otherwise.
+    fn report(&self, bug: &Bug);
+}
+
+/// A shared [`BugSink`].
+pub type BugSinkRef = std::sync::Arc<dyn BugSink>;
+
+/// Logs each bug at error: the sink of a store whose app names none.
+pub struct LoggedBugs;
+
+impl BugSink for LoggedBugs {
+    fn report(&self, bug: &Bug) {
+        tracing::error!(operation = bug.operation, "a bug in work nobody waits for: {bug}");
+    }
+}
+
+/// An error that may carry a bug: work its call ran panicked, and the call's
+/// error says so (E15). Work nobody waits for reports the bug its error
+/// carries, as it reports its own panic.
+pub trait CarriesBug {
+    /// The bug this error carries, itself or through the failure it keeps.
+    fn bug(&self) -> Option<&Bug>;
+}
+
+impl CarriesBug for Bug {
+    fn bug(&self) -> Option<&Bug> {
+        Some(self)
+    }
+}
+
+impl CarriesBug for TaskFailed {
+    fn bug(&self) -> Option<&Bug> {
+        match self {
+            Self::Panicked(bug) => Some(bug),
+            Self::Shutdown(_) => None,
+        }
+    }
+}
+
+/// Hand `bug` to `bugs`. A sink that panics too is logged, and its panic
+/// goes no further: it runs where nothing above it catches.
+pub fn report(bugs: &dyn BugSink, bug: &Bug) {
+    if let Err(again) = caught_sync("report a bug", || bugs.report(bug)) {
+        tracing::error!(operation = bug.operation, "reporting {bug} panicked: {again}");
+    }
+}
+
+/// Hand the bug `error` carries, if it carries one, to `bugs`: the error of
+/// work nobody waits for, which no caller hears of. Whether it carried one,
+/// so the work logs an error that carried none.
+pub fn report_carried(bugs: &dyn BugSink, error: &impl CarriesBug) -> bool {
+    let bug = error.bug();
+    if let Some(bug) = bug {
+        report(bugs, bug);
+    }
+    bug.is_some()
+}
+
+/// `error`, once the bug it carries, if any, has gone to `bugs`: the error
+/// of work nobody waits for, which it records where readers see it.
+pub fn reported<E: CarriesBug>(bugs: &dyn BugSink, error: E) -> E {
+    report_carried(bugs, &error);
+    error
+}
+
+/// Run `work`, named `operation`, as its own task that nobody waits for: a
+/// worker its owner stops. A panic in it goes to `bugs`, then `ended` runs,
+/// so the owner ends what the work served in a way its readers see, such as
+/// recording that sync failed. A panic in `ended` goes to `bugs` too, and no
+/// further.
+pub fn spawn_owned<E, F>(
+    operation: &'static str,
+    bugs: BugSinkRef,
+    work: impl Future<Output = ()> + Send + 'static,
+    ended: E,
+) -> OwnedTask
+where
+    E: FnOnce(Bug) -> F + Send + 'static,
+    F: Future<Output = ()> + Send,
+{
+    OwnedTask {
+        operation,
+        task: tokio::spawn(async move {
+            let Err(bug) = caught(operation, work).await else {
+                return;
+            };
+            report(bugs.as_ref(), &bug);
+            if let Err(again) = caught(operation, ended(bug)).await {
+                report(bugs.as_ref(), &again);
+            }
+        }),
+    }
+}
+
+/// A task [`spawn_owned`] started. Dropping it leaves the task running.
+#[derive(Debug)]
+pub struct OwnedTask {
+    operation: &'static str,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl OwnedTask {
+    /// End the work at its next wait. Its `ended` does not run.
+    pub fn abort(&self) {
+        self.task.abort();
+    }
+
+    /// Whether the work has ended.
+    pub fn is_finished(&self) -> bool {
+        self.task.is_finished()
+    }
+
+    /// Wait until the work has ended: finished, panicked and reported, or
+    /// dropped by its runtime as it shuts down, which ends it too.
+    pub async fn ended(self) {
+        // The task catches every panic in it, so only its runtime ending it
+        // is left.
+        if let Err(error) = self.task.await {
+            tracing::debug!("{}", TaskFailed::of_join(self.operation, error));
+        }
+    }
+}
+
+/// Run `work`, named `operation`, as its own task, so it finishes even when
+/// its caller stops waiting, as closing a store does. Its panic comes back
+/// as `TaskFailed::Panicked` to a caller still waiting. Once none is, the
+/// panic goes to `bugs`, as does a bug its error carries.
+pub fn spawn_completing<T: Send + 'static, E: CarriesBug + Send + 'static>(
+    operation: &'static str,
+    bugs: BugSinkRef,
+    work: impl Future<Output = Result<T, E>> + Send + 'static,
+) -> CompletingTask<Result<T, E>> {
+    let (done, completion) = tokio::sync::oneshot::channel();
+    tokio::spawn(async move {
+        let unheard = match done.send(caught(operation, work).await) {
+            Ok(()) => return,
+            Err(unheard) => unheard,
+        };
+        match &unheard {
+            Err(bug) => report(bugs.as_ref(), bug),
+            Ok(Err(error)) => {
+                report_carried(bugs.as_ref(), error);
+            }
+            Ok(Ok(_)) => {}
+        }
+    });
+    CompletingTask { operation, completion }
+}
+
+/// The result of work [`spawn_completing`] runs. Dropping it leaves the work
+/// running.
+#[derive(Debug)]
+pub struct CompletingTask<T> {
+    operation: &'static str,
+    completion: tokio::sync::oneshot::Receiver<Result<T, Bug>>,
+}
+
+impl<T> Future for CompletingTask<T> {
+    type Output = Result<T, TaskFailed>;
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let operation = self.operation;
+        Pin::new(&mut self.completion).poll(cx).map(|completed| match completed {
+            Ok(result) => result.map_err(TaskFailed::Panicked),
+            // The runtime dropped the task partway as it shut down.
+            Err(_dropped) => {
+                Err(TaskFailed::Shutdown(Shutdown { operation, outcome: ShutdownOutcome::Unknown }))
+            }
+        })
+    }
 }
 
 /// The failure a joined panic's `payload` stands for.

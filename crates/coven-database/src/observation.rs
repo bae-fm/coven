@@ -200,6 +200,14 @@ impl CommitSubscription {
         self.shared.state.send_modify(|state| state.changed = false);
     }
 
+    /// Wait on nothing, whatever this subscription was doing: its query
+    /// ended on a bug, so what its run read is unknown (E15).
+    pub(crate) fn stop(&self) {
+        let mut tracked = self.shared.tracking.lock().expect("observation lock poisoned");
+        tracked.tracking = Tracking::Waiting(Arc::new(Vec::new()));
+        tracked.epoch += 1;
+    }
+
     /// Wait on `reads`, which join no table: no commit needs a lookup.
     pub(crate) fn finish(&self, reads: ReadSet) {
         self.finish_judging(reads, &mut |_, _| {

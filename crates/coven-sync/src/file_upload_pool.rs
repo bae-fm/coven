@@ -191,19 +191,39 @@ impl Run<'_> {
 }
 
 impl FilesInner {
-    /// Queue an app retry for the upload worker, and wake it.
-    pub(super) fn ask_retry(&self) -> Result<UploadRetryAnswer, DbError> {
+    /// Queue an app retry for the upload worker, and wake it. A worker that
+    /// panicked serves none: the retry fails with its bug.
+    pub(super) fn ask_retry(&self) -> Result<UploadRetryAnswer, SyncError> {
         let (reply, answer) = oneshot::channel();
         {
             // Closing sets the flag before clearing this list under its lock,
-            // so a retry queued here is either cleared or refused.
+            // and the worker's panic sets its bug before answering it, so a
+            // retry queued here is either cleared, answered or refused.
             let mut retries = self.app_retries.lock().expect("app retries poisoned");
             self.check_open()?;
+            if let Some(bug) = self.worker_bug.get() {
+                return Err(SyncError::Bug(bug.clone()));
+            }
             let asked = self.retries_asked.fetch_add(1, Ordering::AcqRel);
             retries.push(AppRetry { covers: None, uploaded: 0, asked, reply });
         }
         self.upload_wake.notify_one();
         Ok(UploadRetryAnswer(answer))
+    }
+
+    /// The upload worker panicked with `bug`: no run will serve an app
+    /// retry, so each waiting one is answered with the bug, as each asked
+    /// from now on is (E15).
+    pub(super) fn worker_panicked(&self, bug: coven_foundation::task::Bug) {
+        let mut retries = self.app_retries.lock().expect("app retries poisoned");
+        let bug = self.worker_bug.get_or_init(|| bug);
+        for retry in retries.drain(..) {
+            #[expect(
+                clippy::let_underscore_must_use,
+                reason = "a retry whose caller stopped waiting needs no answer"
+            )]
+            let _ = retry.reply.send(Err(SyncError::Bug(bug.clone())));
+        }
     }
 
     /// Answer every queued app retry with this; `None` keeps them all, as

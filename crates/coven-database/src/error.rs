@@ -2,6 +2,7 @@
 //! are `schema_error`'s.
 
 use coven_foundation::files::{SettingsError, StoreLockError};
+use coven_foundation::task::{Bug, CarriesBug};
 
 /// The result of opening or using this database.
 pub type CovenResult<T> = Result<T, CovenError>;
@@ -90,6 +91,44 @@ pub enum CovenError {
     /// as an Android app without coven's Android library (api.md E1, E5).
     #[error(transparent)]
     NetworkWatch(#[from] coven_foundation::network_watch::NetworkWatchError),
+}
+
+impl CarriesBug for CovenError {
+    fn bug(&self) -> Option<&Bug> {
+        match self {
+            Self::Bug(bug) => Some(bug),
+            Self::Database(error) => error.bug(),
+            Self::Key(error) => error.bug(),
+            Self::Rollback { operation, .. } => operation.bug(),
+            Self::FileCleanup { write, failures } => {
+                write.bug().or_else(|| failures.iter().find_map(DbError::bug))
+            }
+            Self::Migration(MigrationError::Failed { source, .. })
+            | Self::CovenMigration(CovenMigrationError::Failed { source }) => source.bug(),
+            _ => None,
+        }
+    }
+}
+
+impl CarriesBug for DbError {
+    fn bug(&self) -> Option<&Bug> {
+        match self {
+            Self::Bug(bug) => Some(bug),
+            Self::Disk(error) => error.bug(),
+            Self::StatePersistence(cause) | Self::CheckpointFailed(cause) => cause.bug(),
+            Self::Rollback { operation, .. } => operation.bug(),
+            Self::FileCleanup { write, failures } => write
+                .as_ref()
+                .err()
+                .and_then(|write| write.bug())
+                .or_else(|| failures.iter().find_map(DbError::bug)),
+            Self::StagingCleanup { operation, cleanup } => {
+                operation.bug().or_else(|| cleanup.bug())
+            }
+            Self::Closing { failures } => failures.iter().find_map(DbError::bug),
+            _ => None,
+        }
+    }
 }
 
 impl From<coven_foundation::task::TaskFailed> for CovenError {

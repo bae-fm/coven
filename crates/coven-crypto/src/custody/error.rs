@@ -86,6 +86,15 @@ pub enum KeyError {
     Bug(#[from] coven_foundation::task::Bug),
 }
 
+impl coven_foundation::task::CarriesBug for KeyError {
+    fn bug(&self) -> Option<&coven_foundation::task::Bug> {
+        match self {
+            Self::Bug(bug) => Some(bug),
+            _ => None,
+        }
+    }
+}
+
 impl From<coven_foundation::task::TaskFailed> for KeyError {
     fn from(failed: coven_foundation::task::TaskFailed) -> Self {
         failed.into_error()

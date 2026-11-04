@@ -18,10 +18,12 @@ use std::{sync::Arc, time::SystemTime};
 use tokio::sync::watch;
 
 /// Ends this device's invites as their lifetimes end, from the store's
-/// opening until its handle closes. Dropping it stops the wakes too.
+/// opening until its handle closes. Dropping it stops the wakes too. A
+/// panic in it goes to the store's bug sink and ends the wakes, as does a
+/// bug a write returns; the next open writes the expiries that passed.
 pub struct InviteExpiry {
     stop: watch::Sender<bool>,
-    task: tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
+    task: tokio::sync::Mutex<Option<coven_foundation::task::OwnedTask>>,
 }
 
 impl InviteExpiry {
@@ -41,7 +43,13 @@ impl InviteExpiry {
         state: Arc<SequenceState>,
     ) -> Self {
         let (stop, stopping) = watch::channel(false);
-        let task = tokio::spawn(run(database, clock, waits, state, stopping));
+        let bugs = database.bugs().clone();
+        let task = coven_foundation::task::spawn_owned(
+            "invite expiry",
+            bugs,
+            run(database, clock, waits, state, stopping),
+            |_| async {},
+        );
         Self { stop, task: tokio::sync::Mutex::new(Some(task)) }
     }
 
@@ -49,7 +57,7 @@ impl InviteExpiry {
     pub async fn close(&self) {
         self.stop.send_replace(true);
         if let Some(task) = self.task.lock().await.take() {
-            crate::files::stopped("invite expiry", task).await;
+            task.ended().await;
         }
     }
 }
@@ -66,9 +74,12 @@ async fn run(
         let next = match expire(&database, clock.now(), &waits, &state).await {
             Ok(next) => next,
             // The failed write has failed the handle, which every call and
-            // live query reports, `coven_invites`' included.
+            // live query reports, `coven_invites`' included; a bug in it
+            // reaches nobody else.
             Err(error) => {
-                tracing::debug!("invite expiry stopped on a failed handle: {error}");
+                if !coven_foundation::task::report_carried(database.bugs().as_ref(), &error) {
+                    tracing::debug!("invite expiry stopped on a failed handle: {error}");
+                }
                 return;
             }
         };

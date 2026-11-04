@@ -190,3 +190,124 @@ async fn joined_keeps_a_payload_whose_drop_panics_from_unwinding() {
         }))
     );
 }
+
+/// Keeps every bug it hears of, as an app's crash reporter would.
+#[derive(Default)]
+struct HeardBugs(std::sync::Mutex<Vec<Bug>>);
+
+impl BugSink for HeardBugs {
+    fn report(&self, bug: &Bug) {
+        self.0.lock().unwrap().push(bug.clone());
+    }
+}
+
+impl HeardBugs {
+    fn heard(&self) -> Vec<Bug> {
+        self.0.lock().unwrap().clone()
+    }
+}
+
+#[tokio::test]
+async fn an_owned_task_s_panic_goes_to_the_sink_then_its_owner_ends_its_work() {
+    let bugs = Arc::new(HeardBugs::default());
+    let (ended, owner_heard) = tokio::sync::oneshot::channel();
+    let task = spawn_owned(
+        "upload files",
+        bugs.clone(),
+        async { panic!("the queue's first row is gone") },
+        |bug| async move {
+            ended.send(bug).unwrap();
+        },
+    );
+    task.ended().await;
+    let bug = Bug { operation: "upload files", message: "the queue's first row is gone".into() };
+    assert_eq!(bugs.heard(), std::slice::from_ref(&bug));
+    assert_eq!(owner_heard.await.unwrap(), bug);
+}
+
+#[tokio::test]
+async fn an_owned_task_s_ending_that_panics_goes_to_the_sink_too() {
+    let bugs = Arc::new(HeardBugs::default());
+    spawn_owned("sync", bugs.clone(), async { panic!("a pass panicked") }, |_| async {
+        panic!("recording the failure panicked")
+    })
+    .ended()
+    .await;
+    let messages: Vec<_> = bugs.heard().into_iter().map(|bug| bug.message).collect();
+    assert_eq!(messages, ["a pass panicked", "recording the failure panicked"]);
+}
+
+#[tokio::test]
+async fn an_owned_task_that_finishes_reports_nothing() {
+    let bugs = Arc::new(HeardBugs::default());
+    spawn_owned("follow the network", bugs.clone(), async {}, |_| async {
+        unreachable!("only a panic ends the work")
+    })
+    .ended()
+    .await;
+    assert!(bugs.heard().is_empty());
+}
+
+#[tokio::test]
+async fn a_completing_task_s_panic_goes_to_its_waiting_caller_alone() {
+    let bugs = Arc::new(HeardBugs::default());
+    let failed = spawn_completing("close the store", bugs.clone(), async {
+        panic!("a writer is still held")
+    })
+    .await;
+    assert_eq!(
+        failed,
+        Err::<Result<(), Bug>, _>(TaskFailed::Panicked(Bug {
+            operation: "close the store",
+            message: "a writer is still held".into(),
+        }))
+    );
+    assert!(bugs.heard().is_empty());
+    assert_eq!(spawn_completing("add", bugs, async { Ok::<_, Bug>(2 + 2) }).await, Ok(Ok(4)));
+}
+
+/// Sends each bug it hears of, so a test waits for the report.
+struct SentBugs(tokio::sync::mpsc::UnboundedSender<Bug>);
+
+impl BugSink for SentBugs {
+    fn report(&self, bug: &Bug) {
+        self.0.send(bug.clone()).unwrap();
+    }
+}
+
+/// Work whose state is gone: it panics before it can answer.
+fn loop_is_gone() -> Result<(), Bug> {
+    panic!("the loop is gone")
+}
+
+#[tokio::test]
+async fn a_completing_task_whose_caller_stopped_waiting_reports_its_panic() {
+    let (sent, mut reported) = tokio::sync::mpsc::unbounded_channel();
+    let (go, wait) = tokio::sync::oneshot::channel::<()>();
+    let completion = spawn_completing("stop sync", Arc::new(SentBugs(sent)), async move {
+        wait.await.unwrap();
+        loop_is_gone()
+    });
+    drop(completion);
+    go.send(()).unwrap();
+    assert_eq!(
+        reported.recv().await,
+        Some(Bug { operation: "stop sync", message: "the loop is gone".into() })
+    );
+}
+
+#[tokio::test]
+async fn a_completing_task_whose_caller_stopped_waiting_reports_the_bug_its_error_carries() {
+    let (sent, mut reported) = tokio::sync::mpsc::unbounded_channel();
+    let (go, wait) = tokio::sync::oneshot::channel::<()>();
+    let completion = spawn_completing("close custody", Arc::new(SentBugs(sent)), async move {
+        wait.await.unwrap();
+        blocking("forget the keys", || -> u8 { panic!("no key session") }).await
+    });
+    drop(completion);
+    go.send(()).unwrap();
+    assert_eq!(
+        reported.recv().await,
+        Some(Bug { operation: "forget the keys", message: "no key session".into() })
+    );
+}

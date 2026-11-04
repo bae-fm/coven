@@ -133,7 +133,7 @@ impl SequenceSync {
         let owner = self.clone();
         // The owned task survives cancellation of the app's waiter, including
         // requests that the provider cannot cancel once sent.
-        tokio::spawn(async move {
+        let submitting = async move {
             let mut session = owner.session.lock().await;
             let member =
                 owner.member.read()?.ok_or(coven_storage::StorageFailure::MemberKeysMissing)?;
@@ -156,9 +156,13 @@ impl SequenceSync {
                 }
                 result => result,
             }
-        })
-        .await
-        .map_err(|error| SyncError::disk(std::io::Error::other(error)))?
+        };
+        coven_foundation::task::spawn_completing(
+            "submit an operation",
+            self.database.bugs().clone(),
+            submitting,
+        )
+        .await?
     }
 
     /// Journal `request` as a new sequence operation, before its first step.

@@ -131,6 +131,7 @@ impl MemoryProvider {
     ) -> Result<ObjectStream<'static>, StorageError> {
         self.before(MemoryRequest::Read(path.clone(), range)).await?;
         let mut state = self.state.lock().await;
+        assert!(!state.faults.read_panics.contains(path), "a read of {path:?} panicked");
         let result = (|| {
             if let Some(failure) = state.faults.read_failures.get(path) {
                 return Err((*failure).into());

@@ -774,8 +774,8 @@ impl Files {
         // Isolate explicit runs and transfers from the independent workers,
         // retaining the real file owner and its database operations.
         self.worker.stop.send_replace(true);
-        for task in std::mem::take(&mut *self.worker.tasks.lock().await) {
-            stopped("the upload worker", task).await;
+        if let Some(task) = self.worker.task.lock().await.take() {
+            task.ended().await;
         }
     }
 }

@@ -271,10 +271,22 @@ impl Drop for SnapshotStaging {
         };
         // Only an abandoned staging gets here: a cancelled or panicking
         // caller. Its connection's temporary storage goes when the store
-        // closes, which waits for this removal.
+        // closes, which waits for this removal. Nobody waits for the removal,
+        // so a bug in it goes to the store's bug sink.
+        let bugs = self.database.bugs.clone();
         let remove = move |inner: &DatabaseInner| {
-            if let Err(error) = inner.call(|inner| inner.inputs.remove_staging(&tables)) {
-                tracing::error!(%error, "removing an abandoned snapshot staging failed");
+            let removed =
+                coven_foundation::task::caught_sync("remove an abandoned snapshot staging", || {
+                    inner.call(|inner| inner.inputs.remove_staging(&tables))
+                });
+            match removed {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => {
+                    if !coven_foundation::task::report_carried(bugs.as_ref(), &error) {
+                        tracing::error!(%error, "removing an abandoned snapshot staging failed");
+                    }
+                }
+                Err(bug) => coven_foundation::task::report(bugs.as_ref(), &bug),
             }
             Ok::<_, DbError>(())
         };

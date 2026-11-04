@@ -22,7 +22,7 @@ impl StorageConnections {
             attempts.take()
         };
         if let Some(previous) = previous {
-            attempt_ended(previous.task).await;
+            previous.task.ended().await;
         }
         let live = self.live.lock().await;
         if let ConnectionState::Active(connected) = &*live {
@@ -41,11 +41,31 @@ impl StorageConnections {
         // The attempt is the start of the first pass: retries wait for it.
         self.waits.sync_started().await?;
         let owner = self.clone();
-        *self.attempts.lock().expect("connection attempts poisoned") = Some(ConnectionAttempt {
-            epoch,
-            task: tokio::spawn(async move { owner.connect_started(epoch).await }),
-        });
+        let ending = self.clone();
+        let task = crate::task::spawn_owned(
+            "connect to storage",
+            self.database.bugs().clone(),
+            async move { owner.connect_started(epoch).await },
+            |bug| async move { ending.attempt_panicked(bug).await },
+        );
+        *self.attempts.lock().expect("connection attempts poisoned") =
+            Some(ConnectionAttempt { epoch, task });
         Ok(())
+    }
+
+    /// The connection attempt panicked with `bug`, which has gone to the
+    /// store's bug sink: the last pass is recorded failed with it, sync
+    /// stops, and the retries waiting, those the attempt took among them,
+    /// are answered with it (E15).
+    async fn attempt_panicked(&self, bug: crate::task::Bug) {
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "the attempt has ended either way; a failed write has failed the handle, which reports it"
+        )]
+        let _ = self.show(LastPass::failed(SyncError::Bug(bug.clone()))).await;
+        if let Err(error) = self.waits.sync_panicked(bug).await {
+            tracing::debug!("stopping sync on a failed handle: {error}");
+        }
     }
 
     /// Build the started loop's first client, retrying under the connection
@@ -57,7 +77,9 @@ impl StorageConnections {
         let mut rearmed = self.waits.rearmed();
         let mut retry = match coven_sync::ConnectionRetry::open(&self.database).await {
             Ok(retry) => retry,
-            Err(error) => return self.give_up(coven_sync::connection_failure(error)).await,
+            Err(error) => {
+                return self.give_up(coven_sync::connection_failure(self.reported(error))).await
+            }
         };
         let held = retry.held(&self.waits);
         if self.waits.holds(held).await.is_err() {
@@ -81,7 +103,7 @@ impl StorageConnections {
             if let Err(error) =
                 self.waits.end_reported_waits(coven_sync::NetworkOwner::Connection).await
             {
-                return self.give_up(coven_sync::connection_failure(error)).await;
+                return self.give_up(coven_sync::connection_failure(self.reported(error))).await;
             }
             // The cooldown's end changes what the person's retry would do,
             // even while the connection's backoff still holds. Taken before
@@ -97,7 +119,7 @@ impl StorageConnections {
             {
                 Ok(wait) => wait,
                 Err(error) => {
-                    return self.give_up(coven_sync::connection_failure(error.into())).await
+                    return self.give_up(coven_sync::connection_failure(self.reported(error))).await
                 }
             };
             if retry.held(&self.waits).is_some()
@@ -166,6 +188,7 @@ impl StorageConnections {
                     return;
                 }
                 Err((error, reason)) => {
+                    let error = self.reported(error);
                     let failed = retry
                         .failed(
                             &self.database,
@@ -209,6 +232,12 @@ impl StorageConnections {
         // running, and stopping records the location, once this ends.
     }
 
+    /// `error`, once a bug it carries has gone to the store's bug sink:
+    /// nobody waits for the attempt, so its failures reach no caller (E15).
+    fn reported(&self, error: impl Into<SyncError>) -> SyncError {
+        crate::task::reported(self.database.bugs().as_ref(), error.into())
+    }
+
     /// An attempt that cannot go on shows why; no pass follows it.
     async fn give_up(&self, failure: coven_sync::PassFailure) {
         #[expect(
@@ -238,20 +267,20 @@ impl StorageConnections {
     /// failure; stopping goes on, and the failure is returned.
     pub(crate) async fn stop(self: &Arc<Self>) -> Result<(), SyncError> {
         let owner = self.clone();
-        let stopping = tokio::spawn(async move {
+        let stopping = async move {
             let _call = owner.calls.lock().await;
             owner.epoch.fetch_add(1, Ordering::SeqCst);
             let stopped = owner.waits.sync_stopped().await;
             owner.stopped.notify_waiters();
             let attempt = owner.attempts.lock().expect("connection attempts poisoned").take();
             if let Some(attempt) = attempt {
-                attempt_ended(attempt.task).await;
+                attempt.task.ended().await;
             }
             let released = owner.release(&mut *owner.live.lock().await).await;
             let published = owner.publish_released(released).await;
             stopped.map_err(SyncError::from).and(published)
-        });
-        crate::task::joined("stop sync", stopping).await?
+        };
+        crate::task::spawn_completing("stop sync", self.database.bugs().clone(), stopping).await?
     }
 
     /// Request a pass while started.
@@ -302,7 +331,7 @@ impl StorageConnections {
         self.stopped.notify_waiters();
         let attempts = self.attempts.lock().expect("connection attempts poisoned").take();
         if let Some(attempts) = attempts {
-            attempt_ended(attempts.task).await;
+            attempts.task.ended().await;
         }
         let _call = self.calls.lock().await;
         let released = self.release(&mut *self.live.lock().await).await;
@@ -323,15 +352,6 @@ impl StorageConnections {
     #[cfg(test)]
     pub(crate) fn fail_next_close(&self, failure: SyncError) {
         *self.close_failure.lock().expect("close failure poisoned") = Some(failure);
-    }
-}
-
-/// Wait for a connection attempt to end. A panic in it unwinds into the
-/// waiter; the runtime dropping it as it shuts down has ended it too, which
-/// is all the waiter needs.
-async fn attempt_ended(task: tokio::task::JoinHandle<()>) {
-    if let Err(shutdown) = coven_foundation::unwinding::task("connect to storage", task.await) {
-        tracing::debug!("{shutdown}");
     }
 }
 

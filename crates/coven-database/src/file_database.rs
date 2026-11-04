@@ -45,6 +45,15 @@ impl FileDatabase {
         Self { access: FileDatabaseAccess::Reader(database) }
     }
 
+    /// Where a bug in the file owner's work that nobody waits for goes, as
+    /// its database's does (E15).
+    pub fn bugs(&self) -> &coven_foundation::task::BugSinkRef {
+        match &self.access {
+            FileDatabaseAccess::Writer(database) => database.bugs(),
+            FileDatabaseAccess::Reader(database) => database.bugs(),
+        }
+    }
+
     /// The files this process is sending now, which the upload worker marks
     /// as each attempt starts and ends (§17.9).
     pub fn uploads_in_flight(&self) -> crate::InFlight {

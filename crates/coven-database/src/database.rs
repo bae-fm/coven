@@ -66,6 +66,8 @@ pub struct Database {
     /// The device's network as this process last heard of it, which
     /// coven's views read (§4).
     network: crate::network_facts::NetworkFacts,
+    /// Where a bug in the store's work that nobody waits for goes (E15).
+    bugs: coven_foundation::task::BugSinkRef,
     closing: Arc<coven_foundation::files::StoreClosingGuard>,
     inner: Arc<RwLock<Option<DatabaseInner>>>,
     file_tasks: Arc<tokio::sync::RwLock<()>>,
@@ -390,6 +392,11 @@ impl Database {
 }
 
 impl Database {
+    /// Where a bug in the store's work that nobody waits for goes (E15).
+    pub fn bugs(&self) -> &coven_foundation::task::BugSinkRef {
+        &self.bugs
+    }
+
     /// Mark this instance as closing for a reopen to wait on, though workers
     /// still hold clones of it: the facade's owning scope ended (F.4).
     pub fn begin_close(&self) {
@@ -764,55 +771,52 @@ impl Database {
         let database = self.clone();
         // Closing runs as its own task so that a caller dropping this future
         // doesn't stop it partway; the runtime dropping that task can.
-        coven_foundation::task::joined(
-            "close the store",
-            tokio::spawn(async move {
-                let file_tasks = database.file_tasks.clone().write_owned().await;
-                finish_blocking(
-                    "close the store",
-                    tokio::task::spawn_blocking(crate::commit_scope::bind(move || {
-                        let _file_tasks = file_tasks;
-                        let mut slot = database.inner.write().expect("database lock poisoned");
-                        let Some(inner) = slot.take() else {
-                            return Err(DbError::StoreClosed);
-                        };
-                        let mut failures: Vec<DbError> = inner
-                            .checkpoints
-                            .into_iter()
-                            .filter_map(|checkpoints| checkpoints.stop().err())
-                            .collect();
-                        failures.extend(inner.inputs.close());
-                        // The statistics follow this session's writes, outside
-                        // any captured transaction. A failed handle's writer may
-                        // still hold a transaction, which closing rolls back.
-                        if inner.access.observer.error().is_none() {
-                            if let Err(error) = inner
-                                .access
-                                .writer
-                                .lock()
-                                .expect("database connection lock poisoned")
-                                .optimize()
-                            {
-                                failures.push(error);
-                            }
+        coven_foundation::task::spawn_completing("close the store", self.bugs.clone(), async move {
+            let file_tasks = database.file_tasks.clone().write_owned().await;
+            finish_blocking(
+                "close the store",
+                tokio::task::spawn_blocking(crate::commit_scope::bind(move || {
+                    let _file_tasks = file_tasks;
+                    let mut slot = database.inner.write().expect("database lock poisoned");
+                    let Some(inner) = slot.take() else {
+                        return Err(DbError::StoreClosed);
+                    };
+                    let mut failures: Vec<DbError> = inner
+                        .checkpoints
+                        .into_iter()
+                        .filter_map(|checkpoints| checkpoints.stop().err())
+                        .collect();
+                    failures.extend(inner.inputs.close());
+                    // The statistics follow this session's writes, outside
+                    // any captured transaction. A failed handle's writer may
+                    // still hold a transaction, which closing rolls back.
+                    if inner.access.observer.error().is_none() {
+                        if let Err(error) = inner
+                            .access
+                            .writer
+                            .lock()
+                            .expect("database connection lock poisoned")
+                            .optimize()
+                        {
+                            failures.push(error);
                         }
-                        match inner.access.close() {
-                            Err(DbError::Closing { failures: application }) => {
-                                failures.extend(application)
-                            }
-                            Err(error) => failures.push(error),
-                            Ok(()) => (),
+                    }
+                    match inner.access.close() {
+                        Err(DbError::Closing { failures: application }) => {
+                            failures.extend(application)
                         }
-                        if failures.is_empty() {
-                            Ok(())
-                        } else {
-                            Err(DbError::Closing { failures })
-                        }
-                    }))
-                    .await,
-                )
-            }),
-        )
+                        Err(error) => failures.push(error),
+                        Ok(()) => (),
+                    }
+                    if failures.is_empty() {
+                        Ok(())
+                    } else {
+                        Err(DbError::Closing { failures })
+                    }
+                }))
+                .await,
+            )
+        })
         .await
         .map_err(DbError::from)?
     }
@@ -848,10 +852,18 @@ pub struct DatabaseReadHandle {
     observer: CommitObserver,
     /// Never started: this handle transfers nothing (§4).
     transfers: crate::transfers_in_flight::TransfersInFlight,
+    /// Where a bug in the handle's work that nobody waits for goes (E15).
+    bugs: coven_foundation::task::BugSinkRef,
     inner: Arc<RwLock<Option<DatabaseAccess<StoreReadLock>>>>,
 }
 
 impl DatabaseReadHandle {
+    /// Where a bug in the handle's work that nobody waits for goes, such as
+    /// its file owner's worker's (E15).
+    pub fn bugs(&self) -> &coven_foundation::task::BugSinkRef {
+        &self.bugs
+    }
+
     /// The files this handle is sending: none, since it sends nothing.
     pub fn uploads_in_flight(&self) -> crate::InFlight {
         self.transfers.uploads()

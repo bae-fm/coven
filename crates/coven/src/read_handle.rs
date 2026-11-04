@@ -69,10 +69,11 @@ impl CovenReadHandle {
     /// handle. File streams retain their own locks.
     pub async fn close(&self) -> Result<(), DbError> {
         let handle = self.clone();
-        let closing = tokio::spawn(async move {
+        let bugs = self.database.bugs().clone();
+        let closing = async move {
             handle.files.close().await;
             handle.database.close().await
-        });
-        crate::task::joined("close the read-only store", closing).await?
+        };
+        crate::task::spawn_completing("close the read-only store", bugs, closing).await?
     }
 }

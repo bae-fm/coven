@@ -249,6 +249,34 @@ async fn a_metered_network_holds_trailing_uploads_until_it_is_unmetered() {
     f.close().await;
 }
 
+/// The upload worker panics as Ben's photo starts uploading: his app's
+/// early retry hears the bug instead of waiting for a run that never
+/// comes, and so does a retry asked after it (E15).
+#[tokio::test]
+async fn a_panicking_upload_worker_answers_app_retries_with_its_bug() {
+    let f = Fixture::new(Provenance::AppProvided).await;
+    let faults = coven_storage::test_utils::Faults {
+        panic_file_uploads: 1,
+        ..coven_storage::test_utils::Faults::none()
+    };
+    f.storage.set_faults(faults).await;
+    f.attach("files", "a", photo(1)).await;
+    f.set_uploads_paused(false).await;
+    let answered = tokio::time::timeout(Duration::from_secs(10), f.files.retry_uploads_now())
+        .await
+        .expect("the retry is answered");
+    let Err(SyncError::Bug(bug)) = answered else {
+        panic!("the retry heard no bug: {answered:?}");
+    };
+    assert_eq!(bug.operation, "the upload worker");
+    assert!(bug.message.starts_with("the upload of"), "{bug:?}");
+    assert!(
+        matches!(f.files.retry_uploads_now().await, Err(SyncError::Bug(later)) if later == bug),
+        "a later retry hears the bug"
+    );
+    f.close().await;
+}
+
 /// An app retry joins the run in progress rather than waiting for it: the
 /// run takes it at its next read of the queue, covering the upload still in
 /// flight and the one waiting, and answers once both attempts have ended.

@@ -112,6 +112,9 @@ struct FilesInner {
     downloading: coven_database::InFlight,
     /// App retries waiting for an upload run to serve them.
     app_retries: Mutex<Vec<file_upload_pool::AppRetry>>,
+    /// The bug the upload worker ended on, set under `app_retries`' lock: no
+    /// run serves a retry once it is set, so each fails with it (E15).
+    worker_bug: std::sync::OnceLock<coven_foundation::task::Bug>,
     /// Connection changes waiting for the uploads in flight to end; while
     /// any waits, no upload starts.
     changing: AtomicUsize,
@@ -128,8 +131,8 @@ struct FilesInner {
 }
 struct FileWorker {
     stop: watch::Sender<bool>,
-    /// The upload worker.
-    tasks: tokio::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>,
+    /// The upload worker, until the owner closes.
+    task: tokio::sync::Mutex<Option<coven_foundation::task::OwnedTask>>,
 }
 impl Drop for FileWorker {
     fn drop(&mut self) {
@@ -175,6 +178,7 @@ impl Files {
             in_flight,
             downloading,
             app_retries: Mutex::new(Vec::new()),
+            worker_bug: std::sync::OnceLock::new(),
             changing: AtomicUsize::new(0),
             cache: tokio::sync::RwLock::new(()),
             reads: Mutex::new(BTreeMap::new()),
@@ -184,12 +188,21 @@ impl Files {
             #[cfg(test)]
             blocked_end_gate: Mutex::new(None),
         });
-        let tasks = vec![tokio::spawn(upload_worker(
-            Arc::downgrade(&inner),
-            stop.subscribe(),
-            uploads_changes,
-        ))];
-        Self { inner, worker: Arc::new(FileWorker { stop, tasks: tokio::sync::Mutex::new(tasks) }) }
+        // A panic in the worker goes to the store's bug sink, and fails the
+        // app retries it would have served.
+        let owner = Arc::downgrade(&inner);
+        let task = coven_foundation::task::spawn_owned(
+            "the upload worker",
+            inner.database.bugs().clone(),
+            upload_worker(Arc::downgrade(&inner), stop.subscribe(), uploads_changes),
+            |bug| async move {
+                if let Some(owner) = owner.upgrade() {
+                    owner.worker_panicked(bug);
+                }
+            },
+        );
+        let worker = FileWorker { stop, task: tokio::sync::Mutex::new(Some(task)) };
+        Self { inner, worker: Arc::new(worker) }
     }
     /// The limits shared by this handle's transfer consumers.
     pub fn transfer_limits(&self) -> TransferLimits {
@@ -211,8 +224,8 @@ impl Files {
         // A pin's download waiting for the network fails as the store closes.
         self.inner.hold_wake.notify_waiters();
         self.worker.stop.send_replace(true);
-        for task in std::mem::take(&mut *self.worker.tasks.lock().await) {
-            stopped("the upload worker", task).await;
+        if let Some(task) = self.worker.task.lock().await.take() {
+            task.ended().await;
         }
         let _drain = self.inner.drain.lock().await;
         let _pins = self.inner.pins.lock().await;
@@ -226,7 +239,8 @@ impl Files {
     /// clear still hold (§17.9), and while uploads are paused only bound ones
     /// are tried; while sync is stopped none is (§17.4).
     pub async fn retry_uploads_now(&self) -> Result<DrainOutcome, SyncError> {
-        // The worker stopping with the store drops the retry unanswered.
+        // The worker stopping with the store drops the retry unanswered; a
+        // worker that panicked answers it with the bug.
         self.inner.ask_retry()?.answered().await
     }
     /// Persist the pause setting, as a step of `sql`'s write; a running
@@ -364,6 +378,7 @@ async fn upload_worker(
             () = &mut retry => {},
         }
         let Some(owner) = owner.upgrade() else { break };
+        let bugs = owner.database.bugs();
         let run = async {
             match owner.drain_uploads().await {
                 Ok(_) => (),
@@ -376,13 +391,21 @@ async fn upload_worker(
                     tracing::debug!("file uploads waiting for a completed catch-up");
                 }
                 Err(SyncError::Database(DbError::StoreClosed)) => (),
-                Err(error) => tracing::error!(?error, "upload queue failed"),
+                Err(error) => {
+                    if !coven_foundation::task::report_carried(bugs.as_ref(), &error) {
+                        tracing::error!(?error, "upload queue failed");
+                    }
+                }
             }
             // The switches a run made can ask for pins; a paused queue or no
             // storage holds no pin made from coven's copy.
             match owner.keep_pinned().await {
                 Ok(()) | Err(SyncError::Database(DbError::StoreClosed)) => (),
-                Err(error) => tracing::error!(?error, "keeping files here failed"),
+                Err(error) => {
+                    if !coven_foundation::task::report_carried(bugs.as_ref(), &error) {
+                        tracing::error!(?error, "keeping files here failed");
+                    }
+                }
             }
         };
         tokio::select! { biased; _ = stopping.changed() => break, () = run => {} }
@@ -396,7 +419,9 @@ async fn upload_worker(
             // Commits, network reports and wakes still run the worker; no
             // retry wait wakes it until a later run arms one.
             Err(error) => {
-                tracing::error!(?error, "reading the bound uploads failed");
+                if !coven_foundation::task::report_carried(owner.database.bugs().as_ref(), &error) {
+                    tracing::error!(?error, "reading the bound uploads failed");
+                }
                 Box::pin(std::future::pending())
             }
         };
@@ -551,15 +576,6 @@ pub(crate) enum TrailingHold {
 /// `Upload.heldOnMetered`; the views' `coven_uploads.metered` says the same.
 pub(crate) fn held_on_metered(bound: bool) -> bool {
     !bound
-}
-
-/// Wait for a background worker to end as its owner stops it. A panic in it
-/// unwinds into the owner; the runtime dropping it as it shuts down has ended
-/// it too, which is all stopping waits for.
-pub(crate) async fn stopped(worker: &'static str, task: tokio::task::JoinHandle<()>) {
-    if let Err(shutdown) = coven_foundation::unwinding::task(worker, task.await) {
-        tracing::debug!("{shutdown}");
-    }
 }
 
 #[cfg(test)]

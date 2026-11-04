@@ -2,7 +2,7 @@
 
 use super::BodyFailure;
 use crate::*;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
 /// Faults applied to the next calls, including accepted parts with lost replies.
@@ -16,6 +16,11 @@ pub struct Faults {
     /// stored. Every other call goes through, so a pass beside the upload
     /// can't take the fault.
     pub refuse_file_uploads: usize,
+    /// Panic in this many file uploads as they start, as a bug in the
+    /// caller's upload would; every other call goes through.
+    pub panic_file_uploads: usize,
+    /// Panic in exact reads at these paths, as a bug in the reader would.
+    pub read_panics: BTreeSet<ObjectPath>,
     /// Fail exact reads at these paths, retaining other in-flight responses.
     pub read_failures: BTreeMap<ObjectPath, StorageFailure>,
     /// Fail exact status calls at these paths, independently of reads.
@@ -76,6 +81,8 @@ impl Faults {
         Self {
             fail_next: 0,
             refuse_file_uploads: 0,
+            panic_file_uploads: 0,
+            read_panics: BTreeSet::new(),
             read_failures: BTreeMap::new(),
             status_failures: BTreeMap::new(),
             delete_failures: BTreeMap::new(),

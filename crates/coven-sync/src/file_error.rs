@@ -91,6 +91,16 @@ pub enum FileReadError {
     #[error(transparent)]
     Write(Box<coven_database::CovenError>),
 }
+impl coven_foundation::task::CarriesBug for FileReadError {
+    fn bug(&self) -> Option<&coven_foundation::task::Bug> {
+        match self {
+            Self::Database(error) => error.bug(),
+            Self::Disk(error) => error.bug(),
+            Self::Write(error) => error.bug(),
+            _ => None,
+        }
+    }
+}
 impl From<coven_database::CovenError> for FileReadError {
     fn from(error: coven_database::CovenError) -> Self {
         match error {
@@ -157,6 +167,15 @@ pub(crate) enum TransferError {
     /// Reading, storing or checking bytes failed.
     #[error(transparent)]
     File(#[from] FileReadError),
+}
+
+impl coven_foundation::task::CarriesBug for TransferError {
+    fn bug(&self) -> Option<&coven_foundation::task::Bug> {
+        match self {
+            Self::Refused(_) => None,
+            Self::File(error) => error.bug(),
+        }
+    }
 }
 
 impl From<StorageError> for TransferError {
