@@ -1486,7 +1486,7 @@ Every member can read the device and claim number; the provider can't.
 | Slot kind | Body |
 | --- | --- |
 | admin | one D6 frame |
-| writes | `count:u64`, then `length:u64 \| inner write` for each queued write: in strictly increasing write-number order, all by the header's device, with no omitted unconfirmed predecessor |
+| writes | `count:u64`, at least 1, then `length:u64 \| inner write` for each queued write, the length positive and within the body: in strictly increasing write-number order, all by the header's device, with no omitted unconfirmed predecessor |
 | key copy | one empty kind-16 frame |
 | announcement | one kind-15 frame: `snapshot:SnapshotId \| covers:u64 \| purpose:Purpose \| digest:32 bytes` |
 

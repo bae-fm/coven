@@ -16,6 +16,7 @@ use coven_format::{
     sealed_slot::{BoundedSlot, SlotKind, SlotObjectPrefix},
     sealed_write::WriteObjectPrefix,
     sequence::{SlotFrame, SlotHeader},
+    writes_slot,
 };
 use coven_merge::Audience;
 use std::{
@@ -172,27 +173,17 @@ pub(crate) fn open(
         0,
     )
     .hashing(digest);
-    let bytes = read_exact(&mut plain, 47, path)?;
-    let header = checked(path, SlotHeader::decode(&bytes, path))?;
-    let count =
-        u64::from_be_bytes(read_exact(&mut plain, 8, path)?.try_into().expect("eight bytes"));
-    if count == 0 {
-        return Err(damaged(path, Refusal::Parse { cause: None }));
-    }
+    let head = read_exact(&mut plain, writes_slot::HEAD_LEN, path)?;
+    let (header, count) = checked(path, writes_slot::decode_head(&head, path))?;
     let mut previous = None;
     let mut writes = Vec::new();
     for _ in 0..count {
-        let length =
-            u64::from_be_bytes(read_exact(&mut plain, 8, path)?.try_into().expect("eight bytes"));
+        let field = read_exact(&mut plain, 8, path)?.try_into().expect("eight bytes");
         let position = plain.stream_position().map_err(SyncError::disk)?;
-        if length == 0 || length > plain.len() - position {
-            return Err(damaged(path, Refusal::Parse { cause: None }));
-        }
+        let length =
+            checked(path, writes_slot::decode_write_length(field, plain.len() - position))?;
         let write = inner(&mut plain, path, length, ring, history, &readable)?;
-        checked(
-            path,
-            coven_format::writes_slot::check_write(&header, previous, &write.header.header),
-        )?;
+        checked(path, writes_slot::check_write(&header, previous, &write.header.header))?;
         if history
             .owner(write.header.header.position.device, write.header.header.read_through)
             .map_err(|failure| damaged(path, failure))?

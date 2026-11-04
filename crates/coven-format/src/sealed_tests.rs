@@ -555,8 +555,7 @@ mod sequence {
         let path = f::slot_path(6);
         let plain = open_stream(&bytes, prefix_length, path.as_str()).unwrap();
         let slot = f::slot_header(6, 5);
-        let mut expected = slot.encode(&path).unwrap();
-        expected.extend_from_slice(&2u64.to_be_bytes());
+        let mut expected = crate::writes_slot::encode_head(&slot, &path, 2).unwrap();
         let mut previous = None;
         for (inner, header) in [
             (hex(include_str!("../fixtures/sealed-write.hex")), f::chunked_write().header),
@@ -564,7 +563,8 @@ mod sequence {
         ] {
             crate::writes_slot::check_write(&slot, previous, &header).unwrap();
             previous = Some(header.position.number);
-            expected.extend_from_slice(&(inner.len() as u64).to_be_bytes());
+            expected
+                .extend_from_slice(&crate::writes_slot::encode_write_length(inner.len() as u64));
             expected.extend(inner);
         }
         assert_eq!(plain, expected);

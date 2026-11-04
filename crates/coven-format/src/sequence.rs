@@ -24,6 +24,10 @@ pub struct SlotHeader {
 }
 wire_struct!(SlotHeader, device, claim, author, after);
 impl SlotHeader {
+    /// The encoded frame's length: its prefix, then device, claim, author
+    /// and predecessor.
+    pub const ENCODED_LEN: usize = crate::FRAME_PREFIX_LEN + 8 + 8 + 16 + 8;
+
     /// Encode the kind-14 frame, checking its path binding.
     pub fn encode(&self, path: &ObjectPath) -> Result<Vec<u8>, Error> {
         self.validate_at(path)?;

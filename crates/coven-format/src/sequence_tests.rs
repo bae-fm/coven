@@ -8,6 +8,7 @@ fn headers_bind_claims_to_exact_slot_paths() {
         let header = f::slot_header(slot, u64::MAX);
         let bytes = header.encode(&path).unwrap();
         assert_eq!(bytes.len(), 47);
+        assert_eq!(SlotHeader::ENCODED_LEN, 47);
         assert_eq!(SlotHeader::decode(&bytes, &path).unwrap(), header);
         assert!(SlotHeader::decode(&bytes, &f::slot_path(if slot == 1 { 2 } else { 1 })).is_err());
         for end in 0..bytes.len() {

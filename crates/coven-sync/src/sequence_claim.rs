@@ -415,7 +415,7 @@ impl SequenceSync {
                                 ))
                             })
                         };
-                        emit(&length.to_be_bytes())?;
+                        emit(&coven_format::writes_slot::encode_write_length(length))?;
                         crate::write_seal::seal(store, upload, &held, &author, &mut emit)
                     })
                     .await;
@@ -437,9 +437,8 @@ impl SequenceSync {
             let seal = move |number| -> Result<_, coven_database::DbError> {
                 let header =
                     SlotHeader { device, claim: number, author: author.member(), after: at - 1 };
-                let mut body = header.encode(&path)?;
-                body.extend_from_slice(&count.to_be_bytes());
-                let input = Cursor::new(body).chain(input);
+                let head = coven_format::writes_slot::encode_head(&header, &path, count)?;
+                let input = Cursor::new(head).chain(input);
                 Ok(ClaimAttempt {
                     path: path.clone(),
                     bytes: SealedStream::new(input, path, prefix.encode()?, None, key, author),

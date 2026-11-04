@@ -20,3 +20,28 @@ fn batch_checks_device_read_through_and_original_write_order() {
         format!("coven/write/{}/1/3", f::STORE_ID)
     );
 }
+
+#[test]
+fn a_body_head_holds_its_slot_header_and_a_positive_write_count() {
+    let path = f::slot_path(8);
+    let slot = f::slot_header(8, 4);
+    let head = encode_head(&slot, &path, 2).unwrap();
+    assert_eq!(head.len(), HEAD_LEN);
+    assert_eq!(&head[SlotHeader::ENCODED_LEN..], 2u64.to_be_bytes());
+    assert_eq!(decode_head(&head, &path).unwrap(), (slot.clone(), 2));
+    assert!(decode_head(&head, &f::slot_path(9)).is_err());
+    assert!(decode_head(&head[..HEAD_LEN - 1], &path).is_err());
+    assert!(encode_head(&slot, &path, 0).is_err());
+    let mut empty = head;
+    empty[SlotHeader::ENCODED_LEN..].copy_from_slice(&0u64.to_be_bytes());
+    assert!(decode_head(&empty, &path).is_err());
+}
+
+#[test]
+fn an_inner_write_length_is_positive_and_within_the_body() {
+    let field = encode_write_length(5);
+    assert_eq!(field, 5u64.to_be_bytes());
+    assert_eq!(decode_write_length(field, 5).unwrap(), 5);
+    assert!(decode_write_length(field, 4).is_err());
+    assert!(decode_write_length(encode_write_length(0), 5).is_err());
+}
