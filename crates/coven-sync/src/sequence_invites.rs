@@ -7,7 +7,7 @@ use crate::sequence_sync::OperationState;
 use crate::{
     Invite, InviteAccess, InviteDelivery, InviteTarget, JoinRequest, OperationKind,
     OperationOutcome, OperationRejection, PendingReason, PendingRecord, PendingSubject,
-    ProviderAccessAction, RetryWaits, SequenceState, SyncError,
+    ProviderAccessAction, SyncError,
 };
 use approval::Child;
 use coven_crypto::{ConfirmationNumber, InviteSecret, MemberIdentity, SecretText, StoreKeyring};
@@ -26,7 +26,7 @@ use coven_storage::{
     CloudProvider, InviteStorage, ObjectPath, S3Credentials, StorageFailure, StorageInvitation,
 };
 use serde::{Deserialize, Serialize};
-use std::{collections::BTreeSet, sync::Arc, time::SystemTime};
+use std::{collections::BTreeSet, time::SystemTime};
 
 /// How an invited person reaches storage, as the invite's journal keeps it.
 #[derive(Serialize, Deserialize)]
@@ -307,15 +307,15 @@ impl SequenceSync {
         access: InviteAccess,
         delivery: InviteDelivery,
     ) -> Result<Invite, SyncError> {
-        let (device, ids, now, state) =
-            (self.device, self.ids.clone(), self.clock.now(), self.state.clone());
-        let held = self.member.read()?.ok_or(StorageFailure::MemberKeysMissing)?;
+        let steps = self.operation_steps();
         let location = self.storage.config().clone();
+        coven_storage::record_config(&self.directory, &location)?;
         let (invite, _, operation) = self
             .database
             .write(move |sql| {
                 let made = NewInvite { target, access, delivery };
-                create_invite(&sql, device, &held, ids.as_ref(), now, &location, state, made)
+                steps
+                    .create_invite(&sql, made)
                     .map_err(|error| coven_database::DbError::SyncStream(Box::new(error)))
             })
             .await?;
@@ -340,11 +340,9 @@ impl SequenceSync {
         request: &JoinRequest,
     ) -> Result<(), SyncError> {
         let request = request.clone();
-        let (now, waits, state) = (self.clock.now(), self.waits.clone(), self.state.clone());
+        let steps = self.operation_steps();
         let outcome = self
-            .journal_and_pass(move |sql| {
-                approve_join_request(sql, now, waits, state, &request).map(Some)
-            })
+            .journal_and_pass(move |sql| steps.approve_join_request(sql, &request).map(Some))
             .await?
             .expect("an approval always journals its binding");
         crate::operation_outcome::into_slot(outcome).map(drop)
@@ -358,17 +356,16 @@ impl SequenceSync {
         request: &JoinRequest,
     ) -> Result<(), SyncError> {
         let request = request.clone();
-        let (now, waits, state) = (self.clock.now(), self.waits.clone(), self.state.clone());
-        self.settle_and_pass(move |sql| decline_join_request(sql, now, waits, state, &request))
-            .await
+        let steps = self.operation_steps();
+        self.settle_and_pass(move |sql| steps.decline_join_request(sql, &request)).await
     }
 
     /// Cancel the invite as the app's write step does, then run the pass
     /// that deletes its request.
     #[cfg(test)]
     pub(crate) async fn cancel_invite(&self, invite: InviteId) -> Result<(), SyncError> {
-        let (now, waits, state) = (self.clock.now(), self.waits.clone(), self.state.clone());
-        self.settle_and_pass(move |sql| cancel_invite(sql, now, waits, state, invite)).await
+        let steps = self.operation_steps();
+        self.settle_and_pass(move |sql| steps.cancel_invite(sql, invite)).await
     }
 
     #[cfg(test)]
@@ -566,10 +563,8 @@ impl SequenceSync {
                         // invite has one request path, so the checked request
                         // is approved in the pass that read it (§13.2).
                         InviteDeliveryKind::InPerson => {
-                            let binding = crate::admin_steps::journaled(
-                                &SequenceOperation::change(work.binding_change(&request)?),
-                                operation_kind::INVITE,
-                            )?;
+                            let binding = SequenceOperation::change(work.binding_change(&request)?)
+                                .journaled(operation_kind::INVITE)?;
                             self.database
                                 .start_operation_advancing(binding, move |binding| {
                                     work.state = InviteState::Approving { code, request, binding };
@@ -913,9 +908,8 @@ mod shares;
 
 #[path = "sequence_invite_steps.rs"]
 mod steps;
-pub use steps::{
-    approve_join_request, cancel_invite, create_invite, decline_join_request, NewInvite,
-};
+pub use steps::NewInvite;
+pub(crate) use steps::{approve_request, end_invite, make_invite};
 
 #[path = "invite_expiry.rs"]
 pub(crate) mod expiry;

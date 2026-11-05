@@ -58,6 +58,8 @@ pub struct CovenHandle {
     _scope: Arc<HandleScope>,
     database: Database,
     files: coven_sync::Files,
+    /// The store's operation steps, which an app's write runs.
+    steps: Arc<coven_sync::OperationSteps>,
     /// Follows the store's watch of the device's network (§6.7).
     network: Arc<coven_sync::NetworkFollow>,
     storage: Arc<crate::storage::StorageConnections>,
@@ -89,6 +91,7 @@ impl CovenHandle {
         database: Database,
         custody: StoreCustody,
         files: coven_sync::Files,
+        steps: Arc<coven_sync::OperationSteps>,
         network: Arc<coven_sync::NetworkFollow>,
         storage: Arc<crate::storage::StorageConnections>,
         directory: StoreDir,
@@ -99,6 +102,7 @@ impl CovenHandle {
             _scope: Arc::new(HandleScope(database.clone())),
             database,
             files,
+            steps,
             network,
             storage,
             custody: Arc::new(Mutex::new(Some(custody))),

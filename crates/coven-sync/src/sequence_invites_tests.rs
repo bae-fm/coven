@@ -203,11 +203,12 @@ async fn a_decline_ends_the_invite_in_its_write_and_a_pass_deletes_the_request()
     let mut carol = join(&group, invite.shown_code(), "Carol's phone").await;
     ana.sync.pass().await.unwrap();
     let request = requests(&ana).await.remove(0);
-    let (now, waits, state) = (group.clock.now(), ana.sync.waits.clone(), ana.sync.state.clone());
+    let steps = ana.sync.operation_steps();
     ana.sync
         .database
         .write(move |sql| {
-            crate::decline_join_request(&sql, now, waits, state, &request)
+            steps
+                .decline_join_request(&sql, &request)
                 .map_err(|error| coven_database::DbError::SyncStream(Box::new(error)))
         })
         .await
@@ -621,13 +622,13 @@ async fn a_pass_under_way_records_nothing_over_a_cancel() {
     ana.storage.hold_next_read(request_path(&invite), observed, held).await;
     let cancel = async {
         read.await.unwrap();
-        let (now, waits, state) =
-            (group.clock.now(), ana.sync.waits.clone(), ana.sync.state.clone());
+        let steps = ana.sync.operation_steps();
         let id = invite.id;
         ana.sync
             .database
             .write(move |sql| {
-                crate::cancel_invite(&sql, now, waits, state, id)
+                steps
+                    .cancel_invite(&sql, id)
                     .map_err(|error| coven_database::DbError::SyncStream(Box::new(error)))
             })
             .await
@@ -809,12 +810,12 @@ async fn a_stop_for_good_ends_this_devices_invites() {
     group.clock.set(group.clock.now() + std::time::Duration::from_secs(1));
     ana.sync.pass().await.unwrap();
     let request = requests(&ana).await.remove(0);
-    let now = group.clock.now();
-    let (waits, state) = (ana.sync.waits.clone(), ana.sync.state.clone());
+    let steps = ana.sync.operation_steps();
     let binding = ana
         .database()
         .write(move |sql| {
-            crate::approve_join_request(&sql, now, waits, state, &request)
+            steps
+                .approve_join_request(&sql, &request)
                 .map_err(|error| coven_database::DbError::SyncStream(Box::new(error)))
         })
         .await

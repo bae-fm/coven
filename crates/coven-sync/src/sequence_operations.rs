@@ -9,7 +9,9 @@ use crate::{
 };
 use coven_crypto::{MemberIdentity, StoreKeyring};
 use coven_database::operation_kind;
-use coven_database::{ClaimAttempt, ClaimSettlement, ClaimWork, OperationId, OperationRecord};
+use coven_database::{
+    ClaimAttempt, ClaimSettlement, ClaimWork, Journal, NewOperation, OperationId, OperationRecord,
+};
 use coven_format::{
     admin::StoreChange,
     sealed_key::{CopyBox, KeyCopyPrefix},
@@ -53,6 +55,26 @@ pub(crate) struct SequenceOperation {
 impl OperationState for SequenceOperation {}
 
 impl SequenceOperation {
+    /// The journal row that starts this operation, before its first step.
+    pub(crate) fn journaled(&self, started_by: &str) -> Result<NewOperation, SyncError> {
+        Ok(NewOperation {
+            kind: operation_kind::SEQUENCE.into(),
+            data: serde_json::to_vec(self)?,
+            started_by: started_by.into(),
+            pauses_writes: false,
+        })
+    }
+
+    /// Journal the operation as one the app's write asked for.
+    pub(crate) fn start(
+        self,
+        journal: &Journal<'_>,
+        started_by: &str,
+    ) -> Result<OperationId, SyncError> {
+        let kind = self.kind().listed();
+        Ok(journal.start_app_operation(&self.journaled(started_by)?, &kind)?)
+    }
+
     /// An administrative change, before its first step.
     pub(crate) fn change(change: StoreChange) -> Self {
         Self {
@@ -233,7 +255,7 @@ impl SequenceSync {
             request,
             progress: OperationProgress::Running(OperationStep::Preparing),
         };
-        Ok(self.database.start_operation(crate::admin_steps::journaled(&work, started_by)?).await?)
+        Ok(self.database.start_operation(work.journaled(started_by)?).await?)
     }
 
     pub(crate) async fn start_request(
@@ -834,13 +856,11 @@ impl SequenceSync {
         &self,
         name: String,
     ) -> Result<coven_foundation::id_source::CircleId, SyncError> {
-        let (device, ids, state) = (self.device, self.ids.clone(), self.state.clone());
-        let held = self.member.read()?.ok_or(coven_storage::StorageFailure::MemberKeysMissing)?;
+        let steps = self.operation_steps();
         let (sender, receiver) = tokio::sync::oneshot::channel();
         let outcome = self
             .journal_and_pass(move |sql| {
-                let (circle, operation) =
-                    crate::create_circle(sql, device, &held, ids.as_ref(), state, name)?;
+                let (circle, operation) = steps.create_circle(sql, name)?;
                 sender.send(circle).expect("the caller waits");
                 Ok(Some(operation))
             })

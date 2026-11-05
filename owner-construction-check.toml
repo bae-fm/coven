@@ -389,8 +389,8 @@ task_types = [
     "Observing",
     "MigrationContext",
     "SqlContext",
-    # An app's write borrows the store's operation owner, whose steps
-    # run in it, for that one transaction.
+    # An app's write borrows the store's operation steps and files for that
+    # one transaction.
     "CovenWrite",
     # A bulk write's SQL borrows the writer connection for its one
     # transaction, as a write's does.
@@ -1398,6 +1398,9 @@ tables = [
 # One retry schedule per opened installation, injected into every worker and
 # connection; a read-only handle keeps its own in memory.
 "crates/coven-sync/src/retry_waits.rs" = ["RetryWaits::open", "RetryWaits::in_memory"]
+# The app's write's operation steps, one per writer handle, made where its
+# handle is.
+"crates/coven-sync/src/operation_steps.rs" = ["OperationSteps::new"]
 # What each waiting operation's wait names, one per retry schedule.
 "crates/coven-sync/src/operation_evidence.rs" = ["OperationEvidence::new"]
 # The person's waiting retries, one per retry schedule.

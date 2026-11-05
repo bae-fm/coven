@@ -164,11 +164,12 @@ async fn an_expiry_after_a_decision_writes_nothing() {
     let carol = join(&group, invite.shown_code(), "Carol's phone").await;
     ana.sync.pass().await.unwrap();
     let request = requests(&ana).await.remove(0);
-    let (now, waits, state) = (group.clock.now(), ana.sync.waits.clone(), ana.sync.state.clone());
+    let steps = ana.sync.operation_steps();
     ana.sync
         .database
         .write(move |sql| {
-            crate::decline_join_request(&sql, now, waits, state, &request)
+            steps
+                .decline_join_request(&sql, &request)
                 .map_err(|error| DbError::SyncStream(Box::new(error)))
         })
         .await

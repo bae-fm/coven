@@ -70,7 +70,7 @@ impl SequenceSync {
             request,
             progress: OperationProgress::Running(OperationStep::Preparing),
         };
-        let child = crate::admin_steps::journaled(&work, operation_kind::INVITE)?;
+        let child = work.journaled(operation_kind::INVITE)?;
         Ok(Child::Journaled(self.database.start_operation_advancing(child, parent).await?))
     }
 

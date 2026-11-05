@@ -341,12 +341,12 @@ async fn sequence_authored_circle_permission_matches_lean() {
 
 /// Journal an admin change in a write of the device's own, as the app does.
 async fn journal(device: &Device, change: StoreChange) -> coven_database::OperationId {
-    let (id, state, held) =
-        (device.sync.device, device.sync.state.clone(), device.identity.clone());
+    let steps = device.sync.operation_steps();
     device
         .database()
         .write(move |sql| {
-            crate::administer(&sql, id, &held, state, change)
+            steps
+                .administer(&sql, change)
                 .map_err(|error| coven_database::DbError::SyncStream(Box::new(error)))
         })
         .await

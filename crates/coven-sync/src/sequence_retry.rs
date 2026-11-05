@@ -1,11 +1,9 @@
 //! Operation waits use their own prerequisites and persisted retry deadlines.
 use crate::{
-    sequence_sync::SequenceSync, PendingReason, PendingRecord, PendingSubject, Retry, RetryWaits,
-    SequenceState, SyncError,
+    sequence_sync::SequenceSync, PendingReason, PendingRecord, PendingSubject, Retry, SyncError,
 };
 use coven_crypto::StoreKeyring;
 use coven_database::{Journal, OperationId, OperationRecord, RetrySubject};
-use std::sync::Arc;
 
 /// An operation's failed attempt, and who receives its error.
 pub(crate) enum OperationFailure<'a> {
@@ -17,24 +15,15 @@ pub(crate) enum OperationFailure<'a> {
 }
 
 /// Make an operation's retry or undo due now, from its recorded progress,
-/// as a step of a write (E6): its pending record and retry wait end in the
-/// write's transaction. It cannot resurrect an invalidated action, or one
-/// that waits for an update not installed yet, and it can't bypass a
-/// provider cooldown or the stuck-device rule. Once the write commits, the
-/// operation's wait ends in this session too, and a pass is asked for to
-/// run it.
-pub fn retry_pending_operation(
+/// in the write's transaction (E6): its pending record and retry wait end
+/// there. It cannot resurrect an invalidated action, or one that waits for
+/// an update not installed yet, and it can't bypass a provider cooldown or
+/// the stuck-device rule.
+pub(crate) fn make_retry_due(
     sql: &coven_database::SqlContext<'_, '_>,
-    waits: Arc<RetryWaits>,
-    state: Arc<SequenceState>,
     id: OperationId,
 ) -> Result<(), SyncError> {
-    sql.journal_step(|journal| clear_for_retry(journal, id))?;
-    sql.after_commit(move || {
-        waits.retried(id);
-        state.request_pass();
-    });
-    Ok(())
+    sql.journal_step(|journal| clear_for_retry(journal, id))
 }
 
 /// End the operation's pending record and retry wait for a retry, unless
@@ -73,7 +62,7 @@ impl SequenceSync {
     pub(crate) async fn retry_operation(&self, id: OperationId) -> Result<(), SyncError> {
         self.database
             .write(move |sql| {
-                sql.journal_step(|journal| clear_for_retry(journal, id))
+                make_retry_due(&sql, id)
                     .map_err(|error| coven_database::DbError::SyncStream(Box::new(error)))
             })
             .await?;

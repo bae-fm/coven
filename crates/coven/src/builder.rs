@@ -883,6 +883,15 @@ impl OpeningOwners {
         );
         let network =
             coven_sync::NetworkFollow::start(self.network, waits.clone(), database.clone());
+        let steps = Arc::new(coven_sync::OperationSteps::new(
+            self.device,
+            self.identity.clone(),
+            self.ids.clone(),
+            self.clock.clone(),
+            self.directory.clone(),
+            waits.clone(),
+            self.state.clone(),
+        ));
         let storage = crate::storage::StorageConnections::new(
             database.clone(),
             files.clone(),
@@ -910,6 +919,7 @@ impl OpeningOwners {
             database,
             self.custody,
             files,
+            steps,
             Arc::new(network),
             Arc::new(storage),
             self.directory,

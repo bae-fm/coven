@@ -156,6 +156,21 @@ impl SequenceSync {
     pub(crate) fn store(&self) -> StoreId {
         self.directory.id()
     }
+
+    /// The app's write steps over this owner's own fields, for tests that
+    /// run a step beside the pass.
+    #[cfg(test)]
+    pub(crate) fn operation_steps(&self) -> crate::OperationSteps {
+        crate::OperationSteps::new(
+            self.device,
+            self.member.clone(),
+            self.ids.clone(),
+            self.clock.clone(),
+            self.directory.clone(),
+            self.waits.clone(),
+            self.state.clone(),
+        )
+    }
     pub(crate) fn path(&self, slot: u64) -> Result<ObjectPath, SyncError> {
         Ok(ObjectPath::slot(
             self.store(),
@@ -655,6 +670,7 @@ pub(crate) mod sequence_join;
 mod sequence_keys;
 #[path = "sequence_member_keys.rs"]
 mod sequence_member_keys;
+pub(crate) use sequence_member_keys::registered;
 #[path = "sequence_operations.rs"]
 pub(crate) mod sequence_operations;
 pub use sequence_operations::registration_journaled;
@@ -666,8 +682,7 @@ pub(crate) mod sequence_reload;
 pub(crate) mod sequence_retention;
 #[path = "sequence_retry.rs"]
 mod sequence_retry;
-pub use sequence_retry::retry_pending_operation;
-pub(crate) use sequence_retry::OperationFailure;
+pub(crate) use sequence_retry::{make_retry_due, OperationFailure};
 #[path = "sequence_snapshots.rs"]
 mod sequence_snapshots;
 #[path = "slot_reading.rs"]

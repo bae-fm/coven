@@ -1,63 +1,14 @@
 //! Administrative and credential work for the open store (E6, E9-E12).
-//! Administrative changes are steps of an app's write, journaled with or
-//! without a connection, which a pass runs. The other calls need the
-//! connected sequence owner and without a connection report `NoStorage`;
-//! credential reads and disconnected credential changes use the store's own
-//! credential owner.
+//! These calls need the connected sequence owner and without a connection
+//! report `NoStorage`; credential reads and disconnected credential changes
+//! use the store's own credential owner. Administrative changes journaled by
+//! an app's write are `OperationSteps`.
 
 use super::{ConnectionState, StorageConnections};
 use crate::*;
 use coven_format::admin::StoreChange;
 
 impl StorageConnections {
-    /// Journal one administrative change as a step of an app's write: once
-    /// the write commits, a pass is asked for, which runs it (§11, E6).
-    pub(crate) fn administer(
-        &self,
-        sql: &coven_database::SqlContext<'_, '_>,
-        change: StoreChange,
-    ) -> Result<Option<OperationId>, SyncError> {
-        coven_sync::administer(sql, self.device, &self.held()?, self.state.clone(), change)
-    }
-
-    /// The member pair this installation holds, which an admin step checks
-    /// the applied binding against.
-    fn held(&self) -> Result<MemberIdentity, SyncError> {
-        Ok(self.identity.read()?.ok_or(StorageFailure::MemberKeysMissing)?)
-    }
-
-    /// Journal a device's removal as a step of an app's write, and say how
-    /// its member signs out of the provider, if anything is left to do
-    /// there, from the recorded location (§14.2).
-    pub(crate) fn remove_device(
-        &self,
-        sql: &coven_database::SqlContext<'_, '_>,
-        device: DeviceId,
-    ) -> Result<(Option<OperationId>, Option<ProviderSignOut>), SyncError> {
-        let location =
-            coven_storage::recorded_config(&self.directory)?.ok_or(SyncError::NoStorage)?;
-        let operation = self.administer(sql, StoreChange::RemoveDevice { device })?;
-        Ok((operation, location.provider().sign_out()))
-    }
-
-    /// Journal the replacement of another member's public pair as a step of
-    /// an app's write (§12.3, E9).
-    pub(crate) fn replace_member_keys_for(
-        &self,
-        sql: &coven_database::SqlContext<'_, '_>,
-        member: MemberId,
-        keys: MemberPublicKeys,
-    ) -> Result<Option<OperationId>, SyncError> {
-        coven_sync::replace_member_keys_for(
-            sql,
-            self.device,
-            &self.held()?,
-            self.state.clone(),
-            member,
-            keys,
-        )
-    }
-
     /// Publish this device's removal, for deleting the store from it, and
     /// return once its slot applies (§14.1). Applying it stops this device:
     /// that is the removal taking effect, not a failure.
@@ -71,22 +22,6 @@ impl StorageConnections {
             Err(SyncError::Removed) => Ok(()),
             result => result,
         }
-    }
-
-    /// Journal making a circle as a step of an app's write (§15.5, E12).
-    pub(crate) fn create_circle(
-        &self,
-        sql: &coven_database::SqlContext<'_, '_>,
-        name: String,
-    ) -> Result<(CircleId, OperationId), SyncError> {
-        coven_sync::create_circle(
-            sql,
-            self.device,
-            &self.held()?,
-            self.ids.as_ref(),
-            self.state.clone(),
-            name,
-        )
     }
 
     /// Snapshot an audience and claim its reset (§19.4).
@@ -115,80 +50,6 @@ impl StorageConnections {
             return Err(SyncError::NoStorage);
         };
         live.sync.clean_up_gone_devices_files().await
-    }
-
-    /// Make an invite as a step of an app's write, from the recorded
-    /// location: once the write commits, a pass is asked for, which checks
-    /// it again, grants its access and fixes its code (§13.2, E10). A store
-    /// with no recorded location fails with `NoStorage`.
-    pub(crate) fn create_invite(
-        &self,
-        sql: &coven_database::SqlContext<'_, '_>,
-        invite: coven_sync::NewInvite,
-    ) -> Result<(InviteId, MemberId, OperationId), SyncError> {
-        let location =
-            coven_storage::recorded_config(&self.directory)?.ok_or(SyncError::NoStorage)?;
-        coven_sync::create_invite(
-            sql,
-            self.device,
-            &self.held()?,
-            self.ids.as_ref(),
-            self.clock.now(),
-            &location,
-            self.state.clone(),
-            invite,
-        )
-    }
-
-    /// Approve a join request as a step of an app's write, returning the
-    /// operation that binds its pair: once the write commits, a pass is
-    /// asked for, which runs it (§13.2, E10).
-    pub(crate) fn approve_join_request(
-        &self,
-        sql: &coven_database::SqlContext<'_, '_>,
-        request: &JoinRequest,
-    ) -> Result<OperationId, SyncError> {
-        coven_sync::approve_join_request(
-            sql,
-            self.clock.now(),
-            self.waits.clone(),
-            self.state.clone(),
-            request,
-        )
-    }
-
-    /// Decline a join request as a step of an app's write: once the write
-    /// commits, a pass is asked for, which deletes the request and takes
-    /// back the invite's access (§13.2, E10).
-    pub(crate) fn decline_join_request(
-        &self,
-        sql: &coven_database::SqlContext<'_, '_>,
-        request: &JoinRequest,
-    ) -> Result<(), SyncError> {
-        coven_sync::decline_join_request(
-            sql,
-            self.clock.now(),
-            self.waits.clone(),
-            self.state.clone(),
-            request,
-        )
-    }
-
-    /// Cancel an invite as a step of an app's write: once the write
-    /// commits, a pass is asked for, which deletes a waiting request and
-    /// takes back the invite's access (§13.2, E10).
-    pub(crate) fn cancel_invite(
-        &self,
-        sql: &coven_database::SqlContext<'_, '_>,
-        invite: InviteId,
-    ) -> Result<(), SyncError> {
-        coven_sync::cancel_invite(
-            sql,
-            self.clock.now(),
-            self.waits.clone(),
-            self.state.clone(),
-            invite,
-        )
     }
 
     /// The restore code for the pair the applied history binds now (§13.1).

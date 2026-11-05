@@ -1,6 +1,5 @@
 //! The shared store sequence, durable operations, snapshots and file transfers.
 
-mod admin_steps;
 mod chunk_reader;
 mod effects;
 mod error;
@@ -12,6 +11,8 @@ mod joining_identity;
 mod last_pass;
 mod object_input;
 mod operation_outcome;
+mod operation_steps;
+pub use operation_steps::OperationSteps;
 mod operation_types;
 mod pending;
 mod pending_encoding;
@@ -54,7 +55,6 @@ pub use retry_waits::{
 };
 pub use sync_often::SyncOftenGuard;
 
-pub use admin_steps::{administer, create_circle, replace_member_keys_for};
 pub use codes::{
     decode_code_info, read_invite_code, read_restore_code, CodeError, CodeInfo, CodeKind,
     CodeMetadata, InviteInfo,
@@ -80,11 +80,9 @@ pub use saved_code::{
 };
 pub use sequence_state::{ProviderCheckPermit, SequenceState, SequenceStatus};
 pub use sequence_sync::sequence_invites::expiry::InviteExpiry;
-pub use sequence_sync::sequence_invites::{
-    approve_join_request, cancel_invite, create_invite, decline_join_request, NewInvite,
-};
+pub use sequence_sync::sequence_invites::NewInvite;
 pub use sequence_sync::sequence_join::{JoinOutcome, NextCheck};
-pub use sequence_sync::{registration_journaled, retry_pending_operation, SequenceSync};
+pub use sequence_sync::{registration_journaled, SequenceSync};
 pub use sign_in::{DeviceCredentials, SessionSignIn};
 pub use sync_status::{
     record_location, record_opened, sync_status, SyncCause, SyncState, SyncStatus, SyncWait,

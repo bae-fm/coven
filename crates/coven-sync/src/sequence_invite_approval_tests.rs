@@ -195,13 +195,12 @@ async fn a_demoted_approvers_approval_is_refused_by_its_pass() {
 /// Approve the request as the app's write step does, without a pass, and
 /// return the operation that binds its pair.
 async fn approve(device: &Device, request: &JoinRequest) -> coven_database::OperationId {
-    let state = device.sync.state.clone();
-    let (now, waits, request) =
-        (device.sync.clock.now(), device.sync.waits.clone(), request.clone());
+    let (steps, request) = (device.sync.operation_steps(), request.clone());
     device
         .database()
         .write(move |sql| {
-            crate::approve_join_request(&sql, now, waits, state, &request)
+            steps
+                .approve_join_request(&sql, &request)
                 .map_err(|error| coven_database::DbError::SyncStream(Box::new(error)))
         })
         .await

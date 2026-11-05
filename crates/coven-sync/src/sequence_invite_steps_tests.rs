@@ -121,35 +121,31 @@ impl Case {
         &self,
         request: JoinRequest,
     ) -> impl FnOnce(&SqlContext<'_, '_>) -> Result<OperationId, SyncError> + Send + 'static {
-        let now = self.group.clock.now();
-        let (waits, state) = (self.ana.sync.waits.clone(), self.ana.sync.state.clone());
-        move |sql| crate::approve_join_request(sql, now, waits, state, &request)
+        let steps = self.ana.sync.operation_steps();
+        move |sql| steps.approve_join_request(sql, &request)
     }
 
     fn decline_step(
         &self,
         request: JoinRequest,
     ) -> impl FnOnce(&SqlContext<'_, '_>) -> Result<(), SyncError> + Send + 'static {
-        let (now, waits, state) =
-            (self.group.clock.now(), self.ana.sync.waits.clone(), self.ana.sync.state.clone());
-        move |sql| crate::decline_join_request(sql, now, waits, state, &request)
+        let steps = self.ana.sync.operation_steps();
+        move |sql| steps.decline_join_request(sql, &request)
     }
 
     fn cancel_step(
         &self,
     ) -> impl FnOnce(&SqlContext<'_, '_>) -> Result<(), SyncError> + Send + 'static {
-        let (now, waits, state) =
-            (self.group.clock.now(), self.ana.sync.waits.clone(), self.ana.sync.state.clone());
+        let steps = self.ana.sync.operation_steps();
         let invite = self.invite.id;
-        move |sql| crate::cancel_invite(sql, now, waits, state, invite)
+        move |sql| steps.cancel_invite(sql, invite)
     }
 
     fn retry_step(
         &self,
     ) -> impl FnOnce(&SqlContext<'_, '_>) -> Result<(), SyncError> + Send + 'static {
-        let (waits, state, id) =
-            (self.ana.sync.waits.clone(), self.ana.sync.state.clone(), self.operation);
-        move |sql| crate::retry_pending_operation(sql, waits, state, id)
+        let (steps, id) = (self.ana.sync.operation_steps(), self.operation);
+        move |sql| steps.retry_pending_operation(sql, id)
     }
 
     fn ack_step(
@@ -271,13 +267,9 @@ impl Case {
                 }
                 self.renames += 1;
                 let name = format!("Household {}", self.renames);
-                let (device, held, state) =
-                    (self.ana.sync.device, self.ana.identity.clone(), self.ana.sync.state.clone());
+                let steps = self.ana.sync.operation_steps();
                 let change = StoreChange::RenameStore { name };
-                match self
-                    .write(move |sql| crate::administer(sql, device, &held, state, change))
-                    .await
-                {
+                match self.write(move |sql| steps.administer(sql, change)).await {
                     Ok(op) => {
                         self.op = Some(op.expect("a new name journals a rename"));
                         "ok"

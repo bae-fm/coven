@@ -10,8 +10,9 @@ use crate::{
     SyncError,
 };
 use coven_crypto::{MemberIdentity, MemberKeys, MemberPublicKeys, StoreKeyring};
-use coven_database::{NewOperation, OperationId};
+use coven_database::{NewOperation, OperationId, StoreState};
 use coven_format::admin::StoreChange;
+use coven_foundation::id_source::{DeviceId, MemberId};
 use coven_storage::StorageFailure;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -43,6 +44,29 @@ fn held_current(session: &Session, identity: &MemberIdentity) -> Result<(), Sync
         }
         Some(_) => Err(SyncError::MemberKeysReplaced { member: identity.member() }),
     }
+}
+
+/// This device's member, while the applied state has both active and binds
+/// the member to the pair this installation holds, or its kept candidate:
+/// only then does it author admin entries (§10, §12.3). A replaced binding
+/// fails with `MemberKeysReplaced`, as the pass that applied it reported.
+pub(crate) fn registered(
+    applied: &StoreState,
+    device: DeviceId,
+    held: &MemberIdentity,
+) -> Result<MemberId, SyncError> {
+    let member = applied.devices.get(&device).filter(|registered| registered.active()).and_then(
+        |registered| applied.active_member(&registered.member).map(|m| (registered.member, m)),
+    );
+    let Some((id, member)) = member else {
+        return Err(SyncError::Rejected(OperationRejection::NotAllowed));
+    };
+    if member.keys != held.keys().public_keys()
+        && held.candidate().map(|keys| keys.public_keys()) != Some(member.keys)
+    {
+        return Err(SyncError::MemberKeysReplaced { member: id });
+    }
+    Ok(id)
 }
 
 impl SequenceSync {
@@ -266,12 +290,9 @@ impl SequenceSync {
         member: coven_foundation::id_source::MemberId,
         keys: MemberPublicKeys,
     ) -> Result<(), SyncError> {
-        let (device, state) = (self.device, self.state.clone());
-        let held = self.member.read()?.ok_or(StorageFailure::MemberKeysMissing)?;
+        let steps = self.operation_steps();
         let outcome = self
-            .journal_and_pass(move |sql| {
-                crate::replace_member_keys_for(sql, device, &held, state, member, keys)
-            })
+            .journal_and_pass(move |sql| steps.replace_member_keys_for(sql, member, keys))
             .await?;
         let Some(outcome) = outcome else {
             return Ok(());

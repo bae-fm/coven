@@ -1,6 +1,7 @@
 //! The app's decisions about an invite as steps of its write (§4, §13.2):
 //! each reads the invite in the write's transaction and decides it there,
-//! with or without storage; a pass does the storage work after.
+//! with or without storage; a pass does the storage work after. The store's
+//! `OperationSteps` run them and wake that pass.
 
 use super::*;
 
@@ -31,19 +32,13 @@ pub struct NewInvite {
 /// with `Rejected(TargetGone)`, and of this device's own member, with
 /// `Rejected(NotAllowed)`. A name that isn't one fails with `Format`, and
 /// access that doesn't fit `location` with its storage failure.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "a step takes the device's identity, its id source, clock and \
-              location, and the sequence state its commit wakes, beside the invite"
-)]
-pub fn create_invite(
+pub(crate) fn make_invite(
     sql: &SqlContext<'_, '_>,
     device: DeviceId,
     held: &MemberIdentity,
     ids: &dyn IdSource,
     now: SystemTime,
     location: &coven_storage::StorageConfig,
-    state: Arc<SequenceState>,
     invite: NewInvite,
 ) -> Result<(InviteId, MemberId, OperationId), SyncError> {
     let NewInvite { target, access, delivery } = invite;
@@ -69,7 +64,7 @@ pub fn create_invite(
     let id = InviteId(ids.new_id());
     let made = sql.journal_step(|journal| {
         let applied = journal.store_state()?;
-        let me = crate::admin_steps::registered(&applied, device, held)?;
+        let me = crate::sequence_sync::registered(&applied, device, held)?;
         if !applied.active_admin(&me) {
             return Err(SyncError::Rejected(OperationRejection::NotAllowed));
         }
@@ -123,7 +118,6 @@ pub fn create_invite(
         })?;
         Ok((id, member, operation))
     })?;
-    sql.after_commit(move || state.request_pass());
     Ok(made)
 }
 
@@ -172,14 +166,12 @@ fn invite_grant(access: InviteAccess, provider: CloudProvider) -> Result<InviteG
 /// binding's outcome. A request the invite no longer shows, an in-person
 /// invite's, whose approval began on its own, and an invite whose lifetime
 /// ended by `now` fail the step with `InvitationChanged`.
-pub fn approve_join_request(
+pub(crate) fn approve_request(
     sql: &SqlContext<'_, '_>,
     now: SystemTime,
-    waits: Arc<RetryWaits>,
-    state: Arc<SequenceState>,
     request: &JoinRequest,
-) -> Result<OperationId, SyncError> {
-    let (invite, binding) = sql.journal_step(|journal| {
+) -> Result<(OperationId, OperationId), SyncError> {
+    sql.journal_step(|journal| {
         let (record, mut work) = invite_record(journal, request.invite)?;
         if work.expired(now) {
             return Err(SyncError::InvitationChanged);
@@ -192,70 +184,24 @@ pub fn approve_join_request(
             return Err(SyncError::InvitationChanged);
         }
         let change = work.binding_change(&stored)?;
-        let binding = crate::admin_steps::start(
-            journal,
-            SequenceOperation::change(change),
-            operation_kind::INVITE,
-        )?;
+        let binding = SequenceOperation::change(change).start(journal, operation_kind::INVITE)?;
         work.state = InviteState::Approving { code, request: stored, binding };
         journal.advance_operation(&work.update(&record)?)?;
         Ok((record.id, binding))
-    })?;
-    sql.after_commit(move || {
-        waits.operation_advanced(invite);
-        state.request_pass();
-    });
-    Ok(binding)
-}
-
-/// Decline an invite's checked request, as a step of a write (§13.2): the
-/// write ends the invite, which takes it out of `coven_invites`, with or
-/// without storage. Once the write commits, a pass is asked for, which
-/// deletes the request, so the requester's join ends as declined, and takes
-/// back the access the invite granted. A request the invite no longer
-/// shows, an invite whose approval has begun, and one whose lifetime ended
-/// by `now` fail the step with `InvitationChanged`.
-pub fn decline_join_request(
-    sql: &SqlContext<'_, '_>,
-    now: SystemTime,
-    waits: Arc<RetryWaits>,
-    state: Arc<SequenceState>,
-    request: &JoinRequest,
-) -> Result<(), SyncError> {
-    end_invite(sql, now, waits, state, request.invite, Some(request))
-}
-
-/// Cancel an invite before anyone joins with it, as a step of a write
-/// (§13.2): the write ends the invite, which takes it out of
-/// `coven_invites`, with or without storage. Once the write commits, a pass
-/// is asked for, which deletes a waiting request, so the requester's join
-/// ends as declined, and takes back the access the invite granted. An
-/// invite whose approval has begun, including an in-person invite's own,
-/// and one whose lifetime ended by `now`, fail the step with
-/// `InvitationChanged`.
-pub fn cancel_invite(
-    sql: &SqlContext<'_, '_>,
-    now: SystemTime,
-    waits: Arc<RetryWaits>,
-    state: Arc<SequenceState>,
-    invite: InviteId,
-) -> Result<(), SyncError> {
-    end_invite(sql, now, waits, state, invite, None)
+    })
 }
 
 /// End the invite in the write, for a decline of `request` or a cancel.
 /// Reading the invite and ending it share the write's transaction, so no
 /// expiry comes between. An invite whose lifetime ended is left to its
 /// expiry, a write of its own that the handle makes at that time.
-fn end_invite(
+pub(crate) fn end_invite(
     sql: &SqlContext<'_, '_>,
     now: SystemTime,
-    waits: Arc<RetryWaits>,
-    state: Arc<SequenceState>,
     invite: InviteId,
     request: Option<&JoinRequest>,
-) -> Result<(), SyncError> {
-    let ended = sql.journal_step(|journal| {
+) -> Result<OperationId, SyncError> {
+    sql.journal_step(|journal| {
         let (record, mut work) = invite_record(journal, invite)?;
         if work.expired(now) {
             return Err(SyncError::InvitationChanged);
@@ -278,12 +224,7 @@ fn end_invite(
         work.end();
         journal.advance_operation(&work.update(&record)?)?;
         Ok(record.id)
-    })?;
-    sql.after_commit(move || {
-        waits.operation_advanced(ended);
-        state.request_pass();
-    });
-    Ok(())
+    })
 }
 
 /// The invite's journal row and its state, as the write sees them; a

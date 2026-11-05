@@ -21,16 +21,18 @@ use coven_format::admin::StoreChange;
 /// caught-up state refuses is undone and ends `Rejected` (§11.2).
 pub struct CovenWrite<'write> {
     sql: SqlContext<'write, 'write>,
-    /// The store's operation owner, whose steps run in this write.
-    storage: &'write crate::storage::StorageConnections,
+    /// The store's operation steps, which run in this write.
+    steps: &'write coven_sync::OperationSteps,
+    files: &'write coven_sync::Files,
 }
 
 impl<'write> CovenWrite<'write> {
     pub(crate) fn new(
         sql: SqlContext<'write, 'write>,
-        storage: &'write crate::storage::StorageConnections,
+        steps: &'write coven_sync::OperationSteps,
+        files: &'write coven_sync::Files,
     ) -> Self {
-        Self { sql, storage }
+        Self { sql, steps, files }
     }
 
     /// Puts files `CovenHandle::stage_files` staged into this write, and
@@ -113,7 +115,7 @@ impl<'write> CovenWrite<'write> {
     /// and stops between confirmed parts; the setting persists. Bound
     /// uploads run on, since writes wait for them (§17.4).
     pub fn set_uploads_paused(&self, paused: bool) -> Result<(), DbError> {
-        self.storage.set_uploads_paused(&self.sql, paused)
+        self.files.set_uploads_paused(&self.sql, paused)
     }
 
     /// Moves files only on unmetered networks, or on any (§17.9). While the
@@ -123,7 +125,7 @@ impl<'write> CovenWrite<'write> {
     /// this device only. A retry asked after the write returns is never
     /// answered from the setting it replaced.
     pub fn set_unmetered_only(&self, unmetered_only: bool) -> Result<(), DbError> {
-        self.storage.set_unmetered_only(&self.sql, unmetered_only)
+        self.files.set_unmetered_only(&self.sql, unmetered_only)
     }
 
     /// Dismisses lost values the app has dealt with (§8.4): the write's
@@ -171,12 +173,12 @@ impl<'write> CovenWrite<'write> {
     /// can't bypass a provider cooldown. Once the write commits, a pass runs
     /// the operation as soon as storage is connected.
     pub fn retry_pending_operation(&self, operation: OperationId) -> Result<(), OperationError> {
-        self.storage.retry_pending_operation(&self.sql, operation)
+        self.steps.retry_pending_operation(&self.sql, operation)
     }
 
     /// Renames the store, as an admin (§10, E9).
     pub fn rename_store(&self, name: &str) -> Result<Option<OperationId>, SyncError> {
-        self.storage.administer(&self.sql, StoreChange::RenameStore { name: name.into() })
+        self.steps.administer(&self.sql, StoreChange::RenameStore { name: name.into() })
     }
 
     /// Changes a member's role, as an admin (§10, E9).
@@ -185,7 +187,7 @@ impl<'write> CovenWrite<'write> {
         member: &MemberId,
         role: MemberRole,
     ) -> Result<Option<OperationId>, SyncError> {
-        self.storage.administer(&self.sql, StoreChange::ChangeRole { member: *member, role })
+        self.steps.administer(&self.sql, StoreChange::ChangeRole { member: *member, role })
     }
 
     /// Removes a member and all their devices, as an admin (§14.1, E9).
@@ -193,7 +195,7 @@ impl<'write> CovenWrite<'write> {
     /// themselves leaves: once the removal applies, this device deletes
     /// their saved restore code and S3 key, and stops.
     pub fn remove_member(&self, member: &MemberId) -> Result<Option<OperationId>, SyncError> {
-        self.storage.administer(&self.sql, StoreChange::RemoveMember { member: *member })
+        self.steps.administer(&self.sql, StoreChange::RemoveMember { member: *member })
     }
 
     /// Removes a device: their own, or any as an admin (§14.1, E9). It also
@@ -205,7 +207,7 @@ impl<'write> CovenWrite<'write> {
         &self,
         device: DeviceId,
     ) -> Result<(Option<OperationId>, Option<ProviderSignOut>), SyncError> {
-        self.storage.remove_device(&self.sql, device)
+        self.steps.remove_device(&self.sql, device)
     }
 
     /// Publishes a prepared public pair for another active member, as an
@@ -217,7 +219,7 @@ impl<'write> CovenWrite<'write> {
         member: &MemberId,
         keys: MemberPublicKeys,
     ) -> Result<Option<OperationId>, SyncError> {
-        self.storage.replace_member_keys_for(&self.sql, *member, keys)
+        self.steps.replace_member_keys_for(&self.sql, *member, keys)
     }
 
     /// Makes a circle with this member as its first member, and returns its
@@ -227,7 +229,7 @@ impl<'write> CovenWrite<'write> {
     /// once its slot applies. A name that isn't a valid name fails with
     /// `Format`.
     pub fn create_circle(&self, name: &str) -> Result<(CircleId, OperationId), SyncError> {
-        self.storage.create_circle(&self.sql, name.into())
+        self.steps.create_circle(&self.sql, name.into())
     }
 
     /// Renames a circle this member is in, without changing its key,
@@ -237,13 +239,13 @@ impl<'write> CovenWrite<'write> {
         circle: CircleId,
         name: &str,
     ) -> Result<Option<OperationId>, SyncError> {
-        self.storage.administer(&self.sql, StoreChange::RenameCircle { circle, name: name.into() })
+        self.steps.administer(&self.sql, StoreChange::RenameCircle { circle, name: name.into() })
     }
 
     /// Deletes a circle this member is in: from its slot the deleted-circle
     /// rule hides the circle's rows (§15.9, E12).
     pub fn delete_circle(&self, circle: CircleId) -> Result<Option<OperationId>, SyncError> {
-        self.storage.administer(&self.sql, StoreChange::DeleteCircle { circle })
+        self.steps.administer(&self.sql, StoreChange::DeleteCircle { circle })
     }
 
     /// Adds a store member to a circle this member is in, sealing every key
@@ -253,7 +255,7 @@ impl<'write> CovenWrite<'write> {
         circle: CircleId,
         member: &MemberId,
     ) -> Result<Option<OperationId>, SyncError> {
-        self.storage.administer(&self.sql, StoreChange::AddCircleMember { circle, member: *member })
+        self.steps.administer(&self.sql, StoreChange::AddCircleMember { circle, member: *member })
     }
 
     /// Removes a member from a circle this member is in; the remaining
@@ -263,7 +265,7 @@ impl<'write> CovenWrite<'write> {
         circle: CircleId,
         member: &MemberId,
     ) -> Result<Option<OperationId>, SyncError> {
-        self.storage
+        self.steps
             .administer(&self.sql, StoreChange::RemoveCircleMember { circle, member: *member })
     }
 
@@ -288,7 +290,7 @@ impl<'write> CovenWrite<'write> {
         access: InviteAccess,
         delivery: InviteDelivery,
     ) -> Result<(InviteId, MemberId, OperationId), SyncError> {
-        self.storage.create_invite(&self.sql, coven_sync::NewInvite { target, access, delivery })
+        self.steps.create_invite(&self.sql, coven_sync::NewInvite { target, access, delivery })
     }
 
     /// Approves exactly this checked request of a sent invite (§13.2, E10),
@@ -306,7 +308,7 @@ impl<'write> CovenWrite<'write> {
     /// call, and calling it fails with `InvitationChanged`, as do a request
     /// the invite no longer shows and an invite whose lifetime has ended.
     pub fn approve_join_request(&self, request: &JoinRequest) -> Result<OperationId, SyncError> {
-        self.storage.approve_join_request(&self.sql, request)
+        self.steps.approve_join_request(&self.sql, request)
     }
 
     /// Declines an open invite's checked request (§13.2, E10). The write
@@ -319,7 +321,7 @@ impl<'write> CovenWrite<'write> {
     /// `InvitationChanged`; an ended one leaves the list when coven writes
     /// its expiry.
     pub fn decline_join_request(&self, request: &JoinRequest) -> Result<(), SyncError> {
-        self.storage.decline_join_request(&self.sql, request)
+        self.steps.decline_join_request(&self.sql, request)
     }
 
     /// Cancels an invite before anyone joins with it (§13.2, E10). The
@@ -331,7 +333,7 @@ impl<'write> CovenWrite<'write> {
     /// invite's own, and one whose lifetime has ended fail with
     /// `InvitationChanged`.
     pub fn cancel_invite(&self, invite: &InviteId) -> Result<(), SyncError> {
-        self.storage.cancel_invite(&self.sql, *invite)
+        self.steps.cancel_invite(&self.sql, *invite)
     }
 
     /// Acknowledges a finished operation's outcome, in this write, so it

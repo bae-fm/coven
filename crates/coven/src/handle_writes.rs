@@ -10,8 +10,8 @@ impl CovenHandle {
         F: FnOnce(CovenWrite<'_>) -> CovenResult<R> + Send + 'static,
         R: Send + 'static,
     {
-        let storage = self.storage.clone();
-        self.database.write_as(move |sql| write(CovenWrite::new(sql, &storage))).await
+        let (steps, files) = (self.steps.clone(), self.files.clone());
+        self.database.write_as(move |sql| write(CovenWrite::new(sql, &steps, &files))).await
     }
 
     /// Runs one bulk write: SQL that changes device-local tables alone, run
