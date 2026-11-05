@@ -41,11 +41,7 @@ impl WriteSchema {
         }
         let result = Self {
             schema,
-            versions: db.query_row(
-                "SELECT minimum FROM _coven_snapshot_schema WHERE singleton=1",
-                [],
-                |r| r.get(0),
-            )?..=db.schema_version()?,
+            versions: crate::raise_capture::breaking_version(db)?..=db.schema_version()?,
             declarations,
             rules,
             conversions: BTreeMap::new(),

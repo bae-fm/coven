@@ -11,7 +11,7 @@ variable {S : Sig} (R : Rules S)
 /-- Eligibility for coverage comes from an ordinary announcement or an applied
 boundary, never a preparation announcement by itself. -/
 def Usable (seq : Nat → Slot S) (A : S.Aud) (head c : Nat) (p : S.Path) : Prop :=
-  (∃ a d, 1 ≤ a ∧ a ≤ head ∧ seq a = .snapshot d A c p ∧ AppliedTo R seq A a) ∨
+  (∃ a d v, 1 ≤ a ∧ a ≤ head ∧ seq a = .snapshot d A c v p ∧ AppliedTo R seq A a) ∨
   (∃ r d kind, 1 ≤ r ∧ r ≤ head ∧ seq r = .boundary d A kind c p ∧ AppliedTo R seq A r)
 
 theorem activated_is_usable (seq : Nat → Slot S) (A : S.Aud) (head r : Nat)
@@ -22,19 +22,19 @@ theorem activated_is_usable (seq : Nat → Slot S) (A : S.Aud) (head r : Nat)
 /-- A successful announcement step has its prepared body already in storage. -/
 theorem announcement_uploaded {seq : Nat → Slot S} {st st' : Store S}
     (step : StoreStep R seq st st') (advances : st.head < st'.head)
-    (A : S.Aud) (d : S.Dev) (kind : Boundary) (c : Nat) (p : S.Path)
-    (slot : seq (st.head + 1) = .prepare d A kind c p)
+    (A : S.Aud) (d : S.Dev) (kind : Boundary) (c v : Nat) (p : S.Path)
+    (slot : seq (st.head + 1) = .prepare d A kind c v p)
     (applied : AppliedTo R seq A (st.head + 1)) :
     ∃ L P, st.body p = some (L, P, preparedRows R kind p (rowsAt R seq A c)) := by
   cases step with
-  | claim prepared _ => exact prepared A d kind c p slot applied
+  | claim prepared _ => exact prepared A d kind c v p slot applied
   | _ => simp at advances
 
 theorem ordinary_covers_boundary (seq : Nat → Slot S) (A : S.Aud)
-    {r a : Nat} {d e : S.Dev} {kind : Boundary} {c f : Nat} {p q : S.Path}
+    {r a : Nat} {d e : S.Dev} {kind : Boundary} {c f w : Nat} {p q : S.Path}
     (positive : 1 ≤ r) (before : r < a)
     (boundary : seq r = .boundary d A kind c p) (applied : AppliedTo R seq A r)
-    (snapshot : seq a = .snapshot e A f q) (announced : AppliedTo R seq A a) : r ≤ f := by
+    (snapshot : seq a = .snapshot e A f w q) (announced : AppliedTo R seq A a) : r ≤ f := by
   have last := boundary_lastBoundary R seq A positive boundary applied
   have mono := lastBoundary_mono R seq A r (a - 1) (by omega)
   have valid := announced.2
@@ -76,20 +76,31 @@ theorem schema_reset_at_coverage (seq : Nat → Slot S) (A : S.Aud) (c : Nat) :
 /-- A valid ordinary snapshot's schema and reset are those at announcement,
 even when the capture and announcement have different sequence positions. -/
 theorem ordinary_matches_schema_reset (seq : Nat → Slot S) (A : S.Aud)
-    (a c : Nat) (d : S.Dev) (p : S.Path) (slot : seq a = .snapshot d A c p)
+    (a c v : Nat) (d : S.Dev) (p : S.Path) (slot : seq a = .snapshot d A c v p)
     (applied : AppliedTo R seq A a) :
     (audAt R seq A (a - 1)).version = (audAt R seq A c).version ∧
     (audAt R seq A (a - 1)).lastReset = (audAt R seq A c).lastReset := by
   have valid := applied.2
   rw [slot] at valid
   simp only [audValid, Bool.and_eq_true, decide_eq_true_eq] at valid
-  exact schema_reset_at_coverage R seq A c (a - 1) (by omega) valid.2
+  exact schema_reset_at_coverage R seq A c (a - 1) (by omega) valid.1.2
+
+/-- A counted ordinary snapshot's body is at a version its audience had
+reached at its coverage. -/
+theorem ordinary_version_reached (seq : Nat → Slot S) (A : S.Aud)
+    (a c v : Nat) (d : S.Dev) (p : S.Path) (slot : seq a = .snapshot d A c v p)
+    (applied : AppliedTo R seq A a) : v ≤ (audAt R seq A c).version := by
+  have same := (ordinary_matches_schema_reset R seq A a c v d p slot applied).1
+  have valid := applied.2
+  rw [slot] at valid
+  simp only [audValid, Bool.and_eq_true, decide_eq_true_eq] at valid
+  omega
 
 /-- Provenance of every preparation in the audience ledger. -/
 theorem preparation_announced (seq : Nat → Slot S) (A : S.Aud)
     (initial : (R.aud0 A).preparations = []) (kind : Boundary) (c : Nat) (p : S.Path) :
     ∀ k, (kind, c, p) ∈ (audAt R seq A k).preparations →
-      ∃ a d, 1 ≤ a ∧ a ≤ k ∧ seq a = .prepare d A kind c p ∧ AppliedTo R seq A a
+      ∃ a d v, 1 ≤ a ∧ a ≤ k ∧ seq a = .prepare d A kind c v p ∧ AppliedTo R seq A a
   | 0, h => by simp [audAt, initial] at h
   | k + 1, h => by
     rw [audAt_succ] at h
@@ -99,30 +110,30 @@ theorem preparation_announced (seq : Nat → Slot S) (A : S.Aud)
       split at h
       · rename_i valid
         cases slot : seq (k + 1) with
-        | prepare d a v f q =>
+        | prepare d a v f w q =>
           rw [slot] at h touches
           have same : a = A := by simpa [CovenSequence.touches] using touches
           subst a
           simp only [audEffect, List.mem_cons, Prod.mk.injEq] at h
           rcases h with ⟨rfl, rfl, rfl⟩ | old
-          · exact ⟨k + 1, d, by omega, Nat.le_refl _, slot,
+          · exact ⟨k + 1, d, w, by omega, Nat.le_refl _, slot,
               by simpa [AppliedTo, slot, CovenSequence.touches] using valid⟩
-          · obtain ⟨i, d, hi, le, hs, ha⟩ := preparation_announced seq A initial kind c p k old
-            exact ⟨i, d, hi, by omega, hs, ha⟩
+          · obtain ⟨i, d, w, hi, le, hs, ha⟩ := preparation_announced seq A initial kind c p k old
+            exact ⟨i, d, w, hi, by omega, hs, ha⟩
         | writes d g parts =>
           rw [slot] at h
           simp only [audEffect] at h
           split at h <;>
-            obtain ⟨i, d, hi, le, hs, ha⟩ := preparation_announced seq A initial kind c p k h <;>
-            exact ⟨i, d, hi, by omega, hs, ha⟩
+            obtain ⟨i, d, w, hi, le, hs, ha⟩ := preparation_announced seq A initial kind c p k h <;>
+            exact ⟨i, d, w, hi, by omega, hs, ha⟩
         | _ =>
           rw [slot] at h
-          obtain ⟨i, d, hi, le, hs, ha⟩ := preparation_announced seq A initial kind c p k h
-          exact ⟨i, d, hi, by omega, hs, ha⟩
-      · obtain ⟨i, d, hi, le, hs, ha⟩ := preparation_announced seq A initial kind c p k h
-        exact ⟨i, d, hi, by omega, hs, ha⟩
-    · obtain ⟨i, d, hi, le, hs, ha⟩ := preparation_announced seq A initial kind c p k h
-      exact ⟨i, d, hi, by omega, hs, ha⟩
+          obtain ⟨i, d, w, hi, le, hs, ha⟩ := preparation_announced seq A initial kind c p k h
+          exact ⟨i, d, w, hi, by omega, hs, ha⟩
+      · obtain ⟨i, d, w, hi, le, hs, ha⟩ := preparation_announced seq A initial kind c p k h
+        exact ⟨i, d, w, hi, by omega, hs, ha⟩
+    · obtain ⟨i, d, w, hi, le, hs, ha⟩ := preparation_announced seq A initial kind c p k h
+      exact ⟨i, d, w, hi, by omega, hs, ha⟩
 
 /-- An applied raise or reset has an earlier matching announcement. Upload
 precedes that announcement by StoreStep.claim's preparation-body premise. -/
@@ -130,22 +141,23 @@ theorem activation_requires_preparation (seq : Nat → Slot S) (A : S.Aud)
     (initial : (R.aud0 A).preparations = []) {r : Nat} {d : S.Dev}
     {kind : Boundary} {c : Nat} {p : S.Path}
     (slot : seq r = .boundary d A kind c p) (applied : AppliedTo R seq A r) :
-    ∃ a e, 1 ≤ a ∧ a < r ∧ seq a = .prepare e A kind c p ∧ AppliedTo R seq A a := by
+    ∃ a e v, 1 ≤ a ∧ a < r ∧ seq a = .prepare e A kind c v p ∧ AppliedTo R seq A a := by
   have valid := applied.2
   rw [slot] at valid
   simp only [audValid, Bool.and_eq_true, decide_eq_true_eq] at valid
-  obtain ⟨a, e, positive, le, hs, ha⟩ := preparation_announced R seq A initial kind c p (r - 1) valid.1.2
-  exact ⟨a, e, positive, by omega, hs, ha⟩
+  obtain ⟨a, e, v, positive, le, hs, ha⟩ :=
+    preparation_announced R seq A initial kind c p (r - 1) valid.1.2
+  exact ⟨a, e, v, positive, by omega, hs, ha⟩
 
 /-- Announcement alone does not change rows, schema, reset or usable ordinary
 snapshots. Its coverage still constrains later preparations and entries. -/
 theorem preparation_no_effect (L : Ledger S) (P : AudLedger S) (k : Nat) (A : S.Aud)
-    (d : S.Dev) (kind : Boundary) (c : Nat) (p : S.Path) (rows : S.Rows) :
-    (audStep R L P k A (.prepare d A kind c p)).snapshots = P.snapshots ∧
-    (audStep R L P k A (.prepare d A kind c p)).version = P.version ∧
-    (audStep R L P k A (.prepare d A kind c p)).lastReset = P.lastReset ∧
-    rowsStep R A L P rows k (.prepare d A kind c p) = rows := by
-  by_cases h : audValid R L P k A (.prepare d A kind c p) = true
+    (d : S.Dev) (kind : Boundary) (c v : Nat) (p : S.Path) (rows : S.Rows) :
+    (audStep R L P k A (.prepare d A kind c v p)).snapshots = P.snapshots ∧
+    (audStep R L P k A (.prepare d A kind c v p)).version = P.version ∧
+    (audStep R L P k A (.prepare d A kind c v p)).lastReset = P.lastReset ∧
+    rowsStep R A L P rows k (.prepare d A kind c v p) = rows := by
+  by_cases h : audValid R L P k A (.prepare d A kind c v p) = true
   all_goals simp [audStep, rowsStep, touches, h, audEffect, refuseAud, applyWrite]
 
 /-- A reset replaces rows with its chosen body and replays none of the suffix
@@ -160,7 +172,7 @@ theorem reset_replaces (seq : Nat → Slot S) (A : S.Aud) (k : Nat) (d : S.Dev) 
 
 open ReaderExamples in
 def abandoned : Nat → Slot sig
-  | 1 => .prepare () () .reset 0 (7 : Nat)
+  | 1 => .prepare () () .reset 0 0 (7 : Nat)
   | _ => .writes () 0 (fun _ => none)
 
 /-- A separately announced reset preparation that never takes effect is not
@@ -190,9 +202,56 @@ theorem abandoned_supplies_no_coverage :
 theorem abandoned_not_usable (head c : Nat) (p : Nat) :
     ¬ Usable ReaderExamples.rules abandoned () head c p := by
   intro usable
-  rcases usable with ⟨a, d, _, _, slot, _⟩ | ⟨a, d, kind, _, _, slot, _⟩
+  rcases usable with ⟨a, d, v, _, _, slot, _⟩ | ⟨a, d, kind, _, _, slot, _⟩
   all_goals cases a with
   | zero => simp [abandoned] at slot
   | succ a => cases a <;> simp [abandoned] at slot
+
+open ReaderExamples in
+/-- Slot 1 announces a snapshot covering nothing, its body at version 1, while
+its audience has had no raise: its device migrated ahead of the history. -/
+def ahead : Nat → Slot sig
+  | 1 => .snapshot () () 0 1 (5 : Nat)
+  | _ => .writes () 0 (fun _ => none)
+
+/-- **Counterexample: coverage alone counts a snapshot ahead of its audience.**
+Slot 1's author is active, and it covers less than its slot, every earlier
+announcement and the last raise or reset, so the coverage rules count it. Its
+body is at version 1 while its audience is at version 0: a device loading it
+would hold rows in a shape the history has not raised to. The version rule
+refuses it. -/
+theorem ahead_refused :
+    active ReaderExamples.ledger0 () = true ∧ 0 < 1 ∧
+    (audAt ReaderExamples.rules ahead () 0).maxCover ≤ 0 ∧
+    (audAt ReaderExamples.rules ahead () 0).lastBoundary ≤ 0 ∧
+    (audAt ReaderExamples.rules ahead () 0).version < 1 ∧
+    ¬ AppliedTo ReaderExamples.rules ahead () 1 := by
+  refine ⟨by decide, by decide, by decide, by decide, by decide, ?_⟩
+  unfold AppliedTo
+  decide
+
+open ReaderExamples in
+/-- A circle whose creation entry recorded breaking version 2: its audience
+starts at that version, its base. -/
+def basedRules : Rules sig := { rules with aud0 := fun _ => { aud0 with version := 2 } }
+
+open ReaderExamples in
+/-- Slot 1 announces a snapshot of the circle covering nothing, its body at
+version 2; slot 2 prepares a raise of it to version 2. -/
+def based : Nat → Slot sig
+  | 1 => .snapshot () () 0 2 (5 : Nat)
+  | 2 => .prepare () () (.raise 2) 1 2 (6 : Nat)
+  | _ => .writes () 0 (fun _ => none)
+
+open ReaderExamples in
+/-- **A circle starts at the breaking version its creation recorded.** With no
+raise of its own, it counts a snapshot at that version, which a circle with
+base zero refuses, and a raise of it must go past that version: one to the
+same version is refused. -/
+theorem based_counted :
+    AppliedTo basedRules based () 1 ∧ ¬ AppliedTo rules based () 1 ∧
+    ¬ AppliedTo basedRules based () 2 := by
+  unfold AppliedTo
+  decide
 
 end CovenSequence.Preparations

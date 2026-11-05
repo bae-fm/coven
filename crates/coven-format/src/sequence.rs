@@ -109,12 +109,16 @@ pub struct SnapshotAnnouncement {
     pub snapshot: SnapshotId,
     /// Last included slot; strictly below the announcing slot.
     pub covers: u64,
+    /// The version of the newest breaking migration the body went through,
+    /// zero if none. Applying the announcement refuses one its audience has
+    /// not been raised to by the coverage (§16.3).
+    pub breaking_version: u32,
     /// Ordinary state or an admin operation's preparation.
     pub purpose: Purpose,
     /// SHA-256 of the complete sealed snapshot object.
     pub digest: [u8; 32],
 }
-wire_struct!(SnapshotAnnouncement, snapshot, covers, purpose, digest);
+wire_struct!(SnapshotAnnouncement, snapshot, covers, breaking_version, purpose, digest);
 impl SnapshotAnnouncement {
     /// Encode the announcement at its claimed slot.
     pub fn encode(&self, slot: Slot) -> Result<Vec<u8>, Error> {

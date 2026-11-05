@@ -187,8 +187,11 @@ pub(crate) fn read(database: &DatabaseConnection) -> Result<StoreState, DbError>
         .into_iter()
         .collect();
     state.circles = database
-        .query("SELECT circle,name FROM _coven_circles", [], |row| {
-            Ok((circle(row.get(0)?)?, StoreCircle { name: row.get(1)?, members: BTreeSet::new() }))
+        .query("SELECT circle,name,base FROM _coven_circles", [], |row| {
+            Ok((
+                circle(row.get(0)?)?,
+                StoreCircle { name: row.get(1)?, members: BTreeSet::new(), base: row.get(2)? },
+            ))
         })?
         .into_iter()
         .collect();
@@ -261,8 +264,8 @@ pub(crate) fn replace(database: &DatabaseConnection, state: &StoreState) -> Resu
     }
     for (id, circle) in &state.circles {
         database.internal_execute(
-            "INSERT INTO _coven_circles(circle,name) VALUES(?1,?2)",
-            params![id.to_string(), circle.name],
+            "INSERT INTO _coven_circles(circle,name,base) VALUES(?1,?2,?3)",
+            params![id.to_string(), circle.name, circle.base],
         )?;
         for member in &circle.members {
             database.internal_execute(

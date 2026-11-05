@@ -583,7 +583,7 @@ def heldAt (st : Store S) (seq : Nat → Slot S) (through reach a : Nat) : Optio
 the device holds. -/
 def FloorAnnounced (held : Nat → Option (Slot S)) (st : Store S) : Prop :=
   ∀ A, st.floor.covers A = 0 ∨
-    ∃ a au, held a = some (.snapshot au A (st.floor.covers A) (st.floor.path A))
+    ∃ a au w, held a = some (.snapshot au A (st.floor.covers A) w (st.floor.path A))
 
 /-- **A lost claim accepts the floor of the device that won its slot.** The
 floor's writer applied through `reach`, the floor's `at`, and each snapshot the
@@ -594,13 +594,13 @@ so the floor authenticates. Slots it has already applied are its own history; th
 slots it reads are at or above the first kept slot, so they are genuine. -/
 theorem settle_reads_through_floor {seq : Nat → Slot S} {st : Store S} (g : Good R st seq)
     {through reach : Nat} (hstart : st.floor.start ≤ through + 1) (hat : reach ≤ st.head)
-    (hnamed : ∀ A, st.floor.covers A = 0 ∨ ∃ a au, 1 ≤ a ∧ a ≤ reach ∧
-      seq a = .snapshot au A (st.floor.covers A) (st.floor.path A)) :
+    (hnamed : ∀ A, st.floor.covers A = 0 ∨ ∃ a au w, 1 ≤ a ∧ a ≤ reach ∧
+      seq a = .snapshot au A (st.floor.covers A) w (st.floor.path A)) :
     FloorAnnounced (heldAt st seq through (max through reach)) st := by
   intro A
-  rcases hnamed A with h0 | ⟨a, au, h1, h2, hs⟩
+  rcases hnamed A with h0 | ⟨a, au, w, h1, h2, hs⟩
   · exact Or.inl h0
-  · refine Or.inr ⟨a, au, ?_⟩
+  · refine Or.inr ⟨a, au, w, ?_⟩
     unfold heldAt
     by_cases ha : a ≤ through
     · simp [ha, hs]
@@ -615,15 +615,15 @@ snapshot there, a check against the history the device already holds finds no
 announcement and refuses the floor. -/
 theorem settle_held_refuses_floor {seq : Nat → Slot S} {st : Store S} {through : Nat}
     (A : S.Aud) (hc : st.floor.covers A ≠ 0)
-    (hpast : ∀ a au, seq a = .snapshot au A (st.floor.covers A) (st.floor.path A) → through < a) :
+    (hpast : ∀ a au w, seq a = .snapshot au A (st.floor.covers A) w (st.floor.path A) → through < a) :
     ¬ FloorAnnounced (heldAt st seq through through) st := by
   intro h
-  rcases h A with h0 | ⟨a, au, ha⟩
+  rcases h A with h0 | ⟨a, au, w, ha⟩
   · exact hc h0
   · unfold heldAt at ha
     by_cases hle : a ≤ through
     · simp only [hle, ite_true, Option.some.injEq] at ha
-      have := hpast a au ha
+      have := hpast a au w ha
       omega
     · simp [hle] at ha
 
@@ -640,7 +640,7 @@ open CovenSequence in
 /-- Slot 1 adds member `false`; slot 2 announces the snapshot covering it. -/
 def lostSeq : Nat → Slot adminSig
   | 1 => .admin true (.addMember false .member)
-  | 2 => .snapshot false () 1 ()
+  | 2 => .snapshot false () 1 0 ()
   | _ => .admin false (.other ())
 
 open CovenSequence in
@@ -669,7 +669,7 @@ theorem lostStore_good : Good adminRules lostStore lostSeq where
   floor_body _ := rfl
   floor_announced A := by
     cases A
-    exact Or.inr ⟨2, false, by decide, by decide, rfl, by unfold AppliedTo; exact ⟨by decide, by decide⟩⟩
+    exact Or.inr ⟨2, false, 0, by decide, by decide, rfl, by unfold AppliedTo; exact ⟨by decide, by decide⟩⟩
   boundary_body _ r au v c p h1 h2 hs := by
     have h2 : r ≤ 2 := h2
     have : r = 1 ∨ r = 2 := by omega
@@ -686,7 +686,7 @@ theorem lost_claim_refuses_honest_floor :
     ¬ FloorAnnounced (heldAt lostStore lostSeq 1 1) lostStore ∧
     FloorAnnounced (heldAt lostStore lostSeq 1 (max 1 2)) lostStore := by
   refine ⟨lostStore_good, by decide, ?_, ?_⟩
-  · refine settle_held_refuses_floor () (by decide) fun a au h => ?_
+  · refine settle_held_refuses_floor () (by decide) fun a au w h => ?_
     by_cases ha : a = 2
     · omega
     · exfalso
@@ -697,7 +697,7 @@ theorem lost_claim_refuses_honest_floor :
       | 2 => exact absurd rfl ha
       | n + 3 => simp [lostSeq]
   · exact settle_reads_through_floor adminRules lostStore_good (by decide) (by decide)
-      fun A => by cases A; exact Or.inr ⟨2, false, by decide, by decide, rfl⟩
+      fun A => by cases A; exact Or.inr ⟨2, false, 0, by decide, by decide, rfl⟩
 
 /-! ## Another copy using this device id -/
 

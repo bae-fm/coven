@@ -17,7 +17,10 @@ use coven_database::operation_kind;
 use coven_database::{
     Database, IncomingSlot, LoadStep, NewOperation, ProviderAccessChange, SlotContent,
 };
-use coven_format::{floor::OriginalSlot, sequence::SlotFrame};
+use coven_format::{
+    floor::OriginalSlot,
+    sequence::{Purpose, SlotFrame},
+};
 use coven_foundation::{
     files::StoreDir,
     id_source::{DeviceId, StoreId},
@@ -617,8 +620,17 @@ impl History {
             .filter(|prior| prior.boundary.snapshot().audience == announcement.snapshot.audience)
             .map(|prior| prior.boundary.entry().0)
             .max();
+        // Covering the latest raise, the audience's version at the coverage
+        // is its version now (§16.3).
+        let reached = match announcement.purpose {
+            Purpose::Raise(version) => version,
+            Purpose::Ordinary | Purpose::Reset => {
+                self.state.reached(&announcement.snapshot.audience)
+            }
+        };
         previous.is_none_or(|covers| announcement.covers >= covers)
             && boundary.is_none_or(|at| announcement.covers >= at)
+            && announcement.breaking_version <= reached
     }
 }
 

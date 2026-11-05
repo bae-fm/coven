@@ -6,7 +6,7 @@ import CovenSequence.Claims
 One numbered sequence per store. Slot `k` holds one of: an admin entry, one
 device's batch of data writes for a sync pass (with one part per audience it
 writes to), a key copy, a snapshot announcement for one audience ("audience
-`A` as of slot `c` is at path `p`"), a preparation announcement, or a schema raise or reset of one audience
+`A` as of slot `c`, at schema version `v`, is at path `p`"), a preparation announcement, or a schema raise or reset of one audience
 that activates its previously announced body. The audiences are the
 store and each circle. A slot's kind, and which audiences its parts or
 announcement belong to, and its device and claim number, are readable by every
@@ -111,8 +111,10 @@ inductive Slot (S : Sig) where
   gives its part for each audience it writes to. -/
   | writes (author : S.Dev) (keyGen : Nat) (parts : S.Aud → Option (WPart S))
   | keyCopy (author : S.Dev) (recipient : S.Mem) (keyGen : Nat)
-  | snapshot (author : S.Dev) (aud : S.Aud) (covers : Nat) (path : S.Path)
-  | prepare (author : S.Dev) (aud : S.Aud) (kind : Boundary) (covers : Nat) (path : S.Path)
+  /-- `version` is the schema version its body is at. -/
+  | snapshot (author : S.Dev) (aud : S.Aud) (covers : Nat) (version : Nat) (path : S.Path)
+  | prepare (author : S.Dev) (aud : S.Aud) (kind : Boundary) (covers : Nat) (version : Nat)
+      (path : S.Path)
   | boundary (author : S.Dev) (aud : S.Aud) (kind : Boundary) (covers : Nat) (path : S.Path)
 
 /-- What admin slots decide. -/
@@ -174,6 +176,9 @@ structure Rules (S : Sig) where
   /-- SHA-256 of the complete slot bytes, including the claimed path. -/
   digest : Nat → Slot S → S.Digest
   ledger0 : Ledger S
+  /-- Each audience before its first slot. Its version is the audience's base:
+  zero for the store, and for a circle the breaking version its creation entry
+  recorded (coven.md §16.3). -/
   aud0 : S.Aud → AudLedger S
   rows0 : S.Aud → S.Rows
 
@@ -249,8 +254,8 @@ def author : Slot S → S.Dev
   | .admin d _ => d
   | .writes d _ _ => d
   | .keyCopy d _ _ => d
-  | .snapshot d _ _ _ => d
-  | .prepare d _ _ _ _ => d
+  | .snapshot d _ _ _ _ => d
+  | .prepare d _ _ _ _ _ => d
   | .boundary d _ _ _ _ => d
 
 /-- Record a claimed slot's number and digest for its device, whether or not the slot is
@@ -285,8 +290,7 @@ def authoredPermission (L : Ledger S) (current readThrough : Nat) (d : S.Dev) (A
 /-- Whether slot `x` has a part for, or announces for, audience `A`. -/
 def touches (A : S.Aud) : Slot S → Bool
   | .writes _ _ parts => (parts A).isSome
-  | .snapshot _ a _ _ => decide (a = A)
-  | .prepare _ a _ _ _ | .boundary _ a _ _ _ => decide (a = A)
+  | .snapshot _ a _ _ _ | .prepare _ a _ _ _ _ | .boundary _ a _ _ _ => decide (a = A)
   | _ => false
 
 /-- Whether slot `k`'s part for `A` is valid, against the ledger and `A`'s
@@ -295,7 +299,8 @@ ledger as of slot `k-1`.
 - A part counts under the current removal cut-off, with permission at its
   authored `readThrough`, and at a version `A` has reached.
 - Every announcement covers less than its own slot, never decreases
-  announced coverage and covers the last raise or reset.
+  announced coverage and covers the last raise or reset. Its body is at a
+  version `A` has reached, or, for a raise's, at most the version it raises to.
 - A boundary requires its matching preparation, audience authority and
   coverage of every earlier announcement. A raise increases the version. -/
 def audValid (L : Ledger S) (P : AudLedger S) (k : Nat) (A : S.Aud) : Slot S → Bool
@@ -304,11 +309,14 @@ def audValid (L : Ledger S) (P : AudLedger S) (k : Nat) (A : S.Aud) : Slot S →
     | some w => counts L d g && authoredPermission R L (k - 1) w.readThrough d A &&
         decide (w.readThrough < k) && decide (w.version ≤ P.version)
     | none => true
-  | .snapshot d _ c _ =>
-    active L d && decide (c < k) && decide (P.maxCover ≤ c) && decide (P.lastBoundary ≤ c)
-  | .prepare d _ kind c _ =>
+  | .snapshot d _ c v _ =>
     active L d && decide (c < k) && decide (P.maxCover ≤ c) && decide (P.lastBoundary ≤ c) &&
-      (match kind with | .raise v => decide (P.version < v) | .reset => true)
+      decide (v ≤ P.version)
+  | .prepare d _ kind c v _ =>
+    active L d && decide (c < k) && decide (P.maxCover ≤ c) && decide (P.lastBoundary ≤ c) &&
+      (match kind with
+        | .raise w => decide (P.version < w) && decide (v ≤ w)
+        | .reset => decide (v ≤ P.version))
   | .boundary d _ kind c p =>
     active L d && R.boundaryAllowed L d A kind && decide (c < k) && decide (P.maxCover ≤ c) &&
       decide (P.lastBoundary ≤ c) && decide ((kind, c, p) ∈ P.preparations) &&
@@ -327,8 +335,8 @@ def audEffect (P : AudLedger S) (k : Nat) (A : S.Aud) : Slot S → AudLedger S
     match parts A with
     | some w => { P with owner := claimAll P.owner k w.claims }
     | none => P
-  | .snapshot _ _ c p => { P with snapshots := (k, c, p) :: P.snapshots, maxCover := max P.maxCover c }
-  | .prepare _ _ kind c p =>
+  | .snapshot _ _ c _ p => { P with snapshots := (k, c, p) :: P.snapshots, maxCover := max P.maxCover c }
+  | .prepare _ _ kind c _ p =>
     { P with preparations := (kind, c, p) :: P.preparations, maxCover := max P.maxCover c }
   | .boundary _ _ kind _ _ =>
     { P with lastBoundary := k

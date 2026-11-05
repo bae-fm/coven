@@ -120,6 +120,7 @@ impl TestStore {
                     .or_insert(crate::store_state::StoreCircle {
                         name: "Circle".into(),
                         members: std::collections::BTreeSet::new(),
+                        base: 0,
                     })
                     .members
                     .insert(member);

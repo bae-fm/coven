@@ -75,13 +75,7 @@ impl SequenceSync {
             })
             .collect();
         for capture in self.database.raise_captures().await? {
-            if session
-                .history
-                .state
-                .schema
-                .get(&capture.audience)
-                .is_some_and(|current| current.number >= capture.version)
-            {
+            if session.history.state.reached(&capture.audience) >= capture.version {
                 self.database.discard_raise_capture(capture.audience, capture.version).await?;
                 continue;
             }
@@ -147,18 +141,14 @@ impl SequenceSync {
                 _ => None,
             })
             .collect();
-        // A raise still waiting for its captured writes to land comes next
-        // for its audience: an ordinary snapshot now would carry this
-        // device's newer schema version before the history holds it (§18.3).
-        let raising: BTreeSet<_> = self
-            .database
-            .raise_captures()
-            .await?
-            .into_iter()
-            .map(|capture| capture.audience)
-            .collect();
+        // An audience that hasn't reached this device's newest breaking
+        // migration, as while its own raise waits for its captured writes,
+        // gets no ordinary snapshot: it would carry this device's newer schema
+        // version before the history holds it, and its announcement would not
+        // count (§16.2, §16.3).
+        let breaking = self.database.breaking_version().await?;
         for audience in session.history.state.readable_audiences(&member.member()) {
-            if pending.contains(&audience) || raising.contains(&audience) {
+            if pending.contains(&audience) || session.history.state.reached(&audience) < breaking {
                 continue;
             }
             let previous = session.history.announcements.iter().rev().find(|(_, snapshot)| {

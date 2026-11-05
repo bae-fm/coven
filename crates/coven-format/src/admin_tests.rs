@@ -118,7 +118,13 @@ fn introduction_layouts_preserve_exact_key_ids_and_hashes() {
                     key,
                     key_hash,
                 },
-                StoreChange::CreateCircle { circle: circle(1), name: "C".into(), key, key_hash },
+                StoreChange::CreateCircle {
+                    circle: circle(1),
+                    name: "C".into(),
+                    key,
+                    key_hash,
+                    breaking_version: 0,
+                },
                 StoreChange::RotateKey { audience: Audience::Store, key, key_hash },
                 StoreChange::RotateKey { audience: Audience::Circle(circle(1)), key, key_hash },
             ];
@@ -134,7 +140,8 @@ fn introduction_layouts_preserve_exact_key_ids_and_hashes() {
             .concat();
             let prefixes = [
                 creation,
-                [vec![6], circle(1).0.as_bytes().to_vec(), b"\0\0\0\x01C".to_vec()].concat(),
+                [vec![6], circle(1).0.as_bytes().to_vec(), b"\0\0\0\x01C\0\0\0\0".to_vec()]
+                    .concat(),
                 vec![15, 0],
                 [vec![15, 1], circle(1).0.as_bytes().to_vec()].concat(),
             ];

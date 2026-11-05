@@ -5111,7 +5111,11 @@ Circles are made, and members added and removed, by admin entries, under §10's
 rules. Any member of the store can make a circle and is its first member.
 Making one is a step of a write (§11.1): it returns the circle's id at once,
 and its first key, the copy that hands the key to its maker and its
-introduction follow in a pass. A row goes into the circle only once that slot
+introduction follow in a pass. The entry records its maker's *breaking
+version*, the version of the newest breaking migration the maker's app had run
+when the pass prepared it, zero if none (§18.1): the circle starts at that
+schema version, its base, and keeps it until a raise of its own goes past it
+(§16.3, §18.3). A row goes into the circle only once that slot
 applies, since a write checks membership against the slots its device has
 applied (§15.6). Its own
 members rename it, add and remove its members, rotate its key and delete it; an
@@ -5294,8 +5298,9 @@ A snapshot becomes usable in three steps, each one recorded before it happens:
 
 1. the device journals the snapshot;
 2. it uploads the snapshot's fixed bytes;
-3. it claims a slot announcing it, naming its path, its coverage and its purpose:
-   ordinary, a schema raise (§18.3) or a reset (§19.4).
+3. it claims a slot announcing it, naming its path, its coverage, its breaking
+   version (§16.3) and its purpose: ordinary, a schema raise (§18.3) or a reset
+   (§19.4).
 
 So an announcement that counts always names a body already in storage. An upload
 never announced supplies no coverage. If the operation that made it can't
@@ -5369,10 +5374,12 @@ snapshot comes next. An ordinary one taken first would carry the device's newer
 schema version before the history holds it: Cara, joining on the old app while
 Ana's raise waits for her held cover write, would find a snapshot she can't
 read instead of loading the store and stopping at Ana's raise with
-`UpdateRequired` once it lands. So the device asks for none then, and the
-capture itself checks for a waiting raise in the read that fixes its schema
-version. A request journaled before the app's update and resuming after it,
-or one made meanwhile, ends `Rejected(NotAllowed)` without uploading or
+`UpdateRequired` once it lands. Every device would refuse its announcement
+anyway (§16.3). So a device asks for no ordinary snapshot of an audience that
+hasn't reached its newest breaking migration, and while its own raise
+waits, the capture itself checks for that raise in the read that fixes its
+schema version. A request journaled before the app's update and resuming after
+it, or one made meanwhile, ends `Rejected(NotAllowed)` without uploading or
 announcing anything. A reset's snapshot (§19.4) is refused the same way, for
 the same reason.
 
@@ -5382,9 +5389,10 @@ equal coverage, the later one is the one devices use. There is no deadline for
 an upload; a slow upload simply announces later.
 
 **Announcing and loading are separate.** Applying an announcement reads no
-snapshot: the announcement is signed and carries the coverage, the purpose and a
-hash of the snapshot. A device reads the body when it loads the snapshot or
-checks which files the snapshot still references before deleting files (§17.10).
+snapshot: the announcement is signed and carries the coverage, the breaking
+version, the purpose and a hash of the snapshot. A device reads the body when it
+loads the snapshot or checks which files the snapshot still references before
+deleting files (§17.10).
 Both uses check the body against the announced hash, then its signature and its
 prefix ([format.md D9](format.md#d9-sealed-objects)). File deletion needs those
 checked references even when the device does not install the snapshot's rows.
@@ -5456,9 +5464,27 @@ The rules:
 - **An ordinary snapshot must cover the latest raise and reset** before its
   announcement. With no raise or reset between its coverage and its
   announcement, the audience's schema version and reset at its coverage are
-  the ones it has when announced. Its body is written at its device's app
-  version, which runs ahead of that schema version only by additions (§18.2):
-  a device takes no snapshot while its own raise of the audience waits (§16.2).
+  the ones it has when announced.
+- **A snapshot's breaking version must be one its audience has reached.** The
+  announcement names its *breaking version*: the version of the newest
+  breaking migration its body went through, or zero if none (§18.1). It must be
+  no higher than the version the audience had reached by its coverage: the one
+  its latest raise selected, or before any raise its *base*, zero for the
+  store and for a circle the breaking version its creation entry recorded
+  (§15.5). A raise's own snapshot may name up to the version it raises to.
+  Without the rule, a device on the old app would find the floor naming a
+  snapshot it can't read; the checked counterexample is
+  [`ahead_refused`](proofs/sequence/CovenSequence/Preparations.lean). A device
+  takes no snapshot that would break the rule (§16.2), and every device refuses
+  an announcement that breaks it anyway: it never counts, and no floor names
+  it. The version may be lower than the audience's: an addition moves a waiting
+  raise to its own version (§18.5), so Ana's raise to version 3, an addition
+  after her breaking version 2, leaves her later snapshots naming version 2.
+  A circle needs its base because a device raises only the audiences it reads
+  when it migrates: Ana's Gifts, made after her app reached version 2, is never
+  raised to it, and without a base none of its snapshots would count. A raise
+  of a circle must go past its base
+  ([`based_counted`](proofs/sequence/CovenSequence/Preparations.lean)).
 - **A prepared snapshot supports an ordinary reload only after its admin entry
   applies.** A raise or reset snapshot is announced first and then named by the
   raise or reset entry. An entry can name only a snapshot already announced.
@@ -7385,7 +7411,8 @@ For a circle it can't read, the first device of one of that circle's members to
 update writes the circle's snapshot at the new version, with an entry raising the
 circle. The circle's other devices reload from that one.
 
-A raise must increase the current version. An operation that finds the version it
+A raise must increase the current version: the last one raised to, or for a
+circle never raised, its base (§15.5). An operation that finds the version it
 wanted already established adopts the announced state instead of claiming another
 raise. A higher raise is checked against that state.
 
@@ -11058,6 +11085,9 @@ Write-ups explain each model and state its assumptions:
 | Model premise, for preparation announcements only: the storage step that claims a preparation announcement requires its body to be in storage already, and the theorem reads that premise back. Ordinary announcements carry no such premise | `announcement_uploaded` | `proofs/sequence/CovenSequence/Preparations.lean` | §16.2 |
 | Among candidates already checked for applicability, explicit reload selects one with no later candidate, independently of the floor | `newest_mem`, `newest_latest` | `proofs/sequence/CovenSequence/Reload.lean` | §16.2 |
 | A counted ordinary announcement covers the latest raise and reset, and matches the schema and reset state | `ordinary_covers_boundary`, `ordinary_matches_schema_reset` | `proofs/sequence/CovenSequence/Preparations.lean` | §16.3 |
+| A counted ordinary announcement names a schema version its audience had reached at its coverage | `ordinary_version_reached` | `proofs/sequence/CovenSequence/Preparations.lean` | §16.3 |
+| *Body.* A snapshot whose body is a version ahead of its audience meets every coverage rule, and only the version rule refuses it | `ahead_refused` | `proofs/sequence/CovenSequence/Preparations.lean` | §16.3 |
+| *Body.* A circle with no raise of its own counts a snapshot at its base, the breaking version its creation recorded, and refuses a raise to that version | `based_counted` | `proofs/sequence/CovenSequence/Preparations.lean` | §15.5, §16.3 |
 | *Body.* A stale capture announced after a raise is refused; accepting it would strand a joiner | `slot4_refused`, `stale_floor_strands_joiner` | `proofs/sequence/CovenSequence/ReaderExamples.lean` | §16.3 |
 | Activating a prepared snapshot needs an earlier matching announcement, which makes its coverage usable | `activation_requires_preparation`, `activated_is_usable` | `proofs/sequence/CovenSequence/Preparations.lean` | §16.3 |
 | With the coverage rules, a sound reader with its key advances and reaches the end without anyone holding deletion back (honest snapshot bodies and kept raise and reset bodies assumed); a reader behind a floor snapshot's coverage may always reload | `read_progress`, `reaches_head` | `proofs/sequence/CovenSequence/Reader.lean` | §16.3, §16.4, §16.6 |

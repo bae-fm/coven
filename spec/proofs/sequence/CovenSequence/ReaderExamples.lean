@@ -82,9 +82,9 @@ def part (b : Nat) : Unit → Option (WPart sig) := fun _ => some ⟨0, [], b, 0
 
 def seqEx : Nat → Slot sig
   | 1 => .writes () 0 (part 10)
-  | 2 => .prepare () () (.raise 1) 1 (1 : Nat)
+  | 2 => .prepare () () (.raise 1) 1 1 (1 : Nat)
   | 3 => .boundary () () (.raise 1) 1 (1 : Nat)
-  | 4 => .snapshot () () 2 (2 : Nat)
+  | 4 => .snapshot () () 2 0 (2 : Nat)
   | _ => .writes () 0 (fun _ => none)
 
 /-- The version rule refuses slot 4. Every other condition on it holds: its

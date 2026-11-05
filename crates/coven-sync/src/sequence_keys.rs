@@ -118,9 +118,15 @@ impl SequenceSync {
             }
         };
         let change = match target {
-            KeyPreparation::Circle { circle, name, key } => {
-                StoreChange::CreateCircle { circle, name, key, key_hash: hash }
-            }
+            // The circle starts at the version this app's newest breaking
+            // migration reached, its base (§15.5).
+            KeyPreparation::Circle { circle, name, key } => StoreChange::CreateCircle {
+                circle,
+                name,
+                key,
+                key_hash: hash,
+                breaking_version: self.database.breaking_version().await?,
+            },
             KeyPreparation::Rotation { audience, key } => {
                 StoreChange::RotateKey { audience, key, key_hash: hash }
             }

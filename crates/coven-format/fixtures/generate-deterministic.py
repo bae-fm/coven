@@ -414,7 +414,7 @@ def changes(sodium):
         b"\x03" + ANA + b"\x00",
         b"\x04" + text(b"D") + b"\x00",
         b"\x05" + u64(2),
-        b"\x06" + CIRCLE + text(b"C") + bytes([1]) * 16 + initial_hash,
+        b"\x06" + CIRCLE + text(b"C") + u32(2) + bytes([1]) * 16 + initial_hash,
         b"\x07" + CIRCLE + text(b"N"),
         b"\x08" + CIRCLE,
         b"\x09" + CIRCLE + ANA,
@@ -653,9 +653,9 @@ def main():
     store_key, circle_key = copies(sodium)
     # The floor carries original copies and announcement bytes, each at its old path.
     announcement = bounded_slot(sodium, 10, 3, frame(15,
-        snapshot_id(store_audience(), 1, 1) + u64(9) + b"\x01" + u32(2) + hashlib.sha256(snapshot).digest()), claim=9)
+        snapshot_id(store_audience(), 1, 1) + u64(9) + u32(2) + b"\x01" + u32(2) + hashlib.sha256(snapshot).digest()), claim=9)
     circle_announcement = bounded_slot(sodium, 9, 3, frame(15,
-        snapshot_id(circle_audience(CIRCLE), 1, 1) + u64(8) + b"\x00" + hashlib.sha256(circle_snapshot).digest()), claim=8)
+        snapshot_id(circle_audience(CIRCLE), 1, 1) + u64(8) + u32(0) + b"\x00" + hashlib.sha256(circle_snapshot).digest()), claim=8)
     path = STORE_TEXT + b"floor"
     prefix = bytes([39, 0, 1]) + bytes([1]) * 16 + u64(6)
     prefix += collection([u64(2) + text(store_key), u64(8) + text(circle_key)])

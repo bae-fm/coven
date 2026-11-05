@@ -48,13 +48,13 @@ precedes that announcement, so the capture includes every deleted slot. -/
 theorem capture_covers_floor {S : Sig} (R : Rules S)
     {st : Store S} {seq : Nat → Slot S} (good : Good R st seq)
     (audience : S.Aud) (capturedAt : Nat)
-    (announcements : ∀ a author, 1 ≤ a → a ≤ st.head →
-      seq a = .snapshot author audience (st.floor.covers audience) (st.floor.path audience) →
+    (announcements : ∀ a author w, 1 ≤ a → a ≤ st.head →
+      seq a = .snapshot author audience (st.floor.covers audience) w (st.floor.path audience) →
       AppliedTo R seq audience a → a ≤ capturedAt) :
     st.floor.covers audience ≤ capturedAt := by
-  rcases good.floor_announced audience with zero | ⟨a, author, positive, claimed, slot, applied⟩
+  rcases good.floor_announced audience with zero | ⟨a, author, w, positive, claimed, slot, applied⟩
   · omega
-  · have bound := announcements a author positive claimed slot applied
+  · have bound := announcements a author w positive claimed slot applied
     have valid := applied.2
     rw [slot] at valid
     simp only [audValid, Bool.and_eq_true, decide_eq_true_eq] at valid

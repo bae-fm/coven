@@ -8,10 +8,11 @@ use std::collections::{BTreeMap, BTreeSet};
 
 /// Store state, including removed identities needed to check older writes (§10.4).
 ///
-/// Schema versions belong to each audience: the store's version is
-/// under [`Audience::Store`], and each circle has its own. A version is absent
-/// until a kept raise selects it, as in §18.3. These are independent of the
-/// local app migration version returned by [`crate::Database::schema_version`].
+/// Schema versions belong to each audience: the store's raise is under
+/// [`Audience::Store`], and each circle has its own. A raise is absent until a
+/// kept raise selects it, as in §18.3; before one, the audience is at its base
+/// ([`StoreState::reached`]). These are independent of the local app
+/// migration version returned by [`crate::Database::schema_version`].
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct StoreState {
     /// Absent before the first entry creates the store.
@@ -30,6 +31,7 @@ pub struct StoreState {
     /// Deleted circles and their deciding slots; absence means no deletion.
     pub circle_deletions: BTreeMap<CircleId, Slot>,
     /// The selected schema raise per audience; creation itself carries no raise.
+    /// [`Self::reached`] gives an audience's version, a circle's base included.
     pub schema: BTreeMap<Audience, StoreVersion>,
     /// The last kept reset of each audience (§19.4).
     pub resets: BTreeMap<Audience, SnapshotId>,
@@ -63,6 +65,17 @@ impl StoreState {
     /// whose parts its devices open, snapshot and reload (§15.6, §16).
     pub fn readable_circles(&self, member: &MemberId) -> BTreeSet<CircleId> {
         self.circles.keys().copied().filter(|circle| self.reads_circle(*circle, member)).collect()
+    }
+
+    /// The schema version `audience` has reached: the one its latest kept
+    /// raise selected, or before any raise its base, zero for the store and
+    /// for a circle the breaking version its creation recorded. A raise goes
+    /// past the base, so this is the greater of the two (§16.3, §18.3).
+    pub fn reached(&self, audience: &Audience) -> u32 {
+        self.schema.get(audience).map(|raised| raised.number).unwrap_or_else(|| match audience {
+            Audience::Store => 0,
+            Audience::Circle(circle) => self.circles.get(circle).map_or(0, |circle| circle.base),
+        })
     }
 
     /// Every audience `member` reads: the store's, then each of
@@ -164,6 +177,9 @@ pub struct StoreCircle {
     pub name: String,
     /// Current members; empty after deletion.
     pub members: BTreeSet<MemberId>,
+    /// The breaking version its creation entry recorded: its schema version
+    /// until a raise of its own goes past it (§15.5, §16.3).
+    pub base: u32,
 }
 
 /// A selected version raise and the snapshot it chose (§18.3).

@@ -90,7 +90,7 @@ spaces only separate fields for reading. Example times are UTC.
 | · admin entry slot | | one membership or settings change | D6, D9 |
 | · writes slot | | one device's queued writes, each an inner write | D5, D9 |
 | · key copy slot | | one audience key sealed to one member | D9, D11 |
-| · snapshot announcement slot | | a snapshot's id, coverage, purpose and hash | D9 |
+| · snapshot announcement slot | | a snapshot's id, coverage, breaking version, purpose and hash | D9 |
 | Inner write | inside a writes slot | one write: a header, then one part per audience | D5, D9 |
 | Floor | `<store>/floor` | the first kept slot, one snapshot per audience, and the original key copies a new device needs | D8, D9 |
 | Snapshot | `<store>/snapshots/<audience>/<device>/<n>` | one audience's state at its coverage | D7, D9 |
@@ -822,7 +822,7 @@ An admin frame (kind 4) is `change:u8 | fields`.
 | 3 | Change role | `member:MemberId \| role:u8` |
 | 4 | Add device | `name:name \| replaces:Option<DeviceId>`; registers the writing device, which `replaces` must not name |
 | 5 | Remove device | `device:DeviceId` |
-| 6 | Create circle | `circle:uuid \| name:name \| key:uuid \| key_hash:32 bytes` |
+| 6 | Create circle | `circle:uuid \| name:name \| breaking_version:u32 \| key:uuid \| key_hash:32 bytes` |
 | 7 | Rename circle | `circle:uuid \| name:name` |
 | 8 | Delete circle | `circle:uuid` |
 | 9 | Add circle member | `circle:uuid \| member:MemberId` |
@@ -893,6 +893,11 @@ set-access, is refused (`StoreOwner`).
 
 **Removals and circles.** Remove and circle changes use the immediately preceding
 state, including deleting a circle whose last member leaves.
+
+**A circle's base.** Create-circle's `breaking_version` is the version of the
+newest breaking migration its author's app had run, zero if none. The circle
+holds that schema version until a raise of its own, which must name a higher
+one (§15.5, §16.3).
 
 **Keys.** `key` and `key_hash` name the key being introduced, and the SHA-256 of
 its exact 32 bytes. Both are inside the encryption.
@@ -1472,11 +1477,17 @@ Every member can read the device and claim number; the provider can't.
 | admin | one D6 frame |
 | writes | `count:u64`, at least 1, then `length:u64 \| inner write` for each queued write, the length positive and within the body: in strictly increasing write-number order, all by the header's device, with no omitted unconfirmed predecessor |
 | key copy | one empty kind-16 frame |
-| announcement | one kind-15 frame: `snapshot:SnapshotId \| covers:u64 \| purpose:Purpose \| digest:32 bytes` |
+| announcement | one kind-15 frame: `snapshot:SnapshotId \| covers:u64 \| breaking_version:u32 \| purpose:Purpose \| digest:32 bytes` |
 
 **Announcements.**
 
 - The coverage is below the announcement's own slot.
+- `breaking_version` is the version of the newest breaking migration the body
+  went through, zero if none. Applying the announcement refuses one above the
+  version its audience had reached by the coverage: its latest raise's, or
+  before any raise its base, zero for the store and for a circle its
+  create-circle's `breaking_version`. A raise's announcement may name up to the
+  version it raises to (§16.3).
 - The digest is the SHA-256 of the complete snapshot.
 - Applying the announcement uses only these signed fields. A reader that loads
   the body checks it against the digest, and checks the snapshot's prefix against

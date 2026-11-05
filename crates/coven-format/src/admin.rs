@@ -122,6 +122,10 @@ pub enum StoreChange {
         circle: CircleId,
         /// The circle's name.
         name: String,
+        /// The newest breaking migration its maker's app had run, zero if
+        /// none: the circle's schema version until a raise of its own goes
+        /// past it (§15.5, §16.3).
+        breaking_version: u32,
         /// The first circle key, introduced by this entry.
         key: KeyId,
         /// SHA-256 of the exact 32 circle-key bytes.
@@ -265,7 +269,7 @@ store_changes!(
     3 => ChangeRole { member, role },
     4 => AddDevice { name => crate::wire::get_name, replaces },
     5 => RemoveDevice { device },
-    6 => CreateCircle { circle, name => crate::wire::get_name, key, key_hash },
+    6 => CreateCircle { circle, name => crate::wire::get_name, breaking_version, key, key_hash },
     7 => RenameCircle { circle, name => crate::wire::get_name },
     8 => DeleteCircle { circle },
     9 => AddCircleMember { circle, member },

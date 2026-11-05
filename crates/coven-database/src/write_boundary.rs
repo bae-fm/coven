@@ -42,9 +42,10 @@ impl Boundary {
         }
     }
 
-    /// The no-op rule for a raise; a lower version never replaces a higher one.
+    /// The no-op rule for a raise: one that doesn't go past the version its
+    /// audience has reached, a circle's base included, changes nothing.
     pub fn schema_in_place(state: &StoreState, version: u32, snapshot: &SnapshotId) -> bool {
-        state.schema.get(&snapshot.audience).is_some_and(|current| version <= current.number)
+        version <= state.reached(&snapshot.audience)
     }
 
     /// Repeating the current reset does not introduce a new boundary.

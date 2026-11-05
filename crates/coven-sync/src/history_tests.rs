@@ -251,11 +251,12 @@ fn sequence_key_selection_matches_lean() {
                 } else {
                     BTreeSet::from([member(1), member(2)])
                 },
+                base: 0,
             },
         );
         history.state.circles.insert(
             unused_circle,
-            StoreCircle { name: "No introduction".into(), members: BTreeSet::new() },
+            StoreCircle { name: "No introduction".into(), members: BTreeSet::new(), base: 0 },
         );
         for (index, (audience, id)) in keys.iter().enumerate() {
             history.introductions.push(Introduction {

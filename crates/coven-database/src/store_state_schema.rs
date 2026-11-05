@@ -53,7 +53,8 @@ macro_rules! coven_store_state_tables {
             "
             CREATE TABLE _coven_circles (
                 circle TEXT PRIMARY KEY NOT NULL,
-                name TEXT NOT NULL
+                name TEXT NOT NULL,
+                base INTEGER NOT NULL CHECK(base BETWEEN 0 AND 4294967295)
             ) STRICT, WITHOUT ROWID;
         "
         );

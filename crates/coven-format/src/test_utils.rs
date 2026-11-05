@@ -246,6 +246,7 @@ pub fn announcement() -> crate::sequence::SnapshotAnnouncement {
     crate::sequence::SnapshotAnnouncement {
         snapshot: snapshot_header().id,
         covers: 6,
+        breaking_version: 0,
         purpose: crate::sequence::Purpose::Ordinary,
         digest: [0x99; 32],
     }
@@ -572,6 +573,7 @@ pub fn store_changes() -> Vec<StoreChange> {
             name: "C".into(),
             key: coven_foundation::id_source::KeyId(uuid::Uuid::from_bytes([1; 16])),
             key_hash: store_key().hash(),
+            breaking_version: 2,
         },
         StoreChange::RenameCircle { circle: c, name: "N".into() },
         StoreChange::DeleteCircle { circle: c },

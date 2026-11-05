@@ -37,13 +37,15 @@ impl<E: coven_foundation::task::CarriesBug> coven_foundation::task::CarriesBug
     }
 }
 
+/// Returns the snapshot's breaking version, read in the transaction that
+/// reads its schema version (§16.3).
 pub(crate) fn write<E>(
     db: &DatabaseConnection,
     schema: &WriteSchema,
     id: SnapshotId,
     begin: impl FnOnce(&SnapshotHeader) -> Result<(), E>,
     mut emit: impl FnMut(Vec<u8>) -> Result<(), E>,
-) -> Result<(), SnapshotWriteError<E>> {
+) -> Result<u32, SnapshotWriteError<E>> {
     let covers = crate::sequence::applied(db)?;
     let audience = id.audience.clone();
     let removed = crate::published::removals(db, &schema.schema, &schema.rules)?;
@@ -104,6 +106,7 @@ pub(crate) fn write<E>(
     }
     let claims = crate::sequence::claims(db)?;
     counts[section::CLAIM] = claims.len() as u64;
+    let breaking = crate::raise_capture::breaking_version(db)?;
     let (mut encoder, header) = SnapshotEncoder::start(SnapshotHeader {
         id,
         schema_version: db.schema_version()?,
@@ -150,7 +153,7 @@ pub(crate) fn write<E>(
         record(SnapshotRecord::Claim(claim))?;
     }
     emit(encoder.finish()?).map_err(SnapshotWriteError::Output)?;
-    Ok(())
+    Ok(breaking)
 }
 
 pub(crate) fn read_write(r: &rusqlite::Row<'_>) -> rusqlite::Result<AppliedWrite> {

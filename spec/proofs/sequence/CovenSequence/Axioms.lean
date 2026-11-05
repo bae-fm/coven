@@ -137,6 +137,9 @@ import SequenceApply
 #print axioms CovenSequence.Preparations.announcement_uploaded
 #print axioms CovenSequence.Preparations.abandoned_not_usable
 #print axioms CovenSequence.Preparations.ordinary_matches_schema_reset
+#print axioms CovenSequence.Preparations.ordinary_version_reached
+#print axioms CovenSequence.Preparations.ahead_refused
+#print axioms CovenSequence.Preparations.based_counted
 
 #print axioms CovenSequence.reaches_target
 #print axioms CovenSequence.QueueReload.commit_numbered

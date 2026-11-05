@@ -121,13 +121,14 @@ impl Database {
     /// commits on the writer connection continue throughout this call. While
     /// this device's raise of the audience waits, it refuses with
     /// [`DbError::RaiseWaiting`]: the snapshot would be written at a schema
-    /// version the history doesn't hold yet (§16.2).
+    /// version the history doesn't hold yet (§16.2). Returns the snapshot's
+    /// breaking version, for its announcement (§16.3).
     pub async fn write_snapshot<B, F, E>(
         &self,
         id: coven_format::admin::SnapshotId,
         begin: B,
         emit: F,
-    ) -> Result<(), crate::SnapshotWriteError<E>>
+    ) -> Result<u32, crate::SnapshotWriteError<E>>
     where
         B: FnOnce(&coven_format::snapshot::SnapshotHeader) -> Result<(), E> + Send + 'static,
         F: FnMut(Vec<u8>) -> Result<(), E> + Send + 'static,
@@ -146,6 +147,16 @@ impl Database {
                 crate::write_schema::prepare_evaluators(reader, &inner.access.write_schema)?;
                 crate::snapshot_write::write(reader, &inner.access.write_schema, id, begin, emit)
             })
+        })
+        .await
+    }
+
+    /// The version of the newest breaking migration this installation ran,
+    /// zero if none: its snapshots' breaking version (§16.3).
+    pub async fn breaking_version(&self) -> Result<u32, DbError> {
+        self.call(move |inner| {
+            let reader = inner.access.readers.acquire_reader();
+            reader.with_reader(crate::raise_capture::breaking_version)
         })
         .await
     }
@@ -210,7 +221,7 @@ impl Database {
         version: u32,
         begin: B,
         emit: F,
-    ) -> Result<(), crate::SnapshotWriteError<E>>
+    ) -> Result<u32, crate::SnapshotWriteError<E>>
     where
         B: FnOnce(&coven_format::snapshot::SnapshotHeader) -> Result<(), E> + Send + 'static,
         F: FnMut(Vec<u8>) -> Result<(), E> + Send + 'static,

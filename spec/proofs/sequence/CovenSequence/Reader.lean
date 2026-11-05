@@ -169,7 +169,7 @@ structure Good (st : Store S) (seq : Nat → Slot S) : Prop where
   covers_le : ∀ A, st.floor.covers A ≤ st.head
   floor_body : ∀ A, st.body (st.floor.path A) = some (stateAt R seq A (st.floor.covers A))
   floor_announced : ∀ A, st.floor.covers A = 0 ∨
-    ∃ a au, 1 ≤ a ∧ a ≤ st.head ∧ seq a = .snapshot au A (st.floor.covers A) (st.floor.path A) ∧
+    ∃ a au w, 1 ≤ a ∧ a ≤ st.head ∧ seq a = .snapshot au A (st.floor.covers A) w (st.floor.path A) ∧
       AppliedTo R seq A a
   boundary_body : ∀ A r au v c p, 1 ≤ r → r ≤ st.head → seq r = .boundary au A v c p → AppliedTo R seq A r →
     (st.floor.covers A < r → ∃ L' P', st.body p = some (L', P', preparedRows R v p (rowsAt R seq A c))) ∧
@@ -242,8 +242,8 @@ theorem applied_aud (seq : Nat → Slot S) (A : S.Aud) {j : Nat} (hj : 1 ≤ j) 
   rw [hjeq, audAt_succ, ← hjeq]
   simp [audStep, ht, hv]
 
-theorem announced_maxCover (seq : Nat → Slot S) (A : S.Aud) {a : Nat} {au : S.Dev} {c : Nat}
-    {p : S.Path} (ha : 1 ≤ a) (hs : seq a = .snapshot au A c p) (happ : AppliedTo R seq A a) :
+theorem announced_maxCover (seq : Nat → Slot S) (A : S.Aud) {a : Nat} {au : S.Dev} {c w : Nat}
+    {p : S.Path} (ha : 1 ≤ a) (hs : seq a = .snapshot au A c w p) (happ : AppliedTo R seq A a) :
     c ≤ (audAt R seq A a).maxCover := by
   rw [applied_aud R seq A ha happ, hs]
   simp only [audEffect]; exact Nat.le_max_right _ _
@@ -424,7 +424,7 @@ theorem read_progress {st : Store S} {seq : Nat → Slot S} (g : Good R st seq) 
         (by omega)
       -- Either boundary kind covers the floor's snapshot.
       have hcov : st.floor.covers a ≤ c := by
-        rcases g.floor_announced a with h0 | ⟨a', au', ha1, hahead, has, haapp⟩
+        rcases g.floor_announced a with h0 | ⟨a', au', w', ha1, hahead, has, haapp⟩
         · omega
         · by_cases hlt' : a' < d.pos + 1
           · have h1 := announced_maxCover R seq a ha1 has haapp

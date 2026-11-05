@@ -29,6 +29,8 @@ pub(crate) struct Capture {
 pub(crate) struct SnapshotArtifact {
     pub(crate) capture: Capture,
     pub(crate) covers: u64,
+    /// The newest breaking migration the body went through (§16.3).
+    pub(crate) breaking_version: u32,
     pub(crate) digest: [u8; 32],
     pub(crate) size: u64,
     pub(crate) session: Option<coven_storage::UploadSession>,
@@ -38,6 +40,7 @@ impl SnapshotArtifact {
         SnapshotAnnouncement {
             snapshot: self.capture.id.clone(),
             covers: self.covers,
+            breaking_version: self.breaking_version,
             purpose: self.capture.purpose,
             digest: self.digest,
         }
@@ -142,17 +145,24 @@ impl SequenceSync {
         };
         let consume = seal_frames(writer, header_receiver, receiver, &path, key, member);
         let (produced, consumed) = tokio::join!(produce, consume);
-        match produced {
+        let breaking_version = match produced {
             Err(coven_database::SnapshotWriteError::Database(error)) => return Err(error.into()),
             Err(coven_database::SnapshotWriteError::Format(error)) => return Err(error.into()),
             Err(coven_database::SnapshotWriteError::Output(error)) => {
                 consumed?;
                 return Err(SyncError::disk(error));
             }
-            Ok(()) => (),
-        }
+            Ok(breaking_version) => breaking_version,
+        };
         let (covers, digest, size) = consumed?;
-        Ok(SnapshotArtifact { capture: capture.clone(), covers, digest, size, session: None })
+        Ok(SnapshotArtifact {
+            capture: capture.clone(),
+            covers,
+            breaking_version,
+            digest,
+            size,
+            session: None,
+        })
     }
 }
 

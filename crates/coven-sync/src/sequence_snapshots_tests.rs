@@ -355,6 +355,7 @@ fn announcement_by(
                 number: 99,
             },
             covers,
+            breaking_version: 0,
             purpose: coven_format::sequence::Purpose::Ordinary,
             digest: [7; 32],
         },
@@ -568,6 +569,141 @@ async fn no_ordinary_snapshot_is_captured_while_a_raise_of_its_audience_waits() 
         .all(|record| record.id != journaled));
     assert_eq!(announced(&ana).await, before);
     assert!(ana.sync.database.store_state().await.unwrap().schema.is_empty());
+    for device in [&ana, &ben] {
+        device.sync.database.close().await.unwrap();
+    }
+}
+
+/// An announcement counts only if its breaking version is one its audience
+/// has reached: no higher than the version the audience was raised to by its
+/// coverage, zero before any raise, and for a raise's own snapshot no higher
+/// than the version it raises to. Otherwise a floor could name a snapshot a
+/// device on the old app can't read. A device's own snapshots name the newest
+/// breaking migration it ran (§16.3).
+#[tokio::test]
+async fn an_announcement_counts_only_at_a_breaking_version_its_audience_reached() {
+    use coven_format::sequence::Purpose;
+    let group = Group::new();
+    group.raises.store(true, std::sync::atomic::Ordering::SeqCst);
+    let ana = group.device(1).await;
+    let ben = group.device(2).await;
+    group.create(&ana).await;
+    group.admit(&ana, &ben).await;
+    insert(&ana.sync.database, "a", "before the raise").await;
+    ana.sync.pass().await.unwrap();
+    let before = ana.sync.snapshot(coven_merge::Audience::Store).await.unwrap();
+    let allowed = async |ana: &Device, ben: &Device, breaking_version, purpose| {
+        let history = ana.sync.session.lock().await.history.clone();
+        let covers = ana.sync.database.applied_slot().await.unwrap();
+        let (announcement, header) = announcement_by(ben, covers);
+        let announcement = coven_format::sequence::SnapshotAnnouncement {
+            breaking_version,
+            purpose,
+            ..announcement
+        };
+        history.announcement_allowed(coven_merge::Slot(1_000), &header, &announcement)
+    };
+    let history = ana.sync.session.lock().await.history.clone();
+    assert_eq!(history.announcements[&before].breaking_version, 0);
+    assert!(allowed(&ana, &ben, 0, Purpose::Ordinary).await);
+    assert!(!allowed(&ana, &ben, 2, Purpose::Ordinary).await, "no raise yet");
+    assert!(!allowed(&ana, &ben, 2, Purpose::Reset).await, "no raise yet");
+    assert!(allowed(&ana, &ben, 2, Purpose::Raise(2)).await);
+    assert!(!allowed(&ana, &ben, 3, Purpose::Raise(2)).await);
+
+    group.version.store(2, std::sync::atomic::Ordering::SeqCst);
+    let (ana, ben) = (group.reopen(ana).await, group.reopen(ben).await);
+    ana.sync.pass().await.unwrap();
+    ana.sync.pass().await.unwrap();
+    ben.sync.pass().await.unwrap();
+    let state = ana.sync.database.store_state().await.unwrap();
+    assert_eq!(state.schema[&coven_merge::Audience::Store].number, 2);
+    assert!(allowed(&ana, &ben, 2, Purpose::Ordinary).await);
+    assert!(!allowed(&ana, &ben, 3, Purpose::Ordinary).await);
+    assert!(!allowed(&ana, &ben, 3, Purpose::Reset).await);
+    let after = ana.sync.snapshot(coven_merge::Audience::Store).await.unwrap();
+    let history = ana.sync.session.lock().await.history.clone();
+    assert_eq!(history.announcements[&after].breaking_version, 2);
+    for device in [&ana, &ben] {
+        device.sync.database.close().await.unwrap();
+    }
+}
+
+/// Ana makes Garden after her app reached breaking version 2. Her raise
+/// covered only the audiences she read then, so nothing raises Garden: it
+/// starts at the breaking version her creation entry records, and her Garden
+/// snapshot at version 2 counts (§15.5, §16.3).
+#[tokio::test]
+async fn a_circle_made_after_its_makers_migration_counts_snapshots_at_its_base() {
+    let group = Group::new();
+    group.raises.store(true, std::sync::atomic::Ordering::SeqCst);
+    let ana = group.device(1).await;
+    let ben = group.device(2).await;
+    group.create(&ana).await;
+    group.admit(&ana, &ben).await;
+    group.version.store(2, std::sync::atomic::Ordering::SeqCst);
+    let ana = group.reopen(ana).await;
+    ana.sync.pass().await.unwrap();
+    ana.sync.pass().await.unwrap();
+    let state = ana.sync.database.store_state().await.unwrap();
+    assert_eq!(state.schema[&coven_merge::Audience::Store].number, 2);
+    let garden = ana.sync.create_circle("Garden".into()).await.unwrap();
+    let announced = ana.sync.snapshot(coven_merge::Audience::Circle(garden)).await.unwrap();
+    let history = ana.sync.session.lock().await.history.clone();
+    assert_eq!(history.announcements[&announced].breaking_version, 2);
+    assert!(!history.state.schema.contains_key(&coven_merge::Audience::Circle(garden)));
+    for device in [&ana, &ben] {
+        device.sync.database.close().await.unwrap();
+    }
+}
+
+/// Ben's app updates with a breaking migration while he reads only the
+/// store, so his raise covers the store alone. Ana, still on the old app,
+/// then adds him to Garden, which nobody has raised. Every device would
+/// refuse a Garden snapshot he announced, its breaking version being above
+/// Garden's, so he asks for none: aged history brings a snapshot of the store
+/// and none of Garden (§16.2, §16.3).
+#[tokio::test]
+async fn no_snapshot_is_asked_for_an_audience_not_raised_to_the_devices_migration() {
+    let group = Group::new();
+    group.raises.store(true, std::sync::atomic::Ordering::SeqCst);
+    let ana = group.device(1).await;
+    let ben = group.device(2).await;
+    group.create(&ana).await;
+    group.admit(&ana, &ben).await;
+    let garden = ana.sync.create_circle("Garden".into()).await.unwrap();
+    ben.sync.pass().await.unwrap();
+    group.version.store(2, std::sync::atomic::Ordering::SeqCst);
+    let ben = group.reopen(ben).await;
+    ana.sync
+        .administer(coven_format::admin::StoreChange::AddCircleMember {
+            circle: garden,
+            member: ben.identity.member(),
+        })
+        .await
+        .unwrap();
+    ben.sync.pass().await.unwrap();
+    ben.sync.pass().await.unwrap();
+    let state = ben.sync.database.store_state().await.unwrap();
+    assert_eq!(state.schema[&coven_merge::Audience::Store].number, 2);
+    assert!(!state.schema.contains_key(&coven_merge::Audience::Circle(garden)));
+    assert!(state.reads_circle(garden, &ben.identity.member()));
+    group.clock.set(
+        std::time::UNIX_EPOCH
+            + crate::sequence_sync::sequence_retention::GRACE
+            + std::time::Duration::from_secs(1),
+    );
+    ben.sync.pass().await.unwrap();
+    let uploaded = |audience: coven_merge::Audience| {
+        ben.storage.request_trace().into_iter().any(|request| {
+            matches!(request, coven_storage::test_utils::MemoryRequest::Create(path)
+            if path.snapshot_id().is_some_and(|snapshot| {
+                snapshot.device == ben.sync.device && snapshot.audience == audience
+            }))
+        })
+    };
+    assert!(uploaded(coven_merge::Audience::Store), "Ben snapshots the store");
+    assert!(!uploaded(coven_merge::Audience::Circle(garden)), "Ben takes no Garden snapshot");
     for device in [&ana, &ben] {
         device.sync.database.close().await.unwrap();
     }

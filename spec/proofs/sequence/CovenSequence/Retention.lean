@@ -29,7 +29,7 @@ variable {S : Sig} (R : Rules S)
 /-- Storage steps, for the claimed sequence `seq`. -/
 inductive StoreStep (seq : Nat → Slot S) : Store S → Store S → Prop
   | claim (st : Store S)
-      (hprepared : ∀ A au v c p, seq (st.head + 1) = .prepare au A v c p →
+      (hprepared : ∀ A au v c w p, seq (st.head + 1) = .prepare au A v c w p →
         AppliedTo R seq A (st.head + 1) →
         ∃ L' P', st.body p = some (L', P', preparedRows R v p (rowsAt R seq A c)))
       (hbody : ∀ A au v c p, seq (st.head + 1) = .boundary au A v c p → AppliedTo R seq A (st.head + 1) →
@@ -44,8 +44,8 @@ inductive StoreStep (seq : Nat → Slot S) : Store S → Store S → Prop
   | writeFloor (st : Store S) (F : Floor S) (hstart : st.floor.start ≤ F.start)
       (hcov : ∀ A, st.floor.covers A ≤ F.covers A) (hle : ∀ A, F.start ≤ F.covers A + 1)
       (hhead : ∀ A, F.covers A ≤ st.head)
-      (hann : ∀ A, F.covers A = 0 ∨ ∃ a au, 1 ≤ a ∧ a ≤ st.head ∧
-        seq a = .snapshot au A (F.covers A) (F.path A) ∧ AppliedTo R seq A a)
+      (hann : ∀ A, F.covers A = 0 ∨ ∃ a au w, 1 ≤ a ∧ a ≤ st.head ∧
+        seq a = .snapshot au A (F.covers A) w (F.path A) ∧ AppliedTo R seq A a)
       (hbody : ∀ A, st.body (F.path A) = some (stateAt R seq A (F.covers A))) :
       StoreStep seq st { st with floor := F }
   | delete (st : Store S) (i : Nat) (hi : i < st.floor.start) :
@@ -87,9 +87,9 @@ theorem store_good {seq : Nat → Slot S} {st st' : Store S} (s : StoreStep R se
       by_cases h : i = st.head + 1
       · simp [h]
       · simp only [h, ite_false]; exact g.kept_genuine i hi
-    · rcases g.floor_announced A with h | ⟨a, au, h1, h2, h3, h4⟩
+    · rcases g.floor_announced A with h | ⟨a, au, w, h1, h2, h3, h4⟩
       · exact Or.inl h
-      · exact Or.inr ⟨a, au, h1, by simp only; omega, h3, h4⟩
+      · exact Or.inr ⟨a, au, w, h1, by simp only; omega, h3, h4⟩
     · simp only at h2 ⊢
       by_cases hr : r = st.head + 1
       · subst hr

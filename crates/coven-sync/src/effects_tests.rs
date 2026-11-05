@@ -180,7 +180,9 @@ fn replacement_keeps_its_expected_binding_and_never_reuses_either_public_key() {
 fn already_satisfied_deletion_finishes_without_requiring_lost_membership() {
     let mut state = household();
     let circle = CircleId(uuid::Uuid::from_u128(20));
-    state.circles.insert(circle, StoreCircle { name: "Gifts".into(), members: Default::default() });
+    state
+        .circles
+        .insert(circle, StoreCircle { name: "Gifts".into(), members: Default::default(), base: 0 });
     state.circle_deletions.insert(circle, Slot(3));
     assert!(apply(&state, 1, StoreChange::DeleteCircle { circle }).unwrap().is_none());
 }
@@ -194,6 +196,7 @@ fn activating_a_preparation_checks_coverage_against_later_announcements() {
             number,
         },
         covers,
+        breaking_version: 0,
         purpose: Purpose::Reset,
         digest: [number as u8; 32],
     };
@@ -220,12 +223,14 @@ fn a_floor_keeps_the_schema_and_reset_selected_at_its_own_prefix() {
         },
         purpose: Purpose::Ordinary,
         covers: 10,
+        breaking_version: 0,
         digest: [7; 32],
     };
     let prepared = SnapshotAnnouncement {
         snapshot: coven_format::admin::SnapshotId { number: 2, ..ordinary.snapshot.clone() },
         purpose: Purpose::Reset,
         covers: 12,
+        breaking_version: 0,
         digest: [8; 32],
     };
     history.boundaries.push(coven_database::BoundaryCoverage {
@@ -246,6 +251,7 @@ fn announced(number: u64, covers: u64, purpose: Purpose) -> SnapshotAnnouncement
             number,
         },
         covers,
+        breaking_version: 0,
         purpose,
         digest: [number as u8; 32],
     }
@@ -340,10 +346,13 @@ fn only_an_admin_resets_the_store_and_only_a_circle_member_resets_its_circle() {
         state = apply(&state, author, change).unwrap().unwrap().state;
     }
     let circle = CircleId(uuid::Uuid::from_u128(20));
-    state.circles.insert(circle, StoreCircle { name: "Gifts".into(), members: [id(1)].into() });
+    state
+        .circles
+        .insert(circle, StoreCircle { name: "Gifts".into(), members: [id(1)].into(), base: 0 });
     let announcement = |audience| SnapshotAnnouncement {
         snapshot: coven_format::admin::SnapshotId { audience, device: DeviceId(1), number: 1 },
         covers: 10,
+        breaking_version: 0,
         purpose: Purpose::Reset,
         digest: [1; 32],
     };
@@ -721,6 +730,7 @@ fn create_circle(circle: CircleId, name: &str) -> StoreChange {
         name: name.into(),
         key: KeyId(uuid::Uuid::from_u128(circle.0.as_u128() + 100)),
         key_hash: [2; 32],
+        breaking_version: 0,
     }
 }
 
@@ -754,6 +764,38 @@ fn any_member_creates_a_circle_and_only_its_members_manage_it() {
         );
         assert!(apply(&made, 2, change.clone()).is_ok(), "{change:?}");
     }
+}
+
+/// A circle starts at the breaking version its creation recorded: a raise
+/// of it to that version changes nothing, and one past it applies (§15.5,
+/// §18.3).
+#[test]
+fn a_raise_of_a_circle_must_go_past_its_base() {
+    let StoreChange::CreateCircle { circle, name, key, key_hash, .. } =
+        create_circle(gifts(), "Gifts")
+    else {
+        unreachable!("a circle's creation")
+    };
+    let creation = StoreChange::CreateCircle { circle, name, key, key_hash, breaking_version: 2 };
+    let made = apply(&household(), 2, creation).unwrap().unwrap().state;
+    assert_eq!(made.circles[&gifts()].base, 2);
+    assert_eq!(made.reached(&Audience::Circle(gifts())), 2);
+    assert_eq!(made.reached(&Audience::Store), 0);
+    let raise = |version| {
+        let mut announcement = announced(1, 8, Purpose::Raise(version));
+        announcement.snapshot.audience = Audience::Circle(gifts());
+        checked_change(
+            &made,
+            &header(2, 2, 19),
+            Slot(20),
+            &StoreChange::RaiseSchema { version, announcement: Slot(10) },
+            &BTreeMap::from([(Slot(10), announcement)]),
+            &[],
+        )
+    };
+    assert!(matches!(raise(2), Ok(None)));
+    let raised = raise(3).unwrap().unwrap().state;
+    assert_eq!(raised.reached(&Audience::Circle(gifts())), 3);
 }
 
 /// Only a device's own member registers a new device in its place; several

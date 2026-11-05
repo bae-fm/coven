@@ -48,11 +48,15 @@ async fn fixture(db: &crate::Database) {
     state.circles = [
         (
             CircleId(uuid::Uuid::from_u128(7)),
-            StoreCircle { name: "Gifts".into(), members: [member(1), member(2), member(3)].into() },
+            StoreCircle {
+                name: "Gifts".into(),
+                members: [member(1), member(2), member(3)].into(),
+                base: 0,
+            },
         ),
         (
             CircleId(uuid::Uuid::from_u128(8)),
-            StoreCircle { name: "Old".into(), members: [].into() },
+            StoreCircle { name: "Old".into(), members: [].into(), base: 0 },
         ),
     ]
     .into();

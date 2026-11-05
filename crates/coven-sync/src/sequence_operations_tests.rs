@@ -240,6 +240,7 @@ async fn creating_a_circle_does_not_require_a_snapshot_of_nonexistent_history() 
             name: "Gifts".into(),
             key: key_id,
             key_hash: hash,
+            breaking_version: 0,
         })
         .await
         .unwrap();

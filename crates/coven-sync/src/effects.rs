@@ -275,12 +275,18 @@ pub(crate) fn checked_change(
             }
             target.state = DeviceState::Removed;
         }
-        CreateCircle { circle, name, .. } => {
+        CreateCircle { circle, name, breaking_version, .. } => {
             if state.circles.contains_key(circle) {
                 return Err(TargetGone(EntryTarget::Circle(*circle)));
             }
-            next.circles
-                .insert(*circle, StoreCircle { name: name.clone(), members: [*author].into() });
+            next.circles.insert(
+                *circle,
+                StoreCircle {
+                    name: name.clone(),
+                    members: [*author].into(),
+                    base: *breaking_version,
+                },
+            );
         }
         RenameCircle { circle, name } => {
             let target = next.circles.get_mut(circle).expect("authorized circle");

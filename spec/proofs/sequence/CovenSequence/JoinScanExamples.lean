@@ -67,7 +67,7 @@ def rules : Rules sig where
 
 /-- Ana snapshots through 12, then sends Dan's copy and admits him. -/
 def history (slot : Nat) : Slot sig :=
-  if slot = 13 then .snapshot () () 12 1
+  if slot = 13 then .snapshot () () 12 0 1
   else if slot = 14 then .keyCopy () true 0
   else if slot = 15 then .admin () (.addMember true .member)
   else .writes () 0 (fun _ => none)
@@ -101,7 +101,7 @@ theorem retained_good : Good rules retained history := by
   · intro a; cases a; rfl
   · intro a
     cases a
-    exact Or.inr ⟨13, (), by decide, by decide, rfl, by unfold AppliedTo; decide⟩
+    exact Or.inr ⟨13, (), 0, by decide, by decide, rfl, by unfold AppliedTo; decide⟩
   · intro a r author kind covered path _ _ boundary _
     simp only [history] at boundary
     split at boundary <;> first

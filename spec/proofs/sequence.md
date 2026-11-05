@@ -20,7 +20,7 @@ the audit with the other proofs.
 Slot `<store>/seq/<n>` is claimed create-once. It holds an admin entry, one
 device's batch of writes for a sync pass (one part per audience it writes to),
 a key copy, a snapshot announcement for one audience ("audience `A` as of slot
-`c` is at path `p`"), a preparation announcement, or a schema raise or reset
+`c`, at schema version `v`, is at path `p`"), a preparation announcement, or a schema raise or reset
 that activates its matching preparation. The audiences are the store and each circle. Every
 device applies slots in strict order.
 
@@ -104,7 +104,12 @@ These are the validity rules:
   audience authority. Its coverage must include every earlier announcement
   (C6) and the last raise or reset. A raise must increase the version.
 - **Every announcement of `A`** covers less than its own slot, never decreases
-  announced coverage and covers the last raise or reset (the version rule).
+  announced coverage and covers the last raise or reset (the version rule). It
+  names the schema version its body is at, which `A` has reached; a raise's
+  preparation may name at most the version it raises to. Coven names the
+  breaking version (coven.md §16.3), as the model has no additions. `A` starts
+  at its initial ledger's version, its base: zero for the store, and for a
+  circle the breaking version its creation entry recorded.
 
 ## Claiming a slot
 
@@ -493,7 +498,14 @@ needed.
   applied raise and reset. The generalized `read_progress` and `reaches_head`
   prove progress with both kinds under the same floor rule.
   `ordinary_matches_schema_reset` proves the captured schema and reset
-  equal the state immediately before announcement.
+  equal the state immediately before announcement, and
+  `ordinary_version_reached` that a counted snapshot's body is at a version
+  its audience had reached at its coverage. `ahead_refused` is the checked
+  counterexample: a snapshot whose body is a version ahead of its audience
+  meets every coverage rule, and only the version rule refuses it.
+  `based_counted`: a circle created at breaking version 2 counts a snapshot
+  at version 2 with no raise of its own, which a circle with base zero
+  refuses, and refuses a raise of it to version 2.
 - `announcement_uploaded`, `activation_requires_preparation`: upload precedes
   the announcement; activation requires an earlier matching counted
   announcement. `activated_is_usable` admits its coverage only after activation.

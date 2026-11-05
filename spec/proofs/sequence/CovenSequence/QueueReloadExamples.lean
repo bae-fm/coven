@@ -24,7 +24,7 @@ def loaded (R : Rules sig) (history : Nat → Slot sig) (through : Nat) : Reader
     rowsAt R history () through, fun _ => none⟩
 
 def resetHistory : Nat → Slot sig
-  | 2 => .prepare () () .reset 1 1
+  | 2 => .prepare () () .reset 1 0 1
   | 3 => .boundary () () .reset 1 1
   | _ => .writes () 0 (fun _ => none)
 
@@ -58,7 +58,7 @@ def raiseRules : Rules sig :=
 
 def raiseHistory : Nat → Slot sig
   | 1 => .writes () 0 (part 42)
-  | 2 => .prepare () () (.raise 1) 1 1
+  | 2 => .prepare () () (.raise 1) 1 1 1
   | 3 => .boundary () () (.raise 1) 1 1
   | _ => .writes () 0 (fun _ => none)
 

@@ -162,19 +162,19 @@ theorem honest_floor_never_blamed {st : Store S} {seq : Nat → Slot S} (g : Goo
     (check : Nat → Bool) {pos stop known reach : Nat} (why : Stop)
     (hcheck : ∀ n, check n = true ↔ FloorAnnounced (heldAt st seq pos n) st)
     (hstart : st.floor.start ≤ pos + 1) (hstop : pos < stop) (held : stop - 1 ≤ st.head)
-    (hnamed : ∀ A, st.floor.covers A = 0 ∨ ∃ a au, 1 ≤ a ∧ a ≤ reach ∧
-      seq a = .snapshot au A (st.floor.covers A) (st.floor.path A)) :
+    (hnamed : ∀ A, st.floor.covers A = 0 ∨ ∃ a au w, 1 ≤ a ∧ a ≤ reach ∧
+      seq a = .snapshot au A (st.floor.covers A) w (st.floor.path A)) :
     pass check pos stop why known (some ⟨st.floor.start, reach⟩) ≠ .floorDamaged := by
   intro blamed
   obtain ⟨f, hf, past, failed⟩ := floor_blamed_only_when_held blamed
   cases hf
   have past : reach < stop := past
-  have within : ∀ A, st.floor.covers A = 0 ∨ ∃ a au, 1 ≤ a ∧ a ≤ stop - 1 ∧
-      seq a = .snapshot au A (st.floor.covers A) (st.floor.path A) := by
+  have within : ∀ A, st.floor.covers A = 0 ∨ ∃ a au w, 1 ≤ a ∧ a ≤ stop - 1 ∧
+      seq a = .snapshot au A (st.floor.covers A) w (st.floor.path A) := by
     intro A
-    rcases hnamed A with zero | ⟨a, au, h1, h2, hs⟩
+    rcases hnamed A with zero | ⟨a, au, w, h1, h2, hs⟩
     · exact Or.inl zero
-    · exact Or.inr ⟨a, au, h1, Nat.le_trans h2 (Nat.le_sub_one_of_lt past), hs⟩
+    · exact Or.inr ⟨a, au, w, h1, Nat.le_trans h2 (Nat.le_sub_one_of_lt past), hs⟩
   have announced := settle_reads_through_floor R g (through := pos) (reach := stop - 1) hstart held within
   rw [Nat.max_eq_right (by omega : pos ≤ stop - 1)] at announced
   rw [(hcheck (stop - 1)).2 announced] at failed

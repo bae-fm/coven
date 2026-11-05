@@ -54,11 +54,7 @@ pub(crate) fn capture_created(
     db: &DatabaseConnection,
     schema: &WriteSchema,
 ) -> Result<(), DbError> {
-    let minimum: u32 =
-        db.query_row("SELECT minimum FROM _coven_snapshot_schema WHERE singleton=1", [], |r| {
-            r.get(0)
-        })?;
-    if minimum == 0 || !provisional(db)?.is_empty() {
+    if breaking_version(db)? == 0 || !provisional(db)?.is_empty() {
         return Ok(());
     }
     let device = db
@@ -159,7 +155,7 @@ pub(crate) fn write<E>(
     version: u32,
     begin: impl FnOnce(&SnapshotHeader) -> Result<(), E>,
     emit: impl FnMut(Vec<u8>) -> Result<(), E>,
-) -> Result<(), crate::SnapshotWriteError<E>> {
+) -> Result<u32, crate::SnapshotWriteError<E>> {
     let capture = captures(db, id.device)?
         .into_iter()
         .find(|capture| capture.audience == id.audience && capture.version == version)
@@ -171,6 +167,13 @@ pub(crate) fn write<E>(
         return Err(DbError::CaptureChanged.into());
     }
     crate::snapshot_write::write(db, schema, id, begin, emit)
+}
+
+/// The version of the newest breaking migration this installation ran, zero
+/// if none: received writes are read from it on (§18.5), and a snapshot this
+/// installation writes announces it as its breaking version (§16.3).
+pub(crate) fn breaking_version(db: &DatabaseConnection) -> Result<u32, DbError> {
+    db.query_row("SELECT minimum FROM _coven_snapshot_schema WHERE singleton=1", [], |r| r.get(0))
 }
 
 /// Read received writes from schema version `minimum` on, the version a

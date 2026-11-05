@@ -69,8 +69,8 @@ theorem honest_floor_installs {st : Store S} {seq : Nat → Slot S} (g : Good R 
     (check : Nat → Bool) {first target reach : Nat}
     (hcheck : ∀ n, check n = true ↔ FloorAnnounced (heldAt st seq target n) st)
     (hfirst : first ≤ target) (hat : reach ≤ st.head)
-    (hnamed : ∀ A, st.floor.covers A = 0 ∨ ∃ a au, 1 ≤ a ∧ a ≤ reach ∧
-      seq a = .snapshot au A (st.floor.covers A) (st.floor.path A)) :
+    (hnamed : ∀ A, st.floor.covers A = 0 ∨ ∃ a au w, 1 ≤ a ∧ a ≤ reach ∧
+      seq a = .snapshot au A (st.floor.covers A) w (st.floor.path A)) :
     install check first target ⟨st.floor.start, reach⟩ ≠ .floorDamaged := by
   intro damaged
   simp only [install] at damaged
