@@ -130,6 +130,42 @@ async fn waiting_downloads_do_not_advance_local_timestamps_even_after_reopen() {
     source.close().await.unwrap();
 }
 #[tokio::test]
+async fn a_newer_version_write_waits_and_applies_once_the_app_updates() {
+    const COLOR: &str = "ALTER TABLE notes ADD COLUMN color TEXT";
+    let ids = SequentialIds::new();
+    let source_store = TestStore::with_ids(&ids);
+    let receiver_store = TestStore::with_ids(&ids);
+    let migrations =
+        || vec![Migration::addition(1, "notes", NOTES), Migration::addition(2, "color", COLOR)];
+    let source = source_store.builder(notes(), migrations()).open().await.unwrap();
+    let receiver = open(&receiver_store).await;
+    sql(&source, "INSERT INTO notes VALUES('n','title','','blue')").await.unwrap();
+    let write = records(&source).remove(0);
+    assert_eq!(write.header.schema_version, 2);
+
+    assert_eq!(
+        receiver.receive(write.clone().into()).await.unwrap(),
+        ApplyOutcome::Waiting(WriteWait::SchemaVersion(2))
+    );
+    assert_eq!(count(&receiver, "notes"), 0);
+    receiver.close().await.unwrap();
+
+    let updated = receiver_store.builder(notes(), migrations()).open().await.unwrap();
+    assert_eq!(updated.receive(write.into()).await.unwrap(), ApplyOutcome::Applied);
+    assert_eq!(
+        updated
+            .read(|sql| Ok(sql.query_row("SELECT title,color FROM notes", [], |r| Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?
+            )))?))
+            .await
+            .unwrap(),
+        ("title".into(), "blue".into())
+    );
+    updated.close().await.unwrap();
+    source.close().await.unwrap();
+}
+#[tokio::test]
 async fn older_schema_inserts_use_new_defaults_without_inventing_cell_setters() {
     let ids = SequentialIds::new();
     let source_store = TestStore::with_ids(&ids);
