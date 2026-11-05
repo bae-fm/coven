@@ -197,7 +197,6 @@ fn pending_subjects_keep_their_variant_and_snapshot_order() {
         PendingSubject::Operation { id: OperationId(1), kind: OperationKind::CreateStore },
         PendingSubject::Retention { path: ObjectPath::floor(StoreId(Uuid::from_u128(1))) },
         PendingSubject::Audience(Audience::Store),
-        PendingSubject::JoinRequest(InviteId(Uuid::from_u128(1))),
         PendingSubject::Connection,
     ];
     let mut subjects: Vec<_> = expected.iter().rev().cloned().collect();

@@ -5094,7 +5094,6 @@ pub enum PendingSubject {
     Operation { id: OperationId, kind: OperationKind },
     Retention { path: ObjectPath },
     Audience(Audience),
-    JoinRequest(InviteId),
     Connection,
 }
 

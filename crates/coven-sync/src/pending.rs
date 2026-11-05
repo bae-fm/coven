@@ -4,7 +4,7 @@ use super::pending_encoding as encoding;
 use crate::{OperationId, OperationKind, Refusal};
 use coven_database::PendingValue;
 use coven_format::{admin::SnapshotId, path::ObjectPath};
-use coven_foundation::id_source::{DeviceId, FileId, InviteId, KeyId, MemberId};
+use coven_foundation::id_source::{DeviceId, FileId, KeyId, MemberId};
 use coven_merge::{Audience, Slot, WriteId};
 use coven_storage::{CloudProvider, RetainedAccess, StorageFailure};
 use serde::{Deserialize, Serialize};
@@ -124,8 +124,6 @@ pub enum PendingSubject {
     },
     /// An audience that requires dependent work.
     Audience(#[serde(with = "crate::pending_encoding::audience")] Audience),
-    /// A joining request.
-    JoinRequest(InviteId),
     /// The local storage connection.
     Connection,
 }
