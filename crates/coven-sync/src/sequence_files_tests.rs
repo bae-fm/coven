@@ -258,3 +258,98 @@ async fn stalled_pin_downloads_leave_sequence_passes_free() {
         device.database().close().await.unwrap();
     }
 }
+
+/// A pass never waits for a file: with a trailing file's upload held, the
+/// pass still sends the row's writes. Once the upload is stored, a second
+/// local write switches the record to the stored location, a later pass
+/// sends it, and the app's row is unchanged (§6.6, §17.3).
+#[tokio::test]
+async fn a_pass_sends_its_writes_while_their_file_upload_is_held() {
+    use coven_database::{
+        DatabaseBuilder, FileColumn, FilePlace, Migration, Namespace, Place, Provenance,
+        RowIdentity, SyncedTable,
+    };
+    use coven_foundation::id_source::{IdSource, MemberId};
+    let group = Group::new();
+    let (temp, directory) = group.directory();
+    let database = DatabaseBuilder::new(directory)
+        .synced_tables(vec![
+            SyncedTable::new("photos", RowIdentity::SharedKey).file_column(FileColumn::new("file"))
+        ])
+        .namespaces(vec![Namespace::new("photos", Provenance::AppProvided, 1 << 20)])
+        .migrations(vec![Migration::addition(
+            1,
+            "photos",
+            "CREATE TABLE photos(id TEXT NOT NULL PRIMARY KEY,file TEXT)",
+        )])
+        .open()
+        .await
+        .unwrap();
+    let identity = coven_crypto::MemberIdentity::new(
+        MemberId(group.ids.new_id()),
+        coven_format::test_utils::keys_from_seed(1),
+    );
+    let ana = group
+        .attach(temp, identity, Some(group.ring.clone()), group.storage.for_device(), database)
+        .await;
+    group.create(&ana).await;
+    let (started, observed) = tokio::sync::oneshot::channel();
+    let (resume, held) = tokio::sync::oneshot::channel();
+    ana.storage
+        .hold_next_creation(
+            coven_storage::ObjectPrefix::device_files(group.store, ana.sync.device),
+            started,
+            held,
+        )
+        .await;
+    let photo = ana
+        .database()
+        .staged_write::<_, _, _, _, coven_database::DbError>(
+            |batch| Ok(batch.put_file("photos", b"photo".to_vec(), Place::Cloud)),
+            |sql, file| {
+                sql.execute("INSERT INTO photos(id,file) VALUES('1',?1)", [file])?;
+                Ok(file)
+            },
+        )
+        .await
+        .unwrap();
+    observed.await.unwrap();
+    let row = |ana: &Device| {
+        let database = ana.database().clone();
+        async move {
+            database
+                .read(|sql| {
+                    Ok(sql.query_row("SELECT id,file FROM photos", [], |r| {
+                        Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+                    })?)
+                })
+                .await
+                .unwrap()
+        }
+    };
+    let before = row(&ana).await;
+    let slot = ana.database().applied_slot().await.unwrap();
+    ana.sync.pass().await.unwrap();
+    assert_eq!(
+        ana.database().applied_slot().await.unwrap(),
+        slot + 1,
+        "the writes slot is claimed"
+    );
+    assert!(matches!(
+        ana.database().file_ref(photo).await.unwrap().place(),
+        FilePlace::DeviceOnly { .. }
+    ));
+
+    resume.send(()).unwrap();
+    ana.files().retry_uploads_now().await.unwrap();
+    assert!(matches!(
+        ana.database().file_ref(photo).await.unwrap().place(),
+        FilePlace::Cloud { .. }
+    ));
+    assert_eq!(row(&ana).await, before, "the completion leaves the app's row as it was");
+    ana.sync.pass().await.unwrap();
+    assert_eq!(ana.database().applied_slot().await.unwrap(), slot + 2, "the switch is sent");
+    assert!(ana.database().test_queued_writes().await.unwrap().is_empty());
+    ana.files().close().await;
+    ana.database().close().await.unwrap();
+}
