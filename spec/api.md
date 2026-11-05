@@ -856,14 +856,15 @@ pub trait StorageConnector: Send + Sync {
     ) -> Result<S3Detection, StorageError> {
         Err(StorageFailure::ProviderUnavailable.into())
     }
-    /// Before a store's first setup at an S3 location whose member keys reach
-    /// the whole bucket, refuse a bucket holding anything outside the store's
-    /// folder or the `coven-bucket` marker (§20.7). Reads only.
-    /// A connector without native S3 refuses this capability.
-    async fn check_new_s3_store(
+    /// Before a store's first setup at a location it needs to itself (a
+    /// Dropbox shared folder, a OneDrive folder, or an S3 bucket whose member
+    /// keys reach all of it), refuse a location whose root holds anything
+    /// outside the store's folder or the `coven-location` marker (§20.3).
+    /// Reads only. A connector without that provider refuses this capability.
+    async fn check_new_store(
         &self,
         _config: StorageConfig,
-        _credentials: S3Credentials,
+        _auth: ProviderAuth,
         _store: StoreId,
     ) -> Result<(), StorageError> {
         Err(StorageFailure::ProviderUnavailable.into())
@@ -3842,8 +3843,11 @@ while let Some(Ok(values)) = lost.next().await {
 
 - *Setting up storage* creates the store at a location on a provider, the
   first time it connects, and connects this device to it.
-  - Paths start with this store's id. Other stores can share the location,
-    except on an S3 service whose member keys reach a whole bucket (below).
+  - Paths start with this store's id. Other stores can share a CloudKit zone,
+    the Dropbox App folder, or an S3 bucket and base prefix where member keys
+    can be limited to a prefix. A Dropbox shared folder, a OneDrive folder,
+    and a bucket whose member keys reach all of it hold one store each
+    (below).
   - Once a location is recorded, setup reconnects at it, such as after this
     device's credentials were lost. It refuses a different location with `LocationChangeUnsupported`;
     setup does not relocate a store already used by other devices. The
@@ -3855,8 +3859,8 @@ while let Some(Ok(values)) = lost.next().await {
     reconnect loads what other devices published. So it reports its steps to
     its `on_progress` as `Progress<StorageSetupStep>`
     ([E1](#e1-opening)), on the task awaiting it, and the app shows them
-    instead of a bare spinner. S3 lists the bucket's root when creating a
-    store whose member keys reach the whole bucket (`CheckingBucket`), then
+    instead of a bare spinner. Creating a store that needs its location to
+    itself first lists the location's root (`CheckingLocation`). S3 then
     detects settings (`DetectingSettings`). iCloud prepares a new store's
     zone (`PreparingZone`); Dropbox and OneDrive read the account's name
     (`ReadingAccount`). Every setup then connects and checks the provider
@@ -3879,7 +3883,7 @@ while let Some(Ok(values)) = lost.next().await {
     `Set access` slot or `Satisfied` for a reconnect. A failure before the point
     of no return undoes setup, outcome `Undone(Failed)`; one after it is
     returned while setup stays running, and setup starts the sync loop, whose
-    connection finishes it. A claim refused after it, slot 1 or the bucket
+    connection finishes it. A claim refused after it, slot 1 or the location
     marker another store holds, or a refused `Set access`, undoes setup:
     `Undone(Failed)` or `Rejected`.
   - Opening a store undoes a setup a crash cut before its point of no return,
@@ -3929,19 +3933,23 @@ while let Some(Ok(values)) = lost.next().await {
   known host, a name other than AWS or any custom profile without an
   endpoint, or plain `http` to a known host is `InvalidConfiguration`;
   other endpoints may use `http`.
-- Where an S3 service's member keys reach a whole bucket (R2, and every
-  custom profile, detected or chosen), any member's key reaches every store
-  in the bucket, so each store has its own bucket from creation (§20.7). A
-  non-empty base prefix fails validation, before any request, with
-  `StorageFailure::OwnBucketRequired { reason: OwnBucketReason::Prefix }`.
-  A store's first setup lists the bucket's root before detection writes and
-  permits only that store's folder and the root `coven-bucket` marker. Setup
-  later checks that the marker names the same store (§20.7). Any other object causes
-  `OwnBucketRequired { reason: OwnBucketReason::Occupied }`, wrapped in
-  `StorageSetupError::Storage`. Reconnecting, restoring and joining read that
-  exact marker to verify bucket ownership (§20.7); they do not list outside
-  the store's folder. AWS, GCS, RustFS, SeaweedFS, Ceph RGW and Versity Gateway
-  keys can be limited to the store's prefix, so their stores share buckets and prefixes unchecked.
+- A Dropbox shared folder, a OneDrive folder, and a bucket on an S3 service
+  whose member keys reach the whole bucket (R2, and every custom profile,
+  detected or chosen) hold one store each from creation (§20.3): any member
+  reaches everything in them, so a member of one store could delete another
+  store's objects there. On S3 a non-empty base prefix fails validation,
+  before any request, with
+  `StorageFailure::OwnLocationRequired { reason: OwnLocationReason::Prefix }`.
+  A store's first setup lists the location's root before any write and
+  permits only that store's folder and the root `coven-location` marker.
+  Setup later checks that the marker names the same store (§20.3). Any other
+  object causes `OwnLocationRequired { reason: OwnLocationReason::Occupied }`,
+  wrapped in `StorageSetupError::Storage`. Reconnecting, restoring and joining
+  read that exact marker to verify the location is the store's (§20.3); they
+  do not list outside the store's folder. A Dropbox App folder, which can't be
+  shared, has no marker and no check. AWS, GCS, RustFS, SeaweedFS, Ceph RGW and
+  Versity Gateway keys can be limited to the store's prefix, so their stores
+  share buckets and prefixes unchecked.
 - An endpoint matching no known host and naming no profile has no AWS
   fallback: setup detects its settings and returns and records the location
   with them as a custom profile. Reconnecting with that same location and no
@@ -4278,7 +4286,7 @@ pub enum StorageConfig {
     /// An existing S3 bucket and a base prefix. Where the service's member
     /// keys can be limited to a prefix, the base prefix may hold several
     /// stores; where they reach a whole bucket (R2, and every custom or
-    /// detected profile), the store has the bucket to itself (§20.7).
+    /// detected profile), the store has the bucket to itself (§20.3, §20.7).
     S3 {
         /// The bucket's name.
         bucket: String,
@@ -4295,16 +4303,18 @@ pub enum StorageConfig {
         profile: Option<S3Profile>,
         /// The base prefix, parsed where the location is built; paths add
         /// the store id. Empty where member keys reach a whole bucket;
-        /// otherwise `OwnBucketRequired { reason: Prefix }`.
+        /// otherwise `OwnLocationRequired { reason: Prefix }`.
         prefix: S3Prefix,
     },
-    /// Required creation choice: an App folder or a shared-capable namespace.
+    /// Required creation choice: an App folder or a shared-capable namespace,
+    /// which holds this store alone (§20.3).
     Dropbox {
         location: DropboxLocation,
         /// Display only; None before setup. Coven reads this member's account at setup.
         account_label: Option<String>,
     },
-    /// A OneDrive folder; paths within it start with the store id.
+    /// A OneDrive folder holding this store alone (§20.3); paths within it
+    /// start with the store id.
     OneDrive {
         drive_id: String,
         folder_id: String,
@@ -4575,9 +4585,10 @@ pub enum StorageFailure {
     ContainerNotFound,
     /// The S3 endpoint or signing region is wrong.
     RegionMismatch,
-    /// The S3 service's member keys reach a whole bucket, so a store there
-    /// needs a bucket of its own (§20.7).
-    OwnBucketRequired { reason: OwnBucketReason },
+    /// Every member reaches the whole location (a Dropbox shared folder, a
+    /// OneDrive folder, or an S3 bucket whose member keys reach all of it), so
+    /// a store there needs the location to itself (§20.3).
+    OwnLocationRequired { reason: OwnLocationReason },
     /// Setting up a store that never had storage found another device's
     /// slot 1: another installation claimed this location first (§10.3, D10).
     /// Restore or join it instead.
@@ -4646,11 +4657,14 @@ pub enum StorageFailure {
     CatchUpRequired,
 }
 
-/// Why an S3 location cannot hold a store that needs its own bucket (§20.7).
-pub enum OwnBucketReason {
-    /// The location names a base prefix; the store occupies the bucket's root.
+/// Why a location cannot hold a store that needs it to itself (§20.3).
+pub enum OwnLocationReason {
+    /// The S3 location names a base prefix; the store occupies the bucket's root.
     Prefix,
-    /// Creating the store found objects outside its own folder in the bucket.
+    /// Creating the store found objects outside its own folder in the
+    /// location, or the location marker names another store; reconnecting,
+    /// restoring or joining found the marker missing, malformed or naming
+    /// another store.
     Occupied,
 }
 
@@ -5513,8 +5527,10 @@ pub struct StorageSetup {
 /// A step of setting up storage, in the order they run (E5). A step other
 /// than `Loading` is one unit, done when it ends.
 pub enum StorageSetupStep {
-    /// S3, creating a store where member keys reach the whole bucket.
-    CheckingBucket,
+    /// Creating a store in a location it needs to itself: a Dropbox shared
+    /// folder, a OneDrive folder, or an S3 bucket whose member keys reach all
+    /// of it.
+    CheckingLocation,
     /// S3: detecting settings and checking them against the service (§20.8).
     DetectingSettings,
     /// iCloud, creating a store: reading the account and saving its zone.
@@ -5523,8 +5539,8 @@ pub enum StorageSetupStep {
     ReadingAccount,
     /// Connecting and checking the provider.
     Connecting,
-    /// Creating: past the point of no return, claiming the bucket where the
-    /// location needs it, then slot 1. Cancel no longer undoes setup.
+    /// Creating: past the point of no return, claiming the location where it
+    /// holds one store, then slot 1. Cancel no longer undoes setup.
     CreatingStore,
     /// Reconnecting: loading, with loading's steps and counts (§13.4).
     Loading(LoadStep),

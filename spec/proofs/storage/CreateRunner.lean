@@ -1,6 +1,6 @@
 import CovenStorage.Objects
 import CovenStorage.CopyPublication
-import CovenStorage.BucketClaim
+import CovenStorage.LocationClaim
 import Lean
 
 /-! JSON adapter for testing provider publication against the create-once model.
@@ -9,7 +9,8 @@ An array of creates runs `create`, or for a copy-publication profile
 (`"copy": true`) stages each create as its own session and publishes it with
 `CopyPublication.publish`. An object `{"ops": [...]}` runs staged sessions and
 publications in the given arrival order through `CopyPublication.run`. An
-object `{"bucket": [...]}` runs setup and reconnect through `BucketClaim`. -/
+object `{"bucket": [...]}` runs setup and reconnect through `LocationClaim`; the
+key is the name the Rust differential sends. -/
 
 open Lean CovenStorage
 
@@ -71,21 +72,21 @@ private def ops (list : Array Json) : Except String Json := do
         ("bytes", toJson ((bucket.objects (.slot n)).map (·.bytes)))]).toArray),
     ("staged", toJson (sessions.filter fun s => (bucket.staging s).isSome).length)]
 
-private def bucketClaims (requests : Array Json) : Except String Json := do
+private def locationClaims (requests : Array Json) : Except String Json := do
   let mut storage := emptyStorage
   let mut results := #[]
   for request in requests do
     let store ← request.getObjValAs? (List Nat) "store"
     let accepted ← match ← request.getObjValAs? String "op" with
       | "setup" => do
-          let (after, accepted) := BucketClaim.setup storage store 0
+          let (after, accepted) := LocationClaim.setup storage store 0
           storage := after
           pure accepted
-      | "reconnect" => pure (BucketClaim.names storage store)
-      | other => throw s!"unknown bucket operation {other}"
+      | "reconnect" => pure (LocationClaim.names storage store)
+      | other => throw s!"unknown location operation {other}"
     results := results.push <| Json.mkObj [
       ("accepted", toJson accepted),
-      ("bytes", toJson ((storage .bucket).map (·.bytes)))]
+      ("bytes", toJson ((storage .locationMarker).map (·.bytes)))]
   pure <| Json.arr results
 
 private def recordings (requests : Array Json) : Except String Json := do
@@ -108,7 +109,7 @@ private def run (j : Json) : Except String Json :=
   match j with
   | .arr requests => creates requests
   | _ => match j.getObjVal? "bucket" with
-    | .ok requests => do bucketClaims (← requests.getArr?)
+    | .ok requests => do locationClaims (← requests.getArr?)
     | .error _ => match j.getObjVal? "recordings" with
       | .ok requests => do recordings (← requests.getArr?)
       | .error _ => do ops (← j.getObjValAs? (Array Json) "ops")

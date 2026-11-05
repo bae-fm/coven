@@ -1,8 +1,8 @@
 import CovenStorage
 
-#print axioms CovenStorage.BucketClaim.at_most_one_store
-#print axioms CovenStorage.BucketClaim.retry_passes
-#print axioms CovenStorage.BucketClaim.reconnect_refuses_other
+#print axioms CovenStorage.LocationClaim.at_most_one_store
+#print axioms CovenStorage.LocationClaim.retry_passes
+#print axioms CovenStorage.LocationClaim.reconnect_refuses_other
 
 #print axioms CovenStorage.Clocks.first_stamp
 #print axioms CovenStorage.Clocks.first_stamp_before_epoch

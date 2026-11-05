@@ -1,5 +1,5 @@
 import CovenStorage.Objects
-import CovenStorage.BucketClaim
+import CovenStorage.LocationClaim
 import CovenStorage.Files
 import CovenStorage.Moves
 import CovenStorage.Holds

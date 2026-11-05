@@ -3436,7 +3436,7 @@ These calls, and the work passes do for them, follow the rule:
 | Taking provider access back after a removal (§14.2) | the provider request, fixed before it is sent | none: it is sent again until confirmed |
 | Deleting gone devices' files (`clean_up_gone_devices_files`, §17.10) | the files operation | none: it deletes only what nothing refers to |
 | Sending writes and uploading files (§4, §17.9) | the send queue and the upload queue | the writes slot's claim; a file's confirmed upload |
-| Setting up storage (`setup_s3_storage`, `setup_oauth_storage`, `setup_cloudkit_storage`, §20.8) | its operation, with the credentials it connects with kept apart from the committed ones | the bucket marker or slot 1 when creating; the `Set access` claim, or committing, when reconnecting |
+| Setting up storage (`setup_s3_storage`, `setup_oauth_storage`, `setup_cloudkit_storage`, §20.8) | its operation, with the credentials it connects with kept apart from the committed ones | the location marker or slot 1 when creating; the `Set access` claim, or committing, when reconnecting |
 
 #### 11.7 What the proofs cover
 
@@ -8106,15 +8106,16 @@ Choosing the location is separate from accessing the store's objects below it.
 
 Every object path starts with the store's id: slots, the floor, snapshots, files,
 the setup check's test objects, and S3 detection's probes. The one exception is
-the own-bucket marker `coven-bucket`, at the root of a bucket that a
-bucket-scoped S3 service gives one store (§20.7).
+the location marker `coven-location`, at the root of a location that holds one
+store (below).
 [format.md D10](format.md#d10-paths) gives each object exactly one spelling.
 
-So several stores can share one Dropbox or OneDrive folder, one CloudKit zone, or
-one S3 bucket prefix where member keys can be limited to a prefix. Ana creates
-Household and Ben creates Garden in the same folder; their store ids differ, so
-their first entries land at different paths. On an S3 service whose keys reach a
-whole bucket, each store gets its own bucket instead (§20.7).
+So several stores can share one CloudKit zone, or one S3 bucket prefix where
+member keys can be limited to a prefix. Ana creates Household and Ben creates
+Garden in the same AWS bucket; their store ids differ, so their first entries
+land at different paths. A Dropbox shared folder or a OneDrive folder holds one
+store, and so does a bucket on an S3 service whose keys reach the whole bucket
+(below).
 
 An S3 location names a bucket and a *base prefix*: the folder inside the bucket
 that holds its stores' folders. Ana types `music/stores` when she sets up
@@ -8139,9 +8140,9 @@ prefix-scoped location, other stores and unrelated objects outside this prefix
 don't compete with this store. A few accesses are wider, and none reads another
 store's data:
 
-- creating a store that needs its own bucket lists the bucket's root, to check
-  it holds nothing else, then creates the bucket marker; later setups read the
-  marker (§20.7);
+- creating a store that needs its own location lists the location's root, to
+  check it holds nothing else, then creates the location marker; later setups
+  read the marker (below);
 - S3's bucket-versioning query has bucket scope, because the owner's setting
   applies to every object (§20.7).
 
@@ -8151,6 +8152,91 @@ codes.
 
 Key copies are ordinary slots, found by reading the sequence, never by listing
 (§12.1).
+
+##### A location of its own
+
+On Dropbox and OneDrive a folder is shared with a store's members whole: each
+member's account reaches everything in it. On an S3 service whose member keys
+reach a whole bucket, each key reaches everything in the bucket (§20.7). If two
+stores shared such a location, a member of one could delete the other's
+encrypted objects. On Dropbox and OneDrive, inviting someone to one store would
+also share everything else in its folder with them. So on these providers
+**every store has its own location from creation:** its own shared folder on
+Dropbox, its own folder on OneDrive, its own bucket on a bucket-scoped S3
+service.
+
+Ana creates Household in the Dropbox shared folder `Household`. Ben then tries
+to create Garden in that same folder, and setup refuses it; Garden gets a
+shared folder of its own, `Garden`. On R2 it is the same with buckets:
+Household in the bucket `household`, Garden in `garden`.
+
+The rule applies from creation, even to one-member stores, because moving a
+store into a location of its own at its first invite would mean copying all its
+data. A Dropbox store in the App folder is the exception. Dropbox refuses sharing
+inside the App folder, so no one but its owner reaches it, and sharing such a
+store means relocating it anyway (§20.2). Several of a person's not-shared
+stores can live in the App folder.
+
+It is enforced like this:
+
+- On S3 the location's base prefix must be empty, since the store's location
+  is the whole bucket. Any other prefix fails before any request with
+  `StorageFailure::OwnLocationRequired { reason: Prefix }`. A Dropbox or
+  OneDrive location is the folder itself and has no prefix.
+- A store's first setup, before any location is recorded, lists the location's
+  root: the folder on Dropbox and OneDrive, the bucket's root with delimiter
+  `/` on S3. It does so before S3 detection or any other write. Any object or
+  folder other than the store's own `<store>/` and the location marker
+  `coven-location` refuses setup with `OwnLocationRequired { reason: Occupied }`.
+  A retried creation that already wrote under `<store>/` passes.
+- Then, after S3 detection and the provider check pass (§20.8), first setup
+  passes its point of no return (§11.6) and claims the location, before slot 1
+  and before committing the location: it creates `coven-location` at the
+  location's root once, with the same create-once request slots use. Its
+  complete bytes are the store id as a lowercase hyphenated UUID, 36 ASCII
+  bytes with no newline ([format.md D10](format.md#the-location-marker)).
+- If that create succeeds, setup proceeds. If the name is taken, setup reads the
+  marker exactly: the same bytes mean this is a retry of this store's setup,
+  which proceeds; any other bytes refuse with
+  `OwnLocationRequired { reason: Occupied }`.
+- Reconnecting, restoring and joining use the recorded location. Besides their
+  usual checks they read `coven-location` exactly and require it to name this
+  store; a missing, malformed or other store's marker refuses with
+  `OwnLocationRequired { reason: Occupied }`. They neither list the location's
+  root nor create a missing marker. A failed read keeps its provider cause.
+- The marker is never replaced or deleted. Setup claims it only past its point
+  of no return, so a setup that writes it always finishes, after a crash too;
+  an undone setup never wrote one. A marker naming another store undoes setup,
+  which then wrote none. Deleting a store from a device (`delete_store` or
+  `discard_store`, [api.md E1](api.md#e1-opening)) leaves the marker in storage,
+  like the store's other objects.
+
+Why both checks? The root listing finds objects stored before setup, but only
+those older than the listing margin (§20.4): anything stored within the margin
+may be missing from it. Ana and Ben could each start a store in the folder
+`Household` at the same moment, and both listings would look empty. The marker
+closes that gap. Create-once lets only one of them claim `coven-location`, so
+at most one store's setup passes per location, however far listings lag
+([`at_most_one_store`](proofs/storage/CovenStorage/LocationClaim.lean)).
+
+The marker relies only on create-once and exact reads, which every provider
+must supply (§20.1), never on a listing. On Dropbox its create is an upload in
+mode `add` that never renames, refused with 409 `path/conflict` when the name is
+taken. On OneDrive it is a temporary copied to the marker's name with
+`conflictBehavior=fail`, refused with 409 when the name is taken (Appendix E.2).
+On S3 it is the profile's create (§20.7). Writers on two accounts racing one
+name in a shared folder kept exactly one winner on both Dropbox and OneDrive
+([probes](storage-certification.md#cross-account-create-once-probes-2026-10-16)).
+Measured listings lagged by up to 1.4 s on Dropbox and 1.9 s on OneDrive, and
+no measurement bounds the lag, so a listing alone can't hold the rule.
+
+**Edge cases.**
+
+- Setup checks what the location holds, not the folders above it. Ben could
+  pick a OneDrive folder inside Household's folder for Garden; Household's
+  members would then reach Garden's objects through that parent folder.
+- Only first setup checks what the location holds. Ana can later put her own
+  files in Household's folder; listings skip them (§20.4).
 
 #### 20.4 Listings
 
@@ -8188,7 +8274,7 @@ A file a gone device's folder listing misses through lag is found by the app's
 next cleanup of the files of devices gone for good (§17.10). A join request a gone
 device's listing misses is deleted by its joining device, which finds the
 gone marker (§13.2). The setup check (§20.8) and the
-own-bucket check (§20.7) allow for the margin.
+own-location check (§20.3) allow for the margin.
 
 #### 20.5 Status, times, revisions and checksums
 
@@ -8376,47 +8462,11 @@ from creation,** whoever makes its keys, by hand in the provider's dashboard or
 through coven. Ana creates Household in the R2 bucket `household`. Creating Garden
 in that bucket is refused; Garden gets the bucket `garden`.
 
-The rule applies from creation, even to one-member stores, because moving a store
-into its own bucket at its first invite would mean copying all its data. It is
-enforced like this:
-
-- The location's base prefix must be empty. Any other prefix fails before any
-  request with `StorageFailure::OwnBucketRequired { reason: Prefix }`.
-- A store's first setup, before any location is recorded, lists the bucket's root
-  with delimiter `/`, before detection or any other write. Any object or folder
-  other than the store's own `<store>/` and the bucket marker `coven-bucket`
-  refuses setup with `OwnBucketRequired { reason: Occupied }`. A retried
-  creation that already wrote under `<store>/` passes.
-- Then, after detection and the provider check pass (§20.8), first setup passes
-  its point of no return (§11.6) and claims the bucket, before slot 1 and
-  before committing the location: it creates `coven-bucket` at the bucket's
-  root once, with the same
-  create-once request slots use. Its complete bytes are the store id as a
-  lowercase hyphenated UUID, 36 ASCII bytes with no newline
-  ([format.md D10](format.md#the-bucket-marker)).
-- If that create succeeds, setup proceeds. If the name is taken, setup reads the
-  marker exactly: the same bytes mean this is a retry of this store's setup,
-  which proceeds; any other bytes refuse with
-  `OwnBucketRequired { reason: Occupied }`.
-- Reconnecting, restoring and joining use the recorded location. Besides their
-  usual checks they read `coven-bucket` exactly and require it to name this
-  store; a missing, malformed or other store's marker refuses with
-  `OwnBucketRequired { reason: Occupied }`. They neither list the bucket's root
-  nor create a missing marker. A failed read keeps its provider cause.
-- The marker is never replaced or deleted. Setup claims it only past its point
-  of no return, so a setup that writes it always finishes, after a crash too;
-  an undone setup never wrote one. A marker naming another store undoes setup,
-  which then wrote none. Deleting a store from a device (`delete_store` or
-  `discard_store`, [api.md E1](api.md#e1-opening)) leaves the marker in storage,
-  like the store's other objects.
-
-Why both checks? The root listing finds objects stored before setup, but only
-those older than the listing margin: anything stored within the margin may be
-missing from it. Ana and Ben could each start a store in the bucket `household`
-at the same moment, and both listings would look empty. The marker closes that
-gap. Create-once lets only one of them claim `coven-bucket`, so at most one
-store's setup passes per bucket, however far listings lag
-([`at_most_one_store`](proofs/storage/CovenStorage/BucketClaim.lean)).
+Dropbox shared folders and OneDrive folders follow the same rule, for the same
+reason, and §20.3 gives how it is enforced for all three. On S3 the location's
+base prefix must be empty, first setup checks that the bucket's root holds
+nothing else, and the location marker `coven-location` at the bucket's root
+names the one store that owns the bucket.
 
 ##### Detection
 
@@ -8537,7 +8587,7 @@ once the service's `Retry-After` has passed, or after the ordinary delay of
 §6.7 when it names none. A requested wait never shortens that delay, and a live
 cooldown (§6.7) counts as one.
 
-- **One minute per setup call.** The own-bucket check (§20.7), detection, both
+- **One minute per setup call.** The own-location check (§20.3), detection, both
   checks here, reading the account's label (§20.2), preparing the CloudKit zone
   and the admin claim all draw on it. Past the minute, or for a requested wait
   longer than what is left, setup fails with the refusal, `RateLimited`. A
@@ -8560,7 +8610,7 @@ cooldown (§6.7) counts as one.
 reconnect loading what other devices published, setup can run long enough that
 a bare spinner leaves the person guessing. So it reports each step as it runs,
 as an open does (§4). Ben's first setup of his R2 bucket reports checking that
-the bucket holds nothing else (§20.7), detecting settings, then connecting,
+the bucket holds nothing else (§20.3), detecting settings, then connecting,
 which covers both checks here, then creating the store. Ana's laptop
 reconnecting the Household store on Dropbox reports reading the account's
 label, connecting, then loading, with loading's own steps and counts (§13.4).
@@ -8575,7 +8625,7 @@ outcome is `Cancelled`. Detection's probes and the provider check's test object
 are deleted as each check ends; one a crash leaves is space nothing refers to.
 
 - **The point of no return** is recording the first claim setup is about to
-  send: the bucket marker or slot 1 when it creates the store (the
+  send: the location marker or slot 1 when it creates the store (the
   `CreatingStore` step), or `Set access` when a reconnect records changed access
   (`RecordingAccess`). A reconnect with nothing to record passes it as it
   commits. A cancel from then on is answered that setup is finishing.
@@ -10807,7 +10857,7 @@ Write-ups explain each model and state its assumptions:
 | Assuming hidden staging, atomic comparison and a fresh revision on publication, parts preserve the original condition; incomplete or stale publication leaves the floor unchanged; success stores the whole object; two uploads using one condition cannot both publish | `receive_preserves_condition`, `incomplete_keeps_floor`, `stale_keeps_floor`, `stored_whole`, `one_winner` | `proofs/storage/CovenStorage/FloorUpload.lean` | §16.6, §20.6 |
 | *Body.* A copy that checks a free name and then writes it lets two racers both win | `check_then_write_two_winners` | `proofs/storage/CovenStorage/CopyPublication.lean` | §20.6 |
 | *Body.* A conditional PUT racing a copy can be accepted beside it | `put_racing_copy_two_winners` | `proofs/storage/CovenStorage/CopyPublication.lean` | §20.6 |
-| *Body.* At most one store's setup passes per bucket, however far listings lag | `at_most_one_store` | `proofs/storage/CovenStorage/BucketClaim.lean` | §20.7 |
+| *Body.* At most one store's setup passes per location, however far listings lag | `at_most_one_store` | `proofs/storage/CovenStorage/LocationClaim.lean` | §20.3 |
 | With an atomic copy, copy publication is create-once: same effect as a create, temporaries hidden, one winner per race, lost replies settled by the marker, a marker means the session's bytes | `copy_is_create`, `stage_hidden`, `race_one_winner`, `lost_reply_settles`, `marker_settles_bytes` | `proofs/storage/CovenStorage/CopyPublication.lean` | E.10 |
 | When every publication of a name is a conditional copy, at most one is accepted in any order, and none if the name was taken | `every_copy_at_most_one`, `copied_at_most` | `proofs/storage/CovenStorage/CopyPublication.lean` | E.10 |
 | Concurrent attempts sharing one temporary never hard-fail or lose the create; a missing temporary settles from the destination; an empty destination retries and publishes | `shared_never_fails`, `shared_occupied_identical`, `attemptCopy_retry_empty`, `retry_publishes`, `shared_temporary_missing` | `proofs/storage/CovenStorage/CopyPublication.lean` | E.10 |
@@ -10981,8 +11031,8 @@ pass's failure, kept for its retry.
 | `StorageFailure::ProviderUnavailable` | CloudKit on a platform other than Apple's | §20.2, E.1 |
 | `ContainerNotFound` | CloudKit's zone is missing | E.1 |
 | `S3PrefixError` | a typed S3 base prefix has two slashes in a row, a folder name with a character other than an ASCII letter or digit, `-` or `_`, or a folder name over 255 bytes | §20.3 |
-| `StorageFailure::OwnBucketRequired { reason: Prefix }` | a bucket-scoped service's location has a base prefix | §20.7 |
-| `OwnBucketRequired { reason: Occupied }` | at first setup, a bucket-scoped store's bucket holds anything besides its own folder and the bucket marker, or the marker `coven-bucket` names another store; on reconnecting, restoring or joining, the marker is missing, malformed or names another store | §20.7 |
+| `StorageFailure::OwnLocationRequired { reason: Prefix }` | a bucket-scoped S3 service's location has a base prefix | §20.3, §20.7 |
+| `OwnLocationRequired { reason: Occupied }` | at first setup, the location of a store that needs its own (a Dropbox shared folder, a OneDrive folder, or a bucket-scoped S3 service's bucket) holds anything besides the store's own folder and the location marker, or the marker `coven-location` names another store; on reconnecting, restoring or joining, the marker is missing, malformed or names another store | §20.3 |
 | `InvalidConfiguration` | an S3 location contradicts its host, or has an unknown host outside setup | §20.7, E.3 |
 | `StorageSetupError::S3VersioningUnsupported` | a versioned bucket without a versioned certification | §20.7, E.9 |
 | `S3VersioningUnknown` | an uncertified profile can't read the bucket's versioning state | E.9 |

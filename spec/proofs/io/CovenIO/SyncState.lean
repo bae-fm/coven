@@ -116,7 +116,7 @@ inductive Failure
   | providerUnavailable | accessNotRegistered | accessNotGranted
   | dropboxAppFolderNotShareable | catchUpRequired | network | authentication
   | permissionDenied | notFound | alreadyExists | conflict | containerNotFound
-  | regionMismatch | storeExists | clockSkew | ownBucketRequired | quotaExceeded
+  | regionMismatch | storeExists | clockSkew | ownLocationRequired | quotaExceeded
   | rateLimited | invalidConfiguration | refused | protocol | invalidPath
   | invalidRange | notStoreOwner | inviteeIsStoreOwner | accountIdUnavailable
   | invitationMismatch | sessionMismatch | sessionExpired | sessionIdentityUnknown

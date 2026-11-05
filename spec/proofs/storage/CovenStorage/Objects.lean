@@ -2,9 +2,9 @@ import Std
 
 namespace CovenStorage
 
-/-- D10, in one bucket. Store object paths abstract one store's namespace. -/
+/-- D10, in one location. Store object paths abstract one store's namespace. -/
 inductive Path where
-  | bucket
+  | locationMarker
   | slot (number : Nat)
   | snapshot (audience device number : Nat)
   | file (device id : Nat)

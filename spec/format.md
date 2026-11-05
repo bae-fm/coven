@@ -100,7 +100,7 @@ spaces only separate fields for reading. Example times are UTC.
 | Gone device's marker | `<store>/join-requests/<device>/gone`, beside the device's requests | nothing but its kind and format | D8 |
 | Restore code, invite code | on paper or a screen, never in storage | what a new device needs to find and open the store | D13 |
 | Saved restore code | iCloud Keychain or Block Store, never in storage | a restore code with the store's name, for the person's next devices | D13 |
-| Bucket marker | `coven-bucket`, at the bucket's root, only where member keys reach the whole bucket | the id of the one store that owns the bucket, as plain text | D10 |
+| Location marker | `coven-location`, at the root of a location that holds one store: a Dropbox shared folder, a OneDrive folder, or a bucket whose member keys reach all of it | the id of the one store that owns the location, as plain text | D10 |
 
 ### Three layers
 
@@ -125,14 +125,14 @@ writes slot Ana won in §5.1:
   from D10, using the keys and contexts of D11.
 
 Files, codes and markers are the exceptions. A file has its own simpler
-envelope (D12); a code is a frame turned into text (D13); the bucket marker is
-a store id in plain text, with no envelope at all (D10). An ended invite's
+envelope (D12); a code is a frame turned into text (D13); the location marker
+is a store id in plain text, with no envelope at all (D10). An ended invite's
 marker is a kind, a format and a time; a gone device's marker is a kind and a
 format. Neither is sealed (D8).
 
 ### Kind numbers
 
-Every object and every frame, except the bucket marker, starts with a kind byte.
+Every object and every frame, except the location marker, starts with a kind byte.
 Format 1 uses these:
 
 | Kind | What | Section |
@@ -193,7 +193,7 @@ else rather than guessing.
 has a variable length.
 
 **Every stored object starts in the clear with `kind:u8 | version:u16`,** except
-D10's unsealed bucket marker.
+D10's unsealed location marker.
 
 - A reader refuses an unknown kind.
 - A reader that meets a newer version asks for an update instead of calling the
@@ -1355,7 +1355,7 @@ device_name  name
 
 When an invite ends, the inviting device puts a marker in its request's place
 (§13.2): the same path, created once. It is the only object at a join
-request's path that isn't a request. Like the bucket marker and a gone
+request's path that isn't a request. Like the location marker and a gone
 device's marker (below), it isn't sealed: it holds no secret. It is eleven
 bytes, `kind:u8 | format:u16 | kept_until:u64`:
 
@@ -1713,7 +1713,7 @@ provider can't move one object into another's place.
 
 | Path | Holds |
 | --- | --- |
-| `coven-bucket` | Bucket-root create-once ownership marker, only where member keys reach the whole bucket (§20.7) |
+| `coven-location` | Create-once ownership marker at the root of a location that holds one store (§20.3) |
 | `<store>/seq/<n>` | One create-once sequence slot |
 | `<store>/floor` | Signed, encrypted snapshot references and the first retained slot; conditional replacement |
 | `<store>/snapshots/<audience>/<device>/<n>` | One snapshot, discovered by its announcement; a device gone for good's folders are listed once, for bodies no announcement names (§16.6) |
@@ -1742,32 +1742,35 @@ numbered 3 is `5d0c8e2a-7b1f-4c3e-9a64-0f2d8b71c3e5/snapshots/store/4242/3`.
 - Every immutable path is created once, and retries compare exact bytes. Only
   the floor is replaceable.
 - Bootstrap discovers store creation at slot 1, or in the floor's store
-  snapshot. The bucket marker (below) reserves ownership only; it doesn't mark
+  snapshot. The location marker (below) reserves ownership only; it doesn't mark
   creation.
 
-### The bucket marker
+### The location marker
 
-On a service whose member keys reach a whole bucket, such as R2, a member of one
-store could delete another store's objects in the same bucket. So there, every
-store has its own bucket (§20.7). A listing of the bucket's root can't enforce
-that alone: an object stored within the listing margin may be missing from it,
-so two stores set up in one bucket at nearly the same time could both pass. The
-bucket marker closes that gap. It is one object at the bucket's root, created
-once, naming the one store that owns the bucket.
+On Dropbox and OneDrive a folder is shared with a store's members whole, and on
+a service whose member keys reach a whole bucket, such as R2, each key reaches
+the whole bucket. A member of one store could delete another store's objects in
+the same folder or bucket. So there, every store has its own location: its own
+folder or bucket (§20.3). A listing of the location's root can't enforce that
+alone: an object stored within the listing margin may be missing from it, so two
+stores set up in one location at nearly the same time could both pass. The
+location marker closes that gap. It is one object at the location's root,
+created once, naming the one store that owns the location.
 
-*Example.* Ana sets up Household in the R2 bucket `household`. Its first setup
-creates the object `coven-bucket` at the bucket's root, whose complete bytes are
-Household's store id as text:
+*Example.* Ana sets up Household in the Dropbox shared folder `Household`. Its
+first setup creates the object `coven-location` at the folder's root, whose
+complete bytes are Household's store id as text:
 
 ```
 35 64 30 63 38 65 32 61 2D 37 62 31 66 2D 34 63 33 65 2D 39 61 36 34 2D 30 66 32 64 38 62 37 31 63 33 65 35
                               "5d0c8e2a-7b1f-4c3e-9a64-0f2d8b71c3e5": 36 bytes
 ```
 
-If someone tries to set up Garden in the same bucket, its create of
-`coven-bucket` finds the name taken, reads these bytes, sees another store's id,
-and is refused with `OwnBucketRequired { reason: Occupied }`. A retry of
-Household's own setup reads equal bytes and proceeds.
+If someone tries to set up Garden in the same folder, its create of
+`coven-location` finds the name taken, reads these bytes, sees another store's
+id, and is refused with `OwnLocationRequired { reason: Occupied }`. A retry of
+Household's own setup reads equal bytes and proceeds. In an R2 bucket the
+marker is the same object at the bucket's root.
 
 **Rules.**
 
@@ -1775,9 +1778,11 @@ Household's own setup reads equal bytes and proceeds.
   hyphenated UUID: 36 ASCII bytes, with no header, newline, encryption or
   signature. It has no `kind | version` prefix (D1).
 - Its path has no store prefix.
-- It exists only where member keys reach the whole bucket.
+- It exists only in a location that holds one store: a Dropbox shared folder, a
+  OneDrive folder, or a bucket whose member keys reach all of it. A Dropbox App
+  folder has none.
 - First setup alone creates it. Reconnect, restore and join require an exact
-  match of its bytes (§20.7).
+  match of its bytes (§20.3).
 - It is never replaced or deleted, including by local store deletion.
 
 ---

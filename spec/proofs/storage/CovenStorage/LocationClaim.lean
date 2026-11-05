@@ -1,34 +1,37 @@
 import CovenStorage.Objects
 
-namespace CovenStorage.BucketClaim
+namespace CovenStorage.LocationClaim
 
-/-! The bucket marker uses the same atomic create as slots. Store ids are
-their canonical, injective byte encodings. Listings can omit every recent
-object: they are an additional refusal gate, never evidence of ownership.
+/-! The location marker uses the same atomic create as slots. A location is a
+Dropbox shared folder, a OneDrive folder, or a bucket whose member keys reach
+all of it; each needs only that create and exact reads, so one model covers
+them. Store ids are their canonical, injective byte encodings. Listings can
+omit every recent object: they are an additional refusal gate, never evidence
+of ownership.
 No transition replaces or deletes the marker, including local store deletion. -/
 
 def names (s : Storage) (store : Bytes) : Bool :=
-  match s .bucket with
+  match s .locationMarker with
   | none => false
   | some o => o.bytes == store
 
 def setup (s : Storage) (store : Bytes) (time : Nat) : Storage × Bool :=
-  (create s .bucket store time, match s .bucket with
+  (create s .locationMarker store time, match s .locationMarker with
     | none => true
     | some o => o.bytes == store)
 
 theorem names_iff (s : Storage) (store : Bytes) :
-    names s store = true ↔ ∃ o, s .bucket = some o ∧ o.bytes = store := by
-  cases h : s .bucket <;> simp [names, h]
+    names s store = true ↔ ∃ o, s .locationMarker = some o ∧ o.bytes = store := by
+  cases h : s .locationMarker <;> simp [names, h]
 
 theorem setup_passes (s : Storage) (store : Bytes) (time : Nat)
     (h : (setup s store time).2 = true) : names (setup s store time).1 store = true := by
-  cases hs : s .bucket <;> simp_all [setup, names, create]
+  cases hs : s .locationMarker <;> simp_all [setup, names, create]
 
 theorem names_preserved (s : Storage) (store : Bytes) (requests : List Publication)
     (h : names s store = true) : names (publishAll s requests) store = true := by
   obtain ⟨o, ho, hb⟩ := (names_iff _ _).1 h
-  exact (names_iff _ _).2 ⟨o, stored_history_preserved s requests .bucket o ho, hb⟩
+  exact (names_iff _ _).2 ⟨o, stored_history_preserved s requests .locationMarker o ho, hb⟩
 
 /-- Two successful setups, separated by any number of creates and retries,
 must name the same store. A delayed read after a refused create sees that
@@ -54,4 +57,4 @@ theorem reconnect_refuses_other (s : Storage) (a b : Bytes)
   obtain ⟨o, ho, hb⟩ := (names_iff _ _).1 h
   simp [names, ho, hb, different]
 
-end CovenStorage.BucketClaim
+end CovenStorage.LocationClaim
