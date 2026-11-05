@@ -594,3 +594,38 @@ async fn a_discard_stopped_after_its_entries_is_finished_by_the_listing() {
         .unwrap();
     assert_eq!(again.id(), store);
 }
+
+/// Dropping the caller of a read-only handle's `close` after it has begun
+/// does not stop it: every clone's connections close and the store lock is
+/// released, so a writable open then succeeds (E4).
+#[tokio::test]
+async fn cancelling_a_read_only_close_still_closes_every_clone() {
+    use std::{
+        future::{poll_fn, Future},
+        task::Poll,
+    };
+    let root = tempfile::tempdir().unwrap();
+    let app = Coven::in_memory(root.path().to_owned());
+    let directory = app.create_closed_store("Household", Arc::new(UuidIds)).await.unwrap();
+    builder(&app).open(directory.id(), |_| ()).await.unwrap().close().await.unwrap();
+    let reader = builder(&app).open_read_only(directory.id()).await.unwrap();
+    let clone = reader.clone();
+    {
+        let close = reader.close();
+        tokio::pin!(close);
+        poll_fn(|cx| {
+            assert!(close.as_mut().poll(cx).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+    }
+    for handle in [&reader, &clone] {
+        let read = tokio::time::timeout(HANG_GUARD, handle.read(|_| Ok(()))).await.unwrap();
+        assert!(matches!(read, Err(CovenError::Database(DbError::StoreClosed))), "{read:?}");
+    }
+    let writer = tokio::time::timeout(HANG_GUARD, builder(&app).open(directory.id(), |_| ()))
+        .await
+        .expect("the cancelled close released the store")
+        .unwrap();
+    writer.close().await.unwrap();
+}
