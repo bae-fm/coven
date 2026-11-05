@@ -430,6 +430,7 @@ proofs() {
         COVEN_SEQUENCE_LEAN="$runner" exact_ignored coven-sync --all-features -- --nocapture \
             sequence_sync::tests::differential::sequence_floor_matches_lean \
             sequence_sync::sequence_read::tests::sequence_read_pass_matches_lean \
+            sequence_sync::sequence_read::tests::sequence_end_search_matches_lean \
             sequence_sync::sequence_reload::tests::sequence_blocked_floor_matches_lean \
             sequence_sync::sequence_retention::tests::sequence_audience_coverage_matches_lean \
             sequence_sync::sequence_retention::tests::sequence_daily_retention_matches_lean \

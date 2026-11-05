@@ -181,6 +181,11 @@ def readPass (j : Json) : Except String Json := do
     | .stops slot => Json.mkObj [("stops", toJson slot)]
     | .floorDamaged => toJson "floorDamaged"
 
+def readEndSearch (j : Json) : Except String Json := do
+  let present ← j.getObjValAs? (List Nat) "present"
+  distinct present "present slot"
+  return toJson (ReadPass.locateEnd (fun i => present.contains i) (← nat j "start"))
+
 def readSelection (j : Json) : Except String (Reload.Selection Nat) := do
   let slot ← positive j "slot"
   let covers ← nat j "covers"
@@ -356,6 +361,7 @@ def run (j : Json) : Except String Json := do
   | "settle" => readSettle j
   | "read" => readRead j
   | "readPass" => readPass j
+  | "endSearch" => readEndSearch j
   | "joinScan" => readJoinScan j
   | "retention" => readRetention j
   | "floor" => return toJson (Retention.floorStart (← j.getObjValAs? (List (Option Nat)) "coverage"))

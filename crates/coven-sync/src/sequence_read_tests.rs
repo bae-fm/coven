@@ -523,3 +523,32 @@ async fn sequence_read_pass_matches_lean() {
     }
     eprintln!("read pass: {cases} cases");
 }
+
+/// The real end search over slots `1..=20` with one missing, from each
+/// start through 12, against `endSearch` (§6.1, `ReadPass.locateEnd`).
+#[tokio::test]
+#[ignore = "requires COVEN_SEQUENCE_LEAN; scripts/check.sh builds sequenceRunner"]
+async fn sequence_end_search_matches_lean() {
+    let group = Group::new();
+    let ana = group.device(1).await;
+    let path = |slot: u64| ObjectPath::slot(group.store, slot.try_into().unwrap());
+    for slot in 1..=20 {
+        group.storage.plant(&path(slot), b"slot").await.unwrap();
+    }
+    for lost in 0..=21u64 {
+        if (1..=20).contains(&lost) {
+            group.storage.delete(&path(lost)).await.unwrap();
+        }
+        let present: Vec<u64> = (1..=20).filter(|slot| *slot != lost).collect();
+        for start in 0..=12 {
+            let input = serde_json::json!({"kind":"endSearch","start":start,"present":present});
+            let expected = crate::tests::run_lean("COVEN_SEQUENCE_LEAN", &input);
+            let found = ana.sync.locate_end(start).await.unwrap();
+            assert_eq!(serde_json::json!(found), expected, "{input}");
+        }
+        if (1..=20).contains(&lost) {
+            group.storage.plant(&path(lost), b"slot").await.unwrap();
+        }
+    }
+    ana.database().close().await.unwrap();
+}

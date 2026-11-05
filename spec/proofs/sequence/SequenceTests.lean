@@ -546,6 +546,14 @@ def keyCase (slots held current : List Json) : Json := json% {
   rejects (pass 3 4 "missing" Json.null)
   rejects (pass 5 4 "lost" Json.null)
 
+-- A gap the end search checks reads as the end; one it skips is found.
+#eval do
+  let present := fun (gap : Nat) => ((List.range 21).filter (fun i => i ≠ 0 ∧ i ≠ gap))
+  for (gap, found) in ([(11, 10), (12, 11), (13, 20), (14, 13), (21, 20)] : List (Nat × Nat)) do
+    check (json% {"kind":"endSearch","start":10,"present":$(present gap)}) (toJson found)
+  check (json% {"kind":"endSearch","start":10,"present":[]}) (toJson (10 : Nat))
+  rejects (json% {"kind":"endSearch","start":10,"present":[11,11]})
+
 -- Ben's unread removal preserves the old original; reading it forbids new
 -- originals, and a later device removal still cuts off the old original.
 #eval do

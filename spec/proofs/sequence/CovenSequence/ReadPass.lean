@@ -25,6 +25,11 @@ Reporting a stop at or below the floor's `at` first (`pass`) reports the gap
 (`gap_report_wins`), and blames a floor only once the device holds the history
 through its `at` (`floor_blamed_only_when_held`), which an honest floor passes
 (`honest_floor_never_blamed`).
+
+The end search (`locateEnd`) finds a slot whose next one is missing. Storage
+whose sequence ends at its answer answers every check it makes the same way
+(`end_search_sees_an_end`), so a gap at a slot it checked is not known: no slot
+after it is known to exist until a later check or a floor's `at` shows one.
 -/
 namespace CovenSequence.ReadPass
 
@@ -212,5 +217,153 @@ theorem checkFirst_blames_honest_floor (check : Nat → Bool)
   refine ⟨lostStore_good, rfl, rfl, rfl, ?_, ?_⟩
   · simp [checkFirst, gapStore, lostStore, refused]
   · exact gap_report_wins check .missing (by decide) (by decide)
+
+/-! ## Finding the end
+
+`locateEnd` checks `start + 1`, `start + 2`, `start + 4`, … until one is
+missing, then halves the bracket. Checks only test existence. -/
+
+/-- Halve `(low, high)` until the two are adjacent. -/
+def narrow (present : Nat → Bool) (low high : Nat) : Nat → Nat
+  | 0 => low
+  | fuel + 1 =>
+    if high ≤ low + 1 then low
+    else if present (low + (high - low) / 2) then narrow present (low + (high - low) / 2) high fuel
+    else narrow present low (low + (high - low) / 2) fuel
+
+/-- Check `start + step`, doubling `step`, until a check misses. -/
+def climb (present : Nat → Bool) (start low step : Nat) : Nat → Nat × Nat
+  | 0 => (low, start + step)
+  | fuel + 1 =>
+    if present (start + step) then climb present start (start + step) (2 * step) fuel
+    else (low, start + step)
+
+/-- The end search: 64 doublings and 64 halvings, as for a `u64` slot number. -/
+def locateEnd (present : Nat → Bool) (start : Nat) : Nat :=
+  narrow present (climb present start start 1 64).1 (climb present start start 1 64).2 64
+
+theorem narrow_bounds (present : Nat → Bool) :
+    ∀ fuel low high, low < high →
+      low ≤ narrow present low high fuel ∧ narrow present low high fuel < high
+  | 0, low, high, h => ⟨Nat.le_refl _, h⟩
+  | fuel + 1, low, high, h => by
+    simp only [narrow]
+    by_cases adjacent : high ≤ low + 1
+    · simp only [adjacent, ite_true]; exact ⟨Nat.le_refl _, h⟩
+    · simp only [adjacent, ite_false]
+      split
+      · have := narrow_bounds present fuel (low + (high - low) / 2) high (by omega)
+        exact ⟨by omega, by omega⟩
+      · have := narrow_bounds present fuel low (low + (high - low) / 2) (by omega)
+        exact ⟨by omega, by omega⟩
+
+/-- Halving gives the same answer on any presence that agrees, inside the
+bracket, with "at most the answer". -/
+theorem narrow_congr (present other : Nat → Bool) :
+    ∀ fuel low high, low < high →
+      (∀ i, low < i → i < high → (other i = true ↔ i ≤ narrow present low high fuel)) →
+      narrow other low high fuel = narrow present low high fuel
+  | 0, _, _, _, _ => rfl
+  | fuel + 1, low, high, h, agree => by
+    by_cases adjacent : high ≤ low + 1
+    · simp [narrow, adjacent]
+    have lower : low < low + (high - low) / 2 := by omega
+    have upper : low + (high - low) / 2 < high := by omega
+    cases hp : present (low + (high - low) / 2)
+    · have hr : narrow present low high (fuel + 1) =
+          narrow present low (low + (high - low) / 2) fuel := by
+        simp [narrow, adjacent, hp]
+      have bound := (narrow_bounds present fuel low _ lower).2
+      have ho : other (low + (high - low) / 2) = false := by
+        cases ho : other (low + (high - low) / 2)
+        · rfl
+        · have := (agree _ lower upper).1 ho
+          omega
+      rw [hr]
+      simp only [narrow, adjacent, ho, ite_false, Bool.false_eq_true]
+      exact narrow_congr present other fuel low _ lower fun i h1 h2 => by
+        rw [← hr]; exact agree i h1 (by omega)
+    · have hr : narrow present low high (fuel + 1) =
+          narrow present (low + (high - low) / 2) high fuel := by
+        simp [narrow, adjacent, hp]
+      have bound := (narrow_bounds present fuel _ high upper).1
+      have ho : other (low + (high - low) / 2) = true := (agree _ lower upper).2 (by omega)
+      rw [hr]
+      simp only [narrow, adjacent, ho, ite_false, ite_true]
+      exact narrow_congr present other fuel _ high upper fun i h1 h2 => by
+        rw [← hr]; exact agree i (by omega) h2
+
+/-- While `low` precedes the next check, the doubling keeps it so, and its
+bracket stays ordered. -/
+theorem climb_bounds (present : Nat → Bool) (start : Nat) :
+    ∀ fuel low step, 0 < step → low < start + step →
+      low ≤ (climb present start low step fuel).1 ∧
+        (climb present start low step fuel).1 < (climb present start low step fuel).2
+  | 0, low, step, _, h => ⟨Nat.le_refl _, h⟩
+  | fuel + 1, low, step, positive, h => by
+    simp only [climb]
+    split
+    · have := climb_bounds present start fuel (start + step) (2 * step) (by omega) (by omega)
+      exact ⟨by omega, by omega⟩
+    · exact ⟨Nat.le_refl _, h⟩
+
+/-- Doubling gives the same bracket on "at most `r`", for any `r` the bracket holds. -/
+theorem climb_congr (present : Nat → Bool) (start r : Nat) :
+    ∀ fuel low step, 0 < step → low < start + step →
+      (climb present start low step fuel).1 ≤ r → r < (climb present start low step fuel).2 →
+      climb (fun i => decide (i ≤ r)) start low step fuel = climb present start low step fuel
+  | 0, _, _, _, _, _, _ => rfl
+  | fuel + 1, low, step, positive, h, lower, upper => by
+    cases hp : present (start + step)
+    · have hc : climb present start low step (fuel + 1) = (low, start + step) := by
+        simp [climb, hp]
+      rw [hc] at upper
+      rw [hc]
+      simp only at upper
+      simp [climb, show ¬ start + step ≤ r by omega]
+    · have hc : climb present start low step (fuel + 1) =
+          climb present start (start + step) (2 * step) fuel := by
+        simp [climb, hp]
+      rw [hc] at lower upper
+      rw [hc]
+      have bound := (climb_bounds present start fuel (start + step) (2 * step) (by omega) (by omega)).1
+      simp only [climb, show start + step ≤ r by omega, decide_true, ite_true]
+      exact climb_congr present start r fuel (start + step) (2 * step) (by omega) (by omega) lower upper
+
+theorem locateEnd_bounds (present : Nat → Bool) (start : Nat) :
+    start ≤ locateEnd present start ∧
+      (climb present start start 1 64).1 ≤ locateEnd present start ∧
+      locateEnd present start < (climb present start start 1 64).2 := by
+  have b := climb_bounds present start 64 start 1 (by omega) (by omega)
+  have n := narrow_bounds present 64 _ _ b.2
+  exact ⟨by unfold locateEnd; omega, n.1, n.2⟩
+
+/-- **The end search sees an end.** Storage whose sequence ends at the search's
+answer answers every check the search makes the same way, so the search
+answers the same there. A slot after the answer, past a checked miss, is not
+known to exist: a gap at a slot the search checked reads as the end until a
+later check or a floor's `at` shows a later slot. -/
+theorem end_search_sees_an_end (present : Nat → Bool) (start : Nat) :
+    locateEnd (fun i => decide (i ≤ locateEnd present start)) start = locateEnd present start := by
+  have b := climb_bounds present start 64 start 1 (by omega) (by omega)
+  have e := locateEnd_bounds present start
+  have same := climb_congr present start (locateEnd present start) 64 start 1 (by omega) (by omega)
+    e.2.1 e.2.2
+  unfold locateEnd at same ⊢
+  rw [same]
+  exact narrow_congr present _ 64 _ _ b.2 fun i _ _ => by simp
+
+/-- Ben applied through 10; Ana's slots run to 20. The gap at 12 is a slot
+the search checks: the search answers 11 and the pass reads to the end there.
+The gap at 13 is not: the check of 14 finds a later slot, and the pass
+reports 13. -/
+theorem checked_gap_reads_as_end :
+    locateEnd (fun i => decide (i ≤ 20 ∧ i ≠ 12)) 10 = 11 ∧
+    pass (fun _ => true) 10 12 .missing (locateEnd (fun i => decide (i ≤ 20 ∧ i ≠ 12)) 10) none =
+      .synced 11 ∧
+    locateEnd (fun i => decide (i ≤ 20 ∧ i ≠ 13)) 10 = 20 ∧
+    pass (fun _ => true) 10 13 .missing (locateEnd (fun i => decide (i ≤ 20 ∧ i ≠ 13)) 10) none =
+      .stops 13 := by
+  decide
 
 end CovenSequence.ReadPass

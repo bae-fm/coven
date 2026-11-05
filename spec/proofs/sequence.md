@@ -974,6 +974,17 @@ it, or it is at or below the floor's `at`.
   kept slot through the head is present, so a gap below the floor's `at` is
   damage.
 
+`locateEnd` models the end search: checks at `start + 1`, `start + 2`,
+`start + 4`, … until one misses, then halving.
+
+- `end_search_sees_an_end`: storage whose sequence ends at the search's answer
+  answers every check the search makes the same way, so the search answers the
+  same there. A missing slot a check lands on is therefore not known to be a gap;
+  a later check or a floor's `at` makes it known.
+- `checked_gap_reads_as_end`: from slot 10 with slots to 20, a gap at 12, which
+  a check lands on, reads as the end at 11; a gap at 13 is passed over by the
+  check of 14 and reported.
+
 ## JSON runner
 
 Build with `cd spec/proofs/sequence && lake build`; the executable is
@@ -1031,6 +1042,10 @@ reach every named slot. The answer is `"reload"`, `{"synced":n}`,
 ```
 
 Answer: `{"stops":5}`.
+
+**`endSearch`** calls `ReadPass.locateEnd` from `start` over the distinct
+`present` slots; every other slot is missing. It returns the end found:
+`{"kind":"endSearch","start":10,"present":[11,13]}` gives 11.
 
 **`retention`** gives one audience's floor: `Retention.newest` for the name and
 `Retention.floorFirst` over `Retention.choose` for `first`. Input `snapshots`
@@ -1229,6 +1244,8 @@ and settlement comparisons also include deterministic seeded cases.
 - `coven-sync`'s `sequence_read_pass_matches_lean` loses one slot from a store
   whose floor's `at` is past it, or one written after the floor, or one with no
   floor, and compares what the real pass applies and reports with `readPass`.
+  `sequence_end_search_matches_lean` compares the real end search over storage
+  missing one slot with `endSearch`.
 - `coven-database` applies write slots and compares visible unique winners,
   permanent owner creations (slot, write number, author and member) and consumed
   cut-off refusals at every prefix.

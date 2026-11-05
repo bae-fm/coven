@@ -347,3 +347,5 @@ import SequenceApply
 #print axioms CovenSequence.ReadPass.gap_below_at_is_damage
 #print axioms CovenSequence.ReadPass.honest_floor_never_blamed
 #print axioms CovenSequence.ReadPass.checkFirst_blames_honest_floor
+#print axioms CovenSequence.ReadPass.end_search_sees_an_end
+#print axioms CovenSequence.ReadPass.checked_gap_reads_as_end

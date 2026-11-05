@@ -1501,7 +1501,11 @@ until one is missing.
   counts as absent.
 - **Far behind.** A device far behind finds the end quickly by checking n+1,
   n+2, n+4, … and then narrowing the gap. These checks only test existence; they
-  apply nothing.
+  apply nothing. A check that misses reads as the end: storage whose sequence
+  ends just before it answers every check the same way
+  ([`end_search_sees_an_end`](proofs/sequence/CovenSequence/ReadPass.lean)).
+  So a missing slot that a check lands on is found to be a gap only once a later
+  slot is known to exist.
 - **On a miss, read the floor.** If the missing slot is below the first kept slot,
   the device *reloads*: it loads the floor's snapshots in place of the history it
   missed, then applies the kept slots after them (§16.5).
@@ -10752,6 +10756,7 @@ Write-ups explain each model and state its assumptions:
 | A pass whose reading stops at or below the floor's `at` applies the slots before the stop and reports the stop; it reports the floor as damaged only after holding the slots through the floor's `at` and failing the check, which an honest floor in storage in good order never does. A stop past the floor's `at` reads as it did with the floor checked first | `gap_report_wins`, `floor_blamed_only_when_held`, `honest_floor_never_blamed`, `pass_eq_checkFirst` | `proofs/sequence/CovenSequence/ReadPass.lean` | §6.1, §6.2 |
 | In storage in good order every slot from the first kept slot through the floor's `at` is present, so a missing one there is damage | `gap_below_at_is_damage` | `proofs/sequence/CovenSequence/ReadPass.lean` | §6.1 |
 | *Body.* Checked first against the slots before a gap, an honest floor is reported as damaged instead of the gap | `checkFirst_blames_honest_floor` | `proofs/sequence/CovenSequence/ReadPass.lean` | §6.1 |
+| *Body.* The end search answers the same on storage that ends at its answer, so a missing slot its checks land on reads as the end until a later slot is known to exist; one they pass over is found | `end_search_sees_an_end`, `checked_gap_reads_as_end` | `proofs/sequence/CovenSequence/ReadPass.lean` | §6.1 |
 | Bookkeeping requests no pass, and no write is lost even when passes race | `write_never_lost`, `racing_passes`, `bookkeeping_retains_none` | `proofs/io/CovenIO/Wakes.lean` | §6.7 |
 | A wait is due when its delay passes or a commit changes the prerequisite it names; a commit changing another prerequisite leaves it waiting, and being woken doesn't reset the backoff. Every start after the first is paid for by a full delay or by such a commit, so a wait nothing changes starts at most 1 + ⌊t / d⌋ times in t seconds, and n of them at most n times that | `evidence_rate`, `unrelated_commit_ignored`, `evidence_keeps_backoff`, `unchanged_rate`, `unchanged_waits_rate` | `proofs/io/CovenIO/WaitingEvidence.lean` | §6.7, §21.2 |
 | A reopened wait keeps its backoff and is due within its full wait under any wall clock; without a forward wall-clock jump, each reopen adds at most one start, and a forward jump can end a wait early | `reopen_within_wait`, `reopened_due`, `reopen_rate`, `reopen_unchanged_rate`, `forward_jump_ends_wait` | `proofs/io/CovenIO/WaitingReopen.lean` | §6.7, §21.2 |
