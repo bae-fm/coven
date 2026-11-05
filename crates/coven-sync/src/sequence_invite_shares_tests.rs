@@ -257,3 +257,52 @@ async fn an_invite_cancelled_while_its_share_lands_settles_the_share() {
     assert_ended_and_sending(&phone).await;
     phone.database().close().await.unwrap();
 }
+
+/// Ana's phone is taking Carol's account back, its invite ended, when
+/// her laptop shares the account again for an invite of its own. The
+/// revoke finishes; the account's work is not complete until the opposite
+/// request reverses it, one request at a time (§20.9).
+#[tokio::test]
+async fn a_request_made_obsolete_while_it_runs_is_reversed_before_the_accounts_work_ends() {
+    let group = Group::shared();
+    let (phone, ben, laptop) = household(&group).await;
+    let first = invite(&phone).await;
+    laptop.sync.pass().await.unwrap();
+
+    phone.sync.cancel_invite(first.id).await.unwrap();
+    let (entered, entering) = tokio::sync::oneshot::channel();
+    let (release, released) = tokio::sync::oneshot::channel();
+    phone.storage.hold_next_access(CAROL, false, entered, released).await;
+    let (revoking, ()) = tokio::join!(phone.sync.pass(), async {
+        entering.await.unwrap();
+        invite(&laptop).await;
+        release.send(()).unwrap();
+    });
+    revoking.unwrap();
+
+    let account_requests: Vec<_> = phone
+        .storage
+        .request_trace()
+        .into_iter()
+        .filter(|request| {
+            matches!(
+                request,
+                MemoryRequest::Other("grant_access") | MemoryRequest::Other("revoke_access")
+            )
+        })
+        .collect();
+    assert_eq!(
+        account_requests,
+        [
+            MemoryRequest::Other("grant_access"),
+            MemoryRequest::Other("revoke_access"),
+            MemoryRequest::Other("grant_access"),
+        ]
+    );
+    assert_eq!(row(&phone, CAROL).await, Some((true, Some(true))));
+    assert!(group.storage.shared_with(CAROL).await);
+    assert!(phone.database().pending::<PendingRecord>().await.unwrap().is_empty());
+    for device in [&phone, &ben, &laptop] {
+        device.database().close().await.unwrap();
+    }
+}
