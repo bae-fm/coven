@@ -132,6 +132,31 @@ async fn a_failed_flush_fails_the_write_and_commits_nothing() {
     db.close().await.unwrap();
 }
 
+/// Staging a file takes the store's read lock for as long as the file's
+/// writer lives; when the lock can't be taken, the write fails with that lock
+/// error and commits nothing (§17.3).
+#[tokio::test(flavor = "current_thread")]
+async fn staging_that_cant_retain_the_store_fails_with_its_lock_error() {
+    let store = TestStore::new();
+    let db = open(&store, Provenance::AppProvided).await;
+    // The readers lock file is made when first needed; a directory in its
+    // place can't be opened as one.
+    let directory = store.database_path().parent().unwrap().to_owned();
+    let readers = directory.with_file_name(format!(".{}.readers.lock", store.id()));
+    std::fs::create_dir(&readers).unwrap();
+    let ran = Arc::new(AtomicBool::new(false));
+    let error = write_two(&db, ran.clone()).await.unwrap_err();
+    assert!(
+        matches!(&error, DbError::Lock(coven_foundation::files::StoreLockError::File(_))),
+        "{error:?}"
+    );
+    assert!(!ran.load(Ordering::SeqCst));
+    assert_eq!(committed_rows(&store), 0);
+    assert!(owned_paths(&store).is_empty());
+    std::fs::remove_dir(&readers).unwrap();
+    db.close().await.unwrap();
+}
+
 struct Started<R> {
     reader: R,
     entered: Option<tokio::sync::oneshot::Sender<()>>,
