@@ -357,7 +357,7 @@ impl StorageConnections {
                 config.clone(),
                 auth,
                 self.device,
-                self.publications.clone(),
+                self.state.clone(),
                 self.waits.clone(),
                 self.transfers.clone(),
             )
@@ -377,8 +377,11 @@ impl StorageConnections {
                 .seal_chunk(&key, path.as_str(), 0, plaintext)
                 .map_err(|error| StorageSetupError::Internal(Box::new(error)))?,
         );
-        self.publications
-            .check(&path, coven_storage::check_provider(setup.as_ref(), &path, &bytes))
+        self.state
+            .permit_provider_check(
+                &path,
+                coven_storage::check_provider(setup.as_ref(), &path, &bytes),
+            )
             .await?;
         progress.done(1);
         self.reached(SetupStop::Checked).await?;
@@ -461,7 +464,7 @@ impl StorageConnections {
                 location,
                 auth,
                 self.device,
-                self.publications.clone(),
+                self.state.clone(),
                 self.waits.clone(),
                 self.transfers.clone(),
             )

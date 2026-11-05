@@ -339,7 +339,7 @@ impl StorageConnections {
 
     /// Hold idle passes at most `interval` apart until the guard drops.
     pub(crate) fn sync_often(&self, interval: std::time::Duration) -> coven_sync::SyncOftenGuard {
-        self.publications.state.sync_often(interval)
+        self.state.sync_often(interval)
     }
 
     /// Once the connection is released, record whether storage is set up

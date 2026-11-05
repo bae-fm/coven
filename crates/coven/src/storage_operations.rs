@@ -17,13 +17,7 @@ impl StorageConnections {
         sql: &coven_database::SqlContext<'_, '_>,
         change: StoreChange,
     ) -> Result<Option<OperationId>, SyncError> {
-        coven_sync::administer(
-            sql,
-            self.device,
-            &self.held()?,
-            self.publications.state.clone(),
-            change,
-        )
+        coven_sync::administer(sql, self.device, &self.held()?, self.state.clone(), change)
     }
 
     /// The member pair this installation holds, which an admin step checks
@@ -58,7 +52,7 @@ impl StorageConnections {
             sql,
             self.device,
             &self.held()?,
-            self.publications.state.clone(),
+            self.state.clone(),
             member,
             keys,
         )
@@ -90,7 +84,7 @@ impl StorageConnections {
             self.device,
             &self.held()?,
             self.ids.as_ref(),
-            self.publications.state.clone(),
+            self.state.clone(),
             name,
         )
     }
@@ -141,7 +135,7 @@ impl StorageConnections {
             self.ids.as_ref(),
             self.clock.now(),
             &location,
-            self.publications.state.clone(),
+            self.state.clone(),
             invite,
         )
     }
@@ -158,7 +152,7 @@ impl StorageConnections {
             sql,
             self.clock.now(),
             self.waits.clone(),
-            self.publications.state.clone(),
+            self.state.clone(),
             request,
         )
     }
@@ -175,7 +169,7 @@ impl StorageConnections {
             sql,
             self.clock.now(),
             self.waits.clone(),
-            self.publications.state.clone(),
+            self.state.clone(),
             request,
         )
     }
@@ -192,7 +186,7 @@ impl StorageConnections {
             sql,
             self.clock.now(),
             self.waits.clone(),
-            self.publications.state.clone(),
+            self.state.clone(),
             invite,
         )
     }

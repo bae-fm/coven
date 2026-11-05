@@ -16,7 +16,6 @@ use coven_sync::{
     DeviceCredentials, LastPass, RestoreCodes, SequenceState, SequenceSync, SessionSignIn, SyncLoop,
 };
 use std::{
-    collections::BTreeSet,
     future::Future,
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
@@ -71,35 +70,6 @@ pub(crate) async fn record_opened(
     coven_sync::InviteExpiry::opened(database, clock.now()).await.map_err(SyncError::from)
 }
 
-/// What a connection may publish: the sequence owner's gate, and the fresh
-/// objects of a provider check setup is running (§20.8, E5).
-pub(crate) struct Publications {
-    state: Arc<SequenceState>,
-    checks: std::sync::Mutex<BTreeSet<ObjectPath>>,
-}
-
-impl Publications {
-    pub(crate) fn new(state: Arc<SequenceState>) -> Self {
-        Self { state, checks: std::sync::Mutex::new(BTreeSet::new()) }
-    }
-    /// Permit the provider check's own object while `scope` runs.
-    async fn check<T>(&self, path: &ObjectPath, scope: impl Future<Output = T>) -> T {
-        lock_unpoisoned(&self.checks).insert(path.clone());
-        let result = scope.await;
-        lock_unpoisoned(&self.checks).remove(path);
-        result
-    }
-}
-
-impl PublicationGate for Publications {
-    fn check(&self, path: &ObjectPath) -> Result<(), StorageError> {
-        if lock_unpoisoned(&self.checks).contains(path) {
-            return Ok(());
-        }
-        PublicationGate::check(self.state.as_ref(), path)
-    }
-}
-
 /// A read-only handle publishes nothing.
 pub(crate) struct NoPublications;
 
@@ -150,7 +120,8 @@ pub(crate) struct StorageConnections {
     /// The person's entries, for each connection's sequence owner.
     person: Arc<PersonEntries>,
     credentials: Arc<DeviceCredentials>,
-    publications: Arc<Publications>,
+    /// The sequence state whose gate every connection publishes through.
+    state: Arc<SequenceState>,
     directory: StoreDir,
     waits: Arc<coven_sync::RetryWaits>,
     transfers: Arc<coven_storage::TransferBudget>,
@@ -207,7 +178,7 @@ impl StorageConnections {
         identity: Arc<KeySession<MemberIdentity>>,
         person: Arc<PersonEntries>,
         credentials: Arc<DeviceCredentials>,
-        publications: Arc<Publications>,
+        state: Arc<SequenceState>,
         directory: StoreDir,
         waits: Arc<coven_sync::RetryWaits>,
         transfers: Arc<coven_storage::TransferBudget>,
@@ -235,7 +206,7 @@ impl StorageConnections {
             database.clone(),
             clock.clone(),
             waits.clone(),
-            publications.state.clone(),
+            state.clone(),
         );
         Self {
             codes,
@@ -245,7 +216,7 @@ impl StorageConnections {
             identity,
             person,
             credentials,
-            publications,
+            state,
             directory,
             waits,
             transfers,
@@ -333,12 +304,7 @@ impl StorageConnections {
         sql: &coven_database::SqlContext<'_, '_>,
         operation: OperationId,
     ) -> Result<(), SyncError> {
-        coven_sync::retry_pending_operation(
-            sql,
-            self.waits.clone(),
-            self.publications.state.clone(),
-            operation,
-        )
+        coven_sync::retry_pending_operation(sql, self.waits.clone(), self.state.clone(), operation)
     }
 
     /// Pause trailing uploads, or resume them, as a step of an app's write
@@ -448,7 +414,7 @@ impl StorageConnections {
                 keys,
                 self.identity.clone(),
                 self.person.clone(),
-                self.publications.state.clone(),
+                self.state.clone(),
                 self.clock.clone(),
                 self.ids.clone(),
                 self.waits.clone(),
@@ -560,7 +526,7 @@ impl StorageConnections {
                 data.location,
                 self.codes.provider_auth(data.credentials),
                 self.device,
-                self.publications.clone(),
+                self.state.clone(),
                 self.waits.clone(),
                 self.transfers.clone(),
             )

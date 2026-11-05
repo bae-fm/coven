@@ -388,7 +388,6 @@ async fn bootstrap_device(
             database,
             storage,
             state,
-            publications,
             waits,
         })) => {
             let requests = storage.requests();
@@ -421,7 +420,6 @@ async fn bootstrap_device(
                 let mut owners = builder
                     .owners(pending.directory(), Arc::new(StoreKeychain::new(keychain, id)))?;
                 owners.state = state;
-                owners.publications = publications;
                 owners.storage = Some(storage);
                 // A join's kept sign-in is already this store's device
                 // credentials: the handle refreshes through the same custody
@@ -588,9 +586,8 @@ struct Loaded {
     ring: StoreKeyring,
     database: Database,
     storage: Arc<coven_storage::StorageConnection>,
-    /// The sequence state the handle continues, and the connection's gate around it.
+    /// The sequence state the handle continues, which gates the connection.
     state: Arc<coven_sync::SequenceState>,
-    publications: Arc<crate::storage::Publications>,
     waits: Arc<coven_sync::RetryWaits>,
 }
 
@@ -633,7 +630,6 @@ async fn prepare_and_load(
     let provider = data.location.provider();
     let settings = directory.settings().map_err(CovenError::from)?;
     let state = Arc::new(coven_sync::SequenceState::new());
-    let publications = Arc::new(crate::storage::Publications::new(state.clone()));
     let ring = Arc::new(KeySession::store(Arc::new(InMemoryCustody::<StoreKeyring>::empty()))?);
     let identity = Arc::new(KeySession::member(Arc::new(InMemoryCustody::new(member.clone())))?);
     // A replacement registers the fresh id as the old one's replacement.
@@ -667,7 +663,7 @@ async fn prepare_and_load(
                 data.location.clone(),
                 provider_auth(&data, &sign_in)?,
                 settings.device_id,
-                publications.clone(),
+                state.clone(),
                 waits.clone(),
                 builder.transfers.clone(),
             )
@@ -852,7 +848,6 @@ async fn prepare_and_load(
             database,
             storage,
             state,
-            publications,
             waits,
         })),
         result => {

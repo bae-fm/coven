@@ -1521,8 +1521,6 @@ tables = [
 "crates/coven/src/handle.rs" = ["CovenHandle::close", "CovenHandle::new"]
 "crates/coven/src/read_handle.rs" = ["CovenReadHandle::close", "CovenReadHandle::new"]
 "crates/coven/src/storage.rs" = [
-    # Made once per opened installation, beside its sequence state.
-    "Publications::new",
     # A completed sign-in becomes this session's custody.
     "StorageConnections::authenticate",
     "StorageConnections::call",

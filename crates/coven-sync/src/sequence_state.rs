@@ -3,6 +3,7 @@
 use crate::{DeviceIdEvidence, PendingRecord, SyncError, SyncFailure};
 use coven_foundation::locks::lock_unpoisoned;
 use coven_storage::{ObjectPath, PublicationGate, StorageError, StorageFailure};
+use std::collections::BTreeSet;
 use std::sync::Mutex;
 use tokio::sync::watch;
 
@@ -55,6 +56,9 @@ pub struct SequenceState {
     wake: tokio::sync::Notify,
     /// The intervals apps hold for idle passes, across connections.
     often: crate::sync_often::SyncOften,
+    /// Fresh objects a storage setup's provider check writes while it runs,
+    /// which a connection may publish whatever the sync state (§20.8, E5).
+    checks: Mutex<BTreeSet<ObjectPath>>,
 }
 
 impl SequenceState {
@@ -66,7 +70,19 @@ impl SequenceState {
             registered: Mutex::new(false),
             wake: tokio::sync::Notify::new(),
             often: crate::sync_often::SyncOften::new(),
+            checks: Mutex::new(BTreeSet::new()),
         }
+    }
+    /// Permit the provider check's own object while `scope` runs.
+    pub async fn permit_provider_check<T>(
+        &self,
+        path: &ObjectPath,
+        scope: impl std::future::Future<Output = T>,
+    ) -> T {
+        lock_unpoisoned(&self.checks).insert(path.clone());
+        let result = scope.await;
+        lock_unpoisoned(&self.checks).remove(path);
+        result
     }
     /// The sync activity now: progress, or what blocks or stopped it.
     pub(crate) fn status(&self) -> SequenceStatus {
@@ -141,6 +157,9 @@ impl SequenceState {
 }
 impl PublicationGate for SequenceState {
     fn check(&self, path: &ObjectPath) -> Result<(), StorageError> {
+        if lock_unpoisoned(&self.checks).contains(path) {
+            return Ok(());
+        }
         // A join request is the bootstrap step before any sequence state
         // exists; the stuck-device rule governs only sequence-derived sends.
         if path.join_request_invite().is_some() {

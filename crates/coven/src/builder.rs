@@ -626,7 +626,6 @@ impl CovenBuilder {
             device: settings.device_id,
             keys,
             identity,
-            publications: Arc::new(crate::storage::Publications::new(state.clone())),
             state,
             clock: self.clock,
             ids: self.ids,
@@ -729,11 +728,9 @@ struct OpeningOwners {
     identity: Arc<KeySession<MemberIdentity>>,
     /// This installation's sequence state, shared by the handle's transfers.
     state: Arc<coven_sync::SequenceState>,
-    /// The gate of every connection this handle makes, around `state`.
-    publications: Arc<crate::storage::Publications>,
     clock: ClockRef,
     ids: IdSourceRef,
-    /// A loaded installation's connection, made through `publications`.
+    /// A loaded installation's connection, made through `state`.
     storage: Option<Arc<coven_storage::StorageConnection>>,
 }
 
@@ -847,7 +844,7 @@ impl OpeningOwners {
             coven_database::FileDatabase::new(database.clone()),
             self.directory.clone(),
             self.storage.clone().map(|storage| storage as Arc<dyn coven_storage::Storage>),
-            self.state,
+            self.state.clone(),
             waits.clone(),
             self.ids.clone(),
             self.transfers.clone(),
@@ -862,7 +859,7 @@ impl OpeningOwners {
             self.identity,
             self.person,
             self.credentials,
-            self.publications,
+            self.state,
             self.directory.clone(),
             waits,
             self.transfers,
