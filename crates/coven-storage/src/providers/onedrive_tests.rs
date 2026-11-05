@@ -904,3 +904,28 @@ fn children(
     }
     reply(result)
 }
+
+/// OneDrive fetches an object's exact metadata before its content, and checks
+/// a replaceable object's metadata again once the content is read (§20.5).
+#[tokio::test]
+async fn a_download_fetches_exact_metadata_first() {
+    let state = remote();
+    let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
+    let storage = provider(&server.url);
+    let immutable = ObjectPath::slot(STORE_ID, std::num::NonZeroU64::MIN);
+    let replaceable = ObjectPath::floor(STORE_ID);
+    storage.create(&immutable, b"slot").await.unwrap();
+    storage.create(&replaceable, b"floor").await.unwrap();
+    for (path, metadata_requests) in [(&immutable, 1), (&replaceable, 2)] {
+        state.lock().unwrap().requests.clear();
+        storage.read_object(path, None).await.unwrap();
+        let requests = state.lock().unwrap().requests.clone();
+        let download = requests.iter().position(|(_, uri)| uri.starts_with("/download/")).unwrap();
+        assert_eq!(download, 1, "one metadata request precedes the content: {requests:?}");
+        assert_eq!(requests[0].0, Method::GET);
+        assert_eq!(requests.len(), 1 + metadata_requests, "{requests:?}");
+        assert!(requests[2..]
+            .iter()
+            .all(|(method, uri)| *method == Method::GET && uri == &requests[0].1));
+    }
+}
