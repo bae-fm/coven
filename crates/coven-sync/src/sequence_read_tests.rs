@@ -244,3 +244,127 @@ async fn a_slot_damaged_in_its_last_byte_commits_nothing() {
         device.database().close().await.unwrap();
     }
 }
+
+/// The requests a pass adds for each kind of work: a claim is its create and
+/// a floor read after it lands; losing a race adds the occupied slot's read
+/// and a further attempt; a snapshot is its upload, its announcement claim,
+/// the floor write naming it and the next pass's one read of that floor;
+/// deleting history is the floor's upload and one delete per slot below its
+/// new `first` (§21.1).
+#[tokio::test]
+async fn each_kind_of_work_adds_the_requests_the_cost_table_names() {
+    use coven_storage::test_utils::MemoryRequest as Request;
+    let group = Group::new();
+    let ana = group.device(1).await;
+    let ben = group.device(2).await;
+    group.create(&ana).await;
+    group.admit(&ana, &ben).await;
+    ana.sync.pass().await.unwrap();
+    ben.sync.pass().await.unwrap();
+    let floor = ObjectPath::floor(group.store);
+    let slot = |number: u64| ObjectPath::slot(group.store, number.try_into().unwrap());
+    let since = |traced: usize| ana.storage.request_trace().split_off(traced);
+
+    // A claim: its create, and a floor read after it lands, beside the quiet
+    // pass's two reads.
+    let next = ana.database().applied_slot().await.unwrap() + 1;
+    insert(ana.database(), "a", "one").await;
+    let traced = ana.storage.request_trace().len();
+    ana.sync.pass().await.unwrap();
+    assert_eq!(
+        since(traced),
+        [
+            Request::Read(slot(next), None),
+            Request::Read(floor.clone(), None),
+            Request::Create(slot(next)),
+            Request::Read(floor.clone(), None),
+        ]
+    );
+
+    // Losing a race: Ben takes the slot Ana's create was about to take. Ana
+    // reads the occupied slot, then makes a further attempt.
+    let next = ana.database().applied_slot().await.unwrap() + 1;
+    insert(ana.database(), "b", "two").await;
+    insert(ben.database(), "c", "three").await;
+    let (started, observed) = tokio::sync::oneshot::channel();
+    let (resume, held) = tokio::sync::oneshot::channel();
+    group
+        .storage
+        .hold_next_creation(coven_storage::ObjectPrefix::all(group.store), started, held)
+        .await;
+    let traced = ana.storage.request_trace().len();
+    let racing = async { ana.sync.pass().await.unwrap() };
+    let winning = async {
+        observed.await.unwrap();
+        ben.sync.pass().await.unwrap();
+        resume.send(()).unwrap();
+    };
+    tokio::join!(racing, winning);
+    let trace = since(traced);
+    let creates: Vec<_> = trace
+        .iter()
+        .filter_map(|request| match request {
+            Request::Create(path) => Some(path.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(creates, [slot(next), slot(next + 1)], "{trace:?}");
+    let occupied = trace.iter().position(|request| *request == Request::Create(slot(next)));
+    let reread = trace[occupied.unwrap() + 1..]
+        .iter()
+        .position(|request| *request == Request::Read(slot(next), None));
+    assert!(reread.is_some(), "the occupied slot is read after the lost create: {trace:?}");
+
+    // A snapshot: its upload and its announcement claim.
+    let traced = ana.storage.request_trace().len();
+    ana.sync.snapshot(coven_merge::Audience::Store).await.unwrap();
+    let creates: Vec<_> = since(traced)
+        .into_iter()
+        .filter_map(|request| match request {
+            Request::Create(path) => Some(path),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(creates.len(), 2);
+    assert!(creates[0].snapshot_id().is_some() && creates[1].slot_number().is_some());
+
+    // The floor write naming it, and the writer's next pass reading that
+    // floor's bytes once.
+    let traced = ana.storage.request_trace().len();
+    ana.sync.pass().await.unwrap();
+    let trace = since(traced);
+    let count = |wanted: &Request| trace.iter().filter(|request| *request == wanted).count();
+    assert_eq!(count(&Request::Read(floor.clone(), None)), 1, "{trace:?}");
+    assert_eq!(count(&Request::Other("begin_upload")), 1, "{trace:?}");
+    assert_eq!(count(&Request::Other("finish_upload")), 1, "{trace:?}");
+
+    // Deleting history: once the snapshot passes grace, the floor upload and
+    // one delete per slot below its new `first`.
+    group.clock.set(
+        std::time::UNIX_EPOCH
+            + crate::sequence_sync::sequence_retention::GRACE
+            + std::time::Duration::from_secs(1),
+    );
+    let traced = ana.storage.request_trace().len();
+    ana.sync.pass().await.unwrap();
+    let trace = since(traced);
+    let deleted: Vec<_> = trace
+        .iter()
+        .filter_map(|request| match request {
+            Request::Delete(path) => path.slot_number().map(|slot| slot.0),
+            _ => None,
+        })
+        .collect();
+    ana.sync.pass().await.unwrap();
+    let first = ana.sync.session.lock().await.floor.as_ref().unwrap().header.first.0;
+    assert!(first > 1);
+    assert_eq!(deleted, (1..first).collect::<Vec<_>>(), "{trace:?}");
+    assert_eq!(
+        trace.iter().filter(|request| **request == Request::Other("finish_upload")).count(),
+        1,
+        "{trace:?}"
+    );
+    for device in [&ana, &ben] {
+        device.database().close().await.unwrap();
+    }
+}
