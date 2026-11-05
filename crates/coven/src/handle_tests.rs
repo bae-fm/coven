@@ -745,9 +745,7 @@ mod store_rename {
             assert_eq!(
                 device.app.readable_stores().await,
                 vec![StoreInfo {
-                    id: device.store,
-                    name: "家庭 recipes".into(),
-                    unfinished_replacement: None,
+                    id: device.store, name: "家庭 recipes".into(), unfinished: None
                 }]
             );
         }

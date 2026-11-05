@@ -96,26 +96,6 @@ impl SequenceOperation {
     }
 }
 
-/// Whether this installation's registration is journaled and has not ended:
-/// its claim may still land, or has landed and not yet been applied. A
-/// restore that ends without its store, its device absent from the history
-/// it applied, reads this before it removes its installation (§13.1, §11.6).
-pub async fn registration_journaled(
-    database: &coven_database::Database,
-) -> Result<bool, SyncError> {
-    for record in database.operations().await? {
-        if record.kind == operation_kind::SEQUENCE
-            && matches!(
-                serde_json::from_slice::<SequenceOperation>(&record.data)?.request,
-                Request::Change(StoreChange::AddDevice { .. })
-            )
-        {
-            return Ok(true);
-        }
-    }
-    Ok(false)
-}
-
 impl SequenceSync {
     /// Administrative requests retain their target across contention and reopening.
     pub async fn administer(

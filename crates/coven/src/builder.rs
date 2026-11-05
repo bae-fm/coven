@@ -351,9 +351,36 @@ impl CovenBuilder {
         // Its work rides on the heap, as every bootstrap's does, so an app's
         // future holding this call stays small.
         Box::pin(async move {
-            let opening = self.open_graph(store).await?;
+            let opening = self.open_graph(store, Opening::ForUse).await?;
             let progress = opening.database.subscribe_progress();
             progress.forward(opening.open(), on_progress).await
+        })
+        .await
+    }
+
+    /// Finishes this device's recorded deletion of `store`, which
+    /// `CovenHandle::delete_store` began and couldn't finish: it opens the
+    /// store as `open` does, then goes on as the deletion would, with the
+    /// choice for unsent work it recorded. Before the device's removal is
+    /// journaled, a refusal or failure removes the record and leaves the
+    /// store as it was; from the journal on, a failure is
+    /// `StoreDeletionError::Unfinished` and the deletion stays recorded
+    /// (§11.6, E1). A store with no deletion recorded fails with
+    /// `StoreDeletionError::NoUnfinishedDeletion`.
+    pub async fn resume_deletion(self, store: StoreId) -> Result<(), StoreDeletionError> {
+        Box::pin(async move {
+            let directory = self.directories.store_dir(&store);
+            let unsent = crate::task::blocking("read the deletion record", move || {
+                directory.unfinished_deletion()
+            })
+            .await??
+            .ok_or(StoreDeletionError::NoUnfinishedDeletion(store))?;
+            let opening = self
+                .open_graph(store, Opening::ToDelete)
+                .await
+                .map_err(StoreDeletionError::Open)?;
+            let handle = opening.open().await.map_err(StoreDeletionError::Open)?;
+            handle.leave(unsent).await
         })
         .await
     }
@@ -499,73 +526,6 @@ impl CovenBuilder {
         Box::pin(bootstrap::resume_restore(self, store, on_status, cancel)).await
     }
 
-    /// Opens the store for reading only, alongside a handle that has it open.
-    /// Its shared lock protects both read connections and local cache metadata.
-    /// It runs no migration and refuses a database whose schema is newer,
-    /// whose coven tables need migrating, or whose indexes were built with
-    /// other versions of the app's collations and functions.
-    /// File reads connect using saved settings and custody credentials when present.
-    pub async fn open_read_only(
-        mut self,
-        store: StoreId,
-    ) -> Result<CovenReadHandle, ReadOnlyOpenError> {
-        let directory = self.directories.store_dir(&store);
-        let ids = self.ids.clone();
-        let clock = self.clock.clone();
-        // A read-only handle cannot persist a cooldown; it holds its own requests.
-        let waits = Arc::new(coven_sync::RetryWaits::in_memory(clock.clone()));
-        let connector = self.connector();
-        let transfers = self.transfers.clone();
-        let database = self.database(directory.clone())?;
-        // Before the swap's marker exists, only the record shows that a
-        // replacement is moving the files a reader would open (§19.3).
-        refuse_unfinished_replacement(&directory, store)?;
-        let database = database.open_read_only().await?;
-        if let Some(identity) = database.store_state().await?.store {
-            check_store_settings(&identity, &directory)?;
-        }
-        let device = directory.settings().map_err(CovenError::from)?.device_id;
-        let oauth = self.oauth_exchange();
-        let in_directory = directory.clone();
-        let (credentials, data) = crate::task::blocking("read the saved credentials", move || {
-            let credentials = device_credentials(self.keychain()?, store, in_directory, oauth);
-            let data = credentials.connection()?;
-            Ok::<_, SyncError>((credentials, data))
-        })
-        .await
-        .map_err(SyncError::from)??;
-        let storage: Option<Arc<dyn Storage>> = match data {
-            Some(data) => {
-                let storage = connector
-                    .connect(
-                        data.location,
-                        coven_storage::ProviderAuth::new(data.credentials, credentials),
-                        device,
-                        Arc::new(crate::storage::NoPublications),
-                        waits.clone(),
-                        transfers.clone(),
-                    )
-                    .await
-                    .map_err(SyncError::from)?;
-                storage.check_bucket(store).await.map_err(SyncError::from)?;
-                Some(storage)
-            }
-            None => None,
-        };
-        let files = coven_sync::Files::read_only(
-            coven_database::FileDatabase::new(database.clone()),
-            directory,
-            storage,
-            Arc::new(coven_sync::SequenceState::new()),
-            waits,
-            ids,
-            transfers,
-            clock,
-            coven_foundation::network_watch::NetworkWatch::unwatched().view(),
-        );
-        Ok(CovenReadHandle::new(database, files))
-    }
-
     fn database(&self, directory: StoreDir) -> CovenResult<DatabaseBuilder> {
         let tables = self
             .tables
@@ -591,7 +551,7 @@ impl CovenBuilder {
         Ok(self.keychain.clone())
     }
 
-    async fn open_graph(self, store: StoreId) -> CovenResult<OpeningStore> {
+    async fn open_graph(self, store: StoreId, opening: Opening) -> CovenResult<OpeningStore> {
         let directory = self.directories.store_dir(&store);
         let database = self.database(directory.clone())?;
         let lock = directory.lock_for_open().await?;
@@ -603,6 +563,10 @@ impl CovenBuilder {
             // An interrupted replacement resumes only through the call that
             // began it (§19.3).
             refuse_unfinished_replacement(&directory, settings.id)?;
+            // A store this device is leaving opens only to finish that.
+            if opening == Opening::ForUse {
+                refuse_unfinished_deletion(&directory, settings.id)?;
+            }
             // A copy restored without its non-backed-up custody id, or a
             // keychain that no longer names it, changes nothing (§19.3).
             if keychain.device_id()? != Some(settings.device_id) {
@@ -852,6 +816,24 @@ impl OpeningStore {
     }
 }
 
+/// Why the store opens.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Opening {
+    /// For the app's use.
+    ForUse,
+    /// To finish this device's recorded deletion of it.
+    ToDelete,
+}
+
+/// A store this device is deleting and leaving opens only to finish that
+/// (E1, §11.6).
+fn refuse_unfinished_deletion(directory: &impl StoreDirAccess, store: StoreId) -> CovenResult<()> {
+    match directory.unfinished_deletion().map_err(DbError::from)? {
+        Some(_) => Err(StoreLockError::DeletionUnfinished(store).into()),
+        None => Ok(()),
+    }
+}
+
 /// A sync failure while opening, as the opening call reports it.
 /// An interrupted replacement resumes only through the call that began it
 /// (§19.3).
@@ -977,6 +959,9 @@ mod tests;
 
 #[path = "builder_creation.rs"]
 mod creation;
+
+#[path = "builder_read_only.rs"]
+mod read_only;
 
 #[path = "bootstrap.rs"]
 mod bootstrap;

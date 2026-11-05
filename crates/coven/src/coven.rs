@@ -31,9 +31,20 @@ pub struct StoreInfo {
     /// The current name from this device's committed database state. While
     /// a replacement is unfinished, the name its new installation loaded.
     pub name: String,
-    /// The call that must finish a replacement of this device's installation
-    /// before the store opens (§19.3); `None` when no replacement is unfinished.
-    pub unfinished_replacement: Option<ReplacedBy>,
+    /// The work that must finish before the store opens, if any.
+    pub unfinished: Option<Unfinished>,
+}
+
+/// Work on a store that must finish before it opens (E1).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Unfinished {
+    /// A replacement of this device's installation, which the call it names
+    /// finishes, or `CovenBuilder::resume_replacement` (§19.3).
+    Replacement(ReplacedBy),
+    /// This device is deleting the store and leaving it, its removal
+    /// journaled or about to be: `CovenBuilder::resume_deletion` finishes it
+    /// (§11.6).
+    Deletion,
 }
 
 /// A store on this device as the listing found it (E1).
@@ -151,11 +162,12 @@ impl Coven {
     /// Stores on this device, ordered by id, with their committed names.
     /// A store whose replacement record or name can't be read is listed as
     /// `Unreadable` with why; a listing never substitutes an older name.
-    /// A store whose replacement is unfinished lists with the call that
-    /// finishes it, so the app can offer to; an unfinished first installation
-    /// is not listed. First it finishes every deletion a cut call left
-    /// recorded, which no call holds (§19.3, E1); a failure there fails the
-    /// listing with `StoreListError::Deletion`.
+    /// A store whose replacement or deletion is unfinished lists with the
+    /// work that must finish, so the app can offer to finish it; an
+    /// unfinished first installation is not listed. First it finishes every
+    /// deletion from the device that a cut call left under the directory's
+    /// deletion name, which no call holds (§19.3, E1); a failure there fails
+    /// the listing with `StoreListError::Deletion`.
     pub async fn stores(&self) -> Result<Vec<ListedStore>, StoreListError> {
         for store in self.directories.recorded_deletions().await? {
             let directory = self.store_dir(&store);
@@ -196,21 +208,26 @@ impl Coven {
 
     async fn read_listed(&self, id: StoreId) -> Result<StoreInfo, CovenError> {
         let directory = self.store_dir(&id);
-        let unfinished = {
+        let (replacement, deletion) = {
             let directory = directory.clone();
-            crate::task::blocking("read the replacement record", move || {
-                directory.unfinished_replacement()
+            crate::task::blocking("read the store's records", move || {
+                Ok::<_, CovenError>((
+                    directory.unfinished_replacement()?,
+                    directory.unfinished_deletion().map_err(DbError::from)?,
+                ))
             })
             .await??
         };
-        Ok(match unfinished {
-            Some(record) => {
-                StoreInfo { id, name: record.name, unfinished_replacement: Some(record.by) }
-            }
+        Ok(match replacement {
+            Some(record) => StoreInfo {
+                id,
+                name: record.name,
+                unfinished: Some(Unfinished::Replacement(record.by)),
+            },
             None => StoreInfo {
                 id,
                 name: coven_database::read_store_name(directory).await?,
-                unfinished_replacement: None,
+                unfinished: deletion.map(|_| Unfinished::Deletion),
             },
         })
     }

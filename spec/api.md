@@ -909,9 +909,19 @@ pub struct StoreInfo {
     /// The current name from this device's committed database state. While
     /// a replacement is unfinished, the name its new installation loaded.
     pub name: String,
-    /// The call that must finish a replacement of this device's installation
-    /// before the store opens (§19.3); `None` when no replacement is unfinished.
-    pub unfinished_replacement: Option<ReplacedBy>,
+    /// The work that must finish before the store opens; `None` when none is.
+    pub unfinished: Option<Unfinished>,
+}
+
+/// Work on a store that must finish before it opens (E1).
+pub enum Unfinished {
+    /// A replacement of this device's installation, which the call it names
+    /// finishes, or `CovenBuilder::resume_replacement` (§19.3).
+    Replacement(ReplacedBy),
+    /// This device is deleting the store and leaving it, its removal
+    /// journaled or about to be: `CovenBuilder::resume_deletion` finishes it
+    /// (§11.6).
+    Deletion,
 }
 
 /// The call that began a replacement, and the only call that finishes it (§19.3).
@@ -1865,6 +1875,13 @@ pub enum StoreLockError {
     /// `CovenBuilder::resume_replacement`, finishes it, or
     /// `Coven::discard_store` deletes the store from this device (§19.3).
     ReplacementUnfinished { store: StoreId, by: ReplacedBy },
+    /// This device is deleting the store and leaving it: its deletion
+    /// recorded itself, just before it journaled the device's removal, and
+    /// did not finish. Opening, read only too, and replacing the store are
+    /// refused before anything changes; `CovenBuilder::resume_deletion`
+    /// finishes it, or `Coven::discard_store` deletes the store from this
+    /// device alone (§11.6).
+    DeletionUnfinished(StoreId),
     /// A supplied lock protects a different directory.
     WrongDirectory(StoreId),
     /// Opening or locking the lock file failed, or did not run because its
@@ -1985,14 +2002,27 @@ pub enum StoreDeletionError {
     /// Writes or files wait to upload, as `unsent_work` counts them;
     /// nothing was deleted.
     Unsent(UnsentWork),
-    /// Reading the queue or publishing this device's removal failed, deleting
-    /// nothing; this device hasn't applied its removal, and `delete_store`
-    /// again finishes it.
+    /// Reading the queue, connecting or journaling this device's removal
+    /// failed before the removal was journaled: nothing was deleted, nothing
+    /// in storage changed, and the store is as it was.
     Sync(SyncError),
-    /// This device's removal was published, or no storage was set up, and
-    /// closing the handle failed, deleting nothing; `Coven::discard_store`
-    /// finishes the deletion.
+    /// A location is recorded and this device holds no credentials for it,
+    /// so it can't publish its removal: the person signs in, then deletes
+    /// again. Before the removal was journaled nothing changed; after, the
+    /// deletion stays recorded.
+    SignInRequired(CloudProvider),
+    /// This device's removal is journaled, and the deletion failed before
+    /// it applied. The handle is closed, the store lists as being deleted
+    /// and refuses opens, and `CovenBuilder::resume_deletion` finishes it.
+    Unfinished(SyncError),
+    /// This device's removal applied, or no storage was set up, and closing
+    /// the handle failed, deleting nothing. `CovenBuilder::resume_deletion`
+    /// finishes a recorded deletion, and `Coven::discard_store` either.
     Closing(SyncError),
+    /// Opening the store to finish its recorded deletion failed.
+    Open(CovenError),
+    /// `resume_deletion` found no deletion of the store recorded here.
+    NoUnfinishedDeletion(StoreId),
     /// Removing a keychain entry failed.
     Key(KeyError),
     /// Removing the store directory failed.
@@ -2156,10 +2186,11 @@ impl Coven {
     /// Reads names from their databases. A store whose replacement record or
     /// name can't be read is listed as `Unreadable` with why; no older name is
     /// substituted.
-    /// A store whose replacement is unfinished is listed with the call that
-    /// finishes it; an unfinished first installation is not listed. First it
-    /// finishes every deletion a cut call left recorded that no call holds;
-    /// a failure there is `StoreListError::Deletion` (§11.6).
+    /// A store whose replacement or deletion is unfinished is listed with the
+    /// work that must finish; an unfinished first installation is not listed.
+    /// First it finishes every deletion from the device that a cut call left
+    /// under the directory's deletion name and no call holds; a failure there
+    /// is `StoreListError::Deletion` (§11.6).
     pub async fn stores(&self) -> Result<Vec<ListedStore>, StoreListError>;
 
     /// The directory of the store with `id`.
@@ -2310,6 +2341,9 @@ impl CovenBuilder {
     /// Local database calls need no store key. Opening does not start
     /// the sync loop; `start_sync` starts it. Opening records whether
     /// storage is set up, so the sync state is ready once it returns (E5).
+    /// A store whose replacement or deletion is unfinished is refused with
+    /// `StoreLockError::ReplacementUnfinished` or `DeletionUnfinished`,
+    /// changing nothing (§19.3, §11.6).
     /// `on_progress` hears each step the open runs, on this task (§4).
     pub async fn open(
         self,
@@ -2329,7 +2363,8 @@ impl CovenBuilder {
     /// by this call or `resume_replacement`. Uses the existing bootstrap
     /// errors; an interrupted call resumes with the same fresh id. A
     /// replacement restore_device began is refused with
-    /// ReplacementUnfinished, changing nothing. The returned handle holds a
+    /// ReplacementUnfinished, changing nothing, and a store this device is
+    /// deleting with DeletionUnfinished. The returned handle holds a
     /// device-reset notice that unsent edits may have been lost (E5).
     /// `on_status` hears how far the new device has come, as `BootstrapStatus`
     /// reports it for the other bootstrap calls (E10).
@@ -2347,7 +2382,20 @@ impl CovenBuilder {
     /// its migrations, whose coven tables need migrating, or whose indexes
     /// were built with other versions of the app's collations and functions.
     /// File reads use saved storage settings and custody credentials when present.
+    /// A store whose replacement or deletion is unfinished is refused, as
+    /// `open` refuses it.
     pub async fn open_read_only(self, store: StoreId) -> Result<CovenReadHandle, ReadOnlyOpenError>;
+
+    /// Finishes this device's deletion of `store` that `delete_store` began
+    /// and recorded: it opens the store as `open` does, then goes on as the
+    /// deletion would, with the choice for unsent work it recorded. Before
+    /// the device's removal is journaled, a refusal or failure removes the
+    /// record and leaves the store as it was; from the journal on, a failure
+    /// is `StoreDeletionError::Unfinished` and the deletion stays recorded
+    /// (§11.6). The call runs to its end even if the app drops its future. A
+    /// store with no deletion recorded fails with
+    /// `StoreDeletionError::NoUnfinishedDeletion`.
+    pub async fn resume_deletion(self, store: StoreId) -> Result<(), StoreDeletionError>;
 
     /// Replace provider construction in tests while exercising setup, credential
     /// custody, reconnect, restore and recovery through the production graph.
@@ -2430,13 +2478,22 @@ impl CovenHandle {
     /// not stop closing.
     pub async fn close(&self) -> Result<(), SyncError>;
 
-    /// Deletes this store from this device. With storage set up, it refuses
-    /// unsent work unless discarding it, then publishes this device's removal
-    /// (§14.1); either failure deletes nothing, as `Unsent` or `Sync`. Then
-    /// closes, a failure there being `Closing`, and deletes as
-    /// `Coven::discard_store`, which finishes a deletion failing after the
-    /// removal.
-    /// Only this device leaves: the person's restore code and S3 key stay.
+    /// Deletes this store from this device and leaves it. With storage set
+    /// up, a location recorded without credentials is refused as
+    /// `SignInRequired`, and unsent work unless discarding it as `Unsent`;
+    /// both change nothing. Then the deletion records itself in the store's
+    /// directory, with `unsent`, and publishes this device's removal
+    /// (§14.1), waiting until it applies. A failure before the removal is
+    /// journaled removes the record and is `Sync`, the store as it was. From
+    /// the journal on it only goes forward: a failure closes the handle and
+    /// is `Unfinished`, and the store lists as being deleted
+    /// (`Unfinished::Deletion`), refuses opens with `DeletionUnfinished` and
+    /// is finished by `CovenBuilder::resume_deletion` (§11.6). Once the
+    /// removal applied, or with no storage set up, it closes, a failure
+    /// there being `Closing`, and deletes as `Coven::discard_store`. A device
+    /// already stopped for good publishes nothing. The call runs to its end
+    /// even if the app drops its future. Only this device leaves: the
+    /// person's restore code and S3 key stay.
     pub async fn delete_store(&self, unsent: IfUnsent) -> Result<(), StoreDeletionError>;
 
     /// The writes and files this device committed and has not uploaded, from
@@ -6918,6 +6975,8 @@ pub enum ProviderSignOut {
   `StoreLockError::ReplacementUnfinished { by: Restore }`, `Coven::stores`
   lists the store in that state, and `reset_device` is refused with that error,
   changing nothing ([§19.3](coven.md#193-another-copy-of-the-same-device)).
+  A store this device is deleting refuses the restore with
+  `StoreLockError::DeletionUnfinished`, changing nothing.
   Only the facts end it before the swap: its registration refused, or the
   new device gone for good, removes the record, the kept entry and the new
   installation, and the old copy is the store again.

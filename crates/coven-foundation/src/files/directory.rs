@@ -239,6 +239,17 @@ pub trait StoreDirAccess: Sized {
     /// the bootstrap marker, with settings already naming the new device, is
     /// not returned; the next replacement removes it. Reads only.
     fn unfinished_replacement(&self) -> Result<Option<super::ReplacementRecord>, SettingsError>;
+    /// What the store's unfinished deletion does with unsent work, when this
+    /// device recorded that it is deleting the store and leaving it (E1).
+    /// Reads only.
+    fn unfinished_deletion(&self) -> Result<Option<super::IfUnsent>, FileError>;
+    /// Record that this device is deleting the store and leaving it, with
+    /// what the deletion does with unsent work, before it journals the
+    /// device's removal. The record goes with the directory.
+    fn record_deletion(&self, unsent: super::IfUnsent) -> Result<(), FileError>;
+    /// Remove the record of a deletion that ended before it journaled the
+    /// device's removal. An absent record succeeds.
+    fn forget_deletion(&self) -> Result<(), FileError>;
     /// The settings written when this store was created, restored or joined.
     /// Reading takes no lock; a read-only open uses it alongside a writer.
     fn settings(&self) -> Result<StoreSettings, SettingsError>;
@@ -310,6 +321,15 @@ impl StoreDirAccess for StoreDir {
     }
     fn unfinished_replacement(&self) -> Result<Option<super::ReplacementRecord>, SettingsError> {
         super::device_reset::unfinished(&self.path, self.id)
+    }
+    fn unfinished_deletion(&self) -> Result<Option<super::IfUnsent>, FileError> {
+        super::deletion::read(&self.path)
+    }
+    fn record_deletion(&self, unsent: super::IfUnsent) -> Result<(), FileError> {
+        super::deletion::record(&self.path, unsent)
+    }
+    fn forget_deletion(&self) -> Result<(), FileError> {
+        super::deletion::forget(&self.path)
     }
     fn settings(&self) -> Result<StoreSettings, SettingsError> {
         settings::read(&self.path, self.id)

@@ -107,7 +107,7 @@ async fn application_lifecycle_two_stores_lock_read_only_live_query_and_reopen()
     app.discard_store(&first).await.unwrap();
     assert_eq!(
         app.readable_stores().await,
-        vec![StoreInfo { id: second.id(), name: "Work".into(), unfinished_replacement: None }]
+        vec![StoreInfo { id: second.id(), name: "Work".into(), unfinished: None }]
     );
 }
 
@@ -512,7 +512,7 @@ async fn a_store_whose_database_is_damaged_is_listed_as_unreadable_beside_the_ot
     assert!(matches!(
         listed.as_slice(),
         [
-            ListedStore::Readable(StoreInfo { id: first, name, unfinished_replacement: None }),
+            ListedStore::Readable(StoreInfo { id: first, name, unfinished: None }),
             ListedStore::Unreadable {
                 id: second,
                 reason: CovenError::Database(DbError::DamagedDatabase),

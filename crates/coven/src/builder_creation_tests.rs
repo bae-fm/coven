@@ -50,7 +50,7 @@ async fn publication_sync_failure_releases_the_store_before_returning() {
     let member = Custody::<MemberIdentity>::unlock(&identity).unwrap().unwrap();
     assert_eq!(
         app.readable_stores().await,
-        [StoreInfo { id: expected, name: "Household".into(), unfinished_replacement: None }]
+        [StoreInfo { id: expected, name: "Household".into(), unfinished: None }]
     );
     let reopened = builder().open(expected, |_| ()).await.unwrap();
     assert_eq!(reopened.store_id(), expected);
@@ -156,7 +156,7 @@ async fn creation_initializes_every_builtin_identity_custody_before_setup() {
         let id = handle.store_id();
         assert_eq!(
             app.readable_stores().await,
-            [StoreInfo { id, name: "Created".into(), unfinished_replacement: None }]
+            [StoreInfo { id, name: "Created".into(), unfinished: None }]
         );
         handle
             .setup_s3_storage(
@@ -330,7 +330,7 @@ async fn a_panic_after_publication_keeps_the_published_store() {
     );
     assert_eq!(
         app.readable_stores().await,
-        [StoreInfo { id: expected, name: "Household".into(), unfinished_replacement: None }]
+        [StoreInfo { id: expected, name: "Household".into(), unfinished: None }]
     );
     let reopened = builder().open(expected, |_| ()).await.unwrap();
     reopened.close().await.unwrap();

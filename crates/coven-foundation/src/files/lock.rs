@@ -220,6 +220,13 @@ pub enum StoreLockError {
         /// The call that began the replacement.
         by: super::ReplacedBy,
     },
+    /// This device is deleting the store and leaving it, and its deletion
+    /// recorded itself, just before it journaled the device's removal, and
+    /// did not finish. Opening and replacing the store are refused before
+    /// anything changes; only finishing the deletion, or discarding the
+    /// store, ends it (E1).
+    #[error("store {0} is being deleted from this device")]
+    DeletionUnfinished(StoreId),
     /// A supplied lock protects a different directory.
     #[error("lock does not protect store {0}")]
     WrongDirectory(StoreId),

@@ -82,7 +82,7 @@ pub use sequence_state::{ProviderCheckPermit, SequenceState, SequenceStatus};
 pub use sequence_sync::sequence_invites::expiry::InviteExpiry;
 pub use sequence_sync::sequence_invites::NewInvite;
 pub use sequence_sync::sequence_join::{JoinOutcome, NextCheck};
-pub use sequence_sync::{registration_journaled, SequenceSync};
+pub use sequence_sync::{registration_journaled, removal_journaled, SequenceSync};
 pub use sign_in::{DeviceCredentials, SessionSignIn};
 pub use sync_status::{
     record_location, record_opened, sync_status, SyncCause, SyncState, SyncStatus, SyncWait,

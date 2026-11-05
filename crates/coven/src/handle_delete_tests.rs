@@ -6,6 +6,7 @@ use crate::*;
 use coven_crypto::custody::KeyringCustody;
 use coven_foundation::clock::HANG_GUARD;
 use coven_foundation::files::StoreDirAccess;
+use coven_storage::test_utils::Faults;
 use std::sync::Arc;
 
 async fn insert(handle: &CovenHandle, id: &str) {
@@ -338,5 +339,143 @@ async fn a_close_failing_after_the_removal_is_finished_by_discarding() {
         .flat_map(|member| member.devices)
         .any(|d| d.id == device && d.state == DeviceState::Removed);
     assert!(removed);
+    network.close().await;
+}
+
+/// Whether the owner lists `device` as removed, once it has read storage.
+async fn removed(network: &mut Network, device: DeviceId) -> bool {
+    network.sync(0).await;
+    network.devices[0]
+        .handle
+        .members()
+        .await
+        .unwrap()
+        .into_iter()
+        .flat_map(|member| member.devices)
+        .any(|d| d.id == device && d.state == DeviceState::Removed)
+}
+
+/// The phone's store as its listing shows it.
+async fn listed(device: &crate::tests::Device) -> Vec<StoreInfo> {
+    device.app.readable_stores().await
+}
+
+/// The phone's removal lands in storage, and the provider answers with an
+/// error, so the call fails after the removal was journaled. Past that
+/// point the deletion only goes forward: the handle closes, the store lists
+/// as being deleted and refuses opens, so it is never used while its removal
+/// is under way, and `resume_deletion` finishes it (§11.6, E1).
+#[tokio::test]
+async fn a_deletion_failing_after_its_removal_was_journaled_is_listed_and_resumed() {
+    let mut network = Network::new(2).await;
+    let phone = &network.devices[1];
+    let device = phone.app.store_dir(&phone.store).settings().unwrap().device_id;
+    stopped(phone).await;
+    phone.storage.set_faults(Faults { refuse_after_storing: 1, ..Faults::none() }).await;
+    let failed = phone.handle.delete_store(IfUnsent::Refuse).await;
+    phone.storage.set_faults(Faults::none()).await;
+    assert!(matches!(failed, Err(StoreDeletionError::Unfinished(_))), "{failed:?}");
+    assert!(phone.handle.unsent_work().await.is_err(), "the handle is still in use");
+    assert_eq!(
+        listed(phone).await,
+        [StoreInfo {
+            id: phone.store,
+            name: "Household".into(),
+            unfinished: Some(Unfinished::Deletion)
+        }]
+    );
+    let opened = network.reopen(phone).open(phone.store, |_| ()).await;
+    assert!(
+        matches!(opened, Err(CovenError::Lock(StoreLockError::DeletionUnfinished(store))) if store == phone.store),
+        "{:?}",
+        opened.map(drop)
+    );
+    network.reopen(phone).resume_deletion(phone.store).await.unwrap();
+    assert!(phone.app.stores().await.unwrap().is_empty());
+    network.devices.remove(1);
+    assert!(removed(&mut network, device).await);
+    network.close().await;
+}
+
+/// The phone's removal applies, and closing its handle fails, as a crash
+/// right after the removal would leave it. The store is recorded as being
+/// deleted: it doesn't open, read only or for use, as a removed store with
+/// its data and keys, nor reset, and `resume_deletion` finishes it (§11.6,
+/// E1).
+#[tokio::test]
+async fn a_deletion_stopped_after_its_removal_applied_refuses_opens_and_resumes() {
+    let mut network = Network::new(2).await;
+    let phone = &network.devices[1];
+    let device = phone.app.store_dir(&phone.store).settings().unwrap().device_id;
+    phone.handle.storage.fail_next_close(SyncError::Database(DbError::RollbackFailed));
+    assert!(matches!(
+        phone.handle.delete_store(IfUnsent::Refuse).await,
+        Err(StoreDeletionError::Closing(_))
+    ));
+    let deleting = |error: &StoreLockError| matches!(error, StoreLockError::DeletionUnfinished(store) if *store == phone.store);
+    assert!(matches!(
+        network.reopen(phone).open(phone.store, |_| ()).await,
+        Err(CovenError::Lock(error)) if deleting(&error)
+    ));
+    assert!(matches!(
+        network.reopen(phone).open_read_only(phone.store).await,
+        Err(ReadOnlyOpenError::Local(CovenError::Lock(error))) if deleting(&error)
+    ));
+    assert!(matches!(
+        network.reopen(phone).reset_device(phone.store, "Phone", |_| ()).await,
+        Err(BootstrapError::Directory(BootstrapDirectoryError::Lock(error))) if deleting(&error)
+    ));
+    assert_eq!(listed(phone).await[0].unfinished, Some(Unfinished::Deletion));
+    network.reopen(phone).resume_deletion(phone.store).await.unwrap();
+    assert!(phone.app.stores().await.unwrap().is_empty());
+    network.devices.remove(1);
+    assert!(removed(&mut network, device).await);
+    network.close().await;
+}
+
+/// The phone holds no credentials for Household's recorded location: the
+/// person signed out. It can't publish its removal, so deleting is refused,
+/// naming the sign-in, and nothing changes. Deleting the store anyway would
+/// leave the phone one of Household's devices for good (E1).
+#[tokio::test]
+async fn deleting_a_signed_out_store_is_refused_naming_the_sign_in() {
+    let mut network = Network::new(2).await;
+    let phone = network.devices.remove(1);
+    phone.handle.close().await.unwrap();
+    phone.app.lose_storage_credentials(phone.store).unwrap();
+    let reopened = network.reopen(&phone).open(phone.store, |_| ()).await.unwrap();
+    let refused = reopened.delete_store(IfUnsent::Discard).await;
+    assert!(
+        matches!(refused, Err(StoreDeletionError::SignInRequired(CloudProvider::S3))),
+        "{refused:?}"
+    );
+    assert_eq!(listed(&phone).await.len(), 1);
+    assert_eq!(listed(&phone).await[0].unfinished, None);
+    reopened.close().await.unwrap();
+    network.close().await;
+}
+
+/// The phone recorded its deletion, refusing unsent work, and stopped
+/// before journaling its removal, with a write still unsent. Resuming
+/// checks again with the recorded choice: it refuses, removes the record,
+/// and the store opens as before, its write still to send (§11.6, E1).
+#[tokio::test]
+async fn a_resumed_deletion_before_its_journal_refuses_unsent_work_and_forgets_itself() {
+    let mut network = Network::new(2).await;
+    let phone = network.devices.remove(1);
+    stopped(&phone).await;
+    insert(&phone.handle, "unsent").await;
+    phone.handle.close().await.unwrap();
+    phone.app.store_dir(&phone.store).record_deletion(IfUnsent::Refuse).unwrap();
+    assert_eq!(listed(&phone).await[0].unfinished, Some(Unfinished::Deletion));
+    let resumed = network.reopen(&phone).resume_deletion(phone.store).await;
+    assert!(
+        matches!(resumed, Err(StoreDeletionError::Unsent(UnsentWork { writes: 1, files: 0 }))),
+        "{resumed:?}"
+    );
+    assert_eq!(listed(&phone).await[0].unfinished, None);
+    let reopened = network.reopen(&phone).open(phone.store, |_| ()).await.unwrap();
+    assert_eq!(reopened.unsent_work().await.unwrap(), UnsentWork { writes: 1, files: 0 });
+    reopened.close().await.unwrap();
     network.close().await;
 }

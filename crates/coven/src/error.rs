@@ -233,16 +233,37 @@ pub enum StoreDeletionError {
     /// Writes or files wait to upload; nothing was deleted.
     #[error("{} writes and {} files wait to upload", .0.writes, .0.files)]
     Unsent(coven_database::UnsentWork),
-    /// Reading the queue or publishing this device's removal failed;
-    /// nothing was deleted, and this device hasn't applied its removal.
-    /// `delete_store` again finishes it.
+    /// Reading the queue, connecting, or journaling this device's removal
+    /// failed before the removal was journaled: nothing was deleted, nothing
+    /// in storage changed, and the store is as it was.
     #[error(transparent)]
     Sync(crate::SyncError),
-    /// This device's removal was published, or no storage was set up, and
-    /// closing the handle failed; nothing was deleted.
-    /// `Coven::discard_store` finishes the deletion.
+    /// A location is recorded for the store and this device holds no
+    /// credentials for it, so it can't publish its removal: the person
+    /// signs in to `provider`, then deletes again. Before the removal was
+    /// journaled nothing changed; after, the deletion stays recorded for
+    /// `CovenBuilder::resume_deletion`.
+    #[error("sign in to {0:?} to delete the store from this device")]
+    SignInRequired(crate::CloudProvider),
+    /// This device's removal is journaled, and the deletion failed before it
+    /// applied, with `0`'s cause. The deletion only goes forward: the handle
+    /// is closed, the store lists as being deleted and refuses opens, and
+    /// `CovenBuilder::resume_deletion` finishes it.
+    #[error("the store is being deleted from this device; finishing it failed: {0}")]
+    Unfinished(#[source] crate::SyncError),
+    /// This device's removal applied, or no storage was set up, and closing
+    /// the handle failed; nothing was deleted. A recorded deletion is
+    /// finished by `CovenBuilder::resume_deletion`, and either by
+    /// `Coven::discard_store`.
     #[error("closing the store failed after this device left it: {0}")]
     Closing(#[source] crate::SyncError),
+    /// Opening the store to finish its recorded deletion failed.
+    #[error(transparent)]
+    Open(crate::CovenError),
+    /// `resume_deletion` found no deletion of the store recorded on this
+    /// device.
+    #[error("no deletion of store {0} is under way")]
+    NoUnfinishedDeletion(crate::StoreId),
     /// Removing a keychain entry failed.
     #[error(transparent)]
     Key(KeyError),
@@ -264,7 +285,8 @@ impl crate::task::CarriesBug for StoreDeletionError {
         match self {
             Self::Bug(bug) => Some(bug),
             Self::Lock(error) => error.bug(),
-            Self::Sync(error) | Self::Closing(error) => error.bug(),
+            Self::Sync(error) | Self::Closing(error) | Self::Unfinished(error) => error.bug(),
+            Self::Open(error) => error.bug(),
             Self::Key(error) => error.bug(),
             Self::File(error) => error.bug(),
             _ => None,

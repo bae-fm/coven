@@ -255,6 +255,11 @@ pub(super) async fn begin(
     // A live handle, in this process or another, refuses the replacement.
     let writer = lock::acquire_for_open(&path, id).await?;
     let current = settings::read(&path, id).map_err(DirectoryCreationError::Settings)?;
+    // The device is leaving the store: only finishing that deletion, or
+    // discarding the store, ends it.
+    if super::deletion::read(&path)?.is_some() {
+        return Err(StoreLockError::DeletionUnfinished(id).into());
+    }
     let pending = bootstrap::is_pending(&path)?;
     let recorded = match device_reset::read(&path)? {
         // Publication removed the marker but not the record: that replacement

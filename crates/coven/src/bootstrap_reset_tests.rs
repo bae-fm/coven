@@ -355,7 +355,7 @@ async fn a_reset_interrupted_after_its_swap_is_finished_by_the_next_reset() {
         [StoreInfo {
             id: store,
             name: "Reset".into(),
-            unfinished_replacement: Some(ReplacedBy::Reset),
+            unfinished: Some(Unfinished::Replacement(ReplacedBy::Reset)),
         }]
     );
     // A restore would commit the code's pair and remove the old copy.
@@ -389,7 +389,7 @@ async fn a_reset_interrupted_after_its_swap_is_finished_by_the_next_reset() {
     assert_eq!(notes(&handle).await, ["kept"]);
     assert!(!loading_area(&f).exists());
     handle.close().await.unwrap();
-    assert_eq!(f.app.readable_stores().await[0].unfinished_replacement, None);
+    assert_eq!(f.app.readable_stores().await[0].unfinished, None);
 }
 
 /// A reset stopped right after its fresh device registered, before its
@@ -419,7 +419,10 @@ async fn a_reset_stopped_after_registering_is_finished_by_resuming() {
         reopen(&f).open(store, |_| ()).await,
         Err(CovenError::Lock(error)) if unfinished(&error)
     ));
-    assert_eq!(f.app.readable_stores().await[0].unfinished_replacement, Some(ReplacedBy::Reset));
+    assert_eq!(
+        f.app.readable_stores().await[0].unfinished,
+        Some(Unfinished::Replacement(ReplacedBy::Reset))
+    );
     let (_, cancel) = watch::channel(false);
     let handle = reopen(&f).resume_replacement(store, |_| (), &cancel).await.unwrap();
     assert_eq!(handle.device_reset().await.unwrap(), Some(decided.reset));
@@ -427,7 +430,7 @@ async fn a_reset_stopped_after_registering_is_finished_by_resuming() {
     assert!(!loading_area(&f).exists());
     handle.close().await.unwrap();
     assert!(custody(&f).replacement_record().unwrap().is_none());
-    assert_eq!(f.app.readable_stores().await[0].unfinished_replacement, None);
+    assert_eq!(f.app.readable_stores().await[0].unfinished, None);
 }
 
 /// A reset that fails while its new device loads changes nothing: the store

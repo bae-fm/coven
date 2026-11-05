@@ -3460,6 +3460,30 @@ storage, is an operation, held to §11.3 and §11.4:
   ([`unfinished_deletion_blocks_store`](proofs/sequence/CovenSequence/StoreDiscard.lean)).
   So listing the stores, and a restore or join of the store, finish a
   recorded deletion no call holds, as discarding it again does.
+- **Leaving a store goes forward from its removal.** `delete_store` publishes
+  this device's removal (§14.1), then deletes the store from the device. The
+  removal's operation lives in the store's own database, so the store can
+  go only once the removal has applied. Ana deletes Household from her
+  phone; the removal lands, and the phone crashes before deleting anything.
+  Had nothing recorded the deletion, Household would open again as a store
+  this phone was removed from, its data and keys still there
+  ([`crashed_deletion_reopens_removed`](proofs/sequence/CovenSequence/StoreDeletion.lean)).
+  Had the call failed just after journaling the removal and left the store
+  open, the removal would land while Ana went on using it
+  ([`failed_deletion_removes_store_in_use`](proofs/sequence/CovenSequence/StoreDeletion.lean)).
+  So just before it journals the removal, the deletion records itself in
+  the store's directory, with what it does with unsent work. From then on
+  opening the store is refused with `DeletionUnfinished`, read only too, and
+  so is a reset; the listing shows the store as being deleted; and
+  `resume_deletion` finishes it, checking unsent work again with the
+  recorded choice if the removal wasn't journaled yet. A failure before the
+  journal removes the record, and the store is as it was. A store whose
+  location is recorded without credentials can't send its removal, so
+  deleting it is refused with `SignInRequired`, changing nothing: deleted
+  anyway, the phone would stay one of Household's devices for good
+  ([`signed_out_strands_device`](proofs/sequence/CovenSequence/StoreDeletion.lean)).
+  `discard_store` still deletes the store from the device alone, leaving
+  the device registered until someone removes it.
 - **Space isn't state.** A crash can leave behind an object nothing refers to,
   such as the provider check's test object or a detection probe (§20.8). No
   state is wrong, only space taken, so coven leaves it; this is not a repair
@@ -3477,6 +3501,7 @@ These calls, and the work passes do for them, follow the rule:
 | Taking provider access back after a removal (§14.2) | the provider request, fixed before it is sent | none: it is sent again until confirmed |
 | Deleting gone devices' files (`clean_up_gone_devices_files`, §17.10) | the files operation | none: it deletes only what nothing refers to |
 | Deleting a store from the device (`discard_store`, and the last step of `delete_store`, api.md [E1](api.md#e1-opening)) | the store's directory, renamed to its deletion name | none: it writes nothing to storage, and only goes forward |
+| Deleting a store from the device and leaving it (`delete_store`, api.md [E1](api.md#e1-opening)) | the deletion's record in the store's directory, then the removal's operation | the record, kept just before the removal's journal |
 | Sending writes and uploading files (§4, §17.9) | the send queue and the upload queue | the writes slot's claim; a file's confirmed upload |
 | Setting up storage (`setup_s3_storage`, `setup_oauth_storage`, `setup_cloudkit_storage`, §20.8) | its operation, with the credentials it connects with kept apart from the committed ones | the location marker or slot 1 when creating; the `Set access` claim, or committing, when reconnecting |
 
@@ -11067,6 +11092,8 @@ Write-ups explain each model and state its assumptions:
 | *Body.* Ending a restore whose commit a crash cut, deleting only its kept sign-in and record, leaves the device id and keys the commit wrote | `cut_commit_orphans_custody` | `proofs/sequence/CovenSequence/BootstrapCommit.lean` | §13.4 |
 | A deletion from the device that first renames the store's directory, and is finished by the next listing or restore, never leaves the store listed without its entries, and settles with the store whole or gone with its entries and lock files | `never_broken`, `settles` | `proofs/sequence/CovenSequence/StoreDiscard.lean` | §11.6 |
 | *Body.* Deleting the entries first leaves the store listed with no device id or keys after a crash; with nothing finishing a recorded deletion, its remains keep the store's id taken for good | `entries_first_breaks_store`, `unfinished_deletion_blocks_store` | `proofs/sequence/CovenSequence/StoreDiscard.lean` | §11.6 |
+| A deletion that leaves the store, recording itself before it journals the device's removal, refusing opens while recorded and a signed-out store's deletion, never deletes the store before its removal applied, never leaves the store open with its removal under way, and settles, gone with its removal applied or untouched | `never_stranded`, `never_unlisted`, `settles`, `settled_outcome` | `proofs/sequence/CovenSequence/StoreDeletion.lean` | §11.6 |
+| *Body.* Signed out, a deletion that skips the removal leaves the device registered for good; without the record, a crash after the removal lands leaves the store opening as removed, and a failure after the journal leaves it in use while the removal lands | `signed_out_strands_device`, `crashed_deletion_reopens_removed`, `failed_deletion_removes_store_in_use` | `proofs/sequence/CovenSequence/StoreDeletion.lean` | §11.6 |
 | Store-reset authority is checked in the state before the slot (circle-reset authority is left to the model's supplied audience policy) | `store_reset_authorized` | `proofs/sequence/CovenSequence/Authority.lean` | §19.4 |
 | An applied reset loads its chosen rows without replaying the slots before it | `reset_replaces` | `proofs/sequence/CovenSequence/Preparations.lean` | §19.4 |
 | From empty storage, with every create recorded and the journal kept, a slot signed by this device's id that it never attempted means another copy | `foreign_slot_means_copy` | `proofs/sequence/CovenSequence/Settle.lean` | §19.3 |

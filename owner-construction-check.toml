@@ -1502,13 +1502,15 @@ tables = [
     "CovenBuilder::resume_join",
     "CovenBuilder::resume_restore",
     "CovenBuilder::resume_replacement",
-    "CovenBuilder::open_read_only",
+    # Resuming a recorded deletion opens the store to finish leaving it (§11.6).
+    "CovenBuilder::resume_deletion",
     "CovenBuilder::owners",
     "CovenBuilder::create_store",
     "OpeningOwners::into_handle",
     "OpeningStore::open",
 ]
 "crates/coven/src/builder_creation.rs" = ["create", "prepare"]
+"crates/coven/src/builder_read_only.rs" = ["CovenBuilder::open_read_only"]
 # The app's stores on this device, with the OS keychain it builds once at
 # startup and the platform's network, and what it builds over them.
 "crates/coven/src/coven.rs" = [
@@ -1524,6 +1526,9 @@ tables = [
 # store's entries.
 "crates/coven/src/saved_restore.rs" = ["list", "forget"]
 "crates/coven/src/handle.rs" = ["CovenHandle::close", "CovenHandle::new"]
+# Leaving a store runs in a task of its own that finishes even if the app
+# stops waiting: past its removal's journal it only goes forward (§11.6).
+"crates/coven/src/handle_delete.rs" = ["CovenHandle::leave"]
 "crates/coven/src/read_handle.rs" = ["CovenReadHandle::close", "CovenReadHandle::new"]
 "crates/coven/src/storage.rs" = [
     # A completed sign-in becomes this session's custody.

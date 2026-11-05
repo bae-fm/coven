@@ -301,8 +301,8 @@ async fn refuses_opens(network: &Network, replaced: &KeysReplaced) {
         Err(ReadOnlyOpenError::Local(CovenError::Lock(error))) if unfinished(&error)
     ));
     assert_eq!(
-        replaced.carol.app.readable_stores().await[0].unfinished_replacement,
-        Some(ReplacedBy::Restore)
+        replaced.carol.app.readable_stores().await[0].unfinished,
+        Some(Unfinished::Replacement(ReplacedBy::Restore))
     );
 }
 
@@ -469,7 +469,11 @@ async fn a_restore_interrupted_after_its_swap_is_finished_by_retrying_it() {
     ));
     assert_eq!(
         app.readable_stores().await,
-        [StoreInfo { id: store, name, unfinished_replacement: Some(ReplacedBy::Restore) }]
+        [StoreInfo {
+            id: store,
+            name,
+            unfinished: Some(Unfinished::Replacement(ReplacedBy::Restore))
+        }]
     );
     assert_eq!(held(&replaced.carol.app, store), before);
     // A reset would load under the replaced pair and keep the old copy.
@@ -485,7 +489,7 @@ async fn a_restore_interrupted_after_its_swap_is_finished_by_retrying_it() {
     assert_eq!(held(&replaced.carol.app, store), before);
     let handle = restore(network.reopen(&replaced.carol), store, &replaced.code).await.unwrap();
     assert_eq!(restored(&network, &replaced, handle, old).await, decided.reset.new_device);
-    assert_eq!(app.readable_stores().await[0].unfinished_replacement, None);
+    assert_eq!(app.readable_stores().await[0].unfinished, None);
     network.close().await;
 }
 

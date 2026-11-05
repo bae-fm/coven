@@ -8,6 +8,7 @@ pub use asset_files::{AssetFile, AssetFiles};
 mod atomic_file;
 mod bootstrap;
 mod creation;
+mod deletion;
 mod device_reset;
 mod directory;
 mod file_lock;
@@ -37,6 +38,7 @@ mod tree_copy;
 pub use atomic_file::{replace as write_atomic, AtomicFile, FileError, FileWriter};
 pub use bootstrap::{BootstrapDirectoryError, BootstrapStore};
 pub use creation::DirectoryCreationError;
+pub use deletion::IfUnsent;
 pub use device_reset::{DeviceReset, ReplacedBy, ReplacementPhase, ReplacementRecord};
 pub use directory::{
     protect_files, verify_lock, FileArea, FileName, FileNameError, StoreDir, StoreDirAccess,

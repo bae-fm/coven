@@ -673,7 +673,9 @@ mod sequence_member_keys;
 pub(crate) use sequence_member_keys::registered;
 #[path = "sequence_operations.rs"]
 pub(crate) mod sequence_operations;
-pub use sequence_operations::registration_journaled;
+#[path = "sequence_own_membership.rs"]
+mod sequence_own_membership;
+pub use sequence_own_membership::{registration_journaled, removal_journaled};
 #[path = "sequence_read.rs"]
 mod sequence_read;
 #[path = "sequence_reload.rs"]
