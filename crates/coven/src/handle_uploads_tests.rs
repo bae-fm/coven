@@ -413,6 +413,72 @@ async fn a_raise_waits_for_a_held_write_and_follows_it() {
     network.sync(0).await;
     network.close().await;
 }
+/// The household's migrations with a breaking version 2 whose late
+/// old-schema writes convert unchanged.
+fn converting() -> Vec<Migration> {
+    vec![
+        Migration::addition(1, "covers", SCHEMA),
+        Migration::breaking(
+            2,
+            "notes by title",
+            "CREATE INDEX notes_by_title ON notes(title)",
+            OldWrites::Convert(std::sync::Arc::new(|_| Ok(()))),
+        ),
+    ]
+}
+
+/// Ben, on the old app, writes a note while his sync is stopped and Ana
+/// raises the store to version 2. His pass stops at the raise, which his app
+/// can't apply, and sends nothing, so Ana never sees the note. After his app
+/// updates, his write goes out unchanged, at schema version 1, and Ana
+/// applies it (§18.3).
+#[tokio::test]
+async fn an_old_app_holds_its_unsent_writes_and_sends_them_unchanged_after_updating() {
+    let mut network = household().await;
+    let ben = &network.devices[1];
+    stopped(ben).await;
+    note(ben, "offline").await;
+    let held = ben.handle.test_queued_writes().await.unwrap();
+    assert_eq!(held.len(), 1);
+    assert_eq!(held[0].header.schema_version, 1);
+
+    let device = &network.devices[0];
+    device.handle.close().await.unwrap();
+    let handle =
+        network.reopen(device).migrations(converting()).open(device.store, |_| ()).await.unwrap();
+    handle.start_sync().await.unwrap();
+    network.devices[0].handle = handle;
+    passes_until(&network, 0, async |n: &Network| raised_to(n, 0, 2).await).await;
+
+    let ben = &network.devices[1];
+    let mut last = ben.handle.test_last_pass();
+    ben.handle.start_sync().await.unwrap();
+    ben.handle.sync_now();
+    last.wait_for(|last| {
+        matches!(
+            last,
+            Some(LastPass::Blocked {
+                reason: PendingReason::UpdateRequired(RequiredUpdate::AppSchema { version: 2 }),
+                ..
+            })
+        )
+    })
+    .await;
+    assert_eq!(ben.handle.test_queued_writes().await.unwrap(), held);
+    network.sync(0).await;
+    assert!(notes(&network.devices[0]).await.is_empty());
+
+    let device = &network.devices[1];
+    device.handle.close().await.unwrap();
+    let handle =
+        network.reopen(device).migrations(converting()).open(device.store, |_| ()).await.unwrap();
+    handle.start_sync().await.unwrap();
+    network.devices[1].handle = handle;
+    passes_until(&network, 1, async |n: &Network| queued_writes(n, 1).await == 0).await;
+    network.sync(0).await;
+    assert_eq!(notes(&network.devices[0]).await, ["offline"]);
+    network.close().await;
+}
 /// While Ana's raise waits for her held cover write, her history ages past
 /// grace, which asks for a snapshot of it. The raise's own snapshot is the
 /// next one for the store: no ordinary snapshot, written at version 2 her
