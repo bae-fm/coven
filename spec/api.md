@@ -5207,7 +5207,9 @@ impl PendingRecord {
     /// as a locked keychain, except in an operation the app started: its call
     /// returns them and the app calls again (§19.1). Uploads and coven-owned
     /// operations also retry storage QuotaExceeded/File.
-    /// AfterUpdate: refused immutable objects and unsupported formats/schema.
+    /// AfterUpdate: refused immutable objects, which every build of coven
+    /// other than the one that refused them rechecks once, and unsupported
+    /// formats/schema, retried once coven or the app supports them (§19.1).
     /// Never: WritesRefused or this device's removal/replacement.
     /// AppAction: failures a person clears, such as required credentials;
     /// retried on new credentials or connection.

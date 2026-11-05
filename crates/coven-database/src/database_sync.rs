@@ -580,6 +580,18 @@ impl Database {
         .await
     }
 
+    /// Make every pending record one `build` recorded, as a store opened by
+    /// another build of coven finds the records an earlier one wrote (§19.1).
+    #[cfg(any(test, feature = "test-utils"))]
+    pub async fn set_pending_build(&self, build: u128) -> Result<(), DbError> {
+        self.call(move |inner| {
+            inner.access.with_writer(|writer| {
+                writer.state_transaction(|db| crate::pending::set_build(db, build))
+            })
+        })
+        .await
+    }
+
     /// Read the oldest waiting plaintext and its recorded sealing keys.
     /// The callback runs in a committed reader transaction; its result is `None`
     /// when the queue is empty.

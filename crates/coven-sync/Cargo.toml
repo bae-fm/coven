@@ -24,6 +24,7 @@ hex.workspace = true
 tracing.workspace = true
 zeroize.workspace = true
 uuid = { workspace = true, features = ["serde"] }
+const-random.workspace = true
 
 [dev-dependencies]
 coven-crypto = { workspace = true, features = ["test-utils"] }

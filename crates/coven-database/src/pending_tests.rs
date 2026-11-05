@@ -94,11 +94,12 @@ impl PendingValue for Record {
     fn ends_when_covered(&self) -> bool {
         !matches!(self.reason, Reason::Refused | Reason::WritesRefused)
     }
-    fn can_retry(&self, version: &str, schema: u32) -> bool {
+    const BUILD: u128 = 1;
+    fn can_retry(&self, build: u128, schema: u32) -> bool {
         match self.reason {
             Reason::Missing => true,
             Reason::WritesRefused => false,
-            Reason::Refused => version != env!("CARGO_PKG_VERSION"),
+            Reason::Refused => build != Self::BUILD,
             Reason::Update(required) => schema >= required,
         }
     }
@@ -126,7 +127,7 @@ fn record(subject: u64) -> Record {
 }
 
 #[tokio::test]
-async fn reopening_preserves_conditions_and_a_version_change_rearms_without_erasing_them() {
+async fn reopening_preserves_conditions_and_a_build_change_rearms_without_erasing_them() {
     let store = TestStore::new();
     let db = store.builder(vec![], vec![]).open().await.unwrap();
     let pending = record(1);
@@ -136,11 +137,8 @@ async fn reopening_preserves_conditions_and_a_version_change_rearms_without_eras
     let db = store.builder(vec![], vec![]).open().await.unwrap();
     assert_eq!(db.pending::<Record>().await.unwrap(), std::slice::from_ref(&pending));
     assert!(!db.pending_can_retry::<Record>(1.into()).await.unwrap());
-    // A database last judged by another library release.
-    db.commit_writer(|sql| {
-        sql.internal_execute("UPDATE _coven_pending SET coven_version=?1", ["previous-version"])
-            .unwrap()
-    });
+    // A database whose records another build of coven recorded.
+    db.set_pending_build(2).await.unwrap();
     db.close().await.unwrap();
     let db = store.builder(vec![], vec![]).open().await.unwrap();
     assert_eq!(db.pending::<Record>().await.unwrap(), std::slice::from_ref(&pending));
@@ -487,9 +485,9 @@ async fn a_pending_subject_accepts_one_local_record_without_an_observer_identity
         let value = serde_json::to_vec(&pending).unwrap();
         for _ in 0..2 {
             sql.internal_execute(
-                "INSERT INTO _coven_pending(subject,value,coven_version) VALUES(?1,?2,?3)
+                "INSERT INTO _coven_pending(subject,value,build) VALUES(?1,?2,?3)
                  ON CONFLICT(subject) DO UPDATE SET value=excluded.value",
-                (&subject, &value, env!("CARGO_PKG_VERSION")),
+                (&subject, &value, Record::BUILD.to_be_bytes()),
             )
             .unwrap();
         }
@@ -582,11 +580,11 @@ async fn a_records_cause_is_written_with_it_and_cleared_at_open() {
 /// table, inside its transaction (`internal_schema_scan_reasons_tests.rs`).
 pub(crate) fn fill_for_plans(db: &rusqlite::Connection) {
     db.execute_batch(
-        "INSERT INTO _coven_pending(subject,value,operation,object,work,device,file,coven_version)
+        "INSERT INTO _coven_pending(subject,value,operation,object,work,device,file,build)
            SELECT key,x'00',CASE WHEN i%2=0 THEN i END,
                   CAST(x'00' || n AS BLOB),CASE WHEN i%4=1 THEN 'upload' WHEN i%4=3 THEN 'download' END,
                   CASE WHEN i%2=1 THEN device END,
-                  CASE WHEN i%2=1 THEN substr(key,17,16) END,'1' FROM fixture;",
+                  CASE WHEN i%2=1 THEN substr(key,17,16) END,zeroblob(16) FROM fixture;",
     )
     .unwrap();
 }
@@ -603,8 +601,10 @@ pub(crate) fn scan_reason(
     match (file, template, relation) {
 ("pending.rs", "{SELECT} ORDER BY id", "_coven_pending") =>
     Some("pending returns every retained condition"),
-("pending.rs", "SELECT subject,value,operation,object,work,device,file,coven_version,move,pin,cause,id FROM _coven_pending", "_coven_pending") =>
+("pending.rs", "SELECT subject,value,operation,object,work,device,file,build,move,pin,cause,id FROM _coven_pending", "_coven_pending") =>
     Some("pending returns every retained condition"),
+("pending.rs", "UPDATE _coven_pending SET build=?1", "_coven_pending") =>
+    Some("test support: every record becomes another build's"),
 ("pending.rs", "UPDATE _coven_pending SET cause=NULL WHERE cause IS NOT NULL", "_coven_pending") =>
     Some("once per open: every record's cause names an error an earlier run met"),
 ("pending.rs", "DELETE FROM _coven_pending AS p WHERE NOT EXISTS(SELECT 1 FROM _coven_provider_access a WHERE a.operation=p.operation)", "p") =>

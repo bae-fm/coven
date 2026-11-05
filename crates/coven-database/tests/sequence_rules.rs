@@ -48,7 +48,8 @@ impl PendingValue for Pending {
     fn ends_when_covered(&self) -> bool {
         false
     }
-    fn can_retry(&self, _: &str, _: u32) -> bool {
+    const BUILD: u128 = 0;
+    fn can_retry(&self, _: u128, _: u32) -> bool {
         false
     }
     fn cause(&self) -> Option<&str> {

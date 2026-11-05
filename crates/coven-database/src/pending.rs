@@ -49,8 +49,13 @@ pub trait PendingValue: Serialize + DeserializeOwned + Send + 'static {
     /// loaded snapshot's do, also end this observation: true for a write that
     /// waits, false for a verdict on its bytes, which loading never clears (§19.1).
     fn ends_when_covered(&self) -> bool;
-    /// Whether automatic work can retry with these installed versions.
-    fn can_retry(&self, recorded_coven_version: &str, schema_version: u32) -> bool;
+    /// The build of coven that judges these records, which every record
+    /// saved names: one draws its own at each compilation, so a change to the
+    /// code that judges gives another (§19.1).
+    const BUILD: u128;
+    /// Whether automatic work can retry, given the build that recorded this
+    /// record and the app's installed schema version.
+    fn can_retry(&self, recorded_build: u128, schema_version: u32) -> bool;
     /// The text of the error behind this record, which `_coven_pending`
     /// keeps beside it in the same write: none when no error was met in
     /// this run, or when an app call received it.
@@ -83,7 +88,7 @@ impl rusqlite::types::FromSql for SubjectKey {
 }
 
 const SELECT: &str =
-    "SELECT subject,value,operation,object,work,device,file,coven_version,move,pin,cause,id FROM _coven_pending";
+    "SELECT subject,value,operation,object,work,device,file,build,move,pin,cause,id FROM _coven_pending";
 
 struct StoredRecord {
     /// Its place in the order the records arose.
@@ -93,7 +98,8 @@ struct StoredRecord {
     operation: Option<i64>,
     object: Option<Vec<u8>>,
     file: Option<(String, Vec<u8>, Vec<u8>)>,
-    coven_version: String,
+    /// The build of coven that recorded it.
+    build: u128,
     moved: Option<i64>,
     pin: Option<String>,
     cause: Option<String>,
@@ -114,7 +120,7 @@ impl StoredRecord {
                 (None, None, None) => None,
                 _ => return Err(crate::write_encoding::damaged(4, rusqlite::types::Type::Text)),
             },
-            coven_version: row.get(7)?,
+            build: u128::from_be_bytes(row.get(7)?),
             moved: row.get(8)?,
             pin: row.get(9)?,
             cause: row.get(10)?,
@@ -169,12 +175,12 @@ pub(crate) fn save<P: PendingValue>(db: &DatabaseConnection, record: &P) -> Resu
         // nothing: no pin or read can try them again. The cause is the
         // record's, written with it.
         db.internal_execute(
-            "INSERT INTO _coven_pending(subject,value,operation,object,work,device,file,coven_version,move,pin,cause)
+            "INSERT INTO _coven_pending(subject,value,operation,object,work,device,file,build,move,pin,cause)
              SELECT ?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11
              WHERE ?5 IS NOT 'download' OR EXISTS(SELECT 1 FROM _coven_stored_files AS s WHERE s.device=?6 AND s.object=?7)
-             ON CONFLICT(subject) DO UPDATE SET value=excluded.value,operation=excluded.operation,object=excluded.object,work=excluded.work,device=excluded.device,file=excluded.file,coven_version=excluded.coven_version,move=excluded.move,pin=excluded.pin,cause=excluded.cause
-             WHERE value!=excluded.value OR coven_version!=excluded.coven_version OR cause IS NOT excluded.cause",
-            rusqlite::params![subject, value, record.operation().map(|id| id.0), stored_object(record), work, device, file, env!("CARGO_PKG_VERSION"), record.move_of(), record.pin_of(), record.cause()],
+             ON CONFLICT(subject) DO UPDATE SET value=excluded.value,operation=excluded.operation,object=excluded.object,work=excluded.work,device=excluded.device,file=excluded.file,build=excluded.build,move=excluded.move,pin=excluded.pin,cause=excluded.cause
+             WHERE value!=excluded.value OR build!=excluded.build OR cause IS NOT excluded.cause",
+            rusqlite::params![subject, value, record.operation().map(|id| id.0), stored_object(record), work, device, file, P::BUILD.to_be_bytes(), record.move_of(), record.pin_of(), record.cause()],
         )?;
         Ok(())
     })
@@ -268,10 +274,18 @@ pub(crate) fn retry<P: PendingValue>(
 ) -> Result<bool, DbError> {
     match stored(db, subject)? {
         None => Ok(true),
-        Some(stored) => {
-            Ok(stored.decode::<P>()?.can_retry(&stored.coven_version, db.schema_version()?))
-        }
+        Some(stored) => Ok(stored.decode::<P>()?.can_retry(stored.build, db.schema_version()?)),
     }
+}
+
+/// Make every record one `build` recorded, as a store opened by another
+/// build of coven finds the records an earlier one wrote.
+#[cfg(any(test, feature = "test-utils"))]
+pub(crate) fn set_build(db: &DatabaseConnection, build: u128) -> Result<(), DbError> {
+    db.pending_change(|| {
+        db.internal_execute("UPDATE _coven_pending SET build=?1", [build.to_be_bytes()])?;
+        Ok(())
+    })
 }
 
 fn object_key(slot: coven_merge::Slot, covered: bool) -> Vec<u8> {

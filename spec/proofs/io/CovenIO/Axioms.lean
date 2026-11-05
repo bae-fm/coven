@@ -153,3 +153,9 @@ import CovenIO
 #print axioms CovenIO.Retired.candidates_kept
 #print axioms CovenIO.Retired.pass_lists_once
 #print axioms CovenIO.Retired.cleanup_finds_a_later_upload
+#print axioms CovenIO.Recheck.own_refusal_waits
+#print axioms CovenIO.Recheck.other_build_rechecks
+#print axioms CovenIO.Recheck.differing_build_rechecks
+#print axioms CovenIO.Recheck.waiting_loses_nothing
+#print axioms CovenIO.Recheck.recheck_once
+#print axioms CovenIO.Recheck.shared_key_strands

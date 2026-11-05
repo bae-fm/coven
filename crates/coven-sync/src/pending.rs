@@ -282,7 +282,8 @@ pub enum PendingReason {
 pub enum Retry {
     /// Retry when the prerequisite or retry deadline changes.
     Automatic,
-    /// Retry only after the applicable software update.
+    /// Retry only under software that may decide otherwise: a refusal under
+    /// another build of coven, a required update once it is installed.
     AfterUpdate,
     /// A person must act.
     AppAction,
@@ -599,9 +600,19 @@ impl PendingValue for PendingRecord {
             PendingReason::Refused(_) | PendingReason::WritesRefused { .. }
         )
     }
-    fn can_retry(&self, recorded_version: &str, schema_version: u32) -> bool {
+    /// Drawn at random each time this crate compiles. Every refusal is made
+    /// here, from checks in this crate and in the crates it depends on, so a
+    /// change to any of that code, or to a dependency, compiles this crate
+    /// again and draws another. A version number would not do: development
+    /// never moves it, so a refusal a since-fixed bug made would never be
+    /// rechecked.
+    const BUILD: u128 = const_random::const_random!(u128);
+    /// A refusal is a verdict on bytes that never change, judged against
+    /// what never changes either: only another build can judge it
+    /// differently, and each other build checks it once (§19.1).
+    fn can_retry(&self, recorded_build: u128, schema_version: u32) -> bool {
         match self.reason.retry_cause() {
-            PendingReason::Refused(_) => recorded_version != env!("CARGO_PKG_VERSION"),
+            PendingReason::Refused(_) => recorded_build != Self::BUILD,
             PendingReason::UpdateRequired(RequiredUpdate::AppSchema { version }) => {
                 schema_version >= *version
             }

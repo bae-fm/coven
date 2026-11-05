@@ -21,9 +21,9 @@ inductive Reason where
 /-- What lets a failed download run again (§17.7, E5). Only the app's reads
 and pins download, and their calls return the failure, so nothing retries a
 download on its own: the app's next read or pin tries again. Only a pin's
-failure is recorded. Refused bytes wait for an applicable update, and a
-provider's outright refusal never clears (Rust `PendingRecord::retry` for
-`PendingSubject::Download`). -/
+failure is recorded. Refused bytes wait for another build of coven to
+recheck them (`Recheck`), and a provider's outright refusal never clears
+(Rust `PendingRecord::retry` for `PendingSubject::Download`). -/
 inductive Retry where
   | nextCall | afterUpdate | never
   deriving DecidableEq, Repr

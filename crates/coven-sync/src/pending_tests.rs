@@ -44,8 +44,8 @@ fn cleanup_retains_both_causes_and_obeys_the_unfinished_causes_retry_gate() {
             }
         );
         assert_eq!(reopened.retry(), retry);
-        assert_eq!(reopened.can_retry(env!("CARGO_PKG_VERSION"), 2), before);
-        assert_eq!(reopened.can_retry(env!("CARGO_PKG_VERSION"), 3), after);
+        assert_eq!(reopened.can_retry(PendingRecord::BUILD, 2), before);
+        assert_eq!(reopened.can_retry(PendingRecord::BUILD, 3), after);
     }
 }
 
@@ -125,7 +125,7 @@ fn local_failures_retry_slots_and_passes_as_they_clear() {
         ] {
             let record = PendingRecord::new(subject.clone(), PendingReason::Failed(failure));
             assert_eq!(record.retry(), retry, "{record:?}");
-            assert_eq!(record.can_retry(env!("CARGO_PKG_VERSION"), 1), retry == Retry::Automatic);
+            assert_eq!(record.can_retry(PendingRecord::BUILD, 1), retry == Retry::Automatic);
         }
     }
 }
@@ -162,7 +162,7 @@ fn uploads_retry_by_themselves_and_downloads_on_the_apps_next_call() {
         let downloaded = PendingRecord::new(download.clone(), reason);
         assert_eq!(uploaded.retry(), uploads, "{uploaded:?}");
         assert_eq!(downloaded.retry(), downloads, "{downloaded:?}");
-        assert!(!downloaded.can_retry(env!("CARGO_PKG_VERSION"), 1));
+        assert!(!downloaded.can_retry(PendingRecord::BUILD, 1));
     }
     let source = PendingReason::FileUnavailable(FileMissingReason::Source(
         crate::FileSourceFailure::Missing,
@@ -222,4 +222,77 @@ fn only_an_unanswered_network_failure_is_offline() {
     assert!(!storage(StorageFailure::RateLimited, true).offline());
     assert!(!storage(StorageFailure::File, false).offline());
     assert!(!PendingReason::Failed(LocalFailure::Disk).offline());
+}
+
+/// A refusal is a verdict on bytes that never change, so only coven's own
+/// code can change it: the record names the build that refused it, and each
+/// other build checks the slot again, once (§19.1). Ben's device refuses
+/// damaged bytes at slot `n`: the same build never checks them again, and
+/// another build does, and refusing again records its own build. Cal's device
+/// holds a refusal of the honest slot, as a build with a wrong check recorded
+/// it: the same build keeps the slot refused, and another build applies it.
+#[tokio::test]
+async fn a_refused_slot_is_rechecked_once_by_another_build() {
+    use crate::sequence_sync::tests::{insert, Device, Group};
+    let group = Group::new();
+    let ana = group.device(1).await;
+    let ben = group.device(2).await;
+    let cal = group.device(3).await;
+    group.create(&ana).await;
+    group.admit(&ana, &ben).await;
+    group.admit(&ana, &cal).await;
+    ben.sync.pass().await.unwrap();
+    cal.sync.pass().await.unwrap();
+    insert(ana.database(), "a", "refused").await;
+    ana.sync.pass().await.unwrap();
+    let n = ana.database().applied_slot().await.unwrap();
+    let path = ObjectPath::slot(group.store, n.try_into().unwrap());
+    let subject = PendingSubject::Slot(Slot(n));
+    let another = !PendingRecord::BUILD;
+    let blocked = |result: Result<crate::SequenceStatus, crate::SyncError>| {
+        matches!(result, Err(crate::SyncError::Pending(record))
+            if record.subject == subject && matches!(record.reason, PendingReason::Refused(_)))
+    };
+    let rechecks = |device: &Device| {
+        let (subject, database) = (subject.clone(), device.database().clone());
+        async move { database.pending_can_retry::<PendingRecord>(subject).await.unwrap() }
+    };
+
+    group.storage.corrupt_byte(&path, 0).await.unwrap();
+    let refused = ben.sync.pass().await.unwrap_err();
+    assert!(matches!(refused, crate::SyncError::Damaged(_)), "{refused:?}");
+    // The same build doesn't check the slot again, reopened or not.
+    assert!(!rechecks(&ben).await);
+    let ben = group.reopen(ben).await;
+    assert!(blocked(ben.sync.pass().await));
+    // Another build checks it again; refused again, the record names that
+    // build, which doesn't check it a second time.
+    ben.database().set_pending_build(another).await.unwrap();
+    let ben = group.reopen(ben).await;
+    assert!(rechecks(&ben).await);
+    let refused = ben.sync.pass().await.unwrap_err();
+    assert!(matches!(refused, crate::SyncError::Damaged(_)), "{refused:?}");
+    assert!(!rechecks(&ben).await);
+    assert!(blocked(ben.sync.pass().await));
+    group.storage.corrupt_byte(&path, 0).await.unwrap();
+
+    // Cal's build refused the honest slot. It keeps it refused; another
+    // build applies it.
+    let wrong = crate::Refusal::WrongIdentity { cause: None };
+    cal.database()
+        .record_pending(PendingRecord::new(subject.clone(), PendingReason::Refused(wrong)))
+        .await
+        .unwrap();
+    let cal = group.reopen(cal).await;
+    assert!(blocked(cal.sync.pass().await));
+    assert_eq!(cal.database().applied_slot().await.unwrap(), n - 1);
+    cal.database().set_pending_build(another).await.unwrap();
+    let cal = group.reopen(cal).await;
+    cal.sync.pass().await.unwrap();
+    assert_eq!(cal.database().applied_slot().await.unwrap(), n);
+    let pending = cal.database().pending::<PendingRecord>().await.unwrap();
+    assert!(pending.iter().all(|record| record.subject != subject), "{pending:?}");
+    for device in [&ana, &ben, &cal] {
+        device.database().close().await.unwrap();
+    }
 }

@@ -8,6 +8,7 @@ import CovenIO.RetryAnswer
 import CovenIO.SyncState
 import CovenIO.Wakes
 import CovenIO.Downloads
+import CovenIO.Recheck
 import CovenIO.Keep
 import CovenIO.Retired
 import CovenIO.Examples

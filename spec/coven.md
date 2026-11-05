@@ -6625,7 +6625,7 @@ again.
 | network or provider failure | the provider's `Storage` category | the next read or pin tries again |
 | storage confirms nothing at the path the record names | `FileUnavailable(Lost)` | needs the app to act |
 | the file is on this device only and uploading, and its source fails the read's check | the upload's record (§17.9) | the upload retries, or its move fails (§17.9) |
-| a complete chunk fails authentication | `Refused(Decryption)` | the same bytes are never retried on their own; an applicable coven update can permit a recheck (§19.1) |
+| a complete chunk fails authentication | `Refused(Decryption)` | the same bytes are never retried on their own; another build of coven rechecks them once (§19.1) |
 | authenticated bytes disagree with the record's content hash | `Refused(ContentHash)` | as above |
 | writing the local cache fails | `Failed(Disk)` | |
 | the database fails | `Failed(Database)` | |
@@ -7898,8 +7898,20 @@ read, never a refusal.
   `Refused(Decryption)` in the process that met it. The pending record still
   distinguishes `Refused(Decryption)` from `Refused(ContentHash)`. This lets the
   app handle both failures alike while pending work preserves the reason.
-- An applicable coven update permits one recheck of a refused object. Reopening
-  the same version doesn't repeat it.
+- Each build of coven rechecks a refused object once. A refusal is a verdict on
+  bytes that never change, judged against what never changes either: the
+  history before a slot, which a stuck device never moves past, or a file's
+  recorded content hash. Only coven's own code can change it. The record names
+  the build that refused it, and any other build checks the object again: Ben's
+  laptop refused slot 52 under a build with a bug, and the next build he
+  installs, with the fix, applies it, though coven's version number stayed the
+  same. A recheck that refuses again records its own build, so reopening under
+  the same build doesn't repeat it, and nothing loops. A build is one
+  compilation of `coven-sync`, where every refusal is made, from its own checks
+  and those of the crates below it: each compilation draws a new random
+  identity, and a change to any of that code, or to a dependency, compiles it
+  again. A number builds share, such as the package version, would leave a
+  device stuck on a refusal the fix never rechecks (Appendix G.7).
 - A refused slot stops the device under §5.4's rule. No later floor, reset or
   admin entry can get past the refusal.
 - A failed database transaction keeps the old state and applied slot. A
@@ -9428,7 +9440,7 @@ Coven's other tables, besides the merge records Appendix B.1 lists:
 | `_coven_moves` | each move of this device's files to the cloud, by id, never reused: moving, failed, cancelled or finished; every queued upload names its move, and whether its bytes are stored (§17.3) |
 | `_coven_copy_chunks` | the plaintext chunk hashes of coven's copy of each app file, by the copy, which a move's upload checks (§17.3) |
 | `_coven_unreferenced_files` | the files other devices' writes left with no reference, whose records this device's next write deletes (§17.2) |
-| `_coven_pending` | one record per thing that can't proceed, with the stored bytes it describes and whether it is about their upload or their downloads, or the move it describes, if any, and the text of the error behind it that this run met, numbered in the order the records arose (§19.1) |
+| `_coven_pending` | one record per thing that can't proceed, with the stored bytes it describes and whether it is about their upload or their downloads, or the move it describes, if any, the text of the error behind it that this run met, and the build of coven that recorded it, numbered in the order the records arose (§19.1) |
 | `_coven_device_reset` | the reset notice with old and new device ids (§19.3) |
 | `_coven_sql_versions` | the version of each app collation and deterministic function the store's indexes were last built with, and of the SQLite that last opened the store for writing (§4) |
 
@@ -11119,6 +11131,7 @@ Write-ups explain each model and state its assumptions:
 | The setter actually replaced decides; partial chains of writes | `actual_setter_decides`, `partial_write_chain` | `proofs/queue/CovenQueue/DataExamples.lean` | §18.6 |
 | Conversion of old writes (queue model overview) | (write-up) | `proofs/queue.md` | §18.6 |
 | A status screen's sync state is the one candidate no other outranks; not synced means no location is recorded, and a location without credentials is signed out; between offline and offline with unsent changes whether a write or a file is queued decides, and a write committed while offline changes one into the other with no pass; syncing shows only while a slot or a file moves, waiting to sync only while nothing moves and a held-back pass or a queued file names its wait, and synced only once every file this device uploads is stored and only after a pass that ended synced; with the setting to transfer only on unmetered networks on and a metered network, every upload the setting holds waits for something before its backoff, and an upload waits for the network only then; a change of network never changes which state shows; a pass that moves nothing leaves the state as it was; the last synced time never goes backward, and only a pass reaching the read end changes it; each pending reason names one state or none, a wait for data names none, a pass held back by a wait waits to sync, and a file that can't be uploaded or read names failed | `one_state`, `not_synced_iff`, `signed_out_without_credentials`, `offline_unsent_iff`, `offline_iff`, `write_while_offline`, `syncing_only_moving`, `waiting_not_moving`, `synced_files_stored`, `bad_file_fails`, `quiet_pass_keeps`, `last_synced_never_back`, `last_synced_kept`, `waits_name_no_state`, `file_failures_name_failed`, `failed_pass_not_synced`, `waiting_pass_waits`, `metered_holds`, `metered_only_held`, `network_keeps_state` | `proofs/io/CovenIO/SyncState.lean` | §19.1 |
+| A refusal is rechecked by every build of coven other than the one that recorded it, so by every build that would judge it differently, and never by its own; waiting loses nothing, and a recheck that refuses again records its build, so each build rechecks once and never loops. Keyed to a number several builds share, a refusal is never rechecked by a build that would accept it | `other_build_rechecks`, `differing_build_rechecks`, `own_refusal_waits`, `waiting_loses_nothing`, `recheck_once`, `shared_key_strands` | `proofs/io/CovenIO/Recheck.lean` | §19.1 |
 | A replacement of this device's installation that records itself before its fresh device registers, refuses opens while recorded and from the record on only goes forward never opens the old installation once a registration replacing it may have landed, keeps the new installation while history names it, and settles, on every path, published or with the old installation the store and no claim open | `old_never_stale`, `never_missing`, `settles`, `settled_outcome` | `proofs/sequence/CovenSequence/DeviceReplacement.lean` | §11.6, §19.3 |
 | *Body.* A replacement that records itself only at the swap opens the old installation after a crash once its registration landed; one that moves the old installation back after a failure past the swap does the same; a cancel that doesn't wait removes the new installation while its registration is on its way | `crashed_replacement_opens_old`, `unswapped_replacement_opens_old`, `cancelled_replacement_missing` | `proofs/sequence/CovenSequence/DeviceReplacement.lean` | §19.3 |
 | A new installation whose commit only goes forward, and whose ending deletes every device-only entry of its store, leaves no custody for a store the device doesn't have, publishes only whole custody, and settles, published or removed | `never_orphaned`, `published_whole`, `settles` | `proofs/sequence/CovenSequence/BootstrapCommit.lean` | §13.4, §11.6 |

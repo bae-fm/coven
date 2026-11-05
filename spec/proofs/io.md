@@ -1,8 +1,8 @@
 # IO and observable work
 
 The Lean package in [io](io/) covers retained byte ranges, file downloads,
-retry waits, the answer to the person's retry, the sync state, work
-notifications and the removed-device file scan. The
+retry waits, rechecks of refusals, the answer to the person's retry, the sync
+state, work notifications and the removed-device file scan. The
 [sequence model](sequence.md) covers ordered reads, blocked devices, claims,
 operations, snapshot selection, the floor and history deletion.
 
@@ -26,13 +26,12 @@ to its caller and leaves the state as it was (`failed_read_records_nothing`),
 so nothing is pending after it. Only the app's reads and pins download, so
 nothing retries a download on its own (`never_on_its_own`): a failure the
 app's next read or pin can clear retries then (`next_call_retries`), refused
-bytes wait for an
-applicable update, and a provider's outright refusal never clears
-(`refusal_never_retries`). A timeout or connection failure cannot be reported
-as a missing file, and a confirmed absence at the path a record's coordinates
-name waits for the app, never for an upload (`absence_waits_for_the_app`):
-coordinates say cloud only once storage confirmed the
-bytes (§17.2). The model assumes
+bytes wait for another build of coven to recheck them (below), and a
+provider's outright refusal never clears (`refusal_never_retries`). A timeout
+or connection failure cannot be reported as a missing file, and a confirmed
+absence at the path a record's coordinates name waits for the app, never for an
+upload (`absence_waits_for_the_app`): coordinates say cloud only once storage
+confirmed the bytes (§17.2). The model assumes
 the byte reader, validator and local writes supply truthful outcomes; it does
 not prove cipher security or filesystem atomicity.
 
@@ -281,6 +280,29 @@ and cleanups that complete or fail, and compares the recorded candidates with
 The premise matters: a successful listing is complete. That is a provider
 assumption. A listing discovers candidates; retained references and snapshots
 still determine whether any file can be deleted.
+
+## Rechecking a refusal
+
+[Recheck.lean](io/CovenIO/Recheck.lean) models when a refusal is checked again
+(§19.1). A refusal is a verdict on bytes that never change, judged against a
+history a stuck device never moves past, so only coven's own code can change it.
+The record names the build of coven that last refused the input. Any other build
+rechecks it (`other_build_rechecks`), so every build that would judge it
+differently does (`differing_build_rechecks`); the recording build never does
+(`own_refusal_waits`), and loses nothing by waiting, since it would refuse again
+(`waiting_loses_nothing`). A recheck that refuses again records the running
+build, so each build rechecks at most once and never loops (`recheck_once`). A
+number several builds share, such as a package version development never moves,
+would strand the device: a build that would accept the input never rechecks a
+refusal another build with the same number recorded (`shared_key_strands`).
+
+The model takes a build to be distinct from every build whose code differs.
+Rust draws a fresh random build identity each time it compiles `coven-sync`,
+where every refusal is made, from its own checks and those of the crates below
+it: a change to any of that code, or to a dependency, compiles it again.
+`pending::tests::a_refused_slot_is_rechecked_once_by_another_build` runs a
+device whose slot was refused over bytes that check out: the same build keeps
+the slot refused, another build applies it.
 
 ## Checking
 

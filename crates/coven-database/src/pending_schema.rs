@@ -6,6 +6,8 @@ macro_rules! coven_pending_tables {
         // the record by the run that met the error. Opening clears every
         // cause: one from an earlier run names a failure nothing has met
         // since (§19.1).
+        // `build` is the build of coven that recorded it: a refusal is
+        // rechecked once by each other build (§19.1).
         $visit!(_coven_pending, "
             CREATE TABLE _coven_pending (
                 id INTEGER PRIMARY KEY,
@@ -16,7 +18,7 @@ macro_rules! coven_pending_tables {
                 work TEXT CHECK(work IN ('upload','download')),
                 device BLOB CHECK(device IS NULL OR length(device)=8),
                 file BLOB CHECK(file IS NULL OR length(file)=16),
-                coven_version TEXT NOT NULL,
+                build BLOB NOT NULL CHECK(length(build)=16),
                 move INTEGER REFERENCES _coven_moves(id),
                 pin TEXT REFERENCES _coven_pin_requests(file) ON DELETE CASCADE,
                 cause TEXT,

@@ -70,6 +70,7 @@ syn = { version = "3.0.3", features = ["full", "visit"] }
 thiserror = "2.0"
 toml = "1.1"
 uuid = "1.27.0"
+const-random = "0.1.18"
 serde = "1.0.229"
 serde_json = "1.0.151"
 tempfile = "3.27.0"
