@@ -36,8 +36,8 @@ fi
 step "owner-construction-check: Appendix F.1 dependencies, F.2 and F.3 capabilities and owners, F.5 conventions"
 scripts/cargo.sh run --quiet -p owner-construction-check -- "${checker_args[@]}"
 
-step "cargo deny check bans licenses: the crates Appendix F.1 refuses and the licenses coven accepts"
-cargo deny check bans licenses
+step "cargo deny check advisories bans licenses: the crates Appendix F.1 refuses and the licenses coven accepts"
+cargo deny check advisories bans licenses
 
 step "cargo clippy ${packages[*]} --all-targets --all-features"
 scripts/cargo.sh clippy "${packages[@]}" --all-targets --all-features -- -D warnings

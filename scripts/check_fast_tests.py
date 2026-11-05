@@ -43,7 +43,7 @@ class FastChecks(unittest.TestCase):
                 ]
                 if checker_status == 0:
                     expected += [
-                        "deny check bans licenses",
+                        "deny check advisories bans licenses",
                         "clippy -p coven-storage --all-targets --all-features"
                         " -- -D warnings",
                         "check -p coven-storage",

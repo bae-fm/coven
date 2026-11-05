@@ -10722,8 +10722,9 @@ the same on any platform.
 
 1. Formatting, and clippy with warnings denied: on the host, and for Android,
    which compiles code no host does and hosts no runner.
-2. The dependency rules of F.1, with `cargo deny check bans` for the crates
-   `deny.toml` refuses.
+2. The dependency rules of F.1, with `cargo deny check advisories bans
+   licenses`: known security advisories, the crates `deny.toml` refuses, and
+   the licenses it allows.
 3. The rules of F.2 and F.3, by a checker that reads the syntax tree of every
    crate, including inside macro calls, and the crates' `.sql` files, against
    the policy file,
