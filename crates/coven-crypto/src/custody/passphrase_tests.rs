@@ -240,3 +240,36 @@ fn a_passphrase_erases_its_allocation_when_dropped() {
     let passphrase = Passphrase::new("correct horse".to_owned());
     erases(&passphrase.0);
 }
+
+/// A file whose header is damaged, unknown or cut short is a header failure,
+/// not a wrong passphrase (E1).
+#[test]
+fn a_damaged_or_unknown_header_is_a_header_failure() {
+    let key_ids = coven_foundation::id_source::SequentialIds::new();
+    let (_temp, file, id) = file();
+    let custody =
+        PassphraseCustody::<StoreKeyring>::new(Passphrase::new("phrase".into()), file.clone(), id);
+    custody.unlock().unwrap();
+    custody
+        .persist(&StoreKeyring::new(StoreKey::generate(KeyId(key_ids.new_id())).unwrap()))
+        .unwrap();
+    let open = || {
+        PassphraseCustody::<StoreKeyring>::new(Passphrase::new("phrase".into()), file.clone(), id)
+            .unlock()
+    };
+    let original = file.read_optional().unwrap().unwrap();
+    open().unwrap();
+
+    let mut changed_magic = original.clone();
+    changed_magic[0] ^= 1;
+    let mut unknown_version = original.clone();
+    unknown_version[5..9].copy_from_slice(&0x14u32.to_le_bytes());
+    for bytes in [changed_magic, unknown_version] {
+        file.replace(&bytes).unwrap();
+        assert!(matches!(open(), Err(KeyError::PassphraseHeader)));
+    }
+    for length in [0, 4, 5, 8, 20, 36, 37, 60, 76] {
+        file.replace(&original[..length]).unwrap();
+        assert!(matches!(open(), Err(KeyError::PassphraseHeader)), "cut at {length}");
+    }
+}
