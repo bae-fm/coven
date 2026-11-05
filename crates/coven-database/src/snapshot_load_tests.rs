@@ -650,6 +650,45 @@ async fn replaying_waiting_files_keeps_every_queued_copy() {
     db.close().await.unwrap();
 }
 
+/// A load replaces synced state only: this device's pending records,
+/// journaled operations and cached files stay as they were (§16.1).
+#[tokio::test]
+async fn a_load_keeps_the_devices_pending_records_journals_and_cached_files() {
+    use crate::{FileDatabase, NewOperation, PendingValue};
+    use coven_foundation::files::FileName;
+    let store = TestStore::new();
+    let db = open(&store, Provenance::AppProvided).await;
+    let file = stage(&db, vec![5; 3], true).await.unwrap();
+    complete_uploads(&db).await;
+    let file = db.file_ref(file).await.unwrap();
+    FileDatabase::new(db.clone())
+        .cache_range(&file, 0, 1, FileName::new("cached").unwrap(), vec![9; 20])
+        .await
+        .unwrap();
+    db.record_pending(crate::pending::tests::Record::reload(Audience::Store)).await.unwrap();
+    db.start_operation(NewOperation {
+        kind: "journaled".into(),
+        data: vec![1, 2, 3],
+        started_by: "test".into(),
+        pauses_writes: false,
+    })
+    .await
+    .unwrap();
+    let snapshot = frames(&db, Audience::Store).await;
+    let kept = || {
+        let all = contents(&db);
+        ["_coven_pending", "_coven_operations", "_coven_cache", "_coven_cache_budgets"]
+            .map(|table| all[table].clone())
+    };
+    let before = kept();
+    for table in &before[..3] {
+        assert_eq!(table.len(), 1);
+    }
+    load(&db, Audience::Store, snapshot).await;
+    assert_eq!(kept(), before);
+    db.close().await.unwrap();
+}
+
 #[tokio::test]
 async fn a_snapshot_removing_a_queued_files_row_keeps_its_upload_source() {
     let ids = SequentialIds::new();
