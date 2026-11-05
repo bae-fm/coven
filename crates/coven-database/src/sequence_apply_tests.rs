@@ -338,3 +338,105 @@ pub(crate) fn fill_for_plans(db: &rusqlite::Connection) {
     )
     .unwrap();
 }
+
+/// Every device that has applied the same writes ends with the same merge
+/// records, not only the same app tables, whether it made some of them
+/// itself or only received them (§8).
+#[tokio::test]
+async fn devices_that_applied_the_same_slots_hold_the_same_merge_records() {
+    let ids = coven_foundation::id_source::SequentialIds::new();
+    let ana_store = TestStore::with_ids(&ids);
+    let carol_store = TestStore::with_ids(&ids);
+    let tables = || {
+        vec![
+            SyncedTable::new("rows", RowIdentity::SharedKey),
+            SyncedTable::new("owned", RowIdentity::SharedKey).owner_only(),
+        ]
+    };
+    let ana = ana_store.schema(tables(), SCHEMA).await.unwrap();
+    let carol = carol_store.schema(tables(), SCHEMA).await.unwrap();
+    let ben_device = DeviceId(900);
+    let ana_device = ana_store.device();
+    for db in [&ana, &carol] {
+        TestStore::register(db, ana_device, 1);
+        TestStore::register(db, ben_device, 2);
+    }
+
+    // Ana commits two writes locally, the second contending with Ben's write
+    // for a unique value.
+    ana.write(|sql| {
+        sql.execute("INSERT INTO rows(id,a,b) VALUES('r1','taken','x')", [])?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+    ana.write(|sql| {
+        sql.execute("INSERT INTO rows(id,a,b) VALUES('r2','shared','y')", [])?;
+        sql.execute("INSERT INTO owned(id,a,b) VALUES('o1','mine','z')", [])?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+    let ours = ana.test_queued_writes().await.unwrap();
+    assert_eq!(ours.len(), 2);
+    let mut theirs = record(ben_device.0, 1, 5, 3, 0, 7);
+    theirs.parts[0].rows.retain(|row| row.row.table == "rows");
+    let Operation::Insert(columns) = &mut theirs.parts[0].rows[0].change.operation else {
+        unreachable!()
+    };
+    columns.get_mut("a").unwrap().value = Scalar::Text("shared".into());
+
+    for db in [&ana, &carol] {
+        for (slot, device, writes) in
+            [(1, ana_device, ours.clone()), (2, ben_device, vec![theirs.clone()])]
+        {
+            db.apply_slot::<crate::pending::tests::Record, _, _>(
+                IncomingSlot {
+                    slot: Slot(slot),
+                    header: SlotHeader {
+                        device,
+                        claim: slot,
+                        author: crate::tests::member(if slot == 1 { 1 } else { 2 }),
+                        after: slot - 1,
+                    },
+                    digest: [slot as u8; 32],
+                    content: SlotContent::Writes {
+                        size: 1,
+                        writes: writes
+                            .into_iter()
+                            .map(|write| crate::sequence::tests::stream(write.into()))
+                            .collect(),
+                    },
+                },
+                || Ok(()),
+            )
+            .await
+            .unwrap();
+        }
+    }
+    let merged = |db: &Database| {
+        let mut contents = crate::tests::contents(db);
+        contents.retain(|table, _| {
+            matches!(table.as_str(), "rows" | "owned")
+                || [
+                    "_coven_writes",
+                    "_coven_rows",
+                    "_coven_cells",
+                    "_coven_references",
+                    "_coven_claims",
+                    "_coven_written_values",
+                    "_coven_lost",
+                ]
+                .contains(&table.as_str())
+        });
+        contents
+    };
+    let (ana_merge, carol_merge) = (merged(&ana), merged(&carol));
+    assert_eq!(ana_merge.len(), 9, "{:?}", ana_merge.keys().collect::<Vec<_>>());
+    assert!(!ana_merge["_coven_lost"].is_empty(), "the contention lost a value");
+    for table in ana_merge.keys() {
+        assert_eq!(ana_merge[table], carol_merge[table], "{table}");
+    }
+    ana.close().await.unwrap();
+    carol.close().await.unwrap();
+}
