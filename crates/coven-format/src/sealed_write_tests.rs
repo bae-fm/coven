@@ -452,3 +452,36 @@ fn changing_only_source_evidence_changes_the_authenticated_object() {
     }
     assert!(test_utils::member().signing.verify_object(path, &hash.finish(), &signature).is_err());
 }
+
+/// What the provider sees of a write: its kind, format and the ids of the
+/// keys that seal its parts, never which audience a part is for. The
+/// circle's id appears only inside the sealed header (D9).
+#[test]
+fn a_writes_object_shows_no_part_audience_in_the_clear() {
+    let pieces = object();
+    let record = test_utils::chunked_write();
+    let coven_merge::Audience::Circle(circle) = &record.parts[1].audience else {
+        panic!("the second part is a circle's");
+    };
+    let raw = circle.0.as_bytes().to_vec();
+    let text = circle.0.to_string().into_bytes();
+    let found =
+        |bytes: &[u8], needle: &[u8]| bytes.windows(needle.len()).any(|window| window == needle);
+    let whole = pieces.concat();
+    assert!(!found(&whole, &raw) && !found(&whole, &text));
+    // Without any key, the prefix tells the kind and the key ids.
+    let prefix = WriteObjectPrefix::decode(&pieces[0]).unwrap();
+    assert_eq!(prefix.part_keys, [key(1).id(), key(2).id()]);
+    // The header, opened with the store key, does name it.
+    let header = key(1)
+        .derive()
+        .open_object_chunk(
+            PATH,
+            &pieces[0],
+            0,
+            0,
+            WriteObjectPrefix::header_chunk(&pieces[1]).unwrap(),
+        )
+        .unwrap();
+    assert!(found(&header, &raw) || found(&header, &text));
+}
