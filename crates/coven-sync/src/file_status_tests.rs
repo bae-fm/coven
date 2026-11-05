@@ -364,3 +364,18 @@ async fn st_differential_file_status() {
     b.close().await;
     a.close().await;
 }
+
+/// A file's status asks storage about the file's exact path and never lists a
+/// folder (§20.5).
+#[tokio::test]
+async fn a_files_status_uses_exact_status_never_a_listing() {
+    let a = Fixture::new(Provenance::AppProvided).await;
+    let file = a.uploaded("photo", vec![63; CHUNK + 9]).await;
+    let (b, remote) = receiver(&a, &file).await;
+    let before = a.storage.request_trace().len();
+    assert_eq!(b.files.file_status(&remote).await.unwrap(), FileStatus::Available);
+    let status = a.storage.request_trace().split_off(before);
+    assert_eq!(status, [MemoryRequest::Status(a.path(&file))]);
+    b.close().await;
+    a.close().await;
+}
