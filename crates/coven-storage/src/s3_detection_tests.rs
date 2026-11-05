@@ -176,3 +176,25 @@ fn resolution_records_detected_settings_only_where_the_location_needs_them() {
         })
         .is_err());
 }
+
+/// Settings that contradict the checksums detection saw fail the behavior
+/// check: no checksums where one came back, or a stated scope where it came
+/// back unscoped (§20.7, E.8).
+#[test]
+fn checksum_settings_contradicting_what_arrived_fail_the_behavior_check() {
+    let scoped =
+        conforming_detection(S3Settings { checksums: S3Checksums::ScopeStated, ..SERVICE });
+    scoped.check(&scoped.settings).unwrap();
+    assert_eq!(
+        failed(scoped.check(&S3Settings { checksums: S3Checksums::Absent, ..SERVICE })),
+        StorageCheck::Behavior
+    );
+
+    let unscoped =
+        conforming_detection(S3Settings { checksums: S3Checksums::UnstatedIgnored, ..SERVICE });
+    unscoped.check(&unscoped.settings).unwrap();
+    assert_eq!(
+        failed(unscoped.check(&S3Settings { checksums: S3Checksums::ScopeStated, ..SERVICE })),
+        StorageCheck::Behavior
+    );
+}
