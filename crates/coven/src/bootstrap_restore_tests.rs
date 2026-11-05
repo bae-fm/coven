@@ -461,3 +461,127 @@ async fn listing_reclaims_an_installation_left_before_the_record() {
     .await;
     owner.close().await;
 }
+
+/// Ana's laptop sends its registration, and the provider stores it but the
+/// reply is lost, so the call fails with the claim still journaled. The
+/// next restore call settles that slot as the laptop's own before it
+/// retries, so history holds one registration and the laptop is the same
+/// device (§13.1, §5.1).
+#[tokio::test]
+async fn a_restores_registration_whose_reply_was_lost_settles_before_retrying() {
+    let owner = Owner::new(CloudProvider::S3, false).await;
+    owner.stop_sync().await;
+    let install = Installation::new();
+    let (_, cancel) = watch::channel(false);
+    owner.storage.set_faults(Faults { lose_completion_reply: true, ..Faults::none() }).await;
+    let builder = install.authenticated_builder(&owner, owner.storage.clone()).await;
+    let ended = restoring(&owner, builder, &cancel).await;
+    assert!(matches!(ended, Err(BootstrapError::Sync(SyncError::Storage(_)))), "{ended:?}");
+    owner.storage.set_faults(Faults::none()).await;
+    let device = laptop(&install, &owner);
+    let slot = std::num::NonZeroU64::new(owner.applied().await + 1).unwrap();
+    let stored = owner.storage.status(&ObjectPath::slot(owner.directory.id(), slot)).await;
+    assert!(stored.unwrap().is_some(), "the registration was stored");
+    // The retry is the same call the person makes again.
+    let handle = restoring(
+        &owner,
+        install.authenticated_builder(&owner, owner.storage.clone()).await,
+        &cancel,
+    )
+    .await
+    .unwrap();
+    assert_eq!(laptop(&install, &owner), device);
+    finished(&install, &owner, handle).await;
+    owner.close().await;
+}
+
+/// Ana's laptop restores Household with a builder that lets two uploads run
+/// at once. Files staged on the returned handle upload two at a time, with
+/// no reopen: the default is one, so a third waits for a place (§13.4,
+/// §17.9).
+#[tokio::test]
+async fn a_restored_handle_moves_files_with_the_builders_transfer_limits() {
+    let owner = Owner::new(CloudProvider::S3, false).await;
+    owner.stop_sync().await;
+    let install = Installation::new();
+    let (_, cancel) = watch::channel(false);
+    let mut migrations = migrations();
+    migrations.push(Migration::addition(
+        2,
+        "files",
+        "CREATE TABLE files(id TEXT NOT NULL PRIMARY KEY,file TEXT)",
+    ));
+    let mut synced = tables();
+    synced.push(
+        SyncedTable::new("files", RowIdentity::SharedKey).file_column(FileColumn::new("file")),
+    );
+    let builder = install
+        .authenticated_builder(&owner, owner.storage.clone())
+        .await
+        .synced_tables(synced)
+        .namespaces(vec![Namespace::new("files", Provenance::AppProvided, 1 << 30)])
+        .migrations(migrations)
+        .max_concurrent_uploads(NonZeroUsize::new(2).unwrap());
+    let handle = restore_from_code(
+        builder,
+        &owner.code.to_text().unwrap(),
+        owner.s3_credentials(),
+        "Ana’s laptop",
+        |_| {},
+        &cancel,
+    )
+    .await
+    .unwrap();
+    assert_eq!(handle.transfer_limits().uploads.get(), 2);
+    handle.start_sync().await.unwrap();
+    handle.test_last_pass().wait_for(|last| *last == Some(LastPass::Synced)).await;
+    handle.test_hold_passes(true).await;
+    handle.set_uploads_paused(true).await.unwrap();
+    handle
+        .test_staged_write(
+            |batch| {
+                Ok((0..3_u8)
+                    .map(|id| {
+                        batch.put_file(
+                            "files",
+                            FileSource::Stream(Box::pin(std::io::Cursor::new(vec![id; 2048]))),
+                            crate::Place::Cloud,
+                        )
+                    })
+                    .collect::<Vec<_>>())
+            },
+            |sql, files| {
+                for (id, file) in files.iter().enumerate() {
+                    sql.execute(
+                        "INSERT INTO files(id,file) VALUES(?1,?2)",
+                        (id.to_string(), file),
+                    )?;
+                }
+                Ok(())
+            },
+        )
+        .await
+        .unwrap();
+    // Each create stays in flight until the test lets it finish.
+    let creations = Arc::new(tokio::sync::Semaphore::new(0));
+    owner.storage.gate_creations(creations.clone()).await;
+    owner.storage.reset_request_peak();
+    let mut requests = owner.storage.subscribe_requests();
+    handle.set_uploads_paused(false).await.unwrap();
+    tokio::time::timeout(HANG_GUARD, requests.wait_for(|_| owner.storage.peak_requests() == 2))
+        .await
+        .expect("the restored handle's queue runs two uploads at once")
+        .unwrap();
+    creations.add_permits(3);
+    let mut uploads = handle.subscribe(|sql| {
+        Ok(sql.query_row("SELECT count(*) FROM coven_uploads", [], |r| r.get::<_, i64>(0))?)
+    });
+    tokio::time::timeout(HANG_GUARD, async {
+        while uploads.next().await.expect("the live query answers").unwrap() != 0 {}
+    })
+    .await
+    .unwrap();
+    assert_eq!(owner.storage.peak_requests(), 2);
+    handle.close().await.unwrap();
+    owner.close().await;
+}
