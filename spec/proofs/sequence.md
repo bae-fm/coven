@@ -906,6 +906,28 @@ Each rule is needed:
 - `cancelled_replacement_missing`: a cancel that doesn't wait removes the new
   installation while the attempt is on its way, and it lands after.
 
+[`BootstrapCommit`](sequence/CovenSequence/BootstrapCommit.lean) models the
+commit a restore or a join makes once it has loaded (§13.4, §11.6): one write
+at a time of the device's custody for the store, then publication. The call
+runs past its point of no return, so the installation stays listed and the
+next call loads and commits again; a failure or a crash keeps what the commit
+wrote. Another device may remove this one, after which loading fails and the
+facts end the installation. Under `Rules.correct` ending the installation
+deletes every device-only entry of its store.
+
+- `never_orphaned`: no custody is left for a store the device doesn't have.
+- `published_whole`: a published installation's custody is whole.
+- `settles`: from every reachable state, coven's own steps and the app
+  resuming what is listed reach a state with nothing left: published, or the
+  installation removed with no call running. The proof is a measure those
+  steps lower (`progress`).
+
+The rule is needed:
+
+- `cut_commit_orphans_custody`: a crash in the middle of the commit, then the
+  facts ending the restore, leaves the custody the commit wrote, the device
+  id and keys among it, for a store the device doesn't have.
+
 ## Settling a claim whose slot was deleted
 
 [`Settle`](sequence/CovenSequence/Settle.lean). Each copy numbers all its slot

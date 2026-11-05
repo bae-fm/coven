@@ -345,6 +345,12 @@ import SequenceApply
 #print axioms CovenSequence.DeviceReplacement.crashed_replacement_opens_old
 #print axioms CovenSequence.DeviceReplacement.unswapped_replacement_opens_old
 #print axioms CovenSequence.DeviceReplacement.cancelled_replacement_missing
+#print axioms CovenSequence.BootstrapCommit.reachable_inv
+#print axioms CovenSequence.BootstrapCommit.never_orphaned
+#print axioms CovenSequence.BootstrapCommit.published_whole
+#print axioms CovenSequence.BootstrapCommit.progress
+#print axioms CovenSequence.BootstrapCommit.settles
+#print axioms CovenSequence.BootstrapCommit.cut_commit_orphans_custody
 #print axioms CovenSequence.JoinStatus.phases_forward
 #print axioms CovenSequence.JoinStatus.opened_never_waits
 #print axioms CovenSequence.JoinStatus.resumed_waits_again
