@@ -720,3 +720,60 @@ fn an_admin_entry_needs_an_active_authoring_device() {
         Some(OperationRejection::TargetGone(coven_database::EntryTarget::Device(DeviceId(3))))
     );
 }
+
+/// A copy of the newest store key to Ben lands in a slot after his removal,
+/// whoever sent it. On Ana's next read that key is exposed, so her new data
+/// goes to the older key no copy reached him with (§12.2).
+#[test]
+fn a_late_copy_to_a_removed_member_exposes_its_key_on_the_next_read() {
+    let ana = coven_format::test_utils::keys_from_seed(1).public_keys();
+    let ben = coven_format::test_utils::keys_from_seed(2).public_keys();
+    let mut material = StoreKeyring::new(StoreKey::from_bytes(key(90), [1; 32]));
+    material.insert_store_key(StoreKey::from_bytes(key(10), [2; 32])).unwrap();
+    let mut history = History::default();
+    for (id, public, removed) in [(member(1), ana, false), (member(2), ben, true)] {
+        history.state.members.insert(
+            id,
+            StoreMember {
+                keys: public,
+                access: crate::sequence_sync::tests::access("fixture"),
+                role: MemberRole::Member,
+                removed,
+            },
+        );
+    }
+    let to_ana = |id| KeyCopyPrefix {
+        audience: Audience::Store,
+        key: id,
+        member: member(1),
+        sealing: ana.sealing,
+    };
+    for (slot, id) in [(1, key(90)), (3, key(10))] {
+        history.introductions.push(Introduction {
+            slot: Slot(slot + 1),
+            audience: Audience::Store,
+            key: id,
+            hash: material.store_key(id).unwrap().hash(),
+        });
+        copy(&mut history, &material, slot, to_ana(id));
+    }
+    let sending =
+        |history: &History| history.sending_key(&material, member(1), &Audience::Store).unwrap();
+    assert!(!history.exposed(&Audience::Store, key(10)));
+    assert_eq!(sending(&history), key(10));
+
+    copy(
+        &mut history,
+        &material,
+        7,
+        KeyCopyPrefix {
+            audience: Audience::Store,
+            key: key(10),
+            member: member(2),
+            sealing: ben.sealing,
+        },
+    );
+    assert!(history.exposed(&Audience::Store, key(10)));
+    assert!(!history.exposed(&Audience::Store, key(90)));
+    assert_eq!(sending(&history), key(90));
+}
