@@ -101,3 +101,35 @@ async fn one_new_note_costs_its_reader_three_reads() {
         device.database().close().await.unwrap();
     }
 }
+
+/// Finding the sequence never lists a folder: slots, snapshots and members are
+/// found by exact path, through writing, catching up across more slots than one
+/// batch holds (which locates the end) and a newcomer's restore (§20.4).
+#[tokio::test]
+async fn finding_the_sequence_never_lists() {
+    let group = Group::new();
+    let ana = group.device(1).await;
+    let ben = group.device(2).await;
+    group.create(&ana).await;
+    group.admit(&ana, &ben).await;
+    ben.sync.pass().await.unwrap();
+    for i in 0..40u32 {
+        let id: &'static str = Box::leak(i.to_string().into_boxed_str());
+        insert(ana.database(), id, "written").await;
+        ana.sync.pass().await.unwrap();
+    }
+    ben.sync.pass().await.unwrap();
+    let laptop = group.newcomer(ana.identity.clone(), group.storage.for_device()).await;
+    laptop.sync.pass().await.unwrap();
+    assert_eq!(rows(laptop.database()).await, rows(ana.database()).await);
+    for device in [&ana, &ben, &laptop] {
+        let trace = device.storage.request_trace();
+        assert!(!trace.is_empty());
+        let listed: Vec<_> = trace
+            .iter()
+            .filter(|request| matches!(request, coven_storage::test_utils::MemoryRequest::List(_)))
+            .collect();
+        assert!(listed.is_empty(), "{listed:?}");
+        device.database().close().await.unwrap();
+    }
+}
