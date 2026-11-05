@@ -78,7 +78,7 @@ async fn observe(
             listed.len(),
         );
         held &= after && before;
-        clock.sleep(SPACING).await;
+        clock.wait_out(SPACING).await;
     }
     Ok(held)
 }

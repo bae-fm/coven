@@ -68,7 +68,7 @@ impl coven_foundation::clock::Clock for RecordingWaits {
     fn elapsed(&self) -> std::time::Duration {
         self.clock.elapsed()
     }
-    fn sleep(
+    fn deadline(
         &self,
         duration: std::time::Duration,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {

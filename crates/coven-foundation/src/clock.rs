@@ -27,10 +27,20 @@ pub trait Clock: Send + Sync {
     /// spent asleep (§16.6). Readings never decrease within a process; only
     /// differences between two readings of one clock mean anything.
     fn elapsed(&self) -> Duration;
-    /// Wait for an elapsed duration. System clocks use the runtime's monotonic
-    /// timer; controlled clocks wake only when their supplied time advances.
-    fn sleep(&self, duration: Duration) -> Pin<Box<dyn Future<Output = ()> + Send>> {
+    /// End once `duration` of elapsed time has passed: a deadline that
+    /// work races, such as a sign-in's wait for its callback or a stalled
+    /// transfer's, or an interval, such as the idle time between passes.
+    /// System clocks use the runtime's monotonic timer; controlled clocks
+    /// wake only when their supplied time advances.
+    fn deadline(&self, duration: Duration) -> Pin<Box<dyn Future<Output = ()> + Send>> {
         Box::pin(tokio::time::sleep(duration))
+    }
+    /// Wait out `wait` before trying again: a backoff, a provider's
+    /// cooldown, or the spacing between requests the code chose. It passes
+    /// as a deadline of the same length does; a test's clock may move its
+    /// time to the wait's end as the code arms it, since no work races it.
+    fn wait_out(&self, wait: Duration) -> Pin<Box<dyn Future<Output = ()> + Send>> {
+        self.deadline(wait)
     }
     /// Wait until the wall clock reads `at` or later, however it gets
     /// there: by running, or by being set past it (§13.2). A time already
@@ -189,14 +199,14 @@ impl FixedClock {
         });
     }
 
-    /// How many sleeps have begun on this clock so far.
+    /// How many deadlines and waits have begun on this clock so far.
     pub fn sleeps_begun(&self) -> u64 {
         self.sleeps.borrow().0
     }
 
-    /// Wait until a sleep begins after the first `seen`, and return how
-    /// many have begun and the latest one's deadline by `elapsed`, so a
-    /// test can set the clock to exactly the wait the code armed.
+    /// Wait until a deadline or wait begins after the first `seen`, and
+    /// return how many have begun and the latest one's end by `elapsed`,
+    /// so a test can set the clock to exactly the wait the code armed.
     pub fn sleep_begun_after(
         &self,
         seen: u64,
@@ -215,7 +225,7 @@ impl Clock for FixedClock {
     fn elapsed(&self) -> Duration {
         self.time.borrow().elapsed
     }
-    fn sleep(&self, duration: Duration) -> Pin<Box<dyn Future<Output = ()> + Send>> {
+    fn deadline(&self, duration: Duration) -> Pin<Box<dyn Future<Output = ()> + Send>> {
         let mut time = self.time.subscribe();
         let deadline = time.borrow().elapsed + duration;
         self.sleeps.send_modify(|(begun, latest)| {

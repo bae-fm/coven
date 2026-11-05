@@ -82,14 +82,29 @@ async fn covers(device: &Device) -> Vec<(String, bool)> {
 }
 
 /// Stop the device's sync, so no upload or pass starts until it resumes.
-/// Wait until `device` has applied the store audience's raise to `number`,
-/// as the passes its started sync runs on their own apply it.
-async fn raised_to(device: &Device, number: u32) {
-    device
-        .handle
-        .test_store_state()
-        .wait_for(|state| state.schema.get(&Audience::Store).is_some_and(|v| v.number == number))
-        .await;
+/// Whether device `index` has applied the store audience's raise to
+/// `number`.
+async fn raised_to(network: &Network, index: usize, number: u32) -> bool {
+    let state = network.devices[index].handle.store_state().await;
+    state.schema.get(&Audience::Store).is_some_and(|version| version.number == number)
+}
+
+/// How many writes device `index` holds queued.
+async fn queued_writes(network: &Network, index: usize) -> usize {
+    network.devices[index].handle.test_queued_writes().await.unwrap().len()
+}
+
+/// Run device `index`'s passes, as an app's pull to refresh does, until
+/// `done` holds. A pass's own commits ask for no pass (§6.7), so what the
+/// next one sends waits for one the test runs.
+async fn passes_until(network: &Network, index: usize, done: impl AsyncFn(&Network) -> bool) {
+    tokio::time::timeout(HANG_GUARD, async {
+        while !done(network).await {
+            network.sync(index).await;
+        }
+    })
+    .await
+    .expect("the passes reach the state");
 }
 
 async fn stopped(device: &Device) {
@@ -351,6 +366,8 @@ async fn update(network: &mut Network, index: usize) {
 #[tokio::test]
 async fn a_raise_waits_for_a_held_write_and_follows_it() {
     let mut network = household().await;
+    // The refused upload retries only as the test lets it.
+    network.polling.hold_waits();
     let ana = &network.devices[0];
     stopped(ana).await;
     let cover = stage(ana, "covers", "album", vec![5; 4096]).await;
@@ -368,8 +385,10 @@ async fn a_raise_waits_for_a_held_write_and_follows_it() {
 
     ana.storage.set_faults(Faults::none()).await;
     ana.handle.retry_uploads_now().await.unwrap();
-    raised_to(ana, 2).await;
-    wait_for_sent(&ana.handle).await;
+    passes_until(&network, 0, async |n: &Network| {
+        queued_writes(n, 0).await == 0 && raised_to(n, 0, 2).await
+    })
+    .await;
     assert!(ana.handle.test_queued_writes().await.unwrap().is_empty());
 
     let ben = &network.devices[1];
@@ -403,6 +422,8 @@ async fn a_raise_waits_for_a_held_write_and_follows_it() {
 #[tokio::test]
 async fn a_waiting_raise_keeps_ordinary_snapshots_behind_it() {
     let mut network = household().await;
+    // The refused upload retries only as the test lets it.
+    network.polling.hold_waits();
     let ana = &network.devices[0];
     stopped(ana).await;
     let cover = stage(ana, "covers", "album", vec![5; 4096]).await;
@@ -415,12 +436,22 @@ async fn a_waiting_raise_keeps_ordinary_snapshots_behind_it() {
     let ana = &network.devices[0];
     upload_failed(ana, StorageFailure::QuotaExceeded).await;
     network.sync(0).await;
-    let before = crate::tests::snapshots(&ana.storage, ana.store).await.len();
+    // Moving the clock ends Ben's idle wait too, and his pass may snapshot
+    // his own history; only Ana's ordinary snapshots wait for her raise.
+    let own = async |ana: &Device| {
+        let device = ana.handle.device_id();
+        crate::tests::stored(&ana.storage, ana.store, |path| {
+            path.snapshot_id().is_some_and(|snapshot| snapshot.device == device)
+        })
+        .await
+        .len()
+    };
+    let before = own(ana).await;
     network.clock.set(network.clock.now() + Duration::from_secs(31 * 24 * 3600));
     network.sync(0).await;
     let ana = &network.devices[0];
     assert!(ana.handle.store_state().await.schema.is_empty());
-    assert_eq!(crate::tests::snapshots(&ana.storage, ana.store).await.len(), before);
+    assert_eq!(own(ana).await, before);
     let joined = network
         .try_join_as(2, InviteTarget::NewMember { role: MemberRole::Member, name: "Cara".into() })
         .await;
@@ -429,8 +460,10 @@ async fn a_waiting_raise_keeps_ordinary_snapshots_behind_it() {
 
     ana.storage.set_faults(Faults::none()).await;
     ana.handle.retry_uploads_now().await.unwrap();
-    raised_to(ana, 2).await;
-    wait_for_sent(&ana.handle).await;
+    passes_until(&network, 0, async |n: &Network| {
+        queued_writes(n, 0).await == 0 && raised_to(n, 0, 2).await
+    })
+    .await;
     let ben = &network.devices[1];
     let mut last = ben.handle.test_last_pass();
     ben.handle.sync_now();
@@ -516,10 +549,10 @@ async fn changes_on_a_migration_another_raise_replaced_are_lost_everywhere() {
     let [marker, edit] = [&queued[0], &queued[1]].map(|write| write.header.position);
 
     retitle(&mut network, 1).await;
-    raised_to(&network.devices[1], 2).await;
+    passes_until(&network, 1, async |n: &Network| raised_to(n, 1, 2).await).await;
 
     network.devices[0].storage.set_online(true);
-    wait_for_sent(&network.devices[0].handle).await;
+    passes_until(&network, 0, async |n: &Network| queued_writes(n, 0).await == 0).await;
     network.sync(1).await;
     network.sync(0).await;
     let (ana, ben) = (&network.devices[0], &network.devices[1]);
@@ -616,7 +649,7 @@ async fn a_device_joins_with_a_breaking_migration_declared() {
     wait_for_sent(&network.devices[0].handle).await;
     network.sync(1).await;
     retitle(&mut network, 0).await;
-    raised_to(&network.devices[0], 2).await;
+    passes_until(&network, 0, async |n: &Network| raised_to(n, 0, 2).await).await;
     retitle(&mut network, 1).await;
     network.sync(1).await;
     network.update_app(retitled());
@@ -645,6 +678,8 @@ async fn a_device_joins_with_a_breaking_migration_declared() {
 #[tokio::test]
 async fn a_device_joining_past_a_replaced_migration_loses_changes_built_on_it() {
     let mut network = household().await;
+    // The refused upload retries only as the test lets it.
+    network.polling.hold_waits();
     note(&network.devices[0], "n").await;
     wait_for_sent(&network.devices[0].handle).await;
     network.sync(1).await;
@@ -666,7 +701,7 @@ async fn a_device_joining_past_a_replaced_migration_loses_changes_built_on_it() 
         .unwrap();
 
     retitle(&mut network, 1).await;
-    raised_to(&network.devices[1], 2).await;
+    passes_until(&network, 1, async |n: &Network| raised_to(n, 1, 2).await).await;
 
     let ana = &network.devices[0];
     let mut faults = Faults::none();
@@ -677,8 +712,7 @@ async fn a_device_joining_past_a_replaced_migration_loses_changes_built_on_it() 
     ana.storage.set_online(true);
     // Back online, Ana's passes send the marker; the edit waits on the
     // refused upload.
-    let mut unsent = coven_database::test_utils::Followed::new(ana.handle.subscribe_unsent_work());
-    unsent.wait_for(|work| work.writes == 1).await;
+    passes_until(&network, 0, async |n: &Network| queued_writes(n, 0).await == 1).await;
     assert_eq!(ana.handle.test_queued_writes().await.unwrap().len(), 1);
     network.sync(1).await;
     let marker_slot = network.devices[1].handle.applied_slot().await;
@@ -702,7 +736,7 @@ async fn a_device_joining_past_a_replaced_migration_loses_changes_built_on_it() 
     let ana = &network.devices[0];
     ana.storage.set_faults(Faults::none()).await;
     ana.handle.retry_uploads_now().await.unwrap();
-    wait_for_sent(&ana.handle).await;
+    passes_until(&network, 0, async |n: &Network| queued_writes(n, 0).await == 0).await;
     network.sync(1).await;
     assert!(network.devices[1].handle.applied_slot().await > marker_slot + 1);
 

@@ -239,7 +239,7 @@ impl ExchangeProgress {
                 if idle >= STALL_WINDOW {
                     return;
                 }
-                progress.clock.sleep(STALL_WINDOW - idle).await;
+                progress.clock.deadline(STALL_WINDOW - idle).await;
             }
         })
     }

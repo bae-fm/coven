@@ -11,7 +11,7 @@ impl Clock for Waits {
     fn elapsed(&self) -> Duration {
         self.0.lock().unwrap().iter().sum()
     }
-    fn sleep(&self, duration: Duration) -> std::pin::Pin<Box<dyn Future<Output = ()> + Send>> {
+    fn deadline(&self, duration: Duration) -> std::pin::Pin<Box<dyn Future<Output = ()> + Send>> {
         self.0.lock().unwrap().push(duration);
         Box::pin(std::future::ready(()))
     }

@@ -120,6 +120,6 @@ async fn wait_for_listing(storage: &dyn Storage, object: &StoredObject, clock: &
             return;
         }
         assert!(clock.now() < deadline, "test object did not become visible in provider listing");
-        clock.sleep(std::time::Duration::from_millis(200)).await;
+        clock.wait_out(std::time::Duration::from_millis(200)).await;
     }
 }

@@ -386,7 +386,7 @@ impl coven_foundation::clock::Clock for Pauses {
     fn elapsed(&self) -> std::time::Duration {
         self.0.lock().unwrap().iter().sum()
     }
-    fn sleep(
+    fn deadline(
         &self,
         duration: std::time::Duration,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
@@ -500,7 +500,7 @@ impl coven_foundation::clock::Clock for WaitedPauses {
     fn elapsed(&self) -> std::time::Duration {
         SystemClock.elapsed()
     }
-    fn sleep(
+    fn deadline(
         &self,
         duration: std::time::Duration,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {

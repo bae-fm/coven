@@ -133,6 +133,8 @@ async fn a_bound_file_waits_on_its_retry_while_uploads_are_paused() {
     let mut faults = Faults::none();
     faults.create_failures.insert(upload_path(ana, cover).await, (StorageFailure::Network, 503));
     ana.storage.set_faults(faults).await;
+    // The upload's backoff holds until the test lets it go.
+    network.polling.hold_waits();
     ana.handle.start_sync().await.unwrap();
     let waiting =
         state(ana, |state| matches!(state, SyncState::WaitingToSync(SyncWait::Retrying { .. })))

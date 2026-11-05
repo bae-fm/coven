@@ -339,16 +339,36 @@ impl Network {
         let connector = Connector::new(storage.clone());
         let control = JoinControl::new();
         let name = format!("Device {index}");
+        let (waiting, mut waits) = tokio::sync::watch::channel(false);
         let joining = join_with_invite(
             builder(&app, self.polling.clone(), self.ids.clone(), connector.clone())
                 .synced_tables(self.schema.0.clone())
                 .migrations(self.schema.1.clone()),
             invite.shown_code(),
             &name,
-            |_| {},
+            |status| {
+                if matches!(status, BootstrapStatus::WaitingForApproval { .. }) {
+                    waiting.send_replace(true);
+                }
+            },
             &control,
         );
-        let (handle, _) = join_and_approve(owner, joining, |_| async {}).await;
+        // The join's checks for approval back off. Held, they wait while
+        // device 0 reads the request in a pass and approves it, and Check
+        // now runs the check that finds the approval.
+        let held = self.polling.holds_waits();
+        self.polling.hold_waits();
+        let (handle, ()) = join_with_response(joining, async {
+            waits.wait_for(|waiting| *waiting).await.unwrap();
+            self.pass(0).await;
+            let request = next_join_request(owner).await;
+            approve(owner, &request).await;
+            control.check_now();
+        })
+        .await;
+        if !held {
+            self.polling.release_waits();
+        }
         let handle = handle?.expect("an approved join opens");
         let store = decode_code_info(invite.shown_code()).unwrap().metadata().store_id;
         handle.start_sync().await.unwrap();

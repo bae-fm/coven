@@ -494,13 +494,13 @@ impl OneDriveStorage {
                     set_upload(session, OneDriveUpload::Published)?;
                     return self.finish_cleanup(publication, session).await;
                 }
-                self.session.sleep(crate::retry_delay(checks)).await;
+                self.session.wait_out(crate::retry_delay(checks)).await;
                 checks += 1;
             }
         };
         tokio::select! {
             result = copying => result,
-            () = self.session.sleep(Duration::from_secs(300)) => {
+            () = self.session.deadline(Duration::from_secs(300)) => {
                 Err(StorageFailure::Network.with_source("OneDrive copy monitor timed out"))
             }
         }

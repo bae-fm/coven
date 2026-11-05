@@ -131,7 +131,7 @@ impl Live {
                         .await
                         .unwrap();
                     match http::string(&status, ".tag").unwrap() {
-                        "in_progress" => self.clock.sleep(Duration::from_secs(1)).await,
+                        "in_progress" => self.clock.wait_out(Duration::from_secs(1)).await,
                         "complete" => break status,
                         _ => panic!("Dropbox folder sharing failed (details withheld)"),
                     }

@@ -79,8 +79,13 @@ impl OAuthSession {
     pub(crate) fn provider(&self) -> CloudProvider {
         self.provider
     }
-    pub(crate) async fn sleep(&self, duration: std::time::Duration) {
-        self.clock.sleep(duration).await;
+    /// End once `duration` has passed, a deadline the work races.
+    pub(crate) async fn deadline(&self, duration: std::time::Duration) {
+        self.clock.deadline(duration).await;
+    }
+    /// Wait out a backoff or poll spacing before trying again.
+    pub(crate) async fn wait_out(&self, wait: std::time::Duration) {
+        self.clock.wait_out(wait).await;
     }
     pub(crate) async fn send(
         &self,

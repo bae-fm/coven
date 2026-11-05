@@ -1,5 +1,4 @@
 use super::*;
-use coven_foundation::clock::HANG_GUARD;
 use coven_sync::JoiningIdentity;
 
 #[tokio::test]
@@ -305,7 +304,10 @@ async fn a_restore_learns_the_renamed_name_from_the_floor_snapshot() {
 }
 
 /// Ana's own sync pass approves an in-person invite's request: Carol's join
-/// loads the store with no call from Ana's app (§13.2).
+/// loads the store with no call from Ana's app (§13.2). Ana's invite polls
+/// for the request, and Carol's join for its approval, by backoff; both are
+/// held, so Ana's pass reads the request once Carol waits, and Carol's
+/// Check now runs once the invite has ended with its approval landed.
 #[tokio::test]
 async fn an_in_person_join_loads_without_an_approval_call() {
     let owner = Owner::new(CloudProvider::S3, false).await;
@@ -319,16 +321,35 @@ async fn an_in_person_join_loads_without_an_approval_call() {
         InviteDelivery::InPerson,
     )
     .await;
+    owner.hold_waits();
     let install = Installation::new();
-    let (_, cancel) = watch::channel(false);
-    let joining = install.run(
-        &owner,
-        Installation::join_request(&invite),
-        owner.recipient(),
-        &cancel,
-        |_| {},
+    let builder = install.builder(&owner, owner.recipient()).clock(owner.clock.clone());
+    let control = JoinControl::new();
+    let (waits, mut waiting) = watch::channel(false);
+    let joining = join_with_invite(
+        builder,
+        invite.shown_code(),
+        "New phone",
+        |status| {
+            if matches!(
+                status,
+                BootstrapStatus::WaitingForApproval { next_check: NextCheck::At(_), .. }
+            ) {
+                waits.send_replace(true);
+            }
+        },
+        &control,
     );
-    let handle = tokio::time::timeout(HANG_GUARD, joining).await.unwrap().unwrap().unwrap();
+    let approved = async {
+        waiting.wait_for(|waiting| *waiting).await.unwrap();
+        // Ana's next pass reads the request and approves it; the invite
+        // ends once its binding has landed.
+        owner.pass().await;
+        owner.handle.test_invites().wait_for(|invites| invites.is_empty()).await;
+        control.check_now();
+    };
+    let (handle, ()) = join_with_response(joining, approved).await;
+    let handle = handle.unwrap().unwrap();
     assert!(handle
         .members()
         .await

@@ -462,7 +462,7 @@ impl MemoryProvider {
                 .forget();
         }
         if !delay.is_zero() {
-            self.clock.sleep(delay).await;
+            self.clock.deadline(delay).await;
         }
         match failure {
             Some(failure) => Err(self.injected(failure)),

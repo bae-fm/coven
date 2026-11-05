@@ -214,7 +214,7 @@ fn publication_time(pause: Duration) {
         live.storage.upload_part(&mut upload, &bytes).await.unwrap();
         assert!(!upload.is_complete());
         let first_part = Instant::now();
-        live.clock.sleep(pause).await;
+        live.clock.wait_out(pause).await;
         let complete_before = live.marker(4).await;
         let completion_started = live.clock.now();
         let elapsed = first_part.elapsed();
@@ -348,7 +348,7 @@ fn onedrive_live_immutable_time_is_stable() {
         live.storage.create(&path, b"immutable").await.unwrap();
         let first = live.observed(&path).await;
         let before = live.storage.provider().metadata(&path).await.unwrap();
-        live.clock.sleep(Duration::from_secs(3)).await;
+        live.clock.wait_out(Duration::from_secs(3)).await;
         live.marker(2).await;
         assert_eq!(live.storage.read(&path).await.unwrap(), b"immutable");
         let second = live.observed(&path).await;
@@ -459,7 +459,7 @@ async fn monitor(provider: &OneDriveStorage, response: reqwest::Response) {
         match state {
             "completed" => return,
             "notStarted" | "inProgress" | "waiting" => {
-                provider.session.sleep(Duration::from_secs(1)).await
+                provider.session.wait_out(Duration::from_secs(1)).await
             }
             "failed" | "deleteFailed" => {
                 panic!("copy failed: code={}", http::string(&value["error"], "code").unwrap())
@@ -570,7 +570,7 @@ fn onedrive_live_conditional_copy() {
         }
         let temporary = temporary.unwrap();
         report_item("completed temporary", &temporary);
-        live.clock.sleep(Duration::from_secs(3)).await;
+        live.clock.wait_out(Duration::from_secs(3)).await;
         let before = live.marker(4).await;
         let copy_started = live.clock.now();
         let response = copy_response(
@@ -653,7 +653,7 @@ fn onedrive_live_conditional_copy() {
             if elapsed >= Duration::from_secs(600) {
                 break;
             }
-            live.clock.sleep(Duration::from_secs(30)).await;
+            live.clock.wait_out(Duration::from_secs(30)).await;
         }
     });
 }

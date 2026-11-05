@@ -51,7 +51,7 @@ impl SetupWaits {
             (wait, spent.resends)
         };
         tracing::info!(?wait, resends, "storage setup rate limited; sending again");
-        clock.sleep(wait).await;
+        clock.wait_out(wait).await;
         true
     }
 

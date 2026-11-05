@@ -144,7 +144,7 @@ pub(super) async fn race(
 ) -> Vec<Outcome> {
     let seen = now(clock);
     let late_us = seen.saturating_sub(release);
-    clock.sleep(Duration::from_micros(release.saturating_sub(seen))).await;
+    clock.wait_out(Duration::from_micros(release.saturating_sub(seen))).await;
     futures_util::future::join_all(writers.iter().map(|writer| async move {
         let started_us = now(clock);
         let result = writer.storage.create(path, &claim(&writer.name, attempt)).await;
@@ -333,7 +333,7 @@ async fn read_back(
                 ) && tries < RETRIES =>
             {
                 tries += 1;
-                clock.sleep(error.retry_after().map_or(RETRY_WAIT, RetryAfter::wait)).await;
+                clock.wait_out(error.retry_after().map_or(RETRY_WAIT, RetryAfter::wait)).await;
             }
             Err(error) => return Err(error),
         }

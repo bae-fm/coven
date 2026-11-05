@@ -205,7 +205,7 @@ impl RetryWaits {
 
     /// A wait enforcing `not_before`, over once `wait` has passed from now.
     fn armed(&self, not_before: SystemTime, wait: Duration) -> Armed {
-        let timer = (self.clock.elapsed() + wait, self.clock.sleep(wait).shared());
+        let timer = (self.clock.elapsed() + wait, self.clock.wait_out(wait).shared());
         let ends = self.clock.now().checked_add(wait);
         Armed { not_before, timer: Some(timer), ends, seen: false }
     }

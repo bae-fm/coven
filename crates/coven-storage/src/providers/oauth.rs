@@ -192,7 +192,7 @@ impl OAuthFlow {
         };
         tokio::select! {
             result = flow => result,
-            _ = self.exchange.clock.sleep(Duration::from_secs(300)) => Err(OAuthError::Timeout),
+            _ = self.exchange.clock.deadline(Duration::from_secs(300)) => Err(OAuthError::Timeout),
         }
     }
 }

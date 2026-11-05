@@ -22,7 +22,7 @@ impl Clock for HandSetClock {
     fn elapsed(&self) -> std::time::Duration {
         std::time::Duration::ZERO
     }
-    fn sleep(
+    fn deadline(
         &self,
         _duration: std::time::Duration,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {

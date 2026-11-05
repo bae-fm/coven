@@ -120,7 +120,7 @@ pub(crate) async fn wait_for_writers(
         .max()
     {
         println!("sequence writers throttled wait_ms={}", wait.as_millis());
-        clock.sleep(wait).await;
+        clock.wait_out(wait).await;
     }
     replies_valid(replies)
 }
@@ -140,7 +140,7 @@ pub(crate) async fn retry<T>(
                     attempt + 1,
                     wait.as_millis()
                 );
-                clock.sleep(wait).await;
+                clock.wait_out(wait).await;
                 if attempt == 19 {
                     return Err(error);
                 }
@@ -165,7 +165,7 @@ pub(crate) async fn rounds(
     let mut consecutive = 0;
     while completed < trials {
         // Pace independent rounds without separating the concurrent writers.
-        clock.sleep(Duration::from_secs(1)).await;
+        clock.wait_out(Duration::from_secs(1)).await;
         let attempt = completed + tally.throttled + tally.refused + 1;
         match round(completed + 1, attempt).await {
             Ok(Round::Won) => {
@@ -193,7 +193,7 @@ pub(crate) async fn rounds(
                     tally.throttled,
                     wait.as_millis()
                 );
-                clock.sleep(wait).await;
+                clock.wait_out(wait).await;
                 if tally.throttled >= 100 {
                     return Err(error);
                 }

@@ -203,7 +203,7 @@ impl DropboxStorage {
                 "complete" => return remaining_parent_access(&value, member),
                 "in_progress" if attempt + 1 < REMOVAL_CHECKS => {
                     let delay = crate::retry_delay(attempt).as_secs() as u32;
-                    self.session.sleep(self.removal_poll_unit * delay).await
+                    self.session.wait_out(self.removal_poll_unit * delay).await
                 }
                 "in_progress" => break,
                 "failed" => return Err(original.into_error(PROVIDER)),

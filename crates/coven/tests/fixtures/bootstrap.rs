@@ -71,6 +71,13 @@ impl Owner {
         self.network.sync(0).await;
     }
 
+    /// End Ana's later backoffs and cooldowns only as the test moves the
+    /// clock or asks for a retry, so a wait that polls for what the test
+    /// does next can't run ahead of it.
+    pub(super) fn hold_waits(&self) {
+        self.network.polling.hold_waits();
+    }
+
     /// Stop sync and wait for its release: no pass runs until sync starts
     /// again (E5).
     pub(super) async fn stop_sync(&self) {

@@ -61,7 +61,7 @@ impl coven_foundation::clock::Clock for Waits {
     fn elapsed(&self) -> Duration {
         self.0.lock().unwrap().iter().sum()
     }
-    fn sleep(
+    fn deadline(
         &self,
         duration: Duration,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {

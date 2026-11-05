@@ -77,7 +77,7 @@ async fn observe(
             let bytes = format!("copy reply trial={trial}").into_bytes();
             let observed = single(s.provider(), &target, &bytes, condition).await?;
             verdict.add(compare("single", trial, &observed));
-            clock.sleep(SPACING).await;
+            clock.wait_out(SPACING).await;
         }
         let floor = ObjectPath::floor(store);
         let observed = single(s.provider(), &floor, b"copy reply floor", condition).await?;
@@ -88,7 +88,7 @@ async fn observe(
             let target = path(store, SINGLE_TRIALS + trial);
             let observed = multipart(&s, &target, trial, condition).await?;
             verdict.add(compare("multipart", trial, &observed));
-            clock.sleep(SPACING).await;
+            clock.wait_out(SPACING).await;
         }
     }
     Ok(verdict)

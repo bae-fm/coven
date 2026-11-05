@@ -252,22 +252,20 @@ async fn a_closed_join_on_dropbox_resumes_with_the_sign_in_it_kept() {
 /// committed to her phone's keychain before the retried check uses it. Her
 /// phone then restarts, with no sign-in and no way to refresh one: the
 /// resumed join starts from the refreshed token, and the joined store keeps
-/// it (§13.2, §20.2).
+/// it (§13.2, §20.2). Carol's waits end only when the test moves the clock,
+/// so each check after the first runs when the test asks for it. Ana's are
+/// held too: a backoff of hers passing would move the clock under Carol's
+/// requests and end their stall windows.
 #[tokio::test]
 async fn a_refresh_while_waiting_is_kept_for_the_resumed_join() {
     let owner = Owner::new(CloudProvider::Dropbox, false).await;
     let invite = owner.invite().await;
+    owner.hold_waits();
     let install = Installation::new();
     let store = owner.directory.id();
     let sign_in = SignIn::new().await;
-    let (sleeping, mut asleep) = watch::channel(false);
-    let (resume, resumed) = watch::channel(false);
-    let clock = Arc::new(JoinClock {
-        clock: crate::tests::PollingClock::new(owner.clock.clone()),
-        sleeping,
-        resume: resumed,
-    });
-    let mut builder = sign_in.configure(install.builder(&owner, owner.recipient()).clock(clock));
+    let mut builder =
+        sign_in.configure(install.builder(&owner, owner.recipient()).clock(owner.clock.clone()));
     builder.authenticate(OAuthAccess::Dropbox(DropboxAccess::FullDropbox)).await.unwrap();
     let control = JoinControl::new();
     let (waited, mut waits) = watch::channel(0_usize);
@@ -286,9 +284,9 @@ async fn a_refresh_while_waiting_is_kept_for_the_resumed_join() {
         &control,
     );
     let refreshed = async {
-        asleep.wait_for(|sleeping| *sleeping).await.unwrap();
+        waits.wait_for(|waits| *waits >= 1).await.unwrap();
         owner.storage.reject_access_token("access-0").await;
-        resume.send(true).unwrap();
+        control.check_now();
         // The second wait follows the check that refreshed the token.
         waits.wait_for(|waits| *waits >= 2).await.unwrap();
     };
@@ -303,8 +301,18 @@ async fn a_refresh_while_waiting_is_kept_for_the_resumed_join() {
     assert_eq!(sign_in.request_count(), 2);
     let kept = install.only_kept_sign_in(store).await.unwrap();
     assert_eq!(kept.access_token.as_str(), "access-1");
-    let resumed = install.builder(&owner, owner.recipient()).resume_join(store, |_| {}, &control);
-    let (result, _) = join_and_approve(&owner.handle, resumed, |_| async {}).await;
+    let resumed = install
+        .builder(&owner, owner.recipient())
+        .clock(owner.clock.clone())
+        .resume_join(store, |_| {}, &control);
+    let approve = async {
+        // Ana's next pass reads the request the join made before it closed.
+        owner.pass().await;
+        let request = next_join_request(&owner.handle).await;
+        crate::tests::approve(&owner.handle, &request).await;
+        control.check_now();
+    };
+    let (result, ()) = join_with_response(resumed, approve).await;
     let handle = result.unwrap().unwrap();
     assert_eq!(install.device_tokens(store).unwrap().access_token.as_str(), "access-1");
     assert_eq!(sign_in.request_count(), 2);

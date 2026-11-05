@@ -296,8 +296,11 @@ impl<S: Clone + PartialEq + Send + Sync> crate::clock::Clock for RecordingClock<
         self.record();
         self.clock.elapsed()
     }
-    fn sleep(&self, duration: Duration) -> std::pin::Pin<Box<dyn Future<Output = ()> + Send>> {
-        self.clock.sleep(duration)
+    fn deadline(&self, duration: Duration) -> std::pin::Pin<Box<dyn Future<Output = ()> + Send>> {
+        self.clock.deadline(duration)
+    }
+    fn wait_out(&self, wait: Duration) -> std::pin::Pin<Box<dyn Future<Output = ()> + Send>> {
+        self.clock.wait_out(wait)
     }
     fn sleep_until(
         &self,

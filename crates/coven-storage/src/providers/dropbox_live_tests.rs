@@ -115,7 +115,7 @@ fn dropbox_live_complete_publication_time() {
             let start_after = marker(&storage, &live.path(base + 2)).await;
             let first = vec![0x51; upload.part_size()];
             storage.upload_part(&mut upload, &first).await.unwrap();
-            live.clock.sleep(Duration::from_secs(pause)).await;
+            live.clock.wait_out(Duration::from_secs(pause)).await;
             let finish_before = marker(&storage, &live.path(base + 3)).await;
             storage.upload_part(&mut upload, b"z").await.unwrap();
             storage.finish_upload(&mut upload).await.unwrap();
@@ -154,7 +154,7 @@ fn dropbox_live_unfinished_upload_is_invisible() {
         let mut upload = live.begin(&storage, &path).await;
         let first = vec![0x51; upload.part_size()];
         storage.upload_part(&mut upload, &first).await.unwrap();
-        live.clock.sleep(Duration::from_secs(3)).await;
+        live.clock.wait_out(Duration::from_secs(3)).await;
         let objects = storage.list(&ObjectPrefix::all(live.store)).await.unwrap();
         let read = storage.read(&path).await;
         let status = storage.status(&path).await.unwrap();
@@ -224,7 +224,7 @@ fn dropbox_live_immutable_time_is_stable() {
         let before = listed(&storage, &path).await;
         assert_eq!(storage.status(&path).await.unwrap().unwrap(), before);
         let native_before = metadata(&storage, &path).await;
-        live.clock.sleep(Duration::from_secs(3)).await;
+        live.clock.wait_out(Duration::from_secs(3)).await;
         marker(&storage, &live.path(2)).await;
         assert_eq!(
             storage.create(&path, b"immutable").await.unwrap_err().failure(),

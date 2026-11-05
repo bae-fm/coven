@@ -310,10 +310,10 @@ impl Probes<'_> {
         key: &str,
         after: StorageTime,
     ) -> Result<StorageTime, StorageError> {
-        self.clock.sleep(FIRST_PAUSE).await;
+        self.clock.wait_out(FIRST_PAUSE).await;
         for attempt in 0..=RETRIES {
             if attempt > 0 {
-                self.clock.sleep(RETRY_PAUSE).await;
+                self.clock.wait_out(RETRY_PAUSE).await;
             }
             self.put(key, b"later marker", None).await?;
             let marked = time(&self.head(key).await?)?;
@@ -408,7 +408,7 @@ impl Probes<'_> {
         let mut shown = false;
         for attempt in 0..=RETRIES {
             if attempt > 0 {
-                self.clock.sleep(RETRY_PAUSE).await;
+                self.clock.wait_out(RETRY_PAUSE).await;
             }
             if !shown {
                 let page = self.page(protocol, None, None).await?;

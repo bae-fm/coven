@@ -258,7 +258,7 @@ fn idle_wait(
     from: Duration,
     interval: Duration,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
-    sync.clock.sleep((from + interval).saturating_sub(sync.clock.elapsed()))
+    sync.clock.deadline((from + interval).saturating_sub(sync.clock.elapsed()))
 }
 
 async fn run(

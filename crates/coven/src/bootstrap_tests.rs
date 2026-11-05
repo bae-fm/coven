@@ -48,6 +48,23 @@ struct JoinClock {
     resume: watch::Receiver<bool>,
 }
 
+impl JoinClock {
+    /// The joiner's one-second check wait, held until the test resumes it.
+    fn held(
+        &self,
+        duration: Duration,
+    ) -> Option<std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>> {
+        if duration != Duration::from_secs(1) || *self.resume.borrow() {
+            return None;
+        }
+        self.sleeping.send(true).unwrap();
+        let mut resume = self.resume.clone();
+        Some(Box::pin(async move {
+            resume.wait_for(|resumed| *resumed).await.unwrap();
+        }))
+    }
+}
+
 impl Clock for JoinClock {
     fn now(&self) -> std::time::SystemTime {
         self.clock.now()
@@ -57,19 +74,17 @@ impl Clock for JoinClock {
         self.clock.elapsed()
     }
 
-    fn sleep(
+    fn deadline(
         &self,
         duration: Duration,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
-        if duration == Duration::from_secs(1) && !*self.resume.borrow() {
-            self.sleeping.send(true).unwrap();
-            let mut resume = self.resume.clone();
-            Box::pin(async move {
-                resume.wait_for(|resumed| *resumed).await.unwrap();
-            })
-        } else {
-            self.clock.sleep(duration)
-        }
+        self.held(duration).unwrap_or_else(|| self.clock.deadline(duration))
+    }
+    fn wait_out(
+        &self,
+        wait: Duration,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
+        self.held(wait).unwrap_or_else(|| self.clock.wait_out(wait))
     }
     fn sleep_until(
         &self,

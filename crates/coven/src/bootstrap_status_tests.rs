@@ -208,35 +208,47 @@ async fn a_join_reports_finding_its_keys_before_it_loads() {
 /// A join reports opening its new installation, then connecting, then
 /// waiting for approval, then loading (E10). While it waits, a sent invite's
 /// status carries the number Ana's phone shows with the request, and when the
-/// next check runs.
+/// next check runs. Carol's waits end only when the test moves the clock, so
+/// Ana approves while the join waits, and Check now runs the next check.
 #[tokio::test]
 async fn a_join_reports_each_bootstrap_phase_in_order() {
     let owner = Owner::new(CloudProvider::S3, false).await;
     let invite = owner.invite().await;
     let install = Installation::new();
-    let (_, cancel) = watch::channel(false);
+    let builder = install.builder(&owner, owner.recipient()).clock(owner.clock.clone());
+    let control = JoinControl::new();
     let reported = std::sync::Mutex::new(Vec::new());
-    let joining = install.run(
-        &owner,
-        Installation::join_request(&invite),
-        owner.recipient(),
-        &cancel,
+    let (waited, mut waiting) = watch::channel(false);
+    let joining = join_with_invite(
+        builder,
+        invite.shown_code(),
+        "New phone",
         |status| {
+            if matches!(
+                status,
+                BootstrapStatus::WaitingForApproval { next_check: NextCheck::At(_), .. }
+            ) {
+                waited.send_replace(true);
+            }
             let mut reported = reported.lock().unwrap();
             if reported.last() != Some(&status) {
                 reported.push(status);
             }
         },
+        &control,
     );
-    let approved = std::sync::Mutex::new(None);
-    let (result, _) = join_and_approve(&owner.handle, joining, |request| {
-        *approved.lock().unwrap() = Some(request);
-        async {}
-    })
-    .await;
+    let approve = async {
+        waiting.wait_for(|waited| *waited).await.unwrap();
+        // Ana's next pass reads the request.
+        owner.pass().await;
+        let request = next_join_request(&owner.handle).await;
+        crate::tests::approve(&owner.handle, &request).await;
+        control.check_now();
+        request
+    };
+    let (result, request) = join_with_response(joining, approve).await;
     result.unwrap().unwrap().close().await.unwrap();
     let reported = reported.into_inner().unwrap();
-    let request = approved.into_inner().unwrap().unwrap();
     let reported = before_finishing(after_opening(&reported));
     assert_eq!(reported.first(), Some(&BootstrapStatus::Connecting));
     assert_honest(reported);
