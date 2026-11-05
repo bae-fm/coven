@@ -753,3 +753,75 @@ async fn blocked_device_reloads_no_audience() {
 async fn sequence_blocked_floor_matches_lean() {
     blocked_floor(true).await;
 }
+
+/// Ben is added to Gifts, whose announced snapshot storage no longer has.
+/// His pass reports the snapshot as missing, and goes on reporting it; Gifts
+/// stays unwritable for him while the store still takes his writes (§15.7).
+#[tokio::test]
+async fn a_newly_readable_circle_whose_snapshot_is_missing_reports_it() {
+    let group = Group::new();
+    let ana = group.device(1).await;
+    let ben = group.device(2).await;
+    group.create(&ana).await;
+    group.admit(&ana, &ben).await;
+    let gifts = ana.sync.create_circle("Gifts".into()).await.unwrap();
+    pin(&ana.sync.database, PIN_1, gifts, "before Ben").await;
+    ana.sync.pass().await.unwrap();
+    let announced = ana.sync.snapshot(Audience::Circle(gifts)).await.unwrap();
+    ben.sync.pass().await.unwrap();
+    let snapshot = ana.sync.session.lock().await.history.announcements[&announced].snapshot.clone();
+    let path = crate::snapshot_object::path(group.store, &snapshot).unwrap();
+    group
+        .storage
+        .set_faults(Faults {
+            read_failures: [(path.clone(), StorageFailure::NotFound)].into(),
+            ..Faults::none()
+        })
+        .await;
+    ana.sync
+        .administer(StoreChange::AddCircleMember { circle: gifts, member: ben.identity.member() })
+        .await
+        .unwrap();
+    for _ in 0..2 {
+        assert!(ben.sync.pass().await.is_err());
+        let SequenceStatus::Blocked(record) = ben.sync.state.subscribe().borrow().clone() else {
+            panic!("the slot adding Ben blocks on the missing snapshot");
+        };
+        assert!(
+            matches!(
+                &record.reason,
+                PendingReason::Storage { failure, .. } if *failure == StorageFailure::NotFound
+            ),
+            "{record:?}"
+        );
+        let pending = ben.sync.database.pending::<PendingRecord>().await.unwrap();
+        assert!(
+            pending.iter().any(|record| matches!(
+                &record.reason,
+                PendingReason::Waits(Prerequisite::Reload(Audience::Circle(c))) if *c == gifts
+            )),
+            "{pending:?}"
+        );
+    }
+    let gifts_write = ben
+        .sync
+        .database
+        .write(move |sql| {
+            sql.execute("INSERT INTO pins VALUES(?1,?2,'fresh')", (PIN_2, gifts.to_string()))?;
+            Ok(())
+        })
+        .await;
+    assert!(
+        matches!(gifts_write, Err(coven_database::DbError::AudienceReloading(Audience::Circle(c))) if c == gifts),
+        "{gifts_write:?}"
+    );
+    insert(&ben.sync.database, "store", "still writable").await;
+    // Once storage serves the snapshot again, the next pass loads Gifts.
+    group.storage.set_faults(Faults::none()).await;
+    ben.sync.pass().await.unwrap();
+    assert_eq!(pins(&ben.sync.database).await, [(PIN_1.into(), "before Ben".into())]);
+    assert!(ben.sync.database.pending::<PendingRecord>().await.unwrap().is_empty());
+    for device in [&ana, &ben] {
+        device.database().close().await.unwrap();
+    }
+}
