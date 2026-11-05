@@ -562,3 +562,50 @@ pub(crate) fn scan_reason(
         _ => None,
     }
 }
+
+/// A device that deleted Gifts still receives a late write of it. The
+/// write's record of a stored file arrives taken out, and its lost value
+/// goes on protecting the stored bytes: a deleted circle is no permission to
+/// delete its files (§15.9).
+#[tokio::test]
+async fn a_deleted_circles_lost_value_keeps_its_stored_file() {
+    use coven_foundation::id_source::CircleId;
+    let circle = CircleId(uuid::Uuid::from_u128(10));
+    let audience = coven_merge::Audience::Circle(circle);
+    let store = TestStore::new();
+    let db = store
+        .schema(
+            vec![SyncedTable::new("t", RowIdentity::IndependentUuid)
+                .audience_column("audience")
+                .file_column(FileColumn::new("file"))],
+            "CREATE TABLE t(id TEXT NOT NULL PRIMARY KEY,file TEXT,audience TEXT NOT NULL)",
+        )
+        .await
+        .unwrap();
+    crate::tests::delete_circle(&db, circle).await.unwrap();
+    let file = FileId(uuid::Uuid::from_u128(7));
+    let mut late = write(2, 1, stored(2, file, "ab"));
+    let part = &mut late.parts[0];
+    part.audience = audience.clone();
+    for row in &mut part.rows {
+        row.row.audience = audience.clone();
+        let Operation::Insert(columns) = &mut row.change.operation else { unreachable!() };
+        let text = crate::write_encoding::audience_text(&audience);
+        if row.row.table == "t" {
+            let id = "00000000-0000-4000-8000-000000000046";
+            row.row.key = crate::tests::text_key(id);
+            columns.insert("id".into(), coven_format::test_utils::column(Value::Text(id.into())));
+            columns.insert("audience".into(), coven_format::test_utils::column(Value::Text(text)));
+        } else {
+            columns.insert("audience".into(), coven_format::test_utils::column(Value::Text(text)));
+        }
+    }
+    assert_eq!(db.receive(late.into()).await.unwrap(), crate::ApplyOutcome::Applied);
+    assert!(!db.lost_values().await.unwrap().is_empty());
+    assert!(db.retained_files().await.unwrap().references.contains(&(DeviceId(2), file)));
+    db.add_file_candidates(BTreeSet::from([(DeviceId(2), file)])).await.unwrap();
+    let candidates = db.file_candidates(candidates_of(DeviceId(2))).await.unwrap();
+    assert_eq!(candidates.len(), 1);
+    assert!(candidates[0].protected, "the lost value protects the bytes");
+    db.close().await.unwrap();
+}
