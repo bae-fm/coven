@@ -705,3 +705,44 @@ async fn a_resumed_install_that_fails_partway_leaves_history_and_prefix_together
     ana.database().close().await.unwrap();
     ben.database().close().await.unwrap();
 }
+
+/// A reload refuses writes only to its own audience: while a circle loads,
+/// the store's rows stay writable (§2.1, §16.5).
+#[tokio::test]
+async fn a_reloading_circle_leaves_the_store_audience_writable() {
+    let group = Group::new();
+    let ana = circle_device(&group, 1).await;
+    let ben = circle_device(&group, 2).await;
+    group.create(&ana).await;
+    group.admit(&ana, &ben).await;
+    let circle = ana.sync.create_circle("Shared keys".into()).await.unwrap();
+    pin(ana.database(), "7", circle, "loaded").await;
+    ana.sync.pass().await.unwrap();
+    let snapshot = ana.sync.snapshot(Audience::Circle(circle)).await.unwrap();
+    read(&ben).await;
+    ana.sync
+        .administer(StoreChange::AddCircleMember { circle, member: ben.identity.member() })
+        .await
+        .unwrap();
+    let snapshot = ana.sync.session.lock().await.history.announcements[&snapshot].snapshot.clone();
+    let path = crate::snapshot_object::path(group.store, &snapshot).unwrap();
+    during_load(&ben, path, async {
+        let circle_write = ben
+            .database()
+            .write(move |sql| {
+                sql.execute("INSERT INTO pins VALUES('8',?1,'fresh')", [circle.to_string()])?;
+                Ok(())
+            })
+            .await;
+        assert!(
+            matches!(circle_write, Err(DbError::AudienceReloading(Audience::Circle(c))) if c == circle),
+            "{circle_write:?}"
+        );
+        insert(ben.database(), "during", "store write").await;
+    })
+    .await;
+    assert!(rows(ben.database()).await.contains(&("during".into(), "store write".into())));
+    for device in [&ana, &ben] {
+        device.database().close().await.unwrap();
+    }
+}
