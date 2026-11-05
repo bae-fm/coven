@@ -795,6 +795,28 @@ async fn a_reference_taken_while_uploading_reads_storage_once_stored() {
     f.close().await;
 }
 
+/// A store whose reader lock cannot be taken fails a read of a file staged
+/// here with `Lock`, not with a missing or damaged file (§17.7).
+#[tokio::test]
+async fn opening_a_file_whose_store_lock_fails_returns_lock() {
+    let f = Fixture::new(Provenance::AppProvided).await;
+    f.files.stop_background_for_counts().await;
+    f.files.set_storage(None, std::future::ready(Ok(()))).await.unwrap();
+    let file = f.attach("files", "waiting", b"kept here".to_vec()).await;
+    let readers = f
+        .root
+        .path()
+        .join("stores")
+        .join(format!(".{}.readers.lock", StoreId(uuid::Uuid::from_u128(1))));
+    std::fs::remove_file(&readers).ok();
+    std::fs::create_dir(&readers).unwrap();
+    let result = f.files.read_file(&file).await;
+    assert!(matches!(result, Err(FileReadError::Lock(_))), "{result:?}");
+    std::fs::remove_dir(&readers).unwrap();
+    assert_eq!(f.files.read_file(&file).await.unwrap(), b"kept here");
+    f.close().await;
+}
+
 impl Files {
     pub(crate) async fn stop_background_for_counts(&self) {
         // Isolate explicit runs and transfers from the independent workers,
