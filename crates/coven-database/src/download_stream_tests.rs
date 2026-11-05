@@ -88,6 +88,45 @@ async fn downloads_refuse_a_descendant_in_another_audience_than_its_parent() {
     source.close().await.unwrap();
     rejects_schema_violation(record, circle_tables(), CIRCLE_SCHEMA).await;
 }
+/// A received insert supplies its audience cell, and a descendant's its
+/// reference cell; one lacking either is refused with nothing applied,
+/// plain and streamed. An update may leave both out (§15.1).
+#[tokio::test]
+async fn a_received_insert_without_its_audience_or_reference_cell_is_refused_and_an_update_may_leave_them_out(
+) {
+    let store = TestStore::new();
+    let source = circle_db(&store).await;
+    sql(&source, "INSERT INTO notes VALUES('00000000-0000-4000-8000-000000000001','store','title'); INSERT INTO children VALUES('00000000-0000-4000-8000-000000000002','00000000-0000-4000-8000-000000000001')").await.unwrap();
+    sql(&source, "UPDATE notes SET title='changed'").await.unwrap();
+    let writes = records(&source);
+    source.close().await.unwrap();
+    for (table, column) in [("notes", "audience"), ("children", "note")] {
+        let mut record = writes[0].clone();
+        let row = record.parts[0].rows.iter_mut().find(|row| row.row.table == table).unwrap();
+        let Operation::Insert(columns) = &mut row.change.operation else { panic!("an insert") };
+        assert!(columns.remove(column).is_some(), "{table} supplies {column}");
+        row.old.remove(column);
+        row.sources.setters.remove(column);
+        rejects_schema_violation(record, circle_tables(), CIRCLE_SCHEMA).await;
+    }
+    let Operation::Update(columns) = &writes[1].parts[0].rows[0].change.operation else {
+        panic!("an update")
+    };
+    assert!(!columns.contains_key("audience") && !columns.contains_key("note"));
+    for streamed in [false, true] {
+        let receiver = TestStore::new();
+        let db = receiver.schema(circle_tables(), CIRCLE_SCHEMA).await.unwrap();
+        db.receive(writes[0].clone().into()).await.unwrap();
+        if streamed {
+            db.receive_stream(stream(&writes[1]), || Ok(())).await.unwrap();
+        } else {
+            db.receive(writes[1].clone().into()).await.unwrap();
+        }
+        assert_eq!(count(&db, "notes"), 1);
+        assert_eq!(count(&db, "children"), 1);
+        db.close().await.unwrap();
+    }
+}
 #[tokio::test]
 async fn streamed_retarget_is_one_write_including_local_trigger_effects() {
     let ids = SequentialIds::new();
