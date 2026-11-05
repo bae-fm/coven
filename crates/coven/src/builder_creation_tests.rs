@@ -336,3 +336,86 @@ async fn a_panic_after_publication_keeps_the_published_store() {
     reopened.close().await.unwrap();
     app.discard_store(&app.store_dir(&expected)).await.unwrap();
 }
+
+/// An identity custody whose persist reports that it started and waits for
+/// the test, then stores the identity or fails.
+struct HeldIdentity {
+    keys: Mutex<Option<MemberIdentity>>,
+    started: tokio::sync::Notify,
+    release: Mutex<std::sync::mpsc::Receiver<()>>,
+    fail: bool,
+    forgotten: std::sync::atomic::AtomicBool,
+    closed: tokio::sync::Notify,
+}
+
+impl Custody<MemberIdentity> for HeldIdentity {
+    fn unlock(&self) -> Result<Option<MemberIdentity>, KeyError> {
+        Ok(self.keys.lock().unwrap().clone())
+    }
+    fn persist(&self, identity: &MemberIdentity) -> Result<(), KeyError> {
+        self.started.notify_one();
+        self.release.lock().unwrap().recv_timeout(HANG_GUARD).unwrap();
+        if self.fail {
+            return Err(KeyError::PassphraseAuthentication);
+        }
+        *self.keys.lock().unwrap() = Some(identity.clone());
+        Ok(())
+    }
+    fn forget(&self) -> Result<(), KeyError> {
+        self.keys.lock().unwrap().take();
+        self.forgotten.store(true, std::sync::atomic::Ordering::SeqCst);
+        Ok(())
+    }
+    fn close(&self) {
+        self.closed.notify_one();
+    }
+}
+
+/// The app drops the creation future while the member's custody is being
+/// written. Creation runs to its end anyway: it publishes the whole store, or
+/// undoes what it wrote (E1).
+#[tokio::test]
+async fn dropping_the_creation_future_still_finishes_creating_or_undoing_it() {
+    for fail in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let app = Coven::in_memory(root.path().into());
+        let (release, wait) = std::sync::mpsc::channel();
+        let identity = Arc::new(HeldIdentity {
+            keys: Mutex::new(None),
+            started: tokio::sync::Notify::new(),
+            release: Mutex::new(wait),
+            fail,
+            forgotten: std::sync::atomic::AtomicBool::new(false),
+            closed: tokio::sync::Notify::new(),
+        });
+        let builder = || app.builder().synced_tables(vec![]).migrations(vec![]);
+        let creation = builder()
+            .identity_custody(CustodyChoice::Custom(identity.clone()))
+            .create_store("Household");
+        tokio::select! {
+            _ = creation => panic!("creation returned while its custody was held"),
+            () = identity.started.notified() => {}
+        }
+        release.send(()).unwrap();
+        // Creation ends by closing the custody session, whether it published
+        // the store or undid it.
+        tokio::time::timeout(HANG_GUARD, identity.closed.notified()).await.unwrap();
+        if fail {
+            assert!(identity.forgotten.load(std::sync::atomic::Ordering::SeqCst));
+            assert!(identity.keys.lock().unwrap().is_none());
+            assert!(app.stores().await.unwrap().is_empty());
+        } else {
+            let listed = app.stores().await.unwrap();
+            let [ListedStore::Readable(info)] = listed.as_slice() else {
+                panic!("the finished creation lists one store")
+            };
+            assert_eq!(info.name, "Household");
+            let reopened = builder()
+                .identity_custody(CustodyChoice::Custom(identity.clone()))
+                .open(info.id, |_| ())
+                .await
+                .unwrap();
+            reopened.close().await.unwrap();
+        }
+    }
+}
