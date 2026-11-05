@@ -4219,13 +4219,27 @@ inviting device's id and the invite's id.
 - both keys are fresh: no entry in the history her phone has caught up with
   bound either one to a member, current or past (§12.3).
 
-A request that fails a check is neither offered nor approved. The invite goes
-on waiting, with the failure as its pending record, until Ana cancels it or it
-expires. A request carrying Ben's keys, which history bound when he joined,
-fails, though his signing key verifies it. Were the keys checked only when the
-binding applies, an in-person invite would approve that request on its own,
-and a sent invite would offer Ana an approval that history can only refuse
+A request that fails a check is neither offered nor approved. A request
+carrying Ben's keys, which history bound when he joined, fails, though his
+signing key verifies it. Were the keys checked only when the binding applies,
+an in-person invite would approve that request on its own, and a sent invite
+would offer Ana an approval that history can only refuse
 ([`unchecked_keys_approved`](proofs/sequence/CovenSequence/InviteLifecycle.lean)).
+
+A failed check ends the invite, as a decline does, in the pass that found it.
+No later attempt can pass it: the request is created once at the invite's one
+path and never changes, and no other request can reach that path while it is
+there. So Ana's phone puts the invite's marker in the request's place, and
+takes back the access the invite granted. The phone that sent the request
+finds it gone, and its join ends as declined. The invite leaves Ana's list,
+and her phone logs the failed check; to add the person, she makes a new
+invite. Left waiting, with the failure as its pending record, the invite
+would offer Ana a retry that refuses the same request again, while the
+joining phone waited and the access stood until she cancelled the invite or
+it expired
+([`refused_request_retried`](proofs/sequence/CovenSequence/InviteLifecycle.lean)).
+A request in a newer format than Ana's phone reads hasn't failed a check: it
+waits for her update, as any newer object does.
 
 An in-person invite's request is approved as soon as these checks pass, in the
 sync pass that read it. A sent invite's request waits for Ana's decision, with
@@ -4459,8 +4473,9 @@ only by approval, decline or expiry. The app may leave the waiting screen at any
 time; the join stays unfinished and listed. Cancelling before the request is
 sent removes everything, as for a restore.
 
-**Ending an invite.** Once Ana approves, declines or cancels, or the invite
-expires, Ana's phone replaces the request object with a *marker*: it deletes
+**Ending an invite.** Once Ana approves, declines or cancels, the invite
+expires, or her phone refuses its request, Ana's phone replaces the request
+object with a *marker*: it deletes
 the request, then creates the marker at the same path, create-once. Dan's phone
 sees only that his request is gone, so a cancel, a decline and an expiry all
 end his join the same way. Once approval has begun, Ana can no longer cancel:
@@ -4532,8 +4547,8 @@ new installation registers in its old phone's place in the same slot, so an
 admin's does this for the old phone too, after ending the invites it carried.
 
 Declining, or letting the invite expire, takes back the provider access it
-granted. Once the invite ends, whether it was approved, declined, cancelled or
-expired, Ana's phone claims the entry ending its share. Every device of Ana's
+granted. Once the invite ends, whether it was approved, declined, cancelled,
+expired or refused, Ana's phone claims the entry ending its share. Every device of Ana's
 that applies it records the account's revocation in that transaction, unless
 an active member or another open invite share still uses the account (§14.2):
 Dan's, once approval adds him. For an approval, the end comes after the entry
@@ -10930,9 +10945,11 @@ Write-ups explain each model and state its assumptions:
 | From every reachable state, crashes and stops for good included, coven's own steps, with the app retrying only records it is shown, end the invite and every operation the app journaled, and take back its share unless a member uses the account: nothing stays listed, running, pending or shared | `settles` | `proofs/sequence/CovenSequence/InviteLifecycle.lean` | §11.4, §13.2, §14.1, §14.2 |
 | A share an invite granted is always one history records, so the owner's other devices can take it back once the inviting device is gone for good | `share_recorded` | `proofs/sequence/CovenSequence/InviteLifecycle.lean` | §13.2 |
 | A request is offered for approval, or approved, only once its keys are checked fresh, so history refuses an approval's binding only when the approving device may no longer approve, never for the request's keys | `offered_fresh`, `binding_fresh` | `proofs/sequence/CovenSequence/InviteLifecycle.lean` | §13.2 |
+| A request that fails its checks ends the invite in the pass that finds it, as a decline does, with no pending record, and the pass goes on to put the marker in its place, without the app's retry or the invite's expiry | `refused_ends` | `proofs/sequence/CovenSequence/InviteLifecycle.lean` | §13.2 |
 | The listed invite and its binding's entry only move forward; the app's offer of approving, declining, cancelling and acknowledging is exactly what the write steps accept; a sent invite is listed as approving exactly while its binding runs | `forward`, `offered_accepted`, `approval_runs_binding` | `proofs/sequence/CovenSequence/InviteLifecycle.lean` | §11.4, §13.2 |
 | Each rule those results need is needed: leaving out the step check, ending operations or invites at a stop, ending a refused access record, ending the binding with its invite, recording the binding, listing approval as its own stage, leaving an approval's refusal to its pass, or recording the share before the grant each has a counterexample | `unguarded_finding_is_stale`, `forgetful_stop_runs_forever`, `stop_strands_approval`, `refused_record_strands`, `split_binding_disagrees`, `reclaim_binds_twice`, `approval_shown_as_waiting`, `demoted_approval_offered`, `unrecorded_share_strands` | `proofs/sequence/CovenSequence/InviteLifecycle.lean` | §13.2, §14.1 |
 | *Body.* A request whose keys are checked only when its binding applies is offered for approval though a member holds its keys, and an in-person invite approves it on its own; history then refuses the binding | `unchecked_keys_approved` | `proofs/sequence/CovenSequence/InviteLifecycle.lean` | §13.2 |
+| *Body.* An invite left waiting on a request that failed its checks offers the app a retry that comes back to the same state, sent or in person, and stays listed with its share standing until the app cancels it or it expires | `refused_request_retried` | `proofs/sequence/CovenSequence/InviteLifecycle.lean` | §13.2 |
 | An invite ends together with every operation it started for its own entries, its share, the share's end and a recovery's key record, and leaves no claim open; from every reachable state, crashes between a claim landing and its end included, its own slots read before their claims settle, slots lost to other devices and a cancel while the share's record is claimed, coven's own steps end the invite with no claim open, so the device's writes go out | `children_end_with_invite`, `settles` | `proofs/sequence/CovenSequence/InviteClaims.lean` | §5.1, §13.2 |
 | *Body.* An ended invite that looks only at history leaves a claim open for good: its share's end, when its own slot showed the share ended before the claim settled, or its share's record, when the app cancelled it while that claim landed | `ended_share_strands_claim`, `cancelled_share_strands_claim` | `proofs/sequence/CovenSequence/InviteClaims.lean` | §13.2 |
 | While history names a restoring device as active, or a claim of its registration is open, the restore is published or listed for the app to finish; from every reachable state, crashes, dropped calls, failures, cancels, lost slots, the member's removal and the replacement of its keys included, coven's own steps and the app resuming what is listed end the restore published, with its device registered, or with no installation left, its device not active and no claim open | `registered_listed`, `settles`, `settled_outcome` | `proofs/sequence/CovenSequence/RestoreRegistration.lean` | §11.6, §13.1 |

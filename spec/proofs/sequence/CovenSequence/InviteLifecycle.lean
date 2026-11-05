@@ -157,12 +157,17 @@ structure Rules where
   /-- The pass checks that the request's keys are fresh when it opens the
   request, not only when its binding applies. -/
   checkKeys : Bool
+  /-- A request that fails its checks ends the invite, as a decline does,
+  rather than leaving it waiting on a pending record: the request is created
+  once at the invite's one path and never changes, so no retry passes it and
+  no other request can arrive. -/
+  endRefused : Bool
   deriving DecidableEq, Repr
 
-def Rules.correct : Rules := ⟨true, true, true, true, true, true, true, false, true, true⟩
+def Rules.correct : Rules := ⟨true, true, true, true, true, true, true, false, true, true, true⟩
 
 /-- The rules the Rust follows, as the differential test drives it. -/
-def Rules.rust : Rules := ⟨true, true, true, true, true, true, true, false, true, true⟩
+def Rules.rust : Rules := ⟨true, true, true, true, true, true, true, false, true, true, false⟩
 
 /-- Stages that end at the invite's expiry; approval, once begun, finishes. -/
 def expires : Stage → Bool
@@ -285,9 +290,11 @@ def commitOf (R : Rules) (c : Config) (w : World) (r : Row) : World :=
     else recordAt R w r .never
   | .grant => guarded w r fun w => advance { w with shared := true } (.waiting false)
   | .waiting false =>
-    -- A request that fails its checks is not offered or approved: the
-    -- invite goes on waiting, with the failure as its pending record.
-    if w.request && R.checkKeys && w.used then recordAt R w r .app
+    -- A request that fails its checks is neither offered nor approved. It
+    -- can never pass, and the invite's one path holds it, so the invite
+    -- ends as a decline does.
+    if w.request && R.checkKeys && w.used then
+      if R.endRefused then guarded w r (advance · .settled) else recordAt R w r .app
     else if w.request then
       match c.delivery with
       | .sent => guarded w r (advance · (.waiting true))
@@ -758,6 +765,25 @@ theorem unchecked_keys_approved :
       w.bindings = 1 ∧ w.bound = false) :=
   ⟨⟨_, rfl, rfl, rfl⟩, ⟨_, rfl, rfl, rfl⟩⟩
 
+def refusalWaits : Rules := { Rules.correct with endRefused := false }
+
+/-- Left waiting on a request that failed its checks, the invite offers the
+app a retry, and the retry and the pass after it come back to the same state:
+the request stays at the invite's one path, so the pass refuses it again.
+Sent or in person, the invite stays listed as waiting for a request that can
+never come, with its share standing, until the app cancels it or it
+expires. -/
+theorem refused_request_retried :
+    (∃ w, trace refusalWaits sent made toUsedRequest = some w ∧
+      offered (view refusalWaits w) .retry = true ∧
+      trace refusalWaits sent w [.retry, .read, .commit] = some w ∧
+      listed refusalWaits w = some (.waiting false) ∧ w.shared = true) ∧
+    (∃ w, trace refusalWaits inPerson made toUsedRequest = some w ∧
+      offered (view refusalWaits w) .retry = true ∧
+      trace refusalWaits inPerson w [.retry, .read, .commit] = some w ∧
+      listed refusalWaits w = some (.waiting false) ∧ w.shared = true) :=
+  ⟨⟨_, rfl, rfl, rfl, rfl, rfl⟩, ⟨_, rfl, rfl, rfl, rfl, rfl⟩⟩
+
 /-! ## The properties, under the rules -/
 
 /-- What every world reachable under `correct` satisfies. -/
@@ -1108,6 +1134,28 @@ theorem binding_fresh (c : Config) {w : World} (h : Reachable Rules.correct c w)
   have used := (k.checked (.inr (inv.binding.mp b))).1
   refine ⟨used, fun r => ?_⟩
   cases ha : w.approvable <;> simp_all [bindingOutcome]
+
+/-- A pass that reads the invite waiting for its request and finds one
+that fails its checks ends the invite, as a decline does, with no pending
+record, and its next read and write put the marker in the request's place:
+the invite ends without the app's retry and without its expiry (§13.2). -/
+theorem refused_ends (c : Config) {w : World} (h : Reachable Rules.correct c w)
+    (waiting : w.row.map (·.stage) = some (.waiting false)) (request : w.request = true)
+    (used : w.used = true) (r : ready w.pending = true) :
+    ∃ w', trace Rules.correct c w [.crash, .read, .commit, .read, .commit] = some w' ∧
+      w'.row = none ∧ w'.pending = none ∧ w'.request = false := by
+  obtain ⟨⟨stage, n⟩, hrow⟩ : ∃ row, w.row = some row := by
+    cases hr : w.row <;> simp_all
+  have hs : stage = .waiting false := by simpa [hrow] using waiting
+  subst hs
+  have notStopped : w.stopped = false := by
+    cases hst : w.stopped
+    · rfl
+    · have := ((reachable_inv c h).stopped hst).2.2.2.1
+      simp [hrow] at this
+  rcases hp : w.pending with _ | (_ | _ | _) <;> simp [ready, hp] at r <;>
+    simp [trace, enabled, act, commitOf, guarded, atRead, advance, hrow, notStopped, request,
+      used, hp, Rules.correct, ready]
 
 /-! ### No write from a stale read -/
 

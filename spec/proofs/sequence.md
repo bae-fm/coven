@@ -735,6 +735,10 @@ record. The properties are proved under `Rules.correct`:
   are fresh, and an approval under way binds only such a request (`KeysInv`).
   History then refuses the binding only when this device may no longer
   approve, never for the request's keys.
+- `refused_ends`: a pass that finds a request failing its checks ends the
+  invite, as a decline does, with no pending record, and the pass goes on to
+  put the marker in the request's place. The invite ends without the app's
+  retry and without its expiry.
 
 Each rule `correct` has is needed; leaving one out is a checked counterexample:
 
@@ -760,6 +764,11 @@ Each rule `correct` has is needed; leaving one out is a checked counterexample:
   binding applies, a sent invite offers the app a request whose keys a member
   holds, and an in-person invite's pass approves one and journals a binding
   history refuses.
+- `refused_request_retried`: an invite left waiting on a request that failed
+  its checks offers the app a retry that comes back to the same state, sent
+  or in person: the request stays at the invite's one path, so the pass
+  refuses it again, and the invite stays listed, with its share standing,
+  until the app cancels it or it expires.
 
 `Rules.rust` names the rules the Rust follows; the differential test compares
 it.

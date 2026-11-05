@@ -3346,7 +3346,7 @@ let moved = handle
 | | `file` | for a record about stored bytes or an upload, each file over them on this device: the files the upload stores, or the stored files; NULL otherwise |
 | | `position` | its place in the order the records arose, smallest first; a record whose condition changes keeps its place |
 | | `cause` | the text of the error behind the record, written with it, when this run met that error and no app call received it; NULL otherwise (E5) |
-| `coven_invites`: this device's invites that haven't ended, each from the write that makes it until approval, decline, cancel or expiry ends it, each a write (E10) | `invite` | the invite with its stage, read with `operation` by `Invite::list` |
+| `coven_invites`: this device's invites that haven't ended, each from the write that makes it until approval, decline, cancel or expiry ends it, each a write, or a pass refuses its request (E10) | `invite` | the invite with its stage, read with `operation` by `Invite::list` |
 | | `operation` | the invite's operation, which names its pending record in `coven_pending`, read as `i64` for `OperationId`; smallest first is the order the invites were made |
 | `coven_operations`: each operation an app's write journaled (§11.4), from that write's commit, and each storage setup, from its journal (§11.6), until a write acknowledges it, in the order they were journaled (E6) | `operation` | its id, read as `i64` for `OperationId` |
 | | `kind` | what it does, read as `OperationKind` |
@@ -6911,6 +6911,12 @@ pub enum ProviderSignOut {
   `retry_now` ends that wait (E5). Applying a slot that stops the device for
   good ends every invite it made, in that transaction
   ([§14.1](coven.md#141-the-cut-off)).
+- A request that fails the inviting device's checks, its signature, the
+  member id it names or the freshness of its keys, ends its invite in the
+  pass that read it, as a decline does: the request never changes and holds
+  the invite's one path, so no retry could pass it. The invite leaves
+  `coven_invites` with no pending record, and the requester's join ends as
+  declined ([§13.2](coven.md#132-adding-a-person-invites)).
 - An invite ends in a write: approval, decline and cancel each write it, and
   so does expiry. Approving, declining and cancelling are steps of the app's
   write (`CovenWrite::approve_join_request`, `CovenWrite::decline_join_request`,
