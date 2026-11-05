@@ -237,6 +237,36 @@ async fn retention_between_the_miss_and_floor_read_cannot_end_an_approved_join()
     }
 }
 
+/// Approval can land just after the read that missed it. Once the request is
+/// gone, the joining device reads forward again before concluding it was
+/// declined or expired (§13.2).
+#[tokio::test]
+async fn a_joiner_whose_request_disappears_reads_forward_before_concluding() {
+    let group = clocks(UNIX_EPOCH, UNIX_EPOCH);
+    let (ana, mut carol) = waiting(&group).await;
+    let scanned = carol.device.sync.session.lock().await.scanned;
+    let (missed, miss) = tokio::sync::oneshot::channel();
+    let (resume, held) = tokio::sync::oneshot::channel();
+    carol
+        .device
+        .storage
+        .hold_next_read(ObjectPath::slot(group.store, scanned.try_into().unwrap()), missed, held)
+        .await;
+    let polling = async { carol.device.sync.join_outcome(&mut carol.request).await.unwrap() };
+    let approval = async {
+        miss.await.unwrap();
+        ana.sync.pass().await.unwrap();
+        let request = listed(&ana).await.remove(0).shown_request().cloned().unwrap();
+        ana.sync.approve_join_request(&request).await.unwrap();
+        resume.send(()).unwrap();
+    };
+    let (outcome, ()) = tokio::join!(polling, approval);
+    assert_eq!(outcome, JoinOutcome::Admitted);
+    for device in [&ana, &carol.device] {
+        device.database().close().await.unwrap();
+    }
+}
+
 #[tokio::test]
 async fn a_failed_scan_does_not_advance_past_the_keys_it_could_not_keep() {
     let group = Group::shared();
