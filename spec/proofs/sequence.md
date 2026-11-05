@@ -868,6 +868,44 @@ The rule is needed; without it one call's removal takes the other's listing:
   installation is cancelled before its request, and removes the restore's
   record.
 
+[`DeviceReplacement`](sequence/CovenSequence/DeviceReplacement.lean)
+models `reset_device` and `restore_device` past loading (§19.3, §13.1): the
+new installation, loaded beside the old one under a fresh device id,
+registers the fresh id as replacing the old one through the device's claim
+journal, swaps into the store's place once the registration applied, and is
+published. The registration's task, its attempts and the other devices
+behave as in `RestoreRegistration`; another device may remove the member or
+replace its keys, after which a registration is refused and a registered
+device is gone for good. The app cancels before the swap, drops the call or
+crashes at any point, and opens the store whenever no call holds it. Under
+`Rules.correct` the replacement records itself before it registers, and the
+record refuses the app's opens and lists the replacement to resume; from the
+record on a cancel waits for the registration's task and removes the new
+installation only when the facts allow it, and a failure after the swap
+keeps the swap.
+
+- `old_never_stale`: the old installation never opens once a registration
+  replacing it may have landed.
+- `never_missing`: while history names the fresh device as the old one's
+  active replacement, its installation is there.
+- `settles`: from every reachable state, coven's own steps and the app
+  resuming what the store listing shows reach a state with nothing left: the
+  new installation published, or no call running and nothing recorded. The
+  proof is a measure those steps lower (`progress`).
+- `settled_outcome`: there, the new installation is published with its
+  registration landed, or no claim of it is open and history doesn't name
+  it as active.
+
+Each rule is needed:
+
+- `crashed_replacement_opens_old`: without the record, the registration
+  lands and the device crashes; opening the store opens the old
+  installation, which stops for good.
+- `unswapped_replacement_opens_old`: moving the old installation back after
+  a failure past the swap removes the record, and the same open follows.
+- `cancelled_replacement_missing`: a cancel that doesn't wait removes the new
+  installation while the attempt is on its way, and it lands after.
+
 ## Settling a claim whose slot was deleted
 
 [`Settle`](sequence/CovenSequence/Settle.lean). Each copy numbers all its slot

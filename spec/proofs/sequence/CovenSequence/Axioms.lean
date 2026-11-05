@@ -337,6 +337,14 @@ import SequenceApply
 #print axioms CovenSequence.FirstInstallation.restore_strands_join
 #print axioms CovenSequence.FirstInstallation.join_strands_restore
 #print axioms CovenSequence.FirstInstallation.never_stranded
+#print axioms CovenSequence.DeviceReplacement.old_never_stale
+#print axioms CovenSequence.DeviceReplacement.never_missing
+#print axioms CovenSequence.DeviceReplacement.progress
+#print axioms CovenSequence.DeviceReplacement.settles
+#print axioms CovenSequence.DeviceReplacement.settled_outcome
+#print axioms CovenSequence.DeviceReplacement.crashed_replacement_opens_old
+#print axioms CovenSequence.DeviceReplacement.unswapped_replacement_opens_old
+#print axioms CovenSequence.DeviceReplacement.cancelled_replacement_missing
 #print axioms CovenSequence.JoinStatus.phases_forward
 #print axioms CovenSequence.JoinStatus.opened_never_waits
 #print axioms CovenSequence.JoinStatus.resumed_waits_again
