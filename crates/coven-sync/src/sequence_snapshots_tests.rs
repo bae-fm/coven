@@ -453,3 +453,61 @@ async fn of_two_announcements_with_equal_coverage_a_reload_uses_the_later() {
         device.sync.database.close().await.unwrap();
     }
 }
+
+/// A snapshot larger than the provider's single-request limit goes up in
+/// parts, never as one create at its path, and a device reloading from it
+/// reads the same rows (§20.6).
+#[tokio::test]
+async fn a_snapshot_past_the_single_request_limit_goes_up_in_parts() {
+    use coven_storage::test_utils::{MemoryRequest, MemoryStorage};
+    let mut group = Group::new();
+    group.storage = MemoryStorage::builder()
+        .clock(group.clock.clone())
+        .transfer_limits(64 * 1024, 64 * 1024)
+        .build()
+        .unwrap();
+    let ana = group.device(1).await;
+    let ben = group.device(2).await;
+    group.create(&ana).await;
+    group.admit(&ana, &ben).await;
+    for i in 0..30u32 {
+        let title: String =
+            (0..4096u32).map(|n| char::from(b'a' + ((n * 7 + i * 13) % 26) as u8)).collect();
+        ana.sync
+            .database
+            .write(move |sql| {
+                sql.execute("INSERT INTO notes VALUES(?1,?2)", (i.to_string(), title))?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        ana.sync.pass().await.unwrap();
+    }
+    let before = ana.storage.request_trace().len();
+    let announced = ana.sync.snapshot(coven_merge::Audience::Store).await.unwrap();
+    let trace = ana.storage.request_trace().split_off(before);
+    let body = {
+        let session = ana.sync.session.lock().await;
+        crate::snapshot_object::path(
+            group.store,
+            &session.history.announcements[&announced].snapshot,
+        )
+        .unwrap()
+    };
+    assert!(group.storage.status(&body).await.unwrap().unwrap().size > 64 * 1024);
+    assert!(
+        !trace
+            .iter()
+            .any(|request| matches!(request, MemoryRequest::Create(path) if *path == body)),
+        "{trace:?}"
+    );
+    assert!(trace.contains(&MemoryRequest::Other("begin_upload")), "{trace:?}");
+    assert!(trace.contains(&MemoryRequest::Other("finish_upload")), "{trace:?}");
+    ben.sync.pass().await.unwrap();
+    ben.sync.reload_from_snapshot().await.unwrap();
+    assert_eq!(rows(&ben.sync.database).await, rows(&ana.sync.database).await);
+    assert_eq!(rows(&ben.sync.database).await.len(), 30);
+    for device in [&ana, &ben] {
+        device.sync.database.close().await.unwrap();
+    }
+}
