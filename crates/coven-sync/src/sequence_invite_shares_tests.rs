@@ -306,3 +306,53 @@ async fn a_request_made_obsolete_while_it_runs_is_reversed_before_the_accounts_w
         device.database().close().await.unwrap();
     }
 }
+
+/// Ana's laptop takes back Carol's account when Ben removes her, before it
+/// has applied the share Ana's phone then records for a new invite to her.
+/// Applying the share makes the account intended again, and the laptop
+/// grants it back (§20.9).
+#[tokio::test]
+async fn a_share_applied_after_its_account_was_taken_back_grants_it_again() {
+    let group = Group::shared();
+    let (phone, ben, laptop) = household(&group).await;
+    let carol = coven_foundation::id_source::MemberId(
+        coven_foundation::id_source::IdSource::new_id(group.ids.as_ref()),
+    );
+    phone
+        .sync
+        .administer(StoreChange::AddMember {
+            member: carol,
+            keys: coven_format::test_utils::keys_from_seed(4).public_keys(),
+            role: MemberRole::Member,
+            access: MemberAccess::ProviderAccount(CAROL.into()),
+        })
+        .await
+        .unwrap();
+    laptop.sync.pass().await.unwrap();
+    ben.sync.pass().await.unwrap();
+    ben.sync.administer(StoreChange::RemoveMember { member: carol }).await.unwrap();
+    laptop.sync.pass().await.unwrap();
+    assert_eq!(row(&laptop, CAROL).await, Some((false, Some(false))));
+
+    invite(&phone).await;
+    laptop.sync.pass().await.unwrap();
+    let account_requests: Vec<_> = laptop
+        .storage
+        .request_trace()
+        .into_iter()
+        .filter(|request| {
+            matches!(
+                request,
+                MemoryRequest::Other("grant_access") | MemoryRequest::Other("revoke_access")
+            )
+        })
+        .collect();
+    assert_eq!(
+        account_requests,
+        [MemoryRequest::Other("revoke_access"), MemoryRequest::Other("grant_access")]
+    );
+    assert_eq!(row(&laptop, CAROL).await, Some((true, Some(true))));
+    for device in [&phone, &ben, &laptop] {
+        device.database().close().await.unwrap();
+    }
+}
