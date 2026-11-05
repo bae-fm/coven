@@ -4,9 +4,12 @@
 use crate::{CovenError, DbError};
 
 /// A caller's write error can retain both its original cause and failures that
-/// happen while rolling back or removing bytes. Used by facade composition;
-/// ordinary database clients use `DbError`.
-pub trait WriteFailure: From<DbError> + From<rusqlite::Error> {
+/// happen while rolling back or removing bytes, and says which bug it carries,
+/// for a write whose caller stopped waiting (E15). Used by facade
+/// composition; ordinary database clients use `DbError`.
+pub trait WriteFailure:
+    From<DbError> + From<rusqlite::Error> + coven_foundation::task::CarriesBug
+{
     /// Retain a failed rollback alongside the original failure.
     fn with_rollback(self, rollback: rusqlite::Error) -> Self;
     /// Retain the failed write's error and every failed byte-removal operation.

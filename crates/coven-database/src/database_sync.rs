@@ -3,6 +3,7 @@
 use super::Database;
 use crate::internal_schema::retry_effect::{self, RetryState};
 use crate::{CovenResult, DbError};
+use coven_foundation::task::CarriesBug;
 
 impl Database {
     /// Transfer metadata of the current durable claim attempt.
@@ -33,7 +34,7 @@ impl Database {
         select: F,
     ) -> Result<Vec<coven_format::write_stream::WriteHeaderFrame>, E>
     where
-        E: From<DbError> + From<coven_format::Error> + Send + 'static,
+        E: From<DbError> + From<coven_format::Error> + CarriesBug + Send + 'static,
         F: FnMut(
                 &coven_format::write_stream::WriteHeaderFrame,
             ) -> Result<coven_format::sealed_write::WriteObjectPrefix, E>
@@ -52,7 +53,7 @@ impl Database {
     /// app commits append after this fixed number and remain for the next pass.
     pub async fn read_uploads<E, F>(&self, through: u64, consume: F) -> Result<(), E>
     where
-        E: From<DbError> + Send + 'static,
+        E: From<DbError> + CarriesBug + Send + 'static,
         F: FnMut(crate::WaitingUpload<'_>) -> Result<(), E> + Send + 'static,
     {
         self.call(move |inner| {
@@ -590,7 +591,7 @@ impl Database {
     where
         F: FnOnce(crate::WaitingUpload<'_>) -> Result<R, E> + Send + 'static,
         R: Send + 'static,
-        E: Send + 'static,
+        E: CarriesBug + Send + 'static,
     {
         self.call(move |inner| {
             let reader = inner.access.readers.acquire_reader();
@@ -736,7 +737,7 @@ impl Database {
     pub async fn read_current_attempt<T, E, F>(&self, consume: F) -> Result<T, E>
     where
         T: Send + 'static,
-        E: From<DbError> + Send + 'static,
+        E: From<DbError> + CarriesBug + Send + 'static,
         F: FnOnce(crate::ClaimBytes<'_>) -> Result<T, E> + Send + 'static,
     {
         self.call(move |inner| {

@@ -128,7 +128,7 @@ impl Database {
     where
         B: FnOnce(&coven_format::snapshot::SnapshotHeader) -> Result<(), E> + Send + 'static,
         F: FnMut(Vec<u8>) -> Result<(), E> + Send + 'static,
-        E: Send + 'static,
+        E: coven_foundation::task::CarriesBug + Send + 'static,
     {
         self.call(move |inner| {
             inner.access.with_committed(|reader| {
@@ -203,7 +203,7 @@ impl Database {
     where
         B: FnOnce(&coven_format::snapshot::SnapshotHeader) -> Result<(), E> + Send + 'static,
         F: FnMut(Vec<u8>) -> Result<(), E> + Send + 'static,
-        E: Send + 'static,
+        E: coven_foundation::task::CarriesBug + Send + 'static,
     {
         self.call(move |inner| {
             inner.access.with_committed(|reader| {

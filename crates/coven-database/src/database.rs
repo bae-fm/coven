@@ -3,6 +3,7 @@
 //! drops, while another open waits for their release.
 
 use coven_foundation::locks::{lock_unpoisoned, read_unpoisoned, write_unpoisoned};
+use coven_foundation::task::{blocking_completing, CarriesBug};
 use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex, RwLock};
 
@@ -50,11 +51,14 @@ mod builder;
 #[path = "database_store.rs"]
 mod store;
 
+#[path = "database_call.rs"]
+mod call;
 #[path = "database_retry.rs"]
 mod retry;
 #[path = "database_sync.rs"]
 mod sync;
 pub use builder::{discarded_operations, discarded_store_name, read_store_name, DatabaseBuilder};
+pub(crate) use call::{finish_blocking, process, start_call};
 
 /// Shared ownership of the database. Closing any clone closes them all.
 #[derive(Clone)]
@@ -388,11 +392,13 @@ impl Database {
     ) -> Result<R, E>
     where
         R: Send + 'static,
-        E: From<DbError> + Send + 'static,
+        E: From<DbError> + CarriesBug + Send + 'static,
     {
         finish_blocking(
-            "database call",
-            start_call(self.inner.clone(), move |inner: &DatabaseInner| inner.call(run)).await,
+            start_call("database call", &self.bugs, self.inner.clone(), move |inner| {
+                inner.call(run)
+            })
+            .await,
         )
     }
     /// Observe new local writes: rows inserted into the outgoing write queue.
@@ -533,17 +539,18 @@ impl Database {
         let database = Arc::downgrade(&self.inner);
         let query = Arc::new(query);
         let completion = commits.clone();
+        let bugs = self.bugs.clone();
         ReconfigurableLiveQuery::new(
             initial_request,
             Arc::new(move |request| {
                 let database = database.clone();
                 let query = query.clone();
                 let completion = completion.clone();
+                let bugs = bugs.clone();
                 Box::pin(async move {
                     let database = database.upgrade().ok_or(DbError::StoreClosed)?;
                     finish_blocking(
-                        "live query",
-                        start_call(database, move |inner| {
+                        start_call("live query", &bugs, database, move |inner| {
                             inner.call(|inner| {
                                 inner.access.readers.acquire_reader().live_read(
                                     &mut |reads, lookups| completion.finish_judging(reads, lookups),
@@ -556,6 +563,7 @@ impl Database {
                 })
             }),
             commits,
+            self.bugs.clone(),
         )
     }
 
@@ -574,7 +582,7 @@ impl Database {
         F: FnOnce(SqlReadContext<'_>) -> CovenResult<R> + Send + 'static,
         R: Send + 'static,
     {
-        RunningRead::new(start_call(self.inner.clone(), move |inner| {
+        RunningRead::new(start_call("read", &self.bugs, self.inner.clone(), move |inner| {
             inner.call(|inner| inner.access.read(read))
         }))
     }
@@ -637,10 +645,13 @@ impl Database {
         let lease = self.file_tasks.clone().read_owned().await;
         let database = self.inner.clone();
         let (staging, value) = finish_blocking(
-            "stage files",
-            tokio::task::spawn_blocking(crate::commit_scope::bind(move || {
-                file_staging::FileStaging::new(database, lease, stage)
-            }))
+            blocking_completing(
+                "stage files",
+                self.bugs.clone(),
+                crate::commit_scope::bind(move || {
+                    file_staging::FileStaging::new(database, lease, stage)
+                }),
+            )
             .await,
         )?;
         let (staging, flushed) =
@@ -648,13 +659,19 @@ impl Database {
         match flushed {
             Ok(_flushed) => Ok(staging.into_staged(value)),
             // A failed copy or flush removes what the staging wrote.
-            Err(error) => Err(finish_blocking(
-                "discard staged files",
-                tokio::task::spawn_blocking(crate::commit_scope::bind(move || {
-                    Ok::<_, E>(staging.discard::<E>(error))
-                }))
+            // The discard's result is the call's failure, so a bug it
+            // carries reaches the sink too once no caller waits.
+            Err(error) => finish_blocking(
+                blocking_completing(
+                    "discard staged files",
+                    self.bugs.clone(),
+                    crate::commit_scope::bind(move || {
+                        Err::<std::convert::Infallible, E>(staging.discard::<E>(error))
+                    }),
+                )
                 .await,
-            )?),
+            )
+            .map(|never| match never {}),
         }
     }
 
@@ -750,45 +767,49 @@ impl Database {
         let database = self.clone();
         // Closing runs as its own task so that a caller dropping this future
         // doesn't stop it partway; the runtime dropping that task can.
+        let bugs = self.bugs.clone();
         coven_foundation::task::spawn_completing("close the store", self.bugs.clone(), async move {
             let file_tasks = database.file_tasks.clone().write_owned().await;
             finish_blocking(
-                "close the store",
-                tokio::task::spawn_blocking(crate::commit_scope::bind(move || {
-                    let _file_tasks = file_tasks;
-                    #[cfg(test)]
-                    database.tell_close_wait();
-                    let mut slot = write_unpoisoned(&database.inner);
-                    let Some(inner) = slot.take() else {
-                        return Err(DbError::StoreClosed);
-                    };
-                    let mut failures: Vec<DbError> = inner
-                        .checkpoints
-                        .into_iter()
-                        .filter_map(|checkpoints| checkpoints.stop().err())
-                        .collect();
-                    failures.extend(inner.inputs.close());
-                    // The statistics follow this session's writes, outside
-                    // any captured transaction. A failed handle's writer may
-                    // still hold a transaction, which closing rolls back.
-                    if inner.access.observer.error().is_none() {
-                        if let Err(error) = lock_unpoisoned(&inner.access.writer).optimize() {
-                            failures.push(error);
+                blocking_completing(
+                    "close the store",
+                    bugs,
+                    crate::commit_scope::bind(move || {
+                        let _file_tasks = file_tasks;
+                        #[cfg(test)]
+                        database.tell_close_wait();
+                        let mut slot = write_unpoisoned(&database.inner);
+                        let Some(inner) = slot.take() else {
+                            return Err(DbError::StoreClosed);
+                        };
+                        let mut failures: Vec<DbError> = inner
+                            .checkpoints
+                            .into_iter()
+                            .filter_map(|checkpoints| checkpoints.stop().err())
+                            .collect();
+                        failures.extend(inner.inputs.close());
+                        // The statistics follow this session's writes, outside
+                        // any captured transaction. A failed handle's writer may
+                        // still hold a transaction, which closing rolls back.
+                        if inner.access.observer.error().is_none() {
+                            if let Err(error) = lock_unpoisoned(&inner.access.writer).optimize() {
+                                failures.push(error);
+                            }
                         }
-                    }
-                    match inner.access.close() {
-                        Err(DbError::Closing { failures: application }) => {
-                            failures.extend(application)
+                        match inner.access.close() {
+                            Err(DbError::Closing { failures: application }) => {
+                                failures.extend(application)
+                            }
+                            Err(error) => failures.push(error),
+                            Ok(()) => (),
                         }
-                        Err(error) => failures.push(error),
-                        Ok(()) => (),
-                    }
-                    if failures.is_empty() {
-                        Ok(())
-                    } else {
-                        Err(DbError::Closing { failures })
-                    }
-                }))
+                        if failures.is_empty() {
+                            Ok(())
+                        } else {
+                            Err(DbError::Closing { failures })
+                        }
+                    }),
+                )
                 .await,
             )
         })
@@ -856,11 +877,13 @@ impl DatabaseReadHandle {
     ) -> Result<R, E>
     where
         R: Send + 'static,
-        E: From<DbError> + Send + 'static,
+        E: From<DbError> + CarriesBug + Send + 'static,
     {
         finish_blocking(
-            "database call",
-            start_call(self.inner.clone(), move |access| access.call(|| run(access))).await,
+            start_call("database call", &self.bugs, self.inner.clone(), move |access| {
+                access.call(|| run(access))
+            })
+            .await,
         )
     }
     /// Open the local bytes of a file still on this device only; `None`
@@ -903,7 +926,7 @@ impl DatabaseReadHandle {
         F: FnOnce(SqlReadContext<'_>) -> CovenResult<R> + Send + 'static,
         R: Send + 'static,
     {
-        RunningRead::new(start_call(self.inner.clone(), move |inner| {
+        RunningRead::new(start_call("read", &self.bugs, self.inner.clone(), move |inner| {
             inner.call(|| inner.read(read))
         }))
     }
@@ -922,52 +945,13 @@ impl DatabaseReadHandle {
     pub async fn close(&self) -> Result<(), DbError> {
         let handle = self.clone();
         finish_blocking(
-            "close the store",
-            tokio::task::spawn_blocking(move || {
+            blocking_completing("close the store", self.bugs.clone(), move || {
                 let mut slot = write_unpoisoned(&handle.inner);
                 slot.take().ok_or(DbError::StoreClosed)?.close()
             })
             .await,
         )
     }
-}
-
-fn start_call<I, R, E>(
-    inner: Arc<RwLock<Option<I>>>,
-    run: impl FnOnce(&I) -> Result<R, E> + Send + 'static,
-) -> tokio::task::JoinHandle<Result<R, E>>
-where
-    I: Send + Sync + 'static,
-    R: Send + 'static,
-    E: From<DbError> + Send + 'static,
-{
-    tokio::task::spawn_blocking(crate::commit_scope::bind(move || {
-        let slot = read_unpoisoned(&inner);
-        run(slot.as_ref().ok_or(DbError::StoreClosed)?)
-    }))
-}
-
-/// The result of a database call run on the blocking pool as `operation`. A
-/// panic in it is `DbError::Bug`; the pool dropping it unstarted, as it does
-/// once its runtime begins shutting down, is `DbError::Shutdown`, and the
-/// call changed nothing (E15).
-pub(crate) fn finish_blocking<R, E: From<DbError>>(
-    operation: &'static str,
-    joined: Result<Result<R, E>, tokio::task::JoinError>,
-) -> Result<R, E> {
-    joined.map_err(|error| {
-        E::from(DbError::from(coven_foundation::task::TaskFailed::of_blocking_join(
-            operation, error,
-        )))
-    })?
-}
-
-pub(crate) async fn process<F, T>(process: F) -> CovenResult<T>
-where
-    F: FnOnce() -> CovenResult<T> + Send + 'static,
-    T: Send + 'static,
-{
-    finish_blocking("process a read", tokio::task::spawn_blocking(process).await)
 }
 
 #[cfg(test)]

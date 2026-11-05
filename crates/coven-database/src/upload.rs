@@ -37,6 +37,18 @@ pub enum UploadReadError<E> {
     Consumer(E),
 }
 
+#[cfg(any(test, feature = "test-utils"))]
+impl<E: coven_foundation::task::CarriesBug> coven_foundation::task::CarriesBug
+    for UploadReadError<E>
+{
+    fn bug(&self) -> Option<&coven_foundation::task::Bug> {
+        match self {
+            Self::Database(error) => error.bug(),
+            Self::Consumer(error) => error.bug(),
+        }
+    }
+}
+
 /// An incremental SQLite BLOB reader. It never collects the waiting write.
 #[derive(Clone)]
 pub struct UploadBytes<'a> {

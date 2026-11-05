@@ -924,3 +924,64 @@ async fn a_panic_holding_the_live_query_state_fails_the_handle() {
     assert!(matches!(query.next().await, Some(Err(CovenError::Database(DbError::Bug(_))))));
     assert!(query.next().await.is_none());
 }
+
+/// Sends each bug it hears of, so a test waits for the report.
+struct SentBugs(tokio::sync::mpsc::UnboundedSender<coven_foundation::task::Bug>);
+
+impl coven_foundation::task::BugSink for SentBugs {
+    fn report(&self, bug: &coven_foundation::task::Bug) {
+        self.0.send(bug.clone()).unwrap();
+    }
+}
+
+/// A call whose caller stopped waiting still runs to its end on the
+/// blocking pool. A panic in it, whether the call's own, as in a read, or
+/// one its error carries, as in a write, goes to the store's bug sink:
+/// no caller is left to return it to.
+#[tokio::test]
+async fn a_dropped_calls_panic_goes_to_the_bug_sink() {
+    let store = TestStore::new();
+    let (sent, mut reported) = tokio::sync::mpsc::unbounded_channel();
+    let database = store
+        .builder(notes_tables(), notes_migrations())
+        .bug_sink(Arc::new(SentBugs(sent)))
+        .open()
+        .await
+        .unwrap();
+    // Run `call` until its work is entered, drop it, then let the work
+    // panic, and return the bug the sink heard.
+    async fn dropped<T: std::fmt::Debug>(
+        call: impl std::future::Future<Output = T>,
+        entry: tokio::sync::oneshot::Receiver<()>,
+        release: std::sync::mpsc::Sender<()>,
+        reported: &mut tokio::sync::mpsc::UnboundedReceiver<coven_foundation::task::Bug>,
+    ) -> coven_foundation::task::Bug {
+        let mut call = Box::pin(call);
+        tokio::select! {
+            result = &mut call => panic!("held call returned: {result:?}"),
+            result = entry => result.unwrap(),
+        }
+        drop(call);
+        release.send(()).unwrap();
+        tokio::time::timeout(HANG_GUARD, reported.recv()).await.unwrap().unwrap()
+    }
+    let (entered, entry) = tokio::sync::oneshot::channel();
+    let (release, released) = std::sync::mpsc::channel::<()>();
+    let read = database.read(move |_| -> CovenResult<()> {
+        entered.send(()).unwrap();
+        released.recv_timeout(HANG_GUARD).unwrap();
+        panic!("the note is gone")
+    });
+    let bug = dropped(read, entry, release, &mut reported).await;
+    assert_eq!(bug.message, "the note is gone");
+    let (entered, entry) = tokio::sync::oneshot::channel();
+    let (release, released) = std::sync::mpsc::channel::<()>();
+    let write = database.write(move |_| -> Result<(), DbError> {
+        entered.send(()).unwrap();
+        released.recv_timeout(HANG_GUARD).unwrap();
+        panic!("note 43 has no title")
+    });
+    let bug = dropped(write, entry, release, &mut reported).await;
+    assert_eq!((bug.operation, bug.message.as_str()), ("write", "note 43 has no title"));
+    database.close().await.unwrap();
+}

@@ -5,7 +5,7 @@ use super::*;
 use crate::sqlite::DatabaseConnection;
 
 /// The removal of a snapshot staging its caller abandoned.
-pub(crate) type StagingRemoval = tokio::task::JoinHandle<Result<(), DbError>>;
+pub(crate) type StagingRemoval = coven_foundation::task::CompletingTask<Result<(), DbError>>;
 
 impl Database {
     /// Run `gate` where released files' bytes are about to go, after the

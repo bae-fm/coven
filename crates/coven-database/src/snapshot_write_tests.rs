@@ -391,6 +391,16 @@ async fn circle_snapshot_has_only_its_rows_and_reference_metadata() {
     database.close().await.unwrap();
 }
 
+/// A consumer's own refusal, which carries no bug.
+#[derive(Debug, PartialEq)]
+struct Refused(&'static str);
+
+impl coven_foundation::task::CarriesBug for Refused {
+    fn bug(&self) -> Option<&coven_foundation::task::Bug> {
+        None
+    }
+}
+
 #[tokio::test]
 async fn output_errors_and_panics_release_the_reader_transaction() {
     let store = TestStore::new();
@@ -398,19 +408,20 @@ async fn output_errors_and_panics_release_the_reader_transaction() {
     let refused_prefix = database
         .write_snapshot(
             id(Audience::Store),
-            |_| Err("prefix refused"),
-            |_| -> Result<(), &str> { panic!("no frames after prefix failure") },
+            |_| Err(Refused("prefix refused")),
+            |_| -> Result<(), Refused> { panic!("no frames after prefix failure") },
         )
         .await;
-    assert!(matches!(refused_prefix, Err(SnapshotWriteError::Output("prefix refused"))));
-    let result =
-        database.write_snapshot(id(Audience::Store), |_| Ok(()), |_| Err("consumer refused")).await;
-    assert!(matches!(result, Err(SnapshotWriteError::Output("consumer refused"))));
+    assert!(matches!(refused_prefix, Err(SnapshotWriteError::Output(Refused("prefix refused")))));
+    let result = database
+        .write_snapshot(id(Audience::Store), |_| Ok(()), |_| Err(Refused("consumer refused")))
+        .await;
+    assert!(matches!(result, Err(SnapshotWriteError::Output(Refused("consumer refused")))));
     let panicked = database
         .write_snapshot(
             id(Audience::Store),
             |_| Ok(()),
-            |_| -> Result<(), ()> { panic!("consumer panic") },
+            |_| -> Result<(), Refused> { panic!("consumer panic") },
         )
         .await;
     assert!(

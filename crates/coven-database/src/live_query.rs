@@ -5,6 +5,7 @@ use crate::live_query_runs::LiveQueryRuns;
 use crate::observation::CommitSubscription;
 use crate::CovenResult;
 use coven_foundation::locks::lock_unpoisoned;
+use coven_foundation::task::BugSinkRef;
 use std::{
     future::Future,
     pin::Pin,
@@ -117,6 +118,8 @@ pub struct ReconfigurableLiveQuery<Q, T> {
     lifetime: QueryLifetime<Q>,
     query: Query<Q, T>,
     commits: CommitSubscription,
+    /// Where a bug in a run nobody waits for any more goes (E15).
+    bugs: BugSinkRef,
     current: Option<(Q, LiveQueryRevision)>,
     running: Option<Running<Q, T>>,
     previous: Option<T>,
@@ -132,7 +135,12 @@ where
     Q: Clone + PartialEq + Send + Sync + 'static,
     T: Send + 'static,
 {
-    pub(crate) fn new(request: Q, query: Query<Q, T>, commits: CommitSubscription) -> Self {
+    pub(crate) fn new(
+        request: Q,
+        query: Query<Q, T>,
+        commits: CommitSubscription,
+        bugs: BugSinkRef,
+    ) -> Self {
         Self {
             lifetime: QueryLifetime(Arc::new(RequestState {
                 requests: Mutex::new(Requests {
@@ -145,6 +153,7 @@ where
             })),
             query,
             commits,
+            bugs,
             current: None,
             running: None,
             previous: None,
@@ -190,6 +199,7 @@ where
             lifetime,
             query,
             commits,
+            bugs,
             current,
             running,
             previous: _,
@@ -198,13 +208,15 @@ where
             runs,
         } = self;
         let next_process = Arc::clone(&process);
-        let mapped: Query<Q, U> =
-            Arc::new(move |request| process_run(query(request), Arc::clone(&next_process)));
+        let next_bugs = bugs.clone();
+        let mapped: Query<Q, U> = Arc::new(move |request| {
+            process_run(query(request), Arc::clone(&next_process), next_bugs.clone())
+        });
         let running = running.map(|Running { request, revision, cause, run }| Running {
             request,
             revision,
             cause,
-            run: process_run(run, Arc::clone(&process)),
+            run: process_run(run, Arc::clone(&process), bugs.clone()),
         });
         // A new output type has no previous result to compare. Rerun the current
         // request if it has already completed so the transformed query answers it.
@@ -220,6 +232,7 @@ where
             lifetime,
             query: mapped,
             commits,
+            bugs,
             current,
             running,
             previous: None,
@@ -370,14 +383,18 @@ impl<T: Send + 'static> LiveQuery<T> {
     }
 }
 
-fn process_run<T: Send + 'static, U: Send + 'static, P>(run: Run<T>, process: Arc<P>) -> Run<U>
+fn process_run<T: Send + 'static, U: Send + 'static, P>(
+    run: Run<T>,
+    process: Arc<P>,
+    bugs: BugSinkRef,
+) -> Run<U>
 where
     P: Fn(T) -> CovenResult<U> + Send + Sync + 'static,
 {
     Box::pin(async move {
         let result = run.await;
         match result {
-            Ok(value) => crate::database::process(move || process(value)).await,
+            Ok(value) => crate::database::process(&bugs, move || process(value)).await,
             Err(error) => Err(error),
         }
     })

@@ -165,6 +165,16 @@ pub(crate) enum ReadOwner<'a> {
     Reader(&'a DatabaseReadHandle),
 }
 
+impl ReadOwner<'_> {
+    /// Where a bug in the read's work goes once no caller waits for it.
+    fn bugs(&self) -> &coven_foundation::task::BugSinkRef {
+        match self {
+            Self::Writer(database) => database.bugs(),
+            Self::Reader(database) => database.bugs(),
+        }
+    }
+}
+
 impl DatabaseReadHandle {
     /// Membership and audience state from one committed read-only snapshot.
     pub async fn store_state(&self) -> CovenResult<crate::StoreState> {
@@ -195,8 +205,9 @@ where
         P: FnOnce(R) -> CovenResult<T> + Send + 'static,
         T: Send + 'static,
     {
+        let bugs = self.database.bugs().clone();
         let result = self.await?;
-        database::process(move || process(result)).await
+        database::process(&bugs, move || process(result)).await
     }
 }
 
@@ -236,11 +247,11 @@ where
 /// One read's call on the blocking pool, which its database started for the
 /// `Read` that awaits it.
 pub(crate) struct RunningRead<R> {
-    call: tokio::task::JoinHandle<CovenResult<R>>,
+    call: coven_foundation::task::CompletingTask<CovenResult<R>>,
 }
 
 impl<R> RunningRead<R> {
-    pub(crate) fn new(call: tokio::task::JoinHandle<CovenResult<R>>) -> Self {
+    pub(crate) fn new(call: coven_foundation::task::CompletingTask<CovenResult<R>>) -> Self {
         Self { call }
     }
 }
@@ -249,9 +260,7 @@ impl<R> Future for RunningRead<R> {
     type Output = CovenResult<R>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        Pin::new(&mut self.get_mut().call)
-            .poll(cx)
-            .map(|joined| database::finish_blocking("read", joined))
+        Pin::new(&mut self.get_mut().call).poll(cx).map(database::finish_blocking)
     }
 }
 

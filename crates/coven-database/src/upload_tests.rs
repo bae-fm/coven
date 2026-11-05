@@ -210,6 +210,16 @@ async fn a_large_write_goes_to_the_wal_once_and_never_again_as_it_is_sent() {
     db.close().await.unwrap();
 }
 
+/// A consumer's own refusal, which carries no bug.
+#[derive(Debug, PartialEq)]
+struct Refused(&'static str);
+
+impl coven_foundation::task::CarriesBug for Refused {
+    fn bug(&self) -> Option<&coven_foundation::task::Bug> {
+        None
+    }
+}
+
 #[tokio::test]
 async fn consumer_failure_and_panic_release_the_reader() {
     let store = TestStore::new();
@@ -217,8 +227,8 @@ async fn consumer_failure_and_panic_release_the_reader() {
     sql(&db, "INSERT INTO notes VALUES('1','title','body')").await.unwrap();
     for _ in 0..5 {
         assert!(matches!(
-            db.read_oldest_upload(|_| Err::<(), _>("sink failed")).await,
-            Err(UploadReadError::Consumer("sink failed"))
+            db.read_oldest_upload(|_| Err::<(), _>(Refused("sink failed"))).await,
+            Err(UploadReadError::Consumer(Refused("sink failed")))
         ));
         let panicked =
             db.read_oldest_upload(|_| -> Result<(), DbError> { panic!("sink panicked") }).await;

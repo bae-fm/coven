@@ -133,9 +133,9 @@ impl DatabaseBuilder {
     /// device identity. The lock must protect this builder's directory.
     pub async fn open_locked(self, lock: StoreLock) -> CovenResult<Database> {
         let closing = lock.closing_guard();
+        let bugs = self.bugs.clone();
         let result = finish_blocking(
-            "open the store",
-            tokio::task::spawn_blocking(move || self.open_graph(lock)).await,
+            blocking_completing("open the store", bugs, move || self.open_graph(lock)).await,
         );
         // Cancellation drops the guard while SQLite can still be opening.
         // A returned database carries its own guard across its owning clones.
@@ -147,9 +147,10 @@ impl DatabaseBuilder {
     /// migrating or rebuilding, including from a second process while the
     /// writer is open.
     pub async fn open_read_only(self) -> CovenResult<DatabaseReadHandle> {
+        let bugs = self.bugs.clone();
         finish_blocking(
-            "open the store read-only",
-            tokio::task::spawn_blocking(move || self.open_read_graph()).await,
+            blocking_completing("open the store read-only", bugs, move || self.open_read_graph())
+                .await,
         )
     }
 
@@ -423,8 +424,7 @@ pub async fn discarded_operations(
     path: std::path::PathBuf,
 ) -> Result<Vec<crate::OperationRecord>, DbError> {
     finish_blocking(
-        "read the discarded operations",
-        tokio::task::spawn_blocking(move || {
+        coven_foundation::task::blocking("read the discarded operations", move || {
             let db = coven_only(&path, true)?;
             crate::operation::read(&db)
         })
@@ -438,8 +438,7 @@ pub async fn discarded_operations(
 /// needed.
 pub async fn read_store_name(directory: StoreDir) -> CovenResult<String> {
     finish_blocking(
-        "read the store name",
-        tokio::task::spawn_blocking(move || {
+        coven_foundation::task::blocking("read the store name", move || {
             let _lock = directory.lock_read_only()?;
             let database = coven_only(&directory.database_path(), true)?;
             Ok(crate::store_state_tables::name(&database)?)
@@ -454,8 +453,7 @@ pub async fn read_store_name(directory: StoreDir) -> CovenResult<String> {
 /// the app's collations or functions.
 pub async fn discarded_store_name(path: std::path::PathBuf) -> Result<String, DbError> {
     finish_blocking(
-        "read the discarded store name",
-        tokio::task::spawn_blocking(move || {
+        coven_foundation::task::blocking("read the discarded store name", move || {
             let database = coven_only(&path, true)?;
             crate::store_state_tables::name(&database)
         })

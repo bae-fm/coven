@@ -292,7 +292,12 @@ impl Drop for SnapshotStaging {
             Ok::<_, DbError>(())
         };
         if tokio::runtime::Handle::try_current().is_ok() {
-            let removing = start_call(self.database.inner.clone(), remove);
+            let removing = start_call(
+                "remove an abandoned snapshot staging",
+                &self.database.bugs,
+                self.database.inner.clone(),
+                remove,
+            );
             #[cfg(test)]
             coven_foundation::locks::lock_unpoisoned(&self.database.abandoned_stagings)
                 .push(removing);

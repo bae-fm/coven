@@ -218,6 +218,20 @@ impl CarriesBug for Bug {
     }
 }
 
+/// An I/O error carries the bug it was made from, if any.
+impl CarriesBug for std::io::Error {
+    fn bug(&self) -> Option<&Bug> {
+        self.get_ref()?.downcast_ref::<Bug>()
+    }
+}
+
+/// An error that can't happen carries no bug.
+impl CarriesBug for std::convert::Infallible {
+    fn bug(&self) -> Option<&Bug> {
+        match *self {}
+    }
+}
+
 impl CarriesBug for TaskFailed {
     fn bug(&self) -> Option<&Bug> {
         match self {
@@ -322,26 +336,54 @@ pub fn spawn_completing<T: Send + 'static, E: CarriesBug + Send + 'static>(
 ) -> CompletingTask<Result<T, E>> {
     let (done, completion) = tokio::sync::oneshot::channel();
     tokio::spawn(async move {
-        let unheard = match done.send(caught(operation, work).await) {
-            Ok(()) => return,
-            Err(unheard) => unheard,
-        };
-        match &unheard {
-            Err(bug) => report(bugs.as_ref(), bug),
-            Ok(Err(error)) => {
-                report_carried(bugs.as_ref(), error);
-            }
-            Ok(Ok(_)) => {}
+        if let Err(unheard) = done.send(caught(operation, work).await) {
+            report_unheard(bugs.as_ref(), &unheard);
         }
     });
-    CompletingTask { operation, completion }
+    // The runtime drops a task partway as it shuts down.
+    CompletingTask { operation, dropped: ShutdownOutcome::Unknown, completion }
 }
 
-/// The result of work [`spawn_completing`] runs. Dropping it leaves the work
-/// running.
+/// Run `work`, named `operation`, on the blocking pool, where it runs to its
+/// end even when its caller stops waiting. Its panic comes back as
+/// `TaskFailed::Panicked` to a caller still waiting, and the pool dropping it
+/// unstarted as `Shutdown` with `ShutdownOutcome::NotRun`. Once no caller
+/// waits, the panic goes to `bugs`, as does a bug its error carries.
+pub fn blocking_completing<T: Send + 'static, E: CarriesBug + Send + 'static>(
+    operation: &'static str,
+    bugs: BugSinkRef,
+    work: impl FnOnce() -> Result<T, E> + Send + 'static,
+) -> CompletingTask<Result<T, E>> {
+    let (done, completion) = tokio::sync::oneshot::channel();
+    // The pool runs the closure to its end once it starts, so the closure
+    // answers unless the pool dropped it unstarted.
+    tokio::task::spawn_blocking(move || {
+        if let Err(unheard) = done.send(caught_sync(operation, work)) {
+            report_unheard(bugs.as_ref(), &unheard);
+        }
+    });
+    CompletingTask { operation, dropped: ShutdownOutcome::NotRun, completion }
+}
+
+/// Hand `bugs` the panic of work nobody waited for, or the bug its error
+/// carries.
+fn report_unheard<T, E: CarriesBug>(bugs: &dyn BugSink, unheard: &Result<Result<T, E>, Bug>) {
+    match unheard {
+        Err(bug) => report(bugs, bug),
+        Ok(Err(error)) => {
+            report_carried(bugs, error);
+        }
+        Ok(Ok(_)) => {}
+    }
+}
+
+/// The result of work [`spawn_completing`] or [`blocking_completing`] runs.
+/// Dropping it leaves the work running.
 #[derive(Debug)]
 pub struct CompletingTask<T> {
     operation: &'static str,
+    /// How far the work got if its runtime dropped it.
+    dropped: ShutdownOutcome,
     completion: tokio::sync::oneshot::Receiver<Result<T, Bug>>,
 }
 
@@ -349,13 +391,11 @@ impl<T> Future for CompletingTask<T> {
     type Output = Result<T, TaskFailed>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let operation = self.operation;
+        let (operation, outcome) = (self.operation, self.dropped);
         Pin::new(&mut self.completion).poll(cx).map(|completed| match completed {
             Ok(result) => result.map_err(TaskFailed::Panicked),
-            // The runtime dropped the task partway as it shut down.
-            Err(_dropped) => {
-                Err(TaskFailed::Shutdown(Shutdown { operation, outcome: ShutdownOutcome::Unknown }))
-            }
+            // The runtime dropped the work as it shut down.
+            Err(_dropped) => Err(TaskFailed::Shutdown(Shutdown { operation, outcome })),
         })
     }
 }

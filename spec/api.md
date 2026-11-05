@@ -8513,6 +8513,12 @@ end it unseen, and the work it served would wait for it forever.
   as do stopping sync, `rotate_key` and an administrative operation's
   submission. A caller still waiting gets the bug in the call's error. Once
   none is, the bug goes to the sink, as does a bug the call's error carries.
+- Every database call runs on the blocking pool with `blocking_completing`:
+  a read, a write, a live query's run and its processing, staging files,
+  and opening and closing a store. Ana's app drops a write's future while
+  the write runs, and its closure panics with "note 43 has no title". The
+  write rolls back and returns `DbError::Bug` to no one, so the sink hears
+  `Bug { operation: "write", message: "note 43 has no title" }`.
 
 A panic can also leave state half-changed: a lock held as it unwinds is
 poisoned, and code that SQLite calls can't fail at all. What coven does
@@ -8566,8 +8572,8 @@ Edge cases:
   dropped have stopped, which is all closing waits for: closing goes on.
 - Dropping the future `blocking` or `joined` returns does not stop work
   already spawned: it runs to its end, and its result or panic is dropped.
-  Dropping a `spawn_completing` future does not stop its work either, and
-  its panic goes to the bug sink.
+  Dropping a `spawn_completing` or `blocking_completing` future does not
+  stop its work either, and its panic goes to the bug sink.
 - A bug sink whose `report` panics is logged at error; its panic goes no
   further, since nothing above it would catch it.
 - Coven's own values never panic as they drop: one dropped during an
@@ -8689,8 +8695,9 @@ pub type BugSinkRef = std::sync::Arc<dyn BugSink>;
 pub struct LoggedBugs;
 
 /// An error that may carry a bug: work its call ran panicked, and the
-/// call's error says so. Implemented by `Bug`, `TaskFailed` and every coven
-/// error with a `Bug` variant.
+/// call's error says so. Implemented by `Bug`, `TaskFailed`, every coven
+/// error with a `Bug` variant, `std::io::Error`, which carries the bug it was
+/// made from, and `Infallible`.
 pub trait CarriesBug {
     /// The bug this error carries, itself or through the failure it keeps.
     fn bug(&self) -> Option<&Bug>;
@@ -8744,7 +8751,18 @@ pub fn spawn_completing<T: Send + 'static, E: CarriesBug + Send + 'static>(
     work: impl Future<Output = Result<T, E>> + Send + 'static,
 ) -> CompletingTask<Result<T, E>>;
 
-/// The result of work `spawn_completing` runs, a future of
-/// `Result<T, TaskFailed>`. Dropping it leaves the work running.
+/// Run `work` on the blocking pool, where it runs to its end even when its
+/// caller stops waiting. Its panic comes back as `TaskFailed::Panicked` to a
+/// caller still waiting, and the pool dropping it unstarted as `Shutdown`
+/// with `ShutdownOutcome::NotRun`. Once no caller waits, the panic goes to
+/// `bugs`, as does a bug its error carries.
+pub fn blocking_completing<T: Send + 'static, E: CarriesBug + Send + 'static>(
+    operation: &'static str,
+    bugs: BugSinkRef,
+    work: impl FnOnce() -> Result<T, E> + Send + 'static,
+) -> CompletingTask<Result<T, E>>;
+
+/// The result of work `spawn_completing` or `blocking_completing` runs, a
+/// future of `Result<T, TaskFailed>`. Dropping it leaves the work running.
 pub struct CompletingTask<T> { /* private */ }
 ```

@@ -25,6 +25,18 @@ pub enum SnapshotWriteError<E> {
     Output(E),
 }
 
+impl<E: coven_foundation::task::CarriesBug> coven_foundation::task::CarriesBug
+    for SnapshotWriteError<E>
+{
+    fn bug(&self) -> Option<&coven_foundation::task::Bug> {
+        match self {
+            Self::Database(error) => error.bug(),
+            Self::Format(_) => None,
+            Self::Output(error) => error.bug(),
+        }
+    }
+}
+
 pub(crate) fn write<E>(
     db: &DatabaseConnection,
     schema: &WriteSchema,

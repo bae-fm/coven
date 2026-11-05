@@ -1103,8 +1103,14 @@ tables = [
 # Runs its caller's work on a blocking task and waits for it, so the work's
 # panic comes back to the caller as a value (api.md E15). Starts a worker
 # its caller keeps and stops, whose panic goes to the app's bug sink; and
-# work its caller may stop waiting for, whose panic then goes there.
-"crates/coven-foundation/src/task.rs" = ["blocking", "spawn_owned", "spawn_completing"]
+# work its caller may stop waiting for, as a task or on the blocking pool,
+# whose panic then goes there.
+"crates/coven-foundation/src/task.rs" = [
+    "blocking",
+    "spawn_owned",
+    "spawn_completing",
+    "blocking_completing",
+]
 # A test clock that keeps time by the clock it is given and records what one
 # progress watch holds at each reading.
 # The work one test measures, shared by its task and the blocking calls it
@@ -1233,9 +1239,15 @@ tables = [
     "SqlAuthorization::read_only",
     "SqlAuthorization::judging",
 ]
+# Each call on the store runs on the blocking pool to its end, even once its
+# caller stops waiting, and then its bug goes to the store's sink (E15).
+"crates/coven-database/src/database_call.rs" = ["process", "start_call"]
 "crates/coven-database/src/database.rs" = [
-    "process",
-    "start_call",
+    "Database::call",
+    "Database::start_read",
+    "Database::subscribe_reconfigurable",
+    "DatabaseReadHandle::call",
+    "DatabaseReadHandle::start_read",
     "Database::close",
     "Database::stage_files",
     "DatabaseReadHandle::close",

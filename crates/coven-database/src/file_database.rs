@@ -8,6 +8,7 @@ use crate::{
     FileUpload,
 };
 use coven_crypto::SecretBytes;
+use coven_foundation::task::CarriesBug;
 use coven_foundation::{
     files::{FileName, StoreDir},
     id_source::{DeviceId, FileId},
@@ -72,7 +73,7 @@ impl FileDatabase {
         }
     }
 
-    async fn run<T: Send + 'static, E: From<DbError> + Send + 'static>(
+    async fn run<T: Send + 'static, E: From<DbError> + CarriesBug + Send + 'static>(
         &self,
         run: impl FnOnce(&mut DatabaseConnection, &WriteSchema, &StoreDir, DeviceId) -> Result<T, E>
             + Send
@@ -107,7 +108,7 @@ impl FileDatabase {
 
     /// A read-only query on one committed state. A writable handle reads on
     /// its read pool, so read-only decisions never take the writer (§21.2).
-    async fn read<T: Send + 'static, E: From<DbError> + Send + 'static>(
+    async fn read<T: Send + 'static, E: From<DbError> + CarriesBug + Send + 'static>(
         &self,
         read: impl FnOnce(&DatabaseConnection) -> Result<T, E> + Send + 'static,
     ) -> Result<T, E> {

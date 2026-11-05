@@ -311,3 +311,45 @@ async fn a_completing_task_whose_caller_stopped_waiting_reports_the_bug_its_erro
         Some(Bug { operation: "forget the keys", message: "no key session".into() })
     );
 }
+
+#[tokio::test]
+async fn blocking_work_whose_caller_stopped_waiting_reports_its_panic_and_carried_bug() {
+    let (sent, mut reported) = tokio::sync::mpsc::unbounded_channel();
+    let bugs: BugSinkRef = Arc::new(SentBugs(sent));
+    let (go, wait) = std::sync::mpsc::channel::<()>();
+    let completion = blocking_completing("read the tags", bugs.clone(), move || {
+        wait.recv().unwrap();
+        loop_is_gone()
+    });
+    drop(completion);
+    go.send(()).unwrap();
+    assert_eq!(
+        reported.recv().await,
+        Some(Bug { operation: "read the tags", message: "the loop is gone".into() })
+    );
+    let carried = Bug { operation: "seal a part", message: "no key".into() };
+    let (go, wait) = std::sync::mpsc::channel::<()>();
+    let error = carried.clone();
+    let completion = blocking_completing("write the part", bugs, move || -> Result<(), _> {
+        wait.recv().unwrap();
+        Err(std::io::Error::other(error))
+    });
+    drop(completion);
+    go.send(()).unwrap();
+    assert_eq!(reported.recv().await, Some(carried));
+}
+
+#[tokio::test]
+async fn blocking_work_answers_a_caller_still_waiting() {
+    let (sent, mut reported) = tokio::sync::mpsc::unbounded_channel();
+    let bugs: BugSinkRef = Arc::new(SentBugs(sent));
+    assert_eq!(blocking_completing("add", bugs.clone(), || Ok::<_, Bug>(2 + 2)).await, Ok(Ok(4)));
+    assert_eq!(
+        blocking_completing("read the tags", bugs, loop_is_gone).await,
+        Err(TaskFailed::Panicked(Bug {
+            operation: "read the tags",
+            message: "the loop is gone".into()
+        }))
+    );
+    assert!(reported.try_recv().is_err(), "a caller heard the bug, so no sink did");
+}
