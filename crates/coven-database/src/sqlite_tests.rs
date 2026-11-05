@@ -880,6 +880,38 @@ async fn a_failed_rollback_fails_every_later_call_until_reopen() {
     }
 }
 
+/// A callback that fails with a `CovenError` while SQLite also fails to roll
+/// it back keeps both causes, and later calls fail until the store reopens
+/// (§4).
+#[tokio::test]
+async fn a_callback_error_whose_rollback_fails_keeps_both_and_fails_later_calls() {
+    let store = TestStore::new();
+    let open = || store.builder(notes_tables(), notes_migrations()).open();
+    let db = open().await.unwrap();
+    db.inspect_writer(|writer| writer.refuse_transaction_end(true));
+    let error = db
+        .write_as(|sql| {
+            sql.execute("INSERT INTO notes VALUES('n','held','')", [])?;
+            Err::<(), _>(crate::CovenError::Key(coven_crypto::custody::KeyError::StoreClosed))
+        })
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(
+            &error,
+            crate::CovenError::Rollback { operation, .. }
+                if matches!(**operation, crate::CovenError::Key(coven_crypto::custody::KeyError::StoreClosed))
+        ),
+        "{error:?}"
+    );
+    assert!(matches!(db.write(|_| Ok(())).await.unwrap_err(), DbError::RollbackFailed));
+    assert!(matches!(db.schema_version().await.unwrap_err(), DbError::RollbackFailed));
+    db.close().await.unwrap();
+    let db = open().await.unwrap();
+    db.write(|_| Ok(())).await.unwrap();
+    db.close().await.unwrap();
+}
+
 /// The open's profile holds every statement it traced: a migration's, which
 /// runs under a profile of its own, and those after it.
 #[tokio::test]

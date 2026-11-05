@@ -303,6 +303,35 @@ async fn a_failed_write_keeps_its_error_when_pending_deletion_also_fails() {
     db.close().await.unwrap();
 }
 
+/// A callback's `CovenError` is kept whole beside the cleanup that failed too.
+#[tokio::test]
+async fn a_callback_error_keeps_a_failed_cleanup_beside_it() {
+    let store = TestStore::new();
+    let db = open(&store, Provenance::AppProvided).await;
+    db.inspect_writer(|sql| {
+        sql.fail_at("_coven_fail_cleanup", "BEFORE DELETE ON _coven_file_removals", "record stays")
+    });
+    let error = db
+        .staged_write::<_, _, _, _, crate::CovenError>(
+            |batch| Ok(batch.put_file("files", b"partial".to_vec(), crate::Place::Cloud)),
+            |_, _| {
+                Err::<(), _>(crate::CovenError::Key(coven_crypto::custody::KeyError::StoreClosed))
+            },
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(
+            &error,
+            crate::CovenError::FileCleanup { write, failures }
+                if matches!(**write, crate::CovenError::Key(coven_crypto::custody::KeyError::StoreClosed))
+                    && matches!(failures.as_slice(), [DbError::Sqlite(_)])
+        ),
+        "{error:?}"
+    );
+    db.close().await.unwrap();
+}
+
 #[tokio::test]
 async fn a_failed_rollback_cannot_release_bytes_using_uncommitted_records() {
     let store = TestStore::new();
