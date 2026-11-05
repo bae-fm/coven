@@ -7009,6 +7009,12 @@ pub enum ProviderSignOut {
   the invite's one path, so no retry could pass it. The invite leaves
   `coven_invites` with no pending record, and the requester's join ends as
   declined ([§13.2](coven.md#132-adding-a-person-invites)).
+- History refusing the binding of an in-person invite's request, which the
+  inviting device approved on its own, ends the invite as a decline does, in
+  the pass that ran the binding. The device logs the refusal, and the pass
+  goes on: no call made that approval, and a pass failed with it would leave
+  the connection a record that never retries, holding every later pass
+  ([§13.2](coven.md#132-adding-a-person-invites)).
 - An invite ends in a write: approval, decline and cancel each write it, and
   so does expiry. Approving, declining and cancelling are steps of the app's
   write (`CovenWrite::approve_join_request`, `CovenWrite::decline_join_request`,

@@ -695,11 +695,13 @@ steps are every writer that acts on them:
   bound to a member, current or past;
 - what a pass learns: the approver's demotion, and a stop for good, from a
   slot it applies or from history showing another copy of this device;
+- a pass's failure that no retry clears: the connection's record that never
+  retries holds every later pass until the person resets the device (E5);
 - another admin's device applying that stop, which may come first: it writes
   this device's gone marker and deletes the joiner's request, and the joiner
   sends none after it (§13.2);
 - the owner's devices taking back the invite's share: the inviting device once
-  it ended the share, any of them once history records the share and the
+  it ended the share, while no failure holds its passes, any of them once history records the share and the
   inviting device is gone for good, unless the account is a member's by then
   (§13.2, §14.2).
 
@@ -739,6 +741,11 @@ record. The properties are proved under `Rules.correct`:
   invite, as a decline does, with no pending record, and the pass goes on to
   put the marker in the request's place. The invite ends without the app's
   retry and without its expiry.
+- `refused_approval_ends`, `never_held`: an approval whose binding history
+  refuses ends the invite as a decline does, an in-person invite's too, and
+  the next read and write put the marker in the request's place. No pass
+  fails with the refusal, so no failure holds a later pass, and `settles`
+  runs every operation to its end.
 
 Each rule `correct` has is needed; leaving one out is a checked counterexample:
 
@@ -769,6 +776,11 @@ Each rule `correct` has is needed; leaving one out is a checked counterexample:
   or in person: the request stays at the invite's one path, so the pass
   refuses it again, and the invite stays listed, with its share standing,
   until the app cancels it or it expires.
+- `refused_approval_holds`: a pass that fails with an in-person invite's
+  refused approval, once it has ended the invite, leaves the connection a
+  record that never retries. Every later pass is held: the app's admin change
+  journaled before never runs or ends, and this device never takes the
+  invite's share back, until the person resets the device.
 
 `Rules.rust` names the rules the Rust follows; the differential test compares
 it.
