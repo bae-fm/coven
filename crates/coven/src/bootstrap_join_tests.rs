@@ -857,3 +857,50 @@ async fn a_join_after_the_invite_ended_sends_no_request() {
     assert!(crate::tests::no_request(&owner.storage, &path).await);
     owner.close().await;
 }
+
+/// Carol's phone records its request before sending it, and the provider
+/// stores it but the reply is lost, so the call fails. Ana declines the
+/// request, which deletes it. Carol's retry finds neither the request nor
+/// sealed keys for it and treats the invite as finished: the join ends
+/// declined, and no second request is sent (§13.2).
+#[tokio::test]
+async fn a_join_request_whose_create_reply_was_lost_ends_as_settled() {
+    let owner = Owner::new(CloudProvider::S3, false).await;
+    let invite = owner.invite().await;
+    let path = crate::tests::request_path(&invite);
+    let install = Installation::new();
+    let (_, cancel) = watch::channel(false);
+    owner
+        .storage
+        .set_faults(coven_storage::test_utils::Faults {
+            lose_completion_reply: true,
+            ..coven_storage::test_utils::Faults::none()
+        })
+        .await;
+    let lost = install
+        .run(&owner, Installation::join_request(&invite), owner.recipient(), &cancel, |_| {})
+        .await;
+    assert!(matches!(&lost, Err(BootstrapError::Sync(SyncError::Storage(_)))), "{:?}", lost.err());
+    owner.storage.set_faults(coven_storage::test_utils::Faults::none()).await;
+    let request = next_join_request(&owner.handle).await;
+    owner.handle.decline_join_request(&request).await.unwrap();
+    // Ana's pass deletes the request and puts the ended invite's marker in its place.
+    owner.sync().await;
+    let creates = || {
+        owner
+            .storage
+            .request_trace()
+            .into_iter()
+            .filter(|request| {
+                *request == coven_storage::test_utils::MemoryRequest::Create(path.clone())
+            })
+            .count()
+    };
+    let before = creates();
+    let retried = install
+        .run(&owner, Installation::join_request(&invite), owner.recipient(), &cancel, |_| {})
+        .await;
+    assert!(matches!(retried, Ok(None)), "{:?}", retried.err());
+    assert_eq!(creates(), before, "the retry sent no second request");
+    owner.close().await;
+}
