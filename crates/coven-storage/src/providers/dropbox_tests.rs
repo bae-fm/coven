@@ -854,3 +854,19 @@ async fn recorded_floor_uploads_keep_dropbox_revision_conditions() {
         .conditional_floor_upload()
         .await;
 }
+
+/// A download carries its object's metadata in its own response, so it needs
+/// no separate status request (§20.5).
+#[tokio::test]
+async fn a_download_carries_its_metadata_in_one_request() {
+    let state = Arc::new(Mutex::new(Remote::default()));
+    let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
+    let storage = provider(&server.url);
+    let path = ObjectPath::floor(STORE_ID);
+    storage.create(&path, b"first").await.unwrap();
+    state.lock().unwrap().requests = 0;
+    let read = storage.read_object(&path, None).await.unwrap();
+    assert_eq!(state.lock().unwrap().requests, 1);
+    assert_eq!(read.bytes, b"first");
+    assert_eq!(read.metadata, storage.status(&path).await.unwrap().unwrap());
+}
