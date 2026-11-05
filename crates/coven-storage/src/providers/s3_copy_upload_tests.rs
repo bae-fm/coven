@@ -904,3 +904,78 @@ async fn an_upload_listing_without_its_completion_is_a_protocol_failure() {
 
     assert_eq!(error.failure(), StorageFailure::Protocol);
 }
+
+/// A create's temporary is named by what the create is: SHA-256 over the
+/// version tag, the path's length as a big-endian u64, the path and the
+/// bytes, its first 16 bytes as a UUID, in the staging device's folder.
+#[tokio::test]
+async fn a_creates_temporary_is_named_by_its_path_and_bytes() {
+    let (_server, _state, storage) = every_object_provider().await;
+    let device = crate::test_utils::DEVICE;
+    let mut names = std::collections::BTreeSet::new();
+    for (path, bytes) in [
+        (ObjectPath::slot(STORE_ID, std::num::NonZeroU64::MIN), &b"first bytes"[..]),
+        (ObjectPath::slot(STORE_ID, std::num::NonZeroU64::MIN), b"other bytes"),
+        (ObjectPath::slot(STORE_ID, 2.try_into().unwrap()), b"first bytes"),
+    ] {
+        let mut hasher = coven_crypto::ObjectHasher::new();
+        for part in [
+            &b"coven/copy-temporary/v1"[..],
+            &(path.as_str().len() as u64).to_be_bytes(),
+            path.as_str().as_bytes(),
+            bytes,
+        ] {
+            hasher.update(part);
+        }
+        let digest = hasher.finish();
+        let mut id = [0; 16];
+        id.copy_from_slice(&digest.as_bytes()[..16]);
+        let expected = format!(
+            "{}/{}",
+            coven_format::path::device_uploads(STORE_ID, device),
+            uuid::Uuid::from_bytes(id)
+        );
+        let named = storage.provider().create_temporary_key(&path, bytes, device).unwrap();
+        assert_eq!(named, expected);
+        assert!(names.insert(named), "a create's name is its own");
+    }
+}
+
+/// Two attempts of one create stage over one temporary, and both copies are
+/// held: the first copy carries the second's marker and deletes the
+/// temporary, so the second copy finds no source and settles by its own
+/// marker at the destination. Both answer stored (§20.6, E.10).
+#[tokio::test]
+async fn two_attempts_staging_one_temporary_both_answer_stored() {
+    let (_server, state, storage) = every_object_provider().await;
+    let path = ObjectPath::slot(STORE_ID, std::num::NonZeroU64::MIN);
+    let (arrived_first, first_arrival) = tokio::sync::oneshot::channel();
+    let (release_first, first_release) = tokio::sync::oneshot::channel();
+    let (arrived_second, second_arrival) = tokio::sync::oneshot::channel();
+    let (release_second, second_release) = tokio::sync::oneshot::channel();
+    let (finished_first, first_finished) = tokio::sync::oneshot::channel();
+    state.lock().unwrap().held_copy =
+        Some(HeldCopy { arrived: arrived_first, release: first_release });
+    let first = async {
+        let result = storage.create(&path, b"bytes").await;
+        finished_first.send(()).unwrap();
+        result
+    };
+    let second = async {
+        first_arrival.await.unwrap();
+        state.lock().unwrap().held_copy =
+            Some(HeldCopy { arrived: arrived_second, release: second_release });
+        let (result, ()) = tokio::join!(storage.create(&path, b"bytes"), async {
+            second_arrival.await.unwrap();
+            release_first.send(()).unwrap();
+            first_finished.await.unwrap();
+            release_second.send(()).unwrap();
+        });
+        result
+    };
+    let (first, second) = tokio::join!(first, second);
+    first.unwrap();
+    second.unwrap();
+    assert_eq!(storage.read(&path).await.unwrap(), b"bytes");
+    assert_eq!(temporaries(&state), 0);
+}
