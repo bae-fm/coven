@@ -73,6 +73,31 @@ async fn an_unknown_circle_refuses_the_whole_local_write() {
     db.close().await.unwrap();
 }
 
+/// A store opened without a clock stamps its writes by the system clock (§7.2).
+#[tokio::test]
+async fn a_store_opened_without_a_clock_stamps_writes_by_the_system_clock() {
+    let milliseconds = || {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis()
+            .try_into()
+            .unwrap()
+    };
+    let store = TestStore::new();
+    let database = store
+        .builder(notes(), vec![crate::Migration::addition(1, "notes", NOTES)])
+        .open()
+        .await
+        .unwrap();
+    let before: u64 = milliseconds();
+    sql(&database, "INSERT INTO notes VALUES('42','Groceries','')").await.unwrap();
+    let after: u64 = milliseconds();
+    let stamped = records(&database)[0].header.timestamp.milliseconds();
+    assert!((before..=after).contains(&stamped), "{before} <= {stamped} <= {after}");
+    database.close().await.unwrap();
+}
+
 #[tokio::test]
 async fn grocery_title_and_errands_tag_are_one_unsigned_write() {
     let store = TestStore::new();
