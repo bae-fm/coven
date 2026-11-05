@@ -658,3 +658,125 @@ fn a_target_the_state_doesnt_hold_is_gone_not_forbidden() {
         );
     }
 }
+
+fn apply_from(
+    state: &StoreState,
+    device: u64,
+    author: u128,
+    change: StoreChange,
+) -> Result<Option<AdminEffect>, OperationRejection> {
+    checked_change(state, &header(device, author, 3), Slot(4), &change, &BTreeMap::new(), &[])
+}
+
+fn gifts() -> CircleId {
+    CircleId(uuid::Uuid::from_u128(12))
+}
+
+fn create_circle(circle: CircleId, name: &str) -> StoreChange {
+    StoreChange::CreateCircle {
+        circle,
+        name: name.into(),
+        key: KeyId(uuid::Uuid::from_u128(circle.0.as_u128() + 100)),
+        key_hash: [2; 32],
+    }
+}
+
+/// Any member creates a circle and is its first member; only the circle's
+/// members manage it, so an admin outside it can't (§10.1).
+#[test]
+fn any_member_creates_a_circle_and_only_its_members_manage_it() {
+    let state = household();
+    let made = apply(&state, 2, create_circle(gifts(), "Gifts")).unwrap().unwrap().state;
+    assert_eq!(made.circles[&gifts()].members, [id(2)].into());
+
+    let rotation = || StoreChange::RotateKey {
+        audience: Audience::Circle(gifts()),
+        key: KeyId(uuid::Uuid::from_u128(500)),
+        key_hash: [3; 32],
+    };
+    let changes = || {
+        [
+            StoreChange::RenameCircle { circle: gifts(), name: "Presents".into() },
+            StoreChange::AddCircleMember { circle: gifts(), member: id(1) },
+            StoreChange::RemoveCircleMember { circle: gifts(), member: id(2) },
+            StoreChange::DeleteCircle { circle: gifts() },
+            rotation(),
+        ]
+    };
+    for change in changes() {
+        assert_eq!(
+            apply(&made, 1, change.clone()).err(),
+            Some(OperationRejection::NotAllowed),
+            "{change:?}"
+        );
+        assert!(apply(&made, 2, change.clone()).is_ok(), "{change:?}");
+    }
+}
+
+/// Only a device's own member registers a new device in its place; several
+/// new devices of that member may replace the same old id, each keeping its
+/// own id (§19.3).
+#[test]
+fn only_its_member_replaces_a_device_id_and_several_may_replace_one() {
+    let state = household();
+    let phone = DeviceId(1);
+    let replace = |name: &str| StoreChange::AddDevice { name: name.into(), replaces: Some(phone) };
+
+    assert_eq!(
+        apply_from(&state, 5, 2, replace("Ben's")).err(),
+        Some(OperationRejection::NotAllowed)
+    );
+
+    let first = apply_from(&state, 5, 1, replace("Tablet")).unwrap().unwrap().state;
+    let both = apply_from(&first, 6, 1, replace("Laptop")).unwrap().unwrap().state;
+    assert_eq!(both.devices[&phone].state, DeviceState::Replaced);
+    for new in [DeviceId(5), DeviceId(6)] {
+        assert_eq!(both.devices[&new].state, DeviceState::Active);
+        assert_eq!(both.devices[&new].member, id(1));
+    }
+}
+
+/// Removing a circle's last member deletes the circle at the removal's slot;
+/// a circle someone else remains in survives (§14.1).
+#[test]
+fn removing_a_circles_last_member_deletes_it_at_that_slot() {
+    let shared = CircleId(uuid::Uuid::from_u128(13));
+    let mut state = household();
+    for change in [
+        create_circle(gifts(), "Gifts"),
+        create_circle(shared, "Shared"),
+        StoreChange::AddCircleMember { circle: shared, member: id(1) },
+    ] {
+        state = apply(&state, 2, change).unwrap().unwrap().state;
+    }
+    let removed =
+        apply(&state, 1, StoreChange::RemoveMember { member: id(2) }).unwrap().unwrap().state;
+    assert_eq!(removed.circle_deletions.get(&gifts()), Some(&Slot(4)));
+    assert!(removed.circles[&gifts()].members.is_empty());
+    assert_eq!(removed.circle_deletions.get(&shared), None);
+    assert_eq!(removed.circles[&shared].members, [id(1)].into());
+}
+
+/// Replacing a member's keys changes the keys alone: the member's access,
+/// role, circle memberships and device ids stay (§10, §14.3).
+#[test]
+fn replacing_a_members_keys_keeps_access_role_circles_and_devices() {
+    let state = apply(&household(), 2, create_circle(gifts(), "Gifts")).unwrap().unwrap().state;
+    let replaced = apply(
+        &state,
+        1,
+        StoreChange::ReplaceMemberKeys { member: id(2), expected: keys(2), keys: keys(3) },
+    )
+    .unwrap()
+    .unwrap()
+    .state;
+
+    let (before, after) = (&state.members[&id(2)], &replaced.members[&id(2)]);
+    assert_eq!(after.keys, keys(3));
+    assert_ne!(before.keys, after.keys);
+    assert_eq!(after.access, before.access);
+    assert_eq!(after.role, before.role);
+    assert_eq!(after.removed, before.removed);
+    assert_eq!(replaced.circles, state.circles);
+    assert_eq!(replaced.devices, state.devices);
+}
