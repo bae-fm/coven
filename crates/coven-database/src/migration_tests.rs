@@ -741,4 +741,39 @@ pub(crate) mod declarations {
             }
         }
     }
+
+    /// A migration that runs no SQL but makes a table owner-only changes the
+    /// declaration, which is breaking (§18.1).
+    #[tokio::test]
+    async fn changing_a_tables_owner_declaration_in_a_migration_is_breaking() {
+        let owner_only = || notes().into_iter().map(|table| table.owner_only()).collect::<Vec<_>>();
+        let first = Migration::addition(1, "notes", NOTES);
+        let store = TestStore::new();
+        store.builder(notes(), vec![first.clone()]).open().await.unwrap().close().await.unwrap();
+
+        let error = store
+            .builder(
+                owner_only(),
+                vec![first.clone(), Migration::addition_with(2, "owner", |_| Ok(()))],
+            )
+            .open()
+            .await
+            .err()
+            .expect("an addition cannot change the owner declaration");
+        assert!(matches!(database_error(error), DbError::MigrationKindMismatch { version: 2 }));
+
+        let db = store
+            .builder(
+                owner_only(),
+                vec![first, Migration::breaking_with(2, "owner", |_| Ok(()), OldWrites::Drop)],
+            )
+            .open()
+            .await
+            .unwrap();
+        assert_eq!(
+            db.applied_migrations().unwrap().last().unwrap().change,
+            crate::MigrationChange::Breaking
+        );
+        db.close().await.unwrap();
+    }
 }
