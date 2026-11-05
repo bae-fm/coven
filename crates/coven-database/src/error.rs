@@ -791,6 +791,11 @@ pub enum DbError {
     /// The prepared raise no longer names the current counted prefix.
     #[error("raise capture changed before snapshot creation")]
     CaptureChanged,
+    /// An ordinary snapshot of an audience whose raise this device captured
+    /// and has not published: it would carry a schema version the history
+    /// doesn't hold yet (§16.2).
+    #[error("this device's raise of the audience has not landed")]
+    RaiseWaiting,
     /// Loading plaintext supplied by sync failed without changing the database.
     #[error(transparent)]
     Snapshot(#[from] crate::SnapshotError),

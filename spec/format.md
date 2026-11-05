@@ -929,7 +929,7 @@ The header (kind 5) is `id:SnapshotId | schema_version:u32 | counts:12×u64`:
 | Field | Type | Meaning |
 | --- | --- | --- |
 | `id` | `SnapshotId` | which snapshot (D2) |
-| `schema_version` | `u32` | the audience's schema version |
+| `schema_version` | `u32` | the writing device's app schema version, the shape of the rows it holds: the audience's raised version (§18.3) or a later one reached only by additions |
 | `counts` | `12×u64` | the number of records in each section below |
 
 The covered slot is in the sealed prefix, not the header (D9).

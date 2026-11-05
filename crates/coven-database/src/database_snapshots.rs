@@ -118,7 +118,10 @@ impl Database {
     /// Stream an audience's plaintext snapshot frames from one committed reader
     /// transaction. `begin` receives metadata before any frame, so the consumer
     /// can write the sealed prefix and seal each subsequent frame as it arrives;
-    /// commits on the writer connection continue throughout this call.
+    /// commits on the writer connection continue throughout this call. While
+    /// this device's raise of the audience waits, it refuses with
+    /// [`DbError::RaiseWaiting`]: the snapshot would be written at a schema
+    /// version the history doesn't hold yet (§16.2).
     pub async fn write_snapshot<B, F, E>(
         &self,
         id: coven_format::admin::SnapshotId,
@@ -132,6 +135,14 @@ impl Database {
     {
         self.call(move |inner| {
             inner.access.with_committed(|reader| {
+                // In the transaction that reads the schema version the
+                // snapshot is written at.
+                if crate::raise_capture::provisional(reader)?
+                    .iter()
+                    .any(|(audience, _, _)| *audience == id.audience)
+                {
+                    return Err(DbError::RaiseWaiting.into());
+                }
                 crate::write_schema::prepare_evaluators(reader, &inner.access.write_schema)?;
                 crate::snapshot_write::write(reader, &inner.access.write_schema, id, begin, emit)
             })

@@ -511,3 +511,64 @@ async fn a_snapshot_past_the_single_request_limit_goes_up_in_parts() {
         device.sync.database.close().await.unwrap();
     }
 }
+
+/// Ana's app updates with a breaking migration whose raise of the store has
+/// not landed. An ordinary snapshot she captured now would be written at
+/// version 2 while the store's history holds no raise to it, and a device
+/// on the old app could not load it. So no ordinary capture is taken while
+/// her raise waits: an explicit request is refused, and so is a request
+/// journaled before the update that resumes at its capture after it. A
+/// reset's snapshot is refused the same way. None announces anything
+/// (§16.2, §18.5).
+#[tokio::test]
+async fn no_ordinary_snapshot_is_captured_while_a_raise_of_its_audience_waits() {
+    use crate::sequence_sync::{sequence_operations::Request, snapshot_capture::SnapshotRequest};
+    let group = Group::new();
+    let ana = group.device(1).await;
+    let ben = group.device(2).await;
+    group.create(&ana).await;
+    group.admit(&ana, &ben).await;
+    insert(&ana.sync.database, "a", "before the update").await;
+    ana.sync.pass().await.unwrap();
+    let journaled = ana
+        .sync
+        .start_request_row(
+            Request::Snapshot(SnapshotRequest {
+                audience: coven_merge::Audience::Store,
+                purpose: coven_format::sequence::Purpose::Ordinary,
+            }),
+            coven_database::operation_kind::COVEN,
+        )
+        .await
+        .unwrap();
+    group.version.store(2, std::sync::atomic::Ordering::SeqCst);
+    let ana = group.reopen(ana).await;
+    assert_eq!(ana.sync.database.raise_captures().await.unwrap().len(), 1);
+    let announced = async |ana: &Device| ana.sync.session.lock().await.history.announcements.len();
+    let before = announced(&ana).await;
+
+    let explicit = ana.sync.snapshot(coven_merge::Audience::Store).await;
+    assert!(
+        matches!(explicit, Err(crate::SyncError::Rejected(crate::OperationRejection::NotAllowed))),
+        "{explicit:?}"
+    );
+    let reset = ana.sync.reset(coven_merge::Audience::Store).await;
+    assert!(
+        matches!(reset, Err(crate::SyncError::Rejected(crate::OperationRejection::NotAllowed))),
+        "{reset:?}"
+    );
+    ana.sync.pass().await.unwrap();
+    assert!(ana
+        .sync
+        .database
+        .operations()
+        .await
+        .unwrap()
+        .iter()
+        .all(|record| record.id != journaled));
+    assert_eq!(announced(&ana).await, before);
+    assert!(ana.sync.database.store_state().await.unwrap().schema.is_empty());
+    for device in [&ana, &ben] {
+        device.sync.database.close().await.unwrap();
+    }
+}

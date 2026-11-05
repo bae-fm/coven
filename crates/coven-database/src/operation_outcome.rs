@@ -31,7 +31,9 @@ pub enum OperationRejection {
     KeysAlreadyUsed,
     /// Another replacement changed the expected binding.
     MemberKeysChanged(MemberId),
-    /// The author's device, membership or role does not permit this change.
+    /// The author's device, membership or role does not permit this change,
+    /// or, for a snapshot, this device's raise of its audience has not landed
+    /// yet (§16.2).
     NotAllowed,
 }
 

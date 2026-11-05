@@ -5241,6 +5241,9 @@ pub enum OperationRejection {
     KeysAlreadyUsed,
     /// The expected member binding changed while this call was preparing.
     MemberKeysChanged(MemberId),
+    /// The author's device, membership or role does not permit it; for a
+    /// snapshot, also this device's raise of its audience still waiting
+    /// (§16.2).
     NotAllowed,
 
     /// The provider account owns the store: its member can't be removed, and

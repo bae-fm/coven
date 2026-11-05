@@ -5363,13 +5363,18 @@ Deleting history (§16.6) also asks for a snapshot once the oldest slot it doesn
 cover has passed grace. That keeps a deadline on deleting history where the
 slots never reach the threshold, as in that store of renames.
 
-A device asks for no ordinary snapshot of an audience while its own raise of
+A device takes no ordinary snapshot of an audience while its own raise of
 that audience waits for its captured writes to land (§18.5). The raise's
 snapshot comes next. An ordinary one taken first would carry the device's newer
 schema version before the history holds it: Cara, joining on the old app while
 Ana's raise waits for her held cover write, would find a snapshot she can't
 read instead of loading the store and stopping at Ana's raise with
-`UpdateRequired` once it lands.
+`UpdateRequired` once it lands. So the device asks for none then, and the
+capture itself checks for a waiting raise in the read that fixes its schema
+version. A request journaled before the app's update and resuming after it,
+or one made meanwhile, ends `Rejected(NotAllowed)` without uploading or
+announcing anything. A reset's snapshot (§19.4) is refused the same way, for
+the same reason.
 
 **Coverage only moves forward.** An announcement's coverage must not be lower
 than the coverage already announced for that audience. Of two announcements with
@@ -5449,8 +5454,11 @@ refuses Ana's announcement; the checked counterexample is [`slot4_refused`,
 The rules:
 
 - **An ordinary snapshot must cover the latest raise and reset** before its
-  announcement, and its schema version and reset must match the audience's at
-  its coverage.
+  announcement. With no raise or reset between its coverage and its
+  announcement, the audience's schema version and reset at its coverage are
+  the ones it has when announced. Its body is written at its device's app
+  version, which runs ahead of that schema version only by additions (§18.2):
+  a device takes no snapshot while its own raise of the audience waits (§16.2).
 - **A prepared snapshot supports an ordinary reload only after its admin entry
   applies.** A raise or reset snapshot is announced first and then named by the
   raise or reset entry. An entry can name only a snapshot already announced.

@@ -580,17 +580,19 @@ impl SequenceSync {
             }
             match step {
                 OperationStep::Capturing(capture) => {
-                    let artifact = self.capture_snapshot(&capture, ring, member).await?;
-                    self.database
-                        .advance_operation(
-                            SequenceOperation {
-                                request,
-                                progress: OperationProgress::Running(OperationStep::Uploading(
-                                    artifact,
-                                )),
+                    // No snapshot is taken at a version the history doesn't
+                    // hold while this device's raise waits (§16.2).
+                    let progress = match self.capture_snapshot(&capture, ring, member).await {
+                        Err(SyncError::Database(coven_database::DbError::RaiseWaiting)) => {
+                            OperationProgress::Undo {
+                                step: OperationStep::Capturing(capture),
+                                reason: OperationRejection::NotAllowed,
                             }
-                            .update(&record)?,
-                        )
+                        }
+                        artifact => OperationProgress::Running(OperationStep::Uploading(artifact?)),
+                    };
+                    self.database
+                        .advance_operation(SequenceOperation { request, progress }.update(&record)?)
                         .await?;
                 }
                 OperationStep::Uploading(artifact) => {

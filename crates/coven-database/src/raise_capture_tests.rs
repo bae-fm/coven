@@ -545,7 +545,10 @@ async fn a_reload_replays_a_captured_write_only_into_the_audiences_it_loads() {
         crate::OldWrites::Drop,
     );
     let db = store.builder(tables(), vec![schema(), index]).open().await.unwrap();
-    // The circle's snapshot covers the slots before the write's.
+    // Another member raised the circle to version 2, so this device keeps no
+    // capture of it, and the circle's snapshot, at version 2, covers the
+    // slots before the write's (§16.2, §18.3).
+    db.discard_raise_capture(Audience::Circle(circle), 2).await.unwrap();
     let circle_snapshot = unpublished_frames(&db, Audience::Circle(circle)).await;
     crate::tests::publish_through(&db, written.header.position.number).await.unwrap();
     db.load_snapshots::<crate::pending::tests::Record, _>(
