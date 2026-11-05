@@ -356,6 +356,15 @@ import SequenceApply
 #print axioms CovenSequence.StoreDiscard.settles
 #print axioms CovenSequence.StoreDiscard.entries_first_breaks_store
 #print axioms CovenSequence.StoreDiscard.unfinished_deletion_blocks_store
+#print axioms CovenSequence.StoreDeletion.reachable_inv
+#print axioms CovenSequence.StoreDeletion.never_stranded
+#print axioms CovenSequence.StoreDeletion.never_unlisted
+#print axioms CovenSequence.StoreDeletion.progress
+#print axioms CovenSequence.StoreDeletion.settles
+#print axioms CovenSequence.StoreDeletion.settled_outcome
+#print axioms CovenSequence.StoreDeletion.signed_out_strands_device
+#print axioms CovenSequence.StoreDeletion.crashed_deletion_reopens_removed
+#print axioms CovenSequence.StoreDeletion.failed_deletion_removes_store_in_use
 #print axioms CovenSequence.BootstrapCommit.reachable_inv
 #print axioms CovenSequence.BootstrapCommit.never_orphaned
 #print axioms CovenSequence.BootstrapCommit.published_whole

@@ -948,6 +948,38 @@ Each rule is needed:
   deletion, a crash after the rename leaves remains for good, and the
   store's id can't be made again.
 
+[`StoreDeletion`](sequence/CovenSequence/StoreDeletion.lean) models
+`delete_store` (api.md E1, §14.1, §11.6): the call journals this device's
+removal, which lands and applies, then deletes the store from the device.
+The journaled removal lives in the store's database, so deleting the store
+before it applies loses it. The call fails or the device crashes at any
+point; the app opens the store when nothing refuses it, and an open store's
+passes send a journaled removal; the person signs out or in. Under
+`Rules.correct` the deletion records itself in the store's directory before
+it journals the removal, the record refuses opens and lists the deletion
+for a resume, and a failure before the journal removes the record; a store
+whose location is recorded without credentials refuses the deletion.
+
+- `never_stranded`: the store never leaves the device without its removal
+  applied.
+- `never_unlisted`: the app never opens a store whose removal is journaled
+  or applied.
+- `settles`: from every reachable state, coven's own steps, the app
+  resuming the deletion the listing shows and signing in when it must,
+  reach a state with nothing left (`progress` lowers a measure).
+- `settled_outcome`: there, the store is gone with its removal applied, or
+  untouched with no removal journaled.
+
+Each rule is needed:
+
+- `signed_out_strands_device`: signed out, the deletion skips the removal
+  and the device stays registered for good.
+- `crashed_deletion_reopens_removed`: without the record, a crash after the
+  removal lands leaves the store opening as removed, with its data and keys.
+- `failed_deletion_removes_store_in_use`: without the record, a call that
+  fails after journaling leaves the store open, and its passes send the
+  removal while the app uses it.
+
 [`BootstrapCommit`](sequence/CovenSequence/BootstrapCommit.lean) models the
 commit a restore or a join makes once it has loaded (§13.4, §11.6): one write
 at a time of the device's custody for the store, then publication. The call

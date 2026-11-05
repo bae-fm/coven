@@ -36,6 +36,7 @@ import CovenSequence.RestoreRegistration
 import CovenSequence.FirstInstallation
 import CovenSequence.DeviceReplacement
 import CovenSequence.StoreDiscard
+import CovenSequence.StoreDeletion
 import CovenSequence.BootstrapCommit
 import CovenSequence.JoinStatus
 import CovenSequence.ReadPass
