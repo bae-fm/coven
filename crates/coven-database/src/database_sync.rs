@@ -697,14 +697,15 @@ impl Database {
     /// Seal and stage outside the application writer, then atomically reserve
     /// the claim number and retain its complete attempted bytes.
     /// Returning the attempt proves the journal transaction has committed.
-    pub async fn begin_claim<F, R>(
+    pub async fn begin_claim<F, R, E>(
         &self,
         work: crate::ClaimWork,
         seal: F,
-    ) -> Result<crate::Claim, DbError>
+    ) -> Result<crate::Claim, E>
     where
-        F: FnOnce(u64) -> Result<crate::ClaimAttempt<R>, DbError> + Send + 'static,
+        F: FnOnce(u64) -> Result<crate::ClaimAttempt<R>, E> + Send + 'static,
         R: std::io::Read + Send + 'static,
+        E: From<DbError> + CarriesBug + Send + 'static,
     {
         self.call(move |inner| {
             let number = inner
@@ -713,13 +714,13 @@ impl Database {
                 .checked_add(1)
                 .ok_or(DbError::ClaimNumberExhausted)?;
             let attempt = seal(number)?;
-            inner.inputs.prepare_claim(attempt, |prepared| {
+            Ok(inner.inputs.prepare_claim(attempt, |prepared| {
                 inner.access.with_writer(|writer| {
                     writer.stream_transaction(|db| {
                         crate::claim::begin(db, inner.access.device, work, number, prepared)
                     })
                 })
-            })
+            })?)
         })
         .await
     }

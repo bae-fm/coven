@@ -507,7 +507,7 @@ async fn callback_panics_release_the_writer_and_reserve_nothing() {
         assert!(db.current_claim().await.unwrap().is_none());
         let claim = db
             .begin_claim(crate::ClaimWork::Writes(1), |_| {
-                Ok(crate::ClaimAttempt {
+                Ok::<_, crate::DbError>(crate::ClaimAttempt {
                     path: coven_format::path::ObjectPath::slot(
                         crate::tests::store_id(),
                         1u64.try_into().unwrap(),

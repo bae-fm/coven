@@ -197,7 +197,7 @@ pub(crate) fn read_chunk(bytes: &mut dyn Read) -> Result<Vec<u8>, DbError> {
     bytes
         .take(coven_format::chunks::CHUNK_SIZE as u64)
         .read_to_end(&mut chunk)
-        .map_err(|error| DbError::SyncStream(Box::new(error)))?;
+        .map_err(DbError::ClaimRead)?;
     Ok(chunk)
 }
 

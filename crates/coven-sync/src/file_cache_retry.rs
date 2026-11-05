@@ -162,9 +162,7 @@ impl<M: Mode> FilesInner<M> {
                     let waits = self.waits.clone();
                     match records
                         .fail_local_read(file, record, move |previous| {
-                            waits
-                                .next(previous.as_ref())
-                                .map_err(|error| DbError::SyncStream(Box::new(error)))
+                            waits.next(previous.as_ref())
                         })
                         .await
                     {
@@ -173,7 +171,7 @@ impl<M: Mode> FilesInner<M> {
                             Ok(())
                         }
                         Ok(None) => Ok(()),
-                        Err(error) => Err(error.into()),
+                        Err(error) => Err(error),
                     }
                 }
             }
@@ -278,17 +276,14 @@ fn combine<T>(
 ) -> Result<T, FileReadError> {
     match (result, recorded) {
         (result, Ok(())) => result,
-        (Ok(_), Err(crate::SyncError::Database(error))) => Err(error.into()),
-        (Ok(_), Err(error)) => Err(DbError::SyncStream(Box::new(error)).into()),
-        (Err(operation), Err(cleanup)) => {
-            Err(DbError::SyncStream(Box::new(crate::SyncError::cleanup(
-                crate::SyncError::Failed {
-                    failure: crate::LocalFailure::Operation,
-                    source: std::sync::Arc::new(operation),
-                },
-                cleanup,
-            )))
-            .into())
-        }
+        (Ok(_), Err(error)) => Err(error.into()),
+        (Err(operation), Err(cleanup)) => Err(crate::SyncError::cleanup(
+            crate::SyncError::Failed {
+                failure: crate::LocalFailure::Operation,
+                source: std::sync::Arc::new(operation),
+            },
+            cleanup,
+        )
+        .into()),
     }
 }

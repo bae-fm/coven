@@ -33,8 +33,7 @@ impl SequenceSync {
     ) -> Result<coven_database::NewOperation, coven_database::DbError> {
         Ok(coven_database::NewOperation {
             kind: operation_kind::SCHEMA_RAISE.into(),
-            data: serde_json::to_vec(&version)
-                .map_err(|error| coven_database::DbError::SyncStream(Box::new(error)))?,
+            data: serde_json::to_vec(&version).map_err(coven_database::DbError::StateEncoding)?,
             started_by: operation_kind::COVEN.into(),
             pauses_writes: false,
         })

@@ -206,11 +206,7 @@ async fn a_decline_ends_the_invite_in_its_write_and_a_pass_deletes_the_request()
     let steps = ana.sync.operation_steps();
     ana.sync
         .database
-        .write(move |sql| {
-            steps
-                .decline_join_request(&sql, &request)
-                .map_err(|error| coven_database::DbError::SyncStream(Box::new(error)))
-        })
+        .write_as(move |sql| steps.decline_join_request(&sql, &request))
         .await
         .unwrap();
     assert!(listed(&ana).await.is_empty());
@@ -624,15 +620,7 @@ async fn a_pass_under_way_records_nothing_over_a_cancel() {
         read.await.unwrap();
         let steps = ana.sync.operation_steps();
         let id = invite.id;
-        ana.sync
-            .database
-            .write(move |sql| {
-                steps
-                    .cancel_invite(&sql, id)
-                    .map_err(|error| coven_database::DbError::SyncStream(Box::new(error)))
-            })
-            .await
-            .unwrap();
+        ana.sync.database.write_as(move |sql| steps.cancel_invite(&sql, id)).await.unwrap();
         resume.send(()).unwrap();
     };
     let (passed, ()) = tokio::join!(ana.sync.pass(), cancel);
@@ -813,11 +801,7 @@ async fn a_stop_for_good_ends_this_devices_invites() {
     let steps = ana.sync.operation_steps();
     let binding = ana
         .database()
-        .write(move |sql| {
-            steps
-                .approve_join_request(&sql, &request)
-                .map_err(|error| coven_database::DbError::SyncStream(Box::new(error)))
-        })
+        .write_as(move |sql| steps.approve_join_request(&sql, &request))
         .await
         .unwrap();
     assert_eq!(listed(&ana).await.len(), 2);

@@ -90,6 +90,11 @@ pub enum FileReadError {
     /// database, as in a failed rollback, keeping its cause (§17.8).
     #[error(transparent)]
     Write(Box<coven_database::CovenError>),
+    /// Recording what a read or an upload settled failed in sync's own
+    /// work, as a retry wait the clock can't hold, keeping its cause; a
+    /// failed read whose failure couldn't be recorded keeps both (§17.9).
+    #[error(transparent)]
+    Sync(Box<crate::SyncError>),
     /// The read's work panicked: a bug, which the caller reports (E15).
     #[error(transparent)]
     Bug(#[from] coven_foundation::task::Bug),
@@ -127,6 +132,7 @@ impl coven_foundation::task::CarriesBug for FileReadError {
             Self::Lock(error) => error.bug(),
             Self::Storage(error) => error.bug(),
             Self::Write(error) => error.bug(),
+            Self::Sync(error) => error.bug(),
             _ => None,
         }
     }
@@ -149,6 +155,18 @@ impl From<coven_foundation::files::WriterError> for FileReadError {
     }
 }
 
+/// A database or provider failure as itself; any other of sync's own
+/// failures kept whole.
+impl From<crate::SyncError> for FileReadError {
+    fn from(error: crate::SyncError) -> Self {
+        match error {
+            crate::SyncError::Database(error) => error.into(),
+            crate::SyncError::Storage(error) => error.into(),
+            crate::SyncError::Bug(bug) => Self::Bug(bug),
+            error => Self::Sync(Box::new(error)),
+        }
+    }
+}
 impl From<DbError> for FileReadError {
     fn from(error: DbError) -> Self {
         match error {

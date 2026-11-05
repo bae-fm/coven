@@ -861,6 +861,15 @@ impl DatabaseConnection {
 
     /// Streaming transfers publish table invalidations without a session's
     /// retained before/after BLOB values growing with the transferred object.
+    /// `transaction`, for a run whose failures are `E`: a failed rollback
+    /// joins the run's own error.
+    pub(crate) fn transaction_as<T, E: crate::WriteFailure>(
+        &mut self,
+        run: impl FnOnce(&Self) -> Result<T, E>,
+    ) -> Result<T, E> {
+        self.transaction_captured(false, run)
+    }
+
     pub(crate) fn stream_transaction<T>(
         &mut self,
         run: impl FnOnce(&Self) -> Result<T, DbError>,

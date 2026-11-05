@@ -344,11 +344,7 @@ async fn journal(device: &Device, change: StoreChange) -> coven_database::Operat
     let steps = device.sync.operation_steps();
     device
         .database()
-        .write(move |sql| {
-            steps
-                .administer(&sql, change)
-                .map_err(|error| coven_database::DbError::SyncStream(Box::new(error)))
-        })
+        .write_as(move |sql| steps.administer(&sql, change))
         .await
         .unwrap()
         .expect("the change journals")

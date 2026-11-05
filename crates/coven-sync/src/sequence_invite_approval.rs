@@ -56,7 +56,7 @@ impl SequenceSync {
         session: &Session,
         member: &MemberIdentity,
         change: StoreChange,
-        parent: impl FnOnce(OperationId) -> Result<coven_database::OperationUpdate, coven_database::DbError>
+        parent: impl FnOnce(OperationId) -> Result<coven_database::OperationUpdate, SyncError>
             + Send
             + 'static,
     ) -> Result<Child, SyncError> {

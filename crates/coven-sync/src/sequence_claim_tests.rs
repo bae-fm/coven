@@ -369,7 +369,7 @@ mod differential {
             .database
             .begin_claim(ClaimWork::Writes(0), move |n| {
                 assert_eq!(n, number);
-                Ok(ClaimAttempt { path: attempted, bytes: Cursor::new(journal) })
+                Ok::<_, SyncError>(ClaimAttempt { path: attempted, bytes: Cursor::new(journal) })
             })
             .await
             .unwrap();

@@ -197,15 +197,7 @@ async fn a_demoted_approvers_approval_is_refused_by_its_pass() {
 /// return the operation that binds its pair.
 async fn approve(device: &Device, request: &JoinRequest) -> coven_database::OperationId {
     let (steps, request) = (device.sync.operation_steps(), request.clone());
-    device
-        .database()
-        .write(move |sql| {
-            steps
-                .approve_join_request(&sql, &request)
-                .map_err(|error| coven_database::DbError::SyncStream(Box::new(error)))
-        })
-        .await
-        .unwrap()
+    device.database().write_as(move |sql| steps.approve_join_request(&sql, &request)).await.unwrap()
 }
 
 /// The operation's outcome, as `coven_operations` lists it.

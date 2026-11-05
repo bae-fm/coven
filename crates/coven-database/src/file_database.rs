@@ -373,27 +373,36 @@ impl FileDatabase {
     /// Record a local source failure only while its upload remains queued.
     /// The retry is selected from the current upload wait and committed with
     /// the record, so concurrent upload completion cannot leave a stale failure.
-    pub async fn fail_local_read<P: crate::PendingValue>(
+    /// A `next` that fails records nothing and returns its own error; only a
+    /// failed save fails the handle, as any lost pending state does (E5).
+    pub async fn fail_local_read<P, E>(
         &self,
         file: FileId,
         record: P,
-        next: impl FnOnce(Option<crate::RetryWait>) -> Result<crate::RetryWait, DbError>
-            + Send
-            + 'static,
-    ) -> Result<Option<(crate::RetrySubject, crate::RetryWait)>, DbError> {
+        next: impl FnOnce(Option<crate::RetryWait>) -> Result<crate::RetryWait, E> + Send + 'static,
+    ) -> Result<Option<(crate::RetrySubject, crate::RetryWait)>, E>
+    where
+        P: crate::PendingValue,
+        E: From<DbError> + CarriesBug + Send + 'static,
+    {
         self.run(move |db, _, _, _| {
             db.state_transaction(|db| {
                 let Some(id) = file_queue::upload_of(db, file)? else {
-                    return Ok(None);
+                    return Ok(Ok(None));
                 };
                 let subject = crate::RetrySubject::Upload(id);
-                let wait = next(crate::retry::find(db, subject)?)?;
+                // Nothing is written yet: a refused wait leaves the
+                // transaction with nothing to commit.
+                let wait = match next(crate::retry::find(db, subject)?) {
+                    Ok(wait) => wait,
+                    Err(refused) => return Ok(Err(refused)),
+                };
                 crate::pending::save(db, &record)?;
                 crate::retry::save(db, subject, &wait)?;
-                Ok(Some((subject, wait)))
+                Ok(Ok(Some((subject, wait))))
             })
         })
-        .await
+        .await?
     }
 
     /// Durable queue: each upload some file still waits for.

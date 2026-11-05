@@ -120,12 +120,7 @@ impl FilesInner {
         }
         // Storage holds bytes the source gave: whatever was recorded
         // about the source failing ends.
-        self.settled_source(item.id, &item.location, item.of).await.map_err(
-            |error| match error {
-                SyncError::Database(error) => FileReadError::from(error),
-                error => FileReadError::Database(DbError::SyncStream(Box::new(error))),
-            },
-        )?;
+        self.settled_source(item.id, &item.location, item.of).await.map_err(FileReadError::from)?;
         match self.database.complete_upload(item.id, upload_subject(&item.location)).await {
             Ok(coven_database::UploadCompletion::Stored) => Ok(Attempted::Stored),
             Ok(coven_database::UploadCompletion::Retired) => Ok(Attempted::Retired),

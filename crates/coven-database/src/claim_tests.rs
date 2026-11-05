@@ -57,7 +57,7 @@ async fn sequence_settlement_matches_lean() {
         let saved = bytes.clone();
         let claim = db
             .begin_claim(ClaimWork::Writes(0), move |_| {
-                Ok(ClaimAttempt { path, bytes: Cursor::new(saved) })
+                Ok::<_, crate::DbError>(ClaimAttempt { path, bytes: Cursor::new(saved) })
             })
             .await
             .unwrap();
@@ -188,7 +188,7 @@ async fn pinned_last_claims_settle_lost_replies_for_every_slot_kind() {
             let path = path.clone();
             let claim = database
                 .begin_claim(ClaimWork::Writes(0), move |_| {
-                    Ok(ClaimAttempt { path, bytes: Cursor::new(saved) })
+                    Ok::<_, crate::DbError>(ClaimAttempt { path, bytes: Cursor::new(saved) })
                 })
                 .await
                 .unwrap();
@@ -269,7 +269,7 @@ async fn a_stored_claim_that_does_not_decode_is_damaged_database() {
         let path = ObjectPath::slot(coven_format::test_utils::STORE_ID, 1.try_into().unwrap());
         database
             .begin_claim(ClaimWork::Writes(0), move |_| {
-                Ok(ClaimAttempt { path, bytes: Cursor::new(b"slot".to_vec()) })
+                Ok::<_, crate::DbError>(ClaimAttempt { path, bytes: Cursor::new(b"slot".to_vec()) })
             })
             .await
             .unwrap();

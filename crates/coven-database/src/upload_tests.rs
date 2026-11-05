@@ -79,7 +79,7 @@ async fn reads_only_the_oldest_write_as_header_and_audience_streams() {
 
 async fn landed(db: &Database, through: WriteId) {
     db.begin_claim(crate::ClaimWork::Writes(through.number), |_| {
-        Ok(crate::ClaimAttempt {
+        Ok::<_, crate::DbError>(crate::ClaimAttempt {
             path: coven_format::path::ObjectPath::slot(
                 crate::tests::store_id(),
                 1u64.try_into().unwrap(),

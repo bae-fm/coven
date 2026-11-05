@@ -16,12 +16,9 @@ pub(crate) struct SnapshotAuthorship {
 }
 impl SnapshotAuthorship {
     fn key(&self, audience: &Audience, key: KeyId) -> Result<coven_crypto::DerivedKeys, DbError> {
-        crate::write_seal::derive(&self.ring, audience, key).map_err(|error| match error {
-            crate::SyncError::KeyUnavailable(key) => {
-                SnapshotError::KeyUnavailable { audience: audience.clone(), key }.into()
-            }
-            error => DbError::SyncStream(Box::new(error)),
-        })
+        crate::write_seal::held(&self.ring, audience, key)
+            .map(|held| held.derive())
+            .ok_or_else(|| SnapshotError::KeyUnavailable { audience: audience.clone(), key }.into())
     }
 }
 impl Authorship for SnapshotAuthorship {
@@ -32,12 +29,12 @@ impl Authorship for SnapshotAuthorship {
         let plaintext = self
             .key(&Audience::Store, prefix.store_key)?
             .open_object_chunk(&identity, &evidence.prefix, 0, 0, sealed)
-            .map_err(|error| DbError::SyncStream(Box::new(error)))?;
+            .map_err(SnapshotError::Unauthentic)?;
         let header = WriteHeaderFrame::decode(&plaintext)?;
-        let signer = self
-            .history
-            .write_signer(&header)
-            .map_err(|error| DbError::SyncStream(Box::new(error)))?;
+        // The history refuses a signer only as not authorized to write
+        // every part the header names.
+        let signer =
+            self.history.write_signer(&header).map_err(|_refused| SnapshotError::Unauthorized)?;
         signer
             .verify_write_header(
                 &identity,
@@ -46,7 +43,7 @@ impl Authorship for SnapshotAuthorship {
                 &evidence.roots,
                 &coven_crypto::Signature::from_bytes(evidence.signature),
             )
-            .map_err(|error| DbError::SyncStream(Box::new(error)))?;
+            .map_err(SnapshotError::Unauthentic)?;
         Ok(header)
     }
     fn hasher(&self, audience: &Audience, key: KeyId) -> Result<AuthorshipHasher, DbError> {

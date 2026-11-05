@@ -83,7 +83,10 @@ pub(crate) async fn publish_through(db: &Database, through: u64) -> Result<(), D
     let compare = bytes.clone();
     let claim = db
         .begin_claim(crate::ClaimWork::Writes(through), move |_| {
-            Ok(crate::ClaimAttempt { path, bytes: Box::new(std::io::Cursor::new(bytes)) })
+            Ok::<_, crate::DbError>(crate::ClaimAttempt {
+                path,
+                bytes: Box::new(std::io::Cursor::new(bytes)),
+            })
         })
         .await?;
     db.settle_claim(crate::ClaimRead::Kept(Some(Box::new(std::io::Cursor::new(compare))))).await?;

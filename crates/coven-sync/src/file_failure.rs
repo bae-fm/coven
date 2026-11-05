@@ -178,11 +178,13 @@ impl<M: Mode> FilesInner<M> {
             }
             (_, FileReadError::Bug(_)) => PendingReason::Failed(LocalFailure::Bug),
             // A file only on another device is refused before any work it
-            // could record, so these name a local invariant failing.
+            // could record, so these name a local invariant failing, as does
+            // sync's own work failing to record what a read settled.
             (
                 _,
                 FileReadError::Database(_)
                 | FileReadError::Write(_)
+                | FileReadError::Sync(_)
                 | FileReadError::RangeOutOfBounds { .. }
                 | FileReadError::DeviceOnly { .. },
             ) => PendingReason::Failed(LocalFailure::Database),

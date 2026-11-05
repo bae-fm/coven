@@ -196,9 +196,9 @@ pub enum DbError {
     /// A slot's readable original awaits an external prerequisite.
     #[error("write awaits {0:?}")]
     WriteWaiting(crate::WriteWait),
-    /// A pending record, its subject or the sync status could not be
-    /// encoded, or a stored pending record could not be decoded as the
-    /// requested record type (E5).
+    /// A pending record, its subject, the sync status or an operation's
+    /// data could not be encoded, or a stored pending record could not be
+    /// decoded as the requested record type (E5).
     #[error("invalid sync state data: {0}")]
     StateEncoding(#[source] serde_json::Error),
     /// Saving pending state or the sync status failed. The call that lost
@@ -228,10 +228,12 @@ pub enum DbError {
     /// the store did not open (§4).
     #[error("the WAL checkpoint thread could not start: {0}")]
     CheckpointerThread(#[source] std::io::Error),
-    /// Sync's part of a database transaction failed, keeping sync's own typed
-    /// cause, and the transaction did not commit: a streamed transfer's
-    /// producer or final authentication check, or the schema publication
-    /// operation a migration commits with (§18.3, E13).
+    /// Reading a claim's sealed bytes to retain them failed, and the claim's
+    /// transaction did not commit (§11).
+    #[error("reading a claim's bytes failed: {0}")]
+    ClaimRead(#[source] std::io::Error),
+    /// A sync step failed inside an app's write, which did not commit, or
+    /// while the store opened, keeping sync's own typed cause (E1, E3).
     #[error("sync stream failed: {0}")]
     SyncStream(#[source] Box<dyn std::error::Error + Send + Sync>),
     /// This handle or a clone has closed the store (E1).

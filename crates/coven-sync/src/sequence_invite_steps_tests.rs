@@ -8,7 +8,7 @@
 use crate::sequence_sync::sequence_invites::expiry;
 use crate::sequence_sync::tests::*;
 use crate::*;
-use coven_database::{DbError, OperationId, SqlContext};
+use coven_database::{OperationId, SqlContext};
 use coven_format::{
     admin::{MemberRole, StoreChange},
     MemberAccess,
@@ -94,11 +94,8 @@ impl Case {
     async fn write<T: Send + 'static>(
         &self,
         step: impl FnOnce(&SqlContext<'_, '_>) -> Result<T, SyncError> + Send + 'static,
-    ) -> Result<T, DbError> {
-        self.ana
-            .database()
-            .write(move |sql| step(&sql).map_err(|error| DbError::SyncStream(Box::new(error))))
-            .await
+    ) -> Result<T, SyncError> {
+        self.ana.database().write_as(move |sql| step(&sql)).await
     }
 
     /// Whether a write accepts the step; the write is rolled back.
@@ -106,15 +103,18 @@ impl Case {
         &self,
         step: impl FnOnce(&SqlContext<'_, '_>) -> Result<(), SyncError> + Send + 'static,
     ) -> bool {
-        let result: Result<(), DbError> = self
+        let result: Result<(), SyncError> = self
             .ana
             .database()
-            .write(move |sql| {
-                step(&sql).map_err(|error| DbError::SyncStream(Box::new(error)))?;
-                Err(DbError::SyncStream(Box::new(Probe)))
+            .write_as(move |sql| {
+                step(&sql)?;
+                Err(SyncError::Failed {
+                    failure: crate::LocalFailure::Operation,
+                    source: std::sync::Arc::new(Probe),
+                })
             })
             .await;
-        matches!(result, Err(DbError::SyncStream(error)) if error.is::<Probe>())
+        matches!(result, Err(SyncError::Failed { source, .. }) if source.is::<Probe>())
     }
 
     fn approve_step(

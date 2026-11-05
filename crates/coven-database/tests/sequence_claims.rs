@@ -58,7 +58,10 @@ async fn exact_attempts_and_claim_numbers_survive_reopening() {
     let id = operation(&db).await;
     let first = attempt(directory.id(), 1, b"first exact bytes");
     let expected = first.path.clone();
-    let claim = db.begin_claim(ClaimWork::Operation(id), move |_| Ok(first)).await.unwrap();
+    let claim = db
+        .begin_claim::<_, _, coven_database::DbError>(ClaimWork::Operation(id), move |_| Ok(first))
+        .await
+        .unwrap();
     assert_eq!(claim.number, 1);
     db.close().await.unwrap();
     let db = builder(directory.clone()).open().await.unwrap();
@@ -97,7 +100,12 @@ async fn exact_attempts_and_claim_numbers_survive_reopening() {
     let id = operation(&db).await;
     let next = attempt(directory.id(), 3, b"third");
     assert_eq!(
-        db.begin_claim(ClaimWork::Operation(id), move |_| Ok(next)).await.unwrap().number,
+        db.begin_claim::<_, _, coven_database::DbError>(ClaimWork::Operation(id), move |_| Ok(
+            next
+        ))
+        .await
+        .unwrap()
+        .number,
         2
     );
     db.close().await.unwrap();
@@ -119,7 +127,11 @@ async fn compacted_claim_settlement_matches_sequence_settle_examples() {
         let (_temp, directory, db) = open().await;
         let id = operation(&db).await;
         let object = attempt(directory.id(), 3, b"claim one");
-        db.begin_claim(ClaimWork::Operation(id), move |_| Ok(object)).await.unwrap();
+        db.begin_claim::<_, _, coven_database::DbError>(ClaimWork::Operation(id), move |_| {
+            Ok(object)
+        })
+        .await
+        .unwrap();
         for (first, covers) in [(3, 5), (4, 2)] {
             assert!(db
                 .settle_claim(ClaimRead::Compacted { first, covers, last_claim: included, digest })
@@ -152,7 +164,11 @@ async fn terminal_settlement_survives_repeated_reads() {
         let (_temp, directory, db) = open().await;
         let id = operation(&db).await;
         let object = attempt(directory.id(), 1, b"attempt");
-        db.begin_claim(ClaimWork::Operation(id), move |_| Ok(object)).await.unwrap();
+        db.begin_claim::<_, _, coven_database::DbError>(ClaimWork::Operation(id), move |_| {
+            Ok(object)
+        })
+        .await
+        .unwrap();
         let result = db
             .settle_claim(ClaimRead::Kept(Some(bytes(if landed { b"attempt" } else { b"other" }))))
             .await
@@ -178,18 +194,19 @@ async fn writes_and_operations_share_the_counter_and_failed_sealing_reserves_not
         .unwrap()
         .unwrap();
     assert!(db
-        .begin_claim(ClaimWork::Writes(original.header.position.number), |_| Err::<
-            ClaimAttempt<std::io::Empty>,
-            _,
-        >(
-            coven_database::DbError::TransactionEnded
-        ))
+        .begin_claim::<_, _, coven_database::DbError>(
+            ClaimWork::Writes(original.header.position.number),
+            |_| Err::<ClaimAttempt<std::io::Empty>, _>(coven_database::DbError::TransactionEnded)
+        )
         .await
         .is_err());
     assert!(db.current_claim().await.unwrap().is_none());
     let object = attempt(directory.id(), 1, b"writes");
     let claim = db
-        .begin_claim(ClaimWork::Writes(original.header.position.number), move |_| Ok(object))
+        .begin_claim::<_, _, coven_database::DbError>(
+            ClaimWork::Writes(original.header.position.number),
+            move |_| Ok(object),
+        )
         .await
         .unwrap();
     assert_eq!(claim.number, 1);
@@ -213,17 +230,26 @@ async fn writes_and_operations_share_the_counter_and_failed_sealing_reserves_not
     let operation = operation(&db).await;
     let object = attempt(directory.id(), 2, b"admin");
     assert_eq!(
-        db.begin_claim(ClaimWork::Operation(operation), move |_| Ok(object)).await.unwrap().number,
+        db.begin_claim::<_, _, coven_database::DbError>(
+            ClaimWork::Operation(operation),
+            move |_| Ok(object)
+        )
+        .await
+        .unwrap()
+        .number,
         2
     );
     db.settle_claim(ClaimRead::Kept(Some(bytes(b"admin")))).await.unwrap();
     db.finish_claim(None).await.unwrap();
     let object = attempt(directory.id(), 3, b"writes again");
     assert_eq!(
-        db.begin_claim(ClaimWork::Writes(original.header.position.number), move |_| Ok(object))
-            .await
-            .unwrap()
-            .number,
+        db.begin_claim::<_, _, coven_database::DbError>(
+            ClaimWork::Writes(original.header.position.number),
+            move |_| Ok(object)
+        )
+        .await
+        .unwrap()
+        .number,
         3
     );
     db.settle_claim(ClaimRead::Kept(Some(bytes(b"writes again")))).await.unwrap();
@@ -241,7 +267,9 @@ async fn different_bytes_at_an_attempted_path_are_contention() {
     let (_temp, directory, db) = open().await;
     let id = operation(&db).await;
     let first = attempt(directory.id(), 1, b"ours");
-    db.begin_claim(ClaimWork::Operation(id), move |_| Ok(first)).await.unwrap();
+    db.begin_claim::<_, _, coven_database::DbError>(ClaimWork::Operation(id), move |_| Ok(first))
+        .await
+        .unwrap();
     assert!(db.attempted_claim(attempt(directory.id(), 1, b"theirs").path).await.unwrap());
     assert!(!db.attempted_claim(attempt(directory.id(), 2, b"ours").path).await.unwrap());
     db.close().await.unwrap();
@@ -272,16 +300,18 @@ async fn claim_streams_are_bounded_and_failed_reads_preserve_the_journal() {
     let path = attempt(directory.id(), 1, b"").path;
     let failed_path = path.clone();
     assert!(db
-        .begin_claim(ClaimWork::Operation(id), move |_| Ok(ClaimAttempt {
-            path: failed_path,
-            bytes: Box::new(BoundedBytes { remaining: length, fail_at_end: true }),
-        }))
+        .begin_claim::<_, _, coven_database::DbError>(ClaimWork::Operation(id), move |_| Ok(
+            ClaimAttempt {
+                path: failed_path,
+                bytes: Box::new(BoundedBytes { remaining: length, fail_at_end: true }),
+            }
+        ))
         .await
         .is_err());
     assert!(db.current_claim().await.unwrap().is_none());
     assert!(!db.attempted_claim(path.clone()).await.unwrap());
     let claim = db
-        .begin_claim(ClaimWork::Operation(id), move |_| {
+        .begin_claim::<_, _, coven_database::DbError>(ClaimWork::Operation(id), move |_| {
             Ok(ClaimAttempt {
                 path,
                 bytes: Box::new(BoundedBytes { remaining: length, fail_at_end: false }),
@@ -333,7 +363,9 @@ async fn transfer_ranges_and_confirmed_session_survive_reopening() {
     let content: Vec<u8> =
         (0..(3 * coven_format::chunks::CHUNK_SIZE + 19)).map(|index| (index % 251) as u8).collect();
     let object = attempt(directory.id(), 1, &content);
-    db.begin_claim(ClaimWork::Operation(id), move |_| Ok(object)).await.unwrap();
+    db.begin_claim::<_, _, coven_database::DbError>(ClaimWork::Operation(id), move |_| Ok(object))
+        .await
+        .unwrap();
     db.save_claim_upload(b"provider-confirmed-session".to_vec()).await.unwrap();
     db.close().await.unwrap();
     let db = builder(directory).open().await.unwrap();
@@ -369,16 +401,19 @@ async fn claim_sealing_and_streaming_leave_the_app_writer_available() {
         let claim_db = db.clone();
         let claim = tokio::spawn(async move {
             claim_db
-                .begin_claim(ClaimWork::Operation(operation), move |_| {
-                    let mut bytes = HeldBytes { entered: Some(entered), resume, sent: false };
-                    if during_seal {
-                        bytes.wait();
-                    }
-                    Ok(ClaimAttempt {
-                        path: ObjectPath::slot(directory.id(), 1.try_into().unwrap()),
-                        bytes,
-                    })
-                })
+                .begin_claim::<_, _, coven_database::DbError>(
+                    ClaimWork::Operation(operation),
+                    move |_| {
+                        let mut bytes = HeldBytes { entered: Some(entered), resume, sent: false };
+                        if during_seal {
+                            bytes.wait();
+                        }
+                        Ok(ClaimAttempt {
+                            path: ObjectPath::slot(directory.id(), 1.try_into().unwrap()),
+                            bytes,
+                        })
+                    },
+                )
                 .await
         });
         started.await.unwrap();

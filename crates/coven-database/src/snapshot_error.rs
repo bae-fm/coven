@@ -40,6 +40,16 @@ pub enum SnapshotError {
     /// Individually valid records disagree with one another or the schema.
     #[error("inconsistent snapshot: {0}")]
     Inconsistent(&'static str),
+    /// Another member's write that the snapshot carries does not
+    /// authenticate: its sealed header does not open with the store key its
+    /// prefix names, or its header signature does not verify (D9).
+    #[error("snapshot write evidence does not authenticate: {0}")]
+    Unauthentic(#[source] coven_crypto::CryptoError),
+    /// Another member's write that the snapshot carries names a device that,
+    /// at the write's read-through, did not belong to a member of every
+    /// audience the write has a part of (D9).
+    #[error("snapshot write evidence names an author who could not write it")]
+    Unauthorized,
 }
 
 pub(crate) fn invalid(reason: &'static str) -> crate::DbError {

@@ -160,15 +160,13 @@ impl InviteWork {
     fn naming(
         record: &OperationRecord,
         state: impl FnOnce(OperationId) -> InviteState + Send + 'static,
-    ) -> impl FnOnce(OperationId) -> Result<coven_database::OperationUpdate, coven_database::DbError>
-           + Send
-           + 'static {
+    ) -> impl FnOnce(OperationId) -> Result<coven_database::OperationUpdate, SyncError> + Send + 'static
+    {
         let record = record.clone();
         move |child| {
-            let encoded = |error| coven_database::DbError::SyncStream(Box::new(error));
-            let mut work = InviteWork::read(&record).map_err(encoded)?;
+            let mut work = InviteWork::read(&record)?;
             work.state = state(child);
-            work.update(&record).map_err(encoded)
+            work.update(&record)
         }
     }
 
@@ -573,9 +571,7 @@ impl SequenceSync {
                             self.database
                                 .start_operation_advancing(binding, move |binding| {
                                     work.state = InviteState::Approving { code, request, binding };
-                                    work.update(&record).map_err(|error| {
-                                        coven_database::DbError::SyncStream(Box::new(error))
-                                    })
+                                    work.update(&record)
                                 })
                                 .await?;
                         }

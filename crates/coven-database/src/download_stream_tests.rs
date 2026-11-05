@@ -160,9 +160,7 @@ async fn authentication_failure_rolls_back_rows_slot_losses_and_observation() {
     let record = records(&a).remove(0);
     let before = crate::tests::data(&b, Audience::Store);
     assert!(b
-        .receive_stream(stream(&record), || Err(DbError::SyncStream(Box::new(
-            std::io::Error::other("bad signature")
-        ))))
+        .receive_stream(stream(&record), || Err(crate::SnapshotError::Unauthorized.into()))
         .await
         .is_err());
     assert_eq!(count(&b, "notes"), 0);

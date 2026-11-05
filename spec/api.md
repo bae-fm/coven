@@ -1536,14 +1536,15 @@ pub enum DbError {
     /// The system refused the thread that checkpoints the store's WAL, so
     /// the store did not open (§4).
     CheckpointerThread(std::io::Error),
-    /// A pending record, its subject or the sync status could not be
-    /// encoded, or a stored pending record could not be decoded as the
-    /// requested record type (E5).
+    /// Reading a claim's sealed bytes to retain them failed, and the claim's
+    /// transaction did not commit (§11).
+    ClaimRead(std::io::Error),
+    /// A pending record, its subject, the sync status or an operation's data
+    /// could not be encoded, or a stored pending record could not be decoded
+    /// as the requested record type (E5).
     StateEncoding(serde_json::Error),
-    /// Sync's part of a database transaction failed, keeping sync's own typed
-    /// cause, and the transaction did not commit: a streamed transfer's
-    /// producer or final authentication check, or the schema publication
-    /// operation a migration commits with (§18.3, E13).
+    /// A sync step failed inside an app's write, which did not commit, or
+    /// while the store opened, keeping sync's own typed cause (E1, E3).
     SyncStream(Box<dyn std::error::Error + Send + Sync>),
     /// Closing failed for these connections, after every one was tried (E1).
     Closing { failures: Vec<DbError> },
@@ -1628,6 +1629,14 @@ pub enum SnapshotError {
     KeyUnavailable { audience: Audience, key: KeyId },
     /// Individually valid records disagree with one another or the schema.
     Inconsistent(&'static str),
+    /// Another member's write the snapshot carries does not authenticate:
+    /// its header does not open with the key its prefix names, or its
+    /// signature does not verify (D9).
+    Unauthentic(CryptoError),
+    /// Another member's write the snapshot carries names a device whose
+    /// member, at the write's read-through, could not write every part it
+    /// has (D9).
+    Unauthorized,
 }
 
 /// What a downloaded write waits for before it can apply (§5.4, §19.1).
@@ -6487,6 +6496,10 @@ pub enum FileReadError {
     /// The write committing a prepared pin failed other than in the
     /// database, as in a failed rollback, keeping its cause (§17.8).
     Write(Box<CovenError>),
+    /// Recording what a read or an upload settled failed in sync's own work,
+    /// as a retry wait the clock can't hold, keeping its cause; a failed read
+    /// whose failure couldn't be recorded keeps both (§17.9).
+    Sync(Box<SyncError>),
     /// The read's work panicked: a bug (E15). A record of it fails as
     /// `LocalFailure::Bug`.
     Bug(Bug),

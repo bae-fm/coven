@@ -769,9 +769,8 @@ impl SequenceSync {
                 },
                 &held,
                 &author,
-            )
-            .map_err(|error| coven_database::DbError::SyncStream(Box::new(error)))?;
-            Ok(ClaimAttempt { path, bytes: Cursor::new(bytes) })
+            )?;
+            Ok::<_, SyncError>(ClaimAttempt { path, bytes: Cursor::new(bytes) })
         };
         if let Some(claim) = self.database.current_claim().await? {
             self.database.retry_claim(seal(claim.number)?).await?;

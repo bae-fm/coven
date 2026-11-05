@@ -167,11 +167,7 @@ async fn an_expiry_after_a_decision_writes_nothing() {
     let steps = ana.sync.operation_steps();
     ana.sync
         .database
-        .write(move |sql| {
-            steps
-                .decline_join_request(&sql, &request)
-                .map_err(|error| DbError::SyncStream(Box::new(error)))
-        })
+        .write_as(move |sql| steps.decline_join_request(&sql, &request))
         .await
         .unwrap();
     let declined = ana.database().first_operation(operation_kind::INVITE).await.unwrap().unwrap();

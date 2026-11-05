@@ -59,14 +59,14 @@ impl Database {
     /// transaction: `update` builds the step from the new operation's id. A
     /// parent that journals a child this way never loses track of it, nor
     /// starts a second one, whenever it stops.
-    pub async fn start_operation_advancing(
+    pub async fn start_operation_advancing<E: crate::WriteFailure + Send + 'static>(
         &self,
         operation: NewOperation,
-        update: impl FnOnce(OperationId) -> Result<OperationUpdate, DbError> + Send + 'static,
-    ) -> Result<OperationId, DbError> {
+        update: impl FnOnce(OperationId) -> Result<OperationUpdate, E> + Send + 'static,
+    ) -> Result<OperationId, E> {
         self.call(move |inner| {
             inner.access.with_writer(|writer| {
-                writer.transaction(|db| {
+                writer.transaction_as(|db| {
                     let id = crate::operation::insert(db, &operation)?;
                     crate::operation::advance(db, &update(id)?)?;
                     Ok(id)
