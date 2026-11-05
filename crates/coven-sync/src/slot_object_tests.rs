@@ -211,3 +211,81 @@ fn slot_one_is_verified_with_the_key_it_carries() {
         .copy_from_slice(impostor.sign_object(path.as_str(), &hash.finish()).as_bytes());
     assert!(open_bounded(forged, &path, &ring, &History::default()).is_err());
 }
+
+/// A writes slot's clear prefix names only its kind, format and sealing store
+/// key. The slot's device and claim number, and which audiences a write's
+/// parts belong to, are in headers encrypted under the store key: every member
+/// can read them before deciding which parts to open, and the provider can't
+/// (§12).
+#[tokio::test]
+async fn a_writes_slots_device_claim_and_audiences_are_under_the_store_key() {
+    let group = Group::new();
+    let ana = group.device(1).await;
+    let reader = group.device(2).await;
+    group.create(&ana).await;
+    let gifts = ana.sync.create_circle("Gifts".into()).await.unwrap();
+    ana.database()
+        .write(move |sql| {
+            sql.execute("INSERT INTO notes VALUES('n','a store part')", ())?;
+            sql.execute(
+                "INSERT INTO pins VALUES('00000000-0000-4000-8000-000000000001',?1,'a circle part')",
+                (gifts.to_string(),),
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    ana.sync.pass().await.unwrap();
+    let last = ana.database().applied_slot().await.unwrap();
+    let path = ObjectPath::slot(group.store, NonZeroU64::new(last).unwrap());
+    let bytes = coven_storage::Storage::read(&group.storage, &path).await.unwrap();
+
+    let store_key = group.ring.store_key_ids().next().unwrap();
+    let length = SlotObjectPrefix::length(&bytes).unwrap();
+    let prefix = SlotObjectPrefix::decode(&bytes[..length]).unwrap();
+    assert_eq!(
+        prefix,
+        SlotObjectPrefix { format: FormatVersion::CURRENT, key: store_key, kind: SlotKind::Writes }
+    );
+    let circle_id = gifts.0.as_bytes();
+    assert!(!bytes.windows(circle_id.len()).any(|window| window == circle_id));
+
+    let slot = |number| ObjectPath::slot(group.store, NonZeroU64::new(number).unwrap());
+    let mut history = History::default();
+    for number in 1..last {
+        let earlier = coven_storage::Storage::read(&group.storage, &slot(number)).await.unwrap();
+        let received = open_bounded(earlier, &slot(number), &group.ring, &history).unwrap();
+        history.consume(received, ana.identity.member());
+    }
+    let size = bytes.len() as u64;
+    let input = reader
+        .database()
+        .observe_input(path.as_str().into(), vec![9], Vec::new(), false)
+        .await
+        .unwrap()
+        .unwrap();
+    input.keep_range(0, bytes).await.unwrap();
+    let opened =
+        open(input.local_bytes(size).await.unwrap(), &path, &group.ring, &history, |audience| {
+            matches!(audience, Audience::Store)
+        })
+        .unwrap();
+    let (envelope, body) = opened.into_parts();
+    let SlotBody::Writes { writes, .. } = body else { panic!("a writes slot") };
+    assert_eq!(envelope.header.device, writes[0].header.header.position.device);
+    assert!(envelope.header.claim > 0);
+    let audiences: Vec<_> =
+        writes[0].header.parts.iter().map(|part| part.audience.clone()).collect();
+    assert_eq!(audiences, [Audience::Store, Audience::Circle(gifts)]);
+
+    // Without the store key that sealed it, nothing in the body is read.
+    let other = StoreKeyring::new(coven_crypto::StoreKey::from_bytes(
+        coven_foundation::id_source::KeyId(uuid::Uuid::from_u128(77)),
+        [5; 32],
+    ));
+    let refused = open(input.local_bytes(size).await.unwrap(), &path, &other, &history, |_| true);
+    assert!(matches!(refused, Err(SyncError::KeyUnavailable(key)) if key == store_key));
+    for device in [&ana, &reader] {
+        device.database().close().await.unwrap();
+    }
+}
