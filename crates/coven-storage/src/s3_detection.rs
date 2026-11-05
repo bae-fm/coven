@@ -4,7 +4,7 @@
 use crate::{
     S3BucketVersioning, S3Checksums, S3CopyCondition, S3CopyPublication, S3Listing,
     S3MultipartTimestamp, S3Profile, S3ResponseHeaders, S3Revision, S3Settings, S3Signing,
-    S3SinglePut, StorageCheck, StorageConfig, StorageError, StorageFailure, StorageSetupError,
+    S3SinglePut, StorageCheck, StorageCheckError, StorageConfig, StorageError, StorageFailure,
 };
 use std::sync::Arc;
 
@@ -145,9 +145,9 @@ impl S3Detection {
     /// Refuses settings that contradict the results, naming the first
     /// failed check as setup would: CreateOnce, MultipartCreateOnce,
     /// PublicationTime, then Behavior.
-    pub fn check(&self, settings: &S3Settings) -> Result<(), StorageSetupError> {
+    pub fn check(&self, settings: &S3Settings) -> Result<(), StorageCheckError> {
         let fail = |check, reason: &'static str| {
-            Err(StorageSetupError::ProviderCheck {
+            Err(StorageCheckError::ProviderCheck {
                 check,
                 source: StorageFailure::Protocol.with_source(reason),
             })
@@ -229,7 +229,7 @@ impl S3Detection {
     /// The location setup records, after checking versioning support and its effective settings:
     /// an uncatalogued endpoint naming no profile gets these detected
     /// settings as its custom profile; any other location is kept as given.
-    pub fn resolve(&self, location: StorageConfig) -> Result<StorageConfig, StorageSetupError> {
+    pub fn resolve(&self, location: StorageConfig) -> Result<StorageConfig, StorageCheckError> {
         let StorageConfig::S3 { bucket, region, endpoint, profile, prefix } = location else {
             return Err(StorageFailure::InvalidConfiguration
                 .with_source("expected S3 configuration")

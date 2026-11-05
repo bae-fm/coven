@@ -1,4 +1,5 @@
 use super::*;
+use crate::providers::OAuthError;
 use std::error::Error;
 
 #[test]
@@ -25,28 +26,8 @@ fn encoding_preserves_an_opaque_cause() {
     assert_eq!(source.to_string(), "invalid encoded data");
 }
 
-#[test]
-fn setup_preserves_sign_in_and_custody_causes() {
-    let network = StorageError::Provider {
-        provider: CloudProvider::Dropbox,
-        failure: StorageFailure::Network,
-        source: Box::new(std::io::Error::new(std::io::ErrorKind::TimedOut, "token endpoint")),
-    };
-    let setup = StorageSetupError::from(OAuthError::Storage(network));
-    let StorageSetupError::OAuth(OAuthError::Storage(error)) = setup else {
-        panic!("sign-in cause was lost")
-    };
-    assert_eq!(error.failure(), StorageFailure::Network);
-    assert_eq!(
-        error.source().unwrap().downcast_ref::<std::io::Error>().unwrap().kind(),
-        std::io::ErrorKind::TimedOut,
-    );
-    let setup = StorageSetupError::from(KeyError::Unsupported);
-    assert!(matches!(setup, StorageSetupError::SecureStorage(KeyError::Unsupported)));
-}
-
 /// A panic in a provider request's local work is the request's bug,
-/// classified `Bug`, not a file failure; setup and sign-in carry it.
+/// classified `Bug`, not a file failure; sign-in carries it.
 #[test]
 fn a_bug_in_a_requests_file_work_is_storages_bug() {
     use coven_foundation::task::{Bug, CarriesBug};
@@ -59,11 +40,5 @@ fn a_bug_in_a_requests_file_work_is_storages_bug() {
         cleanup: Box::new(storage()),
     };
     assert_eq!(cleanup.bug(), Some(&bug));
-    assert!(
-        matches!(StorageSetupError::from(storage()), StorageSetupError::Bug(found) if found == bug)
-    );
-    assert!(
-        matches!(StorageSetupError::from(KeyError::Bug(bug.clone())), StorageSetupError::Bug(found) if found == bug)
-    );
     assert_eq!(OAuthError::Storage(storage()).bug(), Some(&bug));
 }

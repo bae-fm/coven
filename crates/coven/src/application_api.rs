@@ -11,7 +11,8 @@ pub use crate::coven_write::CovenWrite;
 #[cfg(feature = "dev-tools")]
 pub use crate::dev_tools::empty_s3_prefix;
 pub use crate::error::{
-    ReadOnlyOpenError, StoreCreationError, StoreDeletionError, StoreKeyUnlockError,
+    ReadOnlyOpenError, StorageSetupError, StoreCreationError, StoreDeletionError,
+    StoreKeyUnlockError,
 };
 pub use crate::handle::{Circles, CovenHandle, IfUnsent};
 pub use crate::read_handle::CovenReadHandle;
@@ -106,7 +107,7 @@ pub use coven_storage::{
     StorageConfig, StorageError, StorageFailure, StoredObject,
 };
 pub use coven_storage::{ProviderSignOut, RetainedAccess, RetainedAccessReason};
-pub use coven_storage::{StorageCheck, StorageSetupError};
+pub use coven_storage::{StorageCheck, StorageCheckError};
 pub use coven_sync::{
     decode_code_info, CodeError, CodeInfo, CodeKind, CodeMetadata, InviteInfo, UnreadableSavedCode,
 };

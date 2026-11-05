@@ -8539,8 +8539,9 @@ saw only one writer's bytes. Sequential setup probes passed that same bucket.
 So a versioned bucket needs its own certification. Setup reads the bucket's
 versioning state. `Enabled` or `Suspended` requires the selected profile to hold
 a passing certification with versioning on; otherwise setup refuses with
-`StorageSetupError::S3VersioningUnsupported`. Detected and custom settings never
-inherit this certification, even when they equal a known profile's settings.
+`StorageSetupError::Check(StorageCheckError::S3VersioningUnsupported)`.
+Detected and custom settings never inherit this certification, even when they
+equal a known profile's settings.
 
 Setup never changes the owner's versioning setting. The owner must keep the
 bucket in a supported state while it holds the store; every setup reads it
@@ -8586,7 +8587,8 @@ the real server catches what a service's claims and its profile can't.
 On S3 the **safety check** runs first. Detection runs, and whatever chose the
 settings, detected, named or custom, they must agree with what detection observed.
 After the versioning check (§20.7), setup refuses with
-`StorageSetupError::ProviderCheck`, naming the first failed check in this order:
+`StorageSetupError::Check(StorageCheckError::ProviderCheck)`, naming the
+first failed check in this order:
 
 | Check | Fails when |
 |---|---|
@@ -11073,9 +11075,9 @@ pass's failure, kept for its retry.
 | `StorageFailure::OwnLocationRequired { reason: Prefix }` | a bucket-scoped S3 service's location has a base prefix | §20.3, §20.7 |
 | `OwnLocationRequired { reason: Occupied }` | at first setup, the location of a store that needs its own (a Dropbox shared folder, a OneDrive folder, or a bucket-scoped S3 service's bucket) holds anything besides the store's own folder and the location marker, or the marker `coven-location` names another store; on reconnecting, restoring or joining, the marker is missing, malformed or names another store | §20.3 |
 | `InvalidConfiguration` | an S3 location contradicts its host, or has an unknown host outside setup | §20.7, E.3 |
-| `StorageSetupError::S3VersioningUnsupported` | a versioned bucket without a versioned certification | §20.7, E.9 |
+| `StorageCheckError::S3VersioningUnsupported` | a versioned bucket without a versioned certification | §20.7, E.9 |
 | `S3VersioningUnknown` | an uncertified profile can't read the bucket's versioning state | E.9 |
 | `Unavailable` | R2's documented lack of versioning, at R2's known host | E.9 |
-| `StorageSetupError::ProviderCheck` | the S3 safety check failed, naming the first failed of `CreateOnce`, `MultipartCreateOnce`, `PublicationTime` and `Behavior` | §20.8, E.8 |
+| `StorageCheckError::ProviderCheck` | the S3 safety check failed, naming the first failed of `CreateOnce`, `MultipartCreateOnce`, `PublicationTime` and `Behavior` | §20.8, E.8 |
 | `StorageFailure::CopyTooLarge` | an object past 5 GiB on a profile that publishes by S3 copy | §20.6 |
 | `ClockSkew` | a request still fails for clock skew after one retry with the server's offset | §20.7 |

@@ -123,13 +123,13 @@ async fn versioning_refusal_commits_nothing_and_preserves_an_existing_connection
     for state in [S3BucketVersioning::Enabled, S3BucketVersioning::Suspended] {
         *connector.versioning.lock().unwrap() = Ok(state);
         assert!(
-            matches!(setup(&opened.handle, location.clone()).await.unwrap_err(), StorageSetupError::S3VersioningUnsupported { state: actual } if actual == state)
+            matches!(setup(&opened.handle, location.clone()).await.unwrap_err(), StorageSetupError::Check(StorageCheckError::S3VersioningUnsupported { state: actual }) if actual == state)
         );
     }
     *connector.versioning.lock().unwrap() = Err(Arc::new(StorageFailure::PermissionDenied.into()));
     assert!(matches!(
         setup(&opened.handle, location.clone()).await.unwrap_err(),
-        StorageSetupError::S3VersioningUnknown { .. }
+        StorageSetupError::Check(StorageCheckError::S3VersioningUnknown { .. })
     ));
     assert_eq!(storage.request_count(), 0);
     assert_eq!(coven_storage::recorded_config(&opened.directory).unwrap(), None);
@@ -139,7 +139,7 @@ async fn versioning_refusal_commits_nothing_and_preserves_an_existing_connection
     *connector.versioning.lock().unwrap() = Ok(S3BucketVersioning::Enabled);
     assert!(matches!(
         setup(&opened.handle, location.clone()).await.unwrap_err(),
-        StorageSetupError::S3VersioningUnsupported { .. }
+        StorageSetupError::Check(StorageCheckError::S3VersioningUnsupported { .. })
     ));
     assert_eq!(storage.request_count(), before);
     assert_eq!(coven_storage::recorded_config(&opened.directory).unwrap(), Some(location));
@@ -214,10 +214,10 @@ async fn a_server_that_overwrites_occupied_names_is_refused_before_anything_is_c
         assert!(
             matches!(
                 &error,
-                StorageSetupError::ProviderCheck {
+                StorageSetupError::Check(StorageCheckError::ProviderCheck {
                     check: StorageCheck::CreateOnce,
                     source,
-                } if source.failure() == StorageFailure::Protocol
+                }) if source.failure() == StorageFailure::Protocol
             ),
             "{error:?}"
         );
@@ -444,7 +444,7 @@ async fn setup_fails_once_its_minute_of_rate_limit_waits_is_spent() {
     let error = setup_through_waits(&f).await.unwrap_err();
     // The first request is the provider check's create.
     assert!(
-        matches!(&error, StorageSetupError::ProviderCheck { check: StorageCheck::Create, source }
+        matches!(&error, StorageSetupError::Check(StorageCheckError::ProviderCheck { check: StorageCheck::Create, source })
             if source.failure() == StorageFailure::RateLimited),
         "{error:?}"
     );

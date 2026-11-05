@@ -1,6 +1,6 @@
 use crate::{
-    ByteRange, ObjectPath, ObjectPrefix, Storage, StorageCheck, StorageError, StorageFailure,
-    StorageSetupError,
+    ByteRange, ObjectPath, ObjectPrefix, Storage, StorageCheck, StorageCheckError, StorageError,
+    StorageFailure,
 };
 
 /// Check a candidate provider before reserving or publishing setup state.
@@ -16,7 +16,7 @@ pub async fn check_provider(
     storage: &crate::StorageConnection<impl crate::ProviderOps + ?Sized>,
     path: &ObjectPath,
     encrypted_bytes: &[u8],
-) -> Result<(), StorageSetupError> {
+) -> Result<(), StorageCheckError> {
     let end = encrypted_bytes
         .len()
         .checked_sub(1)
@@ -24,7 +24,7 @@ pub async fn check_provider(
     let range = ByteRange::new(1, end as u64)?;
     let created = storage.create(path, encrypted_bytes).await;
     if created.as_ref().is_err_and(|error| error.failure() == StorageFailure::AlreadyExists) {
-        return created.map(drop).map_err(|source| StorageSetupError::ProviderCheck {
+        return created.map(drop).map_err(|source| StorageCheckError::ProviderCheck {
             check: StorageCheck::Create,
             source,
         });
@@ -97,7 +97,7 @@ pub async fn check_provider(
         check = StorageCheck::Delete;
     }
     crate::transfer::with_cleanup(result, cleanup)
-        .map_err(|source| StorageSetupError::ProviderCheck { check, source })
+        .map_err(|source| StorageCheckError::ProviderCheck { check, source })
 }
 
 #[cfg(test)]

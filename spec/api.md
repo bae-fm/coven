@@ -3907,7 +3907,7 @@ while let Some(Ok(values)) = lost.next().await {
   Listings may lag; check the probe's metadata when it appears.
   Cleanup runs even after a lost create reply;
   a path already occupied before the check is left untouched. A failed check
-  returns `StorageSetupError::ProviderCheck`, naming the operation and its
+  returns `StorageSetupError::Check(StorageCheckError::ProviderCheck)`, naming the operation and its
   classified cause; the error retains a cleanup failure too if both fail.
   It also checks conditional replacement for the floor: a matching revision
   succeeds and a stale revision changes nothing. A request refused as
@@ -4448,11 +4448,11 @@ impl S3Detection {
     /// Refuses settings that contradict the results, naming the first
     /// failed check as setup would: CreateOnce, MultipartCreateOnce,
     /// PublicationTime, then Behavior.
-    pub fn check(&self, settings: &S3Settings) -> Result<(), StorageSetupError>;
+    pub fn check(&self, settings: &S3Settings) -> Result<(), StorageCheckError>;
     /// The location setup records, after checking versioning support and its effective settings:
     /// an unrecognized endpoint naming no profile gets these settings as its
     /// custom profile; any other location is kept as given.
-    pub fn resolve(&self, location: StorageConfig) -> Result<StorageConfig, StorageSetupError>;
+    pub fn resolve(&self, location: StorageConfig) -> Result<StorageConfig, StorageCheckError>;
 }
 
 pub struct S3ProbeResult {
@@ -4744,14 +4744,23 @@ impl ProviderResponse {
     pub fn body(&self) -> &[u8];
 }
 
-/// Storage setup failed before committing credentials and keys (E5).
-pub enum StorageSetupError {
+/// A provider or S3 settings check refused the location (E5).
+pub enum StorageCheckError {
     /// The profile has no certification with bucket versioning enabled.
     S3VersioningUnsupported { state: S3BucketVersioning },
     /// The bucket state is unknown and the profile has no versioning certification.
     S3VersioningUnknown { source: Arc<StorageError> },
     /// A provider check failed; cleanup failures retain both causes.
     ProviderCheck { check: StorageCheck, source: StorageError },
+    /// A classified storage failure.
+    Storage(StorageError),
+}
+
+/// Storage setup failed before committing credentials and keys (E5).
+pub enum StorageSetupError {
+    /// A provider or S3 settings check refused the location. A check's
+    /// storage failure is `Storage`, not `Check(Storage(..))`.
+    Check(StorageCheckError),
     /// An existing store cannot be relocated by setting up another location.
     LocationChangeUnsupported,
     /// The provider refused or failed setup.

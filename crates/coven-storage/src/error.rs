@@ -1,5 +1,4 @@
-use crate::{providers::OAuthError, CloudProvider};
-use coven_crypto::custody::KeyError;
+use crate::CloudProvider;
 
 /// Failures the app can distinguish and act on (Appendix F.5).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -271,9 +270,9 @@ pub enum StorageCheck {
     Behavior,
 }
 
-/// A failed setup commits no local storage settings or credentials.
+/// A provider or S3 settings check refused the location (§20.7, §20.8).
 #[derive(Debug, thiserror::Error)]
-pub enum StorageSetupError {
+pub enum StorageCheckError {
     /// This profile has no certification with bucket versioning enabled.
     #[error("S3 bucket versioning {state:?} is not certified for this profile")]
     S3VersioningUnsupported {
@@ -296,84 +295,24 @@ pub enum StorageSetupError {
         #[source]
         source: StorageError,
     },
-    /// Reconnecting cannot move an established store to another location.
-    #[error("storage location change is unsupported")]
-    LocationChangeUnsupported,
     /// A classified storage failure.
     #[error(transparent)]
     Storage(StorageError),
-    /// Sign-in failed or was cancelled before setup could connect.
-    #[error(transparent)]
-    OAuth(#[from] OAuthError),
-    /// The facade could not commit to key custody.
-    #[error("secure storage: {0}")]
-    SecureStorage(KeyError),
-    /// This device or its member was removed from the store (§14.1).
-    #[error("this device or its member was removed")]
-    Removed,
-    /// This member's account holds the store, and setup signed in with
-    /// another account. Their access stays on the account that holds it:
-    /// the person signs in with that one (§10.1, §20.9).
-    #[error("the store's owner must sign in with the account that holds it")]
-    StoreOwner,
-    /// The store needs a newer app schema or coven format (§18).
-    #[error("an update is required: {0:?}")]
-    UpdateRequired(coven_format::RequiredUpdate),
-    /// The app cancelled setup before its point of no return, and what it
-    /// had written was undone (§11.6).
-    #[error("storage setup was cancelled and undone")]
-    Cancelled,
-    /// A setup on this device is past its point of no return and still
-    /// finishing, so another can't start; starting sync finishes it (§11.6).
-    #[error("a storage setup is still finishing")]
-    SetupRunning,
-    /// A local setup step failed, retaining its cause.
-    #[error("storage setup: {0}")]
-    Internal(#[source] Box<dyn std::error::Error + Send + Sync>),
-    /// Setup's runtime is shutting down and dropped it partway, so how much
-    /// of it was saved is unknown (E15).
-    #[error(transparent)]
-    Shutdown(#[from] coven_foundation::task::Shutdown),
-    /// Setup panicked: a bug, which the caller reports (E15). How much of it
-    /// was saved is unknown.
-    #[error(transparent)]
-    Bug(#[from] coven_foundation::task::Bug),
 }
 
-impl coven_foundation::task::CarriesBug for StorageSetupError {
+impl coven_foundation::task::CarriesBug for StorageCheckError {
     fn bug(&self) -> Option<&coven_foundation::task::Bug> {
         match self {
-            Self::Bug(bug) => Some(bug),
-            Self::SecureStorage(error) => error.bug(),
             Self::Storage(error) | Self::ProviderCheck { source: error, .. } => error.bug(),
             Self::S3VersioningUnknown { source } => source.bug(),
-            Self::OAuth(error) => error.bug(),
-            _ => None,
+            Self::S3VersioningUnsupported { .. } => None,
         }
     }
 }
 
-impl From<StorageError> for StorageSetupError {
+impl From<StorageError> for StorageCheckError {
     fn from(error: StorageError) -> Self {
-        match error {
-            StorageError::Bug(bug) => Self::Bug(bug),
-            error => Self::Storage(error),
-        }
-    }
-}
-
-impl From<KeyError> for StorageSetupError {
-    fn from(error: KeyError) -> Self {
-        match error {
-            KeyError::Bug(bug) => Self::Bug(bug),
-            error => Self::SecureStorage(error),
-        }
-    }
-}
-
-impl From<coven_foundation::task::TaskFailed> for StorageSetupError {
-    fn from(failed: coven_foundation::task::TaskFailed) -> Self {
-        failed.into_error()
+        Self::Storage(error)
     }
 }
 

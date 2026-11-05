@@ -24,9 +24,9 @@ fn location(endpoint: Option<&str>, profile: Option<S3Profile>) -> StorageConfig
     }
 }
 
-fn failed(result: Result<(), StorageSetupError>) -> StorageCheck {
+fn failed(result: Result<(), StorageCheckError>) -> StorageCheck {
     match result {
-        Err(StorageSetupError::ProviderCheck { check, source }) => {
+        Err(StorageCheckError::ProviderCheck { check, source }) => {
             assert_eq!(source.failure(), StorageFailure::Protocol);
             check
         }
@@ -155,7 +155,7 @@ fn resolution_records_detected_settings_only_where_the_location_needs_them() {
     // AWS's catalogued settings need a conditional copy this service lacks.
     assert_eq!(
         match detection.resolve(location(None, None)) {
-            Err(StorageSetupError::ProviderCheck { check, .. }) => check,
+            Err(StorageCheckError::ProviderCheck { check, .. }) => check,
             other => panic!("{other:?}"),
         },
         StorageCheck::MultipartCreateOnce
@@ -165,7 +165,7 @@ fn resolution_records_detected_settings_only_where_the_location_needs_them() {
             Some("https://storage.googleapis.com"),
             Some(S3Profile::Custom(SERVICE))
         )),
-        Err(StorageSetupError::Storage(error))
+        Err(StorageCheckError::Storage(error))
             if error.failure() == StorageFailure::InvalidConfiguration
     ));
     assert!(detection

@@ -102,14 +102,14 @@ fn uncertified_profiles_refuse_enabled_suspended_and_unknown_buckets() {
     for selected in profiles {
         for state in [S3BucketVersioning::Enabled, S3BucketVersioning::Suspended] {
             assert!(
-                matches!(check(Some(&endpoint), selected.as_ref(), &Ok(state)), Err(StorageSetupError::S3VersioningUnsupported { state: observed }) if observed == state)
+                matches!(check(Some(&endpoint), selected.as_ref(), &Ok(state)), Err(StorageCheckError::S3VersioningUnsupported { state: observed }) if observed == state)
             );
         }
         let cause = Arc::new(
             StorageFailure::PermissionDenied.with_source("member lacks bucket metadata permission"),
         );
         match check(Some(&endpoint), selected.as_ref(), &Err(cause.clone())).unwrap_err() {
-            StorageSetupError::S3VersioningUnknown { source } => {
+            StorageCheckError::S3VersioningUnknown { source } => {
                 assert!(Arc::ptr_eq(&source, &cause))
             }
             other => panic!("{other}"),
@@ -144,7 +144,7 @@ fn versioned_certification_admits_enabled_suspended_and_unknown_buckets() {
                 Some(&S3Profile::Custom(entry.settings)),
                 &Ok(S3BucketVersioning::Enabled)
             ),
-            Err(StorageSetupError::S3VersioningUnsupported { .. })
+            Err(StorageCheckError::S3VersioningUnsupported { .. })
         ));
     }
 }

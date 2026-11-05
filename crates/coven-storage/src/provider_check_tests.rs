@@ -11,7 +11,7 @@ async fn provider_check_preserves_an_occupied_path() {
     storage.create(&path, b"existing floor").await.unwrap();
     assert!(matches!(
         check_provider(&storage, &path, b"test bytes").await,
-        Err(StorageSetupError::ProviderCheck { check: StorageCheck::Create, source })
+        Err(StorageCheckError::ProviderCheck { check: StorageCheck::Create, source })
             if source.failure() == StorageFailure::AlreadyExists
     ));
     assert_eq!(storage.read(&path).await.unwrap(), b"existing floor");
@@ -22,7 +22,7 @@ async fn duplicate_upload_cleanup_failure_is_not_an_expected_refusal() {
     let storage = MemoryStorage::builder().transfer_limits(1024, 16).build().unwrap();
     storage.set_faults(Faults { fail_duplicate_cleanup: true, ..Faults::none() }).await;
     let path = ObjectPath::file(STORE_ID, DeviceId(1), FileId(uuid::Uuid::from_u128(1)));
-    let StorageSetupError::ProviderCheck {
+    let StorageCheckError::ProviderCheck {
         check: StorageCheck::CreateOnce,
         source: StorageError::Cleanup { operation, cleanup },
     } = check_provider(&storage, &path, b"sealed test bytes").await.unwrap_err()
@@ -117,7 +117,7 @@ async fn rate_limited_requests_are_sent_again_after_the_requested_wait_or_a_back
 async fn a_provider_that_keeps_limiting_fails_the_check_once_the_bound_is_spent() {
     let (storage, waits) = rate_limited(usize::MAX, None).await;
     let path = ObjectPath::file(STORE_ID, DeviceId(1), FileId(uuid::Uuid::from_u128(3)));
-    let StorageSetupError::ProviderCheck { check: StorageCheck::Create, source } =
+    let StorageCheckError::ProviderCheck { check: StorageCheck::Create, source } =
         check_provider(&storage, &path, b"sealed test bytes").await.unwrap_err()
     else {
         panic!("a rate-limited check named the wrong step");
@@ -130,7 +130,7 @@ async fn a_provider_that_keeps_limiting_fails_the_check_once_the_bound_is_spent(
     let error = check_provider(&storage, &path, b"sealed test bytes").await.unwrap_err();
     assert!(matches!(
         error,
-        StorageSetupError::ProviderCheck { check: StorageCheck::Create, source }
+        StorageCheckError::ProviderCheck { check: StorageCheck::Create, source }
             if source.failure() == StorageFailure::RateLimited
     ));
     assert!(waits.0.lock().unwrap().is_empty());
@@ -162,7 +162,7 @@ async fn a_connection_outside_setup_never_resends() {
     let path = ObjectPath::file(STORE_ID, DeviceId(1), FileId(uuid::Uuid::from_u128(5)));
     assert!(matches!(
         check_provider(&storage, &path, b"sealed test bytes").await,
-        Err(StorageSetupError::ProviderCheck { check: StorageCheck::Create, source })
+        Err(StorageCheckError::ProviderCheck { check: StorageCheck::Create, source })
             if source.failure() == StorageFailure::RateLimited
     ));
 }
@@ -189,7 +189,7 @@ async fn only_a_setup_calls_own_connection_resends() {
     storage.set_faults(limit()).await;
     assert!(matches!(
         check_provider(&storage, &path, b"sealed test bytes").await,
-        Err(StorageSetupError::ProviderCheck { check: StorageCheck::Create, source })
+        Err(StorageCheckError::ProviderCheck { check: StorageCheck::Create, source })
             if source.failure() == StorageFailure::RateLimited
     ));
 }

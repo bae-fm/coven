@@ -3,6 +3,52 @@ use crate::{StorageFailure, SyncFailure};
 use std::error::Error;
 
 #[test]
+fn setup_preserves_sign_in_and_custody_causes() {
+    let network = StorageError::Provider {
+        provider: crate::CloudProvider::Dropbox,
+        failure: StorageFailure::Network,
+        source: Box::new(std::io::Error::new(std::io::ErrorKind::TimedOut, "token endpoint")),
+    };
+    let setup = StorageSetupError::from(OAuthError::Storage(network));
+    let StorageSetupError::OAuth(OAuthError::Storage(error)) = setup else {
+        panic!("sign-in cause was lost")
+    };
+    assert_eq!(error.failure(), StorageFailure::Network);
+    assert_eq!(
+        error.source().unwrap().downcast_ref::<std::io::Error>().unwrap().kind(),
+        std::io::ErrorKind::TimedOut,
+    );
+    let setup = StorageSetupError::from(KeyError::Unsupported);
+    assert!(matches!(setup, StorageSetupError::SecureStorage(KeyError::Unsupported)));
+}
+
+/// A panic in a storage or custody call is setup's bug; a check's storage
+/// failure keeps one spelling, `Storage`.
+#[test]
+fn setup_classifies_a_bug_and_a_checks_storage_failure() {
+    use coven_foundation::task::Bug;
+    let bug = Bug { operation: "stage the asset", message: "it panicked".into() };
+    let storage = || StorageError::from(FileError::Bug(bug.clone()));
+    assert!(
+        matches!(StorageSetupError::from(storage()), StorageSetupError::Bug(found) if found == bug)
+    );
+    assert!(
+        matches!(StorageSetupError::from(KeyError::Bug(bug.clone())), StorageSetupError::Bug(found) if found == bug)
+    );
+    let check = StorageCheckError::from(StorageError::from(StorageFailure::Network));
+    assert!(matches!(
+        StorageSetupError::from(check),
+        StorageSetupError::Storage(error) if error.failure() == StorageFailure::Network
+    ));
+    let versioning =
+        StorageCheckError::S3VersioningUnsupported { state: crate::S3BucketVersioning::Enabled };
+    assert!(matches!(
+        StorageSetupError::from(versioning),
+        StorageSetupError::Check(StorageCheckError::S3VersioningUnsupported { .. })
+    ));
+}
+
+#[test]
 fn setup_unlock_and_sync_preserve_the_storage_classification_and_cause() {
     for failure in [
         StorageFailure::RateLimited,

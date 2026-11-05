@@ -71,15 +71,15 @@ pub(crate) fn check(
     endpoint: Option<&url::Url>,
     profile: Option<&S3Profile>,
     versioning: &Result<S3BucketVersioning, Arc<StorageError>>,
-) -> Result<(), StorageSetupError> {
+) -> Result<(), StorageCheckError> {
     let certified = certified(endpoint, profile)?;
     match versioning {
         Ok(S3BucketVersioning::Disabled | S3BucketVersioning::Unavailable) => Ok(()),
         Ok(state) if !certified => {
-            Err(StorageSetupError::S3VersioningUnsupported { state: *state })
+            Err(StorageCheckError::S3VersioningUnsupported { state: *state })
         }
         Err(source) if !certified => {
-            Err(StorageSetupError::S3VersioningUnknown { source: source.clone() })
+            Err(StorageCheckError::S3VersioningUnknown { source: source.clone() })
         }
         Err(source) => {
             tracing::warn!(cause = %source, "S3 versioning unknown; profile certified with versioning enabled");

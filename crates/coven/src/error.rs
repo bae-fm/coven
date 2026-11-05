@@ -1,8 +1,107 @@
 //! Failures composing the store's directory, storage and custody capabilities.
 
 use crate::{
-    CryptoError, FileError, KeyError, StorageError, StorageSetupError, StoreLockError, SyncError,
+    CryptoError, FileError, KeyError, OAuthError, StorageCheckError, StorageError, StoreLockError,
+    SyncError,
 };
+
+/// A failed setup commits no local storage settings or credentials.
+#[derive(Debug, thiserror::Error)]
+pub enum StorageSetupError {
+    /// A provider or S3 settings check refused the location.
+    #[error(transparent)]
+    Check(StorageCheckError),
+    /// Reconnecting cannot move an established store to another location.
+    #[error("storage location change is unsupported")]
+    LocationChangeUnsupported,
+    /// A classified storage failure.
+    #[error(transparent)]
+    Storage(StorageError),
+    /// Sign-in failed or was cancelled before setup could connect.
+    #[error(transparent)]
+    OAuth(#[from] OAuthError),
+    /// The facade could not commit to key custody.
+    #[error("secure storage: {0}")]
+    SecureStorage(KeyError),
+    /// This device or its member was removed from the store (§14.1).
+    #[error("this device or its member was removed")]
+    Removed,
+    /// This member's account holds the store, and setup signed in with
+    /// another account. Their access stays on the account that holds it:
+    /// the person signs in with that one (§10.1, §20.9).
+    #[error("the store's owner must sign in with the account that holds it")]
+    StoreOwner,
+    /// The store needs a newer app schema or coven format (§18).
+    #[error("an update is required: {0:?}")]
+    UpdateRequired(coven_format::RequiredUpdate),
+    /// The app cancelled setup before its point of no return, and what it
+    /// had written was undone (§11.6).
+    #[error("storage setup was cancelled and undone")]
+    Cancelled,
+    /// A setup on this device is past its point of no return and still
+    /// finishing, so another can't start; starting sync finishes it (§11.6).
+    #[error("a storage setup is still finishing")]
+    SetupRunning,
+    /// A local setup step failed, retaining its cause.
+    #[error("storage setup: {0}")]
+    Internal(#[source] Box<dyn std::error::Error + Send + Sync>),
+    /// Setup's runtime is shutting down and dropped it partway, so how much
+    /// of it was saved is unknown (E15).
+    #[error(transparent)]
+    Shutdown(#[from] coven_foundation::task::Shutdown),
+    /// Setup panicked: a bug, which the caller reports (E15). How much of it
+    /// was saved is unknown.
+    #[error(transparent)]
+    Bug(#[from] coven_foundation::task::Bug),
+}
+
+impl coven_foundation::task::CarriesBug for StorageSetupError {
+    fn bug(&self) -> Option<&coven_foundation::task::Bug> {
+        match self {
+            Self::Bug(bug) => Some(bug),
+            Self::SecureStorage(error) => error.bug(),
+            Self::Storage(error) => error.bug(),
+            Self::Check(error) => error.bug(),
+            Self::OAuth(error) => error.bug(),
+            _ => None,
+        }
+    }
+}
+
+impl From<StorageError> for StorageSetupError {
+    fn from(error: StorageError) -> Self {
+        match error {
+            StorageError::Bug(bug) => Self::Bug(bug),
+            error => Self::Storage(error),
+        }
+    }
+}
+
+/// A storage failure keeps its one spelling, `Storage`; the other refusals
+/// are checks.
+impl From<StorageCheckError> for StorageSetupError {
+    fn from(error: StorageCheckError) -> Self {
+        match error {
+            StorageCheckError::Storage(error) => Self::from(error),
+            error => Self::Check(error),
+        }
+    }
+}
+
+impl From<KeyError> for StorageSetupError {
+    fn from(error: KeyError) -> Self {
+        match error {
+            KeyError::Bug(bug) => Self::Bug(bug),
+            error => Self::SecureStorage(error),
+        }
+    }
+}
+
+impl From<coven_foundation::task::TaskFailed> for StorageSetupError {
+    fn from(failed: coven_foundation::task::TaskFailed) -> Self {
+        failed.into_error()
+    }
+}
 
 /// Creating a store failed, with publication and rollback made explicit (E1).
 #[derive(Debug, thiserror::Error)]

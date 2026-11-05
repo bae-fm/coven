@@ -2,7 +2,7 @@
 //! behavior. Times are the test clock's seconds, which detection's waits move.
 use super::*;
 use crate::providers::tests::{query, response, TestServer};
-use crate::{S3Profile, S3ProfileName, StorageCheck, StorageSetupError};
+use crate::{S3Profile, S3ProfileName, StorageCheck, StorageCheckError};
 use axum::{
     body::{Body, Bytes},
     extract::State,
@@ -121,7 +121,7 @@ async fn versioned_uncertified_service_is_refused_even_when_sequential_checks_pa
     ] {
         assert!(matches!(
             detection.resolve(fixture.location(profile)),
-            Err(StorageSetupError::S3VersioningUnsupported { state: S3BucketVersioning::Enabled })
+            Err(StorageCheckError::S3VersioningUnsupported { state: S3BucketVersioning::Enabled })
         ));
     }
     fixture.assert_clean();
@@ -141,16 +141,16 @@ async fn unknown_versioning_refuses_setup_and_outages_stop_detection_before_writ
             assert!(detection.versioning.is_err());
             assert!(matches!(
                 detection.resolve(fixture.location(None)),
-                Err(StorageSetupError::S3VersioningUnknown { .. })
+                Err(StorageCheckError::S3VersioningUnknown { .. })
             ));
             fixture.assert_clean();
         }
     }
 }
 
-fn refused_check(result: Result<StorageConfig, StorageSetupError>) -> StorageCheck {
+fn refused_check(result: Result<StorageConfig, StorageCheckError>) -> StorageCheck {
     match result {
-        Err(StorageSetupError::ProviderCheck { check, source }) => {
+        Err(StorageCheckError::ProviderCheck { check, source }) => {
             assert_eq!(source.failure(), StorageFailure::Protocol);
             check
         }

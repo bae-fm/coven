@@ -875,7 +875,7 @@ async fn setup_rejects_overwriting_providers_before_committing() {
     let f = Fixture::new().await;
     f.storage.set_faults(Faults { overwrite_create: true, ..Faults::none() }).await;
     assert!(
-        matches!(f.setup().await.unwrap_err(), StorageSetupError::ProviderCheck { check: StorageCheck::CreateOnce, source } if source.failure() == StorageFailure::Protocol)
+        matches!(f.setup().await.unwrap_err(), StorageSetupError::Check(StorageCheckError::ProviderCheck { check: StorageCheck::CreateOnce, source }) if source.failure() == StorageFailure::Protocol)
     );
     assert_eq!(f.handle.store_key_state().unwrap(), StoreKeyState::Locked);
     assert!(matches!(f.handle.restore_code().await, Err(SyncError::NoStorage)));
@@ -919,7 +919,7 @@ async fn reconnect_checks_the_provider_and_preserves_the_previous_connection() {
         .await
         .unwrap_err();
     assert!(
-        matches!(error, StorageSetupError::ProviderCheck { check: StorageCheck::CreateOnce, source } if source.failure() == StorageFailure::Protocol)
+        matches!(error, StorageSetupError::Check(StorageCheckError::ProviderCheck { check: StorageCheck::CreateOnce, source }) if source.failure() == StorageFailure::Protocol)
     );
     assert_eq!(f.handle.restore_code().await.unwrap(), before);
     assert_eq!(coven_storage::recorded_config(&f.directory).unwrap(), location);
@@ -933,7 +933,7 @@ async fn reconnect_checks_the_provider_and_preserves_the_previous_connection() {
     f.lose_credentials().await;
     f.storage.set_faults(Faults { overwrite_create: true, ..Faults::none() }).await;
     assert!(
-        matches!(f.setup().await.unwrap_err(), StorageSetupError::ProviderCheck { check: StorageCheck::CreateOnce, source } if source.failure() == StorageFailure::Protocol)
+        matches!(f.setup().await.unwrap_err(), StorageSetupError::Check(StorageCheckError::ProviderCheck { check: StorageCheck::CreateOnce, source }) if source.failure() == StorageFailure::Protocol)
     );
     assert_eq!(f.handle.restore_code().await.unwrap(), before);
     assert_eq!(

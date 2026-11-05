@@ -533,12 +533,12 @@ async fn provider_check_cleans_up_after_a_lost_create_reply_and_retains_both_fai
     state.lock().unwrap().lose_create_reply = true;
     assert!(matches!(check_provider(&storage, &path, b"sealed test bytes")
             .await
-            .unwrap_err(), StorageSetupError::ProviderCheck { check: StorageCheck::Create, source } if source.failure() == StorageFailure::Network));
+            .unwrap_err(), StorageCheckError::ProviderCheck { check: StorageCheck::Create, source } if source.failure() == StorageFailure::Network));
     assert!(state.lock().unwrap().objects.is_empty());
     assert_eq!(state.lock().unwrap().deletions, 1);
     state.lock().unwrap().lose_create_reply = true;
     state.lock().unwrap().refuse_delete = true;
-    let StorageSetupError::ProviderCheck {
+    let StorageCheckError::ProviderCheck {
         check: StorageCheck::Create,
         source: StorageError::Cleanup { operation, cleanup },
     } = check_provider(&storage, &path, b"sealed test bytes").await.unwrap_err()
@@ -557,7 +557,7 @@ async fn provider_check_cleans_up_after_a_lost_create_reply_and_retains_both_fai
     let deletes = state.lock().unwrap().deletions;
     assert!(matches!(check_provider(&storage, &path, b"sealed test bytes")
             .await
-            .unwrap_err(), StorageSetupError::ProviderCheck { check: StorageCheck::Create, source } if source.failure() == StorageFailure::AlreadyExists));
+            .unwrap_err(), StorageCheckError::ProviderCheck { check: StorageCheck::Create, source } if source.failure() == StorageFailure::AlreadyExists));
     assert_eq!(state.lock().unwrap().deletions, deletes);
     assert_eq!(storage.read(&path).await.unwrap(), b"preexisting");
 }
@@ -824,7 +824,7 @@ async fn provider_check_names_each_failed_operation_and_removes_its_object() {
         state.lock().unwrap().broken_check = Some(check);
         let error = check_provider(&storage, &path, b"sealed test bytes").await.unwrap_err();
         assert!(
-            matches!(error, StorageSetupError::ProviderCheck { check: actual, source } if actual == check && source.failure() == if check == StorageCheck::Create {
+            matches!(error, StorageCheckError::ProviderCheck { check: actual, source } if actual == check && source.failure() == if check == StorageCheck::Create {
                 StorageFailure::PermissionDenied
             } else {
                 StorageFailure::Protocol
