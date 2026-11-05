@@ -170,3 +170,37 @@ async fn another_store_cannot_load_a_staged_snapshot() {
     db.close().await.unwrap();
     elsewhere.close().await.unwrap();
 }
+
+/// A load refused before it runs, whose staged records can't then be
+/// removed, reports both failures (§16.2).
+#[tokio::test]
+async fn a_failed_load_whose_staging_cant_be_removed_keeps_both_failures() {
+    let store = TestStore::new();
+    let other = TestStore::new();
+    let (db, snapshot) = fixture(&store).await;
+    let (elsewhere, _) = fixture(&other).await;
+    let staged = staged(&db, &snapshot).await;
+    // Only the input database holds the staged records; making it read-only
+    // refuses the removal of their tables.
+    db.inspect_connections(|connection| {
+        let file: String = connection
+            .query_row("SELECT file FROM pragma_database_list WHERE name='main'", [], |r| r.get(0))
+            .unwrap();
+        if file.ends_with("inputs.db") {
+            connection.batch("PRAGMA query_only=ON").unwrap();
+        }
+    });
+    let refused = elsewhere
+        .load_snapshots::<crate::pending::tests::Record, _>(
+            reload(&elsewhere, snapshot.prefix.covers, vec![staged]),
+            None,
+        )
+        .await;
+    let Err(DbError::StagingCleanup { operation, cleanup }) = refused else {
+        panic!("the refusal and the failed removal must both be reported")
+    };
+    assert!(matches!(*operation, DbError::Invariant { .. }), "{operation:?}");
+    assert!(matches!(*cleanup, DbError::Sqlite(_)), "{cleanup:?}");
+    db.close().await.unwrap();
+    elsewhere.close().await.unwrap();
+}
