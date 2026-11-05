@@ -413,3 +413,205 @@ async fn a_member_lacking_an_older_key_gets_a_copy_once() {
         device.sync.database.close().await.unwrap();
     }
 }
+
+/// Ana adds Ben to Gifts after its key was replaced. Ben receives its
+/// earlier key as well as its current one, before the entry adding him, so
+/// his pass shows the pins written under either (§15.7).
+#[tokio::test]
+async fn a_member_added_after_a_rotation_reads_the_circles_history_under_its_earlier_key() {
+    let group = Group::new();
+    let ana = group.device(1).await;
+    let ben = group.device(2).await;
+    group.create(&ana).await;
+    group.admit(&ana, &ben).await;
+    let circle = ana.sync.create_circle("Gifts".into()).await.unwrap();
+    pin(ana.database(), PIN_1, circle, "under the first key").await;
+    ana.sync.pass().await.unwrap();
+    ana.sync.rotate_key(Audience::Circle(circle)).await.unwrap();
+    pin(ana.database(), PIN_2, circle, "under the second key").await;
+    ana.sync.pass().await.unwrap();
+    ana.sync
+        .administer(StoreChange::AddCircleMember { circle, member: ben.identity.member() })
+        .await
+        .unwrap();
+    ben.sync.pass().await.unwrap();
+    assert_eq!(ben.sync.keys.read().unwrap().unwrap().circle_key_ids(circle).count(), 2);
+    assert_eq!(
+        pins(ben.database()).await,
+        [
+            (PIN_1.to_owned(), "under the first key".to_owned()),
+            (PIN_2.to_owned(), "under the second key".to_owned())
+        ]
+    );
+    for device in [&ana, &ben] {
+        device.database().close().await.unwrap();
+    }
+}
+
+const PIN_1: &str = "00000000-0000-4000-8000-000000000001";
+const PIN_2: &str = "00000000-0000-4000-8000-000000000002";
+
+/// Ben left Gifts, and Ana's next write replaced the key he had been sent.
+/// Adding him back sends him the key made while he was out, and his own next
+/// Gifts write uses that one, never the key exposed to him before he left
+/// (§15.7, §12.2).
+#[tokio::test]
+async fn a_member_added_back_gets_keys_made_while_out_and_never_sends_with_an_exposed_one() {
+    let group = Group::new();
+    let ana = group.device(1).await;
+    let ben = group.device(2).await;
+    group.create(&ana).await;
+    group.admit(&ana, &ben).await;
+    let circle = ana.sync.create_circle("Gifts".into()).await.unwrap();
+    ana.sync
+        .administer(StoreChange::AddCircleMember { circle, member: ben.identity.member() })
+        .await
+        .unwrap();
+    ben.sync.pass().await.unwrap();
+    let exposed = *ben
+        .sync
+        .keys
+        .read()
+        .unwrap()
+        .unwrap()
+        .circle_key_ids(circle)
+        .collect::<Vec<_>>()
+        .first()
+        .unwrap();
+    ana.sync
+        .administer(StoreChange::RemoveCircleMember { circle, member: ben.identity.member() })
+        .await
+        .unwrap();
+    pin(ana.database(), PIN_1, circle, "while Ben was out").await;
+    // The first pass replaces the exposed key; the write follows under the new one.
+    ana.sync.pass().await.unwrap();
+    ana.sync.pass().await.unwrap();
+    ana.sync
+        .administer(StoreChange::AddCircleMember { circle, member: ben.identity.member() })
+        .await
+        .unwrap();
+    ben.sync.pass().await.unwrap();
+    let ring = ben.sync.keys.read().unwrap().unwrap();
+    let audience = Audience::Circle(circle);
+    let session = ben.sync.session.lock().await;
+    let sending = session.history.sending_key(&ring, ben.identity.member(), &audience).unwrap();
+    assert_ne!(sending, exposed, "the key Ben had been sent stays exposed");
+    assert!(ring.circle_key_ids(circle).any(|key| key == sending), "Ben holds the newer key");
+    assert_eq!(
+        session.history.introductions.iter().filter(|i| i.audience == audience).count(),
+        2,
+        "Ana replaced the key while Ben was out"
+    );
+    drop(session);
+    assert_eq!(pins(ben.database()).await.len(), 1);
+    for device in [&ana, &ben] {
+        device.database().close().await.unwrap();
+    }
+}
+
+/// Removing a member from a circle is one entry with no key copy. The next
+/// pass replaces the key Ben was sent and copies the new one to the members
+/// who remain, before Ana's next Gifts write; that write goes out under it
+/// (§15.8, §12.2).
+#[tokio::test]
+async fn a_circle_removal_is_one_entry_and_the_next_circle_write_waits_for_a_new_key() {
+    let group = Group::new();
+    let ana = group.device(1).await;
+    let ben = group.device(2).await;
+    group.create(&ana).await;
+    group.admit(&ana, &ben).await;
+    let circle = ana.sync.create_circle("Gifts".into()).await.unwrap();
+    ana.sync
+        .administer(StoreChange::AddCircleMember { circle, member: ben.identity.member() })
+        .await
+        .unwrap();
+    let audience = Audience::Circle(circle);
+    let keys_before = ana
+        .sync
+        .session
+        .lock()
+        .await
+        .history
+        .introductions
+        .iter()
+        .filter(|i| i.audience == audience)
+        .count();
+    let applied = ana.sync.database.applied_slot().await.unwrap();
+    ana.sync
+        .administer(StoreChange::RemoveCircleMember { circle, member: ben.identity.member() })
+        .await
+        .unwrap();
+    assert_eq!(ana.sync.database.applied_slot().await.unwrap(), applied + 1, "one entry, no copy");
+    assert_eq!(
+        ana.sync
+            .session
+            .lock()
+            .await
+            .history
+            .introductions
+            .iter()
+            .filter(|i| i.audience == audience)
+            .count(),
+        keys_before
+    );
+    pin(ana.database(), PIN_1, circle, "after Ben left").await;
+    ana.sync.pass().await.unwrap();
+    ana.sync.pass().await.unwrap();
+    let ring = ana.sync.keys.read().unwrap().unwrap();
+    let session = ana.sync.session.lock().await;
+    let introduced: Vec<_> =
+        session.history.introductions.iter().filter(|i| i.audience == audience).collect();
+    assert_eq!(introduced.len(), keys_before + 1, "a new key replaced the exposed one");
+    let replacement = introduced.last().unwrap();
+    assert!(!session.history.exposed(&audience, replacement.key));
+    assert_eq!(
+        session.history.sending_key(&ring, ana.identity.member(), &audience).unwrap(),
+        replacement.key
+    );
+    drop(session);
+    ben.sync.pass().await.unwrap();
+    assert!(pins(ben.database()).await.is_empty());
+    for device in [&ana, &ben] {
+        device.database().close().await.unwrap();
+    }
+}
+
+/// Ana removes Ben from Gifts, and Ben reads the removal. He keeps the row
+/// he had read there and the key that opened it (§15.8).
+#[tokio::test]
+async fn a_member_removed_from_a_circle_keeps_its_rows_and_keys() {
+    let group = Group::new();
+    let ana = group.device(1).await;
+    let ben = group.device(2).await;
+    group.create(&ana).await;
+    group.admit(&ana, &ben).await;
+    let circle = ana.sync.create_circle("Gifts".into()).await.unwrap();
+    ana.sync
+        .administer(StoreChange::AddCircleMember { circle, member: ben.identity.member() })
+        .await
+        .unwrap();
+    pin(ana.database(), "00000000-0000-4000-8000-000000000001", circle, "gift").await;
+    ana.sync.pass().await.unwrap();
+    ben.sync.pass().await.unwrap();
+    assert_eq!(pins(ben.database()).await.len(), 1);
+    let held = ben.sync.keys.read().unwrap().unwrap().circle_key_ids(circle).collect::<Vec<_>>();
+    ana.sync
+        .administer(StoreChange::RemoveCircleMember { circle, member: ben.identity.member() })
+        .await
+        .unwrap();
+    ben.sync.pass().await.unwrap();
+    assert!(!ben
+        .database()
+        .store_state()
+        .await
+        .unwrap()
+        .reads_circle(circle, &ben.identity.member()));
+    assert_eq!(pins(ben.database()).await.len(), 1, "Ben keeps the row");
+    assert_eq!(
+        ben.sync.keys.read().unwrap().unwrap().circle_key_ids(circle).collect::<Vec<_>>(),
+        held
+    );
+    for device in [&ana, &ben] {
+        device.database().close().await.unwrap();
+    }
+}
