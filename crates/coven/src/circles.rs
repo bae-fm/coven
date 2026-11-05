@@ -1,9 +1,6 @@
 //! Circle calls borrow the open store's handle (E12).
 
-use crate::{
-    Audience, Circle, CircleId, CircleMemberInfo, CovenHandle, CovenResult, LiveQuery, MemberId,
-    OperationId, SyncError,
-};
+use super::*;
 
 /// A borrowed namespace whose work remains owned by the open store. Making a
 /// circle and each change is its `CovenWrite` step in a write of its own,
@@ -12,21 +9,15 @@ use crate::{
 pub struct Circles<'a> {
     /// The handle whose writes the changes are steps of.
     handle: &'a CovenHandle,
-    storage: &'a crate::storage::StorageConnections,
-    database: &'a coven_database::Database,
 }
 
 impl<'a> Circles<'a> {
-    pub(crate) fn new(
-        handle: &'a CovenHandle,
-        storage: &'a crate::storage::StorageConnections,
-        database: &'a coven_database::Database,
-    ) -> Self {
-        Self { handle, storage, database }
+    pub(crate) fn new(handle: &'a CovenHandle) -> Self {
+        Self { handle }
     }
     /// Reset this circle to a snapshot of this device’s state (§19.4).
     pub async fn reset(&self, circle: CircleId) -> Result<(), SyncError> {
-        self.storage.reset(Audience::Circle(circle)).await
+        self.handle.storage.reset(Audience::Circle(circle)).await
     }
 
     /// Make a circle (`CovenWrite::create_circle`).
@@ -82,18 +73,18 @@ impl<'a> Circles<'a> {
     }
     /// The circles this member is in.
     pub async fn list(&self) -> CovenResult<Vec<Circle>> {
-        self.database.circles().await
+        self.handle.database.circles().await
     }
     /// The same circle-list query, live (E4).
     pub fn subscribe_list(&self) -> LiveQuery<Vec<Circle>> {
-        self.database.subscribe_circles()
+        self.handle.database.subscribe_circles()
     }
     /// A circle's members who are still in the store.
     pub async fn members(&self, circle: CircleId) -> CovenResult<Vec<CircleMemberInfo>> {
-        self.database.circle_members(circle).await
+        self.handle.database.circle_members(circle).await
     }
     /// The same query for this circle's members, live (E4).
     pub fn subscribe_members(&self, circle: CircleId) -> LiveQuery<Vec<CircleMemberInfo>> {
-        self.database.subscribe_circle_members(circle)
+        self.handle.database.subscribe_circle_members(circle)
     }
 }

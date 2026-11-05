@@ -19,8 +19,6 @@ mod handle;
 mod read_handle;
 mod saved_restore;
 
-mod circles;
-
 #[cfg(feature = "dev-tools")]
 mod dev_tools;
 

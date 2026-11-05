@@ -37,6 +37,10 @@ mod uploads;
 #[path = "handle_writes.rs"]
 mod writes;
 
+#[path = "circles.rs"]
+mod circles;
+pub use circles::Circles;
+
 use crate::*;
 use coven_crypto::custody::{StoreCustody, StoreKeychain};
 use coven_database::Database;
@@ -394,7 +398,7 @@ impl CovenHandle {
     }
     /// Circle calls borrowing this store's operation owner.
     pub fn circles(&self) -> Circles<'_> {
-        Circles::new(self, &self.storage, &self.database)
+        Circles::new(self)
     }
 
     /// A read of one consistent snapshot, run when awaited. Attach `process`

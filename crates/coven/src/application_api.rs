@@ -6,7 +6,6 @@ pub use crate::builder::{
     join_with_invite, restore_from_code, restore_from_saved_code, BootstrapError, BootstrapStatus,
     JoinControl,
 };
-pub use crate::circles::Circles;
 pub use crate::coven::{Coven, ListedStore, StoreInfo, StoreListError};
 pub use crate::coven_write::CovenWrite;
 #[cfg(feature = "dev-tools")]
@@ -14,7 +13,7 @@ pub use crate::dev_tools::empty_s3_prefix;
 pub use crate::error::{
     ReadOnlyOpenError, StoreCreationError, StoreDeletionError, StoreKeyUnlockError,
 };
-pub use crate::handle::{CovenHandle, IfUnsent};
+pub use crate::handle::{Circles, CovenHandle, IfUnsent};
 pub use crate::read_handle::CovenReadHandle;
 pub use crate::saved_restore::{SavedRestoreCode, SavedRestoreEntry};
 pub use crate::storage::GuidedAccessKey;
