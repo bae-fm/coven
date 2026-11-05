@@ -296,7 +296,7 @@ impl Group {
             waits.clone(),
             ids,
             transfers,
-            std::sync::Arc::new(coven_foundation::clock::SystemClock),
+            clock.clone(),
             coven_foundation::network_watch::NetworkWatch::unwatched().view(),
         );
         let sync = Arc::new(

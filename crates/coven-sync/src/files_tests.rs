@@ -101,6 +101,7 @@ impl Fixture {
             waits,
             ids.clone(),
             transfers,
+            clock.clone(),
             watched(&network),
         )
         .await;
@@ -134,6 +135,7 @@ impl Fixture {
             waits,
             self.ids.clone(),
             transfers,
+            self.clock.clone(),
             watched(&self.network),
         )
         .await;
@@ -478,7 +480,7 @@ async fn budgets_pins_eviction_and_second_device_reads() {
         second.files.inner.waits.clone(),
         second.ids.clone(),
         second.files.inner.transfers.clone(),
-        std::sync::Arc::new(coven_foundation::clock::SystemClock),
+        second.clock.clone(),
         coven_foundation::network_watch::NetworkWatch::unwatched().view(),
     );
     let ref2 = second.database.file_ref(file.id()).await.unwrap();
@@ -608,7 +610,7 @@ async fn whole_reads_and_pins_check_the_records_hash_after_authenticating_chunks
         b.files.inner.waits.clone(),
         b.ids.clone(),
         b.files.inner.transfers.clone(),
-        std::sync::Arc::new(coven_foundation::clock::SystemClock),
+        b.clock.clone(),
         coven_foundation::network_watch::NetworkWatch::unwatched().view(),
     );
     let file = b.database.file_ref(uploaded.id()).await.unwrap();
@@ -790,6 +792,7 @@ async fn paused_files(
     waits: Arc<crate::RetryWaits>,
     ids: IdSourceRef,
     transfers: Arc<coven_storage::TransferBudget>,
+    clock: ClockRef,
     network: coven_foundation::network_watch::NetworkView,
 ) -> Files {
     database.write(|sql| sql.set_uploads_paused(true)).await.unwrap();
@@ -801,7 +804,7 @@ async fn paused_files(
         waits,
         ids,
         transfers,
-        std::sync::Arc::new(coven_foundation::clock::SystemClock),
+        clock,
         network,
     );
     // The owner's own copy of the setting, which parts check between sends.

@@ -101,7 +101,7 @@ async fn read_only_downloads_keep_typed_errors_without_writing_pending_records()
         Arc::new(crate::RetryWaits::in_memory(f.clock.clone())),
         f.ids.clone(),
         transfers,
-        std::sync::Arc::new(coven_foundation::clock::SystemClock),
+        f.clock.clone(),
         coven_foundation::network_watch::NetworkWatch::unwatched().view(),
     );
     f.storage.set_online(false);
