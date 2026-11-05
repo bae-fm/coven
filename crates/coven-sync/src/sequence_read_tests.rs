@@ -590,3 +590,26 @@ async fn sequence_end_search_matches_lean() {
     }
     ana.database().close().await.unwrap();
 }
+
+/// Ben follows his notes with a live query. Ana writes a note and passes;
+/// Ben's pass applies her slot, and his query reports the new result (E4).
+#[tokio::test]
+async fn a_live_query_reruns_as_a_pass_applies_another_devices_slot() {
+    let group = Group::new();
+    let ana = group.device(1).await;
+    let ben = group.device(2).await;
+    group.create(&ana).await;
+    group.admit(&ana, &ben).await;
+    ben.sync.pass().await.unwrap();
+    let mut notes = coven_database::test_utils::Followed::new(ben.database().subscribe(|sql| {
+        Ok(sql.query("SELECT id FROM notes ORDER BY id", [], |row| row.get::<_, String>(0))?)
+    }));
+    assert!(notes.next().await.is_empty());
+    insert(ana.database(), "from-ana", "written on another device").await;
+    ana.sync.pass().await.unwrap();
+    ben.sync.pass().await.unwrap();
+    assert_eq!(notes.next().await, ["from-ana"]);
+    for device in [&ana, &ben] {
+        device.sync.database.close().await.unwrap();
+    }
+}
