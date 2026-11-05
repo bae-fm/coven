@@ -154,3 +154,44 @@ async fn io_differential_waiting_evidence() {
     }
     assert_eq!(actual, crate::tests::io_runner(&inputs), "{inputs:?}");
 }
+
+/// Finishing a pass leaves a failing operation's wait as it was: the pass
+/// neither resets its count nor makes it due before its time (§21.2).
+#[tokio::test]
+async fn a_finished_pass_leaves_a_failing_waits_delay() {
+    let group = Group::new();
+    group.clock.set(UNIX_EPOCH + Duration::from_secs(1_000_000));
+    let ana = group.device(1).await;
+    group.create(&ana).await;
+    let id = ana.database().start_operation(operation("failing")).await.unwrap();
+    let subject = RetrySubject::Operation(id);
+    for attempt in 0..2 {
+        let error = SyncError::Pending(Box::new(PendingRecord::new(
+            PendingSubject::Operation { id, kind: crate::OperationKind::RetainFiles },
+            PendingReason::ProviderPending {
+                action: crate::ProviderAccessAction::Revoke,
+                account: "nobody@example.com".into(),
+            },
+        )));
+        ana.sync
+            .record_operation_error(
+                id,
+                crate::OperationKind::RetainFiles,
+                crate::sequence_sync::OperationFailure::Returned(&error),
+                &group.ring,
+            )
+            .await
+            .unwrap();
+        let wait = ana.database().retry_wait(subject).await.unwrap().unwrap();
+        if attempt == 0 {
+            group.clock.set(group.clock.now() + wait.wait);
+        }
+    }
+    let before = ana.database().retry_wait(subject).await.unwrap().unwrap();
+    assert_eq!((before.failures, before.wait), (2, Duration::from_secs(2)));
+
+    assert!(matches!(ana.sync.pass().await.unwrap(), crate::SequenceStatus::Synced { .. }));
+    let after = ana.database().retry_wait(subject).await.unwrap().unwrap();
+    assert_eq!(after, before);
+    ana.database().close().await.unwrap();
+}
