@@ -322,6 +322,68 @@ async fn refreshing_coverage_preserves_the_original_captured_prefix() {
     db.close().await.unwrap();
 }
 
+/// Write 1, a migration (marker 2), write 3, a second migration (marker 4),
+/// then write 5: the one capture runs through marker 4 and takes the writes
+/// between the markers too, the first marker goes out with them and replaces
+/// nothing as a lost value, and write 5 waits for the raise, also across a
+/// reopen (§18.5).
+#[tokio::test]
+async fn a_second_breaking_migration_captures_the_writes_between_its_markers() {
+    let store = TestStore::new();
+    let db = store.schema(notes(), NOTES).await.unwrap();
+    connect(&db).await;
+    sql(&db, "INSERT INTO notes VALUES('n','one','body')").await.unwrap();
+    db.close().await.unwrap();
+    let mut migrations = vec![initial(), index(2, crate::OldWrites::Drop)];
+    let db = store.builder(notes(), migrations.clone()).open().await.unwrap();
+    sql(&db, "UPDATE notes SET title='three'").await.unwrap();
+    db.close().await.unwrap();
+    migrations.push(index(3, crate::OldWrites::Drop));
+    let db = store.builder(notes(), migrations.clone()).open().await.unwrap();
+    sql(&db, "UPDATE notes SET title='five'").await.unwrap();
+    let device = db.local_device().unwrap();
+    let positions = |db: &Database| {
+        records(db)
+            .iter()
+            .map(|r| (r.header.position.number, r.header.disposition))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        positions(&db),
+        [
+            (1, WriteDisposition::Apply),
+            (2, WriteDisposition::Migration),
+            (3, WriteDisposition::Apply),
+            (4, WriteDisposition::Migration),
+            (5, WriteDisposition::Apply),
+        ]
+    );
+    db.close().await.unwrap();
+
+    // Reopening keeps the same queued writes, captured version and wait.
+    let db = store.builder(notes(), migrations).open().await.unwrap();
+    let captures = db.raise_captures().await.unwrap();
+    assert_eq!(captures.len(), 1);
+    assert_eq!(captures[0].version, 3);
+    assert_eq!(captures[0].through, WriteId { device, number: 4 });
+    let through = captures[0].through;
+    for number in 1..=4 {
+        assert_eq!(
+            db.unconfirmed_own_prefix(through).await.unwrap(),
+            Some(WriteId { device, number })
+        );
+        crate::tests::publish_through(&db, number).await.unwrap();
+    }
+    assert_eq!(db.unconfirmed_own_prefix(through).await.unwrap(), None);
+    assert_eq!(queue(&db).len(), 1);
+    assert_eq!(queue(&db)[0].0, 5);
+    assert_eq!(db.sendable_through().await.unwrap(), Some(4));
+    let (header, _) = decode(&raise_frames(&db, 6, 3).await);
+    assert_eq!(header.schema_version, 3);
+    assert!(db.lost_values().await.unwrap().is_empty());
+    db.close().await.unwrap();
+}
+
 /// An addition-only update while a raise waits moves that raise to the
 /// update's version, captured again at its schema so the snapshot's header
 /// names the version it raises to; once no capture waits, an addition raises
