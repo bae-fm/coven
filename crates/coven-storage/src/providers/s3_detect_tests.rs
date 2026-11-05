@@ -50,6 +50,7 @@ impl Fixture {
             written: Vec::new(),
             next: 0,
             fail_copies: false,
+            fail_deletes: false,
             frozen: None,
             empty_v2_listing: None,
             incomplete_v1_listing: false,
@@ -313,6 +314,102 @@ async fn a_failed_probe_still_deletes_every_probe_object_and_upload() {
     fixture.state.lock().unwrap().fail_copies = true;
     let error = fixture.detect(None).await.unwrap_err();
     assert_eq!(error.failure(), StorageFailure::Network);
+    fixture.assert_clean();
+}
+
+/// Detection's cleanup is part of it: probe objects it cannot delete fail
+/// the call, keeping the probe's own failure beside the delete's when both
+/// happened (§20.7, E.7).
+#[tokio::test]
+async fn a_failed_probe_cleanup_fails_detection_keeping_both_causes() {
+    let failing = Fixture::new(RUSTFS).await;
+    {
+        let mut state = failing.state.lock().unwrap();
+        state.fail_copies = true;
+        state.fail_deletes = true;
+    }
+    match failing.detect(None).await {
+        Err(StorageError::Cleanup { operation, cleanup }) => {
+            assert_eq!(operation.failure(), StorageFailure::Network);
+            assert_eq!(cleanup.failure(), StorageFailure::PermissionDenied);
+        }
+        other => panic!("both causes are kept: {:?}", other.map(|_| ())),
+    }
+
+    let passing = Fixture::new(RUSTFS).await;
+    passing.state.lock().unwrap().fail_deletes = true;
+    let error = passing.detect(None).await.map(|_| ()).unwrap_err();
+    assert_eq!(error.failure(), StorageFailure::PermissionDenied);
+}
+
+/// A probe's recorded outcome names no key, endpoint or object: what a
+/// person sees of detection holds only fixed labels, statuses and times
+/// (§20.7).
+#[tokio::test]
+async fn probe_results_name_no_key_endpoint_or_object() {
+    for service in [AWS, GCS, R2, RUSTFS, SEAWEEDFS, VERSITY_GW, OVERWRITES] {
+        let fixture = Fixture::new(service).await;
+        let detection = detect(
+            fixture.location(None),
+            S3Credentials {
+                access_key_id: "AKIADISTINCTIVE7".into(),
+                secret_access_key: SecretText::new("secretDistinctive9".into()),
+            },
+            STORE,
+            Arc::new(SystemClock),
+            Arc::new(UuidIds),
+            crate::providers::tests::http_client(),
+            &crate::SetupWaits::default(),
+        )
+        .await
+        .unwrap();
+        let address = fixture.server.url.trim_start_matches("http://").to_owned();
+        assert!(!detection.results.is_empty());
+        let mut probes = BTreeSet::new();
+        for result in &detection.results {
+            assert!(probes.insert(format!("{:?}", result.probe)), "{:?} ran twice", result.probe);
+            for forbidden in [
+                "AKIADISTINCTIVE7",
+                "secretDistinctive9",
+                address.as_str(),
+                "bucket",
+                ".coven-check",
+                "probe",
+                &STORE.to_string(),
+            ] {
+                assert!(
+                    !result.detail.contains(forbidden),
+                    "{:?} detail {:?} names {forbidden}",
+                    result.probe,
+                    result.detail
+                );
+            }
+        }
+    }
+}
+
+/// Detection pauses for a later server second only while it waits for the
+/// timestamp marker: one second, then at most forty quarter-second pauses,
+/// and a server whose listings never lag needs no other pause (§20.7, E.7).
+#[tokio::test]
+async fn detection_pauses_only_for_the_timestamp_marker() {
+    let fixture = Fixture::new(AWS).await;
+    let pauses = Arc::new(WaitedPauses::default());
+    fixture.detect_with(None, pauses.clone()).await.unwrap();
+    let pauses = pauses.0.lock().unwrap().clone();
+    let first = std::time::Duration::from_secs(1);
+    let retry = std::time::Duration::from_millis(250);
+    assert_eq!(pauses.first(), Some(&first));
+    let mut run = 0;
+    for pause in &pauses {
+        if *pause == first {
+            run = 0;
+        } else {
+            assert_eq!(*pause, retry, "{pauses:?}");
+            run += 1;
+            assert!(run <= 40, "{pauses:?}");
+        }
+    }
     fixture.assert_clean();
 }
 

@@ -102,6 +102,8 @@ pub(super) struct Remote {
     pub(super) written: Vec<String>,
     pub(super) next: u64,
     pub(super) fail_copies: bool,
+    /// Refuse every delete, as a key without delete permission does.
+    pub(super) fail_deletes: bool,
     /// The one second every publication is dated, when the server's clock
     /// stands still.
     pub(super) frozen: Option<u64>,
@@ -290,6 +292,9 @@ pub(super) async fn serve(
             response(200, Vec::new())
         }
         Method::DELETE => {
+            if state.fail_deletes {
+                return error(403, "AccessDenied");
+            }
             state.objects.remove(&key);
             response(204, Vec::new())
         }
