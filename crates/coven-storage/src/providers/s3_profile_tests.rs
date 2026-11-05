@@ -363,3 +363,144 @@ fn only_r2_and_uncatalogued_settings_scope_member_keys_to_a_whole_bucket() {
     }
     assert_eq!(select(None, None).unwrap().key_scope(), S3KeyScope::Prefix);
 }
+
+/// Each profile's entry has the behaviours and the certification its row of
+/// the spec's table of certified profiles states (Appendix E.4).
+#[test]
+fn each_profile_entry_has_the_behaviours_its_table_row_states() {
+    use S3ProfileName::*;
+    let multipart = |condition| S3CopyPublication::Multipart(condition);
+    // name, signing, single PUT, copy publication, multipart time, checksums,
+    // revision, requests checksums, response headers, certified, versioned too
+    let rows = [
+        (
+            Aws,
+            S3Signing::AwsSigV4,
+            S3SinglePut::IfNoneMatch,
+            multipart(S3CopyCondition::IfNoneMatch),
+            S3MultipartTimestamp::Start,
+            S3Checksums::ScopeStated,
+            S3Revision::ETag,
+            true,
+            S3ResponseHeaders::S3,
+            false,
+            false,
+        ),
+        (
+            Gcs,
+            S3Signing::GoogleHmac,
+            S3SinglePut::GenerationMatch,
+            multipart(S3CopyCondition::GenerationMatch),
+            S3MultipartTimestamp::Completion,
+            S3Checksums::ScopeStated,
+            S3Revision::Generation,
+            false,
+            S3ResponseHeaders::Google,
+            true,
+            false,
+        ),
+        (
+            R2,
+            S3Signing::AwsSigV4,
+            S3SinglePut::IfNoneMatch,
+            S3CopyPublication::Never,
+            S3MultipartTimestamp::Completion,
+            S3Checksums::UnstatedIgnored,
+            S3Revision::ETag,
+            true,
+            S3ResponseHeaders::S3,
+            true,
+            false,
+        ),
+        (
+            RustFs,
+            S3Signing::AwsSigV4,
+            S3SinglePut::IfNoneMatch,
+            S3CopyPublication::Never,
+            S3MultipartTimestamp::Completion,
+            S3Checksums::Absent,
+            S3Revision::ETag,
+            false,
+            S3ResponseHeaders::S3,
+            true,
+            true,
+        ),
+        (
+            SeaweedFs,
+            S3Signing::AwsSigV4,
+            S3SinglePut::IfNoneMatch,
+            S3CopyPublication::Every(S3CopyCondition::IfNoneMatch),
+            S3MultipartTimestamp::Completion,
+            S3Checksums::Absent,
+            S3Revision::ETag,
+            false,
+            S3ResponseHeaders::S3,
+            true,
+            true,
+        ),
+        (
+            CephRgw,
+            S3Signing::AwsSigV4,
+            S3SinglePut::IfNoneMatch,
+            S3CopyPublication::Never,
+            S3MultipartTimestamp::Completion,
+            S3Checksums::Absent,
+            S3Revision::ETag,
+            false,
+            S3ResponseHeaders::S3,
+            true,
+            false,
+        ),
+        (
+            VersityGw,
+            S3Signing::AwsSigV4,
+            S3SinglePut::IfNoneMatch,
+            S3CopyPublication::Never,
+            S3MultipartTimestamp::Completion,
+            S3Checksums::ScopeStated,
+            S3Revision::ETag,
+            true,
+            S3ResponseHeaders::S3,
+            true,
+            true,
+        ),
+    ];
+    assert_eq!(rows.len(), PROFILES.len());
+    for (
+        name,
+        signing,
+        single_put,
+        copy,
+        time,
+        checksums,
+        revision,
+        asks,
+        headers,
+        certified,
+        versioned,
+    ) in rows
+    {
+        let entry =
+            PROFILES.iter().find(|profile| profile.name == name).expect("a catalogued name");
+        let settings = entry.settings;
+        assert_eq!(settings.signing, signing, "{name:?}");
+        assert_eq!(settings.single_put, single_put, "{name:?}");
+        assert_eq!(settings.copy_publication, copy, "{name:?}");
+        assert_eq!(settings.multipart_timestamp, time, "{name:?}");
+        assert_eq!(settings.checksums, checksums, "{name:?}");
+        assert_eq!(settings.listing, S3Listing::V2, "{name:?}");
+        assert_eq!(settings.revision, revision, "{name:?}");
+        assert_eq!(settings.request_checksums, asks, "{name:?}");
+        assert_eq!(settings.response_headers, headers, "{name:?}");
+        assert_eq!(
+            matches!(entry.certification, Certification::Passed { .. }),
+            certified,
+            "{name:?}"
+        );
+        assert_eq!(
+            matches!(entry.versioned_buckets, Certification::Passed { .. }),
+            versioned,
+            "{name:?}"
+        );
+    }
+}
