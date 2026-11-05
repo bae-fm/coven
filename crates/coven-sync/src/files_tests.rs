@@ -769,6 +769,32 @@ async fn a_file_is_on_its_device_only_until_its_upload_completes() {
     }
 }
 
+/// A reference taken while a user's original uploads names the same file
+/// once it is stored, and reads then use the cache or storage: changing or
+/// removing the original afterwards never reaches it (§17.1, §17.3).
+#[tokio::test]
+async fn a_reference_taken_while_uploading_reads_storage_once_stored() {
+    let f = Fixture::new(Provenance::UserProvided).await;
+    let file = f.original("song", b"the staged bytes").await;
+    assert!(matches!(file.place(), FilePlace::DeviceOnly { .. }));
+    f.drain().await;
+    assert!(matches!(
+        f.database.file_ref(file.id()).await.unwrap().place(),
+        FilePlace::Cloud { .. }
+    ));
+    let song = f.root.path().join("song");
+    std::fs::write(&song, b"changed afterwards, longer").unwrap();
+    let id = file.id();
+    f.database.write(move |sql| sql.evict_file(id)).await.unwrap();
+    let before = f.storage.request_trace().len();
+    assert_eq!(f.files.read_file(&file).await.unwrap(), b"the staged bytes");
+    assert!(f.storage.request_trace().len() > before, "the read used storage");
+    std::fs::remove_file(&song).unwrap();
+    assert_eq!(f.files.read_file(&file).await.unwrap(), b"the staged bytes");
+    assert_eq!(f.files.file_status(&file).await.unwrap(), FileStatus::Available);
+    f.close().await;
+}
+
 impl Files {
     pub(crate) async fn stop_background_for_counts(&self) {
         // Isolate explicit runs and transfers from the independent workers,
