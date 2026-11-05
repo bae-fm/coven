@@ -417,6 +417,32 @@ impl CovenBuilder {
         Box::pin(bootstrap::resume_join(self, store, on_status, control)).await
     }
 
+    /// The restores under way on this device, ordered by store id: each
+    /// restore that recorded itself before registering the device and has
+    /// not ended, as `decode_code_info` reads its code (§13.1). A record coven
+    /// can't read fails the call; it is never skipped.
+    pub async fn unfinished_restores(&self) -> Result<Vec<CodeMetadata>, BootstrapError> {
+        bootstrap::unfinished_restores(self).await
+    }
+
+    /// Continues an unfinished restore from its record, as `restore_from_code`
+    /// does: the code and device name it recorded, and the S3 key or sign-in
+    /// it kept on the device. On Dropbox and OneDrive a sign-in this builder
+    /// holds replaces the kept one once it is shown to grant the location's
+    /// access; with neither, or with a kept sign-in the provider refuses even
+    /// after its one refresh, it fails with `OAuthError::Reauthorize` and the
+    /// restore stays unfinished. Cancelling ends it as `restore_from_code`'s
+    /// cancel does. A store with no record fails with
+    /// `BootstrapError::NoUnfinishedRestore`.
+    pub async fn resume_restore(
+        self,
+        store: StoreId,
+        on_status: impl Fn(BootstrapStatus),
+        cancel: &tokio::sync::watch::Receiver<bool>,
+    ) -> Result<CovenHandle, BootstrapError> {
+        Box::pin(bootstrap::resume_restore(self, store, on_status, cancel)).await
+    }
+
     /// Opens the store for reading only, alongside a handle that has it open.
     /// Its shared lock protects both read connections and local cache metadata.
     /// It runs no migration and refuses a database whose schema is newer,

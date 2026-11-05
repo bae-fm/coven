@@ -240,6 +240,12 @@ fn bootstrap_and_operation_futures_stay_small() {
                 b.resume_join(s, o, x)
             }),
         ),
+        (
+            "resume_restore",
+            size(|(b, s, o, x): (CovenBuilder, StoreId, Status, &'static Receiver<bool>)| {
+                b.resume_restore(s, o, x)
+            }),
+        ),
         ("create_store", size(|(b, n): (CovenBuilder, &'static str)| b.create_store(n))),
         ("open", size(|(b, s): (CovenBuilder, StoreId)| b.open(s, |_| ()))),
         ("open_read_only", size(|(b, s): (CovenBuilder, StoreId)| b.open_read_only(s))),

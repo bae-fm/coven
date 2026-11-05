@@ -21,15 +21,16 @@ pub(super) fn account_sign_in(
 
 /// Where a bootstrap connection's sign-in refreshes when the provider rejects
 /// its token.
+#[derive(Clone)]
 pub(super) enum SignInCustody {
     /// An S3 key or the Apple account: nothing refreshes.
     None,
-    /// A restore's sign-in, held for this session until publication commits
-    /// it with the store.
+    /// A restore's sign-in, held for this session until the restore records
+    /// itself, or publication commits it with the store.
     Session(Arc<SessionSignIn>),
     /// A join's sign-in, kept in the store's device credentials beside its
-    /// saved invite code. The joined store's handle goes on using this
-    /// custody.
+    /// saved invite code, or a recorded restore's, beside its record. The
+    /// store's handle goes on using this custody.
     Device {
         credentials: Arc<DeviceCredentials>,
         /// The call started from the sign-in an earlier call kept, not from

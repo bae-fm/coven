@@ -84,7 +84,7 @@ pub use sequence_sync::sequence_invites::{
     approve_join_request, cancel_invite, create_invite, decline_join_request, NewInvite,
 };
 pub use sequence_sync::sequence_join::{JoinOutcome, NextCheck};
-pub use sequence_sync::{retry_pending_operation, SequenceSync};
+pub use sequence_sync::{registration_journaled, retry_pending_operation, SequenceSync};
 pub use sign_in::{DeviceCredentials, SessionSignIn};
 pub use sync_status::{
     record_location, record_opened, sync_status, SyncCause, SyncState, SyncStatus, SyncWait,

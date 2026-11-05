@@ -23,6 +23,7 @@ const CREDENTIALS_ENTRY: &str = "storage-credentials";
 const HOST_SECRET_NAMES_ENTRY: &str = "host-secret-names";
 const INVITE_CODE_ENTRY: &str = "invite-code";
 const SETUP_CREDENTIALS_ENTRY: &str = "setup-credentials";
+const RESTORE_RECORD_ENTRY: &str = "restore-record";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
 pub(crate) enum EntryScope {
@@ -160,8 +161,9 @@ impl std::fmt::Debug for Keychain {
 }
 
 /// One store's entries kept on this device only: its device id, store and
-/// member keys, provider credentials, the invite code of a join under way and
-/// the app's host secrets (§12.4, §13.2). They
+/// member keys, provider credentials, the invite code of a join under way,
+/// the record of a restore under way and the app's host secrets (§12.4,
+/// §13.1, §13.2). They
 /// never leave the device, so deleting them reaches no other device of the
 /// person. Every read, write and deletion here uses the device-only scope; the
 /// person's entries belong to [`PersonEntries`](super::PersonEntries).
@@ -274,6 +276,42 @@ impl StoreKeychain {
         self.remove(INVITE_CODE_ENTRY)
     }
 
+    /// The record of a restore under way for this store on this device: the
+    /// restore code it loads with and the name it registers the device
+    /// under. A restore past its registration finishes from it, so the app
+    /// can resume it without the code (§13.1). It is never synced.
+    #[expect(
+        clippy::map_err_ignore,
+        reason = "a restore record fails only by its layout, which Encoding names"
+    )]
+    pub fn restore_record(&self) -> Result<Option<(SecretText, String)>, KeyError> {
+        self.read(RESTORE_RECORD_ENTRY)?
+            .map(|bytes| {
+                let text = std::str::from_utf8(bytes.as_bytes())
+                    .map_err(|_| KeyError::from(MaterialError::Encoding))?;
+                let (code, name) = text.split_once('\0').ok_or(MaterialError::Encoding)?;
+                Ok((SecretText::new(code.to_owned()), name.to_owned()))
+            })
+            .transpose()
+    }
+
+    /// Keep a restore's record from before it registers the device until the
+    /// restore ends: the code, which holds no NUL, then a NUL, then the
+    /// device's name.
+    pub fn set_restore_record(&self, code: &SecretText, device_name: &str) -> Result<(), KeyError> {
+        if code.as_str().contains('\0') {
+            return Err(MaterialError::Encoding.into());
+        }
+        let record = SecretText::new(format!("{}\0{device_name}", code.as_str()));
+        self.write(RESTORE_RECORD_ENTRY, record.as_str().as_bytes())
+    }
+
+    /// Remove a restore's record once the restore has ended; an absent entry
+    /// succeeds.
+    pub fn delete_restore_record(&self) -> Result<(), KeyError> {
+        self.remove(RESTORE_RECORD_ENTRY)
+    }
+
     /// Remove this device's entries for the store, including all recorded host
     /// secrets, without opening the database or decoding the values. Delete
     /// listed secrets before the list, then coven's other entries. The person's
@@ -295,6 +333,7 @@ impl StoreKeychain {
             CREDENTIALS_ENTRY,
             SETUP_CREDENTIALS_ENTRY,
             INVITE_CODE_ENTRY,
+            RESTORE_RECORD_ENTRY,
         ] {
             self.remove(name)?;
         }

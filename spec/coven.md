@@ -3432,6 +3432,7 @@ These calls, and the work passes do for them, follow the rule:
 | The app's admin changes and acknowledgements (§11.1) | the operation the app's write journals | its entry's claim |
 | Replacing one's own keys (`replace_member_keys`, §12.3) | its operation, with the candidate pair held first | the replacement's claim |
 | Rotating a key, a schema raise, a snapshot, resetting an audience (§11.5, §16, §18, §19.4) | its operation, step by step | the claim of its first copy or announcement |
+| Restoring on a new device (`restore_from_code`, `restore_from_saved_code`, §13.1) | the restore's record on the device, then its registration's operation | the record, kept just before the registration's claim |
 | Taking provider access back after a removal (§14.2) | the provider request, fixed before it is sent | none: it is sent again until confirmed |
 | Deleting gone devices' files (`clean_up_gone_devices_files`, §17.10) | the files operation | none: it deletes only what nothing refers to |
 | Sending writes and uploading files (§4, §17.9) | the send queue and the upload queue | the writes slot's claim; a file's confirmed upload |
@@ -3953,8 +3954,9 @@ Ana's new laptop scans the code from her phone and signs in to her Dropbox. Then
    Household, so another account fails with `SyncError::StoreOwner` before the
    laptop registers (§20.9): registered, it would stand for a restore that can
    never finish.
-4. It registers itself as a new device through an operation (§11). A claim
-   interrupted along the way is settled before it is retried or cancelled.
+4. It records the restore on the laptop, then registers itself as a new
+   device through an operation (§11). A claim interrupted along the way is
+   settled before it is retried or cancelled.
 5. If the account or key differs from the one history records for Ana, it
    records the new one, as setup does, so her recorded access is the one she
    uses (§14.2). Ben, whose account doesn't hold Household, can restore
@@ -3964,6 +3966,44 @@ Ana's new laptop scans the code from her phone and signs in to her Dropbox. Then
 
 Restoring always makes a fresh device. It doesn't rescue the old installation's
 unsent writes.
+
+**A restore past its registration.** The registration is the restore's first
+write to storage. Once it may land, Household's history may name the laptop
+as one of Ana's devices, and only a finished restore stands for it. Say the
+laptop sends its registration and Ana closes the app before the reply. The
+registration lands. Had the laptop kept nothing, its unfinished installation
+would be hidden like any other (§13.4), and only typing the code again would
+finish it. Otherwise the laptop would stay one of Ana's devices with nothing
+on it
+([`crashed_registration_ghost`](proofs/sequence/CovenSequence/RestoreRegistration.lean)).
+
+So just before it registers, the laptop records the restore in a keychain
+entry of its own, never synced: the code, with her S3 key inside it on S3,
+and the device's name. On Dropbox and OneDrive her sign-in moves into the
+store's device credentials, where it refreshes from then on, as a join keeps
+its sign-in (§13.2). From the record on, the restore only goes forward
+(§11.6):
+
+- `CovenBuilder::unfinished_restores` lists each restore under way, and
+  `resume_restore` finishes one with neither the code nor a new sign-in. A
+  restore that fails, or whose call is dropped, stays listed.
+- Cancelling waits for the registration to end, then fails with
+  `RestoreRegistered`, the restore still listed. A cancel that removed the
+  installation while the registration was on its way would leave the laptop
+  registered with nothing on it once it landed
+  ([`cancelled_registration_ghost`](proofs/sequence/CovenSequence/RestoreRegistration.lean)).
+- The facts can still end it. Ben removes Carol while her new phone
+  restores, and his removal takes the slot her registration was sent for.
+  Checked again, her registration is refused. Nothing in storage names the
+  phone as active, so the call ends the restore. It first checks the facts:
+  the history it applied names the phone as removed, or doesn't name it and
+  no registration of it is journaled, which could still land. Then it
+  deletes the kept sign-in, the record and the installation, in that order.
+  A cancel at that point, or a removal of the device after it registered,
+  ends the restore the same way.
+- Publishing the store deletes the record. A crash before that leaves the
+  record beside the published store, and it goes with the store's other
+  device-only entries when the store is deleted.
 
 **Restoring in place.** Ana replaced Carol's member keys with a pair Carol
 prepared on her phone. Carol's laptop still holds the store under the old pair,
@@ -4527,14 +4567,16 @@ everything is encrypted.
   before it has applied the sequence.
 - **Unfinished installations are hidden.** While loading, the installation is
   missing from listings and ordinary opens refuse it with `BootstrapPending`. An
-  unfinished join is listed on its own, so the app can resume it (§13.2). A
+  unfinished join is listed on its own, so the app can resume it (§13.2), and
+  so is a restore past its record (§13.1). A
   replacement of an installation the device already has is not hidden: its
   store stays listed (§19.3). It stays at its permanent
   path throughout. Only after loading does coven commit the final keys and
   credentials and make it visible, without closing or moving the database. So the
   app's first commits are made against the installed membership and rows (§2.1).
 - **Cancelling.** Cancelling closes the installation and removes its local work.
-  A join whose request may have been sent can't be cancelled (§13.2). Dropping a
+  A join whose request may have been sent can't be cancelled (§13.2), nor a
+  restore whose device may be registered (§13.1). Dropping a
   join that is waiting for approval keeps its encrypted request and saved code,
   so the app can resume it.
 - **Dropping mid-setup.** Dropping a setup in progress marks the installation as
@@ -9291,7 +9333,7 @@ keeps them apart from the app's own Block Store entries:
 
 | Scope | Entries | Deleted when |
 |---|---|---|
-| Device-only: never leaves this device or its backups | device id, store keys, member keys, provider credentials, a storage setup's own credentials until it finishes or is undone (§11.6), the app's secrets and their list | the store is deleted from this device (api.md [E1](api.md#e1-opening)) |
+| Device-only: never leaves this device or its backups | device id, store keys, member keys, provider credentials, a storage setup's own credentials until it finishes or is undone (§11.6), the invite code of a join under way, the record of a restore under way, the app's secrets and their list | the store is deleted from this device (api.md [E1](api.md#e1-opening)) |
 | Kept for the person: synced by iCloud Keychain to their Apple devices; on Android, kept in this phone's Block Store and given to a phone set up from it | restore code with the store's name, and the S3 key beside it | the person's membership ends (§14.1), or the person forgets the entry (§13.1) |
 
 On Apple devices the device-only entries can be read only while the device is
@@ -10661,6 +10703,8 @@ Write-ups explain each model and state its assumptions:
 | Each rule those results need is needed: leaving out the step check, ending operations or invites at a stop, ending a refused access record, ending the binding with its invite, recording the binding, listing approval as its own stage, leaving an approval's refusal to its pass, or recording the share before the grant each has a counterexample | `unguarded_finding_is_stale`, `forgetful_stop_runs_forever`, `stop_strands_approval`, `refused_record_strands`, `split_binding_disagrees`, `reclaim_binds_twice`, `approval_shown_as_waiting`, `demoted_approval_offered`, `unrecorded_share_strands` | `proofs/sequence/CovenSequence/InviteLifecycle.lean` | §13.2, §14.1 |
 | An invite ends together with every operation it started for its own entries, its share, the share's end and a recovery's key record, and leaves no claim open; from every reachable state, crashes between a claim landing and its end included, its own slots read before their claims settle, slots lost to other devices and a cancel while the share's record is claimed, coven's own steps end the invite with no claim open, so the device's writes go out | `children_end_with_invite`, `settles` | `proofs/sequence/CovenSequence/InviteClaims.lean` | §5.1, §13.2 |
 | *Body.* An ended invite that looks only at history leaves a claim open for good: its share's end, when its own slot showed the share ended before the claim settled, or its share's record, when the app cancelled it while that claim landed | `ended_share_strands_claim`, `cancelled_share_strands_claim` | `proofs/sequence/CovenSequence/InviteClaims.lean` | §13.2 |
+| While history names a restoring device as active, or a claim of its registration is open, the restore is published or listed for the app to finish; from every reachable state, crashes, dropped calls, failures, cancels, lost slots and the member's removal included, coven's own steps and the app resuming what is listed end the restore published, with its device registered, or with its device not active and no claim open | `registered_listed`, `settles`, `settled_outcome` | `proofs/sequence/CovenSequence/RestoreRegistration.lean` | §11.6, §13.1 |
+| *Body.* A restore that doesn't record itself before registering leaves its device registered with nothing listed after a crash; a cancel that doesn't wait for the registration leaves it registered with nothing on the device | `crashed_registration_ghost`, `cancelled_registration_ghost` | `proofs/sequence/CovenSequence/RestoreRegistration.lean` | §13.1 |
 | A join's reported phases never go back: waiting, loading, done, across its checks and the calls that resume it. Keeping the opened keys only in the call, or reporting a scan that finds no copy as loading, makes them go back | `phases_forward`, `opened_never_waits`, `resumed_waits_again`, `scan_shown_as_loading` | `proofs/sequence/CovenSequence/JoinStatus.lean` | §13.2 |
 | Writes after a removal or key replacement are refused with rows unchanged and no new unique-value or owner claim, while the claim number is recorded | `cutoff` | `proofs/sequence/CovenSequence/Cutoff.lean` | §14.1 |
 | Circle permission is judged at the authored applied prefix; landing still checks store membership, device removal and key generation | `write_permission_at_authored_prefix` | `proofs/sequence/CovenSequence/Authorship.lean` | §15.6, §15.8 |

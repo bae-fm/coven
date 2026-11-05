@@ -660,6 +660,7 @@ mod sequence_keys;
 mod sequence_member_keys;
 #[path = "sequence_operations.rs"]
 pub(crate) mod sequence_operations;
+pub use sequence_operations::registration_journaled;
 #[path = "sequence_read.rs"]
 mod sequence_read;
 #[path = "sequence_reload.rs"]

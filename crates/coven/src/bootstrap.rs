@@ -38,6 +38,13 @@ pub(super) use replace::restore_device;
 mod reset;
 pub(super) use reset::reset_device;
 
+#[path = "bootstrap_restore.rs"]
+mod restore;
+#[cfg(test)]
+use restore::keychain_code;
+pub use restore::{restore_from_code, restore_from_saved_code};
+pub(super) use restore::{resume_restore, unfinished_restores};
+
 #[path = "restore_credentials.rs"]
 mod credentials;
 use credentials::restore_connection;
@@ -63,6 +70,14 @@ pub enum BootstrapError {
     /// here, or it has ended.
     #[error("no join is under way for store {0}")]
     NoUnfinishedJoin(StoreId),
+    /// Cancelling a restore once its device may be registered. The restore
+    /// stays unfinished and listed, and only finishes (§13.1).
+    #[error("the device may be registered; the restore stays unfinished")]
+    RestoreRegistered,
+    /// No restore is under way for this store on this device: none recorded
+    /// itself here, or it has ended.
+    #[error("no restore is under way for store {0}")]
+    NoUnfinishedRestore(StoreId),
     /// The code cannot be used for this operation.
     #[error(transparent)]
     Code(#[from] CodeError),
@@ -192,70 +207,6 @@ impl From<crate::task::TaskFailed> for BootstrapError {
     }
 }
 
-/// Restore this person's store on a new device, returning its open handle.
-/// S3 requires a key: the one the code carries, or one entered separately,
-/// never both. Other providers require None and use the builder's own
-/// sign-in. Invalid key inputs fail before bootstrap begins.
-pub async fn restore_from_code(
-    builder: CovenBuilder,
-    code: &str,
-    s3_credentials: Option<S3Credentials>,
-    device_name: &str,
-    on_status: impl Fn(BootstrapStatus),
-    cancel: &watch::Receiver<bool>,
-) -> Result<CovenHandle, BootstrapError> {
-    check_cancel(cancel)?;
-    let code = coven_sync::read_restore_code(code)?;
-    let storage = RestoreStorage::decode(code.storage.as_bytes()).map_err(SyncError::from)?;
-    let (data, sign_in) = restore_connection(&builder, storage, s3_credentials)?;
-    Box::pin(bootstrap_device(
-        builder,
-        BootstrapRequest::Restore { code, data, sign_in, name: device_name.into() },
-        on_status,
-        cancel,
-    ))
-    .await?
-    .ok_or_else(|| SyncError::from(StorageFailure::MemberKeysMissing).into())
-}
-
-/// Restore a readable entry selected from `saved_restore_codes`. Reads the current
-/// code by store id, including a replacement saved since listing. Returns None
-/// if that store's code is no longer saved.
-/// S3 uses the explicit key when supplied, otherwise its key saved beside the code.
-/// Missing keys, wrong-provider keys and keychain failures precede bootstrap.
-pub async fn restore_from_saved_code(
-    builder: CovenBuilder,
-    saved: &SavedRestoreCode,
-    s3_credentials: Option<S3Credentials>,
-    device_name: &str,
-    on_status: impl Fn(BootstrapStatus),
-    cancel: &watch::Receiver<bool>,
-) -> Result<Option<CovenHandle>, BootstrapError> {
-    check_cancel(cancel)?;
-    let person = PersonEntries::new(builder.keychain()?, saved.store_id);
-    let Some((code, location)) = keychain_code(&person, saved.store_id)? else {
-        return Ok(None);
-    };
-    let s3_credentials = if location.provider() == CloudProvider::S3 && s3_credentials.is_none() {
-        person
-            .s3_credentials()?
-            .map(|bytes| S3Credentials::decode(bytes.as_bytes()).map_err(SyncError::from))
-            .transpose()?
-    } else {
-        s3_credentials
-    };
-    // The saved code carries no key; the person entries hold it beside it.
-    let storage = RestoreStorage::location_only(location);
-    let (data, sign_in) = restore_connection(&builder, storage, s3_credentials)?;
-    Box::pin(bootstrap_device(
-        builder,
-        BootstrapRequest::Restore { code, data, sign_in, name: device_name.into() },
-        on_status,
-        cancel,
-    ))
-    .await
-}
-
 /// Accept provider access, retain one signed request across restarts, and wait
 /// for approval. Returns the open store, or None when declined or expired.
 /// Dropping the future preserves the unfinished join for a subsequent call
@@ -381,30 +332,13 @@ impl JoinControl {
     }
 }
 
-#[expect(
-    clippy::map_err_ignore,
-    reason = "read_saved_code logs why a saved code is unreadable; restoring sees Invalid"
-)]
-fn keychain_code(
-    keychain: &PersonEntries,
-    store: StoreId,
-) -> Result<Option<(RestoreCode, StorageConfig)>, BootstrapError> {
-    keychain
-        .restore_code()?
-        .map(|bytes| {
-            coven_sync::read_saved_code(store, bytes.as_bytes())
-                .map(|(saved, location)| (saved.code, location))
-                .map_err(|_| CodeError::Invalid.into())
-        })
-        .transpose()
-}
-
 enum BootstrapRequest {
     Restore {
         code: RestoreCode,
         data: ConnectionCredentials,
-        /// The session custody an OAuth connection refreshes in.
-        sign_in: Option<Arc<SessionSignIn>>,
+        /// Where an OAuth connection refreshes: the session, or the store's
+        /// device credentials a recorded restore kept its sign-in in.
+        sign_in: SignInCustody,
         name: String,
     },
     Join {
@@ -476,11 +410,14 @@ async fn bootstrap_device(
                 Err(error) => Err(error),
             };
             let result = match name.and_then(|name| {
-                // A loaded join was approved: its request was sent.
-                check_cancel(cancel).map_err(|error| match &request {
-                    BootstrapRequest::Join { .. } => BootstrapError::JoinRequestSent,
-                    BootstrapRequest::Restore { .. } => error,
-                })?;
+                // A loaded join was approved: its request was sent. A loaded
+                // restore registered its device (§13.1).
+                if check_cancel(cancel).is_err() {
+                    return Err(match &request {
+                        BootstrapRequest::Join { .. } => BootstrapError::JoinRequestSent,
+                        BootstrapRequest::Restore { .. } => BootstrapError::RestoreRegistered,
+                    });
+                }
                 builder.authentication.take();
                 let mut owners = builder
                     .owners(pending.directory(), Arc::new(StoreKeychain::new(keychain, id)))?;
@@ -527,48 +464,48 @@ async fn bootstrap_device(
                 }
                 Err(error) => Err(error),
             };
+            // A published store no longer needs what its join or restore
+            // kept to finish it.
             let result = match &request {
-                BootstrapRequest::Join { .. } => forget_joined_code(&device_entries, result),
-                BootstrapRequest::Restore { .. } => result,
+                BootstrapRequest::Join { .. } => {
+                    forget_kept(result, || device_entries.delete_invite_code())
+                }
+                BootstrapRequest::Restore { .. } => {
+                    forget_kept(result, || device_entries.delete_restore_record())
+                }
             };
             match result {
                 Ok(handle) => Ok(Some(handle)),
                 Err(error @ BootstrapError::Published { .. }) => Err(error),
-                Err(error) => {
-                    let result = combine(
-                        Err(error),
-                        database
-                            .close()
-                            .await
-                            .map_err(CovenError::from)
-                            .map_err(BootstrapError::from),
-                    );
-                    if matches!(result, Err(BootstrapError::Cancelled)) {
-                        remove_unfinished(&device_entries, &pending, result)
-                    } else {
-                        result
-                    }
-                }
+                // A loaded join or restore is past cancelling: it stays for
+                // the next call.
+                Err(error) => combine(Err(error), close_database(&database).await),
             }
         }
         // Only a join ends without a store: declined or expired.
         Ok(None) => remove_unfinished(&device_entries, &pending, Ok(None)),
-        Err(BootstrapError::Cancelled) => {
-            remove_unfinished(&device_entries, &pending, Err(BootstrapError::Cancelled))
-        }
-        Err(error) => Err(error),
+        Err(error) => match &request {
+            BootstrapRequest::Restore { .. } => {
+                restore::ended(&builder, &pending, &device_entries, error).await
+            }
+            BootstrapRequest::Join { .. } if matches!(error, BootstrapError::Cancelled) => {
+                remove_unfinished(&device_entries, &pending, Err(error))
+            }
+            BootstrapRequest::Join { .. } => Err(error),
+        },
     }
 }
 
 /// Remove an unfinished first installation that ends without a store: a join
-/// declined, expired or cancelled before its request was sent, or a cancelled
-/// restore, which may have loaded into a join's installation. The device's
-/// provider credentials go first, which only a join's kept sign-in can be
-/// before publication; then the saved code; then the installation. A failure
-/// part way leaves the code and installation, which list as the join it was
-/// and a retry ends again (signing in first once the kept sign-in is gone),
-/// or the installation alone, which lists as no join. Credentials are never
-/// left without their code (§13.2).
+/// declined, expired or cancelled before its request was sent, or a restore
+/// cancelled, or ended by the facts once recorded (§13.1), which may have
+/// loaded into a join's installation. The device's provider credentials go
+/// first, which only a join's or a recorded restore's kept sign-in can be
+/// before publication; then the saved code or record; then the installation.
+/// A failure part way leaves the code or record and installation, which list
+/// as the join or restore it was and a retry ends again (signing in first
+/// once the kept sign-in is gone), or the installation alone, which lists as
+/// neither. Credentials are never left without their code or record (§13.2).
 fn remove_unfinished<T>(
     device_entries: &StoreKeychain,
     pending: &BootstrapStore,
@@ -577,24 +514,26 @@ fn remove_unfinished<T>(
     match device_entries
         .delete_storage_credentials()
         .and_then(|()| device_entries.delete_invite_code())
+        .and_then(|()| device_entries.delete_restore_record())
     {
         Ok(()) => cleanup(pending, result),
         Err(error) => combine(result, Err(error.into())),
     }
 }
 
-/// A published join no longer needs its saved code. Failing to delete it is
-/// reported with the open handle, as other failures after publication are.
-fn forget_joined_code(
-    device_entries: &StoreKeychain,
+/// A published join no longer needs its saved code, nor a published restore
+/// its record: `delete` deletes it. Failing to is reported with the open
+/// handle, as other failures after publication are.
+fn forget_kept(
     result: Result<CovenHandle, BootstrapError>,
+    delete: impl FnOnce() -> Result<(), KeyError>,
 ) -> Result<CovenHandle, BootstrapError> {
     let (handle, published) = match result {
         Ok(handle) => (handle, None),
         Err(BootstrapError::Published { handle, source }) => (handle, Some(*source)),
         Err(error) => return Err(error),
     };
-    let deleted = device_entries.delete_invite_code().map_err(BootstrapError::from);
+    let deleted = delete().map_err(BootstrapError::from);
     match (published.map_or(Ok(()), Err), deleted) {
         (Ok(()), Ok(())) => Ok(handle),
         (failed, deleted) => Err(BootstrapError::Published {
@@ -664,11 +603,11 @@ async fn prepare_and_load(
     cancel: &watch::Receiver<bool>,
 ) -> Result<Option<Loaded>, BootstrapError> {
     let directory = pending.directory();
-    let (member, mut data, sign_in, device_name, mut admission) = match request {
+    let (member, mut data, mut sign_in, device_name, mut admission) = match request {
         BootstrapRequest::Restore { code, data, sign_in, name } => (
             MemberIdentity::new(code.member, code.member_keys.clone()),
             data.clone(),
-            sign_in.clone().map_or(SignInCustody::None, SignInCustody::Session),
+            sign_in.clone(),
             name.clone(),
             Admission::Restoring,
         ),
@@ -685,6 +624,13 @@ async fn prepare_and_load(
         }
     };
     admission.cancellable(check_cancel(cancel))?;
+    // A new device's restore records itself before it registers (§13.1).
+    let recording = match (request, pending) {
+        (BootstrapRequest::Restore { code, name, .. }, Installing::New(_)) => {
+            Some(restore::Recording::new(builder, code.store, name)?)
+        }
+        _ => None,
+    };
     let provider = data.location.provider();
     let settings = directory.settings().map_err(CovenError::from)?;
     let state = Arc::new(coven_sync::SequenceState::new());
@@ -788,7 +734,7 @@ async fn prepare_and_load(
     let loading = async {
         if let Admission::Joining(joining) = &mut admission {
             if !joining.admit(&sync, &database, status).await? {
-                return Ok(false);
+                return Ok(None);
             }
         }
         // Reading forward opens this member's copies and loads the floor's
@@ -822,33 +768,67 @@ async fn prepare_and_load(
             .devices
             .get(&settings.device_id)
             .is_some_and(|device| device.member == member.member());
-        if !registered {
-            let replaces = replacement.map(|replacement| replacement.device_reset().old_device);
-            let registering = (clock.elapsed(), storage.requests());
-            sync.register_device(device_name, replaces).await?;
-            tracing::info!(
-                time = ?(clock.elapsed() - registering.0),
-                requests = %storage.requests().since(&registering.1),
-                "registered this device"
-            );
-        }
-        if let Some(access) = access {
-            let state = database.store_state().await?;
-            if let Some(change) = crate::storage::access_change(&state, member.member(), access)? {
-                sync.administer(change).await?;
-            }
-        }
-        // The notice commits before any handle is published (E5).
-        if let Some(replacement) = replacement {
-            reset::carry_discarded_provider_work(&sync, &database, replacement).await?;
-        }
-        Ok::<_, BootstrapError>(true)
+        Ok::<_, BootstrapError>(Some((access, registered)))
     };
     let mut cancellation = cancel.clone();
-    let result = tokio::select! {
+    let loaded = tokio::select! {
         biased;
         _ = cancelled(&mut cancellation) => Err(BootstrapError::Cancelled),
         result = loading => result,
+    };
+    let result = match loaded {
+        Ok(Some((access, registered))) => {
+            // The work that writes to storage. A cancel stops it only between
+            // its steps: one under way, a registration on its way above all,
+            // runs to its end first (§11.6).
+            let registering = async {
+                if !registered {
+                    check_cancel(cancel)?;
+                    if let Some(recording) = &recording {
+                        sign_in = recording.record(&member, settings.id, &data, sign_in.clone())?;
+                    }
+                    let replaces =
+                        replacement.map(|replacement| replacement.device_reset().old_device);
+                    let registering = (clock.elapsed(), storage.requests());
+                    sync.register_device(device_name, replaces).await?;
+                    tracing::info!(
+                        time = ?(clock.elapsed() - registering.0),
+                        requests = %storage.requests().since(&registering.1),
+                        "registered this device"
+                    );
+                }
+                if let Some(access) = access {
+                    let state = database.store_state().await?;
+                    if let Some(change) =
+                        crate::storage::access_change(&state, member.member(), access)?
+                    {
+                        check_cancel(cancel)?;
+                        sync.administer(change).await?;
+                    }
+                }
+                // The notice commits before any handle is published (E5).
+                if let Some(replacement) = replacement {
+                    check_cancel(cancel)?;
+                    reset::carry_discarded_provider_work(&sync, &database, replacement).await?;
+                }
+                Ok::<_, BootstrapError>(true)
+            };
+            tokio::pin!(registering);
+            let ended = tokio::select! {
+                biased;
+                _ = cancelled(&mut cancellation) => None,
+                result = &mut registering => Some(result),
+            };
+            match ended {
+                Some(result) => result,
+                None => match registering.await {
+                    Err(error) if crate::task::CarriesBug::bug(&error).is_some() => Err(error),
+                    _ => Err(BootstrapError::Cancelled),
+                },
+            }
+        }
+        Ok(None) => Ok(false),
+        Err(error) => Err(error),
     };
     let result = sign_in.refused(provider, admission.cancellable(result));
     files.close().await;

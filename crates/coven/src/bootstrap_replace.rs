@@ -79,7 +79,12 @@ pub(crate) async fn restore_device(
     replace_installation(
         builder,
         store,
-        BootstrapRequest::Restore { code, data, sign_in, name: device_name.into() },
+        BootstrapRequest::Restore {
+            code,
+            data,
+            sign_in: sign_in.map_or(SignInCustody::None, SignInCustody::Session),
+            name: device_name.into(),
+        },
         Replacing::Restore(prepare),
         status,
         cancel,

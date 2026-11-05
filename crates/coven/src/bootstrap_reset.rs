@@ -81,7 +81,12 @@ pub(crate) async fn reset_device(
     replace::replace_installation(
         builder,
         store,
-        BootstrapRequest::Restore { code, data, sign_in, name: device_name.into() },
+        BootstrapRequest::Restore {
+            code,
+            data,
+            sign_in: sign_in.map_or(SignInCustody::None, SignInCustody::Session),
+            name: device_name.into(),
+        },
         replace::Replacing::Reset,
         status,
         &never,

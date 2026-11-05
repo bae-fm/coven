@@ -6816,6 +6816,21 @@ pub enum ProviderSignOut {
   store, storage or device's copy, needs no open store or provider connection,
   and succeeds when the entries are already absent. It deletes an unreadable
   entry the same way, by its store id, in every keychain group that holds one.
+- A restore records itself on the device before it registers the device:
+  the code it restores with, holding the S3 key on S3, and the device's
+  name, in a device-only keychain entry, then on Dropbox and OneDrive its
+  sign-in, in the store's device credentials, where it refreshes from then
+  on. From the record on, the restore only goes forward
+  ([§13.1](coven.md#131-a-persons-new-device-the-restore-code)).
+  `CovenBuilder::unfinished_restores` lists the restores under way, and
+  `resume_restore` finishes one with neither the code nor a new sign-in.
+  Cancelling once the record is kept waits for the registration to end,
+  then fails with `BootstrapError::RestoreRegistered`, the restore still
+  listed. A cancel, a registration refused, or the member or device
+  removed, while the history the installation applied names the device as
+  removed, or doesn't name it and no registration of it is journaled, ends
+  the restore instead: it deletes the kept sign-in, the record and the
+  installation, in that order.
 - A device that still holds the store under member keys another device
   replaced restores in place with `CovenBuilder::restore_device`
   ([§13.1](coven.md#131-a-persons-new-device-the-restore-code)). The code must
@@ -7091,6 +7106,12 @@ pub enum BootstrapError {
     /// `resume_join` found no join under way for this store on this device:
     /// none was started here, or it has ended.
     NoUnfinishedJoin(StoreId),
+    /// Cancelling a restore once its device may be registered. The restore
+    /// stays unfinished and listed; it only finishes (§13.1).
+    RestoreRegistered,
+    /// `resume_restore` found no restore under way for this store on this
+    /// device: none recorded itself here, or it has ended.
+    NoUnfinishedRestore(StoreId),
     /// The code cannot be used.
     Code(CodeError),
     /// Preparing, publishing or removing the unpublished directory failed.
@@ -7477,6 +7498,13 @@ impl S3Credentials {
 /// `oauth_access` is present. A missing S3 key, a second key beside one the
 /// code holds, or credentials for another provider fail before bootstrap with
 /// BootstrapError::Sync carrying StorageFailure::InvalidConfiguration.
+/// Before it registers the device, the restore records itself on the device,
+/// and from then on only goes forward: dropping or failing the call, or a
+/// crash, leaves it listed for `CovenBuilder::resume_restore`, and cancelling
+/// waits for the registration, then ends the call with
+/// `BootstrapError::RestoreRegistered`. A cancel, or a registration refused
+/// or a member removed, while nothing in storage names the device as active
+/// ends the restore, removing everything it kept (§13.1).
 pub async fn restore_from_code(
     builder: CovenBuilder,
     code: &str,
@@ -7661,6 +7689,28 @@ impl CovenBuilder {
         on_status: impl Fn(BootstrapStatus),
         control: &JoinControl,
     ) -> Result<Option<CovenHandle>, BootstrapError>;
+
+    /// The restores under way on this device (§13.1), ordered by store id,
+    /// each as `decode_code_info` reads the code it recorded: restores that
+    /// recorded themselves before registering the device and have not ended.
+    /// A record coven can't read fails the call; it is never skipped.
+    pub async fn unfinished_restores(&self) -> Result<Vec<CodeMetadata>, BootstrapError>;
+
+    /// Continues an unfinished restore from its record, as `restore_from_code`
+    /// does: the code, with an S3 key in it on S3, and the device name. On
+    /// Dropbox and OneDrive it connects through the sign-in the restore kept,
+    /// or a sign-in this builder holds, which replaces the kept one once it
+    /// grants the location's access. With neither, or a kept one the provider
+    /// refuses even after its one refresh, it fails with
+    /// `OAuthError::Reauthorize` and the restore stays unfinished. Cancelling
+    /// ends it as `restore_from_code`'s cancel does. A store with no record
+    /// fails with `BootstrapError::NoUnfinishedRestore`.
+    pub async fn resume_restore(
+        self,
+        store: StoreId,
+        on_status: impl Fn(BootstrapStatus),
+        cancel: &watch::Receiver<bool>,
+    ) -> Result<CovenHandle, BootstrapError>;
 }
 
 impl OAuthClients {

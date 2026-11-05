@@ -244,6 +244,7 @@ fn deletion_discovers_only_this_stores_entries_from_custody() {
         store.set_host_secret("token", "token").unwrap();
         store.set_host_secret("another-token", "another secret").unwrap();
         store.set_invite_code(&SecretText::new("CVI1-CODE".into())).unwrap();
+        store.set_restore_record(&SecretText::new("CVR1-CODE".into()), "Ana’s laptop").unwrap();
         let person = PersonEntries::new(fake.clone(), store.store);
         person.set_restore_code(&SecretBytes::new(b"restore".to_vec())).unwrap();
         person.set_s3_credentials(&SecretBytes::new(b"S3 key".to_vec())).unwrap();
@@ -259,6 +260,7 @@ fn deletion_discovers_only_this_stores_entries_from_custody() {
         CREDENTIALS_ENTRY,
         HOST_SECRET_NAMES_ENTRY,
         INVITE_CODE_ENTRY,
+        RESTORE_RECORD_ENTRY,
         &host_secret_entry("token"),
         &host_secret_entry("another-token"),
     ] {
@@ -523,4 +525,29 @@ fn an_invite_code_is_kept_on_this_device_only_until_deleted() {
     store.delete_invite_code().unwrap();
     store.delete_invite_code().unwrap();
     assert!(store.invite_code().unwrap().is_none());
+}
+
+/// A restore's record stays on this device: the person's other devices never
+/// see it, and it reads back exactly, a name with a NUL in it too, until the
+/// restore deletes it (§13.1).
+#[test]
+fn a_restore_record_is_kept_on_this_device_only_until_deleted() {
+    let fake = Keychain::in_memory("restore-record").unwrap();
+    let store = StoreKeychain::new(fake.clone(), StoreId(Uuid::from_u128(1)));
+    assert!(store.restore_record().unwrap().is_none());
+    store.set_restore_record(&SecretText::new("CVR1-CODE".into()), "Ana’s\0laptop").unwrap();
+    let (code, name) = store.restore_record().unwrap().unwrap();
+    assert_eq!((code.as_str(), name.as_str()), ("CVR1-CODE", "Ana’s\0laptop"));
+    assert!(fake.read(EntryScope::Person, &store.account(RESTORE_RECORD_ENTRY)).unwrap().is_none());
+    assert!(matches!(
+        store.set_restore_record(&SecretText::new("CVR1\0CODE".into()), "laptop"),
+        Err(KeyError::Material(MaterialError::Encoding))
+    ));
+    for bytes in [&[0xff][..], b"CVR1-CODE"] {
+        store.write(RESTORE_RECORD_ENTRY, bytes).unwrap();
+        assert!(matches!(store.restore_record(), Err(KeyError::Material(MaterialError::Encoding))));
+    }
+    store.delete_restore_record().unwrap();
+    store.delete_restore_record().unwrap();
+    assert!(store.restore_record().unwrap().is_none());
 }

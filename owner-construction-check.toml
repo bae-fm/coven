@@ -1447,10 +1447,21 @@ tables = [
     # Listing reads each unfinished installation's saved code.
     "unfinished_joins",
     "prepare_and_load",
-    "restore_from_code",
-    "restore_from_saved_code",
     # An app makes one for each join it may cancel or check now (api.md E10).
     "JoinControl::new",
+]
+"crates/coven/src/bootstrap_restore.rs" = [
+    "restore_from_code",
+    "restore_from_saved_code",
+    # A restore keeps its record, and its sign-in in the device custody it
+    # composes for the store, from before it registers until it ends (§13.1).
+    "Recording::new",
+    "Recording::record",
+    # Listing reads each unfinished installation's record.
+    "unfinished_restores",
+    "resume_restore",
+    # Ending a restore reads its installation's own database for the facts.
+    "registered",
 ]
 "crates/coven/src/bootstrap_commit.rs" = [
     "publish_bootstrap",
@@ -1489,6 +1500,7 @@ tables = [
     "CovenBuilder::reset_device",
     "CovenBuilder::restore_device",
     "CovenBuilder::resume_join",
+    "CovenBuilder::resume_restore",
     "CovenBuilder::open_read_only",
     "CovenBuilder::owners",
     "CovenBuilder::create_store",
