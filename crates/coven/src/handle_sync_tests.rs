@@ -100,6 +100,30 @@ async fn a_stopped_loop_runs_no_pass_until_started_and_close_ends_it() {
     assert_eq!(storage.request_trace().len(), requests);
 }
 
+/// Opening a store whose storage is set up does not start its sync loop:
+/// no pass runs, whatever wakes it, until `start_sync` (E1).
+#[tokio::test]
+async fn a_reopened_store_runs_no_pass_until_started() {
+    let mut network = Network::new(1).await;
+    let device = network.devices.remove(0);
+    device.handle.close().await.unwrap();
+    let handle = network.reopen(&device).open(device.store, |_| ()).await.unwrap();
+    insert(&handle, "after reopening").await;
+    handle.sync_now();
+    handle.test_parked().await;
+    let requests = device.storage.request_trace().len();
+    for _ in 0..3 {
+        handle.sync_now();
+    }
+    handle.test_parked().await;
+    assert_eq!(device.storage.request_trace().len(), requests, "a pass ran before start_sync");
+    handle.start_sync().await.unwrap();
+    wait_for_sent(&handle).await;
+    assert!(device.storage.request_trace().len() > requests);
+    handle.close().await.unwrap();
+    network.close().await;
+}
+
 /// The sync loop waits for a provider cooldown; requests made meanwhile
 /// coalesce into the pass that follows it (§6.7).
 #[tokio::test]
