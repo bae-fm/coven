@@ -348,6 +348,12 @@ import SequenceApply
 #print axioms CovenSequence.DeviceReplacement.crashed_replacement_opens_old
 #print axioms CovenSequence.DeviceReplacement.unswapped_replacement_opens_old
 #print axioms CovenSequence.DeviceReplacement.cancelled_replacement_missing
+#print axioms CovenSequence.StoreDiscard.reachable_inv
+#print axioms CovenSequence.StoreDiscard.never_broken
+#print axioms CovenSequence.StoreDiscard.progress
+#print axioms CovenSequence.StoreDiscard.settles
+#print axioms CovenSequence.StoreDiscard.entries_first_breaks_store
+#print axioms CovenSequence.StoreDiscard.unfinished_deletion_blocks_store
 #print axioms CovenSequence.BootstrapCommit.reachable_inv
 #print axioms CovenSequence.BootstrapCommit.never_orphaned
 #print axioms CovenSequence.BootstrapCommit.published_whole

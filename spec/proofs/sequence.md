@@ -917,6 +917,28 @@ Each rule is needed:
 - `cancelled_replacement_missing`: a cancel that doesn't wait removes the new
   installation while the attempt is on its way, and it lands after.
 
+[`StoreDiscard`](sequence/CovenSequence/StoreDiscard.lean) models
+`discard_store` (§19.3, api.md E1): the call deletes the device's keychain
+entries for the store, its directory and the lock files beside it, in steps
+no transaction holds together. The call fails or the device crashes at any
+point, and the app discards a listed store again. Under `Rules.correct` the
+deletion first renames the directory to its deletion name, which hides the
+store and records the deletion, and listing the stores, or a restore or join
+of the store, finishes a recorded deletion no call holds.
+
+- `never_broken`: the listing never shows a store whose entries are gone.
+- `settles`: from every reachable state, the call's steps and the listing's
+  reach a state with nothing left: the store whole, or gone with its entries
+  and lock files. The proof is a measure those steps lower (`progress`).
+
+Each rule is needed:
+
+- `entries_first_breaks_store`: deleting the entries first, a crash leaves
+  the store listed with no device id or keys.
+- `unfinished_deletion_blocks_store`: with nothing finishing a recorded
+  deletion, a crash after the rename leaves remains for good, and the
+  store's id can't be made again.
+
 [`BootstrapCommit`](sequence/CovenSequence/BootstrapCommit.lean) models the
 commit a restore or a join makes once it has loaded (§13.4, §11.6): one write
 at a time of the device's custody for the store, then publication. The call
