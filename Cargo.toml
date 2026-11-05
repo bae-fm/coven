@@ -116,7 +116,10 @@ incremental = true
 debug = "line-tables-only"
 
 [profile.test]
-incremental = true
+# Tests build once per change; incremental state for every test build of every
+# crate filled checkouts (37 GB in one), and sccache caches non-incremental
+# builds only.
+incremental = false
 opt-level = 1
 debug = "line-tables-only"
 
