@@ -830,6 +830,29 @@ installation published or listed for it, on every path:
 - `cancelled_registration_ghost`: a cancel that doesn't wait removes the
   installation while the attempt is on its way, and it lands after.
 
+[`FirstInstallation`](sequence/CovenSequence/FirstInstallation.lean)
+models one store's unfinished first installation on a device, which a join
+and a restore both begin on (§13.4). A join keeps its invite code from
+before its request may be sent, and a restore its record from before its
+registration may be sent; each lists its call to resume. A join cancelled
+before sending, or declined, and a restore cancelled or failed before its
+record, remove the installation and everything kept beside it. The app
+drops either call at any point. Under `Rules.correct` a restore refuses an
+installation holding an invite code, and a join one holding a restore's
+record.
+
+- `never_stranded`: whatever storage may hold of a join's request or a
+  restore's registration, the call that sent it stays listed until it meets
+  its outcome.
+
+The rule is needed; without it one call's removal takes the other's listing:
+
+- `restore_strands_join`: a restore begun on a waiting join's installation
+  is cancelled before its record, and removes the join's code.
+- `join_strands_restore`: a join begun on a registering restore's
+  installation is cancelled before its request, and removes the restore's
+  record.
+
 ## Settling a claim whose slot was deleted
 
 [`Settle`](sequence/CovenSequence/Settle.lean). Each copy numbers all its slot

@@ -33,4 +33,5 @@ import CovenSequence.JoinScanExamples
 import CovenSequence.InviteLifecycle
 import CovenSequence.InviteClaims
 import CovenSequence.RestoreRegistration
+import CovenSequence.FirstInstallation
 import CovenSequence.JoinStatus
