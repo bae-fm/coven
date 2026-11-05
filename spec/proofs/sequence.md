@@ -810,25 +810,35 @@ its store, cancelled, its registration refused or its device removed,
 removes the installation only when nothing in storage names the device as
 active and nothing can land: no registration journaled, one refused, or the
 device removed since. Otherwise, and after any other failure, the call ends
-and the restore stays listed.
+and the restore stays listed. Before the record, a failure removes the
+installation, as a cancel does. A crash before the record leaves an
+installation nothing refers to, no call on it and nothing recorded beside
+it; listing unfinished work reclaims it.
 
 - `registered_listed`: while history names the device as active, or a claim
   of its registration is open, the restore is published or listed.
 - `settles`: from every reachable state, coven's own steps and the app
   resuming what is listed reach a state with nothing left: the store
-  published, or nothing recorded and no call running. The proof is a measure
-  those steps lower from every other state (`progress`); it assumes an
-  attempt sent again lands when no other device takes the slot.
+  published, or no installation, nothing recorded and no call running. The
+  proof is a measure those steps lower from every other state (`progress`);
+  it assumes an attempt sent again lands when no other device takes the
+  slot.
 - `settled_outcome`: there, the device is registered and its store
   published, or it is not active in history and no claim of it is open.
+- `ended_call_leaves_nothing_unlisted`: a call that ends other than by a
+  crash publishes the store, removes the installation or leaves the restore
+  listed; only a crash leaves an installation for a listing to reclaim.
 
-Each rule is needed; without it a device stays registered with no
-installation published or listed for it, on every path:
+`record` and `wait` are each needed; without either a device stays
+registered with no installation published or listed for it, on every path:
 
 - `crashed_registration_ghost`: without the record, the registration lands
   and the device crashes; nothing lists the installation to resume.
 - `cancelled_registration_ghost`: a cancel that doesn't wait removes the
   installation while the attempt is on its way, and it lands after.
+
+Without `undo`, a call that fails before the record leaves its installation
+for a later listing to reclaim (`failure_keeps_installation`).
 
 [`FirstInstallation`](sequence/CovenSequence/FirstInstallation.lean)
 models one store's unfinished first installation on a device, which a join
