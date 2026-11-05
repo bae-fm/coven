@@ -631,3 +631,19 @@ async fn a_stored_record_with_part_of_a_file_is_damaged_database() {
     assert!(matches!(read, Err(CovenError::Database(DbError::DamagedDatabase))), "{read:?}");
     db.close().await.unwrap();
 }
+
+/// A stored pending record that doesn't decode as the requested record type
+/// is a state encoding failure (E5).
+#[tokio::test]
+async fn a_pending_record_read_as_another_type_fails_as_state_encoding() {
+    let store = TestStore::new();
+    let db = store.builder(vec![], vec![]).open().await.unwrap();
+    db.record_pending(record(1)).await.unwrap();
+    db.inspect_writer(|sql| {
+        sql.batch("UPDATE _coven_pending SET value=CAST('{\"shape\":\"another type\"}' AS BLOB)")
+            .unwrap()
+    });
+    let read = db.pending::<Record>().await;
+    assert!(matches!(read, Err(CovenError::Database(DbError::StateEncoding(_)))), "{read:?}");
+    db.close().await.unwrap();
+}
