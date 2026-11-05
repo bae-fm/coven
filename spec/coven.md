@@ -7945,7 +7945,8 @@ read, never a refusal.
   compilation of `coven-sync`, where every refusal is made, from its own checks
   and those of the crates below it: each compilation draws a new random
   identity, and a change to any of that code, or to a dependency, compiles it
-  again. A number builds share, such as the package version, would leave a
+  again. A compilation with `CONST_RANDOM_SEED` set, which would draw the same
+  identity every time, fails. A number builds share, such as the package version, would leave a
   device stuck on a refusal the fix never rechecks (Appendix G.7).
 - A refused slot stops the device under §5.4's rule. No later floor, reset or
   admin entry can get past the refusal.

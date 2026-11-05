@@ -606,6 +606,7 @@ impl PendingValue for PendingRecord {
     /// again and draws another. A version number would not do: development
     /// never moves it, so a refusal a since-fixed bug made would never be
     /// rechecked.
+    // crates/coven-sync/build.rs fails the build when CONST_RANDOM_SEED fixes this draw.
     const BUILD: u128 = const_random::const_random!(u128);
     /// A refusal is a verdict on bytes that never change, judged against
     /// what never changes either: only another build can judge it
