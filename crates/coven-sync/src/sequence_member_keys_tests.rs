@@ -619,3 +619,81 @@ async fn a_resumed_replacement_past_its_failure_ends_its_wait() {
     );
     ana.database().close().await.unwrap();
 }
+
+/// An admin replacing their own pair uses `replace_member_keys`: aiming
+/// `replace_member_keys_for` at themselves is refused as not allowed and
+/// journals nothing (E9).
+#[tokio::test]
+async fn an_admin_targeting_themselves_with_replace_for_is_refused() {
+    let group = Group::new();
+    let ana = group.device(1).await;
+    group.create(&ana).await;
+    let slot = ana.database().applied_slot().await.unwrap();
+    let before = ana.database().store_state().await.unwrap().members[&ana.identity.member()].keys;
+    let keys = coven_format::test_utils::keys_from_seed(12).public_keys();
+
+    let result = ana.sync.replace_member_keys_for(ana.identity.member(), keys).await;
+
+    assert!(
+        matches!(result, Err(SyncError::Rejected(OperationRejection::NotAllowed))),
+        "{result:?}"
+    );
+    assert!(ana.database().operations().await.unwrap().is_empty());
+    assert_eq!(ana.database().applied_slot().await.unwrap(), slot);
+    let state = ana.database().store_state().await.unwrap();
+    assert_eq!(state.members[&ana.identity.member()].keys, before);
+    ana.database().close().await.unwrap();
+}
+
+/// Slots signed with a pair that a later replacement retired still verify:
+/// a device applying the sequence from slot one accepts the writes made
+/// before and after the replacement (E9, §12.3).
+#[tokio::test]
+async fn a_newcomer_verifies_slots_signed_with_a_replaced_pair() {
+    let group = Group::new();
+    let ana = group.device(1).await;
+    let newcomer = coven_crypto::MemberIdentity::new(
+        coven_foundation::id_source::MemberId(coven_foundation::id_source::IdSource::new_id(
+            group.ids.as_ref(),
+        )),
+        coven_format::test_utils::keys_from_seed(9),
+    );
+    group.create(&ana).await;
+    insert(&ana.sync.database, "before", "under the old pair").await;
+    ana.sync.pass().await.unwrap();
+    let (codes, _) =
+        codes(&ana, coven_crypto::custody::Keychain::in_memory("newcomer-verifies").unwrap());
+    codes.replace_member_keys().await.unwrap();
+    insert(&ana.sync.database, "after", "under the new pair").await;
+    // The old pair's copies expose the store key: this pass rotates it, and
+    // the write waits for the replacement key.
+    ana.sync.pass().await.unwrap();
+    ana.sync.pass().await.unwrap();
+    assert!(ana.sync.database.pending::<PendingRecord>().await.unwrap().is_empty());
+
+    ana.sync
+        .administer(coven_format::admin::StoreChange::AddMember {
+            member: newcomer.member(),
+            keys: newcomer.keys().public_keys(),
+            role: coven_format::admin::MemberRole::Member,
+            access: group.access("newcomer"),
+        })
+        .await
+        .unwrap();
+    let ben = group.newcomer(newcomer, group.storage.for_device()).await;
+    ben.sync.pass().await.unwrap();
+    ben.sync
+        .administer(coven_format::admin::StoreChange::AddDevice {
+            name: "Newcomer".into(),
+            replaces: None,
+        })
+        .await
+        .unwrap();
+    ben.sync.pass().await.unwrap();
+
+    assert_eq!(rows(&ben.sync.database).await, rows(&ana.sync.database).await);
+    assert_eq!(rows(&ben.sync.database).await.len(), 2);
+    for device in [&ana, &ben] {
+        device.sync.database.close().await.unwrap();
+    }
+}
