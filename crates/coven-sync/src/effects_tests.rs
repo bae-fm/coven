@@ -320,6 +320,49 @@ fn a_reset_covering_less_than_a_preceding_raise_slot_is_refused() {
     .is_some());
 }
 
+/// Only an admin resets the store, and only a member of a circle resets it
+/// (§19.4).
+#[test]
+fn only_an_admin_resets_the_store_and_only_a_circle_member_resets_its_circle() {
+    let mut state = household();
+    for (author, change) in [
+        (
+            1,
+            StoreChange::AddMember {
+                member: id(3),
+                keys: keys(3),
+                role: MemberRole::Member,
+                access: access(3),
+            },
+        ),
+        (3, StoreChange::AddDevice { name: "Cara".into(), replaces: None }),
+    ] {
+        state = apply(&state, author, change).unwrap().unwrap().state;
+    }
+    let circle = CircleId(uuid::Uuid::from_u128(20));
+    state.circles.insert(circle, StoreCircle { name: "Gifts".into(), members: [id(1)].into() });
+    let announcement = |audience| SnapshotAnnouncement {
+        snapshot: coven_format::admin::SnapshotId { audience, device: DeviceId(1), number: 1 },
+        covers: 10,
+        purpose: Purpose::Reset,
+        digest: [1; 32],
+    };
+    let reset = |author: u64, audience: Audience| {
+        checked_change(
+            &state,
+            &header(author, author as u128, 19),
+            Slot(20),
+            &StoreChange::Reset { announcement: Slot(10) },
+            &BTreeMap::from([(Slot(10), announcement(audience))]),
+            &[],
+        )
+    };
+    assert!(matches!(reset(3, Audience::Store), Err(OperationRejection::NotAllowed)));
+    assert!(reset(1, Audience::Store).unwrap().is_some());
+    assert!(matches!(reset(3, Audience::Circle(circle)), Err(OperationRejection::NotAllowed)));
+    assert!(reset(1, Audience::Circle(circle)).unwrap().is_some());
+}
+
 mod sequence_differential {
     use super::*;
     use crate::sequence_sync::tests::Group;
