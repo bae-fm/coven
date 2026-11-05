@@ -238,6 +238,25 @@ impl Installation {
         .await
     }
 
+    /// A bootstrap, as [`Self::run`] runs it, through a held, signed-in
+    /// builder.
+    pub(super) async fn run_held(
+        &self,
+        owner: &Owner,
+        request: BootstrapRequest,
+        storage: Arc<MemoryStorage>,
+        cancel: &watch::Receiver<bool>,
+        status: impl Fn(BootstrapStatus),
+    ) -> Result<Option<CovenHandle>, BootstrapError> {
+        Box::pin(bootstrap_device(
+            self.held_signed_in_builder(owner, storage).await,
+            request,
+            status,
+            cancel,
+        ))
+        .await
+    }
+
     /// A bootstrap, as [`Self::run`], whose loading reports `recorder`
     /// records at their source.
     pub(super) async fn run_recorded(
@@ -287,13 +306,19 @@ impl Installation {
         }
     }
 
-    pub(super) fn join_request(invite: &Invite) -> BootstrapRequest {
+    /// A join request as [`Self::join_request`] makes, which `control` asks
+    /// to check for approval now.
+    pub(super) fn checked_join_request(invite: &Invite, control: &JoinControl) -> BootstrapRequest {
         BootstrapRequest::Join {
             code: coven_sync::read_invite_code(invite.shown_code()).unwrap(),
             name: DeviceName::Given("New phone".into()),
-            // Nobody asks this join to check now.
-            check: watch::channel(0).1,
+            check: control.check.subscribe(),
         }
+    }
+
+    pub(super) fn join_request(invite: &Invite) -> BootstrapRequest {
+        // Nobody asks this join to check now.
+        Self::checked_join_request(invite, &JoinControl::new())
     }
 
     /// Nothing of the store is listed or in custody.
