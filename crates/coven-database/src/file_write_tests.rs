@@ -292,6 +292,24 @@ async fn originals_are_checked_while_prepared_and_never_under_the_writer() {
     db.close().await.unwrap();
 }
 
+/// Preparing a user's original reports the bytes read so far, rising to its
+/// size, which is what the prepared file records (E3).
+#[tokio::test]
+async fn preparing_a_users_file_reports_the_bytes_read_so_far() {
+    let original = tempfile::NamedTempFile::new().unwrap();
+    let size = 3 * 1024 * 1024 + 17;
+    std::fs::write(original.path(), vec![7; size]).unwrap();
+    let reported = std::sync::Mutex::new(Vec::new());
+    let prepared = prepare_user_file(original.path(), |read| reported.lock().unwrap().push(read))
+        .await
+        .unwrap();
+    let reported = reported.into_inner().unwrap();
+    assert!(reported.len() > 1, "{reported:?}");
+    assert!(reported.windows(2).all(|pair| pair[0] < pair[1]), "{reported:?}");
+    assert_eq!(reported.last(), Some(&(size as u64)));
+    assert_eq!(prepared.size(), size as u64);
+}
+
 /// Deleting a user file's last reference forgets its original, which it
 /// never touches.
 #[tokio::test]
