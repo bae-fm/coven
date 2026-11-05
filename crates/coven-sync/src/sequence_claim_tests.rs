@@ -614,3 +614,42 @@ async fn a_slot_changes_a_row_an_unsent_removal_reached() {
         device.sync.database.close().await.unwrap();
     }
 }
+
+/// A slot the provider refuses to publish for its size, a copy past the
+/// profile's single-copy limit, fails the pass naming the limit; the writes
+/// stay queued with their bytes and go out once storage takes the slot
+/// (§20.6).
+#[tokio::test]
+async fn a_slot_past_the_providers_copy_limit_waits_naming_copy_too_large() {
+    let group = Group::new();
+    let ana = group.device(1).await;
+    group.create(&ana).await;
+    let next = ana.database().applied_slot().await.unwrap() + 1;
+    let refused = ObjectPath::slot(group.store, next.try_into().unwrap());
+    ana.storage
+        .set_faults(Faults {
+            create_failures: [(
+                refused.clone(),
+                (coven_storage::StorageFailure::CopyTooLarge { size: 9, limit: 5 }, 400),
+            )]
+            .into(),
+            ..Faults::none()
+        })
+        .await;
+    insert(ana.database(), "big", "queued note").await;
+
+    let error = ana.sync.pass().await.unwrap_err();
+    assert!(
+        matches!(&error, SyncError::Storage(source)
+            if source.failure() == (coven_storage::StorageFailure::CopyTooLarge { size: 9, limit: 5 })),
+        "{error:?}"
+    );
+    assert_eq!(ana.database().waiting_snapshot_headers().await.unwrap().len(), 1);
+    assert!(ana.storage.status(&refused).await.unwrap().is_none());
+
+    ana.storage.set_faults(Faults::none()).await;
+    ana.sync.pass().await.unwrap();
+    assert!(ana.database().waiting_snapshot_headers().await.unwrap().is_empty());
+    assert!(ana.storage.status(&refused).await.unwrap().is_some());
+    ana.database().close().await.unwrap();
+}
