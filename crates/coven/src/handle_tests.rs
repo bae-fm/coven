@@ -787,6 +787,56 @@ mod store_rename {
     }
 }
 
+mod mutual_removal {
+    use super::*;
+    use crate::tests::{landed, outcome, Network};
+
+    /// Ana and Ben, both admins, each journal the other's removal while
+    /// offline. Ana's claims its slot first; Ben's device applies it, stops
+    /// for good, and his call ends `Stopped` without landing (§14.1). No
+    /// removal of Ana ever enters history (§10.2).
+    #[tokio::test]
+    async fn admins_removing_each_other_leave_the_first_removal_only() {
+        let network = Network::new(2).await;
+        let (ana, ben) = (&network.devices[0], &network.devices[1]);
+        let own_id = |handle: &CovenHandle| {
+            let handle = handle.clone();
+            async move { handle.members().await.unwrap().into_iter().find(|m| m.is_self).unwrap().id }
+        };
+        let (ana_id, ben_id) = (own_id(&ana.handle).await, own_id(&ben.handle).await);
+        landed(&ana.handle, ana.handle.set_member_role(&ben_id, MemberRole::Admin).await.unwrap())
+            .await;
+        network.sync(1).await;
+
+        ana.stop_sync().await;
+        ben.stop_sync().await;
+        let against_ben = ana.handle.remove_member(&ben_id).await.unwrap();
+        let against_ana = ben.handle.remove_member(&ana_id).await.unwrap();
+
+        ana.handle.start_sync().await.unwrap();
+        let removal = landed(&ana.handle, against_ben).await;
+        ben.handle.start_sync().await.unwrap();
+        network.clock.set(network.clock.now() + std::time::Duration::from_secs(1));
+        let _ = ben.handle.retry_now().await.unwrap().await;
+        let ended = outcome(&ben.handle, against_ana).await;
+        assert_eq!(ended, OperationOutcome::Stopped(coven_database::DeviceStop::Removed));
+
+        // Ben's device stopped at the removal; Ana's goes on and no slot of
+        // Ben's follows it.
+        network.pass(0).await;
+        let settled = ana.handle.applied_slot().await;
+        network.pass(0).await;
+        assert_eq!(ana.handle.applied_slot().await, settled);
+        assert_eq!(ben.handle.applied_slot().await, removal.0);
+        for device in [ana, ben] {
+            let members = device.handle.members().await.unwrap();
+            let ids: Vec<_> = members.iter().map(|m| m.id).collect();
+            assert_eq!(ids, [ana_id], "{members:?}");
+        }
+        network.close().await;
+    }
+}
+
 /// Closing a read-only handle releases its storage client, while the app
 /// still holds the handle (E1).
 #[tokio::test]
