@@ -410,6 +410,50 @@ async fn invalid_conversions_report_typed_causes_and_commit_nothing() {
     }
 }
 
+/// Two of a converted change's original references that the conversion's
+/// renames map onto one foreign key fail the receipt, committing nothing
+/// (E13).
+#[tokio::test]
+async fn two_references_converted_onto_one_fail_the_receipt() {
+    const SCHEMA: &str = "CREATE TABLE parents(a TEXT NOT NULL, b INT NOT NULL, PRIMARY KEY(a,b));
+        CREATE TABLE children(id TEXT NOT NULL PRIMARY KEY, a TEXT, b INT, c TEXT,
+          FOREIGN KEY(a,b) REFERENCES parents(a,b), FOREIGN KEY(c,b) REFERENCES parents(a,b))";
+    let tables = || {
+        vec![
+            SyncedTable::new("parents", RowIdentity::SharedKey).key_columns(["a", "b"]),
+            SyncedTable::new("children", RowIdentity::SharedKey),
+        ]
+    };
+    let migration = Migration::breaking(
+        2,
+        "one reference",
+        "DROP TABLE children; CREATE TABLE children(id TEXT NOT NULL PRIMARY KEY, a TEXT, b INT,
+          FOREIGN KEY(a,b) REFERENCES parents(a,b))",
+        crate::OldWrites::Convert(std::sync::Arc::new(|row| {
+            if row.table == "children" {
+                row.columns.retain(|c| c.name != "a");
+                row.rename_column("c", "a");
+            }
+            Ok(())
+        })),
+    );
+    let case = Case::new(
+        tables,
+        SCHEMA,
+        &["INSERT INTO parents VALUES('A',3); INSERT INTO children VALUES('child','A',3,'A')"],
+        migration,
+    )
+    .await;
+    let original = records(&case.source);
+    let error = case.receive().await.unwrap_err();
+    assert!(
+        matches!(error, DbError::MigrationReferenceCollision { ref table, .. } if table == "children"),
+        "{error:?}"
+    );
+    case.assert_unchanged(&original).await;
+    case.close().await;
+}
+
 /// A step's classification comes from its statements, never this device's
 /// rows: a receiver that ran a data step on an empty table, as a fresh
 /// device does, converts a late old-schema write exactly as one with rows
