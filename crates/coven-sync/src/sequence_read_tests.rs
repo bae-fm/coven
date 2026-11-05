@@ -1,6 +1,6 @@
 use crate::sequence_sync::tests::*;
 use crate::{PendingSubject, SequenceStatus, SyncError};
-use coven_storage::{ObjectPath, Storage};
+use coven_storage::{test_utils::Faults, ObjectPath, Storage, StorageFailure};
 
 /// A device far behind brackets the end of the sequence with doubling
 /// existence checks and narrows the gap by halving: the checks grow with the
@@ -407,6 +407,44 @@ async fn a_gap_below_the_floor_s_at_reports_the_gap() {
     );
     assert_eq!(ben.database().applied_slot().await.unwrap(), gap - 1);
     assert_eq!(rows(ben.database()).await, [("a".into(), "written".into())]);
+    for device in [&ana, &ben] {
+        device.database().close().await.unwrap();
+    }
+}
+
+/// A floor read that fails proves neither that there is no floor nor that the
+/// missing slot may be skipped: the pass fails with the read's own failure,
+/// applies nothing and reports no damage (§6.1).
+#[tokio::test]
+async fn a_failed_floor_read_while_the_next_slot_is_missing_skips_nothing() {
+    let group = Group::new();
+    let ana = group.device(1).await;
+    let ben = group.device(2).await;
+    group.create(&ana).await;
+    group.admit(&ana, &ben).await;
+    ben.sync.pass().await.unwrap();
+    let applied = ben.database().applied_slot().await.unwrap();
+    for id in ["a", "b", "c"] {
+        insert(ana.database(), id, "written").await;
+        ana.sync.pass().await.unwrap();
+    }
+    let missing = ObjectPath::slot(group.store, (applied + 1).try_into().unwrap());
+    group.storage.delete(&missing).await.unwrap();
+    ben.storage
+        .set_faults(Faults {
+            read_failures: [(ObjectPath::floor(group.store), StorageFailure::PermissionDenied)]
+                .into(),
+            ..Faults::none()
+        })
+        .await;
+    let result = ben.sync.pass().await;
+    assert!(
+        matches!(&result, Err(SyncError::Storage(failure)) if failure.failure() == StorageFailure::PermissionDenied),
+        "{result:?}"
+    );
+    assert_eq!(ben.database().applied_slot().await.unwrap(), applied);
+    assert!(rows(ben.database()).await.is_empty());
+    assert!(ben.sync.session.lock().await.blocked.is_none(), "no slot is reported damaged");
     for device in [&ana, &ben] {
         device.database().close().await.unwrap();
     }
