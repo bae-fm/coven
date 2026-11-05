@@ -850,3 +850,136 @@ async fn closing_a_read_only_handle_releases_its_storage_client() {
     drop(reader);
     network.close().await;
 }
+
+/// The circles a member is in, a circle's members and their live queries
+/// follow the applied slots: a member sees only their own circles in
+/// circle-id order, a circle's members who are still in the store in
+/// member-id order, and each subscription reports an addition, a removal
+/// from the store and a deletion (E12).
+#[tokio::test]
+async fn circle_lists_and_members_follow_applied_slots_live() {
+    use crate::tests::Network;
+    let network = Network::new(3).await;
+    let ana = &network.devices[0].handle;
+    let member = |index: usize| {
+        let handle = network.devices[index].handle.clone();
+        async move { handle.members().await.unwrap().into_iter().find(|m| m.is_self).unwrap().id }
+    };
+    let (ben, carol) = (member(1).await, member(2).await);
+    let gifts = crate::tests::circle(ana, "Gifts").await;
+    let garden = crate::tests::circle(ana, "Garden").await;
+    let bens = crate::tests::circle(&network.devices[1].handle, "Ben's own").await;
+    let mut listed = ana.circles().subscribe_list();
+    let mut gifts_members = ana.circles().subscribe_members(gifts);
+    assert_eq!(listed.next().await.expect("answers").unwrap().len(), 2);
+    assert_eq!(gifts_members.next().await.expect("answers").unwrap().len(), 1);
+    for who in [&ben, &carol] {
+        crate::tests::landed(ana, ana.circles().add_member(gifts, who).await.unwrap()).await;
+    }
+    network.sync(0).await;
+    let circles = ana.circles().list().await.unwrap();
+    let mut expected = vec![gifts, garden];
+    expected.sort();
+    assert_eq!(
+        circles.iter().map(|c| c.id).collect::<Vec<_>>(),
+        expected,
+        "Ben's own circle is not Ana's"
+    );
+    assert!(!circles.iter().any(|c| c.id == bens));
+    let members = ana.circles().members(gifts).await.unwrap();
+    let mut ids = vec![member(0).await, ben, carol];
+    ids.sort();
+    assert_eq!(members.iter().map(|m| m.member).collect::<Vec<_>>(), ids);
+    assert_eq!(members.iter().filter(|m| m.is_self).count(), 1);
+    let live = loop {
+        let value = gifts_members.next().await.expect("answers").unwrap();
+        if value.len() == 3 {
+            break value;
+        }
+    };
+    assert_eq!(live, members);
+    // Removing Carol from the store takes her out of the circle's members.
+    crate::tests::landed(ana, ana.remove_member(&carol).await.unwrap()).await;
+    network.sync(0).await;
+    let live = loop {
+        let value = gifts_members.next().await.expect("answers").unwrap();
+        if value.len() == 2 {
+            break value;
+        }
+    };
+    assert!(!live.iter().any(|m| m.member == carol));
+    assert_eq!(ana.circles().members(gifts).await.unwrap(), live);
+    // Deleting a circle takes it out of the list.
+    crate::tests::landed(ana, ana.circles().delete(garden).await.unwrap()).await;
+    let live = loop {
+        let value = listed.next().await.expect("answers").unwrap();
+        if value.iter().all(|c| c.id != garden) {
+            break value;
+        }
+    };
+    assert_eq!(live.iter().map(|c| c.id).collect::<Vec<_>>(), [gifts]);
+    network.close().await;
+}
+
+/// Ana resets Gifts from her copy. A Gifts write Ben queued before he read
+/// the reset counts on neither device; one he makes after reading it does.
+/// The store's rows are untouched (§19.4, E12).
+#[tokio::test]
+async fn a_circle_reset_keeps_only_the_snapshot_and_writes_that_read_it() {
+    use crate::tests::Network;
+    async fn quiet(network: &Network) {
+        for _ in 0..3 {
+            for index in 0..network.devices.len() {
+                network.sync(index).await;
+            }
+        }
+    }
+    async fn held(handle: &CovenHandle) -> (Vec<String>, i64) {
+        handle
+            .read(|sql| {
+                Ok((
+                    sql.query("SELECT id FROM circle_notes ORDER BY id", [], |r| r.get(0))?,
+                    sql.query_row("SELECT count(*) FROM parents", [], |r| r.get(0))?,
+                ))
+            })
+            .await
+            .unwrap()
+    }
+    let network = Network::new(2).await;
+    let (ana, ben) = (&network.devices[0].handle, &network.devices[1].handle);
+    let ben_id = ben.members().await.unwrap().into_iter().find(|m| m.is_self).unwrap().id;
+    let gifts = crate::tests::circle(ana, "Gifts").await;
+    crate::tests::landed(ana, ana.circles().add_member(gifts, &ben_id).await.unwrap()).await;
+    ana.write(|sql| {
+        sql.execute("INSERT INTO parents(id,label,value) VALUES('store','kept',1)", [])?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+    quiet(&network).await;
+    let note = |id: &'static str| {
+        move |sql: crate::CovenWrite<'_>| {
+            sql.execute(
+                "INSERT INTO circle_notes(id,value,audience) VALUES(?1,1,?2)",
+                (id, gifts.to_string()),
+            )?;
+            Ok(())
+        }
+    };
+    ben.write(note("00000000-0000-7000-8000-000000000100")).await.unwrap();
+    ana.circles().reset(gifts).await.unwrap();
+    quiet(&network).await;
+    for index in 0..2 {
+        let (notes, parents) = held(&network.devices[index].handle).await;
+        assert!(notes.is_empty(), "device {index} dropped the queued write");
+        assert_eq!(parents, 1, "the store's row stays");
+    }
+    ben.write(note("00000000-0000-7000-8000-000000000101")).await.unwrap();
+    quiet(&network).await;
+    for index in 0..2 {
+        let (notes, parents) = held(&network.devices[index].handle).await;
+        assert_eq!(notes, ["00000000-0000-7000-8000-000000000101"], "device {index}");
+        assert_eq!(parents, 1);
+    }
+    network.close().await;
+}
