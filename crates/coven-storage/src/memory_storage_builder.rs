@@ -91,6 +91,7 @@ impl MemoryStorageBuilder {
                 creation_barrier: None,
                 creation_gate: None,
                 part_gate: None,
+                read_gate: None,
                 ranges: Vec::new(),
                 reads: Vec::new(),
                 received_buffers: Vec::new(),

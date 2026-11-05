@@ -166,7 +166,9 @@ async fn transfer_limits_bound_requests_and_a_changed_limit_applies_to_the_next_
             FileSource::Stream(Box::pin(std::io::Cursor::new(vec![id; 2048])))
         })
         .await;
-        memory.set_faults(Faults { delay: Duration::from_millis(100), ..Faults::none() }).await;
+        // Each create stays in flight until the test lets it finish.
+        let creations = Arc::new(tokio::sync::Semaphore::new(0));
+        memory.gate_creations(creations.clone()).await;
         memory.reset_request_peak();
         let mut requests = memory.subscribe_requests();
         handle.set_uploads_paused(false).await.unwrap();
@@ -176,6 +178,7 @@ async fn transfer_limits_bound_requests_and_a_changed_limit_applies_to_the_next_
             downloads: NonZeroUsize::new(2).unwrap(),
         });
         memory.reset_request_peak();
+        creations.add_permits(ids.len());
         let mut uploads = handle.subscribe(|sql| {
             Ok(sql.query_row("SELECT count(*) FROM coven_uploads", [], |r| r.get::<_, i64>(0))?)
         });
@@ -187,12 +190,16 @@ async fn transfer_limits_bound_requests_and_a_changed_limit_applies_to_the_next_
             uploaded.push(handle.file_ref(*id).await.unwrap());
         }
         memory.reset_request_peak();
+        // Each read stays in flight until the test lets it finish.
+        let reads = Arc::new(tokio::sync::Semaphore::new(0));
+        memory.gate_reads(reads.clone()).await;
         let pin = handle.pin(&uploaded);
         tokio::pin!(pin);
         tokio::select! {
             result = &mut pin => panic!("pin ended before two downloads overlapped: {result:?}"),
             _ = requests.wait_for(|_| memory.peak_requests() == 2) => {},
         }
+        reads.add_permits(1 << 20);
         handle.set_transfer_limits(TransferLimits::default());
         pin.await.unwrap();
         assert_eq!(memory.peak_requests(), 2);

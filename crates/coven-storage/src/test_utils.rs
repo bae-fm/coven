@@ -72,11 +72,13 @@ struct MemoryState {
     accounts: BTreeMap<String, AccountAccess>,
     retained_access: BTreeMap<String, Vec<RetainedAccess>>,
     faults: Faults,
-    /// The test's barrier and gate each create waits at, and the gate each
-    /// part waits at (`MemoryStorage::hold_creations` and the gates).
+    /// The test's barrier and gate each create waits at, the gate each part
+    /// waits at, and the gate each read waits at (`MemoryStorage::hold_creations`
+    /// and the gates).
     creation_barrier: Option<Arc<tokio::sync::Barrier>>,
     creation_gate: Option<Arc<tokio::sync::Semaphore>>,
     part_gate: Option<Arc<tokio::sync::Semaphore>>,
+    read_gate: Option<Arc<tokio::sync::Semaphore>>,
     ranges: Vec<ByteRange>,
     reads: Vec<(ObjectPath, u64, u64)>,
     received_buffers: Vec<usize>,
@@ -397,6 +399,11 @@ impl MemoryStorage {
     pub async fn gate_parts(&self, gate: Arc<tokio::sync::Semaphore>) {
         self.provider.state.lock().await.part_gate = Some(gate);
     }
+    /// Hold each read until the test adds a permit to `gate`; each read takes
+    /// one, oldest first.
+    pub async fn gate_reads(&self, gate: Arc<tokio::sync::Semaphore>) {
+        self.provider.state.lock().await.read_gate = Some(gate);
+    }
     /// Whether the store is shared with `account`: granted and not since
     /// revoked.
     pub async fn shared_with(&self, account: &str) -> bool {
@@ -447,6 +454,7 @@ impl MemoryProvider {
                 MemoryRequest::Create(_) => {
                     (state.creation_barrier.clone(), state.creation_gate.clone())
                 }
+                MemoryRequest::Read(..) => (None, state.read_gate.clone()),
                 _ => (None, None),
             };
             (state.faults.delay, failure, (barrier, gate))
