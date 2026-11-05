@@ -827,12 +827,7 @@ impl SequenceSync {
             + Send
             + 'static,
     ) -> Result<Option<OperationOutcome>, SyncError> {
-        let journaled = self
-            .database
-            .write(move |sql| {
-                step(&sql).map_err(|error| coven_database::DbError::SyncStream(Box::new(error)))
-            })
-            .await?;
+        let journaled = self.database.write_as(move |sql| step(&sql)).await?;
         let Some(id) = journaled else {
             return Ok(None);
         };

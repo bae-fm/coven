@@ -60,12 +60,7 @@ impl SequenceSync {
     /// Make an operation due now, in a write of its own, for a call that
     /// goes on to run it.
     pub(crate) async fn retry_operation(&self, id: OperationId) -> Result<(), SyncError> {
-        self.database
-            .write(move |sql| {
-                make_retry_due(&sql, id)
-                    .map_err(|error| coven_database::DbError::SyncStream(Box::new(error)))
-            })
-            .await?;
+        self.database.write_as(move |sql| make_retry_due(&sql, id)).await?;
         self.waits.retried(id);
         Ok(())
     }

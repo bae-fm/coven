@@ -312,11 +312,9 @@ impl SequenceSync {
         coven_storage::record_config(&self.directory, &location)?;
         let (invite, _, operation) = self
             .database
-            .write(move |sql| {
+            .write_as(move |sql| {
                 let made = NewInvite { target, access, delivery };
-                steps
-                    .create_invite(&sql, made)
-                    .map_err(|error| coven_database::DbError::SyncStream(Box::new(error)))
+                steps.create_invite(&sql, made)
             })
             .await?;
         self.pass().await?;
@@ -373,11 +371,7 @@ impl SequenceSync {
         &self,
         step: impl FnOnce(&SqlContext<'_, '_>) -> Result<(), SyncError> + Send + 'static,
     ) -> Result<(), SyncError> {
-        self.database
-            .write(move |sql| {
-                step(&sql).map_err(|error| coven_database::DbError::SyncStream(Box::new(error)))
-            })
-            .await?;
+        self.database.write_as(move |sql| step(&sql)).await?;
         self.pass().await.map(drop)
     }
 

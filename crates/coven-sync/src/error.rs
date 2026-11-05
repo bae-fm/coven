@@ -184,6 +184,33 @@ impl From<SyncError> for coven_database::CovenError {
     }
 }
 
+impl From<coven_database::SqliteError> for SyncError {
+    fn from(error: coven_database::SqliteError) -> Self {
+        DbError::from(error).into()
+    }
+}
+
+/// Sync's own writes keep their error: a database failure as itself, and
+/// any other with a failed rollback or byte removal as a later step that
+/// failed too (§4, Appendix C.3).
+impl coven_database::WriteFailure for SyncError {
+    fn with_rollback(self, rollback: coven_database::SqliteError) -> Self {
+        match self {
+            Self::Database(error) => Self::Database(error.with_rollback(rollback)),
+            error => Self::cleanup(error, rollback.into()),
+        }
+    }
+
+    fn with_cleanup(write: Self, failures: Vec<DbError>) -> Self {
+        match write {
+            Self::Database(error) => Self::Database(DbError::with_cleanup(error, failures)),
+            error => failures
+                .into_iter()
+                .fold(error, |error, failure| Self::cleanup(error, failure.into())),
+        }
+    }
+}
+
 impl From<DbError> for SyncError {
     fn from(error: DbError) -> Self {
         match error {

@@ -227,3 +227,36 @@ fn storage_and_custody_bugs_are_syncs_bug() {
     let custody = SyncError::from(KeyError::Bug(bug.clone()));
     assert!(matches!(custody, SyncError::Bug(found) if found == bug));
 }
+
+/// A sync step's write keeps the step's own error when its rollback or the
+/// removal of its released bytes fails too: each later failure follows it,
+/// and a database failure stays one database failure (§4, Appendix C.3).
+#[test]
+fn a_failed_writes_cleanup_follows_the_steps_own_error() {
+    use coven_database::WriteFailure;
+    let rolled = SyncError::Removed.with_rollback(coven_database::SqliteError::InvalidQuery);
+    let SyncError::Cleanup { operation, cleanup } = rolled else {
+        panic!("a rollback follows the step's error: {rolled:?}")
+    };
+    assert!(matches!(*operation, SyncError::Removed));
+    assert!(matches!(*cleanup, SyncError::Database(_)), "{cleanup:?}");
+    let cleaned = SyncError::with_cleanup(
+        SyncError::Removed,
+        vec![DbError::StoreClosed, DbError::RollbackFailed],
+    );
+    let SyncError::Cleanup { operation, cleanup } = cleaned else {
+        panic!("each removal failure follows the step's error: {cleaned:?}")
+    };
+    assert!(matches!(*cleanup, SyncError::Database(DbError::RollbackFailed)), "{cleanup:?}");
+    assert!(
+        matches!(*operation, SyncError::Cleanup { ref operation, ref cleanup }
+            if matches!(**operation, SyncError::Removed)
+                && matches!(**cleanup, SyncError::Database(DbError::StoreClosed))),
+        "{operation:?}"
+    );
+    let database = SyncError::with_cleanup(
+        SyncError::Database(DbError::StoreClosed),
+        vec![DbError::RollbackFailed],
+    );
+    assert!(matches!(database, SyncError::Database(DbError::FileCleanup { .. })), "{database:?}");
+}
