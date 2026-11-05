@@ -194,3 +194,53 @@ async fn sealed_slot_bytes_request_the_first_snapshot_while_the_parts_are_below_
     assert!(written * 1000 < FIRST_SNAPSHOT_BYTES, "{written} writes");
     ana.sync.database.close().await.unwrap();
 }
+
+/// Once Ben reads his removal from Gifts, his device no longer takes a
+/// snapshot of it; it still snapshots the circle he stays in (§15.8).
+#[tokio::test]
+async fn a_member_removed_from_a_circle_no_longer_snapshots_it() {
+    let group = Group::new();
+    let ana = group.device(1).await;
+    let ben = group.device(2).await;
+    group.create(&ana).await;
+    group.admit(&ana, &ben).await;
+    let gifts = ana.sync.create_circle("Gifts".into()).await.unwrap();
+    let garden = ana.sync.create_circle("Garden".into()).await.unwrap();
+    for circle in [gifts, garden] {
+        ana.sync
+            .administer(coven_format::admin::StoreChange::AddCircleMember {
+                circle,
+                member: ben.identity.member(),
+            })
+            .await
+            .unwrap();
+    }
+    ana.sync
+        .administer(coven_format::admin::StoreChange::RemoveCircleMember {
+            circle: gifts,
+            member: ben.identity.member(),
+        })
+        .await
+        .unwrap();
+    ben.sync.pass().await.unwrap();
+    group.clock.set(
+        std::time::UNIX_EPOCH
+            + crate::sequence_sync::sequence_retention::GRACE
+            + std::time::Duration::from_secs(1),
+    );
+    ben.sync.pass().await.unwrap();
+    let mine =
+        |audience: coven_merge::Audience| {
+            let ben = &ben;
+            async move {
+                ben.sync.session.lock().await.history.announcements.values().any(|a| {
+                    a.snapshot.device == ben.sync.device && a.snapshot.audience == audience
+                })
+            }
+        };
+    assert!(mine(coven_merge::Audience::Circle(garden)).await, "Ben snapshots Garden");
+    assert!(!mine(coven_merge::Audience::Circle(gifts)).await, "Ben no longer snapshots Gifts");
+    for device in [&ana, &ben] {
+        device.database().close().await.unwrap();
+    }
+}
