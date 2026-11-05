@@ -324,6 +324,13 @@ import SequenceApply
 #print axioms CovenSequence.InviteClaims.settles
 #print axioms CovenSequence.InviteClaims.ended_share_strands_claim
 #print axioms CovenSequence.InviteClaims.cancelled_share_strands_claim
+#print axioms CovenSequence.RestoreRegistration.reachable_inv
+#print axioms CovenSequence.RestoreRegistration.registered_listed
+#print axioms CovenSequence.RestoreRegistration.progress
+#print axioms CovenSequence.RestoreRegistration.settles
+#print axioms CovenSequence.RestoreRegistration.settled_outcome
+#print axioms CovenSequence.RestoreRegistration.crashed_registration_ghost
+#print axioms CovenSequence.RestoreRegistration.cancelled_registration_ghost
 #print axioms CovenSequence.JoinStatus.phases_forward
 #print axioms CovenSequence.JoinStatus.opened_never_waits
 #print axioms CovenSequence.JoinStatus.resumed_waits_again

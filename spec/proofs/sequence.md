@@ -795,6 +795,41 @@ waiting, then loading, then done. Each rule is needed:
 - `scan_shown_as_loading`: a scan that finds no copy, reported as loading,
   puts the next check's wait after it.
 
+[`RestoreRegistration`](sequence/CovenSequence/RestoreRegistration.lean)
+models a restore past loading (§13.1, §11.6): the call registers the new
+device through an operation whose claim goes through the device's one claim
+journal, then publishes the store. The registration's task outlives the
+call that started it. Each attempt is sent, then lands or loses its slot to
+another device; the app cancels, drops the call or crashes at any point; the
+call fails; another device removes the member, after which the registration
+is refused and a registered device is no longer active. Every step is one
+transaction. Under `Rules.correct` the restore records itself, with its code
+and sign-in, before it registers, and the app lists recorded restores to
+resume. A cancel waits for the registration's task. A call that ends without
+its store, cancelled, its registration refused or its device removed,
+removes the installation only when nothing in storage names the device as
+active and nothing can land: no registration journaled, one refused, or the
+device removed since. Otherwise, and after any other failure, the call ends
+and the restore stays listed.
+
+- `registered_listed`: while history names the device as active, or a claim
+  of its registration is open, the restore is published or listed.
+- `settles`: from every reachable state, coven's own steps and the app
+  resuming what is listed reach a state with nothing left: the store
+  published, or nothing recorded and no call running. The proof is a measure
+  those steps lower from every other state (`progress`); it assumes an
+  attempt sent again lands when no other device takes the slot.
+- `settled_outcome`: there, the device is registered and its store
+  published, or it is not active in history and no claim of it is open.
+
+Each rule is needed; without it a device stays registered with no
+installation published or listed for it, on every path:
+
+- `crashed_registration_ghost`: without the record, the registration lands
+  and the device crashes; nothing lists the installation to resume.
+- `cancelled_registration_ghost`: a cancel that doesn't wait removes the
+  installation while the attempt is on its way, and it lands after.
+
 ## Settling a claim whose slot was deleted
 
 [`Settle`](sequence/CovenSequence/Settle.lean). Each copy numbers all its slot
