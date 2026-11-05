@@ -341,6 +341,50 @@ async fn a_user_files_last_reference_forgets_its_original_and_leaves_it() {
     db.close().await.unwrap();
 }
 
+/// Another device's write deleting the last row that names a user file,
+/// applied here, forgets the original in the same transaction and never
+/// touches the original itself (§17.1).
+#[tokio::test]
+async fn an_applied_deletion_forgets_a_users_original_in_its_transaction() {
+    let ids = SequentialIds::new();
+    let (a_store, b_store) = (TestStore::with_ids(&ids), TestStore::with_ids(&ids));
+    let a = open(&a_store, Provenance::UserProvided).await;
+    let b = open(&b_store, Provenance::UserProvided).await;
+    let original = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(original.path(), b"original").unwrap();
+    let prepared = prepare_user_file(original.path(), |_| {}).await.unwrap();
+    let file = a
+        .write_as::<_, _, crate::DbError>(move |sql| {
+            let file = sql.put_user_file("files", prepared, crate::Place::Cloud)?;
+            sql.execute("INSERT INTO files(id,file) VALUES('7',?1)", [file])?;
+            Ok(file)
+        })
+        .await
+        .unwrap();
+    for write in records(&a) {
+        a.receive(write.clone().into()).await.unwrap();
+        b.receive(write.into()).await.unwrap();
+    }
+    assert_eq!(local_count(&a, "_coven_user_files"), 1);
+    assert!(a.user_file(file).await.unwrap().is_some());
+    b.write(|sql| {
+        sql.execute("DELETE FROM files WHERE id='7'", [])?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+    for write in records(&b) {
+        a.receive(write.into()).await.unwrap();
+    }
+    assert!(!has_record(&a, file));
+    assert_eq!(a.user_file(file).await.unwrap(), None);
+    assert_eq!(local_count(&a, "_coven_user_files"), 0);
+    assert_eq!(local_count(&a, "_coven_user_chunks"), 0);
+    assert_eq!(std::fs::read(original.path()).unwrap(), b"original");
+    a.close().await.unwrap();
+    b.close().await.unwrap();
+}
+
 /// A file is staged into a declared namespace of its kind (§17.1).
 #[tokio::test]
 async fn the_wrong_kind_or_an_undeclared_namespace_fails() {
