@@ -454,3 +454,55 @@ async fn setup_fails_once_its_minute_of_rate_limit_waits_is_spent() {
     assert!(f.handle.storage_config().await.unwrap().is_none());
     f.handle.close().await.unwrap();
 }
+
+/// Setup reads and writes only under its own store's id: with another
+/// store's object already in the location, two stores set up there touch
+/// only their own paths and leave that object as it was (§20.3).
+#[tokio::test]
+async fn setup_reads_and_writes_only_under_its_stores_prefix() {
+    let f = Fixture::new().await;
+    let unrelated = coven_storage::ObjectPath::floor(StoreId(uuid::Uuid::from_u128(0xabc)));
+    f.storage.plant(&unrelated, b"someone else's floor").await.unwrap();
+    f.setup().await.unwrap();
+    synced(&f.handle).await;
+
+    let directory = f.app.create_closed_store("Garden", Arc::new(UuidIds)).await.unwrap();
+    let other = builder(&f.app, f.clock.clone(), f.connector.clone())
+        .open(directory.id(), |_| ())
+        .await
+        .unwrap();
+    other
+        .setup_s3_storage(
+            f.storage.config(),
+            "Garden device",
+            "garden-key".into(),
+            SecretText::new("secret".into()),
+            |_| {},
+        )
+        .await
+        .unwrap();
+    synced(&other).await;
+
+    let stores = [f.directory.id().to_string(), directory.id().to_string()];
+    let trace = f.storage.request_trace();
+    assert!(!trace.is_empty());
+    for request in trace {
+        let name = match &request {
+            MemoryRequest::Read(path, _)
+            | MemoryRequest::Create(path)
+            | MemoryRequest::Replace(path)
+            | MemoryRequest::Status(path)
+            | MemoryRequest::Delete(path) => path.as_str().to_owned(),
+            MemoryRequest::List(prefix) => prefix.as_str().to_owned(),
+            MemoryRequest::Other(_) => continue,
+        };
+        assert!(
+            stores.iter().any(|store| name.starts_with(&format!("{store}/"))),
+            "{request:?} is outside both stores {stores:?}"
+        );
+    }
+    assert_eq!(f.storage.read(&unrelated).await.unwrap(), b"someone else's floor");
+    for handle in [&f.handle, &other] {
+        handle.close().await.unwrap();
+    }
+}

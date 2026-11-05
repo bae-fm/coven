@@ -335,4 +335,33 @@ mod provider_access_tests {
         assert_eq!(fixture.credentials().as_bytes(), credentials.as_bytes());
         handle.close().await.unwrap();
     }
+
+    /// A store set up in a Dropbox app folder stays there: setting it up
+    /// again at the shared-folder access level is refused before any
+    /// request, and its settings and restore code stay as they were (§20.2,
+    /// §20.3).
+    #[tokio::test]
+    async fn reconnecting_a_dropbox_store_with_the_other_access_level_is_refused() {
+        let fixture = Fixture::new(StorageConfig::Dropbox {
+            account_label: None,
+            location: DropboxLocation::AppFolder,
+        })
+        .await;
+        let handle = fixture.setup(fixture.builder()).await;
+        let code = handle.restore_code().await.unwrap();
+        let settings = coven_storage::StorageSettings::new(fixture.directory.clone());
+        let recorded = settings.read().unwrap();
+        assert!(recorded.is_some());
+        let before = fixture.storage.request_count();
+        let shared = StorageConfig::Dropbox {
+            account_label: None,
+            location: DropboxLocation::SharedFolder { namespace_id: "other-level".into() },
+        };
+        let error = handle.setup_oauth_storage(shared, "Laptop", |_| {}).await.unwrap_err();
+        assert_eq!(error.to_string(), "storage location change is unsupported");
+        assert_eq!(fixture.storage.request_count(), before);
+        assert_eq!(handle.restore_code().await.unwrap(), code);
+        assert_eq!(settings.read().unwrap(), recorded);
+        handle.close().await.unwrap();
+    }
 }
