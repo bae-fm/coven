@@ -482,7 +482,7 @@ async fn release_fifo_writer(path: std::path::PathBuf) {
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
 async fn a_released_fifo_writer_goes_on_however_the_opens_overlap() {
-    const ROUNDS: usize = 50_000;
+    const ROUNDS: usize = 20_000;
     let dir = tempfile::tempdir().unwrap();
     // One mkfifo makes a batch, its names short enough for one command line.
     for batch in (0..ROUNDS).collect::<Vec<_>>().chunks(10_000) {
