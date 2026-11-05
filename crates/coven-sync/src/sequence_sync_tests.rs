@@ -400,7 +400,6 @@ pub(crate) fn codes(
                 device.sync.directory.clone(),
                 None,
             )),
-            Some(device.sync.clone()),
         ),
         person,
     )

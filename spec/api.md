@@ -7264,7 +7264,9 @@ impl CovenHandle {
     /// Shows this member's code again: stable id, current private pair, store
     /// id and location; no name or storage credentials. The pair is the one current
     /// in the applied prefix; missing current keys report MemberKeysReplaced,
-    /// and a retired pair is never exported.
+    /// and a retired pair is never exported. A credential change in flight,
+    /// such as `replace_member_keys`, finishes first, and the code is the one
+    /// it leaves (Appendix F.4).
     pub async fn restore_code(&self) -> Result<String, SyncError>;
 
     /// `restore_code()`'s code holding the S3 key this device holds now, for

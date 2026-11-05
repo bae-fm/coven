@@ -491,7 +491,7 @@ async fn self_replacement() -> (Value, Value) {
     let original = ana.database().waiting_snapshot_headers().await.unwrap().pop().unwrap();
     let (codes, _) =
         codes(&ana, coven_crypto::custody::Keychain::in_memory("queue-binding").unwrap());
-    codes.replace_member_keys().await.unwrap();
+    codes.replace_member_keys(ana.sync.clone()).await.unwrap();
     let current = ana.sync.member.read().unwrap().unwrap();
     let session = ana.sync.session.lock().await;
     let signer = session.history.write_signer(&original).unwrap();
@@ -515,7 +515,7 @@ async fn self_replacement() -> (Value, Value) {
     assert!(after_send);
     ana.sync.pass().await.unwrap();
     ana.sync.pass().await.unwrap();
-    codes.replace_member_keys().await.unwrap();
+    codes.replace_member_keys(ana.sync.clone()).await.unwrap();
     let session = ana.sync.session.lock().await;
     let later = ana.sync.check_binding(&session, &current);
     assert!(matches!(&later, Err(crate::SyncError::MemberKeysReplaced { .. })), "{later:?}");

@@ -38,7 +38,7 @@ async fn a_self_replacement_sends_queued_writes_first_and_retires_other_holders_
     let old = ana.identity.keys().public_keys();
     let (codes, _) =
         codes(&ana, coven_crypto::custody::Keychain::in_memory("self-replacement").unwrap());
-    codes.replace_member_keys().await.unwrap();
+    codes.replace_member_keys(ana.sync.clone()).await.unwrap();
     let installed = ana.sync.member.read().unwrap().unwrap();
     assert_ne!(installed.keys().public_keys(), old);
     assert!(installed.holds(&old), "the retired pair stays held for copies naming it");
@@ -150,7 +150,7 @@ async fn a_failed_code_refresh_keeps_the_replacement_paused_and_resumes_after_re
     let old = owner.restore_code().await.unwrap();
     store.set_restore_code(&SecretBytes::new(b"old code".to_vec())).unwrap();
     keychain.fail_operations_after(&[0]);
-    let result = owner.replace_member_keys().await;
+    let result = owner.replace_member_keys(ana.sync.clone()).await;
     assert!(matches!(result, Err(SyncError::SecureStorage(_))), "{result:?}");
     let current = ana.sync.member.read().unwrap().unwrap();
     assert_ne!(current.keys().public_keys(), ana.identity.keys().public_keys());
@@ -216,7 +216,10 @@ async fn a_background_replacement_refreshes_the_code_before_releasing_writes() {
             ..coven_storage::test_utils::Faults::none()
         })
         .await;
-    assert!(matches!(owner.replace_member_keys().await, Err(SyncError::Storage(_))));
+    assert!(matches!(
+        owner.replace_member_keys(ana.sync.clone()).await,
+        Err(SyncError::Storage(_))
+    ));
     ana.storage.set_faults(coven_storage::test_utils::Faults::none()).await;
     owner.close().await;
     ana.identity = ana.sync.member.read().unwrap().unwrap();
@@ -317,7 +320,7 @@ async fn competing_replacement(same_candidate: bool, compare: bool) {
         assert!(identity.candidate().is_none());
         assert!(identity.holds(&active));
         let (owner, _) = codes(&ana, Keychain::in_memory("competing-candidate").unwrap());
-        owner.replace_member_keys().await.unwrap();
+        owner.replace_member_keys(ana.sync.clone()).await.unwrap();
         assert!(ana.database().operations().await.unwrap().is_empty());
         insert(ana.database(), "after", "candidate and code installed").await;
         owner.close().await;
@@ -507,7 +510,7 @@ async fn a_trailing_upload_stored_during_a_self_replacement_waits_for_its_pause(
     let (owner, store) = codes(&ana, keychain.clone());
     store.set_restore_code(&SecretBytes::new(b"old code".to_vec())).unwrap();
     keychain.fail_operations_after(&[0]);
-    let result = owner.replace_member_keys().await;
+    let result = owner.replace_member_keys(ana.sync.clone()).await;
     assert!(matches!(result, Err(SyncError::SecureStorage(_))), "{result:?}");
     resume.send(()).unwrap();
     let retried = ana.files().retry_uploads_now().await;
@@ -526,7 +529,7 @@ async fn a_trailing_upload_stored_during_a_self_replacement_waits_for_its_pause(
     ));
     // The app retries the replacement, which finishes and ends the pause;
     // the photo's upload then completes.
-    owner.replace_member_keys().await.unwrap();
+    owner.replace_member_keys(ana.sync.clone()).await.unwrap();
     assert!(ana.database().operations().await.unwrap().is_empty());
     ana.files().retry_uploads_now().await.unwrap();
     assert!(matches!(
@@ -663,7 +666,7 @@ async fn a_newcomer_verifies_slots_signed_with_a_replaced_pair() {
     ana.sync.pass().await.unwrap();
     let (codes, _) =
         codes(&ana, coven_crypto::custody::Keychain::in_memory("newcomer-verifies").unwrap());
-    codes.replace_member_keys().await.unwrap();
+    codes.replace_member_keys(ana.sync.clone()).await.unwrap();
     insert(&ana.sync.database, "after", "under the new pair").await;
     // The old pair's copies expose the store key: this pass rotates it, and
     // the write waits for the replacement key.

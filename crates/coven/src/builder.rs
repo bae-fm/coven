@@ -929,7 +929,6 @@ impl OpeningOwners {
             database.clone(),
             self.identity.clone(),
             self.credentials.clone(),
-            None,
         );
         let storage = crate::storage::StorageConnections::new(
             database.clone(),

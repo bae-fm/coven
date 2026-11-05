@@ -257,6 +257,41 @@ async fn dropping_a_replacement_waiter_does_not_interrupt_key_installation_or_pu
     handle.close().await.unwrap();
 }
 
+/// A key replacement whose caller stopped waiting holds the store's
+/// credential owner until it finishes: stopping sync closes the connection
+/// only after it, so the new key is in custody and its id recorded.
+#[tokio::test]
+async fn a_dropped_key_replacement_finishes_before_its_connection_closes() {
+    let f = Fixture::new().await;
+    f.setup().await.unwrap();
+    synced(&f.handle).await;
+    stop(&f).await;
+    f.handle.unlock_store_key().await.unwrap();
+    let (entered, entering) = tokio::sync::oneshot::channel();
+    let (resume, resumed) = tokio::sync::oneshot::channel();
+    f.storage.hold_next_creation(ObjectPrefix::all(f.directory.id()), entered, resumed).await;
+    {
+        let replacement = f
+            .handle
+            .replace_access_key("retained".into(), SecretText::new("retained-secret".into()));
+        tokio::pin!(replacement);
+        tokio::select! {
+            result = &mut replacement => panic!("publication was not held: {result:?}"),
+            _ = entering => {}
+        }
+    }
+    let stopping = crate::tests::stopping(&f.handle);
+    // Stopping's first write says sync isn't running; then it waits.
+    f.handle.test_retry_effect().wait_for(|effect| *effect == RetryEffect::NotSyncing).await;
+    assert!(!stopping.is_finished());
+    resume.send(()).unwrap();
+    stopping.await.unwrap().unwrap();
+    assert_connected_key(&f, "retained", "retained-secret").await;
+    let me = f.handle.members().await.unwrap().into_iter().find(|member| member.is_self).unwrap();
+    assert_eq!(me.access, MemberAccess::S3AccessKey { access_key_id: "retained".into() });
+    f.handle.close().await.unwrap();
+}
+
 #[tokio::test]
 async fn custody_failure_rolls_back_credentials_before_claiming_the_creation() {
     let f = Fixture::new().await;

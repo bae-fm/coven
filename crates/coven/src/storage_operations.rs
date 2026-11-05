@@ -1,8 +1,8 @@
 //! Administrative and credential work for the open store (E6, E9-E12).
 //! These calls need the connected sequence owner and without a connection
-//! report `NoStorage`; credential reads and disconnected credential changes
-//! use the store's own credential owner. Administrative changes journaled by
-//! an app's write are `OperationSteps`.
+//! report `NoStorage`; credential changes run on the store's credential
+//! owner, given the connection's sequence owner when there is one.
+//! Administrative changes journaled by an app's write are `OperationSteps`.
 
 use super::{ConnectionState, StorageConnections};
 use crate::*;
@@ -63,7 +63,7 @@ impl StorageConnections {
         let ConnectionState::Active(live) = &*live else {
             return Err(SyncError::NoStorage);
         };
-        live.codes.replace_access_key(access_key_id, secret_access_key).await
+        self.codes.replace_access_key(live.sync.clone(), access_key_id, secret_access_key).await
     }
 
     /// Keep a separately supplied S3 key, on the connection when there is one.
@@ -76,10 +76,11 @@ impl StorageConnections {
         self.ready(&mut live).await?;
         match &*live {
             ConnectionState::Active(live) => {
-                live.codes.update_credentials(access_key_id, secret_access_key).await
+                let sync = Some(live.sync.clone());
+                self.codes.update_credentials(sync, access_key_id, secret_access_key).await
             }
             _ => {
-                self.codes.update_credentials(access_key_id, secret_access_key).await?;
+                self.codes.update_credentials(None, access_key_id, secret_access_key).await?;
                 self.waits.connection_changed();
                 // Custody holds credentials now: a waiting connector uses
                 // them at its next attempt.
@@ -95,7 +96,7 @@ impl StorageConnections {
         let ConnectionState::Active(live) = &*live else {
             return Err(SyncError::NoStorage);
         };
-        live.codes.replace_member_keys().await
+        self.codes.replace_member_keys(live.sync.clone()).await
     }
 }
 

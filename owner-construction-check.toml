@@ -1536,7 +1536,7 @@ tables = [
     "StorageConnections::new",
     "StorageConnections::close_live",
     # Setup, unlocking, starting and loading compose a connection's sequence
-    # owner, loop and credential owner at runtime.
+    # owner and loop at runtime.
     "StorageConnections::attach",
     "StorageConnections::sequence",
     "StorageConnections::activate",

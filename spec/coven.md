@@ -10691,6 +10691,12 @@ the rules above.
   custody, with no separate closed flag. Storage calls serialize with closing;
   calls already started finish even if the app drops their future. Sign-in stays
   cancellable while presenting or exchanging credentials (api.md E5).
+- **Credentials.** One credential owner serves an open store for its
+  lifetime, connected or not; a change that needs the connection is given
+  the connection's sequence owner. Credential changes run one at a time, and
+  a read of the restore code, the location or the credentials waits for the
+  change in flight and sees what it left. A connection closes only after the
+  change running on it, even one whose caller stopped waiting (api.md E9).
 
 ### F.5 Code conventions
 

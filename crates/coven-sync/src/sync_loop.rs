@@ -179,7 +179,7 @@ async fn pass(
     codes: &crate::RestoreCodes,
 ) -> Result<Option<crate::PendingRecord>, SyncError> {
     sync.pass().await?;
-    codes.resume_member_keys().await?;
+    codes.resume_member_keys(sync).await?;
     failing(sync).await
 }
 

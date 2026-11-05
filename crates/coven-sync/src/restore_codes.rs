@@ -51,8 +51,11 @@ pub fn location_code(
     })
 }
 
-/// Owns code generation and credential changes for one open handle. Closing
-/// waits for updates holding the lock, even when their app futures were dropped.
+/// Owns code generation and credential changes for one open handle, for
+/// its whole lifetime: connected or not, one change runs at a time, and a
+/// read waits for the change in flight. A change that needs the connection
+/// takes its sequence owner as an argument. Closing waits for updates
+/// holding the lock, even when their app futures were dropped.
 #[derive(Clone)]
 pub struct RestoreCodes {
     inner: Arc<tokio::sync::Mutex<Option<RestoreCodesInner>>>,
@@ -65,8 +68,6 @@ struct RestoreCodesInner {
     database: Database,
     identity: Arc<KeySession<MemberIdentity>>,
     credentials: Arc<DeviceCredentials>,
-    /// The connected sequence owner; a disconnected handle has none.
-    sync: Option<Arc<crate::SequenceSync>>,
 }
 
 impl RestoreCodes {
@@ -84,7 +85,6 @@ impl RestoreCodes {
         database: Database,
         identity: Arc<KeySession<MemberIdentity>>,
         credentials: Arc<DeviceCredentials>,
-        sync: Option<Arc<crate::SequenceSync>>,
     ) -> Self {
         Self {
             bugs: database.bugs().clone(),
@@ -93,7 +93,6 @@ impl RestoreCodes {
                 database,
                 identity,
                 credentials: credentials.clone(),
-                sync,
             }))),
             credentials,
         }
@@ -137,16 +136,19 @@ impl RestoreCodes {
         Ok(owner.code(&storage).await?.to_text()?.to_string())
     }
 
-    /// Replace this member's pair and return the code for that exact result.
-    /// Credential changes and close wait for this owned operation.
-    pub async fn replace_member_keys(&self) -> Result<SecretText, SyncError> {
-        let inner = self.inner.clone();
+    /// Replace this member's pair on `sync`, the connection's sequence
+    /// owner, and return the code for that exact result. The change holds
+    /// this owner from the call on, so credential changes, reads and
+    /// `settled` wait for it, even once its caller stops waiting.
+    pub async fn replace_member_keys(
+        &self,
+        sync: Arc<crate::SequenceSync>,
+    ) -> Result<SecretText, SyncError> {
+        let guard = self.inner.clone().lock_owned().await;
         let replacing = async move {
-            let guard = inner.lock().await;
             let owner = guard.as_ref().ok_or(DbError::StoreClosed)?;
             // Reject missing location before publishing a new binding.
             coven_storage::recorded_config(&owner.directory)?.ok_or(SyncError::NoStorage)?;
-            let sync = owner.sync.as_ref().ok_or(SyncError::NoStorage)?;
             sync.replace_member_keys().await?;
             Ok(sync
                 .finish_member_keys(true, |identity, store| owner.refresh_code(identity, store))
@@ -161,43 +163,42 @@ impl RestoreCodes {
         .await?
     }
 
-    /// Finish the code step of a self-replacement resumed by a sync pass (§11.5).
-    pub(crate) async fn resume_member_keys(&self) -> Result<(), SyncError> {
+    /// Finish the code step of a self-replacement a pass of `sync` resumed
+    /// (§11.5).
+    pub(crate) async fn resume_member_keys(
+        &self,
+        sync: &crate::SequenceSync,
+    ) -> Result<(), SyncError> {
         let guard = self.inner.lock().await;
         let owner = guard.as_ref().ok_or(DbError::StoreClosed)?;
-        let sync = owner.sync.as_ref().ok_or(SyncError::NoStorage)?;
         sync.finish_member_keys(false, |identity, store| owner.refresh_code(identity, store))
             .await?;
         Ok(())
     }
 
-    /// Install a manually supplied S3 key and publish its id; the code stays unchanged.
-    /// Requires connected storage. Credentials remain committed if publication
-    /// fails: the remote entry may already exist. Retry with the same key to
-    /// finish publication; queued entry bytes and numbers are reused.
-    /// Coven never deletes the key it replaces; the person deletes it in the
-    /// provider's console (§14.3).
+    /// Install a manually supplied S3 key on `sync`, the connection's
+    /// sequence owner, and publish its id; the code stays unchanged.
+    /// Credentials remain committed if publication fails: the remote entry
+    /// may already exist. Retry with the same key to finish publication;
+    /// queued entry bytes and numbers are reused. Coven never deletes the
+    /// key it replaces; the person deletes it in the provider's console
+    /// (§14.3). The change holds this owner as `replace_member_keys` does.
     pub async fn replace_access_key(
         &self,
+        sync: Arc<crate::SequenceSync>,
         access_key_id: String,
         secret_access_key: SecretText,
     ) -> Result<(), SyncError> {
-        let inner = self.inner.clone();
+        let guard = self.inner.clone().lock_owned().await;
         let replacing = async move {
-            let guard = inner.lock().await;
             let owner = guard.as_ref().ok_or(DbError::StoreClosed)?;
             owner
                 .install_s3(
                     S3Credentials { access_key_id: access_key_id.clone(), secret_access_key },
-                    true,
+                    Some(&sync),
                 )
                 .await?;
-            owner
-                .sync
-                .as_ref()
-                .ok_or(SyncError::NoStorage)?
-                .record_access_key(access_key_id)
-                .await?;
+            sync.record_access_key(access_key_id).await?;
             Ok(())
         };
         coven_foundation::task::spawn_completing(
@@ -209,18 +210,22 @@ impl RestoreCodes {
     }
 
     /// Keep this member's separately supplied S3 key without changing identity,
-    /// location or code. Disconnected handles retain it for their next connection.
-    /// A member whose removal applied gets `Removed` (§14.1).
+    /// location or code, installing it on `sync`, the connection's sequence
+    /// owner, when connected. Disconnected handles retain it for their next
+    /// connection. A member whose removal applied gets `Removed` (§14.1).
+    /// The change holds this owner as `replace_member_keys` does.
     pub async fn update_credentials(
         &self,
+        sync: Option<Arc<crate::SequenceSync>>,
         access_key_id: String,
         secret_access_key: SecretText,
     ) -> Result<(), SyncError> {
-        let inner = self.inner.clone();
+        let guard = self.inner.clone().lock_owned().await;
         let updating = async move {
-            let guard = inner.lock().await;
             let owner = guard.as_ref().ok_or(DbError::StoreClosed)?;
-            owner.install_s3(S3Credentials { access_key_id, secret_access_key }, false).await
+            owner
+                .install_s3(S3Credentials { access_key_id, secret_access_key }, sync.as_deref())
+                .await
         };
         coven_foundation::task::spawn_completing("update credentials", self.bugs.clone(), updating)
             .await?
@@ -297,6 +302,12 @@ impl RestoreCodes {
         ))
     }
 
+    /// Wait for a credential change in flight, even one whose caller stopped
+    /// waiting: a connection closes only after the change it runs.
+    pub async fn settled(&self) {
+        drop(self.inner.lock().await);
+    }
+
     /// Finish the current update, then release custody and connection owners.
     /// Updates that have not acquired the lock receive StoreClosed.
     pub async fn close(&self) {
@@ -350,16 +361,18 @@ impl RestoreCodesInner {
         member_code(&state, &identity, storage)
     }
 
+    /// Keep `credentials` for the recorded location, installing them on
+    /// `sync`, the connection's sequence owner, when connected.
     async fn install_s3(
         &self,
         credentials: S3Credentials,
-        require_connected: bool,
+        sync: Option<&crate::SequenceSync>,
     ) -> Result<(), SyncError> {
         let location =
             coven_storage::recorded_config(&self.directory)?.ok_or(SyncError::NoStorage)?;
         self.install(
             ConnectionCredentials { location, credentials: StorageCredentials::S3(credentials) },
-            require_connected,
+            sync,
         )
         .await
     }
@@ -367,7 +380,7 @@ impl RestoreCodesInner {
     async fn install(
         &self,
         next: ConnectionCredentials,
-        require_connected: bool,
+        sync: Option<&crate::SequenceSync>,
     ) -> Result<(), SyncError> {
         next.validate()?;
         let previous = self.connection()?;
@@ -378,9 +391,8 @@ impl RestoreCodesInner {
                 custody.write(|keychain| commit_credentials(keychain, &credentials, None))?;
             Ok(Box::new(move || custody.write(|keychain| previous.restore(keychain))))
         });
-        match &self.sync {
+        match sync {
             Some(sync) => sync.install_credentials(previous, next, commit).await,
-            None if require_connected => Err(SyncError::NoStorage),
             // Without a connection, no pass can apply a removal meanwhile.
             None => {
                 refuse_after_leaving(&self.database, &self.identity).await?;

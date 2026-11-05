@@ -565,7 +565,7 @@ impl StorageConnections {
         if let Err(error) = self.keychain.delete_setup_credentials() {
             tracing::warn!("a finished setup's own credentials can't be deleted yet: {error}");
         }
-        let released = Self::close_live(live).await;
+        let released = self.close_live(live).await;
         let started = self.activate(live, sync, start).await;
         // Custody and provider are committed, and setup read the store to its
         // end. Worker failures now belong to the sync state; setup must

@@ -79,20 +79,10 @@ impl PublicationGate for NoPublications {
     }
 }
 
-/// One provider connection's sequence owner, loop and credential owner.
+/// One provider connection's sequence owner and loop.
 struct Live {
     sync: Arc<SequenceSync>,
     sync_loop: SyncLoop,
-    codes: RestoreCodes,
-}
-
-impl Live {
-    /// Finish the active pass and transfers, then release the connection.
-    async fn close(self) -> Result<(), SyncError> {
-        let result = self.sync_loop.close().await;
-        self.codes.close().await;
-        result
-    }
 }
 
 /// Bootstrap retains its loaded provider before its sequence worker is needed.
@@ -112,7 +102,8 @@ struct ConnectionAttempt {
 }
 
 pub(crate) struct StorageConnections {
-    /// The credential owner while no connection exists.
+    /// The store's credential owner, connected or not; a change that needs
+    /// the connection is given its sequence owner.
     codes: RestoreCodes,
     database: coven_database::Database,
     files: coven_sync::Files,
@@ -346,8 +337,8 @@ impl StorageConnections {
         crate::task::spawn_completing("storage call", self.database.bugs().clone(), call).await?
     }
 
-    /// Compose a sequence owner, its loop and its credential owner on
-    /// `storage` as this store's connection.
+    /// Compose a sequence owner and its loop on `storage` as this store's
+    /// connection.
     async fn attach(
         &self,
         live: &mut ConnectionState,
@@ -394,17 +385,10 @@ impl StorageConnections {
         sync: Arc<SequenceSync>,
         start: bool,
     ) -> Result<(), SyncError> {
-        let codes = RestoreCodes::new(
-            self.directory.clone(),
-            self.database.clone(),
-            self.identity.clone(),
-            self.credentials.clone(),
-            Some(sync.clone()),
-        );
-        let sync_loop = SyncLoop::new(sync.clone(), codes.clone());
+        let sync_loop = SyncLoop::new(sync.clone(), self.codes.clone());
         let started = if start { sync_loop.start().await } else { Ok(()) };
         *lock_unpoisoned(&self.control) = Some(sync_loop.clone());
-        *live = ConnectionState::Active(Live { sync, sync_loop, codes });
+        *live = ConnectionState::Active(Live { sync, sync_loop });
         started
     }
 
@@ -431,10 +415,16 @@ impl StorageConnections {
         })
     }
 
-    /// Leave the connection released, closing its owners if it was active.
-    async fn close_live(live: &mut ConnectionState) -> Result<(), SyncError> {
+    /// Leave the connection released. An active one closes after its pass
+    /// and transfers, and after the credential change running on it, even
+    /// one whose caller stopped waiting.
+    async fn close_live(&self, live: &mut ConnectionState) -> Result<(), SyncError> {
         match std::mem::replace(live, ConnectionState::Released) {
-            ConnectionState::Active(previous) => previous.close().await,
+            ConnectionState::Active(previous) => {
+                let result = previous.sync_loop.close().await;
+                self.codes.settled().await;
+                result
+            }
             ConnectionState::Released | ConnectionState::Loaded(_) => Ok(()),
         }
     }
@@ -449,7 +439,7 @@ impl StorageConnections {
     ) -> (Result<(), DbError>, Result<(), SyncError>) {
         let stopped = self.waits.sync_stopped().await;
         lock_unpoisoned(&self.control).take();
-        (stopped, Self::close_live(live).await)
+        (stopped, self.close_live(live).await)
     }
 
     /// Release the current connection after its active pass and transfers,
