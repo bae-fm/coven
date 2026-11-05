@@ -342,6 +342,40 @@ async fn a_close_failing_after_the_removal_is_finished_by_discarding() {
     network.close().await;
 }
 
+/// Discarding a closed store loses its unsent writes and does not publish a
+/// removal: the device stays one of the store's devices until it is removed
+/// (E1).
+#[tokio::test]
+async fn discarding_a_closed_store_keeps_its_device_a_member_until_removed() {
+    let mut network = Network::new(2).await;
+    let phone = network.devices.remove(1);
+    let directory = phone.app.store_dir(&phone.store);
+    let device = directory.settings().unwrap().device_id;
+    stopped(&phone).await;
+    insert(&phone.handle, "unsent").await;
+    phone.handle.close().await.unwrap();
+    phone.app.discard_store(&directory).await.unwrap();
+    assert!(phone.app.stores().await.unwrap().is_empty());
+    network.sync(0).await;
+    let owner = &network.devices[0].handle;
+    let state = owner
+        .members()
+        .await
+        .unwrap()
+        .into_iter()
+        .flat_map(|member| member.devices)
+        .find(|d| d.id == device)
+        .expect("the discarded device is still one of the store's devices")
+        .state;
+    assert_ne!(state, DeviceState::Removed);
+    let labels: Vec<String> = owner
+        .read(|sql| Ok(sql.query("SELECT label FROM parents", [], |r| r.get(0))?))
+        .await
+        .unwrap();
+    assert!(!labels.contains(&"unsent".to_owned()));
+    network.close().await;
+}
+
 /// Whether the owner lists `device` as removed, once it has read storage.
 async fn removed(network: &mut Network, device: DeviceId) -> bool {
     network.sync(0).await;
@@ -358,6 +392,31 @@ async fn removed(network: &mut Network, device: DeviceId) -> bool {
 /// The phone's store as its listing shows it.
 async fn listed(device: &crate::tests::Device) -> Vec<StoreInfo> {
     device.app.readable_stores().await
+}
+
+/// The provider refuses the phone's first request, before its removal is
+/// journaled: the deletion fails as `Sync`, its record goes, and the store is
+/// as it was, in use, until deleting again finishes (§11.6, E1).
+#[tokio::test]
+async fn a_deletion_failing_before_its_removal_was_journaled_leaves_the_store_as_it_was() {
+    let mut network = Network::new(2).await;
+    let phone = &network.devices[1];
+    let device = phone.app.store_dir(&phone.store).settings().unwrap().device_id;
+    stopped(phone).await;
+    phone.storage.set_faults(Faults { fail_next: 1, ..Faults::none() }).await;
+    let failed = phone.handle.delete_store(IfUnsent::Refuse).await;
+    phone.storage.set_faults(Faults::none()).await;
+    assert!(matches!(failed, Err(StoreDeletionError::Sync(_))), "{failed:?}");
+    assert_eq!(
+        listed(phone).await,
+        [StoreInfo { id: phone.store, name: "Household".into(), unfinished: None }]
+    );
+    assert!(phone.handle.unsent_work().await.unwrap().is_empty());
+    phone.handle.delete_store(IfUnsent::Refuse).await.unwrap();
+    assert!(phone.app.stores().await.unwrap().is_empty());
+    network.devices.remove(1);
+    assert!(removed(&mut network, device).await);
+    network.close().await;
 }
 
 /// The phone's removal lands in storage, and the provider answers with an
@@ -478,4 +537,54 @@ async fn a_resumed_deletion_before_its_journal_refuses_unsent_work_and_forgets_i
     assert_eq!(reopened.unsent_work().await.unwrap(), UnsentWork { writes: 1, files: 0 });
     reopened.close().await.unwrap();
     network.close().await;
+}
+
+/// A key custody whose close panics, as a bug in the app's custody would.
+struct PanicsOnClose;
+impl Custody<StoreKeyring> for PanicsOnClose {
+    fn unlock(&self) -> Result<Option<StoreKeyring>, KeyError> {
+        Ok(None)
+    }
+    fn persist(&self, _: &StoreKeyring) -> Result<(), KeyError> {
+        Ok(())
+    }
+    fn forget(&self) -> Result<(), KeyError> {
+        Ok(())
+    }
+    fn close(&self) {
+        panic!("the custody's close failed")
+    }
+}
+
+/// Closing reports every failure of closing workers and connections, several
+/// chained as `SyncError::Cleanup`, and closes every clone (E1).
+#[tokio::test]
+async fn closing_reports_several_failures_chained() {
+    let root = tempfile::tempdir().unwrap();
+    let app = Coven::in_memory(root.path().into());
+    let handle = app
+        .builder()
+        .synced_tables(Vec::new())
+        .migrations(Vec::new())
+        .key_custody(CustodyChoice::Custom(Arc::new(PanicsOnClose)))
+        .create_store("session")
+        .await
+        .unwrap();
+    let clone = handle.clone();
+    handle.storage.fail_next_close(SyncError::Database(DbError::RollbackFailed));
+    let failed = handle.close().await;
+    assert!(
+        matches!(
+            &failed,
+            Err(SyncError::Cleanup { operation, cleanup })
+                if matches!(**operation, SyncError::Database(DbError::RollbackFailed))
+                    && matches!(**cleanup, SyncError::Bug(_))
+        ),
+        "{failed:?}"
+    );
+    assert!(matches!(
+        clone.read(|_| Ok(())).await,
+        Err(CovenError::Database(DbError::StoreClosed))
+    ));
+    assert!(matches!(clone.store_key_state(), Err(KeyError::StoreClosed)));
 }
