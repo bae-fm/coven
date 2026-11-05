@@ -386,6 +386,42 @@ async fn a_breaking_migration_raises_its_captured_audiences_through_passes() {
     }
 }
 
+/// A write made after a breaking migration is a new-version write: it waits
+/// in the queue behind the migration marker until a raise to its version
+/// lands, then goes out (§18.5).
+#[tokio::test]
+async fn writes_after_a_breaking_migration_wait_in_the_queue_until_the_raise_lands() {
+    let group = Group::new();
+    let ana = group.device(1).await;
+    let ben = group.device(2).await;
+    group.create(&ana).await;
+    group.admit(&ana, &ben).await;
+    insert(&ana.sync.database, "before", "old version").await;
+    ana.sync.pass().await.unwrap();
+    ben.sync.pass().await.unwrap();
+    group.version.store(2, std::sync::atomic::Ordering::SeqCst);
+    let (ana, ben) = (group.reopen(ana).await, group.reopen(ben).await);
+    insert(&ana.sync.database, "after", "new version").await;
+
+    ana.sync.pass().await.unwrap();
+    ben.sync.pass().await.unwrap();
+    assert_eq!(rows(&ben.sync.database).await, [("before".into(), "old version".into())]);
+    let waiting = ana.sync.database.waiting_snapshot_headers().await.unwrap();
+    assert_eq!(waiting.len(), 1, "the new-version write stays queued");
+
+    ana.sync.raise_schema(Audience::Store, 2).await.unwrap();
+    ana.sync.pass().await.unwrap();
+    ben.sync.pass().await.unwrap();
+    assert_eq!(
+        rows(&ben.sync.database).await,
+        [("after".into(), "new version".into()), ("before".into(), "old version".into())]
+    );
+    assert!(ana.sync.database.waiting_snapshot_headers().await.unwrap().is_empty());
+    for device in [&ana, &ben] {
+        device.sync.database.close().await.unwrap();
+    }
+}
+
 /// Two members migrate; Ana's raise lands while Ben's raise of the same
 /// version is under way. Ben's operation adopts the established version and
 /// claims nothing (§18.3).
