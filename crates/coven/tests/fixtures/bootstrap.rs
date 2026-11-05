@@ -78,6 +78,20 @@ impl Owner {
         self.network.polling.hold_waits();
     }
 
+    /// Ana's pass reading the request Carol's join made, then the request.
+    /// With her waits held, her invite looks for it only when a pass is
+    /// asked for, so Carol's join must have made it first. Unlike
+    /// [`Self::pass`] it leaves the clock where it is: a move would also
+    /// pass the time Carol's join next checks at, and start her check
+    /// before Ana approves.
+    pub(super) async fn read_join_request(&self) -> JoinRequest {
+        match self.handle.retry_now().await.unwrap().await {
+            RetryOutcome::Synced { .. } => {}
+            outcome => panic!("Ana's pass: {outcome:?}"),
+        }
+        next_join_request(&self.handle).await
+    }
+
     /// Stop sync and wait for its release: no pass runs until sync starts
     /// again (E5).
     pub(super) async fn stop_sync(&self) {
@@ -166,6 +180,28 @@ impl Installation {
             .migrations(migrations())
             .clock(Arc::new(crate::tests::PollingClock::new(owner.clock.clone())))
             .storage_connector(storage)
+    }
+
+    /// A builder on the test's clock itself: its waits end only as the test
+    /// moves the clock or asks a join to check, as Ana's do once held.
+    pub(super) fn held_builder(&self, owner: &Owner, storage: Arc<MemoryStorage>) -> CovenBuilder {
+        self.builder(owner, storage).clock(owner.clock.clone())
+    }
+
+    /// A held builder signed in as the owner's provider asks, through
+    /// [`sign_in_held`].
+    pub(super) async fn held_signed_in_builder(
+        &self,
+        owner: &Owner,
+        storage: Arc<MemoryStorage>,
+    ) -> CovenBuilder {
+        let mut builder = self.held_builder(owner, storage);
+        if let Some(access) = owner.storage.config().oauth_access() {
+            let sign_in = crate::authentication::SignIn::new().await;
+            builder = sign_in.configure(builder);
+            sign_in_held(owner, &mut builder, access).await;
+        }
+        builder
     }
 
     pub(super) async fn authenticated_builder(
@@ -443,6 +479,35 @@ pub(super) async fn waiting_join_with(builder: CovenBuilder, invite: &Invite) {
     })
     .await
     .unwrap();
+}
+
+/// Start Carol's join through a held, signed-in builder and stop it while it
+/// waits, as when the app is closed.
+pub(super) async fn held_waiting_join(owner: &Owner, install: &Installation, invite: &Invite) {
+    waiting_join_with(install.held_signed_in_builder(owner, owner.recipient()).await, invite).await;
+}
+
+/// Ana reads the request Carol's join made and approves it, then `control`
+/// asks the join, whose waits are held, to check for that approval now.
+pub(super) async fn approve_held(owner: &Owner, control: &JoinControl) -> MemberId {
+    let request = owner.read_join_request().await;
+    crate::tests::approve(&owner.handle, &request).await;
+    control.check_now();
+    request.member
+}
+
+/// Sign `builder` in for `access`, checking that nothing moved the clock
+/// meanwhile. The sign-in races its deadline, and its token request a stall
+/// window, on that clock; with Ana's waits held, her backoffs between looks
+/// for Carol's request can't move it under them.
+pub(super) async fn sign_in_held(
+    owner: &Owner,
+    builder: &mut CovenBuilder,
+    access: coven_storage::OAuthAccess,
+) {
+    let before = owner.clock.now();
+    builder.authenticate(access).await.unwrap();
+    assert_eq!(owner.clock.now(), before, "a wait moved the clock under the sign-in");
 }
 
 pub(super) fn saved_code(install: &Installation, store: StoreId) -> Option<SecretText> {
