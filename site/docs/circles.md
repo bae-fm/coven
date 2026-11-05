@@ -111,7 +111,7 @@ commits at once:
 ```rust
 handle.write(move |sql| {
     sql.execute("UPDATE notes SET audience = ?1 WHERE id = ?2", (gifts, note))?;
-    Ok(())
+    Ok::<_, CovenError>(())
 }).await?;
 ```
 

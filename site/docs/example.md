@@ -115,7 +115,7 @@ handle.write(move |sql| {
     )?;
     sql.execute("INSERT INTO tags (id) VALUES ('urgent') ON CONFLICT DO NOTHING", [])?;
     sql.execute("INSERT INTO note_tags (note_id, tag_id) VALUES (?1, 'urgent')", (note,))?;
-    Ok(())
+    Ok::<_, CovenError>(())
 }).await?;
 ```
 
@@ -124,7 +124,7 @@ transaction. A live query reruns whenever a write changes rows it read, whether
 the write was Ana's or arrived from another device:
 
 ```rust
-let mut notes = handle.subscribe(|sql| {
+let mut notes: LiveQuery<_, CovenError> = handle.subscribe(|sql| {
     Ok(sql.query("SELECT id, title FROM notes ORDER BY title", [], |row| {
         Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
     })?)
@@ -211,7 +211,7 @@ let file = handle.write(move |sql| {
         "INSERT INTO attachments (id, note_id, name, file) VALUES (?1, ?2, ?3, ?4)",
         (&attachment, &note, "receipt.pdf", file),
     )?;
-    Ok(file)
+    Ok::<_, CovenError>(file)
 }).await?;
 ```
 
@@ -268,7 +268,7 @@ handle.write(move |sql| {
         "INSERT INTO notes (id, title, audience) VALUES (?1, ?2, ?3)",
         (list, "Carol's birthday", gifts),
     )?;
-    Ok(())
+    Ok::<_, CovenError>(())
 }).await?;
 ```
 

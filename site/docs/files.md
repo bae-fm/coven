@@ -159,7 +159,7 @@ let file = handle.write(move |sql| {
         "INSERT INTO attachments (id, note_id, title, file) VALUES (?1, ?2, ?3, ?4)",
         (&attachment, &note, "Swatches", file),
     )?;
-    Ok(file)
+    Ok::<_, CovenError>(file)
 }).await?;
 ```
 
@@ -170,12 +170,12 @@ The write then puts the staged files in its rows with `put_staged`:
 
 ```rust
 let staged = handle
-    .stage_files(move |batch| Ok(batch.put_file("covers", cover_bytes, Place::Cloud)))
+    .stage_files(move |batch| Ok::<_, CovenError>(batch.put_file("covers", cover_bytes, Place::Cloud)))
     .await?;
 let cover = handle.write(move |sql| {
     let cover = sql.put_staged(staged)?;
     sql.execute("UPDATE notes SET cover = ?1 WHERE id = ?2", (cover, &note))?;
-    Ok(cover)
+    Ok::<_, CovenError>(cover)
 }).await?;
 ```
 
@@ -203,7 +203,7 @@ handle.write(move |sql| {
         "INSERT INTO attachments (id, note_id, title, file) VALUES (?1, ?2, ?3, ?4)",
         (&attachment, &note, "Swatches", file),
     )?;
-    Ok(())
+    Ok::<_, CovenError>(())
 }).await?;
 ```
 
@@ -306,7 +306,7 @@ let files = vec![(track, RelativePath::new(["Abbey Road", "01 Come Together.flac
 let prepared = handle
     .prepare_device_only(&music_folder, files, &cancel, |progress| draw(progress))
     .await?;
-handle.write(move |sql| sql.make_device_only(prepared).map_err(Into::into)).await?;
+handle.write(move |sql| sql.make_device_only(prepared).map_err(CovenError::from)).await?;
 ```
 
 - Coven writes each name through one rule, the same on every platform, so it
@@ -369,7 +369,7 @@ resumable upload. Each part the provider confirms is recorded before it counts
 as progress, so after a crash the upload resumes from its confirmed parts.
 
 ```rust
-let mut outbox = handle.subscribe(|sql| {
+let mut outbox: LiveQuery<_, CovenError> = handle.subscribe(|sql| {
     Ok(sql.query(
         "SELECT p.title, u.sending, u.bytes_confirmed, u.bytes_total
          FROM coven_uploads AS u JOIN photos AS p ON u.file = p.file

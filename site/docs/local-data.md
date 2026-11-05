@@ -136,7 +136,7 @@ let handle = Coven::builder(layout.clone())
 //   CREATE INDEX notes_by_title ON notes(title COLLATE natural_order)
 let titles = handle
     .read(|sql| {
-        Ok(sql.query(
+        Ok::<_, CovenError>(sql.query(
             "SELECT title FROM notes ORDER BY title COLLATE natural_order",
             [],
             |row| row.get::<_, String>(0),
@@ -197,7 +197,7 @@ let handle = Coven::builder(layout.clone())
 //   CREATE INDEX notes_folded ON notes(fold(title))
 let matches = handle
     .read(|sql| {
-        Ok(sql.query(
+        Ok::<_, CovenError>(sql.query(
             "SELECT title FROM notes WHERE fold(title) = fold(?1)",
             ["école"],
             |row| row.get::<_, String>(0),
@@ -289,7 +289,7 @@ handle.write(move |sql| {
     sql.execute("INSERT INTO notes (id, title) VALUES (?1, ?2)", (note, "Paint colors"))?;
     sql.execute("INSERT INTO tags (id) VALUES ('urgent') ON CONFLICT DO NOTHING", [])?;
     sql.execute("INSERT INTO note_tags (note_id, tag_id) VALUES (?1, 'urgent')", (note,))?;
-    Ok(())
+    Ok::<_, CovenError>(())
 }).await?;
 ```
 
@@ -374,7 +374,7 @@ write sees that write. SQLite itself refuses writes on these connections.
 
 ```rust
 let titles: Vec<String> = handle
-    .read(|sql| Ok(sql.query("SELECT title FROM notes", [], |row| row.get(0))?))
+    .read(|sql| Ok::<_, CovenError>(sql.query("SELECT title FROM notes", [], |row| row.get(0))?))
     .process(|mut titles| {
         titles.sort();
         Ok(titles)
@@ -397,7 +397,7 @@ saying the store closed or its handle failed: after it, `next()` returns `None`,
 so a loop over it ends. Dropping the `LiveQuery` ends it.
 
 ```rust
-let mut notes = handle.subscribe(|sql| {
+let mut notes: LiveQuery<_, CovenError> = handle.subscribe(|sql| {
     Ok(sql.query("SELECT id, title FROM notes ORDER BY title", [], |row| {
         Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
     })?)
@@ -443,7 +443,7 @@ The file views and tables name a file by its id, the id the app's file
 reference columns hold, so a join reads `u.file = p.file`:
 
 ```rust
-let uploading_first = handle.subscribe(|sql| {
+let uploading_first: LiveQuery<_, CovenError> = handle.subscribe(|sql| {
     Ok(sql.query(
         "SELECT a.title FROM albums AS a
          ORDER BY EXISTS(SELECT 1 FROM photos AS p JOIN coven_uploads AS u
@@ -492,7 +492,7 @@ waiting. `coven_sending` holds one row per upload in flight, so counting an
 album's files being sent takes a lookup per file, however long the queue:
 
 ```rust
-let sending = handle.subscribe(move |sql| {
+let sending: LiveQuery<_, CovenError> = handle.subscribe(move |sql| {
     Ok(sql.query_row(
         "SELECT count(*) FROM coven_sending AS s JOIN photos AS p ON s.file = p.file
          WHERE p.album_id=?1",

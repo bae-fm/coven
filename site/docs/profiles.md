@@ -78,7 +78,7 @@ async fn set_my_name(handle: &CovenHandle, name: String) -> Result<(), CovenErro
                  ON CONFLICT (member_id) DO UPDATE SET display_name = excluded.display_name",
                 (me, name),
             )?;
-            Ok(())
+            Ok::<_, CovenError>(())
         })
         .await
 }
@@ -100,7 +100,7 @@ use coven::{DeviceState, MemberId, MemberInfo, UuidText};
 async fn profiles(handle: &CovenHandle) -> Result<HashMap<MemberId, String>, CovenError> {
     let rows = handle
         .read(|sql| {
-            Ok(sql.query("SELECT member_id, display_name FROM profiles", [], |row| {
+            Ok::<_, CovenError>(sql.query("SELECT member_id, display_name FROM profiles", [], |row| {
                 Ok((MemberId(row.get::<_, UuidText>(0)?.0), row.get::<_, String>(1)?))
             })?)
         })

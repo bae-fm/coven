@@ -67,7 +67,7 @@ let prepared = handle.prepare_pin(&files).await?; // downloads; pins nothing
 handle.write(move |sql| {
     sql.pin(prepared)?; // every file whole on this device, as this write commits
     sql.execute("UPDATE albums SET offline = 1 WHERE id = ?1", [&album])?;
-    Ok(())
+    Ok::<_, CovenError>(())
 }).await?;
 ```
 

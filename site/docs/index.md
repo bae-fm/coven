@@ -126,10 +126,10 @@ use uuid::Uuid;
 let note = UuidText(Uuid::now_v7());
 handle.write(move |sql| {
     sql.execute("INSERT INTO notes (id, title) VALUES (?1, ?2)", (note, "Groceries"))?;
-    Ok(())
+    Ok::<_, CovenError>(())
 }).await?;
 
-let mut titles = handle.subscribe(|sql| {
+let mut titles: LiveQuery<_, CovenError> = handle.subscribe(|sql| {
     Ok(sql.query("SELECT title FROM notes ORDER BY title", [], |row| row.get::<_, String>(0))?)
 });
 while let Some(Ok(titles)) = titles.next().await {

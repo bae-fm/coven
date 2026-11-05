@@ -75,7 +75,7 @@ let removal = handle
     .write(move |sql| {
         let removal = sql.remove_member(&dan)?;
         sql.execute("UPDATE people SET leaving=1 WHERE member=?1", [dan])?;
-        Ok(removal)
+        Ok::<_, CovenError>(removal)
     })
     .await?;
 ```
