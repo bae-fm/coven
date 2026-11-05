@@ -13,7 +13,6 @@ use coven_foundation::files::{
 };
 use coven_storage::{
     ConnectionCredentials, InviteStorage, RestoreStorage, StorageCredentials, StorageFailure,
-    StorageSettings,
 };
 use coven_sync::SequenceSync;
 use std::sync::Arc;
@@ -704,7 +703,6 @@ async fn prepare_and_load(
             ring.clone(),
             identity,
             Arc::new(PersonEntries::new(builder.keychain()?, settings.id)),
-            Arc::new(StorageSettings::new(directory.clone())),
             state.clone(),
             builder.clock.clone(),
             builder.ids.clone(),

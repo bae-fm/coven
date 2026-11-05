@@ -349,7 +349,7 @@ async fn disconnected_member_and_circle_reads_match_their_subscriptions() {
 #[tokio::test]
 async fn closing_waits_for_setup_after_its_caller_is_cancelled() {
     tokio::time::timeout(HANG_GUARD, async {
-        use coven_storage::{test_utils::MemoryStorage, StorageSettings};
+        use coven_storage::test_utils::MemoryStorage;
         let root = tempfile::tempdir().unwrap();
         let app = Coven::in_memory(root.path().to_owned());
         let directory = app.create_closed_store("setup", Arc::new(UuidIds)).await.unwrap();
@@ -379,7 +379,7 @@ async fn closing_waits_for_setup_after_its_caller_is_cancelled() {
         }
         resume.send(()).unwrap();
         close.await.unwrap();
-        assert_eq!(StorageSettings::new(directory.clone()).read().unwrap(), Some(config));
+        assert_eq!(coven_storage::recorded_config(&directory).unwrap(), Some(config));
         // Creation claimed slot 1 and the creator's key copy at slot 2.
         assert_eq!(crate::tests::stored(&storage, directory.id(), |path| path.slot_number().is_some()).await.len(), 2);
         assert!(matches!(handle.store_key_state(), Err(KeyError::StoreClosed)));

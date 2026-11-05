@@ -132,7 +132,7 @@ async fn versioning_refusal_commits_nothing_and_preserves_an_existing_connection
         StorageSetupError::S3VersioningUnknown { .. }
     ));
     assert_eq!(storage.request_count(), 0);
-    assert_eq!(StorageSettings::new(opened.directory.clone()).read().unwrap(), None);
+    assert_eq!(coven_storage::recorded_config(&opened.directory).unwrap(), None);
     *connector.versioning.lock().unwrap() = Ok(S3BucketVersioning::Disabled);
     setup(&opened.handle, location.clone()).await.unwrap();
     let before = storage.request_count();
@@ -142,7 +142,7 @@ async fn versioning_refusal_commits_nothing_and_preserves_an_existing_connection
         StorageSetupError::S3VersioningUnsupported { .. }
     ));
     assert_eq!(storage.request_count(), before);
-    assert_eq!(StorageSettings::new(opened.directory.clone()).read().unwrap(), Some(location));
+    assert_eq!(coven_storage::recorded_config(&opened.directory).unwrap(), Some(location));
     opened.handle.close().await.unwrap();
 }
 
@@ -188,10 +188,7 @@ async fn an_uncatalogued_endpoint_is_set_up_and_reconnected_with_detected_settin
     assert_eq!(detection.settings, DETECTED_S3_SETTINGS);
     let connected = setup(&opened.handle, uncatalogued(None)).await.unwrap();
     assert_eq!(connected.connection.storage, detected);
-    assert_eq!(
-        StorageSettings::new(opened.directory.clone()).read().unwrap(),
-        Some(detected.clone())
-    );
+    assert_eq!(coven_storage::recorded_config(&opened.directory).unwrap(), Some(detected.clone()));
     // Reconnecting with the same location and no profile reuses the
     // recorded settings rather than refusing a location change.
     let reconnected = setup(&opened.handle, uncatalogued(None)).await.unwrap();
@@ -226,7 +223,7 @@ async fn a_server_that_overwrites_occupied_names_is_refused_before_anything_is_c
         );
     }
     assert_eq!(storage.request_count(), 0);
-    assert_eq!(StorageSettings::new(opened.directory.clone()).read().unwrap(), None);
+    assert_eq!(coven_storage::recorded_config(&opened.directory).unwrap(), None);
     opened.handle.close().await.unwrap();
 }
 
@@ -311,7 +308,7 @@ async fn an_r2_store_is_created_only_in_a_bucket_of_its_own() {
     let error = setup(&second.handle, r2("")).await.unwrap_err();
     assert!(own_bucket_required(&error, OwnBucketReason::Occupied), "{error:?}");
     assert_eq!(storage.request_count(), before);
-    assert_eq!(StorageSettings::new(second.directory.clone()).read().unwrap(), None);
+    assert_eq!(coven_storage::recorded_config(&second.directory).unwrap(), None);
     // Reconnecting reads the bucket marker, without listing the root.
     setup(&first.handle, r2("")).await.unwrap();
     first.handle.close().await.unwrap();
@@ -358,7 +355,7 @@ async fn a_setup_failing_past_its_bucket_claim_finishes_through_the_loop() {
         })
         .await;
     assert!(setup(&opened.handle, r2("")).await.is_err());
-    assert_eq!(StorageSettings::new(opened.directory.clone()).read().unwrap(), None);
+    assert_eq!(coven_storage::recorded_config(&opened.directory).unwrap(), None);
     storage.check_bucket(opened.directory.id()).await.unwrap();
     storage.set_faults(coven_storage::test_utils::Faults::none()).await;
     opened.handle.retry_now().await.unwrap().await;
@@ -375,7 +372,7 @@ async fn a_setup_failing_past_its_bucket_claim_finishes_through_the_loop() {
         .unwrap();
     let outcome = opened.handle.operation_outcome(OperationId(setups[0])).await.unwrap();
     assert_eq!(outcome, OperationOutcome::Landed(coven_merge::Slot(1)));
-    assert_eq!(StorageSettings::new(opened.directory.clone()).read().unwrap(), Some(r2("")));
+    assert_eq!(coven_storage::recorded_config(&opened.directory).unwrap(), Some(r2("")));
     setup(&opened.handle, r2("")).await.unwrap();
     opened.handle.close().await.unwrap();
 }
@@ -389,7 +386,7 @@ async fn reconnect_refuses_a_bucket_marker_naming_another_store() {
     storage.plant_bucket_claim(Some(other.to_string().into_bytes())).await;
     let error = setup(&opened.handle, r2("")).await.unwrap_err();
     assert!(own_bucket_required(&error, OwnBucketReason::Occupied), "{error:?}");
-    assert_eq!(StorageSettings::new(opened.directory.clone()).read().unwrap(), Some(r2("")));
+    assert_eq!(coven_storage::recorded_config(&opened.directory).unwrap(), Some(r2("")));
     storage.check_bucket(other).await.unwrap();
     opened.handle.close().await.unwrap();
 }

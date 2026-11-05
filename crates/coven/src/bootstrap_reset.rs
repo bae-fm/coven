@@ -19,11 +19,10 @@ pub(crate) async fn reset_device(
 ) -> Result<CovenHandle, BootstrapError> {
     let directory = builder.directories.store_dir(&store);
     let keychain = Arc::new(StoreKeychain::new(builder.keychain()?, store));
-    let location = StorageSettings::new(directory.clone());
-    if location.read().map_err(SyncError::from)?.is_none() {
+    if coven_storage::recorded_config(&directory).map_err(SyncError::from)?.is_none() {
         return reset_unconnected(builder, store, keychain, &status).await;
     }
-    let data = coven_sync::read_connection(&location, &keychain)?.ok_or(SyncError::NoStorage)?;
+    let data = coven_sync::read_connection(&directory, &keychain)?.ok_or(SyncError::NoStorage)?;
     // The held sign-in refreshes in this session until the new device
     // publishes it, like any bootstrap's (§20.2).
     let sign_in = match &data.credentials {

@@ -468,12 +468,12 @@ impl CovenBuilder {
         if let Some(identity) = database.store_state().await?.store {
             check_store_settings(&identity, &directory)?;
         }
-        let settings = coven_storage::StorageSettings::new(directory.clone());
         let device = directory.settings().map_err(CovenError::from)?.device_id;
         let oauth = self.oauth_exchange();
+        let in_directory = directory.clone();
         let (credentials, data) = crate::task::blocking("read the saved credentials", move || {
-            let credentials = device_credentials(self.keychain()?, store, oauth);
-            let data = credentials.connection(&settings)?;
+            let credentials = device_credentials(self.keychain()?, store, in_directory, oauth);
+            let data = credentials.connection()?;
             Ok::<_, SyncError>((credentials, data))
         })
         .await
@@ -562,8 +562,7 @@ impl CovenBuilder {
                 let store = settings.id;
                 // Without member keys a connected store can only be restored
                 // with its code; reset_device reads them from custody.
-                let connected = coven_storage::StorageSettings::new(directory.clone())
-                    .read()
+                let connected = coven_storage::recorded_config(&directory)
                     .map_err(|error| SettingsError::Corrupt(Box::new(error)))?
                     .is_some();
                 return Err(match identity?.read()? {
@@ -601,6 +600,7 @@ impl CovenBuilder {
         let credentials = Arc::new(coven_sync::DeviceCredentials::new(
             keychain.clone(),
             person.clone(),
+            directory.clone(),
             clients.clone(),
         ));
         let connector = self.connector();
@@ -758,10 +758,8 @@ impl OpeningStore {
                     &owners.person,
                     &coven_sync::SavedName::of(identity),
                     || {
-                        let location =
-                            coven_storage::StorageSettings::new(owners.directory.clone())
-                                .read()
-                                .map_err(|error| sync_error(error.into()))?;
+                        let location = coven_storage::recorded_config(&owners.directory)
+                            .map_err(|error| sync_error(error.into()))?;
                         coven_sync::replacement_code(
                             &state,
                             owners.identity.read()?.as_ref(),
@@ -778,10 +776,7 @@ impl OpeningStore {
             Ok::<_, CovenError>(owners)
         })
         .await??;
-        let location = owners
-            .credentials
-            .location(&coven_storage::StorageSettings::new(owners.directory.clone()))
-            .map_err(sync_error)?;
+        let location = owners.credentials.location().map_err(sync_error)?;
         let configured = location.is_connected();
         // A setup a crash cut is undone, or left for the first connection
         // to finish, before the handle exists (§11.6).
@@ -824,11 +819,13 @@ fn check_store_settings(
 pub(crate) fn device_credentials(
     keychain: Arc<Keychain>,
     store: StoreId,
+    directory: StoreDir,
     oauth: Option<OAuthExchange>,
 ) -> Arc<coven_sync::DeviceCredentials> {
     Arc::new(coven_sync::DeviceCredentials::new(
         Arc::new(StoreKeychain::new(keychain.clone(), store)),
         Arc::new(PersonEntries::new(keychain, store)),
+        directory,
         oauth,
     ))
 }

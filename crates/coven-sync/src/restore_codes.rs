@@ -7,9 +7,10 @@ use coven_crypto::{
 };
 use coven_database::{Database, DbError};
 use coven_format::codes::RestoreCode;
+use coven_foundation::files::StoreDir;
 use coven_storage::{
     ConnectionCredentials, RestoreStorage, S3Credentials, Storage, StorageConfig,
-    StorageCredentials, StorageSettings,
+    StorageCredentials,
 };
 use std::sync::Arc;
 
@@ -60,11 +61,10 @@ pub struct RestoreCodes {
     bugs: coven_foundation::task::BugSinkRef,
 }
 struct RestoreCodesInner {
-    store: coven_foundation::id_source::StoreId,
+    directory: StoreDir,
     database: Database,
     identity: Arc<KeySession<MemberIdentity>>,
     credentials: Arc<DeviceCredentials>,
-    settings: StorageSettings,
     /// The connected sequence owner; a disconnected handle has none.
     sync: Option<Arc<crate::SequenceSync>>,
 }
@@ -74,27 +74,25 @@ impl RestoreCodes {
     pub async fn location(&self) -> Result<Option<coven_storage::StorageConfig>, SyncError> {
         let owner = self.inner.lock().await;
         let owner = owner.as_ref().ok_or(coven_database::DbError::StoreClosed)?;
-        Ok(owner.settings.read()?)
+        Ok(coven_storage::recorded_config(&owner.directory)?)
     }
 
     /// Compose at the facade's opening boundary. The settings and credentials
     /// are also the narrow persisted connection contract used by storage setup.
     pub fn new(
-        store: coven_foundation::id_source::StoreId,
+        directory: StoreDir,
         database: Database,
         identity: Arc<KeySession<MemberIdentity>>,
         credentials: Arc<DeviceCredentials>,
-        settings: StorageSettings,
         sync: Option<Arc<crate::SequenceSync>>,
     ) -> Self {
         Self {
             bugs: database.bugs().clone(),
             inner: Arc::new(tokio::sync::Mutex::new(Some(RestoreCodesInner {
-                store,
+                directory,
                 database,
                 identity,
                 credentials: credentials.clone(),
-                settings,
                 sync,
             }))),
             credentials,
@@ -115,7 +113,8 @@ impl RestoreCodes {
     pub async fn restore_code(&self) -> Result<String, SyncError> {
         let guard = self.inner.lock().await;
         let owner = guard.as_ref().ok_or(DbError::StoreClosed)?;
-        let location = owner.settings.read()?.ok_or(SyncError::NoStorage)?;
+        let location =
+            coven_storage::recorded_config(&owner.directory)?.ok_or(SyncError::NoStorage)?;
         Ok(owner.code(&RestoreStorage::location_only(location)).await?.to_text()?.to_string())
     }
 
@@ -131,9 +130,9 @@ impl RestoreCodes {
                 RestoreStorage { location, s3_key: Some(key) }
             }
             Some(ConnectionCredentials { location, .. }) => RestoreStorage::location_only(location),
-            None => {
-                RestoreStorage::location_only(owner.settings.read()?.ok_or(SyncError::NoStorage)?)
-            }
+            None => RestoreStorage::location_only(
+                coven_storage::recorded_config(&owner.directory)?.ok_or(SyncError::NoStorage)?,
+            ),
         };
         Ok(owner.code(&storage).await?.to_text()?.to_string())
     }
@@ -146,7 +145,7 @@ impl RestoreCodes {
             let guard = inner.lock().await;
             let owner = guard.as_ref().ok_or(DbError::StoreClosed)?;
             // Reject missing location before publishing a new binding.
-            owner.settings.read()?.ok_or(SyncError::NoStorage)?;
+            coven_storage::recorded_config(&owner.directory)?.ok_or(SyncError::NoStorage)?;
             let sync = owner.sync.as_ref().ok_or(SyncError::NoStorage)?;
             sync.replace_member_keys().await?;
             Ok(sync
@@ -250,12 +249,12 @@ impl RestoreCodes {
         let identity =
             owner.identity.read()?.ok_or(coven_storage::StorageFailure::MemberKeysMissing)?;
         // The code names the stable id its unchanged private-pair blob belongs to (D13).
-        let code = location_code(owner.store, &identity, data.location.clone())?;
+        let code = location_code(owner.directory.id(), &identity, data.location.clone())?;
         let text = SecretText::new(code.to_text()?.to_string());
         // The creation slot will publish the name chosen locally (§13.1).
         let (name, named_at) = owner.database.named_store().await?;
         let name = crate::SavedName { name, named_at };
-        let previous_location = owner.settings.read()?;
+        let previous_location = coven_storage::recorded_config(&owner.directory)?;
         Ok((
             Box::new(move || {
                 let owner = guard.as_ref().expect("reserved credential owner");
@@ -284,7 +283,7 @@ impl RestoreCodes {
                     }
                     result
                 };
-                if let Err(error) = owner.settings.commit(&data.location) {
+                if let Err(error) = coven_storage::record_config(&owner.directory, &data.location) {
                     return Err(match rollback(owner, previous) {
                         Ok(()) => error.into(),
                         Err(cleanup) => SyncError::cleanup(error.into(), cleanup),
@@ -311,8 +310,11 @@ impl RestoreCodesInner {
         identity: &MemberIdentity,
         store: &coven_database::StoreIdentity,
     ) -> Result<SecretText, SyncError> {
-        let code =
-            location_code(store.id, identity, self.settings.read()?.ok_or(SyncError::NoStorage)?)?;
+        let code = location_code(
+            store.id,
+            identity,
+            coven_storage::recorded_config(&self.directory)?.ok_or(SyncError::NoStorage)?,
+        )?;
         let text = SecretText::new(code.to_text()?.to_string());
         self.credentials.write(|keychains| {
             keychains.refresh_restore_code(&code, &crate::SavedName::of(store))
@@ -327,8 +329,8 @@ impl RestoreCodesInner {
     ) -> Result<(), SyncError> {
         let credentials = self.credentials.write(|keychain| credentials.restore(keychain));
         let location = match location {
-            Some(location) => self.settings.commit(&location),
-            None => self.settings.remove(),
+            Some(location) => coven_storage::record_config(&self.directory, &location),
+            None => coven_storage::remove_recorded_config(&self.directory),
         }
         .map_err(SyncError::from);
         match (credentials, location) {
@@ -338,7 +340,7 @@ impl RestoreCodesInner {
     }
 
     fn connection(&self) -> Result<Option<ConnectionCredentials>, SyncError> {
-        self.credentials.connection(&self.settings)
+        self.credentials.connection()
     }
 
     async fn code(&self, storage: &RestoreStorage) -> Result<RestoreCode, SyncError> {
@@ -353,7 +355,8 @@ impl RestoreCodesInner {
         credentials: S3Credentials,
         require_connected: bool,
     ) -> Result<(), SyncError> {
-        let location = self.settings.read()?.ok_or(SyncError::NoStorage)?;
+        let location =
+            coven_storage::recorded_config(&self.directory)?.ok_or(SyncError::NoStorage)?;
         self.install(
             ConnectionCredentials { location, credentials: StorageCredentials::S3(credentials) },
             require_connected,
@@ -416,10 +419,10 @@ pub(crate) async fn install_session(
 /// database. Shared by normal sync, read-only file access and damaged-database
 /// recovery. Absence means storage is not configured on this installation.
 pub fn read_connection(
-    settings: &StorageSettings,
+    directory: &StoreDir,
     keychain: &StoreKeychain,
 ) -> Result<Option<ConnectionCredentials>, SyncError> {
-    let Some(location) = settings.read()? else {
+    let Some(location) = coven_storage::recorded_config(directory)? else {
         return Ok(None);
     };
     connection_at(location, keychain)
@@ -428,10 +431,10 @@ pub fn read_connection(
 /// Whether a storage location is recorded on this installation and custody
 /// holds credentials for it, as the sync state reads it (§19.1).
 pub(crate) fn read_location(
-    settings: &StorageSettings,
+    directory: &StoreDir,
     keychain: &StoreKeychain,
 ) -> Result<coven_database::RecordedLocation<coven_storage::CloudProvider>, SyncError> {
-    let Some(location) = settings.read()? else {
+    let Some(location) = coven_storage::recorded_config(directory)? else {
         return Ok(coven_database::RecordedLocation::None);
     };
     let provider = location.provider();

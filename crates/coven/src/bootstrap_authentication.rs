@@ -73,8 +73,12 @@ pub(super) fn join_sign_in(
     location: &StorageConfig,
 ) -> Result<(SignInCustody, OAuthTokens), BootstrapError> {
     let provider = location.provider();
-    let credentials =
-        crate::builder::device_credentials(builder.keychain()?, store, builder.oauth_exchange());
+    let credentials = crate::builder::device_credentials(
+        builder.keychain()?,
+        store,
+        builder.directories.store_dir(&store),
+        builder.oauth_exchange(),
+    );
     let kept = builder.authentication.is_none();
     let tokens = if kept {
         if credentials.write(|keychains| keychains.storage_credentials())?.is_none() {

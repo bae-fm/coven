@@ -7,11 +7,12 @@
 use crate::{commit_credentials, CredentialKeychains, CredentialRollback, SavedName, SyncError};
 use coven_crypto::custody::{PersonEntries, StoreKeychain};
 use coven_format::codes::RestoreCode;
+use coven_foundation::files::StoreDir;
 use coven_foundation::locks::lock_unpoisoned;
 use coven_storage::providers::OAuthTokenRefresh;
 use coven_storage::{
     providers::OAuthExchange, ConnectionCredentials, OAuthTokens, StorageCredentials, StorageError,
-    StorageFailure, StorageSettings, TokenCustody,
+    StorageFailure, TokenCustody,
 };
 use std::sync::{Arc, Mutex};
 
@@ -32,10 +33,11 @@ impl DeviceCredentials {
     pub fn new(
         keychain: Arc<StoreKeychain>,
         person: Arc<PersonEntries>,
+        directory: StoreDir,
         oauth: Option<OAuthExchange>,
     ) -> Self {
         Self {
-            keychains: CredentialKeychains::new(keychain, person),
+            keychains: CredentialKeychains::new(keychain, person, directory),
             oauth,
             writes: Mutex::new(()),
             refreshing: tokio::sync::Mutex::new(()),
@@ -52,20 +54,16 @@ impl DeviceCredentials {
     }
 
     /// The saved location with these credentials; None when either is absent.
-    pub fn connection(
-        &self,
-        settings: &StorageSettings,
-    ) -> Result<Option<ConnectionCredentials>, SyncError> {
-        self.keychains.connection(settings)
+    pub fn connection(&self) -> Result<Option<ConnectionCredentials>, SyncError> {
+        self.keychains.connection()
     }
 
     /// Whether a location is recorded, and this device's credentials for it
     /// held, as the sync state reads it (§19.1).
     pub fn location(
         &self,
-        settings: &StorageSettings,
     ) -> Result<coven_database::RecordedLocation<coven_storage::CloudProvider>, SyncError> {
-        self.keychains.location(settings)
+        self.keychains.location()
     }
 
     /// The OAuth tokens committed here, which a new connection starts with.

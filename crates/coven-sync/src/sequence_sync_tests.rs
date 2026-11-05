@@ -14,7 +14,7 @@ use coven_foundation::{
     files::{StoreDirectories, StoreFile},
     id_source::{IdSource, KeyId, MemberId, SequentialIds, StoreId},
 };
-use coven_storage::{test_utils::MemoryStorage, ObjectPath, Storage, StorageSettings};
+use coven_storage::{test_utils::MemoryStorage, ObjectPath, Storage};
 use std::sync::Arc;
 
 #[cfg(test)]
@@ -308,7 +308,6 @@ impl Group {
                 Arc::new(store_keys),
                 Arc::new(member_keys),
                 Arc::new(PersonEntries::new(keychain.clone(), self.store)),
-                Arc::new(StorageSettings::new(directory.clone())),
                 state,
                 clock,
                 self.ids.clone(),
@@ -389,15 +388,18 @@ pub(crate) fn codes(
 ) -> (RestoreCodes, Arc<PersonEntries>) {
     let store = Arc::new(StoreKeychain::new(keychain.clone(), device.sync.store()));
     let person = Arc::new(PersonEntries::new(keychain, device.sync.store()));
-    let settings = StorageSettings::new(device.sync.directory.clone());
-    settings.commit(&device.storage.config()).unwrap();
+    coven_storage::record_config(&device.sync.directory, &device.storage.config()).unwrap();
     (
         RestoreCodes::new(
-            device.sync.store(),
+            device.sync.directory.clone(),
             device.sync.database.clone(),
             device.sync.member.clone(),
-            Arc::new(DeviceCredentials::new(store, person.clone(), None)),
-            settings,
+            Arc::new(DeviceCredentials::new(
+                store,
+                person.clone(),
+                device.sync.directory.clone(),
+                None,
+            )),
             Some(device.sync.clone()),
         ),
         person,

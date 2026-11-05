@@ -349,7 +349,7 @@ impl StorageConnections {
         &self,
         result: Result<(), SyncError>,
     ) -> Result<(), SyncError> {
-        let result = result.and_then(|()| self.credentials.location(&self.settings));
+        let result = result.and_then(|()| self.credentials.location());
         match result {
             Ok(location) => self.record_location(location, None).await,
             Err(error) => {

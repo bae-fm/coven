@@ -4,7 +4,7 @@ use coven_foundation::clock::HANG_GUARD;
 use coven_foundation::progress::RecordingClock;
 use coven_storage::{
     test_utils::{Faults, MemoryStorage},
-    Storage, StorageConnection, StorageSettings,
+    Storage, StorageConnection,
 };
 use std::{
     sync::atomic::{AtomicBool, Ordering},
@@ -836,7 +836,7 @@ async fn setup_refuses_another_location_after_lost_credentials_and_reopen() {
         .unwrap_err();
     assert_eq!(error.to_string(), "storage location change is unsupported");
     assert_eq!(destination.request_count(), 0);
-    assert_eq!(StorageSettings::new(f.directory.clone()).read().unwrap(), Some(f.storage.config()));
+    assert_eq!(coven_storage::recorded_config(&f.directory).unwrap(), Some(f.storage.config()));
     handle
         .setup_s3_storage(
             f.storage.config(),
@@ -882,7 +882,7 @@ async fn setup_rejects_overwriting_providers_before_committing() {
     assert_eq!(f.handle.test_sync_status().latest().await.state, SyncState::NotSynced);
     assert!(f.storage.list(&ObjectPrefix::all(f.directory.id())).await.unwrap().is_empty());
     assert!(f.handle.members().await.unwrap().is_empty());
-    assert_eq!(StorageSettings::new(f.directory.clone()).read().unwrap(), None);
+    assert_eq!(coven_storage::recorded_config(&f.directory).unwrap(), None);
     f.storage.set_faults(Faults::none()).await;
     f.handle
         .setup_s3_storage(
@@ -904,8 +904,7 @@ async fn reconnect_checks_the_provider_and_preserves_the_previous_connection() {
     synced(&f.handle).await;
     stop(&f).await;
     let before = f.handle.restore_code().await.unwrap();
-    let settings = StorageSettings::new(f.directory.clone());
-    let location = settings.read().unwrap();
+    let location = coven_storage::recorded_config(&f.directory).unwrap();
     let objects = f.storage.list(&ObjectPrefix::all(f.directory.id())).await.unwrap();
     f.storage.set_faults(Faults { overwrite_create: true, ..Faults::none() }).await;
     let error = f
@@ -923,7 +922,7 @@ async fn reconnect_checks_the_provider_and_preserves_the_previous_connection() {
         matches!(error, StorageSetupError::ProviderCheck { check: StorageCheck::CreateOnce, source } if source.failure() == StorageFailure::Protocol)
     );
     assert_eq!(f.handle.restore_code().await.unwrap(), before);
-    assert_eq!(settings.read().unwrap(), location);
+    assert_eq!(coven_storage::recorded_config(&f.directory).unwrap(), location);
     assert_eq!(f.handle.store_key_state().unwrap(), StoreKeyState::Available);
     assert_eq!(f.storage.list(&ObjectPrefix::all(f.directory.id())).await.unwrap(), objects);
     // The refused setup records no failure, and sync stays stopped.

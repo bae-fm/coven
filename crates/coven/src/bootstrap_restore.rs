@@ -112,6 +112,7 @@ impl Recording {
             credentials: crate::builder::device_credentials(
                 keychain,
                 store,
+                builder.directories.store_dir(&store),
                 builder.oauth_exchange(),
             ),
             name: name.to_owned(),

@@ -155,7 +155,7 @@ async fn setup_key_failure_restores_the_separate_saved_values() {
     assert_eq!(person.restore_code().unwrap().unwrap().as_bytes(), old_code.as_bytes());
     assert_eq!(person.s3_credentials().unwrap().unwrap().as_bytes(), old_key.as_bytes());
     assert!(scoped.storage_credentials().unwrap().is_none());
-    assert!(StorageSettings::new(f.directory.clone()).read().unwrap().is_none());
+    assert!(coven_storage::recorded_config(&f.directory).unwrap().is_none());
     handle.close().await.unwrap();
 }
 
@@ -173,8 +173,7 @@ async fn connected_and_signed_out_updates_install_the_supplied_key_without_chang
     synced(&f.handle).await;
     let before = f.handle.restore_code().await.unwrap();
     let member = coven_sync::read_restore_code(&before).unwrap().member_keys.to_secret_bytes();
-    let settings = StorageSettings::new(f.directory.clone());
-    let location = settings.read().unwrap();
+    let location = coven_storage::recorded_config(&f.directory).unwrap();
     f.handle
         .update_credentials("connected".into(), SecretText::new("connected-secret".into()))
         .await
@@ -207,7 +206,7 @@ async fn connected_and_signed_out_updates_install_the_supplied_key_without_chang
     synced_since(&handle, f.clock.now()).await;
     assert_connected_key(&f, "signed-out", "signed-out-secret").await;
     assert_eq!(handle.restore_code().await.unwrap(), before);
-    assert_eq!(settings.read().unwrap(), location);
+    assert_eq!(coven_storage::recorded_config(&f.directory).unwrap(), location);
     assert_eq!(
         coven_sync::read_restore_code(&before).unwrap().member_keys.to_secret_bytes().as_bytes(),
         member.as_bytes()

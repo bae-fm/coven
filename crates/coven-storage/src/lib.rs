@@ -51,6 +51,7 @@ mod secret_json;
 pub use byte_progress::ByteProgress;
 mod session;
 mod settings;
+pub use settings::{record_config, recorded_config, remove_recorded_config};
 mod storage;
 mod token_custody;
 pub(crate) use token_custody::HeldTokens;
@@ -69,7 +70,6 @@ pub use error::*;
 pub use invitation::StorageInvitation;
 pub use path::*;
 pub use session::{UploadSession, UploadTarget};
-pub use settings::StorageSettings;
 pub use storage::*;
 
 #[cfg(any(test, feature = "test-utils"))]

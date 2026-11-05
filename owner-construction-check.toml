@@ -1385,7 +1385,6 @@ tables = [
 # Emptying an S3 prefix, a development tool, connects to the location with
 # its own settings (api.md E14).
 "crates/coven-storage/src/providers/s3_empty.rs" = ["empty_prefix"]
-"crates/coven-storage/src/settings.rs" = ["StorageSettings::new"]
 
 "crates/coven-sync/src/file_read.rs" = ["FileStream::read", "UploadedFile::open"]
 # Creates a reserved cache file for a pin or an upload's own copy.

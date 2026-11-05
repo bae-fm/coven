@@ -12,19 +12,18 @@ fn settings_use_the_reserved_atomic_file_and_refuse_corrupt_values() {
     let directory =
         layout.create_store_dir(StoreId(uuid::Uuid::from_u128(1)), &SequentialIds::new()).unwrap();
     let file = directory.owned_file(StoreFile::StorageSettings);
-    let settings = StorageSettings::new(directory);
-    assert_eq!(settings.read().unwrap(), None);
+    assert_eq!(crate::recorded_config(&directory).unwrap(), None);
     let config = StorageConfig::Dropbox {
         account_label: None,
         location: crate::DropboxLocation::SharedFolder { namespace_id: "namespace".into() },
     };
-    settings.commit(&config).unwrap();
-    assert_eq!(settings.read().unwrap(), Some(config));
+    crate::record_config(&directory, &config).unwrap();
+    assert_eq!(crate::recorded_config(&directory).unwrap(), Some(config));
     file.replace(br#"{"Dropbox":{"location":{"SharedFolder":{"namespace_id":"namespace"}},"secret_access_key":"forbidden"}}"#)
         .unwrap();
-    let error = settings.read().unwrap_err();
+    let error = crate::recorded_config(&directory).unwrap_err();
     assert_eq!(error.failure(), StorageFailure::Encoding);
     assert!(error.source().unwrap().is::<serde_json::Error>());
-    settings.remove().unwrap();
-    assert_eq!(settings.read().unwrap(), None);
+    crate::remove_recorded_config(&directory).unwrap();
+    assert_eq!(crate::recorded_config(&directory).unwrap(), None);
 }

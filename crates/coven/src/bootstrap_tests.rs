@@ -462,10 +462,7 @@ async fn s3_credential_changes_preserve_the_code_location_and_member_across_reop
         .unwrap();
     restore_credentials::assert_key(&install, directory.id(), &original);
     assert_eq!(handle.restore_code().await.unwrap(), before);
-    assert_eq!(
-        coven_storage::StorageSettings::new(directory).read().unwrap(),
-        Some(owner.storage.config())
-    );
+    assert_eq!(coven_storage::recorded_config(&directory).unwrap(), Some(owner.storage.config()));
     assert_eq!(
         coven_sync::read_restore_code(&before).unwrap().member_keys.to_secret_bytes().as_bytes(),
         owner.member.keys().to_secret_bytes().as_bytes()

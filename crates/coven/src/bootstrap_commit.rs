@@ -86,11 +86,11 @@ pub(super) fn commit(
     let location = RestoreStorage::decode(code.storage.as_bytes())
         .map_err(|error| unchanged(SyncError::from(error).into()))?
         .location;
-    let settings = StorageSettings::new(directory.clone());
-    let old_settings = settings.read().map_err(|error| unchanged(SyncError::from(error).into()))?;
+    let old_settings = coven_storage::recorded_config(directory)
+        .map_err(|error| unchanged(SyncError::from(error).into()))?;
     let mut credential_rollback = None;
     let commit = || -> Result<(), BootstrapError> {
-        settings.commit(&location).map_err(SyncError::from)?;
+        coven_storage::record_config(directory, &location).map_err(SyncError::from)?;
         keys.persist(ring)?;
         identity.persist(&MemberIdentity::new(code.member, code.member_keys.clone()))?;
         keychain.set_device_id(owners.device)?;
@@ -172,8 +172,8 @@ pub(super) fn commit(
         }
     }
     let rollback = match old_settings {
-        Some(location) => settings.commit(&location),
-        None => settings.remove(),
+        Some(location) => coven_storage::record_config(directory, &location),
+        None => coven_storage::remove_recorded_config(directory),
     };
     if let Err(cleanup) = rollback {
         error = failed(error, SyncError::from(cleanup).into());

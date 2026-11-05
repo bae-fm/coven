@@ -152,9 +152,6 @@ pub(crate) struct StorageConnections {
     credentials: Arc<DeviceCredentials>,
     publications: Arc<Publications>,
     directory: StoreDir,
-    /// The recorded location, which with custody's credentials decides
-    /// whether storage is set up here.
-    settings: coven_storage::StorageSettings,
     waits: Arc<coven_sync::RetryWaits>,
     transfers: Arc<coven_storage::TransferBudget>,
     keys: std::sync::Mutex<Option<Arc<KeySession<StoreKeyring>>>>,
@@ -228,11 +225,10 @@ impl StorageConnections {
         clock: ClockRef,
     ) -> Self {
         let codes = RestoreCodes::new(
-            directory.id(),
+            directory.clone(),
             database.clone(),
             identity.clone(),
             credentials.clone(),
-            coven_storage::StorageSettings::new(directory.clone()),
             None,
         );
         let expiry = coven_sync::InviteExpiry::start(
@@ -250,7 +246,6 @@ impl StorageConnections {
             person,
             credentials,
             publications,
-            settings: coven_storage::StorageSettings::new(directory.clone()),
             directory,
             waits,
             transfers,
@@ -326,7 +321,7 @@ impl StorageConnections {
     /// Record the location as custody holds it now, as `record_location`
     /// does: after credentials change, or a connection is released.
     pub(crate) async fn record_custody(&self) -> Result<(), SyncError> {
-        let location = self.credentials.location(&self.settings)?;
+        let location = self.credentials.location()?;
         self.record_location(location, None).await
     }
 
@@ -453,7 +448,6 @@ impl StorageConnections {
                 keys,
                 self.identity.clone(),
                 self.person.clone(),
-                Arc::new(coven_storage::StorageSettings::new(self.directory.clone())),
                 self.publications.state.clone(),
                 self.clock.clone(),
                 self.ids.clone(),
@@ -472,11 +466,10 @@ impl StorageConnections {
         start: bool,
     ) -> Result<(), SyncError> {
         let codes = RestoreCodes::new(
-            self.store(),
+            self.directory.clone(),
             self.database.clone(),
             self.identity.clone(),
             self.credentials.clone(),
-            coven_storage::StorageSettings::new(self.directory.clone()),
             Some(sync.clone()),
         );
         let sync_loop = SyncLoop::new(sync.clone(), codes.clone());

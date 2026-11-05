@@ -6,6 +6,7 @@ use coven_crypto::{
     SecretBytes,
 };
 use coven_format::codes::RestoreCode;
+use coven_foundation::files::StoreDir;
 use coven_storage::StorageCredentials;
 use std::sync::Arc;
 
@@ -17,12 +18,20 @@ pub struct CredentialKeychains {
     device: Arc<StoreKeychain>,
     /// The person's entries for the store, shared by all their devices.
     person: Arc<PersonEntries>,
+    /// The store's directory, whose settings file records the location these
+    /// credentials are for.
+    directory: StoreDir,
 }
 
 impl CredentialKeychains {
-    /// Pair one store's device-only entries and the person's entries.
-    pub fn new(device: Arc<StoreKeychain>, person: Arc<PersonEntries>) -> Self {
-        Self { device, person }
+    /// Pair one store's device-only entries and the person's entries, beside
+    /// the store's directory.
+    pub fn new(
+        device: Arc<StoreKeychain>,
+        person: Arc<PersonEntries>,
+        directory: StoreDir,
+    ) -> Self {
+        Self { device, person, directory }
     }
 
     /// This device's committed provider credentials, if any.
@@ -44,20 +53,16 @@ impl CredentialKeychains {
     }
 
     /// The saved location with this device's credentials; None when either is absent.
-    pub fn connection(
-        &self,
-        settings: &coven_storage::StorageSettings,
-    ) -> Result<Option<coven_storage::ConnectionCredentials>, SyncError> {
-        crate::read_connection(settings, &self.device)
+    pub fn connection(&self) -> Result<Option<coven_storage::ConnectionCredentials>, SyncError> {
+        crate::read_connection(&self.directory, &self.device)
     }
 
     /// Whether a location is recorded, and this device's credentials for it
     /// held, as the sync state reads it (§19.1).
     pub fn location(
         &self,
-        settings: &coven_storage::StorageSettings,
     ) -> Result<coven_database::RecordedLocation<coven_storage::CloudProvider>, SyncError> {
-        crate::restore_codes::read_location(settings, &self.device)
+        crate::restore_codes::read_location(&self.directory, &self.device)
     }
 }
 

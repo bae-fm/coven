@@ -2,33 +2,27 @@ use crate::{StorageConfig, StorageError};
 use coven_foundation::files::StoreDirAccess;
 use coven_foundation::files::{StoreDir, StoreFile};
 
-/// Storage settings owned by the store directory; credentials never enter this file.
-pub struct StorageSettings {
-    directory: StoreDir,
+/// Read the location recorded in the store directory's settings file, with
+/// absence distinct from malformed settings. Credentials never enter this file.
+pub fn recorded_config(directory: &StoreDir) -> Result<Option<StorageConfig>, StorageError> {
+    let Some(bytes) = directory.owned_file(StoreFile::StorageSettings).read_optional()? else {
+        return Ok(None);
+    };
+    Ok(Some(StorageConfig::decode(&bytes)?))
 }
-impl StorageSettings {
-    /// Bind settings to the directory supplied at the composition root.
-    pub fn new(directory: StoreDir) -> Self {
-        Self { directory }
-    }
-    /// Read the configured location, with absence distinct from malformed settings.
-    pub fn read(&self) -> Result<Option<StorageConfig>, StorageError> {
-        let Some(bytes) = self.directory.owned_file(StoreFile::StorageSettings).read_optional()?
-        else {
-            return Ok(None);
-        };
-        Ok(Some(StorageConfig::decode(&bytes)?))
-    }
-    /// Atomically commit the location after the facade has established the connection.
-    pub fn commit(&self, config: &StorageConfig) -> Result<(), StorageError> {
-        let bytes = config.encode()?;
-        self.directory.owned_file(StoreFile::StorageSettings).replace(bytes.as_bytes())?;
-        Ok(())
-    }
-    /// Remove settings after the facade successfully removes credentials.
-    pub fn remove(&self) -> Result<(), StorageError> {
-        Ok(self.directory.owned_file(StoreFile::StorageSettings).remove()?)
-    }
+
+/// Atomically record `config` as the store's location after the facade has
+/// established the connection.
+pub fn record_config(directory: &StoreDir, config: &StorageConfig) -> Result<(), StorageError> {
+    let bytes = config.encode()?;
+    directory.owned_file(StoreFile::StorageSettings).replace(bytes.as_bytes())?;
+    Ok(())
+}
+
+/// Remove the recorded location after the facade successfully removes
+/// credentials.
+pub fn remove_recorded_config(directory: &StoreDir) -> Result<(), StorageError> {
+    Ok(directory.owned_file(StoreFile::StorageSettings).remove()?)
 }
 
 impl StorageConfig {

@@ -349,8 +349,7 @@ mod provider_access_tests {
         .await;
         let handle = fixture.setup(fixture.builder()).await;
         let code = handle.restore_code().await.unwrap();
-        let settings = coven_storage::StorageSettings::new(fixture.directory.clone());
-        let recorded = settings.read().unwrap();
+        let recorded = coven_storage::recorded_config(&fixture.directory).unwrap();
         assert!(recorded.is_some());
         let before = fixture.storage.request_count();
         let shared = StorageConfig::Dropbox {
@@ -361,7 +360,7 @@ mod provider_access_tests {
         assert_eq!(error.to_string(), "storage location change is unsupported");
         assert_eq!(fixture.storage.request_count(), before);
         assert_eq!(handle.restore_code().await.unwrap(), code);
-        assert_eq!(settings.read().unwrap(), recorded);
+        assert_eq!(coven_storage::recorded_config(&fixture.directory).unwrap(), recorded);
         handle.close().await.unwrap();
     }
 }

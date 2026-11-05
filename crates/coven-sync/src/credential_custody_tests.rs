@@ -25,12 +25,20 @@ fn saved(store: &CredentialKeychains) -> (Vec<u8>, String) {
     (saved.code.to_bytes().unwrap().to_vec(), saved.name)
 }
 
+/// A directory these tests never read: committing credentials leaves the
+/// settings file alone.
+fn unread_directory(id: StoreId) -> coven_foundation::files::StoreDir {
+    coven_foundation::files::StoreDirectories::new(std::env::temp_dir().join("credential-tests"))
+        .store_dir(&id)
+}
+
 fn fixture(present: bool) -> (Arc<Keychain>, CredentialKeychains, RestoreCode) {
     let keychain = Keychain::in_memory("credential-commit").unwrap();
     let id = StoreId(uuid::Uuid::from_u128(1));
     let store = CredentialKeychains {
         device: Arc::new(StoreKeychain::new(keychain.clone(), id)),
         person: Arc::new(PersonEntries::new(keychain.clone(), id)),
+        directory: unread_directory(id),
     };
     if present {
         // Person and device values may differ; compensation must preserve each.
@@ -272,6 +280,7 @@ fn a_commit_that_needs_a_seventeenth_block_store_entry_fails_and_changes_nothing
     let store = CredentialKeychains {
         device: Arc::new(StoreKeychain::new(keychain.clone(), id)),
         person: Arc::new(PersonEntries::new(keychain, id)),
+        directory: unread_directory(id),
     };
     let (_, _, code) = fixture(false);
     let code = RestoreCode { store: id, ..code };

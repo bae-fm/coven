@@ -123,7 +123,7 @@ async fn custody_failure_restores_the_prior_keys_without_publishing() {
     assert!(scoped.storage_credentials().unwrap().is_none());
     assert!(person.restore_code().unwrap().is_none());
     assert!(person.s3_credentials().unwrap().is_none());
-    assert!(StorageSettings::new(pending.directory()).read().unwrap().is_none());
+    assert!(coven_storage::recorded_config(&pending.directory()).unwrap().is_none());
     assert!(app.stores().await.unwrap().is_empty());
     database.close().await.unwrap();
 }
@@ -178,7 +178,6 @@ async fn publication_failure_rolls_back_settings_and_custody() {
     let person = PersonEntries::new(keychain.clone(), id);
     let (pending, owners, database) =
         prepared(&app, id, keychain, KeyCustody::Keyring, IdentityCustody::Keyring).await;
-    let settings = StorageSettings::new(pending.directory());
     let old_credentials = SecretBytes::new(b"device credentials before restore".to_vec());
     let old_s3_key = SecretBytes::new(b"saved S3 key before restore".to_vec());
     let old_code = SecretBytes::new(b"code before restore".to_vec());
@@ -191,7 +190,7 @@ async fn publication_failure_rolls_back_settings_and_custody() {
             namespace_id: "previous-location".into(),
         },
     };
-    settings.commit(&old_location).unwrap();
+    coven_storage::record_config(&pending.directory(), &old_location).unwrap();
     let marker = root.path().join("stores").join(id.to_string()).join(".coven-bootstrap");
     std::fs::remove_file(&marker).unwrap();
     std::fs::create_dir(&marker).unwrap();
@@ -219,7 +218,7 @@ async fn publication_failure_rolls_back_settings_and_custody() {
     assert_eq!(person.restore_code().unwrap().unwrap().as_bytes(), old_code.as_bytes());
     assert_eq!(person.s3_credentials().unwrap().unwrap().as_bytes(), old_s3_key.as_bytes());
     assert!(scoped.device_id().unwrap().is_none());
-    assert_eq!(settings.read().unwrap(), Some(old_location));
+    assert_eq!(coven_storage::recorded_config(&pending.directory()).unwrap(), Some(old_location));
     assert!(app.stores().await.unwrap().is_empty());
     database.close().await.unwrap();
 }
@@ -276,7 +275,7 @@ async fn credential_publication_failures_restore_every_prior_custody_value() {
         );
         assert_eq!(person_entries.restore_code().unwrap().unwrap().as_bytes(), old_code.as_bytes());
         assert!(scoped.device_id().unwrap().is_none());
-        assert!(StorageSettings::new(pending.directory()).read().unwrap().is_none());
+        assert!(coven_storage::recorded_config(&pending.directory()).unwrap().is_none());
         assert!(app.stores().await.unwrap().is_empty());
         database.close().await.unwrap();
     }
@@ -314,7 +313,7 @@ async fn bootstrap_reports_saved_key_rollback_failure_with_the_publication_failu
     assert!(scoped.storage_credentials().unwrap().is_none());
     assert!(person.restore_code().unwrap().is_none());
     assert!(scoped.device_id().unwrap().is_none());
-    assert!(StorageSettings::new(pending.directory()).read().unwrap().is_none());
+    assert!(coven_storage::recorded_config(&pending.directory()).unwrap().is_none());
     assert!(app.stores().await.unwrap().is_empty());
     database.close().await.unwrap();
 }
@@ -350,7 +349,7 @@ async fn cleanup_failure_returns_the_open_handle_with_its_session_keys() {
         panic!("expected published handle")
     };
     assert_eq!(app.stores().await.unwrap().len(), 1);
-    assert_eq!(StorageSettings::new(pending.directory()).read().unwrap(), Some(location));
+    assert_eq!(coven_storage::recorded_config(&pending.directory()).unwrap(), Some(location));
     assert_eq!(handle.store_key_state().unwrap(), StoreKeyState::Available);
     handle.read(|_| Ok(())).await.unwrap();
     handle.close().await.unwrap();
@@ -478,7 +477,7 @@ async fn a_panicking_custody_step_restores_the_prior_custody() {
     let BootstrapError::Bug(bug) = &error else { panic!("{error:?}") };
     assert_eq!(bug.message, "the identity's entry is half written");
     assert!(StoreKeyCustody::unlock(&KeyringCustody::new(scoped.clone())).unwrap().is_none());
-    assert!(StorageSettings::new(pending.directory()).read().unwrap().is_none());
+    assert!(coven_storage::recorded_config(&pending.directory()).unwrap().is_none());
     assert!(scoped.device_id().unwrap().is_none());
     assert!(app.stores().await.unwrap().is_empty());
     database.close().await.unwrap();
@@ -537,7 +536,7 @@ async fn a_panicking_publication_settles_custody_by_the_marker() {
                 assert_eq!(bug.message, "the marker's removal is lost");
                 assert!(kept.is_none());
                 assert!(scoped.device_id().unwrap().is_none());
-                assert!(StorageSettings::new(pending.directory()).read().unwrap().is_none());
+                assert!(coven_storage::recorded_config(&pending.directory()).unwrap().is_none());
             }
             Ok(other) => panic!("after {after}: {other:?}"),
             Err(other) => panic!("after {after}: {:?}", other.into_error()),

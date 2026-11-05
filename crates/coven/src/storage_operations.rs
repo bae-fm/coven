@@ -40,7 +40,8 @@ impl StorageConnections {
         sql: &coven_database::SqlContext<'_, '_>,
         device: DeviceId,
     ) -> Result<(Option<OperationId>, Option<ProviderSignOut>), SyncError> {
-        let location = self.settings.read()?.ok_or(SyncError::NoStorage)?;
+        let location =
+            coven_storage::recorded_config(&self.directory)?.ok_or(SyncError::NoStorage)?;
         let operation = self.administer(sql, StoreChange::RemoveDevice { device })?;
         Ok((operation, location.provider().sign_out()))
     }
@@ -131,7 +132,8 @@ impl StorageConnections {
         sql: &coven_database::SqlContext<'_, '_>,
         invite: coven_sync::NewInvite,
     ) -> Result<(InviteId, MemberId, OperationId), SyncError> {
-        let location = self.settings.read()?.ok_or(SyncError::NoStorage)?;
+        let location =
+            coven_storage::recorded_config(&self.directory)?.ok_or(SyncError::NoStorage)?;
         coven_sync::create_invite(
             sql,
             self.device,

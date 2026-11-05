@@ -54,9 +54,8 @@ pub struct SequenceSync {
     /// The person's restore code and S3 key: the code's store name follows
     /// applied renames (§13.1), and both are deleted when they leave (§14.1).
     person: Arc<PersonEntries>,
-    /// The store's recorded location, for the code that replaces an
-    /// unreadable saved entry (§13.1).
-    settings: Arc<coven_storage::StorageSettings>,
+    /// The store's directory, whose recorded location is read for the code
+    /// that replaces an unreadable saved entry (§13.1).
     directory: StoreDir,
     device: DeviceId,
     state: Arc<SequenceState>,
@@ -80,7 +79,6 @@ impl SequenceSync {
         keys: Arc<KeySession<StoreKeyring>>,
         member: Arc<KeySession<MemberIdentity>>,
         person: Arc<PersonEntries>,
-        settings: Arc<coven_storage::StorageSettings>,
         state: Arc<SequenceState>,
         clock: coven_foundation::clock::ClockRef,
         ids: coven_foundation::id_source::IdSourceRef,
@@ -122,7 +120,6 @@ impl SequenceSync {
             keys,
             member,
             person,
-            settings,
             directory,
             device,
             state,
@@ -377,7 +374,7 @@ impl SequenceSync {
         match named(next) {
             Some(name) if named(applied) != Some(name.clone()) => {
                 crate::follow_name(&self.person, &name, || {
-                    let location = self.settings.read()?;
+                    let location = coven_storage::recorded_config(&self.directory)?;
                     crate::replacement_code(&next.state, Some(member), location.as_ref())
                 })
             }
