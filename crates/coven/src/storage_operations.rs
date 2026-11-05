@@ -52,18 +52,6 @@ impl StorageConnections {
         live.sync.clean_up_gone_devices_files().await
     }
 
-    /// The restore code for the pair the applied history binds now (§13.1).
-    /// It reads only committed state, so it never waits for the connection.
-    pub(crate) async fn restore_code(&self) -> Result<String, SyncError> {
-        self.codes.restore_code().await
-    }
-
-    /// The restore code with the S3 key this device's custody holds now
-    /// (§13.1). Like `restore_code`, it never waits for the connection.
-    pub(crate) async fn restore_code_for_transfer(&self) -> Result<String, SyncError> {
-        self.codes.transfer_code().await
-    }
-
     /// Install and record a replacement S3 key; it needs the connection.
     pub(crate) async fn replace_access_key(
         &self,
@@ -108,11 +96,6 @@ impl StorageConnections {
             return Err(SyncError::NoStorage);
         };
         live.codes.replace_member_keys().await
-    }
-
-    /// Whether custody holds storage credentials for the recorded location.
-    pub(crate) async fn configured(&self) -> Result<bool, SyncError> {
-        Ok(self.codes.connection().await?.is_some())
     }
 }
 

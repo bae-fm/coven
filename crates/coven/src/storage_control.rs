@@ -330,18 +330,6 @@ impl StorageConnections {
         }
     }
 
-    /// The person asked to retry everything now: the same owners end every
-    /// ordinary wait they retry (§6.7), and the first pass after the request
-    /// answers it, or the retry effect's row at once.
-    pub(crate) async fn retry_now(&self) -> Result<coven_sync::RetryAnswer, SyncError> {
-        Ok(self.waits.retry_requested().await?)
-    }
-
-    /// Hold idle passes at most `interval` apart until the guard drops.
-    pub(crate) fn sync_often(&self, interval: std::time::Duration) -> coven_sync::SyncOftenGuard {
-        self.state.sync_often(interval)
-    }
-
     /// Once the connection is released, record whether storage is set up
     /// here as custody holds it now; a release failure, or a failure reading
     /// custody, is recorded as the last pass's failure with its cause.

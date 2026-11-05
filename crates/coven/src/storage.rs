@@ -178,6 +178,7 @@ impl StorageConnections {
         identity: Arc<KeySession<MemberIdentity>>,
         person: Arc<PersonEntries>,
         credentials: Arc<DeviceCredentials>,
+        codes: RestoreCodes,
         state: Arc<SequenceState>,
         directory: StoreDir,
         waits: Arc<coven_sync::RetryWaits>,
@@ -195,13 +196,6 @@ impl StorageConnections {
         ids: IdSourceRef,
         clock: ClockRef,
     ) -> Self {
-        let codes = RestoreCodes::new(
-            directory.clone(),
-            database.clone(),
-            identity.clone(),
-            credentials.clone(),
-            None,
-        );
         let expiry = coven_sync::InviteExpiry::start(
             database.clone(),
             clock.clone(),

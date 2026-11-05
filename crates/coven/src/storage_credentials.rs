@@ -6,7 +6,7 @@ impl CovenHandle {
     /// This member's current restore code, for their other devices (§13.1).
     /// It carries no S3 key.
     pub async fn restore_code(&self) -> Result<String, SyncError> {
-        self.storage.restore_code().await
+        self.codes.restore_code().await
     }
 
     /// This member's current restore code for the app to show in a QR code
@@ -15,7 +15,7 @@ impl CovenHandle {
     /// none; after a replacement it is the new key. Without a key, on other
     /// providers or when this device holds none, it is `restore_code`'s.
     pub async fn restore_code_for_transfer(&self) -> Result<String, SyncError> {
-        self.storage.restore_code_for_transfer().await
+        self.codes.transfer_code().await
     }
 
     /// Commit a replacement S3 key and publish its id; the restore code is unchanged (E9).

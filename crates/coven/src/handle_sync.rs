@@ -45,7 +45,7 @@ impl CovenHandle {
     /// Deciding the answer writes the retry effect's row; a failed write has
     /// failed the handle, and is returned.
     pub async fn retry_now(&self) -> Result<RetryAnswer, SyncError> {
-        self.storage.retry_now().await
+        Ok(self.waits.retry_requested().await?)
     }
     /// Hold the connection's passes, or let them run again, with sync left
     /// as it is: a test runs uploads with no pass beside them so.
@@ -67,7 +67,7 @@ impl CovenHandle {
     /// and provider cooldowns still hold every pass. The request outlives
     /// stopping and starting sync, and does nothing while sync is stopped.
     pub fn sync_often(&self, interval: std::time::Duration) -> SyncOftenGuard {
-        self.storage.sync_often(interval)
+        self.state.sync_often(interval)
     }
 }
 

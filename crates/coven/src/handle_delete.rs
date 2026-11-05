@@ -35,7 +35,7 @@ impl CovenHandle {
     /// Only this device leaves: the person's restore code and S3 key in iCloud
     /// Keychain stay for their other devices (§13.1).
     pub async fn delete_store(&self, unsent: IfUnsent) -> Result<(), StoreDeletionError> {
-        if self.storage.configured().await? {
+        if self.codes.connection().await?.is_some() {
             let work = self.unsent_work().await.map_err(SyncError::from)?;
             if unsent == IfUnsent::Refuse && !work.is_empty() {
                 return Err(StoreDeletionError::Unsent(work));

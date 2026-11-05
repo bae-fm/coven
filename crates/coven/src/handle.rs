@@ -60,6 +60,10 @@ pub struct CovenHandle {
     files: coven_sync::Files,
     /// The store's operation steps, which an app's write runs.
     steps: Arc<coven_sync::OperationSteps>,
+    waits: Arc<coven_sync::RetryWaits>,
+    state: Arc<coven_sync::SequenceState>,
+    /// The store's restore codes and recorded location.
+    codes: coven_sync::RestoreCodes,
     /// Follows the store's watch of the device's network (§6.7).
     network: Arc<coven_sync::NetworkFollow>,
     storage: Arc<crate::storage::StorageConnections>,
@@ -92,6 +96,9 @@ impl CovenHandle {
         custody: StoreCustody,
         files: coven_sync::Files,
         steps: Arc<coven_sync::OperationSteps>,
+        waits: Arc<coven_sync::RetryWaits>,
+        state: Arc<coven_sync::SequenceState>,
+        codes: coven_sync::RestoreCodes,
         network: Arc<coven_sync::NetworkFollow>,
         storage: Arc<crate::storage::StorageConnections>,
         directory: StoreDir,
@@ -103,6 +110,9 @@ impl CovenHandle {
             database,
             files,
             steps,
+            waits,
+            state,
+            codes,
             network,
             storage,
             custody: Arc::new(Mutex::new(Some(custody))),
