@@ -386,6 +386,53 @@ async fn a_breaking_migration_raises_its_captured_audiences_through_passes() {
     }
 }
 
+/// Ana is in Gifts and the store; Ben only in the store. Ben, migrating first,
+/// raises the store alone, since he can't read Gifts. Ana, migrating later,
+/// raises Gifts with a snapshot of her own, and every device ends with both
+/// audiences at version 2 (§18.3).
+#[tokio::test]
+async fn a_raise_covers_every_readable_audience_and_a_member_raises_a_circle_others_cannot_read() {
+    let group = Group::new();
+    group.raises.store(true, std::sync::atomic::Ordering::SeqCst);
+    let ana = group.device(1).await;
+    let ben = group.device(2).await;
+    group.create(&ana).await;
+    group.admit(&ana, &ben).await;
+    let gifts = ana.sync.create_circle("Gifts".into()).await.unwrap();
+    insert(&ana.sync.database, "a", "before the raise").await;
+    pin(ana.database(), "00000000-0000-4000-8000-000000000001", gifts, "gift").await;
+    ana.sync.pass().await.unwrap();
+    ben.sync.pass().await.unwrap();
+    group.version.store(2, std::sync::atomic::Ordering::SeqCst);
+    let (ana, ben) = (group.reopen(ana).await, group.reopen(ben).await);
+
+    for _ in 0..2 {
+        ben.sync.pass().await.unwrap();
+    }
+    let state = ben.sync.database.store_state().await.unwrap();
+    assert_eq!(state.schema[&Audience::Store].number, 2);
+    assert!(
+        !state.schema.contains_key(&Audience::Circle(gifts))
+            || state.schema[&Audience::Circle(gifts)].number < 2,
+        "Ben, who cannot read Gifts, raised only the store"
+    );
+
+    for _ in 0..2 {
+        ana.sync.pass().await.unwrap();
+    }
+    for _ in 0..2 {
+        ben.sync.pass().await.unwrap();
+    }
+    for device in [&ana, &ben] {
+        let state = device.sync.database.store_state().await.unwrap();
+        assert_eq!(state.schema[&Audience::Store].number, 2);
+        assert_eq!(state.schema[&Audience::Circle(gifts)].number, 2);
+    }
+    for device in [&ana, &ben] {
+        device.sync.database.close().await.unwrap();
+    }
+}
+
 /// A write made after a breaking migration is a new-version write: it waits
 /// in the queue behind the migration marker until a raise to its version
 /// lands, then goes out (§18.5).
@@ -458,6 +505,80 @@ async fn a_raise_whose_version_is_already_established_is_satisfied() {
         assert_eq!(state.schema[&Audience::Store].number, 2);
     }
     assert_eq!(rows(&ana.sync.database).await, rows(&ben.sync.database).await);
+    for device in [&ana, &ben] {
+        device.sync.database.close().await.unwrap();
+    }
+}
+
+/// Ben announces the body of a version 2 raise but his claim fails. Ana's
+/// raise of the same version lands first. When Ben's operation checks again it
+/// finds the version taken, deletes its announced body and publishes no entry;
+/// the announcement stays in history and supplies no snapshot to anyone
+/// (§18.8).
+#[tokio::test]
+async fn a_losing_raise_deletes_its_announced_body_and_publishes_no_entry() {
+    let group = Group::new();
+    let ana = group.device(1).await;
+    let ben = group.device(2).await;
+    group.create(&ana).await;
+    group.admit(&ana, &ben).await;
+    insert(&ana.sync.database, "a", "before the raise").await;
+    ana.sync.pass().await.unwrap();
+    ben.sync.pass().await.unwrap();
+    group.version.store(2, std::sync::atomic::Ordering::SeqCst);
+    let (ana, ben) = (group.reopen(ana).await, group.reopen(ben).await);
+    for device in [&ana, &ben] {
+        device.sync.pass().await.unwrap();
+    }
+
+    // Ben's claim at the slot after his announcement fails.
+    let prepared = ben.sync.database.applied_slot().await.unwrap();
+    let activation = ObjectPath::slot(group.store, (prepared + 2).try_into().unwrap());
+    group
+        .storage
+        .set_faults(Faults {
+            create_failures: [(activation, (StorageFailure::ProviderUnavailable, 503))].into(),
+            ..Faults::none()
+        })
+        .await;
+    let traced = ben.storage.request_trace().len();
+    assert!(ben.sync.raise_schema(Audience::Store, 2).await.is_err());
+    group.storage.set_faults(Faults::none()).await;
+    let body = ben.storage.request_trace()[traced..]
+        .iter()
+        .find_map(|request| match request {
+            coven_storage::test_utils::MemoryRequest::Create(path)
+                if path.snapshot_id().is_some() =>
+            {
+                Some(path.clone())
+            }
+            _ => None,
+        })
+        .expect("Ben announced a body");
+    let announced = body.snapshot_id().unwrap();
+
+    ana.sync.raise_schema(Audience::Store, 2).await.unwrap();
+    let operation = ben.sync.database.operations().await.unwrap()[0].id;
+    let traced = ben.storage.request_trace().len();
+    ben.sync.retry_pending_operation(operation).await.unwrap();
+    let requests = ben.storage.request_trace()[traced..].to_vec();
+    assert!(ben.sync.database.operations().await.unwrap().is_empty());
+    assert!(
+        requests.contains(&coven_storage::test_utils::MemoryRequest::Delete(body)),
+        "Ben deletes his body: {requests:?}"
+    );
+    assert!(
+        !requests.iter().any(|request| matches!(
+            request,
+            coven_storage::test_utils::MemoryRequest::Create(path) if path.slot_number().is_some()
+        )),
+        "Ben publishes no slot: {requests:?}"
+    );
+    let history = ben.sync.session.lock().await.history.clone();
+    assert!(history.announcements.values().any(|announcement| announcement.snapshot == announced));
+    let state = ben.sync.database.store_state().await.unwrap();
+    assert_eq!(state.schema[&Audience::Store].number, 2);
+    assert_ne!(state.schema[&Audience::Store].snapshot, announced);
     for device in [&ana, &ben] {
         device.sync.database.close().await.unwrap();
     }
