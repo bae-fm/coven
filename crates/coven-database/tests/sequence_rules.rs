@@ -771,3 +771,33 @@ impl std::io::Read for HeldPart {
         self.bytes.read(output)
     }
 }
+
+/// A slot's verdicts never show with only part of it applied: when the apply
+/// fails after its writes lost a unique value, no lost value is recorded and
+/// the applied number stays; applying it again records the one (§2.2).
+#[tokio::test]
+async fn a_failed_slot_apply_shows_no_lost_values_or_refusals() {
+    let (_temp, db) = open(false).await;
+    apply(&db, 1, vec![insert(10, 1, 1, "a", "same")]).await.unwrap();
+    let losing = insert(20, 1, 2, "b", "same");
+    let incoming = |writes: Vec<WriteRecord>| IncomingSlot {
+        digest: [0x31; 32],
+        slot: Slot(2),
+        header: SlotHeader { device: DeviceId(20), claim: 2, author: member(20), after: 1 },
+        content: SlotContent::Writes { size: 1, writes: writes.into_iter().map(stream).collect() },
+    };
+    assert!(db
+        .apply_slot::<Pending, _, _>(incoming(vec![losing.clone()]), || Err(
+            DbError::TransactionEnded
+        ))
+        .await
+        .is_err());
+    assert_eq!(db.applied_slot().await.unwrap(), 1);
+    assert!(db.lost_values().await.unwrap().is_empty());
+    assert!(db.pending::<Pending>().await.unwrap().is_empty());
+    assert_eq!(rows(&db).await, [("a".into(), "same".into())]);
+
+    assert_eq!(apply(&db, 2, vec![losing]).await.unwrap(), ApplyOutcome::Applied);
+    assert_eq!(db.lost_values().await.unwrap().len(), 1);
+    db.close().await.unwrap();
+}
