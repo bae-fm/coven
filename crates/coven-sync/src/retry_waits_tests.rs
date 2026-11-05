@@ -149,6 +149,34 @@ async fn a_wait_that_cannot_be_persisted_holds_until_the_app_retries() {
     assert!(waits.due(JOIN, None));
 }
 
+/// Another owner forgets a wait while `due` arms it again from its row:
+/// `due` arms the wait and reads it in one step, so it never finds the
+/// wait gone.
+#[test]
+fn a_wait_forgotten_while_due_arms_it_never_goes_missing() {
+    let clock = Arc::new(FixedClock::new(UNIX_EPOCH + Duration::from_secs(1_000_000)));
+    let waits = RetryWaits::in_memory(clock.clone());
+    let wait = Duration::from_secs(1);
+    let persisted = RetryWait { failures: 1, not_before: clock.now() + wait, wait };
+    let stop = std::sync::atomic::AtomicBool::new(false);
+    std::thread::scope(|scope| {
+        scope.spawn(|| {
+            while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                waits.forget(JOIN);
+            }
+        });
+        let checked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            for _ in 0..200_000 {
+                assert!(!waits.due(JOIN, Some(&persisted)));
+            }
+        }));
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        if let Err(panic) = checked {
+            panic!("due panicked: {}", coven_foundation::task::panic_message(panic.as_ref()));
+        }
+    });
+}
+
 /// IO `Waiting`: the ordinary delay, the restart arm and whether a timer is
 /// due before and after an app retry, from the Rust owner's decisions.
 /// `WaitingEvidence` runs through the operation owner

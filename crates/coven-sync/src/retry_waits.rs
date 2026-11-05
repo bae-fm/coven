@@ -17,7 +17,7 @@ use coven_foundation::locks::lock_unpoisoned;
 use coven_storage::{retry_delay, StorageError, StorageFailure};
 use futures_util::FutureExt;
 use std::{
-    collections::BTreeMap,
+    collections::{btree_map::Entry, BTreeMap},
     future::Future,
     pin::Pin,
     sync::{Arc, Mutex},
@@ -89,7 +89,6 @@ struct WaitSchedule {
     armed: BTreeMap<RetrySubject, Armed>,
 }
 
-#[derive(Clone)]
 struct Armed {
     /// The persisted `T` this deadline enforces.
     not_before: SystemTime,
@@ -200,11 +199,15 @@ impl RetryWaits {
     }
 
     fn arm_for(&self, subject: RetrySubject, not_before: SystemTime, wait: Duration) {
+        let armed = self.armed(not_before, wait);
+        self.lock().armed.insert(subject, armed);
+    }
+
+    /// A wait enforcing `not_before`, over once `wait` has passed from now.
+    fn armed(&self, not_before: SystemTime, wait: Duration) -> Armed {
         let timer = (self.clock.elapsed() + wait, self.clock.sleep(wait).shared());
         let ends = self.clock.now().checked_add(wait);
-        self.lock()
-            .armed
-            .insert(subject, Armed { not_before, timer: Some(timer), ends, seen: false });
+        Armed { not_before, timer: Some(timer), ends, seen: false }
     }
 
     /// Hear sync start and stop, as `coven_retry_effect` commits it.
@@ -281,26 +284,28 @@ impl RetryWaits {
             state.armed.remove(&subject);
             return !Self::cooling(&state, elapsed);
         };
-        self.enforce(subject, persisted);
+        // The persisted wait is enforced in this session, and read, under
+        // one lock: a row armed before this session, or replaced since, is
+        // armed by the restart rule. Between two locks another owner could
+        // forget it.
+        let restarted = || {
+            let wait = restart_wait(persisted.not_before, self.clock.now(), persisted.wait);
+            self.armed(persisted.not_before, wait)
+        };
         let mut state = self.lock();
-        let cooling = Self::cooling(&state, elapsed);
-        let armed = state.armed.get_mut(&subject).expect("armed above");
+        let armed = match state.armed.entry(subject) {
+            Entry::Occupied(entry) => {
+                let armed = entry.into_mut();
+                if armed.not_before != persisted.not_before && armed.timer.is_some() {
+                    *armed = restarted();
+                }
+                armed
+            }
+            Entry::Vacant(entry) => entry.insert(restarted()),
+        };
         let over = armed.over(elapsed);
         armed.seen |= over;
-        !cooling && over
-    }
-
-    /// Enforce the subject's persisted wait in this session: a row armed
-    /// before this session, or replaced since, is armed by the restart rule.
-    fn enforce(&self, subject: RetrySubject, persisted: &RetryWait) {
-        let current = self.lock().armed.get(&subject).cloned();
-        if current
-            .as_ref()
-            .is_none_or(|armed| armed.not_before != persisted.not_before && armed.timer.is_some())
-        {
-            let wait = restart_wait(persisted.not_before, self.clock.now(), persisted.wait);
-            self.arm_for(subject, persisted.not_before, wait);
-        }
+        !Self::cooling(&state, elapsed) && over
     }
 
     /// The owner evaluated the subject's work without running it, e.g.
