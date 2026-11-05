@@ -705,6 +705,39 @@ async fn actions_on_rows_nobody_owns_match_with_generated_columns() {
     }
 }
 
+/// An action that does not match the schema's exact consequence of a write's
+/// direct changes refuses the author's whole transaction, whichever rows own
+/// the tables (§9.6).
+#[tokio::test]
+async fn a_derived_change_the_schema_doesnt_make_refuses_the_authors_write() {
+    use crate::judge::tests::{album_kept, generated_tables, GENERATED};
+    use crate::tests::store_row;
+    let pair = Pair::with(generated_tables(false), GENERATED).await;
+    sql(
+        &pair.ben,
+        "INSERT INTO albums(id,title) VALUES('a','Old');
+         INSERT INTO notes(id,album) VALUES('n','a')",
+    )
+    .await
+    .unwrap();
+    sql(&pair.ben, "DELETE FROM albums").await.unwrap();
+    let genuine = records(&pair.ben).pop().unwrap();
+    // The note's net change sets its album where the delete's action set it NULL.
+    let forged = album_kept(&genuine);
+    let note = store_row("notes", "n");
+    let refused = pair.ben.inspect_writer_schema(|db, schema| {
+        db.batch("SAVEPOINT judged").unwrap();
+        let result = judge_own_write(db, schema, &forged);
+        db.batch("ROLLBACK TO judged; RELEASE judged").unwrap();
+        result
+    });
+    let Err(DbError::InvalidForeignKeyEffect { table, key }) = refused else {
+        panic!("a forged action must refuse the author's write: {refused:?}")
+    };
+    assert_eq!((table.as_str(), crate::RowKey::decode(&note.key).unwrap()), ("notes", key));
+    pair.close().await;
+}
+
 /// The author judges its own write from the record it queues, not by
 /// reading back the records it retained from that record a moment before.
 #[tokio::test]
