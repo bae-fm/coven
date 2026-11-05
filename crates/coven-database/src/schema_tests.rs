@@ -81,6 +81,43 @@ async fn set_default_is_refused_on_open_and_after_migrating() {
     }
 }
 
+/// Owner-only tables get no exemption from the ordinary schema rules: SET
+/// DEFAULT is refused by the migration that adds it and by a later open of the
+/// same schema, as for any synced table (§9.6).
+#[tokio::test]
+async fn owner_tables_refuse_set_default_on_open_and_after_migrating() {
+    const SCHEMA: &str = "CREATE TABLE parent(id TEXT NOT NULL PRIMARY KEY); CREATE TABLE child(id TEXT NOT NULL PRIMARY KEY,p TEXT DEFAULT 'fallback' REFERENCES parent(id) ON DELETE SET DEFAULT)";
+    let store = TestStore::new();
+    let tables = || vec![shared("parent").owner_only(), shared("child").owner_only()];
+    let expected = SchemaError::SetDefault {
+        table: "child".into(),
+        key: "(\"p\") REFERENCES \"parent\" (\"id\")".into(),
+    };
+    let error = store
+        .builder(
+            tables(),
+            vec![Migration::addition_with(1, "foreign key", |sql| {
+                sql.execute_batch(SCHEMA)?;
+                Ok(())
+            })],
+        )
+        .open()
+        .await
+        .err()
+        .expect("SET DEFAULT must fail the migration");
+    assert!(matches!(database_error(error), DbError::Schema(found) if found == expected));
+    let db = store.builder(vec![], vec![]).open().await.unwrap();
+    db.inspect_writer(|writer| writer.batch(SCHEMA).unwrap());
+    db.close().await.unwrap();
+    let error = store
+        .builder(tables(), vec![])
+        .open()
+        .await
+        .map(|_| ())
+        .expect_err("SET DEFAULT must fail open");
+    assert!(matches!(database_error(error), DbError::Schema(found) if found == expected));
+}
+
 #[tokio::test]
 async fn set_default_errors_identify_composite_implicit_and_self_references() {
     for (schema, key) in [
