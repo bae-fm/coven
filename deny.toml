@@ -18,3 +18,22 @@ deny = [
     { crate = "webpki-roots", reason = "a bundled root list is not the platform's trust; use rustls-platform-verifier" },
     { crate = "webpki-root-certs", wrappers = ["rustls-platform-verifier"], reason = "a bundled root list is not the platform's trust; use rustls-platform-verifier" },
 ]
+
+[advisories]
+# An ignore that matches nothing fails, so one is removed once its crate is gone.
+unused-ignored-advisory = "deny"
+ignore = [
+    # pin-utils: unmaintained, pulled in by aws-smithy-http <- aws-sdk-s3 <- coven-storage.
+    # No maintained release replaces it until the AWS SDK drops it; it is a few
+    # pinning macros with no runtime state.
+    "RUSTSEC-2026-0441",
+    # zvariant, zbus_names, zvariant_derive: unmaintained standalone crates,
+    # pulled by zbus 5, which the Linux Secret Service keyring store
+    # (zbus-secret-service-keyring-store <- secret-service 5.2.0, its latest
+    # release) depends on and coven-foundation's network watcher uses directly.
+    # No safe upgrade until secret-service moves to zbus 6, which incorporates
+    # these crates.
+    "RUSTSEC-2026-0370",
+    "RUSTSEC-2026-0371",
+    "RUSTSEC-2026-0372",
+]
