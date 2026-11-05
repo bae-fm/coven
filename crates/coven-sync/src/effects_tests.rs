@@ -780,3 +780,128 @@ fn replacing_a_members_keys_keeps_access_role_circles_and_devices() {
     assert_eq!(replaced.circles, state.circles);
     assert_eq!(replaced.devices, state.devices);
 }
+
+/// Adds member 3, a plain member with a device, to `household()`.
+fn with_a_plain_member(state: &StoreState) -> StoreState {
+    let state = apply(
+        state,
+        1,
+        StoreChange::AddMember {
+            member: id(3),
+            keys: keys(3),
+            role: MemberRole::Member,
+            access: access(3),
+        },
+    )
+    .unwrap()
+    .unwrap()
+    .state;
+    apply(&state, 3, StoreChange::AddDevice { name: "Cy".into(), replaces: None })
+        .unwrap()
+        .unwrap()
+        .state
+}
+
+fn circle_made_by_the_plain_member() -> StoreState {
+    apply(&with_a_plain_member(&household()), 3, create_circle(gifts(), "Gifts"))
+        .unwrap()
+        .unwrap()
+        .state
+}
+
+/// Any member can make a circle and is its first member. Its own members
+/// rename it, add and remove its members and delete it; an admin outside it
+/// can do none of that (§15.5).
+#[test]
+fn a_member_makes_a_circle_and_only_its_members_change_or_delete_it() {
+    let state = circle_made_by_the_plain_member();
+    assert_eq!(state.circles[&gifts()].members.iter().copied().collect::<Vec<_>>(), [id(3)]);
+    for change in [
+        StoreChange::RenameCircle { circle: gifts(), name: "Presents".into() },
+        StoreChange::AddCircleMember { circle: gifts(), member: id(2) },
+        StoreChange::RemoveCircleMember { circle: gifts(), member: id(3) },
+        StoreChange::DeleteCircle { circle: gifts() },
+    ] {
+        assert_eq!(apply(&state, 1, change).err(), Some(OperationRejection::NotAllowed));
+    }
+    let state =
+        apply(&state, 3, StoreChange::RenameCircle { circle: gifts(), name: "Presents".into() })
+            .unwrap()
+            .unwrap()
+            .state;
+    let state = apply(&state, 3, StoreChange::AddCircleMember { circle: gifts(), member: id(2) })
+        .unwrap()
+        .unwrap()
+        .state;
+    assert!(state.circles[&gifts()].members.contains(&id(2)));
+    let state =
+        apply(&state, 3, StoreChange::RemoveCircleMember { circle: gifts(), member: id(2) })
+            .unwrap()
+            .unwrap()
+            .state;
+    assert!(!state.circles[&gifts()].members.contains(&id(2)));
+    let state =
+        apply(&state, 3, StoreChange::DeleteCircle { circle: gifts() }).unwrap().unwrap().state;
+    assert!(state.circle_deletions.contains_key(&gifts()));
+}
+
+/// Renames apply in slot order and the latest allowed one names the circle;
+/// a member outside it changes nothing; a rename leaves the circle's
+/// members as they were (§15.5).
+#[test]
+fn circle_renames_apply_in_slot_order_and_the_latest_valid_one_names_it() {
+    let mut state = circle_made_by_the_plain_member();
+    state = apply(&state, 3, StoreChange::AddCircleMember { circle: gifts(), member: id(2) })
+        .unwrap()
+        .unwrap()
+        .state;
+    let members = state.circles[&gifts()].members.clone();
+    let renames = [
+        (3, "First", true),
+        (1, "Outsider", false),
+        (2, "Second", true),
+        (3, "Third", true),
+        (1, "Late outsider", false),
+    ];
+    let mut named = "Gifts".to_owned();
+    for (author, name, allowed) in renames {
+        let result =
+            apply(&state, author, StoreChange::RenameCircle { circle: gifts(), name: name.into() });
+        if allowed {
+            state = result.unwrap().unwrap().state;
+            named = name.to_owned();
+        } else {
+            assert_eq!(result.err(), Some(OperationRejection::NotAllowed));
+        }
+        assert_eq!(state.circles[&gifts()].name, named);
+        assert_eq!(state.circles[&gifts()].members, members);
+    }
+    assert_eq!(named, "Third");
+}
+
+/// A circle left empty is deleted at that slot, whether its last member left
+/// it or was removed from the store; no later entry can add a member to a
+/// deleted circle (§15.8).
+#[test]
+fn a_circle_left_empty_is_deleted_at_that_slot() {
+    let left = apply(
+        &circle_made_by_the_plain_member(),
+        3,
+        StoreChange::RemoveCircleMember { circle: gifts(), member: id(3) },
+    )
+    .unwrap()
+    .unwrap()
+    .state;
+    let removed =
+        apply(&circle_made_by_the_plain_member(), 1, StoreChange::RemoveMember { member: id(3) })
+            .unwrap()
+            .unwrap()
+            .state;
+    for state in [left, removed] {
+        assert_eq!(state.circle_deletions[&gifts()], Slot(4));
+        assert!(state.circles[&gifts()].members.is_empty());
+        let readded =
+            apply(&state, 1, StoreChange::AddCircleMember { circle: gifts(), member: id(2) });
+        assert!(readded.is_err(), "a deleted circle takes no member");
+    }
+}
