@@ -143,21 +143,15 @@ async fn io_differential_file_scan() {
     assert_eq!(actual, crate::tests::io_runner(&inputs), "{inputs:?}");
 }
 
-/// Ana's original finished uploading, and she pins the stored file, which
-/// keeps it whole from storage (§17.8). A held download of it takes her one
-/// file download, and never holds her sequence passes: their reads don't
-/// count against the download limit (§21.1), so the download goes on
-/// untouched while passes apply Ben's writes.
-#[tokio::test]
-async fn stalled_pin_downloads_leave_sequence_passes_free() {
+/// One device for each of `seeds`, whose app keeps notes and a table of
+/// recordings that reference user files.
+async fn file_devices(group: &Group, seeds: &[u8]) -> Vec<Device> {
     use coven_database::{
-        DatabaseBuilder, FileColumn, FilePlace, Migration, Namespace, PinProgress, Provenance,
-        RowIdentity, SyncedTable,
+        DatabaseBuilder, FileColumn, Migration, Namespace, Provenance, RowIdentity, SyncedTable,
     };
     use coven_foundation::id_source::{IdSource, MemberId};
-    let group = Group::new();
     let mut devices = Vec::new();
-    for seed in [1, 2] {
+    for seed in seeds {
         let (temp, directory) = group.directory();
         let database = DatabaseBuilder::new(directory)
             .synced_tables(vec![
@@ -170,7 +164,7 @@ async fn stalled_pin_downloads_leave_sequence_passes_free() {
             .open().await.unwrap();
         let identity = coven_crypto::MemberIdentity::new(
             MemberId(group.ids.new_id()),
-            coven_format::test_utils::keys_from_seed(seed),
+            coven_format::test_utils::keys_from_seed(*seed),
         );
         devices.push(
             group
@@ -184,6 +178,19 @@ async fn stalled_pin_downloads_leave_sequence_passes_free() {
                 .await,
         );
     }
+    devices
+}
+
+/// Ana's original finished uploading, and she pins the stored file, which
+/// keeps it whole from storage (§17.8). A held download of it takes her one
+/// file download, and never holds her sequence passes: their reads don't
+/// count against the download limit (§21.1), so the download goes on
+/// untouched while passes apply Ben's writes.
+#[tokio::test]
+async fn stalled_pin_downloads_leave_sequence_passes_free() {
+    use coven_database::{FilePlace, PinProgress};
+    let group = Group::new();
+    let devices = file_devices(&group, &[1, 2]).await;
     let ana = &devices[0];
     let ben = &devices[1];
     group.create(ana).await;
@@ -350,6 +357,131 @@ async fn a_pass_sends_its_writes_while_their_file_upload_is_held() {
     ana.sync.pass().await.unwrap();
     assert_eq!(ana.database().applied_slot().await.unwrap(), slot + 2, "the switch is sent");
     assert!(ana.database().test_queued_writes().await.unwrap().is_empty());
+    ana.files().close().await;
+    ana.database().close().await.unwrap();
+}
+
+/// Ana stored a recording's file and then deleted its row. Once a snapshot
+/// that leaves the file out has passed grace and the floor has deleted the
+/// slots that named it, nothing refers to the stored file: the next passes
+/// would delete it. Returns the group, Ana and the file's object path.
+async fn ana_with_an_unreferenced_stored_file() -> (Group, Device, ObjectPath) {
+    use coven_database::FilePlace;
+    let group = Group::new();
+    let mut devices = file_devices(&group, &[1]).await;
+    let ana = devices.remove(0);
+    group.create(&ana).await;
+    let originals = tempfile::tempdir().unwrap();
+    let path = originals.path().join("recording");
+    std::fs::write(&path, b"sound").unwrap();
+    let prepared = coven_database::prepare_user_file(&path, |_| {}).await.unwrap();
+    let staged = ana
+        .database()
+        .write_as::<_, _, coven_database::DbError>(move |sql| {
+            let file = sql.put_user_file("files", prepared, coven_database::Place::Cloud)?;
+            sql.execute("INSERT INTO files(id,file) VALUES('recording',?1)", [file])?;
+            Ok(file)
+        })
+        .await
+        .unwrap();
+    ana.files().retry_uploads_now().await.unwrap();
+    let file = ana.database().file_ref(staged).await.unwrap();
+    let FilePlace::Cloud { location, .. } = file.place() else {
+        panic!("the upload stored the file");
+    };
+    let object = location.path(group.store);
+    ana.sync.pass().await.unwrap();
+    ana.database()
+        .write(|sql| {
+            sql.execute("DELETE FROM files", [])?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    ana.sync.pass().await.unwrap();
+    ana.sync.snapshot(coven_merge::Audience::Store).await.unwrap();
+    group.clock.set(
+        std::time::UNIX_EPOCH
+            + crate::sequence_sync::sequence_retention::GRACE
+            + std::time::Duration::from_secs(1),
+    );
+    (group, ana, object)
+}
+
+/// A provider that refuses the deletion keeps the file stored and the
+/// refusal visible in the pending records; a later attempt with the
+/// permission back deletes it and ends the record (§17.10).
+#[tokio::test]
+async fn a_refused_file_deletion_keeps_the_file_and_stays_visible() {
+    use coven_storage::{test_utils::Faults, StorageFailure};
+    let (group, ana, object) = ana_with_an_unreferenced_stored_file().await;
+    ana.storage
+        .set_faults(Faults {
+            delete_failures: [(object.clone(), StorageFailure::PermissionDenied)].into(),
+            ..Faults::none()
+        })
+        .await;
+    for _ in 0..3 {
+        ana.sync.pass().await.unwrap();
+    }
+    assert!(group.storage.status(&object).await.unwrap().is_some(), "the refused file stays");
+    let operation = ana
+        .database()
+        .operations()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|record| record.kind == "sequence-files")
+        .expect("the refused deletion stays journaled")
+        .id;
+    let pending = ana
+        .database()
+        .operation_pending::<crate::PendingRecord>(operation)
+        .await
+        .unwrap()
+        .expect("the refusal is reported");
+    assert!(matches!(
+        pending.reason,
+        crate::PendingReason::Storage { failure: StorageFailure::PermissionDenied, .. }
+    ));
+    ana.storage.set_faults(Faults::none()).await;
+    ana.sync.retry_pending_operation(operation).await.unwrap();
+    assert!(group.storage.status(&object).await.unwrap().is_none(), "the file is deleted");
+    assert!(ana.database().operation(operation).await.unwrap().is_none());
+    ana.files().close().await;
+    ana.database().close().await.unwrap();
+}
+
+/// The snapshots a deletion decision reads are the ones announcements and
+/// the floor name, read by their paths: no pass lists a snapshot folder to
+/// find them (§17.10).
+#[tokio::test]
+async fn file_deletion_reads_the_snapshots_the_floor_names_and_lists_no_snapshot_folder() {
+    use coven_storage::test_utils::MemoryRequest;
+    let (group, ana, object) = ana_with_an_unreferenced_stored_file().await;
+    let snapshots = coven_storage::ObjectPrefix::snapshots(group.store);
+    let announced = {
+        let session = ana.sync.session.lock().await;
+        let (_, announcement) = session.history.announcements.last_key_value().unwrap();
+        crate::snapshot_object::path(group.store, &announcement.snapshot).unwrap()
+    };
+    let before = ana.storage.request_trace().len();
+    for _ in 0..3 {
+        ana.sync.pass().await.unwrap();
+    }
+    assert!(group.storage.status(&object).await.unwrap().is_none(), "the file is deleted");
+    let trace = ana.storage.request_trace().split_off(before);
+    assert!(
+        trace
+            .iter()
+            .any(|request| matches!(request, MemoryRequest::Read(path, _) if *path == announced)),
+        "the announced snapshot is read: {trace:?}"
+    );
+    assert!(
+        !trace.iter().any(|request| matches!(request, MemoryRequest::List(prefix)
+            if prefix.as_str().starts_with(snapshots.as_str()))),
+        "no snapshot folder is listed: {trace:?}"
+    );
     ana.files().close().await;
     ana.database().close().await.unwrap();
 }
