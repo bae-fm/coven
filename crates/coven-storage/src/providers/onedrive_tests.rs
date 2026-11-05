@@ -63,6 +63,8 @@ pub(super) struct Remote {
     refuse_copy: bool,
     fail_monitor: bool,
     monitor_replies: std::collections::VecDeque<(u16, Value)>,
+    /// Answer `inProgress` once `monitor_replies` is empty, instead of `completed`.
+    monitor_never_completes: bool,
     refuse_temporary_delete: bool,
     lose_temporary_delete_reply: bool,
     expected_ranges: Option<Value>,
@@ -101,6 +103,9 @@ pub(super) async fn endpoint(
         }
         if std::mem::take(&mut state.fail_monitor) {
             return response(503, "{}");
+        }
+        if state.monitor_never_completes {
+            return reply(json!({"status":"inProgress"}));
         }
         return reply(json!({"status":"completed"}));
     }

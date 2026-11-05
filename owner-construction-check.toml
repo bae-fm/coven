@@ -1192,6 +1192,7 @@ tables = [
 "crates/coven-foundation/src/id_source.rs" = ["SequentialIds::new"]
 # A test's clock, which a test hands the builder as it would the system's.
 "crates/coven-foundation/src/clock.rs" = ["FixedClock::new"]
+"crates/coven-foundation/src/clock_polling.rs" = ["PollingClock::new"]
 # A store's writer or bootstrap lock, taken through the registry.
 "crates/coven-foundation/src/files/lock.rs" = [
     "acquire",

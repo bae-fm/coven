@@ -252,6 +252,12 @@ impl Clock for FixedClock {
     }
 }
 
+#[cfg(feature = "test-utils")]
+#[path = "clock_polling.rs"]
+mod polling;
+#[cfg(feature = "test-utils")]
+pub use polling::PollingClock;
+
 /// A clock that calls a supplied function on every read.
 #[cfg(feature = "test-utils")]
 pub struct ClosureClock<F>(

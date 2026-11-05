@@ -713,6 +713,30 @@ impl FixedClock {
         -> impl Future<Output = (u64, Duration)> + Send + 'static;
 }
 
+/// A `FixedClock` whose backoffs pass as the code arms them: `wait_out` moves
+/// the fixed clock to the wait's end. Deadlines and idle intervals end only
+/// when the test moves the clock, as does every wait once held.
+#[cfg(feature = "test-utils")]
+pub struct PollingClock(/* private */);
+
+#[cfg(feature = "test-utils")]
+impl PollingClock {
+    /// A polling clock over `clock`, which it moves.
+    pub fn new(clock: Arc<FixedClock>) -> Self;
+
+    /// End later waits by the test's moves of the fixed clock alone.
+    pub fn hold_waits(&self);
+
+    /// Pass later waits as the code arms them again.
+    pub fn release_waits(&self);
+
+    /// Whether waits are held.
+    pub fn holds_waits(&self) -> bool;
+
+    /// Each backoff, cooldown or spacing the code armed, in order.
+    pub fn waited(&self) -> Vec<Duration>;
+}
+
 /// Deterministic test ids, starting at one.
 #[cfg(feature = "test-utils")]
 pub struct SequentialIds(/* private */);

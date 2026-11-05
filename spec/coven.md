@@ -9487,8 +9487,11 @@ place is distinct from every coven path.
   Retries and resumption derive the same temporary name.
 - After all parts are stored, coven publishes with one server-side Graph `copy`
   to the final parent and name, with `@microsoft.graph.conflictBehavior=fail`. It
-  follows the returned monitor URL until the asynchronous copy completes. An
-  occupied name keeps its original bytes and time.
+  follows the returned monitor URL until the asynchronous copy completes,
+  checking again after the backoff of §6.7. A monitor that has not reported
+  completion five minutes after coven began following it fails the upload with
+  a network failure; the temporary and the copy stay, and resuming the upload
+  follows the monitor again. An occupied name keeps its original bytes and time.
 - After a lost publication reply, confirming an existing object needs complete
   byte comparison.
 - The copy keeps the temporary's `createdDateTime`, which records the session's

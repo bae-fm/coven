@@ -219,9 +219,7 @@ fn builder(
         .id_source(ids)
         .storage_connector(connector)
 }
-#[path = "../tests/fixtures/polling_clock.rs"]
-mod polling_clock;
-pub(crate) use polling_clock::PollingClock;
+pub(crate) use coven_foundation::clock::PollingClock;
 #[path = "../tests/fixtures/file_network.rs"]
 mod file_network;
 pub(crate) use file_network::*;

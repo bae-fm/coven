@@ -1,4 +1,6 @@
 use super::*;
+use coven_foundation::clock::{Clock, FixedClock, PollingClock};
+use std::time::{Duration, UNIX_EPOCH};
 
 #[tokio::test]
 async fn temporary_identity_is_recordable_before_any_provider_request() {
@@ -298,11 +300,9 @@ async fn copy_waits_for_monitor_completion_without_sending_bearer_tokens() {
     let state = remote();
     let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
     let mut storage = provider(&server.url);
+    let clock = polling_clock();
     Arc::get_mut(storage.provider_mut()).unwrap().session =
-        crate::providers::tests::session_with_clock(
-            PROVIDER,
-            Arc::new(coven_foundation::clock::ClosureClock(|| std::time::SystemTime::UNIX_EPOCH)),
-        );
+        crate::providers::tests::session_with_clock(PROVIDER, clock.clone());
     let mut upload = storage.begin_upload(&path(), 4).await.unwrap();
     storage.upload_part(&mut upload, b"data").await.unwrap();
     state.lock().unwrap().monitor_replies.extend([
@@ -314,6 +314,41 @@ async fn copy_waits_for_monitor_completion_without_sending_bearer_tokens() {
     assert!(upload.is_complete());
     assert!(state.lock().unwrap().monitor_replies.is_empty());
     assert_eq!(state.lock().unwrap().files.len(), 1);
+    assert_eq!(clock.waited(), [crate::retry_delay(0), crate::retry_delay(1)]);
+}
+
+#[tokio::test]
+async fn a_copy_monitor_that_never_completes_fails_after_five_minutes() {
+    let state = remote();
+    let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
+    let mut storage = provider(&server.url);
+    let fixed = Arc::new(FixedClock::new(UNIX_EPOCH));
+    let clock = Arc::new(PollingClock::new(fixed.clone()));
+    clock.hold_waits();
+    Arc::get_mut(storage.provider_mut()).unwrap().session =
+        crate::providers::tests::session_with_clock(PROVIDER, clock.clone());
+    let mut upload = storage.begin_upload(&path(), 4).await.unwrap();
+    storage.upload_part(&mut upload, b"data").await.unwrap();
+    state.lock().unwrap().monitor_never_completes = true;
+    let begun = fixed.sleeps_begun();
+    let started = fixed.now();
+    let finishing = storage.finish_upload(&mut upload);
+    let timing_out = async {
+        coven_foundation::clock::within(fixed.sleep_begun_after(begun)).await.unwrap();
+        fixed.set(started + Duration::from_secs(300));
+    };
+    let (result, ()) = tokio::join!(finishing, timing_out);
+    let error = result.unwrap_err();
+    assert_eq!(error.failure(), StorageFailure::Network);
+    assert!(error.to_string().contains("OneDrive copy monitor timed out"), "{error}");
+    assert!(!upload.is_complete());
+    // The timeout ends the wait only: the temporary and the copy stay for the
+    // resumed upload to find.
+    let state = state.lock().unwrap();
+    assert!(state.files.contains_key(&temporary_path(&upload)));
+    assert_eq!(state.copied.len(), 1);
+    assert_eq!(state.files.len(), 2);
+    assert!(state.requests.iter().all(|(method, _)| method != Method::DELETE));
 }
 
 #[tokio::test]
@@ -566,4 +601,8 @@ async fn another_device_deletes_a_devices_folder_of_temporaries() {
         let phones = format!("{STORE_ID}/.coven-uploads/{}", crate::test_utils::DEVICE.0);
         assert!(state.dirs.values().all(|dir| dir != &phones));
     }
+}
+
+fn polling_clock() -> Arc<PollingClock> {
+    Arc::new(PollingClock::new(Arc::new(FixedClock::new(UNIX_EPOCH))))
 }
