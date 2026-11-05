@@ -280,3 +280,36 @@ async fn invites_are_made_and_ended_in_the_apps_writes_with_sync_stopped() {
     assert!(invites.next().await.is_empty());
     network.close().await;
 }
+
+/// Resetting a circle first catches up with the sequence, which needs
+/// storage: with storage unreachable the reset fails and journals nothing
+/// (§2.1, §11.1).
+#[tokio::test]
+async fn an_operation_that_catches_up_first_fails_without_storage_and_journals_nothing() {
+    let network = Network::new(1).await;
+    let device = &network.devices[0];
+    let gifts = crate::tests::circle(&device.handle, "Gifts").await;
+    let before = operations(&device.handle).await;
+
+    device.storage.set_online(false);
+    device.app.lose_network();
+    let reset = device.handle.circles().reset(gifts).await;
+    assert!(
+        matches!(&reset, Err(SyncError::Storage(error)) if error.failure() == StorageFailure::Network),
+        "{reset:?}"
+    );
+    assert_eq!(operations(&device.handle).await, before);
+    network.close().await;
+}
+
+/// The ids of the operations `coven_operations` lists.
+async fn operations(handle: &CovenHandle) -> Vec<i64> {
+    handle
+        .read(|sql| {
+            Ok(sql.query("SELECT operation FROM coven_operations ORDER BY operation", [], |r| {
+                r.get(0)
+            })?)
+        })
+        .await
+        .unwrap()
+}
