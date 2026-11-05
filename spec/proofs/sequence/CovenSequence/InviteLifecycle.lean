@@ -179,7 +179,7 @@ structure Rules where
 def Rules.correct : Rules := ⟨true, true, true, true, true, true, true, false, true, true, true, true⟩
 
 /-- The rules the Rust follows, as the differential test drives it. -/
-def Rules.rust : Rules := ⟨true, true, true, true, true, true, true, false, true, true, true, false⟩
+def Rules.rust : Rules := ⟨true, true, true, true, true, true, true, false, true, true, true, true⟩
 
 /-- Stages that end at the invite's expiry; approval, once begun, finishes. -/
 def expires : Stage → Bool

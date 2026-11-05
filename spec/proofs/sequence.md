@@ -1366,8 +1366,10 @@ invite just made and one after each event: `result` (`ok`, `refused` or
 `approving` or null), `binding` and `op` as `coven_operations` lists them
 (`running`, `landed`, `rejected` or null), `pending` (`auto`, `app`, `never`
 or null), `journal`, `request` (the request object is in storage), `shared`
-(the invite's account is shared) and `accepted`, the app's steps a write
-accepts now.
+(the invite's account is shared), `held` (a pass failed with an error the
+connection's record never retries, so no later pass runs; the Rust's sync
+loop holds them, and its case runs none) and `accepted`, the app's steps a
+write accepts now.
 
 ## Rust comparisons
 

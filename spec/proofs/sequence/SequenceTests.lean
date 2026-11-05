@@ -639,6 +639,16 @@ def keyCase (slots held current : List Json) : Json := json% {
   checkField usedInPerson ["2","invite"] Json.null
   checkField usedInPerson ["2","binding"] Json.null
   checkField usedInPerson ["2","journal"] (toJson false)
+  -- History refuses the binding an in-person invite's pass approved on its
+  -- own: the invite ends as a decline does, its refusal holds no later pass,
+  -- and the next pass takes the share back.
+  let refused ← run (case "inPerson" ["demote", "send", "pass", "pass"])
+  checkField refused ["3","invite"] Json.null
+  checkField refused ["3","journal"] (toJson false)
+  checkField refused ["3","request"] (toJson false)
+  checkField refused ["3","held"] (toJson false)
+  checkField refused ["4","shared"] (toJson false)
+  checkField refused ["4","held"] (toJson false)
   rejects (case "sent" ["wave"])
   rejects (json% {"kind":"inviteLifecycle","delivery":"posted","records":false,"events":[]})
 

@@ -151,6 +151,7 @@ def observe (w : World) (result : String) : Json :=
     ("journal", toJson w.row.isSome),
     ("request", toJson w.request),
     ("shared", toJson w.shared),
+    ("held", toJson w.held),
     ("accepted", toJson ([("approve", Act.approve), ("decline", .decline), ("cancel", .cancel),
       ("retry", .retry), ("ack", .ack), ("ackOp", .ackOp)].filterMap fun (n, a) =>
         if accepted Rules.rust w a then some n else none))]

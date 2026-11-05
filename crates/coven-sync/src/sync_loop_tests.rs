@@ -525,3 +525,51 @@ async fn a_write_while_offline_shows_unsent_changes_with_no_pass() {
     ana_loop.close().await.unwrap();
     ana.database().close().await.unwrap();
 }
+
+/// Ben demotes Ana before her phone reads Carol's request to an in-person
+/// invite. The pass checks the request and approves it on its own, and the
+/// history it caught up with refuses the binding. The invite ends as a
+/// decline does, and the refusal fails no pass: failed, it was the
+/// connection's record that never retries, which held every later pass
+/// until a reset, so Ana's next write never went out (§13.2).
+#[tokio::test]
+async fn a_refused_in_person_approval_ends_the_invite_and_sync_goes_on() {
+    let group = Group::shared();
+    let ana = group.device(1).await;
+    let ben = group.device(2).await;
+    group.create(&ana).await;
+    group.admit(&ana, &ben).await;
+    let invite = carol_invite(&ana, InviteDelivery::InPerson).await;
+    let carol = join(&group, invite.shown_code(), "Carol's phone").await;
+    ben.sync.pass().await.unwrap();
+    ben.sync
+        .administer(coven_format::admin::StoreChange::ChangeRole {
+            member: ana.identity.member(),
+            role: coven_format::admin::MemberRole::Member,
+        })
+        .await
+        .unwrap();
+    let mut last = LastPass::follow(&ana.sync.database);
+    let (ana_codes, _) = codes(&ana, Keychain::in_memory("refused-approval-ana").unwrap());
+    let ana_loop = SyncLoop::new(ana.sync.clone(), ana_codes);
+    ana_loop.start().await.unwrap();
+    let first = last.wait_for(Option::is_some).await;
+    assert_eq!(first, Some(LastPass::Synced));
+    assert!(listed(&ana).await.is_empty());
+    assert!(no_request(&group.storage, &request_path(&invite)).await);
+    assert!(!ana.database().store_state().await.unwrap().members.contains_key(&invite.member));
+    assert!(ana
+        .database()
+        .pending::<PendingRecord>()
+        .await
+        .unwrap()
+        .iter()
+        .all(|record| record.subject != PendingSubject::Connection));
+    let next = ana.database().applied_slot().await.unwrap() + 1;
+    insert(ana.database(), "a", "after the refusal").await;
+    reached(&ana, next).await;
+    ana_loop.close().await.unwrap();
+    for device in [&ana, &ben, &carol.device] {
+        device.database().close().await.unwrap();
+    }
+}

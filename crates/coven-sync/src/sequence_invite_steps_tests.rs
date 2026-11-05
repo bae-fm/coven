@@ -46,6 +46,9 @@ struct Case {
     sent: bool,
     demoted: bool,
     removed: bool,
+    /// A pass failed with an error the sync loop records as the
+    /// connection's record that never retries: no later pass runs (E5).
+    held: bool,
 }
 
 impl Case {
@@ -88,6 +91,7 @@ impl Case {
             sent: false,
             demoted: false,
             removed: false,
+            held: false,
         }
     }
 
@@ -166,15 +170,19 @@ impl Case {
         self.ana.database().operation(self.operation).await.unwrap().is_some()
     }
 
+    /// A pass, unless a failure holds every pass, as the sync loop holds it.
     async fn pass(&mut self) {
         self.group.clock.set(self.group.clock.now() + Duration::from_secs(301));
-        ended(self.ana.sync.pass().await);
+        if !self.held {
+            self.held = holds(&self.ana.sync, self.ana.sync.pass().await);
+        }
     }
 
     /// A pass with `during` committed while it reads the request, when it
     /// reads one; otherwise after it.
     async fn race(&mut self, during: &'static str) {
         let reads = !self.removed
+            && !self.held
             && self.group.clock.now() < self.invite.expires_at
             && matches!(
                 self.listed().await.map(|invite| invite.stage),
@@ -182,7 +190,9 @@ impl Case {
             );
         self.group.clock.set(self.group.clock.now() + Duration::from_secs(301));
         if !reads {
-            ended(self.ana.sync.pass().await);
+            if !self.held {
+                self.held = holds(&self.ana.sync, self.ana.sync.pass().await);
+            }
             self.during(during).await;
             return;
         }
@@ -205,7 +215,7 @@ impl Case {
         read.await.unwrap();
         self.during(during).await;
         resume.send(()).unwrap();
-        ended(pass.await.unwrap());
+        self.held = holds(&self.ana.sync, pass.await.unwrap());
     }
 
     async fn during(&mut self, step: &str) {
@@ -459,6 +469,7 @@ impl Case {
             "journal": self.journaled().await,
             "request": request,
             "shared": self.group.storage.shared_with("carol@example.org").await,
+            "held": self.held,
             "accepted": accepted,
         })
     }
@@ -473,13 +484,18 @@ impl Case {
     }
 }
 
-/// A pass ends in an error once this device stops, or after an in-person
-/// approval it made was rejected; the views say the rest. Any other error
-/// fails the case.
-fn ended(result: Result<SequenceStatus, SyncError>) {
+/// Whether the pass's failure holds every later pass: the sync loop records
+/// it as the connection's record, and that record never retries (E5). A pass
+/// ends in `Removed` once this device stops, which the views say; any other
+/// failure fails the case.
+fn holds(sync: &SequenceSync, result: Result<SequenceStatus, SyncError>) -> bool {
     match result {
-        Ok(_) | Err(SyncError::Removed | SyncError::Rejected(_)) => (),
-        Err(error) => panic!("the pass failed: {error}"),
+        Ok(_) | Err(SyncError::Removed) => false,
+        Err(error) => {
+            let record = PendingRecord::new(PendingSubject::Connection, sync.error_reason(&error));
+            assert_eq!(record.retry(), Retry::Never, "the pass failed: {error}");
+            true
+        }
     }
 }
 
@@ -496,6 +512,10 @@ fn cases() -> Vec<(&'static str, Vec<&'static str>)> {
         ("inPerson", vec!["send", "raceExpire", "pass"]),
         ("inPerson", vec!["send", "pass"]),
         ("inPerson", vec!["demote", "send", "pass"]),
+        // History refuses the binding an in-person invite's pass approved on
+        // its own: the invite ends as a decline does, the refusal holds no
+        // later pass, and the next takes the share back.
+        ("inPerson", vec!["demote", "send", "pass", "pass", "expire", "pass"]),
         // An approval under way when the device stops.
         ("sent", vec!["send", "pass", "approve", "remove", "pass", "expire", "cancel"]),
         // Another admin's device ends the stopped device's requests, and its

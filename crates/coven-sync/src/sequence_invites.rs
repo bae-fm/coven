@@ -392,9 +392,7 @@ impl SequenceSync {
                 continue;
             }
             if let Err(error) = self.run_invite(session, ring, member, record.id).await {
-                if matches!(error, SyncError::Rejected(_) | SyncError::Cleanup { .. })
-                    || self.database.operation(record.id).await?.is_none()
-                {
+                if self.database.operation(record.id).await?.is_none() {
                     return Err(error);
                 }
             }
@@ -604,24 +602,18 @@ impl SequenceSync {
                     self.database
                         .finish_operation_advancing(binding, outcome.clone(), work.update(&record)?)
                         .await?;
-                    // A sent invite's rejection is its binding's outcome, which
+                    // A sent invite's refusal is its binding's outcome, which
                     // `coven_operations` lists for the app that approved it.
-                    // Coven approved an in-person request on its own, so the
-                    // rejection fails the pass, once the invite has ended.
-                    let OperationOutcome::Rejected(reason) = outcome else { continue };
-                    if work.delivery == InviteDeliveryKind::Sent {
-                        continue;
+                    // Coven approved an in-person request on its own, so no
+                    // call hears its refusal: the invite ends as a decline
+                    // does, and the pass goes on. Failed with the refusal, the
+                    // pass would leave the connection a record that never
+                    // retries, holding every later pass (§13.2).
+                    if let OperationOutcome::Rejected(reason) = &outcome {
+                        if work.delivery == InviteDeliveryKind::InPerson {
+                            tracing::warn!(?id, ?reason, "history refused an in-person approval");
+                        }
                     }
-                    let operation = SyncError::Rejected(reason);
-                    return Err(
-                        match Box::pin(self.advance_invite(session, ring, member, id, step)).await {
-                            Ok(_) => operation,
-                            Err(cleanup) => SyncError::Cleanup {
-                                operation: Box::new(operation),
-                                cleanup: Box::new(cleanup),
-                            },
-                        },
-                    );
                 }
                 InviteState::Recording { set_access: None } => {
                     let change = StoreChange::SetAccess {
