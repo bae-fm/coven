@@ -128,12 +128,12 @@ async fn setup_key_failure_restores_the_separate_saved_values() {
     person.set_s3_credentials(&old_key).unwrap();
     let app = Coven::with_keychain(f._root.path().into(), keychain);
     let handle = builder(&app, f.clock.clone(), f.storage.clone())
-        .identity_custody(IdentityCustody::Custom(Arc::new(
+        .identity_custody(CustodyChoice::Custom(Arc::new(
             coven_crypto::custody::KeyringCustody::new(Arc::new(
                 f.app.store_keychain(f.directory.id()),
             )),
         )))
-        .key_custody(KeyCustody::Custom(Arc::new(RefusePersist {
+        .key_custody(CustodyChoice::Custom(Arc::new(RefusePersist {
             keys: std::sync::Mutex::new(None),
             refuse: AtomicBool::new(true),
         })))
@@ -262,7 +262,7 @@ async fn custody_failure_rolls_back_credentials_before_claiming_the_creation() {
     let f = Fixture::new().await;
     f.handle.close().await.unwrap();
     let handle = builder(&f.app, f.clock.clone(), f.storage.clone())
-        .key_custody(KeyCustody::Custom(Arc::new(RefusePersist {
+        .key_custody(CustodyChoice::Custom(Arc::new(RefusePersist {
             keys: std::sync::Mutex::new(None),
             refuse: AtomicBool::new(true),
         })))
@@ -296,7 +296,7 @@ async fn custody_failure_rolls_back_credentials_before_claiming_the_creation() {
 /// would.
 struct PanicsForgetting(std::sync::Mutex<Option<StoreKeyring>>);
 
-impl StoreKeyCustody for PanicsForgetting {
+impl Custody<StoreKeyring> for PanicsForgetting {
     fn unlock(&self) -> Result<Option<StoreKeyring>, KeyError> {
         Ok(self.0.lock().unwrap().clone())
     }
@@ -317,7 +317,7 @@ async fn a_panicking_key_forget_fails_with_its_bug() {
     let f = Fixture::new().await;
     f.handle.close().await.unwrap();
     let handle = builder(&f.app, f.clock.clone(), f.storage.clone())
-        .key_custody(KeyCustody::Custom(Arc::new(PanicsForgetting(std::sync::Mutex::new(None)))))
+        .key_custody(CustodyChoice::Custom(Arc::new(PanicsForgetting(std::sync::Mutex::new(None)))))
         .open(f.directory.id(), |_| ())
         .await
         .unwrap();

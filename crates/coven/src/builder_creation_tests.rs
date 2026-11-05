@@ -47,7 +47,7 @@ async fn publication_sync_failure_releases_the_store_before_returning() {
     ) if *id == expected && source.to_string() == "injected publication directory sync failure"));
     let identity =
         coven_crypto::custody::KeyringCustody::new(Arc::new(app.store_keychain(expected)));
-    let member = MemberKeyCustody::unlock(&identity).unwrap().unwrap();
+    let member = Custody::<MemberIdentity>::unlock(&identity).unwrap().unwrap();
     assert_eq!(
         app.readable_stores().await,
         [StoreInfo { id: expected, name: "Household".into(), unfinished_replacement: None }]
@@ -62,7 +62,7 @@ async fn publication_sync_failure_releases_the_store_before_returning() {
         .unwrap();
     assert_eq!(value, "Household");
     assert_eq!(
-        MemberKeyCustody::unlock(&identity).unwrap().unwrap().keys().public_keys(),
+        Custody::<MemberIdentity>::unlock(&identity).unwrap().unwrap().keys().public_keys(),
         member.keys().public_keys()
     );
     reopened.close().await.unwrap();
@@ -77,7 +77,7 @@ struct ClosingIdentity {
     release: Mutex<std::sync::mpsc::Receiver<()>>,
 }
 
-impl MemberKeyCustody for ClosingIdentity {
+impl Custody<MemberIdentity> for ClosingIdentity {
     fn unlock(&self) -> Result<Option<MemberIdentity>, KeyError> {
         Ok(self.keys.lock().unwrap().clone())
     }
@@ -114,7 +114,7 @@ async fn publication_sync_failure_waits_for_close_and_releases_session_custody()
             .id_source(Arc::new(SequentialIds::new()))
             .synced_tables(vec![])
             .migrations(vec![])
-            .identity_custody(IdentityCustody::Custom(identity.clone())),
+            .identity_custody(CustodyChoice::Custom(identity.clone())),
         "Household".into(),
         fail_publication_sync,
     ));
@@ -137,12 +137,12 @@ async fn publication_sync_failure_waits_for_close_and_releases_session_custody()
 #[tokio::test]
 async fn creation_initializes_every_builtin_identity_custody_before_setup() {
     for custody in [
-        IdentityCustody::Keyring,
-        IdentityCustody::InMemory,
-        IdentityCustody::Passphrase(Passphrase::new("member password".into())),
+        CustodyChoice::Keyring,
+        CustodyChoice::InMemory,
+        CustodyChoice::Passphrase(Passphrase::new("member password".into())),
     ] {
-        let persisted = !matches!(custody, IdentityCustody::InMemory);
-        let passphrase = matches!(custody, IdentityCustody::Passphrase(_));
+        let persisted = !matches!(custody, CustodyChoice::InMemory);
+        let passphrase = matches!(custody, CustodyChoice::Passphrase(_));
         let root = tempfile::tempdir().unwrap();
         let app = Coven::in_memory(root.path().into());
         let storage = Arc::new(MemoryStorage::builder().build().unwrap());
@@ -173,9 +173,9 @@ async fn creation_initializes_every_builtin_identity_custody_before_setup() {
         handle.close().await.unwrap();
         if persisted {
             let custody = if passphrase {
-                IdentityCustody::Passphrase(Passphrase::new("member password".into()))
+                CustodyChoice::Passphrase(Passphrase::new("member password".into()))
             } else {
-                IdentityCustody::Keyring
+                CustodyChoice::Keyring
             };
             let reopened = builder().identity_custody(custody).open(id, |_| ()).await.unwrap();
             assert_eq!(reopened.restore_code().await.unwrap(), code);
@@ -189,7 +189,7 @@ struct FailAfterIdentity {
     identity: Mutex<Option<MemberIdentity>>,
     fail_cleanup: bool,
 }
-impl MemberKeyCustody for FailAfterIdentity {
+impl Custody<MemberIdentity> for FailAfterIdentity {
     fn unlock(&self) -> Result<Option<MemberIdentity>, KeyError> {
         Ok(self.identity.lock().unwrap().clone())
     }
@@ -223,7 +223,7 @@ async fn failure_after_identity_creation_never_exposes_an_incomplete_store() {
         let expected = StoreId(SequentialIds::new().new_id());
         let error = builder()
             .id_source(Arc::new(SequentialIds::new()))
-            .identity_custody(IdentityCustody::Custom(identity.clone()))
+            .identity_custody(CustodyChoice::Custom(identity.clone()))
             .create_store("Refused")
             .await
             .unwrap_err();
@@ -260,7 +260,7 @@ async fn creation_does_not_replace_an_existing_custom_identity() {
         .builder()
         .synced_tables(vec![])
         .migrations(vec![])
-        .identity_custody(IdentityCustody::Custom(identity.clone()))
+        .identity_custody(CustodyChoice::Custom(identity.clone()))
         .create_store("Refused")
         .await
         .unwrap_err();
@@ -298,7 +298,7 @@ async fn a_panic_before_publication_undoes_the_stores_custody() {
     let store_keychain = Arc::new(coven_crypto::custody::StoreKeychain::new(keychain, expected));
     assert!(store_keychain.device_id().unwrap().is_none());
     let identity = coven_crypto::custody::KeyringCustody::new(store_keychain);
-    assert!(MemberKeyCustody::unlock(&identity).unwrap().is_none());
+    assert!(Custody::<MemberIdentity>::unlock(&identity).unwrap().is_none());
 }
 
 /// Creation's publish step panics after it removed the marker: the store

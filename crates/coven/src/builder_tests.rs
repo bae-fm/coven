@@ -74,8 +74,8 @@ async fn app_reopening_resumes_operations_and_files_using_one_storage_capability
             .synced_tables(tables())
             .namespaces(namespaces())
             .migrations(migrations())
-            .key_custody(KeyCustody::Custom(keys.clone()))
-            .identity_custody(IdentityCustody::Custom(identity.clone()))
+            .key_custody(CustodyChoice::Custom(keys.clone()))
+            .identity_custody(CustodyChoice::Custom(identity.clone()))
             .clock(clock.clone())
             .storage_connector(storage.clone())
     };

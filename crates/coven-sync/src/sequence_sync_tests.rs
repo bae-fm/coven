@@ -244,17 +244,17 @@ impl Group {
         let keychain = Keychain::in_memory("sequence-test").unwrap();
         let (store_keys, member_keys) = match self.custody {
             Custody::Memory => (
-                KeySession::store(Arc::new(InMemoryCustody::empty())).unwrap(),
-                KeySession::member(Arc::new(InMemoryCustody::empty())).unwrap(),
+                KeySession::open(Arc::new(InMemoryCustody::empty())).unwrap(),
+                KeySession::open(Arc::new(InMemoryCustody::empty())).unwrap(),
             ),
             Custody::Passphrase => (
-                KeySession::store(Arc::new(PassphraseCustody::new(
+                KeySession::open(Arc::new(PassphraseCustody::new(
                     Passphrase::new("store test phrase".into()),
                     directory.owned_file(StoreFile::StoreKeys),
                     self.store,
                 )))
                 .unwrap(),
-                KeySession::member(Arc::new(PassphraseCustody::new(
+                KeySession::open(Arc::new(PassphraseCustody::new(
                     Passphrase::new("member test phrase".into()),
                     directory.owned_file(StoreFile::MemberKeys),
                     self.store,
@@ -264,8 +264,8 @@ impl Group {
             Custody::Keychain => {
                 let keys = Arc::new(StoreKeychain::new(keychain.clone(), self.store));
                 (
-                    KeySession::store(Arc::new(KeyringCustody::new(keys.clone()))).unwrap(),
-                    KeySession::member(Arc::new(KeyringCustody::new(keys))).unwrap(),
+                    KeySession::open(Arc::new(KeyringCustody::new(keys.clone()))).unwrap(),
+                    KeySession::open(Arc::new(KeyringCustody::new(keys))).unwrap(),
                 )
             }
         };

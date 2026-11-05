@@ -653,8 +653,8 @@ async fn prepare_and_load(
     let provider = data.location.provider();
     let settings = directory.settings().map_err(CovenError::from)?;
     let state = Arc::new(coven_sync::SequenceState::new());
-    let ring = Arc::new(KeySession::store(Arc::new(InMemoryCustody::<StoreKeyring>::empty()))?);
-    let identity = Arc::new(KeySession::member(Arc::new(InMemoryCustody::new(member.clone())))?);
+    let ring = Arc::new(KeySession::open(Arc::new(InMemoryCustody::<StoreKeyring>::empty()))?);
+    let identity = Arc::new(KeySession::open(Arc::new(InMemoryCustody::new(member.clone())))?);
     // A replacement registers the fresh id as the old one's replacement.
     let replacement = match pending {
         Installing::Replacing(replacement) => Some(replacement),

@@ -1,5 +1,5 @@
 use super::*;
-use crate::custody::{InMemoryCustody, Keychain, MemberKeyCustody};
+use crate::custody::{Custody, InMemoryCustody, Keychain};
 use coven_foundation::id_source::{IdSource, StoreId, UuidIds};
 
 fn custody_holding(
@@ -14,8 +14,8 @@ fn custody_holding(
         StoreId(UuidIds.new_id()),
     ));
     let custody = StoreCustody::new(
-        Arc::new(KeySession::store(Arc::new(InMemoryCustody::<StoreKeyring>::empty())).unwrap()),
-        Arc::new(KeySession::member(saved.clone()).unwrap()),
+        Arc::new(KeySession::open(Arc::new(InMemoryCustody::<StoreKeyring>::empty())).unwrap()),
+        Arc::new(KeySession::open(saved.clone()).unwrap()),
         keychain,
     );
     (custody, saved)

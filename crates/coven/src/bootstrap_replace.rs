@@ -49,16 +49,16 @@ pub(crate) async fn restore_device(
     let directory = builder.directories.store_dir(&store);
     let keychain = Arc::new(StoreKeychain::new(builder.keychain()?, store));
     // One identity session reads now and keeps the code's pair at publication.
-    let identity = CovenBuilder::make_identity(
+    let identity = CovenBuilder::make_session(
         std::mem::replace(
             &mut builder.identity,
-            CustodyChoice::Configured(IdentityCustody::InMemory),
+            SessionSource::Configured(CustodyChoice::InMemory),
         ),
         &directory,
         store,
         keychain,
     )?;
-    builder.identity = CustodyChoice::Session(identity.clone());
+    builder.identity = SessionSource::Session(identity.clone());
     let pair = code.member_keys.public_keys();
     let held = identity
         .read()?

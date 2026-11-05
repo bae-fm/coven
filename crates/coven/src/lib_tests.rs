@@ -540,7 +540,7 @@ pub(crate) fn held(app: &Coven, store: StoreId) -> Held {
     use coven_crypto::custody::KeyringCustody;
     let keychain = Arc::new(app.store_keychain(store));
     let identity =
-        MemberKeyCustody::unlock(&KeyringCustody::new(keychain.clone())).unwrap().unwrap();
+        Custody::<MemberIdentity>::unlock(&KeyringCustody::new(keychain.clone())).unwrap().unwrap();
     let bytes = |value: Option<SecretBytes>| value.map(|value| value.as_bytes().to_vec());
     Held {
         device: keychain.device_id().unwrap(),

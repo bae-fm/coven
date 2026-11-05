@@ -723,14 +723,14 @@ async fn restores_return_session_keys_and_builder_choices_without_reopening() {
                 .max_concurrent_uploads(NonZeroUsize::new(3).unwrap())
                 .max_concurrent_downloads(NonZeroUsize::new(4).unwrap())
                 .key_custody(if passphrase {
-                    KeyCustody::Passphrase(Passphrase::new("store password".into()))
+                    CustodyChoice::Passphrase(Passphrase::new("store password".into()))
                 } else {
-                    KeyCustody::InMemory
+                    CustodyChoice::InMemory
                 })
                 .identity_custody(if passphrase {
-                    IdentityCustody::Passphrase(Passphrase::new("identity password".into()))
+                    CustodyChoice::Passphrase(Passphrase::new("identity password".into()))
                 } else {
-                    IdentityCustody::InMemory
+                    CustodyChoice::InMemory
                 });
             let handle = if from_keychain {
                 PersonEntries::new(install.keychain.clone(), owner.directory.id())
@@ -787,8 +787,10 @@ async fn restores_return_session_keys_and_builder_choices_without_reopening() {
                 // The same files remain usable at their permanent paths after publication.
                 let reopened = install
                     .builder(&owner, owner.storage.clone())
-                    .key_custody(KeyCustody::Passphrase(Passphrase::new("store password".into())))
-                    .identity_custody(IdentityCustody::Passphrase(Passphrase::new(
+                    .key_custody(CustodyChoice::Passphrase(Passphrase::new(
+                        "store password".into(),
+                    )))
+                    .identity_custody(CustodyChoice::Passphrase(Passphrase::new(
                         "identity password".into(),
                     )))
                     .open(directory.id(), |_| ())
@@ -810,8 +812,8 @@ async fn joining_retains_the_approved_member_in_session_custody() {
     let control = JoinControl::new();
     let builder = install
         .builder(&owner, owner.recipient())
-        .key_custody(KeyCustody::InMemory)
-        .identity_custody(IdentityCustody::InMemory);
+        .key_custody(CustodyChoice::InMemory)
+        .identity_custody(CustodyChoice::InMemory);
     let joining = join_with_invite(builder, invite.shown_code(), "New phone", |_| {}, &control);
     let (handle, member) = join_and_approve(&owner.handle, joining, |_| async {
         install.absent(owner.directory.id()).await;

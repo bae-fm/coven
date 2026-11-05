@@ -1,6 +1,6 @@
 use super::*;
 use crate::custody::person_entries::{RESTORE_CODE_ENTRY, S3_CREDENTIALS_ENTRY};
-use crate::custody::{KeychainError, MemberKeyCustody, PersonEntries, StoreKeyCustody};
+use crate::custody::{Custody, KeychainError, PersonEntries};
 use crate::{MemberIdentity, StoreKey, StoreKeyring};
 use coven_foundation::id_source::KeyId;
 use uuid::Uuid;
@@ -37,8 +37,8 @@ fn restore_codes_and_s3_keys_sync_separately_and_only_codes_discover_stores() {
     a.set_storage_credentials(&SecretBytes::new(b"device credentials".to_vec())).unwrap();
     assert!(fake.person_restore_codes().unwrap().is_empty());
     for name in [
-        STORE_KEYS_ENTRY,
-        MEMBER_KEYS_ENTRY,
+        StoreKeyring::ENTRY,
+        MemberIdentity::ENTRY,
         CREDENTIALS_ENTRY,
         HOST_SECRET_NAMES_ENTRY,
         &host_secret_entry("api-token"),
@@ -148,8 +148,8 @@ fn host_names_cannot_collide_with_coven_or_another_store() {
         "é",
         "e\u{301}",
         "host-secret-61",
-        STORE_KEYS_ENTRY,
-        MEMBER_KEYS_ENTRY,
+        StoreKeyring::ENTRY,
+        MemberIdentity::ENTRY,
         RESTORE_CODE_ENTRY,
         S3_CREDENTIALS_ENTRY,
         DEVICE_ID_ENTRY,
@@ -189,8 +189,8 @@ fn host_names_cannot_collide_with_coven_or_another_store() {
 fn present_but_empty_or_malformed_key_entries_are_errors() {
     let fake = Keychain::in_memory("corrupt").unwrap();
     let store = Arc::new(StoreKeychain::new(fake, StoreId(Uuid::from_u128(1))));
-    store.write(STORE_KEYS_ENTRY, &[]).unwrap();
-    store.write(MEMBER_KEYS_ENTRY, &[0xff]).unwrap();
+    store.write(StoreKeyring::ENTRY, &[]).unwrap();
+    store.write(MemberIdentity::ENTRY, &[0xff]).unwrap();
     assert!(matches!(
         KeyringCustody::<StoreKeyring>::new(store.clone()).unlock(),
         Err(KeyError::Material(_))
@@ -238,8 +238,8 @@ fn deletion_discovers_only_this_stores_entries_from_custody() {
     let second = StoreKeychain::new(fake.clone(), StoreId(Uuid::from_u128(2)));
     for store in [&first, &second] {
         store.set_device_id(DeviceId(42)).unwrap();
-        store.write(STORE_KEYS_ENTRY, b"store keys").unwrap();
-        store.write(MEMBER_KEYS_ENTRY, b"member keys").unwrap();
+        store.write(StoreKeyring::ENTRY, b"store keys").unwrap();
+        store.write(MemberIdentity::ENTRY, b"member keys").unwrap();
         store.set_storage_credentials(&SecretBytes::new(b"credentials".to_vec())).unwrap();
         store.set_host_secret("token", "token").unwrap();
         store.set_host_secret("another-token", "another secret").unwrap();
@@ -255,8 +255,8 @@ fn deletion_discovers_only_this_stores_entries_from_custody() {
     first.delete_device_entries().unwrap();
     for name in [
         DEVICE_ID_ENTRY,
-        STORE_KEYS_ENTRY,
-        MEMBER_KEYS_ENTRY,
+        StoreKeyring::ENTRY,
+        MemberIdentity::ENTRY,
         CREDENTIALS_ENTRY,
         HOST_SECRET_NAMES_ENTRY,
         INVITE_CODE_ENTRY,
@@ -492,7 +492,8 @@ fn deletion_can_retry_after_each_keychain_failure() {
         let store = StoreKeychain::new(fake.clone(), StoreId(Uuid::from_u128(1)));
         store.set_host_secret("token", "secret").unwrap();
         store.set_host_secret("other", "preserved").unwrap();
-        for name in [STORE_KEYS_ENTRY, MEMBER_KEYS_ENTRY, DEVICE_ID_ENTRY, CREDENTIALS_ENTRY] {
+        for name in [StoreKeyring::ENTRY, MemberIdentity::ENTRY, DEVICE_ID_ENTRY, CREDENTIALS_ENTRY]
+        {
             store.write(name, b"entry").unwrap();
         }
         fail_operation(&fake, after);
@@ -503,7 +504,7 @@ fn deletion_can_retry_after_each_keychain_failure() {
         assert_host_names_cover_values(&store, &["token", "other"]);
         if after <= 3 {
             assert_eq!(recorded_names(&store), BTreeSet::from(["other".into(), "token".into()]));
-            assert!(store.read(STORE_KEYS_ENTRY).unwrap().is_some());
+            assert!(store.read(StoreKeyring::ENTRY).unwrap().is_some());
         }
         store.delete_device_entries().unwrap();
         assert!(fake.with_device_entries(|device| device.is_empty()));

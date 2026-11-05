@@ -108,8 +108,8 @@ impl Fixture {
             .clock(self.clock.clone())
             .id_source(self.ids.clone())
             .storage_connector(self.connector.clone())
-            .key_custody(KeyCustody::Custom(self.keys.clone()))
-            .identity_custody(IdentityCustody::Custom(Arc::new(InMemoryCustody::new(
+            .key_custody(CustodyChoice::Custom(self.keys.clone()))
+            .identity_custody(CustodyChoice::Custom(Arc::new(InMemoryCustody::new(
                 self.member.clone(),
             ))))
             .open(self.directory.id(), |_| ())

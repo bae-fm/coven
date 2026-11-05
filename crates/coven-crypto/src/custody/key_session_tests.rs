@@ -1,5 +1,5 @@
 use super::*;
-use crate::{custody::InMemoryCustody, StoreKey};
+use crate::{custody::InMemoryCustody, StoreKey, StoreKeyring};
 use coven_foundation::id_source::KeyId;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
@@ -30,7 +30,7 @@ impl RecordingCustody {
     }
 }
 
-impl StoreKeyCustody for RecordingCustody {
+impl Custody<StoreKeyring> for RecordingCustody {
     fn unlock(&self) -> Result<Option<StoreKeyring>, KeyError> {
         self.unlocks.fetch_add(1, Ordering::SeqCst);
         self.check()?;
@@ -63,7 +63,7 @@ fn assert_ring(actual: Option<StoreKeyring>, expected: &StoreKeyring) {
 #[test]
 fn workers_share_one_unlock_and_only_successful_saves_change_held_keys() {
     let custody = RecordingCustody::new();
-    let session = Arc::new(KeySession::store(custody.clone()).unwrap());
+    let session = Arc::new(KeySession::open(custody.clone()).unwrap());
     let worker = session.clone();
     for _ in 0..10 {
         assert_ring(worker.read().unwrap(), &ring(1));
@@ -99,14 +99,14 @@ fn workers_share_one_unlock_and_only_successful_saves_change_held_keys() {
 #[test]
 fn dropping_the_last_session_and_failed_open_both_close_custom_custody() {
     let custody = RecordingCustody::new();
-    let session = Arc::new(KeySession::store(custody.clone()).unwrap());
+    let session = Arc::new(KeySession::open(custody.clone()).unwrap());
     let worker = session.clone();
     drop(session);
     assert_eq!(custody.closes.load(Ordering::SeqCst), 0);
     drop(worker);
     assert_eq!(custody.closes.load(Ordering::SeqCst), 1);
     custody.refuse.store(true, Ordering::SeqCst);
-    assert!(KeySession::store(custody.clone()).is_err());
+    assert!(KeySession::open(custody.clone()).is_err());
     assert_eq!(custody.closes.load(Ordering::SeqCst), 2);
 }
 
@@ -119,8 +119,8 @@ fn closing_erases_in_memory_identity_and_store_material() {
         ))
         .unwrap(),
     ));
-    let store_session = KeySession::store(keys.clone()).unwrap();
-    let member_session = KeySession::member(identity.clone()).unwrap();
+    let store_session = KeySession::open(keys.clone()).unwrap();
+    let member_session = KeySession::open(identity.clone()).unwrap();
     member_session.close();
     store_session.close();
     assert!(keys.read().is_none());

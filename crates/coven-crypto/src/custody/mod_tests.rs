@@ -65,15 +65,15 @@ fn in_memory_custody_keeps_both_material_kinds_for_one_session() {
     let member = InMemoryCustody::new(identity());
     assert!(store.unlock().unwrap().is_some());
     assert!(member.unlock().unwrap().is_some());
-    exercise_store_custody(&KeySession::store(Arc::new(store)).unwrap());
-    exercise_member_custody(&KeySession::member(Arc::new(member)).unwrap());
+    exercise_store_custody(&KeySession::open(Arc::new(store)).unwrap());
+    exercise_member_custody(&KeySession::open(Arc::new(member)).unwrap());
 }
 
 #[test]
 fn passphrase_files_round_trip_both_material_kinds() {
     let (_temp, directory) = directory();
     let open_store = || {
-        KeySession::store(Arc::new(PassphraseCustody::new(
+        KeySession::open(Arc::new(PassphraseCustody::new(
             Passphrase::new("store passphrase".into()),
             directory.owned_file(StoreFile::StoreKeys),
             directory.id(),
@@ -81,7 +81,7 @@ fn passphrase_files_round_trip_both_material_kinds() {
         .unwrap()
     };
     let open_member = || {
-        KeySession::member(Arc::new(PassphraseCustody::new(
+        KeySession::open(Arc::new(PassphraseCustody::new(
             Passphrase::new("member passphrase".into()),
             directory.owned_file(StoreFile::MemberKeys),
             directory.id(),
@@ -135,8 +135,8 @@ fn keyring_custody_uses_the_fake_and_isolates_stores_and_material_kinds() {
     assert!(KeyringCustody::<StoreKeyring>::new(second.clone()).unlock().unwrap().is_none());
     member.persist(&identity()).unwrap();
     assert!(KeyringCustody::<MemberIdentity>::new(second).unlock().unwrap().is_none());
-    exercise_store_custody(&KeySession::store(Arc::new(store)).unwrap());
-    exercise_member_custody(&KeySession::member(Arc::new(member)).unwrap());
+    exercise_store_custody(&KeySession::open(Arc::new(store)).unwrap());
+    exercise_member_custody(&KeySession::open(Arc::new(member)).unwrap());
 }
 
 #[test]
@@ -179,10 +179,10 @@ fn custody_debug_never_prints_secrets() {
     keychain.set_host_secret("api-token", "host-secret-must-not-print").unwrap();
     let outputs = [
         format!("{:?}", phrase()),
-        format!("{:?}", KeyCustody::Passphrase(phrase())),
-        format!("{:?}", IdentityCustody::Passphrase(phrase())),
-        format!("{:?}", KeyCustody::InMemory),
-        format!("{:?}", IdentityCustody::InMemory),
+        format!("{:?}", CustodyChoice::<StoreKeyring>::Passphrase(phrase())),
+        format!("{:?}", CustodyChoice::<MemberIdentity>::Passphrase(phrase())),
+        format!("{:?}", CustodyChoice::<StoreKeyring>::InMemory),
+        format!("{:?}", CustodyChoice::<MemberIdentity>::InMemory),
         format!("{:?}", InMemoryCustody::new(keys())),
         format!(
             "{:?}",
@@ -195,8 +195,8 @@ fn custody_debug_never_prints_secrets() {
         format!("{fake:?}"),
         format!("{keychain:?}"),
         format!("{:?}", KeyringCustody::<MemberIdentity>::new(keychain)),
-        format!("{:?}", KeyCustody::Custom(Arc::new(InMemoryCustody::new(keys())))),
-        format!("{:?}", IdentityCustody::Custom(Arc::new(InMemoryCustody::new(member())))),
+        format!("{:?}", CustodyChoice::Custom(Arc::new(InMemoryCustody::new(keys())))),
+        format!("{:?}", CustodyChoice::Custom(Arc::new(InMemoryCustody::new(member())))),
     ];
     for output in outputs {
         assert!(!output.contains("must-not-print"));

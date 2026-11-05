@@ -1,33 +1,24 @@
 //! One unlocked custody session shared by the handle's workers.
 
-use super::{KeyError, MemberKeyCustody, StoreKeyCustody};
-use crate::{MemberIdentity, StoreKeyring};
+use super::{Custody, KeyError, KeyMaterial};
 use coven_foundation::locks::lock_unpoisoned;
 use std::sync::{Arc, Mutex};
 
 /// Held keys and the capability that saves them, released together on close.
 /// Consumers read memory; only opening calls the configured custody's unlock.
 /// Share this owner across every worker using the same custody.
-pub struct KeySession<T> {
+pub struct KeySession<T: KeyMaterial> {
     held: Mutex<Option<Held<T>>>,
 }
 
-struct Held<T> {
+struct Held<T: KeyMaterial> {
     keys: Option<T>,
-    custody: Box<dyn CustodyPersistence<T>>,
+    custody: Arc<dyn Custody<T>>,
 }
 
-struct Custody<C: ?Sized>(Arc<C>);
-
-trait CustodyPersistence<T>: Send + Sync {
-    fn unlock(&self) -> Result<Option<T>, KeyError>;
-    fn persist(&self, keys: &T) -> Result<(), KeyError>;
-    fn forget(&self) -> Result<(), KeyError>;
-    fn close(&self);
-}
-
-impl<T: Clone> KeySession<T> {
-    fn open(custody: Box<dyn CustodyPersistence<T>>) -> Result<Self, KeyError> {
+impl<T: KeyMaterial> KeySession<T> {
+    /// Unlock custody once at the opening composition root.
+    pub fn open(custody: Arc<dyn Custody<T>>) -> Result<Self, KeyError> {
         // The guard also closes a backend that fails partway through unlocking.
         let mut held = Held { keys: None, custody };
         held.keys = held.custody.unlock()?;
@@ -68,60 +59,16 @@ impl<T: Clone> KeySession<T> {
     }
 }
 
-impl KeySession<StoreKeyring> {
-    /// Unlock store and circle custody once at the opening composition root.
-    pub fn store(custody: Arc<dyn StoreKeyCustody>) -> Result<Self, KeyError> {
-        Self::open(Box::new(Custody(custody)))
-    }
-}
-
-impl KeySession<MemberIdentity> {
-    /// Unlock member custody once at the opening composition root.
-    pub fn member(custody: Arc<dyn MemberKeyCustody>) -> Result<Self, KeyError> {
-        Self::open(Box::new(Custody(custody)))
-    }
-}
-
-impl<T> Drop for Held<T> {
+impl<T: KeyMaterial> Drop for Held<T> {
     fn drop(&mut self) {
         self.keys.take();
         self.custody.close();
     }
 }
 
-impl<T> std::fmt::Debug for KeySession<T> {
+impl<T: KeyMaterial> std::fmt::Debug for KeySession<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("KeySession([REDACTED])")
-    }
-}
-
-impl CustodyPersistence<StoreKeyring> for Custody<dyn StoreKeyCustody> {
-    fn unlock(&self) -> Result<Option<StoreKeyring>, KeyError> {
-        self.0.as_ref().unlock()
-    }
-    fn persist(&self, keys: &StoreKeyring) -> Result<(), KeyError> {
-        self.0.as_ref().persist(keys)
-    }
-    fn forget(&self) -> Result<(), KeyError> {
-        self.0.as_ref().forget()
-    }
-    fn close(&self) {
-        self.0.as_ref().close();
-    }
-}
-
-impl CustodyPersistence<MemberIdentity> for Custody<dyn MemberKeyCustody> {
-    fn unlock(&self) -> Result<Option<MemberIdentity>, KeyError> {
-        self.0.as_ref().unlock()
-    }
-    fn persist(&self, keys: &MemberIdentity) -> Result<(), KeyError> {
-        self.0.as_ref().persist(keys)
-    }
-    fn forget(&self) -> Result<(), KeyError> {
-        self.0.as_ref().forget()
-    }
-    fn close(&self) {
-        self.0.as_ref().close();
     }
 }
 

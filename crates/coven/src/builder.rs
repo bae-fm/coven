@@ -2,8 +2,8 @@
 
 use crate::*;
 use coven_crypto::custody::{
-    InMemoryCustody, KeySession, Keychain, KeyringCustody, PassphraseCustody, PersonEntries,
-    StoreCustody, StoreKeychain,
+    Custody, CustodyChoice, InMemoryCustody, KeyMaterial, KeySession, Keychain, KeyringCustody,
+    PassphraseCustody, PersonEntries, StoreCustody, StoreKeychain,
 };
 use coven_database::{DatabaseBuilder, OpenStep};
 use coven_foundation::files::StoreDirAccess;
@@ -39,8 +39,8 @@ pub struct CovenBuilder {
     /// The latest sign-in, held for this session until bootstrap or setup
     /// publishes it, or a join keeps it on the device beside its saved code.
     authentication: Option<Arc<coven_sync::SessionSignIn>>,
-    keys: CustodyChoice<KeyCustody, StoreKeyring>,
-    identity: CustodyChoice<IdentityCustody, MemberIdentity>,
+    keys: SessionSource<StoreKeyring>,
+    identity: SessionSource<MemberIdentity>,
     sqlite: SqliteSettings,
     sql_functions: coven_database::SqlFunctions,
     /// Where a bug in the store's work that nobody waits for goes (E15).
@@ -69,9 +69,10 @@ enum Continuing {
     },
 }
 
-/// Reset transfers its unlocked sessions into the replacement installation.
-enum CustodyChoice<C, T> {
-    Configured(C),
+/// What a builder makes a key kind's session from: the configured choice, or
+/// the unlocked session a reset or restore transfers into the replacement.
+enum SessionSource<T: KeyMaterial> {
+    Configured(CustodyChoice<T>),
     Session(Arc<KeySession<T>>),
 }
 
@@ -100,8 +101,8 @@ impl CovenBuilder {
             authentication: None,
             transfers: Arc::new(coven_storage::TransferBudget::new(TransferLimits::default())),
             network,
-            keys: CustodyChoice::Configured(KeyCustody::Keyring),
-            identity: CustodyChoice::Configured(IdentityCustody::Keyring),
+            keys: SessionSource::Configured(CustodyChoice::Keyring),
+            identity: SessionSource::Configured(CustodyChoice::Keyring),
             sqlite: SqliteSettings::default(),
             sql_functions: coven_database::SqlFunctions::default(),
             bugs: Arc::new(crate::task::LoggedBugs),
@@ -218,15 +219,15 @@ impl CovenBuilder {
 
     /// Where this device keeps the store keys: the OS keychain by default, a
     /// file sealed with a passphrase, memory for this session only, or the
-    /// app's own `StoreKeyCustody`.
-    pub fn key_custody(mut self, custody: KeyCustody) -> Self {
-        self.keys = CustodyChoice::Configured(custody);
+    /// app's own `Custody<StoreKeyring>`.
+    pub fn key_custody(mut self, custody: CustodyChoice<StoreKeyring>) -> Self {
+        self.keys = SessionSource::Configured(custody);
         self
     }
     /// Where this device keeps its member's keys, with the same four choices
-    /// and the app's own `MemberKeyCustody` as the last.
-    pub fn identity_custody(mut self, custody: IdentityCustody) -> Self {
-        self.identity = CustodyChoice::Configured(custody);
+    /// and the app's own `Custody<MemberIdentity>` as the last.
+    pub fn identity_custody(mut self, custody: CustodyChoice<MemberIdentity>) -> Self {
+        self.identity = SessionSource::Configured(custody);
         self
     }
 
@@ -570,10 +571,10 @@ impl CovenBuilder {
             // A copy restored without its non-backed-up custody id, or a
             // keychain that no longer names it, changes nothing (§19.3).
             if keychain.device_id()? != Some(settings.device_id) {
-                let identity = Self::make_identity(
+                let identity = Self::make_session(
                     std::mem::replace(
                         &mut builder.identity,
-                        CustodyChoice::Configured(IdentityCustody::InMemory),
+                        SessionSource::Configured(CustodyChoice::InMemory),
                     ),
                     &directory,
                     settings.id,
@@ -635,9 +636,9 @@ impl CovenBuilder {
             ))
         });
         let connector = self.connector();
-        let keys = Self::make_keys(self.keys, &directory, settings.id, keychain.clone())?;
+        let keys = Self::make_session(self.keys, &directory, settings.id, keychain.clone())?;
         let identity =
-            Self::make_identity(self.identity, &directory, settings.id, keychain.clone())?;
+            Self::make_session(self.identity, &directory, settings.id, keychain.clone())?;
         let network =
             coven_foundation::network_watch::NetworkWatch::start(&self.network, &self.bugs)
                 .map_err(CovenError::NetworkWatch)?;
@@ -663,50 +664,25 @@ impl CovenBuilder {
         })
     }
 
-    fn make_identity(
-        custody: CustodyChoice<IdentityCustody, MemberIdentity>,
+    fn make_session<T: KeyMaterial>(
+        chosen: SessionSource<T>,
         directory: &StoreDir,
         id: StoreId,
         keychain: Arc<StoreKeychain>,
-    ) -> Result<Arc<KeySession<MemberIdentity>>, KeyError> {
-        let custody = match custody {
-            CustodyChoice::Session(session) => return Ok(session),
-            CustodyChoice::Configured(custody) => custody,
+    ) -> Result<Arc<KeySession<T>>, KeyError> {
+        let custody = match chosen {
+            SessionSource::Session(session) => return Ok(session),
+            SessionSource::Configured(custody) => custody,
         };
-        let custody: Arc<dyn MemberKeyCustody> = match custody {
-            IdentityCustody::Keyring => Arc::new(KeyringCustody::new(keychain.clone())),
-            IdentityCustody::Passphrase(secret) => Arc::new(PassphraseCustody::new(
-                secret,
-                directory.owned_file(StoreFile::MemberKeys),
-                id,
-            )),
-            IdentityCustody::InMemory => Arc::new(InMemoryCustody::empty()),
-            IdentityCustody::Custom(keys) => keys,
+        let custody: Arc<dyn Custody<T>> = match custody {
+            CustodyChoice::Keyring => Arc::new(KeyringCustody::new(keychain)),
+            CustodyChoice::Passphrase(secret) => {
+                Arc::new(PassphraseCustody::new(secret, directory.owned_file(T::FILE), id))
+            }
+            CustodyChoice::InMemory => Arc::new(InMemoryCustody::empty()),
+            CustodyChoice::Custom(custody) => custody,
         };
-        Ok(Arc::new(KeySession::member(custody)?))
-    }
-
-    fn make_keys(
-        custody: CustodyChoice<KeyCustody, StoreKeyring>,
-        directory: &StoreDir,
-        id: StoreId,
-        keychain: Arc<StoreKeychain>,
-    ) -> Result<Arc<KeySession<StoreKeyring>>, KeyError> {
-        let custody = match custody {
-            CustodyChoice::Session(session) => return Ok(session),
-            CustodyChoice::Configured(custody) => custody,
-        };
-        let custody: Arc<dyn StoreKeyCustody> = match custody {
-            KeyCustody::Keyring => Arc::new(KeyringCustody::new(keychain)),
-            KeyCustody::Passphrase(secret) => Arc::new(PassphraseCustody::new(
-                secret,
-                directory.owned_file(StoreFile::StoreKeys),
-                id,
-            )),
-            KeyCustody::InMemory => Arc::new(InMemoryCustody::empty()),
-            KeyCustody::Custom(keys) => keys,
-        };
-        Ok(Arc::new(KeySession::store(custody)?))
+        Ok(Arc::new(KeySession::open(custody)?))
     }
 
     /// Make the next replacement stop right after its swap, undoing nothing.

@@ -87,9 +87,9 @@ async fn kept_keys_survive_reopen_and_forgetting_preserves_identity() {
     assert_eq!(handle.store_key_state().unwrap(), StoreKeyState::Available);
     handle.forget_store_keys().await.unwrap();
     assert_eq!(handle.store_key_state().unwrap(), StoreKeyState::Locked);
-    assert!(MemberKeyCustody::unlock(&coven_crypto::custody::KeyringCustody::new(Arc::new(
-        app.store_keychain(directory.id())
-    )))
+    assert!(Custody::<MemberIdentity>::unlock(&coven_crypto::custody::KeyringCustody::new(
+        Arc::new(app.store_keychain(directory.id()))
+    ))
     .unwrap()
     .is_some());
     assert_eq!(handle.host_secret("token").unwrap().as_deref(), Some("secret"));
@@ -109,7 +109,7 @@ struct Keys {
     closes: AtomicUsize,
     refuse: AtomicBool,
 }
-impl StoreKeyCustody for Keys {
+impl Custody<StoreKeyring> for Keys {
     fn unlock(&self) -> Result<Option<StoreKeyring>, KeyError> {
         self.unlocks.fetch_add(1, Ordering::SeqCst);
         if self.refuse.load(Ordering::SeqCst) {
@@ -138,7 +138,7 @@ struct Identity {
     closes: AtomicUsize,
     refuse: AtomicBool,
 }
-impl MemberKeyCustody for Identity {
+impl Custody<MemberIdentity> for Identity {
     fn unlock(&self) -> Result<Option<MemberIdentity>, KeyError> {
         self.unlocks.fetch_add(1, Ordering::SeqCst);
         if self.refuse.load(Ordering::SeqCst) {
@@ -167,8 +167,8 @@ async fn creation_unlocks_once_and_sql_callback_failures_roll_back() {
     let keys = Arc::new(Keys::default());
     let identity = Arc::new(Identity::default());
     let handle = builder(&app)
-        .key_custody(KeyCustody::Custom(keys.clone()))
-        .identity_custody(IdentityCustody::Custom(identity.clone()))
+        .key_custody(CustodyChoice::Custom(keys.clone()))
+        .identity_custody(CustodyChoice::Custom(identity.clone()))
         .create_store("session")
         .await
         .unwrap();
@@ -191,8 +191,8 @@ async fn creation_unlocks_once_and_sql_callback_failures_roll_back() {
     );
     assert!(handle.pending().await.unwrap().is_empty());
     let reader = builder(&app)
-        .key_custody(KeyCustody::Custom(keys.clone()))
-        .identity_custody(IdentityCustody::Custom(identity.clone()))
+        .key_custody(CustodyChoice::Custom(keys.clone()))
+        .identity_custody(CustodyChoice::Custom(identity.clone()))
         .open_read_only(directory.id())
         .await
         .unwrap();
@@ -396,8 +396,8 @@ async fn workers_share_keys_across_stop_forget_and_reacquisition_until_close() {
     let keys = Arc::new(Keys::default());
     let identity = Arc::new(Identity::default());
     let handle = builder(&app)
-        .key_custody(KeyCustody::Custom(keys.clone()))
-        .identity_custody(IdentityCustody::Custom(identity.clone()))
+        .key_custody(CustodyChoice::Custom(keys.clone()))
+        .identity_custody(CustodyChoice::Custom(identity.clone()))
         .storage_connector(connector.clone())
         .create_store("session")
         .await
@@ -455,8 +455,8 @@ async fn failed_identity_unlock_releases_the_opened_store_session() {
     identity.refuse.store(true, Ordering::SeqCst);
     assert!(matches!(
         builder(&app)
-            .key_custody(KeyCustody::Custom(keys.clone()))
-            .identity_custody(IdentityCustody::Custom(identity.clone()))
+            .key_custody(CustodyChoice::Custom(keys.clone()))
+            .identity_custody(CustodyChoice::Custom(identity.clone()))
             .open(directory.id(), |_| ())
             .await,
         Err(CovenError::Key(KeyError::PassphraseAuthentication))
@@ -477,8 +477,8 @@ async fn migration_failure_precedes_custody_unlock() {
     keys.refuse.store(true, Ordering::SeqCst);
     let error = builder(&app)
         .migrations(vec![Migration::addition(1, "invalid", "INVALID SQL")])
-        .key_custody(KeyCustody::Custom(keys.clone()))
-        .identity_custody(IdentityCustody::Custom(identity.clone()))
+        .key_custody(CustodyChoice::Custom(keys.clone()))
+        .identity_custody(CustodyChoice::Custom(identity.clone()))
         .open(directory.id(), |_| ())
         .await
         .unwrap_err();
@@ -498,8 +498,8 @@ async fn closing_erases_custody_once_and_fails_later_calls_on_every_clone() {
     });
     let identity = Arc::new(Identity::default());
     let handle = builder(&app)
-        .key_custody(KeyCustody::Custom(keys.clone()))
-        .identity_custody(IdentityCustody::Custom(identity.clone()))
+        .key_custody(CustodyChoice::Custom(keys.clone()))
+        .identity_custody(CustodyChoice::Custom(identity.clone()))
         .create_store("session")
         .await
         .unwrap();

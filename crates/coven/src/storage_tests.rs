@@ -850,7 +850,7 @@ async fn setup_refuses_another_location_after_lost_credentials_and_reopen() {
     handle.close().await.unwrap();
 }
 
-impl StoreKeyCustody for RefusePersist {
+impl Custody<StoreKeyring> for RefusePersist {
     fn unlock(&self) -> Result<Option<StoreKeyring>, KeyError> {
         Ok(self.keys.lock().unwrap().clone())
     }

@@ -67,9 +67,7 @@ capability_types = [
     "StoreKeychain",
     "PersonEntries",
     "KeyringCustody",
-    "StoreKeyCustody",
-    "MemberKeyCustody",
-    "CustodyPersistence",
+    "Custody",
     "StorageConnector",
     "Storage",
     "ProviderOps",
@@ -110,9 +108,7 @@ shared_pointer_types = ["Arc", "Rc", "Weak"]
 capability_traits = [
     "Clock",
     "IdSource",
-    "StoreKeyCustody",
-    "MemberKeyCustody",
-    "CustodyPersistence",
+    "Custody",
     "StorageConnector",
     "Storage",
     "ProviderOps",
@@ -145,8 +141,7 @@ non_owner_types = [
     # Failure transport may carry a published handle; it does not own store lifetime.
     "BootstrapError",
     "StoreCreationError",
-    "KeyCustody",
-    "IdentityCustody",
+    "CustodyChoice",
     "Command",
     "Request",
     # What stops a connection's lookups that run too long, shared with
@@ -1210,8 +1205,6 @@ tables = [
 "crates/coven-crypto/src/custody/person_entries.rs" = ["CHANGES"]
 "crates/coven-crypto/src/custody/key_session.rs" = [
     "KeySession::open",
-    "KeySession::store",
-    "KeySession::member",
 ]
 "crates/coven-crypto/src/custody/passphrase.rs" = ["PassphraseCustody::new"]
 "crates/coven-crypto/src/custody/store_custody.rs" = ["StoreCustody::new"]
@@ -1494,8 +1487,7 @@ tables = [
     # Builder setters replace a configured or already-unlocked custody choice.
     "CovenBuilder::key_custody",
     "CovenBuilder::identity_custody",
-    "CovenBuilder::make_identity",
-    "CovenBuilder::make_keys",
+    "CovenBuilder::make_session",
     "CovenBuilder::new",
     "CovenBuilder::oauth_exchange",
     "CovenBuilder::oauth_flow",

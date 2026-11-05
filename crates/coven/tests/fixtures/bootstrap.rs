@@ -274,8 +274,12 @@ impl Installation {
         assert!(self.app.stores().await.unwrap().is_empty());
         let scoped = Arc::new(StoreKeychain::new(self.keychain.clone(), id));
         let person = PersonEntries::new(self.keychain.clone(), id);
-        assert!(StoreKeyCustody::unlock(&KeyringCustody::new(scoped.clone())).unwrap().is_none());
-        assert!(MemberKeyCustody::unlock(&KeyringCustody::new(scoped.clone())).unwrap().is_none());
+        assert!(Custody::<StoreKeyring>::unlock(&KeyringCustody::new(scoped.clone()))
+            .unwrap()
+            .is_none());
+        assert!(Custody::<MemberIdentity>::unlock(&KeyringCustody::new(scoped.clone()))
+            .unwrap()
+            .is_none());
         assert!(scoped.device_id().unwrap().is_none());
         assert!(person.restore_code().unwrap().is_none());
         assert!(person.s3_credentials().unwrap().is_none());

@@ -3,7 +3,7 @@
 
 use crate::tests::Network;
 use crate::*;
-use coven_crypto::custody::{KeyringCustody, MemberKeyCustody, StoreKeyCustody};
+use coven_crypto::custody::KeyringCustody;
 use coven_foundation::clock::HANG_GUARD;
 use coven_foundation::files::StoreDirAccess;
 use std::sync::Arc;
@@ -232,10 +232,12 @@ fn device_entries_gone(app: &Coven, store: StoreId) {
     assert!(keychain.device_id().unwrap().is_none());
     assert!(keychain.storage_credentials().unwrap().is_none());
     assert!(keychain.host_secret("api-token").unwrap().is_none());
-    assert!(StoreKeyCustody::unlock(&KeyringCustody::<StoreKeyring>::new(keychain.clone()))
-        .unwrap()
-        .is_none());
-    assert!(MemberKeyCustody::unlock(&KeyringCustody::<MemberIdentity>::new(keychain))
+    assert!(Custody::<StoreKeyring>::unlock(&KeyringCustody::<StoreKeyring>::new(
+        keychain.clone()
+    ))
+    .unwrap()
+    .is_none());
+    assert!(Custody::<MemberIdentity>::unlock(&KeyringCustody::<MemberIdentity>::new(keychain))
         .unwrap()
         .is_none());
 }

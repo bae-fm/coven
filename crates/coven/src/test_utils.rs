@@ -155,7 +155,7 @@ impl Coven {
         keys: &StoreKeyring,
     ) -> Result<(), KeyError> {
         let keychain = Arc::new(StoreKeychain::new(self.keychain.clone(), directory.id()));
-        StoreKeyCustody::persist(&KeyringCustody::new(keychain), keys)
+        Custody::<StoreKeyring>::persist(&KeyringCustody::new(keychain), keys)
     }
 
     /// Delete this installation's storage credentials for `store`, as the

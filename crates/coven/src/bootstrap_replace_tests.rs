@@ -224,7 +224,7 @@ struct RefusesFirstWrite {
     refused: AtomicBool,
 }
 
-impl MemberKeyCustody for RefusesFirstWrite {
+impl Custody<MemberIdentity> for RefusesFirstWrite {
     fn unlock(&self) -> Result<Option<MemberIdentity>, KeyError> {
         self.custody.unlock()
     }
@@ -256,9 +256,7 @@ async fn a_failed_key_commit_moves_the_old_installation_back() {
         refused: AtomicBool::new(false),
     };
     let failed = restore(
-        network
-            .reopen(&replaced.carol)
-            .identity_custody(IdentityCustody::Custom(Arc::new(custody))),
+        network.reopen(&replaced.carol).identity_custody(CustodyChoice::Custom(Arc::new(custody))),
         store,
         &replaced.code,
     )

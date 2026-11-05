@@ -2218,12 +2218,12 @@ impl CovenBuilder {
 
     /// Where this device keeps the store keys: the OS keychain by default, a
     /// file sealed with a passphrase, memory for this session only, or the
-    /// app's own `StoreKeyCustody`.
-    pub fn key_custody(self, custody: KeyCustody) -> Self;
+    /// app's own `Custody<StoreKeyring>`.
+    pub fn key_custody(self, custody: CustodyChoice<StoreKeyring>) -> Self;
 
     /// Where this device keeps its member's keys, with the same four choices
-    /// and the app's own `MemberKeyCustody` as the last.
-    pub fn identity_custody(self, custody: IdentityCustody) -> Self;
+    /// and the app's own `Custody<MemberIdentity>` as the last.
+    pub fn identity_custody(self, custody: CustodyChoice<MemberIdentity>) -> Self;
 
     /// SQLite settings for every connection a handle opens to the store's
     /// database. Unset ones keep SQLite's defaults; the page size and
@@ -2372,20 +2372,15 @@ impl Namespace {
     pub fn cache_budget(&self) -> u64;
 }
 
-pub enum KeyCustody {
+/// Where this device keeps `T`: the store keys (`StoreKeyring`) or the
+/// member's identity (`MemberIdentity`).
+pub enum CustodyChoice<T: KeyMaterial> {
     Keyring,
     Passphrase(Passphrase),
-    /// Starts empty; opening keys keeps them only for this handle’s session.
+    /// Starts empty; holds only this handle's session: what opening,
+    /// creation, restore or join puts there.
     InMemory,
-    Custom(Arc<dyn StoreKeyCustody>),
-}
-
-pub enum IdentityCustody {
-    Keyring,
-    Passphrase(Passphrase),
-    /// Creation, restore or join fills this session-only custody.
-    InMemory,
-    Custom(Arc<dyn MemberKeyCustody>),
+    Custom(Arc<dyn Custody<T>>),
 }
 
 impl CovenHandle {
@@ -8187,24 +8182,20 @@ impl CovenHandle {
   passphrase derivation. An empty session can acquire keys during setup.
 
 ```rust
-/// The app's own store for the store keys and circle keys this device holds.
-pub trait StoreKeyCustody: Send + Sync {
-    /// Called once at creation or open; None when this device has never held keys.
-    /// Retains the unlocked persistence capability until close.
-    fn unlock(&self) -> Result<Option<StoreKeyring>, KeyError>;
-    /// Keeps `keyring`, replacing what was kept.
-    fn persist(&self, keyring: &StoreKeyring) -> Result<(), KeyError>;
-    fn forget(&self) -> Result<(), KeyError>;
-    /// Erases held memory after users finish; performs no persistence or IO.
-    /// Fallible saves complete through persist before dependent work starts.
-    fn close(&self);
-}
+/// What custody keeps: the store keys or the member's identity. Sealed:
+/// coven alone says how each is named and encoded.
+pub trait KeyMaterial: Clone + Send + Sync + 'static { /* sealed */ }
+impl KeyMaterial for StoreKeyring {}
+impl KeyMaterial for MemberIdentity {}
 
-/// The app's own store for the stable id and held member credentials.
-pub trait MemberKeyCustody: Send + Sync {
-    /// Called once at creation or open; persistence reuses the held session capability.
-    fn unlock(&self) -> Result<Option<MemberIdentity>, KeyError>;
-    fn persist(&self, identity: &MemberIdentity) -> Result<(), KeyError>;
+/// The app's own store for key material this device holds.
+pub trait Custody<T: KeyMaterial>: Send + Sync {
+    /// Called once at creation or open; None when this device has never held `T`.
+    /// Retains the unlocked persistence capability until close.
+    fn unlock(&self) -> Result<Option<T>, KeyError>;
+    /// Keeps `material`, replacing what was kept.
+    fn persist(&self, material: &T) -> Result<(), KeyError>;
+    /// Removes what was kept; succeeds if nothing was kept.
     fn forget(&self) -> Result<(), KeyError>;
     /// Erases held memory after users finish; performs no persistence or IO.
     /// Fallible saves complete through persist before dependent work starts.

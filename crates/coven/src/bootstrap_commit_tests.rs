@@ -32,7 +32,7 @@ fn s3_key() -> S3Credentials {
 }
 
 struct RefusedIdentity(Option<std::path::PathBuf>);
-impl MemberKeyCustody for RefusedIdentity {
+impl Custody<MemberIdentity> for RefusedIdentity {
     fn unlock(&self) -> Result<Option<MemberIdentity>, KeyError> {
         Ok(None)
     }
@@ -65,8 +65,8 @@ async fn prepared(
     app: &Coven,
     id: StoreId,
     keychain: Arc<Keychain>,
-    keys: KeyCustody,
-    identity: IdentityCustody,
+    keys: CustodyChoice<StoreKeyring>,
+    identity: CustodyChoice<MemberIdentity>,
 ) -> (BootstrapStore, OpeningOwners, Database) {
     prepared_continuing(app, id, keychain, keys, identity, Continuing::Fresh).await
 }
@@ -75,8 +75,8 @@ async fn prepared_continuing(
     app: &Coven,
     id: StoreId,
     keychain: Arc<Keychain>,
-    keys: KeyCustody,
-    identity: IdentityCustody,
+    keys: CustodyChoice<StoreKeyring>,
+    identity: CustodyChoice<MemberIdentity>,
     continuing: Continuing,
 ) -> (BootstrapStore, OpeningOwners, Database) {
     let pending = app.directories().begin_bootstrap(id, &UuidIds).await.unwrap();
@@ -110,8 +110,8 @@ async fn custody_failure_restores_the_prior_keys_without_publishing() {
         &app,
         id,
         keychain,
-        KeyCustody::Custom(custody.clone()),
-        IdentityCustody::Custom(Arc::new(RefusedIdentity(None))),
+        CustodyChoice::Custom(custody.clone()),
+        CustodyChoice::Custom(Arc::new(RefusedIdentity(None))),
     )
     .await;
     let error = publish_bootstrap(
@@ -153,8 +153,8 @@ async fn settings_rollback_failure_retains_both_causes_and_restores_other_custod
         &app,
         id,
         keychain,
-        KeyCustody::Custom(custody.clone()),
-        IdentityCustody::Custom(Arc::new(RefusedIdentity(Some(path)))),
+        CustodyChoice::Custom(custody.clone()),
+        CustodyChoice::Custom(Arc::new(RefusedIdentity(Some(path)))),
     )
     .await;
     let next = StoreKeyring::new(StoreKey::generate(KeyId(UuidIds.new_id())).unwrap());
@@ -190,7 +190,7 @@ async fn publication_failure_rolls_back_settings_and_custody() {
     let scoped = Arc::new(StoreKeychain::new(keychain.clone(), id));
     let person = PersonEntries::new(keychain.clone(), id);
     let (pending, owners, database) =
-        prepared(&app, id, keychain, KeyCustody::Keyring, IdentityCustody::Keyring).await;
+        prepared(&app, id, keychain, CustodyChoice::Keyring, CustodyChoice::Keyring).await;
     let old_credentials = SecretBytes::new(b"device credentials before restore".to_vec());
     let old_s3_key = SecretBytes::new(b"saved S3 key before restore".to_vec());
     let old_code = SecretBytes::new(b"code before restore".to_vec());
@@ -222,8 +222,12 @@ async fn publication_failure_rolls_back_settings_and_custody() {
     .await
     .unwrap_err();
     assert!(matches!(error, BootstrapError::Directory(BootstrapDirectoryError::File(_))));
-    assert!(StoreKeyCustody::unlock(&KeyringCustody::new(scoped.clone())).unwrap().is_none());
-    assert!(MemberKeyCustody::unlock(&KeyringCustody::new(scoped.clone())).unwrap().is_none());
+    assert!(Custody::<StoreKeyring>::unlock(&KeyringCustody::new(scoped.clone()))
+        .unwrap()
+        .is_none());
+    assert!(Custody::<MemberIdentity>::unlock(&KeyringCustody::new(scoped.clone()))
+        .unwrap()
+        .is_none());
     assert_eq!(
         scoped.storage_credentials().unwrap().unwrap().as_bytes(),
         old_credentials.as_bytes()
@@ -252,7 +256,7 @@ async fn credential_publication_failures_restore_every_prior_custody_value() {
         person_entries.set_s3_credentials(&old_key).unwrap();
         person_entries.set_restore_code(&old_code).unwrap();
         let (pending, owners, database) =
-            prepared(&app, id, keychain.clone(), KeyCustody::InMemory, IdentityCustody::InMemory)
+            prepared(&app, id, keychain.clone(), CustodyChoice::InMemory, CustodyChoice::InMemory)
                 .await;
         // Device id read/write, then all three credential reads and writes.
         keychain.fail_operations_after(&[after]);
@@ -303,7 +307,8 @@ async fn bootstrap_reports_saved_key_rollback_failure_with_the_publication_failu
     let scoped = StoreKeychain::new(keychain.clone(), id);
     let person = PersonEntries::new(keychain.clone(), id);
     let (pending, owners, database) =
-        prepared(&app, id, keychain.clone(), KeyCustody::InMemory, IdentityCustody::InMemory).await;
+        prepared(&app, id, keychain.clone(), CustodyChoice::InMemory, CustodyChoice::InMemory)
+            .await;
     // Refuse the code write, then refuse rolling back the separate S3 entry.
     keychain.fail_operations_after(&[7, 1]);
     let ring = StoreKeyring::new(StoreKey::generate(KeyId(UuidIds.new_id())).unwrap());
@@ -341,7 +346,7 @@ async fn cleanup_failure_returns_the_open_handle_with_its_session_keys() {
     let key = KeyId(UuidIds.new_id());
     let ring = StoreKeyring::new(StoreKey::generate(key).unwrap());
     let (pending, owners, database) =
-        prepared(&app, id, keychain, KeyCustody::InMemory, IdentityCustody::InMemory).await;
+        prepared(&app, id, keychain, CustodyChoice::InMemory, CustodyChoice::InMemory).await;
     let leftover = root.path().join("stores").join(id.to_string()).join("bootstrap.sealed");
     std::fs::create_dir(leftover).unwrap();
     let location = coven_storage::RestoreStorage::decode(code.storage.as_bytes()).unwrap().location;
@@ -375,7 +380,8 @@ async fn publication_returns_the_handle_without_rereading_custody() {
     let keychain = Keychain::in_memory("commit-test").unwrap();
     let app = Coven::with_keychain(root.path().into(), keychain.clone());
     let (pending, owners, database) =
-        prepared(&app, id, keychain.clone(), KeyCustody::InMemory, IdentityCustody::InMemory).await;
+        prepared(&app, id, keychain.clone(), CustodyChoice::InMemory, CustodyChoice::InMemory)
+            .await;
     let waits = waits(&database).await;
     // Publication needs nine keychain operations; the next read fails.
     keychain.fail_operations_after(&[9]);
@@ -418,8 +424,8 @@ async fn publication_with_a_loaded_provider_does_not_suspend() {
         &app,
         id,
         keychain,
-        KeyCustody::InMemory,
-        IdentityCustody::InMemory,
+        CustodyChoice::InMemory,
+        CustodyChoice::InMemory,
         continuing,
     )
     .await;
@@ -453,7 +459,7 @@ fn household() -> coven_sync::SavedName {
 /// Identity custody that panics as it persists, as a bug in an app's
 /// custody would.
 struct PanickingIdentity;
-impl MemberKeyCustody for PanickingIdentity {
+impl Custody<MemberIdentity> for PanickingIdentity {
     fn unlock(&self) -> Result<Option<MemberIdentity>, KeyError> {
         Ok(None)
     }
@@ -480,8 +486,8 @@ async fn a_panicking_custody_step_restores_the_prior_custody() {
         &app,
         id,
         keychain,
-        KeyCustody::Keyring,
-        IdentityCustody::Custom(Arc::new(PanickingIdentity)),
+        CustodyChoice::Keyring,
+        CustodyChoice::Custom(Arc::new(PanickingIdentity)),
     )
     .await;
     let next = StoreKeyring::new(StoreKey::generate(KeyId(UuidIds.new_id())).unwrap());
@@ -500,7 +506,9 @@ async fn a_panicking_custody_step_restores_the_prior_custody() {
     .unwrap_err();
     let BootstrapError::Bug(bug) = &error else { panic!("{error:?}") };
     assert_eq!(bug.message, "the identity's entry is half written");
-    assert!(StoreKeyCustody::unlock(&KeyringCustody::new(scoped.clone())).unwrap().is_none());
+    assert!(Custody::<StoreKeyring>::unlock(&KeyringCustody::new(scoped.clone()))
+        .unwrap()
+        .is_none());
     assert!(coven_storage::recorded_config(&pending.directory()).unwrap().is_none());
     assert!(scoped.device_id().unwrap().is_none());
     assert!(app.stores().await.unwrap().is_empty());
@@ -537,7 +545,7 @@ async fn a_panicking_publication_settles_custody_by_the_marker() {
         let app = Coven::with_keychain(root.path().into(), keychain.clone());
         let scoped = Arc::new(StoreKeychain::new(keychain.clone(), id));
         let (pending, owners, database) =
-            prepared(&app, id, keychain, KeyCustody::Keyring, IdentityCustody::Keyring).await;
+            prepared(&app, id, keychain, CustodyChoice::Keyring, CustodyChoice::Keyring).await;
         let ring = StoreKeyring::new(StoreKey::generate(KeyId(UuidIds.new_id())).unwrap());
         let committed = commit(
             &pending.directory(),
@@ -549,7 +557,7 @@ async fn a_panicking_publication_settles_custody_by_the_marker() {
             &owners,
             &PanickingPublication { pending: &pending, after },
         );
-        let kept = StoreKeyCustody::unlock(&KeyringCustody::new(scoped.clone())).unwrap();
+        let kept = Custody::<StoreKeyring>::unlock(&KeyringCustody::new(scoped.clone())).unwrap();
         match committed {
             Ok(Some(BootstrapError::Bug(bug))) if after => {
                 assert_eq!(bug.message, "the marker's removal is lost");

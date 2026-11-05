@@ -1,8 +1,8 @@
 //! One registered service, with independent entries for each store (E1).
 
 use super::platform::NativeKeychain;
-use super::{KeyError, PersonRestoreCode, MEMBER_KEYS_ENTRY, STORE_KEYS_ENTRY};
-use crate::{wire, MaterialError, SecretBytes, SecretText};
+use super::{KeyError, KeyMaterial, PersonRestoreCode};
+use crate::{wire, MaterialError, MemberIdentity, SecretBytes, SecretText, StoreKeyring};
 use coven_foundation::id_source::{DeviceId, StoreId};
 use coven_foundation::locks::lock_unpoisoned;
 use std::{
@@ -327,8 +327,8 @@ impl StoreKeychain {
         }
         for name in [
             HOST_SECRET_NAMES_ENTRY,
-            STORE_KEYS_ENTRY,
-            MEMBER_KEYS_ENTRY,
+            StoreKeyring::ENTRY,
+            MemberIdentity::ENTRY,
             DEVICE_ID_ENTRY,
             CREDENTIALS_ENTRY,
             SETUP_CREDENTIALS_ENTRY,

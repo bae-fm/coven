@@ -1,5 +1,5 @@
 use super::*;
-use crate::custody::{KeySession, MemberKeyCustody, StoreKeyCustody};
+use crate::custody::{Custody, KeySession};
 use coven_foundation::files::StoreDirAccess;
 use std::sync::Arc;
 
@@ -71,7 +71,7 @@ fn a_session_holds_its_material_and_saves_without_rereading_the_file() {
             file.clone(),
             id,
         ));
-        let session = KeySession::store(custody.clone()).unwrap();
+        let session = KeySession::open(custody.clone()).unwrap();
         let first = StoreKeyring::new(StoreKey::generate(KeyId(Uuid::from_u128(1))).unwrap());
         session.persist(&first).unwrap();
         let header = file.read_optional().unwrap().unwrap()[..37].to_vec();
@@ -91,7 +91,7 @@ fn a_session_holds_its_material_and_saves_without_rereading_the_file() {
         assert_eq!(counter.take().custody_derivations, 1);
         session.close();
         assert!(custody.protection.lock().unwrap().is_none());
-        let reopened = KeySession::store(Arc::new(PassphraseCustody::new(
+        let reopened = KeySession::open(Arc::new(PassphraseCustody::<StoreKeyring>::new(
             Passphrase::new("phrase".into()),
             file,
             id,
@@ -204,7 +204,7 @@ fn failed_save_and_forget_preserve_held_keys_and_reuse_the_sealing_capability() 
             file.clone(),
             id,
         ));
-        let session = KeySession::store(custody.clone()).unwrap();
+        let session = KeySession::open(custody.clone()).unwrap();
         let first = StoreKeyring::new(StoreKey::generate(KeyId(Uuid::from_u128(1))).unwrap());
         session.persist(&first).unwrap();
         file.remove().unwrap();

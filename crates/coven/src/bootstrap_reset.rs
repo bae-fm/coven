@@ -32,25 +32,25 @@ pub(crate) async fn reset_device(
         _ => None,
     };
     // One custody instance per key kind reads now and keeps them at publication.
-    let identity = CovenBuilder::make_identity(
+    let identity = CovenBuilder::make_session(
         std::mem::replace(
             &mut builder.identity,
-            CustodyChoice::Configured(IdentityCustody::InMemory),
+            SessionSource::Configured(CustodyChoice::InMemory),
         ),
         &directory,
         store,
         keychain.clone(),
     )?;
-    builder.identity = CustodyChoice::Session(identity.clone());
+    builder.identity = SessionSource::Session(identity.clone());
     let member = identity.read()?.ok_or(SyncError::from(StorageFailure::MemberKeysMissing))?;
-    let keys = CovenBuilder::make_keys(
-        std::mem::replace(&mut builder.keys, CustodyChoice::Configured(KeyCustody::InMemory)),
+    let keys = CovenBuilder::make_session(
+        std::mem::replace(&mut builder.keys, SessionSource::Configured(CustodyChoice::InMemory)),
         &directory,
         store,
         keychain,
     )?;
     // Unlocking must succeed; loading acquires any store key it lacks.
-    builder.keys = CustodyChoice::Session(keys);
+    builder.keys = SessionSource::Session(keys);
     // Check bucket ownership and slot 1 before anything is loaded.
     let storage = builder
         .connector()

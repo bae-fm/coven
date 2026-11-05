@@ -107,16 +107,17 @@ async fn reset_keeps_passphrase_sessions_until_the_replacement_handle_closes() {
     uploaded(&f, "kept").await;
     f.handle.close().await.unwrap();
     let keychain = Arc::new(custody(&f));
-    let member = MemberKeyCustody::unlock(&KeyringCustody::new(keychain.clone())).unwrap().unwrap();
-    let ring = StoreKeyCustody::unlock(&KeyringCustody::new(keychain)).unwrap().unwrap();
-    let member_session = KeySession::member(Arc::new(PassphraseCustody::new(
+    let member =
+        Custody::<MemberIdentity>::unlock(&KeyringCustody::new(keychain.clone())).unwrap().unwrap();
+    let ring = Custody::<StoreKeyring>::unlock(&KeyringCustody::new(keychain)).unwrap().unwrap();
+    let member_session = KeySession::open(Arc::new(PassphraseCustody::new(
         Passphrase::new("member secret".into()),
         f.directory.owned_file(StoreFile::MemberKeys),
         f.directory.id(),
     )))
     .unwrap();
     member_session.persist(&member).unwrap();
-    let key_session = KeySession::store(Arc::new(PassphraseCustody::new(
+    let key_session = KeySession::open(Arc::new(PassphraseCustody::new(
         Passphrase::new("store secret".into()),
         f.directory.owned_file(StoreFile::StoreKeys),
         f.directory.id(),
@@ -126,8 +127,8 @@ async fn reset_keeps_passphrase_sessions_until_the_replacement_handle_closes() {
     drop((member_session, key_session));
     let configured = || {
         reopen(&f)
-            .identity_custody(IdentityCustody::Passphrase(Passphrase::new("member secret".into())))
-            .key_custody(KeyCustody::Passphrase(Passphrase::new("store secret".into())))
+            .identity_custody(CustodyChoice::Passphrase(Passphrase::new("member secret".into())))
+            .key_custody(CustodyChoice::Passphrase(Passphrase::new("store secret".into())))
     };
     let handle = configured().reset_device(f.directory.id(), "Replacement", |_| ()).await.unwrap();
     assert_eq!(notes(&handle).await, ["kept"]);

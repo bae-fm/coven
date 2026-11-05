@@ -22,8 +22,7 @@ pub use crate::storage::{
     ConnectedStorage, SetupCancellation, StorageSetup, StorageSetupStep, StoreKeyState,
 };
 pub use coven_crypto::custody::{
-    IdentityCustody, IdentityError, KeyCustody, KeyError, KeychainError, MemberKeyCustody,
-    Passphrase, StoreKeyCustody,
+    Custody, CustodyChoice, IdentityError, KeyError, KeyMaterial, KeychainError, Passphrase,
 };
 pub use coven_crypto::{
     CircleKey, ConfirmationNumber, CryptoError, MaterialError, MemberIdentity, MemberKeys,

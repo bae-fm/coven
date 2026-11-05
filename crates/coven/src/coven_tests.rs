@@ -244,7 +244,7 @@ async fn a_breaking_migration_keeps_the_waiting_write_as_authored() {
 }
 
 fn identity(app: &Coven, id: StoreId) -> MemberIdentity {
-    MemberKeyCustody::unlock(&coven_crypto::custody::KeyringCustody::new(Arc::new(
+    Custody::<MemberIdentity>::unlock(&coven_crypto::custody::KeyringCustody::new(Arc::new(
         app.store_keychain(id),
     )))
     .unwrap()
@@ -336,10 +336,12 @@ fn device_entries_remain(app: &Coven, store: StoreId) -> bool {
     let keychain = Arc::new(app.store_keychain(store));
     keychain.device_id().unwrap().is_some()
         || keychain.storage_credentials().unwrap().is_some()
-        || MemberKeyCustody::unlock(&KeyringCustody::<MemberIdentity>::new(keychain.clone()))
-            .unwrap()
-            .is_some()
-        || StoreKeyCustody::unlock(&KeyringCustody::<StoreKeyring>::new(keychain))
+        || Custody::<MemberIdentity>::unlock(&KeyringCustody::<MemberIdentity>::new(
+            keychain.clone(),
+        ))
+        .unwrap()
+        .is_some()
+        || Custody::<StoreKeyring>::unlock(&KeyringCustody::<StoreKeyring>::new(keychain))
             .unwrap()
             .is_some()
 }

@@ -1,5 +1,5 @@
 use super::*;
-use crate::custody::MemberKeyCustody;
+use crate::custody::Custody;
 use crate::MemberIdentity;
 use coven_foundation::id_source::MemberId;
 
