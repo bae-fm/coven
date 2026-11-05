@@ -356,3 +356,69 @@ async fn a_share_applied_after_its_account_was_taken_back_grants_it_again() {
         device.database().close().await.unwrap();
     }
 }
+
+/// Ben is an admin whose own account doesn't hold the store. His invite for
+/// Carol's account is refused by the pass before it shares anything: the
+/// refusal is the invite's pending record, naming `NotStoreOwner`, and the
+/// provider is never asked to grant (§13.2, §20.9).
+#[tokio::test]
+async fn an_admin_whose_account_doesnt_hold_the_store_cannot_share_it() {
+    let group = Group::shared();
+    let (phone, ben, laptop) = household(&group).await;
+    let result = ben
+        .sync
+        .create_invite(
+            InviteTarget::NewMember { role: MemberRole::Member, name: "Carol".into() },
+            InviteAccess::ProviderAccount { email: CAROL.into() },
+            crate::InviteDelivery::Sent { lifetime: crate::InviteLifetime::Day },
+        )
+        .await;
+    let Err(SyncError::Pending(pending)) = result else { panic!("{:?}", result.err()) };
+    assert!(
+        matches!(&pending.reason, PendingReason::Storage { failure, .. } if *failure == coven_storage::StorageFailure::NotStoreOwner),
+        "{pending:?}"
+    );
+    let open = listed(&ben).await;
+    assert_eq!(open.len(), 1);
+    assert_eq!(open[0].stage, InviteStage::Granting);
+    assert_eq!(grants(&ben), 0);
+    assert!(!group.storage.shared_with(CAROL).await);
+    assert_eq!(row(&ben, CAROL).await, None);
+    for device in [&phone, &ben, &laptop] {
+        device.database().close().await.unwrap();
+    }
+}
+
+/// Ana's phone makes a recovery invite for Ben through the account recorded
+/// for him, then cancels it. Cleaning the invite up takes back only what it
+/// newly granted: Ben's existing access, which an active member uses, stays
+/// as it was (§13.2, §14.2).
+#[tokio::test]
+async fn a_recovery_invites_cleanup_takes_back_only_its_new_grant() {
+    let group = Group::shared();
+    let (phone, ben, laptop) = household(&group).await;
+    let before = row(&phone, "ben@example.org").await;
+    assert_eq!(before.map(|(intended, _)| intended), Some(true));
+    let invite = phone
+        .sync
+        .create_invite(
+            InviteTarget::ReplaceMemberKeys { member: ben.identity.member() },
+            InviteAccess::ProviderAccount { email: "Ben@example.org".into() },
+            crate::InviteDelivery::Sent { lifetime: crate::InviteLifetime::Day },
+        )
+        .await
+        .unwrap();
+    assert!(group.storage.shared_with("ben@example.org").await);
+    phone.sync.cancel_invite(invite.id).await.unwrap();
+    phone.sync.pass().await.unwrap();
+    laptop.sync.pass().await.unwrap();
+    assert!(listed(&phone).await.is_empty());
+    assert!(group.storage.shared_with("ben@example.org").await, "Ben's access stays shared");
+    for device in [&phone, &laptop] {
+        assert_eq!(row(device, "ben@example.org").await, before);
+        assert!(!device.storage.request_trace().contains(&MemoryRequest::Other("revoke_access")));
+    }
+    for device in [&phone, &ben, &laptop] {
+        device.database().close().await.unwrap();
+    }
+}
