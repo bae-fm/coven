@@ -103,7 +103,7 @@ async fn an_app_reload_rebuilds_from_the_newest_snapshot_and_keeps_waiting_write
 }
 
 /// The floor in storage, as `device` reads it.
-pub(super) async fn stored_floor(device: &Device) -> crate::floor_object::FloorObject {
+pub(crate) async fn stored_floor(device: &Device) -> crate::floor_object::FloorObject {
     let mut ring = device.sync.keys.read().unwrap().unwrap();
     crate::floor_object::FloorObject::read(
         &device.sync.database,

@@ -895,4 +895,4 @@ impl History {
 
 #[cfg(test)]
 #[path = "sequence_reload_tests.rs"]
-mod tests;
+pub(crate) mod tests;

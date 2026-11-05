@@ -133,3 +133,7 @@ impl SequenceSync {
         Ok(FloorArtifact { capture: capture.clone(), size, session: None })
     }
 }
+
+#[cfg(test)]
+#[path = "floor_capture_tests.rs"]
+mod tests;
