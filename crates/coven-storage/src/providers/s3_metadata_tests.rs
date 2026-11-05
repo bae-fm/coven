@@ -192,3 +192,23 @@ async fn gcs_generation_changes_for_equal_bytes_and_hash_has_full_object_scope()
         Some(ObjectChecksum::FullObject(ChecksumValue::Crc32cBase64("AAAAAA==".into())))
     );
 }
+
+/// An immutable object's revision is its ETag; no replacement revision is
+/// stored with it (Appendix E.11).
+#[tokio::test]
+async fn an_immutable_objects_revision_is_its_etag() {
+    let state = Arc::new(Mutex::new(Remote::default()));
+    let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
+    let storage = provider(&server.url);
+    let path = ObjectPath::slot(STORE_ID, std::num::NonZeroU64::MIN);
+    storage.create(&path, b"immutable entry").await.unwrap();
+    let key = crate::S3Prefix::default().key(&path);
+    let (etag, sent_revision) = {
+        let state = state.lock().unwrap();
+        (state.etags[&key].clone(), state.revisions[&key].clone())
+    };
+    assert_eq!(sent_revision, "immutable", "no coven-revision metadata accompanies the create");
+    let status = storage.status(&path).await.unwrap().unwrap();
+    assert_eq!(status.revision, etag);
+    assert_eq!(storage.read_object(&path, None).await.unwrap().metadata.revision, etag);
+}
