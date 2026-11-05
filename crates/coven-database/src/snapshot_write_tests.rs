@@ -82,6 +82,11 @@ pub(crate) async fn frames_for(database: &Database, id: SnapshotId) -> SnapshotF
     for record in records(database) {
         database.receive(record.into()).await.unwrap();
     }
+    capture(database, id).await
+}
+
+/// The snapshot of the database as it stands, without applying its queue.
+async fn capture(database: &Database, id: SnapshotId) -> SnapshotFrames {
     let frames = Arc::new(Mutex::new(Vec::new()));
     let metadata = Arc::new(Mutex::new(None));
     let output = frames.clone();
@@ -294,6 +299,44 @@ async fn a_snapshot_round_trips_rows_history_and_excluded_changes() {
     target.close().await.unwrap();
     source.close().await.unwrap();
     receiver.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_snapshot_leaves_out_this_devices_unsent_writes() {
+    let ids = SequentialIds::new();
+    let sender_store = TestStore::with_ids(&ids);
+    let device_store = TestStore::with_ids(&ids);
+    let sender = sender_store.schema(notes(), NOTES).await.unwrap();
+    let device = device_store.schema(notes(), NOTES).await.unwrap();
+    sql(&sender, "INSERT INTO notes VALUES('applied','from the sender','')").await.unwrap();
+    for record in records(&sender) {
+        device.receive(record.into()).await.unwrap();
+    }
+    sql(&device, "INSERT INTO notes VALUES('unsent','written here','')").await.unwrap();
+    assert_eq!(count(&device, "_coven_uploads"), 1);
+    let (header, snapshot) = decode(&capture(&device, id(Audience::Store)).await);
+    assert_eq!(header.covers, 1);
+    let rows: Vec<_> = snapshot
+        .iter()
+        .filter_map(|record| match record {
+            SnapshotRecord::Synced(row) => Some(row.columns["title"].value.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(rows, [Value::Text("from the sender".into())]);
+    let merged: Vec<_> =
+        snapshot.iter().filter(|record| matches!(record, SnapshotRecord::Merge(_))).collect();
+    assert_eq!(merged.len(), 1, "one merge record");
+    let writes: Vec<_> = snapshot
+        .iter()
+        .filter_map(|record| match record {
+            SnapshotRecord::Write(write) => Some(write.id),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(writes, [records(&sender)[0].header.position]);
+    sender.close().await.unwrap();
+    device.close().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
