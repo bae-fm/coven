@@ -10,7 +10,9 @@ use coven_sync::DeviceCredentials;
 /// Restore this person's store on a new device, returning its open handle.
 /// S3 requires a key: the one the code carries, or one entered separately,
 /// never both. Other providers require None and use the builder's own
-/// sign-in. Invalid key inputs fail before bootstrap begins.
+/// sign-in. Invalid key inputs fail before bootstrap begins. A store whose
+/// unfinished installation holds a join's saved code is refused with
+/// `StoreLockError::BootstrapPending` before anything changes (§13.4).
 pub async fn restore_from_code(
     builder: CovenBuilder,
     code: &str,

@@ -265,3 +265,107 @@ async fn a_restore_whose_device_was_removed_ends_and_removes_its_installation() 
     assert!(!install.root.path().join("stores").join(owner.directory.id().to_string()).exists());
     owner.close().await;
 }
+
+/// Carol's phone waits for approval of its join to Household, and the app
+/// is closed. Someone then restores Household on the phone from Ana's code
+/// and cancels it as it connects. The phone's one installation of Household
+/// is the join's, so the restore is refused before it changes anything:
+/// cancelled, it would remove the installation with the join's saved code
+/// and sign-in, while Ana may still approve Carol's request (§13.4).
+#[tokio::test]
+async fn a_restore_refuses_a_waiting_joins_installation() {
+    for provider in [CloudProvider::S3, CloudProvider::Dropbox] {
+        let owner = Owner::new(provider, false).await;
+        let invite = owner.invite().await;
+        let install = Installation::new();
+        let store = owner.directory.id();
+        waiting_join(&owner, &install, &invite).await;
+        let kept = install
+            .only_kept_sign_in(store)
+            .await
+            .map(|tokens| tokens.access_token.as_str().to_owned());
+        let (stop, cancel) = watch::channel(false);
+        let ended = restore_from_code(
+            install.authenticated_builder(&owner, owner.storage.clone()).await,
+            &owner.code.to_text().unwrap(),
+            owner.s3_credentials(),
+            "Ana’s laptop",
+            cancel_at(Phase::Connecting, &stop),
+            &cancel,
+        )
+        .await;
+        assert!(
+            matches!(
+                ended,
+                Err(BootstrapError::Directory(BootstrapDirectoryError::Lock(
+                    StoreLockError::BootstrapPending(refused)
+                ))) if refused == store
+            ),
+            "{provider:?}: {ended:?}"
+        );
+        assert_eq!(saved_code(&install, store).unwrap().as_str(), invite.shown_code());
+        assert_eq!(
+            install
+                .only_kept_sign_in(store)
+                .await
+                .map(|tokens| tokens.access_token.as_str().to_owned()),
+            kept,
+            "{provider:?}"
+        );
+        let control = JoinControl::new();
+        let resumed =
+            install.builder(&owner, owner.recipient()).resume_join(store, |_| {}, &control);
+        let (result, _) = join_and_approve(&owner.handle, resumed, |_| async {}).await;
+        result.unwrap().unwrap().close().await.unwrap();
+        owner.close().await;
+    }
+}
+
+/// Ana's laptop registers while restoring Household, and its call fails
+/// before it learns so: the restore is recorded and listed. A join with an
+/// invite to Household then begins on the laptop and is cancelled at once.
+/// The laptop's one installation of Household is the restore's, so the join
+/// is refused before it changes anything: cancelled, it would remove the
+/// installation with the restore's record, and the laptop would stay
+/// registered with nothing listed to finish it (§13.4).
+#[tokio::test]
+async fn a_join_refuses_a_recorded_restores_installation() {
+    let owner = Owner::new(CloudProvider::S3, false).await;
+    let invite = owner.invite().await;
+    let install = Installation::new();
+    let store = owner.directory.id();
+    let (_, cancel) = watch::channel(false);
+    owner.storage.set_faults(Faults { refuse_after_storing: 1, ..Faults::none() }).await;
+    let builder = install.authenticated_builder(&owner, owner.storage.clone()).await;
+    assert!(restoring(&owner, builder, &cancel).await.is_err());
+    owner.storage.set_faults(Faults::none()).await;
+    assert_eq!(listed(&install, &owner).await, [store]);
+    let control = JoinControl::new();
+    control.cancel();
+    let joined = join_with_invite(
+        install.authenticated_builder(&owner, owner.recipient()).await,
+        invite.shown_code(),
+        "Carol's phone",
+        |_| {},
+        &control,
+    )
+    .await;
+    assert!(
+        matches!(
+            joined,
+            Err(BootstrapError::Directory(BootstrapDirectoryError::Lock(
+                StoreLockError::BootstrapPending(refused)
+            ))) if refused == store
+        ),
+        "{joined:?}"
+    );
+    assert!(saved_code(&install, store).is_none());
+    assert_eq!(listed(&install, &owner).await, [store]);
+    // Carol's invite waits for a request, so the owner's passes stay
+    // pending: the resumed restore is checked on the laptop alone.
+    let handle = resume(&install, &owner).await.unwrap();
+    assert_eq!(handle.restore_code().await.unwrap(), owner.code.to_text().unwrap().as_str());
+    handle.close().await.unwrap();
+    assert!(listed(&install, &owner).await.is_empty());
+    owner.close().await;
+}

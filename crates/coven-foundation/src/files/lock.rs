@@ -189,7 +189,8 @@ pub enum StoreLockError {
     #[error("store {0} is already open")]
     AlreadyOpen(StoreId),
     /// An unfinished first installation must be resumed by the call that
-    /// began it: a restore or join with its code.
+    /// began it: a restore or join with its code. A restore on a join's
+    /// installation, or a join on a recorded restore's, is refused too (§13.4).
     #[error("store {0} requires restore or join to finish bootstrap")]
     BootstrapPending(StoreId),
     /// A replacement of this device's installation swapped in but did not

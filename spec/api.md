@@ -1842,7 +1842,8 @@ pub enum StoreLockError {
     /// no timeout or polling, keyed by canonical directory and store id.
     AlreadyOpen(StoreId),
     /// An unfinished first installation must be resumed by the call that
-    /// began it: restore or join.
+    /// began it: opening refuses it, and so does a restore on a join's
+    /// installation or a join on a recorded restore's, changing nothing.
     BootstrapPending(StoreId),
     /// A replacement of this device's installation swapped in but did not
     /// finish. Opening, and the other of `reset_device` and `restore_device`,
@@ -7520,7 +7521,9 @@ impl S3Credentials {
 /// waits for the registration, then ends the call with
 /// `BootstrapError::RestoreRegistered`. A cancel, or a registration refused
 /// or a member removed, while nothing in storage names the device as active
-/// ends the restore, removing everything it kept (§13.1).
+/// ends the restore, removing everything it kept (§13.1). A store whose
+/// unfinished installation holds a join's saved code is refused with
+/// `StoreLockError::BootstrapPending` before anything changes (§13.4).
 pub async fn restore_from_code(
     builder: CovenBuilder,
     code: &str,
@@ -7661,7 +7664,9 @@ pub async fn restore_from_saved_code(
 /// sent, which then isn't. Dropping the call keeps the unfinished join for
 /// `resume_join`. Cancelling through `control` once the request may have been
 /// sent ends the call with `BootstrapError::JoinRequestSent`, keeping the
-/// unfinished join, as dropping does.
+/// unfinished join, as dropping does. A store whose unfinished installation
+/// holds a restore's record is refused with `StoreLockError::BootstrapPending`
+/// before anything changes (§13.4).
 pub async fn join_with_invite(
     builder: CovenBuilder,
     code: &str,

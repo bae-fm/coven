@@ -4579,6 +4579,19 @@ everything is encrypted.
   restore whose device may be registered (§13.1). Dropping a
   join that is waiting for approval keeps its encrypted request and saved code,
   so the app can resume it.
+- **One call to an installation.** A device keeps one unfinished installation
+  of a store, which a join or a restore begins on, whichever made it. Carol's
+  phone waits for approval of her join to Household, and someone types Ana's
+  restore code for Household on it. A restore begun there and cancelled would
+  remove the installation with Carol's saved code and sign-in, while Ana may
+  still approve her request, and nothing on the phone would list the join
+  ([`restore_strands_join`](proofs/sequence/CovenSequence/FirstInstallation.lean)).
+  A join begun on a recorded restore's installation would take the record the
+  same way
+  ([`join_strands_restore`](proofs/sequence/CovenSequence/FirstInstallation.lean)).
+  So a restore refuses an installation holding a join's saved code, and a join
+  one holding a restore's record, with `BootstrapPending`, changing nothing.
+  The app finishes the call under way first.
 - **Dropping mid-setup.** Dropping a setup in progress marks the installation as
   closing. Its locks stay held until its blocking work in flight finishes. Another
   setup or open of the same store in this process waits for them, as any
@@ -10755,6 +10768,8 @@ Write-ups explain each model and state its assumptions:
 | *Body.* An ended invite that looks only at history leaves a claim open for good: its share's end, when its own slot showed the share ended before the claim settled, or its share's record, when the app cancelled it while that claim landed | `ended_share_strands_claim`, `cancelled_share_strands_claim` | `proofs/sequence/CovenSequence/InviteClaims.lean` | §13.2 |
 | While history names a restoring device as active, or a claim of its registration is open, the restore is published or listed for the app to finish; from every reachable state, crashes, dropped calls, failures, cancels, lost slots and the member's removal included, coven's own steps and the app resuming what is listed end the restore published, with its device registered, or with its device not active and no claim open | `registered_listed`, `settles`, `settled_outcome` | `proofs/sequence/CovenSequence/RestoreRegistration.lean` | §11.6, §13.1 |
 | *Body.* A restore that doesn't record itself before registering leaves its device registered with nothing listed after a crash; a cancel that doesn't wait for the registration leaves it registered with nothing on the device | `crashed_registration_ghost`, `cancelled_registration_ghost` | `proofs/sequence/CovenSequence/RestoreRegistration.lean` | §13.1 |
+| A join and a restore of one store begin on the device's one unfinished installation of it; while a restore refuses an installation holding an invite code, and a join one holding a restore's record, whatever storage may hold of a join's request or a restore's registration, the call that sent it stays listed until it meets its outcome | `never_stranded` | `proofs/sequence/CovenSequence/FirstInstallation.lean` | §13.4 |
+| *Body.* Without that refusal, a restore cancelled on a waiting join's installation removes the join's code, and a join cancelled on a registering restore's installation removes the restore's record | `restore_strands_join`, `join_strands_restore` | `proofs/sequence/CovenSequence/FirstInstallation.lean` | §13.4 |
 | A join's reported phases never go back: waiting, loading, done, across its checks and the calls that resume it. Keeping the opened keys only in the call, or reporting a scan that finds no copy as loading, makes them go back | `phases_forward`, `opened_never_waits`, `resumed_waits_again`, `scan_shown_as_loading` | `proofs/sequence/CovenSequence/JoinStatus.lean` | §13.2 |
 | Writes after a removal or key replacement are refused with rows unchanged and no new unique-value or owner claim, while the claim number is recorded | `cutoff` | `proofs/sequence/CovenSequence/Cutoff.lean` | §14.1 |
 | Circle permission is judged at the authored applied prefix; landing still checks store membership, device removal and key generation | `write_permission_at_authored_prefix` | `proofs/sequence/CovenSequence/Authorship.lean` | §15.6, §15.8 |
@@ -10905,7 +10920,7 @@ maps them are with each provider in Appendix E.
 | `DbError::VersionNotRebuilt` | a read-only open registers another version of a collation or function than the store's indexes were built with | §4 |
 | `DbError::MigrationKindMismatch { version }` | a migration's declared kind, `addition` or `breaking`, disagrees with the kind coven finds; nothing commits | §18.3 |
 | `AlreadyOpen` | the store is still open in this process, or locked by another process | F.4 |
-| `BootstrapPending` | a first installation, by restore or join, is unfinished; only that call resumes it | §13.4 |
+| `BootstrapPending` | a first installation, by restore or join, is unfinished; only that call resumes it, and the other is refused on it | §13.4 |
 | `ReplacementUnfinished` | a reset or restore in place swapped the new installation in but did not finish; names the call that finishes it, and refuses the other | §13.1, §19.3 |
 | `SchemaError::ForeignKeyNotPrimaryKey` | a synced table's foreign key doesn't reference the parent's whole primary key | §9.1 |
 | `SchemaError::LocalChildUpdate` | a local foreign key into a synced non-key column has an update action other than cascade or set null | §9.1 |

@@ -215,7 +215,9 @@ impl From<crate::task::TaskFailed> for BootstrapError {
 /// `control` cancels the join or asks for a check for approval at once.
 /// Cancelling before the request may have been sent removes the unpublished
 /// installation; after, the call ends with `BootstrapError::JoinRequestSent`
-/// and keeps it, as dropping does.
+/// and keeps it, as dropping does. A store whose unfinished installation
+/// holds a restore's record is refused with `StoreLockError::BootstrapPending`
+/// before anything changes (§13.4).
 pub async fn join_with_invite(
     builder: CovenBuilder,
     code: &str,
@@ -376,6 +378,17 @@ async fn bootstrap_device(
     let clock = builder.clock.clone();
     let started = clock.elapsed();
     let pending = builder.directories.begin_bootstrap(id, builder.ids.as_ref()).await?;
+    // The store's one unfinished installation lists one call. A restore on
+    // a waiting join's installation, or a join on a recorded restore's,
+    // would remove the other's listing when it ends without the store, with
+    // its request or registration possibly in storage (§13.4).
+    let other = match &request {
+        BootstrapRequest::Restore { .. } => device_entries.invite_code()?.is_some(),
+        BootstrapRequest::Join { .. } => device_entries.restore_record()?.is_some(),
+    };
+    if other {
+        return Err(BootstrapDirectoryError::from(StoreLockError::BootstrapPending(id)).into());
+    }
     let result =
         prepare_and_load(&mut builder, Installing::New(&pending), &request, &status, cancel).await;
     match result {
