@@ -192,6 +192,61 @@ async fn reset_uses_the_authored_prefix_and_precedes_schema_exclusion() {
     db.close().await.unwrap();
 }
 
+/// A reset ignores Ben's write 1, which never read it. His write 2 did read
+/// the reset, so it is judged; it edits the note write 1 created, a source the
+/// reset ignored. Received after a raise with a converter, it is a lost value
+/// naming that source, and the callback never sees the change (§18.6, §9.5).
+#[tokio::test]
+async fn a_change_built_on_a_reset_ignored_part_is_a_data_dependency_loss() {
+    let ids = coven_foundation::id_source::SequentialIds::new();
+    let (ben_store, receiver_store) = (TestStore::with_ids(&ids), TestStore::with_ids(&ids));
+    let ben = ben_store.schema(notes(), NOTES).await.unwrap();
+    sql(&ben, "INSERT INTO notes VALUES('n','title','body')").await.unwrap();
+    sql(&ben, "UPDATE notes SET title='edited'").await.unwrap();
+    let mut writes = records(&ben);
+
+    let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counted = calls.clone();
+    let receiver = receiver_store
+        .builder(
+            notes(),
+            vec![
+                crate::Migration::addition(1, "notes", NOTES),
+                crate::Migration::breaking(
+                    2,
+                    "index",
+                    "CREATE INDEX notes_title ON notes(title)",
+                    crate::OldWrites::Convert(std::sync::Arc::new(move |_| {
+                        counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        Ok(())
+                    })),
+                ),
+            ],
+        )
+        .open()
+        .await
+        .unwrap();
+    receiver.exclude_later_writes(2).await;
+    let reset = Slot(receiver.applied_slot().await.unwrap() + 1);
+    assert!(receiver.install_reset_fixture(reset, Audience::Store, 1).await.unwrap());
+    writes[1].header.read_through = reset.0;
+    for write in &writes {
+        receiver.receive(write.clone().into()).await.unwrap();
+    }
+    assert_eq!(count(&receiver, "notes"), 0);
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+    let losses = receiver.lost_values().await.unwrap();
+    assert!(
+        matches!(&losses[..], [loss] if matches!(&loss.replaced_by,
+            crate::Replacement::DataDependency { write, sources }
+                if *write == writes[1].header.position
+                    && sources.iter().all(|source| source.write == writes[0].header.position))),
+        "{losses:?}"
+    );
+    receiver.close().await.unwrap();
+    ben.close().await.unwrap();
+}
+
 /// Fill this domain's tables from the rows of the plan audit's `fixture`
 /// table, inside its transaction (`internal_schema_scan_reasons_tests.rs`).
 pub(crate) fn fill_for_plans(db: &rusqlite::Connection) {
