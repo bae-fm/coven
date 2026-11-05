@@ -24,6 +24,36 @@ async fn a_lost_create_reply_settles_exact_bytes_without_a_second_slot() {
     ana.sync.database.close().await.unwrap();
 }
 
+/// Queued writes leave the queue only once their claim is settled and the
+/// state that consumed them is committed: a claim whose reply is lost leaves
+/// them queued, and settling it applies them once (§6.3).
+#[tokio::test]
+async fn queued_writes_leave_the_queue_only_once_their_claim_settles() {
+    let group = Group::new();
+    let ana = group.device(1).await;
+    let ben = group.device(2).await;
+    group.create(&ana).await;
+    group.admit(&ana, &ben).await;
+    ana.sync.pass().await.unwrap();
+    insert(&ana.sync.database, "a", "one").await;
+    insert(&ana.sync.database, "b", "two").await;
+    let queued = ana.sync.database.test_queued_writes().await.unwrap().len();
+    assert!(queued >= 2);
+    ana.storage.set_faults(Faults { lose_completion_reply: true, ..Faults::none() }).await;
+    assert!(matches!(ana.sync.pass().await, Err(SyncError::Storage(_))));
+    assert_eq!(ana.sync.database.test_queued_writes().await.unwrap().len(), queued);
+
+    ana.sync.pass().await.unwrap();
+    assert!(ana.sync.database.test_queued_writes().await.unwrap().is_empty());
+    ben.sync.pass().await.unwrap();
+    let expected = [("a".into(), "one".into()), ("b".into(), "two".into())];
+    assert_eq!(rows(&ana.sync.database).await, expected);
+    assert_eq!(rows(&ben.sync.database).await, expected);
+    assert!(ana.sync.database.lost_values().await.unwrap().is_empty());
+    ana.sync.database.close().await.unwrap();
+    ben.sync.database.close().await.unwrap();
+}
+
 #[tokio::test]
 async fn administrative_contention_reuses_the_claim_number() {
     let group = Group::new();
@@ -652,4 +682,62 @@ async fn a_slot_past_the_providers_copy_limit_waits_naming_copy_too_large() {
     assert!(ana.database().waiting_snapshot_headers().await.unwrap().is_empty());
     assert!(ana.storage.status(&refused).await.unwrap().is_some());
     ana.database().close().await.unwrap();
+}
+
+/// A writes slot above the provider's single-request limit uploads in parts
+/// and becomes visible only when complete: while a later part is held, the
+/// slot's path has no object and another device finds no new slot (§6.3).
+#[tokio::test]
+async fn a_large_writes_slot_is_visible_only_once_complete() {
+    let mut group = Group::new();
+    group.storage = coven_storage::test_utils::MemoryStorage::builder()
+        .clock(group.clock.clone())
+        .transfer_limits(256, 128)
+        .build()
+        .unwrap();
+    let ana = group.device(1).await;
+    let ben = group.device(2).await;
+    group.create(&ana).await;
+    group.admit(&ana, &ben).await;
+    ben.sync.pass().await.unwrap();
+    let slot = ana.database().applied_slot().await.unwrap() + 1;
+    let path = ObjectPath::slot(group.store, slot.try_into().unwrap());
+    let title: &'static str = Box::leak("x".repeat(1000).into_boxed_str());
+    insert(ana.database(), "big", title).await;
+
+    let gate = std::sync::Arc::new(tokio::sync::Semaphore::new(0));
+    group.storage.gate_parts(gate.clone()).await;
+    let traced = ana.storage.request_trace().len();
+    let sending = tokio::spawn({
+        let sync = ana.sync.clone();
+        async move { sync.pass().await }
+    });
+    let part = coven_storage::test_utils::MemoryRequest::Other("upload_part");
+    let parts = || ana.storage.request_trace()[traced..].iter().filter(|r| **r == part).count();
+    // The first part is stored; the second is held with its bytes taken.
+    for held in 1..=2 {
+        let arrived = async {
+            while parts() < held && !sending.is_finished() {
+                tokio::task::yield_now().await;
+            }
+        };
+        coven_foundation::clock::within(arrived).await.expect("a part reaches storage");
+        assert_eq!(parts(), held, "the slot is sent in parts");
+        if held == 1 {
+            gate.add_permits(1);
+        }
+    }
+    assert!(group.storage.status(&path).await.unwrap().is_none());
+    ben.sync.pass().await.unwrap();
+    assert_eq!(ben.database().applied_slot().await.unwrap(), slot - 1);
+    assert!(rows(ben.database()).await.is_empty());
+
+    gate.add_permits(64);
+    sending.await.unwrap().unwrap();
+    assert!(group.storage.status(&path).await.unwrap().is_some());
+    ben.sync.pass().await.unwrap();
+    assert_eq!(rows(ben.database()).await, [("big".into(), title.into())]);
+    for device in [&ana, &ben] {
+        device.database().close().await.unwrap();
+    }
 }
