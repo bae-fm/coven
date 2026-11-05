@@ -3456,6 +3456,7 @@ These calls, and the work passes do for them, follow the rule:
 | Replacing one's own keys (`replace_member_keys`, §12.3) | its operation, with the candidate pair held first | the replacement's claim |
 | Rotating a key, a schema raise, a snapshot, resetting an audience (§11.5, §16, §18, §19.4) | its operation, step by step | the claim of its first copy or announcement |
 | Restoring on a new device (`restore_from_code`, `restore_from_saved_code`, §13.1) | the restore's record on the device, then its registration's operation | the record, kept just before the registration's claim |
+| Replacing this device's installation (`reset_device`, `restore_device`, §19.3) | the replacement's record in the store's directory and its kept entry, then its registration's operation | the record, kept just before the registration's claim |
 | Taking provider access back after a removal (§14.2) | the provider request, fixed before it is sent | none: it is sent again until confirmed |
 | Deleting gone devices' files (`clean_up_gone_devices_files`, §17.10) | the files operation | none: it deletes only what nothing refers to |
 | Sending writes and uploading files (§4, §17.9) | the send queue and the upload queue | the writes slot's claim; a file's confirmed upload |
@@ -4060,24 +4061,31 @@ failed. Instead the app passes Carol's current code to
   the store or keychain changes: an old code fails with `MemberKeysReplaced`, and
   the laptop's store and keychain stay as they were.
 - The new device loads beside the old copy, which stays in place until loading
-  has finished (§19.3). Then the new device takes its place, coven commits the
-  new pair and removes the old copy. The saved restore code is rewritten with
-  the current pair, never deleted.
-- **The app's own device-local rows move in the swap.** Carol's laptop keeps
-  her theme in a local `preferences` table, which the new device would start
-  without. The app reads it from the old copy, which still opens, and passes a
-  step that writes it. Coven runs the step as one bulk write on the new device
-  once it has loaded and before the swap (§4), so the theme takes the old
-  copy's place with the new device or not at all. Written after the call
-  returned instead, it would be lost for good to a crash in between, with the
-  old copy already removed. A step that writes a synced table fails the call
-  before the swap, with `SyncedTableInBulkWrite`. A call that finds the swap
-  already made doesn't run its step: the new device holds the rows already.
-- A failure before that swap, or a key commit that fails right after it, leaves
-  the old copy and every keychain entry as they were. Calling it again finishes
-  an interrupted restore. Once the pair is installed, the call just opens the
+  has finished (§19.3). Just before the new device registers, the restore
+  records itself, as a reset does: the code, with her S3 key inside it on S3,
+  and the device's name, in a keychain entry of the laptop's own, and on
+  Dropbox and OneDrive her sign-in in the store's device credentials. From
+  then on it only goes forward. Once registered, the new device takes the old
+  copy's place, coven commits the new pair and removes the old copy. The saved
+  restore code is rewritten with the current pair, never deleted.
+- **The app's own device-local rows move with the new device.** Carol's
+  laptop keeps her theme in a local `preferences` table, which the new device
+  would start without. The app reads it from the old copy, which still opens,
+  and passes a step that writes it. Coven runs the step as one bulk write on
+  the new device once it has loaded and before the record (§4), so the theme
+  takes the old copy's place with the new device or not at all, and nothing
+  past the record needs the app. Written after the call returned instead, it
+  would be lost for good to a crash in between, with the old copy already
+  removed. A step that writes a synced table fails the call before the
+  record, with `SyncedTableInBulkWrite`. A call that finds the restore
+  recorded doesn't run its step: the new device holds the rows already.
+- A failure before the record leaves the old copy as it was. Past it, a
+  failure or a cancel leaves the restore for the next call, and nothing
+  moves back (§19.3); a cancel fails with `RestoreRegistered`.
+  `resume_replacement` finishes it from what it kept, and so does calling
+  `restore_device` again. Once the pair is installed, the call just opens the
   store.
-- If the laptop stops after the swap, its store waits for Carol's restore.
+- If the laptop stops past the record, its store waits for Carol's restore.
   Opening it fails with `ReplacementUnfinished`, naming `restore_device`, and
   the app's list of stores still shows it in that state. A `reset_device` call
   is refused before anything changes: it would load under the pair history
@@ -7885,23 +7893,53 @@ laptop in place from her current restore code instead (§13.1).
 - A load that fails for another reason, such as a lost connection, keeps its
   work in the hidden directory. The store opens as before, and the next reset
   continues the load with the same fresh id.
-- **The swap.** Once loading has finished, coven records the old and new ids in
-  the store's directory. It moves the old local state aside whole, including
-  SQLite's journals and local file sources, and keeps it for inspection, not as
-  live state; a restore in place removes it instead (§13.1). Then it moves the
-  new installation into place and commits its keys and credentials. The store's
+- **The record.** Registering the fresh id as the old one's replacement is the
+  reset's first write to storage, and its point of no return (§11.6). Once it
+  may land, history may name the old installation as replaced: opened again,
+  it would apply its replacement and stop for good, its unsent writes never
+  sent. Say Carol's laptop sends the registration and loses power before the
+  swap. Had it recorded nothing yet, the laptop would open the old
+  installation on restart, and it would stop
+  ([`crashed_replacement_opens_old`](proofs/sequence/CovenSequence/DeviceReplacement.lean)).
+  So just before it registers, coven records the old and new ids in the
+  store's directory, with the call and the store's name, and keeps what
+  finishing needs in a keychain entry of the device's own: the code it loads
+  with, and the device's name. From the record on, ordinary opening refuses
+  the store, read-only opening too, and the replacement only goes forward.
+  A reader holding the store refuses the record, changing nothing.
+- **The swap.** Once the registration has applied, coven marks the record as
+  swapping. It moves the old local state aside whole, including SQLite's
+  journals and local file sources, and keeps it for inspection, not as live
+  state; a restore in place removes it instead (§13.1). Then it moves the new
+  installation into place and commits its keys and credentials. The store's
   location and passphrase-sealed custody files stay where they are.
-- From the record on, ordinary opening refuses the installation until the reset
-  finishes. If committing the keys fails and every prior value is restored, the
-  reset moves the old installation back. Otherwise the next reset finishes the
-  swap with the recorded new id. There is no separate recovery journal.
-- **Only the call that swapped finishes it.** The record also names that call,
-  `reset_device` or `restore_device` (§13.1), and the store's name as the new
-  installation loaded it. Opening fails with `ReplacementUnfinished`, naming the
-  call, so the app can tell it from an unfinished first installation, which
-  fails with `BootstrapPending` (§13.4). The app's list of stores keeps the
-  store, in that state, so the app can offer to finish it. It shows the
-  recorded name: while files move, neither database can be read.
+- **Past the record, only forward.** A failure, a cancel or an interruption
+  leaves the replacement for the next call to finish with the recorded new
+  id: nothing moves back. A commit of the keys that fails restores every
+  prior value and keeps the swap. Moving the old installation back would
+  remove the record, and the old installation would open after its
+  replacement landed
+  ([`unswapped_replacement_opens_old`](proofs/sequence/CovenSequence/DeviceReplacement.lean)).
+  A cancel waits for the registration to end, then fails with
+  `RestoreRegistered`; removing the new installation while the registration
+  was on its way would leave history naming a replacement that isn't there
+  ([`cancelled_replacement_missing`](proofs/sequence/CovenSequence/DeviceReplacement.lean)).
+  Only the facts end it before the swap, as they end a restore (§13.1): the
+  registration refused, or the fresh device gone for good since. Then coven
+  removes the record, so the old installation is the store again, then the
+  kept entry and the new installation.
+- **Resuming.** `CovenBuilder::resume_replacement` finishes a replacement past
+  its record from what it kept, with neither the code nor a new sign-in;
+  calling `reset_device` or `restore_device` again finishes it too. There is
+  no separate recovery journal.
+- **Only the call that began it finishes it.** The record also names that
+  call, `reset_device` or `restore_device` (§13.1), and the store's name as the
+  new installation loaded it. Opening fails with `ReplacementUnfinished`,
+  naming the call, so the app can tell it from an unfinished first
+  installation, which fails with `BootstrapPending` (§13.4). The app's list of
+  stores keeps the store, in that state, so the app can offer to finish it.
+  It shows the recorded name: while the store doesn't open, neither database
+  can be read.
 - The other call is refused before anything changes. A reset can't finish a
   restore: it would load under the pair the restore replaces and fail every
   time. A restore can't finish a reset: it would remove the old copy the reset
@@ -7909,10 +7947,11 @@ laptop in place from her current restore code instead (§13.1).
 - Deleting the store from the device is the other way out. `discard_store`
   ([api.md E1](api.md#e1-opening)) removes both installations, the hidden
   directory and the record. It removes this device's keychain entries too,
-  whichever device they name by then. Without this, a store whose call can't
-  finish, say because its storage is gone, could neither open nor leave the
-  device. Deleting is refused while the call that swapped is still running,
-  and an interrupted deletion finishes when retried.
+  whichever device they name by then, the kept entry with them. Without this,
+  a store whose call can't finish, say because its storage is gone, could
+  neither open nor leave the device. Deleting is refused while the call that
+  began it is still running, and an interrupted deletion finishes when
+  retried.
 - Only owed provider cleanup carries over: owed revocations of account sharing,
   and the old installation's open invites, which become owed cleanup. They are
   copied into the new database, with its reset notice, before it opens. A
@@ -10938,6 +10977,8 @@ Write-ups explain each model and state its assumptions:
 | The setter actually replaced decides; partial chains of writes | `actual_setter_decides`, `partial_write_chain` | `proofs/queue/CovenQueue/DataExamples.lean` | §18.6 |
 | Conversion of old writes (queue model overview) | (write-up) | `proofs/queue.md` | §18.6 |
 | A status screen's sync state is the one candidate no other outranks; not synced means no location is recorded, and a location without credentials is signed out; between offline and offline with unsent changes whether a write or a file is queued decides, and a write committed while offline changes one into the other with no pass; syncing shows only while a slot or a file moves, waiting to sync only while nothing moves and a held-back pass or a queued file names its wait, and synced only once every file this device uploads is stored and only after a pass that ended synced; with the setting to transfer only on unmetered networks on and a metered network, every upload the setting holds waits for something before its backoff, and an upload waits for the network only then; a change of network never changes which state shows; a pass that moves nothing leaves the state as it was; the last synced time never goes backward, and only a pass reaching the read end changes it; each pending reason names one state or none, a wait for data names none, a pass held back by a wait waits to sync, and a file that can't be uploaded or read names failed | `one_state`, `not_synced_iff`, `signed_out_without_credentials`, `offline_unsent_iff`, `offline_iff`, `write_while_offline`, `syncing_only_moving`, `waiting_not_moving`, `synced_files_stored`, `bad_file_fails`, `quiet_pass_keeps`, `last_synced_never_back`, `last_synced_kept`, `waits_name_no_state`, `file_failures_name_failed`, `failed_pass_not_synced`, `waiting_pass_waits`, `metered_holds`, `metered_only_held`, `network_keeps_state` | `proofs/io/CovenIO/SyncState.lean` | §19.1 |
+| A replacement of this device's installation that records itself before its fresh device registers, refuses opens while recorded and from the record on only goes forward never opens the old installation once a registration replacing it may have landed, keeps the new installation while history names it, and settles, on every path, published or with the old installation the store and no claim open | `old_never_stale`, `never_missing`, `settles`, `settled_outcome` | `proofs/sequence/CovenSequence/DeviceReplacement.lean` | §11.6, §19.3 |
+| *Body.* A replacement that records itself only at the swap opens the old installation after a crash once its registration landed; one that moves the old installation back after a failure past the swap does the same; a cancel that doesn't wait removes the new installation while its registration is on its way | `crashed_replacement_opens_old`, `unswapped_replacement_opens_old`, `cancelled_replacement_missing` | `proofs/sequence/CovenSequence/DeviceReplacement.lean` | §19.3 |
 | Store-reset authority is checked in the state before the slot (circle-reset authority is left to the model's supplied audience policy) | `store_reset_authorized` | `proofs/sequence/CovenSequence/Authority.lean` | §19.4 |
 | An applied reset loads its chosen rows without replaying the slots before it | `reset_replaces` | `proofs/sequence/CovenSequence/Preparations.lean` | §19.4 |
 | From empty storage, with every create recorded and the journal kept, a slot signed by this device's id that it never attempted means another copy | `foreign_slot_means_copy` | `proofs/sequence/CovenSequence/Settle.lean` | §19.3 |

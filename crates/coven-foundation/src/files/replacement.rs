@@ -3,20 +3,25 @@
 //!
 //! `reset_device` and `restore_device` load the replacement in a hidden
 //! directory inside the store's directory, while the store stays as it was
-//! and its writer lock stays held. Only once the replacement is loaded does
-//! the swap move the old local state into an archive and the new
-//! installation into place; a restore then removes the archive. A failure
-//! before the swap leaves the store untouched, and the call that swapped can
-//! undo it. An interrupted swap only moves forward: the next call of the same
-//! kind finishes it, and the other kind is refused.
+//! and its writer lock stays held. Before the fresh device registers, the
+//! replacement records itself: from then on the store refuses opens and the
+//! replacement only moves forward, unless the facts end it before the swap.
+//! Once the registration applied, the swap moves the old local state into an
+//! archive and the new installation into place; a restore then removes the
+//! archive. A failure before the record leaves the store untouched. A
+//! replacement recorded or swapping is finished by the next call of the same
+//! kind, and the other kind is refused.
 
 use super::{
     atomic_file::{self, exists},
     bootstrap::{self, BootstrapLease},
-    creation, device_reset, lock,
+    creation, device_reset,
+    file_lock::FileLock,
+    lock,
     protection::Protection,
     settings, BootstrapDirectoryError, BootstrapStore, DeviceReset, DirectoryCreationError,
-    FileError, ReplacedBy, ReplacementRecord, StoreDir, StoreDirAccess, StoreLock, StoreLockError,
+    FileError, ReplacedBy, ReplacementPhase, ReplacementRecord, StoreDir, StoreDirAccess,
+    StoreLock, StoreLockError,
 };
 use crate::id_source::{IdSource, StoreId};
 use crate::locks::lock_unpoisoned;
@@ -40,6 +45,11 @@ pub struct ReplacementStore {
     lease: BootstrapLease,
     /// Keeps every handle out while the new installation loads and swaps in.
     writer: Mutex<Option<StoreLock>>,
+    /// Keeps read-only handles out from the record until the swap, so a
+    /// recorded replacement never waits on one (§19.3).
+    readers: Mutex<Option<FileLock>>,
+    /// The replacement's record, once written: past it, it only goes forward.
+    record: Mutex<Option<ReplacementRecord>>,
     /// The new installation's own bootstrap while it loads in the hidden
     /// directory; none once it has swapped in.
     loading: Mutex<Option<BootstrapStore>>,
@@ -80,46 +90,91 @@ impl ReplacementStore {
         }
     }
 
-    /// Record the swap, naming the call that began it and the store's `name`
-    /// in the loaded database, then move the old local state into its archive
-    /// and the loaded installation into the store's directory, keeping the
-    /// store's custody files in place. Then release the writer lock: from here
-    /// the marker refuses other opens. The loading database must be closed. A
-    /// failure undoes whatever moved and leaves the store as it was.
+    /// Whether the replacement is recorded: past its point of no return.
+    pub fn is_recorded(&self) -> bool {
+        lock_unpoisoned(&self.record).is_some()
+    }
+
+    /// Record the replacement before its fresh device registers, naming the
+    /// call that began it and the store's `name` in the loaded database:
+    /// from here the store refuses opens and lists as this call's to finish,
+    /// and read-only handles are kept out until the swap. A reader holding
+    /// the store refuses the record, changing nothing. Recording again keeps
+    /// the first record.
+    pub fn record(&self, name: String) -> Result<(), BootstrapDirectoryError> {
+        let mut recorded = lock_unpoisoned(&self.record);
+        if recorded.is_some() {
+            return Ok(());
+        }
+        let readers = self.exclude_readers()?;
+        let record = ReplacementRecord {
+            reset: self.reset,
+            by: self.by,
+            name,
+            phase: ReplacementPhase::Registering,
+        };
+        let kept =
+            device_reset::record(&self.path, &record).map_err(DirectoryCreationError::from)?;
+        *lock_unpoisoned(&self.readers) = Some(readers);
+        *recorded = Some(kept);
+        Ok(())
+    }
+
+    /// Mark the swap as begun, recording the replacement first when it has
+    /// no registration to precede (an unconnected reset), then move the old
+    /// local state into its archive and the loaded installation into the
+    /// store's directory, keeping the store's custody files in place. Then
+    /// release the writer and reader locks: from here the marker refuses
+    /// other opens. The loading database must be closed. A failure leaves the
+    /// swap for the next call to finish; nothing moves back.
     pub fn swap(&self, name: String) -> Result<(), BootstrapDirectoryError> {
         let mut loading = lock_unpoisoned(&self.loading);
         if loading.is_none() {
             return Ok(());
         }
         // No reader may hold the moving files open.
-        let _readers = lock::exclude_readers(&self.path, self.id)?;
-        let record = ReplacementRecord { reset: self.reset, by: self.by, name };
-        let swapped = device_reset::record(&self.path, &record)
-            .map_err(DirectoryCreationError::from)
-            .and_then(|_| device_reset::forward(&self.path, self.id, self.reset));
-        if let Err(error) = swapped {
-            return Err(match device_reset::backward(&self.path, self.id, self.reset) {
-                Ok(()) => error.into(),
-                Err(cleanup) => DirectoryCreationError::Rollback {
-                    operation: Box::new(error),
-                    cleanup: io::Error::other(cleanup),
-                }
-                .into(),
-            });
-        }
+        let held = lock_unpoisoned(&self.readers).take();
+        let _readers = match held {
+            Some(readers) => readers,
+            None => self.exclude_readers()?,
+        };
+        let recorded = lock_unpoisoned(&self.record).clone();
+        let record = match recorded {
+            Some(record) => record,
+            None => device_reset::record(
+                &self.path,
+                &ReplacementRecord {
+                    reset: self.reset,
+                    by: self.by,
+                    name,
+                    phase: ReplacementPhase::Swapping,
+                },
+            )
+            .map_err(DirectoryCreationError::from)?,
+        };
+        device_reset::swapping(&self.path, &record).map_err(DirectoryCreationError::from)?;
+        device_reset::forward(&self.path, self.id, self.reset)?;
         drop(loading.take());
         self.release_writer();
         Ok(())
     }
 
-    /// Put the old installation back after a step that followed this call's
-    /// own swap failed with nothing committed. The new installation's
-    /// database must be closed. A failure leaves the swap for the next call
-    /// to finish.
-    pub async fn unswap(self) -> Result<(), BootstrapDirectoryError> {
-        let _writer = self.directory().lock_for_open().await?;
-        let _readers = lock::exclude_readers(&self.path, self.id)?;
-        Ok(device_reset::backward(&self.path, self.id, self.reset)?)
+    /// End a recorded replacement before its swap, once the facts say nothing
+    /// in storage names its fresh device as the old one's active replacement:
+    /// remove the record, so the old installation is the store again, then
+    /// the new installation. The loading database must be closed. A failure
+    /// part way leaves the new installation without its record, which the
+    /// next call continues as an unrecorded load.
+    pub fn abandon(self) -> Result<(), BootstrapDirectoryError> {
+        assert!(!self.is_swapped(), "only an unswapped replacement is abandoned");
+        device_reset::finish(&self.path)?;
+        lock_unpoisoned(&self.record).take();
+        lock_unpoisoned(&self.readers).take();
+        self.cancel()
+    }
+
+    fn exclude_readers(&self) -> Result<FileLock, StoreLockError> {
+        lock::exclude_readers(&self.path, self.id)
     }
 
     /// Remove the swapped-out installation's archive before publication: a
@@ -154,9 +209,10 @@ impl ReplacementStore {
         device_reset::finish(&self.path).map_err(|error| published(io::Error::other(error)))
     }
 
-    /// Remove the unswapped replacement after its database closed, leaving the
-    /// store as it was. A later call starts a new one with a fresh id.
+    /// Remove the unrecorded replacement after its database closed, leaving
+    /// the store as it was. A later call starts a new one with a fresh id.
     pub fn cancel(self) -> Result<(), BootstrapDirectoryError> {
+        assert!(!self.is_recorded(), "a recorded replacement only moves forward");
         let loading = lock_unpoisoned(&self.loading)
             .take()
             .expect("only an unswapped replacement is cancelled");
@@ -221,12 +277,46 @@ pub(super) async fn begin(
     // The installation that stays until the swap, and the replacement's
     // area, made inside the store's directory, take the class (E1).
     protection.apply(&path)?;
-    let (reset, loading) = match recorded {
-        // An interrupted swap or undo finishes the swap.
-        Some(record) => {
+    let (reset, loading, readers) = match &recorded {
+        // An interrupted swap finishes the swap.
+        Some(record) if record.phase == ReplacementPhase::Swapping => {
             let _readers = lock::exclude_readers(&path, id)?;
             device_reset::forward(&path, id, record.reset)?;
-            (record.reset, None)
+            (record.reset, None, None)
+        }
+        // A recorded replacement continues its load, registration included,
+        // with the fresh id it recorded; read-only handles stay out.
+        Some(record) => {
+            let readers = lock::exclude_readers(&path, id)?;
+            let area = path.join(device_reset::AREA);
+            let loading_path = device_reset::loading(&path, id);
+            if !exists("inspect recorded replacement", &loading_path)? {
+                return Err(FileError::at(
+                    "resume a recorded replacement",
+                    &loading_path,
+                    io::Error::new(
+                        io::ErrorKind::NotFound,
+                        "the recorded replacement's installation is missing",
+                    ),
+                )
+                .into());
+            }
+            let loading =
+                bootstrap::reserve_bootstrap_directory(&area, id, ids, protection).await?;
+            let new =
+                loading.directory().settings().map_err(DirectoryCreationError::Settings)?.device_id;
+            if new != record.reset.new_device {
+                return Err(FileError::at(
+                    "resume a recorded replacement",
+                    &loading_path,
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "the loaded installation is not the recorded fresh device",
+                    ),
+                )
+                .into());
+            }
+            (record.reset, Some(loading), Some(readers))
         }
         None => {
             let area = path.join(device_reset::AREA);
@@ -240,7 +330,7 @@ pub(super) async fn begin(
                 bootstrap::reserve_bootstrap_directory(&area, id, ids, protection).await?;
             let new =
                 loading.directory().settings().map_err(DirectoryCreationError::Settings)?.device_id;
-            (DeviceReset { old_device: current.device_id, new_device: new }, Some(loading))
+            (DeviceReset { old_device: current.device_id, new_device: new }, Some(loading), None)
         }
     };
     // Once swapped in, the marker refuses other opens.
@@ -253,6 +343,8 @@ pub(super) async fn begin(
         by,
         lease,
         writer: Mutex::new(writer),
+        readers: Mutex::new(readers),
+        record: Mutex::new(recorded),
         loading: Mutex::new(loading),
         protection,
     })

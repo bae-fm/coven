@@ -193,9 +193,10 @@ pub enum StoreLockError {
     /// installation, or a join on a recorded restore's, is refused too (§13.4).
     #[error("store {0} requires restore or join to finish bootstrap")]
     BootstrapPending(StoreId),
-    /// A replacement of this device's installation swapped in but did not
-    /// finish. Only the call it names finishes it; the other is refused
-    /// before anything changes. Deletion removes it instead (§19.3).
+    /// A replacement of this device's installation recorded itself, just
+    /// before its fresh device registered, and did not finish. Only the call
+    /// it names finishes it; the other is refused before anything changes.
+    /// Deletion removes it instead (§19.3).
     #[error("store {store} requires {by} to finish replacing this device's installation")]
     ReplacementUnfinished {
         /// The store whose installation is being replaced.

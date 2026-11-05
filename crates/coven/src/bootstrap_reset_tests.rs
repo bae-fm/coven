@@ -392,6 +392,44 @@ async fn a_reset_interrupted_after_its_swap_is_finished_by_the_next_reset() {
     assert_eq!(f.app.readable_stores().await[0].unfinished_replacement, None);
 }
 
+/// A reset stopped right after its fresh device registered, before its
+/// swap, leaves the store refusing opens and listed as the reset's: the old
+/// installation, which history now names as replaced, never opens again to
+/// stop on its own replacement. Resuming with nothing from the app finishes
+/// it with the fresh device it registered (§19.3).
+#[tokio::test]
+async fn a_reset_stopped_after_registering_is_finished_by_resuming() {
+    let f = Fixture::new().await;
+    f.setup().await.unwrap();
+    synced(&f.handle).await;
+    uploaded(&f, "kept").await;
+    f.handle.close().await.unwrap();
+    let store = f.directory.id();
+    assert!(matches!(
+        reopen(&f)
+            .interrupt_after_registering()
+            .reset_device(store, "Restored phone", |_| ())
+            .await,
+        Err(BootstrapError::Cancelled)
+    ));
+    let decided = f.directory.unfinished_replacement().unwrap().unwrap();
+    assert_eq!(decided.by, ReplacedBy::Reset);
+    let unfinished = |error: &StoreLockError| matches!(error, StoreLockError::ReplacementUnfinished { store: named, by: ReplacedBy::Reset } if *named == store);
+    assert!(matches!(
+        reopen(&f).open(store, |_| ()).await,
+        Err(CovenError::Lock(error)) if unfinished(&error)
+    ));
+    assert_eq!(f.app.readable_stores().await[0].unfinished_replacement, Some(ReplacedBy::Reset));
+    let (_, cancel) = watch::channel(false);
+    let handle = reopen(&f).resume_replacement(store, |_| (), &cancel).await.unwrap();
+    assert_eq!(handle.device_reset().await.unwrap(), Some(decided.reset));
+    assert_eq!(notes(&handle).await, ["kept"]);
+    assert!(!loading_area(&f).exists());
+    handle.close().await.unwrap();
+    assert!(custody(&f).replacement_record().unwrap().is_none());
+    assert_eq!(f.app.readable_stores().await[0].unfinished_replacement, None);
+}
+
 /// A reset that fails while its new device loads changes nothing: the store
 /// opens as before, and the next reset continues the load (§19.3).
 #[tokio::test]

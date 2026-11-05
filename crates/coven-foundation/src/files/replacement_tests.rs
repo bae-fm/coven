@@ -65,7 +65,12 @@ async fn the_store_stays_as_it_was_until_the_loaded_replacement_swaps_in() {
         drop(replacement.directory().lock_exclusive().unwrap());
         assert_eq!(
             f.store.unfinished_replacement().unwrap(),
-            Some(ReplacementRecord { reset, by: ReplacedBy::Reset, name: "Household".into() })
+            Some(ReplacementRecord {
+                reset,
+                by: ReplacedBy::Reset,
+                name: "Household".into(),
+                phase: ReplacementPhase::Swapping,
+            })
         );
         assert_eq!(f.layout.store_ids().await.unwrap(), [f.store.id()]);
         // A replacement under way is the store's, not a first installation.
@@ -155,32 +160,96 @@ async fn a_reader_refuses_the_swap_and_moves_nothing() {
     replacement.swap("Household".into()).unwrap();
 }
 
+/// Recorded before its fresh device registers, a replacement keeps every
+/// handle out, read-only ones too, and lists with the call that finishes
+/// it. The next call of that kind continues its load with the recorded fresh
+/// id, the other kind is refused, and nothing moves until the swap (§19.3).
 #[tokio::test]
-async fn unswapping_puts_the_old_installation_back() {
+async fn a_recorded_replacement_refuses_opens_and_resumes_its_load() {
     let f = store(4);
+    let replacement =
+        f.layout.begin_replacement(f.store.id(), ReplacedBy::Restore, &UuidIds).await.unwrap();
+    let reset = replacement.device_reset();
+    load(&replacement);
+    replacement.record("Household".into()).unwrap();
+    assert!(replacement.is_recorded());
+    assert!(matches!(f.store.lock_read_only(), Err(StoreLockError::AlreadyOpen(_))));
+    drop(replacement);
+    let refused = |error: &StoreLockError| {
+        matches!(error, StoreLockError::ReplacementUnfinished { store, by: ReplacedBy::Restore }
+            if *store == f.store.id())
+    };
+    assert!(matches!(f.store.lock_exclusive(), Err(error) if refused(&error)));
+    assert!(matches!(f.store.lock_read_only(), Err(error) if refused(&error)));
+    assert_eq!(
+        f.store.unfinished_replacement().unwrap(),
+        Some(ReplacementRecord {
+            reset,
+            by: ReplacedBy::Restore,
+            name: "Household".into(),
+            phase: ReplacementPhase::Registering,
+        })
+    );
+    assert_eq!(f.layout.store_ids().await.unwrap(), [f.store.id()]);
+    assert_eq!(std::fs::read(f.store.database_path()).unwrap(), b"old database");
+    let before = walk(&f.path);
+    assert!(matches!(
+        f.layout.begin_replacement(f.store.id(), ReplacedBy::Reset, &UuidIds).await,
+        Err(BootstrapDirectoryError::Lock(error)) if refused(&error)
+    ));
+    assert_eq!(walk(&f.path), before);
+    let resumed =
+        f.layout.begin_replacement(f.store.id(), ReplacedBy::Restore, &UuidIds).await.unwrap();
+    assert!(resumed.is_recorded());
+    assert!(!resumed.is_swapped());
+    assert_eq!(resumed.device_reset(), reset);
+    assert_eq!(std::fs::read(resumed.directory().database_path()).unwrap(), b"new database");
+    resumed.swap("Household".into()).unwrap();
+    assert_eq!(
+        f.store.unfinished_replacement().unwrap().map(|record| record.phase),
+        Some(ReplacementPhase::Swapping)
+    );
+    resumed.publish().unwrap();
+    drop(resumed);
+    assert_eq!(f.store.unfinished_replacement().unwrap(), None);
+    assert_eq!(f.store.settings().unwrap().device_id, reset.new_device);
+}
+
+/// A reader holding the store refuses the record, and nothing changes.
+#[tokio::test]
+async fn a_reader_refuses_the_record_and_changes_nothing() {
+    let f = store(9);
+    let replacement =
+        f.layout.begin_replacement(f.store.id(), ReplacedBy::Reset, &UuidIds).await.unwrap();
+    load(&replacement);
+    let reader = f.store.lock_read_only().unwrap();
+    assert!(matches!(
+        replacement.record("Household".into()),
+        Err(BootstrapDirectoryError::Lock(StoreLockError::AlreadyOpen(_)))
+    ));
+    drop(reader);
+    assert!(!replacement.is_recorded());
+    assert_eq!(f.store.unfinished_replacement().unwrap(), None);
+    replacement.record("Household".into()).unwrap();
+}
+
+/// A recorded replacement the facts end before its swap removes its record,
+/// so the old installation is the store again, then the new installation.
+#[tokio::test]
+async fn an_abandoned_replacement_leaves_the_old_installation() {
+    let f = store(10);
     let old = f.store.settings().unwrap();
     let replacement =
         f.layout.begin_replacement(f.store.id(), ReplacedBy::Reset, &UuidIds).await.unwrap();
-    let reset = replacement.device_reset();
     load(&replacement);
-    replacement.swap("Household".into()).unwrap();
-    replacement.unswap().await.unwrap();
-    assert_eq!(f.store.settings().unwrap(), old);
+    replacement.record("Household".into()).unwrap();
+    replacement.abandon().unwrap();
     assert_eq!(f.store.unfinished_replacement().unwrap(), None);
+    assert!(!f.path.join(".coven-replacement").exists());
+    assert_eq!(f.store.settings().unwrap(), old);
     assert_eq!(std::fs::read(f.store.database_path()).unwrap(), b"old database");
-    assert_eq!(
-        f.store
-            .file(FileArea::AppProvided, &FileName::new("photo").unwrap())
-            .read_optional()
-            .unwrap(),
-        Some(b"unsent".to_vec())
-    );
-    assert_eq!(f.layout.store_ids().await.unwrap(), [f.store.id()]);
-    // The loaded installation waits for the next call, with its id.
-    let resumed =
-        f.layout.begin_replacement(f.store.id(), ReplacedBy::Reset, &UuidIds).await.unwrap();
-    assert_eq!(resumed.device_reset(), reset);
-    assert_eq!(std::fs::read(resumed.directory().database_path()).unwrap(), b"new database");
+    drop(f.store.lock_read_only().unwrap());
+    drop(f.store.lock_exclusive().unwrap());
 }
 
 #[tokio::test]
@@ -194,7 +263,12 @@ async fn an_interrupted_swap_is_finished_by_the_next_call() {
     // The swap recorded its decision and moved the database aside, then stopped.
     device_reset::record(
         &f.path,
-        &ReplacementRecord { reset, by: ReplacedBy::Reset, name: "Household".into() },
+        &ReplacementRecord {
+            reset,
+            by: ReplacedBy::Reset,
+            name: "Household".into(),
+            phase: ReplacementPhase::Swapping,
+        },
     )
     .unwrap();
     let archive = f.path.join(format!("discarded-device-{}", reset.old_device.0));

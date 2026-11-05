@@ -2,13 +2,14 @@
 //!
 //! `reset_device` and `restore_device` load the new installation in its own
 //! directory inside the store's, then move it into place. The durable record
-//! names the old and new device ids and the call that began the swap: written
-//! before anything moves, it makes ordinary opens refuse the store, naming
-//! that call, and every retry of that call finishes the same swap.
-//! The bootstrap marker separates the two moves. Without it, the old local
-//! state is still moving into its archive; with it, the new installation is
-//! moving in. The settings change last. Each step is idempotent, so a retry
-//! after any interruption continues where it stopped, in either direction.
+//! names the old and new device ids and the call that began the replacement:
+//! written before the fresh device registers, it makes ordinary opens refuse
+//! the store, naming that call, and every later call finishes the same
+//! replacement (§19.3). It says, too, whether the swap has begun.
+//! The bootstrap marker separates the swap's two moves. Without it, the old
+//! local state is still moving into its archive; with it, the new installation
+//! is moving in. The settings change last. Each step is idempotent, so a retry
+//! after any interruption continues forward where it stopped.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -59,26 +60,40 @@ impl std::fmt::Display for ReplacedBy {
     }
 }
 
-/// The durable record of a replacement whose swap has begun (§19.3).
+/// How far a recorded replacement has come (§19.3).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ReplacementPhase {
+    /// Recorded before the fresh device registers. The new installation is
+    /// in its hidden directory and the old one in the store's place.
+    Registering,
+    /// The swap has begun: the installations are moving, or have moved.
+    Swapping,
+}
+
+/// The durable record of a replacement past its point of no return: from
+/// just before the fresh device registers until it is published (§19.3).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ReplacementRecord {
     /// The installation being replaced and its fresh successor.
     pub reset: DeviceReset,
-    /// The call that began the swap and finishes it.
+    /// The call that began the replacement and finishes it.
     pub by: ReplacedBy,
     /// The store's name in the new installation's loaded database. While the
-    /// swap is unfinished neither database can be read, so listings show this.
+    /// replacement is unfinished the store doesn't open, so listings show this.
     pub name: String,
+    /// How far it has come.
+    pub phase: ReplacementPhase,
 }
 
 pub(super) fn read(directory: &Path) -> Result<Option<ReplacementRecord>, FileError> {
     atomic_file::read_json(&directory.join(RECORD), "read replacement record")
 }
 
-/// The record of a replacement that has not finished: one whose marker is
-/// still present, or whose settings do not yet name the new device. A record
-/// that outlived publication is not returned.
+/// The record of a replacement that has not finished: one still
+/// registering, one whose marker is still present, or one whose settings do
+/// not yet name the new device. A record that outlived publication is not
+/// returned.
 pub(super) fn unfinished(
     directory: &Path,
     id: StoreId,
@@ -86,7 +101,8 @@ pub(super) fn unfinished(
     let Some(record) = read(directory)? else {
         return Ok(None);
     };
-    if !bootstrap::is_pending(directory)?
+    if record.phase == ReplacementPhase::Swapping
+        && !bootstrap::is_pending(directory)?
         && settings::read(directory, id)?.device_id == record.reset.new_device
     {
         return Ok(None);
@@ -94,7 +110,8 @@ pub(super) fn unfinished(
     Ok(Some(record))
 }
 
-/// Keep the first decision: a retried swap never changes the chosen fresh id.
+/// Keep the first decision: a resumed replacement never changes the chosen
+/// fresh id. A record already there is returned as it is.
 pub(super) fn record(
     directory: &Path,
     record: &ReplacementRecord,
@@ -117,6 +134,16 @@ pub(super) fn record(
     Ok(record.clone())
 }
 
+/// Mark the recorded replacement's swap as begun, before anything moves.
+pub(super) fn swapping(directory: &Path, recorded: &ReplacementRecord) -> Result<(), FileError> {
+    if recorded.phase == ReplacementPhase::Swapping {
+        return Ok(());
+    }
+    let record = ReplacementRecord { phase: ReplacementPhase::Swapping, ..recorded.clone() };
+    let bytes = serde_json::to_vec(&record).expect("replacement record encodes");
+    atomic_file::replace(&directory.join(RECORD), &bytes)
+}
+
 /// The directory where the replacement of the store at `directory` loads.
 pub(super) fn loading(directory: &Path, id: StoreId) -> PathBuf {
     directory.join(AREA).join(id.to_string())
@@ -129,7 +156,7 @@ fn archive(directory: &Path, old_device: DeviceId) -> PathBuf {
 
 /// Under the writer, bootstrap and excluded reader locks, move the old local
 /// state into its archive and the loaded installation into its place, then
-/// name the new device in the settings. Resumes any interrupted swap or undo.
+/// name the new device in the settings. Resumes any interrupted swap.
 pub(super) fn forward(
     directory: &Path,
     id: StoreId,
@@ -151,29 +178,6 @@ pub(super) fn forward(
         move_local_state(&loaded, directory)?;
     }
     name_device(directory, id, reset.new_device)
-}
-
-/// Undo `forward`, step by step in reverse, after a later step failed: the
-/// old installation is back in place and its settings name it again.
-pub(super) fn backward(
-    directory: &Path,
-    id: StoreId,
-    reset: DeviceReset,
-) -> Result<(), DirectoryCreationError> {
-    name_device(directory, id, reset.old_device)?;
-    let marker = bootstrap::marker(directory);
-    if atomic_file::exists("inspect bootstrap marker", &marker)? {
-        move_local_state(directory, &loading(directory, id))?;
-        atomic_file::remove(&marker)?;
-    }
-    let archive = archive(directory, reset.old_device);
-    if atomic_file::exists("inspect discarded device archive", &archive)? {
-        move_local_state(&archive, directory)?;
-        fs::remove_dir(&archive)
-            .map_err(|source| FileError::at("remove discarded device archive", &archive, source))?;
-        atomic_file::sync_publication(&archive)?;
-    }
-    Ok(atomic_file::remove(&directory.join(RECORD))?)
 }
 
 /// Remove a swap's archive: a restore keeps no old copy (§13.1).
@@ -240,7 +244,8 @@ pub(super) fn discarded_database(directory: &Path, old_device: DeviceId) -> Path
     archive(directory, old_device).join(super::directory::DATABASE)
 }
 
-/// Remove the record once the replacement is published; its database keeps the notice.
+/// Remove the record once the replacement is published, its database
+/// keeping the notice, or once the facts end a replacement before its swap.
 pub(super) fn finish(directory: &Path) -> Result<(), FileError> {
     atomic_file::remove(&directory.join(RECORD))
 }

@@ -37,7 +37,7 @@ mod tree_copy;
 pub use atomic_file::{replace as write_atomic, AtomicFile, FileError, FileWriter};
 pub use bootstrap::{BootstrapDirectoryError, BootstrapStore};
 pub use creation::DirectoryCreationError;
-pub use device_reset::{DeviceReset, ReplacedBy, ReplacementRecord};
+pub use device_reset::{DeviceReset, ReplacedBy, ReplacementPhase, ReplacementRecord};
 pub use directory::{
     protect_files, verify_lock, FileArea, FileName, FileNameError, StoreDir, StoreDirAccess,
     StoreFile, TemporaryFolder, WriterError,

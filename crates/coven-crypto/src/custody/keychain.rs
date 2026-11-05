@@ -24,6 +24,7 @@ const HOST_SECRET_NAMES_ENTRY: &str = "host-secret-names";
 const INVITE_CODE_ENTRY: &str = "invite-code";
 const SETUP_CREDENTIALS_ENTRY: &str = "setup-credentials";
 const RESTORE_RECORD_ENTRY: &str = "restore-record";
+const REPLACEMENT_RECORD_ENTRY: &str = "replacement-record";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
 pub(crate) enum EntryScope {
@@ -162,8 +163,8 @@ impl std::fmt::Debug for Keychain {
 
 /// One store's entries kept on this device only: its device id, store and
 /// member keys, provider credentials, the invite code of a join under way,
-/// the record of a restore under way and the app's host secrets (§12.4,
-/// §13.1, §13.2). They
+/// the record of a restore or a replacement under way and the app's host
+/// secrets (§12.4, §13.1, §13.2, §19.3). They
 /// never leave the device, so deleting them reaches no other device of the
 /// person. Every read, write and deletion here uses the device-only scope; the
 /// person's entries belong to [`PersonEntries`](super::PersonEntries).
@@ -280,12 +281,54 @@ impl StoreKeychain {
     /// restore code it loads with and the name it registers the device
     /// under. A restore past its registration finishes from it, so the app
     /// can resume it without the code (§13.1). It is never synced.
+    pub fn restore_record(&self) -> Result<Option<(SecretText, String)>, KeyError> {
+        self.read_code_record(RESTORE_RECORD_ENTRY)
+    }
+
+    /// Keep a restore's record from before it registers the device until the
+    /// restore ends: the code, which holds no NUL, then a NUL, then the
+    /// device's name.
+    pub fn set_restore_record(&self, code: &SecretText, device_name: &str) -> Result<(), KeyError> {
+        self.write_code_record(RESTORE_RECORD_ENTRY, code, device_name)
+    }
+
+    /// Remove a restore's record once the restore has ended; an absent entry
+    /// succeeds.
+    pub fn delete_restore_record(&self) -> Result<(), KeyError> {
+        self.remove(RESTORE_RECORD_ENTRY)
+    }
+
+    /// What a replacement of this device's installation under way keeps to
+    /// finish (§19.3): the restore code it loads with and the name it
+    /// registers the fresh device under. A replacement past its record
+    /// resumes from it with nothing from the app. It is never synced.
+    pub fn replacement_record(&self) -> Result<Option<(SecretText, String)>, KeyError> {
+        self.read_code_record(REPLACEMENT_RECORD_ENTRY)
+    }
+
+    /// Keep a replacement's code and device name from before it registers the
+    /// fresh device until it is published or ends, as a restore's record is
+    /// kept.
+    pub fn set_replacement_record(
+        &self,
+        code: &SecretText,
+        device_name: &str,
+    ) -> Result<(), KeyError> {
+        self.write_code_record(REPLACEMENT_RECORD_ENTRY, code, device_name)
+    }
+
+    /// Remove a replacement's record once it has been published or has ended;
+    /// an absent entry succeeds.
+    pub fn delete_replacement_record(&self) -> Result<(), KeyError> {
+        self.remove(REPLACEMENT_RECORD_ENTRY)
+    }
+
     #[expect(
         clippy::map_err_ignore,
-        reason = "a restore record fails only by its layout, which Encoding names"
+        reason = "a code record fails only by its layout, which Encoding names"
     )]
-    pub fn restore_record(&self) -> Result<Option<(SecretText, String)>, KeyError> {
-        self.read(RESTORE_RECORD_ENTRY)?
+    fn read_code_record(&self, entry: &str) -> Result<Option<(SecretText, String)>, KeyError> {
+        self.read(entry)?
             .map(|bytes| {
                 let text = std::str::from_utf8(bytes.as_bytes())
                     .map_err(|_| KeyError::from(MaterialError::Encoding))?;
@@ -295,21 +338,17 @@ impl StoreKeychain {
             .transpose()
     }
 
-    /// Keep a restore's record from before it registers the device until the
-    /// restore ends: the code, which holds no NUL, then a NUL, then the
-    /// device's name.
-    pub fn set_restore_record(&self, code: &SecretText, device_name: &str) -> Result<(), KeyError> {
+    fn write_code_record(
+        &self,
+        entry: &str,
+        code: &SecretText,
+        device_name: &str,
+    ) -> Result<(), KeyError> {
         if code.as_str().contains('\0') {
             return Err(MaterialError::Encoding.into());
         }
         let record = SecretText::new(format!("{}\0{device_name}", code.as_str()));
-        self.write(RESTORE_RECORD_ENTRY, record.as_str().as_bytes())
-    }
-
-    /// Remove a restore's record once the restore has ended; an absent entry
-    /// succeeds.
-    pub fn delete_restore_record(&self) -> Result<(), KeyError> {
-        self.remove(RESTORE_RECORD_ENTRY)
+        self.write(entry, record.as_str().as_bytes())
     }
 
     /// Remove this device's entries for the store, including all recorded host
@@ -334,6 +373,7 @@ impl StoreKeychain {
             SETUP_CREDENTIALS_ENTRY,
             INVITE_CODE_ENTRY,
             RESTORE_RECORD_ENTRY,
+            REPLACEMENT_RECORD_ENTRY,
         ] {
             self.remove(name)?;
         }

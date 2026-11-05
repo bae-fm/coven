@@ -1,5 +1,5 @@
 use super::*;
-use crate::tests::{held, KeysReplaced, Network};
+use crate::tests::{held, Held, KeysReplaced, Network};
 use coven_crypto::custody::KeyringCustody;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -243,9 +243,11 @@ impl Custody<MemberIdentity> for RefusesFirstWrite {
 }
 
 /// Committing the new pair fails after the swap: every keychain entry gets
-/// its value back and the old installation moves back into place.
+/// its value back, and the restore, past its registration, stays for the
+/// next call: nothing moves back, and the store refuses opens until
+/// resuming finishes it (§19.3).
 #[tokio::test]
-async fn a_failed_key_commit_moves_the_old_installation_back() {
+async fn a_failed_key_commit_leaves_the_swap_for_resuming() {
     let mut network = Network::new(2).await;
     let replaced = network.replace_keys_elsewhere().await;
     let store = replaced.carol.store;
@@ -267,12 +269,167 @@ async fn a_failed_key_commit_moves_the_old_installation_back() {
         failed.as_ref().err()
     );
     assert_eq!(held(&replaced.carol.app, store), before);
-    assert!(!leftovers(&replaced)
-        .iter()
-        .any(|name| name.starts_with("discarded-device-") || name == "device-reset.json"));
-    opens_as_before(&network, &replaced, old).await;
-    let handle = restore(network.reopen(&replaced.carol), store, &replaced.code).await.unwrap();
+    assert!(matches!(
+        network.reopen(&replaced.carol).open(store, |_| ()).await,
+        Err(CovenError::Lock(StoreLockError::ReplacementUnfinished {
+            by: ReplacedBy::Restore,
+            ..
+        }))
+    ));
+    let handle = resume(&network, &replaced).await.unwrap();
     restored(&network, &replaced, handle, old).await;
+    network.close().await;
+}
+
+/// Resume Carol's replacement through a builder given nothing of hers.
+async fn resume(network: &Network, replaced: &KeysReplaced) -> Result<CovenHandle, BootstrapError> {
+    let (_, cancel) = watch::channel(false);
+    network.reopen(&replaced.carol).resume_replacement(replaced.carol.store, |_| {}, &cancel).await
+}
+
+/// Opening the store is refused while Carol's restore is unfinished, naming
+/// the call that finishes it.
+async fn refuses_opens(network: &Network, replaced: &KeysReplaced) {
+    let store = replaced.carol.store;
+    let unfinished = |error: &StoreLockError| matches!(error, StoreLockError::ReplacementUnfinished { store: named, by: ReplacedBy::Restore } if *named == store);
+    assert!(matches!(
+        network.reopen(&replaced.carol).open(store, |_| ()).await,
+        Err(CovenError::Lock(error)) if unfinished(&error)
+    ));
+    assert!(matches!(
+        network.reopen(&replaced.carol).open_read_only(store).await,
+        Err(ReadOnlyOpenError::Local(CovenError::Lock(error))) if unfinished(&error)
+    ));
+    assert_eq!(
+        replaced.carol.app.readable_stores().await[0].unfinished_replacement,
+        Some(ReplacedBy::Restore)
+    );
+}
+
+/// Carol's laptop restores in place and stops right after its fresh device
+/// registered, before the swap. History now names the old installation as
+/// replaced, so it never opens again: the store refuses opens, naming
+/// `restore_device`, and lists in that state, with custody as it was.
+/// Resuming with nothing from the app finishes it (§13.1, §19.3).
+#[tokio::test]
+async fn a_restore_stopped_after_registering_refuses_opens_and_resumes_from_what_it_kept() {
+    let mut network = Network::new(2).await;
+    let replaced = network.replace_keys_elsewhere().await;
+    let store = replaced.carol.store;
+    let before = held(&replaced.carol.app, store);
+    let old = before.device.unwrap();
+    let interrupted = restore(
+        network.reopen(&replaced.carol).interrupt_after_registering(),
+        store,
+        &replaced.code,
+    )
+    .await;
+    assert!(matches!(interrupted, Err(BootstrapError::Cancelled)), "{interrupted:?}");
+    refuses_opens(&network, &replaced).await;
+    assert_eq!(held(&replaced.carol.app, store), before);
+    restored(&network, &replaced, resume(&network, &replaced).await.unwrap(), old).await;
+    assert!(replaced.carol.app.store_keychain(store).replacement_record().unwrap().is_none());
+    network.close().await;
+}
+
+/// Hold the next object created in Carol's store, the laptop's registration
+/// once it has loaded: `started` hears it is on its way, and it is stored
+/// once `release` is sent. Ana syncs first, so the slot her pass writes
+/// after applying the key replacement is in storage, not the one held.
+async fn hold_registration(
+    network: &Network,
+    replaced: &KeysReplaced,
+) -> (tokio::sync::oneshot::Receiver<()>, tokio::sync::oneshot::Sender<()>) {
+    network.sync(0).await;
+    let (started, starting) = tokio::sync::oneshot::channel();
+    let (release, released) = tokio::sync::oneshot::channel();
+    replaced
+        .carol
+        .storage
+        .hold_next_creation(
+            coven_storage::ObjectPrefix::all(replaced.carol.store),
+            started,
+            released,
+        )
+        .await;
+    (starting, release)
+}
+
+/// Carol cancels the restore while its fresh device's registration is on
+/// its way. The cancel waits for it to land, then fails with
+/// `RestoreRegistered`: the store refuses opens, and resuming finishes
+/// (§19.3, §11.6).
+#[tokio::test]
+async fn cancelling_a_restore_in_place_after_it_registers_refuses_and_keeps_it() {
+    let mut network = Network::new(2).await;
+    let replaced = network.replace_keys_elsewhere().await;
+    let store = replaced.carol.store;
+    let old = held(&replaced.carol.app, store).device.unwrap();
+    let (started, release) = hold_registration(&network, &replaced).await;
+    let (stop, cancel) = watch::channel(false);
+    let builder = network.reopen(&replaced.carol);
+    let restoring = builder.restore_device(
+        store,
+        &replaced.code,
+        Some(carol_key()),
+        "Carol's laptop",
+        |_| Ok(()),
+        |_| {},
+        &cancel,
+    );
+    let cancelling = async {
+        started.await.unwrap();
+        stop.send_replace(true);
+        release.send(()).unwrap();
+    };
+    let (result, ()) = tokio::time::timeout(coven_foundation::clock::HANG_GUARD, async {
+        tokio::join!(restoring, cancelling)
+    })
+    .await
+    .unwrap();
+    assert!(matches!(result, Err(BootstrapError::RestoreRegistered)), "{result:?}");
+    refuses_opens(&network, &replaced).await;
+    restored(&network, &replaced, resume(&network, &replaced).await.unwrap(), old).await;
+    network.close().await;
+}
+
+/// Ana removes Carol while Carol's laptop restores in place, and the
+/// removal takes the slot the laptop's registration was sent for. Checked
+/// again, the registration is refused: nothing in storage names the fresh
+/// device, so the restore ends, removing its record and new installation,
+/// and the old copy is the store again (§19.3).
+#[tokio::test]
+async fn a_restore_in_place_whose_registration_is_refused_leaves_the_old_copy() {
+    let mut network = Network::new(2).await;
+    let replaced = network.replace_keys_elsewhere().await;
+    let store = replaced.carol.store;
+    let before = held(&replaced.carol.app, store);
+    let (started, release) = hold_registration(&network, &replaced).await;
+    let restoring = restore(network.reopen(&replaced.carol), store, &replaced.code);
+    let ana = &network.devices[0].handle;
+    let removing = async {
+        started.await.unwrap();
+        crate::tests::landed(ana, ana.remove_member(&replaced.member).await.unwrap()).await;
+        release.send(()).unwrap();
+    };
+    let (result, ()) = tokio::time::timeout(coven_foundation::clock::HANG_GUARD, async {
+        tokio::join!(restoring, removing)
+    })
+    .await
+    .unwrap();
+    assert!(
+        matches!(result, Err(BootstrapError::Sync(SyncError::Removed | SyncError::Rejected(_)))),
+        "{result:?}"
+    );
+    assert_eq!(replaced.carol.app.store_dir(&store).unfinished_replacement().unwrap(), None);
+    assert!(leftovers(&replaced).is_empty(), "{:?}", leftovers(&replaced));
+    assert!(replaced.carol.app.store_keychain(store).replacement_record().unwrap().is_none());
+    // The laptop's custody is as it was, but for Carol's restore code: her
+    // removal deletes it as the new device applied it (§14.1).
+    assert_eq!(held(&replaced.carol.app, store), Held { code: None, ..before });
+    let handle = network.reopen(&replaced.carol).open(store, |_| ()).await.unwrap();
+    assert_eq!(handle.device_id(), before.device.unwrap());
+    handle.close().await.unwrap();
     network.close().await;
 }
 

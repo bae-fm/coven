@@ -95,20 +95,42 @@ pub(super) fn keychain_code(
         .transpose()
 }
 
-/// What a new device's restore keeps on the device before its registration,
-/// its first write to storage: from then on the restore only goes forward,
-/// and finishes from what it kept (§13.1).
+/// What a restore keeps on the device before its registration, its first
+/// write to storage: from then on it only goes forward, and finishes from
+/// what it kept. A new device's restore keeps its record (§13.1); a
+/// replacement of this device's installation keeps its own entry beside the
+/// replacement's record (§19.3).
 pub(super) struct Recording {
     entries: Arc<StoreKeychain>,
     credentials: Arc<DeviceCredentials>,
     name: String,
+    replacement: bool,
 }
 
 impl Recording {
+    /// What a new device's restore keeps.
     pub(super) fn new(
         builder: &CovenBuilder,
         store: StoreId,
         name: &str,
+    ) -> Result<Self, BootstrapError> {
+        Self::kept(builder, store, name, false)
+    }
+
+    /// What a replacement of this device's installation keeps.
+    pub(super) fn replacement(
+        builder: &CovenBuilder,
+        store: StoreId,
+        name: &str,
+    ) -> Result<Self, BootstrapError> {
+        Self::kept(builder, store, name, true)
+    }
+
+    fn kept(
+        builder: &CovenBuilder,
+        store: StoreId,
+        name: &str,
+        replacement: bool,
     ) -> Result<Self, BootstrapError> {
         let keychain = builder.keychain()?;
         Ok(Self {
@@ -120,15 +142,11 @@ impl Recording {
                 builder.oauth_exchange(),
             ),
             name: name.to_owned(),
+            replacement,
         })
     }
 
-    /// Record the restore: the code, holding the S3 key on S3, and the
-    /// device's name, then on Dropbox and OneDrive the sign-in, which from
-    /// now on refreshes in the store's device credentials. A record without
-    /// its sign-in lists a restore that resumes once the person signs in;
-    /// a sign-in is never kept without its record. Returns the custody the
-    /// sign-in refreshes in.
+    /// Record the restore, then keep its sign-in (`keep_sign_in`).
     pub(super) fn record(
         &self,
         member: &MemberIdentity,
@@ -136,6 +154,17 @@ impl Recording {
         data: &ConnectionCredentials,
         sign_in: SignInCustody,
     ) -> Result<SignInCustody, BootstrapError> {
+        self.keep(member, store, data)?;
+        self.keep_sign_in(sign_in)
+    }
+
+    /// Keep the code, holding the S3 key on S3, and the device's name.
+    pub(super) fn keep(
+        &self,
+        member: &MemberIdentity,
+        store: StoreId,
+        data: &ConnectionCredentials,
+    ) -> Result<(), BootstrapError> {
         let s3_key = match &data.credentials {
             StorageCredentials::S3(key) => Some(key.clone()),
             _ => None,
@@ -149,7 +178,30 @@ impl Recording {
                 .map_err(SyncError::from)?,
         };
         let text = SecretText::new(code.to_text().map_err(SyncError::from)?.to_string());
-        self.entries.set_restore_record(&text, &self.name)?;
+        match self.replacement {
+            true => self.entries.set_replacement_record(&text, &self.name)?,
+            false => self.entries.set_restore_record(&text, &self.name)?,
+        }
+        Ok(())
+    }
+
+    /// Delete what `keep` kept, when the call ends before it needs it.
+    pub(super) fn forget(&self) -> Result<(), BootstrapError> {
+        match self.replacement {
+            true => self.entries.delete_replacement_record()?,
+            false => self.entries.delete_restore_record()?,
+        }
+        Ok(())
+    }
+
+    /// On Dropbox and OneDrive keep the sign-in, which from now on refreshes
+    /// in the store's device credentials. A record without its sign-in lists
+    /// a restore that resumes once the person signs in; a sign-in is never
+    /// kept without its record. Returns the custody the sign-in refreshes in.
+    pub(super) fn keep_sign_in(
+        &self,
+        sign_in: SignInCustody,
+    ) -> Result<SignInCustody, BootstrapError> {
         Ok(match sign_in {
             SignInCustody::Session(session) => {
                 session.publish(&self.credentials, |keychains, tokens| {
@@ -277,7 +329,7 @@ pub(super) async fn ended(
     if !ends {
         return Err(error);
     }
-    match registered(builder, pending).await {
+    match registered(builder, pending.directory()).await {
         Ok(false) => remove_unfinished(entries, pending, Err(error)),
         Ok(true) if cancelled => Err(BootstrapError::RestoreRegistered),
         Ok(true) => Err(error),
@@ -292,12 +344,11 @@ pub(super) async fn ended(
 /// A replaced pair leaves the device's entry active, so the entry alone
 /// doesn't decide. Until history names the device, a registration still
 /// journaled may land. Read from the installation's own database, with
-/// nothing of it running.
-async fn registered(
+/// nothing of it running: a new device's, or a replacement's (§19.3).
+pub(super) async fn registered(
     builder: &CovenBuilder,
-    pending: &BootstrapStore,
+    directory: StoreDir,
 ) -> Result<bool, BootstrapError> {
-    let directory = pending.directory();
     let device = directory.settings().map_err(CovenError::from)?.device_id;
     let database = open_installation(builder.database(directory)?, &|_| ()).await?;
     let facts = async {

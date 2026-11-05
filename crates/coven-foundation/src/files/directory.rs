@@ -158,16 +158,28 @@ impl StoreDir {
             .is_some_and(|instance| lock::bootstrap_running(&self.path, self.id, instance))
     }
 
-    /// A marker beside a replacement record belongs to a swap under way;
-    /// alone, it belongs to a first installation.
+    /// An unfinished replacement's record refuses opens, from before its
+    /// fresh device registers until it is published; a marker alone belongs
+    /// to a first installation.
     fn check_published(&self) -> Result<(), StoreLockError> {
-        if !self.is_bootstrapping() && super::bootstrap::is_pending(&self.path)? {
-            return Err(match super::device_reset::read(&self.path)? {
-                Some(record) => {
-                    StoreLockError::ReplacementUnfinished { store: self.id, by: record.by }
-                }
-                None => StoreLockError::BootstrapPending(self.id),
-            });
+        if self.is_bootstrapping() {
+            return Ok(());
+        }
+        let unfinished =
+            super::device_reset::unfinished(&self.path, self.id).map_err(|error| match error {
+                SettingsError::File(error) => StoreLockError::from(error),
+                error => FileError::at(
+                    "read the store's settings beside its replacement record",
+                    &self.path,
+                    std::io::Error::other(error),
+                )
+                .into(),
+            })?;
+        if let Some(record) = unfinished {
+            return Err(StoreLockError::ReplacementUnfinished { store: self.id, by: record.by });
+        }
+        if super::bootstrap::is_pending(&self.path)? {
+            return Err(StoreLockError::BootstrapPending(self.id));
         }
         Ok(())
     }

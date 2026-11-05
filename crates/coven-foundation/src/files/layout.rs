@@ -199,8 +199,9 @@ impl StoreDirectories {
     /// Replace the installation of a published store, or continue a
     /// replacement under way: hold the store's bootstrap and writer locks, so
     /// no handle opens it meanwhile, and load the new installation in a
-    /// hidden directory inside the store's directory (§19.3). A swap under
-    /// way that the other call began is refused with
+    /// hidden directory inside the store's directory (§19.3). A recorded
+    /// replacement continues its load, and a swap under way finishes. One
+    /// that the other call began is refused with
     /// `StoreLockError::ReplacementUnfinished`, changing nothing.
     pub async fn begin_replacement(
         &self,

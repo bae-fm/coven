@@ -48,6 +48,10 @@ pub struct CovenBuilder {
     /// Stop a replacement right after its swap, as if the process ended there.
     #[cfg(test)]
     interrupt_after_swap: bool,
+    /// Stop a replacement right after its fresh device registered, before
+    /// its swap, as if the process ended there.
+    #[cfg(test)]
+    interrupt_after_registering: bool,
     /// Records every value a bootstrap through this builder reports as it
     /// loads; also the builder's clock.
     #[cfg(test)]
@@ -108,6 +112,8 @@ impl CovenBuilder {
             bugs: Arc::new(crate::task::LoggedBugs),
             #[cfg(test)]
             interrupt_after_swap: false,
+            #[cfg(test)]
+            interrupt_after_registering: false,
             #[cfg(test)]
             loading_recorder: None,
         }
@@ -353,8 +359,11 @@ impl CovenBuilder {
     /// unsent is salvaged. The new device loads beside the old copy, which
     /// moves aside only once loading is complete; saved member keys that
     /// history has replaced fail with `MemberKeysReplaced` and change nothing.
-    /// An interrupted call resumes with the same fresh id. A swap that
-    /// `restore_device` began is refused with
+    /// Just before the fresh device registers, the reset records itself and
+    /// only goes forward: the store refuses opens with
+    /// `StoreLockError::ReplacementUnfinished` until this call, or
+    /// `resume_replacement`, finishes it. An interrupted call resumes with the
+    /// same fresh id. A replacement `restore_device` began is refused with
     /// `StoreLockError::ReplacementUnfinished`, changing nothing. The returned
     /// handle's `device_reset()` names the old and new ids. `on_status` hears
     /// how far the new device has come, as the other bootstrap calls report
@@ -372,19 +381,23 @@ impl CovenBuilder {
     /// current restore code, for a device whose member keys were replaced
     /// (§13.1). The code must name this store, and its pair must be current,
     /// checked against history before the store or keychain changes. The new
-    /// device loads beside the old copy, which stays openable until the load
-    /// completes; then it swaps in, and the old copy is removed. An
-    /// interrupted call is finished by retrying it; a swap `reset_device`
-    /// began is refused with `StoreLockError::ReplacementUnfinished`, changing
-    /// nothing. A device whose custody and applied history already hold the
-    /// code's pair just opens. S3 requires the separately held key, as
+    /// device loads beside the old copy, which stays openable until the
+    /// restore records itself, just before its fresh device registers; from
+    /// then on the store refuses opens and the restore only goes forward,
+    /// and once registered it swaps in and the old copy is removed. Cancelling
+    /// past the record waits for the registration, then fails with
+    /// `RestoreRegistered`. An interrupted call is finished by retrying it, or
+    /// by `resume_replacement`; a replacement `reset_device` began is refused
+    /// with `StoreLockError::ReplacementUnfinished`, changing nothing. A
+    /// device whose custody and applied history already hold the code's pair
+    /// just opens. S3 requires the separately held key, as
     /// `restore_from_code` does. `prepare` is the app's step on the new
     /// installation: one bulk write (`CovenHandle::write_bulk`) of its
-    /// device-local tables, run after loading and before the swap, so what it
-    /// writes, such as preferences read from the old copy before the call,
+    /// device-local tables, run after loading and before the record, so what
+    /// it writes, such as preferences read from the old copy before the call,
     /// takes the old copy's place with the new installation or not at all. A
-    /// call that finds the swap already made, or the pair already installed,
-    /// doesn't run it.
+    /// call that finds the replacement recorded, or the pair already
+    /// installed, doesn't run it.
     pub async fn restore_device(
         self,
         store: StoreId,
@@ -406,6 +419,22 @@ impl CovenBuilder {
             cancel,
         ))
         .await
+    }
+
+    /// Finishes this device's replacement of `store` past its record, as the
+    /// call that began it would: `reset_device` or `restore_device`, from
+    /// what the replacement kept on the device, with neither the code nor a
+    /// new sign-in (§19.3). On Dropbox and OneDrive it connects through the
+    /// kept sign-in, or a sign-in this builder holds once it grants the
+    /// location's access. A store with no replacement under way fails with
+    /// `BootstrapError::NoUnfinishedReplacement`.
+    pub async fn resume_replacement(
+        self,
+        store: StoreId,
+        on_status: impl Fn(BootstrapStatus),
+        cancel: &tokio::sync::watch::Receiver<bool>,
+    ) -> Result<CovenHandle, BootstrapError> {
+        Box::pin(bootstrap::resume_replacement(self, store, on_status, cancel)).await
     }
 
     /// The joins under way on this device, ordered by store id (§13.2). A
@@ -689,6 +718,14 @@ impl CovenBuilder {
     #[cfg(test)]
     pub(crate) fn interrupt_after_swap(mut self) -> Self {
         self.interrupt_after_swap = true;
+        self
+    }
+
+    /// Make the next replacement stop right after its fresh device
+    /// registered, before its swap, undoing nothing.
+    #[cfg(test)]
+    pub(crate) fn interrupt_after_registering(mut self) -> Self {
+        self.interrupt_after_registering = true;
         self
     }
 

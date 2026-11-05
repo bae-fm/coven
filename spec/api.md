@@ -183,9 +183,9 @@ pub enum Audience {
   bootstrap locks. Deletion holds all three while removing the directory, then
   releases and removes every lock file, so a deleted store leaves nothing named
   for it. Holding the bootstrap lock keeps out a running restore, join or
-  replacement: after its swap, a running `reset_device` or `restore_device`
-  holds only that lock between steps, and deletion must not remove files under
-  it. Lock acquisition, creation and lock-file removal are serialized by the
+  replacement: after its swap, a running `reset_device`, `restore_device` or
+  `resume_replacement` holds only that lock between steps, and deletion must
+  not remove files under it. Lock acquisition, creation and lock-file removal are serialized by the
   layout, so no one can lock a lock file between its release and its removal.
 - Deleting a store with storage set up loses whatever hasn't been uploaded.
   So before Ana deletes the Household store from her phone, the app shows
@@ -1845,9 +1845,11 @@ pub enum StoreLockError {
     /// began it: opening refuses it, and so does a restore on a join's
     /// installation or a join on a recorded restore's, changing nothing.
     BootstrapPending(StoreId),
-    /// A replacement of this device's installation swapped in but did not
-    /// finish. Opening, and the other of `reset_device` and `restore_device`,
-    /// are refused before anything changes; only `by` finishes it, or
+    /// A replacement of this device's installation recorded itself, just
+    /// before its fresh device registered, and did not finish. Opening, read
+    /// only too, and the other of `reset_device` and `restore_device`, are
+    /// refused before anything changes; only `by`, or
+    /// `CovenBuilder::resume_replacement`, finishes it, or
     /// `Coven::discard_store` deletes the store from this device (§19.3).
     ReplacementUnfinished { store: StoreId, by: ReplacedBy },
     /// A supplied lock protects a different directory.
@@ -2161,7 +2163,7 @@ impl Coven {
     /// S3 key stay for their next devices (§13.1). Unsent
     /// work is lost; membership stays until this device is removed. For a
     /// store that cannot open, or to finish `CovenHandle::delete_store`. A
-    /// store whose `reset_device` or `restore_device` stopped after its swap
+    /// store whose `reset_device` or `restore_device` stopped past its record
     /// is deleted whole: both installations, the replacement's directory and
     /// record, and this device's entries, whichever device they name by then.
     /// Refused while a writer, read-only handle, file stream, file I/O or a
@@ -2299,9 +2301,13 @@ impl CovenBuilder {
     /// copy using this id (§19.3). Uses saved settings and custody; no salvage.
     /// Checks storage and keys, then loads beside the old copy, which moves
     /// aside only once loading is complete. Saved member keys that history
-    /// has replaced fail with MemberKeysReplaced and change nothing. Uses the
-    /// existing bootstrap errors; an interrupted call resumes with the same
-    /// fresh id. A swap restore_device began is refused with
+    /// has replaced fail with MemberKeysReplaced and change nothing. Just
+    /// before the fresh device registers, the reset records itself and keeps
+    /// the device name on the device; from then on the store refuses opens
+    /// with ReplacementUnfinished and the reset only goes forward, finished
+    /// by this call or `resume_replacement`. Uses the existing bootstrap
+    /// errors; an interrupted call resumes with the same fresh id. A
+    /// replacement restore_device began is refused with
     /// ReplacementUnfinished, changing nothing. The returned handle holds a
     /// device-reset notice that unsent edits may have been lost (E5).
     /// `on_status` hears how far the new device has come, as `BootstrapStatus`
@@ -6857,13 +6863,19 @@ pub enum ProviderSignOut {
   replaced restores in place with `CovenBuilder::restore_device`
   ([§13.1](coven.md#131-a-persons-new-device-the-restore-code)). The code must
   name that store, or the call fails with `CodeError::WrongStore`. The new
-  device loads beside the old copy, which stays openable until the load
-  completes; a failure before the swap, or a failed key commit after it,
-  leaves the old copy and every keychain entry as they were. Retrying the
-  same call finishes an interrupted restore. Until then, opening fails with
+  device loads beside the old copy, which stays openable until the restore
+  records itself, just before the new device registers; a failure before
+  the record leaves the old copy as it was. From the record on it only goes
+  forward: a failure leaves it for the next call, a cancel fails with
+  `BootstrapError::RestoreRegistered`, and retrying the same call, or
+  `CovenBuilder::resume_replacement` with nothing from the app, finishes it.
+  Until then, opening fails with
   `StoreLockError::ReplacementUnfinished { by: Restore }`, `Coven::stores`
   lists the store in that state, and `reset_device` is refused with that error,
   changing nothing ([§19.3](coven.md#193-another-copy-of-the-same-device)).
+  Only the facts end it before the swap: its registration refused, or the
+  new device gone for good, removes the record, the kept entry and the new
+  installation, and the old copy is the store again.
   `Coven::discard_store` can delete the store from the device instead, both
   copies with it. The person's restore code and S3 key stay.
 - An admin adds a person with an invite
@@ -7134,6 +7146,9 @@ pub enum BootstrapError {
     /// `resume_restore` found no restore under way for this store on this
     /// device: none recorded itself here, or it has ended.
     NoUnfinishedRestore(StoreId),
+    /// `resume_replacement` found no replacement of this device's
+    /// installation of the store past its record.
+    NoUnfinishedReplacement(StoreId),
     /// The code cannot be used.
     Code(CodeError),
     /// Preparing, publishing or removing the unpublished directory failed.
@@ -7547,22 +7562,29 @@ impl CovenBuilder {
     /// current restore code, for a device whose member keys were replaced
     /// (§13.1). The code must name `store`; its pair is checked against
     /// history before the store or keychain changes, so an old code fails
-    /// with MemberKeysReplaced. The new device loads beside the old copy and
-    /// swaps in only once loaded; then the pair is committed, the old copy
+    /// with MemberKeysReplaced. The new device loads beside the old copy.
+    /// Just before it registers, the restore records itself, keeping the
+    /// code, with the S3 key inside it on S3, and the device name on the
+    /// device, and on Dropbox and OneDrive the sign-in in the store's device
+    /// credentials; from then on the store refuses opens with
+    /// ReplacementUnfinished and the restore only goes forward. Once
+    /// registered it swaps in; then the pair is committed, the old copy
     /// removed and the saved restore code rewritten. A failure before the
-    /// swap, or a failed key commit after it, leaves the old copy and every
-    /// keychain entry unchanged; retrying the call finishes an interrupted
-    /// one. A swap reset_device began is refused with ReplacementUnfinished,
-    /// changing nothing. When custody holds the code's pair and applied
-    /// history binds it, the store just opens, reporting the open's steps as
-    /// `BootstrapStatus::Opening`. S3 credentials as for
+    /// record leaves the old copy unchanged; past it, a failure, or a failed
+    /// key commit after the swap, leaves the restore for the next call, and
+    /// cancelling waits for the registration, then fails with
+    /// RestoreRegistered. Retrying the call, or `resume_replacement`,
+    /// finishes it. A replacement reset_device began is refused with
+    /// ReplacementUnfinished, changing nothing. When custody holds the code's
+    /// pair and applied history binds it, the store just opens, reporting the
+    /// open's steps as `BootstrapStatus::Opening`. S3 credentials as for
     /// `restore_from_code`. `prepare` is the app's step on the new
     /// installation, one bulk write of its device-local tables
     /// (`CovenHandle::write_bulk`, E3), run after loading and before the
-    /// swap: what it writes swaps in with the new installation or not at all.
-    /// A failed step fails the call before the swap; a call that finds the
-    /// swap made or the pair installed doesn't run it. The handle holds the
-    /// device-reset notice (E5).
+    /// record: what it writes takes the old copy's place with the new
+    /// installation or not at all. A failed step fails the call before the
+    /// record; a call that finds the restore recorded or the pair installed
+    /// doesn't run it. The handle holds the device-reset notice (E5).
     pub async fn restore_device(
         self,
         store: StoreId,
@@ -7570,6 +7592,22 @@ impl CovenBuilder {
         s3_credentials: Option<S3Credentials>,
         device_name: &str,
         prepare: impl FnOnce(BulkSqlContext<'_>) -> CovenResult<()> + Send + 'static,
+        on_status: impl Fn(BootstrapStatus),
+        cancel: &watch::Receiver<bool>,
+    ) -> Result<CovenHandle, BootstrapError>;
+
+    /// Finishes this device's replacement of `store` past its record, as the
+    /// call that began it would, `reset_device` or `restore_device`, from what
+    /// it kept on the device: with neither the code nor a new sign-in
+    /// (§19.3). On Dropbox and OneDrive it connects through the kept sign-in,
+    /// or a sign-in this builder holds once it grants the location's access;
+    /// with neither, or a kept one the provider refuses even after its one
+    /// refresh, it fails with `OAuthError::Reauthorize` and the replacement
+    /// stays unfinished. A store with no replacement past its record fails
+    /// with `BootstrapError::NoUnfinishedReplacement`.
+    pub async fn resume_replacement(
+        self,
+        store: StoreId,
         on_status: impl Fn(BootstrapStatus),
         cancel: &watch::Receiver<bool>,
     ) -> Result<CovenHandle, BootstrapError>;

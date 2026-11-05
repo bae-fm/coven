@@ -204,7 +204,7 @@ impl Coven {
     /// this device stays registered with the store until it is removed; prefer
     /// `CovenHandle::delete_store`. Use this for a store that cannot open, or
     /// to finish a handle's deletion that failed after closing. A store whose
-    /// `reset_device` or `restore_device` stopped after its swap is deleted
+    /// `reset_device` or `restore_device` stopped past its record is deleted
     /// whole: both installations, the replacement's directory and record,
     /// and this device's entries, which by then may name either device.
     /// Refused while a writer, read-only handle, file stream or a running

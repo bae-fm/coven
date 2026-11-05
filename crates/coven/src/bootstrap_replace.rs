@@ -8,10 +8,11 @@ use super::*;
 pub(crate) type Prepare = Box<dyn FnOnce(BulkSqlContext<'_>) -> CovenResult<()> + Send>;
 
 /// Which call replaces the installation: a reset, or a restore with the
-/// app's step on the new installation.
+/// app's step on the new installation, which a resumed restore past its
+/// record no longer has to run.
 pub(super) enum Replacing {
     Reset,
-    Restore(Prepare),
+    Restore(Option<Prepare>),
 }
 
 impl Replacing {
@@ -85,22 +86,80 @@ pub(crate) async fn restore_device(
             sign_in: sign_in.map_or(SignInCustody::None, SignInCustody::Session),
             name: device_name.into(),
         },
-        Replacing::Restore(prepare),
+        Replacing::Restore(Some(prepare)),
         status,
         cancel,
     )
     .await
 }
 
-/// Load the new installation beside the old one, swap it into the store's
-/// directory, commit its custody, settle the old installation's local state,
-/// then publish it. A reset keeps the old local state for inspection; a
-/// restore removes it (§13.1), and runs the app's step on the new
-/// installation before the swap. Until the swap, the old installation and every
-/// keychain entry stay as they were, and the store opens as before. A failure
-/// after this call's own swap, with custody unchanged, puts the old
-/// installation back. A swap interrupted any other way only moves forward:
-/// the next call of the same kind finishes it, and the other is refused.
+/// Finish a replacement past its record from what it kept
+/// (`CovenBuilder::resume_replacement`): a reset from the store's own
+/// custody and the device name it kept, a restore from the code and name it
+/// kept, its S3 key inside the code, and its sign-in in the store's device
+/// credentials or the builder's.
+pub(crate) async fn resume_replacement(
+    builder: CovenBuilder,
+    store: StoreId,
+    status: impl Fn(BootstrapStatus),
+    cancel: &watch::Receiver<bool>,
+) -> Result<CovenHandle, BootstrapError> {
+    check_cancel(cancel)?;
+    let directory = builder.directories.store_dir(&store);
+    let record = directory
+        .unfinished_replacement()
+        .map_err(CovenError::from)?
+        .ok_or(BootstrapError::NoUnfinishedReplacement(store))?;
+    let kept = StoreKeychain::new(builder.keychain()?, store).replacement_record()?;
+    match record.by {
+        // An unconnected reset registers nothing, so it keeps no name.
+        ReplacedBy::Reset => {
+            let name = kept.map(|(_, name)| name).unwrap_or_default();
+            Box::pin(reset::reset_device(builder, store, &name, status)).await
+        }
+        ReplacedBy::Restore => {
+            let (text, name) = kept.ok_or(BootstrapError::NoUnfinishedReplacement(store))?;
+            let code = coven_sync::read_restore_code(text.as_str())?;
+            CodeError::require_store(store, code.store)?;
+            let storage =
+                RestoreStorage::decode(code.storage.as_bytes()).map_err(SyncError::from)?;
+            let (data, sign_in) = match storage.location.provider() {
+                provider if provider.signs_in_with_oauth() => {
+                    let (custody, tokens) = join_sign_in(&builder, store, &storage.location)?;
+                    let data = ConnectionCredentials {
+                        location: storage.location,
+                        credentials: StorageCredentials::OAuth(tokens),
+                    };
+                    data.validate().map_err(SyncError::from)?;
+                    (data, custody)
+                }
+                _ => (restore_connection(&builder, storage, None)?.0, SignInCustody::None),
+            };
+            replace_installation(
+                builder,
+                store,
+                BootstrapRequest::Restore { code, data, sign_in, name },
+                Replacing::Restore(None),
+                status,
+                cancel,
+            )
+            .await
+        }
+    }
+}
+
+/// Load the new installation beside the old one, record the replacement and
+/// register its fresh device, swap it into the store's directory, commit its
+/// custody, settle the old installation's local state, then publish it. A
+/// reset keeps the old local state for inspection; a restore removes it
+/// (§13.1), and runs the app's step on the new installation before the
+/// record. Until the record, the old installation and the store's custody
+/// stay as they were, and the store opens as before. From the record on, the
+/// store refuses opens and the replacement only moves forward: a failure,
+/// a cancel or an interruption leaves it for the next call of the same kind
+/// to finish, or for `resume_replacement`, and the other kind is refused.
+/// Only the facts end it before the swap: its registration refused, or its
+/// fresh device gone for good, removes the new installation and its record.
 pub(super) async fn replace_installation(
     mut builder: CovenBuilder,
     store: StoreId,
@@ -111,7 +170,12 @@ pub(super) async fn replace_installation(
 ) -> Result<CovenHandle, BootstrapError> {
     check_cancel(cancel)?;
     let by = call.by();
+    let prepare = match call {
+        Replacing::Reset => None,
+        Replacing::Restore(prepare) => prepare,
+    };
     let keychain = builder.keychain()?;
+    let entries = StoreKeychain::new(keychain.clone(), store);
     let replacement =
         builder.directories.begin_replacement(store, by, builder.ids.as_ref()).await?;
     let swapping = !replacement.is_swapped();
@@ -119,6 +183,7 @@ pub(super) async fn replace_installation(
         &mut builder,
         Installing::Replacing(&replacement),
         &request,
+        prepare,
         &status,
         cancel,
     )
@@ -126,28 +191,23 @@ pub(super) async fn replace_installation(
     let Loaded { code, provider, credentials, sign_in, ring, database, waits, .. } = match loaded {
         Ok(Some(loaded)) => loaded,
         Ok(None) => unreachable!("only a join waits for approval"),
-        Err(error) if swapping && abandons(&error) => {
-            return combine(Err(error), replacement.cancel().map_err(Into::into))
-        }
-        // The loaded work, and once registered its fresh id, wait for a retry.
-        Err(error) => return Err(error),
+        Err(error) => return ended(&builder, replacement, &entries, error).await,
     };
+    #[cfg(test)]
+    if builder.interrupt_after_registering {
+        // As if the process stopped here: nothing is undone.
+        return combine(Err(BootstrapError::Cancelled), close(database).await);
+    }
     let (database, waits) = if swapping {
-        // The app's step writes the new installation before it takes the old
-        // one's place, so its rows arrive with the swap or not at all. After
-        // an earlier call's swap they are there already.
-        if let Replacing::Restore(prepare) = call {
-            if let Err(error) = database.write_bulk(prepare).await {
-                return combine(Err(error.into()), close(database).await);
-            }
-        }
-        // Listings show this name until the swap finishes.
+        // Listings show this name until the replacement finishes.
         let name = database.store_name().await;
         // The loading database closes before its files move.
         database.close().await.map_err(CovenError::from)?;
         let name = name?;
-        if let Err(error) = check_cancel(cancel) {
-            return combine(Err(error), replacement.cancel().map_err(Into::into));
+        // Loaded, the fresh device is registered: past the record, a cancel
+        // can't take it back (§11.6).
+        if check_cancel(cancel).is_err() {
+            return Err(BootstrapError::RestoreRegistered);
         }
         replacement.swap(name)?;
         #[cfg(test)]
@@ -155,12 +215,7 @@ pub(super) async fn replace_installation(
             // As if the process stopped here: nothing is undone.
             return Err(BootstrapError::Cancelled);
         }
-        match open_swapped(&builder, &replacement, &status).await {
-            Ok(opened) => opened,
-            Err(error) => {
-                return combine(Err(error), replacement.unswap().await.map_err(Into::into))
-            }
-        }
+        open_swapped(&builder, &replacement, &status).await?
     } else {
         (database, waits)
     };
@@ -173,13 +228,14 @@ pub(super) async fn replace_installation(
         crate::builder::Continuing::Fresh,
     ) {
         Ok(owners) => owners,
-        Err(error) => return undo(error.into(), database, swapping.then_some(replacement)).await,
+        Err(error) => return combine(Err(error.into()), close(database).await),
     };
     let name = match commit::loaded_name(&database).await {
         Ok(name) => name,
-        Err(error) => return undo(error, database, swapping.then_some(replacement)).await,
+        Err(error) => return combine(Err(error), close(database).await),
     };
-    // The swapped store's own publication follows, and moves only forward.
+    // The swapped store's own publication follows, and moves only forward:
+    // a commit that fails leaves the swap for the next call to finish.
     if let Err(uncommitted) = commit::commit(
         &directory,
         &code,
@@ -190,13 +246,7 @@ pub(super) async fn replace_installation(
         &owners,
         &commit::PublishedLater,
     ) {
-        return match uncommitted {
-            commit::Uncommitted::Restored(error) => {
-                undo(error, database, swapping.then_some(replacement)).await
-            }
-            // Custody may name the new device: only finishing is safe.
-            commit::Uncommitted::Partly(error) => undo(error, database, None).await,
-        };
+        return combine(Err(uncommitted.into_error()), close(database).await);
     }
     if by == ReplacedBy::Restore {
         if let Err(error) = replacement.remove_replaced().await {
@@ -205,7 +255,91 @@ pub(super) async fn replace_installation(
     }
     let finished = owners.clock.now();
     let location = coven_database::RecordedLocation::Connected(provider);
-    publish(&replacement, owners, database, waits, location, Some(finished)).await
+    let published = publish(&replacement, owners, database, waits, location, Some(finished)).await;
+    // A published replacement no longer needs what it kept to finish.
+    forget_kept(published, || entries.delete_replacement_record())
+}
+
+/// Run the app's step on the loaded installation, keep the code and the
+/// device name, record the replacement, then keep its sign-in: all before
+/// the fresh device registers (§19.3). A reader holding the store refuses
+/// the record, and what was kept for it goes. A replacement an earlier call
+/// recorded has its step's rows already, and keeps this call's code and
+/// sign-in again.
+pub(super) async fn record_replacement(
+    replacement: &ReplacementStore,
+    recording: &restore::Recording,
+    database: &Database,
+    prepare: Option<Prepare>,
+    (member, store, data): (&MemberIdentity, StoreId, &ConnectionCredentials),
+    sign_in: SignInCustody,
+) -> Result<SignInCustody, BootstrapError> {
+    if !replacement.is_recorded() {
+        if let Some(prepare) = prepare {
+            database.write_bulk(prepare).await?;
+        }
+        let name = database.store_name().await?;
+        recording.keep(member, store, data)?;
+        if let Err(error) = replacement.record(name) {
+            return combine(Err(error.into()), recording.forget());
+        }
+    } else {
+        recording.keep(member, store, data)?;
+    }
+    recording.keep_sign_in(sign_in)
+}
+
+/// End a replacement whose call failed or was cancelled before it swapped.
+/// Before the record, a refusal no retry can change, or a cancel, removes the
+/// new installation: the store stays exactly as it was; any other failure
+/// keeps the loaded work for the next call. From the record on, it stays for
+/// the next call unless the facts end it: a cancel, its registration
+/// refused, or its member removed or its keys replaced, while no
+/// registration of the fresh device is journaled and the history it applied
+/// doesn't name the device as active, or names it as gone for good. Then
+/// the record, what it kept and the new installation go, and the old
+/// installation is the store again. A cancel the facts don't end is refused
+/// with `RestoreRegistered` (§19.3, §11.6).
+async fn ended(
+    builder: &CovenBuilder,
+    replacement: ReplacementStore,
+    entries: &StoreKeychain,
+    error: BootstrapError,
+) -> Result<CovenHandle, BootstrapError> {
+    if !replacement.is_recorded() {
+        if !replacement.is_swapped() && abandons(&error) {
+            return combine(
+                combine(Err(error), entries.delete_replacement_record().map_err(Into::into)),
+                replacement.cancel().map_err(Into::into),
+            );
+        }
+        return Err(error);
+    }
+    let cancelled = matches!(error, BootstrapError::Cancelled);
+    let ends = cancelled
+        || matches!(
+            error,
+            BootstrapError::Sync(
+                SyncError::Removed | SyncError::MemberKeysReplaced { .. } | SyncError::Rejected(_)
+            )
+        );
+    if !ends || replacement.is_swapped() {
+        return Err(error);
+    }
+    match restore::registered(builder, replacement.directory()).await {
+        Ok(false) => {
+            let directory = replacement.directory();
+            let abandoned = replacement.abandon().map_err(BootstrapError::from);
+            tracing::info!(store = %directory.id(), "the facts ended a recorded replacement");
+            combine(
+                combine(Err(error), abandoned),
+                entries.delete_replacement_record().map_err(Into::into),
+            )
+        }
+        Ok(true) if cancelled => Err(BootstrapError::RestoreRegistered),
+        Ok(true) => Err(error),
+        Err(read) => combine(Err(error), Err(read)),
+    }
 }
 
 /// Publish the committed replacement and hand back its open store, with
@@ -235,9 +369,9 @@ pub(super) async fn publish(
     }
 }
 
-/// A refusal no retry can change, or cancellation, removes the unswapped
-/// replacement: the store stays exactly as it was.
-pub(super) fn abandons(error: &BootstrapError) -> bool {
+/// A refusal no retry can change, or cancellation, removes a replacement
+/// not yet recorded: the store stays exactly as it was.
+fn abandons(error: &BootstrapError) -> bool {
     matches!(
         error,
         BootstrapError::Cancelled
@@ -264,18 +398,13 @@ pub(super) async fn open_swapped(
     }
 }
 
-/// Close the swapped installation's database after a failure, then put the
-/// old installation back when this call swapped it and nothing is committed.
+/// Close the swapped installation's database after a failure, leaving the
+/// swap for the next call to finish.
 pub(super) async fn undo(
     error: BootstrapError,
     database: Database,
-    unswap: Option<ReplacementStore>,
 ) -> Result<CovenHandle, BootstrapError> {
-    let result = combine(Err(error), close(database).await);
-    match unswap {
-        Some(replacement) => combine(result, replacement.unswap().await.map_err(Into::into)),
-        None => result,
-    }
+    combine(Err(error), close(database).await)
 }
 
 async fn close(database: Database) -> Result<(), BootstrapError> {

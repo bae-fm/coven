@@ -245,6 +245,7 @@ fn deletion_discovers_only_this_stores_entries_from_custody() {
         store.set_host_secret("another-token", "another secret").unwrap();
         store.set_invite_code(&SecretText::new("CVI1-CODE".into())).unwrap();
         store.set_restore_record(&SecretText::new("CVR1-CODE".into()), "Ana’s laptop").unwrap();
+        store.set_replacement_record(&SecretText::new("CVR1-CODE".into()), "Ana’s laptop").unwrap();
         let person = PersonEntries::new(fake.clone(), store.store);
         person.set_restore_code(&SecretBytes::new(b"restore".to_vec())).unwrap();
         person.set_s3_credentials(&SecretBytes::new(b"S3 key".to_vec())).unwrap();
@@ -261,6 +262,7 @@ fn deletion_discovers_only_this_stores_entries_from_custody() {
         HOST_SECRET_NAMES_ENTRY,
         INVITE_CODE_ENTRY,
         RESTORE_RECORD_ENTRY,
+        REPLACEMENT_RECORD_ENTRY,
         &host_secret_entry("token"),
         &host_secret_entry("another-token"),
     ] {
@@ -551,4 +553,24 @@ fn a_restore_record_is_kept_on_this_device_only_until_deleted() {
     store.delete_restore_record().unwrap();
     store.delete_restore_record().unwrap();
     assert!(store.restore_record().unwrap().is_none());
+}
+
+/// A replacement's record stays on this device, apart from a restore's, and
+/// reads back exactly until the replacement deletes it (§19.3).
+#[test]
+fn a_replacement_record_is_kept_on_this_device_only_until_deleted() {
+    let fake = Keychain::in_memory("replacement-record").unwrap();
+    let store = StoreKeychain::new(fake.clone(), StoreId(Uuid::from_u128(1)));
+    assert!(store.replacement_record().unwrap().is_none());
+    store.set_replacement_record(&SecretText::new("CVR1-CODE".into()), "Carol’s laptop").unwrap();
+    let (code, name) = store.replacement_record().unwrap().unwrap();
+    assert_eq!((code.as_str(), name.as_str()), ("CVR1-CODE", "Carol’s laptop"));
+    assert!(store.restore_record().unwrap().is_none());
+    assert!(fake
+        .read(EntryScope::Person, &store.account(REPLACEMENT_RECORD_ENTRY))
+        .unwrap()
+        .is_none());
+    store.delete_replacement_record().unwrap();
+    store.delete_replacement_record().unwrap();
+    assert!(store.replacement_record().unwrap().is_none());
 }

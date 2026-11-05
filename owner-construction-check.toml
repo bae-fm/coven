@@ -1451,9 +1451,14 @@ tables = [
     "restore_from_code",
     "restore_from_saved_code",
     # A restore keeps its record, and its sign-in in the device custody it
-    # composes for the store, from before it registers until it ends (§13.1).
+    # composes for the store, from before it registers until it ends (§13.1);
+    # a replacement of this device's installation keeps its own entry the
+    # same way (§19.3).
     "Recording::new",
+    "Recording::replacement",
+    "Recording::kept",
     "Recording::record",
+    "Recording::keep_sign_in",
     # Listing reads each unfinished installation's record.
     "unfinished_restores",
     "resume_restore",
@@ -1476,6 +1481,9 @@ tables = [
     "open_swapped",
     "publish",
     "restore_device",
+    # Resuming a recorded replacement composes its request from what the
+    # device kept (§19.3).
+    "resume_replacement",
 ]
 "crates/coven/src/bootstrap_reset.rs" = ["reset_device", "reset_unconnected"]
 "crates/coven/src/builder.rs" = [
@@ -1497,6 +1505,7 @@ tables = [
     "CovenBuilder::restore_device",
     "CovenBuilder::resume_join",
     "CovenBuilder::resume_restore",
+    "CovenBuilder::resume_replacement",
     "CovenBuilder::open_read_only",
     "CovenBuilder::owners",
     "CovenBuilder::create_store",

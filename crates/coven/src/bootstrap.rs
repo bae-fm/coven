@@ -31,7 +31,7 @@ mod join;
 
 #[path = "bootstrap_replace.rs"]
 mod replace;
-pub(super) use replace::restore_device;
+pub(super) use replace::{restore_device, resume_replacement};
 
 #[path = "bootstrap_reset.rs"]
 mod reset;
@@ -83,6 +83,10 @@ pub enum BootstrapError {
     /// itself here, or it has ended.
     #[error("no restore is under way for store {0}")]
     NoUnfinishedRestore(StoreId),
+    /// No replacement of this device's installation of the store is under
+    /// way past its record: none recorded itself, or it has finished.
+    #[error("no replacement is under way for store {0}")]
+    NoUnfinishedReplacement(StoreId),
     /// The code cannot be used for this operation.
     #[error(transparent)]
     Code(#[from] CodeError),
@@ -398,7 +402,8 @@ async fn bootstrap_device(
         return Err(BootstrapDirectoryError::from(StoreLockError::BootstrapPending(id)).into());
     }
     let result =
-        prepare_and_load(&mut builder, Installing::New(&pending), &request, &status, cancel).await;
+        prepare_and_load(&mut builder, Installing::New(&pending), &request, None, &status, cancel)
+            .await;
     match result {
         Ok(Some(Loaded {
             code,
@@ -614,10 +619,14 @@ struct Loaded {
     waits: Arc<coven_sync::RetryWaits>,
 }
 
+/// Load the store into `pending` and register its device. A replacement
+/// runs the app's `prepare` step on its loaded installation, then keeps what
+/// finishing needs and records itself, before it registers (§19.3).
 async fn prepare_and_load(
     builder: &mut CovenBuilder,
     pending: Installing<'_>,
     request: &BootstrapRequest,
+    prepare: Option<replace::Prepare>,
     status: &impl Fn(BootstrapStatus),
     cancel: &watch::Receiver<bool>,
 ) -> Result<Option<Loaded>, BootstrapError> {
@@ -643,13 +652,18 @@ async fn prepare_and_load(
         }
     };
     admission.cancellable(check_cancel(cancel))?;
-    // A new device's restore records itself before it registers (§13.1).
+    // A restore records itself before it registers: a new device's (§13.1),
+    // and a replacement of this device's installation (§19.3).
     let recording = match (request, pending) {
         (BootstrapRequest::Restore { code, name, .. }, Installing::New(_)) => {
             Some(restore::Recording::new(builder, code.store, name)?)
         }
+        (BootstrapRequest::Restore { code, name, .. }, Installing::Replacing(_)) => {
+            Some(restore::Recording::replacement(builder, code.store, name)?)
+        }
         _ => None,
     };
+    let mut prepare = prepare;
     let provider = data.location.provider();
     let settings = directory.settings().map_err(CovenError::from)?;
     let state = Arc::new(coven_sync::SequenceState::new());
@@ -801,8 +815,23 @@ async fn prepare_and_load(
             let registering = async {
                 if !registered {
                     check_cancel(cancel)?;
-                    if let Some(recording) = &recording {
-                        sign_in = recording.record(&member, settings.id, &data, sign_in.clone())?;
+                    match (replacement, &recording) {
+                        (Some(replacement), Some(recording)) => {
+                            sign_in = replace::record_replacement(
+                                replacement,
+                                recording,
+                                &database,
+                                prepare.take(),
+                                (&member, settings.id, &data),
+                                sign_in.clone(),
+                            )
+                            .await?;
+                        }
+                        (None, Some(recording)) => {
+                            sign_in =
+                                recording.record(&member, settings.id, &data, sign_in.clone())?;
+                        }
+                        _ => {}
                     }
                     let replaces =
                         replacement.map(|replacement| replacement.device_reset().old_device);

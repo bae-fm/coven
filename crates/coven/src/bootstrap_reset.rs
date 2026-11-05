@@ -131,8 +131,7 @@ async fn reset_unconnected(
         .begin_replacement(store, ReplacedBy::Reset, builder.ids.as_ref())
         .await?;
     let reset = replacement.device_reset();
-    let swapping = !replacement.is_swapped();
-    let (database, waits) = if swapping {
+    if !replacement.is_swapped() {
         let prepared = async {
             let name = coven_database::discarded_store_name(replacement.discarded_database_path())
                 .await
@@ -162,27 +161,19 @@ async fn reset_unconnected(
             // As if the process stopped here: nothing is undone.
             return Err(BootstrapError::Cancelled);
         }
-        match replace::open_swapped(&builder, &replacement, status).await {
-            Ok(opened) => opened,
-            Err(error) => {
-                return combine(Err(error), replacement.unswap().await.map_err(Into::into))
-            }
-        }
-    } else {
-        replace::open_swapped(&builder, &replacement, status).await?
-    };
+    }
+    // From the swap on, a failure leaves it for the next reset to finish.
+    let (database, waits) = replace::open_swapped(&builder, &replacement, status).await?;
     let owners = match builder.owners(
         replacement.directory(),
         keychain.clone(),
         crate::builder::Continuing::Fresh,
     ) {
         Ok(owners) => owners,
-        Err(error) => {
-            return replace::undo(error.into(), database, swapping.then_some(replacement)).await
-        }
+        Err(error) => return replace::undo(error.into(), database).await,
     };
     if let Err(error) = keychain.set_device_id(reset.new_device) {
-        return replace::undo(error.into(), database, swapping.then_some(replacement)).await;
+        return replace::undo(error.into(), database).await;
     }
     replace::publish(
         &replacement,
