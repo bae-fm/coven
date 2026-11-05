@@ -361,16 +361,10 @@ async fn a_pass_sends_its_writes_while_their_file_upload_is_held() {
     ana.database().close().await.unwrap();
 }
 
-/// Ana stored a recording's file and then deleted its row. Once a snapshot
-/// that leaves the file out has passed grace and the floor has deleted the
-/// slots that named it, nothing refers to the stored file: the next passes
-/// would delete it. Returns the group, Ana and the file's object path.
-async fn ana_with_an_unreferenced_stored_file() -> (Group, Device, ObjectPath) {
+/// Ana stored a recording's file and then deleted its row; returns the
+/// file's object path.
+async fn stored_file_whose_row_was_deleted(group: &Group, ana: &Device) -> ObjectPath {
     use coven_database::FilePlace;
-    let group = Group::new();
-    let mut devices = file_devices(&group, &[1]).await;
-    let ana = devices.remove(0);
-    group.create(&ana).await;
     let originals = tempfile::tempdir().unwrap();
     let path = originals.path().join("recording");
     std::fs::write(&path, b"sound").unwrap();
@@ -399,6 +393,19 @@ async fn ana_with_an_unreferenced_stored_file() -> (Group, Device, ObjectPath) {
         .await
         .unwrap();
     ana.sync.pass().await.unwrap();
+    object
+}
+
+/// Ana stored a recording's file and then deleted its row. Once a snapshot
+/// that leaves the file out has passed grace and the floor has deleted the
+/// slots that named it, nothing refers to the stored file: the next passes
+/// would delete it. Returns the group, Ana and the file's object path.
+async fn ana_with_an_unreferenced_stored_file() -> (Group, Device, ObjectPath) {
+    let group = Group::new();
+    let mut devices = file_devices(&group, &[1]).await;
+    let ana = devices.remove(0);
+    group.create(&ana).await;
+    let object = stored_file_whose_row_was_deleted(&group, &ana).await;
     ana.sync.snapshot(coven_merge::Audience::Store).await.unwrap();
     group.clock.set(
         std::time::UNIX_EPOCH
@@ -484,4 +491,225 @@ async fn file_deletion_reads_the_snapshots_the_floor_names_and_lists_no_snapshot
     );
     ana.files().close().await;
     ana.database().close().await.unwrap();
+}
+
+/// Removing a member lists the files folder of each of their devices, not
+/// only the first: every device's unreferenced object goes (§17.10).
+#[tokio::test]
+async fn removing_a_member_lists_the_folder_of_each_of_their_devices() {
+    use coven_foundation::id_source::FileId;
+    let group = Group::new();
+    let ana = group.device(1).await;
+    let ben = group.device(2).await;
+    group.create(&ana).await;
+    group.admit(&ana, &ben).await;
+    let laptop = group.laptop(&ben).await;
+    ana.sync.pass().await.unwrap();
+    let mut orphans = Vec::new();
+    for (n, device) in [&ben, &laptop].into_iter().enumerate() {
+        let orphan = ObjectPath::file(
+            group.store,
+            device.sync.device,
+            FileId(uuid::Uuid::from_u128(n as u128 + 100)),
+        );
+        group.storage.create(&orphan, b"never named").await.unwrap();
+        orphans.push(orphan);
+    }
+    ana.sync.administer(StoreChange::RemoveMember { member: ben.identity.member() }).await.unwrap();
+    ana.sync.pass().await.unwrap();
+    for orphan in &orphans {
+        assert!(group.storage.status(orphan).await.unwrap().is_none(), "{orphan:?} stays");
+    }
+    for device in [&ana, &ben, &laptop] {
+        device.database().close().await.unwrap();
+    }
+}
+
+/// Ben, who cannot see Gifts' key yet, has announced a Gifts snapshot, so
+/// Ana cannot prove nothing in it names her unreferenced file: the file
+/// stays, her second pass makes no read of the snapshot, and once Ben adds
+/// her to Gifts the next pass reads it and deletes the file (§17.10).
+#[tokio::test]
+async fn unreadable_evidence_keeps_a_file_and_an_unchanged_pass_reads_it_no_more() {
+    use coven_storage::test_utils::MemoryRequest;
+    let group = Group::new();
+    let devices = file_devices(&group, &[1, 2]).await;
+    let (ana, ben) = (&devices[0], &devices[1]);
+    group.create(ana).await;
+    group.admit(ana, ben).await;
+    let object = stored_file_whose_row_was_deleted(&group, ana).await;
+    // Ben reads Ana's deletion and publishes a write that read through it.
+    ben.sync.pass().await.unwrap();
+    insert(ben.database(), "note", "written after the deletion").await;
+    ben.sync.pass().await.unwrap();
+    let gifts = ben.sync.create_circle("Gifts".into()).await.unwrap();
+    let announced = ben.sync.snapshot(coven_merge::Audience::Circle(gifts)).await.unwrap();
+    ana.sync.pass().await.unwrap();
+    ana.sync.snapshot(coven_merge::Audience::Store).await.unwrap();
+    group.clock.set(
+        std::time::UNIX_EPOCH
+            + crate::sequence_sync::sequence_retention::GRACE
+            + std::time::Duration::from_secs(1),
+    );
+    let gifts_body = {
+        let session = ana.sync.session.lock().await;
+        crate::snapshot_object::path(
+            group.store,
+            &session.history.announcements[&announced].snapshot,
+        )
+        .unwrap()
+    };
+    let reads = |ana: &Device| {
+        ana.storage
+            .request_trace()
+            .iter()
+            .filter(
+                |request| matches!(request, MemoryRequest::Read(path, _) if *path == gifts_body),
+            )
+            .count()
+    };
+    for _ in 0..3 {
+        ana.sync.pass().await.unwrap();
+    }
+    assert!(group.storage.status(&object).await.unwrap().is_some(), "unreadable evidence keeps it");
+    let operation = ana
+        .database()
+        .operations()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|record| record.kind == "sequence-files")
+        .expect("the waiting deletion stays journaled")
+        .id;
+    let pending = ana
+        .database()
+        .operation_pending::<crate::PendingRecord>(operation)
+        .await
+        .unwrap()
+        .expect("the wait is reported");
+    assert!(matches!(pending.reason, crate::PendingReason::KeyUnavailable { .. }), "{pending:?}");
+    let before = reads(ana);
+    ana.sync.pass().await.unwrap();
+    ana.sync.pass().await.unwrap();
+    assert_eq!(reads(ana), before, "an unchanged pass reads the snapshot no more");
+
+    // Ben reads everything first, then adds Ana to Gifts.
+    ben.sync.pass().await.unwrap();
+    ben.sync
+        .administer(StoreChange::AddCircleMember { circle: gifts, member: ana.identity.member() })
+        .await
+        .unwrap();
+    for _ in 0..8 {
+        ben.sync.pass().await.unwrap();
+        ana.sync.pass().await.unwrap();
+    }
+    // Ana's reload of Gifts restarts what every other device must have
+    // seen, so Ben writes again before the deletion is settled.
+    insert(ben.database(), "later", "written after Ana joined Gifts").await;
+    for _ in 0..3 {
+        ben.sync.pass().await.unwrap();
+        ana.sync.pass().await.unwrap();
+    }
+    assert!(group.storage.status(&object).await.unwrap().is_none(), "the file is deleted");
+    assert!(ana.database().pending::<crate::PendingRecord>().await.unwrap().is_empty());
+    for device in &devices {
+        device.files().close().await;
+        device.database().close().await.unwrap();
+    }
+}
+
+/// The provider sees random object names and ciphertext only: a file's key,
+/// its content and chunk hashes and the path of the user's original appear
+/// in no stored object, and the file's object is named by its random id
+/// (§17.5).
+#[tokio::test]
+async fn stored_objects_never_hold_a_files_key_hashes_or_path() {
+    use coven_crypto::ContentHasher;
+    use coven_database::FilePlace;
+    let group = Group::new();
+    let devices = file_devices(&group, &[1, 2]).await;
+    let (ana, ben) = (&devices[0], &devices[1]);
+    group.create(ana).await;
+    group.admit(ana, ben).await;
+    let originals = tempfile::tempdir().unwrap();
+    let path = originals.path().join("private-recording-title.flac");
+    let bytes: Vec<u8> =
+        (0..70_000u32).map(|n| (n.wrapping_mul(2_654_435_761) >> 13) as u8).collect();
+    std::fs::write(&path, &bytes).unwrap();
+    let prepared = coven_database::prepare_user_file(&path, |_| {}).await.unwrap();
+    let staged = ana
+        .database()
+        .write_as::<_, _, coven_database::DbError>(move |sql| {
+            let file = sql.put_user_file("files", prepared, coven_database::Place::Cloud)?;
+            sql.execute("INSERT INTO files(id,file) VALUES('recording',?1)", [file])?;
+            Ok(file)
+        })
+        .await
+        .unwrap();
+    ana.files().retry_uploads_now().await.unwrap();
+    ana.sync.pass().await.unwrap();
+    ben.sync.pass().await.unwrap();
+    ana.sync.snapshot(coven_merge::Audience::Store).await.unwrap();
+    let file = ana.database().file_ref(staged).await.unwrap();
+    let FilePlace::Cloud { location, .. } = file.place() else {
+        panic!("the upload stored the file");
+    };
+    let (coordinates, content_hash) = ana
+        .database()
+        .read(|sql| {
+            Ok(sql.query_row("SELECT coordinates,hash FROM coven_files", [], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
+            })?)
+        })
+        .await
+        .unwrap();
+    let key_text = coordinates.split_whitespace().last().unwrap().to_owned();
+    let mut secrets: Vec<(&str, Vec<u8>)> = vec![
+        ("the file key", key_text.clone().into_bytes()),
+        ("the content hash", content_hash.clone()),
+        (
+            "the content hash in hex",
+            content_hash.iter().map(|b| format!("{b:02x}")).collect::<String>().into_bytes(),
+        ),
+        ("the original's path", std::os::unix::ffi::OsStrExt::as_bytes(path.as_os_str()).to_vec()),
+        ("the original's name", b"private-recording-title".to_vec()),
+    ];
+    if key_text.len() == 64 {
+        if let Ok(raw) = (0..32)
+            .map(|i| u8::from_str_radix(&key_text[2 * i..2 * i + 2], 16))
+            .collect::<Result<Vec<u8>, _>>()
+        {
+            secrets.push(("the raw file key", raw));
+        }
+    }
+    for chunk in bytes.chunks(64 * 1024) {
+        let mut hasher = ContentHasher::new();
+        hasher.update(chunk);
+        secrets.push(("a chunk hash", hasher.finish().as_bytes().to_vec()));
+    }
+    let objects = group.storage.list(&coven_storage::ObjectPrefix::all(group.store)).await.unwrap();
+    assert!(objects.len() > 3, "slots, a snapshot and the file are stored");
+    let mut found_file = false;
+    for object in objects {
+        let stored = group.storage.read(&object.path).await.unwrap();
+        for (what, secret) in &secrets {
+            assert!(
+                !stored.windows(secret.len()).any(|window| window == secret.as_slice()),
+                "{:?} holds {what}",
+                object.path
+            );
+        }
+        if object.path == location.path(group.store) {
+            found_file = true;
+            assert_eq!(
+                object.path.as_str().rsplit('/').next().unwrap(),
+                location.object().0.to_string()
+            );
+        }
+    }
+    assert!(found_file);
+    for device in &devices {
+        device.files().close().await;
+        device.database().close().await.unwrap();
+    }
 }
