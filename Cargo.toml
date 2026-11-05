@@ -124,7 +124,71 @@ incremental = false
 opt-level = 1
 debug = "line-tables-only"
 
-[profile.test.package."*"]
+# Dependencies build at the test profile's opt-level 1, except the crypto
+# crates below at opt-level 3: the Argon2id key derivation (64 MiB) in the
+# passphrase tests, the hashes and ciphers, and the Curve25519 code are the
+# tests' CPU-bound dependency code. The list holds the constant-time and
+# zeroizing helpers too (`subtle`, `cmov`, `ctutils`, `zeroize`): with only the
+# algorithm crates, `coven-format --lib codes` took 35-70 s against 23-25 s with
+# the `"*"` wildcard, and with the helpers added it is back at 23-25 s. Every
+# other timed test group matched the wildcard within noise. Building the rest
+# of the tree (aws-sdk-s3, reqwest, rustls, icu data, syn) at opt-level 3
+# cost CPU and sped up none of the timed groups: a cold `coven` test build
+# took 528 s of CPU with the wildcard, 478 s with this list. List a crate here
+# by name; `build-override` does not beat a `package."*"` entry.
+[profile.test.package.argon2]
+opt-level = 3
+[profile.test.package.blake2]
+opt-level = 3
+[profile.test.package.sha2]
+opt-level = 3
+[profile.test.package.chacha20]
+opt-level = 3
+[profile.test.package.chacha20poly1305]
+opt-level = 3
+[profile.test.package.poly1305]
+opt-level = 3
+[profile.test.package.curve25519-dalek]
+opt-level = 3
+[profile.test.package.ed25519-dalek]
+opt-level = 3
+[profile.test.package.x25519-dalek]
+opt-level = 3
+[profile.test.package.hkdf]
+opt-level = 3
+[profile.test.package.hmac]
+opt-level = 3
+[profile.test.package.digest]
+opt-level = 3
+[profile.test.package.cipher]
+opt-level = 3
+[profile.test.package.aead]
+opt-level = 3
+[profile.test.package.crypto-common]
+opt-level = 3
+[profile.test.package.block-buffer]
+opt-level = 3
+[profile.test.package.cmov]
+opt-level = 3
+[profile.test.package.ctutils]
+opt-level = 3
+[profile.test.package.subtle]
+opt-level = 3
+[profile.test.package.zeroize]
+opt-level = 3
+[profile.test.package.hybrid-array]
+opt-level = 3
+[profile.test.package.inout]
+opt-level = 3
+[profile.test.package.ed25519]
+opt-level = 3
+[profile.test.package.signature]
+opt-level = 3
+[profile.test.package.rand_core]
+opt-level = 3
+[profile.test.package.cpufeatures]
+opt-level = 3
+[profile.test.package.base64ct]
 opt-level = 3
 
 [patch.crates-io]
