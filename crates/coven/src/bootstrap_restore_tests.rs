@@ -678,3 +678,34 @@ async fn a_restore_finishes_a_cut_deletion_of_its_store() {
     assert_eq!(install.app.stores().await.unwrap().len(), 1);
     owner.close().await;
 }
+
+/// In-memory key custody keeps the keys a restore opened only for that
+/// handle's session: once it closes, the store opens with them locked (E1).
+#[tokio::test]
+async fn in_memory_key_custody_keeps_opened_keys_only_until_close() {
+    let owner = Owner::new(CloudProvider::S3, false).await;
+    let install = Installation::new();
+    let (_, cancel) = watch::channel(false);
+    let in_memory = |builder: CovenBuilder| {
+        builder.key_custody(CustodyChoice::InMemory).identity_custody(CustodyChoice::InMemory)
+    };
+    let handle = restore_from_code(
+        in_memory(install.builder(&owner, owner.storage.clone())),
+        &owner.code.to_text().unwrap(),
+        owner.s3_credentials(),
+        "Laptop",
+        |_| {},
+        &cancel,
+    )
+    .await
+    .unwrap();
+    assert_eq!(handle.store_key_state().unwrap(), StoreKeyState::Available);
+    handle.close().await.unwrap();
+    let reopened = in_memory(install.builder(&owner, owner.storage.clone()))
+        .open(owner.directory.id(), |_| ())
+        .await
+        .unwrap();
+    assert_eq!(reopened.store_key_state().unwrap(), StoreKeyState::Locked);
+    reopened.close().await.unwrap();
+    owner.close().await;
+}
