@@ -724,6 +724,35 @@ Each rule `correct` has is needed; leaving one out is a checked counterexample:
 `Rules.rust` names the rules the Rust follows; the differential test compares
 it.
 
+[`InviteClaims`](sequence/CovenSequence/InviteClaims.lean) models what
+`InviteLifecycle` takes as landing in one step: the entries an invite claims
+through operations of its own, its share's record, the share's end and a kept
+S3 replacement's key record, and the device's one open claim they share
+(§5.1, §13.2). Each attempt is sent, then lands or loses its slot to another
+device; a pass may read this device's own landed slot before it settles the
+claim, as one that restarts after a crash between the two does; the app
+cancels, and the invite expires, at any point. Every step is one transaction.
+Under `Rules.correct` the invite names each operation it starts, and its
+settled step settles the claim of every one still journaled, claiming nothing
+for it again, and ends them all with the invite:
+
+- `children_end_with_invite`: once the invite's row is gone, none of its
+  operations is journaled and no claim is open.
+- `settles`: from every reachable state, coven's own steps, its passes, its
+  attempts sent again and the expiry, end the invite with no claim open, so
+  the device's writes go out. The proof is a measure a step of coven's own
+  lowers from every other state (`progress`); it assumes an attempt sent again
+  lands when no other device takes the slot.
+
+`Rules.unnamed`, the invite that looked only at history once it ended, has a
+counterexample for each way it left a claim open for good:
+
+- `ended_share_strands_claim`: the share's end lands, and the pass reads that
+  slot before settling its claim; the invite ends without the claim.
+- `cancelled_share_strands_claim`: the app cancels the invite while its share's
+  record lands; the share's end it then claims is refused by that open claim,
+  and the invite never ends.
+
 [`JoinStatus`](sequence/CovenSequence/JoinStatus.lean) models what a waiting
 join reports across its checks and across the calls that resume it: a call
 may stop between checks, or in the check whose copies opened its keys, after

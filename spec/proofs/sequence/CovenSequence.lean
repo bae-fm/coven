@@ -30,4 +30,5 @@ import CovenSequence.Authorship
 import CovenSequence.JoinScan
 import CovenSequence.JoinScanExamples
 import CovenSequence.InviteLifecycle
+import CovenSequence.InviteClaims
 import CovenSequence.JoinStatus

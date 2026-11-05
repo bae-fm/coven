@@ -309,6 +309,12 @@ import SequenceApply
 #print axioms CovenSequence.InviteLifecycle.reclaim_binds_twice
 #print axioms CovenSequence.InviteLifecycle.approval_shown_as_waiting
 #print axioms CovenSequence.InviteLifecycle.unrecorded_share_strands
+#print axioms CovenSequence.InviteClaims.reachable_inv
+#print axioms CovenSequence.InviteClaims.children_end_with_invite
+#print axioms CovenSequence.InviteClaims.progress
+#print axioms CovenSequence.InviteClaims.settles
+#print axioms CovenSequence.InviteClaims.ended_share_strands_claim
+#print axioms CovenSequence.InviteClaims.cancelled_share_strands_claim
 #print axioms CovenSequence.JoinStatus.phases_forward
 #print axioms CovenSequence.JoinStatus.opened_never_waits
 #print axioms CovenSequence.JoinStatus.resumed_waits_again
