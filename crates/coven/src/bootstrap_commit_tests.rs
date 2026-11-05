@@ -1,4 +1,5 @@
 use super::*;
+use crate::builder::Continuing;
 use coven_crypto::custody::{InMemoryCustody, KeyringCustody};
 use coven_storage::S3Credentials;
 
@@ -67,6 +68,17 @@ async fn prepared(
     keys: KeyCustody,
     identity: IdentityCustody,
 ) -> (BootstrapStore, OpeningOwners, Database) {
+    prepared_continuing(app, id, keychain, keys, identity, Continuing::Fresh).await
+}
+
+async fn prepared_continuing(
+    app: &Coven,
+    id: StoreId,
+    keychain: Arc<Keychain>,
+    keys: KeyCustody,
+    identity: IdentityCustody,
+    continuing: Continuing,
+) -> (BootstrapStore, OpeningOwners, Database) {
     let pending = app.directories().begin_bootstrap(id, &UuidIds).await.unwrap();
     let builder = app
         .builder()
@@ -76,8 +88,9 @@ async fn prepared(
         .identity_custody(identity);
     let database = builder.database(pending.directory()).unwrap().open().await.unwrap();
     database.initialize_store_name("Household".into()).await.unwrap();
-    let owners =
-        builder.owners(pending.directory(), Arc::new(StoreKeychain::new(keychain, id))).unwrap();
+    let owners = builder
+        .owners(pending.directory(), Arc::new(StoreKeychain::new(keychain, id)), continuing)
+        .unwrap();
     (pending, owners, database)
 }
 
@@ -395,10 +408,21 @@ async fn publication_with_a_loaded_provider_does_not_suspend() {
     let keychain = Keychain::in_memory("commit-test").unwrap();
     let app = Coven::with_keychain(root.path().into(), keychain.clone());
     let id = StoreId(UuidIds.new_id());
-    let (pending, mut owners, database) =
-        prepared(&app, id, keychain, KeyCustody::InMemory, IdentityCustody::InMemory).await;
     let provider = coven_storage::test_utils::MemoryStorage::builder().build().unwrap();
-    owners.storage = Some(provider.shared_connection());
+    let continuing = Continuing::Loaded {
+        state: Arc::new(coven_sync::SequenceState::new()),
+        storage: provider.shared_connection(),
+        credentials: None,
+    };
+    let (pending, owners, database) = prepared_continuing(
+        &app,
+        id,
+        keychain,
+        KeyCustody::InMemory,
+        IdentityCustody::InMemory,
+        continuing,
+    )
+    .await;
     let waits = waits(&database).await;
     let mut publishing = Box::pin(publish_bootstrap(
         &pending,

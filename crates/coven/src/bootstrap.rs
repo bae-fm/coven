@@ -417,16 +417,18 @@ async fn bootstrap_device(
                     });
                 }
                 builder.authentication.take();
-                let mut owners = builder
-                    .owners(pending.directory(), Arc::new(StoreKeychain::new(keychain, id)))?;
-                owners.state = state;
-                owners.storage = Some(storage);
-                // A join's kept sign-in is already this store's device
-                // credentials: the handle refreshes through the same custody
-                // as the connection it continues.
-                if let SignInCustody::Device { credentials, .. } = &sign_in {
-                    owners.credentials = credentials.clone();
-                }
+                let credentials = match &sign_in {
+                    // A join's kept sign-in is already this store's device
+                    // credentials: the handle refreshes through the same
+                    // custody as the connection it continues.
+                    SignInCustody::Device { credentials, .. } => Some(credentials.clone()),
+                    _ => None,
+                };
+                let owners = builder.owners(
+                    pending.directory(),
+                    Arc::new(StoreKeychain::new(keychain, id)),
+                    crate::builder::Continuing::Loaded { state, storage, credentials },
+                )?;
                 Ok((owners, name))
             }) {
                 // No cancellable await separates final custody, publication

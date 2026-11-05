@@ -167,9 +167,11 @@ pub(super) async fn replace_installation(
     status(BootstrapStatus::Committing);
     builder.authentication.take();
     let directory = replacement.directory();
-    let owners = match builder
-        .owners(directory.clone(), Arc::new(StoreKeychain::new(keychain, store)))
-    {
+    let owners = match builder.owners(
+        directory.clone(),
+        Arc::new(StoreKeychain::new(keychain, store)),
+        crate::builder::Continuing::Fresh,
+    ) {
         Ok(owners) => owners,
         Err(error) => return undo(error.into(), database, swapping.then_some(replacement)).await,
     };

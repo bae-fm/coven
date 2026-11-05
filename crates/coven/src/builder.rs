@@ -54,6 +54,21 @@ pub struct CovenBuilder {
     loading_recorder: Option<Arc<RecordingClock<coven_database::LoadStep>>>,
 }
 
+/// What a store's owners continue from as its handle is made.
+enum Continuing {
+    /// The store's own files: a new sequence state, no connection yet, and
+    /// device credentials over this installation's keychain.
+    Fresh,
+    /// A bootstrap that loaded the store from storage: the sequence state
+    /// and connection it loaded through, and, for a join, the device
+    /// credentials its sign-in is kept in (§13.2).
+    Loaded {
+        state: Arc<coven_sync::SequenceState>,
+        storage: Arc<coven_storage::StorageConnection>,
+        credentials: Option<Arc<coven_sync::DeviceCredentials>>,
+    },
+}
+
 /// Reset transfers its unlocked sessions into the replacement installation.
 enum CustodyChoice<C, T> {
     Configured(C),
@@ -592,22 +607,32 @@ impl CovenBuilder {
         mut self,
         directory: StoreDir,
         keychain: Arc<StoreKeychain>,
+        continuing: Continuing,
     ) -> CovenResult<OpeningOwners> {
         let clients = self.oauth_exchange();
         let oauth = Self::oauth_flow(clients.clone(), self.presenter.clone());
         let settings = directory.settings()?;
         let person = Arc::new(PersonEntries::new(self.keychain()?, settings.id));
-        let credentials = Arc::new(coven_sync::DeviceCredentials::new(
-            keychain.clone(),
-            person.clone(),
-            directory.clone(),
-            clients.clone(),
-        ));
+        let (state, storage, credentials) = match continuing {
+            Continuing::Fresh => (Arc::new(coven_sync::SequenceState::new()), None, None),
+            Continuing::Loaded { state, storage, credentials } => {
+                (state, Some(storage), credentials)
+            }
+        };
+        // A restore keeps no sign-in in device credentials: the absence is
+        // designed, not a default over a failure.
+        let credentials = credentials.unwrap_or_else(|| {
+            Arc::new(coven_sync::DeviceCredentials::new(
+                keychain.clone(),
+                person.clone(),
+                directory.clone(),
+                clients.clone(),
+            ))
+        });
         let connector = self.connector();
         let keys = Self::make_keys(self.keys, &directory, settings.id, keychain.clone())?;
         let identity =
             Self::make_identity(self.identity, &directory, settings.id, keychain.clone())?;
-        let state = Arc::new(coven_sync::SequenceState::new());
         let network =
             coven_foundation::network_watch::NetworkWatch::start(&self.network, &self.bugs)
                 .map_err(CovenError::NetworkWatch)?;
@@ -629,7 +654,7 @@ impl CovenBuilder {
             state,
             clock: self.clock,
             ids: self.ids,
-            storage: None,
+            storage,
         })
     }
 
@@ -745,7 +770,7 @@ impl OpeningStore {
             coven_sync::RetryWaits::open(database.clone(), self.builder.clock.clone()).await?,
         );
         let owners = crate::task::blocking("open the store's owners", move || {
-            let owners = self.builder.owners(self.directory, self.keychain)?;
+            let owners = self.builder.owners(self.directory, self.keychain, Continuing::Fresh)?;
             // The saved restore code's name catches up with this store's
             // when the store's is newer, and an unreadable entry is replaced
             // with this device's current code (§13.1). A store never set up

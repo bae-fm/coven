@@ -52,7 +52,7 @@ async fn prepare(
             builder.keychain().map_err(CovenError::from)?,
             directory.id(),
         ));
-        let owners = builder.owners(directory, keychain)?;
+        let owners = builder.owners(directory, keychain, crate::builder::Continuing::Fresh)?;
         // Each step catches its panic, so a panic undoes custody as any
         // failure before publication does (E15). Making the identity writes
         // nothing, and refuses one custody already holds, so a failure there

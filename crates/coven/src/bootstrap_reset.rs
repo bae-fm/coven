@@ -171,7 +171,11 @@ async fn reset_unconnected(
     } else {
         replace::open_swapped(&builder, &replacement, status).await?
     };
-    let owners = match builder.owners(replacement.directory(), keychain.clone()) {
+    let owners = match builder.owners(
+        replacement.directory(),
+        keychain.clone(),
+        crate::builder::Continuing::Fresh,
+    ) {
         Ok(owners) => owners,
         Err(error) => {
             return replace::undo(error.into(), database, swapping.then_some(replacement)).await
