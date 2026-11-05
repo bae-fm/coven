@@ -52,6 +52,10 @@ pub struct CovenBuilder {
     /// its swap, as if the process ended there.
     #[cfg(test)]
     interrupt_after_registering: bool,
+    /// Stop the next commit of a new installation's custody right after it
+    /// writes the device id, as if the process ended there.
+    #[cfg(test)]
+    interrupt_commit: bool,
     /// Records every value a bootstrap through this builder reports as it
     /// loads; also the builder's clock.
     #[cfg(test)]
@@ -114,6 +118,8 @@ impl CovenBuilder {
             interrupt_after_swap: false,
             #[cfg(test)]
             interrupt_after_registering: false,
+            #[cfg(test)]
+            interrupt_commit: false,
             #[cfg(test)]
             loading_recorder: None,
         }
@@ -690,6 +696,8 @@ impl CovenBuilder {
             clock: self.clock,
             ids: self.ids,
             storage,
+            #[cfg(test)]
+            interrupt_commit: self.interrupt_commit,
         })
     }
 
@@ -726,6 +734,14 @@ impl CovenBuilder {
     #[cfg(test)]
     pub(crate) fn interrupt_after_registering(mut self) -> Self {
         self.interrupt_after_registering = true;
+        self
+    }
+
+    /// Make the next commit of a new installation's custody stop right after
+    /// it writes the device id, undoing nothing.
+    #[cfg(test)]
+    pub(crate) fn interrupt_commit(mut self) -> Self {
+        self.interrupt_commit = true;
         self
     }
 
@@ -775,6 +791,9 @@ struct OpeningOwners {
     ids: IdSourceRef,
     /// A loaded installation's connection, made through `state`.
     storage: Option<Arc<coven_storage::StorageConnection>>,
+    /// Stop the commit right after it writes the device id.
+    #[cfg(test)]
+    interrupt_commit: bool,
 }
 
 impl OpeningStore {

@@ -235,8 +235,9 @@ pub(super) async fn replace_installation(
         Err(error) => return combine(Err(error), close(database).await),
     };
     // The swapped store's own publication follows, and moves only forward:
-    // a commit that fails leaves the swap for the next call to finish.
-    if let Err(uncommitted) = commit::commit(
+    // a commit that fails keeps what it wrote and the swap, for the next
+    // call to finish.
+    if let Err(error) = commit::commit(
         &directory,
         &code,
         &name,
@@ -246,7 +247,7 @@ pub(super) async fn replace_installation(
         &owners,
         &commit::PublishedLater,
     ) {
-        return combine(Err(uncommitted.into_error()), close(database).await);
+        return combine(Err(error), close(database).await);
     }
     if by == ReplacedBy::Restore {
         if let Err(error) = replacement.remove_replaced().await {

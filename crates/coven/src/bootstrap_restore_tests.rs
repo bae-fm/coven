@@ -586,3 +586,62 @@ async fn a_restored_handle_moves_files_with_the_builders_transfer_limits() {
     handle.close().await.unwrap();
     owner.close().await;
 }
+
+/// None of this device's own entries for the store is left: its device id,
+/// store and member keys, provider credentials and the restore's record.
+fn no_device_entries(install: &Installation, store: StoreId) {
+    let scoped = Arc::new(StoreKeychain::new(install.keychain.clone(), store));
+    assert!(scoped.device_id().unwrap().is_none());
+    assert!(Custody::<StoreKeyring>::unlock(&KeyringCustody::new(scoped.clone()))
+        .unwrap()
+        .is_none());
+    assert!(Custody::<MemberIdentity>::unlock(&KeyringCustody::new(scoped.clone()))
+        .unwrap()
+        .is_none());
+    assert!(scoped.storage_credentials().unwrap().is_none());
+    assert!(scoped.restore_record().unwrap().is_none());
+}
+
+/// Ana's laptop loads Household and its commit stops part way, its device
+/// id and keys written, as a crash would stop it. Her phone then removes the
+/// laptop, so the resumed restore can't load and the facts end it. Ending it
+/// deletes every entry the laptop kept for Household, the ones the cut
+/// commit wrote with them: left, they would outlive the installation, for a
+/// store the laptop doesn't have (§13.4, §11.6).
+#[tokio::test]
+async fn ending_a_restore_whose_commit_was_cut_deletes_what_it_wrote() {
+    let owner = Owner::new(CloudProvider::S3, false).await;
+    let install = Installation::new();
+    let store = owner.directory.id();
+    let (_, cancel) = watch::channel(false);
+    let builder = install.authenticated_builder(&owner, owner.storage.clone()).await;
+    assert!(restoring(&owner, builder.interrupt_commit(), &cancel).await.is_err());
+    let device = laptop(&install, &owner);
+    let scoped = StoreKeychain::new(install.keychain.clone(), store);
+    assert_eq!(scoped.device_id().unwrap(), Some(device));
+    assert_eq!(listed(&install, &owner).await, [store]);
+    let (removal, _) = owner.handle.remove_device(device).await.unwrap();
+    crate::tests::landed(&owner.handle, removal).await;
+    let resumed = resume(&install, &owner).await;
+    assert!(matches!(resumed, Err(BootstrapError::Sync(SyncError::Removed))), "{resumed:?}");
+    assert!(listed(&install, &owner).await.is_empty());
+    assert!(install.app.stores().await.unwrap().is_empty());
+    no_device_entries(&install, store);
+    assert!(!install.root.path().join("stores").join(store.to_string()).exists());
+    owner.close().await;
+}
+
+/// Ana's laptop loads Household and its commit stops part way, as a crash
+/// would stop it. The restore is listed, and resuming it commits everything
+/// again and publishes the store (§13.4, §11.6).
+#[tokio::test]
+async fn a_restore_whose_commit_was_cut_resumes_and_publishes() {
+    let owner = Owner::new(CloudProvider::S3, false).await;
+    let install = Installation::new();
+    let (_, cancel) = watch::channel(false);
+    let builder = install.authenticated_builder(&owner, owner.storage.clone()).await;
+    assert!(restoring(&owner, builder.interrupt_commit(), &cancel).await.is_err());
+    assert_eq!(listed(&install, &owner).await, [owner.directory.id()]);
+    finished(&install, &owner, resume(&install, &owner).await.unwrap()).await;
+    owner.close().await;
+}

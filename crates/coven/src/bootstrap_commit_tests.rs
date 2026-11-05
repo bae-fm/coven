@@ -1,6 +1,6 @@
 use super::*;
 use crate::builder::Continuing;
-use coven_crypto::custody::{InMemoryCustody, KeyringCustody};
+use coven_crypto::custody::KeyringCustody;
 use coven_storage::S3Credentials;
 
 fn code(store: StoreId) -> RestoreCode {
@@ -94,95 +94,140 @@ async fn prepared_continuing(
     (pending, owners, database)
 }
 
+/// The owners a later call makes for the same installation, with these
+/// custody choices.
+fn owners_again(
+    app: &Coven,
+    pending: &BootstrapStore,
+    keychain: Arc<Keychain>,
+    keys: CustodyChoice<StoreKeyring>,
+    identity: CustodyChoice<MemberIdentity>,
+) -> OpeningOwners {
+    let id = pending.directory().id();
+    app.builder()
+        .synced_tables(Vec::new())
+        .migrations(Vec::new())
+        .key_custody(keys)
+        .identity_custody(identity)
+        .owners(pending.directory(), Arc::new(StoreKeychain::new(keychain, id)), Continuing::Fresh)
+        .unwrap()
+}
+
+/// The custody a whole commit of `code` leaves for the store, beside the
+/// installation's `device`: its location, keys, identity, device id and
+/// credentials, and the person's restore code and S3 key.
+fn committed(
+    keychain: &Arc<Keychain>,
+    pending: &BootstrapStore,
+    code: &RestoreCode,
+    ring: &StoreKeyring,
+    device: DeviceId,
+) {
+    let id = pending.directory().id();
+    let scoped = Arc::new(StoreKeychain::new(keychain.clone(), id));
+    let person = PersonEntries::new(keychain.clone(), id);
+    let location = coven_storage::RestoreStorage::decode(code.storage.as_bytes()).unwrap().location;
+    assert_eq!(coven_storage::recorded_config(&pending.directory()).unwrap(), Some(location));
+    assert_eq!(
+        Custody::<StoreKeyring>::unlock(&KeyringCustody::new(scoped.clone()))
+            .unwrap()
+            .unwrap()
+            .to_secret_bytes()
+            .as_bytes(),
+        ring.to_secret_bytes().as_bytes()
+    );
+    let identity =
+        Custody::<MemberIdentity>::unlock(&KeyringCustody::new(scoped.clone())).unwrap().unwrap();
+    assert_eq!(identity.member(), code.member);
+    assert_eq!(scoped.device_id().unwrap(), Some(device));
+    assert_eq!(
+        scoped.storage_credentials().unwrap().unwrap().as_bytes(),
+        credentials().encode().unwrap().as_bytes()
+    );
+    assert_eq!(
+        person.s3_credentials().unwrap().unwrap().as_bytes(),
+        s3_key().encode().unwrap().as_bytes()
+    );
+    let (saved, _) =
+        coven_sync::read_saved_code(id, person.restore_code().unwrap().unwrap().as_bytes())
+            .unwrap();
+    assert_eq!(saved.code.member, code.member);
+}
+
+/// The member's keys can't be kept, after the location and the store keys
+/// were written. The commit runs past its call's point of no return, so it
+/// keeps what it wrote and publishes nothing; the next call commits it all
+/// again and publishes (§13.4, §11.6).
 #[tokio::test]
-async fn custody_failure_restores_the_prior_keys_without_publishing() {
+async fn a_failed_custody_step_keeps_what_it_wrote_and_the_next_commit_finishes() {
     let root = tempfile::tempdir().unwrap();
     let id = StoreId(UuidIds.new_id());
     let keychain = Keychain::in_memory("commit-test").unwrap();
     let app = Coven::with_keychain(root.path().into(), keychain.clone());
     let scoped = Arc::new(StoreKeychain::new(keychain.clone(), id));
-    let person = PersonEntries::new(keychain.clone(), id);
     let old = StoreKeyring::new(StoreKey::generate(KeyId(UuidIds.new_id())).unwrap());
-    let custody = Arc::new(KeyringCustody::<StoreKeyring>::new(scoped.clone()));
-    custody.persist(&old).unwrap();
+    KeyringCustody::<StoreKeyring>::new(scoped.clone()).persist(&old).unwrap();
     let next = StoreKeyring::new(StoreKey::generate(KeyId(UuidIds.new_id())).unwrap());
     let (pending, owners, database) = prepared(
         &app,
         id,
-        keychain,
-        CustodyChoice::Custom(custody.clone()),
+        keychain.clone(),
+        CustodyChoice::Keyring,
         CustodyChoice::Custom(Arc::new(RefusedIdentity(None))),
     )
     .await;
-    let error = publish_bootstrap(
+    let code = code(id);
+    let error = commit(
+        &pending.directory(),
+        &code,
+        &household(),
+        &credentials(),
+        &SignInCustody::None,
+        &next,
+        &owners,
         &pending,
-        code(id),
-        household(),
-        credentials(),
-        SignInCustody::None,
-        next,
-        owners,
-        database.clone(),
-        waits(&database).await,
     )
-    .await
     .unwrap_err();
-    assert!(matches!(error, BootstrapError::SecureStorage(KeyError::Unsupported)));
+    assert!(matches!(error, BootstrapError::SecureStorage(KeyError::Unsupported)), "{error:?}");
     assert_eq!(
-        custody.unlock().unwrap().unwrap().to_secret_bytes().as_bytes(),
-        old.to_secret_bytes().as_bytes()
+        Custody::<StoreKeyring>::unlock(&KeyringCustody::new(scoped.clone()))
+            .unwrap()
+            .unwrap()
+            .to_secret_bytes()
+            .as_bytes(),
+        next.to_secret_bytes().as_bytes()
     );
     assert!(scoped.device_id().unwrap().is_none());
-    assert!(scoped.storage_credentials().unwrap().is_none());
-    assert!(person.restore_code().unwrap().is_none());
-    assert!(person.s3_credentials().unwrap().is_none());
-    assert!(coven_storage::recorded_config(&pending.directory()).unwrap().is_none());
     assert!(app.stores().await.unwrap().is_empty());
-    database.close().await.unwrap();
-}
-
-#[tokio::test]
-async fn settings_rollback_failure_retains_both_causes_and_restores_other_custody() {
-    let root = tempfile::tempdir().unwrap();
-    let id = StoreId(UuidIds.new_id());
-    let keychain = Keychain::in_memory("commit-test").unwrap();
-    let app = Coven::with_keychain(root.path().into(), keychain.clone());
-    let custody = Arc::new(InMemoryCustody::<StoreKeyring>::empty());
-    let path = root.path().join("stores").join(id.to_string()).join("storage.json");
-    let (pending, owners, database) = prepared(
+    let again = owners_again(
         &app,
-        id,
-        keychain,
-        CustodyChoice::Custom(custody.clone()),
-        CustodyChoice::Custom(Arc::new(RefusedIdentity(Some(path)))),
-    )
-    .await;
-    let next = StoreKeyring::new(StoreKey::generate(KeyId(UuidIds.new_id())).unwrap());
-    let error = publish_bootstrap(
         &pending,
-        code(id),
-        household(),
-        credentials(),
-        SignInCustody::None,
-        next,
-        owners,
-        database.clone(),
-        waits(&database).await,
-    )
-    .await
-    .unwrap_err();
-    let BootstrapError::Cleanup { operation, cleanup } = error else {
-        panic!("rollback failure was discarded: {error}")
-    };
-    assert!(matches!(*operation, BootstrapError::SecureStorage(KeyError::Unsupported)));
-    assert!(matches!(*cleanup, BootstrapError::Sync(SyncError::Storage(_))));
-    assert!(custody.unlock().unwrap().is_none());
-    assert!(app.stores().await.unwrap().is_empty());
+        keychain.clone(),
+        CustodyChoice::Keyring,
+        CustodyChoice::Keyring,
+    );
+    let published = commit(
+        &pending.directory(),
+        &code,
+        &household(),
+        &credentials(),
+        &SignInCustody::None,
+        &next,
+        &again,
+        &pending,
+    );
+    assert!(matches!(published, Ok(None)), "{published:?}");
+    committed(&keychain, &pending, &code, &next, again.device);
+    assert_eq!(app.stores().await.unwrap().len(), 1);
     database.close().await.unwrap();
 }
 
+/// Publication fails after every custody value was written. The values
+/// stay, so the store's custody is whole when the call that resumes the
+/// installation publishes it; what the device held before is not put back
+/// (§13.4).
 #[tokio::test]
-async fn publication_failure_rolls_back_settings_and_custody() {
+async fn a_failed_publication_keeps_the_committed_custody() {
     let root = tempfile::tempdir().unwrap();
     let id = StoreId(UuidIds.new_id());
     let keychain = Keychain::in_memory("commit-test").unwrap();
@@ -190,90 +235,70 @@ async fn publication_failure_rolls_back_settings_and_custody() {
     let scoped = Arc::new(StoreKeychain::new(keychain.clone(), id));
     let person = PersonEntries::new(keychain.clone(), id);
     let (pending, owners, database) =
-        prepared(&app, id, keychain, CustodyChoice::Keyring, CustodyChoice::Keyring).await;
-    let old_credentials = SecretBytes::new(b"device credentials before restore".to_vec());
-    let old_s3_key = SecretBytes::new(b"saved S3 key before restore".to_vec());
-    let old_code = SecretBytes::new(b"code before restore".to_vec());
-    scoped.set_storage_credentials(&old_credentials).unwrap();
-    person.set_s3_credentials(&old_s3_key).unwrap();
-    person.set_restore_code(&old_code).unwrap();
-    let old_location = StorageConfig::Dropbox {
-        account_label: None,
-        location: coven_storage::DropboxLocation::SharedFolder {
-            namespace_id: "previous-location".into(),
-        },
-    };
-    coven_storage::record_config(&pending.directory(), &old_location).unwrap();
+        prepared(&app, id, keychain.clone(), CustodyChoice::Keyring, CustodyChoice::Keyring).await;
+    scoped
+        .set_storage_credentials(&SecretBytes::new(b"device credentials before".to_vec()))
+        .unwrap();
+    person.set_s3_credentials(&SecretBytes::new(b"saved S3 key before".to_vec())).unwrap();
+    person.set_restore_code(&SecretBytes::new(b"code before".to_vec())).unwrap();
     let marker = root.path().join("stores").join(id.to_string()).join(".coven-bootstrap");
     std::fs::remove_file(&marker).unwrap();
     std::fs::create_dir(&marker).unwrap();
-    let next = StoreKeyring::new(StoreKey::generate(KeyId(UuidIds.new_id())).unwrap());
-    let error = publish_bootstrap(
+    let code = code(id);
+    let ring = StoreKeyring::new(StoreKey::generate(KeyId(UuidIds.new_id())).unwrap());
+    let error = commit(
+        &pending.directory(),
+        &code,
+        &household(),
+        &credentials(),
+        &SignInCustody::None,
+        &ring,
+        &owners,
         &pending,
-        code(id),
-        household(),
-        credentials(),
-        SignInCustody::None,
-        next,
-        owners,
-        database.clone(),
-        waits(&database).await,
     )
-    .await
     .unwrap_err();
     assert!(matches!(error, BootstrapError::Directory(BootstrapDirectoryError::File(_))));
-    assert!(Custody::<StoreKeyring>::unlock(&KeyringCustody::new(scoped.clone()))
-        .unwrap()
-        .is_none());
-    assert!(Custody::<MemberIdentity>::unlock(&KeyringCustody::new(scoped.clone()))
-        .unwrap()
-        .is_none());
-    assert_eq!(
-        scoped.storage_credentials().unwrap().unwrap().as_bytes(),
-        old_credentials.as_bytes()
-    );
-    assert_eq!(person.restore_code().unwrap().unwrap().as_bytes(), old_code.as_bytes());
-    assert_eq!(person.s3_credentials().unwrap().unwrap().as_bytes(), old_s3_key.as_bytes());
-    assert!(scoped.device_id().unwrap().is_none());
-    assert_eq!(coven_storage::recorded_config(&pending.directory()).unwrap(), Some(old_location));
+    committed(&keychain, &pending, &code, &ring, owners.device);
     assert!(app.stores().await.unwrap().is_empty());
     database.close().await.unwrap();
 }
 
+/// The keychain refuses one of the commit's operations, whichever it is.
+/// The commit keeps what it wrote, and run again it finishes, leaving the
+/// same custody as a commit nothing interrupted (§13.4).
 #[tokio::test]
-async fn credential_publication_failures_restore_every_prior_custody_value() {
-    for after in 0..8 {
+async fn a_commit_refused_at_any_keychain_operation_finishes_when_run_again() {
+    for after in 0..9 {
         let root = tempfile::tempdir().unwrap();
         let id = StoreId(UuidIds.new_id());
         let keychain = Keychain::in_memory("commit-test").unwrap();
         let app = Coven::with_keychain(root.path().into(), keychain.clone());
         let scoped = StoreKeychain::new(keychain.clone(), id);
-        let person_entries = PersonEntries::new(keychain.clone(), id);
-        let old_device = SecretBytes::new(b"old device credentials".to_vec());
-        let old_key = SecretBytes::new(b"old saved S3 key".to_vec());
-        let old_code = SecretBytes::new(b"old saved code".to_vec());
-        scoped.set_storage_credentials(&old_device).unwrap();
-        person_entries.set_s3_credentials(&old_key).unwrap();
-        person_entries.set_restore_code(&old_code).unwrap();
+        let person = PersonEntries::new(keychain.clone(), id);
+        scoped
+            .set_storage_credentials(&SecretBytes::new(b"old device credentials".to_vec()))
+            .unwrap();
+        person.set_s3_credentials(&SecretBytes::new(b"old saved S3 key".to_vec())).unwrap();
+        person.set_restore_code(&SecretBytes::new(b"old saved code".to_vec())).unwrap();
         let (pending, owners, database) =
-            prepared(&app, id, keychain.clone(), CustodyChoice::InMemory, CustodyChoice::InMemory)
+            prepared(&app, id, keychain.clone(), CustodyChoice::Keyring, CustodyChoice::Keyring)
                 .await;
-        // Device id read/write, then all three credential reads and writes.
-        keychain.fail_operations_after(&[after]);
+        let code = code(id);
         let ring = StoreKeyring::new(StoreKey::generate(KeyId(UuidIds.new_id())).unwrap());
-        let error = publish_bootstrap(
-            &pending,
-            code(id),
-            household(),
-            credentials(),
-            SignInCustody::None,
-            ring,
-            owners,
-            database.clone(),
-            waits(&database).await,
-        )
-        .await
-        .unwrap_err();
+        let run = || {
+            commit(
+                &pending.directory(),
+                &code,
+                &household(),
+                &credentials(),
+                &SignInCustody::None,
+                &ring,
+                &owners,
+                &pending,
+            )
+        };
+        keychain.fail_operations_after(&[after]);
+        let error = run().unwrap_err();
         assert!(
             matches!(
                 error,
@@ -282,58 +307,13 @@ async fn credential_publication_failures_restore_every_prior_custody_value() {
             ),
             "operation {after}: {error}"
         );
-        assert_eq!(
-            scoped.storage_credentials().unwrap().unwrap().as_bytes(),
-            old_device.as_bytes()
-        );
-        assert_eq!(
-            person_entries.s3_credentials().unwrap().unwrap().as_bytes(),
-            old_key.as_bytes()
-        );
-        assert_eq!(person_entries.restore_code().unwrap().unwrap().as_bytes(), old_code.as_bytes());
-        assert!(scoped.device_id().unwrap().is_none());
-        assert!(coven_storage::recorded_config(&pending.directory()).unwrap().is_none());
         assert!(app.stores().await.unwrap().is_empty());
+        keychain.fail_operations_after(&[]);
+        assert!(matches!(run(), Ok(None)), "operation {after}");
+        committed(&keychain, &pending, &code, &ring, owners.device);
+        assert_eq!(app.stores().await.unwrap().len(), 1);
         database.close().await.unwrap();
     }
-}
-
-#[tokio::test]
-async fn bootstrap_reports_saved_key_rollback_failure_with_the_publication_failure() {
-    let root = tempfile::tempdir().unwrap();
-    let id = StoreId(UuidIds.new_id());
-    let keychain = Keychain::in_memory("commit-test").unwrap();
-    let app = Coven::with_keychain(root.path().into(), keychain.clone());
-    let scoped = StoreKeychain::new(keychain.clone(), id);
-    let person = PersonEntries::new(keychain.clone(), id);
-    let (pending, owners, database) =
-        prepared(&app, id, keychain.clone(), CustodyChoice::InMemory, CustodyChoice::InMemory)
-            .await;
-    // Refuse the code write, then refuse rolling back the separate S3 entry.
-    keychain.fail_operations_after(&[7, 1]);
-    let ring = StoreKeyring::new(StoreKey::generate(KeyId(UuidIds.new_id())).unwrap());
-    let error = publish_bootstrap(
-        &pending,
-        code(id),
-        household(),
-        credentials(),
-        SignInCustody::None,
-        ring,
-        owners,
-        database.clone(),
-        waits(&database).await,
-    )
-    .await
-    .unwrap_err();
-    assert!(matches!(error, BootstrapError::Sync(SyncError::Cleanup { operation, cleanup })
-        if matches!(*operation, SyncError::SecureStorage(_)) && matches!(*cleanup, SyncError::SecureStorage(_))));
-    assert!(person.s3_credentials().unwrap().is_some());
-    assert!(scoped.storage_credentials().unwrap().is_none());
-    assert!(person.restore_code().unwrap().is_none());
-    assert!(scoped.device_id().unwrap().is_none());
-    assert!(coven_storage::recorded_config(&pending.directory()).unwrap().is_none());
-    assert!(app.stores().await.unwrap().is_empty());
-    database.close().await.unwrap();
 }
 
 #[tokio::test]
@@ -472,11 +452,11 @@ impl Custody<MemberIdentity> for PanickingIdentity {
     fn close(&self) {}
 }
 
-/// A custody step that panics fails the commit with the bug, and every
-/// value the commit changed before it holds its prior value again, as after
-/// any failure before publication (E15).
+/// A custody step that panics fails the commit with the bug, and what the
+/// commit wrote before it stays, as after any failure before publication
+/// (§13.4, E15).
 #[tokio::test]
-async fn a_panicking_custody_step_restores_the_prior_custody() {
+async fn a_panicking_custody_step_keeps_what_the_commit_wrote() {
     let root = tempfile::tempdir().unwrap();
     let id = StoreId(UuidIds.new_id());
     let keychain = Keychain::in_memory("commit-test").unwrap();
@@ -497,7 +477,7 @@ async fn a_panicking_custody_step_restores_the_prior_custody() {
         household(),
         credentials(),
         SignInCustody::None,
-        next,
+        next.clone(),
         owners,
         database.clone(),
         waits(&database).await,
@@ -506,10 +486,15 @@ async fn a_panicking_custody_step_restores_the_prior_custody() {
     .unwrap_err();
     let BootstrapError::Bug(bug) = &error else { panic!("{error:?}") };
     assert_eq!(bug.message, "the identity's entry is half written");
-    assert!(Custody::<StoreKeyring>::unlock(&KeyringCustody::new(scoped.clone()))
-        .unwrap()
-        .is_none());
-    assert!(coven_storage::recorded_config(&pending.directory()).unwrap().is_none());
+    assert_eq!(
+        Custody::<StoreKeyring>::unlock(&KeyringCustody::new(scoped.clone()))
+            .unwrap()
+            .unwrap()
+            .to_secret_bytes()
+            .as_bytes(),
+        next.to_secret_bytes().as_bytes()
+    );
+    assert!(coven_storage::recorded_config(&pending.directory()).unwrap().is_some());
     assert!(scoped.device_id().unwrap().is_none());
     assert!(app.stores().await.unwrap().is_empty());
     database.close().await.unwrap();
@@ -534,22 +519,23 @@ impl Publish for PanickingPublication<'_> {
 }
 
 /// Publication panics. Whether the marker went says how far it got: a
-/// store still unpublished has its custody restored, and a published one
-/// keeps it, with the bug as the failure after publication (E15).
+/// published store reports the bug as the failure after publication, and an
+/// unpublished one fails with it. Either keeps its custody (E15, §13.4).
 #[tokio::test]
-async fn a_panicking_publication_settles_custody_by_the_marker() {
+async fn a_panicking_publication_settles_by_the_marker() {
     for after in [false, true] {
         let root = tempfile::tempdir().unwrap();
         let id = StoreId(UuidIds.new_id());
         let keychain = Keychain::in_memory("commit-test").unwrap();
         let app = Coven::with_keychain(root.path().into(), keychain.clone());
-        let scoped = Arc::new(StoreKeychain::new(keychain.clone(), id));
         let (pending, owners, database) =
-            prepared(&app, id, keychain, CustodyChoice::Keyring, CustodyChoice::Keyring).await;
+            prepared(&app, id, keychain.clone(), CustodyChoice::Keyring, CustodyChoice::Keyring)
+                .await;
         let ring = StoreKeyring::new(StoreKey::generate(KeyId(UuidIds.new_id())).unwrap());
-        let committed = commit(
+        let code = code(id);
+        let committing = commit(
             &pending.directory(),
-            &code(id),
+            &code,
             &household(),
             &credentials(),
             &SignInCustody::None,
@@ -557,22 +543,17 @@ async fn a_panicking_publication_settles_custody_by_the_marker() {
             &owners,
             &PanickingPublication { pending: &pending, after },
         );
-        let kept = Custody::<StoreKeyring>::unlock(&KeyringCustody::new(scoped.clone())).unwrap();
-        match committed {
+        match committing {
             Ok(Some(BootstrapError::Bug(bug))) if after => {
                 assert_eq!(bug.message, "the marker's removal is lost");
-                assert!(kept.is_some());
-                assert_eq!(scoped.device_id().unwrap(), Some(owners.device));
             }
-            Err(Uncommitted::Restored(BootstrapError::Bug(bug))) if !after => {
+            Err(BootstrapError::Bug(bug)) if !after => {
                 assert_eq!(bug.message, "the marker's removal is lost");
-                assert!(kept.is_none());
-                assert!(scoped.device_id().unwrap().is_none());
-                assert!(coven_storage::recorded_config(&pending.directory()).unwrap().is_none());
             }
-            Ok(other) => panic!("after {after}: {other:?}"),
-            Err(other) => panic!("after {after}: {:?}", other.into_error()),
+            other => panic!("after {after}: {other:?}"),
         }
+        committed(&keychain, &pending, &code, &ring, owners.device);
+        assert_eq!(app.stores().await.unwrap().len(), usize::from(after));
         database.close().await.unwrap();
     }
 }

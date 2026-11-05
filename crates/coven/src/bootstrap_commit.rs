@@ -38,34 +38,22 @@ impl Publish for PublishedLater {
     }
 }
 
-/// Committing a loaded installation's custody failed before publication.
-pub(super) enum Uncommitted {
-    /// Every value the commit changed holds its prior value again.
-    Restored(BootstrapError),
-    /// Restoring a prior value failed too; the error keeps both causes.
-    Partly(BootstrapError),
-}
-
-impl Uncommitted {
-    pub(super) fn into_error(self) -> BootstrapError {
-        match self {
-            Self::Restored(error) | Self::Partly(error) => error,
-        }
-    }
-}
-
 /// Commit the installation's storage settings, store keys, member identity,
 /// device id and credentials, with the restore code saved beside the loaded
 /// store's `name` (§13.1), then `publish` it. A restore's OAuth store commits
 /// its session sign-in's current tokens, which then refresh in device
-/// custody; a rollback holds them in the session again. A join's sign-in is
-/// already the device's, refreshes included, and stays as it is: only the
-/// code commits beside it, so a rollback leaves the join its kept sign-in
-/// (§13.2). A failure before publication restores every prior value, and
-/// so does a panic in a step, as `BootstrapError::Bug` (E15). A panic in
-/// `publish` leaves unknown whether the store was published, so its marker
-/// says. `Ok(Some(_))` is a failure after publication, which keeps custody
-/// committed.
+/// custody. A join's sign-in, or a recorded restore's, is already the
+/// device's, refreshes included, and stays as it is: only the code commits
+/// beside it (§13.2).
+///
+/// The writes go to the keychain and to files, so no transaction holds them
+/// together. The commit runs past its call's point of no return and only goes
+/// forward: each write sets a value the loaded installation fixes, so a
+/// commit that fails, panics (as `BootstrapError::Bug`, E15) or is cut keeps
+/// what it wrote, and the call that resumes the installation loads it again
+/// and writes everything again (§13.4, §11.6). A panic in `publish` leaves
+/// unknown whether the store was published, so its marker says.
+/// `Ok(Some(_))` is a failure after publication.
 pub(super) fn commit(
     directory: &StoreDir,
     code: &RestoreCode,
@@ -75,26 +63,23 @@ pub(super) fn commit(
     ring: &StoreKeyring,
     owners: &OpeningOwners,
     publish: &impl Publish,
-) -> Result<Option<BootstrapError>, Uncommitted> {
-    let unchanged = Uncommitted::Restored;
+) -> Result<Option<BootstrapError>, BootstrapError> {
     let keys = &owners.keys;
     let identity = &owners.identity;
     let keychain = &owners.keychain;
-    let old_keys = keys.read().map_err(|error| unchanged(error.into()))?;
-    let old_identity = identity.read().map_err(|error| unchanged(error.into()))?;
-    let old_device = keychain.device_id().map_err(|error| unchanged(error.into()))?;
-    let location = RestoreStorage::decode(code.storage.as_bytes())
-        .map_err(|error| unchanged(SyncError::from(error).into()))?
-        .location;
-    let old_settings = coven_storage::recorded_config(directory)
-        .map_err(|error| unchanged(SyncError::from(error).into()))?;
-    let mut credential_rollback = None;
+    let location =
+        RestoreStorage::decode(code.storage.as_bytes()).map_err(SyncError::from)?.location;
     let commit = || -> Result<(), BootstrapError> {
         coven_storage::record_config(directory, &location).map_err(SyncError::from)?;
         keys.persist(ring)?;
         identity.persist(&MemberIdentity::new(code.member, code.member_keys.clone()))?;
         keychain.set_device_id(owners.device)?;
-        credential_rollback = Some(match sign_in {
+        #[cfg(test)]
+        if owners.interrupt_commit {
+            // As if the process stopped here.
+            return Err(BootstrapError::Cancelled);
+        }
+        match sign_in {
             SignInCustody::Session(session) => {
                 session.publish(&owners.credentials, |keychain, tokens| {
                     coven_sync::commit_credentials(
@@ -102,83 +87,33 @@ pub(super) fn commit(
                         &StorageCredentials::OAuth(tokens.clone()),
                         Some((code, name)),
                     )
+                    .map(drop)
                 })?
             }
-            SignInCustody::Device { .. } => owners.credentials.commit_code(code, name)?,
+            SignInCustody::Device { .. } => owners.credentials.commit_code(code, name).map(drop)?,
             SignInCustody::None => owners.credentials.write(|keychain| {
-                coven_sync::commit_credentials(keychain, credentials, Some((code, name)))
+                coven_sync::commit_credentials(keychain, credentials, Some((code, name))).map(drop)
             })?,
-        });
+        }
         Ok(())
     };
-    let committed = caught_sync("commit the loaded store's custody", commit)
-        .unwrap_or_else(|bug| Err(BootstrapError::Bug(bug)));
-    let mut error = match committed {
-        Ok(()) => match caught_sync("publish the loaded store", || publish.publish()) {
-            Ok(Ok(())) => return Ok(None),
-            Ok(Err(error)) if error.published_unsynced() => {
-                return Ok(Some(BootstrapError::Directory(error)))
-            }
-            Ok(Err(error)) => error.into(),
-            Err(bug) => match publish.published() {
-                Ok(true) => return Ok(Some(BootstrapError::Bug(bug))),
-                Ok(false) => BootstrapError::Bug(bug),
-                // How far publication got is unknown: custody stays, and
-                // listing the stores shows whether it was published.
-                Err(read) => {
-                    return Err(Uncommitted::Partly(
-                        combine::<()>(
-                            Err(BootstrapError::Bug(bug)),
-                            Err(BootstrapDirectoryError::from(read).into()),
-                        )
-                        .expect_err("failed publication"),
-                    ))
-                }
-            },
+    caught_sync("commit the loaded store's custody", commit)
+        .unwrap_or_else(|bug| Err(BootstrapError::Bug(bug)))?;
+    match caught_sync("publish the loaded store", || publish.publish()) {
+        Ok(Ok(())) => Ok(None),
+        Ok(Err(error)) if error.published_unsynced() => Ok(Some(BootstrapError::Directory(error))),
+        Ok(Err(error)) => Err(error.into()),
+        Err(bug) => match publish.published() {
+            Ok(true) => Ok(Some(BootstrapError::Bug(bug))),
+            Ok(false) => Err(BootstrapError::Bug(bug)),
+            // How far publication got is unknown: listing the stores shows
+            // whether it was published.
+            Err(read) => combine(
+                Err(BootstrapError::Bug(bug)),
+                Err(BootstrapDirectoryError::from(read).into()),
+            ),
         },
-        Err(error) => error,
-    };
-    // Attempt every rollback even if an earlier one fails. A failure is
-    // returned to this initiator; no background repair is installed.
-    let mut restored = true;
-    let mut failed = |error: BootstrapError, cleanup: BootstrapError| {
-        restored = false;
-        combine::<()>(Err(error), Err(cleanup)).expect_err("failed commit")
-    };
-    for rollback in [
-        match old_keys {
-            Some(keys_before) => keys.persist(&keys_before),
-            None => keys.forget(),
-        },
-        match old_identity {
-            Some(identity_before) => identity.persist(&identity_before),
-            None => identity.forget(),
-        },
-        match old_device {
-            Some(device) => keychain.set_device_id(device),
-            None => keychain.delete_device_id(),
-        },
-    ] {
-        if let Err(cleanup) = rollback {
-            error = failed(error, cleanup.into());
-        }
     }
-    if let Some(previous) = credential_rollback {
-        if let Err(cleanup) = owners.credentials.write(|keychain| previous.restore(keychain)) {
-            error = failed(error, cleanup.into());
-        }
-        if let SignInCustody::Session(session) = sign_in {
-            session.unpublish();
-        }
-    }
-    let rollback = match old_settings {
-        Some(location) => coven_storage::record_config(directory, &location),
-        None => coven_storage::remove_recorded_config(directory),
-    };
-    if let Err(cleanup) = rollback {
-        error = failed(error, SyncError::from(cleanup).into());
-    }
-    Err(if restored { Uncommitted::Restored(error) } else { Uncommitted::Partly(error) })
 }
 
 /// Commit custody and publish a new device's loaded store, returning its
@@ -196,8 +131,7 @@ pub(super) async fn publish_bootstrap(
 ) -> Result<CovenHandle, BootstrapError> {
     let directory = pending.directory();
     let publication_error =
-        commit(&directory, &code, &name, &credentials, &sign_in, &ring, &owners, pending)
-            .map_err(Uncommitted::into_error)?;
+        commit(&directory, &code, &name, &credentials, &sign_in, &ring, &owners, pending)?;
     let handle = owners.into_handle(database, waits, true, false);
     let cleanup = directory
         .owned_file(StoreFile::Bootstrap)

@@ -7009,17 +7009,19 @@ pub enum ProviderSignOut {
     is dropped they don't, even when an owner still holds one; dropping it
     releases the lock at once.
   - Keys and credentials enter final custody only after the store loads, except
-    a join's kept provider sign-in. Custody or publication failures roll back
-    final custody, restoring exactly the entries the commit changed, so a join
-    keeps its sign-in; rollback failures retain both causes. Errors after
-    publication carry the open handle, including its session-only keys, and
-    retain committed custody.
-  - A panic in a custody step rolls back the same way, as
-    `BootstrapError::Bug` (E15). A panic while publishing leaves unknown
-    whether the marker went, so coven reads it: a store already published
-    keeps its custody, with the bug as the error after publication, and
-    one still unpublished rolls back. Rolling back a published store's
-    custody would leave it visible with keys it can't open.
+    a join's kept provider sign-in. The commit runs past the call's point of
+    no return and only goes forward: a custody or publication failure, a
+    panic in a custody step (`BootstrapError::Bug`, E15) or a crash keeps
+    what it wrote, the installation stays listed, and the call that resumes
+    it writes everything again before publishing. Ending an unpublished
+    installation without its store deletes every device-only entry of the
+    store, the provider credentials before the saved code or record (§13.4).
+    Errors after publication carry the open handle, including its
+    session-only keys, and retain committed custody.
+  - A panic while publishing leaves unknown whether the marker went, so
+    coven reads it: a store already published keeps its custody, with the
+    bug as the error after publication, and one still unpublished fails with
+    the bug, its custody kept for the call that resumes it.
   - Cancellation closes the loading database and removes the unpublished store,
     with a join's kept sign-in and code, without committing final keys or
     credentials. Dropping a waiting future

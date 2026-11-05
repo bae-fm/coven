@@ -4035,9 +4035,10 @@ its sign-in (§13.2). From the record on, the restore only goes forward
   phone as active, so the call ends the restore. It first checks the facts:
   the history it applied names the phone as gone for good (§14.1), or
   doesn't name it and no registration of it is journaled, which could still
-  land. Then it deletes the kept sign-in, the record and the installation,
-  in that order. A cancel at that point, or a removal of the device after it
-  registered, ends the restore the same way.
+  land. Then it deletes every device-only entry of the store, the kept
+  sign-in before the record, then the installation (§13.4). A cancel at that
+  point, or a removal of the device after it registered, ends the restore
+  the same way.
 - So does a replacement of the member's keys. Carol's phone registers, and
   its call fails before it publishes. Her laptop then replaces her keys,
   with a pair the phone's restore code doesn't hold. History still names
@@ -4402,7 +4403,8 @@ sent its request:
   request. A listed join always has the request it resumes from, and a kept
   sign-in always belongs to a listed join.
 - Ending without loading, declined, expired, or cancelled before sending, it
-  deletes the kept sign-in first, then the code, then the installation. Stopping
+  deletes the store's entries on the device, the kept sign-in before the code,
+  then the installation. Stopping
   after the sign-in leaves a join that still lists, and the next call ends it
   once Dan signs in. Stopping after the code leaves an installation without a
   code, which lists as no join. A sign-in is never left without its code, where
@@ -4639,6 +4641,28 @@ everything is encrypted.
   path throughout. Only after loading does coven commit the final keys and
   credentials and make it visible, without closing or moving the database. So the
   app's first commits are made against the installed membership and rows (§2.1).
+- **The commit only goes forward.** It writes the device's custody for the
+  store one value at a time: the location, the store keys, the member's keys,
+  the device id and the credentials, with the person's restore code. Those go
+  to the keychain and to files, so they can't be one transaction. The commit
+  runs past its call's point of no return (§11.6): the join's request was
+  approved, the restore's device registered. So a commit that fails, panics or
+  is cut by a crash keeps what it wrote. The installation stays listed, and the
+  next call loads it again and writes everything again, each value the one the
+  loaded installation fixes, then publishes. A rollback held in memory would
+  never run after a crash, and a commit run again would take the half-written
+  values for the ones to put back.
+- **Ending deletes the installation's custody.** A first installation is the
+  only one of its store on the device, so every device-only entry for the
+  store is its own. Ending it without its store deletes them all, the provider
+  credentials before the saved code or record, then the installation; the
+  person's restore code and S3 key stay, as they do when a store is deleted. Ana's
+  laptop crashes part way through its commit, with its device id and keys
+  written, and her phone removes the laptop before she resumes. The facts end
+  the restore (§13.1), and nothing of Household is left on the laptop. Had
+  ending deleted only the kept sign-in and the record, the device id and keys
+  would have outlived the installation
+  ([`cut_commit_orphans_custody`](proofs/sequence/CovenSequence/BootstrapCommit.lean)).
 - **Cancelling.** Cancelling closes the installation and removes its local work.
   A join whose request may have been sent can't be cancelled (§13.2), nor a
   restore whose device may be registered (§13.1). A restore that fails
@@ -7915,9 +7939,10 @@ laptop in place from her current restore code instead (§13.1).
   location and passphrase-sealed custody files stay where they are.
 - **Past the record, only forward.** A failure, a cancel or an interruption
   leaves the replacement for the next call to finish with the recorded new
-  id: nothing moves back. A commit of the keys that fails restores every
-  prior value and keeps the swap. Moving the old installation back would
-  remove the record, and the old installation would open after its
+  id: nothing moves back. A commit of the keys that fails, or is cut, keeps
+  what it wrote and the swap, and the next call commits again (§13.4).
+  Moving the old installation back would remove the record, and the old
+  installation would open after its
   replacement landed
   ([`unswapped_replacement_opens_old`](proofs/sequence/CovenSequence/DeviceReplacement.lean)).
   A cancel waits for the registration to end, then fails with
@@ -10979,6 +11004,8 @@ Write-ups explain each model and state its assumptions:
 | A status screen's sync state is the one candidate no other outranks; not synced means no location is recorded, and a location without credentials is signed out; between offline and offline with unsent changes whether a write or a file is queued decides, and a write committed while offline changes one into the other with no pass; syncing shows only while a slot or a file moves, waiting to sync only while nothing moves and a held-back pass or a queued file names its wait, and synced only once every file this device uploads is stored and only after a pass that ended synced; with the setting to transfer only on unmetered networks on and a metered network, every upload the setting holds waits for something before its backoff, and an upload waits for the network only then; a change of network never changes which state shows; a pass that moves nothing leaves the state as it was; the last synced time never goes backward, and only a pass reaching the read end changes it; each pending reason names one state or none, a wait for data names none, a pass held back by a wait waits to sync, and a file that can't be uploaded or read names failed | `one_state`, `not_synced_iff`, `signed_out_without_credentials`, `offline_unsent_iff`, `offline_iff`, `write_while_offline`, `syncing_only_moving`, `waiting_not_moving`, `synced_files_stored`, `bad_file_fails`, `quiet_pass_keeps`, `last_synced_never_back`, `last_synced_kept`, `waits_name_no_state`, `file_failures_name_failed`, `failed_pass_not_synced`, `waiting_pass_waits`, `metered_holds`, `metered_only_held`, `network_keeps_state` | `proofs/io/CovenIO/SyncState.lean` | §19.1 |
 | A replacement of this device's installation that records itself before its fresh device registers, refuses opens while recorded and from the record on only goes forward never opens the old installation once a registration replacing it may have landed, keeps the new installation while history names it, and settles, on every path, published or with the old installation the store and no claim open | `old_never_stale`, `never_missing`, `settles`, `settled_outcome` | `proofs/sequence/CovenSequence/DeviceReplacement.lean` | §11.6, §19.3 |
 | *Body.* A replacement that records itself only at the swap opens the old installation after a crash once its registration landed; one that moves the old installation back after a failure past the swap does the same; a cancel that doesn't wait removes the new installation while its registration is on its way | `crashed_replacement_opens_old`, `unswapped_replacement_opens_old`, `cancelled_replacement_missing` | `proofs/sequence/CovenSequence/DeviceReplacement.lean` | §19.3 |
+| A new installation whose commit only goes forward, and whose ending deletes every device-only entry of its store, leaves no custody for a store the device doesn't have, publishes only whole custody, and settles, published or removed | `never_orphaned`, `published_whole`, `settles` | `proofs/sequence/CovenSequence/BootstrapCommit.lean` | §13.4, §11.6 |
+| *Body.* Ending a restore whose commit a crash cut, deleting only its kept sign-in and record, leaves the device id and keys the commit wrote | `cut_commit_orphans_custody` | `proofs/sequence/CovenSequence/BootstrapCommit.lean` | §13.4 |
 | Store-reset authority is checked in the state before the slot (circle-reset authority is left to the model's supplied audience policy) | `store_reset_authorized` | `proofs/sequence/CovenSequence/Authority.lean` | §19.4 |
 | An applied reset loads its chosen rows without replaying the slots before it | `reset_replaces` | `proofs/sequence/CovenSequence/Preparations.lean` | §19.4 |
 | From empty storage, with every create recorded and the journal kept, a slot signed by this device's id that it never attempted means another copy | `foreign_slot_means_copy` | `proofs/sequence/CovenSequence/Settle.lean` | §19.3 |

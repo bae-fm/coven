@@ -400,8 +400,9 @@ async fn a_refused_kept_sign_in_asks_for_a_new_one_and_keeps_the_join() {
     owner.close().await;
 }
 
-/// Ending a declined join removes its kept sign-in, then its code, then its
-/// installation. A keychain failure part way leaves the code, so the join
+/// Ending a declined join removes every entry the device keeps for the
+/// store, its kept sign-in before its code, then its installation (§13.4).
+/// A keychain failure part way leaves the code, so the join
 /// still lists, and the next call ends it: from the kept sign-in when
 /// removing that failed, or after a new sign-in when it was already gone
 /// (§13.2).
@@ -417,8 +418,9 @@ async fn a_join_that_fails_to_end_still_lists_and_the_next_call_ends_it() {
         let request = owner.read_join_request().await;
         owner.handle.decline_join_request(&request).await.unwrap();
         let pending = install.app.directories().begin_bootstrap(store, &UuidIds).await.unwrap();
-        // The first deletion that fails: the sign-in's, or the code's after it.
-        install.keychain.fail_operations_after(&[usize::from(sign_in_removed)]);
+        // The first deletion that fails: the sign-in's, the sixth keychain
+        // operation, or the code's, the eighth (`delete_device_entries`).
+        install.keychain.fail_operations_after(&[if sign_in_removed { 7 } else { 5 }]);
         let ended = remove_unfinished(
             &StoreKeychain::new(install.keychain.clone(), store),
             &pending,
