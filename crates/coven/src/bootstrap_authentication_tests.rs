@@ -322,16 +322,24 @@ async fn a_refresh_while_waiting_is_kept_for_the_resumed_join() {
 
 /// A sign-in the builder holds when Carol's join resumes replaces the one it
 /// kept, but only once it is shown to grant the shared folder's access: an
-/// App-folder sign-in is refused and leaves the kept one (§13.2).
+/// App-folder sign-in is refused and leaves the kept one (§13.2). Ana's
+/// invite looks for Carol's request and backs off between looks; her waits
+/// and Carol's end only when the test moves the clock or asks for a check.
+/// A backoff passing on its own would move the shared clock under Carol's
+/// sign-ins, which race their deadline and their requests' stall windows on
+/// it.
 #[tokio::test]
 async fn a_new_sign_in_replaces_the_kept_one_only_with_the_locations_access() {
     let owner = Owner::new(CloudProvider::Dropbox, false).await;
+    owner.hold_waits();
     let invite = owner.invite().await;
+    let before = owner.clock.now();
     let install = Installation::new();
     let store = owner.directory.id();
     let sign_in = SignIn::new().await;
     let signed_in = |access| {
-        let mut builder = sign_in.configure(install.builder(&owner, owner.recipient()));
+        let mut builder = sign_in
+            .configure(install.builder(&owner, owner.recipient()).clock(owner.clock.clone()));
         async move {
             builder.authenticate(OAuthAccess::Dropbox(access)).await.unwrap();
             builder
@@ -351,7 +359,15 @@ async fn a_new_sign_in_replaces_the_kept_one_only_with_the_locations_access() {
     );
     assert_eq!(kept().await.as_str(), "access-0");
     let resumed = signed_in(DropboxAccess::FullDropbox).await.resume_join(store, |_| {}, &control);
-    let (result, _) = join_and_approve(&owner.handle, resumed, |_| async {}).await;
+    assert_eq!(owner.clock.now(), before, "a wait moved the clock under Carol's sign-ins");
+    let approve = async {
+        // Ana's next pass reads the request the join made before it closed.
+        owner.pass().await;
+        let request = next_join_request(&owner.handle).await;
+        crate::tests::approve(&owner.handle, &request).await;
+        control.check_now();
+    };
+    let (result, ()) = join_with_response(resumed, approve).await;
     let handle = result.unwrap().unwrap();
     assert_eq!(install.device_tokens(store).unwrap().access_token.as_str(), "access-2");
     handle.close().await.unwrap();
