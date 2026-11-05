@@ -625,15 +625,20 @@ def keyCase (slots held current : List Json) : Json := json% {
   checkField stopped ["5","invite"] Json.null
   checkField stopped ["5","journal"] (toJson false)
   checkField stopped ["5","binding"] (toJson "stopped")
-  -- A request whose keys a member already holds is not offered: the invite
-  -- waits, with the failure as its pending record.
-  let used ← run (case "sent" ["sendUsed", "pass"])
-  checkField used ["2","invite"] (toJson "waiting")
-  checkField used ["2","pending"] (toJson "app")
-  checkField used ["2","accepted"] (json% ["cancel","retry"])
+  -- A request whose keys a member already holds is neither offered nor
+  -- approved: the pass that reads it ends the invite, with its marker in the
+  -- request's place and no pending record, and the next takes the share back.
+  let used ← run (case "sent" ["sendUsed", "pass", "pass"])
+  checkField used ["2","invite"] Json.null
+  checkField used ["2","pending"] Json.null
+  checkField used ["2","journal"] (toJson false)
+  checkField used ["2","request"] (toJson false)
+  checkField used ["2","accepted"] (json% [])
+  checkField used ["3","shared"] (toJson false)
   let usedInPerson ← run (case "inPerson" ["sendUsed", "pass"])
-  checkField usedInPerson ["2","invite"] (toJson "waiting")
+  checkField usedInPerson ["2","invite"] Json.null
   checkField usedInPerson ["2","binding"] Json.null
+  checkField usedInPerson ["2","journal"] (toJson false)
   rejects (case "sent" ["wave"])
   rejects (json% {"kind":"inviteLifecycle","delivery":"posted","records":false,"events":[]})
 

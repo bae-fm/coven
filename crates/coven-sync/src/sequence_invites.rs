@@ -556,7 +556,18 @@ impl SequenceSync {
                         }
                         Err(error) => return Err(error.into()),
                     };
-                    let request = self.open_request(&work, &session.history.state, &bytes)?;
+                    let request = match self.open_request(&work, &session.history.state, &bytes)? {
+                        Opened::Checked(request) => request,
+                        // No attempt can pass it, and no other request can
+                        // reach the invite's one path while it is there: the
+                        // invite ends, as a decline does (§13.2).
+                        Opened::Refused(refusal) => {
+                            tracing::warn!(?id, %refusal, "a join request failed its checks");
+                            work.end();
+                            self.database.advance_operation(work.update(&record)?).await?;
+                            continue;
+                        }
+                    };
                     let code = code.clone();
                     match work.delivery {
                         // Ana watched the phone that scanned her code: an
@@ -840,29 +851,47 @@ impl SequenceSync {
         Ok(SecretText::new(code.to_string()))
     }
 
-    /// Open and check a request: its own new signing key verifies it, it
-    /// repeats the invite's id and member id, and `state`, the history this
-    /// pass caught up with, has bound neither of its keys (§13.2). A request
-    /// that fails is neither offered nor approved: the invite goes on waiting,
-    /// with the failure as its pending record.
+    /// Open and check a request: it opens with the invite's secret, its own
+    /// new signing key verifies it, it repeats the invite's id and member id,
+    /// and `state`, the history this pass caught up with, has bound neither
+    /// of its keys (§13.2). A request that fails a check is `Refused`; one
+    /// in a newer format than this device reads waits for its update, as an
+    /// error.
     fn open_request(
         &self,
         work: &InviteWork,
         state: &coven_database::StoreState,
         bytes: &[u8],
-    ) -> Result<Vec<u8>, SyncError> {
+    ) -> Result<Opened, SyncError> {
         let path = ObjectPath::join_request(self.store(), work.device, work.id);
-        let (request, plain) =
-            crate::joining_identity::opened_join_request(&work.secret()?, &path, bytes)?
-                .ok_or(SyncError::InvitationChanged)?;
-        if request.invite != work.id
-            || request.member != work.member
-            || !crate::effects::fresh(state, &request.keys)
-        {
-            return Err(SyncError::InvitationChanged);
+        let secret = work.secret()?;
+        let opened = match crate::joining_identity::opened_join_request(&secret, &path, bytes) {
+            Ok(opened) => opened,
+            Err(refusal @ (SyncError::Crypto(_) | SyncError::Format(_))) => {
+                return Ok(Opened::Refused(refusal))
+            }
+            Err(error) => return Err(error),
+        };
+        let Some((request, plain)) = opened else {
+            return Ok(Opened::Refused(crate::write_object::wrong_identity(&path)));
+        };
+        if request.invite != work.id || request.member != work.member {
+            return Ok(Opened::Refused(crate::write_object::wrong_identity(&path)));
         }
-        Ok(plain)
+        if !crate::effects::fresh(state, &request.keys) {
+            return Ok(Opened::Refused(SyncError::Rejected(OperationRejection::KeysAlreadyUsed)));
+        }
+        Ok(Opened::Checked(plain))
     }
+}
+
+/// What opening an invite's request found (`open_request`).
+pub(crate) enum Opened {
+    /// The request passed every check: its exact plaintext.
+    Checked(Vec<u8>),
+    /// It failed this check. The request is created once at the invite's one
+    /// path and never changes, so no later attempt would pass it (§13.2).
+    Refused(SyncError),
 }
 
 /// How far one call advanced an invite.

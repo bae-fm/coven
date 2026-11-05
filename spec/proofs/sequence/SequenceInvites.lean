@@ -52,9 +52,12 @@ def attempt (c : Config) (during : List Act) : Nat → World → World × Bool
       let applies := atRead w r
       let next := (take c w .commit).1
       let moved := next.row.map (·.step) != some r.step
+      -- A refused request ends the invite, which the attempt goes on to
+      -- settle; a checked one goes on only to an in-person approval.
       let goesOn : Bool := applies && moved && match r.stage with
         | .grant | .waiting true | .settled => false
-        | .waiting false => c.delivery == .inPerson
+        | .waiting false =>
+          c.delivery == .inPerson || next.row.map (·.stage) == some .settled
         | _ => true
       if goesOn then
         let (w, ran) := attempt c (if reading then [] else during) fuel next

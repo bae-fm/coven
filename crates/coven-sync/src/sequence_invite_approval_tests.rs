@@ -491,73 +491,73 @@ async fn publish_request(
     group.storage.create(&path, &bytes).await.unwrap();
 }
 
-/// A request signed correctly by the pair it names, but naming a member
-/// other than the one the invite fixed, is not shown for approval: the
-/// invite goes on waiting for a request (§13.2).
+/// A request that fails one of Ana's checks, published at her invite's one
+/// path, ends the invite in the pass that reads it, as a decline does,
+/// sent or in person: no attempt could pass it, and no other request can
+/// reach that path. The invite leaves her list with no pending record and
+/// no binding journaled, its marker takes the request's place, and the next
+/// pass takes back Carol's account (§13.2).
 #[tokio::test]
-async fn a_request_naming_another_member_is_not_offered_for_approval() {
-    let group = Group::shared();
-    let ana = group.device(1).await;
-    group.create(&ana).await;
-    let delivery = InviteDelivery::Sent { lifetime: InviteLifetime::Day };
-    let (code, member) = carol_request_slot(&group, &ana, delivery).await;
-    let keys = coven_crypto::MemberKeys::generate().unwrap();
-    let other = coven_foundation::id_source::MemberId(uuid::Uuid::from_u128(99));
-    assert_ne!(other, member);
-    let request = coven_format::objects::JoinRequest {
-        invite: code.invite,
-        member: other,
-        keys: keys.public_keys(),
-        device_name: "Carol's phone".into(),
-    };
-    publish_request(&group, &code, &request, &keys).await;
-    ana.sync.pass().await.unwrap();
-    assert!(requests(&ana).await.is_empty());
-    let open = listed(&ana).await;
-    assert_eq!(open.len(), 1);
-    assert!(matches!(open[0].stage, InviteStage::Waiting { request: None, .. }));
-    ana.sync.database.close().await.unwrap();
-}
-
-/// A request signed correctly by its own pair, but a pair history has
-/// already bound, Ben's, fails the check that both keys are fresh when Ana's
-/// phone opens it: a sent invite doesn't offer it for approval, and an
-/// in-person invite's pass approves nothing and journals no binding. The
-/// invite goes on waiting for a request (§13.2).
-#[tokio::test]
-async fn a_request_reusing_a_members_keys_is_not_offered_or_approved() {
-    for delivery in
-        [InviteDelivery::Sent { lifetime: InviteLifetime::Day }, InviteDelivery::InPerson]
-    {
-        let group = Group::shared();
-        let ana = group.device(1).await;
-        let ben = group.device(2).await;
-        group.create(&ana).await;
-        group.admit(&ana, &ben).await;
-        let (code, member) = carol_request_slot(&group, &ana, delivery).await;
-        let request = coven_format::objects::JoinRequest {
-            invite: code.invite,
-            member,
-            keys: ben.identity.keys().public_keys(),
-            device_name: "Carol's phone".into(),
-        };
-        publish_request(&group, &code, &request, ben.identity.keys()).await;
-        let pass = ana.sync.pass().await;
-        assert!(pass.is_ok(), "{delivery:?}: {:?}", pass.err());
-        assert!(requests(&ana).await.is_empty(), "{delivery:?}");
-        let open = listed(&ana).await;
-        assert_eq!(open.len(), 1, "{delivery:?}");
-        assert!(
-            matches!(open[0].stage, InviteStage::Waiting { request: None, .. }),
-            "{delivery:?}"
-        );
-        let journaled = ana.sync.database.operations().await.unwrap();
-        assert!(
-            journaled.iter().all(|record| record.kind != operation_kind::SEQUENCE),
-            "{delivery:?}: no binding is journaled"
-        );
-        for device in [&ana, &ben] {
-            device.sync.database.close().await.unwrap();
+async fn a_request_failing_a_check_ends_its_invite() {
+    for check in ["signature", "member", "keys"] {
+        for delivery in
+            [InviteDelivery::Sent { lifetime: InviteLifetime::Day }, InviteDelivery::InPerson]
+        {
+            let group = Group::shared();
+            let ana = group.device(1).await;
+            let ben = group.device(2).await;
+            group.create(&ana).await;
+            group.admit(&ana, &ben).await;
+            let (code, member) = carol_request_slot(&group, &ana, delivery).await;
+            let operation = listed(&ana).await[0].operation;
+            let carol = coven_crypto::MemberKeys::generate().unwrap();
+            let (keys, member, signer) = match check {
+                // Signed by a pair other than the one it names.
+                "signature" => (carol.public_keys(), member, ben.identity.keys()),
+                // Naming another member than the invite fixed.
+                "member" => (
+                    carol.public_keys(),
+                    coven_foundation::id_source::MemberId(uuid::Uuid::from_u128(99)),
+                    &carol,
+                ),
+                // Ben's pair, which history bound when he joined.
+                _ => (ben.identity.keys().public_keys(), member, ben.identity.keys()),
+            };
+            let request = coven_format::objects::JoinRequest {
+                invite: code.invite,
+                member,
+                keys,
+                device_name: "Carol's phone".into(),
+            };
+            publish_request(&group, &code, &request, signer).await;
+            let pass = ana.sync.pass().await;
+            assert!(pass.is_ok(), "{check} {delivery:?}: {:?}", pass.err());
+            assert!(listed(&ana).await.is_empty(), "{check} {delivery:?}");
+            assert_eq!(
+                ana.sync.database.operation_pending::<PendingRecord>(operation).await.unwrap(),
+                None,
+                "{check} {delivery:?}"
+            );
+            let journaled = ana.sync.database.operations().await.unwrap();
+            assert!(
+                journaled.iter().all(|record| {
+                    record.kind != operation_kind::INVITE && record.kind != operation_kind::SEQUENCE
+                }),
+                "{check} {delivery:?}: the invite ended, and no binding was journaled"
+            );
+            let marker = group.storage.read(&code.request_path()).await.unwrap();
+            assert!(
+                coven_format::invite_end::InviteEnd::decode(&marker).is_ok(),
+                "{check} {delivery:?}: the marker takes the request's place"
+            );
+            ana.sync.pass().await.unwrap();
+            assert!(
+                !group.storage.shared_with("carol@example.org").await,
+                "{check} {delivery:?}: the account goes back"
+            );
+            for device in [&ana, &ben] {
+                device.sync.database.close().await.unwrap();
+            }
         }
     }
 }

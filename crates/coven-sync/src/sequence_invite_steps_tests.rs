@@ -517,9 +517,12 @@ fn cases() -> Vec<(&'static str, Vec<&'static str>)> {
         ("sent", vec!["pass", "remove", "send", "pass"]),
         ("inPerson", vec!["send", "pass", "remove", "pass"]),
         // A request whose keys a member already holds is neither offered
-        // nor approved: the invite waits until it expires.
+        // nor approved: the pass that reads it ends the invite, which no
+        // retry, cancel or expiry reaches after, and the next pass takes the
+        // share back.
         ("sent", vec!["sendUsed", "pass", "retry", "pass", "expire", "pass"]),
         ("inPerson", vec!["sendUsed", "pass", "pass", "cancel", "pass"]),
+        ("sent", vec!["sendUsed", "raceCancel", "pass"]),
     ];
     const EVENTS: [&str; 16] = [
         "pass",
