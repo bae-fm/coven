@@ -120,3 +120,55 @@ async fn damage_the_open_meets_fails_the_open() {
         );
     }
 }
+
+/// A replaced database's journal is read in place and read-only: damage to a
+/// table of the app's doesn't stop that, and a journal whose own page is
+/// damaged is `DamagedDatabase`, which supplies no records (§19.3).
+#[tokio::test]
+async fn a_discarded_journal_is_read_past_damage_elsewhere_but_not_when_it_is_damaged() {
+    let store = TestStore::new();
+    let database = store.builder(notes_tables(), migrations()).open().await.unwrap();
+    let body = "A".repeat(page_size(&store) * 4);
+    database
+        .write(move |sql| {
+            sql.execute("INSERT INTO drafts VALUES(1, ?1)", [body])?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let owed = serde_json::to_vec("owed-account@example.org").unwrap();
+    database
+        .start_operation(crate::NewOperation {
+            kind: crate::operation_kind::PROVIDER_ACCESS.into(),
+            data: owed.clone(),
+            started_by: crate::operation_kind::COVEN.into(),
+            pauses_writes: false,
+        })
+        .await
+        .unwrap();
+    database.close().await.unwrap();
+
+    damage_overflow(&store, b'A');
+    let records = crate::discarded_operations(store.database_path()).await.unwrap();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].kind, crate::operation_kind::PROVIDER_ACCESS);
+    assert_eq!(records[0].data, owed);
+
+    // The page holding the journal's row: its b-tree page kind becomes one
+    // SQLite refuses.
+    let size = page_size(&store);
+    let mut file =
+        std::fs::OpenOptions::new().read(true).write(true).open(store.database_path()).unwrap();
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes).unwrap();
+    let needle = b"owed-account@example.org";
+    let at = bytes
+        .windows(needle.len())
+        .position(|window| window == needle)
+        .expect("the journal row is in the file");
+    file.seek(SeekFrom::Start((at / size * size) as u64)).unwrap();
+    file.write_all(&[0xff]).unwrap();
+    file.sync_all().unwrap();
+    let damaged = crate::discarded_operations(store.database_path()).await;
+    assert!(matches!(damaged, Err(DbError::DamagedDatabase)), "{damaged:?}");
+}

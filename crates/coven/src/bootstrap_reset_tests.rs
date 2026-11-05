@@ -626,3 +626,99 @@ async fn a_reset_replaces_a_database_a_call_found_damaged() {
     assert!(drafts.is_empty());
     handle.close().await.unwrap();
 }
+
+/// A reset reads the replaced database's operation journal for owed cleanup,
+/// and a journal SQLite reports damaged supplies none: the reset still
+/// completes, as it does past damage to a table of the app's (§19.3).
+#[tokio::test]
+async fn a_reset_completes_when_the_replaced_journal_is_damaged() {
+    use std::io::{Read, Seek, SeekFrom, Write};
+    let page = 4096;
+    for damage_journal in [false, true] {
+        let f = Fixture::new().await;
+        f.setup().await.unwrap();
+        synced(&f.handle).await;
+        // An unsent rename stays in the journal, its text in no other table.
+        f.handle.stop_sync().await.unwrap();
+        assert!(f.handle.rename_store("Zebra Journal Row").await.unwrap().is_some());
+        f.handle.close().await.unwrap();
+        let with_drafts = || {
+            reopen(&f).migrations(vec![
+                Migration::addition(
+                    1,
+                    "notes",
+                    "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY,body TEXT NOT NULL)",
+                ),
+                Migration::addition(
+                    2,
+                    "drafts",
+                    "CREATE TABLE drafts(id INTEGER PRIMARY KEY, body TEXT NOT NULL)",
+                ),
+            ])
+        };
+        let handle = with_drafts().open(f.directory.id(), |_| ()).await.unwrap();
+        let draft = "A".repeat(page * 4);
+        handle
+            .write(move |sql| {
+                sql.execute("INSERT INTO drafts VALUES(1, ?1)", [draft])?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        handle.close().await.unwrap();
+
+        let mut file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(f.directory.database_path())
+            .unwrap();
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes).unwrap();
+        let pages: Vec<usize> = if damage_journal {
+            // The page the journal read depends on: the first whose b-tree
+            // page kind, made one SQLite refuses, the read meets.
+            let mut found = None;
+            for candidate in 1..bytes.len() / page {
+                let at = (candidate * page) as u64;
+                file.seek(SeekFrom::Start(at)).unwrap();
+                file.write_all(&[0xff]).unwrap();
+                file.sync_all().unwrap();
+                let read = coven_database::discarded_operations(f.directory.database_path()).await;
+                file.seek(SeekFrom::Start(at)).unwrap();
+                file.write_all(&bytes[candidate * page..candidate * page + 1]).unwrap();
+                file.sync_all().unwrap();
+                if matches!(read, Err(coven_database::DbError::DamagedDatabase)) {
+                    found = Some(candidate);
+                    break;
+                }
+            }
+            vec![found.expect("a page of the journal")]
+        } else {
+            // The draft's first full overflow page: its next page lies past
+            // the end of the file.
+            vec![bytes
+                .chunks(page)
+                .position(|bytes| bytes[4..].iter().all(|b| *b == b'A'))
+                .expect("an overflow page of the draft")]
+        };
+        let overwrite: &[u8] = if damage_journal { &[0xff] } else { &u32::MAX.to_be_bytes() };
+        for damaged in pages {
+            file.seek(SeekFrom::Start((damaged * page) as u64)).unwrap();
+            file.write_all(overwrite).unwrap();
+        }
+        file.sync_all().unwrap();
+
+        let journal = coven_database::discarded_operations(f.directory.database_path()).await;
+        match journal {
+            Err(coven_database::DbError::DamagedDatabase) => assert!(damage_journal),
+            Ok(records) => assert!(!damage_journal && records.len() == 1, "{records:?}"),
+            Err(error) => panic!("{error:?}"),
+        }
+        let old = f.directory.settings().unwrap().device_id;
+        let handle =
+            with_drafts().reset_device(f.directory.id(), "Restored laptop", |_| ()).await.unwrap();
+        let reset = handle.device_reset().await.unwrap().unwrap();
+        assert_eq!(reset.old_device, old, "journal damaged: {damage_journal}");
+        handle.close().await.unwrap();
+    }
+}
