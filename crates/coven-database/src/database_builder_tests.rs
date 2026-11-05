@@ -64,7 +64,9 @@ async fn damage_a_statement_meets_after_opening_fails_that_statement() {
 
     let database = store.builder(notes_tables(), migrations()).open().await.unwrap();
     let ids = database
-        .read(|sql| Ok(sql.query("SELECT id FROM drafts", [], |r| r.get::<_, i64>(0))?))
+        .read(|sql| {
+            Ok::<_, DbError>(sql.query("SELECT id FROM drafts", [], |r| r.get::<_, i64>(0))?)
+        })
         .await
         .unwrap();
     assert_eq!(ids, [1]);

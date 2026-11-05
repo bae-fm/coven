@@ -231,7 +231,9 @@ async fn an_inherited_audience_rows_file_follows_its_parent() {
     .await
     .unwrap();
     let moved: FileId = db
-        .read(|sql| Ok(sql.query_row("SELECT token FROM attachments", [], |r| r.get(0))?))
+        .read(|sql| {
+            Ok::<_, DbError>(sql.query_row("SELECT token FROM attachments", [], |r| r.get(0))?)
+        })
         .await
         .unwrap();
     assert_ne!(moved, file);

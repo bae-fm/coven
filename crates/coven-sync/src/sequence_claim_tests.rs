@@ -1,5 +1,6 @@
 use crate::sequence_sync::tests::*;
 use crate::*;
+use coven_database::DbError;
 use coven_format::admin::StoreChange;
 use coven_foundation::clock::Clock;
 use coven_storage::{test_utils::Faults, ObjectPath, Storage};
@@ -582,7 +583,7 @@ async fn write(db: &coven_database::Database, statement: &'static str) {
 async fn folders_state(db: &coven_database::Database) -> (Vec<(String, String)>, String) {
     let notes = db
         .read(|sql| {
-            Ok(sql.query("SELECT id,title FROM notes ORDER BY id", [], |row| {
+            Ok::<_, DbError>(sql.query("SELECT id,title FROM notes ORDER BY id", [], |row| {
                 Ok((row.get(0)?, row.get(1)?))
             })?)
         })

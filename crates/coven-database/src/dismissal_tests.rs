@@ -1,5 +1,6 @@
 use crate::tests::TestStore;
 use crate::write::tests::{count, notes, records, sql, NOTES};
+use crate::DbError;
 use crate::{Database, Migration};
 use coven_foundation::{clock::FixedClock, id_source::SequentialIds};
 use coven_merge::Audience;
@@ -175,11 +176,13 @@ async fn dismissed_removed_row_stays_deleted_and_concurrent_edit_is_lost() {
     b.receive(records(&a)[2].clone().into()).await.unwrap();
     for db in [&a, &b] {
         assert_eq!(
-            db.read(|s| Ok(s
-                .query_row("SELECT count(*) FROM notes WHERE id='b'", [], |r| r
-                    .get::<_, i64>(0))?))
-                .await
-                .unwrap(),
+            db.read(|s| Ok::<_, DbError>(s.query_row(
+                "SELECT count(*) FROM notes WHERE id='b'",
+                [],
+                |r| r.get::<_, i64>(0)
+            )?))
+            .await
+            .unwrap(),
             0
         );
     }
@@ -219,11 +222,13 @@ async fn set_null_child_returns_when_its_removed_parent_is_dismissed() {
     b.receive(records(&a)[1].clone().into()).await.unwrap();
     for db in [&a, &b] {
         assert_eq!(
-            db.read(|s| Ok(s
-                .query_row("SELECT parent FROM children WHERE id='c'", [], |r| r
-                    .get::<_, Option<String>>(0))?))
-                .await
-                .unwrap(),
+            db.read(|s| Ok::<_, DbError>(s.query_row(
+                "SELECT parent FROM children WHERE id='c'",
+                [],
+                |r| r.get::<_, Option<String>>(0)
+            )?))
+            .await
+            .unwrap(),
             None
         );
         assert!(db.lost_values().await.unwrap().is_empty());

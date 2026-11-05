@@ -127,7 +127,7 @@ async fn coven_checkpoints_the_wal_past_its_threshold() {
         assert_eq!(pages, 0, "the writer never checkpoints as it commits");
     });
     let mut restarts = db.report_checkpoints();
-    let mut query = db.subscribe(|sql| {
+    let mut query: crate::LiveQuery<_, DbError> = db.subscribe(|sql| {
         Ok(sql.query_row("SELECT count(*) FROM blobs", [], |r| r.get::<_, i64>(0))?)
     });
     let reader = tokio::spawn(async move { while let Some(Ok(_)) = query.next().await {} });
@@ -190,7 +190,9 @@ async fn closing_checkpoints_and_removes_the_wal() {
     assert!(!wal(&store).exists(), "closing removes the WAL");
     let db = blobs(&store, SqliteSettings::default()).open().await.unwrap();
     let rows: i64 = db
-        .read(|sql| Ok(sql.query_row("SELECT count(*) FROM blobs", [], |r| r.get(0))?))
+        .read(|sql| {
+            Ok::<_, DbError>(sql.query_row("SELECT count(*) FROM blobs", [], |r| r.get(0))?)
+        })
         .await
         .unwrap();
     assert_eq!(rows, 200);
@@ -349,7 +351,9 @@ async fn a_busy_checkpoint_is_tried_again() {
     for _ in 0..3 {
         checkpointed(&db, &mut tries).await;
     }
-    db.read(|sql| Ok(sql.query_row("SELECT 1", [], |r| r.get::<_, i64>(0))?)).await.unwrap();
+    db.read(|sql| Ok::<_, DbError>(sql.query_row("SELECT 1", [], |r| r.get::<_, i64>(0))?))
+        .await
+        .unwrap();
     db.close().await.unwrap();
 }
 

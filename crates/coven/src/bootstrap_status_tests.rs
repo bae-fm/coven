@@ -431,7 +431,7 @@ async fn a_waiting_joins_scan_reports_its_wait() {
                     "INSERT INTO notes VALUES('later',?1)",
                     coven_database::params![vec![1_u8; 9]],
                 )?;
-                Ok(())
+                Ok::<_, CovenError>(())
             })
             .await
             .unwrap();

@@ -338,7 +338,7 @@ async fn the_apps_sql_reads_members_and_devices_former_ones_included() {
     // The member id is the text an app keeps in its own tables.
     let joined: Vec<String> = db
         .read(move |sql| {
-            Ok(sql.query(
+            Ok::<_, DbError>(sql.query(
                 "SELECT d.name FROM coven_devices AS d JOIN coven_members AS m ON m.member=d.member
                  WHERE m.member=?1 ORDER BY d.name",
                 [member(2)],
@@ -368,7 +368,7 @@ async fn the_apps_sql_reads_each_members_keys_and_access() {
     type KeysRow = (MemberId, [u8; 32], [u8; 32], Option<String>, Option<String>);
     let rows: Vec<KeysRow> = db
         .read(|sql| {
-            Ok(sql.query(
+            Ok::<_, DbError>(sql.query(
                 "SELECT member,signing,sealing,account,access_key_id FROM coven_members
                  ORDER BY member",
                 [],
@@ -413,16 +413,18 @@ async fn the_apps_sql_finds_a_circle_by_name_and_reads_its_members() {
     let gifts = CircleId(uuid::Uuid::from_u128(7));
     let named = |name: &'static str| {
         db.read(move |sql| {
-            Ok(sql.query("SELECT circle FROM coven_circles WHERE name=?1", [name], |r| {
-                r.get::<_, CircleId>(0)
-            })?)
+            Ok::<_, DbError>(sql.query(
+                "SELECT circle FROM coven_circles WHERE name=?1",
+                [name],
+                |r| r.get::<_, CircleId>(0),
+            )?)
         })
     };
     assert_eq!(named("Gifts").await.unwrap(), [gifts]);
     assert!(named("Old").await.unwrap().is_empty(), "a deleted circle");
     let members: Vec<(CircleId, MemberId, bool)> = db
         .read(|sql| {
-            Ok(sql.query(
+            Ok::<_, DbError>(sql.query(
                 "SELECT circle,member,is_self FROM coven_circle_members ORDER BY circle,member",
                 [],
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),

@@ -349,7 +349,7 @@ async fn cleanup_failure_returns_the_open_handle_with_its_session_keys() {
     assert_eq!(app.stores().await.unwrap().len(), 1);
     assert_eq!(coven_storage::recorded_config(&pending.directory()).unwrap(), Some(location));
     assert_eq!(handle.store_key_state().unwrap(), StoreKeyState::Available);
-    handle.read(|_| Ok(())).await.unwrap();
+    handle.read(|_| Ok::<_, CovenError>(())).await.unwrap();
     handle.close().await.unwrap();
 }
 

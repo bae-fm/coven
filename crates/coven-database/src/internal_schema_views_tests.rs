@@ -50,12 +50,17 @@ async fn the_app_reads_coven_views_but_not_covens_tables() {
         // The pause view always holds its one row.
         let expected = usize::from(view == "coven_upload_pause");
         let statement = format!("SELECT * FROM {view}");
-        let rows = db.read(move |sql| Ok(sql.query(&statement, [], |_| Ok(()))?)).await.unwrap();
+        let rows = db
+            .read(move |sql| Ok::<_, DbError>(sql.query(&statement, [], |_| Ok(()))?))
+            .await
+            .unwrap();
         assert_eq!(rows.len(), expected, "{view}");
         // A count reads no column of the tables behind the view.
         let statement = format!("SELECT count(*) FROM {view}");
-        let count: i64 =
-            db.read(move |sql| Ok(sql.query_row(&statement, [], |r| r.get(0))?)).await.unwrap();
+        let count: i64 = db
+            .read(move |sql| Ok::<_, DbError>(sql.query_row(&statement, [], |r| r.get(0))?))
+            .await
+            .unwrap();
         assert_eq!(count, expected as i64, "{view}");
     }
     db.write(|sql| {
@@ -67,7 +72,7 @@ async fn the_app_reads_coven_views_but_not_covens_tables() {
     // A view in an app subquery, as an order or a filter reads it.
     let first: Vec<String> = db
         .read(|sql| {
-            Ok(sql.query(
+            Ok::<_, DbError>(sql.query(
                 "SELECT id FROM notes ORDER BY EXISTS(SELECT 1 FROM coven_uploads AS u
                  WHERE u.file=notes.title) DESC, id",
                 [],
@@ -163,7 +168,7 @@ async fn coven_key_encodes_a_rows_key_and_an_index_can_hold_it() {
         .unwrap();
     let (one, two): (Vec<u8>, Vec<u8>) = db
         .read(|sql| {
-            Ok(sql.query_row("SELECT coven_key('a'), coven_key(7,'a')", [], |r| {
+            Ok::<_, DbError>(sql.query_row("SELECT coven_key('a'), coven_key(7,'a')", [], |r| {
                 Ok((r.get(0)?, r.get(1)?))
             })?)
         })
@@ -198,7 +203,7 @@ async fn coven_files_holds_each_record_beside_the_apps_rows() {
     let db = open(&store, Provenance::AppProvided).await;
     let listed = || async {
         db.read(|sql| {
-            Ok(sql.query(
+            Ok::<_, DbError>(sql.query(
                 "SELECT f.id,c.size,coven_file_device(c.coordinates) IS NOT NULL,c.hash IS NOT NULL
                  FROM files AS f JOIN coven_files AS c ON c.id=f.file",
                 [],
@@ -248,7 +253,7 @@ async fn coven_uploads_names_each_queued_file() {
     let file = stage(&db, b"take".to_vec(), true).await.unwrap();
     let listed = db
         .read(|sql| {
-            Ok(sql.query(
+            Ok::<_, DbError>(sql.query(
                 "SELECT u.file FROM coven_uploads AS u JOIN files AS f ON f.file=u.file WHERE f.id='7'",
                 [],
                 |r| r.get::<_, FileId>(0),
@@ -273,9 +278,11 @@ async fn coven_uploads_gives_each_files_confirmed_bytes() {
     stage(&db, b"take".to_vec(), true).await.unwrap();
     let bytes = || async {
         db.read(|sql| {
-            Ok(sql.query("SELECT bytes_confirmed,bytes_total FROM coven_uploads", [], |r| {
-                Ok((r.get::<_, Option<i64>>(0)?, r.get::<_, Option<i64>>(1)?))
-            })?)
+            Ok::<_, DbError>(sql.query(
+                "SELECT bytes_confirmed,bytes_total FROM coven_uploads",
+                [],
+                |r| Ok((r.get::<_, Option<i64>>(0)?, r.get::<_, Option<i64>>(1)?)),
+            )?)
         })
         .await
         .unwrap()
@@ -311,7 +318,7 @@ async fn coven_upload_pause_says_whether_uploads_are_paused() {
     use crate::Provenance;
     let store = TestStore::new();
     let db = open(&store, Provenance::AppProvided).await;
-    let mut paused = db
+    let mut paused: crate::LiveQuery<_, DbError> = db
         .subscribe(|sql| {
             Ok(sql
                 .query_row("SELECT paused FROM coven_upload_pause", [], |r| r.get::<_, bool>(0))?)

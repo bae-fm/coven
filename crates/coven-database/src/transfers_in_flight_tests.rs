@@ -1,5 +1,6 @@
 use crate::file_write::tests::{complete_uploads, namespaces, open, stage, tables, SCHEMA};
 use crate::tests::TestStore;
+use crate::DbError;
 use crate::{Migration, Provenance};
 use coven_foundation::id_source::{DeviceId, FileId};
 
@@ -23,7 +24,9 @@ const PROGRESS: crate::TransferProgress =
 /// sending: one live query over `coven_uploads` (E4).
 const COUNTS: &str = "SELECT count(*) FILTER (WHERE sending),count(*) FROM coven_uploads";
 
-async fn next<T: Clone + PartialEq + Send + 'static>(query: &mut crate::LiveQuery<T>) -> T {
+async fn next<T: Clone + PartialEq + Send + 'static>(
+    query: &mut crate::LiveQuery<T, crate::DbError>,
+) -> T {
     tokio::time::timeout(HANG_GUARD, query.next())
         .await
         .expect("the live query answers")
@@ -57,7 +60,7 @@ async fn a_live_query_of_sending_runs_again_as_an_upload_starts_or_ends() {
     assert!(next(&mut row).await);
     let listed = db
         .read(|sql| {
-            Ok(sql.query("SELECT file FROM coven_sending", [], |r| {
+            Ok::<_, DbError>(sql.query("SELECT file FROM coven_sending", [], |r| {
                 r.get::<_, coven_foundation::id_source::FileId>(0)
             })?)
         })
@@ -79,14 +82,14 @@ async fn a_live_query_that_reads_no_sending_state_stays_idle() {
     let (file, uploader, object) = queued(&db).await;
     let runs = Arc::new(AtomicUsize::new(0));
     let counted = runs.clone();
-    let mut queued = db.subscribe(move |sql| {
+    let mut queued: crate::LiveQuery<_, DbError> = db.subscribe(move |sql| {
         counted.fetch_add(1, Ordering::SeqCst);
         Ok(sql.query_row("SELECT count(*),max(position) FROM coven_uploads", [], |r| {
             r.get::<_, i64>(0)
         })?)
     });
     assert_eq!(queued.next().await.unwrap().unwrap(), 1);
-    let mut sending_list = db.subscribe(|sql| {
+    let mut sending_list: crate::LiveQuery<_, DbError> = db.subscribe(|sql| {
         Ok(sql.query("SELECT file FROM coven_sending", [], |r| r.get::<_, String>(0))?)
     });
     assert!(sending_list.next().await.unwrap().unwrap().is_empty());
@@ -114,7 +117,7 @@ async fn a_read_only_handle_reads_every_file_as_waiting() {
         .unwrap();
     let counts = reader
         .read(|sql| {
-            Ok(sql.query_row(
+            Ok::<_, DbError>(sql.query_row(
                 "SELECT count(*) FILTER (WHERE sending),count(*),(SELECT count(*) FROM coven_sending)
                  FROM coven_uploads",
                 [],
@@ -199,7 +202,9 @@ async fn reading_what_is_being_sent_costs() {
             for _ in 0..5 {
                 let started = std::time::Instant::now();
                 answer = db
-                    .read(move |read| Ok(read.query_row(sql, [], |r| r.get::<_, i64>(0))?))
+                    .read(move |read| {
+                        Ok::<_, DbError>(read.query_row(sql, [], |r| r.get::<_, i64>(0))?)
+                    })
                     .await
                     .unwrap();
                 best = best.min(started.elapsed());
@@ -326,8 +331,11 @@ async fn a_live_query_of_downloading_runs_again_as_a_download_starts_or_ends() {
     let _unnamed = downloads.start(uploader, FileId(uuid::Uuid::nil()), Vec::new(), PROGRESS);
     let listed = db
         .read(|sql| {
-            Ok(sql
-                .query_row("SELECT count(*) FROM coven_downloading", [], |r| r.get::<_, i64>(0))?)
+            Ok::<_, DbError>(
+                sql.query_row("SELECT count(*) FROM coven_downloading", [], |r| {
+                    r.get::<_, i64>(0)
+                })?,
+            )
         })
         .await
         .unwrap();

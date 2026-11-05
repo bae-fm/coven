@@ -42,13 +42,17 @@ async fn application_lifecycle_two_stores_lock_read_only_live_query_and_reopen()
     assert!(live.next().await.expect("the live query answers").unwrap().is_empty());
     a.write(|sql| {
         sql.execute("INSERT INTO notes VALUES(?1,?2)", ("a", "Paint colors"))?;
-        Ok(())
+        Ok::<_, CovenError>(())
     })
     .await
     .unwrap();
     assert_eq!(live.next().await.expect("the live query answers").unwrap(), ["Paint colors"]);
     let titles = reader
-        .read(|sql| Ok(sql.query("SELECT title FROM notes", [], |r| r.get::<_, String>(0))?))
+        .read(|sql| {
+            Ok::<_, CovenError>(
+                sql.query("SELECT title FROM notes", [], |r| r.get::<_, String>(0))?,
+            )
+        })
         .process(|mut titles| {
             titles.sort();
             Ok(titles)
@@ -57,18 +61,23 @@ async fn application_lifecycle_two_stores_lock_read_only_live_query_and_reopen()
         .unwrap();
     assert_eq!(titles, ["Paint colors"]);
     assert_eq!(
-        b.read(|sql| Ok(sql.query_row("SELECT count(*) FROM notes", [], |r| r.get::<_, i64>(0))?))
-            .await
-            .unwrap(),
+        b.read(|sql| Ok::<_, CovenError>(sql.query_row(
+            "SELECT count(*) FROM notes",
+            [],
+            |r| r.get::<_, i64>(0)
+        )?))
+        .await
+        .unwrap(),
         0
     );
     assert!(a.lost_values().await.unwrap().is_empty());
     let mut losses = a.subscribe_lost_values();
     assert!(losses.next().await.expect("the live query answers").unwrap().is_empty());
     a.dismiss_lost_values(&[]).await.unwrap();
-    let mut by_id = a.subscribe_reconfigurable("a".to_owned(), |id, sql| {
-        Ok(sql.query("SELECT title FROM notes WHERE id=?1", [id], |r| r.get::<_, String>(0))?)
-    });
+    let mut by_id: crate::ReconfigurableLiveQuery<_, _, crate::CovenError> = a
+        .subscribe_reconfigurable("a".to_owned(), |id, sql| {
+            Ok(sql.query("SELECT title FROM notes WHERE id=?1", [id], |r| r.get::<_, String>(0))?)
+        });
     let requests = by_id.requests();
     assert_eq!(
         by_id.next().await.expect("the live query answers").result.unwrap(),
@@ -96,9 +105,11 @@ async fn application_lifecycle_two_stores_lock_read_only_live_query_and_reopen()
     reader.close().await.unwrap();
     let a = builder(&app).open(first.id(), |_| ()).await.unwrap();
     assert_eq!(
-        a.read(|sql| Ok(sql.query_row("SELECT title FROM notes", [], |r| r.get::<_, String>(0))?))
-            .await
-            .unwrap(),
+        a.read(|sql| Ok::<_, CovenError>(
+            sql.query_row("SELECT title FROM notes", [], |r| r.get::<_, String>(0))?
+        ))
+        .await
+        .unwrap(),
         "Paint colors"
     );
     a.close().await.unwrap();
@@ -194,7 +205,7 @@ async fn a_breaking_migration_keeps_the_waiting_write_as_authored() {
     handle
         .write(|sql| {
             sql.execute("INSERT INTO attachments VALUES('a','Swatches')", [])?;
-            Ok(())
+            Ok::<_, CovenError>(())
         })
         .await
         .unwrap();
@@ -223,9 +234,11 @@ async fn a_breaking_migration_keeps_the_waiting_write_as_authored() {
     assert!(converted.lock().unwrap().is_empty());
     assert_eq!(
         handle
-            .read(|sql| Ok(
-                sql.query_row("SELECT name FROM attachments", [], |r| r.get::<_, String>(0))?
-            ))
+            .read(|sql| Ok::<_, CovenError>(sql.query_row(
+                "SELECT name FROM attachments",
+                [],
+                |r| r.get::<_, String>(0)
+            )?))
             .await
             .unwrap(),
         "Swatches"
@@ -446,7 +459,7 @@ async fn discarding_waits_after_the_last_handle_drops_or_close_starts() {
         let mut read = Box::pin(handle.read(move |_| {
             entered.send(()).unwrap();
             released.recv_timeout(HANG_GUARD).unwrap();
-            Ok(())
+            Ok::<_, CovenError>(())
         }));
         tokio::select! {
             result = &mut read => panic!("held read returned: {result:?}"),

@@ -70,7 +70,7 @@ async fn member_keys_are_replaced_through_the_public_calls() {
     handle
         .write(|sql| {
             sql.execute("INSERT INTO notes VALUES('carol',x'01')", [])?;
-            Ok(())
+            Ok::<_, CovenError>(())
         })
         .await
         .unwrap();
@@ -166,7 +166,11 @@ mod owner_identity {
     async fn title(handle: &CovenHandle) -> String {
         handle
             .read(|sql| {
-                Ok(sql.query_row("SELECT title FROM notes WHERE id='carol'", [], |r| r.get(0))?)
+                Ok::<_, CovenError>(sql.query_row(
+                    "SELECT title FROM notes WHERE id='carol'",
+                    [],
+                    |r| r.get(0),
+                )?)
             })
             .await
             .unwrap()
@@ -206,7 +210,7 @@ mod owner_identity {
             .handle
             .write(|sql| {
                 sql.execute("INSERT INTO notes VALUES('carol','first')", [])?;
-                Ok(())
+                Ok::<_, CovenError>(())
             })
             .await
             .unwrap();
@@ -250,7 +254,7 @@ mod owner_identity {
             .handle
             .write(|sql| {
                 sql.execute("INSERT INTO notes VALUES('carol','first')", [])?;
-                Ok(())
+                Ok::<_, CovenError>(())
             })
             .await
             .unwrap();
@@ -263,7 +267,7 @@ mod owner_identity {
             .handle
             .write(move |sql| {
                 sql.execute("INSERT INTO notes VALUES('ana',?1)", [large])?;
-                Ok(())
+                Ok::<_, CovenError>(())
             })
             .await
             .unwrap();

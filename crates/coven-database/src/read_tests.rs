@@ -21,7 +21,7 @@ async fn read_is_lazy_and_readonly_opens_use_the_same_api() {
     let count = Arc::clone(&calls);
     let read = db.read(move |sql| {
         count.fetch_add(1, Ordering::SeqCst);
-        Ok(sql.query_row(
+        Ok::<_, DbError>(sql.query_row(
             "SELECT title FROM notes WHERE id=?1",
             ["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
             |r| r.get::<_, String>(0),
@@ -32,9 +32,11 @@ async fn read_is_lazy_and_readonly_opens_use_the_same_api() {
     assert_eq!(calls.load(Ordering::SeqCst), 1);
     let ro = store.builder(notes_tables(), notes_migrations()).open_read_only().await.unwrap();
     assert_eq!(
-        ro.read(|sql| Ok(sql.query_row("SELECT body FROM notes", [], |r| r.get::<_, String>(0))?))
-            .await
-            .unwrap(),
+        ro.read(|sql| Ok::<_, DbError>(
+            sql.query_row("SELECT body FROM notes", [], |r| r.get::<_, String>(0))?
+        ))
+        .await
+        .unwrap(),
         "body"
     );
     ro.close().await.unwrap();
@@ -59,7 +61,7 @@ async fn snapshot_is_fixed_before_the_closure_and_across_its_statements() {
                     sql.query_row("SELECT title FROM notes", [], |r| r.get::<_, String>(0))?;
                 let second =
                     sql.query_row("SELECT title FROM notes", [], |r| r.get::<_, String>(0))?;
-                Ok((first, second))
+                Ok::<_, DbError>((first, second))
             })
             .await
     });
@@ -68,9 +70,11 @@ async fn snapshot_is_fixed_before_the_closure_and_across_its_statements() {
     release.send(()).unwrap();
     assert_eq!(task.await.unwrap().unwrap(), ("old".into(), "old".into()));
     assert_eq!(
-        db.read(|sql| Ok(sql.query_row("SELECT title FROM notes", [], |r| r.get::<_, String>(0))?))
-            .await
-            .unwrap(),
+        db.read(|sql| Ok::<_, DbError>(
+            sql.query_row("SELECT title FROM notes", [], |r| r.get::<_, String>(0))?
+        ))
+        .await
+        .unwrap(),
         "new"
     );
     db.close().await.unwrap();
@@ -107,9 +111,11 @@ async fn read_context_refuses_writes_and_internal_tables_with_typed_errors() {
         assert!(matches!(error, CovenError::Database(DbError::InternalTable { .. })), "{error:?}");
     }
     assert_eq!(
-        db.read(|sql| Ok(sql.query_row("SELECT count(*) FROM notes", [], |r| r.get::<_, i64>(0))?))
-            .await
-            .unwrap(),
+        db.read(|sql| Ok::<_, DbError>(
+            sql.query_row("SELECT count(*) FROM notes", [], |r| r.get::<_, i64>(0))?
+        ))
+        .await
+        .unwrap(),
         0
     );
     db.close().await.unwrap();
@@ -130,7 +136,9 @@ async fn process_releases_all_reader_leases_and_store_borrows() {
         tasks.push(tokio::spawn(async move {
             clone
                 .read(|sql| {
-                    Ok(sql.query_row("SELECT count(*) FROM notes", [], |r| r.get::<_, i64>(0))?)
+                    Ok::<_, DbError>(
+                        sql.query_row("SELECT count(*) FROM notes", [], |r| r.get::<_, i64>(0))?,
+                    )
                 })
                 .process(move |value| {
                     entered.send(()).unwrap();
@@ -143,7 +151,10 @@ async fn process_releases_all_reader_leases_and_store_borrows() {
     for _ in 0..4 {
         entry.recv_timeout(HANG_GUARD).unwrap();
     }
-    assert_eq!(tokio::time::timeout(HANG_GUARD, db.read(|_| Ok(42))).await.unwrap().unwrap(), 42);
+    assert_eq!(
+        tokio::time::timeout(HANG_GUARD, db.read(|_| Ok::<_, DbError>(42))).await.unwrap().unwrap(),
+        42
+    );
     tokio::time::timeout(HANG_GUARD, db.close()).await.unwrap().unwrap();
     for release in releases {
         release.send(()).unwrap();
@@ -161,7 +172,9 @@ async fn a_panicking_read_releases_its_snapshot_and_keeps_the_reader_usable() {
         db.read(|_| -> crate::CovenResult<()> { panic!("app read panic") }).await.unwrap_err();
     assert!(read_bug(&error, "app read panic"), "{error:?}");
     assert_eq!(
-        db.read(|sql| Ok(sql.query_row("SELECT 42", [], |r| r.get::<_, i64>(0))?)).await.unwrap(),
+        db.read(|sql| Ok::<_, DbError>(sql.query_row("SELECT 42", [], |r| r.get::<_, i64>(0))?))
+            .await
+            .unwrap(),
         42
     );
     db.close().await.unwrap();
@@ -171,7 +184,9 @@ async fn a_panicking_read_releases_its_snapshot_and_keeps_the_reader_usable() {
         ro.read(|_| -> crate::CovenResult<()> { panic!("read-only panic") }).await.unwrap_err();
     assert!(read_bug(&error, "read-only panic"), "{error:?}");
     assert_eq!(
-        ro.read(|sql| Ok(sql.query_row("SELECT 42", [], |r| r.get::<_, i64>(0))?)).await.unwrap(),
+        ro.read(|sql| Ok::<_, DbError>(sql.query_row("SELECT 42", [], |r| r.get::<_, i64>(0))?))
+            .await
+            .unwrap(),
         42
     );
     ro.close().await.unwrap();
@@ -220,7 +235,7 @@ async fn a_failed_snapshot_rollback_fails_the_handle_until_reopen() {
         assert!(rollback_failed(notes.next().await.expect("the live query answers")));
         db.close().await.unwrap();
         let db = open().await.unwrap();
-        assert!(db.read(|_| Ok(())).await.is_ok());
+        assert!(db.read(|_| Ok::<_, DbError>(())).await.is_ok());
         db.close().await.unwrap();
     }
 }
@@ -259,6 +274,57 @@ async fn a_read_only_handle_fails_after_any_of_its_connections_fails_to_roll_bac
     assert!(rollback_failed(ro.read(|_| Ok(())).await));
     ro.close().await.unwrap();
     let ro = open().open_read_only().await.unwrap();
-    assert!(ro.read(|_| Ok(())).await.is_ok());
+    assert!(ro.read(|_| Ok::<_, DbError>(())).await.is_ok());
     ro.close().await.unwrap();
+}
+
+/// An app's own error type, as an app declares one for its reads: coven's
+/// failures convert into it, and its own refusals sit beside them.
+#[derive(Debug)]
+pub(crate) enum AppError {
+    Database(DbError),
+    Refused(&'static str),
+}
+
+impl From<DbError> for AppError {
+    fn from(error: DbError) -> Self {
+        Self::Database(error)
+    }
+}
+
+impl From<rusqlite::Error> for AppError {
+    fn from(error: rusqlite::Error) -> Self {
+        Self::Database(error.into())
+    }
+}
+
+impl coven_foundation::task::CarriesBug for AppError {
+    fn bug(&self) -> Option<&coven_foundation::task::Bug> {
+        match self {
+            Self::Database(error) => error.bug(),
+            Self::Refused(_) => None,
+        }
+    }
+}
+
+/// A read whose closure refuses with the app's own error returns that
+/// error as it was, and `process` fails with the same type.
+#[tokio::test]
+async fn a_read_fails_with_its_closures_own_error() {
+    let store = TestStore::new();
+    let db = store.builder(notes_tables(), notes_migrations()).open().await.unwrap();
+    let refused = db.read(|_| Err::<(), _>(AppError::Refused("no"))).await;
+    assert!(matches!(refused, Err(AppError::Refused("no"))), "{refused:?}");
+    let processed = db
+        .read(|sql| {
+            Ok::<_, AppError>(
+                sql.query_row("SELECT count(*) FROM notes", [], |r| r.get::<_, i64>(0))?,
+            )
+        })
+        .process(|count| if count == 0 { Err(AppError::Refused("empty")) } else { Ok(count) })
+        .await;
+    assert!(matches!(processed, Err(AppError::Refused("empty"))), "{processed:?}");
+    db.close().await.unwrap();
+    let closed = db.read(|_| Ok::<_, AppError>(())).await;
+    assert!(matches!(closed, Err(AppError::Database(DbError::StoreClosed))), "{closed:?}");
 }

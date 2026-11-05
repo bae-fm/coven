@@ -811,7 +811,7 @@ impl SequenceSync {
         let outcome = self
             .database
             .read(move |sql| {
-                Ok(sql.query_row(
+                Ok::<_, coven_database::DbError>(sql.query_row(
                     "SELECT outcome FROM coven_operations WHERE operation=?1",
                     [id.0],
                     |row| row.get::<_, OperationOutcome>(0),

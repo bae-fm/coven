@@ -334,7 +334,11 @@ async fn app_tests_count_the_steps_a_read_runs() {
         async move {
             counter.take();
             handle
-                .read(move |db| Ok(db.query_row(sql, [], |r| r.get::<_, types::Value>(0))?))
+                .read(move |db| {
+                    Ok::<_, crate::CovenError>(
+                        db.query_row(sql, [], |r| r.get::<_, types::Value>(0))?,
+                    )
+                })
                 .await
                 .unwrap();
             counter.take().app_read_steps
@@ -349,7 +353,7 @@ async fn app_tests_count_the_steps_a_read_runs() {
                      INSERT INTO notes SELECT i, 'note ' || i FROM n",
                     [from, to],
                 )?;
-                Ok(())
+                Ok::<_, crate::CovenError>(())
             })
             .await
             .unwrap();

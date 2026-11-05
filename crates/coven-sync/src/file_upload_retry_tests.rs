@@ -512,7 +512,7 @@ async fn pausing_between_parts_and_reconnecting_resume_the_recorded_session() {
     assert_eq!(
         f.database
             .read(|sql| {
-                Ok(sql.query(
+                Ok::<_, DbError>(sql.query(
                     "SELECT bytes_confirmed,bytes_total FROM coven_uploads",
                     [],
                     |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
@@ -769,7 +769,7 @@ async fn a_pending_records_cause_arrives_with_it_in_the_view() {
     let clock = Arc::new(FixedClock::new(SystemTime::UNIX_EPOCH + Duration::from_secs(1000)));
     let f = fixture(&clock).await;
     f.attach("files", "photo", b"photo".to_vec()).await;
-    let mut viewed = f.database.subscribe(|sql| {
+    let mut viewed: coven_database::LiveQuery<_, DbError> = f.database.subscribe(|sql| {
         Ok(sql.query(
             "SELECT p.record,p.cause FROM coven_pending AS p
              JOIN files AS f ON f.file=p.file WHERE f.id='photo'",

@@ -214,9 +214,11 @@ async fn join_accepts_provider_access_and_approval_then_loads_the_store() {
         assert_ne!(member, owner.member.member());
         assert_eq!(
             handle
-                .read(|sql| Ok(sql.query("SELECT id,body FROM notes ORDER BY id", [], |r| Ok(
-                    (r.get::<_, String>(0)?, r.get::<_, Vec<u8>>(1)?)
-                ))?))
+                .read(|sql| Ok::<_, CovenError>(sql.query(
+                    "SELECT id,body FROM notes ORDER BY id",
+                    [],
+                    |r| Ok((r.get::<_, String>(0)?, r.get::<_, Vec<u8>>(1)?))
+                )?))
                 .await
                 .unwrap(),
             owner.rows().await
@@ -783,7 +785,7 @@ async fn restores_return_session_keys_and_builder_choices_without_reopening() {
             handle
                 .write(|sql| {
                     sql.execute("INSERT INTO notes VALUES('new',?1)", params![b"new".to_vec()])?;
-                    Ok(())
+                    Ok::<_, CovenError>(())
                 })
                 .await
                 .unwrap();

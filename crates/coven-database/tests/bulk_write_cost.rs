@@ -4,6 +4,7 @@
 //!
 //!   cargo test --release -p coven-database --test bulk_write_cost -- --ignored --nocapture
 
+use coven_database::DbError;
 use coven_database::{Database, DatabaseBuilder, Migration, RowIdentity, SyncedTable};
 use coven_foundation::{
     files::StoreDirectories,
@@ -53,7 +54,7 @@ async fn bulk(db: &Database, sql: &'static str) -> Duration {
 async fn clearing_a_local_table_through_a_write_and_a_bulk_write() {
     let directory = tempfile::tempdir().unwrap();
     let db = open(&directory).await;
-    let mut live = db.subscribe(|sql| {
+    let mut live: coven_database::LiveQuery<_, DbError> = db.subscribe(|sql| {
         Ok(sql.query_row("SELECT count(*) FROM queue", [], |r| r.get::<_, i64>(0))?)
     });
     assert_eq!(live.next().await.unwrap().unwrap(), 0);

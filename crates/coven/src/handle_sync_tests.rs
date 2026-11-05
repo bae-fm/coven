@@ -35,7 +35,7 @@ async fn insert(handle: &CovenHandle, id: &str) {
     handle
         .write(move |sql| {
             sql.execute("INSERT INTO parents(id,label,value) VALUES(?1,?1,1)", [&id])?;
-            Ok(())
+            Ok::<_, CovenError>(())
         })
         .await
         .unwrap();
@@ -363,7 +363,7 @@ async fn refuse_rotation(
 }
 
 /// Waits until the last pass reports the failing rotation.
-async fn rotation_failed(last: &mut Followed<Option<LastPass>>) {
+async fn rotation_failed(last: &mut Followed<Option<LastPass>, DbError>) {
     last.wait_for(|last| {
         matches!(last, Some(LastPass::Failed { failure: StatusFailure::Operation(record), .. })
             if matches!(record.subject, PendingSubject::Operation { kind: OperationKind::RotateKey, .. }))
@@ -790,7 +790,7 @@ async fn a_view_record_arrives_with_its_cause() {
     let mut faults = Faults::none();
     faults.create_failures.insert(path, (StorageFailure::QuotaExceeded, 507));
     device.storage.set_faults(faults).await;
-    let mut list = device.handle.subscribe(|sql| {
+    let mut list: crate::LiveQuery<_, crate::CovenError> = device.handle.subscribe(|sql| {
         Ok(sql.query(
             "SELECT e.record,e.cause,f.id FROM coven_pending AS e JOIN files AS f ON f.file=e.file",
             [],
@@ -828,7 +828,7 @@ async fn a_view_record_arrives_with_its_cause() {
 
 /// Every pending record as the app's SQL reads it from `coven_pending`,
 /// as a live query (E4).
-fn subscribe_records(handle: &CovenHandle) -> LiveQuery<Vec<PendingRecord>> {
+fn subscribe_records(handle: &CovenHandle) -> LiveQuery<Vec<PendingRecord>, crate::CovenError> {
     handle.subscribe(|sql| {
         Ok(sql.query("SELECT record FROM coven_pending ORDER BY position", [], |r| {
             r.get::<_, PendingRecord>(0)

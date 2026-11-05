@@ -382,7 +382,7 @@ async fn a_restart_checkpoint_reports_busy_while_a_read_uses_the_wal() {
                 sql.query_row("SELECT count(*) FROM notes", [], |r| r.get::<_, i64>(0))?;
                 reading.send(()).unwrap();
                 released.recv().unwrap();
-                Ok(())
+                Ok::<_, crate::DbError>(())
             })
             .await
     });

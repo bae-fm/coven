@@ -133,10 +133,11 @@ async fn independent_key_changes_validate_the_inserted_key() {
         assert_eq!(count(&db, "local_rows"), 0);
         assert_eq!(records(&db).len(), 1);
         assert_eq!(
-            db.read(|sql| Ok(sql.query_row("SELECT id,title FROM notes", [], |r| Ok((
-                r.get::<_, String>(0)?,
-                r.get::<_, String>(1)?
-            )))?))
+            db.read(|sql| Ok::<_, DbError>(sql.query_row(
+                "SELECT id,title FROM notes",
+                [],
+                |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+            )?))
             .await
             .unwrap(),
             (V4.into(), "original".into())

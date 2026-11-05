@@ -190,7 +190,7 @@ async fn coven_uploads_names_each_files_move() {
     let staged = stage(&db, &["c"], Place::Cloud).await;
     let listed = db
         .read(|sql| {
-            Ok(sql.query(
+            Ok::<_, DbError>(sql.query(
                 "SELECT f.id,u.move FROM coven_uploads AS u JOIN files AS f ON f.file=u.file
                  ORDER BY f.id",
                 [],

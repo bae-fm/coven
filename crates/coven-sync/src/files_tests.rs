@@ -256,7 +256,7 @@ impl Fixture {
     }
     /// The queue as the app's SQL reads it from coven's views (E4), as a
     /// live query.
-    fn subscribe_queue(&self) -> coven_database::LiveQuery<ViewedQueue> {
+    fn subscribe_queue(&self) -> coven_database::LiveQuery<ViewedQueue, coven_database::DbError> {
         self.database.subscribe(viewed_queue)
     }
     /// The same, read once.
@@ -265,7 +265,9 @@ impl Fixture {
     }
     /// Every pending record as the app's SQL reads it from `coven_pending`,
     /// as a live query.
-    fn subscribe_pending(&self) -> coven_database::LiveQuery<Vec<crate::PendingRecord>> {
+    fn subscribe_pending(
+        &self,
+    ) -> coven_database::LiveQuery<Vec<crate::PendingRecord>, coven_database::DbError> {
         self.database.subscribe(|sql| {
             Ok(sql.query("SELECT record FROM coven_pending ORDER BY position", [], |r| {
                 r.get::<_, crate::PendingRecord>(0)
@@ -345,7 +347,7 @@ struct ViewedUpload {
 }
 fn viewed_queue(
     sql: coven_database::SqlReadContext<'_>,
-) -> coven_database::CovenResult<ViewedQueue> {
+) -> Result<ViewedQueue, coven_database::DbError> {
     let paused = sql.query_row("SELECT paused FROM coven_upload_pause", [], |r| r.get(0))?;
     let files = sql.query(
         "SELECT file,sending,bytes_confirmed,bytes_total,retry_at,pending IS NOT NULL

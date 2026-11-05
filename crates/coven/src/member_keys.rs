@@ -24,8 +24,6 @@ impl CovenHandle {
         keys: MemberPublicKeys,
     ) -> Result<Option<OperationId>, SyncError> {
         let member = *member;
-        self.write(move |write| Ok(write.replace_member_keys_for(&member, keys)?))
-            .await
-            .map_err(SyncError::from)
+        self.write(move |write| write.replace_member_keys_for(&member, keys)).await
     }
 }

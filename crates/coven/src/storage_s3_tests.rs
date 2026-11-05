@@ -362,7 +362,7 @@ async fn a_setup_failing_past_its_bucket_claim_finishes_through_the_loop() {
     let setups = opened
         .handle
         .read(|sql| {
-            Ok(sql.query(
+            Ok::<_, CovenError>(sql.query(
                 "SELECT operation FROM coven_operations WHERE kind='StorageSetup'",
                 [],
                 |row| row.get::<_, i64>(0),

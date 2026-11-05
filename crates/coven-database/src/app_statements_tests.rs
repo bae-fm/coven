@@ -45,7 +45,7 @@ async fn a_repeated_app_statement_is_prepared_once() {
 async fn a_cached_query_still_records_its_reads() {
     let store = TestStore::new();
     let db = notes(&store).await;
-    let mut titles = db.subscribe(|sql| {
+    let mut titles: crate::LiveQuery<_, DbError> = db.subscribe(|sql| {
         Ok(sql.query("SELECT title FROM notes ORDER BY id", [], |r| r.get::<_, String>(0))?)
     });
     assert!(titles.next().await.expect("the live query answers").unwrap().is_empty());
@@ -75,7 +75,7 @@ async fn a_query_kept_from_a_one_shot_read_still_records_its_reads_live() {
     let titles =
         |sql: crate::SqlReadContext<'_>| Ok(sql.query(TITLES, [], |r| r.get::<_, String>(0))?);
     assert!(db.read(titles).await.unwrap().is_empty());
-    let mut live = db.subscribe(titles);
+    let mut live: crate::LiveQuery<_, DbError> = db.subscribe(titles);
     assert!(next(&mut live).await.is_empty());
     sql(&db, "INSERT INTO notes VALUES ('1','a')").await.unwrap();
     assert_eq!(next(&mut live).await, ["a"]);
@@ -137,7 +137,9 @@ async fn a_schema_change_prepares_again() {
     let prepared = db.inspect_writer(|writer| writer.app_statements.fresh.get()) - before;
     assert_eq!(prepared, 1);
     let count: i64 = db
-        .read(|sql| Ok(sql.query_row("SELECT count(*) FROM notes", [], |r| r.get(0))?))
+        .read(|sql| {
+            Ok::<_, DbError>(sql.query_row("SELECT count(*) FROM notes", [], |r| r.get(0))?)
+        })
         .await
         .unwrap();
     assert_eq!(count, 3);

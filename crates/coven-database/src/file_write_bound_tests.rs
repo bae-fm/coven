@@ -228,9 +228,11 @@ async fn the_pause_shows_on_trailing_uploads_only() {
     let cover = stage(&db, "covers", "1", b"cover".to_vec(), Place::Cloud).await.unwrap();
     let paused = |db: Database| async move {
         db.read(|sql| {
-            Ok(sql.query("SELECT file,paused FROM coven_uploads ORDER BY position", [], |r| {
-                Ok((r.get::<_, FileId>(0)?, r.get::<_, bool>(1)?))
-            })?)
+            Ok::<_, DbError>(sql.query(
+                "SELECT file,paused FROM coven_uploads ORDER BY position",
+                [],
+                |r| Ok((r.get::<_, FileId>(0)?, r.get::<_, bool>(1)?)),
+            )?)
         })
         .await
         .unwrap()
@@ -248,9 +250,11 @@ async fn the_pause_shows_on_trailing_uploads_only() {
     });
     let metered = db
         .read(|sql| {
-            Ok(sql.query("SELECT file,metered FROM coven_uploads ORDER BY position", [], |r| {
-                Ok((r.get::<_, FileId>(0)?, r.get::<_, bool>(1)?))
-            })?)
+            Ok::<_, DbError>(sql.query(
+                "SELECT file,metered FROM coven_uploads ORDER BY position",
+                [],
+                |r| Ok((r.get::<_, FileId>(0)?, r.get::<_, bool>(1)?)),
+            )?)
         })
         .await
         .unwrap();

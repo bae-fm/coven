@@ -254,9 +254,11 @@ async fn migrated(store: &TestStore) -> Database {
 }
 
 async fn title(db: &Database) -> String {
-    db.read(|sql| Ok(sql.query_row("SELECT title FROM notes WHERE id='n'", [], |r| r.get(0))?))
-        .await
-        .unwrap()
+    db.read(|sql| {
+        Ok::<_, DbError>(sql.query_row("SELECT title FROM notes WHERE id='n'", [], |r| r.get(0))?)
+    })
+    .await
+    .unwrap()
 }
 
 #[tokio::test]
@@ -565,7 +567,7 @@ async fn a_reload_replays_a_captured_write_only_into_the_audiences_it_loads() {
     .unwrap();
     let values = db
         .read(|sql| {
-            Ok(sql.query("SELECT audience,value FROM notes", [], |r| {
+            Ok::<_, DbError>(sql.query("SELECT audience,value FROM notes", [], |r| {
                 Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
             })?)
         })

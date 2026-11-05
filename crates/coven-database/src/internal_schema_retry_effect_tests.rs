@@ -110,7 +110,11 @@ async fn a_local_trigger_follows_each_retry_effect_as_it_changes() {
         .await
         .unwrap();
     let mut log = crate::test_utils::Followed::new(db.subscribe(|sql| {
-        Ok(sql.query("SELECT effect FROM effect_log ORDER BY id", [], |r| r.get::<_, String>(0))?)
+        Ok::<_, crate::DbError>(sql.query(
+            "SELECT effect FROM effect_log ORDER BY id",
+            [],
+            |r| r.get::<_, String>(0),
+        )?)
     }));
     assert!(log.next().await.is_empty());
     for state in [syncing(false, None), syncing(false, None), syncing(true, None)] {

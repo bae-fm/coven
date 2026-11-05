@@ -192,7 +192,7 @@ async fn a_set_default_migration_preserves_the_previous_schema_and_rows() {
             assert_eq!(sql.query_row("SELECT p FROM child WHERE id='c'", [], |r| r.get::<_, String>(0))?, "p");
             assert_eq!(sql.query_row("SELECT sql FROM sqlite_schema WHERE name='child'", [], |r| r.get::<_, String>(0))?, "CREATE TABLE child(id TEXT NOT NULL PRIMARY KEY,p TEXT REFERENCES parent(id) ON DELETE CASCADE)");
             assert_eq!(sql.query_row("SELECT count(*) FROM sqlite_schema WHERE name='rebuilt'", [], |r| r.get::<_, i64>(0))?, 0);
-            Ok(())
+            Ok::<_, DbError>(())
         }).await.unwrap();
         db.close().await.unwrap();
     }

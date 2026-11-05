@@ -6,13 +6,13 @@ use serde::Deserialize;
 
 /// The pending records as the app's SQL reads them from `coven_pending`,
 /// as a live query.
-fn records(db: &crate::Database) -> crate::LiveQuery<Vec<Record>> {
+fn records(db: &crate::Database) -> crate::LiveQuery<Vec<Record>, DbError> {
     db.subscribe(|sql| {
         sql.query("SELECT record FROM coven_pending ORDER BY position", [], |r| {
             r.get::<_, Vec<u8>>(0)
         })?
         .iter()
-        .map(|record| Ok(serde_json::from_slice(record).map_err(DbError::StateEncoding)?))
+        .map(|record| serde_json::from_slice(record).map_err(DbError::StateEncoding))
         .collect()
     })
 }
@@ -240,16 +240,14 @@ async fn losing_a_pending_update_fails_all_calls_and_subscriptions_until_reopen(
         };
         let original = cause(failed.unwrap_err());
         let failures = [
-            cause(db_error(live.next().await.expect("the live query answers").unwrap_err())),
+            cause(live.next().await.expect("the live query answers").unwrap_err()),
             cause(db_error(ordinary.next().await.expect("the live query answers").unwrap_err())),
             cause(db_error(db.pending::<Record>().await.unwrap_err())),
             cause(db_error(db.read(|_| Ok(())).await.unwrap_err())),
             cause(db.write(|_| Ok(())).await.unwrap_err()),
             cause(db.applied_migrations().unwrap_err()),
             cause(db.schema_version().await.unwrap_err()),
-            cause(db_error(
-                records(&db).next().await.expect("the live query answers").unwrap_err(),
-            )),
+            cause(records(&db).next().await.expect("the live query answers").unwrap_err()),
         ];
         assert!(failures.iter().all(|error| std::sync::Arc::ptr_eq(&original, error)));
         db.close().await.unwrap();
@@ -509,9 +507,11 @@ async fn coven_pending_lists_records_in_the_order_they_arose() {
     let db = store.builder(vec![], vec![]).open().await.unwrap();
     let listed = || {
         db.read(|sql| {
-            Ok(sql.query("SELECT record FROM coven_pending ORDER BY position", [], |r| {
-                r.get::<_, Vec<u8>>(0)
-            })?)
+            Ok::<_, DbError>(sql.query(
+                "SELECT record FROM coven_pending ORDER BY position",
+                [],
+                |r| r.get::<_, Vec<u8>>(0),
+            )?)
         })
     };
     let subjects = |records: Vec<Vec<u8>>| -> Vec<Subject> {
@@ -552,7 +552,7 @@ async fn a_records_cause_is_written_with_it_and_cleared_at_open() {
             })?)
         })
     };
-    let mut live = follow(&db);
+    let mut live: crate::LiveQuery<_, DbError> = follow(&db);
     let mut next = async || live.next().await.expect("the live query answers").unwrap();
     assert_eq!(next().await, vec![]);
     let failed = Record { cause: Some("disk full".into()), ..record(1) };

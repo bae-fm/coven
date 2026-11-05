@@ -47,7 +47,7 @@ async fn note(device: &Device, id: &str) {
         .handle
         .write(move |sql| {
             sql.execute("INSERT INTO notes(id,title) VALUES(?1,?1)", [&id])?;
-            Ok(())
+            Ok::<_, CovenError>(())
         })
         .await
         .unwrap();
@@ -58,7 +58,9 @@ async fn notes(device: &Device) -> Vec<String> {
     device
         .handle
         .read(|sql| {
-            Ok(sql.query("SELECT id FROM notes ORDER BY id", [], |r| r.get::<_, String>(0))?)
+            Ok::<_, CovenError>(
+                sql.query("SELECT id FROM notes ORDER BY id", [], |r| r.get::<_, String>(0))?,
+            )
         })
         .await
         .unwrap()
@@ -70,7 +72,7 @@ async fn covers(device: &Device) -> Vec<(String, bool)> {
     device
         .handle
         .read(|sql| {
-            Ok(sql.query(
+            Ok::<_, CovenError>(sql.query(
                 "SELECT c.id,coven_file_device(f.coordinates) IS NULL
                  FROM covers AS c JOIN coven_files AS f ON f.id=c.file ORDER BY c.id",
                 [],
@@ -113,7 +115,7 @@ async fn stopped(device: &Device) {
 
 /// Wait until the device records `failure` for an upload.
 async fn upload_failed(device: &Device, failure: StorageFailure) {
-    let mut pending = device.handle.subscribe(|sql| {
+    let mut pending: crate::LiveQuery<_, crate::CovenError> = device.handle.subscribe(|sql| {
         Ok(sql.query("SELECT record FROM coven_pending ORDER BY position", [], |r| {
             r.get::<_, PendingRecord>(0)
         })?)
@@ -214,9 +216,11 @@ async fn the_pause_holds_trailing_uploads_and_leaves_bound_ones_running() {
     let paused: bool = ana
         .handle
         .read(move |sql| {
-            Ok(sql.query_row("SELECT paused FROM coven_uploads WHERE file=?1", [photo], |r| {
-                r.get(0)
-            })?)
+            Ok::<_, CovenError>(sql.query_row(
+                "SELECT paused FROM coven_uploads WHERE file=?1",
+                [photo],
+                |r| r.get(0),
+            )?)
         })
         .await
         .unwrap();
@@ -236,7 +240,7 @@ async fn moves(device: &Device, table: &'static str) -> Vec<(String, Option<Move
     device
         .handle
         .read(move |sql| {
-            Ok(sql.query(
+            Ok::<_, CovenError>(sql.query(
                 &format!(
                     "SELECT t.id,u.move FROM {table} AS t JOIN coven_uploads AS u ON u.file=t.file
                      ORDER BY t.id"
@@ -274,7 +278,7 @@ async fn the_app_finds_a_cloud_imports_move_in_coven_uploads_and_cancels_it() {
                 sql.execute("INSERT INTO tracks(id,file) VALUES(?1,?2)", (name, file))?;
                 files.push(file);
             }
-            Ok(files)
+            Ok::<_, CovenError>(files)
         })
         .await
         .unwrap();
@@ -283,7 +287,7 @@ async fn the_app_finds_a_cloud_imports_move_in_coven_uploads_and_cancels_it() {
         panic!("both tracks name a move: {queued:?}");
     };
     assert_eq!(id, other, "one write's cloud files are one move");
-    ana.handle.write(move |sql| Ok(sql.cancel_move(id)?)).await.unwrap();
+    ana.handle.write(move |sql| Ok::<_, CovenError>(sql.cancel_move(id)?)).await.unwrap();
     assert!(moves(ana, "tracks").await.is_empty());
     for file in files {
         assert!(matches!(
@@ -314,7 +318,7 @@ async fn coven_uploads_names_no_move_for_a_bound_upload() {
             |sql, (cover, photo)| {
                 sql.execute("INSERT INTO covers(id,file) VALUES('album',?1)", [cover])?;
                 sql.execute("INSERT INTO photos(id,file) VALUES('beach',?1)", [photo])?;
-                Ok(())
+                Ok::<_, CovenError>(())
             },
         )
         .await
@@ -324,7 +328,7 @@ async fn coven_uploads_names_no_move_for_a_bound_upload() {
     let [(_, Some(id))] = queued[..] else {
         panic!("the photo names a move: {queued:?}");
     };
-    ana.handle.write(move |sql| Ok(sql.cancel_move(id)?)).await.unwrap();
+    ana.handle.write(move |sql| Ok::<_, CovenError>(sql.cancel_move(id)?)).await.unwrap();
     assert!(moves(ana, "photos").await.is_empty());
     assert_eq!(moves(ana, "covers").await, [("album".to_owned(), None)]);
     network.close().await;
@@ -576,7 +580,7 @@ async fn titles(device: &Device) -> Vec<(String, String)> {
     device
         .handle
         .read(|sql| {
-            Ok(sql.query("SELECT id,title FROM notes ORDER BY id", [], |r| {
+            Ok::<_, CovenError>(sql.query("SELECT id,title FROM notes ORDER BY id", [], |r| {
                 Ok((r.get(0)?, r.get(1)?))
             })?)
         })
@@ -607,7 +611,7 @@ async fn changes_on_a_migration_another_raise_replaced_are_lost_everywhere() {
         .write(|sql| {
             sql.execute("UPDATE notes SET title='edited' WHERE id='n'", [])?;
             sql.execute("DELETE FROM notes WHERE id='m'", [])?;
-            Ok(())
+            Ok::<_, CovenError>(())
         })
         .await
         .unwrap();
@@ -756,7 +760,7 @@ async fn a_device_joining_past_a_replaced_migration_loses_changes_built_on_it() 
     let cover = ana
         .handle
         .test_staged_write(
-            |batch| Ok(batch.put_file("files", vec![9; 4096], Place::Cloud)),
+            |batch| Ok::<_, CovenError>(batch.put_file("files", vec![9; 4096], Place::Cloud)),
             |sql, file| {
                 sql.execute("UPDATE notes SET title='edited' WHERE id='n'", [])?;
                 sql.execute("INSERT INTO covers(id,file) VALUES('album',?1)", [file])?;
@@ -789,7 +793,7 @@ async fn a_device_joining_past_a_replaced_migration_loses_changes_built_on_it() 
     ben.handle
         .write(move |sql| {
             sql.execute("INSERT INTO notes(id,title) VALUES('long',?1)", [title])?;
-            Ok(())
+            Ok::<_, CovenError>(())
         })
         .await
         .unwrap();

@@ -121,7 +121,7 @@ async fn local_table_writes_against_plain_sqlite() {
             .open()
             .await
             .unwrap();
-        let mut live = db.subscribe(|sql| {
+        let mut live: crate::LiveQuery<_, DbError> = db.subscribe(|sql| {
             Ok(sql.query_row("SELECT count(*) FROM queue", [], |r| r.get::<_, i64>(0))?)
         });
         assert_eq!(live.next().await.expect("the live query answers").unwrap(), 0);
@@ -135,7 +135,7 @@ async fn local_table_writes_against_plain_sqlite() {
         let coven_delete = started.elapsed();
         assert_eq!(live.next().await.expect("the live query answers").unwrap(), 0);
         drop(live);
-        let mut narrow = db.subscribe(|sql| {
+        let mut narrow: crate::LiveQuery<_, DbError> = db.subscribe(|sql| {
             Ok(sql.query("SELECT position FROM queue WHERE track = 'none'", [], |r| {
                 r.get::<_, i64>(0)
             })?)

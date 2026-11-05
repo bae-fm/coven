@@ -263,7 +263,7 @@ async fn a_read_only_open_refuses_indexes_built_with_another_version() {
     open(&store, ORDERED_WORDS, ordered(2)).await.unwrap().close().await.unwrap();
     let reading = read_only(2).await.unwrap();
     let read = reading
-        .read(|sql| Ok(sql.query(AFTER_B, [], |row| row.get::<_, String>(0))?))
+        .read(|sql| Ok::<_, DbError>(sql.query(AFTER_B, [], |row| row.get::<_, String>(0))?))
         .await
         .unwrap();
     assert_eq!(read, ["bananas", "cherries", "dates"]);

@@ -39,7 +39,7 @@ impl CovenHandle {
         on_progress: impl Fn(Progress<DeviceOnlyStep>),
     ) -> Result<(), DeviceOnlyError> {
         let prepared = self.prepare_device_only(folder, files, cancel, on_progress).await?;
-        self.write(move |write| Ok(write.make_device_only(prepared)?))
+        self.write(move |write| write.make_device_only(prepared))
             .await
             .map_err(DeviceOnlyError::from)
     }

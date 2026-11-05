@@ -61,7 +61,7 @@ async fn stage(
         .write(move |sql| {
             let file = sql.put_user_file("tracks", prepared, place)?;
             insert(sql, file)?;
-            Ok(file)
+            Ok::<_, CovenError>(file)
         })
         .await
         .unwrap()
@@ -377,7 +377,7 @@ async fn only_a_member_who_may_change_every_referencing_row_may() {
     ana.handle
         .write(move |sql| {
             sql.execute("INSERT INTO owned_tracks(id,file) VALUES('also',?1)", [carol_track])?;
-            Ok(())
+            Ok::<_, CovenError>(())
         })
         .await
         .unwrap();
@@ -390,7 +390,7 @@ async fn only_a_member_who_may_change_every_referencing_row_may() {
     ana.handle
         .write(|sql| {
             sql.execute("DELETE FROM owned_tracks WHERE id='also'", [])?;
-            Ok(())
+            Ok::<_, CovenError>(())
         })
         .await
         .unwrap();
@@ -498,14 +498,14 @@ async fn refused_paths_and_files_leave_the_folder_alone() {
         .write(move |sql| {
             let file = sql.put_user_file("tracks", prepared, Place::DeviceOnly)?;
             sql.execute("INSERT INTO tracks(id,file) VALUES('local',?1)", [file])?;
-            Ok(file)
+            Ok::<_, CovenError>(file)
         })
         .await
         .unwrap();
     let cover = ana
         .handle
         .test_staged_write(
-            |batch| Ok(batch.put_file("files", b"cover".to_vec(), Place::Cloud)),
+            |batch| Ok::<_, CovenError>(batch.put_file("files", b"cover".to_vec(), Place::Cloud)),
             |sql, file| {
                 sql.execute("INSERT INTO covers(id,file) VALUES('cover',?1)", [file])?;
                 Ok(file)
@@ -649,7 +649,7 @@ async fn a_failure_or_cancel_before_the_switch_leaves_nothing() {
         .handle
         .write(|sql| {
             sql.execute("INSERT INTO tracks(id) VALUES('next')", [])?;
-            Ok(())
+            Ok::<_, CovenError>(())
         })
         .await
         .unwrap();
@@ -906,7 +906,7 @@ async fn a_prepared_switch_reports_its_bytes_and_commits_in_the_apps_write() {
         .write(move |sql| {
             sql.execute("INSERT INTO covers(id) VALUES('made local')", [])?;
             sql.make_device_only(prepared)?;
-            Ok(())
+            Ok::<_, CovenError>(())
         })
         .await
         .unwrap();
@@ -947,7 +947,7 @@ async fn an_uncommitted_switch_keeps_no_copy() {
     assert!(names(music.path()).is_empty());
     drop(prepare().await.unwrap());
     assert_eq!(names(&music.path().join("Album")), ["01.flac"]);
-    carol.handle.write(|_| Ok(())).await.unwrap();
+    carol.handle.write(|_| Ok::<_, CovenError>(())).await.unwrap();
     assert!(names(music.path()).is_empty());
     assert!(matches!(carol.handle.file_ref(one).await.unwrap().place(), FilePlace::Cloud { .. }));
     network.close().await;

@@ -117,7 +117,10 @@ impl Database {
         self.read(move |sql| sql.pin_progress(&files, device)).await
     }
     /// The same pre-built cache query with the same fixed references.
-    pub fn subscribe_pin_progress(&self, files: Vec<FileRef>) -> LiveQuery<PinProgress> {
+    pub fn subscribe_pin_progress(
+        &self,
+        files: Vec<FileRef>,
+    ) -> LiveQuery<PinProgress, crate::CovenError> {
         let device = self.local_device().ok();
         self.subscribe(move |sql| sql.pin_progress(&files, device.ok_or(DbError::StoreClosed)?))
     }
@@ -126,7 +129,10 @@ impl Database {
         self.read(move |sql| sql.files_pinned(&files)).await
     }
     /// The same internal query, live.
-    pub fn subscribe_files_pinned(&self, files: Vec<FileId>) -> LiveQuery<Vec<Option<bool>>> {
+    pub fn subscribe_files_pinned(
+        &self,
+        files: Vec<FileId>,
+    ) -> LiveQuery<Vec<Option<bool>>, crate::CovenError> {
         self.subscribe(move |sql| sql.files_pinned(&files))
     }
 }

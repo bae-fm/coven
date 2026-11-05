@@ -1,6 +1,7 @@
 use crate::sequence_sync::tests::*;
 use crate::*;
 use coven_database::operation_kind;
+use coven_database::DbError;
 use coven_format::{admin::MemberRole, MemberAccess};
 use coven_foundation::clock::Clock;
 use coven_storage::{test_utils::MemoryStorage, InviteStorage, ObjectPath, Storage};
@@ -821,7 +822,7 @@ async fn a_stop_for_good_ends_this_devices_invites() {
     let outcome = ana
         .database()
         .read(move |sql| {
-            Ok(sql.query_row(
+            Ok::<_, DbError>(sql.query_row(
                 "SELECT outcome FROM coven_operations WHERE operation=?1",
                 [binding.0],
                 |row| row.get::<_, Option<OperationOutcome>>(0),

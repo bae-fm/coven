@@ -185,7 +185,7 @@ async fn internal_schema_migrates_on_open_and_preserves_app_data() {
         });
         assert_eq!(count(&db, "_coven_writes"), 0);
         assert_eq!(
-            db.read(|sql| Ok(
+            db.read(|sql| Ok::<_, DbError>(
                 sql.query_row("SELECT value FROM local", [], |r| r.get::<_, String>(0))?
             ))
             .await
@@ -197,9 +197,9 @@ async fn internal_schema_migrates_on_open_and_preserves_app_data() {
     let reader = store.builder(vec![], vec![]).open_read_only().await.unwrap();
     assert_eq!(
         reader
-            .read(
-                |sql| Ok(sql.query_row("SELECT value FROM local", [], |r| r.get::<_, String>(0))?)
-            )
+            .read(|sql| Ok::<_, DbError>(
+                sql.query_row("SELECT value FROM local", [], |r| r.get::<_, String>(0))?
+            ))
             .await
             .unwrap(),
         "kept"
@@ -523,7 +523,7 @@ async fn changeset_failure_rolls_back_and_reaches_the_writer_without_ending_quer
         .schema(vec![], "CREATE TABLE items(id INTEGER PRIMARY KEY,value TEXT)")
         .await
         .unwrap();
-    let mut query = db
+    let mut query: crate::LiveQuery<_, DbError> = db
         .subscribe(|sql| Ok(sql.query("SELECT value FROM items", [], |r| r.get::<_, String>(0))?));
     assert!(next(&mut query).await.is_empty());
     db.inspect_writer(|writer| {
@@ -569,7 +569,7 @@ async fn commit_failure_and_net_zero_transactions_do_not_publish() {
     let db=store.schema(vec![],"CREATE TABLE parent(id INTEGER PRIMARY KEY); CREATE TABLE items(id INTEGER PRIMARY KEY,parent REFERENCES parent DEFERRABLE INITIALLY DEFERRED,value TEXT)").await.unwrap();
     let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let count = calls.clone();
-    let mut query = db.subscribe(move |sql| {
+    let mut query: crate::LiveQuery<_, DbError> = db.subscribe(move |sql| {
         count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         Ok(sql.query("SELECT value FROM items", [], |r| r.get::<_, String>(0))?)
     });
@@ -592,9 +592,9 @@ async fn commit_failure_and_net_zero_transactions_do_not_publish() {
 async fn observation_and_local_write_sessions_cover_app_and_materialized_changes() {
     let store = TestStore::new();
     let db=store.schema(vec![SyncedTable::new("roots",RowIdentity::SharedKey),SyncedTable::new("notes", RowIdentity::IndependentUuid).audience_column("audience")],"CREATE TABLE roots(id TEXT NOT NULL PRIMARY KEY,value TEXT); CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY,audience TEXT NOT NULL,title TEXT,root TEXT REFERENCES roots(id)); CREATE INDEX notes_root ON notes(root); CREATE TABLE audit(value TEXT); CREATE TRIGGER gone AFTER DELETE ON notes BEGIN INSERT INTO audit VALUES(old.title); END").await.unwrap();
-    let mut notes = db
+    let mut notes: crate::LiveQuery<_, DbError> = db
         .subscribe(|sql| Ok(sql.query("SELECT title FROM notes", [], |r| r.get::<_, String>(0))?));
-    let mut audit = db
+    let mut audit: crate::LiveQuery<_, DbError> = db
         .subscribe(|sql| Ok(sql.query("SELECT value FROM audit", [], |r| r.get::<_, String>(0))?));
     let mut lost = db.subscribe_lost_values();
     assert!(next(&mut notes).await.is_empty());
@@ -634,7 +634,7 @@ async fn every_internal_statement_path_is_observed_by_the_transaction() {
         .schema(vec![], "CREATE TABLE items(id INTEGER PRIMARY KEY,value TEXT)")
         .await
         .unwrap();
-    let mut query = db.subscribe(|sql| {
+    let mut query: crate::LiveQuery<_, DbError> = db.subscribe(|sql| {
         Ok(sql.query_row("SELECT value FROM items", [], |r| r.get::<_, String>(0))?)
     });
     assert!(query.next().await.expect("the live query answers").is_err());
@@ -713,7 +713,7 @@ async fn ordinary_tables_get_no_hook_change_and_retain_column_and_key_precision(
         let runs = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let count = runs.clone();
         let query = format!("SELECT value FROM items WHERE id={first}");
-        let mut query = db.subscribe(move |sql| {
+        let mut query: crate::LiveQuery<_, DbError> = db.subscribe(move |sql| {
             let value = sql.query_row(&query, [], |r| r.get::<_, i64>(0))?;
             Ok((count.fetch_add(1, std::sync::atomic::Ordering::SeqCst), value))
         });
@@ -736,7 +736,7 @@ async fn hook_changes_publish_after_commit_and_are_discarded_on_transaction_fail
     let store = TestStore::new();
     let db=store.schema(vec![],"CREATE TABLE parent(id INTEGER PRIMARY KEY); CREATE TABLE local(id TEXT,value TEXT,extra INTEGER,parent REFERENCES parent DEFERRABLE INITIALLY DEFERRED); INSERT INTO local VALUES(NULL,'unchanged',0,NULL)").await.unwrap();
     let count = std::sync::atomic::AtomicUsize::new(0);
-    let mut query = db.subscribe(move |sql| {
+    let mut query: crate::LiveQuery<_, DbError> = db.subscribe(move |sql| {
         let values =
             sql.query("SELECT value FROM local WHERE id IS NULL", [], |r| r.get::<_, String>(0))?;
         Ok((count.fetch_add(1, std::sync::atomic::Ordering::SeqCst), values))

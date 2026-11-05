@@ -626,7 +626,9 @@ async fn snapshots_keep_the_written_reference_when_the_app_reads_null() {
     sql(&a, "DELETE FROM parents WHERE id='parent'").await.unwrap();
     b.receive(records(&a).remove(1).into()).await.unwrap();
     let displayed: Option<String> = b
-        .read(|sql| Ok(sql.query_row("SELECT parent FROM children", [], |r| r.get(0))?))
+        .read(|sql| {
+            Ok::<_, DbError>(sql.query_row("SELECT parent FROM children", [], |r| r.get(0))?)
+        })
         .await
         .unwrap();
     assert_eq!(displayed, None);

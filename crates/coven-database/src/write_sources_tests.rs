@@ -249,7 +249,9 @@ async fn schema_renames_preserve_original_sources_and_authored_records() {
     }
     assert_eq!(
         receiver
-            .read(|db| Ok(db.query_row("SELECT name FROM renamed", [], |r| r.get::<_, String>(0))?))
+            .read(|db| Ok::<_, DbError>(
+                db.query_row("SELECT name FROM renamed", [], |r| r.get::<_, String>(0))?
+            ))
             .await
             .unwrap(),
         "third"
@@ -558,7 +560,7 @@ async fn authored_sources_differential() {
             let key = row.clone();
             let present = db
                 .read(move |sql| {
-                    Ok(sql.query_row(
+                    Ok::<_, DbError>(sql.query_row(
                         "SELECT EXISTS(SELECT 1 FROM notes WHERE id=?1)",
                         [key],
                         |r| r.get::<_, bool>(0),

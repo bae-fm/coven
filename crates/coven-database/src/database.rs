@@ -77,12 +77,12 @@ pub(crate) use call::{finish_blocking, process, start_call};
 /// ```
 /// ```compile_fail
 /// fn cannot_subscribe(handle: &coven_database::Database<coven_database::ReadOnly>) {
-///     handle.subscribe(|_| Ok(()));
+///     handle.subscribe(|_| Ok::<_, coven_database::DbError>(()));
 /// }
 /// ```
 /// ```compile_fail
 /// fn cannot_reconfigure(handle: &coven_database::Database<coven_database::ReadOnly>) {
-///     handle.subscribe_reconfigurable((), |_, _| Ok(()));
+///     handle.subscribe_reconfigurable((), |_, _| Ok::<_, coven_database::DbError>(()));
 /// }
 /// ```
 /// ```compile_fail
@@ -291,7 +291,10 @@ impl<L> DatabaseAccess<L> {
         self.readers.acquire_reader().read_snapshot(|sql| sql.user_file(file))
     }
 
-    fn read<R>(&self, read: impl FnOnce(SqlReadContext<'_>) -> CovenResult<R>) -> CovenResult<R> {
+    fn read<R, E: From<DbError>>(
+        &self,
+        read: impl FnOnce(SqlReadContext<'_>) -> Result<R, E>,
+    ) -> Result<R, E> {
         self.readers.acquire_reader().read_snapshot(read)
     }
 
@@ -475,11 +478,14 @@ impl<M: Mode> Database<M> {
         self.call(move |open| M::access(open).user_file(file)).await
     }
 
-    /// Run ordinary SQL against one consistent snapshot when awaited.
-    pub fn read<F, R>(&self, read: F) -> Read<'_, F, M>
+    /// Run ordinary SQL against one consistent snapshot when awaited. The
+    /// read fails with the closure's own error type, and with a failure of
+    /// the database's own as that type's `From<DbError>`.
+    pub fn read<F, R, E>(&self, read: F) -> Read<'_, F, M>
     where
-        F: FnOnce(SqlReadContext<'_>) -> CovenResult<R> + Send + 'static,
+        F: FnOnce(SqlReadContext<'_>) -> Result<R, E> + Send + 'static,
         R: Send + 'static,
+        E: From<DbError> + CarriesBug + Send + 'static,
     {
         Read::new(self, read)
     }
@@ -489,10 +495,11 @@ impl<M: Mode> Database<M> {
         self.read(|sql| sql.lost_values()).await
     }
 
-    pub(crate) fn start_read<F, R>(&self, read: F) -> RunningRead<R>
+    pub(crate) fn start_read<F, R, E>(&self, read: F) -> RunningRead<R, E>
     where
-        F: FnOnce(SqlReadContext<'_>) -> CovenResult<R> + Send + 'static,
+        F: FnOnce(SqlReadContext<'_>) -> Result<R, E> + Send + 'static,
         R: Send + 'static,
+        E: From<DbError> + CarriesBug + Send + 'static,
     {
         RunningRead::new(start_call("read", &self.bugs, self.inner.clone(), move |open| {
             let access = M::access(open);
@@ -598,25 +605,27 @@ impl Database {
     }
 
     /// Observe the tables and columns a query reads, and the rows its
-    /// conditions allow.
-    pub fn subscribe<F, R>(&self, query: F) -> LiveQuery<R>
+    /// conditions allow. Its results fail with the closure's own error type.
+    pub fn subscribe<F, R, E>(&self, query: F) -> LiveQuery<R, E>
     where
-        F: Fn(SqlReadContext<'_>) -> CovenResult<R> + Send + Sync + 'static,
+        F: Fn(SqlReadContext<'_>) -> Result<R, E> + Send + Sync + 'static,
         R: Send + 'static,
+        E: From<DbError> + CarriesBug + Send + 'static,
     {
         LiveQuery::new(self.subscribe_reconfigurable((), move |(), sql| query(sql)))
     }
 
     /// Observe a query whose request can be replaced through a shared handle.
-    pub fn subscribe_reconfigurable<Q, F, R>(
+    pub fn subscribe_reconfigurable<Q, F, R, E>(
         &self,
         initial_request: Q,
         query: F,
-    ) -> ReconfigurableLiveQuery<Q, R>
+    ) -> ReconfigurableLiveQuery<Q, R, E>
     where
         Q: Clone + PartialEq + Send + Sync + 'static,
-        F: Fn(&Q, SqlReadContext<'_>) -> CovenResult<R> + Send + Sync + 'static,
+        F: Fn(&Q, SqlReadContext<'_>) -> Result<R, E> + Send + Sync + 'static,
         R: Send + 'static,
+        E: From<DbError> + CarriesBug + Send + 'static,
     {
         let commits = self.observer.subscribe();
         // A subscription retains a database only for its active blocking read.
@@ -653,7 +662,7 @@ impl Database {
     }
 
     /// Observe the decoded lost cells and removed rows.
-    pub fn subscribe_lost_values(&self) -> LiveQuery<Vec<LostValue>> {
+    pub fn subscribe_lost_values(&self) -> LiveQuery<Vec<LostValue>, crate::CovenError> {
         self.subscribe(|sql| sql.lost_values())
     }
 

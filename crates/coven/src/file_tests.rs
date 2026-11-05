@@ -24,9 +24,11 @@ async fn stage_rows(
     handle
         .test_staged_write(
             move |batch| {
-                Ok((0..count)
-                    .map(|id| batch.put_file("files", bytes(id), crate::Place::Cloud))
-                    .collect())
+                Ok::<_, CovenError>(
+                    (0..count)
+                        .map(|id| batch.put_file("files", bytes(id), crate::Place::Cloud))
+                        .collect(),
+                )
             },
             |sql, files: Vec<FileId>| {
                 for (id, file) in files.iter().enumerate() {
@@ -179,7 +181,7 @@ async fn transfer_limits_bound_requests_and_a_changed_limit_applies_to_the_next_
         });
         memory.reset_request_peak();
         creations.add_permits(ids.len());
-        let mut uploads = handle.subscribe(|sql| {
+        let mut uploads: crate::LiveQuery<_, crate::CovenError> = handle.subscribe(|sql| {
             Ok(sql.query_row("SELECT count(*) FROM coven_uploads", [], |r| r.get::<_, i64>(0))?)
         });
         while uploads.next().await.expect("the live query answers").unwrap() != 0 {}
@@ -281,7 +283,9 @@ async fn thumbnail(
     let (note, id) = (note.to_owned(), id.to_owned());
     handle
         .test_staged_write(
-            move |batch| Ok(batch.put_file("thumbnails", bytes, crate::Place::Cloud)),
+            move |batch| {
+                Ok::<_, CovenError>(batch.put_file("thumbnails", bytes, crate::Place::Cloud))
+            },
             move |sql, file| {
                 if insert_note {
                     sql.execute("INSERT INTO notes VALUES(?1,'note','store')", [&note])?;
@@ -328,7 +332,7 @@ async fn originals_owned_copies_ranges_references_and_deletion_use_the_app_api()
                 "INSERT INTO attachments (id,note_id,title,file) VALUES (?1,?2,?3,?4)",
                 (&attachment, &note, "Swatches", file),
             )?;
-            Ok(file)
+            Ok::<_, CovenError>(file)
         })
         .await
         .unwrap();
@@ -479,8 +483,11 @@ async fn uploaded_files_pins_and_read_only_ranges_use_the_composed_owner() {
     let queued = || async {
         handle
             .read(|sql| {
-                Ok(sql
-                    .query_row("SELECT count(*) FROM coven_uploads", [], |r| r.get::<_, i64>(0))?)
+                Ok::<_, CovenError>(sql.query_row(
+                    "SELECT count(*) FROM coven_uploads",
+                    [],
+                    |r| r.get::<_, i64>(0),
+                )?)
             })
             .await
             .unwrap()
@@ -645,13 +652,19 @@ async fn the_apps_sql_reads_uploads_pins_and_pending_records() {
                 "INSERT INTO attachments(id,note_id,title,file) VALUES(?1,?2,'take',?3)",
                 (&recorded, &parent, take),
             )?;
-            Ok(take)
+            Ok::<_, CovenError>(take)
         })
         .await
         .unwrap();
     let preview = handle
         .test_staged_write(
-            move |batch| Ok(batch.put_file("thumbnails", b"preview".to_vec(), crate::Place::Cloud)),
+            move |batch| {
+                Ok::<_, CovenError>(batch.put_file(
+                    "thumbnails",
+                    b"preview".to_vec(),
+                    crate::Place::Cloud,
+                ))
+            },
             move |sql, preview| {
                 sql.execute(
                     "INSERT INTO thumbnails(id,note_id,title,file) VALUES(?1,?2,'preview',?3)",
@@ -726,7 +739,7 @@ async fn the_apps_sql_reads_uploads_pins_and_pending_records() {
     // coven_pending lists the move's record, which names no file.
     let named: Vec<(PendingRecord, Option<FileId>)> = handle
         .read(|sql| {
-            Ok(sql.query("SELECT record,file FROM coven_pending", [], |r| {
+            Ok::<_, CovenError>(sql.query("SELECT record,file FROM coven_pending", [], |r| {
                 Ok((r.get(0)?, r.get(1)?))
             })?)
         })
@@ -753,16 +766,18 @@ async fn the_apps_sql_reads_uploads_pins_and_pending_records() {
     handle
         .write(move |sql| {
             sql.execute("DELETE FROM thumbnails WHERE id=?1", [&row])?;
-            Ok(())
+            Ok::<_, CovenError>(())
         })
         .await
         .unwrap();
     assert!(pins.next().await.expect("the live query answers").unwrap().is_empty());
     let listed: i64 = handle
         .read(move |sql| {
-            Ok(sql.query_row("SELECT count(*) FROM coven_pins WHERE file=?1", [preview], |r| {
-                r.get(0)
-            })?)
+            Ok::<_, CovenError>(sql.query_row(
+                "SELECT count(*) FROM coven_pins WHERE file=?1",
+                [preview],
+                |r| r.get(0),
+            )?)
         })
         .await
         .unwrap();

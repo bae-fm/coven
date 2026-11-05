@@ -296,7 +296,9 @@ mod typed_bindings {
         .unwrap();
         let audience = db
             .read(|sql| {
-                Ok(sql.query_row("SELECT audience FROM notes", [], |r| r.get::<_, Audience>(0))?)
+                Ok::<_, DbError>(
+                    sql.query_row("SELECT audience FROM notes", [], |r| r.get::<_, Audience>(0))?,
+                )
             })
             .await
             .unwrap();
@@ -309,7 +311,7 @@ mod typed_bindings {
         .unwrap();
         let (audience, read_circle, text) = db
             .read(|sql| {
-                Ok(sql.query_row("SELECT audience FROM notes", [], |r| {
+                Ok::<_, DbError>(sql.query_row("SELECT audience FROM notes", [], |r| {
                     Ok((r.get::<_, Audience>(0)?, r.get::<_, CircleId>(0)?, r.get::<_, String>(0)?))
                 })?)
             })
@@ -334,7 +336,7 @@ mod typed_bindings {
         assert!(matches!(error, DbError::InvalidAudience { .. }));
         let (key, text) = db
             .read(|sql| {
-                Ok(sql.query_row("SELECT id FROM notes", [], |r| {
+                Ok::<_, DbError>(sql.query_row("SELECT id FROM notes", [], |r| {
                     Ok((r.get::<_, UuidText>(0)?, r.get::<_, String>(0)?))
                 })?)
             })

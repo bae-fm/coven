@@ -95,7 +95,13 @@ async fn app_reopening_resumes_operations_and_files_using_one_storage_capability
     handle.set_uploads_paused(true).await.unwrap();
     let staged = handle
         .test_staged_write(
-            |batch| Ok(batch.put_file("attachments", vec![42; 200_000], crate::Place::Cloud)),
+            |batch| {
+                Ok::<_, CovenError>(batch.put_file(
+                    "attachments",
+                    vec![42; 200_000],
+                    crate::Place::Cloud,
+                ))
+            },
             |sql, file| {
                 sql.execute("INSERT INTO attachments(id,file) VALUES('shared',?1)", [file])?;
                 Ok(file)
@@ -105,7 +111,11 @@ async fn app_reopening_resumes_operations_and_files_using_one_storage_capability
         .unwrap();
     let local = handle.file_ref(staged).await.unwrap();
     let queued = handle
-        .read(|sql| Ok(sql.query("SELECT file FROM coven_uploads", [], |r| r.get::<_, FileId>(0))?))
+        .read(|sql| {
+            Ok::<_, CovenError>(
+                sql.query("SELECT file FROM coven_uploads", [], |r| r.get::<_, FileId>(0))?,
+            )
+        })
         .await
         .unwrap();
     assert_eq!(queued, [local.id()]);
@@ -123,7 +133,7 @@ async fn app_reopening_resumes_operations_and_files_using_one_storage_capability
     // The pause setting survived reopening; the app resumes uploads.
     assert!(handle.uploads().await.unwrap().paused);
     handle.set_uploads_paused(false).await.unwrap();
-    let mut uploads = handle.subscribe(|sql| {
+    let mut uploads: crate::LiveQuery<_, crate::CovenError> = handle.subscribe(|sql| {
         Ok(sql.query_row("SELECT count(*) FROM coven_uploads", [], |r| r.get::<_, i64>(0))?)
     });
     tokio::time::timeout(HANG_GUARD, async {
@@ -341,7 +351,7 @@ mod recovery {
             handle
                 .write(|sql| {
                     sql.execute("INSERT INTO notes VALUES('saved','from storage')", [])?;
-                    Ok(())
+                    Ok::<_, CovenError>(())
                 })
                 .await
                 .unwrap();
@@ -355,7 +365,7 @@ mod recovery {
             handle
                 .write(|sql| {
                     sql.execute("INSERT INTO notes VALUES('unsent','local only')", [])?;
-                    Ok(())
+                    Ok::<_, CovenError>(())
                 })
                 .await
                 .unwrap();
@@ -419,9 +429,11 @@ mod recovery {
             assert_eq!(std::fs::read(archive.join("store.db")).unwrap(), damaged);
             let title: String = recovered
                 .read(|sql| {
-                    Ok(sql.query_row("SELECT title FROM notes WHERE id='saved'", [], |row| {
-                        row.get(0)
-                    })?)
+                    Ok::<_, CovenError>(sql.query_row(
+                        "SELECT title FROM notes WHERE id='saved'",
+                        [],
+                        |row| row.get(0),
+                    )?)
                 })
                 .await
                 .unwrap();
@@ -429,7 +441,7 @@ mod recovery {
             // Nothing unsent is salvaged from the damaged copy.
             let unsent: i64 = recovered
                 .read(|sql| {
-                    Ok(sql.query_row(
+                    Ok::<_, CovenError>(sql.query_row(
                         "SELECT count(*) FROM notes WHERE id='unsent'",
                         [],
                         |row| row.get(0),
@@ -601,20 +613,20 @@ async fn the_apps_collations_reach_both_handles_from_creation() {
                 "INSERT INTO notes VALUES ('1','apples'),('2','cherries'),('3','bananas')",
                 [],
             )?;
-            Ok(())
+            Ok::<_, CovenError>(())
         })
         .await
         .unwrap();
     let in_order = "SELECT title FROM notes ORDER BY title COLLATE reversed";
     let expected = ["cherries", "bananas", "apples"];
     let read = handle
-        .read(|sql| Ok(sql.query(in_order, [], |row| row.get::<_, String>(0))?))
+        .read(|sql| Ok::<_, CovenError>(sql.query(in_order, [], |row| row.get::<_, String>(0))?))
         .await
         .unwrap();
     assert_eq!(read, expected);
     let reader = builder().open_read_only(handle.store_id()).await.unwrap();
     let read = reader
-        .read(|sql| Ok(sql.query(in_order, [], |row| row.get::<_, String>(0))?))
+        .read(|sql| Ok::<_, CovenError>(sql.query(in_order, [], |row| row.get::<_, String>(0))?))
         .await
         .unwrap();
     assert_eq!(read, expected);
@@ -642,20 +654,20 @@ async fn the_apps_functions_reach_both_handles_from_creation() {
     handle
         .write(|sql| {
             sql.execute("INSERT INTO notes VALUES ('1','École'),('2','ecole'),('3','ÉCOLE')", [])?;
-            Ok(())
+            Ok::<_, CovenError>(())
         })
         .await
         .unwrap();
     let matching = "SELECT title FROM notes WHERE fold(title) = 'école' ORDER BY id";
     let expected = ["École", "ÉCOLE"];
     let read = handle
-        .read(|sql| Ok(sql.query(matching, [], |row| row.get::<_, String>(0))?))
+        .read(|sql| Ok::<_, CovenError>(sql.query(matching, [], |row| row.get::<_, String>(0))?))
         .await
         .unwrap();
     assert_eq!(read, expected);
     let reader = builder().open_read_only(handle.store_id()).await.unwrap();
     let read = reader
-        .read(|sql| Ok(sql.query(matching, [], |row| row.get::<_, String>(0))?))
+        .read(|sql| Ok::<_, CovenError>(sql.query(matching, [], |row| row.get::<_, String>(0))?))
         .await
         .unwrap();
     assert_eq!(read, expected);
@@ -756,7 +768,7 @@ async fn the_chosen_protection_class_reaches_every_file_of_the_store() {
         handle
             .write(move |sql| {
                 sql.execute("INSERT INTO attachments(id) VALUES(?1)", [row])?;
-                Ok(())
+                Ok::<_, CovenError>(())
             })
             .await
             .unwrap();

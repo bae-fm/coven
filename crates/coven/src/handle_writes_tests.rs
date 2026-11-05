@@ -50,7 +50,7 @@ async fn making_the_store_file_device_only_leaves_the_circles_readable() {
         .write(move |sql| {
             let file = sql.put_user_file("tracks", prepared, Place::Cloud)?;
             sql.execute("INSERT INTO tracks(id,file) VALUES('one',?1)", [file])?;
-            Ok(file)
+            Ok::<_, CovenError>(file)
         })
         .await
         .unwrap();
@@ -65,7 +65,7 @@ async fn making_the_store_file_device_only_leaves_the_circles_readable() {
                      VALUES('00000000-0000-7000-8000-000000000001',?1,?2)",
                 (file, audience),
             )?;
-            Ok(file)
+            Ok::<_, CovenError>(file)
         })
         .await
         .unwrap();
@@ -102,7 +102,7 @@ async fn making_the_store_file_device_only_leaves_the_circles_readable() {
         .handle
         .write(|sql| {
             sql.execute("INSERT INTO tracks(id) VALUES('later')", [])?;
-            Ok(())
+            Ok::<_, CovenError>(())
         })
         .await
         .unwrap();
@@ -149,7 +149,7 @@ async fn shared_track() -> (Network, CircleId, FileId) {
         .handle
         .test_staged_write(
             |batch| {
-                Ok(batch.put_file(
+                Ok::<_, CovenError>(batch.put_file(
                     "files",
                     FileSource::Stream(Box::pin(std::io::Cursor::new(vec![9; 4096]))),
                     Place::Cloud,
@@ -212,14 +212,14 @@ async fn a_concurrent_copy_reads_bytes_whose_record_was_deleted() {
                      VALUES('00000000-0000-7000-8000-000000000001',?1,?2)",
                 (file, audience),
             )?;
-            Ok(file)
+            Ok::<_, CovenError>(file)
         })
         .await
         .unwrap();
     ana.handle
         .write(|sql| {
             sql.execute("DELETE FROM tracks WHERE id='one'", [])?;
-            Ok(())
+            Ok::<_, CovenError>(())
         })
         .await
         .unwrap();
@@ -237,7 +237,7 @@ async fn a_concurrent_copy_reads_bytes_whose_record_was_deleted() {
     ben.handle
         .write(|sql| {
             sql.execute("DELETE FROM gifts", [])?;
-            Ok(())
+            Ok::<_, CovenError>(())
         })
         .await
         .unwrap();
@@ -250,7 +250,7 @@ async fn a_concurrent_copy_reads_bytes_whose_record_was_deleted() {
     ben.handle
         .write(|sql| {
             sql.execute("INSERT INTO tracks(id) VALUES('two')", [])?;
-            Ok(())
+            Ok::<_, CovenError>(())
         })
         .await
         .unwrap();
@@ -276,7 +276,7 @@ async fn a_concurrent_move_reads_bytes_whose_record_was_deleted() {
         .handle
         .test_staged_write(
             |batch| {
-                Ok(batch.put_file(
+                Ok::<_, CovenError>(batch.put_file(
                     "files",
                     FileSource::Stream(Box::pin(std::io::Cursor::new(vec![5; 4096]))),
                     Place::Cloud,
@@ -301,14 +301,14 @@ async fn a_concurrent_move_reads_bytes_whose_record_was_deleted() {
     ben.handle
         .write(move |sql| {
             sql.execute("UPDATE gifts SET audience=?1 WHERE id=?2", (audience, row))?;
-            Ok(())
+            Ok::<_, CovenError>(())
         })
         .await
         .unwrap();
     ana.handle
         .write(move |sql| {
             sql.execute("DELETE FROM gifts WHERE id=?1", [row])?;
-            Ok(())
+            Ok::<_, CovenError>(())
         })
         .await
         .unwrap();
@@ -323,7 +323,11 @@ async fn a_concurrent_move_reads_bytes_whose_record_was_deleted() {
     let moved: FileId = ben
         .handle
         .read(move |sql| {
-            Ok(sql.query_row("SELECT file FROM gifts WHERE id=?1", [row], |r| r.get(0))?)
+            Ok::<_, CovenError>(sql.query_row(
+                "SELECT file FROM gifts WHERE id=?1",
+                [row],
+                |r| r.get(0),
+            )?)
         })
         .await
         .unwrap();
@@ -348,7 +352,7 @@ async fn a_concurrent_copy_out_of_a_circle_reads_bytes_whose_record_was_deleted(
         .handle
         .test_staged_write(
             |batch| {
-                Ok(batch.put_file(
+                Ok::<_, CovenError>(batch.put_file(
                     "files",
                     FileSource::Stream(Box::pin(std::io::Cursor::new(vec![6; 4096]))),
                     Place::Cloud,
@@ -374,14 +378,14 @@ async fn a_concurrent_copy_out_of_a_circle_reads_bytes_whose_record_was_deleted(
         .write(move |sql| {
             let file = sql.existing_file(photo);
             sql.execute("INSERT INTO tracks(id,file) VALUES('two',?1)", [file])?;
-            Ok(file)
+            Ok::<_, CovenError>(file)
         })
         .await
         .unwrap();
     ana.handle
         .write(move |sql| {
             sql.execute("DELETE FROM gifts WHERE id=?1", [row])?;
-            Ok(())
+            Ok::<_, CovenError>(())
         })
         .await
         .unwrap();
@@ -413,7 +417,7 @@ async fn a_removed_device_holds_no_bytes() {
     ana.handle
         .write(|sql| {
             sql.execute("DELETE FROM tracks WHERE id='one'", [])?;
-            Ok(())
+            Ok::<_, CovenError>(())
         })
         .await
         .unwrap();
@@ -444,7 +448,7 @@ async fn a_switch_holds_the_bytes_until_its_device_writes_again() {
         .write(move |sql| {
             let file = sql.put_user_file("tracks", prepared, Place::Cloud)?;
             sql.execute("INSERT INTO tracks(id,file) VALUES('imported',?1)", [file])?;
-            Ok(file)
+            Ok::<_, CovenError>(file)
         })
         .await
         .unwrap();
@@ -471,7 +475,7 @@ async fn a_switch_holds_the_bytes_until_its_device_writes_again() {
     ben.handle
         .write(|sql| {
             sql.execute("INSERT INTO tracks(id) VALUES('later')", [])?;
-            Ok(())
+            Ok::<_, CovenError>(())
         })
         .await
         .unwrap();
@@ -481,5 +485,84 @@ async fn a_switch_holds_the_bytes_until_its_device_writes_again() {
         ana.storage.status(&object).await.unwrap().is_none(),
         "the uploader deletes stored bytes no record names"
     );
+    network.close().await;
+}
+
+/// An app's own error type, as an app declares one for its writes: coven's
+/// failures convert into it, its own refusals sit beside them, and a failed
+/// rollback or byte removal keeps the write's own failure (`WriteFailure`).
+#[derive(Debug, thiserror::Error)]
+enum AppError {
+    #[error(transparent)]
+    Coven(CovenError),
+    #[error("refused: {0}")]
+    Refused(&'static str),
+    #[error("{operation}; rollback failed: {rollback}")]
+    Rollback {
+        operation: Box<AppError>,
+        #[source]
+        rollback: SqliteError,
+    },
+    #[error("file cleanup failed: {failures:?}; write failed: {write}")]
+    FileCleanup { write: Box<AppError>, failures: Vec<DbError> },
+}
+
+impl From<DbError> for AppError {
+    fn from(error: DbError) -> Self {
+        Self::Coven(error.into())
+    }
+}
+
+impl From<SqliteError> for AppError {
+    fn from(error: SqliteError) -> Self {
+        Self::Coven(error.into())
+    }
+}
+
+impl task::CarriesBug for AppError {
+    fn bug(&self) -> Option<&task::Bug> {
+        match self {
+            Self::Coven(error) => error.bug(),
+            Self::Refused(_) => None,
+            Self::Rollback { operation, .. } => operation.bug(),
+            Self::FileCleanup { write, failures } => {
+                write.bug().or_else(|| failures.iter().find_map(task::CarriesBug::bug))
+            }
+        }
+    }
+}
+
+impl WriteFailure for AppError {
+    fn with_rollback(self, rollback: SqliteError) -> Self {
+        Self::Rollback { operation: Box::new(self), rollback }
+    }
+
+    fn with_cleanup(write: Self, failures: Vec<DbError>) -> Self {
+        Self::FileCleanup { write: Box::new(write), failures }
+    }
+}
+
+/// Ana's app refuses a row in its own write, after inserting it: the write
+/// returns the app's own refusal as it was, and rolls the row back.
+#[tokio::test]
+async fn a_write_fails_with_its_closures_own_error() {
+    let network = Network::new(1).await;
+    let ana = &network.devices[0].handle;
+    let refused = ana
+        .write(|sql| {
+            sql.execute("INSERT INTO parents(id,label,value) VALUES('p','first',1)", [])?;
+            Err::<(), _>(AppError::Refused("no"))
+        })
+        .await;
+    assert!(matches!(refused, Err(AppError::Refused("no"))), "{refused:?}");
+    let parents = ana
+        .read(|sql| {
+            Ok::<_, AppError>(
+                sql.query_row("SELECT count(*) FROM parents", [], |r| r.get::<_, i64>(0))?,
+            )
+        })
+        .await
+        .unwrap();
+    assert_eq!(parents, 0);
     network.close().await;
 }

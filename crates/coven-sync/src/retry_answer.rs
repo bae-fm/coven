@@ -145,7 +145,7 @@ impl RetryEffect {
     #[cfg(any(test, feature = "test-utils"))]
     pub fn follow(
         database: &coven_database::Database,
-    ) -> coven_database::test_utils::Followed<Self> {
+    ) -> coven_database::test_utils::Followed<Self, coven_database::CovenError> {
         coven_database::test_utils::Followed::new(database.subscribe(Self::read))
     }
 }

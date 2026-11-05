@@ -1,5 +1,6 @@
 use crate::tests::TestStore;
 use crate::write::tests::{count, records, sql};
+use crate::DbError;
 use crate::{Lost, RemovalRule, Replacement, RowIdentity, SyncedTable};
 use coven_foundation::id_source::SequentialIds;
 
@@ -58,7 +59,7 @@ async fn stale_references_are_judged_as_one_null_substitution() {
                 assert!(losses.is_empty());
                 let values: (Option<String>, Option<String>) = db
                     .read(|sql| {
-                        Ok(sql.query_row("SELECT a,b FROM children", [], |r| {
+                        Ok::<_, DbError>(sql.query_row("SELECT a,b FROM children", [], |r| {
                             Ok((r.get(0)?, r.get(1)?))
                         })?)
                     })

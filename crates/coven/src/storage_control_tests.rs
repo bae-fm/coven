@@ -365,7 +365,13 @@ async fn an_operation_on_a_device_without_storage_fails_before_journaling() {
     assert!(matches!(f.handle.reload_from_snapshot().await, Err(SyncError::NoStorage)));
     let journal: i64 = f
         .handle
-        .read(|sql| Ok(sql.query_row("SELECT count(*) FROM coven_operations", [], |r| r.get(0))?))
+        .read(|sql| {
+            Ok::<_, CovenError>(sql.query_row(
+                "SELECT count(*) FROM coven_operations",
+                [],
+                |r| r.get(0),
+            )?)
+        })
         .await
         .unwrap();
     assert_eq!(journal, 0);
@@ -407,7 +413,7 @@ async fn a_retried_operation_still_waits_out_a_provider_cooldown() {
     let finished: Option<OperationOutcome> = f
         .handle
         .read(move |sql| {
-            Ok(sql.query_row(
+            Ok::<_, CovenError>(sql.query_row(
                 "SELECT outcome FROM coven_operations WHERE operation=?1",
                 [operation.0],
                 |r| r.get(0),
@@ -784,9 +790,11 @@ async fn a_start_right_after_a_stop_connects_a_new_client() {
 async fn starts_and_last_pass(f: &Fixture) -> (i64, Option<Vec<u8>>) {
     f.handle
         .read(|sql| {
-            Ok(sql.query_row("SELECT starts,last_pass FROM coven_sync_status", [], |r| {
-                Ok((r.get(0)?, r.get(1)?))
-            })?)
+            Ok::<_, CovenError>(sql.query_row(
+                "SELECT starts,last_pass FROM coven_sync_status",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )?)
         })
         .await
         .unwrap()
@@ -818,7 +826,7 @@ async fn every_start_counts_even_one_held_for_the_reason_the_last_was() {
 /// and `coven_retry_effect` reports, as one row.
 fn status_and_effect(
     f: &Fixture,
-) -> coven_database::test_utils::Followed<(Option<Vec<u8>>, String)> {
+) -> coven_database::test_utils::Followed<(Option<Vec<u8>>, String), DbError> {
     coven_database::test_utils::Followed::new(f.handle.subscribe(|sql| {
         Ok(sql.query_row(
             "SELECT s.last_pass,e.effect FROM coven_sync_status AS s,coven_retry_effect AS e",

@@ -15,7 +15,7 @@ impl CovenHandle {
     }
 
     /// The same pre-built query, live (E4).
-    pub fn subscribe_unsent_work(&self) -> LiveQuery<UnsentWork> {
+    pub fn subscribe_unsent_work(&self) -> LiveQuery<UnsentWork, CovenError> {
         self.database.subscribe_unsent()
     }
 

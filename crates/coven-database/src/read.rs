@@ -1,6 +1,9 @@
 //! Borrowed reads and their connection-scoped SQL capability.
 
-use crate::{database, sqlite::DatabaseConnection, CovenResult, Database, LostValue, Mode, Writer};
+use crate::{
+    database, sqlite::DatabaseConnection, CovenResult, Database, DbError, LostValue, Mode, Writer,
+};
+use coven_foundation::task::CarriesBug;
 use rusqlite::{Params, Row};
 use std::{
     any::Any,
@@ -161,26 +164,28 @@ pub struct Read<'a, F, M: Mode = Writer> {
 }
 
 // The public type names the closure, rather than its result. Only poll creates
-// the running slot, as RunningRead<R> for that closure.
+// the running slot, as RunningRead<R, E> for that closure.
 enum ReadState<F> {
     Pending(F),
     Running(Box<dyn Any + Send>),
     Finished,
 }
 
-impl<'a, F, R, M: Mode> Read<'a, F, M>
+impl<'a, F, R, E, M: Mode> Read<'a, F, M>
 where
-    F: FnOnce(SqlReadContext<'_>) -> CovenResult<R> + Send + 'static,
+    F: FnOnce(SqlReadContext<'_>) -> Result<R, E> + Send + 'static,
     R: Send + 'static,
+    E: From<DbError> + CarriesBug + Send + 'static,
 {
     pub(crate) fn new(database: &'a Database<M>, read: F) -> Self {
         Self { database, state: ReadState::Pending(read) }
     }
 
-    /// Process the value on another worker after releasing the read connection.
-    pub async fn process<P, T>(self, process: P) -> CovenResult<T>
+    /// Process the value on another worker after releasing the read
+    /// connection. It fails with the read's own error type.
+    pub async fn process<P, T>(self, process: P) -> Result<T, E>
     where
-        P: FnOnce(R) -> CovenResult<T> + Send + 'static,
+        P: FnOnce(R) -> Result<T, E> + Send + 'static,
         T: Send + 'static,
     {
         let bugs = self.database.bugs().clone();
@@ -192,12 +197,13 @@ where
 // No field relies on a pinned address. The task itself is a movable handle.
 impl<F, M: Mode> Unpin for Read<'_, F, M> {}
 
-impl<F, R, M: Mode> Future for Read<'_, F, M>
+impl<F, R, E, M: Mode> Future for Read<'_, F, M>
 where
-    F: FnOnce(SqlReadContext<'_>) -> CovenResult<R> + Send + 'static,
+    F: FnOnce(SqlReadContext<'_>) -> Result<R, E> + Send + 'static,
     R: Send + 'static,
+    E: From<DbError> + CarriesBug + Send + 'static,
 {
-    type Output = CovenResult<R>;
+    type Output = Result<R, E>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = self.get_mut();
@@ -208,7 +214,7 @@ where
                 ReadState::Finished => panic!("read polled after completion"),
             };
         let running =
-            task.downcast_mut::<RunningRead<R>>().expect("read task matches its closure result");
+            task.downcast_mut::<RunningRead<R, E>>().expect("read task matches its closure result");
         match Pin::new(running).poll(cx) {
             Poll::Pending => {
                 this.state = ReadState::Running(task);
@@ -221,18 +227,18 @@ where
 
 /// One read's call on the blocking pool, which its database started for the
 /// `Read` that awaits it.
-pub(crate) struct RunningRead<R> {
-    call: coven_foundation::task::CompletingTask<CovenResult<R>>,
+pub(crate) struct RunningRead<R, E> {
+    call: coven_foundation::task::CompletingTask<Result<R, E>>,
 }
 
-impl<R> RunningRead<R> {
-    pub(crate) fn new(call: coven_foundation::task::CompletingTask<CovenResult<R>>) -> Self {
+impl<R, E> RunningRead<R, E> {
+    pub(crate) fn new(call: coven_foundation::task::CompletingTask<Result<R, E>>) -> Self {
         Self { call }
     }
 }
 
-impl<R> Future for RunningRead<R> {
-    type Output = CovenResult<R>;
+impl<R, E: From<DbError>> Future for RunningRead<R, E> {
+    type Output = Result<R, E>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         Pin::new(&mut self.get_mut().call).poll(cx).map(database::finish_blocking)
@@ -241,4 +247,4 @@ impl<R> Future for RunningRead<R> {
 
 #[cfg(test)]
 #[path = "read_tests.rs"]
-mod tests;
+pub(crate) mod tests;

@@ -212,7 +212,7 @@ async fn import(handle: &CovenHandle, clock: &BenchClock, library: Library, rele
                                 ));
                             }
                         }
-                        Ok(files)
+                        Ok::<_, coven::CovenError>(files)
                     })
                     .await
                     .unwrap();
@@ -297,7 +297,7 @@ fn insert_releases(
 
 /// Wait until the device has uploaded every file it staged.
 async fn uploaded(handle: &CovenHandle) {
-    let mut uploads = handle.subscribe(|sql| {
+    let mut uploads: coven::LiveQuery<_, coven::CovenError> = handle.subscribe(|sql| {
         Ok(sql.query_row("SELECT count(*) FROM coven_uploads", [], |r| r.get::<_, i64>(0))?)
     });
     while uploads.next().await.expect("the live query answers").unwrap() != 0 {}
@@ -311,7 +311,7 @@ async fn edit(handle: &CovenHandle, clock: &BenchClock) {
                     "UPDATE releases SET title = ?1 WHERE id = ?2",
                     (format!("Album {edit} (remastered)"), format!("release-{edit:05}")),
                 )?;
-                Ok(())
+                Ok::<_, coven::CovenError>(())
             })
             .await
             .unwrap();
@@ -416,7 +416,7 @@ async fn track_count(handle: &CovenHandle) -> i64 {
         .read(|sql| {
             let count =
                 sql.query_row("SELECT count(*) FROM tracks", [], |row| row.get::<_, i64>(0))?;
-            Ok(count)
+            Ok::<_, coven::CovenError>(count)
         })
         .await
         .unwrap()

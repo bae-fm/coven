@@ -1,6 +1,7 @@
 use crate::file_write::tests::{namespaces, open, stage, tables, SCHEMA};
 use crate::tests::next;
 use crate::tests::TestStore;
+use crate::DbError;
 use crate::{Migration, Provenance};
 use coven_foundation::network_watch::NetworkState;
 
@@ -24,7 +25,8 @@ async fn a_live_query_of_the_network_runs_again_as_it_changes() {
     let store = TestStore::new();
     let db = open(&store, Provenance::AppProvided).await;
     stage(&db, b"photo".to_vec(), true).await.unwrap();
-    let mut network = db.subscribe(|sql| Ok(sql.query_row(SHOWN, [], shown)?));
+    let mut network: crate::LiveQuery<_, DbError> =
+        db.subscribe(|sql| Ok(sql.query_row(SHOWN, [], shown)?));
     assert_eq!(next(&mut network).await, (None, false, false, Some(false)));
     db.record_network(NetworkState { usable: Some(true), metered: true, joined: 1 });
     assert_eq!(next(&mut network).await, (Some(true), true, false, Some(false)));
@@ -47,7 +49,7 @@ async fn the_setting_persists_and_the_network_does_not() {
     let db = open(&store, Provenance::AppProvided).await;
     let row = db
         .read(|sql| {
-            Ok(sql.query_row(
+            Ok::<_, DbError>(sql.query_row(
                 "SELECT usable,metered,unmetered_only FROM coven_network",
                 [],
                 |r| Ok((r.get::<_, Option<bool>>(0)?, r.get::<_, bool>(1)?, r.get::<_, bool>(2)?)),
@@ -59,9 +61,11 @@ async fn the_setting_persists_and_the_network_does_not() {
     db.write(|sql| sql.set_unmetered_only(false)).await.unwrap();
     let on = db
         .read(|sql| {
-            Ok(sql.query_row("SELECT unmetered_only FROM coven_network", [], |r| {
-                r.get::<_, bool>(0)
-            })?)
+            Ok::<_, DbError>(sql.query_row(
+                "SELECT unmetered_only FROM coven_network",
+                [],
+                |r| r.get::<_, bool>(0),
+            )?)
         })
         .await
         .unwrap();
@@ -102,7 +106,7 @@ async fn a_read_only_handle_knows_no_network() {
         .unwrap();
     let row = reader
         .read(|sql| {
-            Ok(sql.query_row(
+            Ok::<_, DbError>(sql.query_row(
                 "SELECT usable,metered,unmetered_only FROM coven_network",
                 [],
                 |r| Ok((r.get::<_, Option<bool>>(0)?, r.get::<_, bool>(1)?, r.get::<_, bool>(2)?)),

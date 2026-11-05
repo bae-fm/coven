@@ -16,7 +16,7 @@ fn operation() -> NewOperation {
 
 async fn listed(db: &Database) -> Vec<(i64, String, Option<Vec<u8>>)> {
     db.read(|sql| {
-        Ok(sql.query(
+        Ok::<_, DbError>(sql.query(
             "SELECT operation,kind,outcome FROM coven_operations ORDER BY operation",
             [],
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),

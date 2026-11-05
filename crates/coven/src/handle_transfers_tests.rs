@@ -58,7 +58,7 @@ async fn photo(handle: &CovenHandle, id: &str, bytes: Vec<u8>) -> FileRef {
     let key = id.to_string();
     let file = handle
         .test_staged_write(
-            move |batch| Ok(batch.put_file("photos", bytes, crate::Place::Cloud)),
+            move |batch| Ok::<_, CovenError>(batch.put_file("photos", bytes, crate::Place::Cloud)),
             move |sql, file| {
                 sql.execute("INSERT INTO photos(id,file) VALUES(?1,?2)", (key, file))?;
                 Ok(file)
@@ -130,7 +130,9 @@ async fn a_file_sent_in_one_request_shows_its_bytes_going() {
     // Held for its reply, the photo is still being sent.
     let sending = handle
         .read(|sql| {
-            Ok(sql.query_row("SELECT count(*) FROM coven_sending", [], |r| r.get::<_, i64>(0))?)
+            Ok::<_, CovenError>(
+                sql.query_row("SELECT count(*) FROM coven_sending", [], |r| r.get::<_, i64>(0))?,
+            )
         })
         .await
         .unwrap();
@@ -182,7 +184,7 @@ async fn a_pins_download_shows_its_bytes_arriving() {
     let file = photo(&handle, "sunset", vec![3; 300 * 1024]).await;
     let total = encrypted(&file);
     handle.set_uploads_paused(false).await.unwrap();
-    let mut queue = handle.subscribe(|sql| {
+    let mut queue: crate::LiveQuery<_, crate::CovenError> = handle.subscribe(|sql| {
         Ok(sql.query_row("SELECT count(*) FROM coven_uploads", [], |r| r.get::<_, i64>(0))?)
     });
     while queue.next().await.unwrap().unwrap() != 0 {}
@@ -210,8 +212,11 @@ async fn a_pins_download_shows_its_bytes_arriving() {
     assert!(heard.iter().flatten().all(|progress| progress.bytes_total == total));
     let downloading = handle
         .read(|sql| {
-            Ok(sql
-                .query_row("SELECT count(*) FROM coven_downloading", [], |r| r.get::<_, i64>(0))?)
+            Ok::<_, CovenError>(sql.query_row(
+                "SELECT count(*) FROM coven_downloading",
+                [],
+                |r| r.get::<_, i64>(0),
+            )?)
         })
         .await
         .unwrap();

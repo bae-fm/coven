@@ -3,9 +3,9 @@
 #[cfg(any(test, feature = "test-utils"))]
 use crate::live_query_runs::LiveQueryRuns;
 use crate::observation::CommitSubscription;
-use crate::CovenResult;
+use crate::DbError;
 use coven_foundation::locks::lock_unpoisoned;
-use coven_foundation::task::BugSinkRef;
+use coven_foundation::task::{BugSinkRef, CarriesBug};
 use std::{
     future::Future,
     pin::Pin,
@@ -13,8 +13,8 @@ use std::{
 };
 use tokio::sync::Notify;
 
-type Run<T> = Pin<Box<dyn Future<Output = CovenResult<T>> + Send>>;
-type Query<Q, T> = Arc<dyn Fn(Q) -> Run<T> + Send + Sync>;
+type Run<T, E> = Pin<Box<dyn Future<Output = Result<T, E>> + Send>>;
+type Query<Q, T, E> = Arc<dyn Fn(Q) -> Run<T, E> + Send + Sync>;
 
 /// A request revision assigned by one live query.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -39,15 +39,16 @@ pub enum LiveQueryCause {
 
 /// One result with the exact request and revision that produced it.
 #[derive(Debug)]
-pub struct ReconfigurableLiveQueryEvent<Q, T> {
+pub struct ReconfigurableLiveQueryEvent<Q, T, E> {
     /// The request used by this run.
     pub request: Q,
     /// The revision assigned to that request.
     pub revision: LiveQueryRevision,
     /// The reason the query ran.
     pub cause: LiveQueryCause,
-    /// A value or a failure; failures do not end the query.
-    pub result: CovenResult<T>,
+    /// A value or a failure, of the query's own error type; failures do
+    /// not end the query.
+    pub result: Result<T, E>,
 }
 
 struct Requests<Q> {
@@ -106,38 +107,41 @@ impl<Q> Drop for QueryLifetime<Q> {
     }
 }
 
-struct Running<Q, T> {
+struct Running<Q, T, E> {
     request: Q,
     revision: LiveQueryRevision,
     cause: LiveQueryCause,
-    run: Run<T>,
+    run: Run<T, E>,
 }
 
-/// A subscription whose request may be replaced while it runs.
-pub struct ReconfigurableLiveQuery<Q, T> {
+/// A subscription whose request may be replaced while it runs. Its results
+/// fail with `E`, the query closure's own error type.
+pub struct ReconfigurableLiveQuery<Q, T, E> {
     lifetime: QueryLifetime<Q>,
-    query: Query<Q, T>,
+    query: Query<Q, T, E>,
     commits: CommitSubscription,
     /// Where a bug in a run nobody waits for any more goes (E15).
     bugs: BugSinkRef,
     current: Option<(Q, LiveQueryRevision)>,
-    running: Option<Running<Q, T>>,
+    running: Option<Running<Q, T, E>>,
     previous: Option<T>,
-    /// The store closed, its handle failed or a run panicked, and a result
-    /// said so: the query has ended, and answers nothing more.
+    /// The store closed, its handle failed or a run's error carried a bug,
+    /// as a panic's does, and a result said so: the query has ended, and
+    /// answers nothing more.
     ended: bool,
     #[cfg(any(test, feature = "test-utils"))]
     runs: LiveQueryRuns,
 }
 
-impl<Q, T> ReconfigurableLiveQuery<Q, T>
+impl<Q, T, E> ReconfigurableLiveQuery<Q, T, E>
 where
     Q: Clone + PartialEq + Send + Sync + 'static,
     T: Send + 'static,
+    E: From<DbError> + CarriesBug + Send + 'static,
 {
     pub(crate) fn new(
         request: Q,
-        query: Query<Q, T>,
+        query: Query<Q, T, E>,
         commits: CommitSubscription,
         bugs: BugSinkRef,
     ) -> Self {
@@ -188,10 +192,10 @@ where
 
     /// Process each value on a worker after releasing the connection.
     /// Equality compares processed values; request handles and event metadata remain.
-    pub fn process<P, U>(self, process: P) -> ReconfigurableLiveQuery<Q, U>
+    pub fn process<P, U>(self, process: P) -> ReconfigurableLiveQuery<Q, U, E>
     where
         T: Clone + PartialEq,
-        P: Fn(T) -> CovenResult<U> + Send + Sync + 'static,
+        P: Fn(T) -> Result<U, E> + Send + Sync + 'static,
         U: Send + 'static,
     {
         let process = Arc::new(process);
@@ -209,7 +213,7 @@ where
         } = self;
         let next_process = Arc::clone(&process);
         let next_bugs = bugs.clone();
-        let mapped: Query<Q, U> = Arc::new(move |request| {
+        let mapped: Query<Q, U, E> = Arc::new(move |request| {
             process_run(query(request), Arc::clone(&next_process), next_bugs.clone())
         });
         let running = running.map(|Running { request, revision, cause, run }| Running {
@@ -245,10 +249,10 @@ where
     /// Return the next result and its request. Cancelling this wait retains the
     /// in-flight run, so its request revision is not lost. Once the store is
     /// closed, or the handle fails every call, one result reports why and
-    /// every later call returns `None`. So does a run that panicked, with
-    /// `DbError::Bug`: what it read is unknown, so no commit could tell
-    /// whether to run it again (E15).
-    pub async fn next(&mut self) -> Option<ReconfigurableLiveQueryEvent<Q, T>>
+    /// every later call returns `None`. So does a run whose error carries a
+    /// bug, as one that panicked does with `DbError::Bug`: what it read is
+    /// unknown, so no commit could tell whether to run it again (E15).
+    pub async fn next(&mut self) -> Option<ReconfigurableLiveQueryEvent<Q, T, E>>
     where
         T: Clone + PartialEq,
     {
@@ -275,7 +279,7 @@ where
                     (None, false) => None,
                 };
                 if let Some(((request, revision), cause)) = next {
-                    let run: Run<T> = if let Some(error) = failure {
+                    let run: Run<T, E> = if let Some(error) = failure {
                         Box::pin(async move { Err(error.into()) })
                     } else {
                         self.commits.begin();
@@ -298,7 +302,7 @@ where
                 Ok(value) => self.previous.as_ref() == Some(value),
                 Err(_) => false,
             };
-            // CovenError preserves arbitrary typed sources, which have no value
+            // An error keeps its typed sources, which need have no value
             // equality or Clone. A failed run is delivered and breaks the chain
             // of equal successful results; it never terminates the subscription.
             self.previous = match &result {
@@ -313,7 +317,7 @@ where
             // A failure while the store is closed or the handle failed is the
             // last result: answering again would only repeat it. So is a bug,
             // after which the query watches nothing more.
-            let bug = matches!(&result, Err(crate::CovenError::Database(crate::DbError::Bug(_))));
+            let bug = result.as_ref().err().and_then(CarriesBug::bug).is_some();
             if bug {
                 self.commits.stop();
             }
@@ -330,28 +334,30 @@ where
 
 /// `run`, which ends with its `DbError::Bug` if it panics, so `next` never
 /// polls it again after the panic.
-fn caught_run<T: Send + 'static>(run: Run<T>) -> Run<T> {
+fn caught_run<T: Send + 'static, E: From<DbError> + Send + 'static>(run: Run<T, E>) -> Run<T, E> {
     Box::pin(async move {
         coven_foundation::task::caught("live query", run)
             .await
-            .unwrap_or_else(|bug| Err(crate::DbError::Bug(bug).into()))
+            .unwrap_or_else(|bug| Err(E::from(DbError::Bug(bug))))
     })
 }
 
-/// A subscription's results and lifetime; dropping it ends future runs.
-pub struct LiveQuery<T> {
-    inner: ReconfigurableLiveQuery<(), T>,
+/// A subscription's results and lifetime; dropping it ends future runs. Its
+/// results fail with `E`, the query closure's own error type.
+pub struct LiveQuery<T, E> {
+    inner: ReconfigurableLiveQuery<(), T, E>,
 }
 
-impl<T: Send + 'static> LiveQuery<T> {
-    pub(crate) fn new(inner: ReconfigurableLiveQuery<(), T>) -> Self {
+impl<T: Send + 'static, E: From<DbError> + CarriesBug + Send + 'static> LiveQuery<T, E> {
+    pub(crate) fn new(inner: ReconfigurableLiveQuery<(), T, E>) -> Self {
         Self { inner }
     }
 
     /// The first result at once; then only changed results. Errors remain
     /// results and don't end the query, except the one reporting that the
-    /// store closed, the handle failed or a run panicked: after it, `None`.
-    pub async fn next(&mut self) -> Option<CovenResult<T>>
+    /// store closed, the handle failed or a run's error carries a bug, as a
+    /// panic's does: after it, `None`.
+    pub async fn next(&mut self) -> Option<Result<T, E>>
     where
         T: Clone + PartialEq,
     {
@@ -373,23 +379,24 @@ impl<T: Send + 'static> LiveQuery<T> {
 
     /// Process each value on a worker after its connection has been released.
     /// Equality is tested on the processed value.
-    pub fn process<P, U>(self, process: P) -> LiveQuery<U>
+    pub fn process<P, U>(self, process: P) -> LiveQuery<U, E>
     where
         T: Clone + PartialEq,
-        P: Fn(T) -> CovenResult<U> + Send + Sync + 'static,
+        P: Fn(T) -> Result<U, E> + Send + Sync + 'static,
         U: Send + 'static,
     {
         LiveQuery { inner: self.inner.process(process) }
     }
 }
 
-fn process_run<T: Send + 'static, U: Send + 'static, P>(
-    run: Run<T>,
+fn process_run<T: Send + 'static, U: Send + 'static, E, P>(
+    run: Run<T, E>,
     process: Arc<P>,
     bugs: BugSinkRef,
-) -> Run<U>
+) -> Run<U, E>
 where
-    P: Fn(T) -> CovenResult<U> + Send + Sync + 'static,
+    E: From<DbError> + CarriesBug + Send + 'static,
+    P: Fn(T) -> Result<U, E> + Send + Sync + 'static,
 {
     Box::pin(async move {
         let result = run.await;

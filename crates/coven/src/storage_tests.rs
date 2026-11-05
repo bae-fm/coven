@@ -459,7 +459,7 @@ async fn setup_starts_sync_and_committed_writes_wake_it_without_a_tick() {
     f.handle
         .write(|sql| {
             sql.execute("INSERT INTO notes VALUES('one','written')", [])?;
-            Ok(())
+            Ok::<_, CovenError>(())
         })
         .await
         .unwrap();
@@ -477,7 +477,7 @@ async fn stop_start_idle_tick_offline_recovery_and_close_use_the_injected_clock(
     f.handle
         .write(|sql| {
             sql.execute("INSERT INTO notes VALUES('held','offline')", [])?;
-            Ok(())
+            Ok::<_, CovenError>(())
         })
         .await
         .unwrap();
@@ -555,7 +555,7 @@ async fn reconnecting_without_network_is_offline_and_stop_and_close_finish_the_a
         f.handle
             .write(move |sql| {
                 sql.execute("INSERT INTO notes VALUES(?1,'held')", [id])?;
-                Ok(())
+                Ok::<_, CovenError>(())
             })
             .await
             .unwrap();
@@ -710,7 +710,7 @@ async fn two_stores_share_one_location_without_reading_each_others_history() {
         handle
             .write(move |sql| {
                 sql.execute("INSERT INTO notes VALUES('same', ?1)", [body])?;
-                Ok(())
+                Ok::<_, CovenError>(())
             })
             .await
             .unwrap();
@@ -721,9 +721,11 @@ async fn two_stores_share_one_location_without_reading_each_others_history() {
     for (handle, expected) in [(&f.handle, "Household"), (&other, "Garden")] {
         let body = handle
             .read(|sql| {
-                Ok(sql.query_row("SELECT body FROM notes WHERE id='same'", [], |row| {
-                    row.get::<_, String>(0)
-                })?)
+                Ok::<_, CovenError>(sql.query_row(
+                    "SELECT body FROM notes WHERE id='same'",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )?)
             })
             .await
             .unwrap();

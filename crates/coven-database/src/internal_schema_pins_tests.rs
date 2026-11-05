@@ -60,10 +60,10 @@ async fn pin_stored(db: &crate::Database) -> crate::FileRef {
 async fn a_local_trigger_follows_each_pin_as_it_changes() {
     let store = TestStore::new();
     let db = open(&store, vec![Migration::addition(1, "files", FOLLOWED)]).await;
-    let mut pinned = db.subscribe(|sql| {
+    let mut pinned: crate::LiveQuery<_, DbError> = db.subscribe(|sql| {
         Ok(sql.query("SELECT id FROM pinned_files ORDER BY id", [], |r| r.get::<_, String>(0))?)
     });
-    let mut pins = db
+    let mut pins: crate::LiveQuery<_, DbError> = db
         .subscribe(|sql| {
             Ok(sql.query("SELECT file FROM coven_pins", [], |r| r.get::<_, String>(0))?)
         })
@@ -102,8 +102,11 @@ async fn a_local_trigger_follows_each_pin_as_it_changes() {
     assert_eq!(local_count(&db, "_coven_file_removals"), 0);
     let title = db
         .read(|sql| {
-            Ok(sql
-                .query_row("SELECT title FROM files WHERE id='7'", [], |r| r.get::<_, String>(0))?)
+            Ok::<_, DbError>(
+                sql.query_row("SELECT title FROM files WHERE id='7'", [], |r| {
+                    r.get::<_, String>(0)
+                })?,
+            )
         })
         .await
         .unwrap();
@@ -405,7 +408,9 @@ async fn counting_unpinned_releases_costs() {
                 let started = std::time::Instant::now();
                 let sql = sql.clone();
                 answer = db
-                    .read(move |read| Ok(read.query_row(&sql, [], |r| r.get::<_, i64>(0))?))
+                    .read(move |read| {
+                        Ok::<_, DbError>(read.query_row(&sql, [], |r| r.get::<_, i64>(0))?)
+                    })
                     .await
                     .unwrap();
                 best = best.min(started.elapsed());

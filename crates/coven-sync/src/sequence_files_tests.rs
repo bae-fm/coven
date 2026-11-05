@@ -1,4 +1,5 @@
 use crate::sequence_sync::tests::*;
+use coven_database::DbError;
 use coven_format::admin::StoreChange;
 use coven_foundation::clock::HANG_GUARD;
 use coven_storage::{ObjectPath, Storage};
@@ -326,7 +327,7 @@ async fn a_pass_sends_its_writes_while_their_file_upload_is_held() {
         async move {
             database
                 .read(|sql| {
-                    Ok(sql.query_row("SELECT id,file FROM photos", [], |r| {
+                    Ok::<_, DbError>(sql.query_row("SELECT id,file FROM photos", [], |r| {
                         Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
                     })?)
                 })
@@ -658,9 +659,11 @@ async fn stored_objects_never_hold_a_files_key_hashes_or_path() {
     let (coordinates, content_hash) = ana
         .database()
         .read(|sql| {
-            Ok(sql.query_row("SELECT coordinates,hash FROM coven_files", [], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
-            })?)
+            Ok::<_, DbError>(sql.query_row(
+                "SELECT coordinates,hash FROM coven_files",
+                [],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?)),
+            )?)
         })
         .await
         .unwrap();

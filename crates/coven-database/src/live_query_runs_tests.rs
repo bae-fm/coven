@@ -1,6 +1,7 @@
 use crate::tests::next;
 use crate::tests::TestStore;
 use crate::Database;
+use crate::DbError;
 
 fn write(db: &Database, sql: &str) {
     db.commit_writer(|db| db.batch(sql).unwrap());
@@ -14,7 +15,7 @@ async fn counts_runs_writes_and_equal_results() {
     let store = TestStore::new();
     let db = store.schema(vec![], "CREATE TABLE items(id INTEGER PRIMARY KEY, value INTEGER); INSERT INTO items VALUES (1, 0), (2, 0)").await.unwrap();
     let (ran, mut runs) = tokio::sync::mpsc::unbounded_channel();
-    let mut query = db
+    let mut query: crate::LiveQuery<_, DbError> = db
         .subscribe(move |sql| {
             let read = sql.query_row("SELECT value > 0 FROM items WHERE id = 1", [], |r| {
                 r.get::<_, bool>(0)

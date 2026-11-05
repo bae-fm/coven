@@ -766,7 +766,7 @@ async fn write_once_refuses_changing_a_reference_that_names_a_file() {
 /// The file `photos` row `row` names.
 async fn photo_file(db: &crate::Database, row: &'static str) -> FileId {
     db.read(move |sql| {
-        Ok(sql.query_row("SELECT file FROM photos WHERE id=?1", [row], |r| r.get(0))?)
+        Ok::<_, DbError>(sql.query_row("SELECT file FROM photos WHERE id=?1", [row], |r| r.get(0))?)
     })
     .await
     .unwrap()
@@ -911,7 +911,9 @@ async fn constraint_removal_keeps_the_file_until_the_row_is_restored() {
     .unwrap();
     a.receive(records(&b).remove(0).into()).await.unwrap();
     let present = a
-        .read(|sql| Ok(sql.query_row("SELECT id FROM files", [], |r| r.get::<_, String>(0))?))
+        .read(|sql| {
+            Ok::<_, DbError>(sql.query_row("SELECT id FROM files", [], |r| r.get::<_, String>(0))?)
+        })
         .await
         .unwrap();
     assert_eq!(present, "other");
@@ -925,7 +927,9 @@ async fn constraint_removal_keeps_the_file_until_the_row_is_restored() {
     .unwrap();
     a.receive(records(&b).remove(1).into()).await.unwrap();
     let present = a
-        .read(|sql| Ok(sql.query_row("SELECT id FROM files", [], |r| r.get::<_, String>(0))?))
+        .read(|sql| {
+            Ok::<_, DbError>(sql.query_row("SELECT id FROM files", [], |r| r.get::<_, String>(0))?)
+        })
         .await
         .unwrap();
     assert_eq!(present, "7");

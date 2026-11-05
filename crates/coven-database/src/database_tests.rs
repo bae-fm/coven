@@ -210,7 +210,7 @@ async fn dropped_bootstrap_reopen_waits_for_the_active_read_to_finish() {
     let mut read = Box::pin(database.read(move |_| {
         entered.send(()).unwrap();
         released.recv_timeout(HANG_GUARD).unwrap();
-        Ok(())
+        Ok::<_, DbError>(())
     }));
     tokio::select! {
         result = &mut read => panic!("held read returned: {result:?}"),
@@ -233,7 +233,7 @@ async fn dropped_bootstrap_reopen_waits_for_the_active_read_to_finish() {
         .open()
         .await
         .unwrap();
-    database.read(|_| Ok(())).await.unwrap();
+    database.read(|_| Ok::<_, DbError>(())).await.unwrap();
     database.close().await.unwrap();
     resumed.cancel().unwrap();
 }
@@ -252,7 +252,7 @@ async fn reopening_a_dropped_or_closing_database_waits_for_its_active_read() {
         let read = database.start_read(move |_| {
             entered.send(()).unwrap();
             released.recv_timeout(HANG_GUARD).unwrap();
-            Ok(())
+            Ok::<_, DbError>(())
         });
         entry.await.unwrap();
         if close {
@@ -362,7 +362,7 @@ async fn dropping_a_write_caller_makes_reopen_wait_for_its_commit() {
     let reopened = reopen.await.unwrap();
     assert_eq!(
         reopened
-            .read(|sql| Ok(sql.query_row(
+            .read(|sql| Ok::<_, DbError>(sql.query_row(
                 "SELECT title FROM notes WHERE id='00000000-0000-4000-8000-000000000001'",
                 [],
                 |row| row.get::<_, String>(0)
@@ -768,7 +768,9 @@ async fn a_pausing_operation_refuses_app_writes_until_it_finishes() {
     db.finish_operation(paused).await.unwrap();
     insert(5).await.unwrap();
     let ids: Vec<String> = db
-        .read(|sql| Ok(sql.query("SELECT id FROM notes ORDER BY id", [], |r| r.get(0))?))
+        .read(|sql| {
+            Ok::<_, DbError>(sql.query("SELECT id FROM notes ORDER BY id", [], |r| r.get(0))?)
+        })
         .await
         .unwrap();
     let expected: Vec<String> =

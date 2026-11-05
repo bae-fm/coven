@@ -14,7 +14,7 @@ async fn insert(handle: &CovenHandle, id: &str) {
     handle
         .write(move |sql| {
             sql.execute("INSERT INTO parents(id,label,value) VALUES(?1,?1,1)", [&id])?;
-            Ok(())
+            Ok::<_, CovenError>(())
         })
         .await
         .unwrap();
@@ -48,7 +48,7 @@ async fn deleting_refuses_unsent_writes_then_retires_this_device() {
     network.sync(0).await;
     let owner = &network.devices[0].handle;
     let labels: Vec<String> = owner
-        .read(|sql| Ok(sql.query("SELECT label FROM parents", [], |r| r.get(0))?))
+        .read(|sql| Ok::<_, CovenError>(sql.query("SELECT label FROM parents", [], |r| r.get(0))?))
         .await
         .unwrap();
     assert!(labels.contains(&"unsent".to_owned()));
@@ -160,7 +160,9 @@ async fn attach(handle: &CovenHandle, id: &str) {
     let row = id.to_owned();
     handle
         .test_staged_write(
-            move |batch| Ok(batch.put_file("files", vec![7; 2048], crate::Place::Cloud)),
+            move |batch| {
+                Ok::<_, CovenError>(batch.put_file("files", vec![7; 2048], crate::Place::Cloud))
+            },
             move |sql, file| {
                 sql.execute("INSERT INTO files(id,file) VALUES(?1,?2)", (&row, file))?;
                 Ok(())
@@ -170,7 +172,7 @@ async fn attach(handle: &CovenHandle, id: &str) {
         .unwrap();
 }
 
-async fn until(work: &mut LiveQuery<UnsentWork>, expected: UnsentWork) {
+async fn until(work: &mut LiveQuery<UnsentWork, crate::CovenError>, expected: UnsentWork) {
     tokio::time::timeout(HANG_GUARD, async {
         while work.next().await.expect("the live query answers").unwrap() != expected {}
     })
@@ -369,7 +371,7 @@ async fn discarding_a_closed_store_keeps_its_device_a_member_until_removed() {
         .state;
     assert_ne!(state, DeviceState::Removed);
     let labels: Vec<String> = owner
-        .read(|sql| Ok(sql.query("SELECT label FROM parents", [], |r| r.get(0))?))
+        .read(|sql| Ok::<_, CovenError>(sql.query("SELECT label FROM parents", [], |r| r.get(0))?))
         .await
         .unwrap();
     assert!(!labels.contains(&"unsent".to_owned()));

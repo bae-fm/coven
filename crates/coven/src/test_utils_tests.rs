@@ -146,13 +146,19 @@ async fn stop_connected(f: &Fixture, handle: &CovenHandle) {
 async fn note(handle: &CovenHandle, body: String) {
     handle.write(move |sql| {
         sql.execute("INSERT INTO notes VALUES('note',?1,'store') ON CONFLICT(audience,id) DO UPDATE SET body=excluded.body", [body])?;
-        Ok(())
+        Ok::<_, CovenError>(())
     }).await.unwrap();
 }
 
 async fn read_note(handle: &CovenHandle) -> String {
     handle
-        .read(|sql| Ok(sql.query_row("SELECT body FROM notes WHERE id='note'", [], |r| r.get(0))?))
+        .read(|sql| {
+            Ok::<_, CovenError>(sql.query_row(
+                "SELECT body FROM notes WHERE id='note'",
+                [],
+                |r| r.get(0),
+            )?)
+        })
         .await
         .unwrap()
 }
@@ -219,7 +225,13 @@ fn every_post_commit_crash_preserves_the_write_for_upload() {
             handle.set_uploads_paused(true).await.unwrap();
             handle
                 .test_staged_write(
-                    |batch| Ok(batch.put_file("files", b"obsolete".to_vec(), crate::Place::Cloud)),
+                    |batch| {
+                        Ok::<_, CovenError>(batch.put_file(
+                            "files",
+                            b"obsolete".to_vec(),
+                            crate::Place::Cloud,
+                        ))
+                    },
                     |sql, file| {
                         sql.execute("INSERT INTO files(id,file) VALUES('obsolete',?1)", [file])?;
                         Ok(())
@@ -250,9 +262,11 @@ fn every_post_commit_crash_preserves_the_write_for_upload() {
             assert_eq!(read_note(&handle).await, "committed", "{checkpoint:?}");
             assert_eq!(
                 handle
-                    .read(|sql| Ok(
-                        sql.query_row("SELECT count(*) FROM files", [], |r| r.get::<_, i64>(0))?
-                    ))
+                    .read(|sql| Ok::<_, CovenError>(sql.query_row(
+                        "SELECT count(*) FROM files",
+                        [],
+                        |r| r.get::<_, i64>(0)
+                    )?))
                     .await
                     .unwrap(),
                 0
@@ -370,7 +384,7 @@ async fn identical_app_files_have_distinct_stored_ciphertext() {
     let staged = handle
         .test_staged_write(
             move |batch| {
-                Ok([
+                Ok::<_, CovenError>([
                     batch.put_file("files", input.clone(), crate::Place::Cloud),
                     batch.put_file("files", input.clone(), crate::Place::Cloud),
                 ])
@@ -385,7 +399,7 @@ async fn identical_app_files_have_distinct_stored_ciphertext() {
     handle.set_uploads_paused(false).await.unwrap();
     // Uploads run only while sync is started (§17.4).
     handle.start_sync().await.unwrap();
-    let mut uploads = handle.subscribe(|sql| {
+    let mut uploads: crate::LiveQuery<_, crate::CovenError> = handle.subscribe(|sql| {
         Ok(sql.query_row("SELECT count(*) FROM coven_uploads", [], |r| r.get::<_, i64>(0))?)
     });
     while uploads.next().await.expect("the live query answers").unwrap() != 0 {}

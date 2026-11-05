@@ -2918,6 +2918,17 @@ fn tables() -> Vec<SyncedTable> {
   part of its change, or undone rows coven saw it change. A closure that
   returns its own error keeps it. `QueryReturnedNoRows`, and the closure's
   own mapping errors, fail nothing ([§4](coven.md#4-writing-locally)).
+- A write fails with its closure's own error type. Ana's music app has a
+  `LibraryError` of its own; its closures return one, and `write` gives
+  back the app's own value, never one wrapped in coven's error that the app
+  must take apart. An app with no error type of its own uses `CovenError`.
+  The type implements `WriteFailure`: it takes coven's `DbError` and
+  SQLite's error with `From`, says which bug it carries (E15), and keeps a
+  failed rollback or byte removal beside the write's own failure, as
+  `CovenError`'s `Rollback` and `FileCleanup` do. Without them, a failed
+  rollback would be lost behind the app's error, while every later call
+  fails with `RollbackFailed` because of it
+  ([§4](coven.md#4-writing-locally)).
 - A bulk write runs SQL on device-local tables alone, as plain SQLite: no
   row change is recorded, a table empties in one step, and after commit each
   live query that read a table it changed runs again, whatever rows it read
@@ -2944,6 +2955,20 @@ pub struct CovenWrite<'write> { /* private fields */ }
 
 /// A bulk write's SQL access, borrowing its connection (§4, E3).
 pub struct BulkSqlContext<'connection> { /* private fields */ }
+
+/// An error a write's closure fails with, which coven's own failures and
+/// SQLite's convert into, and which keeps a failed rollback or byte removal
+/// beside the write's own failure (§4, E3). `CovenError`, `DbError` and
+/// `SyncError` implement it; an app implements it for its own error type.
+pub trait WriteFailure: From<DbError> + From<rusqlite::Error> + coven::task::CarriesBug {
+    /// The write failed with `self`, and SQLite then failed to roll it back.
+    fn with_rollback(self, rollback: rusqlite::Error) -> Self;
+    /// The write failed with `write`, and removing the bytes it released
+    /// failed with each of `failures`.
+    fn with_cleanup(write: Self, failures: Vec<DbError>) -> Self
+    where
+        Self: Sized;
+}
 
 /// A user's original read whole once before a write: its path, size and
 /// modification time, and the content hash and chunk hashes of the bytes the
@@ -2992,10 +3017,11 @@ impl CovenHandle {
     /// A statement or shared trigger targeting another owner's row refuses
     /// the transaction with DbError::NotOwner (§9.6). Authorized foreign-key
     /// actions may change that row under the declared schema.
-    pub async fn write<F, R>(&self, write: F) -> CovenResult<R>
+    pub async fn write<F, R, E>(&self, write: F) -> Result<R, E>
     where
-        F: FnOnce(CovenWrite<'_>) -> CovenResult<R> + Send + 'static,
-        R: Send + 'static;
+        F: FnOnce(CovenWrite<'_>) -> Result<R, E> + Send + 'static,
+        R: Send + 'static,
+        E: WriteFailure + Send + 'static;
 
     /// Runs one bulk write: SQL that changes device-local tables alone, as
     /// plain SQLite with no pre-update hook, so emptying a table takes one
@@ -3007,10 +3033,11 @@ impl CovenHandle {
     /// whatever rows it read: a small change that should rerun only the live
     /// queries reading its rows belongs in `write`. Failures, the write lock,
     /// a closed store and a failed handle are as for `write`.
-    pub async fn write_bulk<F, R>(&self, sql: F) -> CovenResult<R>
+    pub async fn write_bulk<F, R, E>(&self, sql: F) -> Result<R, E>
     where
-        F: FnOnce(BulkSqlContext<'_>) -> CovenResult<R> + Send + 'static,
-        R: Send + 'static;
+        F: FnOnce(BulkSqlContext<'_>) -> Result<R, E> + Send + 'static,
+        R: Send + 'static,
+        E: WriteFailure + Send + 'static;
 
     /// Stages app bytes for a write that puts them in rows (§17.3): `stage`
     /// stages each file and returns what that write needs, such as the ids
@@ -3020,10 +3047,11 @@ impl CovenHandle {
     /// cancellation, but not for the staged files it returns. An undeclared
     /// namespace fails with `UndeclaredNamespace`, a user one with
     /// `NamespaceKind`; a failed copy or flush removes what it wrote.
-    pub async fn stage_files<F, T>(&self, stage: F) -> CovenResult<StagedFiles<T>>
+    pub async fn stage_files<F, T, E>(&self, stage: F) -> Result<StagedFiles<T>, E>
     where
-        F: FnOnce(&mut WriteBatch<'_>) -> CovenResult<T> + Send + 'static,
-        T: Send + 'static;
+        F: FnOnce(&mut WriteBatch<'_>) -> Result<T, E> + Send + 'static,
+        T: Send + 'static,
+        E: WriteFailure + Send + 'static;
 }
 
 impl WriteBatch<'_> {
@@ -3218,7 +3246,7 @@ let file = handle
             "INSERT INTO attachments (id, note_id, title, file) VALUES (?1, ?2, ?3, ?4)",
             (&attachment_id, &note_id, "Swatches", file),
         )?;
-        Ok(file)
+        Ok::<_, CovenError>(file)
     })
     .await?;
 ```
@@ -3227,13 +3255,13 @@ App bytes are staged first, outside the write, which puts them in its rows:
 
 ```rust
 let staged = handle
-    .stage_files(move |batch| Ok(batch.put_file("covers", cover_bytes, Place::Cloud)))
+    .stage_files(move |batch| Ok::<_, CovenError>(batch.put_file("covers", cover_bytes, Place::Cloud)))
     .await?;
 let cover = handle
     .write(move |sql| {
         let cover = sql.put_staged(staged)?;
         sql.execute("UPDATE notes SET cover = ?1 WHERE id = ?2", (cover, &note_id))?;
-        Ok(cover)
+        Ok::<_, CovenError>(cover)
     })
     .await?;
 ```
@@ -3249,12 +3277,12 @@ let file = handle
             "INSERT INTO attachments (id, note_id, title, file) VALUES (?1, ?2, ?3, ?4)",
             (&attachment_id, &note_id, "Swatches", file),
         )?;
-        Ok(file)
+        Ok::<_, CovenError>(file)
     })
     .await?;
 // Later, when the person moves it to the cloud: nothing is read again.
 let moved = handle
-    .write(move |sql| Ok(sql.move_to_cloud(vec![MoveFile::User(file)])?))
+    .write(move |sql| Ok::<_, CovenError>(sql.move_to_cloud(vec![MoveFile::User(file)])?))
     .await?;
 ```
 
@@ -3267,8 +3295,15 @@ let moved = handle
   ([§4](coven.md#4-writing-locally)).
 - A *live query* runs once, then again whenever a write commits that changes
   rows it read. Its errors are results and don't end it, except the one saying
-  the store closed or its handle fails every call: after that one, `next()`
-  returns `None`, and never repeats it.
+  the store closed or its handle fails every call, and one that carries a bug,
+  as a run that panicked does (E15): after that one, `next()` returns `None`,
+  and never repeats it.
+- A read and a live query fail with their closure's own error type, as a
+  write does (E3): Ana's music app's closures return its `LibraryError`, and
+  its live query of albums delivers one. The type takes coven's `DbError`
+  with `From` and says which bug it carries (E15). `process` fails with the
+  same type. An app with no error type of its own uses `CovenError`, and
+  names it as a live query's: `LiveQuery<Vec<String>, CovenError>`.
 - Each screen is one live query over the local database, its SQL returning the
   rows the screen draws in the order it draws them, with their counts
   ([§4.1](coven.md#41-showing-data)). Writes go to the database and live
@@ -3454,7 +3489,7 @@ Example:
 ```rust
 // The albums still uploading come first, one live query over the app's
 // tables and coven's queue.
-let albums = handle.subscribe(|sql| {
+let albums: LiveQuery<_, CovenError> = handle.subscribe(|sql| {
     Ok(sql.query(
         "SELECT a.title FROM albums AS a
          ORDER BY EXISTS(SELECT 1 FROM photos AS p JOIN coven_uploads AS u
@@ -3469,7 +3504,7 @@ let albums = handle.subscribe(|sql| {
 ```rust
 // How many of an album's photos are going out now: a lookup per file being
 // sent, run again as each upload starts or ends.
-let mut sending = handle.subscribe(move |sql| {
+let mut sending: LiveQuery<_, CovenError> = handle.subscribe(move |sql| {
     Ok(sql.query_row(
         "SELECT count(*) FROM coven_sending AS s JOIN photos AS p ON s.file=p.file
          WHERE p.album_id=?1",
@@ -3481,7 +3516,7 @@ let mut sending = handle.subscribe(move |sql| {
 
 ```rust
 // The photos that can't upload, each with its error.
-let mut failing = handle.subscribe(|sql| {
+let mut failing: LiveQuery<_, CovenError> = handle.subscribe(|sql| {
     Ok(sql.query(
         "SELECT e.record, e.cause, p.title FROM coven_pending AS e
          JOIN photos AS p ON e.file=p.file",
@@ -3517,20 +3552,23 @@ impl Mode for ReadOnly {}
 /// An awaitable read that keeps its store borrow until it finishes (E4).
 pub struct Read<'a, F, M: Mode = Writer> { /* private fields */ }
 
-impl<F, R, M: Mode> Future for Read<'_, F, M>
+impl<F, R, E, M: Mode> Future for Read<'_, F, M>
 where
-    F: FnOnce(SqlReadContext<'_>) -> CovenResult<R> + Send + 'static,
+    F: FnOnce(SqlReadContext<'_>) -> Result<R, E> + Send + 'static,
     R: Send + 'static,
+    E: From<DbError> + coven::task::CarriesBug + Send + 'static,
 {
-    type Output = CovenResult<R>;
+    type Output = Result<R, E>;
     fn poll(self: Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> std::task::Poll<Self::Output>;
 }
 
 /// A subscription's results and lifetime; dropping it ends the query (E4).
-pub struct LiveQuery<T> { /* private fields */ }
+/// Its results fail with `E`, the query closure's own error type.
+pub struct LiveQuery<T, E> { /* private fields */ }
 
-/// A subscription whose request may be replaced while it runs (E4).
-pub struct ReconfigurableLiveQuery<Q, T> { /* private fields */ }
+/// A subscription whose request may be replaced while it runs (E4), its
+/// results failing with `E` as a `LiveQuery`'s do.
+pub struct ReconfigurableLiveQuery<Q, T, E> { /* private fields */ }
 
 /// Shared access to replacing a live query's request (E4).
 pub struct LiveQueryRequests<Q> { /* private fields */ }
@@ -3548,7 +3586,7 @@ pub struct LiveQueryRevision(pub u64);
 pub struct LiveQueryClosed;
 
 /// A result together with the request that produced it (E4).
-pub struct ReconfigurableLiveQueryEvent<Q, T> {
+pub struct ReconfigurableLiveQueryEvent<Q, T, E> {
     /// The request used by this run.
     pub request: Q,
     /// The revision assigned to that request.
@@ -3556,7 +3594,7 @@ pub struct ReconfigurableLiveQueryEvent<Q, T> {
     /// A new request, changed rows, or both.
     pub cause: LiveQueryCause,
     /// The query's result, including failures that do not end the query.
-    pub result: CovenResult<T>,
+    pub result: Result<T, E>,
 }
 
 /// Why a reconfigurable live query ran; its first run answers the initial request (E4).
@@ -3577,31 +3615,35 @@ pub struct FileStream<M: Mode = Writer> { /* private fields */ }
 
 impl CovenHandle {
     /// A read of one consistent snapshot, run when awaited. Attach `process`
-    /// to work on the result after the connection is released.
-    pub fn read<F, R>(&self, read: F) -> Read<'_, F>
+    /// to work on the result after the connection is released. It fails
+    /// with the closure's own error type.
+    pub fn read<F, R, E>(&self, read: F) -> Read<'_, F>
     where
-        F: FnOnce(SqlReadContext<'_>) -> CovenResult<R> + Send + 'static,
-        R: Send + 'static;
+        F: FnOnce(SqlReadContext<'_>) -> Result<R, E> + Send + 'static,
+        R: Send + 'static,
+        E: From<DbError> + coven::task::CarriesBug + Send + 'static;
 
     /// A live query. Coven records the tables and columns the query reads,
     /// and the rows its conditions allow, and reruns it only for writes that
-    /// touch them.
-    pub fn subscribe<F, R>(&self, query: F) -> LiveQuery<R>
+    /// touch them. Its results fail with the closure's own error type.
+    pub fn subscribe<F, R, E>(&self, query: F) -> LiveQuery<R, E>
     where
-        F: Fn(SqlReadContext<'_>) -> CovenResult<R> + Send + Sync + 'static,
-        R: Send + 'static;
+        F: Fn(SqlReadContext<'_>) -> Result<R, E> + Send + Sync + 'static,
+        R: Send + 'static,
+        E: From<DbError> + coven::task::CarriesBug + Send + 'static;
 
     /// A live query whose request, such as a page or a search term, can be
     /// replaced without starting a new subscription.
-    pub fn subscribe_reconfigurable<Q, F, R>(
+    pub fn subscribe_reconfigurable<Q, F, R, E>(
         &self,
         initial_request: Q,
         query: F,
-    ) -> ReconfigurableLiveQuery<Q, R>
+    ) -> ReconfigurableLiveQuery<Q, R, E>
     where
         Q: Clone + PartialEq + Send + Sync + 'static,
-        F: Fn(&Q, SqlReadContext<'_>) -> CovenResult<R> + Send + Sync + 'static,
-        R: Send + 'static;
+        F: Fn(&Q, SqlReadContext<'_>) -> Result<R, E> + Send + Sync + 'static,
+        R: Send + 'static,
+        E: From<DbError> + coven::task::CarriesBug + Send + 'static;
 
     /// Every lost value and removed row, as `_coven_lost` holds them (§8.2, §8.4).
     /// References show what was written, even if their parents were deleted.
@@ -3656,37 +3698,43 @@ impl SqlRead for SqlReadContext<'_> {}
 impl SqlRead for CovenWrite<'_> {}
 impl SqlRead for BulkSqlContext<'_> {}
 
-impl<'a, F, R, M: Mode> Read<'a, F, M>
+impl<'a, F, R, E, M: Mode> Read<'a, F, M>
 where
-    F: FnOnce(SqlReadContext<'_>) -> CovenResult<R> + Send + 'static,
+    F: FnOnce(SqlReadContext<'_>) -> Result<R, E> + Send + 'static,
     R: Send + 'static,
+    E: From<DbError> + coven::task::CarriesBug + Send + 'static,
 {
     /// Runs `process` on the read's result on a separate worker, after the
     /// read has released its connection. The closure and result cross workers,
     /// so both must be Send and own any borrowed data.
-    pub async fn process<P, T>(self, process: P) -> CovenResult<T>
+    pub async fn process<P, T>(self, process: P) -> Result<T, E>
     where
-        P: FnOnce(R) -> CovenResult<T> + Send + 'static,
+        P: FnOnce(R) -> Result<T, E> + Send + 'static,
         T: Send + 'static;
 }
 
-impl<T: Send + 'static> LiveQuery<T> {
+impl<T, E> LiveQuery<T, E>
+where
+    T: Send + 'static,
+    E: From<DbError> + coven::task::CarriesBug + Send + 'static,
+{
     /// The first result at once; after that, waits for a write that changes
     /// the result and returns the new one. An error is a result too, and
     /// doesn't end the query, except the one saying the store closed, the
     /// handle fails every call (`RollbackFailed`, `StatePersistence`,
     /// `CheckpointFailed`, `WallTimer`, or `Bug` for state a panic left
-    /// half-changed) or a run panicked (`DbError::Bug`, E15): after it,
-    /// `None`, so a loop over the query ends.
-    pub async fn next(&mut self) -> Option<CovenResult<T>>
+    /// half-changed), or one that carries a bug, as a run that panicked
+    /// does (`DbError::Bug`, E15): after it, `None`, so a loop over the
+    /// query ends.
+    pub async fn next(&mut self) -> Option<Result<T, E>>
     where
         T: Clone + PartialEq;
 
     /// Runs `process` on each result after the connection is released.
-    pub fn process<P, U>(self, process: P) -> LiveQuery<U>
+    pub fn process<P, U>(self, process: P) -> LiveQuery<U, E>
     where
         T: Clone + PartialEq,
-        P: Fn(T) -> CovenResult<U> + Send + Sync + 'static,
+        P: Fn(T) -> Result<U, E> + Send + Sync + 'static,
         U: Send + 'static;
 
     /// How often this query has run so far, its processed form's runs too.
@@ -3700,18 +3748,19 @@ impl<T: Send + 'static> LiveQuery<T> {
     pub fn is_marked_for_rerun(&self) -> bool;
 }
 
-impl<Q, T> ReconfigurableLiveQuery<Q, T>
+impl<Q, T, E> ReconfigurableLiveQuery<Q, T, E>
 where
     Q: Clone + PartialEq + Send + Sync + 'static,
     T: Send + 'static,
+    E: From<DbError> + coven::task::CarriesBug + Send + 'static,
 {
     /// Process each successful value on a worker after releasing its connection.
     /// Request, revision and cause stay on the event; errors remain results.
     /// Equality compares processed values. Existing request handles still work.
-    pub fn process<P, U>(self, process: P) -> ReconfigurableLiveQuery<Q, U>
+    pub fn process<P, U>(self, process: P) -> ReconfigurableLiveQuery<Q, U, E>
     where
         T: Clone + PartialEq,
-        P: Fn(T) -> CovenResult<U> + Send + Sync + 'static,
+        P: Fn(T) -> Result<U, E> + Send + Sync + 'static,
         U: Send + 'static;
 
     /// A handle that replaces the request.
@@ -3728,9 +3777,9 @@ where
 
     /// The next result, with the request and revision that produced it, and
     /// whether a new request, a write, or both caused it; `None` after the
-    /// result saying the store closed, the handle failed or a run panicked,
-    /// as for `LiveQuery::next`.
-    pub async fn next(&mut self) -> Option<ReconfigurableLiveQueryEvent<Q, T>>
+    /// result saying the store closed or the handle failed, or one carrying
+    /// a bug, as for `LiveQuery::next`.
+    pub async fn next(&mut self) -> Option<ReconfigurableLiveQueryEvent<Q, T, E>>
     where
         T: Clone + PartialEq;
 }
@@ -3887,10 +3936,11 @@ impl CovenReadHandle {
     /// closing.
     pub async fn close(&self) -> Result<(), DbError>;
 
-    pub fn read<F, R>(&self, read: F) -> Read<'_, F, ReadOnly>
+    pub fn read<F, R, E>(&self, read: F) -> Read<'_, F, ReadOnly>
     where
-        F: FnOnce(SqlReadContext<'_>) -> CovenResult<R> + Send + 'static,
-        R: Send + 'static;
+        F: FnOnce(SqlReadContext<'_>) -> Result<R, E> + Send + 'static,
+        R: Send + 'static,
+        E: From<DbError> + coven::task::CarriesBug + Send + 'static;
     /// The file a row references, by the id the row holds, as
     /// `CovenHandle::file_ref` reads it (E8).
     pub async fn file_ref(&self, file: FileId) -> Result<FileRef, DbError>;
@@ -3914,11 +3964,11 @@ Example:
 ```rust
 // The order is the query's; process only builds the app's types.
 let titles: Vec<Title> = handle
-    .read(|sql| Ok(sql.query("SELECT title FROM notes ORDER BY title", [], |row| row.get(0))?))
+    .read(|sql| Ok::<_, CovenError>(sql.query("SELECT title FROM notes ORDER BY title", [], |row| row.get(0))?))
     .process(|titles: Vec<String>| Ok(titles.into_iter().map(Title::new).collect()))
     .await?;
 
-let mut notes = handle.subscribe(|sql| {
+let mut notes: LiveQuery<_, CovenError> = handle.subscribe(|sql| {
     Ok(sql.query(
         "SELECT id, title, audience FROM notes ORDER BY title",
         [],
@@ -6073,7 +6123,7 @@ Example:
 ```rust
 // The outbox as a live query over coven's views (E4): each queued photo,
 // whether it is being sent, and the bytes the provider confirmed.
-let mut outbox = handle.subscribe(|sql| {
+let mut outbox: LiveQuery<_, CovenError> = handle.subscribe(|sql| {
     Ok(sql.query(
         "SELECT p.title, u.sending, u.bytes_confirmed, u.bytes_total
          FROM coven_uploads AS u JOIN photos AS p ON u.file=p.file
@@ -6591,7 +6641,7 @@ handle
     .write(move |sql| {
         sql.make_device_only(prepared)?;
         sql.execute("UPDATE albums SET local_here = 1 WHERE id = ?1", [&local])?;
-        Ok(())
+        Ok::<_, CovenError>(())
     })
     .await?;
 ```

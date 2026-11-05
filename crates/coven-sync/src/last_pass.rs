@@ -110,7 +110,7 @@ impl LastPass {
     #[cfg(any(test, feature = "test-utils"))]
     pub fn follow(
         database: &coven_database::Database,
-    ) -> coven_database::test_utils::Followed<Option<Self>> {
+    ) -> coven_database::test_utils::Followed<Option<Self>, coven_database::DbError> {
         coven_database::test_utils::Followed::new(database.subscribe(|sql| {
             Ok(sql.query_row("SELECT last_pass FROM coven_sync_status", [], |row| row.get(0))?)
         }))

@@ -8,6 +8,7 @@
 use crate::sequence_sync::sequence_invites::expiry;
 use crate::sequence_sync::tests::*;
 use crate::*;
+use coven_database::DbError;
 use coven_database::{OperationId, SqlContext};
 use coven_format::{
     admin::{MemberRole, StoreChange},
@@ -370,7 +371,7 @@ impl Case {
             .ana
             .database()
             .read(move |sql| {
-                Ok(sql.query(
+                Ok::<_, DbError>(sql.query(
                     "SELECT outcome FROM coven_operations WHERE operation=?1",
                     [id.0],
                     |row| row.get::<_, Option<OperationOutcome>>(0),

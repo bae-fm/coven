@@ -5,6 +5,7 @@
 //!
 //!   cargo test --release -p coven-database --test insert_cost -- --ignored --nocapture --test-threads=1
 
+use coven_database::DbError;
 use coven_database::{
     Database, DatabaseBuilder, FileColumn, Migration, Namespace, Place, Provenance, RowIdentity,
     SyncedTable,
@@ -212,7 +213,9 @@ async fn import(files: bool, live: bool) -> Duration {
         for sql in JOINED {
             let album = uuid(1, watched);
             let mut query = db.subscribe(move |read| {
-                Ok(read.query(sql, [&album], |r| r.get::<_, coven_database::types::Value>(0))?)
+                Ok::<_, DbError>(
+                    read.query(sql, [&album], |r| r.get::<_, coven_database::types::Value>(0))?,
+                )
             });
             assert!(!query.next().await.unwrap().unwrap().is_empty(), "{sql}");
             queries.push(query);
@@ -231,7 +234,7 @@ async fn import(files: bool, live: bool) -> Duration {
     drop(queries);
     let indexed: i64 = db
         .read(|sql| {
-            Ok(sql.query_row(
+            Ok::<_, DbError>(sql.query_row(
                 "SELECT count(*) FROM track_search WHERE track_search MATCH 'track'",
                 [],
                 |r| r.get(0),
@@ -295,7 +298,9 @@ async fn a_synced_inserts_cost() {
         coven_times.push(started.elapsed());
     }
     let listed: i64 = db
-        .read(|sql| Ok(sql.query_row("SELECT count(*) FROM listing", [], |r| r.get(0))?))
+        .read(|sql| {
+            Ok::<_, DbError>(sql.query_row("SELECT count(*) FROM listing", [], |r| r.get(0))?)
+        })
         .await
         .unwrap();
     assert_eq!(listed, (ROWS * WRITES) as i64);

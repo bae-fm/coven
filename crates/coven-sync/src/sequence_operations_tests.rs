@@ -1,5 +1,6 @@
 use crate::sequence_sync::tests::*;
 use crate::*;
+use coven_database::DbError;
 use coven_format::admin::{MemberRole, StoreChange};
 use coven_foundation::clock::HANG_GUARD;
 use coven_foundation::id_source::{IdSource, KeyId};
@@ -360,7 +361,7 @@ async fn outcome(
     device
         .database()
         .read(move |sql| {
-            Ok(sql.query_row(
+            Ok::<_, DbError>(sql.query_row(
                 "SELECT outcome FROM coven_operations WHERE operation=?1",
                 [operation.0],
                 |row| row.get::<_, Option<OperationOutcome>>(0),

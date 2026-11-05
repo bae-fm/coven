@@ -4,9 +4,9 @@ use crate::{tests::TestStore, DbError};
 async fn streamed_commits_observe_without_rowid_and_virtual_tables_and_discard_rollbacks() {
     let store = TestStore::new();
     let db = store.schema(vec![], "CREATE TABLE items(id TEXT PRIMARY KEY,value TEXT) WITHOUT ROWID; CREATE VIRTUAL TABLE search USING fts5(value)").await.unwrap();
-    let mut items = db
+    let mut items: crate::LiveQuery<_, DbError> = db
         .subscribe(|sql| Ok(sql.query("SELECT value FROM items", [], |r| r.get::<_, String>(0))?));
-    let mut search = db
+    let mut search: crate::LiveQuery<_, DbError> = db
         .subscribe(|sql| Ok(sql.query("SELECT value FROM search", [], |r| r.get::<_, String>(0))?));
     assert!(items.next().await.expect("the live query answers").unwrap().is_empty());
     assert!(search.next().await.expect("the live query answers").unwrap().is_empty());

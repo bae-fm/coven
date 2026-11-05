@@ -44,8 +44,9 @@ pub use coven_database::{
     RowAuthorizationFailure, RowChange, RowIdentity, RowKey, SchemaError, SnapshotError, SqlRead,
     SqlReadContext, SqliteError, SqliteResult, StagedFiles, SyncedTable, TemporaryDirectoryError,
     ToSql, TransferChange, TransferProgress, TransferWatch, UnsentWork, UserFile, WriteBatch,
-    WriteId, WriteWait, Writer, BOUND_FILE_LIMIT,
+    WriteFailure, WriteId, WriteWait, Writer, BOUND_FILE_LIMIT,
 };
+
 pub use coven_database::{
     AnalysisLimit, AutoVacuum, CacheSize, CacheSpill, CheckpointMode, IncrementalVacuum,
     JournalSizeLimit, PageSize, SecureDelete, SqliteSettings, SqliteSettingsInEffect, TempStore,

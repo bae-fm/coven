@@ -174,9 +174,11 @@ pub(crate) fn store_row(table: &str, id: &str) -> coven_merge::RowId {
 
 /// A live query's next result, failing a test it doesn't answer within five
 /// seconds or after it closes.
-pub(crate) async fn next_result<T: Clone + PartialEq + Send + 'static>(
-    query: &mut crate::LiveQuery<T>,
-) -> crate::CovenResult<T> {
+pub(crate) async fn next_result<T, E>(query: &mut crate::LiveQuery<T, E>) -> Result<T, E>
+where
+    T: Clone + PartialEq + Send + 'static,
+    E: From<DbError> + coven_foundation::task::CarriesBug + Send + 'static,
+{
     tokio::time::timeout(HANG_GUARD, query.next())
         .await
         .expect("the live query answers in time")
@@ -185,9 +187,11 @@ pub(crate) async fn next_result<T: Clone + PartialEq + Send + 'static>(
 
 /// A live query's next value, failing a test it doesn't answer or answers
 /// with an error.
-pub(crate) async fn next<T: Clone + PartialEq + Send + 'static>(
-    query: &mut crate::LiveQuery<T>,
-) -> T {
+pub(crate) async fn next<T, E>(query: &mut crate::LiveQuery<T, E>) -> T
+where
+    T: Clone + PartialEq + Send + 'static,
+    E: From<DbError> + coven_foundation::task::CarriesBug + std::fmt::Debug + Send + 'static,
+{
     next_result(query).await.unwrap()
 }
 

@@ -48,7 +48,7 @@ pub(crate) async fn stage(
     device
         .handle
         .test_staged_write(
-            move |batch| Ok(batch.put_file("files", bytes, Place::Cloud)),
+            move |batch| Ok::<_, CovenError>(batch.put_file("files", bytes, Place::Cloud)),
             move |sql, file| {
                 sql.execute(&format!("INSERT INTO {table}(id,file) VALUES(?1,?2)"), (&id, file))?;
                 Ok(file)
@@ -413,7 +413,7 @@ impl Network {
         self.devices[index]
             .handle
             .read(|sql| {
-                Ok((
+                Ok::<_, CovenError>((
                     sql.query("SELECT id,label,value FROM parents ORDER BY id", [], |r| {
                         Ok((r.get(0)?, r.get(1)?, r.get(2)?))
                     })?,
@@ -654,7 +654,7 @@ async fn random_write(handle: &CovenHandle, random: &mut Generator, audience: St
             7 => { sql.execute("INSERT INTO circle_notes(id,value,audience) VALUES(?1,?2,?3) ON CONFLICT(id) DO UPDATE SET value=excluded.value", (&circle_row,value,&audience))?; }
             _ => unreachable!(),
         }
-        Ok(())
+        Ok::<_, CovenError>(())
     }).await.unwrap();
 }
 
@@ -720,7 +720,7 @@ async fn seeded_whole_system_convergence() {
                                 .unwrap();
                             network.quiet().await;
                             let audience = circle.to_string();
-                            network.devices[0].handle.write(move |sql| { sql.execute("INSERT INTO circle_notes(id,value,audience) VALUES('00000000-0000-7000-8000-000000000100',19,?1)", [audience])?; Ok(()) }).await.unwrap();
+                            network.devices[0].handle.write(move |sql| { sql.execute("INSERT INTO circle_notes(id,value,audience) VALUES('00000000-0000-7000-8000-000000000100',19,?1)", [audience])?; Ok::<_, CovenError>(()) }).await.unwrap();
                             network.quiet().await;
                             network.devices[0]
                                 .handle
@@ -809,7 +809,7 @@ async fn a_returning_device_loads_snapshots_covering_deleted_writes_and_keeps_it
         .handle
         .write(|sql| {
             sql.execute("INSERT INTO parents VALUES('waiting','local',7)", [])?;
-            Ok(())
+            Ok::<_, CovenError>(())
         })
         .await
         .unwrap();
@@ -818,7 +818,7 @@ async fn a_returning_device_loads_snapshots_covering_deleted_writes_and_keeps_it
         .handle
         .write(move |sql| {
             sql.execute("INSERT INTO parents VALUES('remote',?1,9)", [label])?;
-            Ok(())
+            Ok::<_, CovenError>(())
         })
         .await
         .unwrap();
@@ -883,7 +883,7 @@ mod pending_records {
         let network = Network::new(2).await;
         let reader = &network.devices[1].handle;
         network.devices[1].stop_sync().await;
-        let mut received = reader.subscribe(|sql| {
+        let mut received: crate::LiveQuery<_, crate::CovenError> = reader.subscribe(|sql| {
             Ok(sql.query("SELECT record FROM coven_pending ORDER BY position", [], |r| {
                 r.get::<_, PendingRecord>(0)
             })?)
@@ -893,7 +893,7 @@ mod pending_records {
         owner
             .write(|sql| {
                 sql.execute("INSERT INTO parents VALUES('one','label',1)", [])?;
-                Ok(())
+                Ok::<_, CovenError>(())
             })
             .await
             .unwrap();

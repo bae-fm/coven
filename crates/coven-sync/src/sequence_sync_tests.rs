@@ -6,6 +6,7 @@ use coven_crypto::{
     },
     MemberIdentity, StoreKey, StoreKeyring,
 };
+use coven_database::DbError;
 use coven_database::{Database, DatabaseBuilder, Migration, RowIdentity, SyncedTable};
 use coven_format::admin::{MemberRole, StoreChange};
 use coven_foundation::clock::HANG_GUARD;
@@ -431,7 +432,7 @@ pub(crate) async fn pin(
 }
 pub(crate) async fn pins(db: &Database) -> Vec<(String, String)> {
     db.read(|sql| {
-        Ok(sql.query("SELECT id,title FROM pins ORDER BY id", [], |row| {
+        Ok::<_, DbError>(sql.query("SELECT id,title FROM pins ORDER BY id", [], |row| {
             Ok((row.get(0)?, row.get(1)?))
         })?)
     })
@@ -440,7 +441,7 @@ pub(crate) async fn pins(db: &Database) -> Vec<(String, String)> {
 }
 pub(crate) async fn rows(db: &Database) -> Vec<(String, String)> {
     db.read(|sql| {
-        Ok(sql.query("SELECT id,title FROM notes ORDER BY id", [], |row| {
+        Ok::<_, DbError>(sql.query("SELECT id,title FROM notes ORDER BY id", [], |row| {
             Ok((row.get(0)?, row.get(1)?))
         })?)
     })

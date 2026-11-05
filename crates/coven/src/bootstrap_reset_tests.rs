@@ -69,7 +69,7 @@ async fn uploaded(f: &Fixture, id: &'static str) {
     f.handle
         .write(move |sql| {
             sql.execute("INSERT INTO notes VALUES(?1,'uploaded')", [id])?;
-            Ok(())
+            Ok::<_, CovenError>(())
         })
         .await
         .unwrap();
@@ -78,7 +78,9 @@ async fn uploaded(f: &Fixture, id: &'static str) {
 
 async fn notes(handle: &CovenHandle) -> Vec<String> {
     handle
-        .read(|sql| Ok(sql.query("SELECT id FROM notes ORDER BY id", [], |r| r.get(0))?))
+        .read(|sql| {
+            Ok::<_, CovenError>(sql.query("SELECT id FROM notes ORDER BY id", [], |r| r.get(0))?)
+        })
         .await
         .unwrap()
 }
@@ -150,7 +152,7 @@ async fn missing_custody_resets_as_a_new_device_and_keeps_the_notice() {
     f.handle
         .write(|sql| {
             sql.execute("INSERT INTO notes VALUES('unsent','local')", [])?;
-            Ok(())
+            Ok::<_, CovenError>(())
         })
         .await
         .unwrap();
@@ -258,7 +260,7 @@ async fn a_restored_copy_behind_storage_stops_until_the_app_resets_it() {
     handle
         .write(|sql| {
             sql.execute("INSERT INTO notes VALUES('newer','uploaded')", [])?;
-            Ok(())
+            Ok::<_, CovenError>(())
         })
         .await
         .unwrap();
@@ -302,7 +304,7 @@ async fn a_restored_copy_behind_storage_stops_until_the_app_resets_it() {
             handle
                 .write(|sql| {
                     sql.execute("INSERT INTO notes VALUES('unsent','local')", [])?;
-                    Ok(())
+                    Ok::<_, CovenError>(())
                 })
                 .await
                 .unwrap();
@@ -474,7 +476,7 @@ async fn an_intact_unconnected_store_resets_to_an_empty_database_with_a_fresh_id
     f.handle
         .write(|sql| {
             sql.execute("INSERT INTO notes VALUES('unsent','local')", [])?;
-            Ok(())
+            Ok::<_, CovenError>(())
         })
         .await
         .unwrap();
@@ -626,7 +628,7 @@ async fn a_reset_replaces_a_database_a_call_found_damaged() {
     handle
         .write(move |sql| {
             sql.execute("INSERT INTO drafts VALUES(1, ?1)", [draft])?;
-            Ok(())
+            Ok::<_, CovenError>(())
         })
         .await
         .unwrap();
@@ -661,7 +663,11 @@ async fn a_reset_replaces_a_database_a_call_found_damaged() {
     assert_eq!(reset.old_device, old);
     assert_eq!(notes(&handle).await, ["kept"]);
     let drafts = handle
-        .read(|sql| Ok(sql.query("SELECT body FROM drafts", [], |r| r.get::<_, String>(0))?))
+        .read(|sql| {
+            Ok::<_, CovenError>(
+                sql.query("SELECT body FROM drafts", [], |r| r.get::<_, String>(0))?,
+            )
+        })
         .await
         .unwrap();
     assert!(drafts.is_empty());
@@ -765,7 +771,7 @@ async fn a_reset_completes_when_the_replaced_journal_is_damaged() {
         handle
             .write(move |sql| {
                 sql.execute("INSERT INTO drafts VALUES(1, ?1)", [draft])?;
-                Ok(())
+                Ok::<_, CovenError>(())
             })
             .await
             .unwrap();

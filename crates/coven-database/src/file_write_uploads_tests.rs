@@ -104,7 +104,7 @@ async fn an_original_staged_on_this_device_only_is_read_from_disk() {
     );
     let listed = db
         .read(|sql| {
-            Ok(sql.query(
+            Ok::<_, DbError>(sql.query(
                 "SELECT file,path,size,modified_seconds,modified_nanos FROM coven_user_files",
                 [],
                 |r| {
@@ -280,7 +280,7 @@ async fn coven_user_files_gives_each_modification_time_exactly() {
     }
     let listed = db
         .read(|sql| {
-            Ok(sql.query(
+            Ok::<_, DbError>(sql.query(
                 "SELECT f.id,u.size,u.modified_seconds,u.modified_nanos
                  FROM files AS f JOIN coven_user_files AS u ON u.file=f.file ORDER BY f.id",
                 [],
@@ -381,7 +381,9 @@ async fn photos(store: &TestStore) -> crate::Database {
 }
 
 async fn photo_file(db: &crate::Database) -> FileId {
-    db.read(|sql| Ok(sql.query_row("SELECT file FROM photos", [], |r| r.get(0))?)).await.unwrap()
+    db.read(|sql| Ok::<_, DbError>(sql.query_row("SELECT file FROM photos", [], |r| r.get(0))?))
+        .await
+        .unwrap()
 }
 
 async fn move_to_circle(db: &crate::Database) {
@@ -469,7 +471,9 @@ async fn a_move_of_a_file_on_another_device_only_fails() {
     );
     assert_eq!(photo_file(&b).await, file);
     let audience: String = b
-        .read(|sql| Ok(sql.query_row("SELECT audience FROM photos", [], |r| r.get(0))?))
+        .read(|sql| {
+            Ok::<_, DbError>(sql.query_row("SELECT audience FROM photos", [], |r| r.get(0))?)
+        })
         .await
         .unwrap();
     assert_eq!(audience, "store");
@@ -539,7 +543,11 @@ async fn a_removed_devices_files_stay_on_it() {
     assert!(has_record(&b, file));
     assert_eq!(b.file_ref(file).await.unwrap().place(), FilePlace::DeviceOnly { device });
     let referenced: Option<FileId> = b
-        .read(|sql| Ok(sql.query_row("SELECT file FROM files WHERE id='7'", [], |r| r.get(0))?))
+        .read(|sql| {
+            Ok::<_, DbError>(
+                sql.query_row("SELECT file FROM files WHERE id='7'", [], |r| r.get(0))?,
+            )
+        })
         .await
         .unwrap();
     assert_eq!(referenced, Some(file));

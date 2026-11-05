@@ -30,14 +30,18 @@ pub enum WriteCheckpoint {
 
 /// A live query's results as a test follows them: each in the order the
 /// query reports it, kept as the latest one seen.
-pub struct Followed<T> {
-    query: crate::LiveQuery<T>,
+pub struct Followed<T, E> {
+    query: crate::LiveQuery<T, E>,
     latest: Option<T>,
 }
 
-impl<T: Clone + PartialEq + std::fmt::Debug + Send + 'static> Followed<T> {
+impl<T, E> Followed<T, E>
+where
+    T: Clone + PartialEq + std::fmt::Debug + Send + 'static,
+    E: From<crate::DbError> + coven_foundation::task::CarriesBug + std::fmt::Debug + Send + 'static,
+{
     /// Follow `query` from its first result.
-    pub fn new(query: crate::LiveQuery<T>) -> Self {
+    pub fn new(query: crate::LiveQuery<T, E>) -> Self {
         Self { query, latest: None }
     }
 

@@ -2,6 +2,7 @@ use crate::file_write::tests::{complete_uploads, local_count, open, owned_paths,
 use crate::snapshot_write::tests::{frames, id, load_one, stream, SnapshotFrames};
 use crate::tests::{contents, TestStore};
 use crate::write::tests::{count, notes, records, sql, NOTES};
+use crate::DbError;
 use crate::{Database, Provenance, RowIdentity, SyncedTable};
 use coven_foundation::clock::HANG_GUARD;
 use coven_foundation::id_source::{CircleId, SequentialIds};
@@ -80,7 +81,7 @@ async fn store_at_40_and_circle_at_38_replay_only_the_circles_missing_parts() {
         assert_eq!(contents(&b), original);
     }
     b.inspect_writer(|db|db.batch("CREATE TABLE store_changes(value INTEGER); CREATE TRIGGER store_change AFTER UPDATE ON notes WHEN new.audience='store' BEGIN INSERT INTO store_changes VALUES(new.value); END").unwrap());
-    let mut query = b.subscribe(|db| {
+    let mut query: crate::LiveQuery<_, DbError> = b.subscribe(|db| {
         Ok(db.query("SELECT value FROM notes ORDER BY audience", [], |r| r.get::<_, i64>(0))?)
     });
     assert!(query.next().await.expect("the live query answers").unwrap().is_empty());
@@ -151,9 +152,9 @@ async fn waiting_writes_keep_their_numbers_and_merge_as_late_writes_on_every_loa
         assert_eq!(records(&a), waiting);
         assert_eq!(crate::upload::tests::selected(&a).await, keys);
         assert_eq!(
-            a.read(
-                |db| Ok(db.query_row("SELECT title FROM notes", [], |r| r.get::<_, String>(0))?)
-            )
+            a.read(|db| Ok::<_, DbError>(
+                db.query_row("SELECT title FROM notes", [], |r| r.get::<_, String>(0))?
+            ))
             .await
             .unwrap(),
             "later"
@@ -295,7 +296,9 @@ async fn loading_a_parent_snapshot_recomputes_other_audiences_without_rewriting_
         assert_eq!(history(&b), child_history);
         let visible = b
             .read(|db| {
-                Ok(db.query("SELECT parent FROM children", [], |r| r.get::<_, Option<String>>(0))?)
+                Ok::<_, DbError>(
+                    db.query("SELECT parent FROM children", [], |r| r.get::<_, Option<String>>(0))?,
+                )
             })
             .await
             .unwrap();
@@ -345,7 +348,7 @@ async fn readers_and_live_queries_observe_only_the_committed_reload() {
             db.query("SELECT title FROM notes ORDER BY id", [], |r| r.get::<_, String>(0))?;
         called.fetch_add(1, Ordering::SeqCst);
         seen.lock().unwrap().push(values.clone());
-        Ok(values)
+        Ok::<_, DbError>(values)
     });
     assert!(query.next().await.expect("the live query answers").unwrap().is_empty());
     let (started, notice) = tokio::sync::oneshot::channel();
@@ -362,9 +365,11 @@ async fn readers_and_live_queries_observe_only_the_committed_reload() {
     });
     tokio::time::timeout(HANG_GUARD, notice).await.unwrap().unwrap();
     assert_eq!(
-        b.read(|db| Ok(db.query_row("SELECT count(*) FROM notes", [], |r| r.get::<_, i64>(0))?))
-            .await
-            .unwrap(),
+        b.read(|db| Ok::<_, DbError>(
+            db.query_row("SELECT count(*) FROM notes", [], |r| r.get::<_, i64>(0))?
+        ))
+        .await
+        .unwrap(),
         0
     );
     assert!(!query.is_marked_for_rerun());
@@ -404,10 +409,11 @@ async fn older_snapshots_cross_additions_but_not_breaking_schema_changes() {
         .unwrap();
     load(&b, Audience::Store, snapshot.clone()).await;
     assert_eq!(
-        b.read(|db| Ok(db.query_row("SELECT title,color FROM notes", [], |r| Ok((
-            r.get::<_, String>(0)?,
-            r.get::<_, String>(1)?
-        )))?))
+        b.read(|db| Ok::<_, DbError>(db.query_row(
+            "SELECT title,color FROM notes",
+            [],
+            |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+        )?))
         .await
         .unwrap(),
         ("old schema".into(), "blue".into())

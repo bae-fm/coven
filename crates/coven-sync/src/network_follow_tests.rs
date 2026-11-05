@@ -1,4 +1,5 @@
 use super::*;
+use coven_database::DbError;
 use coven_database::{test_utils, DatabaseBuilder};
 use coven_foundation::network_watch::{NetworkSource, NetworkWatch, TestNetwork};
 use coven_foundation::{
@@ -11,9 +12,11 @@ use coven_foundation::{
 async fn shown(database: &Database) -> (Option<bool>, bool) {
     database
         .read(|sql| {
-            Ok(sql.query_row("SELECT usable,metered FROM coven_network", [], |r| {
-                Ok((r.get(0)?, r.get(1)?))
-            })?)
+            Ok::<_, DbError>(sql.query_row(
+                "SELECT usable,metered FROM coven_network",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )?)
         })
         .await
         .unwrap()

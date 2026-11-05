@@ -4,6 +4,7 @@
 use crate::tests::next;
 use crate::tests::TestStore;
 use crate::Database;
+use crate::DbError;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
@@ -31,7 +32,7 @@ async fn follows(
     let calls = Arc::new(AtomicUsize::new(0));
     let count = calls.clone();
     let bound = parameters.clone();
-    let mut query = db.subscribe(move |db| {
+    let mut query: crate::LiveQuery<_, DbError> = db.subscribe(move |db| {
         let run = count.fetch_add(1, Ordering::SeqCst);
         let rows = db.query(sql, rusqlite::params_from_iter(&bound), |r| {
             r.get::<_, crate::sql_value::SqlValue>(0)
@@ -48,9 +49,11 @@ async fn follows(
             let parameters = parameters.clone();
             let fresh = db
                 .read(move |db| {
-                    Ok(db.query(sql, rusqlite::params_from_iter(&parameters), |r| {
-                        r.get::<_, crate::sql_value::SqlValue>(0)
-                    })?)
+                    Ok::<_, DbError>(db.query(
+                        sql,
+                        rusqlite::params_from_iter(&parameters),
+                        |r| r.get::<_, crate::sql_value::SqlValue>(0),
+                    )?)
                 })
                 .await
                 .unwrap();

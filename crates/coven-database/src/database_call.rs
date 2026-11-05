@@ -8,7 +8,7 @@ use coven_foundation::task::{
 };
 use std::sync::{Arc, RwLock};
 
-use crate::{CovenResult, DbError};
+use crate::DbError;
 
 /// Run `run`, named `operation`, on the open store on the blocking pool. It
 /// runs to its end even when its caller stops waiting, and then its panic,
@@ -46,10 +46,11 @@ pub(crate) fn finish_blocking<R, E: From<DbError>>(
 
 /// Run `process` on the blocking pool; once its caller stops waiting, its
 /// panic, or a bug its error carries, goes to `bugs`.
-pub(crate) async fn process<F, T>(bugs: &BugSinkRef, process: F) -> CovenResult<T>
+pub(crate) async fn process<F, T, E>(bugs: &BugSinkRef, process: F) -> Result<T, E>
 where
-    F: FnOnce() -> CovenResult<T> + Send + 'static,
+    F: FnOnce() -> Result<T, E> + Send + 'static,
     T: Send + 'static,
+    E: From<DbError> + CarriesBug + Send + 'static,
 {
     finish_blocking(blocking_completing("process a read", bugs.clone(), process).await)
 }

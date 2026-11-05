@@ -56,7 +56,11 @@ async fn publication_sync_failure_releases_the_store_before_returning() {
     assert_eq!(reopened.store_id(), expected);
     let value: String = reopened
         .read(|context| {
-            Ok(context.query_row("SELECT value FROM initial_content", [], |row| row.get(0))?)
+            Ok::<_, CovenError>(context.query_row(
+                "SELECT value FROM initial_content",
+                [],
+                |row| row.get(0),
+            )?)
         })
         .await
         .unwrap();

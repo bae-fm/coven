@@ -22,7 +22,7 @@ impl Database {
     }
 
     /// The same name query, live (E4).
-    pub fn subscribe_store_name(&self) -> LiveQuery<String> {
+    pub fn subscribe_store_name(&self) -> LiveQuery<String, crate::CovenError> {
         self.subscribe(|sql| sql.store_name())
     }
 

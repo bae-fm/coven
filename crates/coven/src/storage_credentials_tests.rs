@@ -11,7 +11,7 @@ async fn assert_original_connection_uploads(f: &Fixture) {
     f.handle
         .write(|sql| {
             sql.execute("INSERT INTO notes VALUES('retained','still connected')", [])?;
-            Ok(())
+            Ok::<_, CovenError>(())
         })
         .await
         .unwrap();

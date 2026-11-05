@@ -197,9 +197,11 @@ async fn far_future_writes_wait_only_for_causes_and_advance_stamps_after_clock_r
         assert_eq!(receive(&receiver, &writes[1], streamed).await, ApplyOutcome::AlreadyApplied);
         assert_eq!(
             receiver
-                .read(|db| Ok(db
-                    .query_row("SELECT title FROM notes WHERE id='n'", [], |r| r
-                        .get::<_, String>(0))?))
+                .read(|db| Ok::<_, DbError>(db.query_row(
+                    "SELECT title FROM notes WHERE id='n'",
+                    [],
+                    |r| r.get::<_, String>(0)
+                )?))
                 .await
                 .unwrap(),
             "after rollback"
@@ -287,9 +289,11 @@ async fn far_future_snapshot_and_tail_apply_with_their_causes_and_preserve_queue
     assert_eq!(records(&receiver), queued);
     assert_eq!(
         receiver
-            .read(|db| Ok(
-                db.query("SELECT title FROM notes ORDER BY id", [], |r| r.get::<_, String>(0))?
-            ))
+            .read(|db| Ok::<_, DbError>(db.query(
+                "SELECT title FROM notes ORDER BY id",
+                [],
+                |r| r.get::<_, String>(0)
+            )?))
             .await
             .unwrap(),
         ["queued", "tail effect"]

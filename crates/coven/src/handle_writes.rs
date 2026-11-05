@@ -5,10 +5,14 @@ use crate::*;
 
 impl CovenHandle {
     /// Runs one write: the app's SQL and coven's steps, in one transaction.
-    pub async fn write<F, R>(&self, write: F) -> CovenResult<R>
+    /// It fails with the closure's own error type, which keeps a failed
+    /// rollback or byte removal beside the write's failure
+    /// (`WriteFailure`).
+    pub async fn write<F, R, E>(&self, write: F) -> Result<R, E>
     where
-        F: FnOnce(CovenWrite<'_>) -> CovenResult<R> + Send + 'static,
+        F: FnOnce(CovenWrite<'_>) -> Result<R, E> + Send + 'static,
         R: Send + 'static,
+        E: WriteFailure + Send + 'static,
     {
         let (steps, files) = (self.steps.clone(), self.files.clone());
         self.database.write_as(move |sql| write(CovenWrite::new(sql, &steps, &files))).await
@@ -23,10 +27,11 @@ impl CovenHandle {
     /// query that read a table the write's statements may change runs again,
     /// whatever rows it read; a small change that should rerun only the live
     /// queries reading its rows belongs in `write`.
-    pub async fn write_bulk<F, R>(&self, sql: F) -> CovenResult<R>
+    pub async fn write_bulk<F, R, E>(&self, sql: F) -> Result<R, E>
     where
-        F: FnOnce(BulkSqlContext<'_>) -> CovenResult<R> + Send + 'static,
+        F: FnOnce(BulkSqlContext<'_>) -> Result<R, E> + Send + 'static,
         R: Send + 'static,
+        E: WriteFailure + Send + 'static,
     {
         self.database.write_bulk(sql).await
     }
@@ -40,10 +45,11 @@ impl CovenHandle {
     /// close waits for: dropped uncommitted, or after the store closes, they
     /// are removed by the next write or open. An undeclared namespace fails
     /// with `UndeclaredNamespace`, a user one with `NamespaceKind`.
-    pub async fn stage_files<F, T>(&self, stage: F) -> CovenResult<StagedFiles<T>>
+    pub async fn stage_files<F, T, E>(&self, stage: F) -> Result<StagedFiles<T>, E>
     where
-        F: FnOnce(&mut WriteBatch<'_>) -> CovenResult<T> + Send + 'static,
+        F: FnOnce(&mut WriteBatch<'_>) -> Result<T, E> + Send + 'static,
         T: Send + 'static,
+        E: WriteFailure + Send + 'static,
     {
         self.database.stage_files(stage).await
     }
@@ -53,12 +59,13 @@ impl CovenHandle {
 impl CovenHandle {
     /// Stage app bytes, then run a write that puts them in its rows, as an
     /// app does with `stage_files` and `put_staged`, for tests.
-    pub(crate) async fn test_staged_write<F, S, T, R>(&self, stage: F, write: S) -> CovenResult<R>
+    pub(crate) async fn test_staged_write<F, S, T, R, E>(&self, stage: F, write: S) -> Result<R, E>
     where
-        F: FnOnce(&mut WriteBatch<'_>) -> CovenResult<T> + Send + 'static,
-        S: FnOnce(CovenWrite<'_>, T) -> CovenResult<R> + Send + 'static,
+        F: FnOnce(&mut WriteBatch<'_>) -> Result<T, E> + Send + 'static,
+        S: FnOnce(CovenWrite<'_>, T) -> Result<R, E> + Send + 'static,
         T: Send + 'static,
         R: Send + 'static,
+        E: WriteFailure + Send + 'static,
     {
         let staged = self.stage_files(stage).await?;
         self.write(move |sql| {

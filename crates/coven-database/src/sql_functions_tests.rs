@@ -65,7 +65,7 @@ async fn order_by_the_apps_collation_uses_its_function_on_every_connection() {
         .unwrap();
     let expected = ["cherries", "bananas", "apples"];
     let read = database
-        .read(|sql| Ok(sql.query(IN_ORDER, [], |row| row.get::<_, String>(0))?))
+        .read(|sql| Ok::<_, DbError>(sql.query(IN_ORDER, [], |row| row.get::<_, String>(0))?))
         .await
         .unwrap();
     assert_eq!(read, expected);
@@ -79,7 +79,7 @@ async fn order_by_the_apps_collation_uses_its_function_on_every_connection() {
         .await
         .unwrap();
     let read = reading
-        .read(|sql| Ok(sql.query(IN_ORDER, [], |row| row.get::<_, String>(0))?))
+        .read(|sql| Ok::<_, DbError>(sql.query(IN_ORDER, [], |row| row.get::<_, String>(0))?))
         .await
         .unwrap();
     assert_eq!(read, expected);
@@ -351,7 +351,7 @@ async fn the_apps_function_is_called_on_every_connection() {
     database.inspect_readers(|reader| assert!(titles(reader, lower).is_empty()));
     let expected = ["École", "ÉCOLE"];
     let read = database
-        .read(|sql| Ok(sql.query(MATCHING, [], |row| row.get::<_, String>(0))?))
+        .read(|sql| Ok::<_, DbError>(sql.query(MATCHING, [], |row| row.get::<_, String>(0))?))
         .await
         .unwrap();
     assert_eq!(read, expected);
@@ -361,7 +361,7 @@ async fn the_apps_function_is_called_on_every_connection() {
     let reading =
         store.builder(notes(), migrations()).sql_functions(fold()).open_read_only().await.unwrap();
     let read = reading
-        .read(|sql| Ok(sql.query(MATCHING, [], |row| row.get::<_, String>(0))?))
+        .read(|sql| Ok::<_, DbError>(sql.query(MATCHING, [], |row| row.get::<_, String>(0))?))
         .await
         .unwrap();
     assert_eq!(read, expected);
@@ -491,9 +491,11 @@ async fn the_regexp_operator_calls_the_apps_regexp() {
     sql(&database, "INSERT INTO notes VALUES ('1','apples'),('2','bananas')").await.unwrap();
     let read = database
         .read(|sql| {
-            Ok(sql.query("SELECT title FROM notes WHERE title REGEXP 'ban'", [], |row| {
-                row.get::<_, String>(0)
-            })?)
+            Ok::<_, DbError>(sql.query(
+                "SELECT title FROM notes WHERE title REGEXP 'ban'",
+                [],
+                |row| row.get::<_, String>(0),
+            )?)
         })
         .await
         .unwrap();
@@ -745,7 +747,7 @@ async fn a_deterministic_function_without_arguments_is_refused() {
     let store = TestStore::new();
     match analyzed_words(&store, Determinism::Deterministic { version: 1 }).await {
         Ok(database) => {
-            let read = database
+            let read: Result<_, DbError> = database
                 .read(|sql| Ok(sql.query(ANSWERED, [], |row| row.get::<_, String>(0))?))
                 .await;
             panic!("a constant function was registered, and the read returned {read:?}");
@@ -762,7 +764,7 @@ async fn a_deterministic_function_without_arguments_is_refused() {
     let store = TestStore::new();
     let database = analyzed_words(&store, Determinism::Nondeterministic).await.unwrap();
     let read = database
-        .read(|sql| Ok(sql.query(ANSWERED, [], |row| row.get::<_, String>(0))?))
+        .read(|sql| Ok::<_, DbError>(sql.query(ANSWERED, [], |row| row.get::<_, String>(0))?))
         .await
         .unwrap();
     assert_eq!(read, ["b"]);

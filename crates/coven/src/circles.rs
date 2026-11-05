@@ -23,10 +23,7 @@ impl<'a> Circles<'a> {
     /// Make a circle (`CovenWrite::create_circle`).
     pub async fn create(&self, name: &str) -> Result<(CircleId, OperationId), SyncError> {
         let name = name.to_owned();
-        self.handle
-            .write(move |write| Ok(write.create_circle(&name)?))
-            .await
-            .map_err(SyncError::from)
+        self.handle.write(move |write| write.create_circle(&name)).await
     }
     /// Rename a circle (`CovenWrite::rename_circle`).
     pub async fn rename(
@@ -35,17 +32,11 @@ impl<'a> Circles<'a> {
         name: &str,
     ) -> Result<Option<OperationId>, SyncError> {
         let name = name.to_owned();
-        self.handle
-            .write(move |write| Ok(write.rename_circle(circle, &name)?))
-            .await
-            .map_err(SyncError::from)
+        self.handle.write(move |write| write.rename_circle(circle, &name)).await
     }
     /// Delete a circle (`CovenWrite::delete_circle`).
     pub async fn delete(&self, circle: CircleId) -> Result<Option<OperationId>, SyncError> {
-        self.handle
-            .write(move |write| Ok(write.delete_circle(circle)?))
-            .await
-            .map_err(SyncError::from)
+        self.handle.write(move |write| write.delete_circle(circle)).await
     }
     /// Add a store member to a circle (`CovenWrite::add_circle_member`).
     pub async fn add_member(
@@ -54,10 +45,7 @@ impl<'a> Circles<'a> {
         member: &MemberId,
     ) -> Result<Option<OperationId>, SyncError> {
         let member = *member;
-        self.handle
-            .write(move |write| Ok(write.add_circle_member(circle, &member)?))
-            .await
-            .map_err(SyncError::from)
+        self.handle.write(move |write| write.add_circle_member(circle, &member)).await
     }
     /// Remove a member from a circle (`CovenWrite::remove_circle_member`).
     pub async fn remove_member(
@@ -66,17 +54,14 @@ impl<'a> Circles<'a> {
         member: &MemberId,
     ) -> Result<Option<OperationId>, SyncError> {
         let member = *member;
-        self.handle
-            .write(move |write| Ok(write.remove_circle_member(circle, &member)?))
-            .await
-            .map_err(SyncError::from)
+        self.handle.write(move |write| write.remove_circle_member(circle, &member)).await
     }
     /// The circles this member is in.
     pub async fn list(&self) -> CovenResult<Vec<Circle>> {
         self.handle.database.circles().await
     }
     /// The same circle-list query, live (E4).
-    pub fn subscribe_list(&self) -> LiveQuery<Vec<Circle>> {
+    pub fn subscribe_list(&self) -> LiveQuery<Vec<Circle>, CovenError> {
         self.handle.database.subscribe_circles()
     }
     /// A circle's members who are still in the store.
@@ -84,7 +69,10 @@ impl<'a> Circles<'a> {
         self.handle.database.circle_members(circle).await
     }
     /// The same query for this circle's members, live (E4).
-    pub fn subscribe_members(&self, circle: CircleId) -> LiveQuery<Vec<CircleMemberInfo>> {
+    pub fn subscribe_members(
+        &self,
+        circle: CircleId,
+    ) -> LiveQuery<Vec<CircleMemberInfo>, CovenError> {
         self.handle.database.subscribe_circle_members(circle)
     }
 }

@@ -7,7 +7,9 @@ use crate::*;
 /// How many `parents` rows the device holds.
 async fn parents(handle: &CovenHandle) -> i64 {
     handle
-        .read(|sql| Ok(sql.query_row("SELECT count(*) FROM parents", [], |r| r.get(0))?))
+        .read(|sql| {
+            Ok::<_, CovenError>(sql.query_row("SELECT count(*) FROM parents", [], |r| r.get(0))?)
+        })
         .await
         .unwrap()
 }
@@ -38,7 +40,7 @@ async fn a_failed_step_fails_the_write_even_when_the_app_goes_on() {
 async fn a_steps_refusal_comes_back_as_its_own_error() {
     let network = Network::new(1).await;
     let ana = &network.devices[0].handle;
-    let result = ana
+    let result: Result<_, CovenError> = ana
         .write(|sql| {
             sql.execute("INSERT INTO parents(id,label,value) VALUES('p','first',1)", [])?;
             sql.retry_pending_operation(OperationId(-1))?;
@@ -61,13 +63,14 @@ async fn listed(
 ) -> Option<(OperationKind, Option<OperationOutcome>)> {
     handle
         .read(move |sql| {
-            Ok(sql
-                .query(
+            Ok::<_, CovenError>(
+                sql.query(
                     "SELECT kind,outcome FROM coven_operations WHERE operation=?1",
                     [operation.0],
                     |r| Ok((r.get(0)?, r.get(1)?)),
                 )?
-                .pop())
+                .pop(),
+            )
         })
         .await
         .unwrap()
@@ -95,7 +98,7 @@ async fn an_admin_change_journals_beside_the_apps_row_and_lands_once_sync_runs()
                 "INSERT INTO parents(id,label,value) VALUES('rename','running',?1)",
                 [rename.0],
             )?;
-            Ok(rename)
+            Ok::<_, CovenError>(rename)
         })
         .await
         .unwrap();
@@ -117,7 +120,7 @@ async fn an_admin_change_journals_beside_the_apps_row_and_lands_once_sync_runs()
     ana.write(move |sql| {
         sql.acknowledge_operation(rename)?;
         sql.execute("UPDATE parents SET label='done' WHERE id='rename'", [])?;
-        Ok(())
+        Ok::<_, CovenError>(())
     })
     .await
     .unwrap();
@@ -132,7 +135,7 @@ async fn an_admin_change_journals_beside_the_apps_row_and_lands_once_sync_runs()
 async fn a_change_the_applied_state_refuses_fails_the_write() {
     let network = Network::new(2).await;
     let ben = &network.devices[1].handle;
-    let result = ben
+    let result: Result<_, CovenError> = ben
         .write(|sql| {
             sql.execute("INSERT INTO parents(id,label,value) VALUES('p','renaming',1)", [])?;
             sql.rename_store("Ben's")?;
@@ -145,7 +148,13 @@ async fn a_change_the_applied_state_refuses_fails_the_write() {
     ));
     assert_eq!(parents(ben).await, 0);
     let operations: i64 = ben
-        .read(|sql| Ok(sql.query_row("SELECT count(*) FROM coven_operations", [], |r| r.get(0))?))
+        .read(|sql| {
+            Ok::<_, CovenError>(sql.query_row(
+                "SELECT count(*) FROM coven_operations",
+                [],
+                |r| r.get(0),
+            )?)
+        })
         .await
         .unwrap();
     assert_eq!(operations, 0);
@@ -177,7 +186,7 @@ async fn a_rejection_met_in_a_pass_stays_listed_until_acknowledged() {
     let ana = network.reopen(&device).open(device.store, |_| ()).await.unwrap();
     let rename = rename.unwrap();
     assert_eq!(listed(&ana, rename).await, Some((OperationKind::RenameCircle, Some(rejected))));
-    ana.write(move |sql| Ok(sql.acknowledge_operation(rename)?)).await.unwrap();
+    ana.write(move |sql| Ok::<_, CovenError>(sql.acknowledge_operation(rename)?)).await.unwrap();
     assert_eq!(listed(&ana, rename).await, None);
     ana.close().await.unwrap();
     network.close().await;
@@ -247,7 +256,7 @@ async fn invites_are_made_and_ended_in_the_apps_writes_with_sync_stopped() {
             let first = sql.create_invite(first.0, first.1, first.2)?;
             let second = sql.create_invite(second.0, second.1, second.2)?;
             sql.execute("INSERT INTO parents(id,label,value) VALUES('invite','made',1)", [])?;
-            Ok((first, second))
+            Ok::<_, CovenError>((first, second))
         })
         .await
         .unwrap();
@@ -261,13 +270,13 @@ async fn invites_are_made_and_ended_in_the_apps_writes_with_sync_stopped() {
     ana.write(move |sql| {
         sql.cancel_invite(&first)?;
         sql.execute("UPDATE parents SET label='cancelled' WHERE id='invite'", [])?;
-        Ok(())
+        Ok::<_, CovenError>(())
     })
     .await
     .unwrap();
     assert_eq!(invites.next().await, listed[1..]);
     network.clock.set(listed[1].expires_at);
-    let result = ana
+    let result: Result<_, CovenError> = ana
         .write(move |sql| {
             sql.execute("INSERT INTO parents(id,label,value) VALUES('late','too late',2)", [])?;
             sql.cancel_invite(&second)?;
@@ -306,9 +315,11 @@ async fn an_operation_that_catches_up_first_fails_without_storage_and_journals_n
 async fn operations(handle: &CovenHandle) -> Vec<i64> {
     handle
         .read(|sql| {
-            Ok(sql.query("SELECT operation FROM coven_operations ORDER BY operation", [], |r| {
-                r.get(0)
-            })?)
+            Ok::<_, CovenError>(sql.query(
+                "SELECT operation FROM coven_operations ORDER BY operation",
+                [],
+                |r| r.get(0),
+            )?)
         })
         .await
         .unwrap()

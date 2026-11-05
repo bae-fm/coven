@@ -11,18 +11,20 @@ impl CovenHandle {
     }
     /// The same pre-built query, live (E4): its first value is the current
     /// state.
-    pub fn subscribe_sync_status(&self) -> LiveQuery<SyncStatus> {
+    pub fn subscribe_sync_status(&self) -> LiveQuery<SyncStatus, CovenError> {
         self.database.subscribe_sync_facts(coven_sync::SyncStatus::computed)
     }
     /// Follow the sync state with `subscribe_sync_status`, as an app does (E5).
     #[cfg(any(test, feature = "test-utils"))]
-    pub fn test_sync_status(&self) -> coven_database::test_utils::Followed<SyncStatus> {
+    pub fn test_sync_status(&self) -> coven_database::test_utils::Followed<SyncStatus, CovenError> {
         coven_database::test_utils::Followed::new(self.subscribe_sync_status())
     }
     /// Follow `coven_sync_status.last_pass` with a live query, as an app's
     /// SQL does (E4): `None` until a pass ends on this device.
     #[cfg(any(test, feature = "test-utils"))]
-    pub fn test_last_pass(&self) -> coven_database::test_utils::Followed<Option<LastPass>> {
+    pub fn test_last_pass(
+        &self,
+    ) -> coven_database::test_utils::Followed<Option<LastPass>, DbError> {
         LastPass::follow(&self.database)
     }
 }

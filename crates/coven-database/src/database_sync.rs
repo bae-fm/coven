@@ -223,7 +223,7 @@ impl Database {
     }
 
     /// The same pre-built unsent-work query, observing committed changes.
-    pub fn subscribe_unsent(&self) -> crate::LiveQuery<crate::UnsentWork> {
+    pub fn subscribe_unsent(&self) -> crate::LiveQuery<crate::UnsentWork, crate::CovenError> {
         self.subscribe(|sql| sql.unsent())
     }
 
@@ -247,7 +247,7 @@ impl Database {
     pub fn subscribe_sync_facts<P, T>(
         &self,
         compute: impl Fn(crate::SyncFacts<P>) -> CovenResult<T> + Send + Sync + 'static,
-    ) -> crate::LiveQuery<T>
+    ) -> crate::LiveQuery<T, crate::CovenError>
     where
         P: crate::PendingValue + Clone,
         T: Send + 'static,
@@ -617,7 +617,7 @@ impl Database {
     /// The same state, live (E4), for a test waiting for passes to change
     /// it, such as to apply a raise.
     #[cfg(any(test, feature = "test-utils"))]
-    pub fn subscribe_store_state(&self) -> crate::LiveQuery<crate::StoreState> {
+    pub fn subscribe_store_state(&self) -> crate::LiveQuery<crate::StoreState, crate::CovenError> {
         self.subscribe(|sql| sql.store_state())
     }
 

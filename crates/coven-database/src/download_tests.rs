@@ -29,7 +29,7 @@ async fn downloaded_writes_share_merge_and_observation_without_uploading() {
     let receiver_store = TestStore::with_ids(&ids);
     let source = open(&source_store).await;
     let receiver = open(&receiver_store).await;
-    let mut query = receiver.subscribe(|sql| {
+    let mut query: crate::LiveQuery<_, DbError> = receiver.subscribe(|sql| {
         Ok(sql.query("SELECT title FROM notes ORDER BY id", [], |r| r.get::<_, String>(0))?)
     });
     assert!(query.next().await.expect("the live query answers").unwrap().is_empty());
@@ -154,10 +154,11 @@ async fn a_newer_version_write_waits_and_applies_once_the_app_updates() {
     assert_eq!(updated.receive(write.into()).await.unwrap(), ApplyOutcome::Applied);
     assert_eq!(
         updated
-            .read(|sql| Ok(sql.query_row("SELECT title,color FROM notes", [], |r| Ok((
-                r.get::<_, String>(0)?,
-                r.get::<_, String>(1)?
-            )))?))
+            .read(|sql| Ok::<_, DbError>(sql.query_row(
+                "SELECT title,color FROM notes",
+                [],
+                |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+            )?))
             .await
             .unwrap(),
         ("title".into(), "blue".into())
@@ -194,10 +195,11 @@ async fn older_schema_inserts_use_new_defaults_without_inventing_cell_setters() 
     }
     assert_eq!(
         receiver
-            .read(|sql| Ok(sql.query_row("SELECT title,color FROM notes", [], |r| Ok((
-                r.get::<_, String>(0)?,
-                r.get::<_, String>(1)?
-            )))?))
+            .read(|sql| Ok::<_, DbError>(sql.query_row(
+                "SELECT title,color FROM notes",
+                [],
+                |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+            )?))
             .await
             .unwrap(),
         ("second".into(), "blue".into())
@@ -555,9 +557,11 @@ async fn reset_ignores_unread_uncovered_parts_of_its_audience_only() {
             if included == 2 { ApplyOutcome::AlreadyApplied } else { ApplyOutcome::Applied }
         );
         assert_eq!(
-            db.read(|sql| Ok(sql.query("SELECT title FROM notes", [], |r| r.get::<_, String>(0))?))
-                .await
-                .unwrap(),
+            db.read(|sql| Ok::<_, DbError>(
+                sql.query("SELECT title FROM notes", [], |r| r.get::<_, String>(0))?
+            ))
+            .await
+            .unwrap(),
             title.into_iter().map(String::from).collect::<Vec<_>>()
         );
         // A reset ignores the write's part without a loss.
@@ -683,9 +687,9 @@ async fn a_reset_successor_can_read_another_post_reset_write() {
     assert!(receiver.lost_values().await.unwrap().is_empty());
     assert_eq!(
         receiver
-            .read(
-                |sql| Ok(sql.query_row("SELECT title FROM notes", [], |r| r.get::<_, String>(0))?)
-            )
+            .read(|sql| Ok::<_, DbError>(
+                sql.query_row("SELECT title FROM notes", [], |r| r.get::<_, String>(0))?
+            ))
             .await
             .unwrap(),
         "second successor"

@@ -11,6 +11,7 @@
 use crate::sql_value::SqlValue;
 use crate::tests::next;
 use crate::tests::TestStore;
+use crate::DbError;
 use crate::{CovenResult, Database, LiveQuery, RowIdentity, SyncedTable};
 use coven_foundation::clock::HANG_GUARD;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -21,7 +22,7 @@ type Pending = std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>;
 
 const TRACKS: &str = "CREATE TABLE tracks(id TEXT NOT NULL PRIMARY KEY, release TEXT, title TEXT)";
 
-fn titles(db: &Database) -> LiveQuery<Vec<String>> {
+fn titles(db: &Database) -> LiveQuery<Vec<String>, crate::DbError> {
     db.subscribe(|sql| {
         Ok(sql.query("SELECT title FROM tracks WHERE release='a' ORDER BY id", [], |r| {
             r.get::<_, String>(0)
@@ -570,10 +571,10 @@ fn read(
 async fn one_shot(db: &Database, query: &Generated) -> Rows {
     let sql = query.sql.clone();
     let parameters = query.parameters.clone();
-    db.read(move |context| Ok(read(&context, &sql, &parameters)?)).await.unwrap()
+    db.read(move |context| Ok::<_, DbError>(read(&context, &sql, &parameters)?)).await.unwrap()
 }
 
-async fn next_rows(query: &mut LiveQuery<(usize, Rows)>) -> (usize, Rows) {
+async fn next_rows(query: &mut LiveQuery<(usize, Rows), crate::DbError>) -> (usize, Rows) {
     tokio::time::timeout(HANG_GUARD, query.next())
         .await
         .expect("query must answer")
@@ -621,7 +622,7 @@ async fn run_seed(seed: u64) -> usize {
     for step in 0..24 {
         let (mut sql, coven) = write(&mut rng);
         let synced: Vec<String> = db
-            .read(|context| Ok(context.query("SELECT id FROM s", [], |r| r.get(0))?))
+            .read(|context| Ok::<_, DbError>(context.query("SELECT id FROM s", [], |r| r.get(0))?))
             .await
             .unwrap();
         if !synced.is_empty() && rng.chance(20) {

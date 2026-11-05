@@ -153,7 +153,7 @@ async fn authentication_failure_rolls_back_rows_slot_losses_and_observation() {
     let sb = TestStore::with_ids(&ids);
     let a = open(&sa).await;
     let b = open(&sb).await;
-    let mut observed =
+    let mut observed: crate::LiveQuery<_, DbError> =
         b.subscribe(|sql| Ok(sql.query("SELECT title FROM notes", [], |r| r.get::<_, String>(0))?));
     assert!(observed.next().await.expect("the live query answers").unwrap().is_empty());
     sql(&a, "INSERT INTO notes VALUES('one','first',''),('two','second','')").await.unwrap();
@@ -508,7 +508,7 @@ async fn a_constraint_refused_at_commit_reports_itself_and_keeps_the_handle_usab
     let b = b_store.schema(tables(), schema).await.unwrap();
     sql(&a, "INSERT INTO notes VALUES('note','title','body')").await.unwrap();
     let write = records(&a).pop().unwrap();
-    let mut observed =
+    let mut observed: crate::LiveQuery<_, DbError> =
         b.subscribe(|sql| Ok(sql.query("SELECT title FROM notes", [], |r| r.get::<_, String>(0))?));
     assert!(observed.next().await.expect("the live query answers").unwrap().is_empty());
     for streamed in [false, true] {

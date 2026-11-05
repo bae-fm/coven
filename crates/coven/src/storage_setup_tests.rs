@@ -59,7 +59,7 @@ impl Phone {
     async fn setups(&self) -> Vec<(OperationId, Option<OperationOutcome>)> {
         self.handle
             .read(|sql| {
-                Ok(sql.query(
+                Ok::<_, CovenError>(sql.query(
                     "SELECT operation,kind,outcome FROM coven_operations ORDER BY operation",
                     [],
                     |row| {
@@ -245,7 +245,11 @@ async fn a_reconnect_cut_past_its_point_of_no_return_finishes_once_sync_starts()
     phone.handle =
         builder(&phone.app, &phone.storage).open(phone.directory.id(), |_| ()).await.unwrap();
     let first = phone.setups().await[0].0;
-    phone.handle.write(move |sql| Ok(sql.acknowledge_operation(first)?)).await.unwrap();
+    phone
+        .handle
+        .write(move |sql| Ok::<_, CovenError>(sql.acknowledge_operation(first)?))
+        .await
+        .unwrap();
 
     phone.crash_at(SetupStop::Claiming);
     phone.setup().await.unwrap_err();

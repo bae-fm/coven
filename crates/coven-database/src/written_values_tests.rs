@@ -1,5 +1,6 @@
 use crate::tests::TestStore;
 use crate::write::tests::{count, records, sql};
+use crate::DbError;
 use crate::{Database, RowIdentity, SyncedTable};
 use coven_format::value::Value;
 use coven_foundation::id_source::SequentialIds;
@@ -36,7 +37,7 @@ async fn reference(db: &Database, lost: bool) -> Option<String> {
             })
             .expect("lost reference");
     }
-    db.read(|sql| Ok(sql.query_row("SELECT parent FROM children", [], |r| r.get(0))?))
+    db.read(|sql| Ok::<_, DbError>(sql.query_row("SELECT parent FROM children", [], |r| r.get(0))?))
         .await
         .unwrap()
 }

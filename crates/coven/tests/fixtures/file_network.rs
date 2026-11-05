@@ -37,7 +37,7 @@ pub(crate) async fn attach(handle: &CovenHandle, id: &str, bytes: Vec<u8>) -> Fi
     let row = id.to_owned();
     let staged = handle
         .stage_files(move |batch| {
-            Ok(batch.put_file(
+            Ok::<_, CovenError>(batch.put_file(
                 "files",
                 FileSource::Stream(Box::pin(std::io::Cursor::new(bytes))),
                 Place::Cloud,
@@ -49,7 +49,7 @@ pub(crate) async fn attach(handle: &CovenHandle, id: &str, bytes: Vec<u8>) -> Fi
         .write(move |sql| {
             let file = sql.put_staged(staged)?;
             sql.execute("INSERT INTO files(id,file) VALUES(?1,?2)", (&row, file))?;
-            Ok(file)
+            Ok::<_, CovenError>(file)
         })
         .await
         .unwrap()
@@ -57,7 +57,7 @@ pub(crate) async fn attach(handle: &CovenHandle, id: &str, bytes: Vec<u8>) -> Fi
 
 pub(crate) async fn wait_for_empty_queue(handle: &CovenHandle) {
     // How many files the queue holds, as coven_uploads lists them.
-    let mut uploads = handle.subscribe(|sql| {
+    let mut uploads: crate::LiveQuery<_, crate::CovenError> = handle.subscribe(|sql| {
         Ok(sql.query_row("SELECT count(*) FROM coven_uploads", [], |r| r.get::<_, i64>(0))?)
     });
     tokio::time::timeout(HANG_GUARD, async {

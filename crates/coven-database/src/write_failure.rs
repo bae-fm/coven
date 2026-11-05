@@ -5,8 +5,10 @@ use crate::{CovenError, DbError};
 
 /// A caller's write error can retain both its original cause and failures that
 /// happen while rolling back or removing bytes, and says which bug it carries,
-/// for a write whose caller stopped waiting (E15). Used by facade
-/// composition; ordinary database clients use `DbError`.
+/// for a write whose caller stopped waiting (E15). A write fails with its
+/// closure's own error type, which implements this: `DbError` for ordinary
+/// database clients, sync's error for sync's writes, and an app's own type
+/// for the app's writes through the facade (E3).
 pub trait WriteFailure:
     From<DbError> + From<rusqlite::Error> + coven_foundation::task::CarriesBug
 {

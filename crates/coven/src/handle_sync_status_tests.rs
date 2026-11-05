@@ -72,7 +72,7 @@ async fn a_photo_waits_for_an_unmetered_network_and_a_cover_does_not() {
     let shown: (bool, bool, bool, bool) = ben
         .handle
         .read(move |sql| {
-            Ok(sql.query_row(
+            Ok::<_, CovenError>(sql.query_row(
                 "SELECT n.usable,n.metered,n.unmetered_only,u.metered
                  FROM coven_network AS n, coven_uploads AS u WHERE u.file=?1",
                 [photo],
@@ -105,9 +105,11 @@ async fn a_photo_waits_while_coven_cannot_tell_the_network() {
     let shown: (Option<bool>, bool) = ben
         .handle
         .read(|sql| {
-            Ok(sql.query_row("SELECT usable,metered FROM coven_network", [], |r| {
-                Ok((r.get(0)?, r.get(1)?))
-            })?)
+            Ok::<_, CovenError>(sql.query_row(
+                "SELECT usable,metered FROM coven_network",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )?)
         })
         .await
         .unwrap();
@@ -196,7 +198,7 @@ async fn a_missing_original_fails_naming_its_move_until_it_uploads() {
         .write(move |sql| {
             let track = sql.put_user_file("tracks", prepared, Place::Cloud)?;
             sql.execute("INSERT INTO photos(id,file) VALUES('track',?1)", [track])?;
-            Ok(())
+            Ok::<_, CovenError>(())
         })
         .await
         .unwrap();

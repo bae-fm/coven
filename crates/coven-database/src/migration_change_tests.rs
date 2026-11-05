@@ -508,8 +508,11 @@ fn counting(calls: &std::sync::Arc<std::sync::atomic::AtomicUsize>) -> Vec<Migra
 
 async fn note_titles(db: &Database) -> Vec<(String, String)> {
     db.read(|sql| {
-        Ok(sql
-            .query("SELECT id,title FROM notes ORDER BY id", [], |r| Ok((r.get(0)?, r.get(1)?)))?)
+        Ok::<_, DbError>(
+            sql.query("SELECT id,title FROM notes ORDER BY id", [], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })?,
+        )
     })
     .await
     .unwrap()

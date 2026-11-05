@@ -96,7 +96,7 @@ async fn a_local_trigger_follows_each_change_of_the_row() {
         .open()
         .await
         .unwrap();
-    let mut log = db.subscribe(|sql| {
+    let mut log: crate::LiveQuery<_, DbError> = db.subscribe(|sql| {
         Ok(sql.query("SELECT storage,moving FROM status_log ORDER BY id", [], |r| {
             Ok((r.get::<_, String>(0)?, r.get::<_, bool>(1)?))
         })?)
@@ -199,7 +199,9 @@ async fn a_read_only_handle_cant_read_the_sync_status() {
         );
     }
     let notes: i64 = reader
-        .read(|sql| Ok(sql.query_row("SELECT count(*) FROM notes", [], |r| r.get(0))?))
+        .read(|sql| {
+            Ok::<_, DbError>(sql.query_row("SELECT count(*) FROM notes", [], |r| r.get(0))?)
+        })
         .await
         .unwrap();
     assert_eq!(notes, 0);

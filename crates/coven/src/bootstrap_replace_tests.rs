@@ -509,9 +509,11 @@ fn with_preferences() -> Vec<Migration> {
 async fn theme(handle: &CovenHandle) -> Option<String> {
     handle
         .read(|sql| {
-            Ok(sql.query("SELECT value FROM preferences WHERE name='theme'", [], |r| {
-                r.get::<_, String>(0)
-            })?)
+            Ok::<_, CovenError>(sql.query(
+                "SELECT value FROM preferences WHERE name='theme'",
+                [],
+                |r| r.get::<_, String>(0),
+            )?)
         })
         .await
         .unwrap()
@@ -535,7 +537,7 @@ async fn a_restore_carries_device_local_rows_its_step_writes() {
     handle
         .write_bulk(|sql| {
             sql.execute("INSERT INTO preferences VALUES('theme','dark')", [])?;
-            Ok(())
+            Ok::<_, CovenError>(())
         })
         .await
         .unwrap();

@@ -133,14 +133,14 @@ impl CovenHandle {
     }
 
     /// The same name query, live (E4).
-    pub fn subscribe_store_name(&self) -> LiveQuery<String> {
+    pub fn subscribe_store_name(&self) -> LiveQuery<String, CovenError> {
         self.database.subscribe_store_name()
     }
 
     /// Renames the store, in a write of its own (`CovenWrite::rename_store`).
     pub async fn rename_store(&self, name: &str) -> Result<Option<OperationId>, SyncError> {
         let name = name.to_owned();
-        self.write(move |write| Ok(write.rename_store(&name)?)).await.map_err(SyncError::from)
+        self.write(move |write| write.rename_store(&name)).await
     }
 
     /// This installation's device id, available before setup and retained after close.
@@ -273,7 +273,7 @@ impl CovenHandle {
     }
 
     /// The same pre-built query, including a replacement completed before opening.
-    pub fn subscribe_device_reset(&self) -> LiveQuery<Option<DeviceReset>> {
+    pub fn subscribe_device_reset(&self) -> LiveQuery<Option<DeviceReset>, CovenError> {
         self.database.subscribe_device_reset()
     }
 
@@ -289,7 +289,7 @@ impl CovenHandle {
     }
 
     /// The same internal query, live (E4).
-    pub fn subscribe_members(&self) -> LiveQuery<Vec<MemberInfo>> {
+    pub fn subscribe_members(&self) -> LiveQuery<Vec<MemberInfo>, CovenError> {
         self.database.subscribe_members()
     }
 
@@ -301,21 +301,19 @@ impl CovenHandle {
         role: MemberRole,
     ) -> Result<Option<OperationId>, SyncError> {
         let member = *member;
-        self.write(move |write| Ok(write.set_member_role(&member, role)?))
-            .await
-            .map_err(SyncError::from)
+        self.write(move |write| write.set_member_role(&member, role)).await
     }
     /// Removes a member, in a write of its own (`CovenWrite::remove_member`).
     pub async fn remove_member(&self, member: &MemberId) -> Result<Option<OperationId>, SyncError> {
         let member = *member;
-        self.write(move |write| Ok(write.remove_member(&member)?)).await.map_err(SyncError::from)
+        self.write(move |write| write.remove_member(&member)).await
     }
     /// Removes a device, in a write of its own (`CovenWrite::remove_device`).
     pub async fn remove_device(
         &self,
         device: DeviceId,
     ) -> Result<(Option<OperationId>, Option<ProviderSignOut>), SyncError> {
-        self.write(move |write| Ok(write.remove_device(device)?)).await.map_err(SyncError::from)
+        self.write(move |write| write.remove_device(device)).await
     }
     /// Waits for an operation the app's writes journaled to end and returns
     /// its outcome, as `coven_operations` lists it (§11.4, E6); the outcome
@@ -326,7 +324,7 @@ impl CovenHandle {
         &self,
         operation: OperationId,
     ) -> Result<OperationOutcome, SyncError> {
-        let mut listed = self.database.subscribe(move |sql| {
+        let mut listed: LiveQuery<_, SyncError> = self.database.subscribe(move |sql| {
             Ok(sql
                 .query(
                     "SELECT outcome FROM coven_operations WHERE operation=?1",
@@ -366,9 +364,7 @@ impl CovenHandle {
         &self,
         operation: OperationId,
     ) -> Result<(), OperationError> {
-        self.write(move |write| Ok(write.retry_pending_operation(operation)?))
-            .await
-            .map_err(OperationError::from)
+        self.write(move |write| write.retry_pending_operation(operation)).await
     }
     /// Makes an invite, in a write of its own (`CovenWrite::create_invite`).
     pub async fn create_invite(
@@ -377,13 +373,11 @@ impl CovenHandle {
         access: InviteAccess,
         delivery: InviteDelivery,
     ) -> Result<(InviteId, MemberId, OperationId), SyncError> {
-        self.write(move |write| Ok(write.create_invite(target, access, delivery)?))
-            .await
-            .map_err(SyncError::from)
+        self.write(move |write| write.create_invite(target, access, delivery)).await
     }
     /// Follow `coven_invites` with a live query, as an app does (E10).
     #[cfg(any(test, feature = "test-utils"))]
-    pub fn test_invites(&self) -> coven_database::test_utils::Followed<Vec<Invite>> {
+    pub fn test_invites(&self) -> coven_database::test_utils::Followed<Vec<Invite>, CovenError> {
         Invite::follow(&self.database)
     }
     /// Approves a request, in a write of its own
@@ -393,22 +387,18 @@ impl CovenHandle {
         request: &JoinRequest,
     ) -> Result<OperationId, SyncError> {
         let request = request.clone();
-        self.write(move |write| Ok(write.approve_join_request(&request)?))
-            .await
-            .map_err(SyncError::from)
+        self.write(move |write| write.approve_join_request(&request)).await
     }
     /// Declines a request, in a write of its own
     /// (`CovenWrite::decline_join_request`).
     pub async fn decline_join_request(&self, request: &JoinRequest) -> Result<(), SyncError> {
         let request = request.clone();
-        self.write(move |write| Ok(write.decline_join_request(&request)?))
-            .await
-            .map_err(SyncError::from)
+        self.write(move |write| write.decline_join_request(&request)).await
     }
     /// Cancels an invite, in a write of its own (`CovenWrite::cancel_invite`).
     pub async fn cancel_invite(&self, invite: &InviteId) -> Result<(), SyncError> {
         let invite = *invite;
-        self.write(move |write| Ok(write.cancel_invite(&invite)?)).await.map_err(SyncError::from)
+        self.write(move |write| write.cancel_invite(&invite)).await
     }
     /// Circle calls borrowing this store's operation owner.
     pub fn circles(&self) -> Circles<'_> {
@@ -416,36 +406,41 @@ impl CovenHandle {
     }
 
     /// A read of one consistent snapshot, run when awaited. Attach `process`
-    /// to work on the result after the connection is released.
-    pub fn read<F, R>(&self, read: F) -> Read<'_, F>
+    /// to work on the result after the connection is released. It fails
+    /// with the closure's own error type, a database failure as its
+    /// `From<DbError>`.
+    pub fn read<F, R, E>(&self, read: F) -> Read<'_, F>
     where
-        F: FnOnce(SqlReadContext<'_>) -> CovenResult<R> + Send + 'static,
+        F: FnOnce(SqlReadContext<'_>) -> Result<R, E> + Send + 'static,
         R: Send + 'static,
+        E: From<DbError> + task::CarriesBug + Send + 'static,
     {
         self.database.read(read)
     }
 
     /// A live query. Coven records the tables, columns and keys the query
     /// reads, and reruns it only for writes that touch them.
-    pub fn subscribe<F, R>(&self, query: F) -> LiveQuery<R>
+    pub fn subscribe<F, R, E>(&self, query: F) -> LiveQuery<R, E>
     where
-        F: Fn(SqlReadContext<'_>) -> CovenResult<R> + Send + Sync + 'static,
+        F: Fn(SqlReadContext<'_>) -> Result<R, E> + Send + Sync + 'static,
         R: Send + 'static,
+        E: From<DbError> + task::CarriesBug + Send + 'static,
     {
         self.database.subscribe(query)
     }
 
     /// A live query whose request, such as a page or a search term, can be
     /// replaced without starting a new subscription.
-    pub fn subscribe_reconfigurable<Q, F, R>(
+    pub fn subscribe_reconfigurable<Q, F, R, E>(
         &self,
         initial_request: Q,
         query: F,
-    ) -> ReconfigurableLiveQuery<Q, R>
+    ) -> ReconfigurableLiveQuery<Q, R, E>
     where
         Q: Clone + PartialEq + Send + Sync + 'static,
-        F: Fn(&Q, SqlReadContext<'_>) -> CovenResult<R> + Send + Sync + 'static,
+        F: Fn(&Q, SqlReadContext<'_>) -> Result<R, E> + Send + Sync + 'static,
         R: Send + 'static,
+        E: From<DbError> + task::CarriesBug + Send + 'static,
     {
         self.database.subscribe_reconfigurable(initial_request, query)
     }
@@ -492,7 +487,7 @@ impl CovenHandle {
     }
 
     /// The same, as a live query.
-    pub fn subscribe_lost_values(&self) -> LiveQuery<Vec<LostValue>> {
+    pub fn subscribe_lost_values(&self) -> LiveQuery<Vec<LostValue>, CovenError> {
         self.database.subscribe_lost_values()
     }
 
@@ -625,14 +620,14 @@ impl CovenHandle {
     pub(crate) fn test_follow_retry_wait(
         &self,
         subject: coven_database::RetrySubject,
-    ) -> coven_database::test_utils::Followed<Option<coven_database::RetryWait>> {
+    ) -> coven_database::test_utils::Followed<Option<coven_database::RetryWait>, CovenError> {
         coven_database::test_utils::Followed::new(self.database.subscribe_retry_wait(subject))
     }
     /// Follow membership and audience state as passes apply it.
     #[cfg(test)]
     pub(crate) fn test_store_state(
         &self,
-    ) -> coven_database::test_utils::Followed<coven_database::StoreState> {
+    ) -> coven_database::test_utils::Followed<coven_database::StoreState, CovenError> {
         coven_database::test_utils::Followed::new(self.database.subscribe_store_state())
     }
     /// Wait until a pause is asked of the sync loop after this call.

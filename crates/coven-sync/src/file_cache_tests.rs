@@ -403,7 +403,7 @@ async fn pin_progress_reads_committed_coverage() {
 async fn downloading(f: &Fixture) -> Vec<String> {
     f.database
         .read(|sql| {
-            Ok(sql.query(
+            Ok::<_, DbError>(sql.query(
                 "SELECT f.id FROM coven_downloading AS d JOIN files AS f ON f.file=d.file",
                 [],
                 |r| r.get::<_, String>(0),
@@ -906,7 +906,7 @@ async fn a_pins_download_stops_before_its_next_request_on_a_metered_network() {
     // The first request finishes, and the download stops: the next never
     // starts.
     let first = requests(&f);
-    let mut listed = f.database.subscribe(|sql| {
+    let mut listed: coven_database::LiveQuery<_, DbError> = f.database.subscribe(|sql| {
         Ok(sql.query_row("SELECT count(*) FROM coven_downloading", [], |r| r.get::<_, i64>(0))?)
     });
     tokio::select! {

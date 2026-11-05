@@ -10,12 +10,12 @@ use coven_database::{Database, ReadOnly};
 ///
 /// ```compile_fail
 /// async fn no_writes(handle: &coven::CovenReadHandle) {
-///     handle.write(|_| Ok(())).await;
+///     handle.write(|_| Ok::<_, coven::CovenError>(())).await;
 /// }
 /// ```
 /// ```compile_fail
 /// fn no_live_query(handle: &coven::CovenReadHandle) {
-///     handle.subscribe(|_| Ok(()));
+///     handle.subscribe(|_| Ok::<_, coven::CovenError>(()));
 /// }
 /// ```
 #[derive(Clone)]
@@ -34,10 +34,11 @@ impl CovenReadHandle {
     }
 
     /// A read of one consistent snapshot, run when awaited.
-    pub fn read<F, R>(&self, read: F) -> Read<'_, F, ReadOnly>
+    pub fn read<F, R, E>(&self, read: F) -> Read<'_, F, ReadOnly>
     where
-        F: FnOnce(SqlReadContext<'_>) -> CovenResult<R> + Send + 'static,
+        F: FnOnce(SqlReadContext<'_>) -> Result<R, E> + Send + 'static,
         R: Send + 'static,
+        E: From<DbError> + task::CarriesBug + Send + 'static,
     {
         self.database.read(read)
     }

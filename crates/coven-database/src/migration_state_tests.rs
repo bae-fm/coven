@@ -424,10 +424,11 @@ mod queued {
         assert!(!current.cells().contains_key("color"));
         assert_eq!(current.cells()["length"].write, actual[1].header.position);
         assert_eq!(
-            db.read(|sql| Ok(sql.query_row("SELECT color,length FROM notes", [], |r| Ok((
-                r.get::<_, String>(0)?,
-                r.get::<_, i64>(1)?
-            )))?))
+            db.read(|sql| Ok::<_, DbError>(sql.query_row(
+                "SELECT color,length FROM notes",
+                [],
+                |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
+            )?))
             .await
             .unwrap(),
             ("blue".into(), 7)

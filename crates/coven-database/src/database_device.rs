@@ -45,7 +45,7 @@ impl Database {
     }
 
     /// The same members query, live (E4).
-    pub fn subscribe_members(&self) -> LiveQuery<Vec<crate::MemberInfo>> {
+    pub fn subscribe_members(&self) -> LiveQuery<Vec<crate::MemberInfo>, crate::CovenError> {
         let device = self.local_device().ok();
         self.subscribe(move |sql| sql.members(device.ok_or(DbError::StoreClosed)?))
     }
@@ -57,7 +57,7 @@ impl Database {
     }
 
     /// The same circle-list query, live (E4).
-    pub fn subscribe_circles(&self) -> LiveQuery<Vec<crate::Circle>> {
+    pub fn subscribe_circles(&self) -> LiveQuery<Vec<crate::Circle>, crate::CovenError> {
         let device = self.local_device().ok();
         self.subscribe(move |sql| sql.circles(device.ok_or(DbError::StoreClosed)?))
     }
@@ -76,7 +76,7 @@ impl Database {
     pub fn subscribe_circle_members(
         &self,
         circle: coven_foundation::id_source::CircleId,
-    ) -> LiveQuery<Vec<crate::CircleMemberInfo>> {
+    ) -> LiveQuery<Vec<crate::CircleMemberInfo>, crate::CovenError> {
         let device = self.local_device().ok();
         self.subscribe(move |sql| sql.circle_members(device.ok_or(DbError::StoreClosed)?, circle))
     }
@@ -87,7 +87,7 @@ impl Database {
     }
 
     /// The same pre-built query, observing committed changes (E4).
-    pub fn subscribe_device_reset(&self) -> LiveQuery<Option<DeviceReset>> {
+    pub fn subscribe_device_reset(&self) -> LiveQuery<Option<DeviceReset>, crate::CovenError> {
         self.subscribe(|sql| sql.device_reset())
     }
 }

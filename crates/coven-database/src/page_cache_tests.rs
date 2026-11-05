@@ -1,5 +1,6 @@
 use crate::tests::TestStore;
 use crate::Database;
+use crate::DbError;
 use coven_foundation::clock::HANG_GUARD;
 
 async fn blobs(store: &TestStore) -> Database {
@@ -65,7 +66,9 @@ async fn one_release_empties_every_connections_page_cache() {
     assert!(released > 5 * 200 * 4000, "released {released} bytes");
     // Reads load what they need again.
     let count: i64 = db
-        .read(|sql| Ok(sql.query_row("SELECT count(*) FROM blobs", [], |r| r.get(0))?))
+        .read(|sql| {
+            Ok::<_, DbError>(sql.query_row("SELECT count(*) FROM blobs", [], |r| r.get(0))?)
+        })
         .await
         .unwrap();
     assert_eq!(count, 200);

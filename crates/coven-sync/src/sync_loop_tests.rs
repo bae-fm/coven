@@ -346,12 +346,12 @@ fn at(group: &Group, seconds: u64) {
 }
 
 /// Follow the sync state, as an app does.
-fn follow(device: &Device) -> Followed<SyncStatus> {
+fn follow(device: &Device) -> Followed<SyncStatus, coven_database::CovenError> {
     Followed::new(device.sync.database.subscribe_sync_facts(SyncStatus::computed))
 }
 
 /// Wait for the pass that finishes `seconds` after the epoch.
-async fn synced_at(status: &mut Followed<SyncStatus>, seconds: u64) {
+async fn synced_at(status: &mut Followed<SyncStatus, coven_database::CovenError>, seconds: u64) {
     let finished = std::time::UNIX_EPOCH + std::time::Duration::from_secs(seconds);
     status.wait_for(|status| status.last_synced == Some(finished)).await;
 }

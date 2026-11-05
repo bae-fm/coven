@@ -47,10 +47,10 @@ async fn reopen_after_drop_waits_only_for_a_subscriptions_active_read() {
 }
 
 async fn next_after_equal_run<T: Clone + PartialEq + Send + std::fmt::Debug + 'static>(
-    query: &mut LiveQuery<T>,
+    query: &mut LiveQuery<T, DbError>,
     equal_finished: tokio::sync::oneshot::Receiver<()>,
     commit: impl FnOnce(),
-) -> CovenResult<T> {
+) -> Result<T, DbError> {
     let answer = next_result(query);
     tokio::pin!(answer);
     tokio::select! {
@@ -112,10 +112,7 @@ async fn relevant_columns_in_any_row_rerun_and_equal_results_are_suppressed() {
     assert_eq!(next_result(&mut query).await.unwrap(), ["b", "c"]);
     assert_eq!(calls.load(Ordering::SeqCst), 5);
     db.close().await.unwrap();
-    assert!(matches!(
-        next_result(&mut query).await,
-        Err(crate::CovenError::Database(DbError::StoreClosed))
-    ));
+    assert!(matches!(next_result(&mut query).await, Err(DbError::StoreClosed)));
 }
 
 #[tokio::test]
@@ -124,7 +121,7 @@ async fn row_count_ignores_updates_and_rollback_journals_do_not_publish() {
     let db = store.builder(notes_tables(), notes_migrations()).open().await.unwrap();
     let calls = Arc::new(AtomicUsize::new(0));
     let count = Arc::clone(&calls);
-    let mut query = db.subscribe(move |sql| {
+    let mut query: crate::LiveQuery<_, DbError> = db.subscribe(move |sql| {
         count.fetch_add(1, Ordering::SeqCst);
         Ok(sql.query_row("SELECT count(*) FROM notes", [], |r| r.get::<_, i64>(0))?)
     });
@@ -164,7 +161,7 @@ async fn commit_between_finished_read_and_wait_is_not_missed() {
     let (release, released) = mpsc::channel();
     let released = Mutex::new(released);
     let calls = AtomicUsize::new(0);
-    let query = db.subscribe(|sql| {
+    let query: crate::LiveQuery<_, DbError> = db.subscribe(|sql| {
         Ok(sql.query_row("SELECT count(*) FROM notes", [], |r| r.get::<_, i64>(0))?)
     });
     let mut query = query.process(move |value| {
@@ -216,13 +213,14 @@ async fn requests_retain_revisions_causes_and_dynamic_dependencies() {
     let store = TestStore::new();
     let db = store.builder(notes_tables(), notes_migrations()).open().await.unwrap();
     db.commit_writer(|sql| sql.batch("INSERT INTO notes VALUES ('a','same','same')").unwrap());
-    let mut query = db.subscribe_reconfigurable(false, |body, sql| {
-        Ok(sql.query_row(
-            if *body { "SELECT body FROM notes" } else { "SELECT title FROM notes" },
-            [],
-            |r| r.get::<_, String>(0),
-        )?)
-    });
+    let mut query: crate::ReconfigurableLiveQuery<_, _, DbError> =
+        db.subscribe_reconfigurable(false, |body, sql| {
+            Ok(sql.query_row(
+                if *body { "SELECT body FROM notes" } else { "SELECT title FROM notes" },
+                [],
+                |r| r.get::<_, String>(0),
+            )?)
+        });
     let requests = query.requests();
     let first = query.next().await.expect("the live query answers");
     assert_eq!(
@@ -268,13 +266,14 @@ async fn cancelled_next_keeps_its_request_and_inflight_result() {
     let entered = Mutex::new(Some(entered));
     let (release, released) = mpsc::channel();
     let released = Mutex::new(released);
-    let mut query = db.subscribe_reconfigurable(5, move |request, sql| {
-        if let Some(entered) = entered.lock().unwrap().take() {
-            entered.send(()).unwrap();
-            released.lock().unwrap().recv_timeout(HANG_GUARD).unwrap();
-        }
-        Ok(sql.query_row("SELECT ?1", [request], |r| r.get::<_, i32>(0))?)
-    });
+    let mut query: crate::ReconfigurableLiveQuery<_, _, DbError> =
+        db.subscribe_reconfigurable(5, move |request, sql| {
+            if let Some(entered) = entered.lock().unwrap().take() {
+                entered.send(()).unwrap();
+                released.lock().unwrap().recv_timeout(HANG_GUARD).unwrap();
+            }
+            Ok(sql.query_row("SELECT ?1", [request], |r| r.get::<_, i32>(0))?)
+        });
     let requests = query.requests();
     tokio::select! { _ = entry => {}, _ = query.next() => panic!("run should be blocked"), }
     assert_eq!(requests.set(6).unwrap(), LiveQueryRevision(1));
@@ -339,7 +338,7 @@ async fn joins_views_generated_columns_collations_and_local_tables_are_observed(
         )
         .unwrap()
     });
-    let mut query = db.subscribe(|sql| {
+    let mut query: crate::LiveQuery<_, DbError> = db.subscribe(|sql| {
         Ok(sql.query("SELECT value,upper_value,other FROM joined", [], |r| {
             Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, Vec<u8>>(2)?))
         })?)
@@ -349,7 +348,7 @@ async fn joins_views_generated_columns_collations_and_local_tables_are_observed(
     assert_eq!(next_result(&mut query).await.unwrap(), [("A".into(), "A".into(), vec![1])]);
     db.commit_writer(|sql| sql.batch("UPDATE keyed SET value=x'02'").unwrap());
     assert_eq!(next_result(&mut query).await.unwrap(), [("A".into(), "A".into(), vec![2])]);
-    let mut generated = db.subscribe(|sql| {
+    let mut generated: crate::LiveQuery<_, DbError> = db.subscribe(|sql| {
         Ok(sql.query_row("SELECT upper_value FROM local", [], |r| r.get::<_, String>(0))?)
     });
     assert_eq!(next_result(&mut generated).await.unwrap(), "A");
@@ -377,7 +376,7 @@ async fn triggers_and_foreign_key_cascades_publish_their_changes() {
         }
         Ok(value)
     });
-    let mut audit = db.subscribe(|sql| {
+    let mut audit: crate::LiveQuery<_, DbError> = db.subscribe(|sql| {
         Ok(sql.query("SELECT value FROM audit ORDER BY rowid", [], |r| r.get::<_, String>(0))?)
     });
     assert_eq!(next_result(&mut children).await.unwrap(), 1);
@@ -411,7 +410,7 @@ async fn virtual_table_queries_observe_updates() {
     let store = TestStore::new();
     let db =
         store.schema(vec![], "CREATE VIRTUAL TABLE search USING fts5(title,body)").await.unwrap();
-    let mut query = db.subscribe(|sql| {
+    let mut query: crate::LiveQuery<_, DbError> = db.subscribe(|sql| {
         Ok(sql.query("SELECT title FROM search WHERE search MATCH 'plan'", [], |r| {
             r.get::<_, String>(0)
         })?)
@@ -428,7 +427,8 @@ async fn virtual_table_queries_observe_updates() {
 async fn replacement_before_first_run_supersedes_the_initial_request() {
     let store = TestStore::new();
     let db = store.builder(vec![], vec![]).open().await.unwrap();
-    let mut query = db.subscribe_reconfigurable(0, |request, _| Ok(*request));
+    let mut query: crate::ReconfigurableLiveQuery<_, _, DbError> =
+        db.subscribe_reconfigurable(0, |request, _| Ok(*request));
     let requests = query.requests();
     assert_eq!(requests.set(1).unwrap(), LiveQueryRevision(1));
     assert_eq!(requests.set(2).unwrap(), LiveQueryRevision(2));
@@ -447,7 +447,7 @@ async fn shadow_changes_invalidate_every_virtual_column_without_reading_contents
     let store = TestStore::new();
     let db=store.schema(vec![],"CREATE VIRTUAL TABLE search USING fts5(title,body); INSERT INTO search(rowid,title,body) VALUES(1,'title','before')").await.unwrap();
     let runs = AtomicUsize::new(0);
-    let mut query = db.subscribe(move |sql| {
+    let mut query: crate::LiveQuery<_, DbError> = db.subscribe(move |sql| {
         let titles =
             sql.query("SELECT title FROM search WHERE rowid=1", [], |r| r.get::<_, String>(0))?;
         Ok((runs.fetch_add(1, Ordering::SeqCst), titles))
@@ -475,7 +475,7 @@ async fn shadow_changes_invalidate_every_virtual_column_without_reading_contents
 async fn hidden_rowid_inserts_are_observed_and_updates_are_refused() {
     let store = TestStore::new();
     let db=store.schema(vec![],"CREATE TABLE items(id TEXT NOT NULL PRIMARY KEY,value TEXT); INSERT INTO items(rowid,id,value) VALUES(7,'a','value')").await.unwrap();
-    let mut query = db.subscribe(|sql| {
+    let mut query: crate::LiveQuery<_, DbError> = db.subscribe(|sql| {
         Ok(sql.query("SELECT rowid FROM items ORDER BY id", [], |r| r.get::<_, i64>(0))?)
     });
     assert_eq!(next_result(&mut query).await.unwrap(), [7]);
@@ -504,9 +504,11 @@ async fn hidden_rowid_inserts_are_observed_and_updates_are_refused() {
         "{error:?}"
     );
     assert_eq!(
-        db.read(|sql| Ok(
-            sql.query_row("SELECT rowid FROM items WHERE id='a'", [], |r| r.get::<_, i64>(0))?
-        ))
+        db.read(|sql| Ok::<_, DbError>(sql.query_row(
+            "SELECT rowid FROM items WHERE id='a'",
+            [],
+            |r| r.get::<_, i64>(0)
+        )?))
         .await
         .unwrap(),
         7
@@ -524,7 +526,7 @@ async fn changing_an_integer_primary_key_through_rowid_is_observed() {
         )
         .await
         .unwrap();
-    let mut query = db
+    let mut query: crate::LiveQuery<_, DbError> = db
         .subscribe(|sql| Ok(sql.query_row("SELECT rowid FROM items", [], |r| r.get::<_, i64>(0))?));
     assert_eq!(next_result(&mut query).await.unwrap(), 1);
     db.write(|sql| {
@@ -541,7 +543,8 @@ async fn changing_an_integer_primary_key_through_rowid_is_observed() {
 async fn processing_a_completed_query_preserves_a_newer_pending_request() {
     let store = TestStore::new();
     let db = store.builder(vec![], vec![]).open().await.unwrap();
-    let mut query = db.subscribe_reconfigurable(1, |request, _| Ok(*request));
+    let mut query: crate::ReconfigurableLiveQuery<_, _, DbError> =
+        db.subscribe_reconfigurable(1, |request, _| Ok(*request));
     let requests = query.requests();
     assert_eq!(query.next().await.expect("the live query answers").result.unwrap(), 1);
     let revision = requests.set(2).unwrap();
@@ -614,7 +617,7 @@ async fn reconfigurable_processing_releases_the_connection_before_its_worker_run
     let released = Mutex::new(released);
     let mut query = db
         .subscribe_reconfigurable(7, |request, sql| {
-            Ok(sql.query_row("SELECT ?1", [request], |row| row.get::<_, i32>(0))?)
+            Ok::<_, DbError>(sql.query_row("SELECT ?1", [request], |row| row.get::<_, i32>(0))?)
         })
         .process(move |value| {
             entered.lock().unwrap().take().unwrap().send(()).unwrap();
@@ -661,7 +664,7 @@ async fn an_apps_write_keeps_a_local_fts5_index_and_its_live_query() {
         .open()
         .await
         .unwrap();
-    let mut search = db.subscribe(|sql| {
+    let mut search: crate::LiveQuery<_, DbError> = db.subscribe(|sql| {
         Ok(sql.query(
             "SELECT title FROM note_search WHERE note_search MATCH 'apples' ORDER BY title",
             [],
@@ -693,7 +696,7 @@ async fn an_apps_write_keeps_a_local_fts5_index_and_its_live_query() {
     db.close().await.unwrap();
 }
 
-fn count_notes(sql: crate::SqlReadContext<'_>) -> CovenResult<i64> {
+fn count_notes(sql: crate::SqlReadContext<'_>) -> Result<i64, DbError> {
     Ok(sql.query_row("SELECT count(*) FROM notes", [], |r| r.get(0))?)
 }
 
@@ -708,17 +711,14 @@ async fn a_closed_stores_query_reports_once_then_ends() {
     assert_eq!(query.next().await.unwrap().unwrap(), 0);
     assert_eq!(requested.next().await.unwrap().result.unwrap(), 0);
     db.close().await.unwrap();
-    assert!(matches!(
-        query.next().await,
-        Some(Err(crate::CovenError::Database(DbError::StoreClosed)))
-    ));
+    assert!(matches!(query.next().await, Some(Err(DbError::StoreClosed))));
     assert!(query.next().await.is_none());
     assert!(query.next().await.is_none());
     // A new request doesn't revive it either.
     requested.requests().set(1).unwrap();
     assert!(matches!(
         requested.next().await.map(|event| event.result),
-        Some(Err(crate::CovenError::Database(DbError::StoreClosed)))
+        Some(Err(DbError::StoreClosed))
     ));
     assert!(requested.next().await.is_none());
 }
@@ -738,10 +738,7 @@ async fn a_failed_handles_query_reports_once_then_ends() {
         })
         .await
         .is_err());
-    assert!(matches!(
-        query.next().await,
-        Some(Err(crate::CovenError::Database(DbError::RollbackFailed)))
-    ));
+    assert!(matches!(query.next().await, Some(Err(DbError::RollbackFailed))));
     assert!(query.next().await.is_none());
     db.close().await.unwrap();
 }
@@ -764,6 +761,55 @@ async fn a_panicking_query_reports_its_bug_once_then_ends() {
         matches!(
             &ended,
             Some(Err(crate::CovenError::Database(DbError::Bug(bug))))
+                if bug.message == "the notes table has 1 rows"
+        ),
+        "{ended:?}"
+    );
+    db.commit_writer(|sql| sql.batch("INSERT INTO notes VALUES ('m','second','')").unwrap());
+    assert!(query.next().await.is_none());
+    db.close().await.unwrap();
+}
+
+/// A live query whose closure refuses with the app's own error delivers
+/// that error as a result, and goes on: the next write that changes what it
+/// read runs it again.
+#[tokio::test]
+async fn a_live_query_delivers_its_closures_own_error_and_goes_on() {
+    use crate::read::tests::AppError;
+    let store = TestStore::new();
+    let db = store.builder(notes_tables(), notes_migrations()).open().await.unwrap();
+    let mut query = db.subscribe(|sql| match count_notes(sql)? {
+        1 => Err(AppError::Refused("one note")),
+        count => Ok(count),
+    });
+    assert_eq!(query.next().await.unwrap().unwrap(), 0);
+    db.commit_writer(|sql| sql.batch("INSERT INTO notes VALUES ('n','first','')").unwrap());
+    let refused = query.next().await;
+    assert!(matches!(refused, Some(Err(AppError::Refused("one note")))), "{refused:?}");
+    db.commit_writer(|sql| sql.batch("INSERT INTO notes VALUES ('m','second','')").unwrap());
+    assert_eq!(query.next().await.unwrap().unwrap(), 2);
+    db.close().await.unwrap();
+}
+
+/// A run that panics fails with the bug in the app's own error type, and
+/// the query ends after it.
+#[tokio::test]
+async fn a_panicking_query_ends_with_its_bug_in_the_apps_own_error() {
+    use crate::read::tests::AppError;
+    let store = TestStore::new();
+    let db = store.builder(notes_tables(), notes_migrations()).open().await.unwrap();
+    let mut query = db.subscribe(|sql| {
+        let count = count_notes(sql)?;
+        assert!(count == 0, "the notes table has {count} rows");
+        Ok::<_, AppError>(count)
+    });
+    assert_eq!(query.next().await.unwrap().unwrap(), 0);
+    db.commit_writer(|sql| sql.batch("INSERT INTO notes VALUES ('n','first','')").unwrap());
+    let ended = query.next().await;
+    assert!(
+        matches!(
+            &ended,
+            Some(Err(AppError::Database(DbError::Bug(bug))))
                 if bug.message == "the notes table has 1 rows"
         ),
         "{ended:?}"

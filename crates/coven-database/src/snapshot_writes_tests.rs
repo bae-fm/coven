@@ -2,6 +2,7 @@ use crate::snapshot_write::tests::{frames, id, load_one, stream};
 use crate::tests::contents;
 use crate::tests::TestStore;
 use crate::write::tests::{notes, records, sql, NOTES};
+use crate::DbError;
 use coven_foundation::id_source::SequentialIds;
 use coven_merge::Audience;
 use std::io::Cursor;
@@ -35,7 +36,7 @@ async fn waiting_changes_and_their_missing_history_commit_in_one_reload() {
         c.receive(write.clone().into()).await.unwrap();
     }
     let original = contents(&b);
-    let mut query = b.subscribe(|db| {
+    let mut query: crate::LiveQuery<_, DbError> = b.subscribe(|db| {
         Ok(db.query_row("SELECT title FROM notes", [], |r| r.get::<_, String>(0))?)
     });
     assert_eq!(query.next().await.expect("the live query answers").unwrap(), "waiting");

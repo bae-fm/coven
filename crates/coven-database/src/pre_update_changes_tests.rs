@@ -1,5 +1,6 @@
 use crate::tests::TestStore;
 use crate::write::tests::sql;
+use crate::DbError;
 use crate::{Migration, RowIdentity, SyncedTable};
 
 /// A device-local queue beside a synced table.
@@ -26,7 +27,7 @@ async fn queue(store: &TestStore) -> crate::Database {
 async fn a_local_tables_columns_still_decide_a_rerun() {
     let store = TestStore::new();
     let db = queue(&store).await;
-    let mut tracks = db.subscribe(|sql| {
+    let mut tracks: crate::LiveQuery<_, DbError> = db.subscribe(|sql| {
         Ok(sql.query("SELECT track FROM queue ORDER BY id", [], |r| r.get::<_, String>(0))?)
     });
     assert_eq!(tracks.next().await.expect("the live query answers").unwrap(), ["a", "b"]);
@@ -48,7 +49,7 @@ async fn a_local_tables_columns_still_decide_a_rerun() {
 async fn a_key_scoped_query_of_a_local_table_reruns_only_for_its_row() {
     let store = TestStore::new();
     let db = queue(&store).await;
-    let mut first = db.subscribe(|sql| {
+    let mut first: crate::LiveQuery<_, DbError> = db.subscribe(|sql| {
         Ok(sql.query("SELECT track FROM queue WHERE id = 1", [], |r| r.get::<_, String>(0))?)
     });
     assert_eq!(first.next().await.expect("the live query answers").unwrap(), ["a"]);
@@ -73,7 +74,7 @@ async fn a_write_past_the_row_bound_wakes_every_query_of_the_table() {
     let store = TestStore::new();
     let db = queue(&store).await;
     let runs = std::sync::atomic::AtomicUsize::new(0);
-    let mut first = db.subscribe(move |sql| {
+    let mut first: crate::LiveQuery<_, DbError> = db.subscribe(move |sql| {
         let run = runs.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let tracks =
             sql.query("SELECT track FROM queue WHERE track = 'a'", [], |r| r.get::<_, String>(0))?;

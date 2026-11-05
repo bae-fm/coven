@@ -116,9 +116,11 @@ async fn names_resembling_reserved_prefixes_remain_app_tables() {
         .await
         .unwrap();
         assert_eq!(
-            db.read(move |sql| Ok(
-                sql.query_row(&format!("SELECT id FROM {name}"), [], |r| r.get::<_, String>(0))?
-            ))
+            db.read(move |sql| Ok::<_, DbError>(sql.query_row(
+                &format!("SELECT id FROM {name}"),
+                [],
+                |r| r.get::<_, String>(0)
+            )?))
             .await
             .unwrap(),
             "app"
@@ -501,9 +503,9 @@ async fn rowid_policy_refreshes_for_migrations_and_reopening() {
             DbError::StatementForbidden { operation: "changing a hidden rowid" }
         ));
         assert_eq!(
-            db.read(
-                |sql| Ok(sql.query_row("SELECT rowid FROM items", [], |r| r.get::<_, i64>(0))?)
-            )
+            db.read(|sql| Ok::<_, DbError>(
+                sql.query_row("SELECT rowid FROM items", [], |r| r.get::<_, i64>(0))?
+            ))
             .await
             .unwrap(),
             7
@@ -527,7 +529,7 @@ async fn rowid_policy_allows_declared_alias_columns_without_exposing_hidden_addr
         .await
         .unwrap();
         assert_eq!(
-            db.read(move |sql| Ok(sql.query_row(
+            db.read(move |sql| Ok::<_, DbError>(sql.query_row(
                 &format!("SELECT {alias} FROM items"),
                 [],
                 |r| r.get::<_, i64>(0)
@@ -614,9 +616,11 @@ async fn shadowed_rowid_guards_follow_schema_changes_nested_triggers_and_reopeni
             DbError::StatementForbidden { operation: "changing a hidden rowid" }
         ));
         assert_eq!(
-            db.read(|sql| Ok(sql.query_row("SELECT oid,rowid,_rowid_ FROM items", [], |r| {
-                Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?, r.get::<_, i64>(2)?))
-            })?))
+            db.read(|sql| Ok::<_, DbError>(sql.query_row(
+                "SELECT oid,rowid,_rowid_ FROM items",
+                [],
+                |r| { Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?, r.get::<_, i64>(2)?)) }
+            )?))
             .await
             .unwrap(),
             (1, 2, 3)

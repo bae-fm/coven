@@ -114,7 +114,7 @@ async fn ana_writes(network: &Network, id: &'static str) {
         .handle
         .write(move |sql| {
             sql.execute("INSERT INTO parents VALUES(?1,?1,1)", [id])?;
-            Ok(())
+            Ok::<_, CovenError>(())
         })
         .await
         .unwrap();

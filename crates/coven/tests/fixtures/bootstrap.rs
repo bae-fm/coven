@@ -42,7 +42,7 @@ impl Owner {
                     "INSERT INTO notes VALUES('before',?1)",
                     coven_database::params![vec![42_u8; if snapshot { 1_100_000 } else { 37 }]],
                 )?;
-                Ok(())
+                Ok::<_, CovenError>(())
             })
             .await
             .unwrap();
@@ -56,7 +56,7 @@ impl Owner {
                     "INSERT INTO notes VALUES('after',?1)",
                     coven_database::params![vec![17_u8; 91]],
                 )?;
-                Ok(())
+                Ok::<_, CovenError>(())
             })
             .await
             .unwrap();
@@ -113,9 +113,11 @@ impl Owner {
     pub(super) async fn rows(&self) -> Vec<(String, Vec<u8>)> {
         self.handle
             .read(|sql| {
-                Ok(sql.query("SELECT id,body FROM notes ORDER BY id", [], |r| {
-                    Ok((r.get(0)?, r.get(1)?))
-                })?)
+                Ok::<_, CovenError>(sql.query(
+                    "SELECT id,body FROM notes ORDER BY id",
+                    [],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )?)
             })
             .await
             .unwrap()
@@ -372,7 +374,9 @@ impl Installation {
 
 pub(super) async fn rows(db: &Database) -> Vec<(String, Vec<u8>)> {
     db.read(|sql| {
-        Ok(sql.query("SELECT id,body FROM notes ORDER BY id", [], |r| Ok((r.get(0)?, r.get(1)?)))?)
+        Ok::<_, CovenError>(
+            sql.query("SELECT id,body FROM notes ORDER BY id", [], |r| Ok((r.get(0)?, r.get(1)?)))?,
+        )
     })
     .await
     .unwrap()

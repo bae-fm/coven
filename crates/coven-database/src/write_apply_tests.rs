@@ -22,7 +22,7 @@ async fn download_suppresses_shared_triggers_and_runs_local_triggers_with_applyi
     b.receive(records(&a).remove(0).into()).await.unwrap();
     let result = b
         .read(|sql| {
-            Ok((
+            Ok::<_, DbError>((
                 sql.query_row("SELECT n FROM totals", [], |r| r.get::<_, i64>(0))?,
                 sql.query_row("SELECT applying FROM audit", [], |r| r.get::<_, i64>(0))?,
             ))
@@ -120,7 +120,7 @@ async fn failure_after_every_remote_mutation_rolls_back_rows_metadata_and_notifi
         db.receive(initial.clone().into()).await.unwrap();
         sql(&db, "UPDATE notes SET body='local' WHERE id='a'; INSERT INTO notes VALUES('c','collision','local')").await.unwrap();
         let before = contents(&db);
-        let mut query = db.subscribe(|sql| {
+        let mut query: crate::LiveQuery<_, DbError> = db.subscribe(|sql| {
             Ok(sql.query("SELECT id,title,body FROM notes ORDER BY id", [], |r| {
                 Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?))
             })?)
@@ -174,7 +174,7 @@ async fn failure_after_every_remote_mutation_rolls_back_rows_metadata_and_notifi
                     assert!(!query.is_marked_for_rerun(), "streamed={streamed}, step={step}");
                     let rows = db
                         .read(|sql| {
-                            Ok(sql.query(
+                            Ok::<_, DbError>(sql.query(
                                 "SELECT id,title,body FROM notes ORDER BY id",
                                 [],
                                 |r| {
@@ -239,7 +239,7 @@ async fn assert_rejected_download(
     expected: coven_merge::MergeError,
 ) {
     let before = contents(database);
-    let mut query = database
+    let mut query: crate::LiveQuery<_, DbError> = database
         .subscribe(|sql| Ok(sql.query("SELECT * FROM notes", [], |r| r.get::<_, String>(0))?));
     query.next().await.expect("the live query answers").unwrap();
     for _ in 0..2 {

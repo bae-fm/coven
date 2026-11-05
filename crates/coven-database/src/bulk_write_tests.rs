@@ -44,7 +44,10 @@ async fn bulk(db: &Database, sql: String) -> Result<(), DbError> {
 }
 
 /// A live query counting `table`'s rows, and how many times it has run.
-fn counting(db: &Database, table: &'static str) -> (crate::LiveQuery<i64>, Arc<AtomicUsize>) {
+fn counting(
+    db: &Database,
+    table: &'static str,
+) -> (crate::LiveQuery<i64, crate::DbError>, Arc<AtomicUsize>) {
     let runs = Arc::new(AtomicUsize::new(0));
     let counted = Arc::clone(&runs);
     let live = db.subscribe(move |sql| {
@@ -54,7 +57,7 @@ fn counting(db: &Database, table: &'static str) -> (crate::LiveQuery<i64>, Arc<A
     (live, runs)
 }
 
-async fn answer(live: &mut crate::LiveQuery<i64>) -> i64 {
+async fn answer(live: &mut crate::LiveQuery<i64, crate::DbError>) -> i64 {
     live.next().await.expect("the live query answers").unwrap()
 }
 

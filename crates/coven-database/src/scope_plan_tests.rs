@@ -1,4 +1,5 @@
 use crate::tests::next;
+use crate::DbError;
 use crate::{tests::TestStore, CovenResult, Database};
 use coven_foundation::clock::HANG_GUARD;
 use std::sync::{
@@ -35,7 +36,7 @@ async fn each_predicate_ignores_outside_keys_and_observes_inside_keys() {
         let calls = Arc::new(AtomicUsize::new(0));
         let count = calls.clone();
         let sql = format!("SELECT id,value FROM main.items AS i WHERE {predicate} ORDER BY id");
-        let mut query = db.subscribe(move |db| {
+        let mut query: crate::LiveQuery<_, DbError> = db.subscribe(move |db| {
             count.fetch_add(1, Ordering::SeqCst);
             Ok(db.query(&sql, [], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)))?)
         });
@@ -66,7 +67,7 @@ async fn inserts_and_old_and_new_keys_can_enter_or_leave_an_empty_range() {
         .unwrap();
     let calls = Arc::new(AtomicUsize::new(0));
     let count = calls.clone();
-    let mut query = db.subscribe(move |db| {
+    let mut query: crate::LiveQuery<_, DbError> = db.subscribe(move |db| {
         count.fetch_add(1, Ordering::SeqCst);
         Ok(db.query("SELECT id,value FROM items WHERE id>=?1 AND id<?2", [2, 5], |r| {
             Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
@@ -99,7 +100,7 @@ async fn text_blob_and_composite_keys_use_bound_values_and_binary_order() {
     let db = store.schema(vec![], "CREATE TABLE items(tenant TEXT, id BLOB, value INTEGER, PRIMARY KEY(tenant,id)) WITHOUT ROWID; INSERT INTO items VALUES ('a',x'0100',0),('b',x'0100',0),('a',x'0200',0),('a',x'0300',0)").await.unwrap();
     let calls = Arc::new(AtomicUsize::new(0));
     let count = calls.clone();
-    let mut query = db.subscribe(move |db| {
+    let mut query: crate::LiveQuery<_, DbError> = db.subscribe(move |db| {
         count.fetch_add(1, Ordering::SeqCst);
         Ok(db.query("SELECT value FROM items WHERE tenant=:tenant AND id IN (:first,:second) ORDER BY id", crate::named_params!{":tenant": "a", ":first": [1_u8,0].as_slice(), ":second": [2_u8,0].as_slice()}, |r| r.get::<_, i64>(0))?)
     });
@@ -122,7 +123,7 @@ async fn separate_statements_keep_their_own_columns_and_ranges() {
     let db = store.schema(vec![], "CREATE TABLE items(id TEXT NOT NULL PRIMARY KEY, title TEXT, body TEXT); INSERT INTO items VALUES ('a','a','a'),('b','b','b')").await.unwrap();
     let calls = Arc::new(AtomicUsize::new(0));
     let count = calls.clone();
-    let mut query = db.subscribe(move |db| {
+    let mut query: crate::LiveQuery<_, DbError> = db.subscribe(move |db| {
         count.fetch_add(1, Ordering::SeqCst);
         Ok((
             db.query_row("SELECT title FROM items WHERE id='a'", [], |r| r.get::<_, String>(0))?,
@@ -164,7 +165,7 @@ async fn unsupported_statement_shapes_keep_whole_table_dependencies() {
     ] {
         let calls = Arc::new(AtomicUsize::new(0));
         let count = calls.clone();
-        let mut query = db.subscribe(move |db| {
+        let mut query: crate::LiveQuery<_, DbError> = db.subscribe(move |db| {
             let run = count.fetch_add(1, Ordering::SeqCst) + 1;
             Ok((run, db.query(sql, [], |r| r.get::<_, i64>(0))?))
         });
@@ -196,7 +197,7 @@ async fn functions_and_aggregates_keep_the_where_range() {
     ] {
         let calls = Arc::new(AtomicUsize::new(0));
         let count = calls.clone();
-        let mut query = db.subscribe(move |db| {
+        let mut query: crate::LiveQuery<_, DbError> = db.subscribe(move |db| {
             let run = count.fetch_add(1, Ordering::SeqCst) + 1;
             Ok((run, db.query(sql, [], |r| r.get::<_, i64>(0))?))
         });
@@ -250,7 +251,7 @@ async fn parameters_preserve_nul_text_and_real_precision_and_slot_identity() {
     });
     let calls = Arc::new(AtomicUsize::new(0));
     let count = calls.clone();
-    let mut text = db.subscribe(move |db| {
+    let mut text: crate::LiveQuery<_, DbError> = db.subscribe(move |db| {
         count.fetch_add(1, Ordering::SeqCst);
         Ok(db.query_row("SELECT value FROM texts WHERE id=?", ["a\0b"], |r| r.get::<_, i64>(0))?)
     });
@@ -265,7 +266,7 @@ async fn parameters_preserve_nul_text_and_real_precision_and_slot_identity() {
 
     // Expanded SQL prints this f64 as 2.0, which would exclude key 2 from `<`.
     let bound = f64::from_bits(2.0_f64.to_bits() + 1);
-    let mut numeric = db.subscribe(move |db| {
+    let mut numeric: crate::LiveQuery<_, DbError> = db.subscribe(move |db| {
         Ok(db.query("SELECT value FROM numbers WHERE id<?1 ORDER BY id", [bound], |r| {
             r.get::<_, i64>(0)
         })?)
@@ -276,7 +277,7 @@ async fn parameters_preserve_nul_text_and_real_precision_and_slot_identity() {
 
     let calls = Arc::new(AtomicUsize::new(0));
     let count = calls.clone();
-    let mut slots = db.subscribe(move |db| {
+    let mut slots: crate::LiveQuery<_, DbError> = db.subscribe(move |db| {
         count.fetch_add(1, Ordering::SeqCst);
         // The first two slots occur before WHERE; repeated ?3 and anonymous ?
         // must follow SQLite's indexing, including the higher numbered slot.
@@ -292,7 +293,7 @@ async fn parameters_preserve_nul_text_and_real_precision_and_slot_identity() {
     assert_eq!(calls.load(Ordering::SeqCst), 1);
     write(&db, "UPDATE numbers SET value=5 WHERE id=3");
     assert_eq!(next(&mut slots).await, [("xy".into(), 1), ("xy".into(), 5)]);
-    let mut holes = db.subscribe(|db| {
+    let mut holes: crate::LiveQuery<_, DbError> = db.subscribe(|db| {
         Ok(db.query_row(
             "SELECT value FROM numbers WHERE id=?3",
             crate::named_params! {"?3": 2},
@@ -315,7 +316,7 @@ async fn unsupported_key_schemas_use_whole_tables() {
     ] {
         let calls = Arc::new(AtomicUsize::new(0));
         let count = calls.clone();
-        let mut query = db.subscribe(move |db| {
+        let mut query: crate::LiveQuery<_, DbError> = db.subscribe(move |db| {
             let run = count.fetch_add(1, Ordering::SeqCst) + 1;
             Ok((run, db.query(select, [], |r| r.get::<_, i64>(0))?))
         });
@@ -336,7 +337,7 @@ async fn empty_in_lists_have_no_matching_keys() {
         .unwrap();
     let calls = Arc::new(AtomicUsize::new(0));
     let count = calls.clone();
-    let mut empty = db.subscribe(move |db| {
+    let mut empty: crate::LiveQuery<_, DbError> = db.subscribe(move |db| {
         count.fetch_add(1, Ordering::SeqCst);
         Ok(db.query("SELECT value FROM items WHERE a IN ()", [], |r| r.get::<_, i64>(0))?)
     });
@@ -380,9 +381,11 @@ async fn request_replacement_installs_its_new_range_and_preserves_causes() {
     use crate::{LiveQueryCause, LiveQueryRevision};
     let store = TestStore::new();
     let db = store.schema(vec![], "CREATE TABLE items(id INTEGER PRIMARY KEY, value TEXT); INSERT INTO items VALUES (1,'one'),(2,'two'),(3,'three')").await.unwrap();
-    let mut query = db.subscribe_reconfigurable(1, |id, db| {
-        Ok(db.query_row("SELECT value FROM items WHERE id=?", [id], |r| r.get::<_, String>(0))?)
-    });
+    let mut query: crate::ReconfigurableLiveQuery<_, _, DbError> =
+        db.subscribe_reconfigurable(1, |id, db| {
+            Ok(db
+                .query_row("SELECT value FROM items WHERE id=?", [id], |r| r.get::<_, String>(0))?)
+        });
     let requests = query.requests();
     let first = query.next().await.expect("the live query answers");
     assert_eq!(
@@ -423,7 +426,7 @@ async fn raw_text_keys_and_quoted_names_are_not_lossily_converted() {
     });
     let calls = Arc::new(AtomicUsize::new(0));
     let count = calls.clone();
-    let mut query = db.subscribe(move |db| {
+    let mut query: crate::LiveQuery<_, DbError> = db.subscribe(move |db| {
         count.fetch_add(1, Ordering::SeqCst);
         Ok(db.query_row(
             "SELECT value FROM \"a\"\"b\" AS \"x\"\"y\" WHERE \"x\"\"y\".\"i\"\"d\"=?",
@@ -509,7 +512,7 @@ async fn and_keeps_key_bounds_without_renumbering_skipped_parameters() {
     ] {
         let calls = Arc::new(AtomicUsize::new(0));
         let count = calls.clone();
-        let mut query = db.subscribe(move |db| {
+        let mut query: crate::LiveQuery<_, DbError> = db.subscribe(move |db| {
             count.fetch_add(1, Ordering::SeqCst);
             Ok(db.query(sql, rusqlite::params_from_iter(&params), |r| r.get::<_,i64>(0))?)
         });
@@ -532,7 +535,7 @@ async fn a_row_mappers_statement_leaves_the_outer_range() {
     let db = store.schema(vec![], "CREATE TABLE items(id INTEGER PRIMARY KEY, value INTEGER); CREATE TABLE notes(id INTEGER PRIMARY KEY, text TEXT); INSERT INTO items VALUES (1,0),(2,0),(9,0); INSERT INTO notes VALUES (1,'one'),(9,'nine')").await.unwrap();
     let calls = Arc::new(AtomicUsize::new(0));
     let count = calls.clone();
-    let mut query = db.subscribe(move |db| {
+    let mut query: crate::LiveQuery<_, DbError> = db.subscribe(move |db| {
         count.fetch_add(1, Ordering::SeqCst);
         Ok(db.query("SELECT id,value FROM items WHERE id IN (1,2) ORDER BY id", [], |r| {
             let id = r.get::<_, i64>(0)?;
@@ -570,7 +573,7 @@ async fn conditions_on_any_column_narrow() {
     ] {
         let calls = Arc::new(AtomicUsize::new(0));
         let count = calls.clone();
-        let mut query = db.subscribe(move |db| {
+        let mut query: crate::LiveQuery<_, DbError> = db.subscribe(move |db| {
             let run = count.fetch_add(1, Ordering::SeqCst) + 1;
             let parameters: &[&str] = if sql.contains('?') { &["a"] } else { &[] };
             Ok((
@@ -585,7 +588,7 @@ async fn conditions_on_any_column_narrow() {
         assert_eq!(next(&mut query).await.0, 2, "inside: {sql}");
     }
     // A row whose condition column moves into or out of the range counts.
-    let mut query = db.subscribe(|db| {
+    let mut query: crate::LiveQuery<_, DbError> = db.subscribe(|db| {
         Ok(db.query("SELECT id FROM tracks WHERE release='a' ORDER BY id", [], |r| {
             r.get::<_, i64>(0)
         })?)
@@ -620,7 +623,7 @@ async fn conversions_collations_and_generated_columns_keep_whole_tables() {
     ] {
         let calls = Arc::new(AtomicUsize::new(0));
         let count = calls.clone();
-        let mut query = db.subscribe(move |db| {
+        let mut query: crate::LiveQuery<_, DbError> = db.subscribe(move |db| {
             let run = count.fetch_add(1, Ordering::SeqCst) + 1;
             Ok((run, db.query(sql, [&parameter], |r| r.get::<_, String>(0))?))
         });

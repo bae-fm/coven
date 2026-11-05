@@ -171,7 +171,9 @@ async fn a_failed_kept_pin_retries_by_itself_and_survives_reopening() {
     // `coven_pending` names the file.
     let named: Vec<Option<FileId>> = f
         .database
-        .read(|sql| Ok(sql.query("SELECT file FROM coven_pending", [], |r| r.get(0))?))
+        .read(|sql| {
+            Ok::<_, DbError>(sql.query("SELECT file FROM coven_pending", [], |r| r.get(0))?)
+        })
         .await
         .unwrap();
     assert_eq!(named, [Some(file)]);

@@ -48,7 +48,7 @@ async fn a_local_trigger_follows_each_file_into_and_out_of_the_queue() {
     let store = TestStore::new();
     let db = open(&store, FOLLOWED).await;
     let owner = FileDatabase::new(db.clone());
-    let mut queued = db.subscribe(|sql| {
+    let mut queued: crate::LiveQuery<_, DbError> = db.subscribe(|sql| {
         Ok(sql.query_row("SELECT files,first FROM queued", [], |r| {
             Ok((r.get::<_, i64>(0)?, r.get::<_, Option<i64>>(1)?))
         })?)
@@ -259,7 +259,7 @@ async fn reading_the_queue_by_release_costs() {
                 let sql = sql.clone();
                 answer = db
                     .read(move |read| {
-                        Ok(read.query_row(&sql, [], |r| {
+                        Ok::<_, DbError>(read.query_row(&sql, [], |r| {
                             Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?, r.get::<_, i64>(2)?))
                         })?)
                     })

@@ -280,7 +280,7 @@ async fn a_restore_learns_the_renamed_name_from_the_floor_snapshot() {
                 "INSERT INTO notes VALUES('snapshot',?1)",
                 coven_database::params![vec![9_u8; 1_100_000]],
             )?;
-            Ok(())
+            Ok::<_, CovenError>(())
         })
         .await
         .unwrap();
@@ -428,14 +428,14 @@ async fn an_approval_journals_beside_the_apps_row_and_lands_once_sync_runs() {
                     "INSERT INTO notes VALUES('approval',?1)",
                     coven_database::params![vec![1_u8]],
                 )?;
-                Ok(binding)
+                Ok::<_, CovenError>(binding)
             })
             .await
             .unwrap();
         let listed = owner
             .handle
             .read(move |sql| {
-                Ok(sql.query_row(
+                Ok::<_, CovenError>(sql.query_row(
                     "SELECT kind,outcome FROM coven_operations WHERE operation=?1",
                     [binding.0],
                     |r| {
@@ -872,7 +872,11 @@ async fn a_removed_members_retained_grant_stays_pending_until_a_retry_revokes_it
     let mut status = owner.handle.test_sync_status();
     let finished = owner.clock.now() + std::time::Duration::from_secs(1);
     owner.clock.set(finished);
-    owner.handle.write(move |sql| Ok(sql.retry_pending_operation(operation)?)).await.unwrap();
+    owner
+        .handle
+        .write(move |sql| Ok::<_, CovenError>(sql.retry_pending_operation(operation)?))
+        .await
+        .unwrap();
     status.wait_for(|s| s.last_synced == Some(finished)).await;
     assert_eq!(retained_grant(&owner.handle.pending().await.unwrap()), None);
     // `sync` checks the pass leaves no operation pending.

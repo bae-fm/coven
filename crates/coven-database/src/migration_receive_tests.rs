@@ -1,3 +1,4 @@
+use crate::DbError;
 use crate::{
     tests::TestStore,
     write::tests::{records, sql},
@@ -56,7 +57,7 @@ fn migrations(version: u32, converters: [bool; 2], calls: &Arc<Mutex<Vec<u32>>>)
 
 async fn result(db: &Database) -> Value {
     let values: Vec<i64> = db
-        .read(|sql| Ok(sql.query("SELECT value FROM notes", [], |row| row.get(0))?))
+        .read(|sql| Ok::<_, DbError>(sql.query("SELECT value FROM notes", [], |row| row.get(0))?))
         .await
         .unwrap();
     let losses = db.lost_values().await.unwrap();
@@ -306,9 +307,11 @@ mod data_sources {
     }
     async fn names(db: &Database, column: &'static str) -> Vec<(String, String)> {
         db.read(move |sql| {
-            Ok(sql.query(&format!("SELECT id,{column} FROM notes ORDER BY id"), [], |r| {
-                Ok((r.get(0)?, r.get(1)?))
-            })?)
+            Ok::<_, DbError>(sql.query(
+                &format!("SELECT id,{column} FROM notes ORDER BY id"),
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )?)
         })
         .await
         .unwrap()

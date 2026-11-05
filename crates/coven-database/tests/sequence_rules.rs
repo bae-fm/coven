@@ -233,8 +233,11 @@ async fn greatest_claim_keeps_its_digest_and_equal_claim_uses_the_later_slot() {
 }
 async fn rows(db: &Database) -> Vec<(String, String)> {
     db.read(|sql| {
-        Ok(sql
-            .query("SELECT id,value FROM items ORDER BY id", [], |r| Ok((r.get(0)?, r.get(1)?)))?)
+        Ok::<_, DbError>(
+            sql.query("SELECT id,value FROM items ORDER BY id", [], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })?,
+        )
     })
     .await
     .unwrap()

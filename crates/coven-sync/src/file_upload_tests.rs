@@ -698,9 +698,11 @@ mod differential {
             let named = f
                 .database
                 .read(move |sql| {
-                    Ok(sql.query("SELECT file FROM files WHERE id=?1", [id], |r| {
-                        r.get::<_, Option<FileId>>(0)
-                    })?)
+                    Ok::<_, coven_database::DbError>(sql.query(
+                        "SELECT file FROM files WHERE id=?1",
+                        [id],
+                        |r| r.get::<_, Option<FileId>>(0),
+                    )?)
                 })
                 .await
                 .unwrap()

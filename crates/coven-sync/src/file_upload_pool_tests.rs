@@ -435,7 +435,7 @@ async fn the_worker_s_attempts_are_what_sending_reads() {
     for (n, id) in ["a", "b", "c"].into_iter().enumerate() {
         files.push(f.attach("files", id, photo(n as u8)).await.id().to_string());
     }
-    let mut counts = f.database.subscribe(|sql| {
+    let mut counts: coven_database::LiveQuery<_, DbError> = f.database.subscribe(|sql| {
         let sending =
             sql.query("SELECT s.file FROM coven_sending AS s ORDER BY s.file", [], |row| {
                 row.get::<_, String>(0)

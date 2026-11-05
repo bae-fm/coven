@@ -142,7 +142,7 @@ async fn an_applied_rename_reaches_every_following_local_key() {
                     "{action} {table}"
                 );
             }
-            Ok(())
+            Ok::<_, DbError>(())
         })
         .await
         .unwrap();
@@ -161,7 +161,7 @@ async fn set_default_between_local_tables_remains_sqlites_action() {
             sql.query_row("SELECT p FROM child", [], |r| r.get::<_, String>(0))?,
             "fallback"
         );
-        Ok(())
+        Ok::<_, DbError>(())
     })
     .await
     .unwrap();
@@ -173,7 +173,7 @@ async fn set_default_between_local_tables_remains_sqlites_action() {
             sql.query_row("SELECT p FROM child", [], |r| r.get::<_, String>(0))?,
             "fallback"
         );
-        Ok(())
+        Ok::<_, DbError>(())
     })
     .await
     .unwrap();
@@ -201,7 +201,7 @@ async fn local_children_can_reference_unique_nonprimary_values() {
                 sql.query_row("SELECT parent FROM children", [], |r| r.get::<_, String>(0))?,
                 "new"
             );
-            Ok(())
+            Ok::<_, DbError>(())
         })
         .await
         .unwrap();

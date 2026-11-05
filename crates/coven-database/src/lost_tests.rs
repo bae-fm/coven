@@ -173,7 +173,11 @@ mod dropped_schema {
         let a = stores[0].builder(tables(&["notes"]), migrations(4)).open().await.unwrap();
         assert_frozen(&a, &before).await;
         let content: String = a
-            .read(|sql| Ok(sql.query_row("SELECT content FROM notes", [], |r| r.get(0))?))
+            .read(|sql| {
+                Ok::<_, crate::DbError>(
+                    sql.query_row("SELECT content FROM notes", [], |r| r.get(0))?,
+                )
+            })
             .await
             .unwrap();
         assert_eq!(content, "new body");

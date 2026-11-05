@@ -3,6 +3,7 @@
 
 use crate::tests::next;
 use crate::tests::TestStore;
+use crate::DbError;
 use crate::{Database, LiveQuery};
 use coven_foundation::clock::HANG_GUARD;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -30,7 +31,7 @@ async fn follows(
     let calls = Arc::new(AtomicUsize::new(0));
     let count = calls.clone();
     let bound = parameters.clone();
-    let mut query = db.subscribe(move |db| {
+    let mut query: crate::LiveQuery<_, DbError> = db.subscribe(move |db| {
         let run = count.fetch_add(1, Ordering::SeqCst);
         let rows = db.query(sql, rusqlite::params_from_iter(&bound), |r| {
             r.get::<_, crate::sql_value::SqlValue>(0)
@@ -47,9 +48,11 @@ async fn follows(
             let parameters = parameters.clone();
             let fresh = db
                 .read(move |db| {
-                    Ok(db.query(sql, rusqlite::params_from_iter(&parameters), |r| {
-                        r.get::<_, crate::sql_value::SqlValue>(0)
-                    })?)
+                    Ok::<_, DbError>(db.query(
+                        sql,
+                        rusqlite::params_from_iter(&parameters),
+                        |r| r.get::<_, crate::sql_value::SqlValue>(0),
+                    )?)
                 })
                 .await
                 .unwrap();
@@ -217,7 +220,11 @@ const CREDITED: u32 = 1_000;
 
 /// The median of `runs` writes that each credit another artist on
 /// [`CREDITED`] tracks. None of them may mark `live` to run again.
-async fn credit(db: &Database, runs: u32, live: Option<&LiveQuery<Vec<String>>>) -> Duration {
+async fn credit(
+    db: &Database,
+    runs: u32,
+    live: Option<&LiveQuery<Vec<String>, crate::DbError>>,
+) -> Duration {
     let mut times = Vec::new();
     for run in 0..runs {
         let started = std::time::Instant::now();
@@ -266,7 +273,7 @@ async fn joined_runs_against_one_shot_reads() {
             .read(|sql| {
                 let started = std::time::Instant::now();
                 sql.query(SQL, [5000], |r| r.get::<_, String>(0))?;
-                Ok(started.elapsed())
+                Ok::<_, DbError>(started.elapsed())
             })
             .await
             .unwrap();
@@ -464,7 +471,8 @@ async fn a_run_reads_nothing_for_its_joins_and_a_write_looks_its_values_up() {
     let db = store.schema(vec![], MUSIC).await.unwrap();
     let counter = crate::test_utils::WorkCounter::new();
     db.test_track_work(counter.clone()).await.unwrap();
-    let mut query = db.subscribe(|sql| Ok(sql.query(ALBUM_X, [], |r| r.get::<_, String>(0))?));
+    let mut query: crate::LiveQuery<_, DbError> =
+        db.subscribe(|sql| Ok(sql.query(ALBUM_X, [], |r| r.get::<_, String>(0))?));
     assert_eq!(next(&mut query).await, ["one", "two", "three"]);
     let work = counter.take();
     let plain = rusqlite::Connection::open_with_flags(
@@ -495,12 +503,15 @@ async fn a_live_run_runs_the_steps_of_a_one_shot_read() {
     let db = store.schema(vec![], MUSIC).await.unwrap();
     let counter = crate::test_utils::WorkCounter::new();
     db.test_track_work(counter.clone()).await.unwrap();
-    let titles =
-        db.read(|sql| Ok(sql.query(ALBUM_X, [], |r| r.get::<_, String>(0))?)).await.unwrap();
+    let titles = db
+        .read(|sql| Ok::<_, DbError>(sql.query(ALBUM_X, [], |r| r.get::<_, String>(0))?))
+        .await
+        .unwrap();
     assert_eq!(titles, ["one", "two", "three"]);
     let once = counter.take();
     assert!(once.app_read_steps > 0);
-    let mut query = db.subscribe(|sql| Ok(sql.query(ALBUM_X, [], |r| r.get::<_, String>(0))?));
+    let mut query: crate::LiveQuery<_, DbError> =
+        db.subscribe(|sql| Ok(sql.query(ALBUM_X, [], |r| r.get::<_, String>(0))?));
     assert_eq!(next(&mut query).await, titles);
     let live = counter.take();
     assert_eq!(live, once);
@@ -548,7 +559,7 @@ async fn a_lookup_past_its_steps_counts_as_a_match() {
     write(&db, "WITH RECURSIVE n(i) AS (VALUES(11) UNION ALL SELECT i+1 FROM n WHERE i<5000) INSERT INTO parents SELECT i, 'p' || i, 'one' FROM n");
     follows(&db, SQL, vec![], &[("UPDATE children SET note = '..' WHERE id = 1", true)]).await;
     let note: String = db
-        .read(|sql| Ok(sql.query_row("SELECT note FROM children", [], |r| r.get(0))?))
+        .read(|sql| Ok::<_, DbError>(sql.query_row("SELECT note FROM children", [], |r| r.get(0))?))
         .await
         .unwrap();
     assert_eq!(note, "..");
@@ -587,14 +598,14 @@ async fn writes_during_a_run_are_judged_against_its_snapshot() {
     ] {
         let store = TestStore::new();
         let db = store.schema(vec![], MUSIC).await.unwrap();
-        let mut waiting =
+        let mut waiting: crate::LiveQuery<_, DbError> =
             db.subscribe(|sql| Ok(sql.query(ALBUM_X, [], |r| r.get::<_, String>(0))?));
         assert_eq!(next(&mut waiting).await, ["one", "two", "three"]);
         let (entered, entry) = tokio::sync::oneshot::channel();
         let entered = std::sync::Mutex::new(Some(entered));
         let (release, released) = std::sync::mpsc::channel::<()>();
         let released = std::sync::Mutex::new(released);
-        let mut query = db.subscribe(move |sql| {
+        let mut query: crate::LiveQuery<_, DbError> = db.subscribe(move |sql| {
             let rows = sql.query(ALBUM_X, [], |r| r.get::<_, String>(0))?;
             if let Some(entered) = entered.lock().unwrap().take() {
                 entered.send(()).unwrap();
@@ -661,7 +672,7 @@ async fn a_run_between_a_writes_judging_and_its_commit_follows_the_write() {
     db.close().await.unwrap();
 }
 
-async fn next_event<Q, T>(query: &mut crate::ReconfigurableLiveQuery<Q, T>) -> T
+async fn next_event<Q, T>(query: &mut crate::ReconfigurableLiveQuery<Q, T, crate::DbError>) -> T
 where
     Q: Clone + PartialEq + Send + Sync + 'static,
     T: Clone + PartialEq + Send + 'static,
@@ -680,7 +691,8 @@ where
 async fn a_streamed_transaction_looks_up_joined_rows() {
     let store = TestStore::new();
     let db = store.schema(vec![], MUSIC).await.unwrap();
-    let mut query = db.subscribe(|sql| Ok(sql.query(ALBUM_X, [], |r| r.get::<_, String>(0))?));
+    let mut query: crate::LiveQuery<_, DbError> =
+        db.subscribe(|sql| Ok(sql.query(ALBUM_X, [], |r| r.get::<_, String>(0))?));
     assert_eq!(next(&mut query).await, ["one", "two", "three"]);
     let stream = |sql: &'static str| {
         db.inspect_writer(|writer| writer.stream_transaction(|writer| writer.batch(sql)).unwrap())
@@ -735,7 +747,8 @@ async fn a_loaded_snapshot_reruns_a_joined_query_by_the_rows_it_changes() {
     let (laptop, phone) = (TestStore::with_ids(&ids), TestStore::with_ids(&ids));
     let ana = laptop.schema(tables(), SYNCED_MUSIC).await.unwrap();
     let ben = phone.schema(tables(), SYNCED_MUSIC).await.unwrap();
-    let mut query = ben.subscribe(|sql| Ok(sql.query(ALBUM_X, [], |r| r.get::<_, String>(0))?));
+    let mut query: crate::LiveQuery<_, DbError> =
+        ben.subscribe(|sql| Ok(sql.query(ALBUM_X, [], |r| r.get::<_, String>(0))?));
     assert!(next(&mut query).await.is_empty());
     for (change, reruns) in [
         ("INSERT INTO releases VALUES ('r1','x',2001),('r2','y',2002); INSERT INTO tracks VALUES ('t1','r1',1,'one'),('t2','r2',1,'two'),('t3','r2',2,'three')", true),
@@ -758,7 +771,7 @@ async fn a_loaded_snapshot_reruns_a_joined_query_by_the_rows_it_changes() {
         if reruns {
             let rows = next(&mut query).await;
             let fresh = ben
-                .read(|sql| Ok(sql.query(ALBUM_X, [], |r| r.get::<_, String>(0))?))
+                .read(|sql| Ok::<_, DbError>(sql.query(ALBUM_X, [], |r| r.get::<_, String>(0))?))
                 .await
                 .unwrap();
             assert_eq!(rows, fresh, "after {change}");
@@ -766,8 +779,10 @@ async fn a_loaded_snapshot_reruns_a_joined_query_by_the_rows_it_changes() {
             assert!(!query.is_marked_for_rerun(), "after {change}");
         }
     }
-    let rows =
-        ben.read(|sql| Ok(sql.query(ALBUM_X, [], |r| r.get::<_, String>(0))?)).await.unwrap();
+    let rows = ben
+        .read(|sql| Ok::<_, DbError>(sql.query(ALBUM_X, [], |r| r.get::<_, String>(0))?))
+        .await
+        .unwrap();
     assert_eq!(rows, ["uno", "deux", "trois"]);
     drop(query);
     for db in [ana, ben] {

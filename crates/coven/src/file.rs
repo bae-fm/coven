@@ -24,14 +24,17 @@ impl CovenHandle {
     /// Prepares a pin and commits it in a write of its own.
     pub async fn pin(&self, files: &[FileRef]) -> Result<(), FileReadError> {
         let prepared = self.prepare_pin(files).await?;
-        self.write(move |write| Ok(write.pin(prepared)?)).await.map_err(FileReadError::from)
+        self.write(move |write| write.pin(prepared)).await.map_err(FileReadError::from)
     }
     /// Verified cache coverage for these fixed references, in one snapshot.
     pub async fn pin_progress(&self, files: Vec<FileRef>) -> CovenResult<PinProgress> {
         self.database.pin_progress(files).await
     }
     /// The same pre-built cache query with the same fixed references.
-    pub fn subscribe_pin_progress(&self, files: Vec<FileRef>) -> LiveQuery<PinProgress> {
+    pub fn subscribe_pin_progress(
+        &self,
+        files: Vec<FileRef>,
+    ) -> LiveQuery<PinProgress, CovenError> {
         self.database.subscribe_pin_progress(files)
     }
     /// Release pins and apply cache budgets, in a write of its own
@@ -48,7 +51,10 @@ impl CovenHandle {
     }
     /// The same internal query, live. To watch different files, drop this
     /// query and subscribe with the new files.
-    pub fn subscribe_files_pinned(&self, files: &[FileId]) -> LiveQuery<Vec<Option<bool>>> {
+    pub fn subscribe_files_pinned(
+        &self,
+        files: &[FileId],
+    ) -> LiveQuery<Vec<Option<bool>>, CovenError> {
         self.database.subscribe_files_pinned(files.to_vec())
     }
     /// Remove cache copies only, in a write of its own

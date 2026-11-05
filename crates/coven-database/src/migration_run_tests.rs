@@ -1,3 +1,4 @@
+use crate::DbError;
 use crate::{
     tests::TestStore,
     write::tests::{count, notes, records, sql, NOTES},
@@ -429,7 +430,7 @@ async fn renames_keep_reference_generations_and_a_migration_insert_uses_the_merg
     });
     sql(&db, "DELETE FROM roots").await.unwrap();
     assert_eq!(
-        db.read(|db| Ok(db.query_row(
+        db.read(|db| Ok::<_, DbError>(db.query_row(
             "SELECT count(*) FROM children WHERE root IS NULL",
             [],
             |r| r.get::<_, i64>(0)

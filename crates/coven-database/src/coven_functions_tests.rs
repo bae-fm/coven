@@ -50,9 +50,11 @@ async fn coven_key_without_arguments_is_refused_where_the_planner_reads_statisti
     // With its arguments, the same comparison reads the index.
     let found = db
         .read(|sql| {
-            Ok(sql.query("SELECT count(*) FROM keys WHERE key = coven_key(7,'a')", [], |r| {
-                r.get::<_, i64>(0)
-            })?)
+            Ok::<_, DbError>(sql.query(
+                "SELECT count(*) FROM keys WHERE key = coven_key(7,'a')",
+                [],
+                |r| r.get::<_, i64>(0),
+            )?)
         })
         .await
         .unwrap();
@@ -70,8 +72,10 @@ async fn coven_key_takes_every_width_an_sql_call_can_pass() {
     for width in [1, 2, widest] {
         let arguments = vec!["1"; width].join(",");
         let statement = format!("SELECT coven_key({arguments})");
-        let key: Vec<u8> =
-            db.read(move |sql| Ok(sql.query_row(&statement, [], |r| r.get(0))?)).await.unwrap();
+        let key: Vec<u8> = db
+            .read(move |sql| Ok::<_, DbError>(sql.query_row(&statement, [], |r| r.get(0))?))
+            .await
+            .unwrap();
         let expected =
             coven_format::key::encode_key(&vec![coven_format::value::Value::Integer(1); width])
                 .unwrap();
@@ -80,7 +84,9 @@ async fn coven_key_takes_every_width_an_sql_call_can_pass() {
     let arguments = vec!["1"; widest + 1].join(",");
     let statement = format!("SELECT coven_key({arguments})");
     assert!(db
-        .read(move |sql| Ok(sql.query_row(&statement, [], |r| r.get::<_, Vec<u8>>(0))?))
+        .read(move |sql| Ok::<_, DbError>(
+            sql.query_row(&statement, [], |r| r.get::<_, Vec<u8>>(0))?
+        ))
         .await
         .is_err());
     db.close().await.unwrap();
@@ -117,20 +123,24 @@ async fn coven_path_text_shows_what_path_text_shows() {
     for path in paths {
         let bytes = path_bytes(&path);
         let shown: String = db
-            .read(
-                move |sql| Ok(sql.query_row("SELECT coven_path_text(?1)", [bytes], |r| r.get(0))?),
-            )
+            .read(move |sql| {
+                Ok::<_, DbError>(
+                    sql.query_row("SELECT coven_path_text(?1)", [bytes], |r| r.get(0))?,
+                )
+            })
             .await
             .unwrap();
         assert_eq!(shown, path_text(&path), "{path:?}");
     }
     let null: Option<String> = db
-        .read(|sql| Ok(sql.query_row("SELECT coven_path_text(NULL)", [], |r| r.get(0))?))
+        .read(|sql| {
+            Ok::<_, DbError>(sql.query_row("SELECT coven_path_text(NULL)", [], |r| r.get(0))?)
+        })
         .await
         .unwrap();
     assert_eq!(null, None);
     assert!(db
-        .read(|sql| Ok(
+        .read(|sql| Ok::<_, DbError>(
             sql.query_row("SELECT coven_path_text('text')", [], |r| r.get::<_, String>(0))?
         ))
         .await
@@ -174,7 +184,7 @@ async fn a_time_reads_as_whole_seconds_and_nanoseconds_in_sql_and_rust() {
         let bytes = encode_time(time);
         let read = db
             .read(move |sql| {
-                Ok(sql.query_row(
+                Ok::<_, DbError>(sql.query_row(
                     "SELECT _coven_unix_seconds(?1),_coven_unix_nanos(?1)",
                     [&bytes],
                     |r| Ok((r.get::<_, i64>(0)?, r.get::<_, u32>(1)?)),

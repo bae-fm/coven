@@ -37,7 +37,7 @@ async fn reopening_waits_after_the_last_handle_drops_or_close_starts() {
         let mut read = Box::pin(clone.read(move |_| {
             entered.send(()).unwrap();
             released.recv_timeout(HANG_GUARD).unwrap();
-            Ok(())
+            Ok::<_, CovenError>(())
         }));
         tokio::select! {
             result = &mut read => panic!("held read returned: {result:?}"),
@@ -62,7 +62,7 @@ async fn reopening_waits_after_the_last_handle_drops_or_close_starts() {
         .await;
         release.send(()).unwrap();
         let reopened = reopen.await.unwrap();
-        reopened.read(|_| Ok(())).await.unwrap();
+        reopened.read(|_| Ok::<_, CovenError>(())).await.unwrap();
         reopened.close().await.unwrap();
     }
 }
@@ -182,9 +182,11 @@ async fn creation_unlocks_once_and_sql_callback_failures_roll_back() {
     assert!(matches!(failed, Err(CovenError::Key(KeyError::PassphraseAuthentication))));
     assert_eq!(
         handle
-            .read(
-                |sql| Ok(sql.query_row("SELECT count(*) FROM notes", [], |r| r.get::<_, i64>(0))?)
-            )
+            .read(|sql| Ok::<_, CovenError>(sql.query_row(
+                "SELECT count(*) FROM notes",
+                [],
+                |r| r.get::<_, i64>(0)
+            )?))
             .await
             .unwrap(),
         0
@@ -196,7 +198,7 @@ async fn creation_unlocks_once_and_sql_callback_failures_roll_back() {
         .open_read_only(directory.id())
         .await
         .unwrap();
-    reader.read(|_| Ok(())).await.unwrap();
+    reader.read(|_| Ok::<_, CovenError>(())).await.unwrap();
     reader.close().await.unwrap();
     assert!(matches!(
         reader.read(|_| Ok(())).await,
@@ -710,7 +712,7 @@ mod store_rename {
     use super::*;
     use crate::tests::{landed, Network};
 
-    async fn name(query: &mut LiveQuery<String>) -> String {
+    async fn name(query: &mut LiveQuery<String, crate::CovenError>) -> String {
         tokio::time::timeout(HANG_GUARD, query.next())
             .await
             .unwrap()
@@ -935,7 +937,7 @@ async fn a_circle_reset_keeps_only_the_snapshot_and_writes_that_read_it() {
     async fn held(handle: &CovenHandle) -> (Vec<String>, i64) {
         handle
             .read(|sql| {
-                Ok((
+                Ok::<_, CovenError>((
                     sql.query("SELECT id FROM circle_notes ORDER BY id", [], |r| r.get(0))?,
                     sql.query_row("SELECT count(*) FROM parents", [], |r| r.get(0))?,
                 ))
@@ -950,7 +952,7 @@ async fn a_circle_reset_keeps_only_the_snapshot_and_writes_that_read_it() {
     crate::tests::landed(ana, ana.circles().add_member(gifts, &ben_id).await.unwrap()).await;
     ana.write(|sql| {
         sql.execute("INSERT INTO parents(id,label,value) VALUES('store','kept',1)", [])?;
-        Ok(())
+        Ok::<_, CovenError>(())
     })
     .await
     .unwrap();
@@ -961,7 +963,7 @@ async fn a_circle_reset_keeps_only_the_snapshot_and_writes_that_read_it() {
                 "INSERT INTO circle_notes(id,value,audience) VALUES(?1,1,?2)",
                 (id, gifts.to_string()),
             )?;
-            Ok(())
+            Ok::<_, CovenError>(())
         }
     };
     ben.write(note("00000000-0000-7000-8000-000000000100")).await.unwrap();
