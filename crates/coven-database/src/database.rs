@@ -116,6 +116,10 @@ struct DatabaseInner {
     /// error, so a test can show that a failed end leaves every wait.
     #[cfg(any(test, feature = "test-utils"))]
     retry_end_failures: std::sync::atomic::AtomicUsize,
+    /// Fail this many coming `applied_slot` reads with a disk error, so a
+    /// test can show what a failed read leaves in memory.
+    #[cfg(any(test, feature = "test-utils"))]
+    applied_slot_failures: std::sync::atomic::AtomicUsize,
 }
 
 // The lock outlives every connection, including when the last handle is dropped.

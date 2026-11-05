@@ -139,14 +139,14 @@ impl SequenceSync {
         loop {
             let ReloadWork::Loading { target, selections: chosen } = &work else {
                 // Cancellation may have followed the database commit before its
-                // in-memory installation. Reconstruct committed state on resume.
-                session.history = History::restore(
-                    &self.database.original_slots().await?,
-                    self.store(),
-                    ring,
-                    member,
-                )?;
-                session.through = self.database.applied_slot().await?;
+                // in-memory installation. Reconstruct committed state on resume:
+                // both reads first, so a failed or cancelled one leaves the
+                // session's history and applied prefix as they were.
+                let originals = self.database.original_slots().await?;
+                let through = self.database.applied_slot().await?;
+                let history = History::restore(&originals, self.store(), ring, member)?;
+                session.history = history;
+                session.through = through;
                 session.floor = None;
                 self.database.finish_operation(record.id).await?;
                 return Ok(());

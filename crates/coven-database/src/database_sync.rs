@@ -618,7 +618,36 @@ impl Database {
 
     /// The store prefix whose complete effects have committed.
     pub async fn applied_slot(&self) -> Result<u64, DbError> {
-        self.call(|inner| inner.access.with_committed(crate::sequence::applied)).await
+        self.call(|inner| {
+            #[cfg(any(test, feature = "test-utils"))]
+            if inner
+                .applied_slot_failures
+                .fetch_update(
+                    std::sync::atomic::Ordering::SeqCst,
+                    std::sync::atomic::Ordering::SeqCst,
+                    |left| left.checked_sub(1),
+                )
+                .is_ok()
+            {
+                return Err(DbError::Sqlite(rusqlite::Error::SqliteFailure(
+                    rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_IOERR),
+                    Some("injected applied slot read failure".into()),
+                )));
+            }
+            inner.access.with_committed(crate::sequence::applied)
+        })
+        .await
+    }
+
+    /// Fail the next `count` `applied_slot` reads with a disk error.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub async fn fail_applied_slots(&self, count: usize) {
+        self.call(move |inner| {
+            inner.applied_slot_failures.store(count, std::sync::atomic::Ordering::SeqCst);
+            Ok::<_, DbError>(())
+        })
+        .await
+        .expect("an open store arms its applied slot failures");
     }
 
     /// Claim numbers and complete-slot digests recorded by every consumed slot, including refusals.

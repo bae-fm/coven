@@ -654,3 +654,54 @@ async fn sequence_reload_selection_matches_lean() {
         assert_eq!(actual, crate::tests::run_lean("COVEN_SEQUENCE_LEAN", &input));
     }
 }
+
+/// A reload whose install committed before its history was installed in
+/// memory rebuilds both from the committed state when it resumes. A read
+/// that fails partway leaves the session's history and applied prefix as
+/// they were, one pair, and the retried reload installs both.
+#[tokio::test]
+async fn a_resumed_install_that_fails_partway_leaves_history_and_prefix_together() {
+    let group = Group::new();
+    let ana = group.device(1).await;
+    let ben = group.device(2).await;
+    group.create(&ana).await;
+    group.admit(&ana, &ben).await;
+    insert(ana.database(), "a", "applied by Ben").await;
+    ana.sync.pass().await.unwrap();
+    ben.sync.pass().await.unwrap();
+    let applied = ben.database().applied_slot().await.unwrap();
+    // The install committed; the session never heard of it.
+    {
+        let mut session = ben.sync.session.lock().await;
+        session.history = crate::history::History::default();
+        session.through = 0;
+    }
+    ben.database()
+        .start_operation(coven_database::NewOperation {
+            kind: coven_database::operation_kind::SEQUENCE_RELOAD.to_owned(),
+            data: serde_json::to_vec(&ReloadWork::Installed).unwrap(),
+            started_by: "reload_from_snapshot".to_owned(),
+            pauses_writes: false,
+        })
+        .await
+        .unwrap();
+    ben.database().fail_applied_slots(1).await;
+    assert!(ben.sync.reload_from_snapshot().await.is_err());
+    {
+        let session = ben.sync.session.lock().await;
+        assert_eq!(session.through, 0);
+        assert!(
+            session.history.state.devices.is_empty(),
+            "the history moved to the committed state while the prefix stayed behind"
+        );
+    }
+    ben.sync.reload_from_snapshot().await.unwrap();
+    {
+        let session = ben.sync.session.lock().await;
+        assert_eq!(session.through, applied);
+        assert!(ben.sync.registered(&session));
+    }
+    assert!(ben.database().operations().await.unwrap().is_empty());
+    ana.database().close().await.unwrap();
+    ben.database().close().await.unwrap();
+}

@@ -332,6 +332,8 @@ impl DatabaseBuilder {
                 flush_hook: Mutex::new(None),
                 #[cfg(any(test, feature = "test-utils"))]
                 retry_end_failures: std::sync::atomic::AtomicUsize::new(0),
+                #[cfg(any(test, feature = "test-utils"))]
+                applied_slot_failures: std::sync::atomic::AtomicUsize::new(0),
             }))),
         })
     }
