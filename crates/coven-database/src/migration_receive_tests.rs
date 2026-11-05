@@ -187,6 +187,64 @@ async fn additions_after_a_breaking_raise_preserve_admission_and_conversion() {
     compare(None).await;
 }
 
+/// An old-schema write converts on receipt after a raise whether its author
+/// had tried to send it or not, and the author's queued record keeps its
+/// bytes and sealing keys (§18.6).
+#[tokio::test]
+async fn an_attempted_write_arriving_after_the_raise_converts_like_an_untried_one() {
+    let mut outcomes = Vec::new();
+    for attempted in [false, true] {
+        let ids = SequentialIds::new();
+        let source_store = TestStore::with_ids(&ids);
+        let receiver_store = TestStore::with_ids(&ids);
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let source = source_store
+            .builder(tables(), migrations(1, [true, false], &calls))
+            .open()
+            .await
+            .unwrap();
+        sql(&source, "INSERT INTO notes(id,value) VALUES('ben',5)").await.unwrap();
+        if attempted {
+            crate::upload::tests::attempt(&source, 9).await.unwrap();
+        }
+        let queued = |db: &Database| {
+            db.inspect_writer(|db| {
+                db.query(
+                    "SELECT u.record,k.sealing_keys FROM _coven_uploads u
+                     LEFT JOIN _coven_upload_keys k USING(device,number) ORDER BY u.number",
+                    [],
+                    |r| Ok((r.get::<_, Vec<u8>>(0)?, r.get::<_, Option<Vec<u8>>>(1)?)),
+                )
+                .unwrap()
+            })
+        };
+        let originals = records(&source);
+        let queue = queued(&source);
+        assert_eq!(queue[0].1.is_some(), attempted);
+
+        let receiver = receiver_store
+            .builder(tables(), migrations(3, [true, false], &calls))
+            .open()
+            .await
+            .unwrap();
+        receiver.install_schema_fixture(Audience::Store, 3, 0).await.unwrap();
+        for write in &originals {
+            assert_eq!(
+                receiver.receive(write.clone().into()).await.unwrap(),
+                ApplyOutcome::Applied
+            );
+        }
+        outcomes.push((result(&receiver).await, calls.lock().unwrap().clone()));
+        assert_eq!(records(&source), originals);
+        assert_eq!(queued(&source), queue);
+        receiver.close().await.unwrap();
+        source.close().await.unwrap();
+    }
+    assert_eq!(outcomes[0], outcomes[1]);
+    assert_eq!(outcomes[0].0, json!({"applied": true, "values": [52], "loss": null}));
+    assert_eq!(outcomes[0].1, [2]);
+}
+
 #[tokio::test]
 #[ignore = "requires COVEN_CONVERSION_LEAN; scripts/check.sh builds conversionRunner"]
 async fn conversion_chain_matches_lean() {
