@@ -1,8 +1,9 @@
 # IO and observable work
 
 The Lean package in [io](io/) covers retained byte ranges, file downloads,
-retry waits, rechecks of refusals, the answer to the person's retry, the sync
-state, work notifications and the removed-device file scan. The
+retry waits, what a refusal judges and when it is rechecked, the answer to the
+person's retry, the sync state, work notifications and the removed-device file
+scan. The
 [sequence model](sequence.md) covers ordered reads, blocked devices, claims,
 operations, snapshot selection, the floor and history deletion.
 
@@ -280,6 +281,26 @@ and cleanups that complete or fail, and compares the recorded candidates with
 The premise matters: a successful listing is complete. That is a provider
 assumption. A listing discovers candidates; retained references and snapshots
 still determine whether any file can be deleted.
+
+## What a refusal judges
+
+[Reread.lean](io/CovenIO/Reread.lean) models what a refused slot's verdict is
+about (§19.1). A device judges the bytes a read returned, and nothing checks a
+slot's transfer. The model takes faults on the way to change bytes each its own
+way, so two different reads agree only when both returned the stored bytes. A
+check that refuses the kept copy reads the slot again, and the slot is refused
+only when the two reads agree; otherwise the read failed, the copy is dropped,
+and a later pass judges a later read. So a refusal is a verdict on the stored
+bytes (`refusal_judges_stored`): a slot whose stored bytes pass is never refused
+(`honest_never_refused`), and a kept copy that is the stored bytes applies
+(`stored_copy_applies`). Refusing on one read, one fault refuses an honest slot,
+and every later check of the kept copy refuses it again
+(`one_read_refuses_honest`); with the second read the next pass applies it
+(`fault_recovers`).
+`pending::tests::a_slot_garbled_on_the_way_is_read_again_not_refused` garbles
+a read on its way: the pass fails as a read and the next applies the slot, and a
+garbled copy an earlier build refused is applied after another build rechecks
+it.
 
 ## Rechecking a refusal
 

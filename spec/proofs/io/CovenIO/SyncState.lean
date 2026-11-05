@@ -114,7 +114,8 @@ theorem rank_injective (a b : State) (h : a.rank = b.rank) : a = b := by
 /-- A provider failure, as `StorageFailure` names it. -/
 inductive Failure
   | providerUnavailable | accessNotRegistered | accessNotGranted
-  | dropboxAppFolderNotShareable | catchUpRequired | network | authentication
+  | dropboxAppFolderNotShareable | catchUpRequired | network | corrupted
+  | authentication
   | permissionDenied | notFound | alreadyExists | conflict | containerNotFound
   | regionMismatch | storeExists | clockSkew | ownLocationRequired | quotaExceeded
   | rateLimited | invalidConfiguration | refused | protocol | invalidPath
@@ -138,7 +139,7 @@ def Failure.named : Failure → Option State
 
 /-- The failures that clear by themselves (`Clears::ByItself`). -/
 def Failure.byItself : Failure → Bool
-  | .network | .conflict | .rateLimited | .notFound | .sessionExpired
+  | .network | .corrupted | .conflict | .rateLimited | .notFound | .sessionExpired
   | .catchUpRequired | .quotaExceeded | .file | .bug => true
   | _ => false
 

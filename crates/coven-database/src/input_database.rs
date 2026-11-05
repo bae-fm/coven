@@ -128,6 +128,16 @@ impl InputDatabase {
             writer.transaction(|db| crate::claim_preparation::prepare(db, attempt, consume))
         })
     }
+    /// Drop an object's received bytes and its receipt, so its next read
+    /// fetches it again.
+    fn discard(&self, id: i64) -> Result<(), DbError> {
+        self.write(|db| {
+            db.internal_execute("DELETE FROM _coven_input_ranges WHERE object=?1", [id])?;
+            db.internal_execute("UPDATE _coven_input_objects SET received=0 WHERE id=?1", [id])?;
+            Ok(())
+        })
+    }
+
     fn release(&self, ids: Vec<i64>) -> Result<(), DbError> {
         let pending = self.read(|db| {
             let mut pending = Vec::new();
@@ -566,6 +576,13 @@ impl RetainedInput {
     pub async fn release_ranges(self) -> Result<(), DbError> {
         let id = self.id;
         self.database.call(move |inner| inner.inputs.release(vec![id])).await
+    }
+
+    /// Drop the received bytes, which a second read of the object
+    /// contradicted, so the next read fetches the object again (§19.1).
+    pub async fn discard(self) -> Result<(), DbError> {
+        let id = self.id;
+        self.database.call(move |inner| inner.inputs.discard(id)).await
     }
 
     /// The checked file evidence of these bytes, if any (§17.10).

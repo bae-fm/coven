@@ -22,6 +22,9 @@ pub enum StorageFailure {
     /// No route to the provider, a timeout, an interrupted response, or a
     /// server failure the provider answered with (§6.7).
     Network,
+    /// Two complete reads of one immutable object returned different bytes:
+    /// a fault on the way to the device changed one of them (§19.1).
+    Corrupted,
     /// Credentials were refused or must be refreshed.
     Authentication,
     /// The account is signed in but cannot perform this operation.

@@ -159,3 +159,8 @@ import CovenIO
 #print axioms CovenIO.Recheck.waiting_loses_nothing
 #print axioms CovenIO.Recheck.recheck_once
 #print axioms CovenIO.Recheck.shared_key_strands
+#print axioms CovenIO.Reread.refusal_judges_stored
+#print axioms CovenIO.Reread.honest_never_refused
+#print axioms CovenIO.Reread.stored_copy_applies
+#print axioms CovenIO.Reread.one_read_refuses_honest
+#print axioms CovenIO.Reread.fault_recovers

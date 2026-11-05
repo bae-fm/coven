@@ -9,6 +9,7 @@ import CovenIO.SyncState
 import CovenIO.Wakes
 import CovenIO.Downloads
 import CovenIO.Recheck
+import CovenIO.Reread
 import CovenIO.Keep
 import CovenIO.Retired
 import CovenIO.Examples

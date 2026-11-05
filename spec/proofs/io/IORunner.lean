@@ -293,6 +293,7 @@ private def failures : List (String × CovenIO.SyncState.Failure) := [
     ("dropboxAppFolderNotShareable", .dropboxAppFolderNotShareable),
     ("catchUpRequired", .catchUpRequired),
     ("network", .network),
+    ("corrupted", .corrupted),
     ("authentication", .authentication),
     ("permissionDenied", .permissionDenied),
     ("notFound", .notFound),

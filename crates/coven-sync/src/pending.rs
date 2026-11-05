@@ -366,6 +366,7 @@ pub(crate) fn automatic_storage(failure: StorageFailure) -> bool {
     matches!(
         failure,
         StorageFailure::Network
+            | StorageFailure::Corrupted
             | StorageFailure::Conflict
             | StorageFailure::RateLimited
             | StorageFailure::NotFound
@@ -379,8 +380,8 @@ pub(crate) fn automatic_storage(failure: StorageFailure) -> bool {
 pub(crate) fn storage_clears(failure: StorageFailure) -> Clears {
     use StorageFailure::*;
     match failure {
-        Network | Conflict | RateLimited | NotFound | SessionExpired | CatchUpRequired
-        | QuotaExceeded | File | Bug => Clears::ByItself,
+        Network | Corrupted | Conflict | RateLimited | NotFound | SessionExpired
+        | CatchUpRequired | QuotaExceeded | File | Bug => Clears::ByItself,
         Authentication
         | PermissionDenied
         | AccessNotRegistered { .. }

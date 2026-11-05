@@ -141,8 +141,17 @@ impl MemoryProvider {
             metadata.read_length(path, range)?;
             let start = range.map_or(0, ByteRange::start) as usize;
             let end = range.map_or(metadata.size, ByteRange::end) as usize;
+            let mut bytes = object.bytes.clone();
+            if let Some(left) = state.faults.garbled_reads.get_mut(path).filter(|left| **left > 0) {
+                if range.is_none() && !bytes.is_empty() {
+                    let mut garbled = bytes.to_vec();
+                    garbled[0] ^= *left;
+                    bytes = garbled.into();
+                    *left -= 1;
+                }
+            }
             let body = MemoryBody {
-                bytes: object.bytes.clone(),
+                bytes,
                 start,
                 end,
                 position: start,

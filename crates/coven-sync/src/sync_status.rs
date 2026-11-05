@@ -211,6 +211,7 @@ fn storage_names(failure: StorageFailure) -> Option<Named> {
         | DropboxAppFolderNotShareable
         | CatchUpRequired
         | Network
+        | Corrupted
         | NotFound
         | AlreadyExists
         | Conflict

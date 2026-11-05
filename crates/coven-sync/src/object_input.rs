@@ -203,6 +203,30 @@ impl ObjectInput {
         Ok(bytes)
     }
 
+    /// Whether a fresh read of the object returns exactly the bytes this
+    /// input holds whole. It keeps none of the fresh bytes (§19.1).
+    pub(crate) async fn same_as_stored(&self, storage: &dyn Storage) -> Result<bool, SyncError> {
+        let mut fresh = self.stream_from(storage, 0).await?;
+        let mut kept = self.local_bytes().await?;
+        let (mut read, mut held) = (vec![0; 64 * 1024], vec![0; 64 * 1024]);
+        loop {
+            let length = fresh.read(&mut read).await?;
+            if length == 0 {
+                return Ok(true);
+            }
+            std::io::Read::read_exact(&mut kept, &mut held[..length]).map_err(kept_failure)?;
+            if read[..length] != held[..length] {
+                return Ok(false);
+            }
+        }
+    }
+
+    /// Drop the bytes this input holds, which a second read contradicted, so
+    /// the next read fetches the object again (§19.1).
+    pub(crate) async fn discard(self) -> Result<(), SyncError> {
+        Ok(self.retained.discard().await?)
+    }
+
     /// One stream of the object's bytes from `start` to its end, of the same
     /// observation, for a reader that keeps none of them (§16.2).
     pub(crate) async fn stream_from<'a>(
@@ -239,6 +263,15 @@ impl ObjectInput {
         }
         self.retained.keep_range(range.start(), read.bytes.clone()).await?;
         Ok(read.bytes)
+    }
+}
+
+/// The kept bytes failed to read back: the database's own failure, or
+/// damage to bytes the input says it holds whole.
+fn kept_failure(error: std::io::Error) -> SyncError {
+    match error.into_inner().map(|cause| cause.downcast::<coven_database::DbError>()) {
+        Some(Ok(failure)) => (*failure).into(),
+        _ => coven_database::DbError::DamagedDatabase.into(),
     }
 }
 

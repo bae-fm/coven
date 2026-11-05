@@ -36,6 +36,10 @@ pub struct Faults {
     pub read_chunk_size: usize,
     /// Failures after metadata, independently of request-start failures.
     pub body_failures: BTreeMap<ObjectPath, BodyFailure>,
+    /// Change the first byte of this many whole responses at these paths,
+    /// each response differently, as faults on the way to the device
+    /// would; the stored object stays as it was.
+    pub garbled_reads: BTreeMap<ObjectPath, u8>,
     /// The classification of injected failures.
     pub failure: StorageFailure,
     /// Injected failures arrive as a provider response with this HTTP
@@ -90,6 +94,7 @@ impl Faults {
             list_failures: BTreeMap::new(),
             read_chunk_size: 64 * 1024,
             body_failures: BTreeMap::new(),
+            garbled_reads: BTreeMap::new(),
             failure: StorageFailure::Network,
             response: None,
             retry_after: None,

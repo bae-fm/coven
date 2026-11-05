@@ -296,3 +296,77 @@ async fn a_refused_slot_is_rechecked_once_by_another_build() {
         device.database().close().await.unwrap();
     }
 }
+
+/// A refusal judges the stored slot, not one read of it, and nothing checks
+/// a slot's transfer: a slot whose bytes a fault changed on the way is read
+/// again, and the second read decides (§19.1). Ben's first read of slot `n`
+/// arrives garbled: his pass fails as a read, records no refusal, and his
+/// next pass applies the slot. Cal kept a garbled read of slot `n` that an
+/// earlier build refused: the build he installs next rechecks it, finds the
+/// stored slot differs from his copy, and applies the slot on the pass after.
+#[tokio::test]
+async fn a_slot_garbled_on_the_way_is_read_again_not_refused() {
+    use crate::sequence_sync::tests::{insert, Group};
+    use coven_storage::test_utils::Faults;
+    let group = Group::new();
+    let ana = group.device(1).await;
+    let ben = group.device(2).await;
+    let cal = group.device(3).await;
+    group.create(&ana).await;
+    group.admit(&ana, &ben).await;
+    group.admit(&ana, &cal).await;
+    ben.sync.pass().await.unwrap();
+    cal.sync.pass().await.unwrap();
+    insert(ana.database(), "a", "garbled").await;
+    ana.sync.pass().await.unwrap();
+    let n = ana.database().applied_slot().await.unwrap();
+    let path = ObjectPath::slot(group.store, n.try_into().unwrap());
+    let subject = PendingSubject::Slot(Slot(n));
+    let garble = |reads| {
+        let (storage, garbled) = (group.storage.clone(), [(path.clone(), reads)].into());
+        async move { storage.set_faults(Faults { garbled_reads: garbled, ..Faults::none() }).await }
+    };
+    let refused = |device: &crate::sequence_sync::tests::Device| {
+        let (subject, database) = (subject.clone(), device.database().clone());
+        async move {
+            database.pending::<PendingRecord>().await.unwrap().into_iter().any(|record| {
+                record.subject == subject && matches!(record.reason, PendingReason::Refused(_))
+            })
+        }
+    };
+
+    garble(1).await;
+    let failed = ben.sync.pass().await.unwrap_err();
+    assert!(
+        matches!(&failed, crate::SyncError::Storage(error)
+        if error.failure() == StorageFailure::Corrupted),
+        "{failed:?}"
+    );
+    assert!(!refused(&ben).await);
+    assert_eq!(ben.database().applied_slot().await.unwrap(), n - 1);
+    ben.sync.pass().await.unwrap();
+    assert_eq!(ben.database().applied_slot().await.unwrap(), n);
+
+    // Cal's copy is a garbled read, refused by an earlier build.
+    garble(1).await;
+    cal.sync.read_slot(&path).await.unwrap().unwrap();
+    let wrong = crate::Refusal::Decryption { cause: None };
+    cal.database()
+        .record_pending(PendingRecord::new(subject.clone(), PendingReason::Refused(wrong)))
+        .await
+        .unwrap();
+    cal.database().set_pending_build(!PendingRecord::BUILD).await.unwrap();
+    let cal = group.reopen(cal).await;
+    let failed = cal.sync.pass().await.unwrap_err();
+    assert!(
+        matches!(&failed, crate::SyncError::Storage(error)
+        if error.failure() == StorageFailure::Corrupted),
+        "{failed:?}"
+    );
+    assert!(!refused(&cal).await);
+    cal.sync.pass().await.unwrap();
+    assert_eq!(cal.database().applied_slot().await.unwrap(), n);
+    for device in [&ana, &ben, &cal] {
+        device.database().close().await.unwrap();
+    }
+}

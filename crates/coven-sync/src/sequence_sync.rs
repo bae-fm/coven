@@ -293,6 +293,29 @@ impl SequenceSync {
             .map(Some)
     }
 
+    /// A refusal judges the stored slot, not one read of it, and nothing
+    /// checks a slot's transfer: the slot whose kept copy a check refused is
+    /// read again, and the refusal stands only when the second read returns
+    /// the same bytes (§19.1). Different bytes mean a fault on the way
+    /// changed a read: a refusal recorded over the copy ends, the copy is
+    /// dropped so the next pass reads the slot again, and this pass fails
+    /// with `Corrupted`.
+    async fn confirm_refusal(&self, session: &mut Session, slot: Slot) -> Result<(), SyncError> {
+        let path = self.path(slot.0)?;
+        let Some(kept) = self.held_slot(&path).await? else {
+            return Ok(());
+        };
+        if kept.same_as_stored(self.storage.as_ref()).await? {
+            return Ok(());
+        }
+        self.database.clear_pending(PendingSubject::Slot(slot)).await?;
+        session.blocked = None;
+        kept.discard().await?;
+        Err(StorageFailure::Corrupted
+            .with_source(format!("a second read of {} returned other bytes", path.as_str()))
+            .into())
+    }
+
     /// Stop for good on history showing another copy of this installation
     /// using its device id (§19.3), and end what this copy's app journaled
     /// and the invites it made: none would ever run, and no slot applies
@@ -468,6 +491,14 @@ impl SequenceSync {
         if matches!(error, SyncError::Removed) {
             self.state.set(SequenceStatus::Stopped(crate::SyncFailure::Removed));
             return error;
+        }
+        let refused = self.path(slot.0).is_ok_and(
+            |path| matches!(&error, SyncError::Damaged(object) if object.path == path.as_str()),
+        );
+        if refused {
+            if let Err(failed) = self.confirm_refusal(session, slot).await {
+                return failed;
+            }
         }
         let reason = slot_block_reason(&error, self.storage.config().provider());
         let subject = PendingSubject::Slot(slot);

@@ -4699,6 +4699,9 @@ pub enum StorageFailure {
     InvalidConfiguration,
     /// The provider refused the request for another reason.
     Refused,
+    /// Two complete reads of one immutable object returned different bytes:
+    /// a fault on the way to the device changed one of them (§19.1).
+    Corrupted,
     /// The response or recorded session is malformed.
     Protocol,
     /// An object path is outside the store's layout.
