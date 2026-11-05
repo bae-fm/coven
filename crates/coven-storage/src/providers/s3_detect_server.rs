@@ -91,6 +91,8 @@ pub(super) enum LostReply {
 }
 
 pub(super) struct Remote {
+    /// The time the server dates objects by, which the test moves.
+    pub(super) clock: Arc<FixedClock>,
     pub(super) lost_reply: Option<LostReply>,
     pub(super) hidden: BTreeSet<String>,
     pub(super) versioning: &'static str,
@@ -118,6 +120,11 @@ pub(super) struct Remote {
     pub(super) lagging_listings: usize,
     /// Every listing request served.
     pub(super) listings: usize,
+}
+
+/// The server's current second, as a service dates its objects.
+pub(super) fn seconds(remote: &Remote) -> u64 {
+    remote.clock.now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs()
 }
 
 pub(super) fn date(secs: u64, format: aws_sdk_s3::primitives::DateTimeFormat) -> String {
@@ -210,7 +217,7 @@ pub(super) async fn serve(
     if q.contains_key("uploads") {
         state.next += 1;
         let id = state.next.to_string();
-        let upload = Upload { key, started: now(), parts: BTreeMap::new() };
+        let upload = Upload { key, started: seconds(&state), parts: BTreeMap::new() };
         state.uploads.insert(id.clone(), upload);
         if state.lost_reply == Some(LostReply::Initiate) {
             return error(503, "ServiceUnavailable");
@@ -242,7 +249,8 @@ pub(super) async fn serve(
                     return error(412, "PreconditionFailed");
                 }
                 let upload = state.uploads.remove(id).unwrap();
-                let modified = if service.start_timestamp { upload.started } else { now() };
+                let modified =
+                    if service.start_timestamp { upload.started } else { seconds(&state) };
                 let bytes = upload.parts.into_values().flatten().collect();
                 publish(&mut state, key.clone(), bytes, modified);
                 if state.lost_reply == Some(LostReply::Complete) {
@@ -270,7 +278,8 @@ pub(super) async fn serve(
         }
         let source = source.strip_prefix("/bucket/").unwrap();
         let bytes = state.objects[source].bytes.clone();
-        publish(&mut state, key.clone(), bytes, now());
+        let modified = seconds(&state);
+        publish(&mut state, key.clone(), bytes, modified);
         if state.lost_reply == Some(LostReply::Copy) {
             state.hidden.insert(key);
             return error(503, "ServiceUnavailable");
@@ -284,7 +293,8 @@ pub(super) async fn serve(
             if enforced && state.objects.contains_key(&key) {
                 return error(412, "PreconditionFailed");
             }
-            publish(&mut state, key.clone(), body.to_vec(), now());
+            let modified = seconds(&state);
+            publish(&mut state, key.clone(), body.to_vec(), modified);
             if state.lost_reply == Some(LostReply::Put) {
                 state.hidden.insert(key);
                 return error(503, "ServiceUnavailable");

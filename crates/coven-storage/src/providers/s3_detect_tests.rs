@@ -1,5 +1,5 @@
 //! Detection against an in-process S3 server configured as each known
-//! behavior. Times are real server seconds, so each run waits about a second.
+//! behavior. Times are the test clock's seconds, which detection's waits move.
 use super::*;
 use crate::providers::tests::{query, response, TestServer};
 use crate::{S3Profile, S3ProfileName, StorageCheck, StorageSetupError};
@@ -9,7 +9,10 @@ use axum::{
     http::{HeaderMap, Method, Response, Uri},
     Router,
 };
-use coven_foundation::{clock::SystemClock, id_source::UuidIds};
+use coven_foundation::{
+    clock::{Clock, FixedClock, PollingClock},
+    id_source::UuidIds,
+};
 use std::{
     collections::BTreeMap,
     sync::{Arc, Mutex},
@@ -19,10 +22,8 @@ use std::{
 mod server;
 use server::*;
 
-/// The server's clock: real seconds, as a service dates its objects.
-fn now() -> u64 {
-    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs()
-}
+/// Where the test's clock starts.
+const START: std::time::Duration = std::time::Duration::from_secs(1_790_000_000);
 
 const STORE: StoreId = StoreId(uuid::Uuid::from_bytes([0x44; 16]));
 
@@ -36,10 +37,15 @@ fn credentials() -> S3Credentials {
 struct Fixture {
     state: Arc<Mutex<Remote>>,
     server: TestServer,
+    /// Detection's clock: it passes each wait at once, moving the server's
+    /// time by it, and records the waits.
+    clock: Arc<PollingClock>,
 }
 impl Fixture {
     async fn new(service: Service) -> Self {
+        let fixed = Arc::new(FixedClock::new(std::time::UNIX_EPOCH + START));
         let state = Arc::new(Mutex::new(Remote {
+            clock: fixed.clone(),
             lost_reply: None,
             hidden: BTreeSet::new(),
             versioning: "",
@@ -60,7 +66,7 @@ impl Fixture {
             listings: 0,
         }));
         let server = TestServer::new(Router::new().fallback(serve).with_state(state.clone())).await;
-        Self { state, server }
+        Self { state, server, clock: Arc::new(PollingClock::new(fixed)) }
     }
     fn location(&self, profile: Option<S3Profile>) -> StorageConfig {
         StorageConfig::S3 {
@@ -72,18 +78,11 @@ impl Fixture {
         }
     }
     async fn detect(&self, profile: Option<S3Profile>) -> Result<S3Detection, StorageError> {
-        self.detect_with(profile, Arc::new(SystemClock)).await
-    }
-    async fn detect_with(
-        &self,
-        profile: Option<S3Profile>,
-        clock: ClockRef,
-    ) -> Result<S3Detection, StorageError> {
         detect(
             self.location(profile),
             credentials(),
             STORE,
-            clock,
+            self.clock.clone(),
             Arc::new(UuidIds),
             crate::providers::tests::http_client(),
             &crate::SetupWaits::default(),
@@ -356,7 +355,7 @@ async fn probe_results_name_no_key_endpoint_or_object() {
                 secret_access_key: SecretText::new("secretDistinctive9".into()),
             },
             STORE,
-            Arc::new(SystemClock),
+            fixture.clock.clone(),
             Arc::new(UuidIds),
             crate::providers::tests::http_client(),
             &crate::SetupWaits::default(),
@@ -394,9 +393,8 @@ async fn probe_results_name_no_key_endpoint_or_object() {
 #[tokio::test]
 async fn detection_pauses_only_for_the_timestamp_marker() {
     let fixture = Fixture::new(AWS).await;
-    let pauses = Arc::new(WaitedPauses::default());
-    fixture.detect_with(None, pauses.clone()).await.unwrap();
-    let pauses = pauses.0.lock().unwrap().clone();
+    fixture.detect(None).await.unwrap();
+    let pauses = fixture.clock.waited();
     let first = std::time::Duration::from_secs(1);
     let retry = std::time::Duration::from_millis(250);
     assert_eq!(pauses.first(), Some(&first));
@@ -420,7 +418,7 @@ async fn listings_exclude_detection_probes_and_malformed_ones() {
         S3Storage::new(
             fixture.location(Some(S3Profile::Named(S3ProfileName::RustFs))),
             credentials(),
-            Arc::new(SystemClock),
+            fixture.clock.clone(),
             Arc::new(UuidIds),
             std::sync::Arc::new(crate::NoCooldown),
             crate::providers::tests::http_client(),
@@ -429,11 +427,19 @@ async fn listings_exclude_detection_probes_and_malformed_ones() {
     ));
     let run = uuid::Uuid::from_bytes([7; 16]);
     let probe = format!("{STORE}/.coven-check/{run}/marker-before");
-    publish(&mut fixture.state.lock().unwrap(), probe, b"left".to_vec(), now());
+    {
+        let mut state = fixture.state.lock().unwrap();
+        let modified = seconds(&state);
+        publish(&mut state, probe, b"left".to_vec(), modified);
+    }
     let all = ObjectPrefix::all(STORE);
     assert!(storage.list(&all).await.unwrap().is_empty());
     let malformed = format!("{STORE}/.coven-check/not-a-run/marker");
-    publish(&mut fixture.state.lock().unwrap(), malformed, b"left".to_vec(), now());
+    {
+        let mut state = fixture.state.lock().unwrap();
+        let modified = seconds(&state);
+        publish(&mut state, malformed, b"left".to_vec(), modified);
+    }
     assert!(storage.list(&all).await.unwrap().is_empty());
 }
 
@@ -463,7 +469,7 @@ async fn v2_is_unsupported_on_501_but_an_outage_fails_detection() {
         },
         credentials(),
         STORE,
-        Arc::new(SystemClock),
+        fixture.clock.clone(),
         Arc::new(UuidIds),
         crate::providers::tests::http_client(),
         &crate::SetupWaits::default(),
@@ -473,41 +479,11 @@ async fn v2_is_unsupported_on_501_but_an_outage_fails_detection() {
     assert_eq!(failed.failure(), StorageFailure::Network);
 }
 
-/// System time that records each pause instead of waiting it.
-#[derive(Default)]
-struct Pauses(Mutex<Vec<std::time::Duration>>);
-impl coven_foundation::clock::Clock for Pauses {
-    fn now(&self) -> std::time::SystemTime {
-        std::time::SystemTime::now()
-    }
-    fn elapsed(&self) -> std::time::Duration {
-        self.0.lock().unwrap().iter().sum()
-    }
-    fn deadline(
-        &self,
-        duration: std::time::Duration,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
-        self.0.lock().unwrap().push(duration);
-        Box::pin(std::future::ready(()))
-    }
-    fn sleep_until(
-        &self,
-        at: std::time::SystemTime,
-    ) -> std::pin::Pin<
-        Box<
-            dyn std::future::Future<Output = Result<(), coven_foundation::clock::WallTimerError>>
-                + Send,
-        >,
-    > {
-        SystemClock.sleep_until(at)
-    }
-}
-
 #[tokio::test]
 async fn complete_v2_does_not_pass_when_v1_never_completes() {
     let fixture = Fixture::new(RUSTFS).await;
     fixture.state.lock().unwrap().incomplete_v1_listing = true;
-    let clock = Arc::new(Pauses::default());
+    let clock = fixture.clock.clone();
     let storage = S3Storage::with_settings(
         fixture.location(None),
         credentials(),
@@ -530,7 +506,7 @@ async fn complete_v2_does_not_pass_when_v1_never_completes() {
     };
     probes.put(&probes.key("published"), b"visible", None).await.unwrap();
     probes.listings(true).await.unwrap();
-    assert_eq!(clock.0.lock().unwrap().len(), RETRIES as usize);
+    assert_eq!(clock.waited().len(), RETRIES as usize);
     for protocol in [S3Listing::V1, S3Listing::V2] {
         let observation = probes
             .results
@@ -548,13 +524,15 @@ async fn complete_v2_does_not_pass_when_v1_never_completes() {
 #[tokio::test]
 async fn a_marker_that_never_advances_fails_after_forty_pauses() {
     let fixture = Fixture::new(AWS).await;
-    fixture.state.lock().unwrap().frozen = Some(now());
-    let pauses = Arc::new(Pauses::default());
-    let error = fixture.detect_with(None, pauses.clone()).await.unwrap_err();
+    {
+        let mut state = fixture.state.lock().unwrap();
+        state.frozen = Some(seconds(&state));
+    }
+    let error = fixture.detect(None).await.unwrap_err();
     assert_eq!(error.failure(), StorageFailure::Protocol);
     let mut expected = vec![std::time::Duration::from_secs(1)];
     expected.extend([std::time::Duration::from_millis(250); 40]);
-    assert_eq!(*pauses.0.lock().unwrap(), expected);
+    assert_eq!(fixture.clock.waited(), expected);
     fixture.assert_clean();
 }
 
@@ -587,45 +565,14 @@ async fn a_lost_probe_completion_reply_leaves_no_object() {
     lost_probe_reply(LostReply::Complete).await;
 }
 
-/// System time that records each pause and waits it.
-#[derive(Default)]
-struct WaitedPauses(Mutex<Vec<std::time::Duration>>);
-impl coven_foundation::clock::Clock for WaitedPauses {
-    fn now(&self) -> std::time::SystemTime {
-        std::time::SystemTime::now()
-    }
-    fn elapsed(&self) -> std::time::Duration {
-        SystemClock.elapsed()
-    }
-    fn deadline(
-        &self,
-        duration: std::time::Duration,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
-        self.0.lock().unwrap().push(duration);
-        Box::pin(tokio::time::sleep(duration))
-    }
-    fn sleep_until(
-        &self,
-        at: std::time::SystemTime,
-    ) -> std::pin::Pin<
-        Box<
-            dyn std::future::Future<Output = Result<(), coven_foundation::clock::WallTimerError>>
-                + Send,
-        >,
-    > {
-        SystemClock.sleep_until(at)
-    }
-}
-
 /// The two signing probes each draw a 429 first; neither is judged by it.
 #[tokio::test]
 async fn rate_limited_probes_are_sent_again_and_detection_passes() {
     let fixture = Fixture::new(AWS).await;
     fixture.state.lock().unwrap().throttle = 2;
-    let pauses = Arc::new(WaitedPauses::default());
-    let detection = fixture.detect_with(None, pauses.clone()).await.unwrap();
+    let detection = fixture.detect(None).await.unwrap();
     assert_eq!(detection.settings, profile::CataloguedProfile::named(S3ProfileName::Aws).settings);
-    assert_eq!(pauses.0.lock().unwrap()[..2], [1, 2].map(std::time::Duration::from_secs));
+    assert_eq!(fixture.clock.waited()[..2], [1, 2].map(std::time::Duration::from_secs));
     fixture.assert_clean();
 }
 
@@ -633,11 +580,10 @@ async fn rate_limited_probes_are_sent_again_and_detection_passes() {
 async fn steady_rate_limiting_fails_detection_once_the_setup_minute_is_spent() {
     let fixture = Fixture::new(AWS).await;
     fixture.state.lock().unwrap().throttle = usize::MAX;
-    let pauses = Arc::new(Pauses::default());
-    let error = fixture.detect_with(None, pauses.clone()).await.unwrap_err();
+    let error = fixture.detect(None).await.unwrap_err();
     assert_eq!(error.failure(), StorageFailure::RateLimited);
     // 1 + 2 + 4 + 8 + 16 seconds; the next, 32, would pass the minute.
-    assert_eq!(*pauses.0.lock().unwrap(), [1, 2, 4, 8, 16].map(std::time::Duration::from_secs));
+    assert_eq!(fixture.clock.waited(), [1, 2, 4, 8, 16].map(std::time::Duration::from_secs));
     assert!(fixture.state.lock().unwrap().objects.is_empty());
 }
 
@@ -646,7 +592,7 @@ async fn steady_rate_limiting_fails_detection_once_the_setup_minute_is_spent() {
 #[tokio::test]
 async fn a_lagging_listing_is_polled_one_page_at_a_time() {
     let fixture = Fixture::new(AWS).await;
-    let clock = Arc::new(Pauses::default());
+    let clock = fixture.clock.clone();
     let storage = S3Storage::with_settings(
         fixture.location(None),
         credentials(),
@@ -678,7 +624,7 @@ async fn a_lagging_listing_is_polled_one_page_at_a_time() {
     }
     let listed = probes.visible(S3Listing::V1).await.unwrap().unwrap();
     assert_eq!(listed.len(), 5);
-    assert_eq!(*clock.0.lock().unwrap(), [std::time::Duration::from_millis(250); 3]);
+    assert_eq!(*clock.waited(), [std::time::Duration::from_millis(250); 3]);
     // Three lagging pages and one complete page, then five pages of one key.
     assert_eq!(fixture.state.lock().unwrap().listings, 4 + 5);
     probes.cleanup().await.unwrap();
