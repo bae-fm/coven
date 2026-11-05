@@ -139,6 +139,37 @@ async fn an_uploading_file_is_judged_locally() {
     f.close().await;
 }
 
+/// A source failure is known on the uploading device alone: Ana's original
+/// goes missing and her read fails, so her status names the source; Ben holds
+/// the same record and sees only that it is on Ana's device, with nothing
+/// recorded about it (§17.6, E8).
+#[tokio::test]
+async fn an_uploaders_source_failure_shows_on_it_alone() {
+    let a = Fixture::new(Provenance::UserProvided).await;
+    let b = Fixture::new(Provenance::UserProvided).await;
+    a.files.stop_background_for_counts().await;
+    a.files.set_storage(None, std::future::ready(Ok(()))).await.unwrap();
+    let file = a.original("photo", &[3; 40]).await;
+    std::fs::remove_file(a.root.path().join("photo")).unwrap();
+    assert!(matches!(a.files.read_file(&file).await, Err(FileReadError::UserFileMissing { .. })));
+    let device = a.location(&file).await.uploader();
+    assert_eq!(
+        a.files.file_status(&file).await.unwrap(),
+        FileStatus::Missing {
+            device,
+            reason: FileMissingReason::Source(FileSourceFailure::Missing)
+        }
+    );
+    for write in a.database.test_queued_writes().await.unwrap() {
+        crate::tests::apply_write(&b.database, write).await.unwrap();
+    }
+    let remote = b.database.file_ref(file.id()).await.unwrap();
+    assert_eq!(b.files.file_status(&remote).await.unwrap(), FileStatus::DeviceOnly { device });
+    assert!(b.database.pending::<crate::PendingRecord>().await.unwrap().is_empty());
+    b.close().await;
+    a.close().await;
+}
+
 #[tokio::test]
 async fn an_object_of_the_wrong_size_at_the_fixed_path_is_damage_not_absence() {
     let a = Fixture::new(Provenance::AppProvided).await;
