@@ -746,3 +746,57 @@ async fn slots_that_land_while_finding_keys_raise_its_total() {
         device.sync.database.close().await.unwrap();
     }
 }
+
+/// Reads run ahead of the slot being applied. When a slot cannot apply, the
+/// reads already started past it may finish, but the device moves no further
+/// than the slot before it, for a device that has the keys and for a restore
+/// that is still finding them (§6.1).
+#[tokio::test]
+async fn reads_already_started_past_a_blocked_slot_move_nothing_past_it() {
+    let group = Group::new();
+    let ana = group.device(1).await;
+    let ben = group.device(2).await;
+    group.create(&ana).await;
+    group.admit(&ana, &ben).await;
+    ben.sync.pass().await.unwrap();
+    for i in 0..30u32 {
+        let id: &'static str = Box::leak(i.to_string().into_boxed_str());
+        insert(ana.database(), id, "written").await;
+        ana.sync.pass().await.unwrap();
+    }
+    let end = ana.database().applied_slot().await.unwrap();
+    let blocked = end - 12;
+    let path = ObjectPath::slot(group.store, blocked.try_into().unwrap());
+    group.storage.corrupt_byte(&path, 0).await.unwrap();
+
+    let laptop = group.newcomer(ana.identity.clone(), group.storage.for_device()).await;
+    for (device, has_keys) in [(&ben, true), (&laptop, false)] {
+        let first = device.sync.pass().await;
+        assert!(
+            matches!(&first, Err(SyncError::Damaged(damaged)) if damaged.path == path.as_str()),
+            "{first:?}"
+        );
+        let read_past = device
+            .storage
+            .request_trace()
+            .into_iter()
+            .filter_map(|request| match request {
+                coven_storage::test_utils::MemoryRequest::Read(path, _) => path.slot_number(),
+                _ => None,
+            })
+            .any(|slot| slot.0 > blocked);
+        assert!(read_past, "the reads in flight finish past the blocked slot");
+        let applied = device.database().applied_slot().await.unwrap();
+        assert!(applied < blocked, "applied through {applied}, past the blocked slot {blocked}");
+        if has_keys {
+            assert_eq!(applied, blocked - 1);
+            assert!(matches!(&*device.sync.state.subscribe().borrow(), SequenceStatus::Blocked(_)));
+            let count = device.storage.request_count();
+            assert!(device.sync.pass().await.is_err());
+            assert_eq!(device.storage.request_count(), count);
+        }
+    }
+    for device in [&ana, &ben, &laptop] {
+        device.database().close().await.unwrap();
+    }
+}
