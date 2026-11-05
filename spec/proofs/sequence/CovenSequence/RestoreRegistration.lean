@@ -12,8 +12,9 @@ cancel removes the installation and nothing in storage changed. From it on,
 the restore only goes forward: a crash, a dropped call or a cancel leaves it
 listed, and the app resumes it to the end, as it resumes a join that may
 have sent its request (§13.2). The one way back is the facts': a
-registration refused, or a device removed since, leaves nothing in storage
-naming the device as active, so the restore ends without its store.
+registration refused, or a device gone for good since, removed or its
+member's keys replaced, leaves nothing in storage naming the device as
+active, so the restore ends without its store.
 
 The model follows one restore's call and its registration. The call records
 the restore (`record`), journals the registration (`register`), and once
@@ -21,8 +22,9 @@ that has ended publishes the store (`conclude`). The registration's own
 task claims a slot and settles the claim (`pass`); storage stores an
 attempt (`land`) or another device takes its slot (`lose`). The app may
 cancel the call, drop it or crash at any point; the call may fail; another
-device may remove the member, after which a registration is refused and a
-registered device is no longer active. Every step is one transaction, so a
+device may remove the member, or replace the member's keys with a pair the
+restore doesn't hold, after which a registration is refused and a
+registered device is gone for good (§14.1). Every step is one transaction, so a
 crash between any two is a path of steps.
 
 Before the record, nothing in storage names the device, and the restore's
@@ -32,7 +34,7 @@ recorded beside it: no call lists it or runs on it, and nothing in storage
 refers to it. That is space, not state; coven reclaims it where it lists
 unfinished work (`reclaim`), never while a call holds it.
 
-`Rules` names the three rules the restore needs. `record`: before it
+`Rules` names the four rules the restore needs. `record`: before it
 registers, the restore records itself on the device with what finishing
 needs (its code and its sign-in), and the app's list of unfinished restores
 shows each recorded one. `wait`: a cancel waits for the registration's task
@@ -44,7 +46,10 @@ other failure. Without either rule a crash or a cancel leaves a device
 registered that no installation stands for, a checked counterexample
 each. `undo`: a call that fails before the record removes the
 installation. Without it the failed call leaves an installation nothing
-lists, for a later listing to reclaim.
+lists, for a later listing to reclaim. `stops`: the facts count every stop
+for good, a replacement of the member's keys as well as a removal. A
+replaced device's entry stays active in history; counting only removals,
+a restore whose device was replaced stays listed, and every resume fails.
 -/
 namespace CovenSequence.RestoreRegistration
 
@@ -95,10 +100,14 @@ structure World where
   landed : Bool
   /-- Another device removed the member. -/
   removed : Bool
+  /-- Another device replaced the member's keys with a pair the restore
+  doesn't hold. The device's entry stays active in history, but it is gone
+  for good: its writes no longer count (§14.1). -/
+  replaced : Bool
   deriving DecidableEq, Repr
 
 /-- A restore call has just made its installation and loaded the store. -/
-def start : World := ⟨.hidden, false, true, false, .none, false, none, false, false⟩
+def start : World := ⟨.hidden, false, true, false, .none, false, none, false, false, false⟩
 
 structure Rules where
   /-- The restore records itself before it registers, and is listed. -/
@@ -108,9 +117,12 @@ structure Rules where
   wait : Bool
   /-- A call that fails before the record removes the installation. -/
   undo : Bool
+  /-- The facts that end a recorded restore count every stop for good:
+  the member's keys replaced as well as the member or device removed. -/
+  stops : Bool
   deriving DecidableEq, Repr
 
-def Rules.correct : Rules := ⟨true, true, true⟩
+def Rules.correct : Rules := ⟨true, true, true, true⟩
 
 /-- The app lists the restore, to resume it. -/
 def listed (w : World) : Bool := w.inst == .hidden && w.recorded
@@ -119,14 +131,19 @@ def listed (w : World) : Bool := w.inst == .hidden && w.recorded
 record lists it. Only a crash before the record leaves one. -/
 def unreferenced (w : World) : Bool := w.inst == .hidden && !w.recorded && !w.call
 
-/-- The device is active in the store's history. -/
-def active (w : World) : Bool := w.landed && !w.removed
+/-- The device is gone for good: removed, or its member's keys replaced. -/
+@[simp] def gone (w : World) : Bool := w.removed || w.replaced
+
+/-- The device is active in the store's history: registered, and not gone
+for good. -/
+def active (w : World) : Bool := w.landed && !gone w
 
 /-- Nothing in storage names the device as active, and nothing can land:
 the registration never started or was refused, or it landed and the device
-was removed since. -/
-def undoable (w : World) : Bool :=
-  !w.recorded || w.op == .none || w.op == .rejected || (w.landed && w.removed)
+is gone for good since. Without `stops`, only a removal counts. -/
+def undoable (R : Rules) (w : World) : Bool :=
+  !w.recorded || w.op == .none || w.op == .rejected ||
+    (w.landed && (w.removed || (R.stops && w.replaced)))
 
 /-- Remove the installation, its record and its journal with it. An attempt
 already sent is on its way whatever the device deletes. -/
@@ -171,6 +188,9 @@ inductive Act where
   | crash
   /-- Another device removes the member. -/
   | remove
+  /-- Another device replaces the member's keys with a pair the restore
+  doesn't hold. -/
+  | replaceKeys
   /-- Listing unfinished work removes an installation nothing refers to. -/
   | reclaim
   deriving DecidableEq, Repr
@@ -181,23 +201,23 @@ def enabled (R : Rules) (w : World) : Act → Bool
       (w.op == .none || w.op == .running)
   | .pass => w.op == .running && w.task && w.claim != some .sent
   | .land | .lose => w.claim == some .sent
-  | .conclude => running w && (w.op == .applied || w.op == .rejected || (w.landed && w.removed))
+  | .conclude => running w && (w.op == .applied || w.op == .rejected || (w.landed && gone w))
   | .cancel => running w
   | .stop => w.call && w.cancelled && (!R.wait || !w.task)
   | .fail => running w
   | .taskFails => w.task
   | .resume => !w.call && listed w
   | .crash => true
-  | .remove => true
+  | .remove | .replaceKeys => true
   | .reclaim => unreferenced w
 
 /-- The registration's task: claim when no claim is open, refused once the
-member is removed; a landed claim applies and ends the operation; a lost
+device is gone for good; a landed claim applies and ends the operation; a lost
 one checks again and claims the next slot. -/
 def pass (w : World) : World :=
   match w.claim with
   | none | some .lost =>
-    if w.removed then { w with op := .rejected, task := false, claim := none }
+    if gone w then { w with op := .rejected, task := false, claim := none }
     else { w with claim := some .sent }
   | some .landed => { w with op := .applied, task := false, claim := none }
   | some .sent => w
@@ -209,20 +229,21 @@ def act (R : Rules) (w : World) : Act → World
   | .land => { w with claim := some .landed, landed := true }
   | .lose => { w with claim := some .lost }
   | .conclude =>
-    if w.op == .applied && !w.removed then
+    if w.op == .applied && !gone w then
       { w with inst := .published, recorded := false, call := false, op := .none }
-    else if R.wait then undo w
-    -- Without the rule, a refused registration fails the call and keeps
-    -- the installation.
+    else if R.wait && undoable R w then undo w
+    -- Otherwise the call fails and keeps the installation, as without
+    -- `wait` a refused registration does.
     else { w with call := false }
   | .cancel => { w with cancelled := true }
   | .stop =>
-    if !R.wait || undoable w then undo w else { w with call := false, cancelled := false }
+    if !R.wait || undoable R w then undo w else { w with call := false, cancelled := false }
   | .fail => if R.undo && !w.recorded then undo w else { w with call := false }
   | .taskFails => { w with task := false }
   | .resume => { w with call := true }
   | .crash => { w with call := false, cancelled := false, task := false }
   | .remove => { w with removed := true }
+  | .replaceKeys => { w with replaced := true }
   | .reclaim => { w with inst := .none }
 
 inductive Step (R : Rules) : World → World → Prop
@@ -278,8 +299,8 @@ cancel waits, Household's history names the laptop as Ana's device and no
 installation is published or listed for it. Only another device removing
 it makes it inactive. -/
 theorem crashed_registration_ghost (wait : Bool) :
-    ∃ w, trace ⟨false, wait, true⟩ start [.register, .pass, .land, .crash] = some w ∧
-      ∀ w', Steps ⟨false, wait, true⟩ w w' → Ghost w' := by
+    ∃ w, trace ⟨false, wait, true, true⟩ start [.register, .pass, .land, .crash] = some w ∧
+      ∀ w', Steps ⟨false, wait, true, true⟩ w w' → Ghost w' := by
   refine ⟨_, rfl, fun w' h => stays _ (ghost_stays _) h ?_⟩
   simp [Ghost, act, pass, start]
 
@@ -289,10 +310,10 @@ after: on every path after, whether or not the restore was recorded,
 Household's history names the laptop as Ana's device and the laptop has
 nothing of Household. -/
 theorem cancelled_registration_ghost (record : Bool) :
-    ∃ w, trace ⟨record, false, true⟩ start
+    ∃ w, trace ⟨record, false, true, true⟩ start
         ((if record then [.record] else []) ++ [.register, .pass, .cancel, .stop, .land]) =
           some w ∧
-      ∀ w', Steps ⟨record, false, true⟩ w w' → Ghost w' := by
+      ∀ w', Steps ⟨record, false, true, true⟩ w w' → Ghost w' := by
   cases record
   all_goals
     refine ⟨_, rfl, fun w' h => stays _ (ghost_stays _) h ?_⟩
@@ -313,8 +334,8 @@ structure Inv (w : World) : Prop where
   applied, its store published, or its installation was removed. -/
   landed : w.landed = true →
     w.claim = some .landed ∨ w.op = .applied ∨ w.inst = .published ∨ w.inst = .none
-  /-- A removed installation's device is no longer active. -/
-  gone : w.inst = .none → w.landed = true → w.removed = true
+  /-- A removed installation's device is gone for good. -/
+  gone : w.inst = .none → w.landed = true → gone w = true
   claimLanded : w.claim = some .landed → w.landed = true
   applied : w.op = .applied → w.landed = true
   /-- A refused registration has no entry. -/
@@ -324,13 +345,13 @@ structure Inv (w : World) : Prop where
 theorem inv_start : Inv start := by
   constructor <;> simp [start]
 
-set_option maxHeartbeats 1000000 in
+set_option maxHeartbeats 4000000 in
 theorem inv_step (w : World) (a : Act) (inv : Inv w) (e : enabled Rules.correct w a = true) :
     Inv (act Rules.correct w a) := by
-  obtain ⟨call, cancelled, op, recorded, task, claim, landed, gone, claimLanded, applied, rejected,
+  obtain ⟨call, cancelled, op, recorded, task, claim, landed, hgone, claimLanded, applied, rejected,
     published⟩ := inv
   cases a
-  case record | cancel | taskFails | resume | crash | remove | land | lose =>
+  case record | cancel | taskFails | resume | crash | remove | replaceKeys | land | lose =>
     rcases hop : w.op <;> rcases hc : w.claim with _ | (_ | _ | _) <;> constructor <;>
       simp_all [act, enabled, Rules.correct, running, listed]
   case fail =>
@@ -344,15 +365,16 @@ theorem inv_step (w : World) (a : Act) (inv : Inv w) (e : enabled Rules.correct 
     rcases hop : w.op <;> rcases hc : w.claim with _ | (_ | _ | _) <;> constructor <;>
       simp_all [act, enabled, Rules.correct, running]
   case pass =>
-    rcases hc : w.claim with _ | (_ | _ | _) <;> rcases hrem : w.removed <;> constructor <;>
-      simp_all [act, enabled, pass]
+    rcases hc : w.claim with _ | (_ | _ | _) <;> rcases hrem : w.removed <;>
+      rcases hrep : w.replaced <;> constructor <;> simp_all [act, enabled, pass]
   case conclude =>
-    rcases hop : w.op <;> rcases hrem : w.removed <;> rcases hl : w.landed <;>
-      rcases hc : w.claim with _ | (_ | _ | _) <;> constructor <;>
-      simp_all [act, enabled, Rules.correct, running, undo]
+    rcases hop : w.op <;> rcases hrem : w.removed <;> rcases hrep : w.replaced <;>
+      rcases hl : w.landed <;> rcases hc : w.claim with _ | (_ | _ | _) <;> constructor <;>
+      simp_all [act, enabled, Rules.correct, running, undo, undoable]
   case stop =>
     rcases hop : w.op <;> rcases hrec : w.recorded <;> rcases hrem : w.removed <;>
-      rcases hl : w.landed <;> rcases hc : w.claim with _ | (_ | _ | _) <;>
+      rcases hrep : w.replaced <;> rcases hl : w.landed <;>
+      rcases hc : w.claim with _ | (_ | _ | _) <;>
       constructor <;> simp_all [act, enabled, Rules.correct, undo, undoable]
 
 theorem reachable_inv {w : World} (h : Reachable Rules.correct w) : Inv w :=
@@ -370,24 +392,28 @@ theorem ended_call_leaves_nothing_unlisted {w : World} (h : Reachable Rules.corr
   case fail =>
     rcases hrec : w.recorded <;> simp_all [act, Rules.correct, undo, unreferenced]
   case stop =>
-    by_cases hu : undoable w = true
-    · simp [act, Rules.correct, hu, undo, unreferenced]
-    · have kept : w.recorded = true := by
-        rcases hr : w.recorded <;> simp_all [undoable]
-      simp [act, Rules.correct, hu, unreferenced, kept]
+    simp only [act]
+    split
+    · simp [undo, unreferenced]
+    · rcases hr : w.recorded <;> simp_all [unreferenced, undoable, Rules.correct]
   case conclude =>
-    simp only [act, Rules.correct]
-    split <;> simp_all [undo, unreferenced]
+    simp only [act]
+    split
+    · simp_all [unreferenced]
+    · split
+      · simp [undo, unreferenced]
+      · rcases hr : w.recorded <;> simp_all [unreferenced, undoable, Rules.correct]
   case crash => contradiction
   case pass =>
-    rcases hc : w.claim with _ | (_ | _ | _) <;> rcases hrem : w.removed <;> simp_all [act, pass]
+    rcases hc : w.claim with _ | (_ | _ | _) <;> rcases hrem : w.removed <;>
+      rcases hrep : w.replaced <;> simp_all [act, pass]
   all_goals simp_all [act]
 
 /-- A failed restore's call that keeps its installation leaves it unlisted:
 nothing is recorded beside it and no call runs on it, so only a later
 listing would reclaim it. -/
 theorem failure_keeps_installation :
-    ∃ w, trace ⟨true, true, false⟩ start [.fail] = some w ∧ unreferenced w = true := by
+    ∃ w, trace ⟨true, true, false, true⟩ start [.fail] = some w ∧ unreferenced w = true := by
   exact ⟨_, rfl, by simp [unreferenced, act, start]⟩
 
 /-- No ghost: while the store's history names the device as active, or a
@@ -403,12 +429,14 @@ theorem registered_listed {w : World} (h : Reachable Rules.correct w)
   -- The registration's operation is journaled, or it applied.
   have op : w.op ≠ .none := by
     rcases registered with r | c
-    · have r : w.landed = true ∧ w.removed = false := by simpa [active] using r
+    · have r : w.landed = true ∧ w.removed = false ∧ w.replaced = false := by
+        simpa [active] using r
       rcases inv.landed r.1 with l | ap | p | n
       · simp [inv.claim (by simp [l])]
       · simp [ap]
       · exact absurd p pub
-      · simp [inv.gone n r.1] at r
+      · have := inv.gone n r.1
+        simp [r.2.1, r.2.2] at this
     · simp [inv.claim c]
   have := inv.op op
   simp [listed, this.1, this.2]
@@ -445,6 +473,48 @@ theorem one {w : World} (a : Act) (own : coven a = true)
 recorded, so nothing is listed, and no installation is left. -/
 def quiet (w : World) : Bool :=
   w.inst == .published || (!w.call && !w.recorded && w.inst == .none)
+
+/-- Coven's own steps and the app resuming what is listed, under any rules. -/
+inductive OwnSteps (R : Rules) : World → World → Prop
+  | refl (w : World) : OwnSteps R w w
+  | step {w w' : World} (a : Act) (own : coven a = true) (e : enabled R w a = true)
+      (rest : OwnSteps R (act R w a) w') : OwnSteps R w w'
+
+/-- A recorded restore whose device registered, then went for good when its
+member's keys were replaced, without a call running. -/
+def Stuck (w : World) : Prop :=
+  w.recorded = true ∧ w.inst = .hidden ∧ w.op = .applied ∧ w.landed = true ∧
+    w.removed = false ∧ w.replaced = true ∧ w.task = false ∧ w.claim = none ∧
+    w.cancelled = false
+
+/-- The facts that count only a removal, not a replacement of the member's keys. -/
+def Rules.removalOnly : Rules := ⟨true, true, true, false⟩
+
+theorem stuck_stays (w : World) (a : Act) (own : coven a = true) (h : Stuck w)
+    (e : enabled Rules.removalOnly w a = true) : Stuck (act Rules.removalOnly w a) := by
+  obtain ⟨r, i, o, l, rm, rp, t, c, cn⟩ := h
+  cases a <;> simp_all [coven, enabled, act, running, listed, unreferenced, undoable, Stuck,
+    Rules.removalOnly]
+
+/-- Ana's laptop registers while restoring Household, and its call fails
+before it publishes, so the restore stays listed. Her phone then replaces
+her member keys with a pair the laptop doesn't hold: the laptop's entry
+stays active in history, but it is gone for good. When ending a restore
+counts only a removal, every resume fails and keeps the restore listed: on
+every path of coven's own steps and the app's resumes, nothing settles. -/
+theorem replaced_restore_stuck :
+    ∃ w, trace Rules.removalOnly start
+        [.record, .register, .pass, .land, .pass, .fail, .replaceKeys] = some w ∧
+      ∀ w', OwnSteps Rules.removalOnly w w' → quiet w' = false := by
+  refine ⟨_, rfl, fun w' h => ?_⟩
+  have stuck : ∀ {a b}, OwnSteps Rules.removalOnly a b → Stuck a → Stuck b := by
+    intro a b h
+    induction h with
+    | refl => exact id
+    | step x own e _ ih => exact fun s => ih (stuck_stays _ x own s e)
+  have s := stuck h (by simp [Stuck, act, pass, start, Rules.removalOnly])
+  obtain ⟨r, i, -⟩ := s
+  simp [quiet, r, i]
 
 /-- What is left of the registration. -/
 def opWork (w : World) : Nat :=
@@ -493,10 +563,11 @@ theorem task_step (w : World) (inv : Inv w) (ht : w.task = true) :
       (act Rules.correct w a).cancelled = w.cancelled ∧
       opWork (act Rules.correct w a) < opWork w := by
   have hop := inv.task ht
-  rcases hc : w.claim with _ | (_ | _ | _) <;> rcases hrem : w.removed
+  rcases hc : w.claim with _ | (_ | _ | _) <;> rcases hrem : w.removed <;>
+    rcases hrep : w.replaced
   all_goals first
     | (refine ⟨.land, rfl, ?_⟩; simp [enabled, act, opWork, hc, hop, ht]; done)
-    | (refine ⟨.pass, rfl, ?_⟩; simp [enabled, act, pass, opWork, hc, hop, ht, hrem]; done)
+    | (refine ⟨.pass, rfl, ?_⟩; simp [enabled, act, pass, opWork, hc, hop, ht, hrem, hrep]; done)
 
 /-- From every reachable state that isn't quiet, coven and the app's resume
 make progress. -/
@@ -523,14 +594,17 @@ theorem progress (w : World) (inv : Inv w) (busy : quiet w = false) :
               (measure_lt busy rfl rfl rfl rfl (by simp [act, opWork, hop, ht]))
           all_goals
             refine go .conclude rfl (by simp [enabled, running, hcall, hcan, hop]) ?_
-            rcases hrem : w.removed <;>
-              simp [act, Rules.correct, measure, quiet, undo, hop, hrem, hrec, hcall, hcan, pub] <;>
+            have applied := inv.applied
+            rcases hrem : w.removed <;> rcases hrep : w.replaced <;> rcases hl : w.landed <;>
+              simp [act, Rules.correct, measure, quiet, undo, undoable, hop, hrem, hrep, hl, hrec,
+                hcall, hcan, pub] at applied ⊢ <;>
               omega
         · refine go .stop rfl (by simp [enabled, Rules.correct, hcall, hcan, ht]) ?_
-          by_cases hu : undoable w = true
-          · simp [act, Rules.correct, hu, measure, quiet, undo, hrec, hcall, hcan, pub]
+          simp only [act]
+          split
+          · simp [measure, quiet, undo, hrec, hcall, hcan, pub]
             omega
-          · simp [act, Rules.correct, hu, measure, quiet, opWork, hrec, hcall, hcan, pub]
+          · simp [measure, quiet, opWork, hrec, hcall, hcan, pub]
     · have hcall : w.call = false := by simpa using hcall
       have hcan : w.cancelled = false := by
         rcases h : w.cancelled
@@ -607,6 +681,8 @@ theorem settled_outcome {w : World} (h : Reachable Rules.correct w) (q : quiet w
     · simp [nclaim] at l
     · simp [nop] at ap
     · exact absurd p pub
-    · simp [active, inv.gone n hl]
+    · have g := inv.gone n hl
+      simp only [gone, Bool.or_eq_true] at g
+      rcases g with g | g <;> simp [active, g]
 
 end CovenSequence.RestoreRegistration

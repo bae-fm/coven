@@ -801,15 +801,17 @@ device through an operation whose claim goes through the device's one claim
 journal, then publishes the store. The registration's task outlives the
 call that started it. Each attempt is sent, then lands or loses its slot to
 another device; the app cancels, drops the call or crashes at any point; the
-call fails; another device removes the member, after which the registration
-is refused and a registered device is no longer active. Every step is one
+call fails; another device removes the member, or replaces the member's
+keys with a pair the restore doesn't hold, after which the registration is
+refused and a registered device is gone for good. Every step is one
 transaction. Under `Rules.correct` the restore records itself, with its code
 and sign-in, before it registers, and the app lists recorded restores to
 resume. A cancel waits for the registration's task. A call that ends without
-its store, cancelled, its registration refused or its device removed,
+its store, cancelled, its registration refused or its device gone for good,
 removes the installation only when nothing in storage names the device as
 active and nothing can land: no registration journaled, one refused, or the
-device removed since. Otherwise, and after any other failure, the call ends
+device gone for good since, a replacement of the member's keys counted as
+well as a removal. Otherwise, and after any other failure, the call ends
 and the restore stays listed. Before the record, a failure removes the
 installation, as a cancel does. A crash before the record leaves an
 installation nothing refers to, no call on it and nothing recorded beside
@@ -838,7 +840,10 @@ registered with no installation published or listed for it, on every path:
   installation while the attempt is on its way, and it lands after.
 
 Without `undo`, a call that fails before the record leaves its installation
-for a later listing to reclaim (`failure_keeps_installation`).
+for a later listing to reclaim (`failure_keeps_installation`). Without
+`stops`, counting only a removal as the device gone, a restore whose
+member's keys were replaced after it registered stays listed, and every
+resume fails on every path (`replaced_restore_stuck`).
 
 [`FirstInstallation`](sequence/CovenSequence/FirstInstallation.lean)
 models one store's unfinished first installation on a device, which a join
