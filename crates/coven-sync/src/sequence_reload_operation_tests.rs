@@ -746,3 +746,48 @@ async fn a_reloading_circle_leaves_the_store_audience_writable() {
         device.database().close().await.unwrap();
     }
 }
+
+/// While Ben loads Gifts, which Ana just added him to, his writes to the
+/// store go through; only his writes to Gifts wait for the load (§15.7).
+#[tokio::test]
+async fn other_audiences_take_writes_while_a_newly_readable_circle_loads() {
+    let group = Group::new();
+    let ana = group.device(1).await;
+    let ben = group.device(2).await;
+    group.create(&ana).await;
+    group.admit(&ana, &ben).await;
+    let circle = ana.sync.create_circle("Gifts".into()).await.unwrap();
+    pin(ana.database(), "00000000-0000-4000-8000-000000000001", circle, "loaded").await;
+    ana.sync.pass().await.unwrap();
+    let snapshot = ana.sync.snapshot(Audience::Circle(circle)).await.unwrap();
+    read(&ben).await;
+    ana.sync
+        .administer(StoreChange::AddCircleMember { circle, member: ben.identity.member() })
+        .await
+        .unwrap();
+    let snapshot = ana.sync.session.lock().await.history.announcements[&snapshot].snapshot.clone();
+    let path = crate::snapshot_object::path(group.store, &snapshot).unwrap();
+    during_load(&ben, path, async {
+        insert(ben.database(), "during", "store write").await;
+        let gifts = ben
+            .database()
+            .write(move |sql| {
+                sql.execute(
+                    "INSERT INTO pins VALUES('00000000-0000-4000-8000-000000000002',?1,'fresh')",
+                    [circle.to_string()],
+                )?;
+                Ok(())
+            })
+            .await;
+        assert!(
+            matches!(gifts, Err(DbError::AudienceReloading(Audience::Circle(c))) if c == circle),
+            "{gifts:?}"
+        );
+    })
+    .await;
+    assert_eq!(rows(ben.database()).await, [("during".into(), "store write".into())]);
+    assert_eq!(pins(ben.database()).await.len(), 1);
+    for device in [&ana, &ben] {
+        device.database().close().await.unwrap();
+    }
+}
