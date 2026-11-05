@@ -553,6 +553,96 @@ mod data_sources {
         }
     }
 
+    /// Ben's 9 is excluded on a device that then takes a snapshot; a device
+    /// loading it receives Ben's 10 late and still treats 9 as a source that
+    /// doesn't count, so 10's edit of the same note is a frozen dependency
+    /// loss while its playlist change converts (§16.1, §9.5).
+    #[tokio::test]
+    async fn a_loaded_snapshot_keeps_an_excluded_writes_verdict_for_later_dependents() {
+        let ids = SequentialIds::new();
+        let (ben_store, receiver_store, loader_store) =
+            (TestStore::with_ids(&ids), TestStore::with_ids(&ids), TestStore::with_ids(&ids));
+        let calls = Arc::new(AtomicUsize::new(0));
+        // The receiver drops late old-schema writes; the loader converts them.
+        let migrations = |old_writes| {
+            vec![
+                initial(),
+                Migration::breaking(
+                    2,
+                    "index",
+                    "CREATE INDEX notes_title ON notes(title)",
+                    old_writes,
+                ),
+            ]
+        };
+        let ben = ben_store.schema(tables(), NOTES).await.unwrap();
+        sql(&ben, "INSERT INTO notes VALUES('p','playlist','b'),('n','covered note','b')")
+            .await
+            .unwrap();
+        sql(&ben, "UPDATE notes SET title='excluded title' WHERE id='n'").await.unwrap();
+        ben.write(|sql| {
+            sql.execute("UPDATE notes SET title='edited' WHERE id='n'", [])?;
+            sql.execute("UPDATE notes SET title='renamed playlist' WHERE id='p'", [])?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        let writes = records(&ben);
+        let receiver = open(&receiver_store, vec![initial()]).await;
+        receiver.receive(writes[0].clone().into()).await.unwrap();
+        receiver.close().await.unwrap();
+        let receiver = open(&receiver_store, migrations(crate::OldWrites::Drop)).await;
+        receiver.exclude_later_writes(2).await;
+        receiver.receive(writes[1].clone().into()).await.unwrap();
+        let snapshot =
+            crate::snapshot_write::tests::frames(&receiver, coven_merge::Audience::Store).await;
+        open(&loader_store, vec![initial()]).await.close().await.unwrap();
+        let counted = calls.clone();
+        let converting = crate::OldWrites::Convert(Arc::new(move |_| {
+            counted.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }));
+        let loader = open(&loader_store, migrations(converting)).await;
+        loader.exclude_later_writes(2).await;
+        loader
+            .load_snapshots::<crate::pending::tests::Record, std::io::Cursor<Vec<u8>>>(
+                crate::tests::reload(
+                    &loader,
+                    vec![snapshot.input()],
+                    vec![],
+                    Arc::new(crate::test_utils::TestAuthorship),
+                )
+                .await,
+                None,
+            )
+            .await
+            .unwrap();
+        let ten = &writes[2];
+        assert_eq!(loader.receive(ten.clone().into()).await.unwrap(), ApplyOutcome::Applied);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        let dependency = loader
+            .lost_values()
+            .await
+            .unwrap()
+            .into_iter()
+            .filter_map(|loss| match loss.replaced_by {
+                Replacement::DataDependency { write, sources } => Some((write, sources)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(dependency, [(ten.header.position, vec![source(&writes[1], "n")])]);
+        assert_eq!(
+            names(&loader, "title").await,
+            [
+                ("n".to_owned(), "covered note".to_owned()),
+                ("p".to_owned(), "renamed playlist".to_owned())
+            ]
+        );
+        for db in [ben, receiver, loader] {
+            db.close().await.unwrap();
+        }
+    }
+
     /// A late write converts through every raise between its version and the
     /// winning one, in version order; a covered write never reaches a callback.
     #[tokio::test]
