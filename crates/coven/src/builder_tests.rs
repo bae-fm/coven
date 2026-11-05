@@ -475,6 +475,25 @@ mod recovery {
     }
 }
 
+/// A builder given no limits starts files moving one upload and one download
+/// at a time (E1).
+#[tokio::test]
+async fn a_builder_left_alone_runs_one_upload_and_one_download_at_a_time() {
+    let root = tempfile::tempdir().unwrap();
+    let app = Coven::in_memory(root.path().into());
+    let handle = app
+        .builder()
+        .synced_tables(tables())
+        .namespaces(namespaces())
+        .migrations(migrations())
+        .create_store("Household")
+        .await
+        .unwrap();
+    let limits = handle.transfer_limits();
+    assert_eq!((limits.uploads.get(), limits.downloads.get()), (1, 1));
+    handle.close().await.unwrap();
+}
+
 #[tokio::test]
 async fn creation_identity_matches_settings_before_and_after_reopening() {
     let root = tempfile::tempdir().unwrap();
@@ -721,6 +740,13 @@ async fn the_chosen_protection_class_reaches_every_file_of_the_store() {
             created.map(drop)
         );
         assert!(app.stores().await.unwrap().is_empty());
+        // A store made without a class can't be opened for use with
+        // `Complete` while the device is locked.
+        let plain_handle = plain().create_store("Work").await.unwrap();
+        let id = plain_handle.store_id();
+        plain_handle.close().await.unwrap();
+        let opened = builder(FileProtection::Complete).open(id, |_| ()).await;
+        assert!(matches!(&opened, Err(CovenError::DeviceLocked { .. })), "{:?}", opened.map(drop));
         return;
     }
     let handle = created.unwrap();
