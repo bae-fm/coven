@@ -548,6 +548,61 @@ async fn store_wins_one_key_and_circles_use_their_generation_start() {
     }
 }
 
+/// A circle's deletion takes its rows out of the app's tables and runs the
+/// same local foreign-key actions as any other removal. The deletion is final,
+/// so those local children stay as the actions left them, and the app's own
+/// writes to its local tables still follow their ordinary rules (§9.1).
+#[tokio::test]
+async fn a_circle_deletion_runs_local_foreign_key_actions_once() {
+    const GIFTS: &str = "00000000-0000-4000-8000-00000000000a";
+    const NOTE: &str = "00000000-0000-4000-8000-000000000001";
+    let circle = coven_foundation::id_source::CircleId(uuid::Uuid::parse_str(GIFTS).unwrap());
+    let store = TestStore::new();
+    let db = store
+        .schema(
+            vec![SyncedTable::new("notes", RowIdentity::IndependentUuid).audience_column("audience")],
+            "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY,audience TEXT NOT NULL,title TEXT); CREATE TABLE search_index(note_id TEXT REFERENCES notes(id) ON DELETE CASCADE); CREATE TABLE selection(note_id TEXT REFERENCES notes(id) ON DELETE SET NULL);",
+        )
+        .await
+        .unwrap();
+    store.join_circle(&db, circle);
+    sql(
+        &db,
+        "INSERT INTO notes VALUES('00000000-0000-4000-8000-000000000001','00000000-0000-4000-8000-00000000000a','Gift'); INSERT INTO search_index VALUES('00000000-0000-4000-8000-000000000001'); INSERT INTO selection VALUES('00000000-0000-4000-8000-000000000001')",
+    )
+    .await
+    .unwrap();
+    let remaining = |db: &Database| {
+        db.inspect_writer(|db| {
+            (
+                db.query_row("SELECT count(*) FROM search_index", [], |r| r.get::<_, i64>(0))
+                    .unwrap(),
+                db.query_row("SELECT note_id FROM selection", [], |r| {
+                    r.get::<_, Option<String>>(0)
+                })
+                .unwrap(),
+            )
+        })
+    };
+    assert_eq!(remaining(&db), (1, Some(NOTE.into())));
+
+    materialize_deleted(&db, "notes", &[NOTE], circle).unwrap();
+    assert_eq!(count(&db, "notes"), 0);
+    assert_eq!(remaining(&db), (0, None), "cascade and set null ran");
+    // Running the removal again changes nothing, and nothing brings the
+    // children back.
+    materialize_deleted(&db, "notes", &[NOTE], circle).unwrap();
+    assert_eq!(count(&db, "notes"), 0);
+    assert_eq!(remaining(&db), (0, None));
+    // The app's own write to a local table follows its ordinary rules: a row
+    // naming the removed note is refused.
+    assert!(sql(&db, "INSERT INTO search_index VALUES('00000000-0000-4000-8000-000000000001')")
+        .await
+        .is_err());
+    assert_eq!(remaining(&db), (0, None));
+    db.close().await.unwrap();
+}
+
 #[tokio::test]
 async fn unique_then_parent_removal_keeps_both_plan_notes_out() {
     let store = TestStore::new();
