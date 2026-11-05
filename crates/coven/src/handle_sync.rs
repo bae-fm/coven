@@ -55,9 +55,7 @@ impl CovenHandle {
     }
     /// Follow `coven_retry_effect` with a live query, as an app does (E5).
     #[cfg(any(test, feature = "test-utils"))]
-    pub fn test_retry_effect(
-        &self,
-    ) -> coven_database::test_utils::Followed<RetryEffect, CovenError> {
+    pub fn test_retry_effect(&self) -> coven_database::test_utils::Followed<RetryEffect, DbError> {
         RetryEffect::follow(&self.database)
     }
     /// Run idle passes at most `interval` apart, instead of every 30

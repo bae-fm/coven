@@ -9,7 +9,7 @@
 //! test checks this against that model's runner.
 
 use crate::{LastPass, LocalFailure, PendingReason, PendingRecord, PendingSubject, StatusFailure};
-use coven_database::{CovenResult, DbError, RecordedLocation, RetrySync};
+use coven_database::{DbError, RecordedLocation, RetrySync};
 use coven_storage::{CloudProvider, StorageFailure};
 use std::time::SystemTime;
 
@@ -559,7 +559,7 @@ impl SyncStatus {
     /// The sync state and when sync last finished, from what one committed
     /// snapshot of coven's rows holds (§19.1): what `Database::sync_facts`
     /// reads once and `Database::subscribe_sync_facts` follows.
-    pub fn computed(facts: coven_database::SyncFacts<PendingRecord>) -> CovenResult<Self> {
+    pub fn computed(facts: coven_database::SyncFacts<PendingRecord>) -> Result<Self, DbError> {
         let (facts, last_synced) = Facts::read(facts)?;
         Ok(Self { state: facts.state(), last_synced })
     }
@@ -567,7 +567,7 @@ impl SyncStatus {
 
 /// The sync state and when sync last finished, computed from what coven
 /// knows in one committed snapshot (§19.1).
-pub async fn sync_status(database: &coven_database::Database) -> CovenResult<SyncStatus> {
+pub async fn sync_status(database: &coven_database::Database) -> Result<SyncStatus, DbError> {
     database.sync_facts(SyncStatus::computed).await
 }
 

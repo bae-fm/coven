@@ -1,6 +1,6 @@
 use crate::test_utils::{notes_migrations, notes_tables};
 use crate::tests::TestStore;
-use crate::{CovenError, DbError, Migration};
+use crate::{DbError, Migration};
 use std::io::{Read, Seek, SeekFrom, Write};
 
 /// The notes table, and a device-local table whose rows coven copies
@@ -73,7 +73,7 @@ async fn damage_a_statement_meets_after_opening_fails_that_statement() {
     let read = database
         .read(|sql| Ok(sql.query_row("SELECT body FROM drafts", [], |r| r.get::<_, String>(0))?))
         .await;
-    assert!(matches!(read, Err(CovenError::Database(DbError::DamagedDatabase))), "{read:?}");
+    assert!(matches!(read, Err(DbError::DamagedDatabase)), "{read:?}");
     let written = database
         .write(|sql| {
             sql.execute("UPDATE drafts SET body='short' WHERE id=1", [])?;
@@ -91,7 +91,7 @@ async fn damage_a_statement_meets_after_opening_fails_that_statement() {
             Ok(sql.query("SELECT body FROM drafts ORDER BY id", [], |r| r.get::<_, String>(0))?)
         })
         .await;
-    assert!(matches!(read, Err(CovenError::Database(DbError::DamagedDatabase))), "{read:?}");
+    assert!(matches!(read, Err(DbError::DamagedDatabase)), "{read:?}");
     reading.close().await.unwrap();
 
     let operations = crate::discarded_operations(store.database_path()).await.unwrap();
@@ -117,7 +117,7 @@ async fn damage_the_open_meets_fails_the_open() {
             builder.open().await.map(|_| ())
         };
         assert!(
-            matches!(opened, Err(CovenError::Database(DbError::DamagedDatabase))),
+            matches!(opened, Err(crate::OpenError::Database(DbError::DamagedDatabase))),
             "read only {read_only}: {opened:?}"
         );
     }

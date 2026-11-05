@@ -86,10 +86,6 @@ pub enum FileReadError {
     /// A provider failure, retaining its classification and native cause.
     #[error(transparent)]
     Storage(StorageError),
-    /// The write committing a prepared pin failed other than in the
-    /// database, as in a failed rollback, keeping its cause (§17.8).
-    #[error(transparent)]
-    Write(Box<coven_database::CovenError>),
     /// Recording what a read or an upload settled failed in sync's own
     /// work, as a retry wait the clock can't hold, keeping its cause; a
     /// failed read whose failure couldn't be recorded keeps both (§17.9).
@@ -131,18 +127,8 @@ impl coven_foundation::task::CarriesBug for FileReadError {
             Self::Disk(error) => error.bug(),
             Self::Lock(error) => error.bug(),
             Self::Storage(error) => error.bug(),
-            Self::Write(error) => error.bug(),
             Self::Sync(error) => error.bug(),
             _ => None,
-        }
-    }
-}
-impl From<coven_database::CovenError> for FileReadError {
-    fn from(error: coven_database::CovenError) -> Self {
-        match error {
-            coven_database::CovenError::Database(error) => error.into(),
-            coven_database::CovenError::Bug(bug) => Self::Bug(bug),
-            error => Self::Write(Box::new(error)),
         }
     }
 }

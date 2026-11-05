@@ -12,7 +12,7 @@ use crate::{
 use approval::Child;
 use coven_crypto::{ConfirmationNumber, InviteSecret, MemberIdentity, SecretText, StoreKeyring};
 use coven_database::{
-    operation_kind, Journal, NewOperation, OperationId, OperationRecord, SqlContext,
+    operation_kind, DbError, Journal, NewOperation, OperationId, OperationRecord, SqlContext,
 };
 use coven_format::{
     admin::{MemberRole, StoreChange},
@@ -248,7 +248,7 @@ impl Invite {
     /// Read `coven_invites`, as an app's live query does:
     /// `handle.subscribe(Invite::list)`. This device's invites that haven't
     /// ended, in the order they were made (§13.2).
-    pub fn list(sql: coven_database::SqlReadContext<'_>) -> coven_database::CovenResult<Vec<Self>> {
+    pub fn list(sql: coven_database::SqlReadContext<'_>) -> Result<Vec<Self>, DbError> {
         Ok(sql.query(
             "SELECT invite,operation FROM coven_invites ORDER BY operation",
             [],
@@ -289,7 +289,7 @@ impl Invite {
     #[cfg(any(test, feature = "test-utils"))]
     pub fn follow(
         database: &coven_database::Database,
-    ) -> coven_database::test_utils::Followed<Vec<Self>, coven_database::CovenError> {
+    ) -> coven_database::test_utils::Followed<Vec<Self>, DbError> {
         coven_database::test_utils::Followed::new(database.subscribe(Self::list))
     }
 }

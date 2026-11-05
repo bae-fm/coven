@@ -47,7 +47,7 @@ async fn a_steps_refusal_comes_back_as_its_own_error() {
             Ok(())
         })
         .await;
-    assert!(matches!(SyncError::from(result.unwrap_err()), SyncError::NotPending(OperationId(-1))),);
+    assert!(matches!(result, Err(CovenError::Sync(SyncError::NotPending(OperationId(-1))))));
     assert!(matches!(
         ana.retry_pending_operation(OperationId(-1)).await,
         Err(OperationError::NotPending(OperationId(-1)))
@@ -143,8 +143,8 @@ async fn a_change_the_applied_state_refuses_fails_the_write() {
         })
         .await;
     assert!(matches!(
-        SyncError::from(result.unwrap_err()),
-        SyncError::Rejected(OperationRejection::NotAllowed)
+        result,
+        Err(CovenError::Sync(SyncError::Rejected(OperationRejection::NotAllowed)))
     ));
     assert_eq!(parents(ben).await, 0);
     let operations: i64 = ben
@@ -283,8 +283,7 @@ async fn invites_are_made_and_ended_in_the_apps_writes_with_sync_stopped() {
             Ok(())
         })
         .await;
-    let refused = SyncError::from(result.unwrap_err());
-    assert!(matches!(refused, SyncError::InvitationChanged), "{refused:?}");
+    assert!(matches!(result, Err(CovenError::Sync(SyncError::InvitationChanged))), "{result:?}");
     assert_eq!(parents(ana).await, 1);
     assert!(invites.next().await.is_empty());
     network.close().await;

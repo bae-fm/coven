@@ -1220,6 +1220,9 @@ pub enum CovenError {
     FileCleanup { write: Box<CovenError>, failures: Vec<DbError> },
     /// The database or a write's validation failed.
     Database(DbError),
+    /// A sync step failed inside an app's write, which did not commit, or
+    /// while the store opened, keeping sync's own error (E1, E3).
+    Sync(SyncError),
     /// An app migration failed or cannot run on this schema.
     Migration(MigrationError),
     /// Coven's internal schema is unsupported or its migration cannot run.
@@ -1238,9 +1241,9 @@ pub enum CovenError {
     /// unstarted, such as opening's custody work; a dropped database call is
     /// `DbError::Shutdown` (E15).
     Shutdown(Shutdown),
-    /// Coven's work for the call panicked, such as opening's custody work: a
-    /// bug, which the caller reports; a database call that panicked is
-    /// `DbError::Bug` (E15).
+    /// Coven's work for the call panicked, such as opening's custody work or
+    /// a sync step: a bug, which the caller reports; a database call that
+    /// panicked is `DbError::Bug` (E15).
     Bug(Bug),
     /// The platform refused to let coven watch the device's network, such as
     /// an Android app without coven's Android library (E1, E5).
@@ -1553,9 +1556,6 @@ pub enum DbError {
     /// could not be encoded, or a stored pending record could not be decoded
     /// as the requested record type (E5).
     StateEncoding(serde_json::Error),
-    /// A sync step failed inside an app's write, which did not commit, or
-    /// while the store opened, keeping sync's own typed cause (E1, E3).
-    SyncStream(Box<dyn std::error::Error + Send + Sync>),
     /// Closing failed for these connections, after every one was tried (E1).
     Closing { failures: Vec<DbError> },
 
@@ -2911,8 +2911,10 @@ fn tables() -> Vec<SyncedTable> {
   app's SQL: each runs where it is called, the write's later SQL sees it, and
   it commits or rolls back with the app's statements. A failed step fails the
   write even if the closure goes on and returns success (`StepFailed`). A
-  step's refusal passed on with `?` keeps its own error inside the
-  `CovenError`, and `SyncError::from` returns it ([§4](coven.md#4-writing-locally)).
+  step's refusal passed on with `?` keeps its own error: the write fails
+  with `CovenError::Sync`, holding the step's `SyncError`, such as
+  `SyncError::NotPending` for retrying an operation that isn't pending
+  ([§4](coven.md#4-writing-locally)).
 - A statement SQLite fails fails the write too, even if the closure drops
   the error and returns success (`StatementFailed`): SQLite may have kept
   part of its change, or undone rows coven saw it change. A closure that
@@ -5657,7 +5659,7 @@ pub enum RetryEffect {
 
 impl RetryEffect {
     /// Reads `coven_retry_effect`: `handle.subscribe(RetryEffect::read)`.
-    pub fn read(sql: SqlReadContext<'_>) -> CovenResult<RetryEffect>;
+    pub fn read(sql: SqlReadContext<'_>) -> Result<RetryEffect, DbError>;
 }
 
 /// Holds idle passes at most its interval apart; dropping it ends the request.
@@ -6486,9 +6488,6 @@ pub enum DeviceOnlyError {
     Disk(FileError),
     /// The app cancelled the call before its files switched.
     Cancelled,
-    /// The write switching the files failed other than in the database, as
-    /// in a failed rollback, keeping its cause.
-    Write(Box<CovenError>),
     /// Removing what the call made failed too; the next open removes it.
     Cleanup { error: Box<DeviceOnlyError>, cleanup: DbError },
     /// The call's work panicked: a bug (E15).
@@ -6607,9 +6606,6 @@ pub enum FileReadError {
     Disk(FileError),
     /// The store cannot be retained while opening its file.
     Lock(StoreLockError),
-    /// The write committing a prepared pin failed other than in the
-    /// database, as in a failed rollback, keeping its cause (§17.8).
-    Write(Box<CovenError>),
     /// Recording what a read or an upload settled failed in sync's own work,
     /// as a retry wait the clock can't hold, keeping its cause; a failed read
     /// whose failure couldn't be recorded keeps both (§17.9).
@@ -7591,7 +7587,7 @@ pub enum InviteStage {
 impl Invite {
     /// Reads `coven_invites`, in the order the invites were made, for a
     /// read or a live query: `handle.subscribe(Invite::list)`.
-    pub fn list(sql: SqlReadContext<'_>) -> CovenResult<Vec<Invite>>;
+    pub fn list(sql: SqlReadContext<'_>) -> Result<Vec<Invite>, DbError>;
 }
 
 pub struct JoinRequest {
@@ -8877,7 +8873,7 @@ call's own error says it was a bug.
   `StoreDeletionError`, `StoreKeyUnlockError` and `ReadOnlyOpenError`.
 - `CovenError` keeps a database call's bug as
   `CovenError::Database(DbError::Bug)`, as it keeps the call's other
-  failures.
+  failures, and a sync step's bug as `CovenError::Bug`.
 
 Work nobody waits for has no caller to return its bug to. A store's
 long-lived workers run that way: its sync loop, a connection attempt, the

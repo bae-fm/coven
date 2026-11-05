@@ -1,6 +1,7 @@
 use super::*;
 use crate::test_utils::{notes_migrations, notes_tables};
 use crate::tests::TestStore;
+use crate::OpenError;
 use coven_foundation::clock::HANG_GUARD;
 use coven_foundation::files::{SettingsError, StoreLockError};
 
@@ -13,7 +14,7 @@ async fn writer_is_exclusive_readers_coexist_and_clones_close_together() {
     let clone = database.clone();
     assert_eq!(database.schema_version().await.unwrap(), 1);
     assert!(
-        matches!(store.builder(notes_tables(), notes_migrations()).open().await.err().unwrap(), CovenError::Lock(StoreLockError::AlreadyOpen(id)) if id == store.id())
+        matches!(store.builder(notes_tables(), notes_migrations()).open().await.err().unwrap(), OpenError::Lock(StoreLockError::AlreadyOpen(id)) if id == store.id())
     );
     let reader = store.builder(notes_tables(), notes_migrations()).open_read_only().await.unwrap();
     assert_eq!(reader.schema_version().await.unwrap(), 1);
@@ -142,10 +143,10 @@ fn calls_whose_runtime_is_shutting_down_return_shutdown() {
         let _entered = handle.enter();
         assert!(matches!(
             query.next().await,
-            Some(Err(CovenError::Database(DbError::Shutdown(Shutdown {
+            Some(Err(DbError::Shutdown(Shutdown {
                 operation: "live query",
                 outcome: ShutdownOutcome::NotRun,
-            }))))
+            })))
         ));
         assert!(matches!(
             database.schema_version().await,
@@ -185,7 +186,7 @@ async fn settings_failure_remains_distinct() {
     std::fs::remove_file(settings).unwrap();
     assert!(matches!(
         store.builder(vec![], vec![]).open().await.err().unwrap(),
-        CovenError::Settings(SettingsError::Missing(_))
+        OpenError::Settings(SettingsError::Missing(_))
     ));
 }
 
@@ -445,7 +446,7 @@ fn read_only_process() {
     assert!(matches!(
         runtime.block_on(DatabaseBuilder::new(directory.clone())
             .synced_tables(notes_tables()).migrations(notes_migrations()).open()),
-        Err(CovenError::Lock(StoreLockError::AlreadyOpen(id))) if id == store_id
+        Err(OpenError::Lock(StoreLockError::AlreadyOpen(id))) if id == store_id
     ));
     assert!(matches!(
         runtime.block_on(layout.begin_bootstrap(store_id, &UuidIds)),
@@ -482,7 +483,7 @@ async fn a_panicking_migration_fails_the_open_with_its_message() {
     assert!(
         matches!(
             &error,
-            CovenError::Database(DbError::Bug(bug))
+            OpenError::Database(DbError::Bug(bug))
                 if bug.operation == "open the store" && bug.message == "the notes table is missing"
         ),
         "{error:?}"
@@ -631,10 +632,7 @@ async fn a_panicking_write_whose_rollback_fails_keeps_its_bug_and_fails_the_hand
     };
     assert_eq!(held(&db), 1, "the writer still holds the uncommitted row");
     assert!(matches!(db.write(|_| Ok(())).await, Err(DbError::RollbackFailed)));
-    assert!(matches!(
-        db.read(|_| Ok(())).await,
-        Err(CovenError::Database(DbError::RollbackFailed))
-    ));
+    assert!(matches!(db.read(|_| Ok(())).await, Err(DbError::RollbackFailed)));
     db.close().await.unwrap();
     let db = open().await.unwrap();
     assert_eq!(held(&db), 0);
@@ -819,7 +817,7 @@ async fn a_panicking_authorizer_fails_the_handle_with_its_bug() {
     assert_eq!(bug.operation, "authorize a statement");
     assert_eq!(bug.message, "the authorizer's state is past repair");
     assert!(
-        matches!(db.read(|_| Ok(())).await, Err(CovenError::Database(DbError::Bug(later))) if later == *bug),
+        matches!(db.read(|_| Ok(())).await, Err(DbError::Bug(later)) if later == *bug),
         "a later call reports the bug"
     );
     assert!(matches!(db.write(|_| Ok(())).await, Err(DbError::Bug(_))));
@@ -854,7 +852,7 @@ async fn a_panic_after_commit_fails_the_handle_and_keeps_the_write() {
     assert_eq!(bug.operation, "tell the live queries of a commit");
     assert_eq!(bug.message, "the live queries' list is torn");
     assert!(
-        matches!(db.read(|_| Ok(())).await, Err(CovenError::Database(DbError::Bug(later))) if later == *bug),
+        matches!(db.read(|_| Ok(())).await, Err(DbError::Bug(later)) if later == *bug),
         "a later call reports the bug"
     );
     drop(db);
@@ -921,9 +919,9 @@ async fn a_panic_holding_the_live_query_state_fails_the_handle() {
     db.observer.test_poison();
     assert!(matches!(
         db.read(|_| Ok(())).await,
-        Err(CovenError::Database(DbError::Bug(bug))) if bug.operation == "the store's live queries"
+        Err(DbError::Bug(bug)) if bug.operation == "the store's live queries"
     ));
-    assert!(matches!(query.next().await, Some(Err(CovenError::Database(DbError::Bug(_))))));
+    assert!(matches!(query.next().await, Some(Err(DbError::Bug(_)))));
     assert!(query.next().await.is_none());
 }
 
@@ -969,7 +967,7 @@ async fn a_dropped_calls_panic_goes_to_the_bug_sink() {
     }
     let (entered, entry) = tokio::sync::oneshot::channel();
     let (release, released) = std::sync::mpsc::channel::<()>();
-    let read = database.read(move |_| -> CovenResult<()> {
+    let read = database.read(move |_| -> Result<(), DbError> {
         entered.send(()).unwrap();
         released.recv_timeout(HANG_GUARD).unwrap();
         panic!("the note is gone")

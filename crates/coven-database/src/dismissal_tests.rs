@@ -41,7 +41,7 @@ async fn dismissed_cell_is_removed_on_both_devices_and_after_reopen() {
     assert_eq!(loss.len(), 1);
     assert_eq!(loss, b.lost_values().await.unwrap());
     let before = data(&a).await;
-    let mut live = a.subscribe_lost_values();
+    let mut live = a.subscribe_lost_values::<DbError>();
     assert_eq!(live.next().await.expect("the live query answers").unwrap(), loss);
     a.dismiss_lost_values(&loss).await.unwrap();
     assert!(live.next().await.expect("the live query answers").unwrap().is_empty());
@@ -273,10 +273,7 @@ async fn a_failed_dismissal_rolls_back_its_delete_losses_position_and_queue() {
     let losses = a.lost_values().await.unwrap();
     let before = data(&a).await;
     a.inspect_writer(|sql| sql.fail_at("refuse", "BEFORE INSERT ON _coven_uploads", "refuse"));
-    assert!(matches!(
-        a.dismiss_lost_values(&losses).await,
-        Err(crate::CovenError::Database(crate::DbError::Sqlite(_)))
-    ));
+    assert!(matches!(a.dismiss_lost_values(&losses).await, Err(crate::DbError::Sqlite(_))));
     assert_eq!(a.lost_values().await.unwrap(), losses);
     assert_eq!(data(&a).await, before);
     assert_eq!(records(&a).len(), 1);
@@ -500,11 +497,11 @@ impl crate::Database {
     pub(crate) async fn dismiss_lost_values(
         &self,
         values: &[crate::LostValue],
-    ) -> crate::CovenResult<()> {
+    ) -> Result<(), DbError> {
         let values = values.to_vec();
-        self.staged_write::<_, _, _, _, crate::CovenError>(
+        self.staged_write::<_, _, _, _, crate::DbError>(
             |_| Ok(()),
-            move |sql, ()| Ok(sql.dismiss_lost_values(&values)?),
+            move |sql, ()| sql.dismiss_lost_values(&values),
         )
         .await
     }

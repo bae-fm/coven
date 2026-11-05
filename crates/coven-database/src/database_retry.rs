@@ -126,7 +126,7 @@ impl Database {
     pub fn subscribe_retry_wait(
         &self,
         subject: RetrySubject,
-    ) -> crate::LiveQuery<Option<RetryWait>, crate::CovenError> {
+    ) -> crate::LiveQuery<Option<RetryWait>, crate::DbError> {
         self.subscribe(move |sql| sql.retry_wait(subject))
     }
 

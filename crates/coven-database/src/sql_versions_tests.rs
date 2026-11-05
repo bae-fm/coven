@@ -1,9 +1,7 @@
 use crate::sqlite::DatabaseConnection;
 use crate::tests::{database_error, TestStore};
 use crate::write::tests::sql;
-use crate::{
-    CovenResult, Database, DbError, Determinism, Migration, RowIdentity, SqlFunctions, SyncedTable,
-};
+use crate::{Database, DbError, Determinism, Migration, RowIdentity, SqlFunctions, SyncedTable};
 
 fn notes() -> Vec<SyncedTable> {
     vec![SyncedTable::new("notes", RowIdentity::SharedKey)]
@@ -57,7 +55,7 @@ async fn open(
     store: &TestStore,
     schema: &'static str,
     functions: SqlFunctions,
-) -> CovenResult<Database> {
+) -> Result<Database, crate::OpenError> {
     store.builder(notes(), migrations(schema)).sql_functions(functions).open().await
 }
 

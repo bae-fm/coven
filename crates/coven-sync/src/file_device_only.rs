@@ -71,10 +71,6 @@ pub enum DeviceOnlyError {
     /// The app cancelled the call before its files switched.
     #[error("cancelled")]
     Cancelled,
-    /// The write switching the files failed other than in the database, as
-    /// in a failed rollback, keeping its cause.
-    #[error(transparent)]
-    Write(Box<coven_database::CovenError>),
     /// Removing what the call made failed too. What stays is recorded, and
     /// the next open removes it.
     #[error("{error}; removing the copies failed: {cleanup}")]
@@ -125,20 +121,8 @@ impl coven_foundation::task::CarriesBug for DeviceOnlyError {
             Self::Database(error) => error.bug(),
             Self::Download { error, .. } => error.bug(),
             Self::Disk(error) => error.bug(),
-            Self::Write(error) => error.bug(),
             Self::Cleanup { error, cleanup } => error.bug().or_else(|| cleanup.bug()),
             Self::RepeatedFile { .. } | Self::Cancelled => None,
-        }
-    }
-}
-
-/// A failure of the write switching the files, as the call reports it.
-impl From<coven_database::CovenError> for DeviceOnlyError {
-    fn from(error: coven_database::CovenError) -> Self {
-        match error {
-            coven_database::CovenError::Database(error) => error.into(),
-            coven_database::CovenError::Bug(bug) => Self::Bug(bug),
-            error => Self::Write(Box::new(error)),
         }
     }
 }

@@ -11,7 +11,7 @@ impl CovenHandle {
     /// set up, `delete_store(IfUnsent::Refuse)` refuses with these counts.
     /// Available while disconnected.
     pub async fn unsent_work(&self) -> CovenResult<UnsentWork> {
-        self.database.unsent().await
+        self.database.unsent().await.map_err(CovenError::from)
     }
 
     /// The same pre-built query, live (E4).
@@ -62,7 +62,7 @@ impl CovenHandle {
                 return Err(StoreDeletionError::SignInRequired(location.provider()));
             }
             if !journaled {
-                let work = self.unsent_work().await.map_err(SyncError::from)?;
+                let work = self.database.unsent().await.map_err(SyncError::from)?;
                 if unsent == IfUnsent::Refuse && !work.is_empty() {
                     self.forget_deletion().await?;
                     return Err(StoreDeletionError::Unsent(work));

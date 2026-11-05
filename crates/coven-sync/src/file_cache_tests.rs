@@ -377,7 +377,7 @@ async fn pin_progress_reads_committed_coverage() {
         bytes_cached: cached,
         bytes_total: total,
     };
-    let mut live = f.database.subscribe_pin_progress(vec![file.clone()]);
+    let mut live = f.database.subscribe_pin_progress::<DbError>(vec![file.clone()]);
     assert_eq!(live.next().await.expect("the live query answers").unwrap(), progress(0));
     // Another reader's verified chunk is coverage the moment it commits.
     let stream = f.files.open_file_stream(&file).await.unwrap();

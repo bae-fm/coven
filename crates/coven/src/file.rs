@@ -28,7 +28,7 @@ impl CovenHandle {
     }
     /// Verified cache coverage for these fixed references, in one snapshot.
     pub async fn pin_progress(&self, files: Vec<FileRef>) -> CovenResult<PinProgress> {
-        self.database.pin_progress(files).await
+        self.database.pin_progress(files).await.map_err(CovenError::from)
     }
     /// The same pre-built cache query with the same fixed references.
     pub fn subscribe_pin_progress(
@@ -47,7 +47,7 @@ impl CovenHandle {
     /// for a file this device has no record of. The answer is whether
     /// `coven_pins` lists it.
     pub async fn files_pinned(&self, files: &[FileId]) -> CovenResult<Vec<Option<bool>>> {
-        self.database.files_pinned(files.to_vec()).await
+        self.database.files_pinned(files.to_vec()).await.map_err(CovenError::from)
     }
     /// The same internal query, live. To watch different files, drop this
     /// query and subscribe with the new files.

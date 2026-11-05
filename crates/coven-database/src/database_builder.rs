@@ -3,7 +3,7 @@
 use super::*;
 use coven_foundation::files::StoreDirAccess;
 
-use crate::{migration::MigrationOperation, NewOperation, OpenStep};
+use crate::{migration::MigrationOperation, NewOperation, OpenError, OpenStep};
 use coven_foundation::progress::{ProgressChannel, ProgressReport, ProgressWatch};
 
 /// Choices needed to open the database part of a store.
@@ -124,14 +124,14 @@ impl DatabaseBuilder {
     /// Always migrate coven's internal tables, then rebuild the indexes a new
     /// version of SQLite or of the app's collations and functions changes,
     /// then migrate the app's schema.
-    pub async fn open(self) -> CovenResult<Database> {
+    pub async fn open(self) -> Result<Database, OpenError> {
         let lock = self.directory.lock_for_open().await?;
         self.open_locked(lock).await
     }
 
     /// Open under a lock already held by the facade while checking restored
     /// device identity. The lock must protect this builder's directory.
-    pub async fn open_locked(self, lock: StoreLock) -> CovenResult<Database> {
+    pub async fn open_locked(self, lock: StoreLock) -> Result<Database, OpenError> {
         let closing = lock.closing_guard();
         let bugs = self.bugs.clone();
         let result = finish_blocking(
@@ -146,7 +146,7 @@ impl DatabaseBuilder {
     /// Open read-only connections under a shared deletion guard, without
     /// migrating or rebuilding, including from a second process while the
     /// writer is open.
-    pub async fn open_read_only(self) -> CovenResult<Database<ReadOnly>> {
+    pub async fn open_read_only(self) -> Result<Database<ReadOnly>, OpenError> {
         let bugs = self.bugs.clone();
         finish_blocking(
             blocking_completing("open the store read-only", bugs, move || self.open_read_graph())
@@ -154,11 +154,11 @@ impl DatabaseBuilder {
         )
     }
 
-    fn open_graph(self, lock: StoreLock) -> CovenResult<Database> {
+    fn open_graph(self, lock: StoreLock) -> Result<Database, OpenError> {
         let tables =
-            self.tables.ok_or(CovenError::MissingConfiguration { field: "synced_tables" })?;
+            self.tables.ok_or(OpenError::MissingConfiguration { field: "synced_tables" })?;
         let migrations =
-            self.migrations.ok_or(CovenError::MissingConfiguration { field: "migrations" })?;
+            self.migrations.ok_or(OpenError::MissingConfiguration { field: "migrations" })?;
         // Refuse a directory that is not a store before creating its database.
         coven_foundation::files::verify_lock(&self.directory, &lock)?;
         let settings = lock.settings()?;
@@ -187,7 +187,7 @@ impl DatabaseBuilder {
         // Before the app's migrations, which may read coven's views.
         writer.serve_views(settings.device_id, &transfers, &network)?;
         let (outcomes, write_schema, inputs, mut checkpoints, migrating, migrated, optimized) =
-            writer.with_profile(|writer| -> CovenResult<_> {
+            writer.with_profile(|writer| -> Result<_, OpenError> {
                 writer.enable_wal()?;
                 let mut progress = ProgressReport::of(&self.progress, clock.clone());
                 let migrating = clock.elapsed();
@@ -340,11 +340,11 @@ impl DatabaseBuilder {
             }))),
         })
     }
-    fn open_read_graph(self) -> CovenResult<Database<ReadOnly>> {
+    fn open_read_graph(self) -> Result<Database<ReadOnly>, OpenError> {
         let tables =
-            self.tables.ok_or(CovenError::MissingConfiguration { field: "synced_tables" })?;
+            self.tables.ok_or(OpenError::MissingConfiguration { field: "synced_tables" })?;
         let migrations =
-            self.migrations.ok_or(CovenError::MissingConfiguration { field: "migrations" })?;
+            self.migrations.ok_or(OpenError::MissingConfiguration { field: "migrations" })?;
         let lock = self.directory.lock_read_only()?;
         let settings = self.directory.settings()?;
         let path = self.directory.database_path();
@@ -438,7 +438,7 @@ pub async fn discarded_operations(
 /// It reads only coven's `_coven_store_state`, and SQLite looks a collation
 /// or function up only for a statement that uses it, so the app's aren't
 /// needed.
-pub async fn read_store_name(directory: StoreDir) -> CovenResult<String> {
+pub async fn read_store_name(directory: StoreDir) -> Result<String, OpenError> {
     finish_blocking(
         coven_foundation::task::blocking("read the store name", move || {
             let _lock = directory.lock_read_only()?;

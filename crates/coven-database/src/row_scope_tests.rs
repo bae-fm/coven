@@ -11,8 +11,7 @@
 use crate::sql_value::SqlValue;
 use crate::tests::next;
 use crate::tests::TestStore;
-use crate::DbError;
-use crate::{CovenResult, Database, LiveQuery, RowIdentity, SyncedTable};
+use crate::{Database, DbError, LiveQuery, RowIdentity, SyncedTable};
 use coven_foundation::clock::HANG_GUARD;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -129,7 +128,7 @@ async fn a_write_during_the_read_that_reveals_the_scope_wakes_it() {
     let entered = Mutex::new(Some(entered));
     let (release, released) = std::sync::mpsc::channel();
     let released = Mutex::new(released);
-    let mut query = db.subscribe(move |sql| -> CovenResult<_> {
+    let mut query = db.subscribe(move |sql| -> Result<_, DbError> {
         if let Some(entered) = entered.lock().unwrap().take() {
             entered.send(()).unwrap();
             released.lock().unwrap().recv_timeout(HANG_GUARD).unwrap();

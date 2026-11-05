@@ -1,8 +1,6 @@
 //! Borrowed reads and their connection-scoped SQL capability.
 
-use crate::{
-    database, sqlite::DatabaseConnection, CovenResult, Database, DbError, LostValue, Mode, Writer,
-};
+use crate::{database, sqlite::DatabaseConnection, Database, DbError, LostValue, Mode, Writer};
 use coven_foundation::task::CarriesBug;
 use rusqlite::{Params, Row};
 use std::{
@@ -64,94 +62,96 @@ impl<'connection> SqlReadContext<'connection> {
         crate::user_file::read(self.database, file)
     }
 
-    pub(crate) fn lost_values(&self) -> CovenResult<Vec<LostValue>> {
+    pub(crate) fn lost_values(&self) -> Result<Vec<LostValue>, DbError> {
         self.database.lost_values()
     }
 
-    pub(crate) fn pending<P: crate::PendingValue>(&self) -> CovenResult<Vec<P>> {
-        Ok(crate::pending::read(self.database)?)
+    pub(crate) fn pending<P: crate::PendingValue>(&self) -> Result<Vec<P>, DbError> {
+        crate::pending::read(self.database)
     }
 
     pub(crate) fn pin_progress(
         &self,
         files: &[crate::FileRef],
         device: coven_foundation::id_source::DeviceId,
-    ) -> CovenResult<crate::PinProgress> {
-        Ok(crate::cache_progress::pin_progress(self.database, files, device)?)
+    ) -> Result<crate::PinProgress, DbError> {
+        crate::cache_progress::pin_progress(self.database, files, device)
     }
 
     pub(crate) fn files_pinned(
         &self,
         files: &[coven_foundation::id_source::FileId],
-    ) -> CovenResult<Vec<Option<bool>>> {
-        Ok(crate::cache_progress::files_pinned(self.database, files)?)
+    ) -> Result<Vec<Option<bool>>, DbError> {
+        crate::cache_progress::files_pinned(self.database, files)
     }
 
-    pub(crate) fn unsent(&self) -> CovenResult<crate::UnsentWork> {
-        Ok(crate::file_queue::unsent(self.database)?)
+    pub(crate) fn unsent(&self) -> Result<crate::UnsentWork, DbError> {
+        crate::file_queue::unsent(self.database)
     }
 
     pub(crate) fn sync_facts<P: crate::PendingValue + Clone>(
         &self,
-    ) -> CovenResult<crate::SyncFacts<P>> {
-        Ok(crate::sync_facts::read(self.database)?)
+    ) -> Result<crate::SyncFacts<P>, DbError> {
+        crate::sync_facts::read(self.database)
     }
 
     /// `coven_sync_status`'s row, as coven reads it.
     #[cfg(test)]
-    pub(crate) fn sync_status_row(&self) -> CovenResult<crate::SyncStatusRow> {
-        Ok(crate::internal_schema::sync_status::read(self.database)?)
+    pub(crate) fn sync_status_row(&self) -> Result<crate::SyncStatusRow, DbError> {
+        crate::internal_schema::sync_status::read(self.database)
     }
 
-    pub(crate) fn upload_queue(&self) -> CovenResult<crate::UploadQueueState> {
-        Ok(crate::file_queue::state(self.database)?)
+    pub(crate) fn upload_queue(&self) -> Result<crate::UploadQueueState, DbError> {
+        crate::file_queue::state(self.database)
     }
 
-    pub(crate) fn device_reset(&self) -> CovenResult<Option<coven_foundation::files::DeviceReset>> {
-        Ok(crate::device_reset::read(self.database)?)
+    pub(crate) fn device_reset(
+        &self,
+    ) -> Result<Option<coven_foundation::files::DeviceReset>, DbError> {
+        crate::device_reset::read(self.database)
     }
 
-    pub(crate) fn store_name(&self) -> CovenResult<String> {
-        Ok(crate::store_state_tables::name(self.database)?)
+    pub(crate) fn store_name(&self) -> Result<String, DbError> {
+        crate::store_state_tables::name(self.database)
     }
 
-    pub(crate) fn named_store(&self) -> CovenResult<(String, coven_merge::Slot)> {
-        Ok(crate::store_state_tables::named(self.database)?)
+    pub(crate) fn named_store(&self) -> Result<(String, coven_merge::Slot), DbError> {
+        crate::store_state_tables::named(self.database)
     }
 
     pub(crate) fn members(
         &self,
         device: coven_foundation::id_source::DeviceId,
-    ) -> CovenResult<Vec<crate::MemberInfo>> {
-        Ok(crate::members::members(self.database, device)?)
+    ) -> Result<Vec<crate::MemberInfo>, DbError> {
+        crate::members::members(self.database, device)
     }
 
     pub(crate) fn circles(
         &self,
         device: coven_foundation::id_source::DeviceId,
-    ) -> CovenResult<Vec<crate::Circle>> {
-        Ok(crate::members::circles(self.database, device)?)
+    ) -> Result<Vec<crate::Circle>, DbError> {
+        crate::members::circles(self.database, device)
     }
 
     pub(crate) fn circle_members(
         &self,
         device: coven_foundation::id_source::DeviceId,
         circle: coven_foundation::id_source::CircleId,
-    ) -> CovenResult<Vec<crate::CircleMemberInfo>> {
-        Ok(crate::members::circle_members(self.database, device, circle)?)
+    ) -> Result<Vec<crate::CircleMemberInfo>, DbError> {
+        crate::members::circle_members(self.database, device, circle)
     }
 
     #[cfg(any(test, feature = "test-utils"))]
-    pub(crate) fn store_state(&self) -> CovenResult<crate::StoreState> {
-        Ok(crate::store_state_tables::read(self.database)?)
+    pub(crate) fn store_state(&self) -> Result<crate::StoreState, DbError> {
+        crate::store_state_tables::read(self.database)
     }
 
     #[cfg(any(test, feature = "test-utils"))]
     pub(crate) fn retry_wait(
         &self,
         subject: crate::RetrySubject,
-    ) -> CovenResult<Option<crate::RetryWait>> {
-        Ok(crate::retry::find(self.database, subject)?)
+    ) -> Result<Option<crate::RetryWait>, DbError> {
+        crate::retry::find(self.database, subject)
     }
 }
 

@@ -1,4 +1,4 @@
-use crate::{tests::TestStore, CovenError, Database, DbError};
+use crate::{tests::TestStore, Database, DbError};
 use crate::{Lost, LostCell, RemovalRule, Replacement, WriteId};
 use coven_format::{key::encode_key, merge_fields::*, value::Value as WireValue};
 use coven_foundation::clock::HANG_GUARD;
@@ -240,7 +240,7 @@ async fn corrupt_values_fail_typed_and_live_losses_recover_after_repair() {
             .await
             .unwrap()
             .expect("the live query answers"),
-        Err(CovenError::Database(DbError::DamagedDatabase))
+        Err(DbError::DamagedDatabase)
     ));
     db.commit_writer(|sql| {
         sql.internal_execute(
@@ -261,7 +261,7 @@ async fn corrupt_values_fail_typed_and_live_losses_recover_after_repair() {
     db.commit_writer(|sql| sql.batch("UPDATE _coven_lost SET value=x'ff'").unwrap());
     assert!(matches!(
         query.next().await.expect("the live query answers"),
-        Err(CovenError::Database(DbError::DamagedDatabase))
+        Err(DbError::DamagedDatabase)
     ));
     db.commit_writer(|sql| sql.batch("DELETE FROM _coven_lost").unwrap());
     assert!(query.next().await.expect("the live query answers").unwrap().is_empty());
@@ -283,7 +283,7 @@ async fn wrong_column_table_is_a_damaged_database() {
         "write",
         encode_write_id(&setter(2)).unwrap(),
     );
-    assert!(matches!(db.lost_values().await, Err(CovenError::Database(DbError::DamagedDatabase))));
+    assert!(matches!(db.lost_values().await, Err(DbError::DamagedDatabase)));
     db.close().await.unwrap();
 }
 

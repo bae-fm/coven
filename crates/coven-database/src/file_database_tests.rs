@@ -2,7 +2,7 @@ use super::*;
 use crate::{
     file_write::tests::{complete_uploads, namespaces, open, stage, tables, SCHEMA},
     tests::TestStore,
-    CovenError, Migration, Namespace, Provenance, SchemaError,
+    DbError, Migration, Namespace, Provenance, SchemaError,
 };
 use coven_foundation::clock::HANG_GUARD;
 
@@ -92,10 +92,7 @@ fn cancelled_cache_reservations_drop_outside_a_runtime_and_record_cleanup_failur
                 .open(),
         );
         let reopened = if refuse_cleanup {
-            assert!(matches!(
-                opened,
-                Err(crate::CovenError::Database(DbError::FileCleanup { .. }))
-            ));
+            assert!(matches!(opened, Err(crate::OpenError::Database(DbError::FileCleanup { .. }))));
             store.assert_writer_unlocked();
             let sql = rusqlite::Connection::open(store.database_path()).unwrap();
             assert_eq!(
@@ -895,7 +892,7 @@ async fn a_namespace_is_declared_once() {
         .await;
     assert!(matches!(
         opened,
-        Err(CovenError::Database(DbError::Schema(SchemaError::DuplicateNamespace { namespace })))
+        Err(crate::OpenError::Database(DbError::Schema(SchemaError::DuplicateNamespace { namespace })))
             if namespace == "files"
     ));
 }

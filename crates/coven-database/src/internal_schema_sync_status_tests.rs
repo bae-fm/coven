@@ -11,7 +11,7 @@ const LOGGED: &str = "CREATE TABLE notes (id TEXT NOT NULL PRIMARY KEY, title TE
          INSERT INTO status_log(storage,moving) VALUES(NEW.storage,NEW.moving);
      END;";
 
-fn row(sql: crate::SqlReadContext<'_>) -> crate::CovenResult<SyncStatusRow> {
+fn row(sql: crate::SqlReadContext<'_>) -> Result<SyncStatusRow, DbError> {
     sql.sync_status_row()
 }
 

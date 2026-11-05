@@ -44,7 +44,7 @@ async fn local_keys_into_values_coven_updates_must_follow_them() {
         ),
     ] {
         let schema = format!("{PARENTS}; {local}");
-        let check = |result: Result<Database, CovenError>| match refused {
+        let check = |result: Result<Database, crate::OpenError>| match refused {
             Some(table) => assert!(
                 matches!(database_error(result.err().expect("refused")), DbError::Schema(SchemaError::LocalChildUpdate { table: t, column }) if t == table && column == "code"),
                 "{local}"

@@ -7,6 +7,7 @@ pub use crate::builder::{
     JoinControl,
 };
 pub use crate::coven::{Coven, ListedStore, StoreInfo, StoreListError, Unfinished};
+pub use crate::coven_error::{CovenError, CovenResult};
 pub use crate::coven_write::CovenWrite;
 #[cfg(feature = "dev-tools")]
 pub use crate::dev_tools::empty_s3_prefix;
@@ -34,16 +35,16 @@ pub use coven_database::test_utils::{WorkCounter, WorkCounts};
 pub use coven_database::LiveQueryRuns;
 pub use coven_database::{
     named_params, params, prepare_user_file, types, unix_seconds_and_nanos, Binding,
-    BulkSqlContext, ChangeOp, ChangeSource, ColumnChange, CovenError, CovenMigrationError,
-    CovenResult, DbError, Determinism, FileColumn, FileLocation, FilePlace, FileRef, FileSource,
-    FunctionArguments, LiveQuery, LiveQueryCause, LiveQueryClosed, LiveQueryRequests,
-    LiveQueryRevision, LoadStep, Lost, LostCell, LostValue, Migration, MigrationContext,
-    MigrationError, Mode, MoveFile, MoveId, Namespace, OldWrites, OpenStep, Params, Place,
-    PreparedDeviceOnly, PreparedPin, PreparedUserFile, Provenance, Read, ReadOnly,
-    ReconfigurableLiveQuery, ReconfigurableLiveQueryEvent, RemovalRule, Replacement, Row,
-    RowAuthorizationFailure, RowChange, RowIdentity, RowKey, SchemaError, SnapshotError, SqlRead,
-    SqlReadContext, SqliteError, SqliteResult, StagedFiles, SyncedTable, TemporaryDirectoryError,
-    ToSql, TransferChange, TransferProgress, TransferWatch, UnsentWork, UserFile, WriteBatch,
+    BulkSqlContext, ChangeOp, ChangeSource, ColumnChange, CovenMigrationError, DbError,
+    Determinism, FileColumn, FileLocation, FilePlace, FileRef, FileSource, FunctionArguments,
+    LiveQuery, LiveQueryCause, LiveQueryClosed, LiveQueryRequests, LiveQueryRevision, LoadStep,
+    Lost, LostCell, LostValue, Migration, MigrationContext, MigrationError, Mode, MoveFile, MoveId,
+    Namespace, OldWrites, OpenStep, Params, Place, PreparedDeviceOnly, PreparedPin,
+    PreparedUserFile, Provenance, Read, ReadOnly, ReconfigurableLiveQuery,
+    ReconfigurableLiveQueryEvent, RemovalRule, Replacement, Row, RowAuthorizationFailure,
+    RowChange, RowIdentity, RowKey, SchemaError, SnapshotError, SqlRead, SqlReadContext,
+    SqliteError, SqliteResult, StagedFiles, SyncedTable, TemporaryDirectoryError, ToSql,
+    TransferChange, TransferProgress, TransferWatch, UnsentWork, UserFile, WriteBatch,
     WriteFailure, WriteId, WriteWait, Writer, BOUND_FILE_LIMIT,
 };
 

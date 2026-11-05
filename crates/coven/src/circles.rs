@@ -58,7 +58,7 @@ impl<'a> Circles<'a> {
     }
     /// The circles this member is in.
     pub async fn list(&self) -> CovenResult<Vec<Circle>> {
-        self.handle.database.circles().await
+        self.handle.database.circles().await.map_err(CovenError::from)
     }
     /// The same circle-list query, live (E4).
     pub fn subscribe_list(&self) -> LiveQuery<Vec<Circle>, CovenError> {
@@ -66,7 +66,7 @@ impl<'a> Circles<'a> {
     }
     /// A circle's members who are still in the store.
     pub async fn members(&self, circle: CircleId) -> CovenResult<Vec<CircleMemberInfo>> {
-        self.handle.database.circle_members(circle).await
+        self.handle.database.circle_members(circle).await.map_err(CovenError::from)
     }
     /// The same query for this circle's members, live (E4).
     pub fn subscribe_members(

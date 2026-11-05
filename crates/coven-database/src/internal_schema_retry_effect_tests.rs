@@ -14,7 +14,7 @@ const LOGGED: &str = "CREATE TABLE notes (id TEXT NOT NULL PRIMARY KEY, title TE
 
 type Row = (String, Option<i64>);
 
-fn effect_row(sql: crate::SqlReadContext<'_>) -> crate::CovenResult<Row> {
+fn effect_row(sql: crate::SqlReadContext<'_>) -> Result<Row, DbError> {
     Ok(sql.query_row("SELECT effect,cooling_until FROM coven_retry_effect", [], |r| {
         Ok((r.get(0)?, r.get(1)?))
     })?)

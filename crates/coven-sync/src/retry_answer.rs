@@ -121,7 +121,7 @@ impl From<RetryState> for RetryEffect {
 impl RetryEffect {
     /// Read `coven_retry_effect`, as an app's live query does:
     /// `handle.subscribe(RetryEffect::read)`.
-    pub fn read(sql: coven_database::SqlReadContext<'_>) -> coven_database::CovenResult<Self> {
+    pub fn read(sql: coven_database::SqlReadContext<'_>) -> Result<Self, DbError> {
         let (effect, until) =
             sql.query_row("SELECT effect,cooling_until FROM coven_retry_effect", [], |row| {
                 Ok((row.get::<_, String>(0)?, row.get::<_, Option<i64>>(1)?))
@@ -133,11 +133,7 @@ impl RetryEffect {
             }
             ("failed", _) => Self::Failed,
             ("not_syncing", None) => Self::NotSyncing,
-            _ => {
-                return Err(
-                    DbError::Invariant { what: "the retry effect is one coven computes" }.into()
-                )
-            }
+            _ => return Err(DbError::Invariant { what: "the retry effect is one coven computes" }),
         })
     }
 
@@ -145,7 +141,7 @@ impl RetryEffect {
     #[cfg(any(test, feature = "test-utils"))]
     pub fn follow(
         database: &coven_database::Database,
-    ) -> coven_database::test_utils::Followed<Self, coven_database::CovenError> {
+    ) -> coven_database::test_utils::Followed<Self, DbError> {
         coven_database::test_utils::Followed::new(database.subscribe(Self::read))
     }
 }

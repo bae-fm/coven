@@ -1,7 +1,7 @@
 //! Device-reset notices and committed member lists (§19.3, E5).
 
 use super::{Database, DbError};
-use crate::{CovenResult, LiveQuery, NewOperation, PendingValue, ProviderAccessChange};
+use crate::{LiveQuery, NewOperation, PendingValue, ProviderAccessChange};
 use coven_foundation::files::DeviceReset;
 use coven_foundation::locks::read_unpoisoned;
 
@@ -39,27 +39,33 @@ impl Database {
 
     /// Store members and every device they registered, from the committed
     /// sequence prefix (E9). `subscribe_members` runs the same query.
-    pub async fn members(&self) -> CovenResult<Vec<crate::MemberInfo>> {
+    pub async fn members(&self) -> Result<Vec<crate::MemberInfo>, DbError> {
         let device = self.local_device()?;
         self.read(move |sql| sql.members(device)).await
     }
 
     /// The same members query, live (E4).
-    pub fn subscribe_members(&self) -> LiveQuery<Vec<crate::MemberInfo>, crate::CovenError> {
+    pub fn subscribe_members<E>(&self) -> LiveQuery<Vec<crate::MemberInfo>, E>
+    where
+        E: From<DbError> + coven_foundation::task::CarriesBug + Send + 'static,
+    {
         let device = self.local_device().ok();
-        self.subscribe(move |sql| sql.members(device.ok_or(DbError::StoreClosed)?))
+        self.subscribe(move |sql| sql.members(device.ok_or(DbError::StoreClosed)?).map_err(E::from))
     }
 
     /// The circles this installation's member belongs to (E12).
-    pub async fn circles(&self) -> CovenResult<Vec<crate::Circle>> {
+    pub async fn circles(&self) -> Result<Vec<crate::Circle>, DbError> {
         let device = self.local_device()?;
         self.read(move |sql| sql.circles(device)).await
     }
 
     /// The same circle-list query, live (E4).
-    pub fn subscribe_circles(&self) -> LiveQuery<Vec<crate::Circle>, crate::CovenError> {
+    pub fn subscribe_circles<E>(&self) -> LiveQuery<Vec<crate::Circle>, E>
+    where
+        E: From<DbError> + coven_foundation::task::CarriesBug + Send + 'static,
+    {
         let device = self.local_device().ok();
-        self.subscribe(move |sql| sql.circles(device.ok_or(DbError::StoreClosed)?))
+        self.subscribe(move |sql| sql.circles(device.ok_or(DbError::StoreClosed)?).map_err(E::from))
     }
 
     /// A circle's members who remain in the store; none for an absent or
@@ -67,28 +73,36 @@ impl Database {
     pub async fn circle_members(
         &self,
         circle: coven_foundation::id_source::CircleId,
-    ) -> CovenResult<Vec<crate::CircleMemberInfo>> {
+    ) -> Result<Vec<crate::CircleMemberInfo>, DbError> {
         let device = self.local_device()?;
         self.read(move |sql| sql.circle_members(device, circle)).await
     }
 
     /// The same circle-members query, live (E4).
-    pub fn subscribe_circle_members(
+    pub fn subscribe_circle_members<E>(
         &self,
         circle: coven_foundation::id_source::CircleId,
-    ) -> LiveQuery<Vec<crate::CircleMemberInfo>, crate::CovenError> {
+    ) -> LiveQuery<Vec<crate::CircleMemberInfo>, E>
+    where
+        E: From<DbError> + coven_foundation::task::CarriesBug + Send + 'static,
+    {
         let device = self.local_device().ok();
-        self.subscribe(move |sql| sql.circle_members(device.ok_or(DbError::StoreClosed)?, circle))
+        self.subscribe(move |sql| {
+            sql.circle_members(device.ok_or(DbError::StoreClosed)?, circle).map_err(E::from)
+        })
     }
 
     /// The latest completed replacement of this installation, or None (E5).
-    pub async fn device_reset(&self) -> CovenResult<Option<DeviceReset>> {
+    pub async fn device_reset(&self) -> Result<Option<DeviceReset>, DbError> {
         self.read(|sql| sql.device_reset()).await
     }
 
     /// The same pre-built query, observing committed changes (E4).
-    pub fn subscribe_device_reset(&self) -> LiveQuery<Option<DeviceReset>, crate::CovenError> {
-        self.subscribe(|sql| sql.device_reset())
+    pub fn subscribe_device_reset<E>(&self) -> LiveQuery<Option<DeviceReset>, E>
+    where
+        E: From<DbError> + coven_foundation::task::CarriesBug + Send + 'static,
+    {
+        self.subscribe(|sql| sql.device_reset().map_err(E::from))
     }
 }
 

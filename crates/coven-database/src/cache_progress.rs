@@ -1,7 +1,7 @@
 //! Pin progress as a query over committed cache coverage (§17.8, E8).
 //! Nothing here counts bytes in flight.
 
-use crate::{sqlite::DatabaseConnection, CovenResult, Database, DbError, FileRef, LiveQuery};
+use crate::{sqlite::DatabaseConnection, Database, DbError, FileRef, LiveQuery};
 use coven_foundation::id_source::{DeviceId, FileId};
 
 /// Verified cache coverage of requested files (§17.8, E8).
@@ -112,28 +112,30 @@ pub(crate) fn files_pinned(
 
 impl Database {
     /// Verified cache coverage for these fixed references, in one snapshot.
-    pub async fn pin_progress(&self, files: Vec<FileRef>) -> CovenResult<PinProgress> {
+    pub async fn pin_progress(&self, files: Vec<FileRef>) -> Result<PinProgress, DbError> {
         let device = self.local_device()?;
         self.read(move |sql| sql.pin_progress(&files, device)).await
     }
     /// The same pre-built cache query with the same fixed references.
-    pub fn subscribe_pin_progress(
-        &self,
-        files: Vec<FileRef>,
-    ) -> LiveQuery<PinProgress, crate::CovenError> {
+    pub fn subscribe_pin_progress<E>(&self, files: Vec<FileRef>) -> LiveQuery<PinProgress, E>
+    where
+        E: From<DbError> + coven_foundation::task::CarriesBug + Send + 'static,
+    {
         let device = self.local_device().ok();
-        self.subscribe(move |sql| sql.pin_progress(&files, device.ok_or(DbError::StoreClosed)?))
+        self.subscribe(move |sql| {
+            sql.pin_progress(&files, device.ok_or(DbError::StoreClosed)?).map_err(E::from)
+        })
     }
     /// Whether each file is pinned, one answer per file in order.
-    pub async fn files_pinned(&self, files: Vec<FileId>) -> CovenResult<Vec<Option<bool>>> {
+    pub async fn files_pinned(&self, files: Vec<FileId>) -> Result<Vec<Option<bool>>, DbError> {
         self.read(move |sql| sql.files_pinned(&files)).await
     }
     /// The same internal query, live.
-    pub fn subscribe_files_pinned(
-        &self,
-        files: Vec<FileId>,
-    ) -> LiveQuery<Vec<Option<bool>>, crate::CovenError> {
-        self.subscribe(move |sql| sql.files_pinned(&files))
+    pub fn subscribe_files_pinned<E>(&self, files: Vec<FileId>) -> LiveQuery<Vec<Option<bool>>, E>
+    where
+        E: From<DbError> + coven_foundation::task::CarriesBug + Send + 'static,
+    {
+        self.subscribe(move |sql| sql.files_pinned(&files).map_err(E::from))
     }
 }
 

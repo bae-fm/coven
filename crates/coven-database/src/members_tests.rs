@@ -157,9 +157,9 @@ async fn members_list_every_device_with_its_state_and_the_local_member() {
 async fn subscriptions_start_with_the_committed_value_and_follow_replay() {
     let store = TestStore::new();
     let db = store.builder(vec![], vec![]).open().await.unwrap();
-    let mut members = db.subscribe_members();
-    let mut circles = db.subscribe_circles();
-    let mut circle = db.subscribe_circle_members(CircleId(uuid::Uuid::from_u128(7)));
+    let mut members = db.subscribe_members::<DbError>();
+    let mut circles = db.subscribe_circles::<DbError>();
+    let mut circle = db.subscribe_circle_members::<DbError>(CircleId(uuid::Uuid::from_u128(7)));
     assert!(members.next().await.expect("the live query answers").unwrap().is_empty());
     assert!(circles.next().await.expect("the live query answers").unwrap().is_empty());
     assert!(circle.next().await.expect("the live query answers").unwrap().is_empty());
@@ -192,7 +192,7 @@ async fn read_failures_reach_callers_and_subscribers() {
     let store = TestStore::new();
     let db = store.builder(vec![], vec![]).open().await.unwrap();
     fixture(&db).await;
-    let mut members = db.subscribe_members();
+    let mut members = db.subscribe_members::<DbError>();
     assert_eq!(members.next().await.expect("the live query answers").unwrap().len(), 2);
     db.inspect_writer(|db| {
         crate::store_state_tables::tests::damage(
@@ -201,9 +201,14 @@ async fn read_failures_reach_callers_and_subscribers() {
         )
     });
     assert!(db.members().await.is_err());
-    assert!(db.subscribe_members().next().await.expect("the live query answers").is_err());
+    assert!(db
+        .subscribe_members::<DbError>()
+        .next()
+        .await
+        .expect("the live query answers")
+        .is_err());
     db.close().await.unwrap();
-    assert!(matches!(db.members().await, Err(crate::CovenError::Database(DbError::StoreClosed))));
+    assert!(matches!(db.members().await, Err(DbError::StoreClosed)));
 }
 
 /// Each stored member fact, and the member a device registered under, that
@@ -218,13 +223,7 @@ async fn a_stored_member_fact_that_does_not_decode_is_damaged_database() {
         fixture(&db).await;
         let own = db.inspect_writer(|sql| sql.local_device()).unwrap();
         db.inspect_writer(|sql| damage(sql, broken));
-        assert!(
-            matches!(
-                db.members().await,
-                Err(crate::CovenError::Database(DbError::DamagedDatabase))
-            ),
-            "{broken}"
-        );
+        assert!(matches!(db.members().await, Err(DbError::DamagedDatabase)), "{broken}");
         if broken.contains("member=") {
             assert!(matches!(
                 db.inspect_writer(|sql| crate::store_state_tables::device_member(sql, own)),
@@ -245,10 +244,7 @@ async fn a_stored_circle_or_slot_that_does_not_decode_is_damaged_database() {
         fixture(&db).await;
         db.inspect_writer(|sql| damage(sql, broken));
         let read = db.store_state().await;
-        assert!(
-            matches!(read, Err(crate::CovenError::Database(DbError::DamagedDatabase))),
-            "{broken}: {read:?}"
-        );
+        assert!(matches!(read, Err(DbError::DamagedDatabase)), "{broken}: {read:?}");
     }
 }
 
@@ -291,11 +287,11 @@ const DEVICES: &str = "SELECT device,member,name,state,is_self FROM coven_device
 type MemberRow = (MemberId, String, bool, bool);
 type DeviceRow = (DeviceId, MemberId, String, String, bool);
 
-fn member_rows(sql: crate::SqlReadContext<'_>) -> crate::CovenResult<Vec<MemberRow>> {
+fn member_rows(sql: crate::SqlReadContext<'_>) -> Result<Vec<MemberRow>, DbError> {
     Ok(sql.query(MEMBERS, [], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?)
 }
 
-fn device_rows(sql: crate::SqlReadContext<'_>) -> crate::CovenResult<Vec<DeviceRow>> {
+fn device_rows(sql: crate::SqlReadContext<'_>) -> Result<Vec<DeviceRow>, DbError> {
     Ok(sql.query(DEVICES, [], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)))?)
 }
 

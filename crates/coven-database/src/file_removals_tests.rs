@@ -1,3 +1,4 @@
+use crate::read::tests::AppError;
 use crate::{
     file_write::tests::{local_count, namespaces, open, owned_paths, stage, tables, SCHEMA},
     tests::TestStore,
@@ -36,7 +37,7 @@ async fn failed_deletions_remain_recorded_until_a_write_or_open_retries_them() {
                 .unwrap();
             assert!(matches!(
                 error,
-                CovenError::Database(DbError::FileCleanup { write: Ok(()), .. })
+                crate::OpenError::Database(DbError::FileCleanup { write: Ok(()), .. })
             ));
             store.assert_writer_unlocked();
         }
@@ -303,7 +304,7 @@ async fn a_failed_write_keeps_its_error_when_pending_deletion_also_fails() {
     db.close().await.unwrap();
 }
 
-/// A callback's `CovenError` is kept whole beside the cleanup that failed too.
+/// A callback's own error is kept whole beside the cleanup that failed too.
 #[tokio::test]
 async fn a_callback_error_keeps_a_failed_cleanup_beside_it() {
     let store = TestStore::new();
@@ -312,19 +313,17 @@ async fn a_callback_error_keeps_a_failed_cleanup_beside_it() {
         sql.fail_at("_coven_fail_cleanup", "BEFORE DELETE ON _coven_file_removals", "record stays")
     });
     let error = db
-        .staged_write::<_, _, _, _, crate::CovenError>(
+        .staged_write::<_, _, _, _, AppError>(
             |batch| Ok(batch.put_file("files", b"partial".to_vec(), crate::Place::Cloud)),
-            |_, _| {
-                Err::<(), _>(crate::CovenError::Key(coven_crypto::custody::KeyError::StoreClosed))
-            },
+            |_, _| Err::<(), _>(AppError::Refused("no")),
         )
         .await
         .unwrap_err();
     assert!(
         matches!(
             &error,
-            crate::CovenError::FileCleanup { write, failures }
-                if matches!(**write, crate::CovenError::Key(coven_crypto::custody::KeyError::StoreClosed))
+            AppError::FileCleanup { write, failures }
+                if matches!(**write, AppError::Refused("no"))
                     && matches!(failures.as_slice(), [DbError::Sqlite(_)])
         ),
         "{error:?}"

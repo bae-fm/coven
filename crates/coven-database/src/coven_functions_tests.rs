@@ -1,5 +1,5 @@
 use crate::tests::TestStore;
-use crate::{CovenError, DbError, Migration, RowIdentity, SyncedTable};
+use crate::{DbError, Migration, RowIdentity, SyncedTable};
 
 /// A store whose planner reads an analyzed index of coven keys.
 async fn analyzed_keys(store: &TestStore) -> crate::Database {
@@ -42,7 +42,7 @@ async fn coven_key_without_arguments_is_refused_where_the_planner_reads_statisti
         .await
         .unwrap_err();
     match error {
-        CovenError::Database(DbError::Sqlite(rusqlite::Error::SqliteFailure(_, Some(msg)))) => {
+        DbError::Sqlite(rusqlite::Error::SqliteFailure(_, Some(msg))) => {
             assert_eq!(msg, "coven_key takes a row's key: one value or more")
         }
         error => panic!("expected coven_key's refusal, received {error:?}"),
@@ -217,10 +217,7 @@ async fn a_time_reads_as_whole_seconds_and_nanoseconds_in_sql_and_rust() {
                 .await
                 .unwrap_err();
             assert!(
-                matches!(
-                    error,
-                    CovenError::Database(DbError::Sqlite(rusqlite::Error::SqliteFailure(..)))
-                ),
+                matches!(error, DbError::Sqlite(rusqlite::Error::SqliteFailure(..))),
                 "{function}: {error:?}"
             );
         }

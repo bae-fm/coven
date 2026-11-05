@@ -1,6 +1,5 @@
 use crate::tests::next;
-use crate::DbError;
-use crate::{tests::TestStore, CovenResult, Database};
+use crate::{tests::TestStore, Database, DbError};
 use coven_foundation::clock::HANG_GUARD;
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
@@ -221,7 +220,7 @@ async fn commit_before_the_statement_reveals_its_range_is_not_missed() {
     let entered = Mutex::new(Some(entered));
     let (release, released) = std::sync::mpsc::channel();
     let released = Mutex::new(released);
-    let mut query = db.subscribe(move |db| -> CovenResult<_> {
+    let mut query = db.subscribe(move |db| -> Result<_, DbError> {
         if let Some(entered) = entered.lock().unwrap().take() {
             entered.send(()).unwrap();
             released.lock().unwrap().recv_timeout(HANG_GUARD).unwrap();
@@ -367,9 +366,7 @@ async fn multiple_statement_errors_remain_live_without_inventing_a_key_range() {
                 .await
                 .unwrap()
                 .expect("the live query answers"),
-            Err(crate::CovenError::Database(crate::DbError::Sqlite(
-                rusqlite::Error::MultipleStatement
-            )))
+            Err(crate::DbError::Sqlite(rusqlite::Error::MultipleStatement))
         ));
     }
     assert_eq!(calls.load(Ordering::SeqCst), 2);
@@ -462,7 +459,7 @@ async fn commits_while_dependencies_are_unknown_still_filter_outside_keys() {
     let released = Mutex::new(released);
     let calls = Arc::new(AtomicUsize::new(0));
     let count = calls.clone();
-    let mut query = db.subscribe(move |db| -> CovenResult<_> {
+    let mut query = db.subscribe(move |db| -> Result<_, DbError> {
         count.fetch_add(1, Ordering::SeqCst);
         if let Some(entered) = entered.lock().unwrap().take() {
             entered.send(()).unwrap();

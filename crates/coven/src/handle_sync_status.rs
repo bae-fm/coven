@@ -7,12 +7,14 @@ impl CovenHandle {
     /// queue, the files moving and the pending records in one committed
     /// snapshot (§19.1).
     pub async fn sync_status(&self) -> CovenResult<SyncStatus> {
-        coven_sync::sync_status(&self.database).await
+        coven_sync::sync_status(&self.database).await.map_err(CovenError::from)
     }
     /// The same pre-built query, live (E4): its first value is the current
     /// state.
     pub fn subscribe_sync_status(&self) -> LiveQuery<SyncStatus, CovenError> {
-        self.database.subscribe_sync_facts(coven_sync::SyncStatus::computed)
+        self.database.subscribe_sync_facts(|facts| {
+            coven_sync::SyncStatus::computed(facts).map_err(CovenError::from)
+        })
     }
     /// Follow the sync state with `subscribe_sync_status`, as an app does (E5).
     #[cfg(any(test, feature = "test-utils"))]

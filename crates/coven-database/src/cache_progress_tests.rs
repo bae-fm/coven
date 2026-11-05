@@ -29,7 +29,7 @@ async fn files_pinned_answers_in_request_order() {
     let db = open(&store, Provenance::AppProvided).await;
     let file = stage(&db, b"bytes".to_vec(), true).await.unwrap();
     let absent = coven_foundation::id_source::FileId(uuid::Uuid::from_u128(1));
-    let mut live = db.subscribe_files_pinned(vec![absent, file]);
+    let mut live = db.subscribe_files_pinned::<DbError>(vec![absent, file]);
     assert_eq!(
         live.next().await.expect("the live query answers").unwrap(),
         vec![None, Some(false)]
@@ -48,7 +48,7 @@ async fn a_live_pin_answer_follows_coven_pins() {
     let file = stage(&db, b"bytes".to_vec(), true).await.unwrap();
     complete_uploads(&db).await;
     let absent = coven_foundation::id_source::FileId(uuid::Uuid::from_u128(1));
-    let mut live = db.subscribe_files_pinned(vec![file, absent]);
+    let mut live = db.subscribe_files_pinned::<DbError>(vec![file, absent]);
     assert_eq!(live.next().await.unwrap().unwrap(), [Some(false), None]);
     let stored = db.file_ref(file).await.unwrap();
     crate::database::file_database::tests::pin_whole(&db, &stored, "whole").await.unwrap();

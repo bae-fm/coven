@@ -61,7 +61,7 @@ async fn a_later_failure_rolls_back_every_pending_migration_and_version() {
     let error = store.builder(notes_tables(), migrations).open().await.err().unwrap();
     assert!(matches!(
         error,
-        CovenError::Migration(MigrationError::Failed { version: 3, name: "backfill", .. })
+        OpenError::Migration(MigrationError::Failed { version: 3, name: "backfill", .. })
     ));
     let db = store.builder(notes_tables(), notes_migrations()).open().await.unwrap();
     assert_eq!(db.schema_version().await.unwrap(), 1);
@@ -129,7 +129,7 @@ async fn migration_numbering_and_newer_database_errors_are_exact() {
         .unwrap();
     assert!(matches!(
         error,
-        CovenError::Migration(MigrationError::NotContiguous { position: 0, found: 2, expected: 1 })
+        OpenError::Migration(MigrationError::NotContiguous { position: 0, found: 2, expected: 1 })
     ));
     let db = store.builder(notes_tables(), notes_migrations()).open().await.unwrap();
     db.close().await.unwrap();
@@ -144,7 +144,7 @@ async fn migration_numbering_and_newer_database_errors_are_exact() {
         .unwrap();
         assert!(matches!(
             error,
-            CovenError::Migration(MigrationError::SchemaTooNew { current: 1, supported: 0 })
+            OpenError::Migration(MigrationError::SchemaTooNew { current: 1, supported: 0 })
         ));
     }
 }

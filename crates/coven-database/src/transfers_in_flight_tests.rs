@@ -231,7 +231,7 @@ async fn app_sql_reads_what_is_being_sent_only_through_the_views() {
         let error =
             db.read(move |sql| Ok(sql.query(statement, [], |_| Ok(()))?)).await.unwrap_err();
         assert!(
-            matches!(error, crate::CovenError::Database(crate::DbError::StatementForbidden { .. })),
+            matches!(error, crate::DbError::StatementForbidden { .. }),
             "{statement}: {error:?}"
         );
     }

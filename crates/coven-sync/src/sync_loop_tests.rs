@@ -182,10 +182,8 @@ async fn a_pass_end_that_cant_be_written_fails_the_handle() {
         .await
         .unwrap()
         .expect("the live query reports the failure");
-    let cause = |error: coven_database::CovenError| match error {
-        coven_database::CovenError::Database(coven_database::DbError::StatePersistence(cause)) => {
-            cause
-        }
+    let cause = |error: coven_database::DbError| match error {
+        coven_database::DbError::StatePersistence(cause) => cause,
         error => panic!("{error:?}"),
     };
     let original = cause(failed.unwrap_err());
@@ -346,12 +344,12 @@ fn at(group: &Group, seconds: u64) {
 }
 
 /// Follow the sync state, as an app does.
-fn follow(device: &Device) -> Followed<SyncStatus, coven_database::CovenError> {
+fn follow(device: &Device) -> Followed<SyncStatus, coven_database::DbError> {
     Followed::new(device.sync.database.subscribe_sync_facts(SyncStatus::computed))
 }
 
 /// Wait for the pass that finishes `seconds` after the epoch.
-async fn synced_at(status: &mut Followed<SyncStatus, coven_database::CovenError>, seconds: u64) {
+async fn synced_at(status: &mut Followed<SyncStatus, coven_database::DbError>, seconds: u64) {
     let finished = std::time::UNIX_EPOCH + std::time::Duration::from_secs(seconds);
     status.wait_for(|status| status.last_synced == Some(finished)).await;
 }

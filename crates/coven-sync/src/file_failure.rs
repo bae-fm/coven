@@ -183,7 +183,6 @@ impl<M: Mode> FilesInner<M> {
             (
                 _,
                 FileReadError::Database(_)
-                | FileReadError::Write(_)
                 | FileReadError::Sync(_)
                 | FileReadError::RangeOutOfBounds { .. }
                 | FileReadError::DeviceOnly { .. },

@@ -1,8 +1,5 @@
 use crate::tests::TestStore;
-use crate::{
-    CheckpointMode, CovenError, DbError, Migration, SqliteSettings, WalAutocheckpoint,
-    WalCheckpoint,
-};
+use crate::{CheckpointMode, DbError, Migration, SqliteSettings, WalAutocheckpoint, WalCheckpoint};
 use coven_foundation::clock::HANG_GUARD;
 use std::num::NonZeroU32;
 use std::sync::{Condvar, Mutex};
@@ -236,7 +233,7 @@ fn faulted(
 async fn checkpointer_failure(
     db: &crate::Database,
     fault: impl FnMut() -> Result<(), DbError> + Send + 'static,
-) -> CovenError {
+) -> DbError {
     let mut tries = faulted(db, fault);
     let mut query = db.subscribe(|sql| {
         Ok(sql.query_row("SELECT count(*) FROM blobs", [], |r| r.get::<_, i64>(0))?)
@@ -317,7 +314,7 @@ async fn a_failed_checkpoint_fails_the_handle_with_its_cause() {
     let db = blobs(&store, checkpointed_at_100_pages()).open().await.unwrap();
     let failure =
         checkpointer_failure(&db, || Err(sqlite_error(rusqlite::ffi::SQLITE_IOERR))).await;
-    let CovenError::Database(DbError::CheckpointFailed(cause)) = &failure else {
+    let DbError::CheckpointFailed(cause) = &failure else {
         panic!("{failure:?}");
     };
     assert!(

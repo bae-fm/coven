@@ -4,113 +4,6 @@
 use coven_foundation::files::{SettingsError, StoreLockError};
 use coven_foundation::task::{Bug, CarriesBug};
 
-/// The result of opening or using this database.
-pub type CovenResult<T> = Result<T, CovenError>;
-
-/// Failures of opening, reading and writing a store (§4, E1, E3).
-#[derive(Debug, thiserror::Error)]
-pub enum CovenError {
-    /// Reading device identity or an app callback's custody operation failed.
-    #[error(transparent)]
-    Key(coven_crypto::custody::KeyError),
-    /// An app callback failed and SQLite also failed to roll it back. Later
-    /// calls fail with `DbError::RollbackFailed` until the store is reopened (§4).
-    #[error("{operation}; rollback failed: {rollback}")]
-    Rollback {
-        /// The callback or database failure.
-        operation: Box<CovenError>,
-        /// SQLite's rollback failure.
-        #[source]
-        rollback: rusqlite::Error,
-    },
-    /// File cleanup failed after the callback failed, retaining both.
-    #[error("file cleanup failed: {failures:?}; write failed: {write}")]
-    FileCleanup {
-        /// The callback's original error.
-        write: Box<CovenError>,
-        /// Each failed byte removal or pending-record update.
-        failures: Vec<DbError>,
-    },
-    /// The database or a write's validation failed.
-    #[error(transparent)]
-    Database(#[from] DbError),
-    /// An app migration failed or cannot run on this schema.
-    #[error(transparent)]
-    Migration(#[from] MigrationError),
-    /// Coven's internal schema is unsupported or its migration cannot run.
-    #[error(transparent)]
-    CovenMigration(#[from] CovenMigrationError),
-    /// The directory's settings could not be read.
-    #[error(transparent)]
-    Settings(#[from] SettingsError),
-    /// The writer's lock could not be acquired.
-    #[error(transparent)]
-    Lock(StoreLockError),
-    /// A required builder choice was not supplied (E1).
-    #[error("opening requires {field}")]
-    MissingConfiguration {
-        /// The missing choice.
-        field: &'static str,
-    },
-    /// The keychain holds no entry naming this directory's device; opening
-    /// changed nothing (§19.3).
-    #[error("store {store}: this device's keychain entry is missing")]
-    DeviceKeyMissing {
-        /// The store whose device entry is missing.
-        store: coven_foundation::id_source::StoreId,
-    },
-    /// A connected store's identity custody holds no member keys either,
-    /// beside the missing device entry; only restoring with the restore code
-    /// continues. Opening changed nothing (§19.3, §13).
-    #[error("store {store}: this device's entry and member keys are missing")]
-    MemberKeysMissing {
-        /// The store whose member keys are missing.
-        store: coven_foundation::id_source::StoreId,
-    },
-    /// The device is locked, and the protection class the app chose keeps
-    /// the store's files closed until it unlocks; opening changed nothing
-    /// the lock refused (api.md E1). The app waits for the unlock and opens
-    /// again.
-    #[error("{}: the device is locked, and the store's files are protected until it unlocks", path.display())]
-    DeviceLocked {
-        /// The first protected file the open was refused.
-        path: std::path::PathBuf,
-    },
-    /// The call's runtime is shutting down and dropped coven's work for it
-    /// on the blocking pool unstarted, such as opening's custody work, so
-    /// that work changed nothing (E15). A database call dropped this way is
-    /// `DbError::Shutdown`.
-    #[error(transparent)]
-    Shutdown(#[from] coven_foundation::task::Shutdown),
-    /// Coven's work for the call panicked on the blocking pool, such as
-    /// opening's custody work: a bug, which the caller reports (E15). A
-    /// database call that panicked is `DbError::Bug`.
-    #[error(transparent)]
-    Bug(#[from] coven_foundation::task::Bug),
-    /// The platform refused to let coven watch the device's network, such
-    /// as an Android app without coven's Android library (api.md E1, E5).
-    #[error(transparent)]
-    NetworkWatch(#[from] coven_foundation::network_watch::NetworkWatchError),
-}
-
-impl CarriesBug for CovenError {
-    fn bug(&self) -> Option<&Bug> {
-        match self {
-            Self::Bug(bug) => Some(bug),
-            Self::Database(error) => error.bug(),
-            Self::Key(error) => error.bug(),
-            Self::Lock(error) => error.bug(),
-            Self::Rollback { operation, .. } => operation.bug(),
-            Self::FileCleanup { write, failures } => {
-                write.bug().or_else(|| failures.iter().find_map(DbError::bug))
-            }
-            Self::Migration(MigrationError::Failed { source, .. })
-            | Self::CovenMigration(CovenMigrationError::Failed { source }) => source.bug(),
-            _ => None,
-        }
-    }
-}
-
 impl CarriesBug for DbError {
     fn bug(&self) -> Option<&Bug> {
         match self {
@@ -130,36 +23,6 @@ impl CarriesBug for DbError {
             Self::Closing { failures } => failures.iter().find_map(DbError::bug),
             _ => None,
         }
-    }
-}
-
-impl From<coven_crypto::custody::KeyError> for CovenError {
-    fn from(error: coven_crypto::custody::KeyError) -> Self {
-        match error {
-            coven_crypto::custody::KeyError::Bug(bug) => Self::Bug(bug),
-            error => Self::Key(error),
-        }
-    }
-}
-
-impl From<StoreLockError> for CovenError {
-    fn from(error: StoreLockError) -> Self {
-        match error {
-            StoreLockError::Bug(bug) => Self::Bug(bug),
-            error => Self::Lock(error),
-        }
-    }
-}
-
-impl From<coven_foundation::task::TaskFailed> for CovenError {
-    fn from(failed: coven_foundation::task::TaskFailed) -> Self {
-        failed.into_error()
-    }
-}
-
-impl From<rusqlite::Error> for CovenError {
-    fn from(error: rusqlite::Error) -> Self {
-        Self::Database(error.into())
     }
 }
 
@@ -232,10 +95,6 @@ pub enum DbError {
     /// transaction did not commit (§11).
     #[error("reading a claim's bytes failed: {0}")]
     ClaimRead(#[source] std::io::Error),
-    /// A sync step failed inside an app's write, which did not commit, or
-    /// while the store opened, keeping sync's own typed cause (E1, E3).
-    #[error("sync stream failed: {0}")]
-    SyncStream(#[source] Box<dyn std::error::Error + Send + Sync>),
     /// This handle or a clone has closed the store (E1).
     #[error("store is closed")]
     StoreClosed,
@@ -891,6 +750,72 @@ impl From<rusqlite::Error> for DbError {
             }
             error => Self::Sqlite(error),
         }
+    }
+}
+
+/// Opening the database failed: its writer or read-only connections, its
+/// lock, its settings or its migrations (§4, E1, E13).
+#[derive(Debug, thiserror::Error)]
+pub enum OpenError {
+    /// The database failed.
+    #[error(transparent)]
+    Database(#[from] DbError),
+    /// An app migration failed or cannot run on this schema.
+    #[error(transparent)]
+    Migration(#[from] MigrationError),
+    /// Coven's internal schema is unsupported or its migration cannot run.
+    #[error(transparent)]
+    CovenMigration(#[from] CovenMigrationError),
+    /// The directory's settings could not be read.
+    #[error(transparent)]
+    Settings(#[from] SettingsError),
+    /// The store's lock could not be taken.
+    #[error(transparent)]
+    Lock(StoreLockError),
+    /// A required builder choice was not supplied (E1).
+    #[error("opening requires {field}")]
+    MissingConfiguration {
+        /// The missing choice.
+        field: &'static str,
+    },
+    /// Taking the store's lock panicked: a bug, which the caller reports
+    /// (E15). Opening's database work that panicked is `DbError::Bug`.
+    #[error(transparent)]
+    Bug(#[from] coven_foundation::task::Bug),
+}
+
+impl CarriesBug for OpenError {
+    fn bug(&self) -> Option<&Bug> {
+        match self {
+            Self::Bug(bug) => Some(bug),
+            Self::Database(error) => error.bug(),
+            Self::Lock(error) => error.bug(),
+            Self::Migration(MigrationError::Failed { source, .. })
+            | Self::CovenMigration(CovenMigrationError::Failed { source }) => source.bug(),
+            Self::Migration(
+                MigrationError::NotContiguous { .. } | MigrationError::SchemaTooNew { .. },
+            )
+            | Self::CovenMigration(
+                CovenMigrationError::ReadOnly | CovenMigrationError::SchemaTooNew { .. },
+            )
+            | Self::Settings(_)
+            | Self::MissingConfiguration { .. } => None,
+        }
+    }
+}
+
+impl From<StoreLockError> for OpenError {
+    fn from(error: StoreLockError) -> Self {
+        match error {
+            StoreLockError::Bug(bug) => Self::Bug(bug),
+            error => Self::Lock(error),
+        }
+    }
+}
+
+impl From<rusqlite::Error> for OpenError {
+    fn from(error: rusqlite::Error) -> Self {
+        Self::Database(error.into())
     }
 }
 

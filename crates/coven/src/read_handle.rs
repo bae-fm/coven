@@ -30,7 +30,7 @@ impl CovenReadHandle {
     }
     /// The store's current name from this device's committed state (E9).
     pub async fn store_name(&self) -> CovenResult<String> {
-        self.database.store_name().await
+        self.database.store_name().await.map_err(CovenError::from)
     }
 
     /// A read of one consistent snapshot, run when awaited.

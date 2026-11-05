@@ -157,33 +157,6 @@ impl From<coven_foundation::task::TaskFailed> for SyncError {
     }
 }
 
-impl From<coven_database::CovenError> for SyncError {
-    fn from(error: coven_database::CovenError) -> Self {
-        match error {
-            coven_database::CovenError::Database(error) => error.into(),
-            coven_database::CovenError::Shutdown(shutdown) => Self::Shutdown(shutdown),
-            coven_database::CovenError::Bug(bug) => Self::Bug(bug),
-            error => {
-                Self::Failed { failure: crate::LocalFailure::Database, source: Arc::new(error) }
-            }
-        }
-    }
-}
-
-/// A sync step's failure inside an app's write, as the write's closure
-/// passes it on: a database failure as itself, any other keeping the
-/// step's own error, which converting back to a `SyncError` returns (§4).
-impl From<SyncError> for coven_database::CovenError {
-    fn from(error: SyncError) -> Self {
-        match error {
-            SyncError::Database(error) => Self::Database(error),
-            SyncError::Shutdown(shutdown) => Self::Database(DbError::Shutdown(shutdown)),
-            SyncError::Bug(bug) => Self::Database(DbError::Bug(bug)),
-            error => Self::Database(DbError::SyncStream(Box::new(error))),
-        }
-    }
-}
-
 impl From<coven_database::SqliteError> for SyncError {
     fn from(error: coven_database::SqliteError) -> Self {
         DbError::from(error).into()
@@ -229,11 +202,6 @@ impl From<DbError> for SyncError {
             DbError::StagingCleanup { operation, cleanup } => {
                 Self::cleanup((*operation).into(), (*cleanup).into())
             }
-            // Sync's own failure inside a database call comes back as itself.
-            DbError::SyncStream(error) => match error.downcast::<SyncError>() {
-                Ok(error) => *error,
-                Err(error) => Self::Database(DbError::SyncStream(error)),
-            },
             error => Self::Database(error),
         }
     }

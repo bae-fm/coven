@@ -13,6 +13,7 @@ pub use coven_foundation::task;
 
 mod builder;
 mod coven;
+mod coven_error;
 mod coven_write;
 mod error;
 mod handle;

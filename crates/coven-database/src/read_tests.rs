@@ -1,7 +1,7 @@
 use crate::{
     test_utils::{notes_migrations, notes_tables},
     tests::TestStore,
-    CovenError, DbError,
+    DbError,
 };
 use coven_foundation::clock::HANG_GUARD;
 use std::sync::{
@@ -40,7 +40,7 @@ async fn read_is_lazy_and_readonly_opens_use_the_same_api() {
         "body"
     );
     ro.close().await.unwrap();
-    assert!(matches!(ro.read(|_| Ok(())).await, Err(CovenError::Database(DbError::StoreClosed))));
+    assert!(matches!(ro.read(|_| Ok(())).await, Err(DbError::StoreClosed)));
     db.close().await.unwrap();
 }
 
@@ -98,17 +98,14 @@ async fn read_context_refuses_writes_and_internal_tables_with_typed_errors() {
     ] {
         let error =
             db.read(move |sql| Ok(sql.query(statement, [], |_| Ok(()))?)).await.unwrap_err();
-        assert!(
-            matches!(error, CovenError::Database(DbError::StatementForbidden { .. })),
-            "{statement}: {error:?}"
-        );
+        assert!(matches!(error, DbError::StatementForbidden { .. }), "{statement}: {error:?}");
     }
     for statement in
         ["SELECT * FROM _coven_lost", "SELECT * FROM _CoVeN_rows", "SELECT * FROM _coven_columns"]
     {
         let error =
             db.read(move |sql| Ok(sql.query(statement, [], |_| Ok(()))?)).await.unwrap_err();
-        assert!(matches!(error, CovenError::Database(DbError::InternalTable { .. })), "{error:?}");
+        assert!(matches!(error, DbError::InternalTable { .. }), "{error:?}");
     }
     assert_eq!(
         db.read(|sql| Ok::<_, DbError>(
@@ -168,8 +165,7 @@ async fn process_releases_all_reader_leases_and_store_borrows() {
 async fn a_panicking_read_releases_its_snapshot_and_keeps_the_reader_usable() {
     let store = TestStore::new();
     let db = store.builder(vec![], vec![]).open().await.unwrap();
-    let error =
-        db.read(|_| -> crate::CovenResult<()> { panic!("app read panic") }).await.unwrap_err();
+    let error = db.read(|_| -> Result<(), DbError> { panic!("app read panic") }).await.unwrap_err();
     assert!(read_bug(&error, "app read panic"), "{error:?}");
     assert_eq!(
         db.read(|sql| Ok::<_, DbError>(sql.query_row("SELECT 42", [], |r| r.get::<_, i64>(0))?))
@@ -181,7 +177,7 @@ async fn a_panicking_read_releases_its_snapshot_and_keeps_the_reader_usable() {
 
     let ro = store.builder(vec![], vec![]).open_read_only().await.unwrap();
     let error =
-        ro.read(|_| -> crate::CovenResult<()> { panic!("read-only panic") }).await.unwrap_err();
+        ro.read(|_| -> Result<(), DbError> { panic!("read-only panic") }).await.unwrap_err();
     assert!(read_bug(&error, "read-only panic"), "{error:?}");
     assert_eq!(
         ro.read(|sql| Ok::<_, DbError>(sql.query_row("SELECT 42", [], |r| r.get::<_, i64>(0))?))
@@ -193,12 +189,12 @@ async fn a_panicking_read_releases_its_snapshot_and_keeps_the_reader_usable() {
 }
 
 /// Whether `error` is the bug of a read whose closure panicked with `message`.
-fn read_bug(error: &CovenError, message: &str) -> bool {
-    matches!(error, CovenError::Database(DbError::Bug(bug)) if bug.operation == "read" && bug.message == message)
+fn read_bug(error: &DbError, message: &str) -> bool {
+    matches!(error, DbError::Bug(bug) if bug.operation == "read" && bug.message == message)
 }
 
-fn rollback_failed<T>(result: crate::CovenResult<T>) -> bool {
-    matches!(result, Err(CovenError::Database(DbError::RollbackFailed)))
+fn rollback_failed<T>(result: Result<T, DbError>) -> bool {
+    matches!(result, Err(DbError::RollbackFailed))
 }
 
 #[tokio::test]
@@ -217,7 +213,7 @@ async fn a_failed_snapshot_rollback_fails_the_handle_until_reopen() {
             .read(move |sql| {
                 sql.query_row("SELECT 1", [], |r| r.get::<_, i64>(0))?;
                 if read_fails {
-                    Err(DbError::DamagedDatabase.into())
+                    Err(DbError::DamagedDatabase)
                 } else {
                     Ok(())
                 }
@@ -225,9 +221,9 @@ async fn a_failed_snapshot_rollback_fails_the_handle_until_reopen() {
             .await
             .unwrap_err();
         if read_fails {
-            assert!(matches!(error, CovenError::Database(DbError::DamagedDatabase)), "{error:?}");
+            assert!(matches!(error, DbError::DamagedDatabase), "{error:?}");
         } else {
-            assert!(matches!(error, CovenError::Database(DbError::Sqlite(_))), "{error:?}");
+            assert!(matches!(error, DbError::Sqlite(_)), "{error:?}");
         }
         assert!(rollback_failed(db.read(|_| Ok(())).await));
         assert!(matches!(db.schema_version().await, Err(DbError::RollbackFailed)));
@@ -245,8 +241,7 @@ async fn a_panicking_read_whose_rollback_fails_keeps_its_bug_and_fails_the_handl
     let store = TestStore::new();
     let db = store.builder(vec![], vec![]).open().await.unwrap();
     db.inspect_readers(|reader| reader.refuse_transaction_end(true));
-    let error =
-        db.read(|_| -> crate::CovenResult<()> { panic!("app read panic") }).await.unwrap_err();
+    let error = db.read(|_| -> Result<(), DbError> { panic!("app read panic") }).await.unwrap_err();
     assert!(read_bug(&error, "app read panic"), "{error:?}");
     assert!(rollback_failed(db.read(|_| Ok(())).await));
     db.close().await.unwrap();
@@ -260,7 +255,7 @@ async fn a_read_only_handle_fails_after_any_of_its_connections_fails_to_roll_bac
     // A reader ending its snapshot.
     let ro = open().open_read_only().await.unwrap();
     ro.inspect_readers(|reader| reader.refuse_transaction_end(true));
-    assert!(matches!(ro.read(|_| Ok(())).await, Err(CovenError::Database(DbError::Sqlite(_)))));
+    assert!(matches!(ro.read(|_| Ok(())).await, Err(DbError::Sqlite(_))));
     assert!(rollback_failed(ro.read(|_| Ok(())).await));
     assert!(matches!(ro.schema_version().await, Err(DbError::RollbackFailed)));
     ro.close().await.unwrap();
@@ -278,12 +273,24 @@ async fn a_read_only_handle_fails_after_any_of_its_connections_fails_to_roll_bac
     ro.close().await.unwrap();
 }
 
-/// An app's own error type, as an app declares one for its reads: coven's
-/// failures convert into it, and its own refusals sit beside them.
-#[derive(Debug)]
+/// An app's own error type, as an app declares one for its reads and
+/// writes: coven's failures convert into it, its own refusals sit beside
+/// them, and a write's failed rollback or byte removal stays beside the
+/// refusal it followed.
+#[derive(Debug, thiserror::Error)]
 pub(crate) enum AppError {
+    #[error(transparent)]
     Database(DbError),
+    #[error("refused: {0}")]
     Refused(&'static str),
+    #[error("{operation}; rollback failed: {rollback}")]
+    Rollback {
+        operation: Box<AppError>,
+        #[source]
+        rollback: rusqlite::Error,
+    },
+    #[error("file cleanup failed: {failures:?}; write failed: {write}")]
+    FileCleanup { write: Box<AppError>, failures: Vec<DbError> },
 }
 
 impl From<DbError> for AppError {
@@ -303,6 +310,25 @@ impl coven_foundation::task::CarriesBug for AppError {
         match self {
             Self::Database(error) => error.bug(),
             Self::Refused(_) => None,
+            Self::Rollback { operation, .. } => operation.bug(),
+            Self::FileCleanup { write, failures } => {
+                write.bug().or_else(|| failures.iter().find_map(DbError::bug))
+            }
+        }
+    }
+}
+
+impl crate::WriteFailure for AppError {
+    fn with_rollback(self, rollback: rusqlite::Error) -> Self {
+        match self {
+            Self::Database(error) => Self::Database(error.with_rollback(rollback)),
+            error => Self::Rollback { operation: Box::new(error), rollback },
+        }
+    }
+    fn with_cleanup(write: Self, failures: Vec<DbError>) -> Self {
+        match write {
+            Self::Database(error) => Self::Database(DbError::with_cleanup(error, failures)),
+            error => Self::FileCleanup { write: Box::new(error), failures },
         }
     }
 }

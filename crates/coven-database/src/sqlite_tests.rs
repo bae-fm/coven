@@ -1,4 +1,5 @@
 use super::*;
+use crate::read::tests::AppError;
 use crate::tests::next;
 use crate::{
     test_utils::{notes_migrations, notes_tables},
@@ -163,7 +164,7 @@ async fn damaged_files_fail_before_migration_or_wal_changes() {
         };
         assert!(matches!(
             result.err().unwrap(),
-            crate::CovenError::Database(DbError::DamagedDatabase)
+            crate::OpenError::Database(DbError::DamagedDatabase)
         ));
         assert_eq!(std::fs::read(store.database_path()).unwrap(), bytes);
     }
@@ -217,7 +218,7 @@ async fn internal_schema_migrations_roll_back_on_failure() {
     .unwrap();
     drop(raw);
     let error = store.builder(vec![], vec![]).open().await.err().unwrap();
-    assert!(matches!(error, crate::CovenError::CovenMigration(CovenMigrationError::Failed { .. })));
+    assert!(matches!(error, crate::OpenError::CovenMigration(CovenMigrationError::Failed { .. })));
     let raw = Connection::open(store.database_path()).unwrap();
     assert_eq!(raw.query_row("PRAGMA application_id", [], |r| r.get::<_, i32>(0)).unwrap(), 0);
     assert_eq!(
@@ -239,7 +240,7 @@ async fn read_only_refuses_internal_migration_without_changing_database() {
     let before = std::fs::read(store.database_path()).unwrap();
     assert!(matches!(
         store.builder(vec![], vec![]).open_read_only().await.err().unwrap(),
-        crate::CovenError::CovenMigration(CovenMigrationError::ReadOnly)
+        crate::OpenError::CovenMigration(CovenMigrationError::ReadOnly)
     ));
     assert_eq!(std::fs::read(store.database_path()).unwrap(), before);
 }
@@ -263,7 +264,7 @@ async fn newer_internal_schema_is_refused_without_changes() {
             };
             assert!(matches!(
                 result,
-                Err(crate::CovenError::CovenMigration(CovenMigrationError::SchemaTooNew {
+                Err(crate::OpenError::CovenMigration(CovenMigrationError::SchemaTooNew {
                     current,
                     supported,
                 })) if current == version && supported == internal_schema::VERSION
@@ -596,7 +597,7 @@ async fn observation_and_local_write_sessions_cover_app_and_materialized_changes
         .subscribe(|sql| Ok(sql.query("SELECT title FROM notes", [], |r| r.get::<_, String>(0))?));
     let mut audit: crate::LiveQuery<_, DbError> = db
         .subscribe(|sql| Ok(sql.query("SELECT value FROM audit", [], |r| r.get::<_, String>(0))?));
-    let mut lost = db.subscribe_lost_values();
+    let mut lost = db.subscribe_lost_values::<DbError>();
     assert!(next(&mut notes).await.is_empty());
     assert!(next(&mut audit).await.is_empty());
     assert!(next(&mut lost).await.is_empty());
@@ -864,13 +865,10 @@ async fn a_failed_rollback_fails_every_later_call_until_reopen() {
         assert!(rollback_failed(db.current_claim().await.unwrap_err()));
         assert!(rollback_failed(db.write(|_| Ok(())).await.unwrap_err()));
         assert!(rollback_failed(db.schema_version().await.unwrap_err()));
-        assert!(matches!(
-            db.read(|_| Ok(())).await.unwrap_err(),
-            crate::CovenError::Database(DbError::RollbackFailed)
-        ));
+        assert!(matches!(db.read(|_| Ok(())).await.unwrap_err(), DbError::RollbackFailed));
         assert!(matches!(
             notes.next().await.expect("the live query answers").unwrap_err(),
-            crate::CovenError::Database(DbError::RollbackFailed)
+            DbError::RollbackFailed
         ));
         db.close().await.unwrap();
         let db = open().await.unwrap();
@@ -880,7 +878,7 @@ async fn a_failed_rollback_fails_every_later_call_until_reopen() {
     }
 }
 
-/// A callback that fails with a `CovenError` while SQLite also fails to roll
+/// A callback that fails with its own error while SQLite also fails to roll
 /// it back keeps both causes, and later calls fail until the store reopens
 /// (§4).
 #[tokio::test]
@@ -892,15 +890,15 @@ async fn a_callback_error_whose_rollback_fails_keeps_both_and_fails_later_calls(
     let error = db
         .write_as(|sql| {
             sql.execute("INSERT INTO notes VALUES('n','held','')", [])?;
-            Err::<(), _>(crate::CovenError::Key(coven_crypto::custody::KeyError::StoreClosed))
+            Err::<(), _>(AppError::Refused("no"))
         })
         .await
         .unwrap_err();
     assert!(
         matches!(
             &error,
-            crate::CovenError::Rollback { operation, .. }
-                if matches!(**operation, crate::CovenError::Key(coven_crypto::custody::KeyError::StoreClosed))
+            AppError::Rollback { operation, .. }
+                if matches!(**operation, AppError::Refused("no"))
         ),
         "{error:?}"
     );

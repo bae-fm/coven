@@ -61,7 +61,6 @@ fn a_bug_in_file_work_is_the_calls_bug() {
         FileReadError::from(StoreLockError::Bug(bug.clone())),
         FileReadError::from(StorageError::Bug(bug.clone())),
         FileReadError::from(DbError::Bug(bug.clone())),
-        FileReadError::from(coven_database::CovenError::Bug(bug.clone())),
         FileReadError::from(LocalFileError::Bug(bug.clone())),
     ];
     for read in reads {
@@ -74,7 +73,6 @@ fn a_bug_in_file_work_is_the_calls_bug() {
         crate::DeviceOnlyError::from(path),
         crate::DeviceOnlyError::from(DbError::Bug(bug.clone())),
         crate::DeviceOnlyError::from(FileError::Bug(bug.clone())),
-        crate::DeviceOnlyError::from(coven_database::CovenError::Bug(bug.clone())),
     ];
     for copy in copies {
         assert!(matches!(&copy, crate::DeviceOnlyError::Bug(found) if *found == bug), "{copy:?}");

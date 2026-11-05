@@ -41,7 +41,7 @@ async fn reopen_after_drop_waits_only_for_a_subscriptions_active_read() {
     assert_eq!(query.next().await.expect("the live query answers").unwrap(), 17);
     assert!(matches!(
         query.next().await.expect("the live query answers"),
-        Err(crate::CovenError::Database(DbError::StoreClosed))
+        Err(DbError::StoreClosed)
     ));
     reopened.close().await.unwrap();
 }
@@ -197,7 +197,7 @@ async fn errors_are_results_and_a_later_commit_can_recover() {
     });
     assert!(matches!(
         next_result(&mut query).await,
-        Err(crate::CovenError::Database(DbError::Sqlite(rusqlite::Error::QueryReturnedNoRows)))
+        Err(DbError::Sqlite(rusqlite::Error::QueryReturnedNoRows))
     ));
     db.commit_writer(|sql| sql.batch("INSERT INTO notes VALUES ('a','Plan','')").unwrap());
     assert_eq!(next_result(&mut query).await.unwrap(), "Plan");
@@ -576,16 +576,13 @@ async fn processing_preserves_query_errors_and_recovers_from_callback_errors() {
         .process(move |value| {
             count.fetch_add(1, Ordering::SeqCst);
             if value == 1 {
-                return Err(DbError::TransactionEnded.into());
+                return Err(DbError::TransactionEnded);
             }
             Ok(value.to_string())
         });
     let requests = query.requests();
     let event = query.next().await.expect("the live query answers");
-    assert!(matches!(
-        event.result,
-        Err(crate::CovenError::Database(DbError::Sqlite(rusqlite::Error::QueryReturnedNoRows)))
-    ));
+    assert!(matches!(event.result, Err(DbError::Sqlite(rusqlite::Error::QueryReturnedNoRows))));
     assert_eq!(calls.load(Ordering::SeqCst), 0);
     for request in [1, 2, 1, 2] {
         let revision = requests.set(request).unwrap();
@@ -595,10 +592,7 @@ async fn processing_preserves_query_errors_and_recovers_from_callback_errors() {
             (request, revision, LiveQueryCause::Request)
         );
         if request == 1 {
-            assert!(matches!(
-                event.result,
-                Err(crate::CovenError::Database(DbError::TransactionEnded))
-            ));
+            assert!(matches!(event.result, Err(DbError::TransactionEnded)));
         } else {
             assert_eq!(event.result.unwrap(), "2");
         }
@@ -760,7 +754,7 @@ async fn a_panicking_query_reports_its_bug_once_then_ends() {
     assert!(
         matches!(
             &ended,
-            Some(Err(crate::CovenError::Database(DbError::Bug(bug))))
+            Some(Err(DbError::Bug(bug)))
                 if bug.message == "the notes table has 1 rows"
         ),
         "{ended:?}"

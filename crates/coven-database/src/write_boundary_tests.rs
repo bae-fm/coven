@@ -271,6 +271,6 @@ async fn a_stored_boundary_of_no_known_kind_is_damaged_database() {
         .unwrap()
     });
     let read = db.store_state().await;
-    assert!(matches!(read, Err(crate::CovenError::Database(DbError::DamagedDatabase))), "{read:?}");
+    assert!(matches!(read, Err(DbError::DamagedDatabase)), "{read:?}");
     db.close().await.unwrap();
 }

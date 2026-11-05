@@ -1,4 +1,4 @@
-use crate::{CovenError, DatabaseBuilder, DbError, Migration, SyncedTable};
+use crate::{DatabaseBuilder, DbError, Migration, OpenError, SyncedTable};
 use coven_foundation::clock::HANG_GUARD;
 use coven_foundation::files::StoreDirAccess;
 use coven_foundation::{
@@ -153,7 +153,7 @@ impl TestStore {
         &self,
         tables: Vec<SyncedTable>,
         sql: &'static str,
-    ) -> Result<crate::Database, CovenError> {
+    ) -> Result<crate::Database, OpenError> {
         self.builder(tables, vec![Migration::addition(1, "schema", sql)]).open().await
     }
 }
@@ -195,10 +195,10 @@ where
     next_result(query).await.unwrap()
 }
 
-pub(crate) fn database_error(error: CovenError) -> DbError {
+pub(crate) fn database_error(error: OpenError) -> DbError {
     match error {
-        CovenError::Database(error) => error,
-        CovenError::Migration(crate::MigrationError::Failed { source, .. }) => *source,
+        OpenError::Database(error) => error,
+        OpenError::Migration(crate::MigrationError::Failed { source, .. }) => *source,
         error => panic!("expected database error, received {error:?}"),
     }
 }
@@ -211,7 +211,7 @@ async fn required_builder_choices_are_typed() {
         (DatabaseBuilder::new(store.directory.clone()).synced_tables(vec![]), "migrations"),
     ] {
         assert!(
-            matches!(builder.open().await.err().unwrap(), CovenError::MissingConfiguration { field } if field == expected)
+            matches!(builder.open().await.err().unwrap(), OpenError::MissingConfiguration { field } if field == expected)
         );
     }
 }

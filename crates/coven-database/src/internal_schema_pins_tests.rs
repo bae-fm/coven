@@ -197,7 +197,7 @@ async fn a_migration_leaves_each_unchanged_pin_alone() {
     };
     let db = open(&store, migrations(false)).await;
     pin_stored(&db).await;
-    async fn changes(db: &crate::Database) -> crate::CovenResult<Vec<String>> {
+    async fn changes(db: &crate::Database) -> Result<Vec<String>, DbError> {
         db.read(|sql| {
             Ok(sql
                 .query("SELECT kind FROM pin_changes ORDER BY id", [], |r| r.get::<_, String>(0))?)

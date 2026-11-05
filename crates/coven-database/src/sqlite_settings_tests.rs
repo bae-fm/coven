@@ -684,7 +684,7 @@ async fn timed_writes(
     };
     let size = || std::fs::metadata(&wal).map_or(0, |m| m.len());
     const WHOLE: &str = "SELECT count(*),sum(length(body)) FROM blobs";
-    let read = |sql: crate::SqlReadContext<'_>| -> crate::CovenResult<(i64, Option<i64>)> {
+    let read = |sql: crate::SqlReadContext<'_>| -> Result<(i64, Option<i64>), DbError> {
         Ok(sql.query_row(WHOLE, [], |r| Ok((r.get(0)?, r.get(1)?)))?)
     };
     let reader = match reading {

@@ -48,7 +48,7 @@ use crate::observation::CommitObserver;
 use crate::schema::Schema;
 use crate::SqlReadContext;
 use crate::{
-    CovenMigrationError, CovenResult, DbError, Migration, MigrationError, MigrationOutcome,
+    CovenMigrationError, DbError, Migration, MigrationError, MigrationOutcome, OpenError,
     SyncedTable,
 };
 
@@ -190,7 +190,7 @@ impl DatabaseConnection {
 
     /// Migrate local tables before app migrations or recovery's waiting work.
     /// Read-only connections require the supported internal version already.
-    pub(crate) fn prepare_internal_schema(&mut self) -> CovenResult<()> {
+    pub(crate) fn prepare_internal_schema(&mut self) -> Result<(), OpenError> {
         let internal: i32 = self.query_row("PRAGMA application_id", [], |r| r.get(0))?;
         let internal = internal as u32;
         if internal > internal_schema::VERSION {
@@ -229,7 +229,7 @@ impl DatabaseConnection {
         author: Option<crate::migration_run::MigrationOrigin>,
         operation: Option<&crate::migration::MigrationOperation>,
         progress: &mut coven_foundation::progress::ProgressReport<crate::OpenStep>,
-    ) -> CovenResult<Vec<MigrationOutcome>> {
+    ) -> Result<Vec<MigrationOutcome>, OpenError> {
         let read_only = author.is_none();
         let supported = validate_versions(migrations)?;
         self.prepare_internal_schema()?;
@@ -822,16 +822,13 @@ impl DatabaseConnection {
         result
     }
 
-    pub(crate) fn lost_values(&self) -> CovenResult<Vec<crate::LostValue>> {
+    pub(crate) fn lost_values(&self) -> Result<Vec<crate::LostValue>, DbError> {
         let records = self.query(
             &format!("{} ORDER BY l.id", crate::loss_record::SELECT),
             [],
             crate::loss_record::read,
         )?;
-        records
-            .into_iter()
-            .map(|record| crate::LostValue::from_record(record).map_err(Into::into))
-            .collect()
+        records.into_iter().map(crate::LostValue::from_record).collect()
     }
 
     fn require_transaction(&self) -> Result<(), DbError> {

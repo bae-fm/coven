@@ -716,7 +716,7 @@ fn a_panicking_function_ends_the_process_before_its_write_commits() {
 async fn analyzed_words(
     store: &TestStore,
     determinism: Determinism,
-) -> crate::CovenResult<crate::Database> {
+) -> Result<crate::Database, crate::OpenError> {
     store
         .builder(
             notes(),

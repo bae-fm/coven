@@ -782,13 +782,13 @@ impl OpeningStore {
                     &coven_sync::SavedName::of(identity),
                     || {
                         let location = coven_storage::recorded_config(&owners.directory)
-                            .map_err(|error| sync_error(error.into()))?;
+                            .map_err(|error| CovenError::from(SyncError::from(error)))?;
                         coven_sync::replacement_code(
                             &state,
                             owners.identity.read()?.as_ref(),
                             location.as_ref(),
                         )
-                        .map_err(sync_error)
+                        .map_err(CovenError::from)
                     },
                 )?;
                 // Where each write chooses the cloud backup, as Block Store's
@@ -799,19 +799,19 @@ impl OpeningStore {
             Ok::<_, CovenError>(owners)
         })
         .await??;
-        let location = owners.credentials.location().map_err(sync_error)?;
+        let location = owners.credentials.location().map_err(CovenError::from)?;
         let configured = location.is_connected();
         // A setup a crash cut is undone, or left for the first connection
         // to finish, before the handle exists (§11.6).
         let finishing =
             Box::pin(crate::storage::settle_opened(&database, &owners.keychain, &owners.keys))
                 .await
-                .map_err(sync_error)?;
+                .map_err(CovenError::from)?;
         // Boxed, so `open`'s future stays as small as an app's stack needs
         // (`application_api_tests.rs`).
         Box::pin(crate::storage::record_opened(&database, &owners.clock, location, None))
             .await
-            .map_err(sync_error)?;
+            .map_err(CovenError::from)?;
         Ok(owners.into_handle(database, waits, configured, finishing))
     }
 }
@@ -834,7 +834,6 @@ fn refuse_unfinished_deletion(directory: &impl StoreDirAccess, store: StoreId) -
     }
 }
 
-/// A sync failure while opening, as the opening call reports it.
 /// An interrupted replacement resumes only through the call that began it
 /// (§19.3).
 fn refuse_unfinished_replacement(
@@ -869,10 +868,6 @@ pub(crate) fn device_credentials(
         directory,
         oauth,
     ))
-}
-
-fn sync_error(error: SyncError) -> CovenError {
-    CovenError::Database(DbError::SyncStream(Box::new(error)))
 }
 
 impl OpeningOwners {

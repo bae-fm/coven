@@ -1,5 +1,5 @@
 use super::*;
-use crate::{tests::TestStore, CovenError, NewOperation, OperationUpdate};
+use crate::{tests::TestStore, DbError, NewOperation, OperationUpdate};
 use coven_foundation::clock::HANG_GUARD;
 use coven_foundation::id_source::DeviceId;
 use serde::Deserialize;
@@ -204,10 +204,6 @@ fn cause(error: DbError) -> std::sync::Arc<DbError> {
     assert!(matches!(*cause, DbError::Sqlite(_)));
     cause
 }
-fn db_error(error: CovenError) -> DbError {
-    let CovenError::Database(error) = error else { panic!("{error:?}") };
-    error
-}
 
 #[tokio::test]
 async fn losing_a_pending_update_fails_all_calls_and_subscriptions_until_reopen() {
@@ -241,9 +237,9 @@ async fn losing_a_pending_update_fails_all_calls_and_subscriptions_until_reopen(
         let original = cause(failed.unwrap_err());
         let failures = [
             cause(live.next().await.expect("the live query answers").unwrap_err()),
-            cause(db_error(ordinary.next().await.expect("the live query answers").unwrap_err())),
-            cause(db_error(db.pending::<Record>().await.unwrap_err())),
-            cause(db_error(db.read(|_| Ok(())).await.unwrap_err())),
+            cause(ordinary.next().await.expect("the live query answers").unwrap_err()),
+            cause(db.pending::<Record>().await.unwrap_err()),
+            cause(db.read(|_| Ok(())).await.unwrap_err()),
             cause(db.write(|_| Ok(())).await.unwrap_err()),
             cause(db.applied_migrations().unwrap_err()),
             cause(db.schema_version().await.unwrap_err()),
@@ -283,7 +279,7 @@ async fn losing_a_pending_update_fails_an_already_running_subscription() {
     let failed = db.record_pending(pending).await;
     release.send(()).unwrap();
     let original = cause(failed.unwrap_err());
-    let observed = cause(db_error(live.next().await.expect("the live query answers").unwrap_err()));
+    let observed = cause(live.next().await.expect("the live query answers").unwrap_err());
     assert!(std::sync::Arc::ptr_eq(&original, &observed));
     db.close().await.unwrap();
 }
@@ -628,7 +624,7 @@ async fn a_stored_record_with_part_of_a_file_is_damaged_database() {
         .unwrap()
     });
     let read = db.pending::<Record>().await;
-    assert!(matches!(read, Err(CovenError::Database(DbError::DamagedDatabase))), "{read:?}");
+    assert!(matches!(read, Err(DbError::DamagedDatabase)), "{read:?}");
     db.close().await.unwrap();
 }
 
@@ -644,6 +640,6 @@ async fn a_pending_record_read_as_another_type_fails_as_state_encoding() {
             .unwrap()
     });
     let read = db.pending::<Record>().await;
-    assert!(matches!(read, Err(CovenError::Database(DbError::StateEncoding(_)))), "{read:?}");
+    assert!(matches!(read, Err(DbError::StateEncoding(_))), "{read:?}");
     db.close().await.unwrap();
 }

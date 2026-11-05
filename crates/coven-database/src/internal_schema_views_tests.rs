@@ -1,6 +1,6 @@
 use crate::tests::{database_error, TestStore};
 use crate::write::tests::sql;
-use crate::{CovenError, DbError, Migration, RowIdentity, SyncedTable};
+use crate::{DbError, Migration, RowIdentity, SyncedTable};
 
 fn notes() -> Vec<SyncedTable> {
     vec![SyncedTable::new("notes", RowIdentity::SharedKey)]
@@ -91,10 +91,7 @@ async fn the_app_reads_coven_views_but_not_covens_tables() {
     ] {
         let error =
             db.read(move |sql| Ok(sql.query(statement, [], |_| Ok(()))?)).await.unwrap_err();
-        assert!(
-            matches!(error, CovenError::Database(DbError::InternalTable { .. })),
-            "{statement}: {error:?}"
-        );
+        assert!(matches!(error, DbError::InternalTable { .. }), "{statement}: {error:?}");
     }
     db.close().await.unwrap();
 }
@@ -237,7 +234,7 @@ async fn a_malformed_key_reads_as_damage() {
         .read(|sql| Ok(sql.query_row("SELECT x'ff'", [], |r| r.get::<_, crate::RowKey>(0))?))
         .await
         .unwrap_err();
-    assert!(matches!(error, CovenError::Database(DbError::DamagedDatabase)), "{error:?}");
+    assert!(matches!(error, DbError::DamagedDatabase), "{error:?}");
     db.close().await.unwrap();
 }
 

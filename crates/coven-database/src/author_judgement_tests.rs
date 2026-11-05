@@ -246,7 +246,7 @@ async fn only_the_owner_dismisses_a_removed_row() {
         if owner == seed {
             result.unwrap();
         } else {
-            refused_for(crate::tests::database_error(result.unwrap_err()), "labels", owner);
+            refused_for(result.unwrap_err(), "labels", owner);
         }
     }
     pair.close().await;
@@ -554,11 +554,7 @@ async fn dismissing_a_frozen_loss_rewrites_no_row() {
     };
     let (db, owners) = if other == 1 { (ben, ana) } else { (ana, ben) };
     owners.close().await.unwrap();
-    refused_for(
-        crate::tests::database_error(db.dismiss_lost_values(&removed).await.unwrap_err()),
-        "labels",
-        owner,
-    );
+    refused_for(db.dismiss_lost_values(&removed).await.unwrap_err(), "labels", owner);
     let creation =
         |db: &Database| db.inspect_writer(|c| crate::ownership::creation(c, &row).unwrap());
     let created = creation(&db);

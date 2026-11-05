@@ -42,7 +42,7 @@ async fn open(store: &TestStore, migrations: Vec<Migration>) -> crate::Database 
 /// What the app's triggers recorded, in order.
 type Changes = Vec<(String, FileId, bool)>;
 
-fn changes(sql: crate::SqlReadContext<'_>) -> crate::CovenResult<Changes> {
+fn changes(sql: crate::SqlReadContext<'_>) -> Result<Changes, DbError> {
     Ok(sql.query("SELECT kind,file,stored FROM file_changes ORDER BY id", [], |r| {
         Ok((r.get(0)?, r.get(1)?, r.get(2)?))
     })?)

@@ -47,7 +47,7 @@ use crate::authorization::SqlAuthorization;
 use crate::observation::CommitObserver;
 use crate::read::RunningRead;
 use crate::sqlite::DatabaseConnection;
-use crate::{CovenError, CovenResult, DbError, Migration, MigrationOutcome, SyncedTable};
+use crate::{DbError, Migration, MigrationOutcome, SyncedTable};
 use crate::{LiveQuery, LostValue, Read, ReconfigurableLiveQuery, SqlReadContext};
 
 #[path = "database_builder.rs"]
@@ -491,7 +491,7 @@ impl<M: Mode> Database<M> {
     }
 
     /// Decode every lost cell and removed row in one snapshot.
-    pub async fn lost_values(&self) -> CovenResult<Vec<LostValue>> {
+    pub async fn lost_values(&self) -> Result<Vec<LostValue>, DbError> {
         self.read(|sql| sql.lost_values()).await
     }
 
@@ -662,8 +662,11 @@ impl Database {
     }
 
     /// Observe the decoded lost cells and removed rows.
-    pub fn subscribe_lost_values(&self) -> LiveQuery<Vec<LostValue>, crate::CovenError> {
-        self.subscribe(|sql| sql.lost_values())
+    pub fn subscribe_lost_values<E>(&self) -> LiveQuery<Vec<LostValue>, E>
+    where
+        E: From<DbError> + coven_foundation::task::CarriesBug + Send + 'static,
+    {
+        self.subscribe(|sql| sql.lost_values().map_err(E::from))
     }
 
     /// Run app SQL and coven's steps, and commit its unsigned write record

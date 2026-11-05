@@ -53,7 +53,10 @@ pub(super) async fn open_installation(
 ) -> CovenResult<Database> {
     let database = database.loading_store();
     let progress = database.subscribe_progress();
-    progress.forward(database.open(), |progress| status(BootstrapStatus::Opening(progress))).await
+    progress
+        .forward(database.open(), |progress| status(BootstrapStatus::Opening(progress)))
+        .await
+        .map_err(CovenError::from)
 }
 
 /// Run `work`, in which `sync` may load the store into the new installation,

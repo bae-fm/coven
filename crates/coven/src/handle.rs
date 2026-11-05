@@ -129,7 +129,7 @@ impl CovenHandle {
 
     /// The store's current name, from this device's committed state (E9).
     pub async fn store_name(&self) -> CovenResult<String> {
-        self.database.store_name().await
+        self.database.store_name().await.map_err(CovenError::from)
     }
 
     /// The same name query, live (E4).
@@ -269,7 +269,7 @@ impl CovenHandle {
     /// The latest completed replacement stored in this installation, or None.
     /// It survives reopening; unsent edits of the old copy were discarded (§19.3).
     pub async fn device_reset(&self) -> CovenResult<Option<DeviceReset>> {
-        self.database.device_reset().await
+        self.database.device_reset().await.map_err(CovenError::from)
     }
 
     /// The same pre-built query, including a replacement completed before opening.
@@ -280,12 +280,12 @@ impl CovenHandle {
     /// Current local conditions, including while disconnected, each with
     /// the cause `coven_pending.cause` keeps beside it.
     pub async fn pending(&self) -> CovenResult<Vec<PendingRecord>> {
-        self.database.pending().await
+        self.database.pending().await.map_err(CovenError::from)
     }
 
     /// The members and their devices, as this device's applied slots have them (E9).
     pub async fn members(&self) -> CovenResult<Vec<MemberInfo>> {
-        self.database.members().await
+        self.database.members().await.map_err(CovenError::from)
     }
 
     /// The same internal query, live (E4).
@@ -377,7 +377,7 @@ impl CovenHandle {
     }
     /// Follow `coven_invites` with a live query, as an app does (E10).
     #[cfg(any(test, feature = "test-utils"))]
-    pub fn test_invites(&self) -> coven_database::test_utils::Followed<Vec<Invite>, CovenError> {
+    pub fn test_invites(&self) -> coven_database::test_utils::Followed<Vec<Invite>, DbError> {
         Invite::follow(&self.database)
     }
     /// Approves a request, in a write of its own
@@ -476,7 +476,7 @@ impl CovenHandle {
 
     /// Every lost value and removed row, as `_coven_lost` holds them (§8.2, §8.4).
     pub async fn lost_values(&self) -> CovenResult<Vec<LostValue>> {
-        self.database.lost_values().await
+        self.database.lost_values().await.map_err(CovenError::from)
     }
 
     /// Dismisses lost values in a write of its own
@@ -620,14 +620,14 @@ impl CovenHandle {
     pub(crate) fn test_follow_retry_wait(
         &self,
         subject: coven_database::RetrySubject,
-    ) -> coven_database::test_utils::Followed<Option<coven_database::RetryWait>, CovenError> {
+    ) -> coven_database::test_utils::Followed<Option<coven_database::RetryWait>, DbError> {
         coven_database::test_utils::Followed::new(self.database.subscribe_retry_wait(subject))
     }
     /// Follow membership and audience state as passes apply it.
     #[cfg(test)]
     pub(crate) fn test_store_state(
         &self,
-    ) -> coven_database::test_utils::Followed<coven_database::StoreState, CovenError> {
+    ) -> coven_database::test_utils::Followed<coven_database::StoreState, DbError> {
         coven_database::test_utils::Followed::new(self.database.subscribe_store_state())
     }
     /// Wait until a pause is asked of the sync loop after this call.

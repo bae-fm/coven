@@ -179,6 +179,13 @@ impl From<crate::CovenError> for StoreCreationError {
     }
 }
 
+/// Opening the database fails as the store's open does.
+impl From<coven_database::OpenError> for StoreCreationError {
+    fn from(error: coven_database::OpenError) -> Self {
+        crate::CovenError::from(error).into()
+    }
+}
+
 impl From<crate::IdentityError> for StoreCreationError {
     fn from(error: crate::IdentityError) -> Self {
         match error {
@@ -356,6 +363,19 @@ impl From<crate::CovenError> for ReadOnlyOpenError {
             crate::CovenError::Bug(bug) => Self::Bug(bug),
             error => Self::Local(error),
         }
+    }
+}
+
+/// A database call's or opening's failure is the store's.
+impl From<crate::DbError> for ReadOnlyOpenError {
+    fn from(error: crate::DbError) -> Self {
+        crate::CovenError::from(error).into()
+    }
+}
+
+impl From<coven_database::OpenError> for ReadOnlyOpenError {
+    fn from(error: coven_database::OpenError) -> Self {
+        crate::CovenError::from(error).into()
     }
 }
 

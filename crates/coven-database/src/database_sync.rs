@@ -2,7 +2,7 @@
 
 use super::{Database, Mode};
 use crate::internal_schema::retry_effect::{self, RetryState};
-use crate::{CovenResult, DbError};
+use crate::DbError;
 use coven_foundation::task::CarriesBug;
 
 impl Database {
@@ -212,52 +212,57 @@ impl Database {
     }
 
     /// Current pending records, decoded as the sync owner's typed values.
-    pub async fn pending<P: crate::PendingValue>(&self) -> CovenResult<Vec<P>> {
+    pub async fn pending<P: crate::PendingValue>(&self) -> Result<Vec<P>, DbError> {
         self.read(|sql| sql.pending()).await
     }
 
     /// Writes and files this device committed and has not uploaded, from one
     /// committed state.
-    pub async fn unsent(&self) -> CovenResult<crate::UnsentWork> {
+    pub async fn unsent(&self) -> Result<crate::UnsentWork, DbError> {
         self.read(|sql| sql.unsent()).await
     }
 
     /// The same pre-built unsent-work query, observing committed changes.
-    pub fn subscribe_unsent(&self) -> crate::LiveQuery<crate::UnsentWork, crate::CovenError> {
-        self.subscribe(|sql| sql.unsent())
+    pub fn subscribe_unsent<E>(&self) -> crate::LiveQuery<crate::UnsentWork, E>
+    where
+        E: From<DbError> + coven_foundation::task::CarriesBug + Send + 'static,
+    {
+        self.subscribe(|sql| sql.unsent().map_err(E::from))
     }
 
     /// What the sync state is computed from, in one committed snapshot
     /// (§19.1): `coven_sync_status`'s row, `coven_retry_effect`'s, the send
     /// and upload queues, the files moving and the pending records, decoded
     /// as the sync owner's typed values, given to `compute` in the read.
-    pub async fn sync_facts<P, T>(
+    pub async fn sync_facts<P, T, E>(
         &self,
-        compute: impl FnOnce(crate::SyncFacts<P>) -> CovenResult<T> + Send + 'static,
-    ) -> CovenResult<T>
+        compute: impl FnOnce(crate::SyncFacts<P>) -> Result<T, E> + Send + 'static,
+    ) -> Result<T, E>
     where
         P: crate::PendingValue + Clone,
         T: Send + 'static,
+        E: From<DbError> + coven_foundation::task::CarriesBug + Send + 'static,
     {
         self.read(move |sql| compute(sql.sync_facts()?)).await
     }
 
     /// The same pre-built query, live: it runs again on each committed
     /// change of what it reads, and as a file starts or ends a transfer.
-    pub fn subscribe_sync_facts<P, T>(
+    pub fn subscribe_sync_facts<P, T, E>(
         &self,
-        compute: impl Fn(crate::SyncFacts<P>) -> CovenResult<T> + Send + Sync + 'static,
-    ) -> crate::LiveQuery<T, crate::CovenError>
+        compute: impl Fn(crate::SyncFacts<P>) -> Result<T, E> + Send + Sync + 'static,
+    ) -> crate::LiveQuery<T, E>
     where
         P: crate::PendingValue + Clone,
         T: Send + 'static,
+        E: From<DbError> + coven_foundation::task::CarriesBug + Send + 'static,
     {
         self.subscribe(move |sql| compute(sql.sync_facts()?))
     }
 
     /// The upload queue, its pause setting and each file's recorded provider
     /// session in one committed snapshot, available while disconnected (E7).
-    pub async fn upload_queue(&self) -> CovenResult<crate::UploadQueueState> {
+    pub async fn upload_queue(&self) -> Result<crate::UploadQueueState, DbError> {
         self.read(|sql| sql.upload_queue()).await
     }
 
@@ -617,7 +622,7 @@ impl Database {
     /// The same state, live (E4), for a test waiting for passes to change
     /// it, such as to apply a raise.
     #[cfg(any(test, feature = "test-utils"))]
-    pub fn subscribe_store_state(&self) -> crate::LiveQuery<crate::StoreState, crate::CovenError> {
+    pub fn subscribe_store_state(&self) -> crate::LiveQuery<crate::StoreState, DbError> {
         self.subscribe(|sql| sql.store_state())
     }
 
@@ -818,10 +823,7 @@ mod device;
 
 impl<M: Mode> Database<M> {
     /// Membership and audience state of the committed sequence prefix.
-    pub async fn store_state(&self) -> CovenResult<crate::StoreState> {
-        self.call(|open| {
-            M::access(open).with_committed(|db| Ok(crate::store_state_tables::read(db)?))
-        })
-        .await
+    pub async fn store_state(&self) -> Result<crate::StoreState, DbError> {
+        self.call(|open| M::access(open).with_committed(crate::store_state_tables::read)).await
     }
 }
