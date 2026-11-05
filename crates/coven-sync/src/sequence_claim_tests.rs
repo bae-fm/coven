@@ -741,3 +741,30 @@ async fn a_large_writes_slot_is_visible_only_once_complete() {
         device.database().close().await.unwrap();
     }
 }
+
+/// The first device's writes made before storage was set up read nothing and
+/// are checked against slot 1's record of the store's creation; no other
+/// device can write at zero (§7.1).
+#[tokio::test]
+async fn the_first_devices_offline_writes_at_zero_check_against_the_creation() {
+    let group = Group::new();
+    let ana = group.device(1).await;
+    let ben = group.device(2).await;
+    insert(ana.database(), "offline", "before storage").await;
+    group.create(&ana).await;
+    group.admit(&ana, &ben).await;
+    ana.sync.pass().await.unwrap();
+    ben.sync.pass().await.unwrap();
+    assert_eq!(rows(ben.database()).await, [("offline".into(), "before storage".into())]);
+    assert_eq!(rows(ana.database()).await, rows(ben.database()).await);
+
+    let history = ana.sync.session.lock().await.history.clone();
+    let (member, _) = history.owner(ana.sync.device, 0).expect("the first device writes at zero");
+    assert_eq!(member, ana.identity.member());
+    assert!(matches!(history.owner(ben.sync.device, 0), Err(Refusal::NotAuthorized)));
+    // Once the device has been added, reading slot 1 is enough for its own.
+    assert!(history.owner(ben.sync.device, history.added(ben.sync.device).unwrap()).is_ok());
+    for device in [&ana, &ben] {
+        device.database().close().await.unwrap();
+    }
+}
