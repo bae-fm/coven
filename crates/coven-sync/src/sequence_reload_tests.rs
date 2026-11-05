@@ -102,6 +102,186 @@ async fn an_app_reload_rebuilds_from_the_newest_snapshot_and_keeps_waiting_write
     }
 }
 
+/// Ana's write is claimed and the reply is lost. A reload at the app's
+/// request settles that claim first: no second slot is taken, the write
+/// leaves the queue, and the reload keeps its row (§19.2).
+#[tokio::test]
+async fn a_reload_settles_a_claim_in_flight_first() {
+    let group = Group::new();
+    let ana = group.device(1).await;
+    group.create(&ana).await;
+    insert(&ana.sync.database, "a", "in the snapshot").await;
+    ana.sync.pass().await.unwrap();
+    ana.sync.snapshot(coven_merge::Audience::Store).await.unwrap();
+    insert(&ana.sync.database, "b", "claimed").await;
+    ana.storage.set_faults(Faults { lose_completion_reply: true, ..Faults::none() }).await;
+    assert!(matches!(ana.sync.pass().await, Err(SyncError::Storage(_))));
+    assert!(ana.sync.database.current_claim().await.unwrap().is_some());
+    let applied = ana.sync.database.applied_slot().await.unwrap();
+
+    ana.sync.reload_from_snapshot().await.unwrap();
+    assert!(ana.sync.database.current_claim().await.unwrap().is_none());
+    assert!(ana.sync.database.test_queued_writes().await.unwrap().is_empty());
+    let applied_after = ana.sync.database.applied_slot().await.unwrap();
+    assert!(applied_after > applied);
+    assert!(group
+        .storage
+        .status(&ObjectPath::slot(group.store, (applied_after + 1).try_into().unwrap()))
+        .await
+        .unwrap()
+        .is_none());
+    assert_eq!(rows(&ana.sync.database).await.len(), 2);
+    ana.sync.database.close().await.unwrap();
+}
+
+/// Ana writes a row after her reset snapshot is captured and before her
+/// reset entry applies. She has not read the reset, so every device, hers
+/// included, ignores that row in the store with no lost value (§19.4).
+#[tokio::test]
+async fn the_resetting_devices_own_writes_after_its_capture_are_ignored() {
+    let group = Group::new();
+    let ana = group.device(1).await;
+    let ben = group.device(2).await;
+    group.create(&ana).await;
+    group.admit(&ana, &ben).await;
+    insert(&ana.sync.database, "a", "in the snapshot").await;
+    ana.sync.pass().await.unwrap();
+    ben.sync.pass().await.unwrap();
+    let (started, observed) = tokio::sync::oneshot::channel();
+    let (resume, held) = tokio::sync::oneshot::channel();
+    group
+        .storage
+        .hold_next_creation(coven_storage::ObjectPrefix::all(group.store), started, held)
+        .await;
+    let late = async {
+        observed.await.unwrap();
+        insert(&ana.sync.database, "late", "after the capture").await;
+        resume.send(()).unwrap();
+    };
+    let (reset, ()) = tokio::join!(ana.sync.reset(Audience::Store), late);
+    reset.unwrap();
+    for _ in 0..2 {
+        ana.sync.pass().await.unwrap();
+        ben.sync.pass().await.unwrap();
+    }
+    for device in [&ana, &ben] {
+        assert_eq!(rows(&device.sync.database).await, [("a".into(), "in the snapshot".into())]);
+        assert!(device.sync.database.lost_values().await.unwrap().is_empty());
+    }
+    for device in [&ana, &ben] {
+        device.sync.database.close().await.unwrap();
+    }
+}
+
+/// A reset, a schema raise and a second reset of the store take effect in
+/// slot order, and the history keeps all three entries (§19.4).
+#[tokio::test]
+async fn later_resets_and_raises_apply_in_slot_order_and_keep_the_earlier_entry() {
+    let group = Group::new();
+    group.raises.store(true, std::sync::atomic::Ordering::SeqCst);
+    let ana = group.device(1).await;
+    let ben = group.device(2).await;
+    group.create(&ana).await;
+    group.admit(&ana, &ben).await;
+    insert(&ana.sync.database, "a", "first").await;
+    ana.sync.pass().await.unwrap();
+    ana.sync.reset(Audience::Store).await.unwrap();
+    ben.sync.pass().await.unwrap();
+    group.version.store(2, std::sync::atomic::Ordering::SeqCst);
+    let (ana, ben) = (group.reopen(ana).await, group.reopen(ben).await);
+    for _ in 0..2 {
+        ana.sync.pass().await.unwrap();
+    }
+    insert(&ana.sync.database, "b", "second").await;
+    ana.sync.pass().await.unwrap();
+    ana.sync.reset(Audience::Store).await.unwrap();
+    for _ in 0..2 {
+        ben.sync.pass().await.unwrap();
+        ana.sync.pass().await.unwrap();
+    }
+    for device in [&ana, &ben] {
+        let history = device.sync.session.lock().await.history.clone();
+        let kinds: Vec<_> = history
+            .boundaries
+            .iter()
+            .map(|coverage| matches!(coverage.boundary, coven_database::Boundary::Reset { .. }))
+            .collect();
+        assert_eq!(kinds, [true, false, true], "reset, raise, reset in slot order");
+        let entries: Vec<_> =
+            history.boundaries.iter().map(|coverage| coverage.boundary.entry()).collect();
+        assert!(entries.windows(2).all(|pair| pair[0] < pair[1]));
+        assert_eq!(
+            rows(&device.sync.database).await,
+            [("a".into(), "first".into()), ("b".into(), "second".into())]
+        );
+    }
+    assert_eq!(rows(&ana.sync.database).await, rows(&ben.sync.database).await);
+    for device in [&ana, &ben] {
+        device.sync.database.close().await.unwrap();
+    }
+}
+
+/// Ana and Ben reset the store at once. Ana's reset entry lands first; Ben's
+/// operation applies it and takes a new snapshot covering it before claiming
+/// a later reset, so both devices end with both rows (§19.4).
+#[tokio::test]
+async fn of_two_resets_the_first_claim_applies_and_the_other_recaptures() {
+    let group = Group::new();
+    let ana = group.device(1).await;
+    let ben = group.device(2).await;
+    group.create(&ana).await;
+    group.admit(&ana, &ben).await;
+    insert(&ana.sync.database, "a", "ana's").await;
+    ana.sync.pass().await.unwrap();
+    ben.sync.pass().await.unwrap();
+    insert(&ben.sync.database, "b", "ben's").await;
+    let hold = || async {
+        let (started, observed) = tokio::sync::oneshot::channel();
+        let (resume, held) = tokio::sync::oneshot::channel();
+        group
+            .storage
+            .hold_next_creation(coven_storage::ObjectPrefix::all(group.store), started, held)
+            .await;
+        (observed, resume)
+    };
+    let (upload, upload_resume) = hold().await;
+    let resetting = ben.sync.reset(Audience::Store);
+    let racing = async {
+        upload.await.unwrap();
+        let (announce, announce_resume) = hold().await;
+        upload_resume.send(()).unwrap();
+        announce.await.unwrap();
+        let (activate, activate_resume) = hold().await;
+        announce_resume.send(()).unwrap();
+        activate.await.unwrap();
+        ana.sync.reset(Audience::Store).await.unwrap();
+        activate_resume.send(()).unwrap();
+    };
+    let (result, ()) = tokio::join!(resetting, racing);
+    result.unwrap();
+    for _ in 0..2 {
+        ana.sync.pass().await.unwrap();
+        ben.sync.pass().await.unwrap();
+    }
+    let history = ben.sync.session.lock().await.history.clone();
+    let resets: Vec<_> = history
+        .boundaries
+        .iter()
+        .filter_map(|coverage| match &coverage.boundary {
+            coven_database::Boundary::Reset { snapshot, .. } => Some(snapshot.device),
+            coven_database::Boundary::SchemaChange(_) => None,
+        })
+        .collect();
+    assert_eq!(resets, [ana.sync.device, ben.sync.device], "Ana's reset applies first");
+    drop(history);
+    assert_eq!(rows(&ana.sync.database).await, rows(&ben.sync.database).await);
+    // Ben's write never read Ana's reset, so every device ignores it.
+    assert_eq!(rows(&ana.sync.database).await, [("a".into(), "ana's".into())]);
+    for device in [&ana, &ben] {
+        device.sync.database.close().await.unwrap();
+    }
+}
+
 /// The floor in storage, as `device` reads it.
 pub(crate) async fn stored_floor(device: &Device) -> crate::floor_object::FloorObject {
     let mut ring = device.sync.keys.read().unwrap().unwrap();
