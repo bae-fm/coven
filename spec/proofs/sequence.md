@@ -41,6 +41,8 @@ Checked counterexamples explain the rules:
   it lands an operation twice ([Operations](#operations)).
 - **Undo after every artifact request ends.** Otherwise a late create leaves
   an artifact behind.
+- **Cancel only before the point of no return.** A cancel after the claim is
+  sent strands a claim that lands later ([Operations](#operations)).
 - **Settle from the per-device claim number and slot digest.** Settling a deleted slot's claim
   from the snapshot's state alone loses or duplicates writes, and misreports
   a completed admin operation. A number without a digest can confirm another copy's
@@ -639,6 +641,33 @@ after slot deletion is proved separately below.
 - `eager_undo_leaks` is a checked counterexample. An undo deletes an artifact
   while its create is in flight, confirms absence and ends. The create then
   lands, leaving the artifact of an undone operation in storage.
+
+[`Setup`](sequence/CovenSequence/Setup.lean) models storage setup, an
+operation with one point of no return (§11.6). Its journal starts before its
+first write to storage. While it checks the provider it has sent no claim and
+committed no connection. Recording the claim it is about to send is its point
+of no return. A cancel, a failure or opening after a crash undoes it only
+before that point. Past it, the claim settles: landed, setup commits the
+connection and finishes; lost, it reads on, and is refused only where every
+claim it sent targets a slot another device holds. Test objects and probes
+setup writes while checking are space nothing refers to, so they are not
+modelled.
+
+- `step_inv`, `steps_inv`: every step keeps the invariant. Checking, setup has
+  sent and committed nothing; the connection is committed only once the claim
+  has landed.
+- `setup_outcome`: over any interleaving, setup's bytes occupy at most one
+  slot, a committed connection has its claim landed, and an undone setup has
+  no committed connection and no bytes in the sequence, now or later.
+- `crash_before_point_undoes`: wherever a run leaves setup checking, opening
+  undoes it with nothing claimed or committed, and nothing of it can land
+  later.
+- `crash_after_point_finishes`: wherever a run leaves setup claiming a slot,
+  its own steps settle the claim. Where the slot is empty or holds its bytes,
+  it lands, commits and finishes; where another device took it, it reads on.
+- `late_cancel_strands_claim` is a checked counterexample. A cancel honoured
+  once the claim is sent ends setup undone; the claim then lands, leaving a
+  store this device doesn't know it made.
 
 [`MemberKeyReplacement`](sequence/CovenSequence/MemberKeyReplacement.lean)
 models the custody decision after a refused self-replacement's child claim is

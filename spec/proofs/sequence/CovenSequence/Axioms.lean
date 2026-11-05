@@ -49,6 +49,15 @@ import SequenceApply
 #print axioms CovenSequence.Operation.forgetful_lands_twice
 #print axioms CovenSequence.Operation.eager_undo_leaks
 
+#print axioms CovenSequence.Setup.step_inv
+#print axioms CovenSequence.Setup.steps_inv
+#print axioms CovenSequence.Setup.steps_keep_result
+#print axioms CovenSequence.Setup.undone_clean
+#print axioms CovenSequence.Setup.setup_outcome
+#print axioms CovenSequence.Setup.crash_before_point_undoes
+#print axioms CovenSequence.Setup.crash_after_point_finishes
+#print axioms CovenSequence.Setup.late_cancel_strands_claim
+
 
 #print axioms CovenSequence.MemberKeyReplacement.unheld_keeps_pause
 #print axioms CovenSequence.MemberKeyReplacement.candidate_installs
