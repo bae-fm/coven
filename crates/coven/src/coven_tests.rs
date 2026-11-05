@@ -500,6 +500,75 @@ fn a_closed_stores_location_read_after_its_runtime_shut_down_is_a_shutdown() {
     });
 }
 
+/// Listing the stores when the folder that holds them can't be read fails
+/// with the file failure, not as an empty list (E1).
+#[tokio::test]
+async fn listing_stores_whose_folder_cant_be_read_fails_with_its_file_error() {
+    let root = tempfile::tempdir().unwrap();
+    let app = Coven::in_memory(root.path().to_owned());
+    std::fs::write(root.path().join("stores"), b"not a folder").unwrap();
+    assert!(matches!(
+        app.stores().await,
+        Err(StoreListError::File(FileError::Io { operation: "list store directories", .. }))
+    ));
+}
+
+/// Calls on a runtime that shut down report it, naming whether anything ran,
+/// and leave the stores as they were (E15). Opening's first blocking step is
+/// taking the store's lock, so that is where its shutdown shows.
+#[test]
+fn calls_on_a_runtime_that_shut_down_are_shutdowns() {
+    use coven_foundation::task::{Shutdown, ShutdownOutcome};
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let handle = runtime.handle().clone();
+    let root = tempfile::tempdir().unwrap();
+    let app = Coven::in_memory(root.path().into());
+    let directory = runtime
+        .block_on(app.create_closed_store("Household", Arc::new(SequentialIds::new())))
+        .unwrap();
+    drop(runtime);
+    let outlived = tokio::runtime::Builder::new_current_thread().build().unwrap();
+    outlived.block_on(async {
+        let _entered = handle.enter();
+        let opened = builder(&app).open(directory.id(), |_| ()).await;
+        assert!(
+            matches!(
+                &opened,
+                Err(CovenError::Lock(StoreLockError::File(FileError::Shutdown(Shutdown {
+                    outcome: ShutdownOutcome::NotRun,
+                    ..
+                }))))
+            ),
+            "{:?}",
+            opened.map(drop)
+        );
+        let created = builder(&app).create_store("Work").await;
+        assert!(
+            matches!(created, Err(StoreCreationError::Shutdown(Shutdown { .. }))),
+            "{:?}",
+            created.map(drop)
+        );
+        let discarded = app.discard_store(&directory).await;
+        assert!(
+            matches!(
+                discarded,
+                Err(StoreDeletionError::Shutdown(Shutdown {
+                    outcome: ShutdownOutcome::NotRun,
+                    ..
+                }))
+            ),
+            "{discarded:?}"
+        );
+    });
+    let listed = tokio::runtime::Builder::new_current_thread().build().unwrap();
+    listed.block_on(async {
+        let stores = app.stores().await.unwrap();
+        assert!(
+            matches!(stores.as_slice(), [ListedStore::Readable(info)] if info.id == directory.id())
+        );
+    });
+}
+
 #[tokio::test]
 async fn a_store_whose_database_is_damaged_is_listed_as_unreadable_beside_the_others() {
     let root = tempfile::tempdir().unwrap();
