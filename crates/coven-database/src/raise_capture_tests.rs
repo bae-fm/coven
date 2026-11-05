@@ -1,7 +1,7 @@
 use crate::snapshot_write::tests::{decode, prefix, SnapshotFrames};
 use crate::tests::TestStore;
 use crate::write::tests::{notes, records, sql, NOTES};
-use crate::{Database, Migration};
+use crate::{Database, DbError, Migration};
 use coven_format::admin::SnapshotId;
 use coven_format::snapshot::SnapshotRecord;
 use coven_format::value::Value;
@@ -381,6 +381,37 @@ async fn a_second_breaking_migration_captures_the_writes_between_its_markers() {
     let (header, _) = decode(&raise_frames(&db, 6, 3).await);
     assert_eq!(header.schema_version, 3);
     assert!(db.lost_values().await.unwrap().is_empty());
+    db.close().await.unwrap();
+}
+
+/// A raise's snapshot is refused once another slot has applied since its
+/// capture covered the applied prefix; capturing again covers the new slot
+/// (§18.5).
+#[tokio::test]
+async fn a_raise_snapshot_after_another_slot_applies_fails_as_capture_changed() {
+    let store = TestStore::new();
+    let db = migrated(&store).await;
+    let capture = db.raise_captures().await.unwrap().remove(0);
+    let outcome = crate::tests::try_remote_update_at(
+        &db,
+        "notes",
+        "n",
+        &[("title", Value::Text("remote".into()))],
+        Some(1),
+    )
+    .await
+    .unwrap();
+    assert_eq!(outcome, crate::ApplyOutcome::Applied);
+    assert!(capture.covers < db.applied_slot().await.unwrap());
+    crate::tests::publish_through(&db, capture.through.number).await.unwrap();
+    let device = db.local_device().unwrap();
+    let id = SnapshotId { audience: Audience::Store, device, number: 3 };
+    let refused =
+        db.write_raise_snapshot(id, 2, |_| Ok::<_, std::convert::Infallible>(()), |_| Ok(())).await;
+    assert!(
+        matches!(refused, Err(crate::SnapshotWriteError::Database(DbError::CaptureChanged))),
+        "{refused:?}"
+    );
     db.close().await.unwrap();
 }
 
