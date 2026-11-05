@@ -63,3 +63,7 @@ pub(crate) async fn settle_occupied(
     }
     Err(crate::write_object::wrong_identity(path))
 }
+
+#[cfg(test)]
+#[path = "identity_tests.rs"]
+mod tests;
