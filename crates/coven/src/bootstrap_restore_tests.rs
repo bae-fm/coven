@@ -313,17 +313,18 @@ async fn a_restore_whose_device_was_removed_ends_and_removes_its_installation() 
 async fn a_restore_refuses_a_waiting_joins_installation() {
     for provider in [CloudProvider::S3, CloudProvider::Dropbox] {
         let owner = Owner::new(provider, false).await;
+        owner.hold_waits();
         let invite = owner.invite().await;
         let install = Installation::new();
         let store = owner.directory.id();
-        waiting_join(&owner, &install, &invite).await;
+        held_waiting_join(&owner, &install, &invite).await;
         let kept = install
             .only_kept_sign_in(store)
             .await
             .map(|tokens| tokens.access_token.as_str().to_owned());
         let (stop, cancel) = watch::channel(false);
         let ended = restore_from_code(
-            install.authenticated_builder(&owner, owner.storage.clone()).await,
+            install.held_signed_in_builder(&owner, owner.storage.clone()).await,
             &owner.code.to_text().unwrap(),
             owner.s3_credentials(),
             "Ana’s laptop",
@@ -351,8 +352,8 @@ async fn a_restore_refuses_a_waiting_joins_installation() {
         );
         let control = JoinControl::new();
         let resumed =
-            install.builder(&owner, owner.recipient()).resume_join(store, |_| {}, &control);
-        let (result, _) = join_and_approve(&owner.handle, resumed, |_| async {}).await;
+            install.held_builder(&owner, owner.recipient()).resume_join(store, |_| {}, &control);
+        let (result, _) = join_with_response(resumed, approve_held(&owner, &control)).await;
         result.unwrap().unwrap().close().await.unwrap();
         owner.close().await;
     }
