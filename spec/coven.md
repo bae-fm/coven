@@ -114,8 +114,10 @@ These are the promises. The rest of the document explains how each is kept.
   least one admin (§10).
 - **Removal is final from a point in history.** Once a person or device is
   removed, nothing they send afterwards counts (§14).
-- **Committed work survives crashes.** A commit, and every admin operation's
-  record of what it has done, outlives a crash or a lost reply.
+- **Committed work survives crashes.** A commit, and every operation's record
+  of what it has done, outlives a crash or a lost reply. Every call that writes
+  to storage in more than one step is such an operation: a crash or a cancel
+  leaves it finished or undone, never half-done (§11.6).
 - **Storage stays bounded.** Old history is replaced by snapshots and deleted,
   without waiting for devices that are away. A device that comes back after a
   year catches up from a snapshot and keeps its unsent edits (§16).
@@ -3061,9 +3063,9 @@ its table has an owner. A failure on another member's row names that member, as
 ## Part III. People
 
 Part III is about who may do what. It covers members and devices (§10), the one
-path every admin change takes (§11), how keys reach people (§12), joining (§13),
-removing people (§14), and circles, which let some members share rows the others
-can't read (§15).
+path every admin change, and every call that writes to storage in steps, takes
+(§11), how keys reach people (§12), joining (§13), removing people (§14), and
+circles, which let some members share rows the others can't read (§15).
 
 ### 10. Members, roles and devices
 
@@ -3229,7 +3231,8 @@ key needs a new key and copies of it; inviting Dan needs a provider share. Any
 step can fail, the device can crash between steps, and another device can claim
 the slot first. Every admin action, from renaming a circle to replacing keys,
 inviting, rotating or resetting, therefore follows one path, so there is one way
-to get it right. That path is an *operation*.
+to get it right. That path is an *operation*. Every other call that writes to
+storage in more than one step is held to it too (§11.6).
 
 #### 11.1 The steps
 
@@ -3373,7 +3376,53 @@ Writes and files keep their journals with their own queues (§4, §17.9). An
 upload's progress survives reopening only as far as the provider has confirmed
 it; bytes merely sent don't advance it.
 
-#### 11.6 What the proofs cover
+#### 11.6 Every call that writes to storage in steps
+
+Admin actions aren't the only calls that write to storage more than once.
+Setting up storage checks the provider, claims a bucket and slot 1, and saves
+the location and sign-in on the device. Restoring, joining and resetting a
+device publish objects and claim slots, and save what they made on the device.
+A crash or a cancel between two of those steps must never leave a half-done
+state that the person has to find, and fix by running the call again with the
+same choices.
+
+Ana sets up Household on Dropbox, and her phone runs out of battery right after
+claiming slot 1. Storage now holds Household. If her phone hadn't recorded the
+setup before its first write, it would reopen not knowing the location, show
+Household as never synced, and finish only if Ana set it up again with the same
+folder. Had she chosen another folder, Household would stay behind in the first.
+
+So every call that makes more than one durable write, at least one of them to
+storage, is an operation, held to §11.3 and §11.4:
+
+- **Journal first.** It records on the device what it will do, with enough to
+  finish it or undo it, before its first write to storage.
+- **One point of no return.** Up to its first claim that may land, a cancel or
+  a failure undoes everything the journal owns, and the call says what it
+  undid. From that claim on the operation is final, as a claimed entry is
+  (§11.4): it finishes, and a cancel is answered that it can no longer be
+  undone.
+- **Crashes settle.** After a restart the device reads the journal. Work that
+  never reached its point of no return is undone. Work past it settles its
+  claim (§5.1) once the device connects, then finishes.
+- **Dropped calls keep going,** to the end or to the undo.
+- **Space isn't state.** A crash can leave behind an object nothing refers to,
+  such as the provider check's test object or a detection probe (§20.8). No
+  state is wrong, only space taken, so coven leaves it; this is not a repair
+  owed by a later pass.
+
+These calls, and the work passes do for them, follow the rule:
+
+| Call or work | Its journal | Point of no return |
+|---|---|---|
+| The app's admin changes and acknowledgements (§11.1) | the operation the app's write journals | its entry's claim |
+| Replacing one's own keys (`replace_member_keys`, §12.3) | its operation, with the candidate pair held first | the replacement's claim |
+| Rotating a key, a schema raise, a snapshot, resetting an audience (§11.5, §16, §18, §19.4) | its operation, step by step | the claim of its first copy or announcement |
+| Taking provider access back after a removal (§14.2) | the provider request, fixed before it is sent | none: it is sent again until confirmed |
+| Deleting gone devices' files (`clean_up_gone_devices_files`, §17.10) | the files operation | none: it deletes only what nothing refers to |
+| Sending writes and uploading files (§4, §17.9) | the send queue and the upload queue | the writes slot's claim; a file's confirmed upload |
+
+#### 11.7 What the proofs cover
 
 The model follows the entry claim and deletable preparation. The entry occupies
 at most one slot and lands only after validation against its preceding slots.
@@ -10518,9 +10567,9 @@ Write-ups explain each model and state its assumptions:
 | A store rename requires an admin in the preceding state; a non-admin rename is refused without changing the name | `applied_rename_authorized`, `non_admin_rename_refused` | `proofs/sequence/CovenSequence/Authority.lean` | §10.3 |
 | The current name is the creation name followed by applied renames; equal prefixes give equal names | `name_is_latest_applied`, `name_prefix` | `proofs/sequence/CovenSequence/Authority.lean` | §10.3 |
 | A member with no active device can still register a new one | `member_without_active_device_can_register` | `proofs/sequence/SequenceApply.lean` | §10.2 |
-| With validation depending only on preceding slots, every operation step keeps its recorded work and in-flight requests accounted for | `steps_inv`, `step_req` | `proofs/sequence/CovenSequence/Operation.lean` | §11.6 |
-| An operation's entry occupies at most one slot and passed validation against its preceding slots; confirmed undo leaves no entry bytes or deletable artifacts. Separate preparation claims are not modeled | `operation_outcome` | `proofs/sequence/CovenSequence/Operation.lean` | §11.6 |
-| Operation steps preserve already claimed history, including key copies and announcements after undo | `steps_preserve_history`, `undo_keeps_preparation`, `undone_retains_history` | `proofs/sequence/CovenSequence/Operation.lean` | §11.3, §11.6 |
+| With validation depending only on preceding slots, every operation step keeps its recorded work and in-flight requests accounted for | `steps_inv`, `step_req` | `proofs/sequence/CovenSequence/Operation.lean` | §11.7 |
+| An operation's entry occupies at most one slot and passed validation against its preceding slots; confirmed undo leaves no entry bytes or deletable artifacts. Separate preparation claims are not modeled | `operation_outcome` | `proofs/sequence/CovenSequence/Operation.lean` | §11.7 |
+| Operation steps preserve already claimed history, including key copies and announcements after undo | `steps_preserve_history`, `undo_keeps_preparation`, `undone_retains_history` | `proofs/sequence/CovenSequence/Operation.lean` | §11.3, §11.7 |
 | *Body.* An undo that doesn't wait for in-flight creates leaves something behind | `eager_undo_leaks` | `proofs/sequence/CovenSequence/Operation.lean` | §11.3 |
 | In the ideal encryption model, a store-key holder reads all store metadata, including circle administration; changing separately sealed content under an unknown key reveals no additional value | `exposed_header_view`, `metadata_reveals_no_protected_content` | `proofs/sequence/CovenSequence/Keys.lean` | §12 |
 | Audience-key preparation records only identities and public commitments; a restart reuses saved material before publishing | `saved_before_prepared`, `restart_reuses_saved`, `journal_depends_only_on_commitment` | `proofs/sequence/CovenSequence/KeyCustody.lean` | §12.4 |
