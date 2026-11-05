@@ -327,6 +327,76 @@ async fn a_device_with_no_usable_key_rotates_before_sending() {
     }
 }
 
+/// Ana removes Ben, then writes and publishes a snapshot. The removal
+/// replaced the store key, so the write's slot and the snapshot open with
+/// the key ring Ana holds now and are refused with the one Ben held before
+/// the removal (§12.2).
+#[tokio::test]
+async fn after_a_removal_the_next_write_and_snapshot_open_only_with_the_replacement_keys() {
+    let group = Group::new();
+    let ana = group.device(1).await;
+    let ben = group.device(2).await;
+    group.create(&ana).await;
+    group.admit(&ana, &ben).await;
+    ben.sync.pass().await.unwrap();
+    let removed_ring = ben.sync.keys.read().unwrap().unwrap();
+    let removal = ana.database().applied_slot().await.unwrap() + 1;
+    ana.sync.administer(StoreChange::RemoveMember { member: ben.identity.member() }).await.unwrap();
+    insert(ana.database(), "after", "the removal").await;
+    ana.sync.pass().await.unwrap();
+    ana.sync.pass().await.unwrap();
+    let announcement = ana.sync.snapshot(Audience::Store).await.unwrap();
+
+    let ring = ana.sync.keys.read().unwrap().unwrap();
+    let history = ana.sync.session.lock().await.history.clone();
+    let last = ana.database().applied_slot().await.unwrap();
+    let mut write_slot = None;
+    for number in (removal..=last).rev() {
+        let path = coven_storage::ObjectPath::slot(group.store, number.try_into().unwrap());
+        let bytes = coven_storage::Storage::read(&group.storage, &path).await.unwrap();
+        let prefix =
+            SlotObjectPrefix::decode(&bytes[..SlotObjectPrefix::length(&bytes).unwrap()]).unwrap();
+        if matches!(prefix.kind, SlotKind::Writes) {
+            write_slot = Some(path);
+            break;
+        }
+    }
+    let path = write_slot.expect("the write was sent");
+    let open = |ring: StoreKeyring| {
+        let (sync, path, history) = (ana.sync.clone(), path.clone(), history.clone());
+        async move {
+            let bytes = sync.fetch(&path).await.unwrap().unwrap().local_bytes().await.unwrap();
+            crate::slot_object::open(bytes, &path, &ring, &history, |_| true).map(drop)
+        }
+    };
+    open(ring.clone()).await.expect("the replacement keys open the write");
+    let refused = open(removed_ring.clone()).await;
+    assert!(matches!(refused, Err(SyncError::KeyUnavailable(_))), "{refused:?}");
+
+    let announced = history.announcements[&announcement].clone();
+    let snapshot_path = crate::snapshot_object::path(group.store, &announced.snapshot).unwrap();
+    let snapshot = crate::snapshot_object::SnapshotObject::read_prefix(
+        ana.database(),
+        ana.sync.storage.as_ref(),
+        &snapshot_path,
+    )
+    .await
+    .unwrap();
+    snapshot
+        .read_body(ana.sync.storage.as_ref(), &ring, &announced, None, None)
+        .await
+        .map(drop)
+        .expect("the replacement keys open the snapshot");
+    let refused = snapshot
+        .read_body(ana.sync.storage.as_ref(), &removed_ring, &announced, None, None)
+        .await
+        .map(drop);
+    assert!(matches!(refused, Err(SyncError::KeyUnavailable(_))), "{refused:?}");
+    for device in [&ana, &ben] {
+        device.sync.database.close().await.unwrap();
+    }
+}
+
 /// Carol joins after the store key was rotated: she is sent a copy of the
 /// older key too, so she reads what was written under it. A retried
 /// operation sends no copy that is already in the sequence (§12.1).
