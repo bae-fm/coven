@@ -6852,9 +6852,10 @@ pub enum ProviderSignOut {
   `resume_restore` finishes one with neither the code nor a new sign-in.
   Cancelling once the record is kept waits for the registration to end,
   then fails with `BootstrapError::RestoreRegistered`, the restore still
-  listed. A cancel, a registration refused, or the member or device
-  removed, while the history the installation applied names the device as
-  removed, or doesn't name it and no registration of it is journaled, ends
+  listed. A cancel, a registration refused, the member or device removed,
+  or the member's keys replaced, while the history the installation applied
+  names the device as gone for good, or doesn't name it and no registration
+  of it is journaled, ends
   the restore instead: it deletes the kept sign-in, the record and the
   installation, in that order.
 - A device that still holds the store under member keys another device
@@ -7530,8 +7531,9 @@ impl S3Credentials {
 /// and from then on only goes forward: dropping or failing the call, or a
 /// crash, leaves it listed for `CovenBuilder::resume_restore`, and cancelling
 /// waits for the registration, then ends the call with
-/// `BootstrapError::RestoreRegistered`. A cancel, or a registration refused
-/// or a member removed, while nothing in storage names the device as active
+/// `BootstrapError::RestoreRegistered`. A cancel, a registration refused, a
+/// member removed or its keys replaced, while nothing in storage names the
+/// device as active
 /// ends the restore, removing everything it kept (§13.1). Before the record,
 /// a cancel or a failure removes the installation it loaded into. A store whose
 /// unfinished installation holds a join's saved code is refused with

@@ -246,9 +246,10 @@ pub(crate) async fn resume_restore(
 /// store. Before the record the restore has only read storage, and a cancel
 /// or any failure removes its installation (§11.6). Once the restore is
 /// recorded it only goes forward, and stays for the next call, unless the
-/// facts end it: a cancel, a registration refused or a member removed,
-/// while no registration is journaled and the history the installation
-/// applied doesn't name the device as active. Then nothing in storage
+/// facts end it: a cancel, a registration refused, a member removed or its
+/// keys replaced, while no registration is journaled and the history the
+/// installation applied doesn't name the device as active, or names it as
+/// gone for good. Then nothing in storage
 /// stands for the device, and the restore removes everything it kept. A
 /// cancel the facts don't end is refused with `RestoreRegistered` (§13.1,
 /// §11.6).
@@ -286,9 +287,12 @@ pub(super) async fn ended(
 
 /// Whether storage may name this installation's device as active. The
 /// history the installation applied decides once it names the device: its
-/// registration landed, and the device is active or was removed since.
-/// Until then, a registration still journaled may land. Read from the
-/// installation's own database, with nothing of it running.
+/// registration landed, and the device is active, or gone for good since,
+/// removed or its member's keys replaced with a pair it doesn't hold (§14.1).
+/// A replaced pair leaves the device's entry active, so the entry alone
+/// doesn't decide. Until history names the device, a registration still
+/// journaled may land. Read from the installation's own database, with
+/// nothing of it running.
 async fn registered(
     builder: &CovenBuilder,
     pending: &BootstrapStore,
@@ -297,8 +301,11 @@ async fn registered(
     let device = directory.settings().map_err(CovenError::from)?.device_id;
     let database = open_installation(builder.database(directory)?, &|_| ()).await?;
     let facts = async {
+        if database.device_stop().await.map_err(CovenError::from)?.is_some() {
+            return Ok(false);
+        }
         match database.store_state().await?.devices.get(&device) {
-            Some(known) => Ok(known.active()),
+            Some(_) => Ok(true),
             None => Ok::<_, BootstrapError>(coven_sync::registration_journaled(&database).await?),
         }
     }

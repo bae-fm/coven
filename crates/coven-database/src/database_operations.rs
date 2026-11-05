@@ -263,6 +263,15 @@ impl Database {
         .await
     }
 
+    /// How the applied state stops this installation for good, if it does:
+    /// its device removed or replaced, its member removed, or its member
+    /// bound to a pair it doesn't hold (§14.1). `None` while the applied
+    /// state doesn't name its device. A restore ending without its store
+    /// reads it for the facts (§13.1).
+    pub async fn device_stop(&self) -> Result<Option<crate::DeviceStop>, DbError> {
+        self.call(|inner| inner.access.with_committed(crate::operation::stopped)).await
+    }
+
     /// The paths of objects whose time to go has passed by `now`, in seconds
     /// since the Unix epoch.
     pub async fn due_object_removals(&self, now: u64) -> Result<Vec<String>, DbError> {

@@ -338,7 +338,7 @@ fn end(
 
 /// How the applied state stops this installation for good, if it does. One
 /// whose device isn't registered yet hasn't started.
-fn stopped(db: &DatabaseConnection) -> Result<Option<crate::DeviceStop>, DbError> {
+pub(crate) fn stopped(db: &DatabaseConnection) -> Result<Option<crate::DeviceStop>, DbError> {
     let held: bool =
         db.query_row("SELECT EXISTS(SELECT 1 FROM _coven_held_keys)", [], |r| r.get(0))?;
     if !held {

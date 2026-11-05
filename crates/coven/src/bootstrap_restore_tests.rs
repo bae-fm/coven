@@ -104,11 +104,16 @@ async fn a_restore_that_ends_after_its_registration_landed_is_listed_and_resumes
 
 /// The app drops Ana's restore while its registration is on its way. The
 /// registration goes on and lands; the restore is listed from before it was
-/// sent, and resumes from the S3 key or Dropbox sign-in it kept, or the
-/// Apple account (§13.1).
+/// sent, and resumes from the S3 key, the Dropbox or OneDrive sign-in it
+/// kept, or the Apple account (§13.1).
 #[tokio::test]
 async fn a_dropped_restore_is_listed_and_resumes_from_what_it_kept() {
-    for provider in [CloudProvider::S3, CloudProvider::Dropbox, CloudProvider::CloudKit] {
+    for provider in [
+        CloudProvider::S3,
+        CloudProvider::Dropbox,
+        CloudProvider::OneDrive,
+        CloudProvider::CloudKit,
+    ] {
         let owner = Owner::new(provider, false).await;
         let install = Installation::new();
         let (_, cancel) = watch::channel(false);
@@ -238,6 +243,38 @@ async fn a_resumed_restore_finishes_the_registration_it_journaled() {
     assert!(!ana_devices(&owner).await.iter().any(|known| known.id == device));
     assert_eq!(listed(&install, &owner).await, [owner.directory.id()]);
     finished(&install, &owner, resume(&install, &owner).await.unwrap()).await;
+    owner.close().await;
+}
+
+/// Ana's laptop registers and its call fails before it learns so. Before
+/// she resumes, her phone replaces her member keys with a pair the laptop
+/// doesn't hold. The laptop's entry stays active in history, but it is gone
+/// for good: its writes no longer count. The resumed restore fails with
+/// `MemberKeysReplaced`, and ends without its store, leaving nothing behind
+/// to resume: kept, every later resume would fail the same way (§13.1,
+/// §14.1).
+#[tokio::test]
+async fn a_restore_whose_member_keys_were_replaced_ends_and_removes_its_installation() {
+    let owner = Owner::new(CloudProvider::S3, false).await;
+    let install = Installation::new();
+    let (_, cancel) = watch::channel(false);
+    owner.storage.set_faults(Faults { refuse_after_storing: 1, ..Faults::none() }).await;
+    let builder = install.authenticated_builder(&owner, owner.storage.clone()).await;
+    assert!(restoring(&owner, builder, &cancel).await.is_err());
+    owner.storage.set_faults(Faults::none()).await;
+    let device = laptop(&install, &owner);
+    assert!(ana_devices(&owner).await.iter().any(|known| known.id == device));
+    owner.handle.replace_member_keys().await.unwrap();
+    owner.sync().await;
+    let resumed = resume(&install, &owner).await;
+    assert!(
+        matches!(resumed, Err(BootstrapError::Sync(SyncError::MemberKeysReplaced { member }))
+            if member == owner.member.member()),
+        "{resumed:?}"
+    );
+    assert!(listed(&install, &owner).await.is_empty());
+    install.absent(owner.directory.id()).await;
+    assert!(!install.root.path().join("stores").join(owner.directory.id().to_string()).exists());
     owner.close().await;
 }
 
