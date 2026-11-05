@@ -78,7 +78,7 @@ pub use restore_codes::{location_code, read_connection, RestoreCodes};
 pub use saved_code::{
     follow_name, read_saved_code, replacement_code, SavedName, UnreadableSavedCode,
 };
-pub use sequence_state::{SequenceState, SequenceStatus};
+pub use sequence_state::{ProviderCheckPermit, SequenceState, SequenceStatus};
 pub use sequence_sync::sequence_invites::expiry::InviteExpiry;
 pub use sequence_sync::sequence_invites::{
     approve_join_request, cancel_invite, create_invite, decline_join_request, NewInvite,

@@ -472,6 +472,8 @@ SyncOftenGuard = "SyncOften"
 IdleInterval = "SyncOften"
 # Each change of the sync activity, for the file workers waiting until sync
 # allows their transfers.
+# A provider check's object while permitted, held for the check's scope.
+ProviderCheckPermit = "SequenceState"
 SequenceStatusWatch = "SequenceState"
 # The running pass's first move, for the sync loop to write that it moves.
 PassMoves = "SequenceState"

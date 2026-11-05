@@ -45,6 +45,20 @@ impl PassMoves {
     }
 }
 
+/// A provider check's object while permitted (`SequenceState::permit_provider_check`):
+/// removes it when dropped, a dropped future included.
+#[must_use = "dropping the permit ends it at once"]
+pub struct ProviderCheckPermit<'a> {
+    checks: &'a Mutex<BTreeSet<ObjectPath>>,
+    path: &'a ObjectPath,
+}
+
+impl Drop for ProviderCheckPermit<'_> {
+    fn drop(&mut self) {
+        lock_unpoisoned(self.checks).remove(self.path);
+    }
+}
+
 /// Shared state of this open installation. It carries no time-based permission.
 pub struct SequenceState {
     status: watch::Sender<SequenceStatus>,
@@ -73,16 +87,11 @@ impl SequenceState {
             checks: Mutex::new(BTreeSet::new()),
         }
     }
-    /// Permit the provider check's own object while `scope` runs.
-    pub async fn permit_provider_check<T>(
-        &self,
-        path: &ObjectPath,
-        scope: impl std::future::Future<Output = T>,
-    ) -> T {
+    /// Permit the provider check's own object until the permit drops, however
+    /// the check ends.
+    pub fn permit_provider_check<'a>(&'a self, path: &'a ObjectPath) -> ProviderCheckPermit<'a> {
         lock_unpoisoned(&self.checks).insert(path.clone());
-        let result = scope.await;
-        lock_unpoisoned(&self.checks).remove(path);
-        result
+        ProviderCheckPermit { checks: &self.checks, path }
     }
     /// The sync activity now: progress, or what blocks or stopped it.
     pub(crate) fn status(&self) -> SequenceStatus {
@@ -174,3 +183,7 @@ impl PublicationGate for SequenceState {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "sequence_state_tests.rs"]
+mod tests;

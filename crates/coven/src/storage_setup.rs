@@ -377,12 +377,10 @@ impl StorageConnections {
                 .seal_chunk(&key, path.as_str(), 0, plaintext)
                 .map_err(|error| StorageSetupError::Internal(Box::new(error)))?,
         );
-        self.state
-            .permit_provider_check(
-                &path,
-                coven_storage::check_provider(setup.as_ref(), &path, &bytes),
-            )
-            .await?;
+        {
+            let _permit = self.state.permit_provider_check(&path);
+            coven_storage::check_provider(setup.as_ref(), &path, &bytes).await?;
+        }
         progress.done(1);
         self.reached(SetupStop::Checked).await?;
         self.check_cancel()?;
