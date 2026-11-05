@@ -319,6 +319,14 @@ pub enum StorageSetupError {
     /// The store needs a newer app schema or coven format (§18).
     #[error("an update is required: {0:?}")]
     UpdateRequired(coven_format::RequiredUpdate),
+    /// The app cancelled setup before its point of no return, and what it
+    /// had written was undone (§11.6).
+    #[error("storage setup was cancelled and undone")]
+    Cancelled,
+    /// A setup on this device is past its point of no return and still
+    /// finishing, so another can't start; starting sync finishes it (§11.6).
+    #[error("a storage setup is still finishing")]
+    SetupRunning,
     /// A local setup step failed, retaining its cause.
     #[error("storage setup: {0}")]
     Internal(#[source] Box<dyn std::error::Error + Send + Sync>),

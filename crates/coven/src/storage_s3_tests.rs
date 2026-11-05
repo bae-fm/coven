@@ -340,8 +340,12 @@ async fn a_base_prefix_is_refused_where_member_keys_reach_the_whole_bucket() {
     opened.handle.close().await.unwrap();
 }
 
+/// Ana's first R2 setup claims its bucket, then fails reading the floor:
+/// it is past its point of no return, so it keeps its bucket claim and
+/// commits nothing yet. Once storage answers, the loop setup started
+/// finishes it, and a later setup reconnects.
 #[tokio::test]
-async fn a_failed_first_setup_keeps_its_bucket_claim_and_can_retry() {
+async fn a_setup_failing_past_its_bucket_claim_finishes_through_the_loop() {
     let storage = Arc::new(MemoryStorage::builder().location(r2("")).build().unwrap());
     let opened = open(storage.clone()).await;
     storage
@@ -357,6 +361,21 @@ async fn a_failed_first_setup_keeps_its_bucket_claim_and_can_retry() {
     assert_eq!(StorageSettings::new(opened.directory.clone()).read().unwrap(), None);
     storage.check_bucket(opened.directory.id()).await.unwrap();
     storage.set_faults(coven_storage::test_utils::Faults::none()).await;
+    opened.handle.retry_now().await.unwrap().await;
+    let setups = opened
+        .handle
+        .read(|sql| {
+            Ok(sql.query(
+                "SELECT operation FROM coven_operations WHERE kind='StorageSetup'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )?)
+        })
+        .await
+        .unwrap();
+    let outcome = opened.handle.operation_outcome(OperationId(setups[0])).await.unwrap();
+    assert_eq!(outcome, OperationOutcome::Landed(coven_merge::Slot(1)));
+    assert_eq!(StorageSettings::new(opened.directory.clone()).read().unwrap(), Some(r2("")));
     setup(&opened.handle, r2("")).await.unwrap();
     opened.handle.close().await.unwrap();
 }

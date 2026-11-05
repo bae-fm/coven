@@ -757,12 +757,18 @@ impl OpeningStore {
             .location(&coven_storage::StorageSettings::new(owners.directory.clone()))
             .map_err(sync_error)?;
         let configured = location.is_connected();
+        // A setup a crash cut is undone, or left for the first connection
+        // to finish, before the handle exists (§11.6).
+        let finishing =
+            Box::pin(crate::storage::settle_opened(&database, &owners.keychain, &owners.keys))
+                .await
+                .map_err(sync_error)?;
         // Boxed, so `open`'s future stays as small as an app's stack needs
         // (`application_api_tests.rs`).
         Box::pin(crate::storage::record_opened(&database, &owners.clock, location, None))
             .await
             .map_err(sync_error)?;
-        Ok(owners.into_handle(database, waits, configured))
+        Ok(owners.into_handle(database, waits, configured, finishing))
     }
 }
 
@@ -812,6 +818,7 @@ impl OpeningOwners {
         database: coven_database::Database,
         waits: Arc<coven_sync::RetryWaits>,
         configured: bool,
+        setup_finishing: bool,
     ) -> CovenHandle {
         let files = coven_sync::Files::new(
             coven_database::FileDatabase::new(database.clone()),
@@ -843,6 +850,8 @@ impl OpeningOwners {
             self.authentication,
             self.storage,
             configured,
+            self.keychain.clone(),
+            setup_finishing,
             self.device,
             self.ids,
             self.clock,

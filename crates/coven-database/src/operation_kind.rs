@@ -26,5 +26,8 @@ pub const SEQUENCE_RELOAD: &str = "sequence-reload";
 pub const SEQUENCE_FILES: &str = "sequence-files";
 /// The kind a breaking migration commits with its schema (§18.3).
 pub const SCHEMA_RAISE: &str = "schema-raise";
+/// Setting up storage on this device, from its first write to storage until
+/// it finishes or is undone (§11.6, §20.8); also its `started_by`.
+pub const STORAGE_SETUP: &str = "storage-setup";
 /// The `started_by` of an operation coven starts on its own.
 pub const COVEN: &str = "coven";

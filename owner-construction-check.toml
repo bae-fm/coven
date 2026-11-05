@@ -1430,7 +1430,10 @@ tables = [
 "crates/coven-sync/src/sequence_sync.rs" = ["SequenceSync::open", "SequenceSync::reconnect"]
 # An operation's call runs as its own task, so a dropped app future cannot
 # abandon a provider request already sent (§11).
-"crates/coven-sync/src/sequence_operations.rs" = ["SequenceSync::submit"]
+"crates/coven-sync/src/sequence_operations.rs" = [
+    "SequenceSync::submit",
+    "SequenceSync::settle_operations",
+]
 "crates/coven-sync/src/sequence_keys.rs" = ["SequenceSync::rotate_key"]
 
 # The development tool's entry point builds the production connector with the
@@ -1518,12 +1521,22 @@ tables = [
     "StorageConnections::attach",
     "StorageConnections::sequence",
     "StorageConnections::activate",
-    "StorageConnections::setup_connection",
     "StorageConnections::forget_store_keys",
+]
+# Setup connects and composes the candidate's sequence owner; a setup a crash
+# cut past its point of no return connects with the credentials it kept, in a
+# sign-in of this session's (§11.6).
+"crates/coven/src/storage_setup.rs" = [
+    "StorageConnections::setup_connection",
+    "StorageConnections::resume_setup",
 ]
 # A started loop's connection attempts outlive the start call; close stops
 # and awaits them. Stopping releases the client after the pass.
-"crates/coven/src/storage_control.rs" = ["StorageConnections::start", "StorageConnections::stop"]
+"crates/coven/src/storage_control.rs" = [
+    "StorageConnections::start",
+    "StorageConnections::start_locked",
+    "StorageConnections::stop",
+]
 "crates/coven/src/test_utils.rs" = [
     # An installation for a test, with an in-memory keychain and a network the
     # test drives.

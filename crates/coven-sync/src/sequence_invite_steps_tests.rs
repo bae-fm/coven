@@ -359,6 +359,9 @@ impl Case {
             }
             Some(Some(OperationOutcome::Rejected(_))) => json!("rejected"),
             Some(Some(OperationOutcome::Stopped(_))) => json!("stopped"),
+            Some(Some(OperationOutcome::Cancelled | OperationOutcome::Undone(_))) => {
+                unreachable!("only storage setup is cancelled or undone")
+            }
         }
     }
 

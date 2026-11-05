@@ -80,7 +80,40 @@ impl SequenceSync {
         self: &std::sync::Arc<Self>,
         change: StoreChange,
     ) -> Result<(), SyncError> {
-        self.submit(Request::Change(change)).await.map(drop)
+        self.administer_at(change).await.map(drop)
+    }
+
+    /// Administer `change`, answering the slot its entry landed at, or
+    /// `None` when the applied state already had it. A store's creation
+    /// lands at slot 1, though its key copy lands after it.
+    pub async fn administer_at(
+        self: &std::sync::Arc<Self>,
+        change: StoreChange,
+    ) -> Result<Option<Slot>, SyncError> {
+        Ok(self.submit(Request::Change(change)).await?.map(Slot))
+    }
+
+    /// Catch up, settle this device's open claim and run its journaled
+    /// operations to their ends, as every new operation does first (§11.4).
+    /// A storage setup a crash cut past its point of no return finishes a
+    /// creation this way.
+    pub async fn settle_operations(self: &std::sync::Arc<Self>) -> Result<(), SyncError> {
+        let owner = self.clone();
+        let settling = async move {
+            let mut session = owner.session.lock().await;
+            let member =
+                owner.member.read()?.ok_or(coven_storage::StorageFailure::MemberKeysMissing)?;
+            let mut ring = owner.ring(&mut session, &member).await?;
+            owner.read_forward(&mut session, &mut ring, &member).await?;
+            owner.settle_open(&mut session, &mut ring, &member).await?;
+            owner.resume_administration(&mut session, &mut ring, &member).await
+        };
+        coven_foundation::task::spawn_completing(
+            "settle operations",
+            self.database.bugs().clone(),
+            settling,
+        )
+        .await?
     }
 
     /// Register this installation for its member once the applied history

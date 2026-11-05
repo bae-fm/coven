@@ -21,6 +21,8 @@ mod restore_codes;
 mod saved_code;
 mod sealed_stream;
 mod sequence_sync;
+mod setup_journal;
+pub use setup_journal::SetupJournal;
 mod sign_in;
 mod slot_object;
 mod snapshot_authorship;
@@ -58,7 +60,9 @@ pub use codes::{
     CodeMetadata, InviteInfo,
 };
 pub use coven_database::WriteCutoff;
-pub use coven_database::{DeviceStop, EntryTarget, OperationOutcome, OperationRejection};
+pub use coven_database::{
+    DeviceStop, EntryTarget, OperationOutcome, OperationRejection, UndoCause,
+};
 pub use credential_custody::{commit_credentials, CredentialKeychains, CredentialRollback};
 pub use error::{DamagedObject, SyncError, SyncFailure};
 pub use identity::DeviceIdEvidence;

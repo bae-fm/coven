@@ -39,6 +39,22 @@ impl Database {
         .await
     }
 
+    /// Commit an operation a call of the app's starts, before its first
+    /// step, listed in `coven_operations` as `kind` names it from this
+    /// commit until a write acknowledges its outcome (§11.4, §11.6).
+    pub async fn start_listed_operation(
+        &self,
+        operation: NewOperation,
+        kind: String,
+    ) -> Result<OperationId, DbError> {
+        self.call(move |inner| {
+            inner.access.with_writer(|writer| {
+                writer.transaction(|db| crate::operation::insert_for_app(db, &operation, &kind))
+            })
+        })
+        .await
+    }
+
     /// Commit a new operation and a step of another that names it, in one
     /// transaction: `update` builds the step from the new operation's id. A
     /// parent that journals a child this way never loses track of it, nor

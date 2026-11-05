@@ -23,39 +23,57 @@ impl StorageConnections {
             let recorded = owner.codes.location().await.map_err(setup_error)?;
             let config = recorded_s3(storage, recorded.as_ref());
             owner.check_location(&config).await?;
-            if recorded.is_none() {
-                // Creating the store: where member keys reach the whole
-                // bucket, the bucket must hold nothing but this store (§20.7).
-                let checking = owner.connector.check_new_s3_store(
-                    config.clone(),
-                    credentials.clone(),
-                    owner.store(),
-                    &waits,
-                );
-                setup_step::single(&mut progress, StorageSetupStep::CheckingBucket, checking)
-                    .await?;
-            }
-            // §20.8's safety check: the effective settings must agree with what
-            // the service does, before the provider check and any commitment.
-            let detecting = async {
-                let detection = owner
-                    .connector
-                    .detect_s3(config.clone(), credentials.clone(), owner.store(), &waits)
-                    .await?;
-                detection.resolve(config)
-            };
-            let config =
-                setup_step::single(&mut progress, StorageSetupStep::DetectingSettings, detecting)
-                    .await?;
+            let journal = owner
+                .begin_setup(&device_name, &StorageCredentials::S3(credentials.clone()))
+                .await?;
             owner
-                .setup_connection(
-                    config,
-                    &device_name,
-                    ProviderAuth::S3(credentials),
-                    None,
-                    waits,
-                    &mut progress,
-                )
+                .run_setup(journal, async |journal| {
+                    if journal.creating() {
+                        // Creating the store: where member keys reach the
+                        // whole bucket, the bucket must hold nothing but this
+                        // store (§20.7).
+                        let checking = owner.connector.check_new_s3_store(
+                            config.clone(),
+                            credentials.clone(),
+                            owner.store(),
+                            &waits,
+                        );
+                        setup_step::single(
+                            &mut progress,
+                            StorageSetupStep::CheckingBucket,
+                            checking,
+                        )
+                        .await?;
+                    }
+                    // §20.8's safety check: the effective settings must agree
+                    // with what the service does, before the provider check
+                    // and any commitment.
+                    let detecting = async {
+                        let detection = owner
+                            .connector
+                            .detect_s3(config.clone(), credentials.clone(), owner.store(), &waits)
+                            .await?;
+                        detection.resolve(config)
+                    };
+                    let config = setup_step::single(
+                        &mut progress,
+                        StorageSetupStep::DetectingSettings,
+                        detecting,
+                    )
+                    .await?;
+                    owner.reached(setup::SetupStop::Detected).await?;
+                    owner.check_cancel()?;
+                    owner
+                        .setup_connection(
+                            journal,
+                            config,
+                            ProviderAuth::S3(credentials),
+                            None,
+                            waits,
+                            &mut progress,
+                        )
+                        .await
+                })
                 .await
         })
         .await

@@ -493,6 +493,12 @@ impl SequenceSync {
                             }
                             .into())
                         }
+                        OperationOutcome::Cancelled | OperationOutcome::Undone(_) => {
+                            return Err(coven_database::DbError::Invariant {
+                                what: "only storage setup is cancelled or undone",
+                            }
+                            .into())
+                        }
                     }
                 }
                 InviteState::Grant => {

@@ -3298,7 +3298,7 @@ let moved = handle
 | | `cause` | the text of the error behind the record, written with it, when this run met that error and no app call received it; NULL otherwise (E5) |
 | `coven_invites`: this device's invites that haven't ended, each from the write that makes it until approval, decline, cancel or expiry ends it, each a write (E10) | `invite` | the invite with its stage, read with `operation` by `Invite::list` |
 | | `operation` | the invite's operation, which names its pending record in `coven_pending`, read as `i64` for `OperationId`; smallest first is the order the invites were made |
-| `coven_operations`: each operation an app's write journaled (§11.4), from that write's commit until a write acknowledges it, in the order they were journaled (E6) | `operation` | its id, read as `i64` for `OperationId` |
+| `coven_operations`: each operation an app's write journaled (§11.4), from that write's commit, and each storage setup, from its journal (§11.6), until a write acknowledges it, in the order they were journaled (E6) | `operation` | its id, read as `i64` for `OperationId` |
 | | `kind` | what it does, read as `OperationKind` |
 | | `outcome` | NULL while it runs; then how it ended, read as `OperationOutcome` |
 | `coven_members`: every member this device's applied slots name, former ones included | `member` | the member id as canonical UUID text, read as `MemberId` |
@@ -3829,10 +3829,34 @@ while let Some(Ok(values)) = lost.next().await {
     loads with loading's own steps and counts (`Loading`, §13.4), then
     publishes changed access (`RecordingAccess`). A step other than `Loading`
     is one unit, done when it ends.
+  - Setup is an operation with one point of no return
+    ([§11.6](coven.md#116-every-call-that-writes-to-storage-in-steps),
+    [§20.8](coven.md#208-checking-a-provider-before-use)). Before its first
+    write to storage it journals itself, listed in `coven_operations` as
+    `StorageSetup`, and keeps the credentials it connects with in a device
+    entry of its own. `cancel_storage_setup` before `CreatingStore` or
+    `RecordingAccess` begins answers `Undoing`: setup undoes what it wrote and
+    fails with `Cancelled`, its outcome `Cancelled`. From those steps on it
+    answers `Finishing`, and setup finishes; the app stops offering Cancel when
+    either step begins. Dropping the call leaves setup running to its end.
+  - Only finishing commits the location, sign-in and restore code on the
+    device; the outcome is `Landed` at slot 1 for a creation, `Landed` at the
+    `Set access` slot or `Satisfied` for a reconnect. A failure before the point
+    of no return undoes setup, outcome `Undone(Failed)`; one after it is
+    returned while setup stays running, and setup starts the sync loop, whose
+    connection finishes it. A claim refused after it, slot 1 or the bucket
+    marker another store holds, or a refused `Set access`, undoes setup:
+    `Undone(Failed)` or `Rejected`.
+  - Opening a store undoes a setup a crash cut before its point of no return,
+    outcome `Undone(Interrupted)`, and leaves one past it running: the first
+    connection attempt after `start_sync` connects with setup's own
+    credentials, settles its claim and finishes it. Another setup meanwhile
+    fails with `SetupRunning`.
 - The app calls `authenticate(access)` on the handle before OAuth setup.
   Coven owns the request, checked redirect and code exchange. The builder's
   presenter opens the page and returns the redirect or cancellation; it receives
-  no tokens. Sign-in is held in coven's session custody until setup succeeds.
+  no tokens. Sign-in is held in coven's session custody until setup succeeds,
+  and from setup's journal on also in setup's own device entry (§11.6).
   Replacing a sign-in does not change an existing storage connection; setup
   verifies the chosen account and location before attaching it.
 - Every setup, including reconnection, reaches the candidate provider with the
@@ -4694,6 +4718,12 @@ pub enum StorageSetupError {
     StoreOwner,
     /// The store needs a newer app schema or coven format (§18).
     UpdateRequired(RequiredUpdate),
+    /// The app cancelled setup before its point of no return, and setup
+    /// undid what it wrote (§11.6).
+    Cancelled,
+    /// A setup past its point of no return is still finishing on this
+    /// device; starting sync finishes it (§11.6).
+    SetupRunning,
     /// Local setup failed, with its cause.
     Internal(Box<dyn std::error::Error + Send + Sync>),
     /// Setup's runtime is shutting down and dropped it partway, so how much
@@ -5121,6 +5151,12 @@ impl CovenHandle {
         on_progress: impl Fn(Progress<StorageSetupStep>),
     ) -> Result<StorageSetup, StorageSetupError>;
 
+    /// Cancels the storage setup running on this store (§11.6): before its
+    /// point of no return it undoes what it wrote and fails with
+    /// `Cancelled`; from its `CreatingStore` or `RecordingAccess` step on, or
+    /// once a crash cut it there, it finishes. Takes no lock.
+    pub fn cancel_storage_setup(&self) -> SetupCancellation;
+
     /// Opens store keys from their copies sealed to this member in storage
     /// (§12.1), keeps them in custody, and connects without starting sync.
     /// Uses the member-key session already held at open; it does not unlock
@@ -5422,6 +5458,17 @@ pub struct ConnectedStorage {
     pub key_state: StoreKeyState,
 }
 
+/// What cancelling storage setup did (§11.6).
+pub enum SetupCancellation {
+    /// Before its point of no return: setup undoes what it wrote and fails
+    /// with `StorageSetupError::Cancelled`.
+    Undoing,
+    /// Past its point of no return: setup finishes.
+    Finishing,
+    /// No setup is running.
+    NoSetup,
+}
+
 /// Setup returns the committed connection and code, including on reconnection.
 pub struct StorageSetup {
     pub connection: ConnectedStorage,
@@ -5439,13 +5486,15 @@ pub enum StorageSetupStep {
     PreparingZone,
     /// Dropbox or OneDrive: reading the signed-in account's name.
     ReadingAccount,
-    /// Connecting and checking the provider; creating claims the bucket.
+    /// Connecting and checking the provider.
     Connecting,
-    /// Creating: claiming slot 1.
+    /// Creating: past the point of no return, claiming the bucket where the
+    /// location needs it, then slot 1. Cancel no longer undoes setup.
     CreatingStore,
     /// Reconnecting: loading, with loading's steps and counts (§13.4).
     Loading(LoadStep),
-    /// Reconnecting with changed access: publishing `Set access`.
+    /// Reconnecting with changed access: past the point of no return,
+    /// publishing `Set access`. Cancel no longer undoes setup.
     RecordingAccess,
 }
 
@@ -5494,9 +5543,10 @@ while let Some(result) = status.next().await {
   journal, with or without storage; a pass runs them. Each returns its
   `OperationId`, or `None` when the applied state already has what it asks.
 - `coven_operations` (E4) lists each operation an app's write journaled, from
-  that write's commit: its outcome is NULL while it runs, then `Landed`,
-  `Satisfied` or `Rejected`, written in the transaction that ends its journal
-  row, so no outcome is lost to a dropped call or a restart. Applying a slot
+  that write's commit, and each storage setup, from its journal on (E5): its
+  outcome is NULL while it runs, then `Landed`, `Satisfied` or `Rejected`, or
+  for a setup `Cancelled` or `Undone`, written in the transaction that ends
+  its journal row, so no outcome is lost to a dropped call or a restart. Applying a slot
   that stops this device for good, its removal, its replacement by a reset or
   a replacement of its member's keys it doesn't hold, ends every one still
   running, in that transaction, as `Stopped` with that stop
@@ -5566,6 +5616,9 @@ pub enum OperationKind {
     Invite,
     /// Snapshot and reset an audience (§19.4).
     Reset,
+    /// Set up storage on this device: check the provider, then create the
+    /// store or reconnect to it (§11.6, §20.8).
+    StorageSetup,
 }
 
 /// Operation calls retain the same typed causes as sync calls (§11).
@@ -5585,6 +5638,23 @@ pub enum OperationOutcome {
     /// and for a copy of this installation, the other copy may land it
     /// (§14.1, §19.3).
     Stopped(DeviceStop),
+    /// The app cancelled it before its point of no return, and what it had
+    /// written was undone (§11.6). Only storage setup ends this way.
+    Cancelled,
+    /// It was undone before its point of no return, or refused after it
+    /// before anything it claimed landed (§11.6). Only storage setup ends
+    /// this way.
+    Undone(UndoCause),
+}
+
+/// Why an operation was undone (§11.6).
+pub enum UndoCause {
+    /// The app or device stopped before its point of no return, and opening
+    /// the store undid it.
+    Interrupted,
+    /// A step failed, with this error's text; the call that ran it returned
+    /// the error itself.
+    Failed { error: String },
 }
 
 /// Why a device stopped for good (§14.1, §19.3).

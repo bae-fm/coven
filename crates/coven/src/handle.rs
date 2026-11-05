@@ -226,6 +226,20 @@ impl CovenHandle {
         let setup = self.storage.setup_cloudkit(container, device_name, progress);
         coven_foundation::progress::forward(watched, setup, on_progress).await
     }
+    /// Cancel the storage setup running on this store (§11.6). Before its
+    /// point of no return setup undoes what it wrote, fails with
+    /// `StorageSetupError::Cancelled`, and `coven_operations` lists it
+    /// cancelled. Past that point, from its `CreatingStore` or
+    /// `RecordingAccess` step on or once a crash cut it there, it finishes,
+    /// and the answer says so. Holds no lock: setup holds its call's.
+    pub fn cancel_storage_setup(&self) -> crate::storage::SetupCancellation {
+        self.storage.cancel_setup()
+    }
+    /// Have the next setup stop or wait at one of its stops.
+    #[cfg(test)]
+    pub(crate) fn test_setup_hook(&self, hook: crate::storage::SetupHook) {
+        self.storage.test_setup_hook(hook);
+    }
     /// Open this member's sealed keys and connect without starting the loop.
     pub async fn unlock_store_key(&self) -> Result<ConnectedStorage, StoreKeyUnlockError> {
         self.storage.unlock().await

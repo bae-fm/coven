@@ -7,7 +7,9 @@ use std::future::Future;
 
 /// A step of setting up storage, in the order they run. Which steps run
 /// depends on the provider and on whether setup creates the store. A step
-/// other than `Loading` is one unit, done when it ends.
+/// other than `Loading` is one unit, done when it ends. Setup can be
+/// cancelled until `CreatingStore` or `RecordingAccess` begins, its point of
+/// no return (§11.6).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum StorageSetupStep {
     /// S3, creating the store where member keys reach a whole bucket:
@@ -23,16 +25,16 @@ pub enum StorageSetupStep {
     /// Dropbox or OneDrive: reading the signed-in account's name.
     ReadingAccount,
     /// Connecting, then checking the provider with a fresh sealed object it
-    /// must create once, read back and delete; creating the store claims
-    /// the bucket too.
+    /// must create once, read back and delete.
     Connecting,
-    /// Creating the store: claiming slot 1, which publishes it.
+    /// Creating the store, past the point of no return: claiming the bucket
+    /// where the location needs it (§20.7), then slot 1, which publishes it.
     CreatingStore,
     /// Reconnecting: opening this member's store keys and loading what other
     /// devices published, each of loading's steps with its count (§13.4).
     Loading(LoadStep),
-    /// Reconnecting with changed provider access: publishing it as
-    /// `Set access`.
+    /// Reconnecting with changed provider access, past the point of no
+    /// return: publishing it as `Set access`.
     RecordingAccess,
 }
 

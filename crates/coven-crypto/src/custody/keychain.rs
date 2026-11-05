@@ -22,6 +22,7 @@ const DEVICE_ID_ENTRY: &str = "device-id";
 const CREDENTIALS_ENTRY: &str = "storage-credentials";
 const HOST_SECRET_NAMES_ENTRY: &str = "host-secret-names";
 const INVITE_CODE_ENTRY: &str = "invite-code";
+const SETUP_CREDENTIALS_ENTRY: &str = "setup-credentials";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
 pub(crate) enum EntryScope {
@@ -227,6 +228,24 @@ impl StoreKeychain {
         self.remove(CREDENTIALS_ENTRY)
     }
 
+    /// The credentials a storage setup under way connects with, kept apart
+    /// from the committed ones until it finishes, so undoing it leaves those
+    /// as they were (§11.6, §20.8).
+    pub fn setup_credentials(&self) -> Result<Option<SecretBytes>, KeyError> {
+        self.read(SETUP_CREDENTIALS_ENTRY)
+    }
+
+    /// Keep the credentials of a storage setup about to write to storage.
+    pub fn set_setup_credentials(&self, bytes: &SecretBytes) -> Result<(), KeyError> {
+        self.write(SETUP_CREDENTIALS_ENTRY, bytes.as_bytes())
+    }
+
+    /// Remove a finished or undone setup's credentials; an absent entry
+    /// succeeds.
+    pub fn delete_setup_credentials(&self) -> Result<(), KeyError> {
+        self.remove(SETUP_CREDENTIALS_ENTRY)
+    }
+
     /// The invite code of a join under way for this store on this device:
     /// its saved request is encrypted with the code's secret, so resuming
     /// needs the code (§13.2). It is never synced.
@@ -274,6 +293,7 @@ impl StoreKeychain {
             MEMBER_KEYS_ENTRY,
             DEVICE_ID_ENTRY,
             CREDENTIALS_ENTRY,
+            SETUP_CREDENTIALS_ENTRY,
             INVITE_CODE_ENTRY,
         ] {
             self.remove(name)?;

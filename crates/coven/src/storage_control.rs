@@ -9,6 +9,13 @@ impl StorageConnections {
     /// credentials, failing and backing off like any pass (E5).
     pub(crate) async fn start(self: &Arc<Self>) -> Result<(), SyncError> {
         let _call = self.lock_open().await?;
+        self.start_locked().await
+    }
+
+    /// Start the loop, as `start` does, for a caller holding the call lock:
+    /// a setup past its point of no return starts it for the connection
+    /// that finishes it (§11.6).
+    pub(super) async fn start_locked(self: &Arc<Self>) -> Result<(), SyncError> {
         let keys = self.with_keys(|keys| Ok(keys.clone()))?;
         if let Some(key) = SequenceSync::missing_store_key(&self.database, &keys).await? {
             return Err(SyncError::KeyUnavailable(key));
@@ -32,10 +39,13 @@ impl StorageConnections {
         }
         // Credentials may have been entered since the store opened without
         // them: record what custody holds now.
-        if !self.configured.load(Ordering::SeqCst) {
+        // A setup past its point of no return connects with its own
+        // credentials until it finishes (§11.6).
+        let finishing = self.setup_finishing();
+        if !finishing && !self.configured.load(Ordering::SeqCst) {
             self.record_custody().await?;
         }
-        if !self.configured.load(Ordering::SeqCst) {
+        if !finishing && !self.configured.load(Ordering::SeqCst) {
             return Ok(());
         }
         let epoch = self.epoch.fetch_add(1, Ordering::SeqCst) + 1;
@@ -162,7 +172,7 @@ impl StorageConnections {
             // Location identifies the provider even if decoding or reading its
             // credentials fails. A location read itself is a local disk failure.
             let connection_version = self.waits.connection_version();
-            let result = match self.codes.location().await {
+            let result = match self.connecting_location().await {
                 Ok(Some(location)) => self.connect(&mut live).await.map_err(|error| {
                     let reason = error.pending_reason(location.provider());
                     (error, reason)
@@ -242,6 +252,20 @@ impl StorageConnections {
         }
         // Superseded: the stop or close that did so says sync isn't
         // running, and stopping records the location, once this ends.
+    }
+
+    /// Where a connection attempt connects: the recorded location, or that
+    /// of a setup past its point of no return, which it finishes (§11.6).
+    async fn connecting_location(&self) -> Result<Option<StorageConfig>, SyncError> {
+        if let Some(location) = self.codes.location().await? {
+            return Ok(Some(location));
+        }
+        if !self.setup_finishing() {
+            return Ok(None);
+        }
+        Ok(coven_sync::SetupJournal::running(&self.database)
+            .await?
+            .and_then(|journal| journal.location().cloned()))
     }
 
     /// `error`, once a bug it carries has gone to the store's bug sink:

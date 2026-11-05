@@ -18,7 +18,9 @@ pub use crate::handle::{CovenHandle, IfUnsent};
 pub use crate::read_handle::CovenReadHandle;
 pub use crate::saved_restore::{SavedRestoreCode, SavedRestoreEntry};
 pub use crate::storage::GuidedAccessKey;
-pub use crate::storage::{ConnectedStorage, StorageSetup, StorageSetupStep, StoreKeyState};
+pub use crate::storage::{
+    ConnectedStorage, SetupCancellation, StorageSetup, StorageSetupStep, StoreKeyState,
+};
 pub use coven_crypto::custody::{
     IdentityCustody, IdentityError, KeyCustody, KeyError, KeychainError, MemberKeyCustody,
     Passphrase, StoreKeyCustody,
@@ -117,7 +119,7 @@ pub use coven_sync::{
     NextCheck, OperationError, OperationId, OperationKind, OperationOutcome, OperationRejection,
     PassFailure, PendingReason, PendingRecord, PendingSubject, Prerequisite, ProviderAccessAction,
     Refusal, RequiredUpdate, Retry, RetryAnswer, RetryEffect, RetryOutcome, StatusFailure,
-    SyncCause, SyncError, SyncFailure, SyncOftenGuard, SyncState, SyncStatus, SyncWait,
+    SyncCause, SyncError, SyncFailure, SyncOftenGuard, SyncState, SyncStatus, SyncWait, UndoCause,
     WriteCutoff,
 };
 pub use coven_sync::{

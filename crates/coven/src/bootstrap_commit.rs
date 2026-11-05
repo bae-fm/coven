@@ -198,7 +198,7 @@ pub(super) async fn publish_bootstrap(
     let publication_error =
         commit(&directory, &code, &name, &credentials, &sign_in, &ring, &owners, pending)
             .map_err(Uncommitted::into_error)?;
-    let handle = owners.into_handle(database, waits, true);
+    let handle = owners.into_handle(database, waits, true, false);
     let cleanup = directory
         .owned_file(StoreFile::Bootstrap)
         .remove()

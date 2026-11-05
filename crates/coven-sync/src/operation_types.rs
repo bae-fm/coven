@@ -65,6 +65,9 @@ pub enum OperationKind {
     /// Replace a member's signing and sealing pair: this member's own, with a
     /// candidate kept in identity custody, or a prepared pair as an admin (§10).
     ReplaceMemberKeys,
+    /// Set up storage on this device: check the provider, then create the
+    /// store or reconnect to it (§11.6, §20.8).
+    StorageSetup,
 }
 
 impl OperationKind {

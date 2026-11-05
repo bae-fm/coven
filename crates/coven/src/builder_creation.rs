@@ -103,7 +103,7 @@ async fn prepare(
     {
         return Err(close_failed(&database, error.into()).await);
     }
-    let handle = owners.into_handle(database, waits, false);
+    let handle = owners.into_handle(database, waits, false, false);
     match publication {
         None => Ok(handle),
         Some(source) => {

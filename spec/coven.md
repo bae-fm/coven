@@ -3186,13 +3186,16 @@ the folder can do.
 Ana sets up Household on Dropbox:
 
 1. Her phone sets up her member keys in custody (OS keychain by default, §12.4).
-2. It claims slot 1, which creates the store with the store id and name she
+2. Setup journals itself, then checks Dropbox (§20.8). Until it claims anything
+   she can cancel it, and it undoes what it wrote (§11.6).
+3. It claims slot 1, which creates the store with the store id and name she
    gave and registers her phone and Ana as admin.
-3. It holds the first store key and claims its sealed copy to Ana next, at slot 2
+4. It holds the first store key and claims its sealed copy to Ana next, at slot 2
    (§12.1).
-4. Setup succeeds once both slots are confirmed.
+5. Setup succeeds once both slots are confirmed, and only then saves the
+   location, sign-in and restore code on her phone.
 
-If another creation already holds slot 1, setup fails with
+If another creation already holds slot 1, setup is undone and fails with
 `StorageFailure::StoreExists`.
 
 Creation supplies the store's id and initial name. Settings supplied later when
@@ -3432,6 +3435,7 @@ These calls, and the work passes do for them, follow the rule:
 | Taking provider access back after a removal (§14.2) | the provider request, fixed before it is sent | none: it is sent again until confirmed |
 | Deleting gone devices' files (`clean_up_gone_devices_files`, §17.10) | the files operation | none: it deletes only what nothing refers to |
 | Sending writes and uploading files (§4, §17.9) | the send queue and the upload queue | the writes slot's claim; a file's confirmed upload |
+| Setting up storage (`setup_s3_storage`, `setup_oauth_storage`, `setup_cloudkit_storage`, §20.8) | its operation, with the credentials it connects with kept apart from the committed ones | the bucket marker or slot 1 when creating; the `Set access` claim, or committing, when reconnecting |
 
 #### 11.7 What the proofs cover
 
@@ -8014,7 +8018,10 @@ token passes through the app:
   Coven builds the request, checks the redirect, exchanges the code, and holds
   the tokens.
 - Until setup or a restore publishes the store, the sign-in lives in coven's
-  session custody. Publishing commits it to the device's custody. A join commits
+  session custody. Setup also keeps a copy in a device entry of its own from
+  its first write to storage, so a crash past its point of no return can still
+  finish it (§11.6). Publishing commits the sign-in to the device's custody,
+  and setup's own copy goes. A join commits
   it there as soon as it has saved its invite code, so the sign-in outlasts a
   restart while the join waits (§13.2).
 - Coven uses a token until the provider rejects it with HTTP 401. It then
@@ -8338,9 +8345,10 @@ enforced like this:
   other than the store's own `<store>/` and the bucket marker `coven-bucket`
   refuses setup with `OwnBucketRequired { reason: Occupied }`. A retried
   creation that already wrote under `<store>/` passes.
-- Then, after detection and the provider check pass (§20.8), and before
-  publishing any store state or recording the location, first setup claims the
-  bucket: it creates `coven-bucket` at the bucket's root once, with the same
+- Then, after detection and the provider check pass (§20.8), first setup passes
+  its point of no return (§11.6) and claims the bucket, before slot 1 and
+  before committing the location: it creates `coven-bucket` at the bucket's
+  root once, with the same
   create-once request slots use. Its complete bytes are the store id as a
   lowercase hyphenated UUID, 36 ASCII bytes with no newline
   ([format.md D10](format.md#the-bucket-marker)).
@@ -8353,8 +8361,10 @@ enforced like this:
   store; a missing, malformed or other store's marker refuses with
   `OwnBucketRequired { reason: Occupied }`. They neither list the bucket's root
   nor create a missing marker. A failed read keeps its provider cause.
-- The marker is never replaced or deleted. A failed setup leaves it for the same
-  store's retry. Deleting a store from a device (`delete_store` or
+- The marker is never replaced or deleted. Setup claims it only past its point
+  of no return, so a setup that writes it always finishes, after a crash too;
+  an undone setup never wrote one. A marker naming another store undoes setup,
+  which then wrote none. Deleting a store from a device (`delete_store` or
   `discard_store`, [api.md E1](api.md#e1-opening)) leaves the marker in storage,
   like the store's other objects.
 
@@ -8513,6 +8523,37 @@ which covers both checks here, then creating the store. Ana's laptop
 reconnecting the Household store on Dropbox reports reading the account's
 label, connecting, then loading, with loading's own steps and counts (§13.4).
 api.md E5 lists the steps.
+
+**Setup is an operation (§11.6).** Before its first write to storage, setup
+journals itself: `coven_operations` lists it as `StorageSetup`, and the
+credentials it connects with go in a device entry of their own, apart from the
+committed ones. Ben cancels his R2 setup while it detects settings: setup
+undoes what it wrote, fails with `StorageSetupError::Cancelled`, and its
+outcome is `Cancelled`. Detection's probes and the provider check's test object
+are deleted as each check ends; one a crash leaves is space nothing refers to.
+
+- **The point of no return** is recording the first claim setup is about to
+  send: the bucket marker or slot 1 when it creates the store (the
+  `CreatingStore` step), or `Set access` when a reconnect records changed access
+  (`RecordingAccess`). A reconnect with nothing to record passes it as it
+  commits. A cancel from then on is answered that setup is finishing.
+- **Only finishing commits.** The location, the sign-in and the restore code
+  are saved on the device once the claim has landed, and setup's own copy of
+  the credentials goes; its outcome is `Landed` at its slot, or `Satisfied`.
+  So an undone reconnect leaves the device's earlier connection as it was. A
+  creation keeps the store key slot 1 introduces just before the point, and
+  an undo forgets it.
+- **After a crash.** Opening the store undoes a setup that hadn't reached the
+  point of no return; its outcome is `Undone(Interrupted)`. One past it stays
+  running, and the first connection attempt after opening, which starting sync
+  makes, connects with setup's own credentials, settles the claim and finishes
+  it. A failure past the point does the same: the call returns it, and the
+  loop setup starts finishes setup under the connection's backoff.
+- **Refused past the point.** A claim refused before it landed, a marker or
+  slot 1 another store holds, or `Set access` the caught-up history refuses,
+  undoes setup: its outcome is `Undone` or `Rejected`.
+- **One at a time.** While a setup is past its point of no return, another is
+  refused with `StorageSetupError::SetupRunning`.
 
 #### 20.9 Sharing with accounts
 
@@ -9250,7 +9291,7 @@ keeps them apart from the app's own Block Store entries:
 
 | Scope | Entries | Deleted when |
 |---|---|---|
-| Device-only: never leaves this device or its backups | device id, store keys, member keys, provider credentials, the app's secrets and their list | the store is deleted from this device (api.md [E1](api.md#e1-opening)) |
+| Device-only: never leaves this device or its backups | device id, store keys, member keys, provider credentials, a storage setup's own credentials until it finishes or is undone (§11.6), the app's secrets and their list | the store is deleted from this device (api.md [E1](api.md#e1-opening)) |
 | Kept for the person: synced by iCloud Keychain to their Apple devices; on Android, kept in this phone's Block Store and given to a phone set up from it | restore code with the store's name, and the S3 key beside it | the person's membership ends (§14.1), or the person forgets the entry (§13.1) |
 
 On Apple devices the device-only entries can be read only while the device is
@@ -10887,7 +10928,9 @@ pass's failure, kept for its retry.
 |---|---|---|
 | `AlreadyExists` | a create-once request found the path occupied | §5.1, §20.1 |
 | `Conflict` | a racer's condition was refused; for a shared temporary, a retryable answer | E.6, E.10 |
-| `StorageFailure::StoreExists` | another creation already holds slot 1 | §10.3 |
+| `StorageFailure::StoreExists` | another creation already holds slot 1; setup is undone | §10.3 |
+| `StorageSetupError::Cancelled` | the app cancelled setup before its point of no return, and setup undid what it wrote | §11.6, §20.8 |
+| `StorageSetupError::SetupRunning` | a setup past its point of no return is still finishing on this device | §20.8 |
 | `StorageFailure::ProviderUnavailable` | CloudKit on a platform other than Apple's | §20.2, E.1 |
 | `ContainerNotFound` | CloudKit's zone is missing | E.1 |
 | `S3PrefixError` | a typed S3 base prefix has two slashes in a row, a folder name with a character other than an ASCII letter or digit, `-` or `_`, or a folder name over 255 bytes | §20.3 |

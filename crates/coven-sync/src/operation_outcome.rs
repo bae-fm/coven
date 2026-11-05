@@ -17,12 +17,20 @@ pub(crate) fn into_slot(outcome: OperationOutcome) -> Result<Option<u64>, SyncEr
             what: "a call waits only for operations a stop doesn't end",
         }
         .into()),
+        // Only storage setup ends cancelled or undone, and it waits for no
+        // sequence operation's outcome this way.
+        OperationOutcome::Cancelled | OperationOutcome::Undone(_) => {
+            Err(coven_database::DbError::Invariant {
+                what: "only storage setup is cancelled or undone",
+            }
+            .into())
+        }
     }
 }
 
 impl OperationKind {
     /// The kind's name, as `coven_operations.kind` lists it.
-    pub(crate) fn listed(self) -> String {
+    pub fn listed(self) -> String {
         match serde_json::to_value(self) {
             Ok(serde_json::Value::String(name)) => name,
             other => unreachable!("an operation kind is named by its variant: {other:?}"),

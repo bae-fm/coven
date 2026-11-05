@@ -54,6 +54,26 @@ pub enum OperationOutcome {
     /// same change, and for a copy of this installation, the other copy may
     /// still land it (§14.1, §19.3).
     Stopped(DeviceStop),
+    /// The app cancelled it before its point of no return, and what it had
+    /// written was undone (§11.6).
+    Cancelled,
+    /// It was undone before its point of no return, or refused after it
+    /// before anything it claimed landed (§11.6).
+    Undone(UndoCause),
+}
+
+/// Why an operation was undone (§11.6).
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum UndoCause {
+    /// The app or the device stopped before its point of no return, and
+    /// opening the store undid it.
+    Interrupted,
+    /// A step failed, with this error's text; the call that ran it returned
+    /// the error itself.
+    Failed {
+        /// The failure's text, secrets and URLs already cut.
+        error: String,
+    },
 }
 
 /// Why a device stopped for good (§14.1, §19.3).

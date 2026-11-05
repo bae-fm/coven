@@ -219,9 +219,9 @@ pub(super) async fn publish(
         return combine(Err(error.into()), close(database).await);
     }
     match replacement.publish() {
-        Ok(()) => Ok(owners.into_handle(database, waits, configured)),
+        Ok(()) => Ok(owners.into_handle(database, waits, configured, false)),
         Err(error) if error.published_unsynced() => Err(BootstrapError::Published {
-            handle: owners.into_handle(database, waits, configured),
+            handle: owners.into_handle(database, waits, configured, false),
             source: Box::new(error.into()),
         }),
         Err(error) => combine(Err(error.into()), close(database).await),
