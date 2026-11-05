@@ -62,3 +62,22 @@ fn announcements_name_prior_coverage_and_explicit_purpose() {
         .encode(Slot(7))
         .is_err());
 }
+
+/// A creation names the store its path holds (§10.3).
+#[test]
+fn a_creation_frame_names_the_store_its_path_holds() {
+    let other_store = coven_foundation::id_source::StoreId(uuid::Uuid::from_bytes([0x20; 16]));
+    let elsewhere = crate::path::ObjectPath::slot(other_store, std::num::NonZeroU64::MIN);
+    let header = f::slot_header(1, 1);
+    let frame = SlotFrame::Admin(f::creation_change());
+
+    let bytes = frame.encode(&header, &f::slot_path(1)).unwrap();
+    assert_eq!(
+        frame.encode(&header, &elsewhere),
+        Err(Error::Invalid { field: "creation slot", rule: Rule::Store })
+    );
+    assert_eq!(
+        SlotFrame::decode(&bytes, &elsewhere),
+        Err(Error::Invalid { field: "creation slot", rule: Rule::Store })
+    );
+}
