@@ -15,9 +15,7 @@ fn reads_key_rows_by_primary_key_and_name_every_other_column() {
         PrerequisiteRows::Slot,
         PrerequisiteRows::Claim,
         PrerequisiteRows::Write(WriteId { device, number: 1 }),
-        PrerequisiteRows::Device(device),
         PrerequisiteRows::Reload(Audience::Store),
-        PrerequisiteRows::Boundaries,
         PrerequisiteRows::ProviderAccess("ana@example.com".into()),
         PrerequisiteRows::Operation(crate::OperationId(1)),
     ];

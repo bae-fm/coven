@@ -135,22 +135,8 @@ pub enum PendingSubject {
 pub enum Prerequisite {
     /// A completed read and apply through the current sequence end.
     SequenceCatchUp,
-    /// A storage object must arrive.
-    Object(ObjectPath),
-    /// The author's device must be registered.
-    DeviceRegistration(DeviceId),
-    /// A migrated schema must be published.
-    SchemaRaise {
-        /// The schema's audience.
-        #[serde(with = "crate::pending_encoding::audience")]
-        audience: Audience,
-        /// The migrated version.
-        version: u32,
-    },
     /// This audience must reload.
     Reload(#[serde(with = "crate::pending_encoding::audience")] Audience),
-    /// A snapshot needed to load history below the floor.
-    Snapshot(#[serde(with = "encoding::snapshot_id")] SnapshotId),
 }
 
 /// A local invariant or resource failure; immediate calls retain the native cause.

@@ -19,12 +19,8 @@ pub enum PrerequisiteRows {
     Claim,
     /// An original write's queue and counted prefix.
     Write(WriteId),
-    /// A device's registration.
-    Device(DeviceId),
     /// An audience's pending reload.
     Reload(Audience),
-    /// The reset and schema boundaries.
-    Boundaries,
     /// A provider account's access record.
     ProviderAccess(String),
     /// Another operation's journal row: it advances or finishes.
@@ -65,10 +61,7 @@ fn rows(table: &str, key: &[(&str, SqlValue)], columns: &[&str]) -> TableRead {
 const UPLOADS: &[&str] = &["record"];
 const UPLOAD_KEYS: &[&str] = &["sealing_keys"];
 const UPLOAD_CLAIMS: &[&str] = &["claim"];
-const DEVICES: &[&str] = &["member", "name", "state"];
 const DATA_RELOADS: &[&str] = &["subject"];
-const BOUNDARIES: &[&str] =
-    &["kind", "version", "audience", "snapshot_device", "snapshot_number", "included", "applied"];
 const PROVIDER_ACCESS: &[&str] = &["intended", "granted", "invitation", "operation", "target"];
 const OPERATIONS: &[&str] = &["kind", "last_step", "data", "started_by"];
 
@@ -90,13 +83,11 @@ impl PrerequisiteRows {
                     rows("_coven_upload_claims", &at, UPLOAD_CLAIMS),
                 ]
             }
-            Self::Device(id) => vec![rows("_coven_devices", &[("device", device(*id))], DEVICES)],
             Self::Reload(audience) => vec![rows(
                 "_coven_data_reloads",
                 &[("audience", text(&crate::write_encoding::audience_text(audience)))],
                 DATA_RELOADS,
             )],
-            Self::Boundaries => vec![rows("_coven_boundaries", &[], BOUNDARIES)],
             Self::ProviderAccess(account) => {
                 vec![rows("_coven_provider_access", &[("account", text(account))], PROVIDER_ACCESS)]
             }

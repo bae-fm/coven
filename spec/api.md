@@ -4918,14 +4918,8 @@ pub enum PendingSubject {
 pub enum Prerequisite {
     /// A completed read and apply through the current sequence end (§11.1).
     SequenceCatchUp,
-
-    Object(ObjectPath),
-    DeviceRegistration(DeviceId),
-    SchemaRaise { audience: Audience, version: u32 },
+    /// This audience must reload.
     Reload(Audience),
-    /// A snapshot needed to load history below the floor (§16.4).
-    Snapshot(SnapshotId),
-
 }
 
 /// One vocabulary for failed object checks in calls and pending records.

@@ -543,16 +543,8 @@ fn retry(reason: PendingReason) -> Retry {
 
 #[test]
 fn missing_prerequisites_retry_automatically() {
-    let device = DeviceId(1);
     let path = ObjectPath::floor(coven_storage::test_utils::STORE_ID);
-    for prerequisite in [
-        Prerequisite::SequenceCatchUp,
-        Prerequisite::Object(path.clone()),
-        Prerequisite::DeviceRegistration(device),
-        Prerequisite::SchemaRaise { audience: Audience::Store, version: 2 },
-        Prerequisite::Reload(Audience::Store),
-        Prerequisite::Snapshot(SnapshotId { audience: Audience::Store, device, number: 1 }),
-    ] {
+    for prerequisite in [Prerequisite::SequenceCatchUp, Prerequisite::Reload(Audience::Store)] {
         assert_eq!(retry(PendingReason::Waits(prerequisite)), Retry::Automatic);
     }
     for reason in [

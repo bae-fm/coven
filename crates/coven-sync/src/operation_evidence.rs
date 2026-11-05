@@ -70,12 +70,6 @@ fn needs(reason: &PendingReason, reload: Option<OperationId>) -> Needs {
         PendingReason::Missing { path } => rows(object_rows(path)),
         PendingReason::Waits(prerequisite) => match prerequisite {
             Prerequisite::SequenceCatchUp => rows(vec![PrerequisiteRows::Slot]),
-            Prerequisite::Object(path) => rows(object_rows(path)),
-            Prerequisite::DeviceRegistration(device) => {
-                rows(vec![PrerequisiteRows::Device(*device)])
-            }
-            Prerequisite::SchemaRaise { .. } => rows(vec![PrerequisiteRows::Boundaries]),
-            Prerequisite::Snapshot(_) => Needs::default(),
             Prerequisite::Reload(audience) => {
                 rows(vec![PrerequisiteRows::Reload(audience.clone())])
             }
