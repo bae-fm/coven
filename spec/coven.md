@@ -8144,12 +8144,14 @@ the location marker `coven-location`, at the root of a location that holds one
 store (below).
 [format.md D10](format.md#d10-paths) gives each object exactly one spelling.
 
-So several stores can share one CloudKit zone, or one S3 bucket prefix where
-member keys can be limited to a prefix. Ana creates Household and Ben creates
-Garden in the same AWS bucket; their store ids differ, so their first entries
-land at different paths. A Dropbox shared folder or a OneDrive folder holds one
-store, and so does a bucket on an S3 service whose keys reach the whole bucket
-(below).
+So several stores can share one S3 bucket prefix where member keys can be
+limited to a prefix. Ana creates Household and Ben creates Garden in the same
+AWS bucket; their store ids differ, so their first entries land at different
+paths. A Dropbox shared folder or a OneDrive folder holds one store, and so does
+a bucket on an S3 service whose keys reach the whole bucket (below). A CloudKit
+store has a zone of its own, `coven-<store>`, which setup creates: a CloudKit
+share covers its whole zone, so a second store in it would reach the first
+store's members.
 
 An S3 location names a bucket and a *base prefix*: the folder inside the bucket
 that holds its stores' folders. Ana types `music/stores` when she sets up
