@@ -399,7 +399,7 @@ impl SequenceSync {
             return Ok(());
         }
         if let SlotContent::Admin { effect: Some(effect), .. } = &mut incoming.content {
-            effect.provider = history.provider_changes(member.member())?;
+            effect.provider_access = history.provider_access(member.member())?;
             if !effect.reload.is_empty() {
                 let required = effect.reload.clone();
                 // Persist the audience gates before reading any replacement body.

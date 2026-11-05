@@ -28,7 +28,7 @@ pub(crate) fn load<P: crate::PendingValue>(
             slots,
             target,
             state,
-            provider,
+            provider_access,
             cutoffs,
             boundaries,
             operation,
@@ -39,7 +39,7 @@ pub(crate) fn load<P: crate::PendingValue>(
             return Err(invalid("reload target precedes committed applied slot"));
         }
         crate::store_state_tables::replace(database, &state)?;
-        crate::provider_access::adopt::<P>(database, &provider.accounts)?;
+        crate::provider_access::adopt::<P>(database, &provider_access)?;
         if cutoffs.iter().any(|(slot, _)| slot.0 > target) {
             return Err(invalid("cut-off exceeds reload target"));
         }

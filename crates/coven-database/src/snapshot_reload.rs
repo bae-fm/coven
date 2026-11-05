@@ -41,7 +41,7 @@ pub struct SnapshotReload<R, W> {
     /// Authenticated membership and keys at the target.
     pub state: StoreState,
     /// Provider work required by the authenticated state at the fixed target.
-    pub provider: crate::ProviderChanges,
+    pub provider_access: Vec<crate::ProviderAccessChange>,
     /// Counted admin changes introducing cut-offs, including compacted history.
     pub cutoffs: Vec<(Slot, StoreChange)>,
     /// Activated schema and reset snapshot coverage at the target.

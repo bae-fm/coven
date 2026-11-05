@@ -2,7 +2,6 @@
 
 use super::*;
 use coven_database::operation_kind;
-use coven_database::ProviderChanges;
 use coven_foundation::files::DeviceReset;
 
 impl SequenceSync {
@@ -45,7 +44,7 @@ impl SequenceSync {
                 _ => (),
             }
         }
-        let mut provider = ProviderChanges { accounts: Vec::new() };
+        let mut provider_access = Vec::new();
         // Only the owner's devices record provider work (§14.2).
         if !session.history.owns_storage(member.member()) {
             accounts.clear();
@@ -59,9 +58,11 @@ impl SequenceSync {
             // The discarded invite may have granted access even if its reply
             // was lost. The replacement must issue the owed revocation.
             change.initially_granted = true;
-            provider.accounts.push(change);
+            provider_access.push(change);
         }
-        self.database.record_device_reset::<PendingRecord>(reset, operations, provider).await?;
+        self.database
+            .record_device_reset::<PendingRecord>(reset, operations, provider_access)
+            .await?;
         Ok(())
     }
 }

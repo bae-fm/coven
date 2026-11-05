@@ -1,7 +1,7 @@
 //! Device-reset notices and committed member lists (§19.3, E5).
 
 use super::{Database, DbError};
-use crate::{CovenResult, LiveQuery, NewOperation, PendingValue, ProviderChanges};
+use crate::{CovenResult, LiveQuery, NewOperation, PendingValue, ProviderAccessChange};
 use coven_foundation::files::DeviceReset;
 use coven_foundation::locks::read_unpoisoned;
 
@@ -12,7 +12,7 @@ impl Database {
         &self,
         reset: DeviceReset,
         operations: Vec<NewOperation>,
-        provider: ProviderChanges,
+        provider_access: Vec<ProviderAccessChange>,
     ) -> Result<(), DbError> {
         self.call(move |inner| {
             inner.access.with_writer(|writer| {
@@ -23,7 +23,7 @@ impl Database {
                     for operation in &operations {
                         crate::operation::insert(db, operation)?;
                     }
-                    crate::provider_access::adopt::<P>(db, &provider.accounts)?;
+                    crate::provider_access::adopt::<P>(db, &provider_access)?;
                     crate::device_reset::record(db, &reset)
                 })
             })

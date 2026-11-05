@@ -318,7 +318,7 @@ impl Database {
                     snapshots,
                     target: reload.target,
                     state: reload.state,
-                    provider: reload.provider,
+                    provider_access: reload.provider_access,
                     cutoffs: reload.cutoffs,
                     boundaries: reload.boundaries,
                     operation: reload.operation,

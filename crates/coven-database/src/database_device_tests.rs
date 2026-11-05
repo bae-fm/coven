@@ -2,7 +2,7 @@ use super::*;
 use crate::{pending::tests::Record, tests::TestStore, ProviderAccessChange};
 use coven_foundation::id_source::DeviceId;
 
-fn cleanup() -> (Vec<NewOperation>, ProviderChanges) {
+fn cleanup() -> (Vec<NewOperation>, Vec<ProviderAccessChange>) {
     let operation = |kind: &str| NewOperation {
         kind: kind.into(),
         data: b"opaque sync data".to_vec(),
@@ -11,15 +11,13 @@ fn cleanup() -> (Vec<NewOperation>, ProviderChanges) {
     };
     (
         vec![operation("invite")],
-        ProviderChanges {
-            accounts: vec![ProviderAccessChange {
-                account: "carol@example.test".into(),
-                intended: false,
-                initially_granted: true,
-                needs_invitation: false,
-                operation: operation("provider-access"),
-            }],
-        },
+        vec![ProviderAccessChange {
+            account: "carol@example.test".into(),
+            intended: false,
+            initially_granted: true,
+            needs_invitation: false,
+            operation: operation("provider-access"),
+        }],
     )
 }
 

@@ -41,7 +41,7 @@ fn reload(
         slots: vec![],
         state: db.inspect_writer(|db| crate::store_state_tables::read(db).unwrap()),
         cutoffs: vec![],
-        provider: Default::default(),
+        provider_access: Vec::new(),
         boundaries: vec![],
         operation: None,
         authorship: std::sync::Arc::new(crate::test_utils::TestAuthorship),

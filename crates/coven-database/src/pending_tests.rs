@@ -312,7 +312,7 @@ async fn judgments_clear_only_with_a_committed_changed_reset() {
         crate::SnapshotStaging,
         crate::DownloadedWriteStream<std::io::Empty>,
     > {
-        provider: Default::default(),
+        provider_access: Vec::new(),
         snapshots,
         slots: vec![crate::IncomingSlot {
             digest: [0x31; 32],

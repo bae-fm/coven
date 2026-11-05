@@ -801,7 +801,7 @@ impl SequenceSync {
                         .map(|cutoff| (cutoff.slot, cutoff.change.clone()))
                         .collect(),
                     boundaries: at_target.boundaries.clone(),
-                    provider: at_target.provider_changes(member.member())?,
+                    provider_access: at_target.provider_access(member.member())?,
                     operation,
                     authorship,
                 },

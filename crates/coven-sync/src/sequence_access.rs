@@ -6,7 +6,7 @@ use crate::{
 };
 use coven_crypto::{MemberIdentity, StoreKeyring};
 use coven_database::operation_kind;
-use coven_database::{OperationId, ProviderAccessChange, ProviderChanges};
+use coven_database::{OperationId, ProviderAccessChange};
 use coven_format::MemberAccess;
 use coven_foundation::id_source::MemberId;
 use std::collections::BTreeSet;
@@ -66,8 +66,11 @@ impl History {
     /// (§14.2). Only the owner's devices change sharing, so only they record
     /// the work: another device could neither do it nor see it done, and a
     /// wait it showed would never end.
-    pub(crate) fn provider_changes(&self, member: MemberId) -> Result<ProviderChanges, SyncError> {
-        let mut changes = ProviderChanges::default();
+    pub(crate) fn provider_access(
+        &self,
+        member: MemberId,
+    ) -> Result<Vec<ProviderAccessChange>, SyncError> {
+        let mut changes = Vec::new();
         if !self.owns_storage(member) {
             return Ok(changes);
         }
@@ -88,7 +91,7 @@ impl History {
             // A member's access entry describes a grant already made,
             // and an invite share one its own device makes: a device
             // that first learns of an account never grants it itself.
-            changes.accounts.push(ProviderAccessChange {
+            changes.push(ProviderAccessChange {
                 initially_granted: true,
                 ..crate::sequence_sync::account_change(&account, intended, false)?
             });
@@ -148,7 +151,7 @@ impl SequenceSync {
                     reason,
                 )
             };
-            // Only the owner's devices record provider work (`provider_changes`).
+            // Only the owner's devices record provider work (`provider_access`).
             if !session.history.owns_storage(member.member()) {
                 return Err(coven_database::DbError::Invariant {
                     what: "provider work runs on a device whose member's account holds the store",

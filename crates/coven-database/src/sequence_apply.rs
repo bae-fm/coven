@@ -51,7 +51,7 @@ pub struct AdminEffect {
     /// without consuming the slot; `load_snapshots` installs it with their data.
     pub reload: Vec<coven_merge::Audience>,
     /// Provider work recorded atomically with this state.
-    pub provider: crate::ProviderChanges,
+    pub provider_access: Vec<crate::ProviderAccessChange>,
 }
 
 pub(crate) fn retain(
@@ -110,7 +110,7 @@ pub(crate) fn apply<P: crate::PendingValue>(
                     if created {
                         crate::raise_capture::capture_created(db, schema)?;
                     }
-                    crate::provider_access::adopt::<P>(db, &effect.provider.accounts)?;
+                    crate::provider_access::adopt::<P>(db, &effect.provider_access)?;
                     for circle in effect.state.circle_deletions.keys().filter(|circle| !old.contains_key(circle)) {
                         touched.extend(db.query(
                             "SELECT DISTINCT table_name,key,audience FROM _coven_rows WHERE audience=?1",

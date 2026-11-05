@@ -261,8 +261,5 @@ pub use store_state::{
     DeviceState, StoreCircle, StoreDevice, StoreIdentity, StoreMember, StoreState, StoreVersion,
 };
 
-mod provider_changes;
-pub use provider_changes::ProviderChanges;
-
 mod claim_preparation;
 mod input_preparation;
