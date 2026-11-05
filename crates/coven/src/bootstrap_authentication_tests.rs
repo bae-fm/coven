@@ -255,19 +255,18 @@ async fn a_closed_join_on_dropbox_resumes_with_the_sign_in_it_kept() {
 /// resumed join starts from the refreshed token, and the joined store keeps
 /// it (§13.2, §20.2). Carol's waits end only when the test moves the clock,
 /// so each check after the first runs when the test asks for it. Ana's are
-/// held too: a backoff of hers passing would move the clock under Carol's
-/// requests and end their stall windows.
+/// held from before the invite: a backoff of hers passing would move the
+/// clock under Carol's requests and end their stall windows.
 #[tokio::test]
 async fn a_refresh_while_waiting_is_kept_for_the_resumed_join() {
     let owner = Owner::new(CloudProvider::Dropbox, false).await;
-    let invite = owner.invite().await;
     owner.hold_waits();
+    let invite = owner.invite().await;
     let install = Installation::new();
     let store = owner.directory.id();
     let sign_in = SignIn::new().await;
-    let mut builder =
-        sign_in.configure(install.builder(&owner, owner.recipient()).clock(owner.clock.clone()));
-    builder.authenticate(OAuthAccess::Dropbox(DropboxAccess::FullDropbox)).await.unwrap();
+    let mut builder = sign_in.configure(install.held_builder(&owner, owner.recipient()));
+    sign_in_held(&owner, &mut builder, OAuthAccess::Dropbox(DropboxAccess::FullDropbox)).await;
     let control = JoinControl::new();
     let (waited, mut waits) = watch::channel(0_usize);
     let joining = join_with_invite(
@@ -302,18 +301,10 @@ async fn a_refresh_while_waiting_is_kept_for_the_resumed_join() {
     assert_eq!(sign_in.request_count(), 2);
     let kept = install.only_kept_sign_in(store).await.unwrap();
     assert_eq!(kept.access_token.as_str(), "access-1");
-    let resumed = install
-        .builder(&owner, owner.recipient())
-        .clock(owner.clock.clone())
-        .resume_join(store, |_| {}, &control);
-    let approve = async {
-        // Ana's next pass reads the request the join made before it closed.
-        owner.pass().await;
-        let request = next_join_request(&owner.handle).await;
-        crate::tests::approve(&owner.handle, &request).await;
-        control.check_now();
-    };
-    let (result, ()) = join_with_response(resumed, approve).await;
+    let resumed =
+        install.held_builder(&owner, owner.recipient()).resume_join(store, |_| {}, &control);
+    // Ana's pass reads the request the join made before it closed.
+    let (result, _) = join_with_response(resumed, approve_held(&owner, &control)).await;
     let handle = result.unwrap().unwrap();
     assert_eq!(install.device_tokens(store).unwrap().access_token.as_str(), "access-1");
     assert_eq!(sign_in.request_count(), 2);
