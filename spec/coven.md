@@ -3175,8 +3175,9 @@ unshare, in one transaction. A failed transaction changes nothing, and the app's
 subscriptions only ever see committed results.
 
 Ana and Ben, both admins, each try to remove the other. Ana's removal claims slot
-41 first. Ben reads it, no longer has authority, and his call undoes its work and
-fails (§11). No removal of Ana ever enters history.
+41 first. Ben reads it and stops syncing, and his removal of Ana ends
+`Stopped(DeviceStop::Removed)` (§14.1): nothing refused it, so it reports no
+failure. No removal of Ana ever enters history.
 
 Devices register themselves. A new installation claims an entry adding its own
 fresh id. A member who has lost every device can still register a new one,
