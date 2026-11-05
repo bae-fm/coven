@@ -154,8 +154,9 @@ impl Files {
     /// something is already, or naming what another path names once
     /// written, case and Unicode form aside, is refused. `progress` hears
     /// each file's download and how many of its bytes, and of the call's,
-    /// are down. Until it returns, `cancel` stops the call; a failure or a
-    /// cancel removes every copy and folder the call made.
+    /// are down. Until it returns, `cancel` stops the call; a failure, a
+    /// panic in a download among them, or a cancel removes every copy and
+    /// folder the call made.
     pub async fn prepare_device_only(
         &self,
         folder: &Path,
@@ -197,19 +198,24 @@ impl Files {
         let reservation = self.inner.database.record_copies(copies.clone()).await?;
         let mut cancel = cancel.clone();
         let mut report = ProgressReport::new(progress, self.inner.clock.clone());
-        let error =
-            match download(self, &folder, &plan.folders, &refs, &copies, &mut cancel, &mut report)
-                .await
-            {
-                Ok((switches, flushed)) => {
-                    return Ok(self.inner.database.prepared_device_only(
-                        reservation,
-                        switches,
-                        flushed,
-                    )?)
-                }
-                Err(error) => error,
-            };
+        // A panic in a download fails the call as any failure does, and
+        // what the call made goes before it returns (E15).
+        let downloaded = coven_foundation::task::caught(
+            "download files to make device-only",
+            download(self, &folder, &plan.folders, &refs, &copies, &mut cancel, &mut report),
+        )
+        .await;
+        let error = match downloaded {
+            Ok(Ok((switches, flushed))) => {
+                return Ok(self.inner.database.prepared_device_only(
+                    reservation,
+                    switches,
+                    flushed,
+                )?)
+            }
+            Ok(Err(error)) => error,
+            Err(bug) => DeviceOnlyError::Bug(bug),
+        };
         let made = copies.into_iter().map(|copy| copy.path).collect();
         let abandoned = self.inner.database.abandon_copies(made).await;
         drop(reservation);

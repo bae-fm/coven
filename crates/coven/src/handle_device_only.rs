@@ -15,7 +15,8 @@ impl CovenHandle {
     /// refused. `on_progress` is called on this task with each file's
     /// download and how many of its bytes, and of all the call's, are down,
     /// at most a few times a second. Until it returns, `cancel` stops the
-    /// call; a failure or a cancel removes every copy and folder it made.
+    /// call; a failure, a panic in a download among them, or a cancel removes
+    /// every copy and folder it made.
     pub async fn prepare_device_only(
         &self,
         folder: &std::path::Path,

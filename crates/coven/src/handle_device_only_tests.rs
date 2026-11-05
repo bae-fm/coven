@@ -660,6 +660,41 @@ async fn a_failure_or_cancel_before_the_switch_leaves_nothing() {
     network.close().await;
 }
 
+/// A download that panics fails the call with the bug, and the call removes
+/// every copy and folder it made before it returns, as any failure does,
+/// with no later write needed. No file switches.
+#[tokio::test]
+async fn a_download_that_panics_returns_the_bug_and_leaves_nothing() {
+    let network = household().await;
+    let (ana, carol) = (&network.devices[0], &network.devices[1]);
+    let originals = tempfile::tempdir().unwrap();
+    let one = import(ana, "tracks", "one", originals.path(), vec![6; 2000]).await;
+    let two = import(ana, "tracks", "two", originals.path(), vec![7; 2000]).await;
+    network.sync(0).await;
+    network.sync(1).await;
+    let music = tempfile::tempdir().unwrap();
+    let mut faults = coven_storage::test_utils::Faults::none();
+    faults.read_panics.insert(stored_path(carol.store, &carol.handle.file_ref(two).await.unwrap()));
+    carol.storage.set_faults(faults).await;
+    let files = vec![(one, path("New Album/one.flac")), (two, path("New Album/two.flac"))];
+    let result =
+        carol.handle.prepare_device_only(music.path(), files, &uncancelled(), |_| {}).await;
+    let Err(error) = result else {
+        panic!("a download that panicked prepared the switch");
+    };
+    let bug = coven_foundation::task::CarriesBug::bug(&error)
+        .unwrap_or_else(|| panic!("the call's error carries no bug: {error:?}"));
+    assert!(bug.message.starts_with("a read of"), "{bug:?}");
+    assert!(names(music.path()).is_empty(), "the call left {:?}", names(music.path()));
+    for file in [one, two] {
+        assert!(matches!(
+            carol.handle.file_ref(file).await.unwrap().place(),
+            FilePlace::Cloud { .. }
+        ));
+    }
+    network.close().await;
+}
+
 /// Ana and Carol make the same tracks device-only at once. Carol's write is
 /// the later one, so it wins on both devices. Ana's download lost: her copy
 /// she didn't touch goes, with the folder coven made for it once empty, and

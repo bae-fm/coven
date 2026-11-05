@@ -6015,9 +6015,9 @@ impl CovenHandle {
     /// once written, case and Unicode form aside, is refused before anything
     /// downloads. `on_progress` is called on this task with each file's
     /// download, at most a few times a second (`DeviceOnlyStep`). Until it
-    /// returns, `cancel` stops the call; a failure or a cancel removes every
-    /// copy and folder it made. A dropped call's copies go with the store's
-    /// next write.
+    /// returns, `cancel` stops the call; a failure, a panic in a download
+    /// among them, or a cancel removes every copy and folder it made before
+    /// it returns. A dropped call's copies go with the store's next write.
     pub async fn prepare_device_only(
         &self,
         folder: &Path,
@@ -8460,6 +8460,10 @@ for file work, and a `Bug` variant of each error that has a `Shutdown` one.
   connection's passes while they work. A panic in that work fails the call
   with the bug and lets the passes run again, as a failure does. Unwound,
   it would leave sync held until the store closes.
+- A panic in one of `prepare_device_only`'s downloads fails the call with
+  `DeviceOnlyError::Bug`, and the call removes every copy and folder it
+  made before it returns, as after any failure. Unwound, it would leave
+  them on disk until the store's next write.
 
 An error that keeps another failure takes the bug that failure carries as
 its own `Bug`, never under a disk, lock, storage or custody label, so the
