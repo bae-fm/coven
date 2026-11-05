@@ -1697,8 +1697,9 @@ state from synced.
 - **A broken connection is a failed read.** It can never be taken as proof that
   bytes which haven't all arrived are bad, and so never leads to a permanent
   refusal (§19.1).
-- **So is a read another read contradicts.** A slot whose check fails is read
-  again, and refused only when both reads return the same bytes (§19.1).
+- **So is a read another read contradicts.** An object whose check fails on
+  bytes nothing else confirms is read again, and refused only when both reads
+  agree (§19.1).
 
 #### 6.6 Files travel outside the pass
 
@@ -6661,7 +6662,8 @@ again.
 | network or provider failure | the provider's `Storage` category | the next read or pin tries again |
 | storage confirms nothing at the path the record names | `FileUnavailable(Lost)` | needs the app to act |
 | the file is on this device only and uploading, and its source fails the read's check | the upload's record (§17.9) | the upload retries, or its move fails (§17.9) |
-| a complete chunk fails authentication | `Refused(Decryption)` | the same bytes are never retried on their own; another build of coven rechecks them once (§19.1) |
+| a complete chunk fails authentication, and a second fetch returns the same bytes | `Refused(Decryption)` | the same bytes are never retried on their own; another build of coven rechecks them once (§19.1) |
+| a fetch's bytes fail their check, and a second fetch returns other bytes | the `Storage` category `Corrupted` | the next read or pin tries again (§19.1) |
 | authenticated bytes disagree with the record's content hash | `Refused(ContentHash)` | as above |
 | writing the local cache fails | `Failed(Disk)` | |
 | the database fails | `Failed(Database)` | |
@@ -7927,19 +7929,29 @@ immutable object completely, or a complete independently authenticated file
 chunk, and it failed a check. A failure to download those bytes is only a failed
 read, never a refusal.
 
-- A refusal judges the stored object, not one read of it. A slot carries
-  nothing that checks its transfer, and a fault on the way can change bytes
-  that arrived whole. So a check that refuses the kept copy of a slot is not
-  yet a refusal: coven reads the slot again, and refuses it only when the second
-  read returns the same bytes. Different bytes mean a read went wrong on the
-  way: coven drops its copy, and the pass fails with `Corrupted`, which retries
-  on the shared schedule; the next pass reads the slot again and judges that
-  read. Say a proxy on Ben's network changes a byte of slot 52 on its way to his
-  laptop: his pass fails as a read would, and the next one applies the slot. A
-  refusal an earlier build recorded over such a copy ends the same way when
-  another build rechecks it. A slot's bytes that authenticated can't have
-  changed on the way, so a refusal after authentication costs only the one more
-  read ([`refusal_judges_stored`](proofs/io/CovenIO/Reread.lean)).
+- A refusal judges the stored object, not one read of it. Neither a slot nor a
+  file's bytes carry anything that checks their transfer, and a fault on the
+  way can change bytes that arrived whole. So a check that refuses the bytes of
+  a slot, or a file's header or chunks, is not yet a refusal: coven reads them
+  again, and refuses them only when the second read returns the same bytes.
+  Different bytes mean a read went wrong on the way: coven drops what it kept
+  of them, and the read fails with `Corrupted`, which retries as a failed read
+  does: a pass on the shared schedule, a file on the app's next read or pin, a
+  pin coven keeps under its backoff. The next read judges fresh bytes. Say a
+  proxy on Ben's network changes a byte of slot 52 on its way to his laptop:
+  his pass fails as a read would, and the next one applies the slot. A refusal
+  an earlier build recorded over such a copy ends the same way when another
+  build rechecks it. Bytes that authenticated can't have changed on the way, so
+  a refusal after authentication, such as a file's content hash, costs only the
+  one more read ([`refusal_judges_stored`](proofs/io/CovenIO/Reread.lean)).
+- A snapshot is kept nowhere whole: its body streams once, and its announcement
+  names the digest of its bytes (§16.2). Bytes whose digest matches it are the
+  announced bytes, so the announcement checks their transfer, and a check that
+  refuses them needs no second read. A snapshot whose digest differs is read
+  again, keeping only the first read's digest, and refused as not the announced
+  snapshot only when the second read's digest is the same. Its signed prefix,
+  which coven keeps and checks before the digest is known, is read again as a
+  slot is when a check refuses it.
 - Calls and pending records use the same `Refusal` variant. A call keeps the
   native error; a durable record keeps its category. File integrity failures are
   the exception: the file API returns `FileReadError::Integrity` for failed
@@ -11186,6 +11198,7 @@ Write-ups explain each model and state its assumptions:
 | Conversion of old writes (queue model overview) | (write-up) | `proofs/queue.md` | §18.6 |
 | A status screen's sync state is the one candidate no other outranks; not synced means no location is recorded, and a location without credentials is signed out; between offline and offline with unsent changes whether a write or a file is queued decides, and a write committed while offline changes one into the other with no pass; syncing shows only while a slot or a file moves, waiting to sync only while nothing moves and a held-back pass or a queued file names its wait, and synced only once every file this device uploads is stored and only after a pass that ended synced; with the setting to transfer only on unmetered networks on and a metered network, every upload the setting holds waits for something before its backoff, and an upload waits for the network only then; a change of network never changes which state shows; a pass that moves nothing leaves the state as it was; the last synced time never goes backward, and only a pass reaching the read end changes it; each pending reason names one state or none, a wait for data names none, a pass held back by a wait waits to sync, and a file that can't be uploaded or read names failed | `one_state`, `not_synced_iff`, `signed_out_without_credentials`, `offline_unsent_iff`, `offline_iff`, `write_while_offline`, `syncing_only_moving`, `waiting_not_moving`, `synced_files_stored`, `bad_file_fails`, `quiet_pass_keeps`, `last_synced_never_back`, `last_synced_kept`, `waits_name_no_state`, `file_failures_name_failed`, `failed_pass_not_synced`, `waiting_pass_waits`, `metered_holds`, `metered_only_held`, `network_keeps_state` | `proofs/io/CovenIO/SyncState.lean` | §19.1 |
 | *Body.* A refusal judges the stored bytes when it stands only on two reads that agree, so an object whose stored bytes pass is never refused, and a kept copy that is the stored bytes applies; refusing on one read, one fault on the way refuses an honest object for good, while with the second read the next pass applies it | `refusal_judges_stored`, `honest_never_refused`, `stored_copy_applies`, `one_read_refuses_honest`, `fault_recovers` | `proofs/io/CovenIO/Reread.lean` | §19.1 |
+| A snapshot, read once and kept nowhere whole, is judged at once when its digest is the announced one, and otherwise refused as not the announced snapshot only when a second read's digest is the first's: a refusal is then a verdict on what storage holds, and an honestly stored snapshot that passes is never refused; refused as soon as its digest differs, one fault makes it not the announced one | `announced_refusal_judges_stored`, `honest_announced_never_refused`, `digest_once_refuses_honest`, `announced_fault_recovers` | `proofs/io/CovenIO/Reread.lean` | §19.1 |
 | A refusal is rechecked by every build of coven other than the one that recorded it, so by every build that would judge it differently, and never by its own; waiting loses nothing, and a recheck that refuses again records its build, so each build rechecks once and never loops. Keyed to a number several builds share, a refusal is never rechecked by a build that would accept it | `other_build_rechecks`, `differing_build_rechecks`, `own_refusal_waits`, `waiting_loses_nothing`, `recheck_once`, `shared_key_strands` | `proofs/io/CovenIO/Recheck.lean` | §19.1 |
 | A replacement of this device's installation that records itself before its fresh device registers, refuses opens while recorded and from the record on only goes forward never opens the old installation once a registration replacing it may have landed, keeps the new installation while history names it, and settles, on every path, published or with the old installation the store and no claim open | `old_never_stale`, `never_missing`, `settles`, `settled_outcome` | `proofs/sequence/CovenSequence/DeviceReplacement.lean` | §11.6, §19.3 |
 | *Body.* A replacement that records itself only at the swap opens the old installation after a crash once its registration landed; one that moves the old installation back after a failure past the swap does the same; a cancel that doesn't wait removes the new installation while its registration is on its way | `crashed_replacement_opens_old`, `unswapped_replacement_opens_old`, `cancelled_replacement_missing` | `proofs/sequence/CovenSequence/DeviceReplacement.lean` | §19.3 |
@@ -11374,7 +11387,7 @@ pass's failure, kept for its retry.
 |---|---|---|
 | `AlreadyExists` | a create-once request found the path occupied | §5.1, §20.1 |
 | `Conflict` | a racer's condition was refused; for a shared temporary, a retryable answer | E.6, E.10 |
-| `Corrupted` | two complete reads of one slot returned different bytes: a fault on the way changed one; it retries on the shared schedule | §6.5, §19.1 |
+| `Corrupted` | two reads of the same bytes of an immutable object, a slot, a file or a snapshot, disagreed: a fault on the way changed one; it retries as a failed read does | §6.5, §19.1 |
 | `StorageFailure::StoreExists` | another creation already holds slot 1; setup is undone | §10.3 |
 | `StorageSetupError::Cancelled` | the app cancelled setup before its point of no return, and setup undid what it wrote | §11.6, §20.8 |
 | `StorageSetupError::SetupRunning` | a setup past its point of no return is still finishing on this device | §20.8 |

@@ -307,7 +307,7 @@ async fn a_refused_slot_is_rechecked_once_by_another_build() {
 #[tokio::test]
 async fn a_slot_garbled_on_the_way_is_read_again_not_refused() {
     use crate::sequence_sync::tests::{insert, Group};
-    use coven_storage::test_utils::Faults;
+    use coven_storage::test_utils::{Faults, Garble};
     let group = Group::new();
     let ana = group.device(1).await;
     let ben = group.device(2).await;
@@ -323,7 +323,8 @@ async fn a_slot_garbled_on_the_way_is_read_again_not_refused() {
     let path = ObjectPath::slot(group.store, n.try_into().unwrap());
     let subject = PendingSubject::Slot(Slot(n));
     let garble = |reads| {
-        let (storage, garbled) = (group.storage.clone(), [(path.clone(), reads)].into());
+        let garble = Garble { at: 0, reads };
+        let (storage, garbled) = (group.storage.clone(), [(path.clone(), garble)].into());
         async move { storage.set_faults(Faults { garbled_reads: garbled, ..Faults::none() }).await }
     };
     let refused = |device: &crate::sequence_sync::tests::Device| {

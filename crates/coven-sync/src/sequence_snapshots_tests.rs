@@ -708,3 +708,52 @@ async fn no_snapshot_is_asked_for_an_audience_not_raised_to_the_devices_migratio
         device.sync.database.close().await.unwrap();
     }
 }
+
+/// A refusal judges the stored snapshot, not one read of it (§19.1). Ben's
+/// reload reads Ana's store snapshot with one byte changed on the way, in its
+/// signed prefix or in its body: the prefix's kept bytes, or the body's
+/// digest, disagree with a second read, so the reload fails as a read with
+/// `Corrupted` and records no refusal, and his next reload loads it.
+#[tokio::test]
+async fn a_snapshot_changed_on_the_way_is_read_again_not_refused() {
+    use coven_storage::test_utils::{Faults, Garble};
+    for prefix in [true, false] {
+        let group = Group::new();
+        let ana = group.device(1).await;
+        let ben = group.device(2).await;
+        group.create(&ana).await;
+        group.admit(&ana, &ben).await;
+        insert(&ana.sync.database, "a", "in the snapshot").await;
+        ana.sync.pass().await.unwrap();
+        let slot = ana.sync.snapshot(coven_merge::Audience::Store).await.unwrap();
+        ben.sync.pass().await.unwrap();
+        let snapshot = ben.sync.session.lock().await.history.announcements[&slot].snapshot.clone();
+        let path = crate::snapshot_object::path(group.store, &snapshot).unwrap();
+        let size = group.storage.status(&path).await.unwrap().unwrap().size;
+        // Whatever of the prefix Ben's pass kept goes, so the reload reads it.
+        if let Some(kept) =
+            crate::object_input::ObjectInput::retained(ben.database(), &path).await.unwrap()
+        {
+            kept.discard().await.unwrap();
+        }
+        let at = if prefix { 0 } else { size - 1 };
+        let garbled = [(path.clone(), Garble { at, reads: 1 })].into();
+        group.storage.set_faults(Faults { garbled_reads: garbled, ..Faults::none() }).await;
+        let failed = ben.sync.reload_from_snapshot().await.unwrap_err();
+        assert!(
+            matches!(&failed, crate::SyncError::Storage(error)
+                if error.failure() == StorageFailure::Corrupted),
+            "{failed:?}"
+        );
+        let pending = ben.database().pending::<crate::PendingRecord>().await.unwrap();
+        assert!(
+            pending.iter().all(|record| !matches!(record.reason, crate::PendingReason::Refused(_))),
+            "{pending:?}"
+        );
+        ben.sync.reload_from_snapshot().await.unwrap();
+        assert_eq!(rows(&ben.sync.database).await.len(), 1);
+        for device in [&ana, &ben] {
+            device.sync.database.close().await.unwrap();
+        }
+    }
+}

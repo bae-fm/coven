@@ -36,10 +36,10 @@ pub struct Faults {
     pub read_chunk_size: usize,
     /// Failures after metadata, independently of request-start failures.
     pub body_failures: BTreeMap<ObjectPath, BodyFailure>,
-    /// Change the first byte of this many whole responses at these paths,
-    /// each response differently, as faults on the way to the device
-    /// would; the stored object stays as it was.
-    pub garbled_reads: BTreeMap<ObjectPath, u8>,
+    /// Change one byte of responses at these paths, each response
+    /// differently, as faults on the way to the device would; the stored
+    /// object stays as it was.
+    pub garbled_reads: BTreeMap<ObjectPath, Garble>,
     /// The classification of injected failures.
     pub failure: StorageFailure,
     /// Injected failures arrive as a provider response with this HTTP
@@ -79,6 +79,15 @@ pub struct Faults {
     /// OneDrive can refuse every writer of one race.
     pub refuse_replacements: usize,
 }
+/// Faults on the way to the device that change one byte of a response.
+#[derive(Clone, Copy, Debug)]
+pub struct Garble {
+    /// The object offset whose byte changes, in a response that holds it.
+    pub at: u64,
+    /// How many such responses change.
+    pub reads: u8,
+}
+
 impl Faults {
     /// No failures or delays.
     pub fn none() -> Self {

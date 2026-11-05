@@ -103,6 +103,13 @@ impl SnapshotObject {
         }
         let digest = body.digest.finish(signature);
         if digest.complete() != &announcement.digest {
+            // Not the announced bytes: refused only when a second read's
+            // digest is this read's, else a fault on the way changed one
+            // (§19.1).
+            if self.input.stored_digest(storage).await? != *digest.complete() {
+                self.input.clone().discard().await?;
+                return Err(crate::object_input::corrupted(path));
+            }
             return Err(crate::write_object::wrong_identity(path));
         }
         if let Some(refused) = refused {

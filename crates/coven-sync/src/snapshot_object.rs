@@ -80,26 +80,37 @@ impl SnapshotObject {
                 ObjectInput::receive_prefix(database, path, response).await?
             }
         };
-        let bytes = input
-            .prefix(
-                storage,
-                SnapshotObjectPrefix::MAX_SIGNED_PREFIX,
-                SnapshotObjectPrefix::signed_length,
-            )
-            .await?;
-        let (prefix, signature) = checked(path, SnapshotObjectPrefix::decode_signed(&bytes))?;
-        let prefix_bytes = bytes[..bytes.len() - SIGNATURE_LEN].to_vec();
-        Ok(Self { input, prefix, signature, prefix_bytes })
+        let decoded = async {
+            let bytes = input
+                .prefix(
+                    storage,
+                    SnapshotObjectPrefix::MAX_SIGNED_PREFIX,
+                    SnapshotObjectPrefix::signed_length,
+                )
+                .await?;
+            let (prefix, signature) = checked(path, SnapshotObjectPrefix::decode_signed(&bytes))?;
+            Ok((prefix, signature, bytes[..bytes.len() - SIGNATURE_LEN].to_vec()))
+        }
+        .await;
+        match decoded {
+            Ok((prefix, signature, prefix_bytes)) => {
+                Ok(Self { input, prefix, signature, prefix_bytes })
+            }
+            Err(refused) => Err(confirm_prefix(&input, storage, refused).await),
+        }
     }
 
-    /// The prefix covers what `announcement` says, for its purpose.
-    pub(crate) fn check_announced(
+    /// The prefix covers what `announcement` says, for its purpose. A kept
+    /// prefix that doesn't is refused only once a second read agrees.
+    pub(crate) async fn check_announced(
         &self,
+        storage: &dyn Storage,
         announcement: &coven_format::sequence::SnapshotAnnouncement,
     ) -> Result<(), SyncError> {
         if self.prefix.covers != announcement.covers || self.prefix.purpose != announcement.purpose
         {
-            return Err(crate::write_object::wrong_identity(&self.input.object().path));
+            let refused = crate::write_object::wrong_identity(&self.input.object().path);
+            return Err(confirm_prefix(&self.input, storage, refused).await);
         }
         Ok(())
     }
@@ -138,6 +149,29 @@ impl SnapshotObject {
             .map_err(|cause| damaged(&self.input.object().path, cause))?;
         body.verify(&self.input.object().path, &signer, Some(announced))?;
         self.verify_prefix(history, id)
+    }
+}
+
+/// A refusal judges the stored snapshot, not one read of it, and nothing
+/// checks a prefix's transfer until the whole object's digest is known: a
+/// kept prefix a check refused is read again, and the refusal stands only
+/// when the fresh prefix is the kept one. A different one is dropped, and
+/// the read fails with `Corrupted` (§19.1).
+async fn confirm_prefix(
+    input: &ObjectInput,
+    storage: &dyn Storage,
+    refused: SyncError,
+) -> SyncError {
+    if !matches!(refused, SyncError::Damaged(_)) {
+        return refused;
+    }
+    match input.kept_ranges_stored(storage).await {
+        Ok(true) => refused,
+        Ok(false) => match input.clone().discard().await {
+            Ok(()) => crate::object_input::corrupted(&input.object().path),
+            Err(error) => error,
+        },
+        Err(error) => error,
     }
 }
 

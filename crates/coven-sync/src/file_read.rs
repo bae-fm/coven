@@ -400,7 +400,29 @@ impl<M: Mode> UploadedFile<M> {
             &ByteProgress::unread(),
         )
         .await?;
+        if let Err(refused) = self.accept_header(&bytes) {
+            return Err(self.confirm(0, &bytes, refused).await);
+        }
         self.publish_header(bytes).await
+    }
+    /// A refusal judges the stored file, not one fetch of it, and nothing
+    /// checks a fetch's transfer: bytes from `start` that a check refused are
+    /// fetched again, and the refusal stands only when the second fetch
+    /// returns the same bytes. Different bytes mean a fault on the way
+    /// changed a fetch, which fails as a read with `Corrupted` (§19.1).
+    async fn confirm(&self, start: u64, first: &[u8], refused: FileReadError) -> FileReadError {
+        if !matches!(refused, FileReadError::Integrity { .. }) {
+            return refused;
+        }
+        let end = start + first.len() as u64;
+        let unread = ByteProgress::unread();
+        match fetch(&self.owner, &self.file, &self.path, start, end, &unread).await {
+            Ok(again) if again == first => refused,
+            Ok(_) => coven_storage::StorageFailure::Corrupted
+                .with_source("a second fetch of the file returned other bytes")
+                .into(),
+            Err(error) => error,
+        }
     }
     /// Check fetched header bytes, then cache them before any chunk.
     async fn publish_header(&self, bytes: Vec<u8>) -> Result<(), FileReadError> {
@@ -556,27 +578,26 @@ impl<M: Mode> UploadedFile<M> {
             end = next_end;
         }
         let received = self.received(&destination, first, end_index, start)?;
-        let bytes = if with_header {
-            // The header precedes chunk zero: one request carries both.
-            let mut bytes = fetch(&self.owner, &self.file, &self.path, 0, end, &received).await?;
-            let chunks = bytes.split_off(FILE_HEADER_LEN);
-            self.publish_header(bytes).await?;
-            chunks
+        let request_start = if with_header { 0 } else { start };
+        let fetched =
+            fetch(&self.owner, &self.file, &self.path, request_start, end, &received).await?;
+        // The header precedes chunk zero: one request carries both, and the
+        // header is cached once it checks, whatever the chunks turn out.
+        let chunks_start = if with_header {
+            let header = fetched.get(..FILE_HEADER_LEN).ok_or_else(|| self.integrity())?;
+            if let Err(refused) = self.accept_header(header) {
+                return Err(self.confirm(request_start, &fetched, refused).await);
+            }
+            self.publish_header(header.to_vec()).await?;
+            FILE_HEADER_LEN
         } else {
-            fetch(&self.owner, &self.file, &self.path, start, end, &received).await?
+            0
         };
-        let mut plain = Vec::new();
-        let mut cursor = 0;
-        for index in first..=end_index {
-            let length = self.header.chunk(index).map_err(|_| self.integrity())?.stored_length();
-            let sealed = bytes.get(cursor..cursor + length).ok_or_else(|| self.integrity())?;
-            let opened = self
-                .header
-                .open_chunk(&self.key, self.path.as_str(), index, sealed)
-                .map_err(|error| FileReadError::chunk(self.file.id().to_string(), error))?;
-            plain.push(OpenedChunk { plaintext: opened, ciphertext: sealed.to_vec() });
-            cursor += length;
-        }
+        let (bytes, mut plain) = match self.open_fetched(&fetched[chunks_start..], first, end_index)
+        {
+            Ok(opened) => opened,
+            Err(refused) => return Err(self.confirm(request_start, &fetched, refused).await),
+        };
         // Every chunk of the range authenticated: it is published as one
         // file and one row. A failed chunk publishes none of it. A pin writes
         // these bytes to its reserved whole file instead; adding them to the
@@ -649,6 +670,33 @@ impl<M: Mode> UploadedFile<M> {
                 }))
             }
         }
+    }
+    /// Open fetched chunks `first..=last`, every one of which must
+    /// authenticate: their sealed bytes, and each one opened.
+    #[expect(
+        clippy::map_err_ignore,
+        reason = "a chunk the file size's layout lacks is the disagreement Integrity names"
+    )]
+    fn open_fetched(
+        &self,
+        fetched: &[u8],
+        first: u64,
+        last: u64,
+    ) -> Result<(Vec<u8>, Vec<OpenedChunk>), FileReadError> {
+        let bytes = fetched.to_vec();
+        let mut plain = Vec::new();
+        let mut cursor = 0;
+        for index in first..=last {
+            let length = self.header.chunk(index).map_err(|_| self.integrity())?.stored_length();
+            let sealed = bytes.get(cursor..cursor + length).ok_or_else(|| self.integrity())?;
+            let opened = self
+                .header
+                .open_chunk(&self.key, self.path.as_str(), index, sealed)
+                .map_err(|error| FileReadError::chunk(self.file.id().to_string(), error))?;
+            plain.push(OpenedChunk { plaintext: opened, ciphertext: sealed.to_vec() });
+            cursor += length;
+        }
+        Ok((bytes, plain))
     }
     /// Authenticate chunk `index`'s cached bytes.
     fn open_cached(&self, index: u64, bytes: Vec<u8>) -> Result<OpenedChunk, FileReadError> {

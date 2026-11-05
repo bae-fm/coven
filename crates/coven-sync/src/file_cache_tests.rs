@@ -240,6 +240,48 @@ async fn an_authentication_failure_refuses_the_bytes_a_pin_downloads() {
     f.close().await;
 }
 
+/// A refusal judges the stored file, not one fetch of it (§19.1). A byte of
+/// the file's header or its chunk changes on the way: the bytes are fetched
+/// again, and since the second fetch disagrees, the read fails as a read and
+/// the pin records a failed read, not a refusal; the next read and pin get
+/// the stored bytes.
+#[tokio::test]
+async fn bytes_changed_on_the_way_are_fetched_again_not_refused() {
+    use coven_storage::test_utils::{Faults, Garble};
+    for at in [0, 200] {
+        let f = Fixture::new(Provenance::AppProvided).await;
+        let read = f.uploaded("read", vec![20; CHUNK]).await;
+        let pinned = f.uploaded("pinned", vec![21; CHUNK]).await;
+        let garble = |file: &FileRef| {
+            let garbled = [(f.path(file), Garble { at, reads: 1 })].into();
+            f.storage.set_faults(Faults { garbled_reads: garbled, ..Faults::none() })
+        };
+        let corrupted = |error: Option<&FileReadError>| {
+            matches!(error, Some(FileReadError::Storage(error))
+                if error.failure() == StorageFailure::Corrupted)
+        };
+        garble(&read).await;
+        let result = f.files.read_file(&read).await;
+        assert!(corrupted(result.as_ref().err()), "{result:?}");
+        assert!(file_records(&f).await.is_empty());
+        assert_eq!(f.files.read_file(&read).await.unwrap(), vec![20; CHUNK]);
+        garble(&pinned).await;
+        let result = f.files.pin(std::slice::from_ref(&pinned)).await;
+        assert!(corrupted(result.as_ref().err()), "{result:?}");
+        assert!(
+            matches!(
+                file_records(&f).await.as_slice(),
+                [crate::PendingReason::Storage { failure: StorageFailure::Corrupted, .. }]
+            ),
+            "{:?}",
+            file_records(&f).await
+        );
+        f.files.pin(std::slice::from_ref(&pinned)).await.unwrap();
+        assert!(file_records(&f).await.is_empty());
+        f.close().await;
+    }
+}
+
 /// `b` connected to `a`'s storage, with only explicit calls downloading.
 async fn connect(b: &Fixture, a: &Fixture) {
     // Only the explicit runs below download.

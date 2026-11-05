@@ -311,9 +311,7 @@ impl SequenceSync {
         self.database.clear_pending(PendingSubject::Slot(slot)).await?;
         session.blocked = None;
         kept.discard().await?;
-        Err(StorageFailure::Corrupted
-            .with_source(format!("a second read of {} returned other bytes", path.as_str()))
-            .into())
+        Err(crate::object_input::corrupted(&path))
     }
 
     /// Stop for good on history showing another copy of this installation

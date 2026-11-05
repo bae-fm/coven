@@ -30,7 +30,7 @@ pub use memory_requests::MemoryRequest;
 
 #[path = "memory_faults.rs"]
 mod memory_faults;
-pub use memory_faults::Faults;
+pub use memory_faults::{Faults, Garble};
 
 struct Object {
     upload_id: Option<u64>,

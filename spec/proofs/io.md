@@ -302,6 +302,24 @@ a read on its way: the pass fails as a read and the next applies the slot, and a
 garbled copy an earlier build refused is applied after another build rechecks
 it.
 
+A snapshot is kept nowhere whole: its body streams once, and its announcement
+names its digest. The model's announced objects judge a read whose bytes are the
+announced ones at once, and read any other again, keeping only the first read's
+digest; the model takes digests to be equal exactly when bytes are, and a fault
+never to produce the announced bytes when storage holds other bytes. A refusal
+is then a verdict on what storage holds: it is not the announced object, or the
+announced object fails the check (`announced_refusal_judges_stored`), so an
+honestly stored snapshot that passes is never refused
+(`honest_announced_never_refused`). Refused as soon as its digest differs, one
+fault makes it not the announced one (`digest_once_refuses_honest`); read again,
+the next read applies it (`announced_fault_recovers`).
+`files::tests::cache::bytes_changed_on_the_way_are_fetched_again_not_refused`
+changes a byte of a file's header and of its chunk on the way, for a read and a
+pin, and
+`sequence_sync::sequence_snapshots::tests::a_snapshot_changed_on_the_way_is_read_again_not_refused`
+one of a snapshot's prefix and of its body: each read fails with `Corrupted`
+and records no refusal, and the next one succeeds.
+
 ## Rechecking a refusal
 
 [Recheck.lean](io/CovenIO/Recheck.lean) models when a refusal is checked again

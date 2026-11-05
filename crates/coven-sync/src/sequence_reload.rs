@@ -251,7 +251,7 @@ impl SequenceSync {
         let path = snapshot_object::path(self.store(), &announcement.snapshot)?;
         let object =
             SnapshotObject::read_prefix(&self.database, self.storage.as_ref(), &path).await?;
-        object.check_announced(announcement)?;
+        object.check_announced(self.storage.as_ref(), announcement).await?;
         Ok(object)
     }
 

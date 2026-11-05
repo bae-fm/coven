@@ -221,6 +221,44 @@ impl ObjectInput {
         }
     }
 
+    /// Whether fresh reads of the ranges this input keeps return exactly the
+    /// kept bytes, as for a snapshot's prefix. It keeps none of them (§19.1).
+    pub(crate) async fn kept_ranges_stored(
+        &self,
+        storage: &dyn Storage,
+    ) -> Result<bool, SyncError> {
+        for kept in self.retained.ranges(0, self.object.size).await? {
+            let range = ByteRange::new(kept.offset, kept.offset + kept.bytes.len() as u64)?;
+            let read = storage.read_object(&self.object.path, Some(range)).await?;
+            if read.metadata.path != self.object.path
+                || identity(&read.metadata)? != identity(&self.object)?
+            {
+                return Err(StorageFailure::Protocol
+                    .with_source("read differs from the retained object observation")
+                    .into());
+            }
+            if read.bytes != kept.bytes {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
+    /// The SHA-256 of the whole object as a fresh read returns it, keeping
+    /// none of its bytes: what a snapshot's announcement names (§19.1).
+    pub(crate) async fn stored_digest(&self, storage: &dyn Storage) -> Result<[u8; 32], SyncError> {
+        let mut fresh = self.stream_from(storage, 0).await?;
+        let mut hash = coven_crypto::ObjectHasher::new();
+        let mut read = vec![0; 64 * 1024];
+        loop {
+            let length = fresh.read(&mut read).await?;
+            if length == 0 {
+                return Ok(*hash.finish().as_bytes());
+            }
+            hash.update(&read[..length]);
+        }
+    }
+
     /// Drop the bytes this input holds, which a second read contradicted, so
     /// the next read fetches the object again (§19.1).
     pub(crate) async fn discard(self) -> Result<(), SyncError> {
@@ -264,6 +302,14 @@ impl ObjectInput {
         self.retained.keep_range(range.start(), read.bytes.clone()).await?;
         Ok(read.bytes)
     }
+}
+
+/// A read a second read of the same immutable object contradicted: a fault
+/// on the way changed one of them (§19.1).
+pub(crate) fn corrupted(path: &ObjectPath) -> SyncError {
+    StorageFailure::Corrupted
+        .with_source(format!("a second read of {} returned other bytes", path.as_str()))
+        .into()
 }
 
 /// The kept bytes failed to read back: the database's own failure, or

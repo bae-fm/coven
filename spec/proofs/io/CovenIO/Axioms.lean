@@ -164,3 +164,7 @@ import CovenIO
 #print axioms CovenIO.Reread.stored_copy_applies
 #print axioms CovenIO.Reread.one_read_refuses_honest
 #print axioms CovenIO.Reread.fault_recovers
+#print axioms CovenIO.Reread.announced_refusal_judges_stored
+#print axioms CovenIO.Reread.honest_announced_never_refused
+#print axioms CovenIO.Reread.digest_once_refuses_honest
+#print axioms CovenIO.Reread.announced_fault_recovers

@@ -418,7 +418,7 @@ impl SequenceSync {
             };
             FileEvidence::Unproven(UnprovenFiles::Schema(version))
         } else {
-            object.check_announced(announcement)?;
+            object.check_announced(self.storage.as_ref(), announcement).await?;
             let staging = self
                 .database
                 .stage_snapshot(announcement.snapshot.clone(), object.prefix().clone())
