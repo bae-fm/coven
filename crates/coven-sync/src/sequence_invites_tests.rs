@@ -944,3 +944,44 @@ async fn a_request_not_signed_by_its_pair_is_refused_before_its_fields() {
     assert!(matches!(result, Err(SyncError::Crypto(_))), "{result:?}");
     ana.sync.database.close().await.unwrap();
 }
+
+/// A removed member can't be brought back by replacing their keys: the
+/// recovery invite's write refuses it, and journals nothing (§13.3).
+#[tokio::test]
+async fn a_recovery_invite_for_a_removed_member_is_refused() {
+    let group = Group::shared();
+    let ana = group.device(1).await;
+    let ben = group.device(2).await;
+    group.create(&ana).await;
+    group.admit(&ana, &ben).await;
+    ana.sync
+        .administer(coven_format::admin::StoreChange::RemoveMember {
+            member: ben.identity.member(),
+        })
+        .await
+        .unwrap();
+    let journaled = ana.sync.database.operations().await.unwrap().len();
+    let result = ana
+        .sync
+        .create_invite(
+            InviteTarget::ReplaceMemberKeys { member: ben.identity.member() },
+            InviteAccess::ProviderAccount { email: "ben-again@example.org".into() },
+            InviteDelivery::Sent { lifetime: InviteLifetime::Day },
+        )
+        .await;
+    assert!(
+        matches!(
+            &result,
+            Err(SyncError::Rejected(OperationRejection::TargetGone(
+                crate::EntryTarget::Member(gone)
+            ))) if *gone == ben.identity.member()
+        ),
+        "{:?}",
+        result.err()
+    );
+    assert!(listed(&ana).await.is_empty());
+    assert_eq!(ana.sync.database.operations().await.unwrap().len(), journaled);
+    for device in [&ana, &ben] {
+        device.sync.database.close().await.unwrap();
+    }
+}
