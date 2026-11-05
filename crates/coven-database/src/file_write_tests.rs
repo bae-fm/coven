@@ -561,6 +561,46 @@ async fn a_deleted_circles_queued_upload_retires() {
     db.close().await.unwrap();
 }
 
+/// A deleted circle's records never come back (§15.9), so a user's original
+/// it named is forgotten as a deleted record is: the device's record of
+/// where the file came from goes, and the original itself is never touched.
+#[tokio::test]
+async fn a_deleted_circles_user_original_is_forgotten() {
+    let store = TestStore::new();
+    let circle = CircleId(uuid::Uuid::parse_str("00000000-0000-4000-8000-000000000002").unwrap());
+    let declaration = SyncedTable::new("photos", RowIdentity::IndependentUuid)
+        .audience_column("audience")
+        .file_column(FileColumn::new("file"));
+    let schema = "CREATE TABLE photos(id TEXT NOT NULL PRIMARY KEY,file TEXT,audience TEXT NOT NULL); CREATE INDEX photos_file ON photos(file)";
+    let db = store
+        .builder(vec![declaration], vec![Migration::addition(1, "photos", schema)])
+        .namespaces(namespaces(Provenance::UserProvided))
+        .open()
+        .await
+        .unwrap();
+    store.join_circle(&db, circle);
+    let original = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(original.path(), b"original").unwrap();
+    let prepared = prepare_user_file(original.path(), |_| {}).await.unwrap();
+    let file = db
+        .write_as::<_, _, crate::DbError>(move |sql| {
+            let file = sql.put_user_file("files", prepared, crate::Place::Cloud)?;
+            sql.execute(
+                "INSERT INTO photos(id,file,audience) VALUES('00000000-0000-4000-8000-000000000011',?1,?2)",
+                rusqlite::params![file, circle.to_string()],
+            )?;
+            Ok(file)
+        })
+        .await
+        .unwrap();
+    assert_eq!(db.user_file(file).await.unwrap().unwrap().path, original.path());
+    crate::tests::delete_circle(&db, circle).await.unwrap();
+    assert_eq!(db.user_file(file).await.unwrap(), None);
+    assert_eq!(local_count(&db, "_coven_user_files"), 0);
+    assert_eq!(std::fs::read(original.path()).unwrap(), b"original");
+    db.close().await.unwrap();
+}
+
 /// Several rows of a file's audience may reference it, as a foreign key
 /// allows; its record goes in the write removing its last reference
 /// (§17.2).
