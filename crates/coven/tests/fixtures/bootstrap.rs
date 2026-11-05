@@ -85,11 +85,17 @@ impl Owner {
     /// pass the time Carol's join next checks at, and start her check
     /// before Ana approves.
     pub(super) async fn read_join_request(&self) -> JoinRequest {
+        self.pass_now().await;
+        next_join_request(&self.handle).await
+    }
+
+    /// One pass of Ana's at the clock's current time, which runs her
+    /// operations whatever their waits.
+    pub(super) async fn pass_now(&self) {
         match self.handle.retry_now().await.unwrap().await {
             RetryOutcome::Synced { .. } => {}
             outcome => panic!("Ana's pass: {outcome:?}"),
         }
-        next_join_request(&self.handle).await
     }
 
     /// Stop sync and wait for its release: no pass runs until sync starts
@@ -510,6 +516,18 @@ pub(super) async fn waiting_join_with(builder: CovenBuilder, invite: &Invite) {
 /// waits, as when the app is closed.
 pub(super) async fn held_waiting_join(owner: &Owner, install: &Installation, invite: &Invite) {
     waiting_join_with(install.held_signed_in_builder(owner, owner.recipient()).await, invite).await;
+}
+
+/// A join's status callback that tells the returned watch once the join
+/// waits for approval, its request made.
+pub(super) fn waiting_for_approval() -> (impl Fn(BootstrapStatus), watch::Receiver<bool>) {
+    let (waiting, waits) = watch::channel(false);
+    let status = move |status| {
+        if matches!(status, BootstrapStatus::WaitingForApproval { .. }) {
+            waiting.send_replace(true);
+        }
+    };
+    (status, waits)
 }
 
 /// Ana reads the request Carol's join made and approves it, then `control`

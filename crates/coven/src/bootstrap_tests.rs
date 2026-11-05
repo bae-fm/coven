@@ -150,17 +150,13 @@ async fn join_accepts_provider_access_and_approval_then_loads_the_store() {
         let install = Installation::new();
         let (_, cancel) = watch::channel(false);
         let control = JoinControl::new();
-        let (waiting, mut waits) = watch::channel(false);
+        let (waiting, mut waits) = waiting_for_approval();
         let joining = install.run_held(
             &owner,
             Installation::checked_join_request(&invite, &control),
             owner.recipient(),
             &cancel,
-            |status| {
-                if matches!(status, BootstrapStatus::WaitingForApproval { .. }) {
-                    waiting.send_replace(true);
-                }
-            },
+            waiting,
         );
         let oauth = provider.signs_in_with_oauth();
         let kept = std::sync::Mutex::new(None);
@@ -329,17 +325,13 @@ async fn permission_revocation_while_joining_keeps_the_provider_failure() {
     let install = Installation::new();
     let (_, cancel) = watch::channel(false);
     let control = JoinControl::new();
-    let (waiting, mut waits) = watch::channel(false);
+    let (waiting, mut waits) = waiting_for_approval();
     let joining = install.run_held(
         &owner,
         Installation::checked_join_request(&invite, &control),
         owner.recipient(),
         &cancel,
-        |status| {
-            if matches!(status, BootstrapStatus::WaitingForApproval { .. }) {
-                waiting.send_replace(true);
-            }
-        },
+        waiting,
     );
     let revoke = async {
         waits.wait_for(|waiting| *waiting).await.unwrap();

@@ -577,11 +577,12 @@ async fn cancelling_a_join_before_its_request_is_sent_removes_every_local_value(
 
 async fn cancel_before_sending(provider: CloudProvider) {
     let owner = Owner::new(provider, false).await;
+    owner.hold_waits();
     let invite = owner.invite().await;
     let install = Installation::new();
     let (stop, cancel) = watch::channel(false);
     let result = install
-        .run(
+        .run_held(
             &owner,
             Installation::join_request(&invite),
             owner.recipient(),
@@ -715,7 +716,11 @@ async fn an_unreadable_saved_code_fails_the_listing() {
 }
 
 /// Ending without a store also removes a Dropbox join's kept sign-in, with its
-/// code (§13.2).
+/// code (§13.2). Carol's join ends as declined only while it can still read
+/// its request's path: once Ana takes back the access the invite granted, the
+/// join's check fails with the provider's refusal instead. Ana puts the
+/// marker in the request's place before she takes the access back, so the
+/// test holds that at the provider while Carol's join checks.
 #[tokio::test]
 async fn declined_cancelled_and_expired_requests_finish_without_committing_custody() {
     // A cancel deletes the request as a decline does; the joiner sees only that.
@@ -724,35 +729,67 @@ async fn declined_cancelled_and_expired_requests_finish_without_committing_custo
         .flat_map(|provider| ["decline", "cancel", "expiry"].map(|ending| (provider, ending)))
     {
         let owner = Owner::new(provider, false).await;
+        owner.hold_waits();
         let invite = owner.invite().await;
         let install = Installation::new();
         let (_, cancel) = watch::channel(false);
-        let joining = install.run(
+        let control = JoinControl::new();
+        let (waiting, mut waits) = waiting_for_approval();
+        let joining = install.run_held(
             &owner,
-            Installation::join_request(&invite),
+            Installation::checked_join_request(&invite, &control),
             owner.recipient(),
             &cancel,
-            |_| {},
+            waiting,
         );
+        let takes_back = provider.signs_in_with_oauth();
+        let (revoking, revoked) = tokio::sync::oneshot::channel();
+        let (release, released) = tokio::sync::oneshot::channel();
+        if takes_back {
+            owner.storage.hold_next_access("join@example.com", false, revoking, released).await;
+        }
         let settle = async {
-            let request = next_join_request(&owner.handle).await;
+            waits.wait_for(|waiting| *waiting).await.unwrap();
+            let request = owner.read_join_request().await;
             match ending {
                 "decline" => owner.handle.decline_join_request(&request).await.unwrap(),
                 "cancel" => owner.handle.cancel_invite(&invite.id).await.unwrap(),
-                _ => {
-                    owner.clock.set(invite.expires_at);
-                    if provider == CloudProvider::S3 {
-                        owner.sync().await;
-                    } else {
-                        // Dropbox takes back the access afterwards, so the
-                        // pass ends with that provider change still pending.
-                        owner.handle.sync_now();
-                    }
-                }
+                _ => owner.clock.set(invite.expires_at),
             }
+            // The ending is a write that takes the invite off Ana's list: a
+            // decline's or a cancel's own, or the expiry's, which her handle
+            // makes once its clock reaches the invite's end.
+            owner
+                .handle
+                .test_invites()
+                .wait_for(|invites| invites.iter().all(|listed| listed.id != invite.id))
+                .await;
+            // Ana's pass after the ending puts the marker in the request's
+            // place, then may take back the access, which waits at the
+            // provider: its end or that wait shows the marker is there. On
+            // S3 there is no access to take back.
+            let answer = owner.handle.retry_now().await.unwrap();
+            let passed = |outcome| assert!(matches!(outcome, RetryOutcome::Synced { .. }));
+            if takes_back {
+                tokio::select! {
+                    outcome = answer => passed(outcome),
+                    revoking = revoked => revoking.unwrap(),
+                }
+            } else {
+                passed(answer.await);
+            }
+            assert!(
+                crate::tests::no_request(&owner.storage, &crate::tests::request_path(&invite))
+                    .await,
+                "{provider:?} {ending}"
+            );
+            control.check_now();
         };
         let (result, ()) = join_with_response(joining, settle).await;
-        assert!(result.unwrap().is_none(), "{provider:?} {ending}");
+        assert!(matches!(result, Ok(None)), "{provider:?} {ending}: {result:?}");
+        if takes_back {
+            release.send(()).unwrap();
+        }
         install.absent(owner.directory.id()).await;
         assert!(StoreKeychain::new(install.keychain.clone(), owner.directory.id())
             .invite_code()
@@ -793,17 +830,24 @@ fn retained_grant(
 #[tokio::test]
 async fn a_removed_members_retained_grant_stays_pending_until_a_retry_revokes_it() {
     let owner = Owner::new(CloudProvider::OneDrive, false).await;
+    owner.hold_waits();
     let invite = owner.invite().await;
     let install = Installation::new();
     let (_, cancel) = watch::channel(false);
-    let joining = install.run(
+    let control = JoinControl::new();
+    let (waiting, mut waits) = waiting_for_approval();
+    let joining = install.run_held(
         &owner,
-        Installation::join_request(&invite),
+        Installation::checked_join_request(&invite, &control),
         owner.recipient(),
         &cancel,
-        |_| {},
+        waiting,
     );
-    let (result, member) = join_and_approve(&owner.handle, joining, |_| async {}).await;
+    let (result, member) = join_with_response(joining, async {
+        waits.wait_for(|waiting| *waiting).await.unwrap();
+        approve_held(&owner, &control).await
+    })
+    .await;
     result.unwrap().unwrap().close().await.unwrap();
     let shares = vec![coven_storage::RetainedAccess {
         provider_id: "parent-folder".into(),
