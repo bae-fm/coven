@@ -13,6 +13,8 @@ Every writer that acts on them is a step:
   transaction open, and only then writes. Between its read and its write any
   other writer may commit;
 - a crash, which loses the pass's read and nothing durable;
+- the joiner writing its request, whose keys may be ones history has already
+  bound to a member, current or past, rather than fresh ones;
 - what a pass learns: the approver's demotion, and a stop for good (removal,
   replacement or member keys replaced, §14.1, or history showing another copy
   of this device, §19.3);
@@ -103,6 +105,9 @@ structure World where
   op : Option (Option Outcome)
   /-- The joiner's request object is in storage. -/
   request : Bool
+  /-- The request's keys are not fresh: history has bound one of them to a
+  member already. -/
+  used : Bool
   /-- This device's gone marker is in storage: another admin's device
   applied its stop for good (§13.2). -/
   gone : Bool
@@ -126,8 +131,8 @@ structure World where
 
 /-- The invite just made by the app's write (`create_invite`). -/
 def made : World :=
-  ⟨some ⟨.requested, 0⟩, none, 0, false, none, 0, false, none, false, false, false, true, false,
-    none, false, false, false⟩
+  ⟨some ⟨.requested, 0⟩, none, 0, false, none, 0, false, none, false, false, false, false, true,
+    false, none, false, false, false⟩
 
 structure Rules where
   /-- A pass saves its finding only while the row is at the step it read. -/
@@ -149,12 +154,15 @@ structure Rules where
   approveChecksApplied : Bool
   /-- The pass records the invite's share in history before granting it. -/
   recordShare : Bool
+  /-- The pass checks that the request's keys are fresh when it opens the
+  request, not only when its binding applies. -/
+  checkKeys : Bool
   deriving DecidableEq, Repr
 
-def Rules.correct : Rules := ⟨true, true, true, true, true, true, true, false, true⟩
+def Rules.correct : Rules := ⟨true, true, true, true, true, true, true, false, true, true⟩
 
 /-- The rules the Rust follows, as the differential test drives it. -/
-def Rules.rust : Rules := ⟨true, true, true, true, true, true, true, false, true⟩
+def Rules.rust : Rules := ⟨true, true, true, true, true, true, true, false, true, false⟩
 
 /-- Stages that end at the invite's expiry; approval, once begun, finishes. -/
 def expires : Stage → Bool
@@ -187,8 +195,10 @@ def recordAt (R : Rules) (w : World) (r : Row) (p : Retry) : World :=
     { w with pending := some p, pendingAt := r.step }
   else w
 
-/-- What the binding's operation ends with, once a pass runs it. -/
-def bindingOutcome (w : World) : Outcome := if w.approvable then .landed else .rejected
+/-- What the binding's operation ends with, once a pass runs it: the caught-up
+history refuses it when this device may no longer approve, or when it has
+bound one of the request's keys already. -/
+def bindingOutcome (w : World) : Outcome := if w.approvable && !w.used then .landed else .rejected
 
 /-- End the binding's operation with its outcome; a sent invite's is listed. -/
 def endBinding (c : Config) (w : World) (o : Outcome) : World :=
@@ -256,8 +266,8 @@ inductive Act where
   | ackOp
   /-- The app journals an admin change. -/
   | administer
-  /-- The joiner writes its request. -/
-  | send
+  /-- The joiner writes its request, `used` when its keys are not fresh. -/
+  | send (used : Bool)
   /-- Another admin's device applies this device's stop for good: it writes
   the gone marker, then deletes the request. -/
   | gone
@@ -275,7 +285,10 @@ def commitOf (R : Rules) (c : Config) (w : World) (r : Row) : World :=
     else recordAt R w r .never
   | .grant => guarded w r fun w => advance { w with shared := true } (.waiting false)
   | .waiting false =>
-    if w.request then
+    -- A request that fails its checks is not offered or approved: the
+    -- invite goes on waiting, with the failure as its pending record.
+    if w.request && R.checkKeys && w.used then recordAt R w r .app
+    else if w.request then
       match c.delivery with
       | .sent => guarded w r (advance · (.waiting true))
       | .inPerson => guarded w r fun w =>
@@ -326,7 +339,7 @@ def enabled (R : Rules) (_c : Config) (w : World) : Act → Bool
   | .stop => applying w
   | .tick => !w.expired
   | .expiry => w.expired && w.row.any (expires ·.stage)
-  | .send => !w.request && !w.gone
+  | .send _ => !w.request && !w.gone
   | .gone => !w.gone
   | .revoke => w.shared && !w.bound && (w.ended || (w.recorded && (w.stopped || w.gone)))
   | a => accepted R w a
@@ -358,7 +371,7 @@ def act (R : Rules) (c : Config) (w : World) : Act → World
   | .ack => { w with outcome := none }
   | .ackOp => { w with op := none }
   | .administer => { w with op := some none }
-  | .send => { w with request := true }
+  | .send used => { w with request := true, used }
   | .gone => { w with gone := true, request := false }
   | .revoke => { w with shared := false }
 
@@ -462,7 +475,7 @@ theorem Steps.trans {R : Rules} {c : Config} {a b d : World} :
 /-- The invite as far as a request waiting for the app's decision, from the
 invite just made: the pass checks it and grants, shows the code, the joiner
 sends its request, and the next pass reads it. -/
-def toWaiting : List Act := [.read, .commit, .read, .commit, .send, .read, .commit]
+def toWaiting : List Act := [.read, .commit, .read, .commit, .send false, .read, .commit]
 
 def sent : Config := ⟨.sent, false⟩
 
@@ -509,6 +522,14 @@ theorem stays {R : Rules} {c : Config} (P : World → Prop)
     (recordAt R w r p).request = w.request := by
   unfold recordAt; split <;> rfl
 
+@[simp] theorem recordAt_used (R : Rules) (w : World) (r : Row) (p : Retry) :
+    (recordAt R w r p).used = w.used := by
+  unfold recordAt; split <;> rfl
+
+@[simp] theorem recordAt_gone (R : Rules) (w : World) (r : Row) (p : Retry) :
+    (recordAt R w r p).gone = w.gone := by
+  unfold recordAt; split <;> rfl
+
 @[simp] theorem recordAt_expired (R : Rules) (w : World) (r : Row) (p : Retry) :
     (recordAt R w r p).expired = w.expired := by
   unfold recordAt; split <;> rfl
@@ -552,6 +573,12 @@ theorem stays {R : Rules} {c : Config} (P : World → Prop)
   unfold advance; split <;> rfl
 
 @[simp] theorem advance_request (w : World) (s : Stage) : (advance w s).request = w.request := by
+  unfold advance; split <;> rfl
+
+@[simp] theorem advance_used (w : World) (s : Stage) : (advance w s).used = w.used := by
+  unfold advance; split <;> rfl
+
+@[simp] theorem advance_gone (w : World) (s : Stage) : (advance w s).gone = w.gone := by
   unfold advance; split <;> rfl
 
 @[simp] theorem advance_expired (w : World) (s : Stage) : (advance w s).expired = w.expired := by
@@ -711,6 +738,25 @@ theorem unrecorded_share_strands :
       ∀ w', Steps unrecorded sent w w' → w'.shared = true := by
   refine ⟨_, rfl, fun w' h => ?_⟩
   exact (stays _ (stranded_share_stays sent) h ⟨rfl, rfl, rfl, rfl, rfl⟩).1
+
+def unchecked : Rules := { Rules.correct with checkKeys := false }
+
+def inPerson : Config := ⟨.inPerson, false⟩
+
+/-- The invite as far as its request, whose keys a member already holds,
+being read. -/
+def toUsedRequest : List Act := [.read, .commit, .read, .commit, .send true, .read, .commit]
+
+/-- Without the pass checking the request's keys when it opens the request, a
+sent invite offers the app a request whose approval history can only refuse,
+and an in-person invite's pass approves one and journals its binding; the
+binding is refused only once it applies. -/
+theorem unchecked_keys_approved :
+    (∃ w, trace unchecked sent made toUsedRequest = some w ∧
+      offered (view unchecked w) .approve = true ∧ w.used = true) ∧
+    (∃ w, trace unchecked inPerson made (toUsedRequest ++ [.read, .commit]) = some w ∧
+      w.bindings = 1 ∧ w.bound = false) :=
+  ⟨⟨_, rfl, rfl, rfl⟩, ⟨_, rfl, rfl, rfl⟩⟩
 
 /-! ## The properties, under the rules -/
 
@@ -978,6 +1024,91 @@ theorem share_recorded (c : Config) {w : World} (h : Reachable Rules.correct c w
     (shared : w.shared = true) : w.recorded = true :=
   (reachable_share c h).2.recorded shared
 
+/-! ### Only a checked request is offered or approved -/
+
+/-- What every reachable world satisfies about the request's keys. -/
+structure KeysInv (w : World) : Prop where
+  /-- A request waiting for the app, or being approved, has fresh keys, and
+  is the request in storage, or another admin's device has ended this
+  device's requests. -/
+  checked : (w.row.map (·.stage) = some (.waiting true) ∨ w.row.map (·.stage) = some .approving) →
+    w.used = false ∧ (w.request = true ∨ w.gone = true)
+
+set_option maxHeartbeats 2000000 in
+theorem keys_step (c : Config) (w : World) (a : Act) (inv : Inv c w) (k : KeysInv w)
+    (e : enabled Rules.correct c w a = true) : KeysInv (act Rules.correct c w a) := by
+  obtain ⟨checked⟩ := k
+  obtain ⟨fresh, readRow, binding, running, early, zero, once, waitingSent, never, stopped⟩ := inv
+  cases a
+  case commit =>
+    rcases hr : w.read with _ | r
+    · simp [enabled, hr] at e
+    obtain ⟨r', hrow, hs⟩ := readRow r hr
+    by_cases cur : atRead w r = true
+    · have same : r' = r := by
+        rcases hs with hs | hs
+        · simp [atRead, hrow] at cur; omega
+        · exact hs
+      subst same
+      obtain ⟨stage, n⟩ := r'
+      cases stage
+      all_goals
+        simp only [act, hr, commitOf, guarded, recordAt, atRead, hrow, Rules.correct, endBinding,
+          bindingOutcome, afterBound, advance]
+        (repeat' split) <;> constructor <;> simp_all
+    · simp only [act, hr, commitOf_stale c w r (by simpa using cur)]
+      exact ⟨checked⟩
+  case lapse =>
+    rcases hr : w.read with _ | r
+    · simp [enabled, hr] at e
+    simp only [act, hr, guarded]
+    split
+    · rcases hrow : w.row with _ | ⟨stage, n⟩
+      · constructor <;> simp_all
+      · constructor <;> simp_all [advance]
+    · constructor <;> simp_all
+  case stop =>
+    simp only [act, stopEffect_correct]
+    constructor <;> simp_all [stopped']
+  case fail p =>
+    rcases hr : w.read with _ | r <;> constructor <;> simp_all [act]
+  case bind => simp [enabled, Rules.correct] at e
+  case send used =>
+    constructor
+    intro h
+    have := checked (by simpa [act] using h)
+    simp_all [enabled]
+  case expiry | approve | decline | cancel =>
+    rcases hrow : w.row with _ | ⟨stage, n⟩
+    all_goals constructor <;> simp_all [act, enabled, accepted, advance]
+  all_goals
+    rcases hrow : w.row with _ | ⟨stage, n⟩
+    all_goals constructor <;> simp_all [act, enabled, accepted]
+
+theorem reachable_keys (c : Config) {w : World} (h : Reachable Rules.correct c w) :
+    Inv c w ∧ KeysInv w :=
+  stays (fun w => Inv c w ∧ KeysInv w)
+    (fun w a ⟨inv, k⟩ e => ⟨inv_step c w a inv e, keys_step c w a inv k e⟩) h
+    ⟨inv_made c, by constructor; simp [made]⟩
+
+/-- The app is offered approving only a request whose keys are fresh: the
+pass checked them when it opened the request (§13.2). -/
+theorem offered_fresh (c : Config) {w : World} (h : Reachable Rules.correct c w)
+    (o : offered (view Rules.correct w) .approve = true) : w.used = false := by
+  refine ((reachable_keys c h).2.checked (.inl ?_)).1
+  rcases hrow : w.row with _ | ⟨_ | _ | (_ | _) | _ | _ | _, n⟩ <;>
+    simp_all [offered, view, listed, Rules.correct]
+
+/-- An approval under way binds a request whose keys are fresh, so the
+caught-up history refuses its binding only when this device may no longer
+approve, never for the request's keys. -/
+theorem binding_fresh (c : Config) {w : World} (h : Reachable Rules.correct c w)
+    (b : w.binding = true) : w.used = false ∧ (bindingOutcome w = .rejected → w.approvable = false) := by
+  obtain ⟨inv, k⟩ := reachable_keys c h
+  have used := (k.checked (.inr (inv.binding.mp b))).1
+  refine ⟨used, fun r => ?_⟩
+  cases ha : w.approvable <;> simp_all [bindingOutcome]
+
 /-! ### No write from a stale read -/
 
 /-- A pending record always holds what a pass found at the row's current
@@ -1097,7 +1228,7 @@ theorem progress (c : Config) (w : World) (inv : Inv c w) (sh : ShareInv w)
       have e₂ : enabled Rules.correct c w₁ .commit = true := by simp_all [w₁, enabled, act]
       refine ⟨_, .step .read rfl e₁ (one .commit rfl e₂), ?_⟩
       rcases staged with h | h | h <;> subst h <;> cases ha : w.approvable <;>
-        cases hc : c.records <;>
+        cases hu : w.used <;> cases hc : c.records <;>
         simp_all [w₁, act, measure, commitOf, guarded, atRead, advance, stageMeasure, Rules.correct,
           endBinding, bindingOutcome, afterBound, beq_iff_eq] <;> omega
     · rcases staged with h | h | h <;> simp_all

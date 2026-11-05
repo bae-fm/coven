@@ -4198,7 +4198,16 @@ inviting device's id and the invite's id.
 
 - the signature verifies with the signing key the request supplies;
 - the member id matches the invite;
-- both keys are fresh.
+- both keys are fresh: no entry in the history her phone has caught up with
+  bound either one to a member, current or past (§12.3).
+
+A request that fails a check is neither offered nor approved. The invite goes
+on waiting, with the failure as its pending record, until Ana cancels it or it
+expires. A request carrying Ben's keys, which history bound when he joined,
+fails, though his signing key verifies it. Were the keys checked only when the
+binding applies, an in-person invite would approve that request on its own,
+and a sent invite would offer Ana an approval that history can only refuse
+([`unchecked_keys_approved`](proofs/sequence/CovenSequence/InviteLifecycle.lean)).
 
 An in-person invite's request is approved as soon as these checks pass, in the
 sync pass that read it. A sent invite's request waits for Ana's decision, with
@@ -10901,8 +10910,10 @@ Write-ups explain each model and state its assumptions:
 | No write from a stale read: an invite's pending record holds what a pass found at its row's current step, and a pass's write changes the row only when the row is the one it read | `finding_current`, `commit_acts_on_read` | `proofs/sequence/CovenSequence/InviteLifecycle.lean` | §13.2 |
 | From every reachable state, crashes and stops for good included, coven's own steps, with the app retrying only records it is shown, end the invite and every operation the app journaled, and take back its share unless a member uses the account: nothing stays listed, running, pending or shared | `settles` | `proofs/sequence/CovenSequence/InviteLifecycle.lean` | §11.4, §13.2, §14.1, §14.2 |
 | A share an invite granted is always one history records, so the owner's other devices can take it back once the inviting device is gone for good | `share_recorded` | `proofs/sequence/CovenSequence/InviteLifecycle.lean` | §13.2 |
+| A request is offered for approval, or approved, only once its keys are checked fresh, so history refuses an approval's binding only when the approving device may no longer approve, never for the request's keys | `offered_fresh`, `binding_fresh` | `proofs/sequence/CovenSequence/InviteLifecycle.lean` | §13.2 |
 | The listed invite and its binding's entry only move forward; the app's offer of approving, declining, cancelling and acknowledging is exactly what the write steps accept; a sent invite is listed as approving exactly while its binding runs | `forward`, `offered_accepted`, `approval_runs_binding` | `proofs/sequence/CovenSequence/InviteLifecycle.lean` | §11.4, §13.2 |
 | Each rule those results need is needed: leaving out the step check, ending operations or invites at a stop, ending a refused access record, ending the binding with its invite, recording the binding, listing approval as its own stage, leaving an approval's refusal to its pass, or recording the share before the grant each has a counterexample | `unguarded_finding_is_stale`, `forgetful_stop_runs_forever`, `stop_strands_approval`, `refused_record_strands`, `split_binding_disagrees`, `reclaim_binds_twice`, `approval_shown_as_waiting`, `demoted_approval_offered`, `unrecorded_share_strands` | `proofs/sequence/CovenSequence/InviteLifecycle.lean` | §13.2, §14.1 |
+| *Body.* A request whose keys are checked only when its binding applies is offered for approval though a member holds its keys, and an in-person invite approves it on its own; history then refuses the binding | `unchecked_keys_approved` | `proofs/sequence/CovenSequence/InviteLifecycle.lean` | §13.2 |
 | An invite ends together with every operation it started for its own entries, its share, the share's end and a recovery's key record, and leaves no claim open; from every reachable state, crashes between a claim landing and its end included, its own slots read before their claims settle, slots lost to other devices and a cancel while the share's record is claimed, coven's own steps end the invite with no claim open, so the device's writes go out | `children_end_with_invite`, `settles` | `proofs/sequence/CovenSequence/InviteClaims.lean` | §5.1, §13.2 |
 | *Body.* An ended invite that looks only at history leaves a claim open for good: its share's end, when its own slot showed the share ended before the claim settled, or its share's record, when the app cancelled it while that claim landed | `ended_share_strands_claim`, `cancelled_share_strands_claim` | `proofs/sequence/CovenSequence/InviteClaims.lean` | §13.2 |
 | While history names a restoring device as active, or a claim of its registration is open, the restore is published or listed for the app to finish; from every reachable state, crashes, dropped calls, failures, cancels, lost slots, the member's removal and the replacement of its keys included, coven's own steps and the app resuming what is listed end the restore published, with its device registered, or with no installation left, its device not active and no claim open | `registered_listed`, `settles`, `settled_outcome` | `proofs/sequence/CovenSequence/RestoreRegistration.lean` | §11.6, §13.1 |

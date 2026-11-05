@@ -97,9 +97,9 @@ def event (c : Config) (run : Run) (name : String) : Except String (Run × Strin
   | "ackOp" => return app .ackOp
   | "administer" =>
     if run.world.op.isSome then return (run, "skipped") else return app .administer
-  | "send" =>
+  | "send" | "sendUsed" =>
     if !run.shown || run.sent || run.world.row.isNone then return (run, "skipped")
-    let (w, _) := take c run.world .send
+    let (w, _) := take c run.world (.send (name == "sendUsed"))
     return ({ run with world := w, sent := true }, "ok")
   | "expire" =>
     let w := (take c run.world .tick).1

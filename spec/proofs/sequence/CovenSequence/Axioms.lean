@@ -318,6 +318,9 @@ import SequenceApply
 #print axioms CovenSequence.InviteLifecycle.reclaim_binds_twice
 #print axioms CovenSequence.InviteLifecycle.approval_shown_as_waiting
 #print axioms CovenSequence.InviteLifecycle.unrecorded_share_strands
+#print axioms CovenSequence.InviteLifecycle.offered_fresh
+#print axioms CovenSequence.InviteLifecycle.binding_fresh
+#print axioms CovenSequence.InviteLifecycle.unchecked_keys_approved
 #print axioms CovenSequence.InviteClaims.reachable_inv
 #print axioms CovenSequence.InviteClaims.children_end_with_invite
 #print axioms CovenSequence.InviteClaims.progress

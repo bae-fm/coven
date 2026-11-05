@@ -691,6 +691,8 @@ steps are every writer that acts on them:
 - a pass, which reads the invite's journal row, does its storage work with no
   transaction open, and writes after. Any other writer may commit in between;
 - a crash, which loses the pass's read and nothing durable;
+- the joiner writing its request, whose keys may be ones history already
+  bound to a member, current or past;
 - what a pass learns: the approver's demotion, and a stop for good, from a
   slot it applies or from history showing another copy of this device;
 - another admin's device applying that stop, which may come first: it writes
@@ -728,6 +730,11 @@ record. The properties are proved under `Rules.correct`:
   is offered to retry can be retried.
 - `approval_runs_binding`: a sent invite listed as approving is exactly one
   whose binding is listed as running.
+- `offered_fresh`, `binding_fresh`: the pass checks the request's keys when it
+  opens the request, so the app is offered approving only a request whose keys
+  are fresh, and an approval under way binds only such a request (`KeysInv`).
+  History then refuses the binding only when this device may no longer
+  approve, never for the request's keys.
 
 Each rule `correct` has is needed; leaving one out is a checked counterexample:
 
@@ -749,6 +756,10 @@ Each rule `correct` has is needed; leaving one out is a checked counterexample:
   refuses a request the app was shown as waiting for its decision.
 - `unrecorded_share_strands`: a share granted without its record, on a device
   that then stops for good, stands forever: no other device knows of it.
+- `unchecked_keys_approved`: with the request's keys checked only when the
+  binding applies, a sent invite offers the app a request whose keys a member
+  holds, and an in-person invite's pass approves one and journals a binding
+  history refuses.
 
 `Rules.rust` names the rules the Rust follows; the differential test compares
 it.
@@ -1264,7 +1275,8 @@ SQL execution, signature checks and extraction from snapshots happen in Rust.
 steps under `Rules.rust`, in [`SequenceInvites`](sequence/SequenceInvites.lean).
 `delivery` is `"sent"` or `"inPerson"`, `records` whether approving also
 records a kept replacement's S3 key, and `events` a list of `pass`, `send`
-(the joiner writes its request), `approve`, `decline`, `cancel`, `retry`,
+(the joiner writes its request), `sendUsed` (it writes one whose keys a member
+already holds), `approve`, `decline`, `cancel`, `retry`,
 `ack`, `ackOp`, `administer`, `expire`, `demote` and `remove` (another admin's
 slot, applied at the next pass; for `remove`, his pass ends this device's
 requests at once, the owner's other device takes the recorded share back,
