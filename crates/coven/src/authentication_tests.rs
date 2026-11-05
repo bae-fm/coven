@@ -12,7 +12,21 @@ pub(crate) struct Presenter {
     pub(crate) cancel: AtomicBool,
     pub(crate) calls: AtomicUsize,
     requests: std::sync::Mutex<Vec<std::collections::BTreeMap<String, String>>>,
+    /// Holds the next presentation.
+    held: Held,
 }
+
+/// A step a test holds: it says it has been reached, then waits until its
+/// future is dropped.
+type Held = tokio::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>;
+
+async fn hold_if_asked(held: &Held) {
+    if let Some(reached) = held.lock().await.take() {
+        reached.send(()).unwrap();
+        std::future::pending::<()>().await;
+    }
+}
+
 #[async_trait::async_trait]
 impl OAuthPresenter for Presenter {
     fn redirect_uri(&self, _: CloudProvider) -> &str {
@@ -20,6 +34,7 @@ impl OAuthPresenter for Presenter {
     }
     async fn present(&self, authorization_url: &str) -> Result<SecretText, OAuthError> {
         self.calls.fetch_add(1, Ordering::SeqCst);
+        hold_if_asked(&self.held).await;
         if self.cancel.load(Ordering::SeqCst) {
             return Err(OAuthError::Cancelled);
         }
@@ -33,6 +48,8 @@ impl OAuthPresenter for Presenter {
 
 struct TokenServerState {
     requests: AtomicUsize,
+    /// Holds the next token reply.
+    held: Held,
 }
 
 pub(crate) struct SignIn {
@@ -43,9 +60,11 @@ pub(crate) struct SignIn {
 }
 impl SignIn {
     pub(crate) async fn new() -> Self {
-        let server = Arc::new(TokenServerState { requests: AtomicUsize::new(0) });
+        let server =
+            Arc::new(TokenServerState { requests: AtomicUsize::new(0), held: Held::default() });
         let router = Router::new().fallback(|State(server): State<Arc<TokenServerState>>| async move {
             let n = server.requests.fetch_add(1, Ordering::SeqCst);
+            hold_if_asked(&server.held).await;
             Json(serde_json::json!({"access_token": format!("access-{n}"), "refresh_token": format!("refresh-{n}"), "token_type": "Bearer", "expires_in": 3600}))
         }).with_state(server.clone());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -59,6 +78,7 @@ impl SignIn {
                 cancel: AtomicBool::new(false),
                 calls: AtomicUsize::new(0),
                 requests: std::sync::Mutex::new(Vec::new()),
+                held: Held::default(),
             }),
             server,
             task,
@@ -363,4 +383,64 @@ mod provider_access_tests {
         assert_eq!(coven_storage::recorded_config(&fixture.directory).unwrap(), recorded);
         handle.close().await.unwrap();
     }
+}
+
+/// Dropping `authenticate` while the provider's page is presented, or while
+/// its token reply is awaited, ends sign-in at once: no tokens are
+/// committed, the call lock is free for the next call, and the earlier
+/// sign-in is still the one setup commits (§20.2).
+#[tokio::test]
+async fn dropping_sign_in_while_presenting_or_exchanging_cancels_it_and_keeps_the_prior_sign_in() {
+    let root = tempfile::tempdir().unwrap();
+    let keychain = Keychain::in_memory("oauth-cancel").unwrap();
+    let app = Coven::with_keychain(root.path().into(), keychain.clone());
+    let clock = Arc::new(FixedClock::new(std::time::SystemTime::UNIX_EPOCH));
+    let sign_in = SignIn::new().await;
+    let storage = Arc::new(
+        MemoryStorage::builder()
+            .provider(coven_storage::CloudProvider::Dropbox)
+            .clock(clock.clone())
+            .build()
+            .unwrap(),
+    );
+    let handle =
+        builder(&app, clock, storage.clone(), &sign_in).create_store("Account").await.unwrap();
+    let scoped = StoreKeychain::new(keychain, app.store_dir(&handle.store_id()).id());
+    let access = || coven_storage::OAuthAccess::Dropbox(coven_storage::DropboxAccess::FullDropbox);
+    handle.authenticate(access()).await.unwrap();
+    assert_eq!(sign_in.request_count(), 1);
+
+    let (reached, presenting) = tokio::sync::oneshot::channel();
+    *sign_in.presenter.held.lock().await = Some(reached);
+    let mut replacing = Box::pin(handle.authenticate(access()));
+    tokio::select! {
+        biased;
+        _ = &mut replacing => panic!("sign-in finished while its page was held"),
+        reached = presenting => reached.unwrap(),
+    }
+    drop(replacing);
+    assert_eq!(sign_in.request_count(), 1, "no token was asked for while presenting");
+
+    let (reached, exchanging) = tokio::sync::oneshot::channel();
+    *sign_in.server.held.lock().await = Some(reached);
+    let mut replacing = Box::pin(handle.authenticate(access()));
+    tokio::select! {
+        biased;
+        _ = &mut replacing => panic!("sign-in finished while its token reply was held"),
+        reached = exchanging => reached.unwrap(),
+    }
+    drop(replacing);
+    assert_eq!(sign_in.request_count(), 2, "the held exchange was the second token request");
+    assert!(scoped.storage_credentials().unwrap().is_none(), "a dropped sign-in commits nothing");
+
+    // The call lock is free, and the sign-in setup commits is the first one.
+    handle.setup_oauth_storage(storage.config(), "Laptop", |_| {}).await.unwrap();
+    let StorageCredentials::OAuth(tokens) =
+        StorageCredentials::decode(scoped.storage_credentials().unwrap().unwrap().as_bytes())
+            .unwrap()
+    else {
+        panic!("OAuth credentials")
+    };
+    assert_eq!(tokens.access_token.as_str(), "access-0");
+    handle.close().await.unwrap();
 }
