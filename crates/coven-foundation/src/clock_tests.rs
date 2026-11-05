@@ -98,19 +98,25 @@ async fn a_system_wall_wait_ends_when_the_clock_reaches_its_time() {
     assert!(woke >= at, "the timer fired {:?} early", at.duration_since(woke));
 }
 
-/// A wait dropped while its timer is armed releases the timer, which then
-/// reaches its time with nothing waiting.
+/// A wait dropped while its timer is armed releases the timer: on macOS
+/// and iOS the source's cancel handler runs, after which its event handler
+/// never does; elsewhere the timer's handle closes as the wait drops.
 #[tokio::test]
 async fn a_dropped_system_wall_wait_releases_its_timer() {
     use std::{future::poll_fn, task::Poll};
-    let mut wait = SystemClock.sleep_until(SystemClock.now() + Duration::from_millis(50));
+    let at = SystemClock.now() + Duration::from_secs(60);
+    let released = super::when_released(at);
+    let mut wait = SystemClock.sleep_until(at);
     poll_fn(|cx| {
         assert!(wait.as_mut().poll(cx).is_pending());
         Poll::Ready(())
     })
     .await;
     drop(wait);
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    tokio::time::timeout(HANG_GUARD, released)
+        .await
+        .expect("the timer is released")
+        .expect("the release is told");
 }
 
 /// A fixed clock's wall wait ends when a setting reaches its time; settings

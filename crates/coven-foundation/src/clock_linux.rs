@@ -34,6 +34,9 @@ use tokio::io::unix::AsyncFd;
 /// at a zero expiry the timer would disarm instead.
 pub(super) async fn sleep_until(at: SystemTime) -> Result<(), WallTimerError> {
     let since = at.duration_since(UNIX_EPOCH).expect("the deadline is after the epoch");
+    // Made before the timer, so it drops after the timer's handle closes.
+    #[cfg(test)]
+    let _released = super::ReleasedOnDrop(at);
     let timer =
         timerfd_create(TimerfdClockId::Realtime, TimerfdFlags::CLOEXEC | TimerfdFlags::NONBLOCK)
             .map_err(WallTimerError::new)?;

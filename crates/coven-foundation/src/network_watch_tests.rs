@@ -73,10 +73,11 @@ async fn a_view_hears_each_change_and_an_unwatched_one_never_does() {
     assert!(view.read().metered);
 
     let unwatched = NetworkWatch::unwatched();
-    let mut view = unwatched.view();
+    let view = unwatched.view();
     assert_eq!(view.current(), NetworkState { usable: None, metered: false, joined: 0 });
-    let waited = tokio::time::timeout(std::time::Duration::from_millis(10), view.changed()).await;
-    assert!(waited.is_err(), "an unwatched network never changes");
+    // Nothing can ever change it: its sender is gone as it is made, and
+    // `changed` then waits forever.
+    assert!(view.0.has_changed().is_err(), "an unwatched network never changes");
 }
 
 /// Where coven watches, the watch holds what the platform says as it

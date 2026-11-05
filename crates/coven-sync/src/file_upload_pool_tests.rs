@@ -326,39 +326,30 @@ async fn an_app_retry_joins_the_run_in_progress() {
 }
 
 /// An app that resumes uploads and then retries is never told uploads are
-/// paused. Each attachment wakes the worker, whose run reads the pause setting;
-/// the app resumes a different number of yields later each round, and other
-/// reads keep the store's readers busy, as an app's screens do, so in some
-/// rounds the run's read began before the resume committed.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+/// paused, even when the worker's run read the pause before the resume
+/// committed: the resume's change waits until the run has acted on what it
+/// read, so the retry it asks next is a later run's.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_retry_after_resuming_is_never_answered_paused() {
     let f = Fixture::new(Provenance::AppProvided).await;
-    let readers: Vec<_> = (0..8)
-        .map(|_| {
-            let database = f.files.inner.database.clone();
-            tokio::spawn(async move {
-                loop {
-                    database.uploads().await.unwrap();
-                }
-            })
-        })
-        .collect();
-    for round in 0..300u16 {
-        f.set_uploads_paused(true).await;
-        f.attach("files", &format!("photo-{round}"), photo(round as u8)).await;
-        for _ in 0..round % 16 {
-            tokio::task::yield_now().await;
-        }
+    f.set_uploads_paused(true).await;
+    let (read, reading) = tokio::sync::oneshot::channel();
+    let (resume, held) = tokio::sync::oneshot::channel();
+    *f.files.inner.settings_read_gate.lock().unwrap() = Some((read, held));
+    // The attachment wakes the worker, whose run reads the pause.
+    f.attach("files", "photo", photo(1)).await;
+    tokio::time::timeout(HANG_GUARD, reading).await.expect("the run reads the settings").unwrap();
+    let waiting = f.files.inner.change_waits_from_now();
+    let retried = async {
         f.set_uploads_paused(false).await;
-        assert_ne!(
-            f.files.retry_uploads_now().await.unwrap(),
-            DrainOutcome::Paused,
-            "round {round}"
-        );
-    }
-    for reader in readers {
-        reader.abort();
-    }
+        f.files.retry_uploads_now().await.unwrap()
+    };
+    let release = async {
+        waiting.await;
+        resume.send(()).unwrap();
+    };
+    let (answer, ()) = tokio::join!(retried, release);
+    assert_ne!(answer, DrainOutcome::Paused);
     f.close().await;
 }
 

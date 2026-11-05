@@ -140,6 +140,15 @@ struct FilesInner {
     /// between the run's check and what it does.
     #[cfg(test)]
     blocked_end_gate: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
+    /// Holds the next upload run once it has read the persisted settings,
+    /// telling the test, until the test resumes it.
+    #[cfg(test)]
+    pub(crate) settings_read_gate:
+        Mutex<Option<(tokio::sync::oneshot::Sender<()>, tokio::sync::oneshot::Receiver<()>)>>,
+    /// How many times an app's change of a setting, or a run, has found
+    /// `hold_change` held and waited.
+    #[cfg(test)]
+    change_waits: tokio::sync::watch::Sender<usize>,
 }
 struct FileWorker {
     stop: watch::Sender<bool>,
@@ -213,6 +222,10 @@ impl Files {
             closed: AtomicBool::new(false),
             #[cfg(test)]
             blocked_end_gate: Mutex::new(None),
+            #[cfg(test)]
+            settings_read_gate: Mutex::new(None),
+            #[cfg(test)]
+            change_waits: tokio::sync::watch::channel(0).0,
         });
         // A panic in the worker goes to the store's bug sink, and fails the
         // app retries it would have served.
@@ -287,7 +300,7 @@ impl Files {
         sql.after_commit(move || {
             // The write's effects run on its blocking thread, where waiting
             // for the run is allowed.
-            let change = inner.hold_change.blocking_lock();
+            let change = inner.hold_change_blocking();
             inner.paused.store(paused, Ordering::Release);
             drop(change);
             if !paused {
@@ -311,7 +324,7 @@ impl Files {
         sql.set_unmetered_only(unmetered_only)?;
         let inner = self.inner.clone();
         sql.after_commit(move || {
-            let change = inner.hold_change.blocking_lock();
+            let change = inner.hold_change_blocking();
             inner.unmetered_only.store(unmetered_only, Ordering::Release);
             drop(change);
             if !unmetered_only {
@@ -571,10 +584,42 @@ impl FilesInner {
     /// prepared as the store opens holds as the setting says, before any
     /// upload run has read it.
     pub(crate) async fn read_unmetered_only(&self) -> Result<(), DbError> {
-        let _change = self.hold_change.lock().await;
+        let _change = self.lock_hold_change().await;
         let unmetered_only = self.database.unmetered_only().await?;
         self.unmetered_only.store(unmetered_only, Ordering::Release);
         Ok(())
+    }
+    /// `hold_change`, for a run; a test hears each wait for it.
+    pub(crate) async fn lock_hold_change(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        #[cfg(test)]
+        match self.hold_change.try_lock() {
+            Ok(change) => return change,
+            Err(_) => self.change_waits.send_modify(|waits| *waits += 1),
+        }
+        self.hold_change.lock().await
+    }
+    /// `hold_change`, for a setting's change on its write's blocking
+    /// thread; a test hears each wait for it.
+    fn hold_change_blocking(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        #[cfg(test)]
+        match self.hold_change.try_lock() {
+            Ok(change) => return change,
+            Err(_) => self.change_waits.send_modify(|waits| *waits += 1),
+        }
+        self.hold_change.blocking_lock()
+    }
+    /// Wait until a setting's change or a run finds `hold_change` held and
+    /// waits, after this call.
+    #[cfg(test)]
+    pub(crate) fn change_waits_from_now(&self) -> impl std::future::Future<Output = ()> {
+        let mut waits = self.change_waits.subscribe();
+        let now = *waits.borrow_and_update();
+        async move {
+            coven_foundation::clock::within(waits.wait_for(|waits| *waits > now))
+                .await
+                .expect("a change waits for the run")
+                .expect("the waits are kept");
+        }
     }
     /// Whether a pin's download waits for the network now (§17.8).
     pub(crate) fn downloads_held(&self) -> bool {

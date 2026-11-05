@@ -48,6 +48,8 @@ unsafe extern "C" {
     ) -> *mut c_void;
     fn dispatch_source_set_timer(source: *mut c_void, start: u64, interval: u64, leeway: u64);
     fn dispatch_source_set_event_handler(source: *mut c_void, handler: &block2::Block<dyn Fn()>);
+    #[cfg(test)]
+    fn dispatch_source_set_cancel_handler(source: *mut c_void, handler: &block2::Block<dyn Fn()>);
     fn dispatch_activate(object: *mut c_void);
     fn dispatch_source_cancel(source: *mut c_void);
     fn dispatch_release(object: *mut c_void);
@@ -86,7 +88,12 @@ pub(super) async fn sleep_until(at: SystemTime) -> Result<(), WallTimerError> {
         tv_nsec: libc::c_long::try_from(nanos % 1_000_000_000).expect("below one second"),
     };
     let (fired, firing) = oneshot::channel::<()>();
-    let timer = DispatchTimer::arm(&when, fired)?;
+    let timer = DispatchTimer::arm(
+        &when,
+        fired,
+        #[cfg(test)]
+        at,
+    )?;
     firing.await.expect("the armed timer keeps its handler");
     drop(timer);
     Ok(())
@@ -95,7 +102,14 @@ pub(super) async fn sleep_until(at: SystemTime) -> Result<(), WallTimerError> {
 impl DispatchTimer {
     /// A timer source that fires at `when` and sends on `fired`, on the global
     /// queue. The handler block isn't `Send`, so it stays out of the wait.
-    fn arm(when: &libc::timespec, fired: oneshot::Sender<()>) -> Result<Self, WallTimerError> {
+    /// In a test, its cancel handler tells the test the source for `at` is
+    /// released: libdispatch runs it once the source is cancelled and no
+    /// event handler can run any more.
+    fn arm(
+        when: &libc::timespec,
+        fired: oneshot::Sender<()>,
+        #[cfg(test)] at: SystemTime,
+    ) -> Result<Self, WallTimerError> {
         let fired = Mutex::new(Some(fired));
         let handler = RcBlock::new(move || {
             // A panic here would abort the process; nothing panics holding the
@@ -120,6 +134,8 @@ impl DispatchTimer {
                 return Err(WallTimerError::new("libdispatch could not create a timer source"));
             }
             dispatch_source_set_event_handler(source, &handler);
+            #[cfg(test)]
+            dispatch_source_set_cancel_handler(source, &RcBlock::new(move || super::released(at)));
             dispatch_source_set_timer(source, start, FOREVER, 0);
             dispatch_activate(source);
             Ok(Self(source))

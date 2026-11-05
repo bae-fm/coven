@@ -58,6 +58,10 @@ pub(crate) struct HeldTokens {
     current: tokio::sync::RwLock<OAuthTokens>,
     custody: Arc<dyn TokenCustody>,
     replacing: tokio::sync::Mutex<()>,
+    /// How many times an install or rejection has found a replacement in
+    /// flight and waited for it, for a test.
+    #[cfg(test)]
+    waits: tokio::sync::watch::Sender<usize>,
 }
 
 impl HeldTokens {
@@ -66,6 +70,33 @@ impl HeldTokens {
             current: tokio::sync::RwLock::new(tokens),
             custody,
             replacing: tokio::sync::Mutex::new(()),
+            #[cfg(test)]
+            waits: tokio::sync::watch::channel(0).0,
+        }
+    }
+
+    /// One replacement at a time: an install or rejection waits for the
+    /// one in flight, and a test hears that it waits.
+    async fn one_replacement(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        #[cfg(test)]
+        match self.replacing.try_lock() {
+            Ok(one) => return one,
+            Err(_) => self.waits.send_modify(|waits| *waits += 1),
+        }
+        self.replacing.lock().await
+    }
+
+    /// Wait until an install or rejection finds a replacement in flight and
+    /// waits for it, after this call.
+    #[cfg(test)]
+    pub(crate) fn waiting_from_now(&self) -> impl std::future::Future<Output = ()> {
+        let mut waits = self.waits.subscribe();
+        let now = *waits.borrow_and_update();
+        async move {
+            coven_foundation::clock::within(waits.wait_for(|waits| *waits > now))
+                .await
+                .expect("a call waits for the replacement")
+                .expect("the waits are kept");
         }
     }
 
@@ -84,13 +115,13 @@ impl HeldTokens {
     /// replacement in flight finishes first: it was committed earlier, so
     /// these later tokens must not be overwritten by it.
     pub(crate) async fn install(&self, tokens: OAuthTokens) {
-        let _one = self.replacing.lock().await;
+        let _one = self.one_replacement().await;
         *self.current.write().await = tokens;
     }
 
     /// The tokens to retry with after the provider rejected `used`.
     pub(crate) async fn rejected(&self, used: &OAuthTokens) -> Result<OAuthTokens, StorageError> {
-        let _one = self.replacing.lock().await;
+        let _one = self.one_replacement().await;
         let current = self.current().await;
         if current.access_token.as_str() != used.access_token.as_str() {
             return Ok(current);

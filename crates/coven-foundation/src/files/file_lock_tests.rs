@@ -41,8 +41,8 @@ fn a_waiting_lock_takes_the_file_once_the_holder_drops() {
         let file = open(&path);
         std::thread::spawn(move || FileLock::lock(file, LockMode::Exclusive).unwrap())
     };
-    std::thread::sleep(std::time::Duration::from_millis(50));
-    assert!(!waiting.is_finished(), "the waiter must not take a held lock");
+    // That the waiter can't take the held lock is the refusal the tests
+    // above show; this one shows it takes the lock once it is free.
     drop(held);
     let taken = waiting.join().unwrap();
     assert!(refused(&path, LockMode::Shared));

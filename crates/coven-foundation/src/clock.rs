@@ -269,6 +269,52 @@ impl<F: Fn() -> SystemTime + Send + Sync> Clock for ClosureClock<F> {
     }
 }
 
+/// The system wall waits a test listens to the release of, by deadline: a
+/// system timer is the process's, so the waits on it are the process's.
+#[cfg(test)]
+static RELEASED: std::sync::Mutex<Vec<(SystemTime, tokio::sync::oneshot::Sender<()>)>> =
+    std::sync::Mutex::new(Vec::new());
+
+/// Told once a system wall wait for `at` has released its timer, so the
+/// timer's handler can no longer run.
+#[cfg(test)]
+fn when_released(at: SystemTime) -> tokio::sync::oneshot::Receiver<()> {
+    let (told, telling) = tokio::sync::oneshot::channel();
+    crate::locks::lock_unpoisoned(&RELEASED).push((at, told));
+    telling
+}
+
+/// A system wall wait for `at` has released its timer: tell whoever waits
+/// for that.
+#[cfg(all(
+    test,
+    any(target_vendor = "apple", target_os = "linux", target_os = "android", windows)
+))]
+fn released(at: SystemTime) {
+    let mut watched = crate::locks::lock_unpoisoned(&RELEASED);
+    let (found, rest): (Vec<_>, Vec<_>) =
+        std::mem::take(&mut *watched).into_iter().partition(|(watched, _)| *watched == at);
+    *watched = rest;
+    for (_, told) in found {
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "a test that stopped listening has no use for it"
+        )]
+        let _ = told.send(());
+    }
+}
+
+/// Dropped after a wait's timer, whose handle closing releases it there.
+#[cfg(all(test, any(target_os = "linux", target_os = "android", windows)))]
+struct ReleasedOnDrop(SystemTime);
+
+#[cfg(all(test, any(target_os = "linux", target_os = "android", windows)))]
+impl Drop for ReleasedOnDrop {
+    fn drop(&mut self) {
+        released(self.0);
+    }
+}
+
 #[cfg(test)]
 #[path = "clock_tests.rs"]
 mod tests;

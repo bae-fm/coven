@@ -60,6 +60,10 @@ pub(super) async fn sleep_until(at: SystemTime) -> Result<(), WallTimerError> {
     .map_err(|error: std::num::TryFromIntError| {
         WallTimerError::new(format!("the time is past what a Windows timer holds: {error}"))
     })?;
+    // Made before the timer, so it drops after the timer's wait is
+    // unregistered and its handle closed.
+    #[cfg(test)]
+    let _released = super::ReleasedOnDrop(at);
     let timer = WaitableTimer::arm(due)?;
     timer.fired().notified().await;
     drop(timer);

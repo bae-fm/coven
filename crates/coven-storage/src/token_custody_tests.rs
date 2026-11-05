@@ -82,11 +82,12 @@ async fn concurrent_rejections_of_one_token_share_one_replacement() {
         async move { held.rejected(&used).await }
     });
     custody.entered.notified().await;
+    let waiting = held.waiting_from_now();
     let second = tokio::spawn({
         let held = held.clone();
         async move { held.rejected(&used).await }
     });
-    tokio::task::yield_now().await;
+    waiting.await;
     custody.release.add_permits(1);
     for result in [first.await.unwrap(), second.await.unwrap()] {
         assert_eq!(result.unwrap().access_token.as_str(), "refreshed-0");
@@ -114,11 +115,12 @@ async fn tokens_installed_during_a_replacement_are_not_overwritten_by_it() {
         async move { held.rejected(&tokens("token")).await }
     });
     custody.entered.notified().await;
+    let waiting = held.waiting_from_now();
     let installed = tokio::spawn({
         let held = held.clone();
         async move { held.install(tokens("upgraded")).await }
     });
-    tokio::task::yield_now().await;
+    waiting.await;
     custody.release.add_permits(1);
     rejected.await.unwrap().unwrap();
     installed.await.unwrap();

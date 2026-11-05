@@ -396,11 +396,19 @@ impl FilesInner {
         // sends. A change of either waits until this run has acted on what
         // it read, so the run cannot answer a retry asked after a resume
         // with the pause.
-        let change = self.hold_change.lock().await;
+        let change = self.lock_hold_change().await;
         let paused = self.database.uploads_paused().await?;
         self.paused.store(paused, Ordering::Release);
         let unmetered_only = self.database.unmetered_only().await?;
         self.unmetered_only.store(unmetered_only, Ordering::Release);
+        #[cfg(test)]
+        {
+            let gate = lock_unpoisoned(&self.settings_read_gate).take();
+            if let Some((read, resume)) = gate {
+                read.send(()).expect("the test waits for the read");
+                resume.await.expect("the test resumes the run");
+            }
+        }
         self.read_writes_paused().await?;
         let work = self.database.upload_work::<PendingRecord>(upload_subject).await?;
         // The pause, a self-replacement's write pause and a metered network
@@ -452,7 +460,7 @@ impl FilesInner {
                         // while the run acts on the hold it saw; after a
                         // resume since the check, the run serves uploads
                         // again.
-                        let _change = self.hold_change.lock().await;
+                        let _change = self.lock_hold_change().await;
                         self.read_writes_paused().await?;
                         if let Some(hold) = self.trailing_hold() {
                             return self.end_blocked(Blocked::Held(hold), run.uploaded);

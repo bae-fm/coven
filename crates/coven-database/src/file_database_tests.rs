@@ -452,13 +452,25 @@ fn fifo(path: &std::path::Path) {
 /// it writes.
 #[cfg(unix)]
 async fn release_fifo_writer(path: std::path::PathBuf) {
-    tokio::task::spawn_blocking(move || {
-        use std::io::Read;
-        let mut fifo = std::fs::File::open(path).unwrap();
-        fifo.read_to_end(&mut Vec::new()).unwrap();
-    })
-    .await
-    .unwrap();
+    let mut reading = tokio::task::spawn_blocking({
+        let path = path.clone();
+        move || {
+            use std::io::Read;
+            let mut fifo = std::fs::File::open(path).unwrap();
+            fifo.read_to_end(&mut Vec::new()).unwrap();
+        }
+    });
+    match tokio::time::timeout(HANG_GUARD, &mut reading).await {
+        Ok(read) => read.unwrap(),
+        Err(_) => {
+            // A write end of our own, opened and closed, ends the read, so
+            // the test fails here instead of its runtime waiting on the
+            // blocked read as it drops.
+            drop(std::fs::OpenOptions::new().write(true).open(&path));
+            drop(reading.await);
+            panic!("the FIFO's writer never closed its end: {}", path.display());
+        }
+    }
 }
 
 /// §21.2, Appendix C.3: a cache range's bytes are written with no writer held. A
