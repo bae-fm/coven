@@ -18,8 +18,6 @@ pub(crate) struct DropboxStorage {
     api: String,
     content: String,
     single_request_limit: u64,
-    /// One second; the job-status backoff counts in these units (§6.7).
-    removal_poll_unit: std::time::Duration,
 }
 impl DropboxStorage {
     /// Construct with this device's own Dropbox sign-in.
@@ -38,7 +36,6 @@ impl DropboxStorage {
             api: super::DROPBOX_API.into(),
             content: super::DROPBOX_CONTENT.into(),
             single_request_limit: 150 * 1024 * 1024,
-            removal_poll_unit: std::time::Duration::from_secs(1),
         })
     }
     fn namespace(&self) -> Result<&str, StorageError> {
@@ -202,8 +199,7 @@ impl DropboxStorage {
                 // beside .tag, including when all optional fields are absent.
                 "complete" => return remaining_parent_access(&value, member),
                 "in_progress" if attempt + 1 < REMOVAL_CHECKS => {
-                    let delay = crate::retry_delay(attempt).as_secs() as u32;
-                    self.session.wait_out(self.removal_poll_unit * delay).await
+                    self.session.wait_out(crate::retry_delay(attempt)).await
                 }
                 "in_progress" => break,
                 "failed" => return Err(original.into_error(PROVIDER)),

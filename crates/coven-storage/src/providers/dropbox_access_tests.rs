@@ -421,7 +421,7 @@ async fn asynchronous_removal_waits_for_publication_and_retries_after_completion
     storage.revoke_access("member").await.unwrap();
     assert!(!state.lock().unwrap().members.contains_key("member"));
     assert_eq!(state.lock().unwrap().sharing_mutations, ["add", "remove"]);
-    assert_eq!(*clock.0.lock().unwrap(), [std::time::Duration::from_millis(1)]);
+    assert_eq!(*clock.0.lock().unwrap(), [std::time::Duration::from_secs(1)]);
 }
 
 #[tokio::test]
@@ -445,11 +445,8 @@ async fn asynchronous_removal_times_out_without_hiding_remaining_access() {
         std::io::ErrorKind::TimedOut
     );
     assert!(state.lock().unwrap().members.contains_key("member"));
-    // Status checks back off; one unit is a millisecond here.
-    assert_eq!(
-        *clock.0.lock().unwrap(),
-        [1, 2, 4, 8, 16, 32].map(std::time::Duration::from_millis)
-    );
+    // Status checks back off.
+    assert_eq!(*clock.0.lock().unwrap(), [1, 2, 4, 8, 16, 32].map(std::time::Duration::from_secs));
     state.lock().unwrap().removal_job.as_mut().unwrap().statuses =
         [json!({".tag":"complete"})].into();
     storage.revoke_access("member").await.unwrap();

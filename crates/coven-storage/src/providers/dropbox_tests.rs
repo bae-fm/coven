@@ -445,7 +445,6 @@ pub(super) fn provider(url: &str) -> StorageConnection<DropboxStorage> {
     .unwrap();
     storage.api = format!("{url}/2");
     storage.content = storage.api.clone();
-    storage.removal_poll_unit = std::time::Duration::from_millis(1);
     StorageConnection::from_provider(Arc::new(storage))
 }
 #[tokio::test]
