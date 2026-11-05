@@ -913,3 +913,27 @@ fn a_broken_body_keeps_its_causes() {
     let StorageError::Provider { source, .. } = &error else { panic!("a provider failure") };
     assert!(source.to_string().contains("checksum mismatch"), "{source}");
 }
+
+/// A download carries its object's metadata in its own response, so it needs
+/// no separate status request (§20.5).
+#[tokio::test]
+async fn a_download_carries_its_metadata_in_one_request() {
+    let state = Arc::new(Mutex::new(Remote::default()));
+    let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
+    let storage = provider(&server.url);
+    let path = ObjectPath::floor(STORE_ID);
+    storage.create(&path, b"first").await.unwrap();
+    state.lock().unwrap().requests.clear();
+    let read = storage.read_object(&path, None).await.unwrap();
+    {
+        let requests = &state.lock().unwrap().requests;
+        assert_eq!(requests.len(), 1, "{requests:?}");
+        assert_eq!(requests[0].0, Method::GET);
+        assert_eq!(
+            requests[0].1.path(),
+            format!("/bucket/{}", crate::S3Prefix::default().key(&path))
+        );
+    }
+    assert_eq!(read.bytes, b"first");
+    assert_eq!(read.metadata, storage.status(&path).await.unwrap().unwrap());
+}
