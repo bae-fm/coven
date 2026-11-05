@@ -1,7 +1,9 @@
 use super::*;
+use crate::clock::HANG_GUARD;
 use crate::files::StoreDirAccess;
 use crate::files::StoreDirectories;
 use crate::id_source::UuidIds;
+use std::future::Future;
 use uuid::Uuid;
 
 #[test]
@@ -237,4 +239,57 @@ fn deleting_a_store_link_never_removes_its_target() {
     assert!(matches!(store.lock_for_deletion(), Err(StoreLockError::File(_))));
     assert!(outside.path().exists());
     assert_eq!(std::fs::read_dir(outside.path()).unwrap().count(), 0);
+}
+
+/// Lock acquisition and lock-file removal wait for the layout lock, so nobody
+/// locks a lock file between its release and its removal (E1).
+#[tokio::test]
+async fn lock_file_removal_and_new_locks_wait_for_the_layout_lock() {
+    let root = tempfile::tempdir().unwrap();
+    let layout = StoreDirectories::new(root.path().to_owned());
+    let id = StoreId(Uuid::from_u128(1));
+    let store = layout.create_store_dir(id, &UuidIds).unwrap();
+    let stores = root.path().join("stores");
+    let paths = [
+        format!(".{id}.lock"),
+        format!(".{id}.readers.lock"),
+        format!(".coven-bootstrap-{id}.lock"),
+    ]
+    .map(|name| stores.join(name));
+    let other = layout.create_store_dir(StoreId(Uuid::from_u128(2)), &UuidIds).unwrap();
+    let deletion = store.lock_for_deletion().unwrap().unwrap();
+
+    let layout_lock = lock_layout(&stores).unwrap();
+    let (starting, started) = std::sync::mpsc::channel();
+    let (removed, finished) = std::sync::mpsc::channel();
+    let remover = std::thread::spawn(move || {
+        starting.send(()).unwrap();
+        removed.send(deletion.remove_directory()).unwrap();
+    });
+    started.recv_timeout(HANG_GUARD).unwrap();
+    // Blocked on the layout lock, the removal reports nothing and removes
+    // nothing; no event says that, so this is the one bounded wait.
+    assert_eq!(
+        finished.recv_timeout(std::time::Duration::from_millis(250)).map(|_| ()),
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout),
+        "removal went ahead of the layout lock"
+    );
+    for path in &paths {
+        assert!(path.is_file(), "{path:?} was removed under the layout lock");
+    }
+    let mut opening = Box::pin(other.lock_for_open());
+    assert!(
+        std::future::poll_fn(|cx| std::task::Poll::Ready(opening.as_mut().poll(cx)))
+            .await
+            .is_pending(),
+        "a new lock was taken under the layout lock"
+    );
+    drop(opening);
+
+    drop(layout_lock);
+    finished.recv_timeout(HANG_GUARD).unwrap().unwrap();
+    remover.join().unwrap();
+    for path in &paths {
+        assert!(!path.exists(), "{path:?}");
+    }
 }
