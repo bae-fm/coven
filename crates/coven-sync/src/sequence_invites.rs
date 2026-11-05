@@ -556,7 +556,7 @@ impl SequenceSync {
                         }
                         Err(error) => return Err(error.into()),
                     };
-                    let request = self.open_request(&work, &bytes)?;
+                    let request = self.open_request(&work, &session.history.state, &bytes)?;
                     let code = code.clone();
                     match work.delivery {
                         // Ana watched the phone that scanned her code: an
@@ -840,14 +840,25 @@ impl SequenceSync {
         Ok(SecretText::new(code.to_string()))
     }
 
-    /// Open and check a request: it repeats the invite's id and member id,
-    /// and its own new signing key verifies it (§13.2).
-    fn open_request(&self, work: &InviteWork, bytes: &[u8]) -> Result<Vec<u8>, SyncError> {
+    /// Open and check a request: its own new signing key verifies it, it
+    /// repeats the invite's id and member id, and `state`, the history this
+    /// pass caught up with, has bound neither of its keys (§13.2). A request
+    /// that fails is neither offered nor approved: the invite goes on waiting,
+    /// with the failure as its pending record.
+    fn open_request(
+        &self,
+        work: &InviteWork,
+        state: &coven_database::StoreState,
+        bytes: &[u8],
+    ) -> Result<Vec<u8>, SyncError> {
         let path = ObjectPath::join_request(self.store(), work.device, work.id);
         let (request, plain) =
             crate::joining_identity::opened_join_request(&work.secret()?, &path, bytes)?
                 .ok_or(SyncError::InvitationChanged)?;
-        if request.invite != work.id || request.member != work.member {
+        if request.invite != work.id
+            || request.member != work.member
+            || !crate::effects::fresh(state, &request.keys)
+        {
             return Err(SyncError::InvitationChanged);
         }
         Ok(plain)

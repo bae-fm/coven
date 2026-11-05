@@ -277,7 +277,7 @@ impl Case {
                     Err(_) => "refused",
                 }
             }
-            "send" => {
+            "send" | "sendUsed" => {
                 if !self.shown || self.sent || !self.journaled().await {
                     return "skipped";
                 }
@@ -288,6 +288,10 @@ impl Case {
                     return "ok";
                 }
                 let code = self.invite.shown_code().to_owned();
+                if name == "sendUsed" {
+                    self.send_used(&code).await;
+                    return "ok";
+                }
                 let carol = joiner(&self.group, &code, "Carol's phone").await;
                 // Once Ben's pass has ended the requests of Ana's removed
                 // device, its gone marker turns this one away (§13.2).
@@ -326,6 +330,27 @@ impl Case {
             }
             other => panic!("unknown event {other}"),
         }
+    }
+
+    /// Send the invite's request carrying Ben's keys, which history bound
+    /// when he joined, signed by them, as a joining device does: none once
+    /// the gone marker of Ana's removed device is there (§13.2).
+    async fn send_used(&self, code: &str) {
+        let code = read_invite_code(code).unwrap();
+        let gone = coven_storage::ObjectPath::device_gone(self.group.store, code.inviting_writer);
+        if self.group.storage.status(&gone).await.unwrap().is_some() {
+            return;
+        }
+        let request = coven_format::objects::JoinRequest {
+            invite: code.invite,
+            member: code.member,
+            keys: self.ben.identity.keys().public_keys(),
+            device_name: "Carol's phone".into(),
+        };
+        let path = code.request_path();
+        let bytes =
+            sealed_join_request(&code.secret, &path, &request, self.ben.identity.keys()).unwrap();
+        self.group.storage.create(&path, &bytes).await.unwrap();
     }
 
     /// An operation as `coven_operations` lists it.
@@ -491,11 +516,16 @@ fn cases() -> Vec<(&'static str, Vec<&'static str>)> {
         ("sent", vec!["send", "pass", "decline", "pass", "pass"]),
         ("sent", vec!["pass", "remove", "send", "pass"]),
         ("inPerson", vec!["send", "pass", "remove", "pass"]),
+        // A request whose keys a member already holds is neither offered
+        // nor approved: the invite waits until it expires.
+        ("sent", vec!["sendUsed", "pass", "retry", "pass", "expire", "pass"]),
+        ("inPerson", vec!["sendUsed", "pass", "pass", "cancel", "pass"]),
     ];
-    const EVENTS: [&str; 15] = [
+    const EVENTS: [&str; 16] = [
         "pass",
         "pass",
         "send",
+        "sendUsed",
         "approve",
         "decline",
         "cancel",

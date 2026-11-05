@@ -940,7 +940,8 @@ async fn a_request_not_signed_by_its_pair_is_refused_before_its_fields() {
         .find(|record| record.kind == operation_kind::INVITE)
         .unwrap();
     let work: super::InviteWork = serde_json::from_slice(&record.data).unwrap();
-    let result = ana.sync.open_request(&work, &bytes);
+    let state = coven_database::StoreState::default();
+    let result = ana.sync.open_request(&work, &state, &bytes);
     assert!(matches!(result, Err(SyncError::Crypto(_))), "{result:?}");
     ana.sync.database.close().await.unwrap();
 }

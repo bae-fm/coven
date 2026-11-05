@@ -26,7 +26,9 @@ pub(crate) fn belongs(state: &StoreState, audience: &Audience, id: &MemberId) ->
         }
 }
 
-fn fresh(state: &StoreState, keys: &coven_crypto::MemberPublicKeys) -> bool {
+/// Whether history has bound neither key of `keys` to a member, current or
+/// past (§12.3).
+pub(crate) fn fresh(state: &StoreState, keys: &coven_crypto::MemberPublicKeys) -> bool {
     state
         .bound_keys
         .iter()

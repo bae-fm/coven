@@ -456,13 +456,14 @@ fn copy_committed(from: &std::path::Path, to: &std::path::Path) {
     });
 }
 
-/// Carol's invite, and the request path its code names, with the member id
-/// the invite fixed for her.
+/// Carol's invite, delivered as `delivery`, and the request path its code
+/// names, with the member id the invite fixed for her.
 async fn carol_request_slot(
     group: &Group,
     ana: &Device,
+    delivery: InviteDelivery,
 ) -> (coven_format::codes::InviteCode, coven_foundation::id_source::MemberId) {
-    let invite = invite(ana).await;
+    let invite = carol_invite(ana, delivery).await;
     let code = read_invite_code(invite.shown_code()).unwrap();
     let record = ana
         .sync
@@ -498,7 +499,8 @@ async fn a_request_naming_another_member_is_not_offered_for_approval() {
     let group = Group::shared();
     let ana = group.device(1).await;
     group.create(&ana).await;
-    let (code, member) = carol_request_slot(&group, &ana).await;
+    let delivery = InviteDelivery::Sent { lifetime: InviteLifetime::Day };
+    let (code, member) = carol_request_slot(&group, &ana, delivery).await;
     let keys = coven_crypto::MemberKeys::generate().unwrap();
     let other = coven_foundation::id_source::MemberId(uuid::Uuid::from_u128(99));
     assert_ne!(other, member);
@@ -515,6 +517,49 @@ async fn a_request_naming_another_member_is_not_offered_for_approval() {
     assert_eq!(open.len(), 1);
     assert!(matches!(open[0].stage, InviteStage::Waiting { request: None, .. }));
     ana.sync.database.close().await.unwrap();
+}
+
+/// A request signed correctly by its own pair, but a pair history has
+/// already bound, Ben's, fails the check that both keys are fresh when Ana's
+/// phone opens it: a sent invite doesn't offer it for approval, and an
+/// in-person invite's pass approves nothing and journals no binding. The
+/// invite goes on waiting for a request (§13.2).
+#[tokio::test]
+async fn a_request_reusing_a_members_keys_is_not_offered_or_approved() {
+    for delivery in
+        [InviteDelivery::Sent { lifetime: InviteLifetime::Day }, InviteDelivery::InPerson]
+    {
+        let group = Group::shared();
+        let ana = group.device(1).await;
+        let ben = group.device(2).await;
+        group.create(&ana).await;
+        group.admit(&ana, &ben).await;
+        let (code, member) = carol_request_slot(&group, &ana, delivery).await;
+        let request = coven_format::objects::JoinRequest {
+            invite: code.invite,
+            member,
+            keys: ben.identity.keys().public_keys(),
+            device_name: "Carol's phone".into(),
+        };
+        publish_request(&group, &code, &request, ben.identity.keys()).await;
+        let pass = ana.sync.pass().await;
+        assert!(pass.is_ok(), "{delivery:?}: {:?}", pass.err());
+        assert!(requests(&ana).await.is_empty(), "{delivery:?}");
+        let open = listed(&ana).await;
+        assert_eq!(open.len(), 1, "{delivery:?}");
+        assert!(
+            matches!(open[0].stage, InviteStage::Waiting { request: None, .. }),
+            "{delivery:?}"
+        );
+        let journaled = ana.sync.database.operations().await.unwrap();
+        assert!(
+            journaled.iter().all(|record| record.kind != operation_kind::SEQUENCE),
+            "{delivery:?}: no binding is journaled"
+        );
+        for device in [&ana, &ben] {
+            device.sync.database.close().await.unwrap();
+        }
+    }
 }
 
 /// Ana's phone made Carol's invite and holds its secret; her laptop, a
