@@ -645,3 +645,36 @@ async fn a_restore_whose_commit_was_cut_resumes_and_publishes() {
     finished(&install, &owner, resume(&install, &owner).await.unwrap()).await;
     owner.close().await;
 }
+
+/// Ana discards Household on her laptop, and removing its directory fails
+/// once its entries are gone, as a crash there would leave it. Restoring
+/// Household on the laptop again finishes that deletion first: its remains
+/// would otherwise hold the store's id, and the restore would be refused as
+/// a store already there (§19.3, E1).
+#[cfg(unix)]
+#[tokio::test]
+async fn a_restore_finishes_a_cut_deletion_of_its_store() {
+    use std::os::unix::fs::PermissionsExt;
+    let owner = Owner::new(CloudProvider::S3, false).await;
+    let install = Installation::new();
+    let store = owner.directory.id();
+    let handle = install.restore(&owner).await;
+    handle.close().await.unwrap();
+    let directory = install.app.store_dir(&store);
+    let files = directory.area_path(coven_foundation::files::FileArea::AppProvided);
+    std::fs::write(files.join("kept"), b"bytes").unwrap();
+    std::fs::set_permissions(&files, std::fs::Permissions::from_mode(0o555)).unwrap();
+    assert!(matches!(
+        install.app.discard_store(&directory).await,
+        Err(StoreDeletionError::File(_))
+    ));
+    let deleting = install.root.path().join("stores").join(format!(".coven-delete-{store}"));
+    std::fs::set_permissions(deleting.join("files"), std::fs::Permissions::from_mode(0o755))
+        .unwrap();
+    let handle = install.restore(&owner).await;
+    assert_eq!(handle.store_id(), store);
+    handle.close().await.unwrap();
+    assert!(!deleting.exists());
+    assert_eq!(install.app.stores().await.unwrap().len(), 1);
+    owner.close().await;
+}

@@ -4,7 +4,7 @@
 
 use crate::{
     BootstrapError, CovenBuilder, CovenError, DbError, FileError, SavedRestoreEntry,
-    StoreDeletionError, StoreDir, StoreId,
+    StoreDeletionError, StoreDir, StoreId, StoreLockError,
 };
 use coven_crypto::custody::{KeyError, Keychain, StoreKeychain};
 use coven_foundation::files::{ReplacedBy, StoreDirAccess, StoreDirectories};
@@ -75,6 +75,16 @@ pub enum StoreListError {
     /// caller reports (E15).
     #[error(transparent)]
     Bug(#[from] crate::task::Bug),
+    /// Finishing the recorded deletion of `store` failed (E1). The store is
+    /// not listed, and the next listing finishes the deletion.
+    #[error("finishing the deletion of store {store} failed: {source}")]
+    Deletion {
+        /// The store being deleted.
+        store: StoreId,
+        /// Why its deletion stopped.
+        #[source]
+        source: StoreDeletionError,
+    },
 }
 
 impl From<FileError> for StoreListError {
@@ -92,6 +102,7 @@ impl crate::task::CarriesBug for StoreListError {
         match self {
             Self::Bug(bug) => Some(bug),
             Self::File(error) => error.bug(),
+            Self::Deletion { source, .. } => source.bug(),
             Self::Shutdown(_) => None,
         }
     }
@@ -142,8 +153,26 @@ impl Coven {
     /// `Unreadable` with why; a listing never substitutes an older name.
     /// A store whose replacement is unfinished lists with the call that
     /// finishes it, so the app can offer to; an unfinished first installation
-    /// is not listed.
+    /// is not listed. First it finishes every deletion a cut call left
+    /// recorded, which no call holds (§19.3, E1); a failure there fails the
+    /// listing with `StoreListError::Deletion`.
     pub async fn stores(&self) -> Result<Vec<ListedStore>, StoreListError> {
+        for store in self.directories.recorded_deletions().await? {
+            let directory = self.store_dir(&store);
+            let keys = StoreKeychain::new(self.keychain.clone(), store);
+            match finish_deletion(&directory, keys).await {
+                Ok(()) => tracing::info!(%store, "finished a recorded deletion"),
+                // A call is deleting it now, and finishes it.
+                Err(StoreDeletionError::Lock(StoreLockError::AlreadyOpen(_))) => {
+                    tracing::debug!(%store, "a call holds a recorded deletion")
+                }
+                Err(StoreDeletionError::Bug(bug)) => return Err(StoreListError::Bug(bug)),
+                Err(StoreDeletionError::Shutdown(shutdown)) => {
+                    return Err(StoreListError::Shutdown(shutdown))
+                }
+                Err(source) => return Err(StoreListError::Deletion { store, source }),
+            }
+        }
         let mut stores = Vec::new();
         for id in self.directories.store_ids().await? {
             stores.push(match self.read_listed(id).await {
@@ -210,12 +239,13 @@ impl Coven {
     /// Refused while a writer, read-only handle, file stream or a running
     /// replacement remains; storage is untouched. A handle of it in this
     /// process that is closing, or whose last clone was dropped, is waited
-    /// for. Retrying finishes a deletion that failed partway.
+    /// for. Its first step renames the store's directory, which hides the
+    /// store and records the deletion: one that stops part way, a crash
+    /// included, is finished by retrying, by the next `stores()`, or by a
+    /// restore or join of the store (§19.3).
     pub async fn discard_store(&self, store_dir: &StoreDir) -> Result<(), StoreDeletionError> {
-        store_dir.closed().await?;
-        let directory = store_dir.clone();
         let keys = StoreKeychain::new(self.keychain.clone(), store_dir.id());
-        crate::task::blocking("discard the store", move || delete(&directory, &keys)).await?
+        finish_deletion(store_dir, keys).await
     }
 
     /// The saved entries of this app's keychain service, in iCloud Keychain on
@@ -255,8 +285,36 @@ impl Coven {
     }
 }
 
-pub(crate) fn delete(directory: &StoreDir, keys: &StoreKeychain) -> Result<(), StoreDeletionError> {
-    let lock = directory.lock_for_deletion()?;
+/// Delete the store at `directory` from this device, or finish a deletion a
+/// cut call left recorded, once no instance of it in this process is
+/// closing.
+pub(crate) async fn finish_deletion<E>(directory: &StoreDir, keys: StoreKeychain) -> Result<(), E>
+where
+    E: From<StoreLockError>
+        + From<FileError>
+        + From<KeyError>
+        + From<crate::task::TaskFailed>
+        + Send
+        + 'static,
+{
+    directory.closed().await?;
+    let directory = directory.clone();
+    crate::task::blocking("delete the store", move || delete(&directory, &keys)).await?
+}
+
+/// Delete the store at `directory` from this device: rename its directory to
+/// its deletion name, which hides the store and records the deletion, then
+/// delete this device's entries for it, then the directory and its lock
+/// files (§19.3, E1). Each step finds the last one's work done, so a
+/// deletion stopped anywhere is finished by deleting again.
+pub(crate) fn delete<E>(directory: &StoreDir, keys: &StoreKeychain) -> Result<(), E>
+where
+    E: From<StoreLockError> + From<FileError> + From<KeyError>,
+{
+    let mut lock = directory.lock_for_deletion()?;
+    if let Some(lock) = &mut lock {
+        lock.unpublish()?;
+    }
     keys.delete_device_entries()?;
     if let Some(lock) = lock {
         lock.remove_directory()?;

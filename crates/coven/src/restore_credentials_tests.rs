@@ -329,7 +329,7 @@ async fn deleting_a_restored_store_keeps_the_code_and_separate_key() {
     assert_key(&install, owner.directory.id(), &owner.s3_credentials().unwrap());
     let code = person.restore_code().unwrap().unwrap();
     handle.close().await.unwrap();
-    crate::coven::delete(&directory, &store).unwrap();
+    crate::coven::delete::<StoreDeletionError>(&directory, &store).unwrap();
     assert!(install.app.stores().await.unwrap().is_empty());
     assert!(store.device_id().unwrap().is_none());
     assert!(store.storage_credentials().unwrap().is_none());

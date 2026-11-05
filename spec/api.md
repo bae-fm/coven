@@ -180,9 +180,13 @@ pub enum Audience {
   credentials or contacts storage. Before setup they return
   `None`; once set up, the location stays, and unreadable settings remain an error.
 - Store lock files live beside each store directory: the writer, reader and
-  bootstrap locks. Deletion holds all three while removing the directory, then
+  bootstrap locks. Deletion holds all three. It first renames the directory to
+  its deletion name, which hides the store and records the deletion, then
+  deletes the device's entries for the store, removes the directory, and
   releases and removes every lock file, so a deleted store leaves nothing named
-  for it. Holding the bootstrap lock keeps out a running restore, join or
+  for it. What a cut deletion leaves, the renamed directory or the lock files
+  alone, would refuse the store's id to creation, restore and join; listing the
+  stores, and a restore or join of the store, finish it first (§11.6). Holding the bootstrap lock keeps out a running restore, join or
   replacement: after its swap, a running `reset_device`, `restore_device` or
   `resume_replacement` holds only that lock between steps, and deletion must
   not remove files under it. Lock acquisition, creation and lock-file removal are serialized by the
@@ -1894,6 +1898,9 @@ pub enum StoreListError {
     Shutdown(Shutdown),
     /// Listing the stores panicked on the blocking pool: a bug (E15).
     Bug(Bug),
+    /// Finishing the recorded deletion of `store` failed. The store is not
+    /// listed; the next listing finishes its deletion (§11.6).
+    Deletion { store: StoreId, source: StoreDeletionError },
 }
 
 /// A store creation failure, with publication and rollback failures explicit.
@@ -2141,7 +2148,9 @@ impl Coven {
     /// name can't be read is listed as `Unreadable` with why; no older name is
     /// substituted.
     /// A store whose replacement is unfinished is listed with the call that
-    /// finishes it; an unfinished first installation is not listed.
+    /// finishes it; an unfinished first installation is not listed. First it
+    /// finishes every deletion a cut call left recorded that no call holds;
+    /// a failure there is `StoreListError::Deletion` (§11.6).
     pub async fn stores(&self) -> Result<Vec<ListedStore>, StoreListError>;
 
     /// The directory of the store with `id`.
@@ -2158,8 +2167,10 @@ impl Coven {
     /// store opens; naming the same folder again is allowed (E1, §21.2).
     pub fn set_temporary_directory(directory: &Path) -> Result<(), TemporaryDirectoryError>;
 
-    /// Deletes a closed store without opening it: this device's own keychain
-    /// entries for it, then its directory. The person's saved restore code and
+    /// Deletes a closed store without opening it: it renames the store's
+    /// directory to its deletion name, which hides the store and records the
+    /// deletion, then deletes this device's own keychain entries for it, then
+    /// the directory and its lock files. The person's saved restore code and
     /// S3 key stay for their next devices (§13.1). Unsent
     /// work is lost; membership stays until this device is removed. For a
     /// store that cannot open, or to finish `CovenHandle::delete_store`. A
@@ -2169,8 +2180,9 @@ impl Coven {
     /// Refused while a writer, read-only handle, file stream, file I/O or a
     /// running replacement holds its lock; storage is untouched. A handle in
     /// this process that is closing, or whose last clone was dropped, is
-    /// waited for first, as opening waits for it. Retrying finishes a
-    /// deletion that failed partway.
+    /// waited for first, as opening waits for it. A deletion that stopped
+    /// part way, a crash included, is finished by retrying, by the next
+    /// `stores()`, or by a restore or join of the store (§11.6).
     pub async fn discard_store(&self, store_dir: &StoreDir) -> Result<(), StoreDeletionError>;
 }
 

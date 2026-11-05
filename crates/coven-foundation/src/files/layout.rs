@@ -108,6 +108,26 @@ impl StoreDirectories {
         .map_err(FileError::from)?
     }
 
+    /// The stores whose deletion from this device is recorded and
+    /// unfinished, ordered by id: a directory under its deletion name, or the
+    /// store's writer or reader lock file with no directory. A deletion's
+    /// first step renames the store's directory, so either is what a cut
+    /// deletion leaves (E1).
+    pub async fn recorded_deletions(&self) -> Result<Vec<StoreId>, FileError> {
+        let root = self.stores();
+        crate::task::blocking("list recorded deletions", move || recorded_deletions(&root)).await?
+    }
+
+    /// Whether the deletion of the store with `id` is recorded and
+    /// unfinished, as `recorded_deletions` reads it.
+    pub async fn deletion_recorded(&self, id: StoreId) -> Result<bool, FileError> {
+        let published = self.stores().join(id.to_string());
+        crate::task::blocking("inspect a recorded deletion", move || {
+            deletion_recorded(&published, id)
+        })
+        .await?
+    }
+
     async fn listed(&self, installations: Installations) -> Result<Vec<StoreId>, FileError> {
         let layout = self.clone();
         crate::task::blocking("list stores", move || layout.list_stores(installations)).await?
@@ -180,6 +200,61 @@ impl StoreDirectories {
     ) -> Result<StoreDir, DirectoryCreationError> {
         crate::files::creation::create(&self.stores(), id, ids, false, self.protection)
     }
+}
+
+/// Whether a deletion of the store whose published directory is `published`
+/// is recorded: its directory under the deletion name, or, with no directory
+/// at all, its writer or reader lock file.
+fn deletion_recorded(published: &std::path::Path, id: StoreId) -> Result<bool, FileError> {
+    use super::atomic_file::exists;
+    // Creation refuses an id while its deletion's remains are there, so a
+    // published directory has none beside it.
+    if exists("inspect a store", published)? {
+        return Ok(false);
+    }
+    if exists("inspect a store's deletion", &super::lock::deletion_path(published, id))? {
+        return Ok(true);
+    }
+    for path in super::lock::lock_paths(published, id) {
+        if exists("inspect a store's lock", &path)? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn recorded_deletions(root: &std::path::Path) -> Result<Vec<StoreId>, FileError> {
+    let entries = match fs::read_dir(root) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(source) => return Err(FileError::at("list store directories", root, source)),
+    };
+    let mut named = std::collections::BTreeSet::new();
+    for entry in entries {
+        let entry =
+            entry.map_err(|source| FileError::at("read store directory entry", root, source))?;
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            tracing::debug!(name = ?name, "entry name is not UTF-8, so no store's");
+            continue;
+        };
+        // The names a deletion leaves: `.coven-delete-<id>`, `.<id>.lock` and
+        // `.<id>.readers.lock`.
+        let id = name
+            .strip_prefix(".coven-delete-")
+            .or_else(|| name.strip_prefix('.').and_then(|rest| rest.strip_suffix(".readers.lock")))
+            .or_else(|| name.strip_prefix('.').and_then(|rest| rest.strip_suffix(".lock")));
+        if let Some(Ok(id)) = id.map(crate::id_source::canonical_uuid) {
+            named.insert(StoreId(id));
+        }
+    }
+    let mut recorded = Vec::new();
+    for id in named {
+        if deletion_recorded(&root.join(id.to_string()), id)? {
+            recorded.push(id);
+        }
+    }
+    Ok(recorded)
 }
 
 impl StoreDirectories {

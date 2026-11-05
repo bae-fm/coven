@@ -1520,6 +1520,9 @@ tables = [
     "Coven::builder",
     "Coven::storage_config",
     "Coven::discard_store",
+    # Listing finishes each deletion a cut call left recorded, with the
+    # store's own entries.
+    "Coven::stores",
 ]
 # Recovery discovery and forgetting scope the installation's keychain to each
 # store's entries.

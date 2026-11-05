@@ -3444,6 +3444,22 @@ storage, is an operation, held to §11.3 and §11.4:
   never reached its point of no return is undone. Work past it settles its
   claim (§5.1) once the device connects, then finishes.
 - **Dropped calls keep going,** to the end or to the undo.
+- **Deleting from the device only goes forward.** Deleting a store from the
+  device removes this device's keychain entries for it, its directory and
+  the lock files beside it, which no transaction holds together. Its first
+  step renames the directory to its deletion name: the store leaves every
+  listing and open, and the name records that its deletion is under way.
+  Ana discards Household on her laptop, which crashes once the entries are
+  gone. Had the entries gone first, the laptop's listing would show
+  Household with no device id or keys, a store that can't open though she
+  deleted it
+  ([`entries_first_breaks_store`](proofs/sequence/CovenSequence/StoreDiscard.lean)).
+  What a cut deletion leaves, the directory under its deletion name or the
+  lock files alone, holds the store's id: creating, restoring or joining
+  the store again would be refused for good
+  ([`unfinished_deletion_blocks_store`](proofs/sequence/CovenSequence/StoreDiscard.lean)).
+  So listing the stores, and a restore or join of the store, finish a
+  recorded deletion no call holds, as discarding it again does.
 - **Space isn't state.** A crash can leave behind an object nothing refers to,
   such as the provider check's test object or a detection probe (§20.8). No
   state is wrong, only space taken, so coven leaves it; this is not a repair
@@ -3460,6 +3476,7 @@ These calls, and the work passes do for them, follow the rule:
 | Replacing this device's installation (`reset_device`, `restore_device`, §19.3) | the replacement's record in the store's directory and its kept entry, then its registration's operation | the record, kept just before the registration's claim |
 | Taking provider access back after a removal (§14.2) | the provider request, fixed before it is sent | none: it is sent again until confirmed |
 | Deleting gone devices' files (`clean_up_gone_devices_files`, §17.10) | the files operation | none: it deletes only what nothing refers to |
+| Deleting a store from the device (`discard_store`, and the last step of `delete_store`, api.md [E1](api.md#e1-opening)) | the store's directory, renamed to its deletion name | none: it writes nothing to storage, and only goes forward |
 | Sending writes and uploading files (§4, §17.9) | the send queue and the upload queue | the writes slot's claim; a file's confirmed upload |
 | Setting up storage (`setup_s3_storage`, `setup_oauth_storage`, `setup_cloudkit_storage`, §20.8) | its operation, with the credentials it connects with kept apart from the committed ones | the location marker or slot 1 when creating; the `Set access` claim, or committing, when reconnecting |
 
@@ -7985,8 +8002,8 @@ laptop in place from her current restore code instead (§13.1).
   whichever device they name by then, the kept entry with them. Without this,
   a store whose call can't finish, say because its storage is gone, could
   neither open nor leave the device. Deleting is refused while the call that
-  began it is still running, and an interrupted deletion finishes when
-  retried.
+  began it is still running. An interrupted deletion finishes as any
+  deletion from the device does (§11.6).
 - Only owed provider cleanup carries over: owed revocations of account sharing,
   and the old installation's open invites, which become owed cleanup. They are
   copied into the new database, with its reset notice, before it opens. A
@@ -11019,6 +11036,8 @@ Write-ups explain each model and state its assumptions:
 | *Body.* A replacement that records itself only at the swap opens the old installation after a crash once its registration landed; one that moves the old installation back after a failure past the swap does the same; a cancel that doesn't wait removes the new installation while its registration is on its way | `crashed_replacement_opens_old`, `unswapped_replacement_opens_old`, `cancelled_replacement_missing` | `proofs/sequence/CovenSequence/DeviceReplacement.lean` | §19.3 |
 | A new installation whose commit only goes forward, and whose ending deletes every device-only entry of its store, leaves no custody for a store the device doesn't have, publishes only whole custody, and settles, published or removed | `never_orphaned`, `published_whole`, `settles` | `proofs/sequence/CovenSequence/BootstrapCommit.lean` | §13.4, §11.6 |
 | *Body.* Ending a restore whose commit a crash cut, deleting only its kept sign-in and record, leaves the device id and keys the commit wrote | `cut_commit_orphans_custody` | `proofs/sequence/CovenSequence/BootstrapCommit.lean` | §13.4 |
+| A deletion from the device that first renames the store's directory, and is finished by the next listing or restore, never leaves the store listed without its entries, and settles with the store whole or gone with its entries and lock files | `never_broken`, `settles` | `proofs/sequence/CovenSequence/StoreDiscard.lean` | §11.6 |
+| *Body.* Deleting the entries first leaves the store listed with no device id or keys after a crash; with nothing finishing a recorded deletion, its remains keep the store's id taken for good | `entries_first_breaks_store`, `unfinished_deletion_blocks_store` | `proofs/sequence/CovenSequence/StoreDiscard.lean` | §11.6 |
 | Store-reset authority is checked in the state before the slot (circle-reset authority is left to the model's supplied audience policy) | `store_reset_authorized` | `proofs/sequence/CovenSequence/Authority.lean` | §19.4 |
 | An applied reset loads its chosen rows without replaying the slots before it | `reset_replaces` | `proofs/sequence/CovenSequence/Preparations.lean` | §19.4 |
 | From empty storage, with every create recorded and the journal kept, a slot signed by this device's id that it never attempted means another copy | `foreign_slot_means_copy` | `proofs/sequence/CovenSequence/Settle.lean` | §19.3 |

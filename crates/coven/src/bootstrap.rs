@@ -186,6 +186,18 @@ impl From<coven_storage::providers::OAuthError> for BootstrapError {
     }
 }
 
+impl From<StoreLockError> for BootstrapError {
+    fn from(error: StoreLockError) -> Self {
+        BootstrapDirectoryError::from(error).into()
+    }
+}
+
+impl From<coven_foundation::files::FileError> for BootstrapError {
+    fn from(error: coven_foundation::files::FileError) -> Self {
+        BootstrapDirectoryError::from(error).into()
+    }
+}
+
 impl From<KeyError> for BootstrapError {
     fn from(error: KeyError) -> Self {
         match error {
@@ -389,6 +401,13 @@ async fn bootstrap_device(
     let device_entries = StoreKeychain::new(keychain.clone(), id);
     let clock = builder.clock.clone();
     let started = clock.elapsed();
+    // A deletion of the store a cut call left recorded still holds its id
+    // (§19.3): it is finished first.
+    if builder.directories.deletion_recorded(id).await.map_err(BootstrapDirectoryError::from)? {
+        let directory = builder.directories.store_dir(&id);
+        let keys = StoreKeychain::new(keychain.clone(), id);
+        crate::coven::finish_deletion::<BootstrapError>(&directory, keys).await?;
+    }
     let pending = builder.directories.begin_bootstrap(id, builder.ids.as_ref()).await?;
     // The store's one unfinished installation lists one call. A restore on
     // a waiting join's installation, or a join on a recorded restore's,

@@ -131,30 +131,20 @@ async fn host_secrets_identity_and_failed_deletion_survive_reopen() {
     assert_eq!(handle.host_secret("token").unwrap().as_deref(), Some("the app's token"));
     handle.close().await.unwrap();
     std::fs::write(directory.database_path(), b"damaged database").unwrap();
-    app.fail_next_keychain_operation();
-    assert!(matches!(app.discard_store(&directory).await, Err(StoreDeletionError::Key(_))));
     assert!(matches!(
         app.stores().await.unwrap().as_slice(),
         [ListedStore::Unreadable { id, reason: CovenError::Database(DbError::DamagedDatabase) }]
             if *id == directory.id()
     ));
-    assert_eq!(directory.settings().unwrap().id, directory.id());
+    app.fail_next_keychain_operation();
+    assert!(matches!(app.discard_store(&directory).await, Err(StoreDeletionError::Key(_))));
     app.discard_store(&directory).await.unwrap();
     assert!(app.stores().await.unwrap().is_empty());
     // Recreate exactly this store id to prove deletion removed all its keychain entries.
-    struct SameStore(std::sync::Mutex<Option<StoreId>>, UuidIds);
-    impl IdSource for SameStore {
-        fn new_id(&self) -> uuid::Uuid {
-            match self.0.lock().unwrap().take() {
-                Some(id) => id.0,
-                None => self.1.new_id(),
-            }
-        }
-    }
     let directory = app
         .create_closed_store(
             "replacement",
-            Arc::new(SameStore(std::sync::Mutex::new(Some(directory.id())), UuidIds)),
+            Arc::new(SameStore(std::sync::Mutex::new(Some(directory.id())))),
         )
         .await
         .unwrap();
@@ -304,7 +294,7 @@ async fn saved_location_survives_lost_credentials_and_reopen_without_custody_rea
     std::fs::write(directory.database_path(), b"damaged").unwrap();
     app.fail_next_keychain_operation();
     assert_eq!(Coven::storage_config(&directory).await.unwrap(), expected);
-    assert!(matches!(app.discard_store(&directory).await, Err(StoreDeletionError::Key(_))));
+    app.fail_keychain_operations_after(&[]);
     directory.owned_file(StoreFile::StorageSettings).replace(b"malformed").unwrap();
     assert!(matches!(
         Coven::storage_config(&directory).await,
@@ -355,10 +345,11 @@ fn person_entries(app: &Coven, store: StoreId) -> (Option<Vec<u8>>, Option<Vec<u
 
 /// Carol's laptop stopped right after the swap of a reset or restore, and
 /// the app discards the store instead of finishing it. A first attempt fails
-/// partway through the keychain and leaves the store listed as it was; the
-/// retry removes both installations, the record, the hidden directory and
-/// every device-only entry, which may already name the new device. It never
-/// touches the person's saved restore code and S3 key (§13.1, §19.3).
+/// partway through the keychain, the store already hidden; the next listing
+/// finishes it, removing both installations, the record, the hidden
+/// directory and every device-only entry, which may already name the new
+/// device. It never touches the person's saved restore code and S3 key
+/// (§13.1, §19.3).
 #[tokio::test]
 async fn discarding_a_store_whose_replacement_stopped_after_its_swap_removes_both_copies() {
     for by in [ReplacedBy::Reset, ReplacedBy::Restore] {
@@ -414,18 +405,18 @@ async fn discarding_a_store_whose_replacement_stopped_after_its_swap_removes_bot
         // The old installation waits in its archive beside the new one.
         assert!(path.join(".coven-replacement").exists());
         assert!(path.join(format!("discarded-device-{}", record.reset.old_device.0)).exists());
-        // Stopped after removing the store keys, before the member keys.
+        // Stopped after removing the store keys, before the member keys:
+        // the store is hidden already, and the next listing finishes it.
         carol.app.fail_keychain_operations_after(&[3]);
         assert!(matches!(
             carol.app.discard_store(&directory).await,
             Err(StoreDeletionError::Key(_))
         ));
-        assert_eq!(carol.app.readable_stores().await[0].unfinished_replacement, Some(by));
-        assert_eq!(directory.unfinished_replacement().unwrap(), Some(record));
+        assert!(!path.exists());
         assert!(device_entries_remain(&carol.app, store));
         // Discarding reaches no person entry: refusing them changes nothing.
         carol.app.refuse_person_entry_operations(true);
-        carol.app.discard_store(&directory).await.unwrap();
+        assert!(carol.app.stores().await.unwrap().is_empty());
         carol.app.refuse_person_entry_operations(false);
         assert!(!path.exists());
         assert!(carol.app.stores().await.unwrap().is_empty());
@@ -529,4 +520,77 @@ async fn a_store_whose_database_is_damaged_is_listed_as_unreadable_beside_the_ot
         ] if *first == good.id() && name == "Household" && *second == damaged.id()
     ));
     assert_eq!(listed.iter().map(ListedStore::id).collect::<Vec<_>>(), [good.id(), damaged.id()]);
+}
+
+/// The entries in an app's stores directory whose names contain `store`.
+fn files_named_for(app_dir: &std::path::Path, store: StoreId) -> Vec<String> {
+    std::fs::read_dir(app_dir.join("stores"))
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .filter(|name| name.contains(&store.to_string()))
+        .collect()
+}
+
+/// Creates the store with the id `store`, once.
+struct SameStore(std::sync::Mutex<Option<StoreId>>);
+impl IdSource for SameStore {
+    fn new_id(&self) -> uuid::Uuid {
+        self.0.lock().unwrap().take().map_or_else(|| UuidIds.new_id(), |id| id.0)
+    }
+}
+
+/// Ana discards Household on her laptop, and the keychain refuses the first
+/// of its entries' deletions. The deletion's first step has hidden the store
+/// already: no listing shows a store whose entries may be gone, and the next
+/// listing finishes the deletion, leaving nothing named for Household, so it
+/// can be made again with the same id (§19.3, E1).
+#[tokio::test]
+async fn a_discard_that_stops_part_way_is_hidden_and_the_listing_finishes_it() {
+    let root = tempfile::tempdir().unwrap();
+    let app = Coven::in_memory(root.path().to_owned());
+    let directory = app.create_closed_store("Household", Arc::new(UuidIds)).await.unwrap();
+    let store = directory.id();
+    assert!(device_entries_remain(&app, store));
+    app.fail_next_keychain_operation();
+    assert!(matches!(app.discard_store(&directory).await, Err(StoreDeletionError::Key(_))));
+    assert!(device_entries_remain(&app, store));
+    assert!(app.stores().await.unwrap().is_empty());
+    assert!(!device_entries_remain(&app, store));
+    assert_eq!(files_named_for(root.path(), store), Vec::<String>::new());
+    let again = app
+        .create_closed_store("Household", Arc::new(SameStore(std::sync::Mutex::new(Some(store)))))
+        .await
+        .unwrap();
+    assert_eq!(again.id(), store);
+}
+
+/// Ana discards Household, and removing its directory fails once its
+/// entries are gone, as a crash there would leave it: the directory under
+/// its deletion name and the lock files beside it. Nothing would ever remove
+/// them, and making Household again with its id would be refused for good.
+/// The next listing finishes the deletion (§19.3, E1).
+#[cfg(unix)]
+#[tokio::test]
+async fn a_discard_stopped_after_its_entries_is_finished_by_the_listing() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = tempfile::tempdir().unwrap();
+    let app = Coven::in_memory(root.path().to_owned());
+    let directory = app.create_closed_store("Household", Arc::new(UuidIds)).await.unwrap();
+    let store = directory.id();
+    let files = directory.area_path(coven_foundation::files::FileArea::AppProvided);
+    std::fs::write(files.join("kept"), b"bytes").unwrap();
+    std::fs::set_permissions(&files, std::fs::Permissions::from_mode(0o555)).unwrap();
+    assert!(matches!(app.discard_store(&directory).await, Err(StoreDeletionError::File(_))));
+    assert!(!device_entries_remain(&app, store));
+    let deleting = root.path().join("stores").join(format!(".coven-delete-{store}"));
+    std::fs::set_permissions(deleting.join("files"), std::fs::Permissions::from_mode(0o755))
+        .unwrap();
+    assert!(!files_named_for(root.path(), store).is_empty());
+    assert!(app.stores().await.unwrap().is_empty());
+    assert_eq!(files_named_for(root.path(), store), Vec::<String>::new());
+    let again = app
+        .create_closed_store("Household", Arc::new(SameStore(std::sync::Mutex::new(Some(store)))))
+        .await
+        .unwrap();
+    assert_eq!(again.id(), store);
 }

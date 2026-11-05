@@ -131,9 +131,34 @@ impl HeldBootstrap {
 }
 
 impl StoreDeletionLock {
-    /// Unpublish the directory and remove its contents before releasing and
-    /// removing its sibling locks. Retry failures through `lock_for_deletion`,
-    /// including a failure after only the lock files remain.
+    /// Rename the store's directory to its deletion name, durably: the store
+    /// leaves every listing and open, and the directory under that name, or
+    /// the store's lock files without a directory, record that its deletion
+    /// is under way, for the next listing, restore or join of the store to
+    /// finish (§11.6, E1). Done already, it changes nothing.
+    pub fn unpublish(&mut self) -> Result<(), FileError> {
+        let _layout = lock_layout(self.store.directory.parent().expect("store parent"))?;
+        self.unpublish_locked()
+    }
+
+    /// `unpublish`, under the layout lock.
+    fn unpublish_locked(&mut self) -> Result<(), FileError> {
+        let destination = deletion_path(&self.store.directory, self.store.id);
+        if self.store.directory != destination && inspect_directory(&self.store.directory)? {
+            crate::files::atomic_file::rename_new(&self.store.directory, &destination).map_err(
+                |source| FileError::at("unpublish store", &self.store.directory, source),
+            )?;
+            self.store.directory = destination;
+            #[cfg(unix)]
+            sync_removal(&self.store.directory)?;
+        }
+        Ok(())
+    }
+
+    /// Unpublish the directory, as `unpublish` does, and remove its contents
+    /// before releasing and removing its sibling locks. Retry failures
+    /// through `lock_for_deletion`, including a failure after only the lock
+    /// files remain.
     pub fn remove_directory(mut self) -> Result<(), FileError> {
         let root = self.store.directory.parent().expect("store parent");
         // Every lock acquisition and creation also takes this lock. None can
@@ -142,17 +167,8 @@ impl StoreDeletionLock {
         // file at the same path.
         let _layout = lock_layout(root)?;
         let paths = deletion_lock_paths(&self.store.directory, self.store.id);
-        let destination = deletion_path(&self.store.directory, self.store.id);
+        self.unpublish_locked()?;
         if inspect_directory(&self.store.directory)? {
-            if self.store.directory != destination {
-                crate::files::atomic_file::rename_new(&self.store.directory, &destination)
-                    .map_err(|source| {
-                        FileError::at("unpublish store", &self.store.directory, source)
-                    })?;
-                self.store.directory = destination;
-            }
-            #[cfg(unix)]
-            sync_removal(&self.store.directory)?;
             std::fs::remove_dir_all(&self.store.directory).map_err(|source| {
                 FileError::at("remove store directory", &self.store.directory, source)
             })?;
