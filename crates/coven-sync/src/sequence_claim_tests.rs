@@ -1,6 +1,7 @@
 use crate::sequence_sync::tests::*;
 use crate::*;
 use coven_format::admin::StoreChange;
+use coven_foundation::clock::Clock;
 use coven_storage::{test_utils::Faults, ObjectPath, Storage};
 
 #[tokio::test]
@@ -766,5 +767,157 @@ async fn the_first_devices_offline_writes_at_zero_check_against_the_creation() {
     assert!(history.owner(ben.sync.device, history.added(ben.sync.device).unwrap()).is_ok());
     for device in [&ana, &ben] {
         device.database().close().await.unwrap();
+    }
+}
+
+/// Ana and Ben share the Gifts circle.
+async fn gifts() -> (Group, Device, Device, coven_foundation::id_source::CircleId) {
+    let group = Group::new();
+    let ana = group.device(1).await;
+    let ben = group.device(2).await;
+    group.create(&ana).await;
+    group.admit(&ana, &ben).await;
+    let circle = ana.sync.create_circle("Gifts".into()).await.unwrap();
+    ana.sync
+        .administer(StoreChange::AddCircleMember { circle, member: ben.identity.member() })
+        .await
+        .unwrap();
+    ben.sync.pass().await.unwrap();
+    (group, ana, ben, circle)
+}
+
+/// The slots `device` has tried to create.
+fn slot_creates(device: &Device) -> usize {
+    device
+        .storage
+        .request_trace()
+        .into_iter()
+        .filter(|request| {
+            matches!(request, coven_storage::test_utils::MemoryRequest::Create(path)
+                if path.slot_number().is_some())
+        })
+        .count()
+}
+
+/// How many slots Ben's rotation of Gifts creates: its key copies, then its entry.
+async fn rotation_creates() -> usize {
+    let (_group, ana, ben, circle) = gifts().await;
+    let before = slot_creates(&ben);
+    ben.sync.rotate_key(coven_merge::Audience::Circle(circle)).await.unwrap();
+    let creates = slot_creates(&ben) - before;
+    for device in [&ana, &ben] {
+        device.sync.database.close().await.unwrap();
+    }
+    creates
+}
+
+/// Hold each of Ben's rotation creations in turn. `at_entry` runs while the
+/// last, the entry's own, is held.
+async fn rotating(
+    group: &Group,
+    ben: &Device,
+    circle: coven_foundation::id_source::CircleId,
+    creates: usize,
+    at_entry: impl AsyncFnOnce(),
+) -> Result<(), SyncError> {
+    let arm = || async {
+        let (started, observed) = tokio::sync::oneshot::channel();
+        let (resume, held) = tokio::sync::oneshot::channel();
+        group
+            .storage
+            .hold_next_creation(coven_storage::ObjectPrefix::all(group.store), started, held)
+            .await;
+        (observed, resume)
+    };
+    let mut current = Some(arm().await);
+    let rotation = ben.sync.rotate_key(coven_merge::Audience::Circle(circle));
+    let steering = async {
+        let mut at_entry = Some(at_entry);
+        for step in 0..creates {
+            let (observed, resume) = current.take().unwrap();
+            observed.await.unwrap();
+            if step + 1 < creates {
+                current = Some(arm().await);
+            } else {
+                at_entry.take().unwrap()().await;
+            }
+            resume.send(()).unwrap();
+        }
+    };
+    let (result, ()) = tokio::join!(rotation, steering);
+    result
+}
+
+/// Ben rotates the Gifts key. His key copies land, and his entry's slot is
+/// created with its reply lost. After a restart his first pass settles that
+/// slot, finishes the rotation, and claims no second entry (§11.1, §11.4).
+#[tokio::test]
+async fn a_rotation_whose_reply_was_lost_settles_its_slot_before_finishing() {
+    let creates = rotation_creates().await;
+    let (group, ana, ben, circle) = gifts().await;
+    let introductions = ben.sync.session.lock().await.history.introductions.len();
+    let result = rotating(&group, &ben, circle, creates, async || {
+        ben.storage.set_faults(Faults { lose_completion_reply: true, ..Faults::none() }).await;
+    })
+    .await;
+    assert!(matches!(result, Err(SyncError::Storage(_))), "{result:?}");
+    assert_eq!(ben.sync.database.operations().await.unwrap().len(), 1);
+
+    let ben = group.reopen(ben).await;
+    group.clock.set(group.clock.now() + std::time::Duration::from_secs(600));
+    ben.sync.pass().await.unwrap();
+    let left = ben.sync.database.operations().await.unwrap();
+    assert!(left.is_empty(), "{left:?}");
+    assert!(ben.sync.database.current_claim().await.unwrap().is_none());
+    let session = ben.sync.session.lock().await;
+    assert_eq!(session.history.introductions.len(), introductions + 1, "the rotation lands once");
+    let slot = ben.sync.database.applied_slot().await.unwrap();
+    drop(session);
+    assert!(group
+        .storage
+        .status(&ObjectPath::slot(group.store, (slot + 1).try_into().unwrap()))
+        .await
+        .unwrap()
+        .is_none());
+    ana.sync.pass().await.unwrap();
+    assert_eq!(ana.sync.database.applied_slot().await.unwrap(), slot);
+    for device in [&ana, &ben] {
+        device.sync.database.close().await.unwrap();
+    }
+}
+
+/// Ben's entry is beaten to its slot by Ana's removal of him from Gifts. His
+/// call applies it, undoes what is left and fails; the copies he claimed stay
+/// in history, and the key they carry counts as exposed (§11.3, §12.2).
+#[tokio::test]
+async fn a_rotation_beaten_to_its_slot_by_a_removal_is_rejected_and_its_copies_stay_exposed() {
+    let creates = rotation_creates().await;
+    let (group, ana, ben, circle) = gifts().await;
+    let audience = coven_merge::Audience::Circle(circle);
+    let keys_before: Vec<_> =
+        ben.sync.keys.read().unwrap().unwrap().circle_key_ids(circle).collect();
+    let copies = ben.sync.session.lock().await.history.copies.len();
+    let result = rotating(&group, &ben, circle, creates, async || {
+        ana.sync
+            .administer(StoreChange::RemoveCircleMember { circle, member: ben.identity.member() })
+            .await
+            .unwrap();
+    })
+    .await;
+    assert!(
+        matches!(result, Err(SyncError::Rejected(OperationRejection::NotAllowed))),
+        "{result:?}"
+    );
+    assert!(ben.sync.database.operations().await.unwrap().is_empty());
+    let ring = ben.sync.keys.read().unwrap().unwrap();
+    let rotated: Vec<_> =
+        ring.circle_key_ids(circle).filter(|key| !keys_before.contains(key)).collect();
+    assert_eq!(rotated.len(), 1, "the new key stays in custody");
+    let session = ben.sync.session.lock().await;
+    assert!(session.history.copies.len() > copies, "the claimed copies stay in history");
+    assert!(session.history.exposed(&audience, rotated[0]));
+    drop(session);
+    for device in [&ana, &ben] {
+        device.sync.database.close().await.unwrap();
     }
 }
