@@ -187,10 +187,6 @@ impl CommitSubscription {
         }
     }
 
-    pub(crate) fn closed() -> Self {
-        Self::new(true, None, None)
-    }
-
     pub(crate) fn state(&self) -> CommitState {
         self.receiver.borrow().clone()
     }
@@ -457,11 +453,6 @@ impl CommitObserver {
         commits.begin();
         commits.finish(reads.clone());
         crate::DatabaseChanges::new(commits, reads, first)
-    }
-
-    /// A watch that has already closed, for a handle that queues no work.
-    pub(crate) fn closed_changes(&self) -> crate::DatabaseChanges {
-        crate::DatabaseChanges::new(CommitSubscription::closed(), Vec::new(), true)
     }
 
     /// Keep every commit made from now on outside `attempt`, until the

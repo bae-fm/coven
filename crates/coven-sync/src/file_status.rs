@@ -8,7 +8,7 @@ use crate::{
     files::{file_failure::upload_subject, Files, FilesInner},
     FileMissingReason, FileReadError, PendingReason, PendingRecord,
 };
-use coven_database::{DbError, FileLocation, FilePlace, FileRef};
+use coven_database::{DbError, FileLocation, FilePlace, FileRef, Mode};
 use coven_format::file::FileHeader;
 use coven_foundation::id_source::DeviceId;
 use coven_foundation::locks::read_unpoisoned;
@@ -108,7 +108,7 @@ impl Files {
     }
 }
 
-impl FilesInner {
+impl<M: Mode> FilesInner<M> {
     /// The file as its record now stands. A file never changes its bytes, so
     /// a reference taken earlier, while the file uploaded, reads the stored
     /// file once it is stored; one whose record went reads as it was named.
@@ -132,9 +132,12 @@ impl FilesInner {
     /// The upload of a file this device uploads, with the source failure
     /// recorded about it: its original's, on its move's record, or coven's
     /// copy's, on its upload's; `None` for any other file.
+    /// A read-only handle keeps no file records, so it knows no upload.
     pub(crate) async fn local(&self, file: &FileRef) -> Result<Option<Uploading>, FileReadError> {
-        let evidence = self
-            .database
+        let Some(records) = self.database.records() else {
+            return Ok(None);
+        };
+        let evidence = records
             .local_evidence::<PendingRecord>(file, upload_subject, |id| {
                 crate::PendingSubject::Move { id }
             })

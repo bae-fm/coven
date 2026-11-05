@@ -1,28 +1,21 @@
 //! The pins coven keeps for files kept here (§17.8), as the file owner
 //! reads and settles them.
 
-use super::{file_ref, read_only, FileDatabase, FileDatabaseAccess};
+use super::{file_ref, FileDatabase};
 use crate::{DbError, FileRef};
 use coven_foundation::{files::FileName, id_source::FileId};
 
 impl FileDatabase {
     /// The files a switch to the cloud asked this device to keep whole, each
     /// with the copy its cache copy is made from and its wait (§17.8).
-    /// Read-only handles keep none.
     pub async fn pin_requests(&self) -> Result<Vec<crate::PinRequest>, DbError> {
-        let FileDatabaseAccess::Writer(_) = &self.access else {
-            return Ok(Vec::new());
-        };
         self.read(crate::file_pins::read).await
     }
     /// The pin `file`'s request asked for is made, or its file is gone: the
     /// request, its record and wait end, and the copy it kept goes once
     /// nothing else names it.
     pub async fn end_pin_request(&self, file: FileId) -> Result<(), DbError> {
-        let FileDatabaseAccess::Writer(database) = &self.access else {
-            return Err(read_only());
-        };
-        database
+        self.database
             .call(move |inner| {
                 // The released copy goes once the writer is free (§21.2).
                 inner.with_files("end a pin request", |writer, _| {
@@ -34,10 +27,7 @@ impl FileDatabase {
     /// Make the pin coven keeps for `file` from `prepared`, ending its
     /// request in the same write (§17.8).
     pub async fn keep(&self, prepared: crate::PreparedPin, file: FileId) -> Result<(), DbError> {
-        let FileDatabaseAccess::Writer(database) = &self.access else {
-            return Err(read_only());
-        };
-        database
+        self.database
             .write(move |sql| {
                 sql.pin(prepared)?;
                 sql.end_pin_request(file)
@@ -47,10 +37,7 @@ impl FileDatabase {
     /// The cache copy couldn't be made from coven's copy: the pin downloads
     /// from storage instead.
     pub async fn drop_pin_copy(&self, file: FileId) -> Result<(), DbError> {
-        let FileDatabaseAccess::Writer(database) = &self.access else {
-            return Err(read_only());
-        };
-        database
+        self.database
             .call(move |inner| {
                 inner.with_files("drop a pin's copy", |writer, _| {
                     writer.transaction(|db| crate::file_pins::drop_copy(db, file))
@@ -67,7 +54,6 @@ impl FileDatabase {
         record: P,
         retry: Option<crate::RetryWait>,
     ) -> Result<(), DbError> {
-        self.require_writer()?;
         self.run(move |db, _, _, _| {
             db.state_transaction(|db| {
                 if record.pin_of() != Some(file) {
@@ -126,14 +112,8 @@ impl FileDatabase {
         file: &FileRef,
         copy: &FileName,
     ) -> Result<crate::LocalFileStream, crate::LocalFileError> {
-        let FileDatabaseAccess::Writer(database) = &self.access else {
-            return Err(DbError::StatementForbidden {
-                operation: "keeping a pin through a read-only handle",
-            }
-            .into());
-        };
         let (id, size, copy) = (file.id().to_string(), file.size(), copy.clone());
-        database
+        self.database
             .call(move |inner| {
                 file_ref::open_source(
                     &inner.access.directory,

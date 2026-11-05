@@ -146,7 +146,7 @@ impl DatabaseBuilder {
     /// Open read-only connections under a shared deletion guard, without
     /// migrating or rebuilding, including from a second process while the
     /// writer is open.
-    pub async fn open_read_only(self) -> CovenResult<DatabaseReadHandle> {
+    pub async fn open_read_only(self) -> CovenResult<Database<ReadOnly>> {
         let bugs = self.bugs.clone();
         finish_blocking(
             blocking_completing("open the store read-only", bugs, move || self.open_read_graph())
@@ -301,15 +301,17 @@ impl DatabaseBuilder {
         }
         Ok(Database {
             observer: observer.clone(),
-            transfers,
-            network,
+            writer: WriterParts {
+                transfers,
+                network,
+                closing: Arc::new(lock.closing_guard()),
+                file_tasks: Arc::new(tokio::sync::RwLock::new(())),
+                #[cfg(test)]
+                close_waits: Arc::new(Mutex::new(None)),
+                #[cfg(test)]
+                abandoned_stagings: Arc::new(Mutex::new(Vec::new())),
+            },
             bugs: self.bugs,
-            closing: Arc::new(lock.closing_guard()),
-            file_tasks: Arc::new(tokio::sync::RwLock::new(())),
-            #[cfg(test)]
-            close_waits: Arc::new(Mutex::new(None)),
-            #[cfg(test)]
-            abandoned_stagings: Arc::new(Mutex::new(Vec::new())),
             inner: Arc::new(RwLock::new(Some(DatabaseInner {
                 inputs,
                 staging: Arc::new(crate::reserved_names::ReservedNames::new(observer.clone())),
@@ -338,7 +340,7 @@ impl DatabaseBuilder {
             }))),
         })
     }
-    fn open_read_graph(self) -> CovenResult<DatabaseReadHandle> {
+    fn open_read_graph(self) -> CovenResult<Database<ReadOnly>> {
         let tables =
             self.tables.ok_or(CovenError::MissingConfiguration { field: "synced_tables" })?;
         let migrations =
@@ -398,9 +400,9 @@ impl DatabaseBuilder {
         )?;
         writer.serve_views(settings.device_id, &transfers, &network)?;
         writer.serve(observer.clone());
-        Ok(DatabaseReadHandle {
+        Ok(Database {
             observer: observer.clone(),
-            transfers,
+            writer: (),
             bugs: self.bugs,
             inner: Arc::new(RwLock::new(Some(DatabaseAccess {
                 writer: Arc::new(Mutex::new(writer)),

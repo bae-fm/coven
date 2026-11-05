@@ -382,7 +382,7 @@ async fn cancelling_close_while_file_work_is_held_does_not_cancel_release() {
     };
     let store = TestStore::new();
     let database = store.builder(vec![], vec![]).open().await.unwrap();
-    let lease = database.file_tasks.clone().read_owned().await;
+    let lease = database.writer.file_tasks.clone().read_owned().await;
     let mut closing = Box::pin(database.close());
     poll_fn(|cx| {
         assert!(closing.as_mut().poll(cx).is_pending());

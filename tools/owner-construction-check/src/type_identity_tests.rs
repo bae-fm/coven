@@ -76,3 +76,24 @@ fn colliding_external_paths_are_known_by_their_resolved_path() {
         .collect::<Vec<_>>();
     assert_eq!(names, ["rusqlite::Connection", "Connection", "T"]);
 }
+
+/// A projection of an associated type names every type the workspace's
+/// trait impls give it, so a generic holder holds what any of them holds.
+#[test]
+fn a_projection_names_every_type_impls_give_it() {
+    assert_eq!(
+        owners(
+            r#"
+            trait Mode { type Held; }
+            enum Writer {}
+            enum Reader {}
+            impl Mode for Writer { type Held = crate::connection::Connection; }
+            impl Mode for Reader { type Held = (); }
+            struct Projected<M: Mode> { held: M::Held }
+            struct Qualified<M: Mode> { held: Option<<M as Mode>::Held> }
+            struct Plain<M: Mode> { held: M }
+            "#,
+        ),
+        BTreeSet::from(["Connection".into(), "Projected".into(), "Qualified".into()])
+    );
+}

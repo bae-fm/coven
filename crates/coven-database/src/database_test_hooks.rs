@@ -37,7 +37,7 @@ impl Database {
     /// open store, and waits for it to end.
     pub(crate) fn tell_close_wait(&self) {
         if matches!(self.inner.try_write(), Err(std::sync::TryLockError::WouldBlock)) {
-            if let Some(waits) = lock_unpoisoned(&self.close_waits).take() {
+            if let Some(waits) = lock_unpoisoned(&self.writer.close_waits).take() {
                 #[expect(
                     clippy::let_underscore_must_use,
                     reason = "a test that stopped listening has no use for it"
@@ -52,7 +52,7 @@ impl Database {
     /// Wait until the removals of every snapshot staging abandoned so far
     /// have ended.
     pub(crate) async fn abandoned_stagings_removed(&self) {
-        let removing = std::mem::take(&mut *self.abandoned_stagings.lock().unwrap());
+        let removing = std::mem::take(&mut *self.writer.abandoned_stagings.lock().unwrap());
         for removal in removing {
             removal.await.unwrap().unwrap();
         }
@@ -62,7 +62,7 @@ impl Database {
     /// it to end.
     pub(crate) fn observe_close_wait(&self) -> tokio::sync::oneshot::Receiver<()> {
         let (sender, receiver) = tokio::sync::oneshot::channel();
-        assert!(self.close_waits.lock().unwrap().replace(sender).is_none());
+        assert!(self.writer.close_waits.lock().unwrap().replace(sender).is_none());
         receiver
     }
 
@@ -157,7 +157,7 @@ impl Database {
     }
 }
 
-impl DatabaseReadHandle {
+impl Database<ReadOnly> {
     pub(crate) fn inspect_readers(&self, inspect: impl Fn(&mut DatabaseConnection)) {
         let inner = self.inner.read().unwrap();
         inner.as_ref().unwrap().readers.inspect_each(inspect);

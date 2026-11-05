@@ -1,6 +1,6 @@
 //! Database operations used by synchronization, on the retained connections.
 
-use super::Database;
+use super::{Database, Mode};
 use crate::internal_schema::retry_effect::{self, RetryState};
 use crate::{CovenResult, DbError};
 use coven_foundation::task::CarriesBug;
@@ -602,14 +602,6 @@ impl Database {
         .await
     }
 
-    /// Membership and audience state of the committed sequence prefix.
-    pub async fn store_state(&self) -> CovenResult<crate::StoreState> {
-        self.call(|inner| {
-            inner.access.with_committed(|db| Ok(crate::store_state_tables::read(db)?))
-        })
-        .await
-    }
-
     /// The same state, live (E4), for a test waiting for passes to change
     /// it, such as to apply a raise.
     #[cfg(any(test, feature = "test-utils"))]
@@ -810,3 +802,13 @@ impl Database {
 
 #[path = "database_device.rs"]
 mod device;
+
+impl<M: Mode> Database<M> {
+    /// Membership and audience state of the committed sequence prefix.
+    pub async fn store_state(&self) -> CovenResult<crate::StoreState> {
+        self.call(|open| {
+            M::access(open).with_committed(|db| Ok(crate::store_state_tables::read(db)?))
+        })
+        .await
+    }
+}

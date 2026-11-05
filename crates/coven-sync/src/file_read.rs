@@ -7,10 +7,10 @@ use crate::{
     FileReadError,
 };
 use coven_crypto::{ContentHash, ContentHasher, FileKey};
-use coven_database::FileLocationKey;
 use coven_database::{
     CacheReservation, DbError, FileLocation, FilePlace, FileRef, LocalFileStream, TransferMeter,
 };
+use coven_database::{FileLocationKey, Mode, Writer};
 use coven_format::{
     chunks::CHUNK_SIZE,
     file::{FileHeader, FILE_HEADER_LEN},
@@ -28,22 +28,22 @@ const REQUEST_BYTES: u64 = 1024 * 1024;
 /// what it reads. Its shared store lock prevents deletion until the stream
 /// and its I/O finish, including reads still running after the store closes
 /// or the caller cancels.
-pub struct FileStream {
+pub struct FileStream<M: Mode = Writer> {
     id: String,
-    source: OpenFile,
+    source: OpenFile<M>,
     state: tokio::sync::Mutex<FileStreamState>,
 }
-enum OpenFile {
+enum OpenFile<M: Mode> {
     Local {
         stream: LocalFileStream,
-        owner: Arc<FilesInner>,
+        owner: Arc<FilesInner<M>>,
         file: FileRef,
         /// Its upload, while one is queued: reads settle or record its
         /// source's failure there, or on its move. A file with no upload
         /// records nothing; its reads' errors go to the caller.
         uploading: Option<Arc<Uploading>>,
     },
-    Uploaded(Arc<UploadedFile>),
+    Uploaded(Arc<UploadedFile<M>>),
 }
 struct FileStreamState {
     end: Option<u64>,
@@ -57,8 +57,8 @@ impl Drop for FileStreamState {
         }
     }
 }
-pub(crate) struct UploadedFile {
-    owner: Arc<FilesInner>,
+pub(crate) struct UploadedFile<M: Mode = Writer> {
+    owner: Arc<FilesInner<M>>,
     file: FileRef,
     /// Where its bytes are stored.
     location: FileLocation,
@@ -110,11 +110,11 @@ enum ChunkDestination<'a> {
     /// A pin's whole file, whose download `meter` hears as its bytes arrive.
     WholeFile(&'a TransferMeter),
 }
-impl Files {
+impl<M: Mode> Files<M> {
     /// Open the file as its record now stands: its bytes here while it is on
     /// this device only, uploading or not, or else its cached or stored
     /// bytes. A file only on another device can't be read here (§17.7).
-    pub async fn open_file_stream(&self, file: &FileRef) -> Result<FileStream, FileReadError> {
+    pub async fn open_file_stream(&self, file: &FileRef) -> Result<FileStream<M>, FileReadError> {
         self.inner.check_open()?;
         let mut file = self.inner.current(file).await?;
         if let FilePlace::DeviceOnly { .. } = file.place() {
@@ -160,8 +160,8 @@ impl Files {
         self.open_file_stream(file).await?.read_at(0, file.size()).await
     }
 }
-impl FileStream {
-    fn new(file: &FileRef, source: OpenFile) -> Self {
+impl<M: Mode> FileStream<M> {
+    fn new(file: &FileRef, source: OpenFile<M>) -> Self {
         Self {
             id: file.id().to_string(),
             source,
@@ -280,7 +280,11 @@ impl FileStream {
     /// fetched chunk before yielding its bytes. For a stored file, the final
     /// buffer checks the whole-file hash when reading sequentially from zero
     /// through the end.
-    pub fn read_range(&self, offset: u64, len: u64) -> Result<FileRangeStream<'_>, FileReadError> {
+    pub fn read_range(
+        &self,
+        offset: u64,
+        len: u64,
+    ) -> Result<FileRangeStream<'_, M>, FileReadError> {
         if offset.checked_add(len).is_none_or(|end| end > self.plaintext_size()) {
             return Err(FileReadError::RangeOutOfBounds {
                 id: self.id.clone(),
@@ -293,13 +297,13 @@ impl FileStream {
     }
 }
 /// A borrowed stream of bounded authenticated plaintext buffers.
-pub struct FileRangeStream<'a> {
-    file: &'a FileStream,
+pub struct FileRangeStream<'a, M: Mode = Writer> {
+    file: &'a FileStream<M>,
     offset: u64,
     remaining: u64,
     empty: bool,
 }
-impl FileRangeStream<'_> {
+impl<M: Mode> FileRangeStream<'_, M> {
     /// Yield the next buffer, or `None` after the exact requested range.
     pub async fn next(&mut self) -> Result<Option<Vec<u8>>, FileReadError> {
         if self.empty {
@@ -333,13 +337,16 @@ impl FilesInner {
         UploadedFile::open(self.clone(), file).await?.keep_whole().await
     }
 }
-impl UploadedFile {
+impl<M: Mode> UploadedFile<M> {
     /// Open an uploaded file without a request when its header is cached.
     /// Otherwise the first fetch checks the header: one starting at chunk
     /// zero carries it in the same request, and any other first fetch reads
     /// it alone (§17.7). An empty file's header is the whole object, so it
     /// is checked here.
-    pub(crate) async fn open(owner: Arc<FilesInner>, file: FileRef) -> Result<Self, FileReadError> {
+    pub(crate) async fn open(
+        owner: Arc<FilesInner<M>>,
+        file: FileRef,
+    ) -> Result<Self, FileReadError> {
         let (location, hash) = stored(&file)?;
         let location = location.clone();
         let directory = owner.directory.clone();
@@ -418,60 +425,6 @@ impl UploadedFile {
         }
         self.header_checked.store(true, std::sync::atomic::Ordering::Release);
         Ok(())
-    }
-    #[expect(
-        clippy::map_err_ignore,
-        reason = "a size whose encrypted layout overflows is the disagreement Integrity names"
-    )]
-    /// Assemble this file's whole encrypted cache copy, from cached and
-    /// fetched chunks, check its content hash and sync it, under a reserved
-    /// name: the copy a pin's write publishes (§17.8). Nothing is kept until
-    /// then. `None` when a metered network the app keeps files off stops it
-    /// before its next request to storage; what it had goes.
-    pub(crate) async fn keep_whole(&self) -> Result<Option<CacheReservation>, TransferError> {
-        // In flight until it ends, by finishing, failing or being dropped.
-        let downloading = self.owner.downloading.start(
-            self.location.uploader(),
-            self.location.object(),
-            vec![self.file.id()],
-            coven_database::TransferProgress {
-                bytes_transferred: 0,
-                bytes_total: self.header.encrypted_size().map_err(|_| self.integrity())?,
-            },
-        );
-        // How far through the encrypted object the whole file has got, in
-        // order: cached chunks count as they are copied in, fetched ones as
-        // their bytes arrive.
-        let meter = downloading.meter();
-        let (reservation, mut writer) = self.owner.create_cache_file(&self.file).await?;
-        let header = self.header.encode();
-        writer.append(&header).await?;
-        let mut written = header.len() as u64;
-        meter.reached(written);
-        let mut hash = ContentHasher::new();
-        let mut index = 0;
-        while index < self.header.chunk_count() {
-            // A metered network the app keeps files off stops the download
-            // before its next request to storage (§17.8).
-            let ChunkStep::Read(last, chunks) = self
-                .chunks(index, self.header.chunk_count() - 1, ChunkDestination::WholeFile(&meter))
-                .await?
-            else {
-                return Ok(None);
-            };
-            for chunk in chunks {
-                hash.update(&chunk.plaintext);
-                writer.append(&chunk.ciphertext).await?;
-                written += chunk.ciphertext.len() as u64;
-                meter.reached(written);
-            }
-            index = last + 1;
-        }
-        if hash.finish() != self.hash {
-            return Err(TransferError::Refused(crate::Refusal::ContentHash));
-        }
-        writer.finish().await?;
-        Ok(Some(reservation))
     }
     fn integrity(&self) -> FileReadError {
         FileReadError::Integrity { id: self.file.id().to_string(), cause: None }
@@ -706,6 +659,63 @@ impl UploadedFile {
         Ok(OpenedChunk { plaintext, ciphertext: bytes })
     }
 }
+
+impl UploadedFile {
+    #[expect(
+        clippy::map_err_ignore,
+        reason = "a size whose encrypted layout overflows is the disagreement Integrity names"
+    )]
+    /// Assemble this file's whole encrypted cache copy, from cached and
+    /// fetched chunks, check its content hash and sync it, under a reserved
+    /// name: the copy a pin's write publishes (§17.8). Nothing is kept until
+    /// then. `None` when a metered network the app keeps files off stops it
+    /// before its next request to storage; what it had goes.
+    pub(crate) async fn keep_whole(&self) -> Result<Option<CacheReservation>, TransferError> {
+        // In flight until it ends, by finishing, failing or being dropped.
+        let downloading = self.owner.database.downloads_in_flight().start(
+            self.location.uploader(),
+            self.location.object(),
+            vec![self.file.id()],
+            coven_database::TransferProgress {
+                bytes_transferred: 0,
+                bytes_total: self.header.encrypted_size().map_err(|_| self.integrity())?,
+            },
+        );
+        // How far through the encrypted object the whole file has got, in
+        // order: cached chunks count as they are copied in, fetched ones as
+        // their bytes arrive.
+        let meter = downloading.meter();
+        let (reservation, mut writer) = self.owner.create_cache_file(&self.file).await?;
+        let header = self.header.encode();
+        writer.append(&header).await?;
+        let mut written = header.len() as u64;
+        meter.reached(written);
+        let mut hash = ContentHasher::new();
+        let mut index = 0;
+        while index < self.header.chunk_count() {
+            // A metered network the app keeps files off stops the download
+            // before its next request to storage (§17.8).
+            let ChunkStep::Read(last, chunks) = self
+                .chunks(index, self.header.chunk_count() - 1, ChunkDestination::WholeFile(&meter))
+                .await?
+            else {
+                return Ok(None);
+            };
+            for chunk in chunks {
+                hash.update(&chunk.plaintext);
+                writer.append(&chunk.ciphertext).await?;
+                written += chunk.ciphertext.len() as u64;
+                meter.reached(written);
+            }
+            index = last + 1;
+        }
+        if hash.finish() != self.hash {
+            return Err(TransferError::Refused(crate::Refusal::ContentHash));
+        }
+        writer.finish().await?;
+        Ok(Some(reservation))
+    }
+}
 struct OpenedChunk {
     plaintext: Vec<u8>,
     ciphertext: Vec<u8>,
@@ -719,8 +729,8 @@ enum ChunkStep {
     Held,
 }
 
-async fn cache(
-    owner: &FilesInner,
+async fn cache<M: Mode>(
+    owner: &FilesInner<M>,
     file: &FileRef,
     first: i64,
     chunks: i64,
@@ -734,8 +744,8 @@ async fn cache(
 /// through the object the bytes received reach: storage tells it as the
 /// stream is read, and CloudKit also as each part's fetch goes, ahead of the
 /// read.
-async fn fetch(
-    owner: &FilesInner,
+async fn fetch<M: Mode>(
+    owner: &FilesInner<M>,
     file: &FileRef,
     path: &ObjectPath,
     start: u64,

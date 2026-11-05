@@ -1,6 +1,6 @@
 //! File metadata operations through the owning database, never through app SQL.
 
-use super::{Database, DatabaseAccess, DatabaseInner, DatabaseReadHandle};
+use super::{Database, DatabaseAccess, DatabaseInner, Mode, Writer};
 use crate::internal_schema::CACHE_NAME_USED_SQL;
 use crate::DatabaseChanges;
 use crate::{
@@ -23,109 +23,77 @@ pub(crate) use cache::{
     set_budget as set_cache_budget, trim_entries as trim_cached, unpin as unpin_cached,
 };
 
-#[derive(Clone)]
-enum FileDatabaseAccess {
-    Writer(Database),
-    Reader(DatabaseReadHandle),
+/// File queue and cache access, on the store's writer or a read-only
+/// handle (`FileDatabase<ReadOnly>`), which reads and caches files and can
+/// change only its local cache metadata. The upload and pin queue and the
+/// file records are the writer's. Construct beside the database at the
+/// application composition root.
+///
+/// ```compile_fail
+/// async fn completes_nothing(files: &coven_database::FileDatabase<coven_database::ReadOnly>) {
+///     files.complete_upload(1, ()).await;
+/// }
+/// ```
+/// ```compile_fail
+/// fn queues_nothing(files: &coven_database::FileDatabase<coven_database::ReadOnly>) {
+///     files.queued_work_changes();
+/// }
+/// ```
+/// ```compile_fail
+/// async fn records_nothing(files: &coven_database::FileDatabase<coven_database::ReadOnly>) {
+///     files.fail_upload(1, (), None).await;
+/// }
+/// ```
+pub struct FileDatabase<M: Mode = Writer> {
+    database: Database<M>,
 }
 
-/// File queue and cache access. Read handles can mutate only local cache metadata.
-/// Construct beside the database at the application composition root.
-#[derive(Clone)]
-pub struct FileDatabase {
-    access: FileDatabaseAccess,
-}
-
-impl FileDatabase {
-    /// Use an open writer for uploads and cache operations.
-    pub fn new(database: Database) -> Self {
-        Self { access: FileDatabaseAccess::Writer(database) }
+// Written out: `derive(Clone)` would ask the mode to be `Clone`.
+impl<M: Mode> Clone for FileDatabase<M> {
+    fn clone(&self) -> Self {
+        Self { database: self.database.clone() }
     }
-    /// Use a read-only application's cache connection; upload mutations are refused.
-    pub fn read_only(database: DatabaseReadHandle) -> Self {
-        Self { access: FileDatabaseAccess::Reader(database) }
+}
+
+impl<M: Mode> FileDatabase<M> {
+    /// Use an open store's handle for its file operations.
+    pub fn new(database: Database<M>) -> Self {
+        Self { database }
     }
 
     /// Where a bug in the file owner's work that nobody waits for goes, as
     /// its database's does (E15).
     pub fn bugs(&self) -> &coven_foundation::task::BugSinkRef {
-        match &self.access {
-            FileDatabaseAccess::Writer(database) => database.bugs(),
-            FileDatabaseAccess::Reader(database) => database.bugs(),
-        }
+        self.database.bugs()
     }
 
-    /// The files this process is sending now, which the upload worker marks
-    /// as each attempt starts and ends (§17.9).
-    pub fn uploads_in_flight(&self) -> crate::InFlight {
-        match &self.access {
-            FileDatabaseAccess::Writer(database) => database.uploads_in_flight(),
-            FileDatabaseAccess::Reader(database) => database.uploads_in_flight(),
-        }
+    /// The writer's file owner, which keeps file records and the upload and
+    /// pin queue; a read-only handle keeps none.
+    pub fn records(&self) -> Option<&FileDatabase<Writer>> {
+        M::records(self)
     }
 
-    /// The files this process is downloading to keep whole now, which each
-    /// pin's download marks as it starts and ends (§17.8).
-    pub fn downloads_in_flight(&self) -> crate::InFlight {
-        match &self.access {
-            FileDatabaseAccess::Writer(database) => database.downloads_in_flight(),
-            FileDatabaseAccess::Reader(database) => database.downloads_in_flight(),
-        }
-    }
-
+    /// Run `run` on the handle's writable connection: the store's writer,
+    /// or a read-only handle's cache connection.
     async fn run<T: Send + 'static, E: From<DbError> + CarriesBug + Send + 'static>(
         &self,
         run: impl FnOnce(&mut DatabaseConnection, &WriteSchema, &StoreDir, DeviceId) -> Result<T, E>
             + Send
             + 'static,
     ) -> Result<T, E> {
-        match &self.access {
-            FileDatabaseAccess::Writer(database) => {
-                database
-                    .call(move |inner| {
-                        inner.access.with_writer(|writer| {
-                            run(
-                                writer,
-                                &inner.access.write_schema,
-                                &inner.access.directory,
-                                inner.access.device,
-                            )
-                        })
-                    })
-                    .await
-            }
-            FileDatabaseAccess::Reader(database) => {
-                database
-                    .call(move |inner| {
-                        inner.with_writer(|writer| {
-                            run(writer, &inner.write_schema, &inner.directory, inner.device)
-                        })
-                    })
-                    .await
-            }
-        }
-    }
-
-    /// A read-only query on one committed state. A writable handle reads on
-    /// its read pool, so read-only decisions never take the writer (§21.2).
-    async fn read<T: Send + 'static, E: From<DbError> + CarriesBug + Send + 'static>(
-        &self,
-        read: impl FnOnce(&DatabaseConnection) -> Result<T, E> + Send + 'static,
-    ) -> Result<T, E> {
-        match &self.access {
-            FileDatabaseAccess::Writer(database) => {
-                database.call(move |inner| inner.access.with_committed(read)).await
-            }
-            FileDatabaseAccess::Reader(_) => self.run(move |db, _, _, _| read(db)).await,
-        }
+        self.database
+            .call(move |open| {
+                let access = M::access(open);
+                access.with_writer(|writer| {
+                    run(writer, &access.write_schema, &access.directory, access.device)
+                })
+            })
+            .await
     }
 
     /// The file this device has a record of under this id.
     pub async fn file_ref(&self, file: FileId) -> Result<FileRef, DbError> {
-        match &self.access {
-            FileDatabaseAccess::Writer(db) => db.file_ref(file).await,
-            FileDatabaseAccess::Reader(db) => db.file_ref(file).await,
-        }
+        self.database.file_ref(file).await
     }
     /// Open and check the local source of a file still on this device only,
     /// while it uploads. `None` means its bytes come from the cache or
@@ -134,10 +102,97 @@ impl FileDatabase {
         &self,
         file: &FileRef,
     ) -> Result<Option<crate::LocalFileStream>, crate::LocalFileError> {
-        match &self.access {
-            FileDatabaseAccess::Writer(db) => db.open_local_file(file).await,
-            FileDatabaseAccess::Reader(db) => db.open_local_file(file).await,
-        }
+        self.database.open_local_file(file).await
+    }
+
+    /// Cached encrypted chunk or header (-1). Its bytes are read with no
+    /// writer held (§21.2); an entry evicted meanwhile reads as not cached.
+    pub async fn cached(&self, file: &FileRef, index: i64) -> Result<Option<Vec<u8>>, DbError> {
+        let file = file.clone();
+        self.database.call(move |open| cache::read(M::access(open), &file, index)).await
+    }
+    /// Keep one verified range of `chunks` consecutive encrypted chunks from
+    /// `first`, or the header (`first` = -1), durably before publishing its
+    /// cache metadata in one transaction. The bytes are written with no
+    /// writer held (§21.2), on a blocking worker that finishes even if the
+    /// caller stops waiting.
+    pub async fn cache_range(
+        &self,
+        file: &FileRef,
+        first: i64,
+        chunks: i64,
+        name: FileName,
+        bytes: Vec<u8>,
+    ) -> Result<(), DbError> {
+        let file = file.clone();
+        self.database
+            .call(move |open| cache::put(M::access(open), &file, first, chunks, &name, &bytes))
+            .await
+    }
+    /// Remove the bytes of cache entries the writer just chose, once it is
+    /// free (§21.2, Appendix C.3). Returns the failures, whose records stay for the
+    /// next attempt.
+    async fn remove_released(
+        &self,
+        chosen: crate::file_removals::Chosen,
+    ) -> Result<Vec<DbError>, DbError> {
+        self.database
+            .call(move |open| Ok::<_, DbError>(M::access(open).remove_released(chosen)))
+            .await
+    }
+    async fn removed(&self, chosen: crate::file_removals::Chosen) -> Result<(), DbError> {
+        let failures = self.remove_released(chosen).await?;
+        crate::write_failure::after_cleanup(Ok(()), failures)
+    }
+    /// Evict unpinned chunks in least-recently-read order, independently per namespace.
+    pub async fn trim_cache(&self, namespace: &str) -> Result<(), DbError> {
+        let namespace = namespace.to_owned();
+        let chosen = self
+            .run(move |db, _, _, _| {
+                let paths = cache::trim(db, &namespace)?;
+                Ok::<_, DbError>(crate::file_removals::choose_cache(&paths))
+            })
+            .await?;
+        self.removed(chosen).await
+    }
+    /// Plaintext bytes absent from this namespace's cache; headers and tags
+    /// are excluded from application download progress. A file only on this
+    /// device is wholly local.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub async fn missing_bytes(&self, file: &FileRef) -> Result<u64, DbError> {
+        let file = file.clone();
+        self.run(move |db, _, _, device| {
+            Ok(file.size() - crate::cache_progress::covered(db, &file, device)?)
+        })
+        .await
+    }
+    /// The namespace's budget, declared or since set.
+    pub async fn budget(&self, namespace: &str) -> Result<u64, DbError> {
+        let namespace = namespace.to_owned();
+        self.run(move |db, _, _, _| cache::budget(db, &namespace)).await
+    }
+}
+
+impl FileDatabase {
+    /// The files this process is sending now, which the upload worker marks
+    /// as each attempt starts and ends (§17.9).
+    pub fn uploads_in_flight(&self) -> crate::InFlight {
+        self.database.uploads_in_flight()
+    }
+
+    /// The files this process is downloading to keep whole now, which each
+    /// pin's download marks as it starts and ends (§17.8).
+    pub fn downloads_in_flight(&self) -> crate::InFlight {
+        self.database.downloads_in_flight()
+    }
+
+    /// A read-only query on one committed state, on the read pool, so
+    /// read-only decisions never take the writer (§21.2).
+    async fn read<T: Send + 'static, E: From<DbError> + CarriesBug + Send + 'static>(
+        &self,
+        read: impl FnOnce(&DatabaseConnection) -> Result<T, E> + Send + 'static,
+    ) -> Result<T, E> {
+        self.database.call(move |inner| inner.access.with_committed(read)).await
     }
     /// The upload of a file this device uploads, its move, this device's
     /// record about the upload's bytes and its move's record, read in one
@@ -185,7 +240,6 @@ impl FileDatabase {
         upload: i64,
         record: P,
     ) -> Result<(), DbError> {
-        self.require_writer()?;
         self.run(move |db, _, _, _| {
             db.state_transaction(|db| {
                 let Some(of) = record.move_of() else {
@@ -221,9 +275,6 @@ impl FileDatabase {
     where
         P::Subject: Send + 'static,
     {
-        let FileDatabaseAccess::Writer(_) = &self.access else {
-            return Ok(None);
-        };
         self.run(move |db, _, _, _| {
             db.state_transaction(|db| {
                 let original: Option<Option<Vec<u8>>> = db
@@ -257,11 +308,8 @@ impl FileDatabase {
         in_flight: std::collections::BTreeSet<FileId>,
         subject: impl Fn(&crate::FileLocation) -> S + Send + 'static,
     ) -> Result<Vec<i64>, DbError> {
-        // A read-only handle queues nothing and retires nothing.
-        let FileDatabaseAccess::Writer(database) = &self.access else {
-            return Ok(Vec::new());
-        };
         // An idle run writes nothing: only work found takes the writer.
+        let database = &self.database;
         let work = database
             .call(move |inner| {
                 inner
@@ -291,13 +339,9 @@ impl FileDatabase {
     }
     /// Record this device's first unmet condition for the stored bytes a
     /// pin downloads, replacing an earlier reason. It keeps no wait: only the
-    /// app's next pin or read tries again (§17.7). Read-only handles keep no
-    /// records.
+    /// app's next pin or read tries again (§17.7).
     pub async fn fail_download<P: crate::PendingValue>(&self, record: P) -> Result<(), DbError> {
-        let FileDatabaseAccess::Writer(database) = &self.access else {
-            return Ok(());
-        };
-        database.record_pending(record).await
+        self.database.record_pending(record).await
     }
     /// Clear only conditions the completed download actually checked. The
     /// predicate and deletion share the pending transaction.
@@ -309,10 +353,7 @@ impl FileDatabase {
     where
         P::Subject: Send + 'static,
     {
-        let FileDatabaseAccess::Writer(database) = &self.access else {
-            return Ok(());
-        };
-        database.clear_checked::<P>(subject, checked).await
+        self.database.clear_checked::<P>(subject, checked).await
     }
     /// Clear only conditions the completed local read actually checked. The
     /// predicate and deletion share the pending transaction. Any queued
@@ -327,10 +368,7 @@ impl FileDatabase {
     where
         P::Subject: Send + 'static,
     {
-        let FileDatabaseAccess::Writer(database) = &self.access else {
-            return Ok(None);
-        };
-        database.clear_pending_if::<P>(object, subject, checked).await
+        self.database.clear_pending_if::<P>(object, subject, checked).await
     }
     /// Record a local source failure only while its upload remains queued.
     /// The retry is selected from the current upload wait and committed with
@@ -343,9 +381,6 @@ impl FileDatabase {
             + Send
             + 'static,
     ) -> Result<Option<(crate::RetrySubject, crate::RetryWait)>, DbError> {
-        let FileDatabaseAccess::Writer(_) = &self.access else {
-            return Ok(None);
-        };
         self.run(move |db, _, _, _| {
             db.state_transaction(|db| {
                 let Some(id) = file_queue::upload_of(db, file)? else {
@@ -436,7 +471,6 @@ impl FileDatabase {
     /// One a file waits for again keeps its record, and its next attempt
     /// finds the session gone and starts another.
     pub async fn forget_session(&self, id: i64) -> Result<(), DbError> {
-        self.require_writer()?;
         self.run(move |db, _, _, _| db.transaction(|db| crate::file_queue::forget_session(db, id)))
             .await
     }
@@ -449,7 +483,6 @@ impl FileDatabase {
         record: P,
         retry: Option<crate::RetryWait>,
     ) -> Result<(), DbError> {
-        self.require_writer()?;
         self.run(move |db, _, _, _| {
             db.transaction(|db| {
                 if !db.query_row(
@@ -489,16 +522,7 @@ impl FileDatabase {
         upload: &FileUpload,
     ) -> Result<Option<crate::LocalFileStream>, crate::LocalFileError> {
         let (id, object, size) = (upload.id, upload.location.object(), upload.size);
-        match &self.access {
-            FileDatabaseAccess::Writer(database) => {
-                database
-                    .call(move |inner| open_upload_source(&inner.access, id, object, size))
-                    .await
-            }
-            FileDatabaseAccess::Reader(database) => {
-                database.call(move |access| open_upload_source(access, id, object, size)).await
-            }
-        }
+        self.database.call(move |inner| open_upload_source(&inner.access, id, object, size)).await
     }
 
     /// Persist the provider recording after each confirmed change in progress,
@@ -515,7 +539,6 @@ impl FileDatabase {
         session: SecretBytes,
         progress: crate::UploadProgress,
     ) -> Result<(), DbError> {
-        self.require_writer()?;
         let count = |bytes: u64| {
             i64::try_from(bytes)
                 .map_err(|_| DbError::Invariant { what: "an upload's size fits SQLite" })
@@ -549,24 +572,18 @@ impl FileDatabase {
         id: i64,
         subject: S,
     ) -> Result<crate::UploadCompletion, DbError> {
-        let FileDatabaseAccess::Writer(database) = &self.access else {
-            return Err(read_only());
-        };
         let subject = crate::pending::SubjectKey::of(&subject)?;
-        database.call(move |inner| complete(inner, id, subject)).await
+        self.database.call(move |inner| complete(inner, id, subject)).await
     }
-    /// Reserve a whole cache file of `file` while it is written and checked.
-    /// Only the writer can pin or complete uploads; read-only file owners
-    /// continue to cache individual chunks.
+    /// Reserve a whole cache file of `file` while it is written and checked,
+    /// for a pin; a read-only handle caches individual chunks only.
     pub async fn reserve_cache_file(
         &self,
         file: &FileRef,
         name: FileName,
     ) -> Result<CacheReservation, DbError> {
-        let FileDatabaseAccess::Writer(database) = &self.access else {
-            return Err(read_only());
-        };
-        let lease = database.file_tasks.clone().read_owned().await;
+        let database = &self.database;
+        let lease = database.writer.file_tasks.clone().read_owned().await;
         let file = file.clone();
         database
             .call(move |inner| {
@@ -599,134 +616,31 @@ impl FileDatabase {
     /// file stopped waiting for. Subscribing before reading the work list
     /// prevents missed commits.
     pub fn queued_work_changes(&self) -> DatabaseChanges {
-        match &self.access {
-            FileDatabaseAccess::Reader(database) => database.observer.closed_changes(),
-            FileDatabaseAccess::Writer(database) => {
-                // A newly queued upload, an upload a file stopped waiting
-                // for, which the worker then retires (§17.9), and a
-                // self-replacement's write pause starting or ending, which
-                // holds trailing uploads' completions (§12.3, §17.4).
-                let reads = vec![
-                    crate::observation::TableRead {
-                        table: "_coven_write_pause".into(),
-                        columns: ["paused".into()].into(),
-                        scope: crate::row_scope::RowScope::All,
-                        inserted_only: false,
-                    },
-                    crate::observation::TableRead {
-                        table: "_coven_file_uploads".into(),
-                        columns: ["location".into()].into(),
-                        scope: crate::row_scope::RowScope::All,
-                        inserted_only: true,
-                    },
-                    crate::observation::TableRead {
-                        table: "_coven_upload_files".into(),
-                        columns: ["file".into()].into(),
-                        scope: crate::row_scope::RowScope::All,
-                        inserted_only: false,
-                    },
-                ];
-                database.observer.changes(reads, true)
-            }
-        }
-    }
-    fn require_writer(&self) -> Result<(), DbError> {
-        match self.access {
-            FileDatabaseAccess::Writer(_) => Ok(()),
-            FileDatabaseAccess::Reader(_) => Err(read_only()),
-        }
-    }
-
-    /// Cached encrypted chunk or header (-1). Its bytes are read with no
-    /// writer held (§21.2); an entry evicted meanwhile reads as not cached.
-    pub async fn cached(&self, file: &FileRef, index: i64) -> Result<Option<Vec<u8>>, DbError> {
-        let file = file.clone();
-        match &self.access {
-            FileDatabaseAccess::Writer(database) => {
-                database.call(move |inner| cache::read(&inner.access, &file, index)).await
-            }
-            FileDatabaseAccess::Reader(database) => {
-                database.call(move |access| cache::read(access, &file, index)).await
-            }
-        }
-    }
-    /// Keep one verified range of `chunks` consecutive encrypted chunks from
-    /// `first`, or the header (`first` = -1), durably before publishing its
-    /// cache metadata in one transaction. The bytes are written with no
-    /// writer held (§21.2), on a blocking worker that finishes even if the
-    /// caller stops waiting.
-    pub async fn cache_range(
-        &self,
-        file: &FileRef,
-        first: i64,
-        chunks: i64,
-        name: FileName,
-        bytes: Vec<u8>,
-    ) -> Result<(), DbError> {
-        let file = file.clone();
-        match &self.access {
-            FileDatabaseAccess::Writer(database) => {
-                database
-                    .call(move |inner| {
-                        cache::put(&inner.access, &file, first, chunks, &name, &bytes)
-                    })
-                    .await
-            }
-            FileDatabaseAccess::Reader(database) => {
-                database
-                    .call(move |access| cache::put(access, &file, first, chunks, &name, &bytes))
-                    .await
-            }
-        }
-    }
-    /// Remove the bytes of cache entries the writer just chose, once it is
-    /// free (§21.2, Appendix C.3). Returns the failures, whose records stay for the
-    /// next attempt.
-    async fn remove_released(
-        &self,
-        chosen: crate::file_removals::Chosen,
-    ) -> Result<Vec<DbError>, DbError> {
-        match &self.access {
-            FileDatabaseAccess::Writer(database) => {
-                database
-                    .call(move |inner| Ok::<_, DbError>(inner.access.remove_released(chosen)))
-                    .await
-            }
-            FileDatabaseAccess::Reader(database) => {
-                database.call(move |inner| Ok::<_, DbError>(inner.remove_released(chosen))).await
-            }
-        }
-    }
-    async fn removed(&self, chosen: crate::file_removals::Chosen) -> Result<(), DbError> {
-        let failures = self.remove_released(chosen).await?;
-        crate::write_failure::after_cleanup(Ok(()), failures)
-    }
-    /// Evict unpinned chunks in least-recently-read order, independently per namespace.
-    pub async fn trim_cache(&self, namespace: &str) -> Result<(), DbError> {
-        let namespace = namespace.to_owned();
-        let chosen = self
-            .run(move |db, _, _, _| {
-                let paths = cache::trim(db, &namespace)?;
-                Ok::<_, DbError>(crate::file_removals::choose_cache(&paths))
-            })
-            .await?;
-        self.removed(chosen).await
-    }
-    /// Plaintext bytes absent from this namespace's cache; headers and tags
-    /// are excluded from application download progress. A file only on this
-    /// device is wholly local.
-    #[cfg(any(test, feature = "test-utils"))]
-    pub async fn missing_bytes(&self, file: &FileRef) -> Result<u64, DbError> {
-        let file = file.clone();
-        self.run(move |db, _, _, device| {
-            Ok(file.size() - crate::cache_progress::covered(db, &file, device)?)
-        })
-        .await
-    }
-    /// The namespace's budget, declared or since set.
-    pub async fn budget(&self, namespace: &str) -> Result<u64, DbError> {
-        let namespace = namespace.to_owned();
-        self.run(move |db, _, _, _| cache::budget(db, &namespace)).await
+        // A newly queued upload, an upload a file stopped waiting for, which
+        // the worker then retires (§17.9), and a self-replacement's write
+        // pause starting or ending, which holds trailing uploads'
+        // completions (§12.3, §17.4).
+        let reads = vec![
+            crate::observation::TableRead {
+                table: "_coven_write_pause".into(),
+                columns: ["paused".into()].into(),
+                scope: crate::row_scope::RowScope::All,
+                inserted_only: false,
+            },
+            crate::observation::TableRead {
+                table: "_coven_file_uploads".into(),
+                columns: ["location".into()].into(),
+                scope: crate::row_scope::RowScope::All,
+                inserted_only: true,
+            },
+            crate::observation::TableRead {
+                table: "_coven_upload_files".into(),
+                columns: ["file".into()].into(),
+                scope: crate::row_scope::RowScope::All,
+                inserted_only: false,
+            },
+        ];
+        self.database.observer.changes(reads, true)
     }
 }
 
@@ -821,9 +735,6 @@ fn changed(count: usize) -> Result<(), DbError> {
     } else {
         Err(DbError::Invariant { what: "a queued upload's update changes exactly its row" })
     }
-}
-fn read_only() -> DbError {
-    DbError::StatementForbidden { operation: "upload through read-only handle" }
 }
 
 /// What this device knows locally about a file it uploads (§17.6): the

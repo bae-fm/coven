@@ -8,25 +8,29 @@ use super::file_error::TransferError;
 use super::file_failure::{download_subject, stored, upload_subject, FileCopy, FileFailure};
 use super::file_status::Uploading;
 use crate::{files::FilesInner, FileReadError, PendingReason, PendingRecord, PendingSubject};
-use coven_database::{DbError, FileRef};
+use coven_database::{DbError, FileRef, Mode};
 use coven_foundation::id_source::FileId;
 
-impl FilesInner {
+impl<M: Mode> FilesInner<M> {
     /// Record a pin's failure as the stored bytes' pending record, or, with
     /// no failure, clear the conditions the completed download checked. The
-    /// record belongs to the stored bytes, whichever call downloaded them.
+    /// record belongs to the stored bytes, whichever call downloaded them. A
+    /// read-only handle keeps no records.
     async fn finish_download(
         &self,
         file: &FileRef,
         failed: Option<PendingRecord>,
         whole: bool,
     ) -> Result<(), crate::SyncError> {
+        let Some(records) = self.database.records() else {
+            return Ok(());
+        };
         let (location, _) = stored(file).map_err(|_device_only| DbError::Invariant {
             what: "only a stored file is downloaded",
         })?;
         let subject = download_subject(location);
         match failed {
-            Some(record) => Ok(self.database.fail_download(record).await?),
+            Some(record) => Ok(records.fail_download(record).await?),
             None => {
                 // A partial read settles every failure but those a whole
                 // file must clear.
@@ -39,7 +43,7 @@ impl FilesInner {
                                 | PendingReason::UpdateRequired(_)
                         )
                 };
-                self.database
+                records
                     .clear_download_pending::<PendingRecord>(subject.clone(), move |record| {
                         ends(&record.reason)
                     })
@@ -126,13 +130,17 @@ impl FilesInner {
     /// user's original, on its move, not an upload's provider condition. A
     /// read that finds the original changed fails the move (§17.3). An
     /// already-open local stream remains usable after its store closes,
-    /// when no pending transaction can run.
+    /// when no pending transaction can run. Only the writer, which keeps
+    /// file records, knows a file's upload.
     pub(super) async fn complete_local_read<T>(
         &self,
         file: FileId,
         uploading: &Uploading,
         result: Result<T, FileReadError>,
     ) -> Result<T, FileReadError> {
+        let Some(records) = self.database.records() else {
+            return result;
+        };
         if self.closed.load(std::sync::atomic::Ordering::Acquire)
             || result.as_ref().is_err_and(unrecorded)
         {
@@ -149,11 +157,10 @@ impl FilesInner {
                 if record.retry() == crate::Retry::AppAction
                     && matches!(record.reason, PendingReason::Original { .. })
                 {
-                    self.database.fail_move(uploading.upload, record).await.map_err(Into::into)
+                    records.fail_move(uploading.upload, record).await.map_err(Into::into)
                 } else {
                     let waits = self.waits.clone();
-                    match self
-                        .database
+                    match records
                         .fail_local_read(file, record, move |previous| {
                             waits
                                 .next(previous.as_ref())
@@ -192,10 +199,12 @@ impl FilesInner {
         location: &coven_database::FileLocation,
         of: coven_database::MoveId,
     ) -> Result<(), crate::SyncError> {
+        let Some(records) = self.database.records() else {
+            return Ok(());
+        };
         let subject = upload_subject(location);
         let object = (location.uploader(), location.object());
-        let retry = self
-            .database
+        let retry = records
             .clear_upload_pending::<PendingRecord>(object, subject.clone(), |record| {
                 source_failure(&record.reason)
             })
@@ -205,8 +214,7 @@ impl FilesInner {
             self.waits.forget(retry);
         }
         let moving = PendingSubject::Move { id: of };
-        if let Some(path) = self
-            .database
+        if let Some(path) = records
             .clear_original::<PendingRecord>(upload, moving.clone(), |record, path| {
                 original_missing(&record.reason, path)
             })

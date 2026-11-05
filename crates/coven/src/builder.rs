@@ -552,8 +552,8 @@ impl CovenBuilder {
             }
             None => None,
         };
-        let files = coven_sync::Files::new(
-            coven_database::FileDatabase::read_only(database.clone()),
+        let files = coven_sync::Files::read_only(
+            coven_database::FileDatabase::new(database.clone()),
             directory,
             storage,
             Arc::new(coven_sync::SequenceState::new()),

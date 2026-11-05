@@ -570,7 +570,7 @@ async fn another_handles_removals_leave_a_range_being_written() {
         .open_read_only()
         .await
         .unwrap();
-    let reader = FileDatabase::read_only(read_only.clone());
+    let reader = FileDatabase::new(read_only.clone());
     let name = FileName::new("range").unwrap();
     let path = cache_path(&store, &name);
     fifo(&path);
@@ -624,7 +624,7 @@ async fn opening_waits_for_a_range_being_written_and_removes_abandoned_ones() {
         .open_read_only()
         .await
         .unwrap();
-    let reader = FileDatabase::read_only(read_only.clone());
+    let reader = FileDatabase::new(read_only.clone());
     let name = FileName::new("live").unwrap();
     let live = cache_path(&store, &name);
     fifo(&live);

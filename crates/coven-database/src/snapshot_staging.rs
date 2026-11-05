@@ -299,7 +299,7 @@ impl Drop for SnapshotStaging {
                 remove,
             );
             #[cfg(test)]
-            coven_foundation::locks::lock_unpoisoned(&self.database.abandoned_stagings)
+            coven_foundation::locks::lock_unpoisoned(&self.database.writer.abandoned_stagings)
                 .push(removing);
             #[cfg(not(test))]
             drop(removing);

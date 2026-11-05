@@ -108,6 +108,10 @@ impl<'ast> Visit<'ast> for TypeNames<'_> {
     }
 
     fn visit_type_path(&mut self, node: &'ast syn::TypePath) {
+        if let Some(projected) = self.types.projection(node) {
+            self.names.extend(projected.iter().cloned());
+            return;
+        }
         if let Some(name) = self.types.name(&node.path) {
             if self.types.phantoms.contains(&name) {
                 if let Some(qself) = &node.qself {
@@ -356,6 +360,9 @@ struct SharedTypeNames<'p> {
 
 impl<'ast> Visit<'ast> for SharedTypeNames<'_> {
     fn visit_type_path(&mut self, node: &'ast syn::TypePath) {
+        if self.types.projection(node).is_some() {
+            return;
+        }
         let (Some(segment), Some(name)) = (node.path.segments.last(), self.types.name(&node.path))
         else {
             return;
@@ -586,6 +593,43 @@ pub(crate) fn flatten_use_tree(
             }
         }
     }
+}
+
+/// Whether `node` is an `impl Clone` whose `clone` is `Self { .. }` with each
+/// field set to `self.<that field>.clone()`, as `derive(Clone)` writes it
+/// for a struct with named fields. Written out where the derive would bound
+/// a type parameter, or one of its associated types, by `Clone`, it makes no
+/// new value of anything the struct holds.
+pub(crate) fn clones_each_field(node: &syn::ItemImpl) -> bool {
+    let is_clone = node
+        .trait_
+        .as_ref()
+        .is_some_and(|(path, _)| path.segments.last().is_some_and(|last| last.ident == "Clone"));
+    let [syn::ImplItem::Fn(function)] = node.items.as_slice() else {
+        return false;
+    };
+    let [syn::Stmt::Expr(syn::Expr::Struct(value), None)] = function.block.stmts.as_slice() else {
+        return false;
+    };
+    is_clone
+        && function.sig.ident == "clone"
+        && value.path.is_ident("Self")
+        && value.rest.is_none()
+        && value.fields.iter().all(|field| {
+            let syn::Member::Named(name) = &field.member else {
+                return false;
+            };
+            let syn::Expr::MethodCall(call) = &field.expr else {
+                return false;
+            };
+            let syn::Expr::Field(source) = call.receiver.as_ref() else {
+                return false;
+            };
+            call.method == "clone"
+                && call.args.is_empty()
+                && matches!(&source.member, syn::Member::Named(own) if own == name)
+                && matches!(source.base.as_ref(), syn::Expr::Path(base) if base.path.is_ident("self"))
+        })
 }
 
 #[cfg(test)]

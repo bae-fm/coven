@@ -15,7 +15,8 @@ pub(super) fn unwatched(
         coven_database::TransferProgress { bytes_transferred: 0, bytes_total: item.bytes_total };
     f.files
         .inner
-        .in_flight
+        .database
+        .uploads_in_flight()
         .start(item.location.uploader(), item.location.object(), item.files.clone(), progress)
         .meter()
 }

@@ -386,7 +386,11 @@ impl FilesInner {
         // ends (§17.9). One holding a provider session has it aborted
         // first, which needs storage and sync started.
         self.end_abandoned_sessions().await?;
-        for id in self.database.retire_unlinked(self.in_flight.current(), upload_subject).await? {
+        for id in self
+            .database
+            .retire_unlinked(self.database.uploads_in_flight().current(), upload_subject)
+            .await?
+        {
             self.waits.forget(RetrySubject::Upload(id));
         }
         if let Some(blocked @ (Blocked::NotSyncing | Blocked::NoStorage)) = self.blocked() {
@@ -611,7 +615,7 @@ impl FilesInner {
                 bytes_transferred: item.progress.map_or(0, |progress| progress.bytes_confirmed),
                 bytes_total: item.bytes_total,
             };
-            let sending = self.in_flight.start(
+            let sending = self.database.uploads_in_flight().start(
                 item.location.uploader(),
                 item.location.object(),
                 item.files.clone(),

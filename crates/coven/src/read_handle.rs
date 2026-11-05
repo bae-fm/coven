@@ -1,7 +1,7 @@
 //! The read-only application surface caches files under a shared deletion guard.
 
 use crate::*;
-use coven_database::DatabaseReadHandle;
+use coven_database::{Database, ReadOnly};
 
 /// A handle that reads synced rows and maintains its local file cache (§4, E1).
 /// Its shared store lock prevents deletion until all its connections close.
@@ -20,12 +20,12 @@ use coven_database::DatabaseReadHandle;
 /// ```
 #[derive(Clone)]
 pub struct CovenReadHandle {
-    database: DatabaseReadHandle,
-    files: coven_sync::Files,
+    database: Database<ReadOnly>,
+    files: coven_sync::Files<ReadOnly>,
 }
 
 impl CovenReadHandle {
-    pub(crate) fn new(database: DatabaseReadHandle, files: coven_sync::Files) -> Self {
+    pub(crate) fn new(database: Database<ReadOnly>, files: coven_sync::Files<ReadOnly>) -> Self {
         Self { database, files }
     }
     /// The store's current name from this device's committed state (E9).
@@ -34,7 +34,7 @@ impl CovenReadHandle {
     }
 
     /// A read of one consistent snapshot, run when awaited.
-    pub fn read<F, R>(&self, read: F) -> Read<'_, F>
+    pub fn read<F, R>(&self, read: F) -> Read<'_, F, ReadOnly>
     where
         F: FnOnce(SqlReadContext<'_>) -> CovenResult<R> + Send + 'static,
         R: Send + 'static,
@@ -61,7 +61,10 @@ impl CovenReadHandle {
     /// Opens a file for reading ranges (§17.7), as its record stands when it
     /// opens; keep the stream for as long as the file is read. Its shared
     /// store lock prevents deletion until it and its I/O finish.
-    pub async fn open_file_stream(&self, file: &FileRef) -> Result<FileStream, FileReadError> {
+    pub async fn open_file_stream(
+        &self,
+        file: &FileRef,
+    ) -> Result<FileStream<ReadOnly>, FileReadError> {
         self.files.open_file_stream(file).await
     }
     /// Closes read and cache connections on all clones and releases their

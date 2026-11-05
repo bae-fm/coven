@@ -21,7 +21,7 @@ impl FilesInner {
         let Some(storage) = read_unpoisoned(&self.storage).clone() else {
             return Ok(());
         };
-        let in_flight = self.in_flight.current();
+        let in_flight = self.database.uploads_in_flight().current();
         for (item, record) in
             self.database.abandoned_uploads::<PendingRecord>(upload_subject).await?
         {

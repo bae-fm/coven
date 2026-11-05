@@ -93,8 +93,8 @@ async fn read_only_downloads_keep_typed_errors_without_writing_pending_records()
     let reader =
         builder(&f.directory, &f.ids, &f.clock, &f.namespaces).open_read_only().await.unwrap();
     let transfers = Arc::new(coven_storage::TransferBudget::new(crate::TransferLimits::default()));
-    let files = Files::new(
-        FileDatabase::read_only(reader.clone()),
+    let files = Files::read_only(
+        FileDatabase::new(reader.clone()),
         f.directory.clone(),
         Some(Arc::new(f.storage.with_transfers(transfers.clone()))),
         f.send.clone(),

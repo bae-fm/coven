@@ -10588,7 +10588,10 @@ places that start background work.
 - Any owner construction outside a listed root fails the check, including
   construction of an owner's private representation. A pattern that names an
   owner's unit variant, in a `match`, an `if let` or `matches!`, matches a value
-  and constructs none.
+  and constructs none. A `Clone` impl whose `clone` clones each field of its
+  own, as `derive(Clone)` writes it, shares what the value holds and
+  constructs none either; it is written out where the derive would ask a
+  type parameter, or one of its associated types, to be `Clone`.
 - Building or reaching a runtime, and spawning a thread or a future, use the
   same list.
 - A legitimate new place must be added deliberately; returning an owner grants no
@@ -10787,7 +10790,10 @@ the same on any platform.
    types each have one declaration, and a dependency's type goes by its name
    unless one of coven's has it. A path to such a type, as
    `rusqlite::Connection` would be beside a `Connection` of coven's, names
-   it by the path it resolves to, so it never stands for coven's type.
+   it by the path it resolves to, so it never stands for coven's type. A
+   projection of an associated type, as `M::Open`, names every type coven's
+   trait impls give it, so a type generic over its mode holds what any mode
+   holds.
 4. The checker's check of the policy, before any rule: every member, file,
    type and composition root the policy names must exist, so the policy can't
    go stale. Each table the schema creates is in one domain, and each

@@ -30,7 +30,7 @@ mod file_upload_queue;
 mod file_upload_retry;
 use crate::SyncError;
 pub use coven_database::PinProgress;
-use coven_database::{DbError, FileDatabase};
+use coven_database::{DbError, FileDatabase, Mode, ReadOnly, Writer};
 use coven_foundation::locks::{lock_unpoisoned, write_unpoisoned};
 use coven_foundation::{files::StoreDir, id_source::IdSourceRef};
 use coven_storage::Storage;
@@ -52,21 +52,28 @@ use tokio::sync::{watch, Notify};
 use coven_storage::TransferBudget;
 pub use coven_storage::TransferLimits;
 
-/// Owns storage, database file operations and the device's file area (Appendix F.3).
-/// Construction starts one commit-driven worker, for uploads; no sync loop or
-/// timer is created. Call `close` before closing the database.
-#[derive(Clone)]
-pub struct Files {
-    inner: Arc<FilesInner>,
+/// Owns storage, database file operations and the device's file area
+/// (Appendix F.3), for the store's writer or a read-only handle
+/// (`Files<ReadOnly>`), which only reads files and keeps its cache. The
+/// writer's starts one commit-driven worker, for uploads and pins; no sync
+/// loop or timer is created. Call `close` before closing the database.
+pub struct Files<M: Mode = Writer> {
+    inner: Arc<FilesInner<M>>,
     worker: Arc<FileWorker>,
+}
+// Written out: `derive(Clone)` would ask the mode to be `Clone`.
+impl<M: Mode> Clone for Files<M> {
+    fn clone(&self) -> Self {
+        Self { inner: self.inner.clone(), worker: self.worker.clone() }
+    }
 }
 /// One lock per stored object's cache entries, by namespace and object.
 type FileReadLocks = BTreeMap<
     (String, coven_foundation::id_source::FileId),
     std::sync::Weak<tokio::sync::Mutex<()>>,
 >;
-struct FilesInner {
-    database: FileDatabase,
+struct FilesInner<M: Mode = Writer> {
+    database: FileDatabase<M>,
     directory: StoreDir,
     storage: std::sync::RwLock<Option<Arc<dyn Storage>>>,
     send: Arc<crate::SequenceState>,
@@ -116,11 +123,6 @@ struct FilesInner {
     upload_parks: crate::Parks,
     /// One upload run at a time.
     drain: tokio::sync::Mutex<()>,
-    /// The files being sent now, which coven's views show (§4, E7).
-    in_flight: coven_database::InFlight,
-    /// The files being downloaded to keep whole now, which
-    /// `coven_downloading` shows (§4, E8).
-    downloading: coven_database::InFlight,
     /// App retries waiting for an upload run to serve them.
     app_retries: Mutex<Vec<file_upload_pool::AppRetry>>,
     /// Why the upload worker ended, other than told to stop, set under
@@ -152,7 +154,8 @@ struct FilesInner {
 }
 struct FileWorker {
     stop: watch::Sender<bool>,
-    /// The upload worker, until the owner closes.
+    /// The writer's upload worker, until the owner closes; a read-only
+    /// handle runs none.
     task: tokio::sync::Mutex<Option<coven_foundation::task::OwnedTask>>,
 }
 impl Drop for FileWorker {
@@ -160,19 +163,11 @@ impl Drop for FileWorker {
         self.stop.send_replace(true);
     }
 }
-impl Files {
-    /// Each time the upload worker has taken every change, wake and due
-    /// retry that was ready, and waits for the next.
-    #[cfg(any(test, feature = "test-utils"))]
-    pub fn uploads_parked_from_now(
-        &self,
-    ) -> impl std::future::Future<Output = ()> + Send + 'static {
-        self.inner.upload_parks.parked_from_now()
-    }
-
-    /// Compose the file owner. Storage may be absent while uploads wait.
-    pub fn new(
-        database: FileDatabase,
+impl Files<ReadOnly> {
+    /// Compose a read-only handle's file owner, which reads files and keeps
+    /// its cache; it uploads, pins and records nothing, and runs no worker.
+    pub fn read_only(
+        database: FileDatabase<ReadOnly>,
         directory: StoreDir,
         storage: Option<Arc<dyn Storage>>,
         send: Arc<crate::SequenceState>,
@@ -182,11 +177,27 @@ impl Files {
         clock: coven_foundation::clock::ClockRef,
         network: coven_foundation::network_watch::NetworkView,
     ) -> Self {
-        let uploads_changes = database.queued_work_changes();
-        let in_flight = database.uploads_in_flight();
-        let downloading = database.downloads_in_flight();
-        let (stop, _) = watch::channel(false);
-        let inner = Arc::new(FilesInner {
+        let inner = Arc::new(FilesInner::new(
+            database, directory, storage, send, waits, ids, transfers, clock, network,
+        ));
+        let worker =
+            FileWorker { stop: watch::channel(false).0, task: tokio::sync::Mutex::new(None) };
+        Self { inner, worker: Arc::new(worker) }
+    }
+}
+impl<M: Mode> FilesInner<M> {
+    fn new(
+        database: FileDatabase<M>,
+        directory: StoreDir,
+        storage: Option<Arc<dyn Storage>>,
+        send: Arc<crate::SequenceState>,
+        waits: Arc<crate::RetryWaits>,
+        ids: IdSourceRef,
+        transfers: Arc<TransferBudget>,
+        clock: coven_foundation::clock::ClockRef,
+        network: coven_foundation::network_watch::NetworkView,
+    ) -> Self {
+        Self {
             database,
             directory,
             storage: std::sync::RwLock::new(storage),
@@ -210,8 +221,6 @@ impl Files {
             upload_wake: Arc::new(Notify::new()),
             upload_parks: crate::Parks::new(),
             drain: tokio::sync::Mutex::new(()),
-            in_flight,
-            downloading,
             app_retries: Mutex::new(Vec::new()),
             worker_ended: std::sync::OnceLock::new(),
             changing: AtomicUsize::new(0),
@@ -226,7 +235,57 @@ impl Files {
             settings_read_gate: Mutex::new(None),
             #[cfg(test)]
             change_waits: tokio::sync::watch::channel(0).0,
-        });
+        }
+    }
+}
+impl<M: Mode> Files<M> {
+    /// Stop background work, wait for in-flight database and transfer work,
+    /// then release the storage client, while clones of this owner live on.
+    /// An app retry still waiting fails as the store closes, as does a read
+    /// of a file stream still open.
+    pub async fn close(&self) {
+        self.inner.closed.store(true, Ordering::Release);
+        // A pin's download waiting for the network fails as the store closes.
+        self.inner.hold_wake.notify_waiters();
+        self.worker.stop.send_replace(true);
+        if let Some(task) = self.worker.task.lock().await.take() {
+            task.ended().await;
+        }
+        let _drain = self.inner.drain.lock().await;
+        let _pins = self.inner.pins.lock().await;
+        let _cache = self.inner.cache.write().await;
+        lock_unpoisoned(&self.inner.app_retries).clear();
+        write_unpoisoned(&self.inner.storage).take();
+    }
+}
+impl Files {
+    /// Each time the upload worker has taken every change, wake and due
+    /// retry that was ready, and waits for the next.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn uploads_parked_from_now(
+        &self,
+    ) -> impl std::future::Future<Output = ()> + Send + 'static {
+        self.inner.upload_parks.parked_from_now()
+    }
+
+    /// Compose the writer's file owner and start its upload worker.
+    /// Storage may be absent while uploads wait.
+    pub fn new(
+        database: FileDatabase,
+        directory: StoreDir,
+        storage: Option<Arc<dyn Storage>>,
+        send: Arc<crate::SequenceState>,
+        waits: Arc<crate::RetryWaits>,
+        ids: IdSourceRef,
+        transfers: Arc<TransferBudget>,
+        clock: coven_foundation::clock::ClockRef,
+        network: coven_foundation::network_watch::NetworkView,
+    ) -> Self {
+        let uploads_changes = database.queued_work_changes();
+        let (stop, _) = watch::channel(false);
+        let inner = Arc::new(FilesInner::new(
+            database, directory, storage, send, waits, ids, transfers, clock, network,
+        ));
         // A panic in the worker goes to the store's bug sink, and fails the
         // app retries it would have served.
         let owner = Arc::downgrade(&inner);
@@ -253,24 +312,6 @@ impl Files {
     pub fn set_transfer_limits(&self, limits: TransferLimits) {
         self.inner.transfers.set_limits(limits);
         self.inner.upload_wake.notify_one();
-    }
-    /// Stop background work, wait for in-flight database and transfer work,
-    /// then release the storage client, while clones of this owner live on.
-    /// An app retry still waiting fails as the store closes, as does a read
-    /// of a file stream still open.
-    pub async fn close(&self) {
-        self.inner.closed.store(true, Ordering::Release);
-        // A pin's download waiting for the network fails as the store closes.
-        self.inner.hold_wake.notify_waiters();
-        self.worker.stop.send_replace(true);
-        if let Some(task) = self.worker.task.lock().await.take() {
-            task.ended().await;
-        }
-        let _drain = self.inner.drain.lock().await;
-        let _pins = self.inner.pins.lock().await;
-        let _cache = self.inner.cache.write().await;
-        lock_unpoisoned(&self.inner.app_retries).clear();
-        write_unpoisoned(&self.inner.storage).take();
     }
     /// Optionally retry recoverable uploads early: the upload worker attempts
     /// every upload that can retry, whatever its wait, and this returns once
@@ -489,7 +530,7 @@ async fn serve_uploads(
     }
 }
 
-impl FilesInner {
+impl<M: Mode> FilesInner<M> {
     fn connection_due(&self, subject: coven_database::RetrySubject) -> bool {
         !lock_unpoisoned(&self.connection_waits).contains(&subject)
     }
@@ -550,14 +591,6 @@ impl FilesInner {
             None
         }
     }
-    /// Read whether a self-replacement pauses this device's writes.
-    pub(crate) async fn read_writes_paused(&self) -> Result<(), DbError> {
-        let asked = self.retries_asked.load(Ordering::Acquire);
-        let paused = self.database.writes_paused().await?;
-        self.writes_paused.store(paused, Ordering::Release);
-        self.writes_paused_read_after.store(asked, Ordering::Release);
-        Ok(())
-    }
     /// How many app retries had been asked when the write pause was last read.
     pub(crate) fn writes_paused_read_after(&self) -> u64 {
         self.writes_paused_read_after.load(Ordering::Acquire)
@@ -578,16 +611,6 @@ impl FilesInner {
         self.unmetered_only.load(Ordering::Acquire)
             && self.network.current().metered
             && held_on_metered(bound)
-    }
-    /// Take the persisted setting to move files only on unmetered networks
-    /// as this owner's copy, as an upload run does for both settings: a pin
-    /// prepared as the store opens holds as the setting says, before any
-    /// upload run has read it.
-    pub(crate) async fn read_unmetered_only(&self) -> Result<(), DbError> {
-        let _change = self.lock_hold_change().await;
-        let unmetered_only = self.database.unmetered_only().await?;
-        self.unmetered_only.store(unmetered_only, Ordering::Release);
-        Ok(())
     }
     /// `hold_change`, for a run; a test hears each wait for it.
     pub(crate) async fn lock_hold_change(&self) -> tokio::sync::MutexGuard<'_, ()> {
@@ -653,6 +676,26 @@ impl FilesInner {
             // but its failure must remain visible in the structured log.
             tracing::error!(?error, namespace, "cache eviction failed");
         }
+    }
+}
+impl FilesInner {
+    /// Read whether a self-replacement pauses this device's writes.
+    pub(crate) async fn read_writes_paused(&self) -> Result<(), DbError> {
+        let asked = self.retries_asked.load(Ordering::Acquire);
+        let paused = self.database.writes_paused().await?;
+        self.writes_paused.store(paused, Ordering::Release);
+        self.writes_paused_read_after.store(asked, Ordering::Release);
+        Ok(())
+    }
+    /// Take the persisted setting to move files only on unmetered networks
+    /// as this owner's copy, as an upload run does for both settings: a pin
+    /// prepared as the store opens holds as the setting says, before any
+    /// upload run has read it.
+    pub(crate) async fn read_unmetered_only(&self) -> Result<(), DbError> {
+        let _change = self.lock_hold_change().await;
+        let unmetered_only = self.database.unmetered_only().await?;
+        self.unmetered_only.store(unmetered_only, Ordering::Release);
+        Ok(())
     }
 }
 /// A pin's download counted as waiting for the network while it waits.

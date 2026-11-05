@@ -9,7 +9,7 @@ use crate::{
     files::FilesInner, FileMissingReason, FileSourceFailure, LocalFailure, PendingReason,
     PendingRecord, PendingSubject, Prerequisite,
 };
-use coven_database::{FileLocation, FilePlace, FileRef};
+use coven_database::{FileLocation, FilePlace, FileRef, Mode};
 use coven_foundation::locks::read_unpoisoned;
 use coven_storage::StorageFailure;
 use std::error::Error;
@@ -76,7 +76,7 @@ impl FileFailure<'_> {
     }
 }
 
-impl FilesInner {
+impl<M: Mode> FilesInner<M> {
     /// The record of the first unmet condition `failure` leaves for the
     /// stored bytes `subject` names. Its error is logged when the reason
     /// appears or changes, and the record keeps its text as its cause when

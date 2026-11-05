@@ -22,7 +22,7 @@ fn cancelled_staging_drops_outside_a_runtime_and_the_next_write_removes_its_byte
     let staging = runtime.block_on(async {
         let staging = super::FileStaging::new(
             db.inner.clone(),
-            db.file_tasks.clone().read_owned().await,
+            db.writer.file_tasks.clone().read_owned().await,
             |batch| {
                 Ok::<_, DbError>(batch.put_file(
                     "files",

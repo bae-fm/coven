@@ -3438,10 +3438,20 @@ while let Some(rows) = failing.next().await {
 /// SQL access to one read-only database snapshot (§4, E4).
 pub struct SqlReadContext<'connection> { /* private fields */ }
 
-/// An awaitable read that keeps its store borrow until it finishes (E4).
-pub struct Read<'a, F> { /* private fields */ }
+/// Which handle a read or a file stream comes from: the store's one
+/// writer, or a read-only handle (E1). Sealed: these two are the only modes.
+pub trait Mode: Clone + Send + Sync + 'static {}
+/// The store's writer: `CovenHandle`'s reads and streams.
+pub enum Writer {}
+/// A read-only handle: `CovenReadHandle`'s reads and streams.
+pub enum ReadOnly {}
+impl Mode for Writer {}
+impl Mode for ReadOnly {}
 
-impl<F, R> Future for Read<'_, F>
+/// An awaitable read that keeps its store borrow until it finishes (E4).
+pub struct Read<'a, F, M: Mode = Writer> { /* private fields */ }
+
+impl<F, R, M: Mode> Future for Read<'_, F, M>
 where
     F: FnOnce(SqlReadContext<'_>) -> CovenResult<R> + Send + 'static,
     R: Send + 'static,
@@ -3495,7 +3505,9 @@ pub enum LiveQueryCause {
 
 /// An open file with checked identity, header and range-reading state (§17.7).
 /// Retaining a stream prevents store deletion, including after the store closes.
-pub struct FileStream { /* private fields */ }
+/// A read-only handle's stream (`FileStream<ReadOnly>`) reads the same way
+/// and records nothing: a failed read goes to its caller only.
+pub struct FileStream<M: Mode = Writer> { /* private fields */ }
 
 impl CovenHandle {
     /// A read of one consistent snapshot, run when awaited. Attach `process`
@@ -3578,7 +3590,7 @@ impl SqlRead for SqlReadContext<'_> {}
 impl SqlRead for CovenWrite<'_> {}
 impl SqlRead for BulkSqlContext<'_> {}
 
-impl<'a, F, R> Read<'a, F>
+impl<'a, F, R, M: Mode> Read<'a, F, M>
 where
     F: FnOnce(SqlReadContext<'_>) -> CovenResult<R> + Send + 'static,
     R: Send + 'static,
@@ -3809,7 +3821,7 @@ impl CovenReadHandle {
     /// closing.
     pub async fn close(&self) -> Result<(), DbError>;
 
-    pub fn read<F, R>(&self, read: F) -> Read<'_, F>
+    pub fn read<F, R>(&self, read: F) -> Read<'_, F, ReadOnly>
     where
         F: FnOnce(SqlReadContext<'_>) -> CovenResult<R> + Send + 'static,
         R: Send + 'static;
@@ -3820,12 +3832,16 @@ impl CovenReadHandle {
     /// user original on this device, or `None` when it has none.
     pub async fn user_file(&self, file: FileId) -> Result<Option<UserFile>, DbError>;
     pub async fn read_file(&self, file: &FileRef) -> Result<Vec<u8>, FileReadError>;
-    pub async fn open_file_stream(&self, file: &FileRef) -> Result<FileStream, FileReadError>;
+    pub async fn open_file_stream(
+        &self,
+        file: &FileRef,
+    ) -> Result<FileStream<ReadOnly>, FileReadError>;
 }
 ```
 
 - A read handle's file reads fill the cache like any other, which changes no
-  synced state.
+  synced state. It keeps no pending record of a file and sends nothing, so
+  it has no upload or download in flight.
 
 Example:
 
@@ -6392,7 +6408,7 @@ pub enum FileMissingReason {
     Source(FileSourceFailure),
 }
 
-impl FileStream {
+impl<M: Mode> FileStream<M> {
     /// The file's whole size in bytes.
     pub fn plaintext_size(&self) -> u64;
 
@@ -6415,7 +6431,11 @@ impl FileStream {
     /// sequential read of a stored file checks the record's content hash
     /// before the final buffer. A file this device uploads is read as it is
     /// on disk (§17.7).
-    pub fn read_range(&self, offset: u64, len: u64) -> Result<FileRangeStream<'_>, FileReadError>;
+    pub fn read_range(
+        &self,
+        offset: u64,
+        len: u64,
+    ) -> Result<FileRangeStream<'_, M>, FileReadError>;
 }
 
 /// Where a read tells how many of its range's bytes are here.
@@ -6427,9 +6447,9 @@ impl ReadProgress {
 }
 
 /// A borrowed stream of bounded authenticated plaintext buffers.
-pub struct FileRangeStream<'a> { /* private */ }
+pub struct FileRangeStream<'a, M: Mode = Writer> { /* private */ }
 
-impl FileRangeStream<'_> {
+impl<M: Mode> FileRangeStream<'_, M> {
     pub async fn next(&mut self) -> Result<Option<Vec<u8>>, FileReadError>;
 }
 

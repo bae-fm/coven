@@ -1,8 +1,6 @@
 //! Borrowed reads and their connection-scoped SQL capability.
 
-use crate::{
-    database, sqlite::DatabaseConnection, CovenResult, Database, DatabaseReadHandle, LostValue,
-};
+use crate::{database, sqlite::DatabaseConnection, CovenResult, Database, LostValue, Mode, Writer};
 use rusqlite::{Params, Row};
 use std::{
     any::Any,
@@ -140,6 +138,7 @@ impl<'connection> SqlReadContext<'connection> {
         Ok(crate::members::circle_members(self.database, device, circle)?)
     }
 
+    #[cfg(any(test, feature = "test-utils"))]
     pub(crate) fn store_state(&self) -> CovenResult<crate::StoreState> {
         Ok(crate::store_state_tables::read(self.database)?)
     }
@@ -153,33 +152,12 @@ impl<'connection> SqlReadContext<'connection> {
     }
 }
 
-/// A read that starts when polled and retains its store borrow until it ends.
+/// A read that starts when polled and retains its store borrow until it
+/// ends, on the store's writer or a read-only handle.
 #[must_use = "reads run when awaited"]
-pub struct Read<'a, F> {
-    database: ReadOwner<'a>,
+pub struct Read<'a, F, M: Mode = Writer> {
+    database: &'a Database<M>,
     state: ReadState<F>,
-}
-
-pub(crate) enum ReadOwner<'a> {
-    Writer(&'a Database),
-    Reader(&'a DatabaseReadHandle),
-}
-
-impl ReadOwner<'_> {
-    /// Where a bug in the read's work goes once no caller waits for it.
-    fn bugs(&self) -> &coven_foundation::task::BugSinkRef {
-        match self {
-            Self::Writer(database) => database.bugs(),
-            Self::Reader(database) => database.bugs(),
-        }
-    }
-}
-
-impl DatabaseReadHandle {
-    /// Membership and audience state from one committed read-only snapshot.
-    pub async fn store_state(&self) -> CovenResult<crate::StoreState> {
-        self.read(|sql| sql.store_state()).await
-    }
 }
 
 // The public type names the closure, rather than its result. Only poll creates
@@ -190,12 +168,12 @@ enum ReadState<F> {
     Finished,
 }
 
-impl<'a, F, R> Read<'a, F>
+impl<'a, F, R, M: Mode> Read<'a, F, M>
 where
     F: FnOnce(SqlReadContext<'_>) -> CovenResult<R> + Send + 'static,
     R: Send + 'static,
 {
-    pub(crate) fn new(database: ReadOwner<'a>, read: F) -> Self {
+    pub(crate) fn new(database: &'a Database<M>, read: F) -> Self {
         Self { database, state: ReadState::Pending(read) }
     }
 
@@ -212,9 +190,9 @@ where
 }
 
 // No field relies on a pinned address. The task itself is a movable handle.
-impl<F> Unpin for Read<'_, F> {}
+impl<F, M: Mode> Unpin for Read<'_, F, M> {}
 
-impl<F, R> Future for Read<'_, F>
+impl<F, R, M: Mode> Future for Read<'_, F, M>
 where
     F: FnOnce(SqlReadContext<'_>) -> CovenResult<R> + Send + 'static,
     R: Send + 'static,
@@ -225,10 +203,7 @@ where
         let this = self.get_mut();
         let mut task: Box<dyn Any + Send> =
             match std::mem::replace(&mut this.state, ReadState::Finished) {
-                ReadState::Pending(read) => Box::new(match this.database {
-                    ReadOwner::Writer(database) => database.start_read(read),
-                    ReadOwner::Reader(database) => database.start_read(read),
-                }),
+                ReadState::Pending(read) => Box::new(this.database.start_read(read)),
                 ReadState::Running(task) => task,
                 ReadState::Finished => panic!("read polled after completion"),
             };

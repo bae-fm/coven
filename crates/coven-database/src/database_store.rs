@@ -21,11 +21,6 @@ impl Database {
         .await
     }
 
-    /// The name in this device's committed state, including a local creation (E9).
-    pub async fn store_name(&self) -> CovenResult<String> {
-        self.read(|sql| sql.store_name()).await
-    }
-
     /// The same name query, live (E4).
     pub fn subscribe_store_name(&self) -> LiveQuery<String> {
         self.subscribe(|sql| sql.store_name())
@@ -39,8 +34,9 @@ impl Database {
     }
 }
 
-impl DatabaseReadHandle {
-    /// The current name in a consistent read-only snapshot (E9).
+impl<M: Mode> Database<M> {
+    /// The name in this device's committed state, including a local creation
+    /// on the writer (E9).
     pub async fn store_name(&self) -> CovenResult<String> {
         self.read(|sql| sql.store_name()).await
     }

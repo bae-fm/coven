@@ -231,6 +231,11 @@ impl<'ast> Visit<'ast> for Collector<'_> {
         let syn::Type::Path(ty) = node.self_ty.as_ref() else {
             return;
         };
+        // A clone of each field, as `derive(Clone)` writes it, makes nothing
+        // new, as the derive's own clone doesn't (`clones_each_field`).
+        if crate::syntax::clones_each_field(node) {
+            return;
+        }
         let trait_path = match &node.trait_ {
             Some((path, _)) => match self.resolve(path) {
                 Some(path) => Some(path),

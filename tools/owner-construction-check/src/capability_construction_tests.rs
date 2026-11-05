@@ -847,3 +847,27 @@ fn a_handle_is_made_by_its_owner() {
         ]
     );
 }
+
+/// A clone that clones each of its own fields, as `derive(Clone)` writes
+/// it, constructs nothing; one that makes a field anew constructs the owner.
+#[test]
+fn a_clone_of_each_field_constructs_nothing() {
+    let path = "crates/app/src/shared.rs";
+    let source = "struct Sender; \
+        struct Shared { sender: std::sync::Arc<Sender> } \
+        impl Clone for Shared { fn clone(&self) -> Self { Self { sender: self.sender.clone() } } } \
+        struct Fresh { sender: std::sync::Arc<Sender> } \
+        impl Clone for Fresh { fn clone(&self) -> Self { Self { sender: std::sync::Arc::new(Sender) } } }";
+    let policy = Policy::fixture("capability_types = [\"Sender\"]");
+    let found =
+        find_capability_construction_violations(&[RustFile::fixture(path, source)], &policy);
+    assert_eq!(
+        found,
+        [Finding::new(
+            path,
+            1,
+            "Fresh::clone constructs owner Fresh outside a composition root",
+            REMEDY
+        )]
+    );
+}

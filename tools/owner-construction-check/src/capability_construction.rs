@@ -595,7 +595,11 @@ impl<'ast> Visit<'ast> for ConstructionVisitor<'_> {
         }) {
             self.record("Self", node.span(), ConstructionKind::DefaultImplementation);
         }
-        visit::visit_item_impl(self, node);
+        // A clone that clones each of its own fields, as `derive(Clone)`
+        // writes it, shares what the value holds and constructs nothing.
+        if !crate::syntax::clones_each_field(node) {
+            visit::visit_item_impl(self, node);
+        }
         self.current_type = previous;
     }
 

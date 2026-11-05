@@ -10,6 +10,10 @@ use std::sync::{Arc, Mutex, RwLock};
 #[path = "file_database.rs"]
 pub(crate) mod file_database;
 
+#[path = "database_mode.rs"]
+mod mode;
+pub use mode::{Mode, ReadOnly, Writer};
+
 #[path = "file_staging.rs"]
 mod file_staging;
 pub use file_staging::StagedFiles;
@@ -35,7 +39,7 @@ mod snapshots;
 pub(crate) mod operation_tests;
 
 use coven_foundation::clock::{ClockRef, SystemClock};
-use coven_foundation::files::{StoreDir, StoreLock, StoreReadLock};
+use coven_foundation::files::{StoreDir, StoreLock};
 use coven_foundation::id_source::FileId;
 use coven_foundation::id_source::{DeviceId, IdSourceRef, UuidIds};
 
@@ -60,24 +64,72 @@ mod sync;
 pub use builder::{discarded_operations, discarded_store_name, read_store_name, DatabaseBuilder};
 pub(crate) use call::{finish_blocking, process, start_call};
 
-/// Shared ownership of the database. Closing any clone closes them all.
-#[derive(Clone)]
-pub struct Database {
+/// Shared ownership of the database, as its writer or a read-only handle
+/// (`Database<ReadOnly>`), which reads the store through the same calls and
+/// cannot write synced rows or migrate. A read-only handle's connections can
+/// change only local cache metadata, and its shared store lock prevents
+/// deletion until all of them close. Closing any clone closes them all.
+///
+/// ```compile_fail
+/// async fn cannot_write(handle: &coven_database::Database<coven_database::ReadOnly>) {
+///     handle.write(|_| Ok(())).await;
+/// }
+/// ```
+/// ```compile_fail
+/// fn cannot_subscribe(handle: &coven_database::Database<coven_database::ReadOnly>) {
+///     handle.subscribe(|_| Ok(()));
+/// }
+/// ```
+/// ```compile_fail
+/// fn cannot_reconfigure(handle: &coven_database::Database<coven_database::ReadOnly>) {
+///     handle.subscribe_reconfigurable((), |_, _| Ok(()));
+/// }
+/// ```
+/// ```compile_fail
+/// fn cannot_subscribe_losses(handle: &coven_database::Database<coven_database::ReadOnly>) {
+///     handle.subscribe_lost_values();
+/// }
+/// ```
+/// ```compile_fail
+/// fn sends_nothing(handle: &coven_database::Database<coven_database::ReadOnly>) {
+///     handle.uploads_in_flight();
+/// }
+/// ```
+pub struct Database<M: Mode = Writer> {
     /// Where every connection reports its commits (§4); it outlives them, and
     /// once they close makes only closed subscriptions.
     observer: CommitObserver,
+    /// Where a bug in the store's work that nobody waits for goes (E15).
+    bugs: coven_foundation::task::BugSinkRef,
+    /// The open store, `None` once closed. Closing takes it before anything
+    /// that can panic, so a panic while it is written leaves it `None`, a
+    /// whole state: the lock is taken as it is (E15).
+    inner: Arc<RwLock<Option<M::Open>>>,
+    /// What only the writer holds beside it.
+    writer: M::WriterParts,
+}
+
+// Written out: `derive(Clone)` would ask the open store to be `Clone`.
+impl<M: Mode> Clone for Database<M> {
+    fn clone(&self) -> Self {
+        Self {
+            observer: self.observer.clone(),
+            bugs: self.bugs.clone(),
+            inner: self.inner.clone(),
+            writer: self.writer.clone(),
+        }
+    }
+}
+
+/// What the store's writer holds beside its open store.
+#[derive(Clone)]
+pub struct WriterParts {
     /// The files this process is sending now, which coven's views read (§4).
     transfers: crate::transfers_in_flight::TransfersInFlight,
     /// The device's network as this process last heard of it, which
     /// coven's views read (§4).
     network: crate::network_facts::NetworkFacts,
-    /// Where a bug in the store's work that nobody waits for goes (E15).
-    bugs: coven_foundation::task::BugSinkRef,
     closing: Arc<coven_foundation::files::StoreClosingGuard>,
-    /// The open store, `None` once closed. Closing takes it before anything
-    /// that can panic, so a panic while it is written leaves it `None`, a
-    /// whole state: the lock is taken as it is (E15).
-    inner: Arc<RwLock<Option<DatabaseInner>>>,
     file_tasks: Arc<tokio::sync::RwLock<()>>,
     /// Told when a close finds a call holding the open store and waits for
     /// it to end.
@@ -89,7 +141,8 @@ pub struct Database {
     abandoned_stagings: Arc<Mutex<Vec<tests::hooks::StagingRemoval>>>,
 }
 
-struct DatabaseInner {
+/// The writer's open store.
+pub struct DatabaseInner {
     /// Coven's checkpointers of the input database and, unless the app
     /// checkpoints it, the store's (§4); stopped before their writers close.
     checkpoints: Vec<crate::wal_checkpoints::WalCheckpointer>,
@@ -126,8 +179,10 @@ struct DatabaseInner {
     applied_slot_failures: std::sync::atomic::AtomicUsize,
 }
 
-// The lock outlives every connection, including when the last handle is dropped.
-struct DatabaseAccess<L> {
+/// The connections every handle reads through, and the lock on the store's
+/// directory, which outlives every connection, including when the last
+/// handle is dropped.
+pub struct DatabaseAccess<L> {
     /// Shared with the store's checkpointer, which holds it while the WAL
     /// starts over (§4).
     writer: Arc<Mutex<DatabaseConnection>>,
@@ -374,32 +429,93 @@ fn released(writer: &DatabaseConnection, inner: &DatabaseInner) -> crate::file_r
     })
 }
 
-impl Database {
+impl<M: Mode> Database<M> {
     /// Where a bug in the store's work that nobody waits for goes (E15).
     pub fn bugs(&self) -> &coven_foundation::task::BugSinkRef {
         &self.bugs
     }
 
-    /// Mark this instance as closing for a reopen to wait on, though workers
-    /// still hold clones of it: the facade's owning scope ended (F.4).
-    pub fn begin_close(&self) {
-        self.closing.begin_close();
-    }
-
+    /// Run `run` on the open store on the blocking pool, refused once a
+    /// connection failed the handle.
     async fn call<R, E>(
         &self,
-        run: impl FnOnce(&DatabaseInner) -> Result<R, E> + Send + 'static,
+        run: impl FnOnce(&M::Open) -> Result<R, E> + Send + 'static,
     ) -> Result<R, E>
     where
         R: Send + 'static,
         E: From<DbError> + CarriesBug + Send + 'static,
     {
         finish_blocking(
-            start_call("database call", &self.bugs, self.inner.clone(), move |inner| {
-                inner.call(run)
+            start_call("database call", &self.bugs, self.inner.clone(), move |open| {
+                M::access(open).call(|| run(open))
             })
             .await,
         )
+    }
+
+    /// Open the local source of a file still on this device only. No storage
+    /// operation occurs; `None` means the bytes come from the cache or
+    /// storage.
+    pub async fn open_local_file(
+        &self,
+        reference: &crate::FileRef,
+    ) -> Result<Option<crate::LocalFileStream>, crate::LocalFileError> {
+        let reference = reference.clone();
+        self.call(move |open| M::access(open).open_local_file(&reference)).await
+    }
+
+    /// The file this device has a record of under this id, from one
+    /// committed state.
+    pub async fn file_ref(&self, file: FileId) -> Result<crate::FileRef, DbError> {
+        self.call(move |open| M::access(open).file_ref(file)).await
+    }
+
+    /// The recorded original's path, size and modification time; never reread its bytes.
+    pub async fn user_file(&self, file: FileId) -> Result<Option<crate::UserFile>, DbError> {
+        self.call(move |open| M::access(open).user_file(file)).await
+    }
+
+    /// Run ordinary SQL against one consistent snapshot when awaited.
+    pub fn read<F, R>(&self, read: F) -> Read<'_, F, M>
+    where
+        F: FnOnce(SqlReadContext<'_>) -> CovenResult<R> + Send + 'static,
+        R: Send + 'static,
+    {
+        Read::new(self, read)
+    }
+
+    /// Decode every lost cell and removed row in one snapshot.
+    pub async fn lost_values(&self) -> CovenResult<Vec<LostValue>> {
+        self.read(|sql| sql.lost_values()).await
+    }
+
+    pub(crate) fn start_read<F, R>(&self, read: F) -> RunningRead<R>
+    where
+        F: FnOnce(SqlReadContext<'_>) -> CovenResult<R> + Send + 'static,
+        R: Send + 'static,
+    {
+        RunningRead::new(start_call("read", &self.bugs, self.inner.clone(), move |open| {
+            let access = M::access(open);
+            access.call(|| access.read(read))
+        }))
+    }
+
+    /// The committed app schema version, read on a read-only connection.
+    pub async fn schema_version(&self) -> Result<u32, DbError> {
+        self.call(|open| M::access(open).schema_version()).await
+    }
+
+    /// The SQLite settings the store's connections have in effect (§4).
+    pub async fn sqlite_settings(&self) -> Result<crate::SqliteSettingsInEffect, DbError> {
+        self.call(|open| M::access(open).sqlite_settings()).await
+    }
+}
+
+impl Database {
+    /// Mark this instance as closing for a reopen to wait on, though workers
+    /// still hold clones of it: the facade's owning scope ended (F.4).
+    pub fn begin_close(&self) {
+        self.writer.closing.begin_close();
     }
     /// Observe new local writes: rows inserted into the outgoing write queue.
     /// Upload confirmation removing a row is this device's own bookkeeping
@@ -461,55 +577,24 @@ impl Database {
         self.observer.watch_attempt(attempt, rows)
     }
 
-    /// Open the local source of a file still on this device only. No storage
-    /// operation occurs; `None` means the bytes come from the cache or
-    /// storage.
-    pub async fn open_local_file(
-        &self,
-        reference: &crate::FileRef,
-    ) -> Result<Option<crate::LocalFileStream>, crate::LocalFileError> {
-        let reference = reference.clone();
-        self.call(move |inner| inner.access.open_local_file(&reference)).await
-    }
-
-    /// The file this device has a record of under this id, from one
-    /// committed state.
-    pub async fn file_ref(&self, file: FileId) -> Result<crate::FileRef, DbError> {
-        self.call(move |inner| inner.access.file_ref(file)).await
-    }
-
-    /// The recorded original's path, size and modification time; never reread its bytes.
-    pub async fn user_file(&self, file: FileId) -> Result<Option<crate::UserFile>, DbError> {
-        self.call(move |inner| inner.access.user_file(file)).await
-    }
-
-    /// Run ordinary SQL against one consistent snapshot when awaited.
-    pub fn read<F, R>(&self, read: F) -> Read<'_, F>
-    where
-        F: FnOnce(SqlReadContext<'_>) -> CovenResult<R> + Send + 'static,
-        R: Send + 'static,
-    {
-        Read::new(crate::read::ReadOwner::Writer(self), read)
-    }
-
     /// The files this process is sending now: the upload worker marks each
     /// attempt, and coven's views read them (§4, §17.9).
     pub fn uploads_in_flight(&self) -> crate::InFlight {
-        self.transfers.uploads()
+        self.writer.transfers.uploads()
     }
 
     /// The files this process is downloading to keep whole now: each pin's
     /// download marks its attempt, and `coven_downloading` reads them (§4,
     /// §17.8).
     pub fn downloads_in_flight(&self) -> crate::InFlight {
-        self.transfers.downloads()
+        self.writer.transfers.downloads()
     }
 
     /// The store's watch says the device's network is now `network`:
     /// coven's views show it, and a live query that read them runs again
     /// (§4, §6.7).
     pub fn record_network(&self, network: coven_foundation::network_watch::NetworkState) {
-        self.network.set(network);
+        self.writer.network.set(network);
     }
 
     /// Observe the tables and columns a query reads, and the rows its
@@ -567,24 +652,9 @@ impl Database {
         )
     }
 
-    /// Decode every lost cell and removed row in one snapshot.
-    pub async fn lost_values(&self) -> CovenResult<Vec<LostValue>> {
-        self.read(|sql| sql.lost_values()).await
-    }
-
     /// Observe the decoded lost cells and removed rows.
     pub fn subscribe_lost_values(&self) -> LiveQuery<Vec<LostValue>> {
         self.subscribe(|sql| sql.lost_values())
-    }
-
-    pub(crate) fn start_read<F, R>(&self, read: F) -> RunningRead<R>
-    where
-        F: FnOnce(SqlReadContext<'_>) -> CovenResult<R> + Send + 'static,
-        R: Send + 'static,
-    {
-        RunningRead::new(start_call("read", &self.bugs, self.inner.clone(), move |inner| {
-            inner.call(|inner| inner.access.read(read))
-        }))
     }
 
     /// Run app SQL and coven's steps, and commit its unsigned write record
@@ -642,7 +712,7 @@ impl Database {
         T: Send + 'static,
         E: crate::WriteFailure + Send + 'static,
     {
-        let lease = self.file_tasks.clone().read_owned().await;
+        let lease = self.writer.file_tasks.clone().read_owned().await;
         let database = self.inner.clone();
         let (staging, value) = finish_blocking(
             blocking_completing(
@@ -712,16 +782,6 @@ impl Database {
         self.call(move |inner| inner.access.with_writer(|writer| writer.bulk_write(sql))).await
     }
 
-    /// The committed app schema version, read on a read-only connection.
-    pub async fn schema_version(&self) -> Result<u32, DbError> {
-        self.call(|inner| inner.access.schema_version()).await
-    }
-
-    /// The SQLite settings the store's connections have in effect (§4).
-    pub async fn sqlite_settings(&self) -> Result<crate::SqliteSettingsInEffect, DbError> {
-        self.call(|inner| inner.access.sqlite_settings()).await
-    }
-
     /// Checkpoint the store's WAL on the writer, between writes (§4).
     pub async fn checkpoint(
         &self,
@@ -763,13 +823,13 @@ impl Database {
     /// Wait for database calls, close all connections, then release the writer lock.
     /// Every subsequent database call, including close, reports `StoreClosed`.
     pub async fn close(&self) -> Result<(), DbError> {
-        self.closing.begin_close();
+        self.writer.closing.begin_close();
         let database = self.clone();
         // Closing runs as its own task so that a caller dropping this future
         // doesn't stop it partway; the runtime dropping that task can.
         let bugs = self.bugs.clone();
         coven_foundation::task::spawn_completing("close the store", self.bugs.clone(), async move {
-            let file_tasks = database.file_tasks.clone().write_owned().await;
+            let file_tasks = database.writer.file_tasks.clone().write_owned().await;
             finish_blocking(
                 blocking_completing(
                     "close the store",
@@ -818,129 +878,7 @@ impl Database {
     }
 }
 
-/// An application read handle that cannot write synced rows or migrate.
-/// It owns a connection restricted to local cache metadata and a shared store
-/// lock that prevents deletion until all its connections close.
-///
-/// ```compile_fail
-/// async fn cannot_write(handle: &coven_database::DatabaseReadHandle) {
-///     handle.write(|_| Ok(())).await;
-/// }
-/// ```
-/// ```compile_fail
-/// fn cannot_subscribe(handle: &coven_database::DatabaseReadHandle) {
-///     handle.subscribe(|_| Ok(()));
-/// }
-/// ```
-/// ```compile_fail
-/// fn cannot_reconfigure(handle: &coven_database::DatabaseReadHandle) {
-///     handle.subscribe_reconfigurable((), |_, _| Ok(()));
-/// }
-/// ```
-/// ```compile_fail
-/// fn cannot_subscribe_losses(handle: &coven_database::DatabaseReadHandle) {
-///     handle.subscribe_lost_values();
-/// }
-/// ```
-#[derive(Clone)]
-pub struct DatabaseReadHandle {
-    /// Where its connections report their commits (§4).
-    observer: CommitObserver,
-    /// Never started: this handle transfers nothing (§4).
-    transfers: crate::transfers_in_flight::TransfersInFlight,
-    /// Where a bug in the handle's work that nobody waits for goes (E15).
-    bugs: coven_foundation::task::BugSinkRef,
-    inner: Arc<RwLock<Option<DatabaseAccess<StoreReadLock>>>>,
-}
-
-impl DatabaseReadHandle {
-    /// Where a bug in the handle's work that nobody waits for goes, such as
-    /// its file owner's worker's (E15).
-    pub fn bugs(&self) -> &coven_foundation::task::BugSinkRef {
-        &self.bugs
-    }
-
-    /// The files this handle is sending: none, since it sends nothing.
-    pub fn uploads_in_flight(&self) -> crate::InFlight {
-        self.transfers.uploads()
-    }
-
-    /// The files this handle is downloading to keep whole: none, since it
-    /// keeps no file whole.
-    pub fn downloads_in_flight(&self) -> crate::InFlight {
-        self.transfers.downloads()
-    }
-
-    async fn call<R, E>(
-        &self,
-        run: impl FnOnce(&DatabaseAccess<StoreReadLock>) -> Result<R, E> + Send + 'static,
-    ) -> Result<R, E>
-    where
-        R: Send + 'static,
-        E: From<DbError> + CarriesBug + Send + 'static,
-    {
-        finish_blocking(
-            start_call("database call", &self.bugs, self.inner.clone(), move |access| {
-                access.call(|| run(access))
-            })
-            .await,
-        )
-    }
-    /// Open the local bytes of a file still on this device only; `None`
-    /// means the bytes come from the cache or storage.
-    pub async fn open_local_file(
-        &self,
-        reference: &crate::FileRef,
-    ) -> Result<Option<crate::LocalFileStream>, crate::LocalFileError> {
-        let reference = reference.clone();
-        self.call(move |inner| inner.open_local_file(&reference)).await
-    }
-
-    /// The file this device has a record of under this id, from one
-    /// committed state.
-    pub async fn file_ref(&self, file: FileId) -> Result<crate::FileRef, DbError> {
-        self.call(move |inner| inner.file_ref(file)).await
-    }
-
-    /// The recorded original's path, size and modification time; never reread its bytes.
-    pub async fn user_file(&self, file: FileId) -> Result<Option<crate::UserFile>, DbError> {
-        self.call(move |inner| inner.user_file(file)).await
-    }
-
-    /// Read one consistent snapshot when awaited.
-    pub fn read<F, R>(&self, read: F) -> Read<'_, F>
-    where
-        F: FnOnce(SqlReadContext<'_>) -> CovenResult<R> + Send + 'static,
-        R: Send + 'static,
-    {
-        Read::new(crate::read::ReadOwner::Reader(self), read)
-    }
-
-    /// Decode every lost cell and removed row in one snapshot.
-    pub async fn lost_values(&self) -> CovenResult<Vec<LostValue>> {
-        self.read(|sql| sql.lost_values()).await
-    }
-
-    pub(crate) fn start_read<F, R>(&self, read: F) -> RunningRead<R>
-    where
-        F: FnOnce(SqlReadContext<'_>) -> CovenResult<R> + Send + 'static,
-        R: Send + 'static,
-    {
-        RunningRead::new(start_call("read", &self.bugs, self.inner.clone(), move |inner| {
-            inner.call(|| inner.read(read))
-        }))
-    }
-
-    /// The committed app schema version.
-    pub async fn schema_version(&self) -> Result<u32, DbError> {
-        self.call(|inner| inner.schema_version()).await
-    }
-
-    /// The SQLite settings this handle's connections have in effect (§4).
-    pub async fn sqlite_settings(&self) -> Result<crate::SqliteSettingsInEffect, DbError> {
-        self.call(|inner| inner.sqlite_settings()).await
-    }
-
+impl Database<ReadOnly> {
     /// Wait for active calls and close every clone of this handle.
     pub async fn close(&self) -> Result<(), DbError> {
         let handle = self.clone();

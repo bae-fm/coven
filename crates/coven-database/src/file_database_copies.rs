@@ -3,7 +3,7 @@
 //! their bytes exist, the write switching the call's files to them, and the
 //! removal of what a failing call made.
 
-use super::{read_only, Database, FileDatabase, FileDatabaseAccess};
+use super::{Database, FileDatabase};
 use crate::{sqlite::DatabaseConnection, DbError, DeviceOnlyCopy, FileRef};
 use coven_foundation::locks::lock_unpoisoned;
 use coven_foundation::{
@@ -33,10 +33,7 @@ impl FileDatabase {
     /// `owner_only` table another member created. Read in one committed
     /// state; the write switching the files checks again.
     pub async fn device_only_files(&self, files: Vec<FileId>) -> Result<Vec<FileRef>, DbError> {
-        let FileDatabaseAccess::Writer(database) = &self.access else {
-            return Err(read_only());
-        };
-        database
+        self.database
             .call(move |inner| {
                 inner.access.with_committed(|db| {
                     files
@@ -61,28 +58,19 @@ impl FileDatabase {
     /// writing a copy at is `CopyPathTaken`; the returned reservation keeps
     /// the copies from other writes' removals while it is held.
     pub async fn record_copies(&self, copies: Vec<FolderCopy>) -> Result<CopyReservation, DbError> {
-        let FileDatabaseAccess::Writer(database) = &self.access else {
-            return Err(read_only());
-        };
-        database.record_copies(copies).await
+        self.database.record_copies(copies).await
     }
 
     /// The call's own mkdir made `folder`: it is the call's to remove, once
     /// empty. A folder that was there already is never marked.
     pub async fn made_folder(&self, folder: &Path) -> Result<(), DbError> {
-        let FileDatabaseAccess::Writer(database) = &self.access else {
-            return Err(read_only());
-        };
-        database.made_folder(folder).await
+        self.database.made_folder(folder).await
     }
 
     /// A copy is whole and synced at its path, renamed there from its
     /// temporary name, with the size and modification time `observed` read.
     pub async fn place_copy(&self, observed: &ObservedFile) -> Result<(), DbError> {
-        let FileDatabaseAccess::Writer(database) = &self.access else {
-            return Err(read_only());
-        };
-        database.place_copy(observed).await
+        self.database.place_copy(observed).await
     }
 
     /// The copies a call placed, ready for the write that switches their
@@ -95,9 +83,7 @@ impl FileDatabase {
         copies: Vec<DeviceOnlyCopy>,
         _flushed: Flushed,
     ) -> Result<PreparedDeviceOnly, DbError> {
-        let FileDatabaseAccess::Writer(database) = &self.access else {
-            return Err(read_only());
-        };
+        let database = &self.database;
         Ok(PreparedDeviceOnly { database: database.clone(), reservation, copies })
     }
 
@@ -110,10 +96,7 @@ impl FileDatabase {
             .iter()
             .map(|path| text(path).map(str::to_owned))
             .collect::<Result<Vec<_>, _>>()?;
-        let FileDatabaseAccess::Writer(database) = &self.access else {
-            return Err(read_only());
-        };
-        database.abandon_copies(paths).await
+        self.database.abandon_copies(paths).await
     }
 }
 

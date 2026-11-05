@@ -377,7 +377,6 @@ task_types = [
     "WriteBatch",
     "SqlReadContext",
     "Read",
-    "ReadOwner",
     "ChangeCapture",
     "StreamCapture",
     "SupplementalChanges",
@@ -1242,11 +1241,8 @@ tables = [
     "Database::call",
     "Database::start_read",
     "Database::subscribe_reconfigurable",
-    "DatabaseReadHandle::call",
-    "DatabaseReadHandle::start_read",
     "Database::close",
     "Database::stage_files",
-    "DatabaseReadHandle::close",
 ]
 "crates/coven-database/src/database_builder.rs" = [
     "DatabaseBuilder::new",
@@ -1263,7 +1259,7 @@ tables = [
     # input database and the discarded-database reads share.
     "coven_only",
 ]
-"crates/coven-database/src/file_database.rs" = ["FileDatabase::new", "FileDatabase::read_only"]
+"crates/coven-database/src/file_database.rs" = ["FileDatabase::new"]
 "crates/coven-database/src/file_staging.rs" = ["FileStaging::write"]
 # A file's stream opens its local source: a copy in the store's directory,
 # or the user's original, which lives outside it at the path the app staged
@@ -1384,7 +1380,7 @@ tables = [
 "crates/coven-sync/src/file_read.rs" = ["FileStream::read", "UploadedFile::open"]
 # Creates a reserved cache file for a pin or an upload's own copy.
 "crates/coven-sync/src/file_cache.rs" = ["FilesInner::create_cache_file"]
-"crates/coven-sync/src/files.rs" = ["Files::new"]
+"crates/coven-sync/src/files.rs" = ["Files::new", "Files::read_only", "FilesInner::new"]
 # The reason last logged for each subject's failure, which the store's retry
 # waits keep.
 "crates/coven-sync/src/failure_log.rs" = ["FailureLog::new"]

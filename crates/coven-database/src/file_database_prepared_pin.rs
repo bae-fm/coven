@@ -3,7 +3,7 @@
 //! this store, or a checked whole copy already kept. Preparing pins
 //! nothing; the write's `pin` step does, for every file at once.
 
-use super::{read_only, CacheReservation, FileDatabase, FileDatabaseAccess};
+use super::{CacheReservation, FileDatabase};
 use crate::{DbError, FileRef};
 use coven_foundation::files::FileName;
 use coven_foundation::locks::read_unpoisoned;
@@ -30,11 +30,8 @@ impl FileDatabase {
         copies: Vec<CacheReservation>,
         kept: Vec<FileRef>,
     ) -> Result<PreparedPin, DbError> {
-        let FileDatabaseAccess::Writer(database) = &self.access else {
-            return Err(read_only());
-        };
         let reserved = {
-            let slot = read_unpoisoned(&database.inner);
+            let slot = read_unpoisoned(&self.database.inner);
             slot.as_ref().ok_or(DbError::StoreClosed)?.staging.clone()
         };
         let copies = copies
@@ -52,10 +49,7 @@ impl FileDatabase {
     /// with its `pin` step, for tests.
     #[cfg(any(test, feature = "test-utils"))]
     pub async fn commit_pin(&self, prepared: PreparedPin) -> Result<(), DbError> {
-        let FileDatabaseAccess::Writer(database) = &self.access else {
-            return Err(read_only());
-        };
-        database.write(move |sql| sql.pin(prepared)).await
+        self.database.write(move |sql| sql.pin(prepared)).await
     }
 
     /// Whether a checked whole copy of this stored file is kept here, pinned
