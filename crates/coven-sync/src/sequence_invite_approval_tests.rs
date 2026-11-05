@@ -5,7 +5,8 @@ use crate::sequence_sync::OperationState;
 use crate::*;
 use coven_database::operation_kind;
 use coven_format::{admin::MemberRole, MemberAccess};
-use coven_storage::ObjectPath;
+use coven_merge::Audience;
+use coven_storage::{ObjectPath, Storage};
 
 /// Ana watched Carol's phone scan an in-person invite: the pass that reads
 /// and checks the request approves it, with no call from the app (§13.2).
@@ -453,4 +454,153 @@ fn copy_committed(from: &std::path::Path, to: &std::path::Path) {
     coven_foundation::files::copy_tree_keeping(from, to, &|name| {
         !name.ends_with(".lock") && !name.ends_with("-shm")
     });
+}
+
+/// Carol's invite, and the request path its code names, with the member id
+/// the invite fixed for her.
+async fn carol_request_slot(
+    group: &Group,
+    ana: &Device,
+) -> (coven_format::codes::InviteCode, coven_foundation::id_source::MemberId) {
+    let invite = invite(ana).await;
+    let code = read_invite_code(invite.shown_code()).unwrap();
+    let record = ana
+        .sync
+        .database
+        .operations()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|record| record.kind == operation_kind::INVITE)
+        .unwrap();
+    let work: InviteWork = serde_json::from_slice(&record.data).unwrap();
+    assert!(no_request(&group.storage, &code.request_path()).await);
+    (code, work.member)
+}
+
+/// Publish `request` at the invite's request path, signed by `signer`.
+async fn publish_request(
+    group: &Group,
+    code: &coven_format::codes::InviteCode,
+    request: &coven_format::objects::JoinRequest,
+    signer: &coven_crypto::MemberKeys,
+) {
+    let path = code.request_path();
+    let bytes = sealed_join_request(&code.secret, &path, request, signer).unwrap();
+    group.storage.create(&path, &bytes).await.unwrap();
+}
+
+/// A request signed correctly by the pair it names, but naming a member
+/// other than the one the invite fixed, is not shown for approval: the
+/// invite goes on waiting for a request (§13.2).
+#[tokio::test]
+async fn a_request_naming_another_member_is_not_offered_for_approval() {
+    let group = Group::shared();
+    let ana = group.device(1).await;
+    group.create(&ana).await;
+    let (code, member) = carol_request_slot(&group, &ana).await;
+    let keys = coven_crypto::MemberKeys::generate().unwrap();
+    let other = coven_foundation::id_source::MemberId(uuid::Uuid::from_u128(99));
+    assert_ne!(other, member);
+    let request = coven_format::objects::JoinRequest {
+        invite: code.invite,
+        member: other,
+        keys: keys.public_keys(),
+        device_name: "Carol's phone".into(),
+    };
+    publish_request(&group, &code, &request, &keys).await;
+    ana.sync.pass().await.unwrap();
+    assert!(requests(&ana).await.is_empty());
+    let open = listed(&ana).await;
+    assert_eq!(open.len(), 1);
+    assert!(matches!(open[0].stage, InviteStage::Waiting { request: None, .. }));
+    ana.sync.database.close().await.unwrap();
+}
+
+/// Ana's phone made Carol's invite and holds its secret; her laptop, a
+/// second device of hers, lists no invite and its approve, decline and
+/// cancel all fail, leaving the phone's invite as it was (§13.2).
+#[tokio::test]
+async fn only_the_inviting_device_lists_and_decides_its_invite() {
+    let group = Group::shared();
+    let phone = group.device(1).await;
+    group.create(&phone).await;
+    let laptop = group.laptop(&phone).await;
+    let invite = invite(&phone).await;
+    let carol = join(&group, invite.shown_code(), "Carol's phone").await;
+    phone.sync.pass().await.unwrap();
+    laptop.sync.pass().await.unwrap();
+    let [request] = requests(&phone).await.try_into().expect("the phone shows Carol's request");
+    assert!(listed(&laptop).await.is_empty());
+    for result in [
+        laptop.sync.approve_join_request(&request).await,
+        laptop.sync.decline_join_request(&request).await,
+        laptop.sync.cancel_invite(invite.id).await,
+    ] {
+        assert!(matches!(result, Err(SyncError::InvitationChanged)), "{result:?}");
+    }
+    assert!(laptop.sync.database.operations().await.unwrap().is_empty());
+    assert_eq!(requests(&phone).await, [request]);
+    assert!(!no_request(&group.storage, &request_path(&invite)).await);
+    for device in [&phone, &laptop, &carol.device] {
+        device.sync.database.close().await.unwrap();
+    }
+}
+
+/// Ana's phone rotated the store key, then lost the older one from custody,
+/// as when its copy has not reached the phone yet. Carol's approval needs a
+/// copy of every store key in history, so it claims no copy and no entry,
+/// and stays journaled with its pending record, even when retried; once the
+/// phone holds the key the same approval lands (§13.2, §12.1).
+#[tokio::test]
+async fn an_approval_missing_a_key_it_must_copy_waits_for_it() {
+    let group = Group::shared();
+    let ana = group.device(1).await;
+    group.create(&ana).await;
+    ana.sync.rotate_key(Audience::Store).await.unwrap();
+    let invite = invite(&ana).await;
+    let carol = join(&group, invite.shown_code(), "Carol's phone").await;
+    ana.sync.pass().await.unwrap();
+    let [request] = requests(&ana).await.try_into().expect("the phone shows Carol's request");
+    let full = ana.sync.keys.read().unwrap().unwrap();
+    let newest = ana.sync.session.lock().await.history.metadata_key(&full).unwrap();
+    assert_eq!(full.store_key_ids().count(), 2, "the rotation leaves an older key");
+    ana.sync
+        .keys
+        .persist(&coven_crypto::StoreKeyring::new(full.store_key(newest).unwrap().clone()))
+        .unwrap();
+    let applied = ana.sync.database.applied_slot().await.unwrap();
+    let binding = approve(&ana, &request).await;
+    let invite_operation = ana
+        .sync
+        .database
+        .operations()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|record| record.kind == operation_kind::INVITE && record.id != binding)
+        .unwrap()
+        .id;
+    let member = request.member;
+    let enrolled =
+        || async { ana.sync.database.store_state().await.unwrap().members.contains_key(&member) };
+    ana.sync.pass().await.unwrap();
+    ana.sync.retry_pending_operation(invite_operation).await.unwrap();
+    assert_eq!(ana.sync.database.applied_slot().await.unwrap(), applied, "no copy, no entry");
+    assert_eq!(outcome(&ana, binding).await, None);
+    assert!(!enrolled().await);
+    assert!(ana
+        .sync
+        .database
+        .operation_pending::<PendingRecord>(invite_operation)
+        .await
+        .unwrap()
+        .is_some());
+    ana.sync.keys.persist(&full).unwrap();
+    ana.sync.retry_pending_operation(invite_operation).await.unwrap();
+    assert!(enrolled().await);
+    assert!(matches!(outcome(&ana, binding).await, Some(OperationOutcome::Landed(_))));
+    for device in [&ana, &carol.device] {
+        device.sync.database.close().await.unwrap();
+    }
 }
