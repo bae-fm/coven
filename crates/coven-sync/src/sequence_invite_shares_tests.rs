@@ -56,6 +56,65 @@ fn grants(device: &Device) -> usize {
         .count()
 }
 
+/// Ana's phone has an invite to Carol whose provider grant is in flight, and
+/// a provider call cannot be cancelled. She cancels the invite meanwhile: the
+/// account's cleanup stays recorded while the grant runs, and ends only after
+/// the grant ends and its revocation is confirmed (E6, §20.9).
+#[tokio::test]
+async fn an_uncancellable_provider_grant_keeps_its_cleanup_until_it_ends() {
+    let group = Group::shared();
+    let (phone, ben, laptop) = household(&group).await;
+    let (entered, entering) = tokio::sync::oneshot::channel();
+    let (release, released) = tokio::sync::oneshot::channel();
+    phone.storage.hold_next_access(CAROL, true, entered, released).await;
+    let making = phone.sync.create_invite(
+        InviteTarget::NewMember { role: MemberRole::Member, name: "Carol".into() },
+        InviteAccess::ProviderAccount { email: CAROL.into() },
+        InviteDelivery::Sent { lifetime: InviteLifetime::Day },
+    );
+    let cancelling = async {
+        entering.await.unwrap();
+        let invite = listed(&phone).await.remove(0);
+        // The app's write step alone: the pass that grants holds the session.
+        let steps = phone.sync.operation_steps();
+        let id = invite.id;
+        phone.sync.database.write_as(move |sql| steps.cancel_invite(&sql, id)).await.unwrap();
+        assert!(!phone.database().operations().await.unwrap().is_empty());
+        release.send(()).unwrap();
+    };
+    let (made, ()) = tokio::time::timeout(coven_foundation::clock::HANG_GUARD, async {
+        tokio::join!(making, cancelling)
+    })
+    .await
+    .expect("the held grant and the cancel finish");
+    drop(made);
+    for _ in 0..2 {
+        phone.sync.pass().await.unwrap();
+    }
+    let account_requests: Vec<_> = phone
+        .storage
+        .request_trace()
+        .into_iter()
+        .filter(|request| {
+            matches!(
+                request,
+                MemoryRequest::Other("grant_access") | MemoryRequest::Other("revoke_access")
+            )
+        })
+        .collect();
+    assert_eq!(
+        account_requests,
+        [MemoryRequest::Other("grant_access"), MemoryRequest::Other("revoke_access")]
+    );
+    assert_eq!(row(&phone, CAROL).await, Some((false, Some(false))));
+    assert!(!group.storage.shared_with(CAROL).await);
+    assert!(phone.database().operations().await.unwrap().is_empty());
+    assert!(phone.database().pending::<PendingRecord>().await.unwrap().is_empty());
+    for device in [&phone, &ben, &laptop] {
+        device.database().close().await.unwrap();
+    }
+}
+
 /// Ben removes Ana's phone while its invite to Carol is open and shared. The
 /// phone never reads storage again, so it can't take the share back. Ana's
 /// laptop reads the share from history: applying the removal, it revokes
