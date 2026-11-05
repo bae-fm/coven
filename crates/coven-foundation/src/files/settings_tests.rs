@@ -55,3 +55,20 @@ fn a_directory_at_the_settings_path_is_not_valid_settings() {
         Err(SettingsError::NotRegularFile(_))
     ));
 }
+
+#[test]
+fn an_unreadable_settings_path_is_a_file_failure() {
+    let directory = tempfile::tempdir().unwrap();
+    // A file where the store directory should be: the settings path can't be
+    // inspected, which is neither absence nor damage.
+    let store = directory.path().join("store");
+    std::fs::write(&store, b"not a directory").unwrap();
+    let id = StoreId(Uuid::from_u128(3));
+    let Err(SettingsError::File(FileError::Io { operation, path, source })) = read(&store, id)
+    else {
+        panic!("an uninspectable settings path must be a file failure")
+    };
+    assert_eq!(operation, "inspect settings file");
+    assert_eq!(path, store.join(SETTINGS_FILE));
+    assert!(source.downcast_ref::<std::io::Error>().is_some());
+}
