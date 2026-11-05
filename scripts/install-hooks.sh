@@ -26,7 +26,7 @@ hook="\$(git rev-parse --show-toplevel)/scripts/hooks/$hook_name"
 exec "\$hook" "\$@"
 EOF
     chmod +x "$target"
-    echo "✅ Installed $hook_name"
+    echo "Installed $hook_name"
 done
 
 echo ""

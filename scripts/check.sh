@@ -140,6 +140,7 @@ code_checks() {
     step "the check scripts' own tests"
     "$(command -v python3 || command -v python)" scripts/check_spec_tests.py
     "$(command -v python3 || command -v python)" scripts/check_fast_tests.py
+    "$(command -v python3 || command -v python)" scripts/hook_restage_tests.py
 
     # Build the structural checker before the crates whose graph it validates (Appendix F.6).
     # It reads the whole workspace and runs in seconds, so every run includes it.
@@ -561,4 +562,4 @@ if [ "$part" != code ] && [ "$part" != android ]; then
 fi
 
 echo ""
-echo "✅ all checks passed"
+echo "all checks passed"
