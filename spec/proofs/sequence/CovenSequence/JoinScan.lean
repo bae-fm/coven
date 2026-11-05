@@ -233,6 +233,112 @@ theorem no_copy_reaches_end (first head : Nat) :
       exact ih (round + 1) ⟨max scan.scanned first + 1, false⟩ rfl (by omega) (by simp; omega)
     · simp [kept]
 
+/-! ## A damaged slot
+
+A scan reads only each slot's clear prefix. A kept slot whose prefix is
+damaged stops the round there: the scan can't tell whether it holds this
+member's copy, so it never reads past it. The scan applies nothing, so the
+damage isn't the scan's to settle: a later floor carries the copies through
+its `at`, and retention can delete the damaged slot. Going on, the next round
+reads the floor again from the damaged slot (`goOn`); stopping for good at the
+damage (`stopAt`) never finds a key a later floor carries
+(`stop_strands_scan`, `deleted_damage_recovers`). -/
+
+inductive Round where
+  | advance (scan : Scan)
+  | key
+  | endOfSequence
+  /-- The kept slot `slot`'s clear prefix is damaged. -/
+  | damaged (slot : Nat)
+  deriving DecidableEq
+
+/-- One round over storage with `damaged` slots. -/
+def readOrDamage (copy damaged : Nat → Bool) (view : View) (scan : Scan) : Round :=
+  if scan.key || !view.copies.isEmpty then .key
+  else
+    let next := max scan.scanned view.first
+    if next ≤ view.head then
+      if damaged next then .damaged next
+      else if copy next then .key else .advance ⟨next + 1, false⟩
+    else .endOfSequence
+
+/-- Without damage a round is `read`'s. -/
+theorem readOrDamage_undamaged (copy : Nat → Bool) (view : View) (scan : Scan) :
+    readOrDamage copy (fun _ => false) view scan =
+      match read copy view scan with
+      | .advance next => .advance next
+      | .key => .key
+      | .endOfSequence => .endOfSequence := by
+  simp only [readOrDamage, read]
+  by_cases hk : (scan.key || !view.copies.isEmpty) = true
+  · simp [hk]
+  · by_cases hh : max scan.scanned view.first ≤ view.head
+    · cases copy (max scan.scanned view.first) <;> simp [hk, hh]
+    · simp [hk, hh]
+
+/-- **A damaged slot is never read past.** A round that advances read a slot
+that is not damaged; the scan passes no damaged slot at or above `first`. -/
+theorem damaged_not_passed (copy damaged : Nat → Bool) (view : View) (scan next : Scan)
+    (advanced : readOrDamage copy damaged view scan = .advance next) :
+    next.scanned = max scan.scanned view.first + 1 ∧ damaged (max scan.scanned view.first) = false := by
+  simp only [readOrDamage] at advanced
+  by_cases hk : (scan.key || !view.copies.isEmpty) = true
+  · simp only [hk, ite_true] at advanced
+    cases advanced
+  simp only [hk, ite_false, Bool.false_eq_true] at advanced
+  by_cases hh : max scan.scanned view.first ≤ view.head
+  · simp only [hh, ite_true] at advanced
+    cases hd : damaged (max scan.scanned view.first)
+    · cases hc : copy (max scan.scanned view.first)
+      · simp only [hd, hc, ite_false, Bool.false_eq_true, Round.advance.injEq] at advanced
+        exact ⟨by rw [← advanced], rfl⟩
+      · simp only [hd, hc, ite_false, ite_true, Bool.false_eq_true] at advanced
+        cases advanced
+    · simp only [hd, ite_true] at advanced
+      cases advanced
+  · simp only [hh, ite_false] at advanced
+    cases advanced
+
+/-- Going on: after a damaged round the scan stays at that slot, and the next
+round reads the floor again. A scan that starts again from an earlier slot
+reaches the same one: the slots before it hold no copy and no damage. -/
+def goOn (copy damaged : Nat → Bool) (views : Nat → View) (round : Nat) (scan : Scan) : Nat → Round
+  | 0 => .advance scan
+  | fuel + 1 => match readOrDamage copy damaged (views round) scan with
+    | .advance next => goOn copy damaged views (round + 1) next fuel
+    | .damaged slot => goOn copy damaged views (round + 1) ⟨slot, false⟩ fuel
+    | result => result
+
+/-- Stopping for good at the first damaged slot, as a durable block would. -/
+def stopAt (copy damaged : Nat → Bool) (views : Nat → View) (round : Nat) (scan : Scan) : Nat → Round
+  | 0 => .advance scan
+  | fuel + 1 => match readOrDamage copy damaged (views round) scan with
+    | .advance next => stopAt copy damaged views (round + 1) next fuel
+    | result => result
+
+/-- **Counterexample: stopping at the damage strands the scan.** Dan's phone
+scans from slot 1, one slot a round; slot 4 is damaged and his copy is at 6.
+The floors of the first four rounds carry no copy for him; the one written
+after his copy, captured through its `at`, does. Stopping at slot 4 keeps reporting it; going on, the
+next round's floor read supplies his key. -/
+theorem stop_strands_scan :
+    let views : Nat → View := fun round => if round < 4 then ⟨1, 6, []⟩ else ⟨1, 7, [6]⟩
+    let damaged := fun slot => slot == 4
+    let copy := fun slot => slot == 6
+    goOn copy damaged views 0 ⟨1, false⟩ 5 = .key ∧
+      ∀ fuel, 4 ≤ fuel → stopAt copy damaged views 0 ⟨1, false⟩ fuel = .damaged 4 := by
+  refine ⟨by decide, fun fuel enough => ?_⟩
+  obtain ⟨n, rfl⟩ : ∃ n, fuel = n + 4 := ⟨fuel - 4, by omega⟩
+  rfl
+
+/-- Retention deletes the damaged slot: a later floor's `first` passes it.
+Going on reads Dan's copy at 6; stopping still reports slot 4. -/
+theorem deleted_damage_recovers :
+    let views : Nat → View := fun round => if round < 4 then ⟨1, 6, []⟩ else ⟨5, 6, []⟩
+    goOn (fun slot => slot == 6) (fun slot => slot == 4) views 0 ⟨1, false⟩ 6 = .key ∧
+      stopAt (fun slot => slot == 6) (fun slot => slot == 4) views 0 ⟨1, false⟩ 6 = .damaged 4 := by
+  decide
+
 inductive Outcome where
   | waiting
   /-- The copies opened and the request remains, but the approving entry

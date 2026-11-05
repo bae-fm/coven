@@ -4306,6 +4306,19 @@ the slot since the previous floor read. It opens any newly carried copies, or
 continues at the newer `first` if that passed the miss. Otherwise it has reached
 the end. It keeps how far it got and retries with the shared backoff (§6.7).
 
+At a slot whose clear prefix is damaged, the scan stops: the phone can't tell
+whether the slot holds Dan's copy, so it never reads past it. The check fails,
+naming that slot's path, and the next check rereads the floor and scans again.
+Unlike a stuck reader (§5.4), the scan records no block. It applies nothing,
+and the damage needn't stop it for good: a floor written after Dan's copy
+carries it, captured through its `at`, and once retention deletes the damaged
+slot a newer `first` passes it. Stopping for good
+there would never find the key such a floor supplies
+([`stop_strands_scan`](proofs/sequence/CovenSequence/JoinScan.lean)). Once his
+keys open, the ordinary reader stops at that slot and reports it, if it is one
+he must apply (§6.1). A restoring device scans for its member's copies the
+same way (§13.1, §13.4).
+
 Once his copies arrive, Dan's phone opens them, checks the entry from Ana's
 approving device that admits him, loads the floor's snapshot and applies the
 slots after it in order. If history he had scanned has since been deleted, the
@@ -10818,6 +10831,8 @@ Write-ups explain each model and state its assumptions:
 | *Body.* A write queued before a member-key replacement needs the old signing key, which is cut off afterward, and the new key can't authenticate its history | `self_replacement_counterexample`, `later_replacement_counterexample` | `proofs/sequence/CovenSequence/QueueReloadExamples.lean` | §12.3 |
 | With successful reads and polling, a claimed usable key copy is found despite immediate prefix deletion; an applied approval still admits a member not subsequently removed. The scan projects one store key and exact credential; cryptography and the approver binding are checked by the reader | `approved_progress`, `approved_eventually_key`, `approval_keeps_membership`, `approved_eventually_admitted`, `approved_never_declined` | `proofs/sequence/CovenSequence/JoinScan.lean` | §13.2, §16.6 |
 | A scan with no matching copies reaches the end; an absent request without its approving binding reports declined | `no_copy_reaches_end`, `real_decline` | `proofs/sequence/CovenSequence/JoinScan.lean` | §13.2 |
+| A scan for a member's copies never reads past a damaged slot; recording no block, it reads past the slot once a later floor's `first` passes it, where stopping for good keeps reporting the slot | `damaged_not_passed`, `readOrDamage_undamaged`, `deleted_damage_recovers` | `proofs/sequence/CovenSequence/JoinScan.lean` | §13.2 |
+| *Body.* A scan that stops for good at a damaged slot never finds the key a later floor carries | `stop_strands_scan` | `proofs/sequence/CovenSequence/JoinScan.lean` | §13.2 |
 | Exponential probes from missing slot 4 all miss a valid retained window at 13–15 containing an applied approval; a missing slot below an existing slot is deleted history | `retained_good`, `approval_is_kept`, `exponential_probes_miss_approval`, `missing_below_existing_is_deleted` | `proofs/sequence/CovenSequence/JoinScanExamples.lean` | §13.2 |
 | No write from a stale read: an invite's pending record holds what a pass found at its row's current step, and a pass's write changes the row only when the row is the one it read | `finding_current`, `commit_acts_on_read` | `proofs/sequence/CovenSequence/InviteLifecycle.lean` | §13.2 |
 | From every reachable state, crashes and stops for good included, coven's own steps, with the app retrying only records it is shown, end the invite and every operation the app journaled, and take back its share unless a member uses the account: nothing stays listed, running, pending or shared | `settles` | `proofs/sequence/CovenSequence/InviteLifecycle.lean` | §11.4, §13.2, §14.1, §14.2 |

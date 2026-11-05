@@ -349,3 +349,7 @@ import SequenceApply
 #print axioms CovenSequence.ReadPass.checkFirst_blames_honest_floor
 #print axioms CovenSequence.ReadPass.end_search_sees_an_end
 #print axioms CovenSequence.ReadPass.checked_gap_reads_as_end
+#print axioms CovenSequence.JoinScan.readOrDamage_undamaged
+#print axioms CovenSequence.JoinScan.damaged_not_passed
+#print axioms CovenSequence.JoinScan.stop_strands_scan
+#print axioms CovenSequence.JoinScan.deleted_damage_recovers

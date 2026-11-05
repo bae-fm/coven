@@ -800,3 +800,55 @@ async fn reads_already_started_past_a_blocked_slot_move_nothing_past_it() {
         device.database().close().await.unwrap();
     }
 }
+
+/// Ben's laptop restores while slot 4, before his copy, is damaged. Its scan
+/// for his copies stops there and records no block; its next check rereads
+/// the floor and requests no slot before slot 4 again. Once Ana writes a
+/// floor carrying his copy, the laptop loads from its snapshot, which covers
+/// slot 4 (§13.2, `stop_strands_scan`).
+#[tokio::test]
+async fn a_restore_s_scan_goes_on_past_a_damaged_slot_once_a_floor_carries_its_copy() {
+    let group = Group::new();
+    let ana = group.device(1).await;
+    let ben = group.device(2).await;
+    group.create(&ana).await;
+    for id in ["a", "b"] {
+        insert(&ana.sync.database, id, "before Ben").await;
+        ana.sync.pass().await.unwrap();
+    }
+    let damaged = ana.sync.database.applied_slot().await.unwrap();
+    group.admit(&ana, &ben).await;
+    ben.sync.pass().await.unwrap();
+    let path = ObjectPath::slot(group.store, damaged.try_into().unwrap());
+    group.storage.corrupt_byte(&path, 0).await.unwrap();
+
+    let laptop = group.newcomer(ben.identity.clone(), group.storage.for_device()).await;
+    for _ in 0..2 {
+        let traced = laptop.storage.request_trace().len();
+        let result = laptop.sync.pass().await;
+        assert!(
+            matches!(&result, Err(SyncError::Damaged(object)) if object.path == path.as_str()),
+            "{result:?}"
+        );
+        assert!(laptop.sync.session.lock().await.blocked.is_none());
+        assert!(matches!(*laptop.sync.state.subscribe().borrow(), SequenceStatus::Opening));
+        if traced > 0 {
+            let read: Vec<_> = laptop.storage.request_trace()[traced..]
+                .iter()
+                .filter_map(|request| match request {
+                    coven_storage::test_utils::MemoryRequest::Read(path, _) => path.slot_number(),
+                    _ => None,
+                })
+                .collect();
+            assert!(read.iter().all(|slot| slot.0 >= damaged), "read {read:?} again");
+        }
+    }
+
+    ana.sync.snapshot(coven_merge::Audience::Store).await.unwrap();
+    ana.sync.pass().await.unwrap();
+    laptop.sync.pass().await.unwrap();
+    assert_eq!(rows(&laptop.sync.database).await, rows(&ana.sync.database).await);
+    for device in [&ana, &ben, &laptop] {
+        device.sync.database.close().await.unwrap();
+    }
+}
