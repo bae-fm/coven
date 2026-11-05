@@ -189,3 +189,25 @@ async fn stored_objects_never_hold_names_values_or_operation_contents() {
         device.database().close().await.unwrap();
     }
 }
+
+/// Slot one carries its author's public key, and that key verifies its
+/// signature: a creation signed by another key is refused (§10.3).
+#[test]
+fn slot_one_is_verified_with_the_key_it_carries() {
+    let path = coven_format::test_utils::slot_path(1);
+    let ring = StoreKeyring::new(coven_format::test_utils::store_key());
+    let creation = || SlotFrame::Admin(coven_format::test_utils::creation_change());
+    let signed = coven_format::test_utils::bounded_slot(1, 1, SlotKind::Admin, creation());
+
+    let received = open_bounded(signed.clone(), &path, &ring, &History::default()).unwrap();
+    assert!(matches!(received.body, SlotBody::Bounded { frame, .. } if frame == creation()));
+
+    let mut forged = signed;
+    let signed_len = forged.len() - SIGNATURE_LEN;
+    let mut hash = coven_crypto::ObjectHasher::new();
+    hash.update(&forged[..signed_len]);
+    let impostor = coven_format::test_utils::keys_from_seed(0x44);
+    forged[signed_len..]
+        .copy_from_slice(impostor.sign_object(path.as_str(), &hash.finish()).as_bytes());
+    assert!(open_bounded(forged, &path, &ring, &History::default()).is_err());
+}

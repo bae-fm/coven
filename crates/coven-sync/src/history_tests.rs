@@ -678,3 +678,45 @@ fn an_s3_store_records_no_invite_share() {
         Some(OperationRejection::NotAllowed)
     );
 }
+
+/// An admin entry is signed with its member's key as of the state before its
+/// slot: the key an earlier replacement retired verifies nothing from the
+/// slot on (§10.2).
+#[test]
+fn an_admin_entry_is_signed_with_its_members_key_as_of_the_state_before_its_slot() {
+    let mut household = Household::new();
+    let ana = household.ana;
+    let signer = |household: &Household, after| {
+        let header = SlotHeader { device: DeviceId(1), claim: after + 1, author: ana, after };
+        household.history.signer(&header, None).unwrap()
+    };
+    let original = coven_format::test_utils::keys_from_seed(1).public_keys().signing;
+    let replacement = coven_format::test_utils::keys_from_seed(5).public_keys().signing;
+    assert_eq!(signer(&household, household.slots), original);
+
+    let at = household.replace_anas_keys(1, 5);
+    assert_eq!(signer(&household, at.0 - 1), original);
+    assert_eq!(signer(&household, at.0), replacement);
+    assert_ne!(signer(&household, at.0), original);
+}
+
+/// An admin entry's device is active, or is the fresh device the entry
+/// registers: a removed device of an active member authors nothing, and a
+/// device already in the state can't register again (§10.2).
+#[test]
+fn an_admin_entry_needs_an_active_authoring_device() {
+    let mut household = Household::new();
+    let ana = household.ana;
+    household.entry(1, ana, StoreChange::RemoveDevice { device: DeviceId(3) });
+    let rename = || StoreChange::RenameStore { name: "Renamed".into() };
+
+    assert_eq!(household.check(3, ana, rename()).err(), Some(OperationRejection::NotAllowed));
+    assert!(household.check(1, ana, rename()).unwrap().is_some());
+
+    let register = || StoreChange::AddDevice { name: "Ana's tablet".into(), replaces: None };
+    assert!(household.check(9, ana, register()).unwrap().is_some());
+    assert_eq!(
+        household.check(3, ana, register()).err(),
+        Some(OperationRejection::TargetGone(coven_database::EntryTarget::Device(DeviceId(3))))
+    );
+}
