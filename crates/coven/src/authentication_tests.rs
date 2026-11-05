@@ -287,6 +287,95 @@ async fn builder_sign_in_is_provider_bound_and_refreshes_when_setup_is_rejected(
     handle.close().await.unwrap();
 }
 
+/// Coven ships no sign-in clients: a builder the app gave none refuses to
+/// sign in, without presenting anything (E1).
+#[tokio::test]
+async fn without_the_apps_clients_sign_in_is_unavailable() {
+    let root = tempfile::tempdir().unwrap();
+    let app = Coven::in_memory(root.path().into());
+    let sign_in = SignIn::new().await;
+    let mut builder = app.builder().oauth_presenter(sign_in.presenter.clone());
+    assert!(matches!(
+        builder.authenticate(coven_storage::OAuthAccess::OneDrive).await,
+        Err(OAuthError::Unavailable(CloudProvider::OneDrive))
+    ));
+    assert_eq!(sign_in.presentation_count(), 0);
+    assert_eq!(sign_in.request_count(), 0);
+}
+
+/// A presenter that reports it was asked and never answers.
+struct Unanswered {
+    asked: tokio::sync::Notify,
+}
+#[async_trait::async_trait]
+impl OAuthPresenter for Unanswered {
+    fn redirect_uri(&self, _: CloudProvider) -> &str {
+        "coven-app://sign-in"
+    }
+    async fn present(&self, _: &str) -> Result<SecretText, OAuthError> {
+        self.asked.notify_one();
+        std::future::pending().await
+    }
+}
+
+/// A sign-in that is cancelled by the presenter, or dropped while waiting on
+/// it, leaves the builder's earlier sign-in in place (E1).
+#[tokio::test]
+async fn a_failed_or_dropped_sign_in_keeps_the_prior_one() {
+    let root = tempfile::tempdir().unwrap();
+    let keychain = Keychain::in_memory("oauth-prior").unwrap();
+    let app = Coven::with_keychain(root.path().into(), keychain.clone());
+    let clock = Arc::new(FixedClock::new(std::time::SystemTime::UNIX_EPOCH));
+    let sign_in = SignIn::new().await;
+    let storage = Arc::new(
+        MemoryStorage::builder()
+            .provider(coven_storage::CloudProvider::OneDrive)
+            .clock(clock.clone())
+            .build()
+            .unwrap(),
+    );
+    let mut builder = builder(&app, clock.clone(), storage.clone(), &sign_in);
+    builder.authenticate(coven_storage::OAuthAccess::OneDrive).await.unwrap();
+    assert_eq!(sign_in.presentation_count(), 1);
+
+    sign_in.presenter.cancel.store(true, Ordering::SeqCst);
+    assert!(matches!(
+        builder.authenticate(coven_storage::OAuthAccess::OneDrive).await,
+        Err(OAuthError::Cancelled)
+    ));
+    sign_in.presenter.cancel.store(false, Ordering::SeqCst);
+    assert_eq!(sign_in.presentation_count(), 2);
+
+    // The app drops the sign-in while the sheet is up.
+    let unanswered = Arc::new(Unanswered { asked: tokio::sync::Notify::new() });
+    let mut builder = builder.oauth_presenter(unanswered.clone());
+    tokio::select! {
+        _ = builder.authenticate(coven_storage::OAuthAccess::OneDrive) => {
+            panic!("a sign-in nobody answered returned")
+        }
+        () = unanswered.asked.notified() => {}
+    }
+    let builder = builder.oauth_presenter(sign_in.presenter.clone());
+
+    // The first sign-in is what setup commits: no new presentation, and the
+    // tokens of the one successful exchange.
+    let handle = builder.create_store("Account").await.unwrap();
+    handle.setup_oauth_storage(storage.config(), "Laptop", |_| {}).await.unwrap();
+    assert_eq!(sign_in.presentation_count(), 2);
+    let StorageCredentials::OAuth(tokens) = StorageCredentials::decode(
+        StoreKeychain::new(keychain, handle.store_id())
+            .storage_credentials()
+            .unwrap()
+            .unwrap()
+            .as_bytes(),
+    )
+    .unwrap() else {
+        panic!("OAuth credentials")
+    };
+    assert_eq!(tokens.access_token.as_str(), "access-0");
+    handle.close().await.unwrap();
+}
+
 mod provider_access_tests {
     use super::*;
 
