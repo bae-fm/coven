@@ -108,6 +108,72 @@ async fn a_stale_create_below_the_floor_is_removed_and_reclaimed_above_it() {
     ben.sync.database.close().await.unwrap();
 }
 
+/// Ana's writes and Ben's snapshot both go for the slot after the last one
+/// either has read. Ben's snapshot lands its slots, and his retention writes
+/// a floor whose `at` is past every slot Ana has read. Ana's create then finds
+/// the slot taken. Settling it, she reads the slots through the floor's `at`
+/// before she checks the floor, accepts it, applies Ben's slots and claims the
+/// next one (§5.1, §16.4).
+#[tokio::test]
+async fn a_lost_claim_accepts_a_floor_past_the_slots_it_has_read() {
+    let group = Group::new();
+    let ana = group.device(1).await;
+    let ben = group.device(2).await;
+    group.create(&ana).await;
+    group.admit(&ana, &ben).await;
+    ben.sync.pass().await.unwrap();
+    let contested = ana.sync.database.applied_slot().await.unwrap() + 1;
+    assert_eq!(ben.sync.database.applied_slot().await.unwrap() + 1, contested);
+    insert(&ana.sync.database, "ana", "waiting").await;
+    let (started, observed) = tokio::sync::oneshot::channel();
+    let (resume, held) = tokio::sync::oneshot::channel();
+    group
+        .storage
+        .hold_next_creation(coven_storage::ObjectPrefix::all(group.store), started, held)
+        .await;
+    let retention = async {
+        observed.await.unwrap();
+        ben.sync.snapshot(coven_merge::Audience::Store).await.unwrap();
+        group.clock.set(
+            std::time::UNIX_EPOCH
+                + crate::sequence_sync::sequence_retention::GRACE
+                + std::time::Duration::from_secs(1),
+        );
+        ben.sync.pass().await.unwrap();
+        let floor = crate::floor_object::FloorObject::read(
+            ben.database(),
+            &group.storage,
+            &ObjectPath::floor(group.store),
+            None,
+            &mut group.ring.clone(),
+            &ben.identity,
+        )
+        .await
+        .unwrap()
+        .expect("retention wrote a floor");
+        // The floor keeps the contested slot, and its `at` is past every
+        // slot Ana has read.
+        assert!(
+            floor.header.first.0 <= contested && floor.header.at >= contested,
+            "{:?}",
+            floor.header
+        );
+        resume.send(()).unwrap();
+        floor.header.at
+    };
+    let (result, at) = tokio::join!(ana.sync.pass(), retention);
+    result.unwrap();
+    // Her writes land in the slot after the floor's.
+    assert_eq!(ana.sync.database.applied_slot().await.unwrap(), at + 1);
+    assert!(ana.sync.database.current_claim().await.unwrap().is_none());
+    ben.sync.pass().await.unwrap();
+    assert_eq!(rows(&ana.sync.database).await, rows(&ben.sync.database).await);
+    assert_eq!(rows(&ben.sync.database).await, [("ana".into(), "waiting".into())]);
+    for device in [&ana, &ben] {
+        device.sync.database.close().await.unwrap();
+    }
+}
+
 #[tokio::test]
 async fn contending_writes_slots_apply_the_winner_and_claim_the_next_slot() {
     let group = Group::new();

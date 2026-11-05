@@ -166,6 +166,29 @@ impl SequenceSync {
         .await
     }
 
+    /// Authenticate `floor` against `history`, which holds the slots
+    /// through `through`. The device that wrote the floor may have applied
+    /// slots past it, such as the announcement that won the slot a claim
+    /// attempted: a copy of the history, with a copy of the keyring, reads
+    /// the kept slots through the floor's `at` first, and both copies are
+    /// dropped once the floor is checked (§5.1, §16.4).
+    pub(crate) async fn authenticate_floor_from(
+        &self,
+        floor: &FloorObject,
+        history: &History,
+        through: u64,
+        ring: &mut StoreKeyring,
+        member: &MemberIdentity,
+    ) -> Result<(), SyncError> {
+        if floor.header.at <= through {
+            return self.authenticate_floor(floor, history, ring, member).await;
+        }
+        let mut later = history.clone();
+        let mut tentative = ring.clone();
+        self.advance_history(&mut later, through, floor.header.at, &mut tentative, member).await?;
+        self.authenticate_floor(floor, &later, &mut tentative, member).await
+    }
+
     pub(crate) async fn authenticate_floor(
         &self,
         floor: &FloorObject,

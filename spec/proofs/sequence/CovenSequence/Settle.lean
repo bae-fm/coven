@@ -565,7 +565,139 @@ theorem settle_from_floor_single {seq : Nat → Slot S} {st : Store S} (g : Good
       cases r
       simp_all
 
+/-! ## Authenticating the floor while settling
+
+A device settling a claim at slot `through + 1` has applied the slots through
+`through`. The floor it reads may have been written by the device that won its
+slot: that device applied through the floor's `at`, which can be past
+`through`, and the floor names each audience's snapshot by the slot that
+announced it. Settling checks each named announcement against the history it
+holds before it trusts the floor's first kept slot. -/
+
+/-- What a settling device holds of slot `a`: its applied prefix through
+`through`, then the slots it read from storage through `reach`. -/
+def heldAt (st : Store S) (seq : Nat → Slot S) (through reach a : Nat) : Option (Slot S) :=
+  if a ≤ through then some (seq a) else if a ≤ reach then st.slot a else none
+
+/-- Settle's floor check: each audience's floor snapshot is announced at a slot
+the device holds. -/
+def FloorAnnounced (held : Nat → Option (Slot S)) (st : Store S) : Prop :=
+  ∀ A, st.floor.covers A = 0 ∨
+    ∃ a au, held a = some (.snapshot au A (st.floor.covers A) (st.floor.path A))
+
+/-- **A lost claim accepts the floor of the device that won its slot.** The
+floor's writer applied through `reach`, the floor's `at`, and each snapshot the
+floor names was announced at or before it. The settling device's claim slot
+`through + 1` is at or above the first kept slot. Reading the kept slots through
+the floor's `at` before checking it, the device holds every named announcement,
+so the floor authenticates. Slots it has already applied are its own history; the
+slots it reads are at or above the first kept slot, so they are genuine. -/
+theorem settle_reads_through_floor {seq : Nat → Slot S} {st : Store S} (g : Good R st seq)
+    {through reach : Nat} (hstart : st.floor.start ≤ through + 1) (hat : reach ≤ st.head)
+    (hnamed : ∀ A, st.floor.covers A = 0 ∨ ∃ a au, 1 ≤ a ∧ a ≤ reach ∧
+      seq a = .snapshot au A (st.floor.covers A) (st.floor.path A)) :
+    FloorAnnounced (heldAt st seq through (max through reach)) st := by
+  intro A
+  rcases hnamed A with h0 | ⟨a, au, h1, h2, hs⟩
+  · exact Or.inl h0
+  · refine Or.inr ⟨a, au, ?_⟩
+    unfold heldAt
+    by_cases ha : a ≤ through
+    · simp [ha, hs]
+    · have hreach : a ≤ max through reach := Nat.le_trans h2 (Nat.le_max_right _ _)
+      simp only [ha, ite_false, hreach, ite_true]
+      rw [g.kept_genuine a (by omega), g.first_genuine a h1 (by omega), hs]
+
+/-- **Checking against the applied prefix alone refuses an honest floor.**
+When every announcement of an audience's floor snapshot is past the slots the
+settling device has applied, as when the device that won its slot announced the
+snapshot there, a check against the history the device already holds finds no
+announcement and refuses the floor. -/
+theorem settle_held_refuses_floor {seq : Nat → Slot S} {st : Store S} {through : Nat}
+    (A : S.Aud) (hc : st.floor.covers A ≠ 0)
+    (hpast : ∀ a au, seq a = .snapshot au A (st.floor.covers A) (st.floor.path A) → through < a) :
+    ¬ FloorAnnounced (heldAt st seq through through) st := by
+  intro h
+  rcases h A with h0 | ⟨a, au, ha⟩
+  · exact hc h0
+  · unfold heldAt at ha
+    by_cases hle : a ≤ through
+    · simp only [hle, ite_true, Option.some.injEq] at ha
+      have := hpast a au ha
+      omega
+    · simp [hle] at ha
+
 end Compose
+
+/-! ## The refused floor, in one store
+
+Device `true` applied slot 1 and claimed slot 2. Device `false` won slot 2
+with a snapshot announcement covering slot 1, and retention then wrote the
+floor naming that snapshot, first kept slot 2. The store is in good order, the
+floor is honest, and the losing device's claim slot is kept. -/
+
+open CovenSequence in
+/-- Slot 1 adds member `false`; slot 2 announces the snapshot covering it. -/
+def lostSeq : Nat → Slot adminSig
+  | 1 => .admin true (.addMember false .member)
+  | 2 => .snapshot false () 1 ()
+  | _ => .admin false (.other ())
+
+open CovenSequence in
+/-- Both slots kept; the floor's first kept slot is 2, its snapshot covers 1. -/
+def lostStore : Store adminSig where
+  slot := fun i => if 1 ≤ i ∧ i ≤ 2 then some (lostSeq i) else none
+  first := fun i => if 1 ≤ i ∧ i ≤ 2 then some (lostSeq i) else none
+  head := 2
+  floor := ⟨2, fun _ => 1, fun _ => ()⟩
+  body := fun _ => some (stateAt adminRules lostSeq () 1)
+
+open CovenSequence in
+theorem lostStore_good : Good adminRules lostStore lostSeq where
+  first_genuine i h1 h2 := by
+    have h2 : i ≤ 2 := h2
+    simp [lostStore, h1, h2]
+  first_out i h := by
+    have h : i = 0 ∨ 2 < i := h
+    rcases h with h | h <;> simp [lostStore] <;> omega
+  slot_out i h := by
+    have h : i = 0 ∨ 2 < i := h
+    rcases h with h | h <;> simp [lostStore] <;> omega
+  kept_genuine i _ := rfl
+  start_le A := by cases A; decide
+  covers_le A := by cases A; decide
+  floor_body _ := rfl
+  floor_announced A := by
+    cases A
+    exact Or.inr ⟨2, false, by decide, by decide, rfl, by unfold AppliedTo; exact ⟨by decide, by decide⟩⟩
+  boundary_body _ r au v c p h1 h2 hs := by
+    have h2 : r ≤ 2 := h2
+    have : r = 1 ∨ r = 2 := by omega
+    rcases this with rfl | rfl <;> simp [lostSeq] at hs
+
+open CovenSequence in
+/-- **Counterexample: settling against the applied prefix refuses an honest
+floor.** In a store in good order, device `true` settles its lost claim of
+slot 2 with history through slot 1. Checked against that history, the floor
+naming device `false`'s announcement in slot 2 is refused; read through the
+floor's `at`, slot 2, it is accepted. -/
+theorem lost_claim_refuses_honest_floor :
+    Good adminRules lostStore lostSeq ∧ lostStore.floor.start ≤ 1 + 1 ∧
+    ¬ FloorAnnounced (heldAt lostStore lostSeq 1 1) lostStore ∧
+    FloorAnnounced (heldAt lostStore lostSeq 1 (max 1 2)) lostStore := by
+  refine ⟨lostStore_good, by decide, ?_, ?_⟩
+  · refine settle_held_refuses_floor () (by decide) fun a au h => ?_
+    by_cases ha : a = 2
+    · omega
+    · exfalso
+      revert h
+      match a with
+      | 0 => simp [lostSeq]
+      | 1 => simp [lostSeq]
+      | 2 => exact absurd rfl ha
+      | n + 3 => simp [lostSeq]
+  · exact settle_reads_through_floor adminRules lostStore_good (by decide) (by decide)
+      fun A => by cases A; exact Or.inr ⟨2, false, by decide, by decide, rfl⟩
 
 /-! ## Another copy using this device id -/
 

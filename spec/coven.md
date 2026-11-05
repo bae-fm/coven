@@ -1377,6 +1377,17 @@ stale create can win a deleted slot
 ([`stale_create_wins_deleted_slot`](proofs/sequence/CovenSequence/Claim.lean)),
 so the device settles from the snapshot instead (§5.3).
 
+Checking the floor means finding each snapshot it names at the slot that announced
+it (§16.4). A settling device can read a floor whose `at` is past the slots it has
+applied: the device that won its slot can announce a snapshot there and move the
+floor before the loser settles. Ana's phone, through slot 40, loses slot 41 to
+Ben's laptop's snapshot announcement, and Ben's laptop then writes a floor naming
+it. Ana's phone reads the kept slots through the floor's `at` into a copy of its
+history and checks the floor against that copy; the slots apply later, in order,
+as any slot does. Checked against only the slots her phone had applied, the floor
+names an announcement it has never read, and an honest floor would be refused as
+damaged ([`lost_claim_refuses_honest_floor`](proofs/sequence/CovenSequence/Settle.lean)).
+
 Bytes recreated below the floor never change what the sequence means. Deleting
 them is recorded cleanup work; if the delete fails, the device keeps that
 obligation and tries again.
@@ -10512,6 +10523,8 @@ Write-ups explain each model and state its assumptions:
 | A read followed by a floor check admits only genuine first bytes | `floor_check_sound` | `proofs/sequence/CovenSequence/Claim.lean` | §5.2, §6.2, §20.1 |
 | *Body.* Without the floor check, a stale create can win a deleted slot and be taken as genuine, so recreated bytes can't confirm a claim | `stale_create_wins_deleted_slot` | `proofs/sequence/CovenSequence/Claim.lean` | §5.2, §6.2, §20.1 |
 | A slot at or above the floor read after the create holds the genuine bytes | `claim_floor_check` | `proofs/sequence/CovenSequence/Retention.lean` | §5.2 |
+| A settling device that reads the kept slots through the floor's `at` before checking it accepts the floor of the device that won its slot | `settle_reads_through_floor` | `proofs/sequence/CovenSequence/Settle.lean` | §5.2 |
+| *Body.* Checked against only the slots a settling device has applied, the floor of the device that won its slot is refused | `settle_held_refuses_floor`, `lost_claim_refuses_honest_floor` | `proofs/sequence/CovenSequence/Settle.lean` | §5.2 |
 | Settling from the floor snapshot's last claim number and hash is correct | `settle_correct'`, `settle_from_floor` | `proofs/sequence/CovenSequence/Settle.lean` | §5.3 |
 | *Body.* Two copies of one device id fool a check of the claim number alone | `copies_fool_number_only` | `proofs/sequence/CovenSequence/Settle.lean` | §5.3 |
 | *Body.* Settling from the state alone fails: later writes or admin entries can erase a landed claim's effects | `admin_state_cannot_settle`, `state_alone_cannot_settle` | `proofs/sequence/CovenSequence/Settle.lean` | §5.3 |

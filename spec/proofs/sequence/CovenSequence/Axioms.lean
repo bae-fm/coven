@@ -79,6 +79,10 @@ import SequenceApply
 #print axioms CovenSequence.Settle.admin_state_cannot_settle
 #print axioms CovenSequence.Settle.cstep_signed
 #print axioms CovenSequence.Settle.foreign_slot_means_copy
+#print axioms CovenSequence.Settle.settle_reads_through_floor
+#print axioms CovenSequence.Settle.settle_held_refuses_floor
+#print axioms CovenSequence.Settle.lostStore_good
+#print axioms CovenSequence.Settle.lost_claim_refuses_honest_floor
 
 #print axioms CovenSequence.Deadline.bounded_retention
 #print axioms CovenSequence.Deadline.uncovered_has_no_deadline

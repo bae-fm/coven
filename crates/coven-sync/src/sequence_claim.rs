@@ -193,7 +193,14 @@ impl SequenceSync {
             Some(floor) => self.settle_compacted(floor, ring, member).await?,
             None => {
                 if let Some(floor) = &floor {
-                    self.authenticate_floor(floor, &session.history, ring, member).await?;
+                    self.authenticate_floor_from(
+                        floor,
+                        &session.history,
+                        session.through,
+                        ring,
+                        member,
+                    )
+                    .await?;
                 }
                 settle(session, ring).await?
             }
