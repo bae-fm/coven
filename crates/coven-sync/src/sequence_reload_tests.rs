@@ -825,3 +825,105 @@ async fn a_newly_readable_circle_whose_snapshot_is_missing_reports_it() {
         device.database().close().await.unwrap();
     }
 }
+
+/// Ana's reset preparation is announced, then undone before activating (her
+/// admin role goes, so the reset is refused and her journal deletes the
+/// body). Ben applies the announcement without reading its body, changes no
+/// rows, schema version or reset, and neither his explicit reload nor the
+/// floor ever uses it (§16.3).
+#[tokio::test]
+async fn an_abandoned_preparation_stays_history_and_supplies_no_snapshot() {
+    let group = Group::new();
+    let ana = group.device(1).await;
+    let ben = group.device(2).await;
+    group.create(&ana).await;
+    group.admit(&ana, &ben).await;
+    insert(ana.database(), "a", "kept").await;
+    ana.sync.pass().await.unwrap();
+    let ordinary = ana.sync.snapshot(Audience::Store).await.unwrap();
+    let prepared = ana.database().applied_slot().await.unwrap();
+    let activation = ObjectPath::slot(group.store, (prepared + 2).try_into().unwrap());
+    group
+        .storage
+        .set_faults(Faults {
+            create_failures: [(activation, (StorageFailure::ProviderUnavailable, 503))].into(),
+            ..Faults::none()
+        })
+        .await;
+    assert!(ana.sync.reset(Audience::Store).await.is_err());
+    group.storage.set_faults(Faults::none()).await;
+    let body = ana
+        .storage
+        .request_trace()
+        .into_iter()
+        .rev()
+        .find_map(|request| match request {
+            coven_storage::test_utils::MemoryRequest::Create(path)
+                if path.snapshot_id().is_some() =>
+            {
+                Some(path)
+            }
+            _ => None,
+        })
+        .expect("the preparation's body was uploaded");
+    ben.sync.pass().await.unwrap();
+    let rows_before = rows(ben.database()).await;
+    let state_before = ben.database().store_state().await.unwrap();
+    let preparation = {
+        let session = ben.sync.session.lock().await;
+        let (slot, announcement) = session.history.announcements.last_key_value().unwrap();
+        assert!(*slot > ordinary);
+        assert_eq!(announcement.purpose, coven_format::sequence::Purpose::Reset);
+        *slot
+    };
+    // Ana loses her admin role, so her reset can't finish and is undone.
+    ben.sync
+        .administer(StoreChange::ChangeRole {
+            member: ana.identity.member(),
+            role: coven_format::admin::MemberRole::Member,
+        })
+        .await
+        .unwrap();
+    let operation = ana.database().operations().await.unwrap()[0].id;
+    ana.sync.pass().await.unwrap();
+    ana.sync.retry_pending_operation(operation).await.unwrap();
+    assert!(ana.database().operations().await.unwrap().is_empty());
+    assert!(group.storage.status(&body).await.unwrap().is_none(), "the journal deleted the body");
+
+    ben.sync.pass().await.unwrap();
+    assert_eq!(rows(ben.database()).await, rows_before);
+    let state = ben.database().store_state().await.unwrap();
+    assert_eq!(state.schema, state_before.schema);
+    assert_eq!(state.resets, state_before.resets);
+    {
+        let session = ben.sync.session.lock().await;
+        let announcement = &session.history.announcements[&preparation];
+        assert!(!session.history.usable(announcement), "an abandoned preparation is not usable");
+    }
+    let before = ben.storage.request_trace().len();
+    ben.sync.reload_from_snapshot().await.unwrap();
+    group.clock.set(
+        std::time::UNIX_EPOCH
+            + crate::sequence_sync::sequence_retention::GRACE
+            + std::time::Duration::from_secs(1),
+    );
+    ben.sync.pass().await.unwrap();
+    let floor = stored_floor(&ben).await;
+    assert!(!floor.header.snapshots.contains(&preparation), "{:?}", floor.header.snapshots);
+    {
+        let session = ben.sync.session.lock().await;
+        for slot in &floor.header.snapshots {
+            let named = &session.history.announcements[slot];
+            assert_eq!(named.purpose, coven_format::sequence::Purpose::Ordinary);
+        }
+    }
+    let reads_body = ben.storage.request_trace().into_iter().any(|request| {
+        matches!(request, coven_storage::test_utils::MemoryRequest::Read(path, _) if path == body)
+    });
+    assert!(!reads_body, "no device reads an abandoned preparation's body");
+    assert!(ben.storage.request_trace().len() > before);
+    assert_eq!(rows(ben.database()).await, rows_before);
+    for device in [&ana, &ben] {
+        device.sync.database.close().await.unwrap();
+    }
+}
