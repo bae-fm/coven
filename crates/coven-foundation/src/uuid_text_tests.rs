@@ -48,3 +48,20 @@ fn member_file_and_device_ids_round_trip_their_sql_forms() {
         Err(FromSqlError::InvalidType)
     ));
 }
+
+/// A UUID and a circle id bind as lowercase hyphenated text, which reads back equal.
+#[test]
+fn uuid_and_circle_ids_bind_as_canonical_text() {
+    let id = Uuid::parse_str("f47ac10b-58cc-4372-a567-0e02b2c3d479").unwrap();
+    let text = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
+    let ToSqlOutput::Owned(Value::Text(bound)) = UuidText(id).to_sql().unwrap() else {
+        panic!("a UUID binds as owned text")
+    };
+    assert_eq!(bound, text);
+    assert_eq!(UuidText::column_result(ValueRef::Text(bound.as_bytes())).unwrap(), UuidText(id));
+    let ToSqlOutput::Owned(Value::Text(bound)) = CircleId(id).to_sql().unwrap() else {
+        panic!("a circle id binds as owned text")
+    };
+    assert_eq!(bound, text);
+    assert_eq!(CircleId::column_result(ValueRef::Text(bound.as_bytes())).unwrap(), CircleId(id));
+}
