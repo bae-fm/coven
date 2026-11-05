@@ -791,3 +791,25 @@ async fn a_held_start_publishes_its_effect_before_its_status() {
     }
     f.handle.close().await.unwrap();
 }
+
+/// A failure releasing the providers is recorded as the last pass's failure
+/// and returned, and leaves no pending connection record (E5).
+#[tokio::test]
+async fn a_failed_release_is_the_last_passs_failure_with_no_connection_record() {
+    let f = stopped_fixture().await;
+    // Stopping records the location by reading custody; this read fails.
+    f.app.fail_next_keychain_operation();
+    let error = f.handle.stop_sync().await.expect_err("the failed release is returned");
+    assert!(error.to_string().contains("NoStorageAccess"), "{error}");
+    let shown = f.handle.test_last_pass().latest().await;
+    assert!(
+        matches!(&shown, Some(LastPass::Failed { error: text, .. }) if text.contains("NoStorageAccess")),
+        "{shown:?}"
+    );
+    let pending = f.handle.pending().await.unwrap();
+    assert!(
+        pending.iter().all(|record| record.subject != coven_sync::PendingSubject::Connection),
+        "{pending:?}"
+    );
+    f.handle.close().await.unwrap();
+}
