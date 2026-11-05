@@ -1,5 +1,5 @@
 use crate::sequence_sync::tests::*;
-use coven_storage::{ObjectPath, Storage};
+use coven_storage::{test_utils::Faults, ObjectPath, Storage, StorageFailure};
 
 #[tokio::test]
 async fn a_snapshot_is_uploaded_before_its_counted_announcement() {
@@ -242,5 +242,72 @@ async fn a_member_removed_from_a_circle_no_longer_snapshots_it() {
     assert!(!mine(coven_merge::Audience::Circle(gifts)).await, "Ben no longer snapshots Gifts");
     for device in [&ana, &ben] {
         device.database().close().await.unwrap();
+    }
+}
+
+/// A reset preparation that a later announcement covers is abandoned: the
+/// journal deletes its uploaded body, and a deletion that fails stays in the
+/// journal with a pending record until the retry deletes it (§16.3, §11.3).
+#[tokio::test]
+async fn an_abandoned_preparation_deletes_its_body_and_keeps_a_failed_deletion() {
+    let group = Group::new();
+    let ana = group.device(1).await;
+    let ben = group.device(2).await;
+    group.create(&ana).await;
+    group.admit(&ana, &ben).await;
+    ben.sync.pass().await.unwrap();
+    let prepared = ana.sync.database.applied_slot().await.unwrap();
+    let activation = ObjectPath::slot(group.store, (prepared + 2).try_into().unwrap());
+    group
+        .storage
+        .set_faults(Faults {
+            create_failures: [(activation, (StorageFailure::ProviderUnavailable, 503))].into(),
+            ..Faults::none()
+        })
+        .await;
+    assert!(ana.sync.reset(coven_merge::Audience::Store).await.is_err());
+    group.storage.set_faults(Faults::none()).await;
+    let body = ana
+        .storage
+        .request_trace()
+        .into_iter()
+        .find_map(|request| match request {
+            coven_storage::test_utils::MemoryRequest::Create(path)
+                if path.snapshot_id().is_some() =>
+            {
+                Some(path)
+            }
+            _ => None,
+        })
+        .expect("the preparation's body was uploaded");
+    assert!(group.storage.status(&body).await.unwrap().is_some());
+    // Ben's ordinary snapshot covers more than the preparation, so Ana's
+    // retry abandons the preparation and starts another.
+    ben.sync.snapshot(coven_merge::Audience::Store).await.unwrap();
+    let operation = ana.sync.database.operations().await.unwrap()[0].id;
+    group
+        .storage
+        .set_faults(Faults {
+            delete_failures: [(body.clone(), StorageFailure::Network)].into(),
+            ..Faults::none()
+        })
+        .await;
+    assert!(ana.sync.retry_pending_operation(operation).await.is_err());
+    assert!(group.storage.status(&body).await.unwrap().is_some());
+    assert_eq!(ana.sync.database.operations().await.unwrap().len(), 1);
+    let pending = ana.sync.database.pending::<crate::PendingRecord>().await.unwrap();
+    assert!(
+        pending.iter().any(|record| matches!(
+            record.reason,
+            crate::PendingReason::Storage { failure: StorageFailure::Network, .. }
+        )),
+        "{pending:?}"
+    );
+    group.storage.set_faults(Faults::none()).await;
+    ana.sync.retry_pending_operation(operation).await.unwrap();
+    assert!(group.storage.status(&body).await.unwrap().is_none());
+    assert!(ana.sync.database.operations().await.unwrap().is_empty());
+    for device in [&ana, &ben] {
+        device.sync.database.close().await.unwrap();
     }
 }
