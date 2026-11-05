@@ -7136,8 +7136,10 @@ pub enum BootstrapError {
     /// Loading or opening the store failed.
     Store(CovenError),
     /// The device is locked, and the class the app chose keeps the
-    /// installation's files closed until it unlocks. The unfinished
-    /// installation stays; the app waits for the unlock and calls again (E1).
+    /// installation's files closed until it unlocks. A join's unfinished
+    /// installation stays, and a recorded restore's; a restore before its
+    /// record removes its own. The app waits for the unlock and calls again
+    /// (E1).
     DeviceLocked { path: PathBuf },
     /// Provider sign-in failed.
     OAuth(OAuthError),
@@ -7521,7 +7523,8 @@ impl S3Credentials {
 /// waits for the registration, then ends the call with
 /// `BootstrapError::RestoreRegistered`. A cancel, or a registration refused
 /// or a member removed, while nothing in storage names the device as active
-/// ends the restore, removing everything it kept (§13.1). A store whose
+/// ends the restore, removing everything it kept (§13.1). Before the record,
+/// a cancel or a failure removes the installation it loaded into. A store whose
 /// unfinished installation holds a join's saved code is refused with
 /// `StoreLockError::BootstrapPending` before anything changes (§13.4).
 pub async fn restore_from_code(
@@ -7692,7 +7695,10 @@ impl JoinControl {
 impl CovenBuilder {
     /// The joins under way on this device (§13.2), ordered by store id, each
     /// as `decode_code_info` reads its saved code. A saved code coven can't
-    /// read fails the call; it is never skipped.
+    /// read fails the call; it is never skipped. An unfinished installation
+    /// that keeps neither a saved code nor a restore's record, and that no
+    /// call holds, is deleted: a crash left it before its call wrote to
+    /// storage (§13.4).
     pub async fn unfinished_joins(&self) -> Result<Vec<InviteInfo>, BootstrapError>;
 
     /// Continues an unfinished join from its saved code and device name, as
@@ -7714,7 +7720,10 @@ impl CovenBuilder {
     /// The restores under way on this device (§13.1), ordered by store id,
     /// each as `decode_code_info` reads the code it recorded: restores that
     /// recorded themselves before registering the device and have not ended.
-    /// A record coven can't read fails the call; it is never skipped.
+    /// A record coven can't read fails the call; it is never skipped. An
+    /// unfinished installation that keeps neither a record nor a join's saved
+    /// code, and that no call holds, is deleted, as `unfinished_joins` does
+    /// (§13.4).
     pub async fn unfinished_restores(&self) -> Result<Vec<CodeMetadata>, BootstrapError>;
 
     /// Continues an unfinished restore from its record, as `restore_from_code`

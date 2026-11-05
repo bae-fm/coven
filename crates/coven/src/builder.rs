@@ -408,7 +408,10 @@ impl CovenBuilder {
     }
 
     /// The joins under way on this device, ordered by store id (§13.2). A
-    /// saved code coven can't read fails the call; it is never skipped.
+    /// saved code coven can't read fails the call; it is never skipped. An
+    /// unfinished installation that keeps neither a saved code nor a
+    /// restore's record, and that no call holds, is deleted: a crash left it
+    /// before its call wrote to storage (§13.4).
     pub async fn unfinished_joins(&self) -> Result<Vec<InviteInfo>, BootstrapError> {
         bootstrap::unfinished_joins(self).await
     }
@@ -435,7 +438,9 @@ impl CovenBuilder {
     /// The restores under way on this device, ordered by store id: each
     /// restore that recorded itself before registering the device and has
     /// not ended, as `decode_code_info` reads its code (§13.1). A record coven
-    /// can't read fails the call; it is never skipped.
+    /// can't read fails the call; it is never skipped. An unfinished
+    /// installation that keeps neither a record nor a join's saved code, and
+    /// that no call holds, is deleted, as `unfinished_joins` does (§13.4).
     pub async fn unfinished_restores(&self) -> Result<Vec<CodeMetadata>, BootstrapError> {
         bootstrap::unfinished_restores(self).await
     }

@@ -1,4 +1,5 @@
-//! Hidden stores retain interrupted bootstrap work until explicit retry or cancellation.
+//! Hidden stores retain interrupted bootstrap work until explicit retry or
+//! cancellation, or until a listing reclaims one nothing refers to.
 
 use super::{
     atomic_file::exists, creation, device_reset, lock, protection::Protection,

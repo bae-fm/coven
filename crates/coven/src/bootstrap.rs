@@ -48,13 +48,19 @@ pub(super) use restore::{resume_restore, unfinished_restores};
 mod credentials;
 use credentials::restore_connection;
 
+#[path = "bootstrap_unfinished.rs"]
+mod unfinished;
+use unfinished::{kept, Kept};
+
 #[path = "bootstrap_status.rs"]
 mod status;
 pub use status::BootstrapStatus;
 use status::{loading, open_installation};
 
-/// Opening a new installation failed; unpublished work remains available for
-/// an explicit retry unless the call was cancelled or the invite was settled.
+/// Opening a new installation failed. A join's unpublished work, and a
+/// recorded restore's, remain for an explicit retry unless the call was
+/// cancelled or the invite was settled; a restore before its record removes
+/// its own.
 #[derive(Debug, thiserror::Error)]
 pub enum BootstrapError {
     /// Cancellation removes unpublished local data and leaves final custody alone.
@@ -87,9 +93,10 @@ pub enum BootstrapError {
     #[error(transparent)]
     Store(CovenError),
     /// The device is locked, and the protection class the app chose keeps
-    /// the installation's files closed until it unlocks (api.md E1). The
-    /// unfinished installation stays for the retry; the app waits for the
-    /// unlock and calls again.
+    /// the installation's files closed until it unlocks (api.md E1). A join's
+    /// unfinished installation stays for the retry, and a recorded
+    /// restore's; a restore before its record removes its own. The app waits
+    /// for the unlock and calls again.
     #[error("{}: the device is locked, and the store's files are protected until it unlocks", path.display())]
     DeviceLocked {
         /// The first protected file the lock refused.
@@ -255,9 +262,10 @@ pub(super) async fn unfinished_joins(
         .await
         .map_err(BootstrapDirectoryError::from)?
     {
-        // An unfinished restore, or a join that can't have sent its
-        // request, saves no code: it is not a join to resume.
-        let Some(text) = StoreKeychain::new(keychain.clone(), store).invite_code()? else {
+        // An unfinished restore saves no code; an installation that keeps
+        // nothing is reclaimed.
+        let entries = StoreKeychain::new(keychain.clone(), store);
+        let Kept::Join(text) = kept(builder, &entries, store).await? else {
             continue;
         };
         let info = match coven_sync::decode_code_info(text.as_str())? {

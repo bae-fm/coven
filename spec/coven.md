@@ -3967,6 +3967,19 @@ Ana's new laptop scans the code from her phone and signs in to her Dropbox. Then
 Restoring always makes a fresh device. It doesn't rescue the old installation's
 unsent writes.
 
+**A restore before its registration.** Until it records itself (step 4), the
+restore has only read storage, and its whole work is the installation it
+loads into. A cancel or a failure removes that installation, and the call
+returns its error: Ana's laptop loses its connection while it loads
+Household, and the next restore loads from the start. Kept, the installation
+would be listed nowhere, with nothing to finish it but typing the code again
+([`failure_keeps_installation`](proofs/sequence/CovenSequence/RestoreRegistration.lean)).
+A crash, or a dropped
+call, leaves the installation with nothing beside it: no call runs on it,
+nothing lists it, and nothing in storage refers to it. That is space, not
+state (§11.6). Listing unfinished restores or joins removes such an
+installation, never while a call holds it.
+
 **A restore past its registration.** The registration is the restore's first
 write to storage. Once it may land, Household's history may name the laptop
 as one of Ana's devices, and only a finished restore stands for it. Say the
@@ -4576,7 +4589,8 @@ everything is encrypted.
   app's first commits are made against the installed membership and rows (§2.1).
 - **Cancelling.** Cancelling closes the installation and removes its local work.
   A join whose request may have been sent can't be cancelled (§13.2), nor a
-  restore whose device may be registered (§13.1). Dropping a
+  restore whose device may be registered (§13.1). A restore that fails
+  before it records itself removes its installation too. Dropping a
   join that is waiting for approval keeps its encrypted request and saved code,
   so the app can resume it.
 - **One call to an installation.** A device keeps one unfinished installation
@@ -4592,6 +4606,13 @@ everything is encrypted.
   So a restore refuses an installation holding a join's saved code, and a join
   one holding a restore's record, with `BootstrapPending`, changing nothing.
   The app finishes the call under way first.
+- **Space a crash left.** An unfinished installation that keeps neither a
+  join's saved code nor a restore's record is one a crash or a dropped call
+  left before either could write to storage. `unfinished_joins` and
+  `unfinished_restores` delete each such installation they find, holding its
+  lock: one a call is running on is never touched, and a call beginning on
+  it meanwhile is refused with `AlreadyOpen`, as beside any other call
+  ([`ended_call_leaves_nothing_unlisted`](proofs/sequence/CovenSequence/RestoreRegistration.lean)).
 - **Dropping mid-setup.** Dropping a setup in progress marks the installation as
   closing. Its locks stay held until its blocking work in flight finishes. Another
   setup or open of the same store in this process waits for them, as any
@@ -10766,8 +10787,9 @@ Write-ups explain each model and state its assumptions:
 | Each rule those results need is needed: leaving out the step check, ending operations or invites at a stop, ending a refused access record, ending the binding with its invite, recording the binding, listing approval as its own stage, leaving an approval's refusal to its pass, or recording the share before the grant each has a counterexample | `unguarded_finding_is_stale`, `forgetful_stop_runs_forever`, `stop_strands_approval`, `refused_record_strands`, `split_binding_disagrees`, `reclaim_binds_twice`, `approval_shown_as_waiting`, `demoted_approval_offered`, `unrecorded_share_strands` | `proofs/sequence/CovenSequence/InviteLifecycle.lean` | §13.2, §14.1 |
 | An invite ends together with every operation it started for its own entries, its share, the share's end and a recovery's key record, and leaves no claim open; from every reachable state, crashes between a claim landing and its end included, its own slots read before their claims settle, slots lost to other devices and a cancel while the share's record is claimed, coven's own steps end the invite with no claim open, so the device's writes go out | `children_end_with_invite`, `settles` | `proofs/sequence/CovenSequence/InviteClaims.lean` | §5.1, §13.2 |
 | *Body.* An ended invite that looks only at history leaves a claim open for good: its share's end, when its own slot showed the share ended before the claim settled, or its share's record, when the app cancelled it while that claim landed | `ended_share_strands_claim`, `cancelled_share_strands_claim` | `proofs/sequence/CovenSequence/InviteClaims.lean` | §13.2 |
-| While history names a restoring device as active, or a claim of its registration is open, the restore is published or listed for the app to finish; from every reachable state, crashes, dropped calls, failures, cancels, lost slots and the member's removal included, coven's own steps and the app resuming what is listed end the restore published, with its device registered, or with its device not active and no claim open | `registered_listed`, `settles`, `settled_outcome` | `proofs/sequence/CovenSequence/RestoreRegistration.lean` | §11.6, §13.1 |
+| While history names a restoring device as active, or a claim of its registration is open, the restore is published or listed for the app to finish; from every reachable state, crashes, dropped calls, failures, cancels, lost slots and the member's removal included, coven's own steps and the app resuming what is listed end the restore published, with its device registered, or with no installation left, its device not active and no claim open | `registered_listed`, `settles`, `settled_outcome` | `proofs/sequence/CovenSequence/RestoreRegistration.lean` | §11.6, §13.1 |
 | *Body.* A restore that doesn't record itself before registering leaves its device registered with nothing listed after a crash; a cancel that doesn't wait for the registration leaves it registered with nothing on the device | `crashed_registration_ghost`, `cancelled_registration_ghost` | `proofs/sequence/CovenSequence/RestoreRegistration.lean` | §13.1 |
+| *Body.* A restore's call that ends other than by a crash publishes the store, removes its installation or leaves the restore listed; only a crash leaves an installation nothing refers to, which listing reclaims. A failure before the record that keeps its installation leaves it unlisted | `ended_call_leaves_nothing_unlisted`, `failure_keeps_installation` | `proofs/sequence/CovenSequence/RestoreRegistration.lean` | §11.6, §13.4 |
 | A join and a restore of one store begin on the device's one unfinished installation of it; while a restore refuses an installation holding an invite code, and a join one holding a restore's record, whatever storage may hold of a join's request or a restore's registration, the call that sent it stays listed until it meets its outcome | `never_stranded` | `proofs/sequence/CovenSequence/FirstInstallation.lean` | §13.4 |
 | *Body.* Without that refusal, a restore cancelled on a waiting join's installation removes the join's code, and a join cancelled on a registering restore's installation removes the restore's record | `restore_strands_join`, `join_strands_restore` | `proofs/sequence/CovenSequence/FirstInstallation.lean` | §13.4 |
 | A join's reported phases never go back: waiting, loading, done, across its checks and the calls that resume it. Keeping the opened keys only in the call, or reporting a scan that finds no copy as loading, makes them go back | `phases_forward`, `opened_never_waits`, `resumed_waits_again`, `scan_shown_as_loading` | `proofs/sequence/CovenSequence/JoinStatus.lean` | §13.2 |

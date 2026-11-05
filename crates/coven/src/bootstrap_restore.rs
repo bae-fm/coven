@@ -12,7 +12,9 @@ use coven_sync::DeviceCredentials;
 /// never both. Other providers require None and use the builder's own
 /// sign-in. Invalid key inputs fail before bootstrap begins. A store whose
 /// unfinished installation holds a join's saved code is refused with
-/// `StoreLockError::BootstrapPending` before anything changes (§13.4).
+/// `StoreLockError::BootstrapPending` before anything changes (§13.4). Until
+/// the restore records itself, a cancel or a failure removes the
+/// installation it loaded into (§13.1).
 pub async fn restore_from_code(
     builder: CovenBuilder,
     code: &str,
@@ -177,8 +179,10 @@ pub(crate) async fn unfinished_restores(
         .await
         .map_err(BootstrapDirectoryError::from)?
     {
-        // A join, or a restore that can't have registered, keeps no record.
-        let Some((code, _)) = StoreKeychain::new(keychain.clone(), store).restore_record()? else {
+        // A join keeps no record; an installation that keeps nothing is
+        // reclaimed.
+        let entries = StoreKeychain::new(keychain.clone(), store);
+        let Kept::Restore(code) = kept(builder, &entries, store).await? else {
             continue;
         };
         let metadata = match coven_sync::decode_code_info(code.as_str())? {
@@ -239,13 +243,15 @@ pub(crate) async fn resume_restore(
 }
 
 /// End a restore whose call failed or was cancelled before it published the
-/// store. Once the restore is recorded it only goes forward, and stays for
-/// the next call, unless the facts end it: a cancel, a registration refused
-/// or a member removed, while no registration is journaled and the history
-/// the installation applied doesn't name the device as active. Then nothing
-/// in storage stands for the device, and the restore removes everything it
-/// kept. A cancel the facts don't end is refused with `RestoreRegistered`
-/// (§13.1, §11.6). Before the record, only a cancel removes it.
+/// store. Before the record the restore has only read storage, and a cancel
+/// or any failure removes its installation (§11.6). Once the restore is
+/// recorded it only goes forward, and stays for the next call, unless the
+/// facts end it: a cancel, a registration refused or a member removed,
+/// while no registration is journaled and the history the installation
+/// applied doesn't name the device as active. Then nothing in storage
+/// stands for the device, and the restore removes everything it kept. A
+/// cancel the facts don't end is refused with `RestoreRegistered` (§13.1,
+/// §11.6).
 pub(super) async fn ended(
     builder: &CovenBuilder,
     pending: &BootstrapStore,
@@ -256,13 +262,10 @@ pub(super) async fn ended(
         Ok(record) => record.is_some(),
         Err(read) => return combine(Err(error), Err(read.into())),
     };
-    let cancelled = matches!(error, BootstrapError::Cancelled);
     if !recorded {
-        return match cancelled {
-            true => remove_unfinished(entries, pending, Err(error)),
-            false => Err(error),
-        };
+        return remove_unfinished(entries, pending, Err(error));
     }
+    let cancelled = matches!(error, BootstrapError::Cancelled);
     let ends = cancelled
         || matches!(
             error,

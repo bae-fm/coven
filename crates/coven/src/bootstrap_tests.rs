@@ -370,8 +370,11 @@ async fn cancellation_during_restore_and_before_publication_keeps_final_custody_
     }
 }
 
+/// A restore that fails before it records itself has only read storage: it
+/// removes the installation it loaded into, and the next one starts over
+/// (§13.1, §11.6).
 #[tokio::test]
-async fn storage_failure_retains_staging_for_retry_without_final_keys() {
+async fn a_restore_failing_before_its_record_removes_its_installation() {
     let owner = Owner::new(CloudProvider::S3, false).await;
     let install = Installation::new();
     let (_, cancel) = watch::channel(false);
@@ -389,6 +392,7 @@ async fn storage_failure_retains_staging_for_retry_without_final_keys() {
         Err(BootstrapError::Sync(SyncError::Storage(_)))
     ));
     install.absent(owner.directory.id()).await;
+    assert!(!install.root.path().join("stores").join(owner.directory.id().to_string()).exists());
     assert!(install
         .run(&owner, Installation::restore_request(&owner), owner.storage.clone(), &cancel, |_| {})
         .await

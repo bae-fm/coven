@@ -369,3 +369,58 @@ async fn a_join_refuses_a_recorded_restores_installation() {
     assert!(listed(&install, &owner).await.is_empty());
     owner.close().await;
 }
+
+/// Ana's laptop stops while it loads Household, before the restore records
+/// itself: nothing in storage names the laptop, and nothing lists the
+/// installation it was loading. The app's next listing of unfinished
+/// restores removes it. While the restore was still loading, the same
+/// listing left it alone (§13.4, §11.6).
+#[tokio::test]
+async fn listing_reclaims_an_installation_left_before_the_record() {
+    let owner = Owner::new(CloudProvider::S3, false).await;
+    owner.stop_sync().await;
+    let install = Installation::new();
+    let store = owner.directory.id();
+    let installation = install.root.path().join("stores").join(store.to_string());
+    let (read, reading) = tokio::sync::oneshot::channel();
+    let (resume, resumed) = tokio::sync::oneshot::channel();
+    owner
+        .storage
+        .hold_next_read(ObjectPath::slot(store, std::num::NonZeroU64::MIN), read, resumed)
+        .await;
+    let (_, cancel) = watch::channel(false);
+    let builder = install.authenticated_builder(&owner, owner.storage.clone()).await;
+    {
+        let restoring = restoring(&owner, builder, &cancel);
+        tokio::pin!(restoring);
+        tokio::time::timeout(HANG_GUARD, async {
+            tokio::select! {
+                result = &mut restoring => panic!("the restore ended while loading: {result:?}"),
+                held = reading => held.unwrap(),
+            }
+        })
+        .await
+        .unwrap();
+        assert!(listed(&install, &owner).await.is_empty());
+        assert!(installation.exists(), "a listing removed an installation a call holds");
+    }
+    // The app dropped the restore, and the read it was waiting for with it.
+    drop(resume);
+    assert!(installation.exists());
+    assert!(listed(&install, &owner).await.is_empty());
+    assert!(!installation.exists(), "the listing left the installation nothing refers to");
+    install.absent(store).await;
+    finished(
+        &install,
+        &owner,
+        restoring(
+            &owner,
+            install.authenticated_builder(&owner, owner.storage.clone()).await,
+            &cancel,
+        )
+        .await
+        .unwrap(),
+    )
+    .await;
+    owner.close().await;
+}

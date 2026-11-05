@@ -8,7 +8,10 @@ use std::path::PathBuf;
 use crate::files::DirectoryCreationError;
 
 use crate::files::protection::Protection;
-use crate::files::{settings, FileError, SettingsError, StoreDir};
+use crate::files::{
+    settings, BootstrapDirectoryError, FileError, SettingsError, StoreDeletionLock, StoreDir,
+    StoreDirAccess, StoreLockError,
+};
 use crate::id_source::{IdSource, StoreId};
 
 /// The stores under `app_dir`, one directory each (E1).
@@ -74,6 +77,35 @@ impl StoreDirectories {
     /// whose replacement is unfinished is listed by `store_ids` instead.
     pub async fn unfinished_first_installations(&self) -> Result<Vec<StoreId>, FileError> {
         self.listed(Installations::UnfinishedFirst).await
+    }
+
+    /// Lock an unfinished first installation for deletion while no call holds
+    /// it: no restore or join, in this process or another, holds its
+    /// bootstrap lock, and one closing in this process has been waited for.
+    /// `None` when a call holds it, or it is no longer an unfinished first
+    /// installation: published, being replaced, or gone. Whether anything
+    /// still refers to it, a join's saved code or a restore's record, is for
+    /// the caller to read while it holds the lock, since no call can begin on
+    /// the installation meanwhile (§13.4, §11.6).
+    pub async fn lock_unfinished_first(
+        &self,
+        id: StoreId,
+    ) -> Result<Option<StoreDeletionLock>, BootstrapDirectoryError> {
+        self.store_dir(&id).closed().await?;
+        let path = self.stores().join(id.to_string());
+        crate::task::blocking("lock an unfinished installation", move || {
+            let lock = match super::lock::for_deletion(&path, id, None) {
+                Ok(Some(lock)) => lock,
+                // A call holds it, or nothing of it is left.
+                Ok(None) | Err(StoreLockError::AlreadyOpen(_)) => return Ok(None),
+                Err(error) => return Err(BootstrapDirectoryError::from(error)),
+            };
+            let first =
+                super::bootstrap::is_pending(&path)? && super::device_reset::read(&path)?.is_none();
+            Ok(first.then_some(lock))
+        })
+        .await
+        .map_err(FileError::from)?
     }
 
     async fn listed(&self, installations: Installations) -> Result<Vec<StoreId>, FileError> {
