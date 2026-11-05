@@ -146,6 +146,42 @@ async fn a_table_rename_keeps_the_original_creation() {
     db.close().await.unwrap();
 }
 
+/// A creation still in the local queue is provisional. When a published
+/// creation already owns the key, the queued changes are checked against that
+/// owner: this device's update to the row is refused, recorded as a lost value
+/// naming the owner, and the row shows the owner's values (§9.6).
+#[tokio::test]
+async fn a_queued_creation_yields_to_a_published_owner() {
+    let store = TestStore::new();
+    let db = store.schema(owned(), SCHEMA).await.unwrap();
+    let theirs = insert(1, 0);
+    TestStore::register(&db, store.device(), 1);
+    TestStore::register(&db, theirs.header.position.device, 2);
+    sql(&db, "INSERT INTO rows VALUES('0','mine','b')").await.unwrap();
+    sql(&db, "UPDATE rows SET a='changed' WHERE id='0'").await.unwrap();
+    assert_eq!(crate::write::tests::records(&db).len(), 2);
+
+    db.receive(theirs.clone().into()).await.unwrap();
+    assert_eq!(selected(&db, &row(0)), Some(own(theirs.header.position, row(0))));
+    let shown: (String, String) = db.inspect_writer(|c| {
+        c.query_row("SELECT a,b FROM rows WHERE id='0'", [], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+    });
+    assert_eq!(shown, ("a1".into(), "b1".into()));
+    let lost = db.lost_values().await.unwrap();
+    assert!(
+        lost.iter().any(|value| matches!(
+            &value.replaced_by,
+            crate::Replacement::NotAuthorized {
+                reason: crate::RowAuthorizationFailure::NotOwner { owner },
+                ..
+            } if *owner == crate::tests::member(2)
+        )),
+        "{lost:?}"
+    );
+    db.close().await.unwrap();
+}
+
 /// An internal write of a creation, for tests that run one beside the app's.
 pub(crate) const CREATED: &str =
     "INSERT INTO _coven_creations VALUES('notes',x'01','store',zeroblob(16),x'00')";
