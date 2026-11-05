@@ -1,6 +1,7 @@
 //! Durable claim identity and settlement through the database API.
 use coven_database::{
-    ClaimAttempt, ClaimRead, ClaimSettlement, ClaimWork, Database, DatabaseBuilder, NewOperation,
+    ClaimAttempt, ClaimRead, ClaimSettlement, ClaimWork, Database, DatabaseBuilder, DbError,
+    NewOperation,
 };
 use coven_format::path::ObjectPath;
 use coven_foundation::clock::HANG_GUARD;
@@ -78,7 +79,10 @@ async fn exact_attempts_and_claim_numbers_survive_reopening() {
         .unwrap();
     assert_eq!(saved, b"first exact bytes");
     assert_eq!(db.settle_claim(ClaimRead::Kept(None)).await.unwrap(), ClaimSettlement::Retry);
-    assert!(db.retry_claim(attempt(directory.id(), 2, b"changed")).await.is_err());
+    assert!(matches!(
+        db.retry_claim(attempt(directory.id(), 2, b"changed")).await,
+        Err(DbError::ClaimUnsettled)
+    ));
     assert_eq!(
         db.settle_claim(ClaimRead::Kept(Some(bytes(b"other")))).await.unwrap(),
         ClaimSettlement::NotLanded
@@ -133,10 +137,16 @@ async fn compacted_claim_settlement_matches_sequence_settle_examples() {
         .await
         .unwrap();
         for (first, covers) in [(3, 5), (4, 2)] {
-            assert!(db
-                .settle_claim(ClaimRead::Compacted { first, covers, last_claim: included, digest })
-                .await
-                .is_err());
+            assert!(matches!(
+                db.settle_claim(ClaimRead::Compacted {
+                    first,
+                    covers,
+                    last_claim: included,
+                    digest
+                })
+                .await,
+                Err(DbError::InvalidClaimCoverage)
+            ));
         }
         assert_eq!(
             db.settle_claim(ClaimRead::Compacted {
@@ -253,7 +263,7 @@ async fn writes_and_operations_share_the_counter_and_failed_sealing_reserves_not
         3
     );
     db.settle_claim(ClaimRead::Kept(Some(bytes(b"writes again")))).await.unwrap();
-    assert!(db.finish_claim(None).await.is_err());
+    assert!(matches!(db.finish_claim(None).await, Err(DbError::ClaimUnsettled)));
     assert!(db
         .read_oldest_upload(|_| Ok::<_, coven_database::DbError>(()))
         .await
@@ -459,4 +469,24 @@ impl std::io::Read for HeldBytes {
         self.sent = true;
         Ok(1)
     }
+}
+
+#[tokio::test]
+async fn claim_calls_without_a_claim_fail_with_no_claim() {
+    let (_temp, directory, db) = open().await;
+    assert!(db.current_claim().await.unwrap().is_none());
+    assert!(matches!(db.settle_claim(ClaimRead::Kept(None)).await, Err(DbError::NoClaim)));
+    assert!(matches!(
+        db.retry_claim(attempt(directory.id(), 1, b"attempt")).await,
+        Err(DbError::NoClaim)
+    ));
+    assert!(matches!(db.finish_claim(None).await, Err(DbError::NoClaim)));
+    assert!(matches!(db.claim_upload().await, Err(DbError::NoClaim)));
+    assert!(matches!(db.claim_range(0, 1).await, Err(DbError::NoClaim)));
+    assert!(matches!(db.save_claim_upload(vec![1]).await, Err(DbError::NoClaim)));
+    assert!(matches!(
+        db.read_current_attempt(|_| Ok::<_, DbError>(())).await,
+        Err(DbError::NoClaim)
+    ));
+    db.close().await.unwrap();
 }
