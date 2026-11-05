@@ -368,3 +368,158 @@ async fn each_kind_of_work_adds_the_requests_the_cost_table_names() {
         device.database().close().await.unwrap();
     }
 }
+
+/// A gap below the floor's `at` is the gap's damage, not the floor's: Ben
+/// reports the missing slot's path, applies the slot before it and stops
+/// there (§6.1, `gap_report_wins`). Checked against the slots before the gap,
+/// the honest floor names an announcement Ben can't reach.
+#[tokio::test]
+async fn a_gap_below_the_floor_s_at_reports_the_gap() {
+    let group = Group::new();
+    let ana = group.device(1).await;
+    let ben = group.device(2).await;
+    group.create(&ana).await;
+    group.admit(&ana, &ben).await;
+    ben.sync.pass().await.unwrap();
+    let applied = ben.database().applied_slot().await.unwrap();
+    for id in ["a", "b", "c"] {
+        insert(ana.database(), id, "written").await;
+        ana.sync.pass().await.unwrap();
+    }
+    ana.sync.snapshot(coven_merge::Audience::Store).await.unwrap();
+    ana.sync.pass().await.unwrap();
+    let gap = applied + 2;
+    let mut ring = ben.sync.keys.read().unwrap().unwrap();
+    let floor = ben.sync.read_floor(None, &mut ring, &ben.identity).await.unwrap().unwrap();
+    assert!(floor.header.first.0 <= applied + 1 && floor.header.at >= gap);
+    let path = ObjectPath::slot(group.store, gap.try_into().unwrap());
+    group.storage.delete(&path).await.unwrap();
+
+    let result = ben.sync.pass().await;
+    assert!(
+        matches!(&result, Err(SyncError::Damaged(object)) if object.path == path.as_str()),
+        "{result:?}"
+    );
+    let blocked = ben.sync.session.lock().await.blocked.clone();
+    assert_eq!(
+        blocked.map(|record| record.subject),
+        Some(PendingSubject::Slot(coven_merge::Slot(gap)))
+    );
+    assert_eq!(ben.database().applied_slot().await.unwrap(), gap - 1);
+    assert_eq!(rows(ben.database()).await, [("a".into(), "written".into())]);
+    for device in [&ana, &ben] {
+        device.database().close().await.unwrap();
+    }
+}
+
+/// Where the lost slot lies against the floor in a read-pass comparison.
+#[derive(Clone, Copy, Debug)]
+enum Lost {
+    /// No snapshot, so no floor.
+    NoFloor,
+    /// At or below the floor's `at`.
+    BelowAt,
+    /// In slots written after the floor.
+    AfterFloor,
+}
+
+/// Ben, caught up, misses or can't open slot `applied + offset` of Ana's
+/// next slots. The real pass's applied slot and report against `readPass`;
+/// false when the slot doesn't lie where `lost` says.
+async fn compare_read_pass(writes: usize, offset: u64, lost: Lost, corrupt: bool) -> bool {
+    let group = Group::new();
+    let ana = group.device(1).await;
+    let ben = group.device(2).await;
+    group.create(&ana).await;
+    group.admit(&ana, &ben).await;
+    ben.sync.pass().await.unwrap();
+    let applied = ben.database().applied_slot().await.unwrap();
+    for id in &["a", "b", "c", "d"][..writes] {
+        insert(ana.database(), id, "written").await;
+        ana.sync.pass().await.unwrap();
+    }
+    if !matches!(lost, Lost::NoFloor) {
+        ana.sync.snapshot(coven_merge::Audience::Store).await.unwrap();
+        ana.sync.pass().await.unwrap();
+    }
+    let mut ring = ben.sync.keys.read().unwrap().unwrap();
+    let floor = ben.sync.read_floor(None, &mut ring, &ben.identity).await.unwrap();
+    if matches!(lost, Lost::AfterFloor) {
+        for id in ["g", "h"] {
+            insert(ana.database(), id, "after the floor").await;
+            ana.sync.pass().await.unwrap();
+        }
+    }
+    let end = ana.database().applied_slot().await.unwrap();
+    let stop = applied + offset;
+    let fits = stop <= end
+        && match (&floor, lost) {
+            (None, Lost::NoFloor) => true,
+            (Some(floor), Lost::BelowAt) => stop <= floor.header.at,
+            (Some(floor), Lost::AfterFloor) => stop > floor.header.at,
+            _ => panic!("{lost:?} with a floor present: {}", floor.is_some()),
+        };
+    if !fits {
+        for device in [&ana, &ben] {
+            device.database().close().await.unwrap();
+        }
+        return false;
+    }
+    let path = ObjectPath::slot(group.store, stop.try_into().unwrap());
+    if corrupt {
+        group.storage.corrupt_byte(&path, 0).await.unwrap();
+    } else {
+        group.storage.delete(&path).await.unwrap();
+    }
+    let floor = floor.map_or(serde_json::Value::Null, |floor| {
+        let named: Vec<u64> = floor.announcements.iter().map(|original| original.slot.0).collect();
+        serde_json::json!({"first":floor.header.first.0,"at":floor.header.at,"named":named})
+    });
+    let input = serde_json::json!({"kind":"readPass","applied":applied,"stop":stop,
+        "why":if corrupt {"fault"} else {"missing"},"known":stop - 1,"floor":floor});
+    let expected = crate::tests::run_lean("COVEN_SEQUENCE_LEAN", &input);
+
+    let result = ben.sync.pass().await;
+    let through = ben.database().applied_slot().await.unwrap();
+    let blocked = ben.sync.session.lock().await.blocked.clone();
+    let actual = match (&result, blocked) {
+        (Ok(_), None) => serde_json::json!({"synced":through}),
+        (Err(SyncError::Damaged(object)), Some(record)) => {
+            let PendingSubject::Slot(slot) = record.subject else {
+                panic!("blocked on {:?}; {input}", record.subject)
+            };
+            assert_eq!(object.path, path.as_str(), "{input}");
+            assert_eq!(through, slot.0 - 1, "{input}");
+            serde_json::json!({"stops":slot.0})
+        }
+        (Err(SyncError::Damaged(object)), None)
+            if object.path == ObjectPath::floor(group.store).as_str() =>
+        {
+            serde_json::json!("floorDamaged")
+        }
+        (result, blocked) => panic!("{result:?} {blocked:?}; {input}"),
+    };
+    assert_eq!(actual, expected, "{input}");
+    for device in [&ana, &ben] {
+        device.database().close().await.unwrap();
+    }
+    true
+}
+
+/// Ana's slots past Ben's, with one lost or damaged, a floor whose `at` is
+/// past it, one written before it, or none (§6.1, `ReadPass.pass`).
+#[tokio::test]
+#[ignore = "requires COVEN_SEQUENCE_LEAN; scripts/check.sh builds sequenceRunner"]
+async fn sequence_read_pass_matches_lean() {
+    let mut cases = 0;
+    for writes in 1..=4usize {
+        for offset in 1..=writes as u64 + 3 {
+            for lost in [Lost::NoFloor, Lost::BelowAt, Lost::AfterFloor] {
+                for corrupt in [false, true] {
+                    cases += usize::from(compare_read_pass(writes, offset, lost, corrupt).await);
+                }
+            }
+        }
+    }
+    eprintln!("read pass: {cases} cases");
+}

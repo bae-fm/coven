@@ -948,6 +948,32 @@ sending it and creates only what it recorded, signed with its id.
   whose bytes that copy's journal never attempted was created by another copy
   using the same id.
 
+## What a pass reports
+
+[`ReadPass`](sequence/CovenSequence/ReadPass.lean) models what one pass's read
+forward reports. The pass reads from its next slot until a slot is missing or
+can't be read or applied, the stop, then reads the floor: its first kept slot
+and its `at`, the slot its writer had applied through. The floor's first kept
+slot gates the commit. Checking the floor itself is `Settle.FloorAnnounced`
+against the slots the device holds, which needs them through `at`. A missing
+slot is damage when a later slot is known to exist: an existence check found
+it, or it is at or below the floor's `at`.
+
+- `checkFirst_blames_honest_floor` is a checked counterexample to checking the
+  floor before reporting the stop. `Settle.lostStore` with slot 2 lost: the
+  device has applied slot 1, misses slot 2, and the floor, honest in the store in
+  good order, names the announcement at 2. Checked against slot 1 it is refused,
+  and the pass reports the floor instead of the gap.
+- `gap_report_wins`: a stop at or below the floor's `at` is reported, with the
+  slots before it applied, whatever the check against the shorter history says.
+- `floor_blamed_only_when_held`, `honest_floor_never_blamed`: the floor is
+  reported as damaged only once the slots read reach its `at` and the check
+  against them fails; storage in good order never fails it.
+  `pass_eq_checkFirst`: a stop past the floor's `at` reads as before.
+- `gap_below_at_is_damage`: in storage in good order every slot from the first
+  kept slot through the head is present, so a gap below the floor's `at` is
+  damage.
+
 ## JSON runner
 
 Build with `cd spec/proofs/sequence && lake build`; the executable is
@@ -991,6 +1017,20 @@ key waits, prepared-body loads and snapshot contents are outside this case.
 ```
 
 Answer: `{"reload":false,"apply":[2,3]}`.
+
+**`readPass`** calls `ReadPass.pass`. `applied` is the device's applied slot,
+`stop` the slot reading stopped at (after `applied`), `why` `"missing"` or
+`"fault"`, `known` the last slot an existence check or a read found, and
+`floor` null or `{first, at, named}`, where `named` lists the slots that
+announced the floor's snapshots. The floor check passes once the slots held
+reach every named slot. The answer is `"reload"`, `{"synced":n}`,
+`{"stops":n}` or `"floorDamaged"`.
+
+```json
+{"kind":"readPass","applied":3,"stop":5,"why":"missing","known":4,"floor":{"first":1,"at":7,"named":[7]}}
+```
+
+Answer: `{"stops":5}`.
 
 **`retention`** gives one audience's floor: `Retention.newest` for the name and
 `Retention.floorFirst` over `Retention.choose` for `first`. Input `snapshots`
@@ -1186,6 +1226,9 @@ and settlement comparisons also include deterministic seeded cases.
   At or above the floor the reader applies its consecutive fetched prefix without
   reading that body. These cases compare the floor gate, not snapshot contents or
   progress under missing-body storage failures.
+- `coven-sync`'s `sequence_read_pass_matches_lean` loses one slot from a store
+  whose floor's `at` is past it, or one written after the floor, or one with no
+  floor, and compares what the real pass applies and reports with `readPass`.
 - `coven-database` applies write slots and compares visible unique winners,
   permanent owner creations (slot, write number, author and member) and consumed
   cut-off refusals at every prefix.

@@ -10,6 +10,7 @@ import CovenSequence.Reload
 import CovenSequence.QueueReloadExamples
 import CovenSequence.MemberKeyReplacement
 import CovenSequence.JoinScan
+import CovenSequence.ReadPass
 
 /-! One case per process; malformed inputs fail on stderr with nonzero exit. -/
 namespace SequenceJson
@@ -156,6 +157,29 @@ def readRead (j : Json) : Except String Json := do
   match Device.checkedSlots (← j.getObjValAs? Bool "stopped") applied start fetched with
   | none => return Json.mkObj [("reload", toJson true), ("apply", toJson ([] : List Nat))]
   | some slots => return Json.mkObj [("reload", toJson false), ("apply", toJson slots)]
+
+/-- `ReadPass.pass`, with the floor check passing once the history held
+reaches every slot that announced a snapshot the floor names. -/
+def readPass (j : Json) : Except String Json := do
+  let applied ← nat j "applied"
+  let stop ← nat j "stop"
+  if stop ≤ applied then throw "reading stops after the applied slot"
+  let why ← match ← j.getObjValAs? String "why" with
+    | "missing" => pure ReadPass.Stop.missing
+    | "fault" => pure ReadPass.Stop.fault
+    | _ => throw "unknown stop"
+  let (floor, named) ← match ← j.getObjVal? "floor" with
+    | .null => pure (none, [])
+    | floor => do
+      let named ← floor.getObjValAs? (List Nat) "named"
+      if named.any (· == 0) then throw "named snapshots' slots must be positive"
+      pure (some ⟨← positive floor "first", ← nat floor "at"⟩, named)
+  let check := fun n => named.all (· ≤ n)
+  return match ReadPass.pass check applied stop why (← nat j "known") floor with
+    | .reload => toJson "reload"
+    | .synced through => Json.mkObj [("synced", toJson through)]
+    | .stops slot => Json.mkObj [("stops", toJson slot)]
+    | .floorDamaged => toJson "floorDamaged"
 
 def readSelection (j : Json) : Except String (Reload.Selection Nat) := do
   let slot ← positive j "slot"
@@ -331,6 +355,7 @@ def run (j : Json) : Except String Json := do
   match ← j.getObjValAs? String "kind" with
   | "settle" => readSettle j
   | "read" => readRead j
+  | "readPass" => readPass j
   | "joinScan" => readJoinScan j
   | "retention" => readRetention j
   | "floor" => return toJson (Retention.floorStart (← j.getObjValAs? (List (Option Nat)) "coverage"))

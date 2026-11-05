@@ -529,6 +529,23 @@ def keyCase (slots held current : List Json) : Json := json% {
 #eval check (json% {"kind":"read","stopped":true,"applied":0,"fetched":[1],"first_kept":10})
   (json% {"reload":false,"apply":[]})
 
+-- A gap below the floor's `at` is reported as the gap, never as the floor; a
+-- floor is checked once the slots read reach its `at`.
+#eval do
+  let pass := fun (stop known : Nat) (why : String) (floor : Json) =>
+    json% {"kind":"readPass","applied":3,"stop":$(stop),"why":$(why),"known":$(known),"floor":$(floor)}
+  let floor := json% {"first":1,"at":7,"named":[7]}
+  check (pass 5 4 "missing" floor) (json% {"stops":5})
+  check (pass 5 4 "fault" floor) (json% {"stops":5})
+  check (pass 8 7 "missing" floor) (json% {"synced":7})
+  check (pass 8 9 "missing" floor) (json% {"stops":8})
+  check (pass 8 7 "missing" (json% {"first":1,"at":7,"named":[9]})) (toJson "floorDamaged")
+  check (pass 5 4 "missing" (json% {"first":5,"at":7,"named":[7]})) (toJson "reload")
+  check (pass 5 4 "missing" Json.null) (json% {"synced":4})
+  check (pass 5 6 "missing" Json.null) (json% {"stops":5})
+  rejects (pass 3 4 "missing" Json.null)
+  rejects (pass 5 4 "lost" Json.null)
+
 -- Ben's unread removal preserves the old original; reading it forbids new
 -- originals, and a later device removal still cuts off the old original.
 #eval do

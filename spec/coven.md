@@ -1387,6 +1387,8 @@ history and checks the floor against that copy; the slots apply later, in order,
 as any slot does. Checked against only the slots her phone had applied, the floor
 names an announcement it has never read, and an honest floor would be refused as
 damaged ([`lost_claim_refuses_honest_floor`](proofs/sequence/CovenSequence/Settle.lean)).
+A pass whose reading stops at or below the floor's `at` can't check it yet; §6.2
+says what it applies and reports.
 
 Bytes recreated below the floor never change what the sequence means. Deleting
 them is recorded cleanup work; if the delete fails, the device keeps that
@@ -1508,7 +1510,18 @@ until one is missing.
 - **No floor yet.** Then the sequence starts at 1, and a miss right after the
   known end means there is no new slot yet.
 - **A gap is damage.** A missing slot before a slot known to exist is damage,
-  unless the floor has passed it. The device reports the path and stops.
+  unless the floor has passed it. The device reports the path and stops. A slot
+  is known to exist when a check found it, or when it is at or below the floor's
+  `at`: the floor's writer had applied it.
+- **The gap is reported, not the floor.** Ben's laptop has applied through slot
+  40. Ana's phone wrote 41 to 43, announced a store snapshot at 44 and wrote a
+  floor with `at` 44; then slot 42 was lost. Ben's laptop reads 41, misses 42,
+  and reads the floor. It can't check that floor: the check reads the slots
+  through its `at` (§16.4), and 42 is gone. So it applies 41, reports `seq/42`
+  and stops there. Checked against the slots through 41 instead, the honest
+  floor names an announcement the laptop never read, and the gap would be
+  reported as a damaged floor
+  ([`checkFirst_blames_honest_floor`](proofs/sequence/CovenSequence/ReadPass.lean)).
 - **A block ends reading.** Once a slot is found that can't apply (§5.4), the
   device reads no further. Requests already started may finish, but their results
   can't move the device past the block.
@@ -1523,6 +1536,12 @@ until one is missing.
   check. If the floor has passed a slot just read and not yet applied, the device
   discards what it read and reloads (§16.5) instead: bytes recreated at a deleted
   path can't become new history (§5.2).
+- **A stop below the floor's `at`.** Checking the floor itself reads the slots
+  through its `at` (§16.4). When reading stops at or below `at`, at a gap, a
+  failed read or a slot that can't apply, the floor can't be checked yet. The
+  device applies the slots before the stop, which the floor's first kept slot
+  has not passed, and reports the stop. A later pass that reads through `at`
+  checks the floor. A floor is reported as damaged only when that check fails.
 - **Signature before use.** The device checks each slot's framing and complete
   signature before applying it. Each original write uses its device owner's
   signing key at `read_through`; its writes slot uses the credential those writes
@@ -10730,6 +10749,9 @@ Write-ups explain each model and state its assumptions:
 | A settled claim, kept or claimed again after it didn't land (the model's `notLanded`), ends in exactly one slot (no bound on contention or time) | `lands_once_never_lost` | `proofs/sequence/CovenSequence/Settle.lean` | §5.3 |
 | A snapshot's per-device claim numbers settle claims of every kind after deletion; they don't describe surviving effects | `claims_ge` | `proofs/sequence/CovenSequence/Settle.lean` | §16.1 |
 | A device missing a followed audience key cannot reload any audience past its blocked slot, even before noticing the block; a stopped device applies and reloads nothing | `device_stops`, `missing_key_blocks_reload`, `stopped_stays`, `Device.stopped_checks_nothing` | `proofs/sequence/CovenSequence/Device.lean` | §5.4, §22 |
+| A pass whose reading stops at or below the floor's `at` applies the slots before the stop and reports the stop; it reports the floor as damaged only after holding the slots through the floor's `at` and failing the check, which an honest floor in storage in good order never does. A stop past the floor's `at` reads as it did with the floor checked first | `gap_report_wins`, `floor_blamed_only_when_held`, `honest_floor_never_blamed`, `pass_eq_checkFirst` | `proofs/sequence/CovenSequence/ReadPass.lean` | §6.1, §6.2 |
+| In storage in good order every slot from the first kept slot through the floor's `at` is present, so a missing one there is damage | `gap_below_at_is_damage` | `proofs/sequence/CovenSequence/ReadPass.lean` | §6.1 |
+| *Body.* Checked first against the slots before a gap, an honest floor is reported as damaged instead of the gap | `checkFirst_blames_honest_floor` | `proofs/sequence/CovenSequence/ReadPass.lean` | §6.1 |
 | Bookkeeping requests no pass, and no write is lost even when passes race | `write_never_lost`, `racing_passes`, `bookkeeping_retains_none` | `proofs/io/CovenIO/Wakes.lean` | §6.7 |
 | A wait is due when its delay passes or a commit changes the prerequisite it names; a commit changing another prerequisite leaves it waiting, and being woken doesn't reset the backoff. Every start after the first is paid for by a full delay or by such a commit, so a wait nothing changes starts at most 1 + ⌊t / d⌋ times in t seconds, and n of them at most n times that | `evidence_rate`, `unrelated_commit_ignored`, `evidence_keeps_backoff`, `unchanged_rate`, `unchanged_waits_rate` | `proofs/io/CovenIO/WaitingEvidence.lean` | §6.7, §21.2 |
 | A reopened wait keeps its backoff and is due within its full wait under any wall clock; without a forward wall-clock jump, each reopen adds at most one start, and a forward jump can end a wait early | `reopen_within_wait`, `reopened_due`, `reopen_rate`, `reopen_unchanged_rate`, `forward_jump_ends_wait` | `proofs/io/CovenIO/WaitingReopen.lean` | §6.7, §21.2 |

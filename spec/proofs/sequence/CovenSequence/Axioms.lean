@@ -341,3 +341,9 @@ import SequenceApply
 #print axioms CovenSequence.JoinStatus.opened_never_waits
 #print axioms CovenSequence.JoinStatus.resumed_waits_again
 #print axioms CovenSequence.JoinStatus.scan_shown_as_loading
+#print axioms CovenSequence.ReadPass.gap_report_wins
+#print axioms CovenSequence.ReadPass.floor_blamed_only_when_held
+#print axioms CovenSequence.ReadPass.pass_eq_checkFirst
+#print axioms CovenSequence.ReadPass.gap_below_at_is_damage
+#print axioms CovenSequence.ReadPass.honest_floor_never_blamed
+#print axioms CovenSequence.ReadPass.checkFirst_blames_honest_floor

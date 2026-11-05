@@ -185,10 +185,12 @@ impl SequenceSync {
                     }
                     continue;
                 }
-                if let Some(floor) = floor
-                    .as_ref()
-                    .filter(|floor| session.checked_floor.as_ref() != Some(floor.object()))
-                {
+                // Checking the floor reads the history through its `at`. A
+                // stop at or below `at` leaves that history unread: the floor
+                // stays unchecked, and the stop is reported (§6.1, §6.2).
+                if let Some(floor) = floor.as_ref().filter(|floor| {
+                    floor.header.at < next && session.checked_floor.as_ref() != Some(floor.object())
+                }) {
                     self.authenticate_floor(floor, &virtual_history, &mut tentative_ring, member)
                         .await?;
                     session.checked_floor = Some(floor.object().clone());
@@ -217,7 +219,11 @@ impl SequenceSync {
             // A failed keychain change fails this pass before any of its
             // slots applies; it is not a fault of the slot, so nothing blocks.
             self.follow_person_entries(&session.history, &virtual_history, member)?;
-            session.floor = floor;
+            // The slots before the stop apply under the floor's first kept
+            // slot; the session keeps the last floor it checked.
+            if floor.as_ref().is_none_or(|floor| floor.header.at < next) {
+                session.floor = floor;
+            }
             let applying = self.clock.elapsed();
             let applied = slots.len();
             if let Some(progress) = progress.as_deref_mut().filter(|_| applied > 0) {
