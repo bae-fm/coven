@@ -685,6 +685,162 @@ mod data_sources {
         receiver.close().await.unwrap();
         ben.close().await.unwrap();
     }
+
+    /// Ben's 9 creates a note and an explicit drop choice excludes it. A later
+    /// raise to version 4, whose converter would accept the write, keeps the
+    /// frozen loss with its values and cause; receiving 9 again neither calls
+    /// the converter nor revives the note (§18.6).
+    #[tokio::test]
+    async fn a_frozen_loss_keeps_its_values_and_cause_through_a_later_raise() {
+        let ids = SequentialIds::new();
+        let (ben_store, receiver_store) = (TestStore::with_ids(&ids), TestStore::with_ids(&ids));
+        let ben = ben_store.schema(tables(), NOTES).await.unwrap();
+        sql(&ben, "INSERT INTO notes VALUES('n','title','b')").await.unwrap();
+        let nine = records(&ben).remove(0);
+        let receiver =
+            open(&receiver_store, vec![initial(), rename(2, "title", "name", None)]).await;
+        receiver.exclude_later_writes(2).await;
+        assert_eq!(receiver.receive(nine.clone().into()).await.unwrap(), ApplyOutcome::Applied);
+        let frozen = receiver.lost_values().await.unwrap();
+        assert!(
+            matches!(&frozen[..], [loss] if loss.replaced_by == Replacement::SchemaChange { version: 2 }),
+            "{frozen:?}"
+        );
+        receiver.close().await.unwrap();
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let receiver = open(
+            &receiver_store,
+            vec![
+                initial(),
+                rename(2, "title", "name", None),
+                Migration::addition(3, "color", "ALTER TABLE notes ADD COLUMN color TEXT"),
+                rename(4, "name", "heading", Some(calls.clone())),
+            ],
+        )
+        .await;
+        receiver.exclude_later_writes(4).await;
+        assert_eq!(receiver.lost_values().await.unwrap(), frozen);
+        assert_eq!(receiver.receive(nine.into()).await.unwrap(), ApplyOutcome::AlreadyApplied);
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert!(names(&receiver, "heading").await.is_empty());
+        assert_eq!(receiver.lost_values().await.unwrap(), frozen);
+        receiver.close().await.unwrap();
+        ben.close().await.unwrap();
+    }
+
+    /// Ben's writes 1 and 2 are excluded by a drop choice. His migrated app
+    /// then writes 4, after a marker, with both earlier writes among its own
+    /// predecessors: the writes it recorded as read order it, and never
+    /// exclude it, so every receiver applies it with no data-dependency
+    /// loss (§18.6).
+    #[tokio::test]
+    async fn recorded_reads_order_a_write_but_never_exclude_it() {
+        let ids = SequentialIds::new();
+        let (ben_store, receiver_store) = (TestStore::with_ids(&ids), TestStore::with_ids(&ids));
+        let ben = ben_store.schema(tables(), NOTES).await.unwrap();
+        sql(&ben, "INSERT INTO notes VALUES('a','first','b')").await.unwrap();
+        sql(&ben, "INSERT INTO notes VALUES('b','second','b')").await.unwrap();
+        ben.close().await.unwrap();
+        let ben = open(&ben_store, vec![initial(), rename(2, "title", "name", None)]).await;
+        sql(&ben, "INSERT INTO notes(id,name,body) VALUES('z','third','b')").await.unwrap();
+        let writes = records(&ben);
+        let numbers: Vec<_> = writes.iter().map(|w| w.header.position.number).collect();
+        assert_eq!(numbers, [1, 2, 3, 4]);
+        assert_eq!(writes[3].header.schema_version, 2);
+
+        let receiver =
+            open(&receiver_store, vec![initial(), rename(2, "title", "name", None)]).await;
+        receiver.exclude_later_writes(2).await;
+        for write in &writes {
+            assert_eq!(
+                receiver.receive(write.clone().into()).await.unwrap(),
+                ApplyOutcome::Applied
+            );
+        }
+        assert_eq!(names(&receiver, "name").await, [("z".to_owned(), "third".to_owned())]);
+        let losses = receiver.lost_values().await.unwrap();
+        assert_eq!(losses.len(), 2, "{losses:?}");
+        assert!(losses
+            .iter()
+            .all(|loss| loss.replaced_by == Replacement::SchemaChange { version: 2 }));
+        receiver.close().await.unwrap();
+        ben.close().await.unwrap();
+    }
+
+    /// Note n keeps its generation from a covered write, its title set by the
+    /// excluded 9. Ben's 10 edits that title and renames a playlist: the
+    /// title edit is frozen on its excluded setter, the rename converts. A
+    /// later edit of the playlist applies; a later edit of the frozen title
+    /// loses with it (§18.6).
+    #[tokio::test]
+    async fn the_replaced_setter_decides_and_later_changes_follow_each_part() {
+        let ids = SequentialIds::new();
+        let (ben_store, receiver_store) = (TestStore::with_ids(&ids), TestStore::with_ids(&ids));
+        let ben = ben_store.schema(tables(), NOTES).await.unwrap();
+        sql(&ben, "INSERT INTO notes VALUES('p','playlist','b'),('n','covered note','b')")
+            .await
+            .unwrap();
+        sql(&ben, "UPDATE notes SET title='excluded title' WHERE id='n'").await.unwrap();
+        ben.write(|sql| {
+            sql.execute("UPDATE notes SET title='edited' WHERE id='n'", [])?;
+            sql.execute("UPDATE notes SET title='renamed playlist' WHERE id='p'", [])?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        sql(&ben, "UPDATE notes SET title='playlist again' WHERE id='p'").await.unwrap();
+        sql(&ben, "UPDATE notes SET title='built on the frozen edit' WHERE id='n'").await.unwrap();
+        let writes = records(&ben);
+        assert_eq!(writes.len(), 5);
+
+        let receiver = open(&receiver_store, vec![initial()]).await;
+        receiver.receive(writes[0].clone().into()).await.unwrap();
+        receiver.close().await.unwrap();
+        let receiver =
+            open(&receiver_store, vec![initial(), rename(2, "title", "name", None)]).await;
+        receiver.exclude_later_writes(2).await;
+        receiver.receive(writes[1].clone().into()).await.unwrap();
+        receiver.close().await.unwrap();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let receiver =
+            open(&receiver_store, vec![initial(), rename(2, "title", "name", Some(calls.clone()))])
+                .await;
+        for write in &writes[2..] {
+            assert_eq!(
+                receiver.receive(write.clone().into()).await.unwrap(),
+                ApplyOutcome::Applied
+            );
+        }
+        // Only the playlist's changes reach the converter.
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            names(&receiver, "name").await,
+            [
+                ("n".to_owned(), "covered note".to_owned()),
+                ("p".to_owned(), "playlist again".to_owned())
+            ]
+        );
+        let dependencies: Vec<_> = receiver
+            .lost_values()
+            .await
+            .unwrap()
+            .into_iter()
+            .filter_map(|loss| match loss.replaced_by {
+                Replacement::DataDependency { write, sources } => Some((write, sources)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            dependencies,
+            [
+                (writes[2].header.position, vec![source(&writes[1], "n")]),
+                (writes[4].header.position, vec![source(&writes[2], "n")]),
+            ]
+        );
+        receiver.close().await.unwrap();
+        ben.close().await.unwrap();
+    }
 }
 
 /// A step's classification comes from its statements, never this device's
@@ -713,4 +869,142 @@ async fn a_data_step_run_on_an_empty_table_still_converts_late_writes() {
     assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
     assert!(case.receiver.lost_values().await.unwrap().is_empty());
     case.close().await;
+}
+
+const TITLES: &str = "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY,title TEXT NOT NULL)";
+
+fn title_tables() -> Vec<SyncedTable> {
+    vec![SyncedTable::new("notes", RowIdentity::SharedKey)]
+}
+
+/// A version 2 that converts late old-schema writes unchanged and counts
+/// each change its callback sees.
+fn counting(calls: &std::sync::Arc<std::sync::atomic::AtomicUsize>) -> Vec<Migration> {
+    let calls = calls.clone();
+    vec![
+        Migration::addition(1, "notes", TITLES),
+        Migration::breaking(
+            2,
+            "titles",
+            "CREATE INDEX titles ON notes(title)",
+            crate::OldWrites::Convert(std::sync::Arc::new(move |_| {
+                calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(())
+            })),
+        ),
+    ]
+}
+
+async fn note_titles(db: &Database) -> Vec<(String, String)> {
+    db.read(|sql| {
+        Ok(sql
+            .query("SELECT id,title FROM notes ORDER BY id", [], |r| Ok((r.get(0)?, r.get(1)?)))?)
+    })
+    .await
+    .unwrap()
+}
+
+/// Ben's old-schema insert is sealed under a member key whose replacement
+/// slot comes before it, so Ana refuses it whole, with a converter declared:
+/// no callback, no row, no lost value. Carol, who applied the insert before
+/// the replacement, edits the note in a write built on it; that change uses
+/// data Ana refused, so it is a frozen loss naming Ben's write, and the
+/// callback never sees it (§14.1, §18.6).
+#[tokio::test]
+async fn a_write_cut_off_by_key_replacement_stays_refused_under_a_converter() {
+    let ids = SequentialIds::new();
+    let (ana_store, ben_store, carol_store) =
+        (TestStore::with_ids(&ids), TestStore::with_ids(&ids), TestStore::with_ids(&ids));
+    let ben = ben_store.schema(title_tables(), TITLES).await.unwrap();
+    let carol = carol_store.schema(title_tables(), TITLES).await.unwrap();
+    let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let ana = ana_store.builder(title_tables(), counting(&calls)).open().await.unwrap();
+    for db in [&ana, &ben, &carol] {
+        TestStore::register(db, ben_store.device(), 2);
+        TestStore::register(db, carol_store.device(), 3);
+    }
+    sql(&ben, "INSERT INTO notes VALUES('n','first')").await.unwrap();
+    let insert = records(&ben).remove(0);
+    carol.receive(insert.clone().into()).await.unwrap();
+    sql(&carol, "UPDATE notes SET title='second'").await.unwrap();
+    let edit = records(&carol).remove(0);
+
+    ana.exclude_later_writes(2).await;
+    let state = ana.store_state().await.unwrap();
+    ana.admin_fixture(
+        coven_format::admin::StoreChange::ReplaceMemberKeys {
+            member: crate::tests::member(2),
+            expected: coven_format::test_utils::keys_from_seed(0xA5).public_keys(),
+            keys: coven_format::test_utils::keys_from_seed(2).public_keys(),
+        },
+        state,
+        None,
+    )
+    .await
+    .unwrap();
+    ana.receive(insert.clone().into()).await.unwrap();
+    // Carol's edit read Ben's insert at the slot Ana gave it.
+    let mut edit = edit;
+    edit.header.read_through = ana.applied_slot().await.unwrap();
+    assert!(note_titles(&ana).await.is_empty());
+    assert!(ana.lost_values().await.unwrap().is_empty());
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+
+    ana.receive(edit.clone().into()).await.unwrap();
+    assert!(note_titles(&ana).await.is_empty());
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+    let dependency: Vec<_> =
+        ana.lost_values().await.unwrap().into_iter().map(|loss| loss.replaced_by).collect();
+    assert!(
+        matches!(&dependency[..], [Replacement::DataDependency { write, sources }]
+            if *write == edit.header.position
+                && sources.iter().all(|source| source.write == insert.header.position)),
+        "{dependency:?}"
+    );
+    for db in [ana, ben, carol] {
+        db.close().await.unwrap();
+    }
+}
+
+/// Another member's old-schema edit of a row she did not create is refused by
+/// the owner rule against the current declaration before any converter runs:
+/// the row keeps its title, the loss names its owner, and the callback never
+/// sees the change (§9.6, §18.6).
+#[tokio::test]
+async fn an_old_write_the_owner_rule_refuses_never_reaches_the_converter() {
+    let ids = SequentialIds::new();
+    let (ana_store, mallory_store) = (TestStore::with_ids(&ids), TestStore::with_ids(&ids));
+    let owned = || vec![SyncedTable::new("notes", RowIdentity::SharedKey).owner_only()];
+    let ana = ana_store.schema(owned(), TITLES).await.unwrap();
+    // Mallory's app declares no owner-only tables, so it authors the edit.
+    let mallory = mallory_store.schema(title_tables(), TITLES).await.unwrap();
+    for db in [&ana, &mallory] {
+        TestStore::register(db, ana_store.device(), 1);
+        TestStore::register(db, mallory_store.device(), 2);
+    }
+    sql(&ana, "INSERT INTO notes VALUES('n','mine')").await.unwrap();
+    let created = records(&ana).remove(0);
+    crate::tests::publish(&ana).await.unwrap();
+    mallory.receive(created.into()).await.unwrap();
+    sql(&mallory, "UPDATE notes SET title='taken'").await.unwrap();
+    let forged = records(&mallory).remove(0);
+    ana.close().await.unwrap();
+
+    let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let ana = ana_store.builder(owned(), counting(&calls)).open().await.unwrap();
+    ana.exclude_later_writes(2).await;
+    ana.receive(forged.clone().into()).await.unwrap();
+    assert_eq!(note_titles(&ana).await, [("n".to_owned(), "mine".to_owned())]);
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+    let losses: Vec<_> =
+        ana.lost_values().await.unwrap().into_iter().map(|loss| loss.replaced_by).collect();
+    assert_eq!(
+        losses,
+        [Replacement::NotAuthorized {
+            write: forged.header.position,
+            reason: RowAuthorizationFailure::NotOwner { owner: crate::tests::member(1) },
+        }]
+    );
+    ana.close().await.unwrap();
+    mallory.close().await.unwrap();
 }
