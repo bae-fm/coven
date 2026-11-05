@@ -145,6 +145,51 @@ async fn a_circle_row_names_a_store_files_bytes_through_a_new_file_with_no_uploa
     b.close().await.unwrap();
 }
 
+/// The same bytes staged twice are two files: each has its own object and
+/// key, so deleting the first row's reference makes only the first object a
+/// deletion candidate and leaves the second record where it was (§17.5).
+#[tokio::test]
+async fn identical_bytes_staged_twice_are_two_stored_files() {
+    let store = TestStore::new();
+    let db = open(&store, Provenance::AppProvided).await;
+    let mut files = Vec::new();
+    for n in [1, 2] {
+        let file = db
+            .staged_write::<_, _, _, _, DbError>(
+                |batch| Ok(batch.put_file("files", b"same bytes".to_vec(), Place::Cloud)),
+                move |sql, file| {
+                    insert(&sql, "photos", n, "store", file)?;
+                    Ok(file)
+                },
+            )
+            .await
+            .unwrap();
+        files.push(file);
+    }
+    complete_uploads(&db).await;
+    let (first, second) = (record(&db, files[0]), record(&db, files[1]));
+    let (crate::file_location::Place::Cloud(first), crate::file_location::Place::Cloud(second)) =
+        (first.place, second.place)
+    else {
+        panic!("both are stored");
+    };
+    assert_ne!(first.object(), second.object());
+    crate::tests::publish(&db).await.unwrap();
+    db.write(|sql| {
+        sql.execute("DELETE FROM photos WHERE id='00000000-0000-4000-8000-000000000001'", [])?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+    crate::tests::publish(&db).await.unwrap();
+    assert!(!has_record(&db, files[0]));
+    assert!(has_record(&db, files[1]));
+    let candidates = unprotected(&db, store.device()).await;
+    assert!(candidates.contains(&first.object()));
+    assert!(!candidates.contains(&second.object()));
+    db.close().await.unwrap();
+}
+
 /// A file this device has no record of gives no new file: the write fails
 /// with `FileAbsent`, naming it.
 #[tokio::test]
