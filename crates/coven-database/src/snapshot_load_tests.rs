@@ -689,6 +689,39 @@ async fn a_load_keeps_the_devices_pending_records_journals_and_cached_files() {
     db.close().await.unwrap();
 }
 
+/// A snapshot holds a deleted row's generations, so an edit of the old
+/// generation that arrives after the load is taken out, not applied to the
+/// row's new generation (§16.1).
+#[tokio::test]
+async fn a_late_edit_after_a_snapshot_load_revives_no_deleted_generation() {
+    let ids = SequentialIds::new();
+    let (a_store, c_store, b_store) =
+        (TestStore::with_ids(&ids), TestStore::with_ids(&ids), TestStore::with_ids(&ids));
+    let a = a_store.schema(notes(), NOTES).await.unwrap();
+    let c = c_store.schema(notes(), NOTES).await.unwrap();
+    let b = b_store.schema(notes(), NOTES).await.unwrap();
+    sql(&a, "INSERT INTO notes VALUES('n','first','')").await.unwrap();
+    c.receive(records(&a)[0].clone().into()).await.unwrap();
+    sql(&c, "UPDATE notes SET title='late edit of the first generation'").await.unwrap();
+    let late = records(&c).pop().unwrap();
+    sql(&a, "DELETE FROM notes").await.unwrap();
+    sql(&a, "INSERT INTO notes VALUES('n','second generation','')").await.unwrap();
+    let snapshot = frames(&a, Audience::Store).await;
+    load(&b, Audience::Store, snapshot).await;
+    b.receive(late.into()).await.unwrap();
+    let title = |db: &Database| {
+        db.inspect_writer(|sql| {
+            sql.query("SELECT title FROM notes", [], |r| r.get::<_, String>(0)).unwrap()
+        })
+    };
+    assert_eq!(title(&b), ["second generation"]);
+    assert_eq!(title(&b), title(&a));
+    assert_eq!(b.lost_values().await.unwrap().len(), 1);
+    for db in [a, b, c] {
+        db.close().await.unwrap();
+    }
+}
+
 #[tokio::test]
 async fn a_snapshot_removing_a_queued_files_row_keeps_its_upload_source() {
     let ids = SequentialIds::new();
