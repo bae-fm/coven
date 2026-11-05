@@ -146,8 +146,8 @@ code_checks() {
     step "owner-construction-check: Appendix F.1 dependencies, F.2 and F.3 capabilities and owners, F.5 conventions"
     scripts/cargo.sh run --quiet -p owner-construction-check -- .
 
-    step "cargo deny check bans: the crates Appendix F.1 refuses"
-    cargo deny check bans
+    step "cargo deny check bans licenses: the crates Appendix F.1 refuses and the licenses coven accepts"
+    cargo deny check bans licenses
 
     step "cargo fmt --check"
     cargo fmt --all --check
