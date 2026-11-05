@@ -5,69 +5,71 @@
 use super::*;
 
 impl SequenceSync {
-    /// Record the share an account invite grants, before granting it: the
+    /// Journal the record of the share an account invite grants, before
+    /// granting it, with the invite's step that names it (`Sharing`): the
     /// owner's other devices then know of the share, and take it back once
-    /// the invite ends or this device is gone for good. Recording it again
-    /// is satisfied, so a pass that stopped after the entry landed goes on.
-    /// The reason the invite waits on, when the caught-up history refuses
-    /// the entry: the app cancels the invite (§13.2).
-    pub(super) async fn record_invite_share(
+    /// the invite ends or this device is gone for good. Nothing is
+    /// journaled when the caught-up history has the share already, or
+    /// refuses it: the refusal is the reason the invite waits on, and the
+    /// app cancels the invite (§13.2).
+    pub(super) async fn start_invite_share(
         &self,
-        session: &mut Session,
-        ring: &mut StoreKeyring,
+        session: &Session,
         member: &MemberIdentity,
+        record: &OperationRecord,
         work: &InviteWork,
-    ) -> Result<Option<PendingReason>, SyncError> {
-        let Some(account) = work.account() else { return Ok(None) };
+        account: &str,
+    ) -> Result<Child, SyncError> {
         let change = StoreChange::AddInviteShare { invite: work.id, account: account.to_owned() };
-        let (claim, outcome) = self.claim_for_invite(session, ring, member, change).await?;
-        if let Some(claim) = claim {
-            self.database.finish_operation_with_outcome(claim, outcome.clone()).await?;
-        }
-        Ok(match outcome {
-            OperationOutcome::Rejected(reason) => {
-                Some(self.error_reason(&SyncError::Rejected(reason)))
-            }
-            OperationOutcome::Landed(_) | OperationOutcome::Satisfied => None,
-            OperationOutcome::Stopped(_) => {
-                return Err(coven_database::DbError::Invariant {
-                    what: "a stop for good ends the invite with its claims",
-                }
-                .into())
-            }
-        })
+        self.start_child(
+            session,
+            member,
+            change,
+            InviteWork::naming(record, |share| InviteState::Sharing { share }),
+        )
+        .await
     }
 
-    /// Record the end of the share this device recorded for an ended
-    /// invite. Applying it takes the account back on every owner device,
-    /// unless an active member or another open share still uses it (§14.2).
-    /// An invite that ended before its share was recorded has none to end;
-    /// one a reset carried was recorded under the old device, whose stop
-    /// ended it (§19.3).
-    pub(super) async fn end_invite_share(
+    /// Journal the end of the share this device recorded for an ended
+    /// invite, with the invite's step that names it, and return it.
+    /// Applying it takes the account back on every owner device, unless an
+    /// active member or another open share still uses it (§14.2). None
+    /// when there is no share to end: an invite that ended before its share
+    /// was recorded has none, and one a reset carried was recorded under the
+    /// old device, whose stop ended it (§19.3). None too when the caught-up
+    /// history refuses the end, which is logged.
+    pub(super) async fn start_share_end(
         &self,
-        session: &mut Session,
-        ring: &mut StoreKeyring,
+        session: &Session,
         member: &MemberIdentity,
+        record: &OperationRecord,
         work: &InviteWork,
-    ) -> Result<(), SyncError> {
+        share: Option<OperationId>,
+    ) -> Result<Option<OperationId>, SyncError> {
         let open = session
             .history
             .invite_shares
             .get(&work.id)
             .is_some_and(|share| !share.ended && share.device == self.device);
         if !open {
-            return Ok(());
+            return Ok(None);
         }
         let change = StoreChange::EndInviteShare { invite: work.id };
-        let (claim, outcome) = self.claim_for_invite(session, ring, member, change).await?;
-        if let OperationOutcome::Rejected(reason) = &outcome {
-            tracing::warn!(invite = ?work.id, ?reason, "an invite share's end was refused");
-        }
-        if let Some(claim) = claim {
-            self.database.finish_operation_with_outcome(claim, outcome).await?;
-        }
-        Ok(())
+        let settled = move |end| InviteState::Settled { share, end: Some(end) };
+        Ok(
+            match self
+                .start_child(session, member, change, InviteWork::naming(record, settled))
+                .await?
+            {
+                Child::Journaled(end) => Some(end),
+                Child::Decided(outcome) => {
+                    if let OperationOutcome::Rejected(reason) = &outcome {
+                        tracing::warn!(invite = ?work.id, ?reason, "an invite share's end was refused");
+                    }
+                    None
+                }
+            },
+        )
     }
 }
 

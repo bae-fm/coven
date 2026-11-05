@@ -33,16 +33,22 @@ impl crate::Database {
         .await
     }
 
-    /// Advance an invitation and its account intention atomically.
+    /// Advance an invitation and its account intention atomically, ending
+    /// the operation it started for the step it leaves, `child`, with its
+    /// outcome, in the same transaction (§13.2).
     pub async fn advance_operation_with_access<P: PendingValue>(
         &self,
         update: crate::OperationUpdate,
         changes: Vec<ProviderAccessChange>,
+        child: Option<(OperationId, crate::OperationOutcome)>,
     ) -> Result<(), DbError> {
         self.call(move |inner| {
             inner.access.with_writer(|db| {
                 db.transaction(|db| {
                     crate::operation::advance(db, &update)?;
+                    if let Some((child, outcome)) = &child {
+                        crate::operation::finish_with_outcome(db, *child, outcome)?;
+                    }
                     adopt::<P>(db, &changes)
                 })
             })

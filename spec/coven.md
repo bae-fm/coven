@@ -4162,6 +4162,22 @@ nothing in history said so, no device would ever take the share back. The
 entry comes first, so no share exists that history doesn't record. An S3
 invite shares nothing and records no share.
 
+**The invite's own claims.** Each entry the invite claims, its share, the
+share's end, its approval's binding and a recovery's S3 key record (below), is
+an operation of its own. The invite's journal names that operation in the
+transaction that journals it, and ends it in the transaction that moves the
+invite past it, or ends the invite. Ana cancels her invite to Dan while her
+phone is claiming its share at slot 31, and the phone crashes after sending
+the entry, before the reply. On restart, the ended invite settles that claim
+first (§5.1), and claims nothing for it again: the share landed at 31, so the
+phone claims the share's end at 32, and both operations end with the invite.
+Had the share not landed, the invite would end with no share to take back.
+A device has one claim open at a time, so a claim no step of the invite named
+would stay open for good: the phone could claim no other slot, and would
+never send a write again
+([`ended_share_strands_claim`](proofs/sequence/CovenSequence/InviteClaims.lean),
+[`cancelled_share_strands_claim`](proofs/sequence/CovenSequence/InviteClaims.lean)).
+
 **Ana's open invites.** Ana's phone lists the invites it made that haven't
 ended: the person's name, the access granted, in person or sent, when it
 expires, the operation that names its pending record, and where each is:
@@ -10596,6 +10612,8 @@ Write-ups explain each model and state its assumptions:
 | A share an invite granted is always one history records, so the owner's other devices can take it back once the inviting device is gone for good | `share_recorded` | `proofs/sequence/CovenSequence/InviteLifecycle.lean` | §13.2 |
 | The listed invite and its binding's entry only move forward; the app's offer of approving, declining, cancelling and acknowledging is exactly what the write steps accept; a sent invite is listed as approving exactly while its binding runs | `forward`, `offered_accepted`, `approval_runs_binding` | `proofs/sequence/CovenSequence/InviteLifecycle.lean` | §11.4, §13.2 |
 | Each rule those results need is needed: leaving out the step check, ending operations or invites at a stop, ending a refused access record, ending the binding with its invite, recording the binding, listing approval as its own stage, leaving an approval's refusal to its pass, or recording the share before the grant each has a counterexample | `unguarded_finding_is_stale`, `forgetful_stop_runs_forever`, `stop_strands_approval`, `refused_record_strands`, `split_binding_disagrees`, `reclaim_binds_twice`, `approval_shown_as_waiting`, `demoted_approval_offered`, `unrecorded_share_strands` | `proofs/sequence/CovenSequence/InviteLifecycle.lean` | §13.2, §14.1 |
+| An invite ends together with every operation it started for its own entries, its share, the share's end and a recovery's key record, and leaves no claim open; from every reachable state, crashes between a claim landing and its end included, its own slots read before their claims settle, slots lost to other devices and a cancel while the share's record is claimed, coven's own steps end the invite with no claim open, so the device's writes go out | `children_end_with_invite`, `settles` | `proofs/sequence/CovenSequence/InviteClaims.lean` | §5.1, §13.2 |
+| *Body.* An ended invite that looks only at history leaves a claim open for good: its share's end, when its own slot showed the share ended before the claim settled, or its share's record, when the app cancelled it while that claim landed | `ended_share_strands_claim`, `cancelled_share_strands_claim` | `proofs/sequence/CovenSequence/InviteClaims.lean` | §13.2 |
 | A join's reported phases never go back: waiting, loading, done, across its checks and the calls that resume it. Keeping the opened keys only in the call, or reporting a scan that finds no copy as loading, makes them go back | `phases_forward`, `opened_never_waits`, `resumed_waits_again`, `scan_shown_as_loading` | `proofs/sequence/CovenSequence/JoinStatus.lean` | §13.2 |
 | Writes after a removal or key replacement are refused with rows unchanged and no new unique-value or owner claim, while the claim number is recorded | `cutoff` | `proofs/sequence/CovenSequence/Cutoff.lean` | §14.1 |
 | Circle permission is judged at the authored applied prefix; landing still checks store membership, device removal and key generation | `write_permission_at_authored_prefix` | `proofs/sequence/CovenSequence/Authorship.lean` | §15.6, §15.8 |

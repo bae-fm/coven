@@ -5,7 +5,7 @@ use coven_format::{
     MemberAccess,
 };
 use coven_foundation::clock::Clock;
-use coven_storage::test_utils::MemoryRequest;
+use coven_storage::test_utils::{Faults, MemoryRequest};
 
 const CAROL: &str = "carol@example.org";
 
@@ -155,4 +155,105 @@ async fn an_ended_invites_share_is_revoked_by_every_owner_device() {
     for device in [&phone, &ben, &laptop] {
         device.database().close().await.unwrap();
     }
+}
+
+/// Run `during` while the next slot `device` creates is stored with its
+/// reply lost: the claim lands, and the device hears nothing back, as when
+/// it stops before the reply.
+async fn losing_the_next_claims_reply<T>(
+    group: &Group,
+    device: &Device,
+    during: impl std::future::Future<Output = T>,
+) -> T {
+    let (started, observed) = tokio::sync::oneshot::channel();
+    let (resume, held) = tokio::sync::oneshot::channel();
+    device
+        .storage
+        .hold_next_creation(coven_storage::ObjectPrefix::slots(group.store), started, held)
+        .await;
+    let lose = async {
+        observed.await.unwrap();
+        device.storage.set_faults(Faults { lose_completion_reply: true, ..Faults::none() }).await;
+        resume.send(()).unwrap();
+    };
+    let (result, ()) = tokio::join!(during, lose);
+    result
+}
+
+/// Reopen `device`, whose claim landed unfinished, as restarting after a
+/// crash does, past the invite's wait for the failure.
+async fn after_the_crash(group: &Group, device: Device) -> Device {
+    let claim = device.database().current_claim().await.unwrap().unwrap();
+    assert_eq!(claim.settlement, coven_database::ClaimSettlement::Unknown);
+    let device = group.reopen(device).await;
+    group.clock.set(group.clock.now() + std::time::Duration::from_secs(600));
+    device
+}
+
+/// Whether `device`'s invites and their claims have all ended, and a write
+/// it makes now goes out in its next pass.
+async fn assert_ended_and_sending(device: &Device) {
+    let operations = device.database().operations().await.unwrap();
+    assert!(operations.is_empty(), "{operations:?}");
+    assert_eq!(device.database().current_claim().await.unwrap(), None);
+    insert(device.database(), "after", "the invite").await;
+    device.sync.pass().await.unwrap();
+    assert_eq!(device.database().unsent().await.unwrap().writes, 0, "the write went out");
+}
+
+/// Ana cancels the phone's invite, and its pass claims the end of the
+/// invite's share. The provider stores the entry, and the phone stops before
+/// the reply. Reopened, it reads its own entry: the share has ended. The
+/// invite still ends the claim with it, so the phone's writes go on. Ending
+/// the invite apart from its claim left that claim open for good, and every
+/// later claim of the phone's refused (§11.4, §13.2).
+#[tokio::test]
+async fn a_crash_after_a_share_end_lands_ends_its_claim_with_the_invite() {
+    let group = Group::shared();
+    let phone = group.device(1).await;
+    group.create(&phone).await;
+    let invite = invite(&phone).await;
+    losing_the_next_claims_reply(&group, &phone, phone.sync.cancel_invite(invite.id))
+        .await
+        .unwrap();
+    let phone = after_the_crash(&group, phone).await;
+    phone.sync.pass().await.unwrap();
+    phone.sync.pass().await.unwrap();
+    assert!(!group.storage.shared_with(CAROL).await);
+    assert_ended_and_sending(&phone).await;
+    phone.database().close().await.unwrap();
+}
+
+/// The phone's pass claims the share of Ana's new invite before granting
+/// it, and the phone stops before the provider's reply, which stored the
+/// entry. Reopened, before any pass, Ana cancels the invite, which hasn't
+/// granted anything. The cancelled invite settles the share's claim it
+/// started: the entry landed, so it ends the share, then ends the claims
+/// with the invite, and the phone's writes go on. Ignoring the share's
+/// claim left it open for good, and the share's end, refused by it, kept
+/// the invite forever (§11.4, §13.2).
+#[tokio::test]
+async fn an_invite_cancelled_while_its_share_lands_settles_the_share() {
+    let group = Group::shared();
+    let phone = group.device(1).await;
+    group.create(&phone).await;
+    let made = losing_the_next_claims_reply(
+        &group,
+        &phone,
+        phone.sync.create_invite(
+            InviteTarget::NewMember { role: MemberRole::Member, name: "Carol".into() },
+            InviteAccess::ProviderAccount { email: CAROL.into() },
+            InviteDelivery::Sent { lifetime: InviteLifetime::Day },
+        ),
+    )
+    .await;
+    assert!(matches!(made, Err(SyncError::Pending(_))), "{made:?}");
+    let invite = listed(&phone).await.remove(0);
+    let phone = after_the_crash(&group, phone).await;
+    phone.sync.cancel_invite(invite.id).await.unwrap();
+    phone.sync.pass().await.unwrap();
+    assert!(phone.sync.session.lock().await.history.invite_shares[&invite.id].ended);
+    assert!(!group.storage.shared_with(CAROL).await);
+    assert_ended_and_sending(&phone).await;
+    phone.database().close().await.unwrap();
 }

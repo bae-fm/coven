@@ -22,13 +22,14 @@ impl SequenceSync {
             match record.kind.as_str() {
                 operation_kind::INVITE => {
                     let mut work = InviteWork::read(record)?;
-                    // An invite no pass has checked yet adopted no account.
-                    if !matches!(work.state, InviteState::Requested) {
+                    // An invite no pass has granted yet adopted no account.
+                    if !matches!(work.state, InviteState::Requested | InviteState::Sharing { .. }) {
                         accounts.extend(work.account().map(str::to_owned));
                     }
-                    if !matches!(work.state, InviteState::Settled) {
-                        work.state = InviteState::Settled;
-                    }
+                    // The operations it started stay with the discarded
+                    // installation: the share it recorded there ends when
+                    // this one registers in its place (§19.3).
+                    work.state = InviteState::Settled { share: None, end: None };
                     operations.push(NewOperation {
                         kind: operation_kind::INVITE.into(),
                         data: serde_json::to_vec(&work)?,

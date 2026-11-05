@@ -202,7 +202,7 @@ impl SequenceSync {
         SlotHeader { device: self.device, claim, author: member.member(), after: session.through }
     }
 
-    fn validate_request(
+    pub(crate) fn validate_request(
         &self,
         session: &Session,
         member: &MemberIdentity,
@@ -335,23 +335,6 @@ impl SequenceSync {
         result
     }
 
-    /// An unfinished claim belongs to the parent that fixed its exact request (§11.2).
-    pub(crate) async fn pending_change(
-        &self,
-        change: &StoreChange,
-        started_by: &str,
-    ) -> Result<Option<OperationId>, SyncError> {
-        for record in self.database.operations().await? {
-            if record.kind == operation_kind::SEQUENCE && record.started_by == started_by {
-                let work: SequenceOperation = serde_json::from_slice(&record.data)?;
-                if matches!(&work.request, Request::Change(existing) if existing == change) {
-                    return Ok(Some(record.id));
-                }
-            }
-        }
-        Ok(None)
-    }
-
     async fn advance_administration(
         &self,
         session: &mut Session,
@@ -398,18 +381,7 @@ impl SequenceSync {
                 if claim.work != ClaimWork::Operation(id) {
                     return Err(coven_database::DbError::ClaimPending.into());
                 }
-                let settlement = match claim.settlement {
-                    ClaimSettlement::Unknown => {
-                        self.settle_open(session, ring, member).await?.expect("open claim")
-                    }
-                    value => value,
-                };
-                let settlement = if settlement == ClaimSettlement::Retry {
-                    self.publish_current(session, ring, member).await?
-                } else {
-                    settlement
-                };
-                match settlement {
+                match self.settle_claim(session, ring, member, &claim).await? {
                     ClaimSettlement::Landed => {
                         let slot = claim
                             .attempts
@@ -588,9 +560,9 @@ impl SequenceSync {
 
     /// End the operation's journal row with its outcome, which the app's
     /// record of it keeps in the same transaction (§11.4). An operation an
-    /// invite started stays journaled at its last step: the invite ends it in
-    /// the transaction that moves the invite on, so a restart never finds one
-    /// without the other (§13.2).
+    /// invite started stays journaled at its last step: the invite names it,
+    /// and ends it in the transaction that moves the invite on or ends the
+    /// invite, so a restart never finds one without the other (§13.2).
     async fn finish(
         &self,
         record: &OperationRecord,
@@ -602,26 +574,25 @@ impl SequenceSync {
         Ok(outcome)
     }
 
-    /// Journal `request` as an operation `started_by` names, once the
-    /// caught-up history allows it, and run it, leaving its end to the
-    /// parent (`finish`). `None` when the history refuses it, with that
-    /// refusal as the outcome; journaling nothing, when the history has it
-    /// already.
-    pub(crate) async fn start_child(
+    /// The settlement of the open `claim`: an attempt not yet read is read,
+    /// and one whose slot is still empty is sent again with its exact bytes.
+    pub(crate) async fn settle_claim(
         &self,
         session: &mut Session,
         ring: &mut StoreKeyring,
         member: &MemberIdentity,
-        request: Request,
-        started_by: &str,
-    ) -> Result<(Option<OperationId>, OperationOutcome), SyncError> {
-        match self.validate_request(session, member, &request) {
-            Err(reason) => return Ok((None, OperationOutcome::Rejected(reason))),
-            Ok(false) => return Ok((None, OperationOutcome::Satisfied)),
-            Ok(true) => (),
+        claim: &coven_database::Claim,
+    ) -> Result<ClaimSettlement, SyncError> {
+        let settlement = match claim.settlement {
+            ClaimSettlement::Unknown => {
+                self.settle_open(session, ring, member).await?.expect("open claim")
+            }
+            value => value,
+        };
+        if settlement == ClaimSettlement::Retry {
+            return self.publish_current(session, ring, member).await;
         }
-        let id = self.start_request_row(request, started_by).await?;
-        Ok((Some(id), self.run_administration(session, ring, member, id).await?))
+        Ok(settlement)
     }
 
     async fn claim_step(

@@ -232,7 +232,6 @@ pub(crate) fn set_step(db: &DatabaseConnection, id: OperationId, step: u32) -> R
     Ok(())
 }
 
-/// Delete the row and its condition, returning how many rows were deleted.
 /// End the running operation `id` with `outcome`, which `coven_operations`
 /// lists for an operation the app's write journaled. An outcome is final:
 /// an operation that no longer runs fails with `OperationChanged` and keeps
@@ -254,7 +253,14 @@ pub(crate) fn finish_with_outcome(
     Ok(())
 }
 
+/// Delete the row and its condition, returning how many rows were deleted.
+/// An operation whose claim is still open never ends: nothing would finish
+/// that claim, and the device, one claim at a time, would claim no slot
+/// again (§5.1).
 pub(crate) fn finish(db: &DatabaseConnection, id: OperationId) -> Result<usize, DbError> {
+    if crate::claim::held_by(db, id)? {
+        return Err(DbError::Invariant { what: "an operation ends after its claim" });
+    }
     crate::pending::clear_operation(db, id)?;
     db.internal_execute("DELETE FROM _coven_operations WHERE id=?1", [id.0])
 }

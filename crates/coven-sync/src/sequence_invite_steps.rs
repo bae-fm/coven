@@ -266,10 +266,16 @@ fn end_invite(
                     return Err(SyncError::InvitationChanged);
                 }
             }
-            (InviteState::Requested | InviteState::Grant | InviteState::Waiting { .. }, None) => {}
+            (
+                InviteState::Requested
+                | InviteState::Sharing { .. }
+                | InviteState::Grant
+                | InviteState::Waiting { .. },
+                None,
+            ) => {}
             _ => return Err(SyncError::InvitationChanged),
         }
-        work.state = InviteState::Settled;
+        work.end();
         journal.advance_operation(&work.update(&record)?)?;
         Ok(record.id)
     })?;

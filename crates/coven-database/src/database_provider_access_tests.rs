@@ -122,6 +122,7 @@ async fn obsolete_completion_and_its_correction_are_one_commit() {
         db.advance_operation_with_access::<Record>(
             OperationUpdate { id: invite, previous: 0, last_step: 1, data: vec![1] },
             vec![change(true)],
+            None,
         )
         .await
         .unwrap();

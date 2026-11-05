@@ -367,10 +367,15 @@ pub(crate) fn landed_operation(
     Ok(Some((id, path.slot_number().ok_or(DbError::InvalidClaimCoverage)?)))
 }
 
+/// Whether the open claim is the operation `id`'s.
+pub(crate) fn held_by(db: &DatabaseConnection, id: OperationId) -> Result<bool, DbError> {
+    Ok(metadata(db)?.is_some_and(|claim| claim.work == ClaimWork::Operation(id)))
+}
+
 /// End the open claim, settled or not, of an operation that ends without
 /// it: this device has stopped for good, and no attempt of it can count.
 pub(crate) fn drop_operation(db: &DatabaseConnection, id: OperationId) -> Result<(), DbError> {
-    if metadata(db)?.is_some_and(|claim| claim.work == ClaimWork::Operation(id)) {
+    if held_by(db, id)? {
         db.internal_execute("DELETE FROM _coven_claim_journal WHERE singleton=1", [])?;
     }
     Ok(())

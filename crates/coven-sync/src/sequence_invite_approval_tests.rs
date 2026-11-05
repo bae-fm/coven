@@ -386,7 +386,7 @@ async fn a_refused_access_record_ends_its_invite() {
     // The binding landed; recording Carol's new key comes next.
     let record = ana.database().first_operation(operation_kind::INVITE).await.unwrap().unwrap();
     let mut work = InviteWork::read(&record).unwrap();
-    work.state = InviteState::Recording;
+    work.state = InviteState::Recording { set_access: None };
     ana.database().advance_operation(work.update(&record).unwrap()).await.unwrap();
     ana.sync
         .administer(coven_format::admin::StoreChange::RemoveMember { member: carol.member() })

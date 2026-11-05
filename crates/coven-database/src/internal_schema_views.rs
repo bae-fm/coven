@@ -112,8 +112,9 @@ pub(super) const SCHEMA: &str = concat!(
             AND f.device=e.device AND f.object=e.file;",
     // This device's invites that haven't ended, in the order they were made,
     // from the operations journal: each from the write that makes it, while
-    // its access is granted, its request is awaited or approved, until a
-    // write of its state ends it, approval, decline, cancel or expiry alike.
+    // its share is recorded and its access granted, its request is awaited
+    // or approved, until a write of its state ends it, approval, decline,
+    // cancel or expiry alike.
     // `invite` is the journal entry, the invite's state as coven-sync encodes
     // it (`InviteWork`), which its `Invite` reads; `operation` names its
     // pending record in `coven_pending`.
@@ -124,6 +125,7 @@ pub(super) const SCHEMA: &str = concat!(
     crate::operation_kind::invite_kind!(),
     "'
             AND (json_extract(CAST(o.data AS TEXT),'$.state') IN ('Requested','Grant')
+                OR json_type(CAST(o.data AS TEXT),'$.state.Sharing') IS NOT NULL
                 OR json_type(CAST(o.data AS TEXT),'$.state.Waiting') IS NOT NULL
                 OR json_type(CAST(o.data AS TEXT),'$.state.Approving') IS NOT NULL);",
     // The operations the app's writes journaled, in the order they were

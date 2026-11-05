@@ -185,18 +185,23 @@ impl Database {
         .await
     }
 
-    /// Retire an ended invite in one commit with the deletion it leaves
-    /// owed: its marker's, once that has passed (§13.2).
+    /// Retire an ended invite in one commit with the operations it started
+    /// that are still journaled, its `children`, and with the deletion it
+    /// leaves owed: its marker's, once that has passed (§13.2). An invite,
+    /// or a child, that has ended already fails with `OperationChanged`.
     pub async fn finish_operation_with_removal(
         &self,
         id: OperationId,
+        children: Vec<OperationId>,
         removal: crate::ObjectRemoval,
     ) -> Result<(), DbError> {
         self.call(move |inner| {
             inner.access.with_writer(|writer| {
                 writer.transaction(|db| {
-                    if crate::operation::finish(db, id)? != 1 {
-                        return Err(DbError::OperationChanged(id));
+                    for id in children.iter().copied().chain([id]) {
+                        if crate::operation::finish(db, id)? != 1 {
+                            return Err(DbError::OperationChanged(id));
+                        }
                     }
                     crate::object_removals::record(db, &removal)
                 })

@@ -9,7 +9,7 @@
 //! own work, which a pass does once storage is connected, as for an invite
 //! ended any other way.
 
-use super::{InviteState, InviteWork};
+use super::InviteWork;
 use crate::{RetryWaits, SequenceState};
 use coven_database::operation_kind;
 use coven_database::{Database, DbError, OperationId};
@@ -162,7 +162,7 @@ async fn write(
                 let mut work: InviteWork =
                     serde_json::from_slice(&record.data).map_err(DbError::StateEncoding)?;
                 if work.expired(now) {
-                    work.state = InviteState::Settled;
+                    work.end();
                     updates.push(
                         record.next_step(
                             serde_json::to_vec(&work).map_err(DbError::StateEncoding)?,

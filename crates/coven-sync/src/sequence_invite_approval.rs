@@ -1,6 +1,11 @@
-//! The invite owns its claims' retries and rejection cleanup (§11).
+//! The operations an invite claims its entries through: it starts each in
+//! the step that names it, owns their retries and rejection cleanup, and
+//! settles a claim it no longer needs (§11, §13.2).
 use super::*;
-use crate::sequence_sync::sequence_operations::Request;
+use crate::sequence_sync::sequence_operations::{
+    OperationProgress, OperationStep, Request, SequenceOperation,
+};
+use coven_database::{ClaimSettlement, ClaimWork};
 
 impl SequenceSync {
     pub(super) async fn run_invite(
@@ -41,25 +46,99 @@ impl SequenceSync {
         result
     }
 
-    /// Claim an entry the invite owns: its share, its share's end, or a
-    /// kept replacement's new S3 key for its member (§13.2, §14.3). Resume
-    /// the unfinished claim, or start it. Returns the operation, left for the
-    /// invite to end, and its outcome; no operation when the caught-up
-    /// history already has the entry or refuses it.
-    pub(super) async fn claim_for_invite(
+    /// Journal `change` as an operation an invite starts, once the
+    /// caught-up history allows it, in one transaction with the invite's
+    /// step that names it: `parent` builds that step from its id. The invite
+    /// runs it, and ends it in the transaction that moves the invite past it
+    /// (`finish`), so a restart always finds it (§13.2).
+    pub(crate) async fn start_child(
+        &self,
+        session: &Session,
+        member: &MemberIdentity,
+        change: StoreChange,
+        parent: impl FnOnce(OperationId) -> Result<coven_database::OperationUpdate, coven_database::DbError>
+            + Send
+            + 'static,
+    ) -> Result<Child, SyncError> {
+        let request = Request::Change(change);
+        match self.validate_request(session, member, &request) {
+            Err(reason) => return Ok(Child::Decided(OperationOutcome::Rejected(reason))),
+            Ok(false) => return Ok(Child::Decided(OperationOutcome::Satisfied)),
+            Ok(true) => (),
+        }
+        let work = SequenceOperation {
+            request,
+            progress: OperationProgress::Running(OperationStep::Preparing),
+        };
+        let child = crate::admin_steps::journaled(&work, operation_kind::INVITE)?;
+        Ok(Child::Journaled(self.database.start_operation_advancing(child, parent).await?))
+    }
+
+    /// Settle the open claim of `id`, an operation an invite started whose
+    /// entry the invite no longer needs, and end that claim without
+    /// claiming again. An attempt not yet read is read, and one whose slot is
+    /// still empty is sent again with its exact bytes, since a request in
+    /// flight may still land (§5.1). A landed claim leaves `id` at its slot,
+    /// its entry applied; one that lost its slot ends with no entry. Without
+    /// an open claim, `id` has nothing in flight.
+    pub(crate) async fn settle_unneeded_claim(
         &self,
         session: &mut Session,
         ring: &mut StoreKeyring,
         member: &MemberIdentity,
-        change: StoreChange,
-    ) -> Result<(Option<OperationId>, OperationOutcome), SyncError> {
-        // The exact requested entry identifies this invite's unfinished claim.
-        if let Some(id) = self.pending_change(&change, operation_kind::INVITE).await? {
-            return Ok((Some(id), self.run_administration(session, ring, member, id).await?));
+        id: OperationId,
+    ) -> Result<(), SyncError> {
+        let Some(claim) = self.database.current_claim().await? else { return Ok(()) };
+        if claim.work != ClaimWork::Operation(id) {
+            return Ok(());
         }
-        self.start_child(session, ring, member, Request::Change(change), operation_kind::INVITE)
-            .await
+        match self.settle_claim(session, ring, member, &claim).await? {
+            ClaimSettlement::Landed => {
+                let record = self
+                    .database
+                    .operation(id)
+                    .await?
+                    .ok_or(coven_database::DbError::OperationChanged(id))?;
+                let SequenceOperation { request, progress } = serde_json::from_slice(&record.data)?;
+                let slot = claim.attempts.last().expect("attempt").slot_number().expect("slot").0;
+                let step = match progress {
+                    OperationProgress::Running(OperationStep::Claiming) => {
+                        OperationStep::Applied(slot)
+                    }
+                    OperationProgress::Running(OperationStep::Copy(_)) => OperationStep::Preparing,
+                    _ => {
+                        return Err(coven_database::DbError::Invariant {
+                            what: "an unneeded claim is a change's entry or key copy",
+                        }
+                        .into())
+                    }
+                };
+                let update =
+                    SequenceOperation { request, progress: OperationProgress::Running(step) }
+                        .update(&record)?;
+                self.database.finish_claim(Some(update)).await?;
+            }
+            ClaimSettlement::NotLanded => self.database.finish_claim(None).await?,
+            ClaimSettlement::DeviceIdInUse => {
+                return Err(self
+                    .stop_copy(crate::DeviceIdEvidence::UnattemptedSlot {
+                        slot: claim.attempts.last().expect("attempt").slot_number().expect("slot"),
+                    })
+                    .await)
+            }
+            _ => unreachable!("settled create"),
+        }
+        Ok(())
     }
+}
+
+/// What starting an invite's operation came to (`start_child`).
+pub(crate) enum Child {
+    /// Journaled with the invite's step that names it.
+    Journaled(OperationId),
+    /// Nothing journaled: the caught-up history refuses the entry, or has it
+    /// already.
+    Decided(OperationOutcome),
 }
 
 #[cfg(test)]

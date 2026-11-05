@@ -9,6 +9,7 @@ use crate::{
     OperationOutcome, OperationRejection, PendingReason, PendingRecord, PendingSubject,
     ProviderAccessAction, RetryWaits, SequenceState, SyncError,
 };
+use approval::Child;
 use coven_crypto::{ConfirmationNumber, InviteSecret, MemberIdentity, SecretText, StoreKeyring};
 use coven_database::{
     operation_kind, Journal, NewOperation, OperationId, OperationRecord, SqlContext,
@@ -65,6 +66,9 @@ pub(crate) enum InviteState {
     /// The app's write made the invite. A pass checks it again against the
     /// history it caught up with before granting anything.
     Requested,
+    /// The invite's share is being recorded in history, before its grant:
+    /// `share` is the operation claiming it, journaled with this state.
+    Sharing { share: OperationId },
     /// Storage access is being granted.
     Grant,
     /// The code is shown; the request, once read and checked, waits for the app.
@@ -77,12 +81,18 @@ pub(crate) enum InviteState {
     /// This checked request is approved: `binding` is the operation that
     /// claims its copies and binds its pair, journaled with this state.
     Approving { code: SecretText, request: Vec<u8>, binding: OperationId },
-    /// A kept replacement records the invite's new S3 key for its member.
-    Recording,
+    /// A kept replacement records the invite's new S3 key for its member:
+    /// `set_access`, once journaled with this state, is the operation
+    /// claiming that record.
+    Recording { set_access: Option<OperationId> },
     /// The invite ended: put its marker in the request's place and settle
-    /// its account's sharing. An S3 key it carried is the person's to delete
-    /// in the provider's console; coven records nothing about it (§14.3).
-    Settled,
+    /// its account's sharing. `share` is the share's record the invite was
+    /// claiming when it ended, whose claim it settles without claiming again;
+    /// `end`, once journaled with this state, is the operation claiming the
+    /// share's end. Both end with the invite. An S3 key it carried is the
+    /// person's to delete in the provider's console; coven records nothing
+    /// about it (§14.3).
+    Settled { share: Option<OperationId>, end: Option<OperationId> },
 }
 
 #[derive(Serialize, Deserialize)]
@@ -124,11 +134,42 @@ impl InviteWork {
     fn expires(&self) -> bool {
         matches!(
             self.state,
-            InviteState::Requested | InviteState::Grant | InviteState::Waiting { .. }
+            InviteState::Requested
+                | InviteState::Sharing { .. }
+                | InviteState::Grant
+                | InviteState::Waiting { .. }
         )
     }
     fn expired(&self, now: std::time::SystemTime) -> bool {
         self.expires() && now >= self.expires_at
+    }
+
+    /// End the invite, as expiry, a decline or a cancel does: its settled
+    /// step carries the share's record it was claiming, which ends with it.
+    fn end(&mut self) {
+        let share = match self.state {
+            InviteState::Sharing { share } => Some(share),
+            _ => None,
+        };
+        self.state = InviteState::Settled { share, end: None };
+    }
+
+    /// The invite's step from `record` to `state`, built from the id of the
+    /// operation it starts, which `state` names: the two commit together
+    /// (`start_child`).
+    fn naming(
+        record: &OperationRecord,
+        state: impl FnOnce(OperationId) -> InviteState + Send + 'static,
+    ) -> impl FnOnce(OperationId) -> Result<coven_database::OperationUpdate, coven_database::DbError>
+           + Send
+           + 'static {
+        let record = record.clone();
+        move |child| {
+            let encoded = |error| coven_database::DbError::SyncStream(Box::new(error));
+            let mut work = InviteWork::read(&record).map_err(encoded)?;
+            work.state = state(child);
+            work.update(&record).map_err(encoded)
+        }
     }
 
     /// The entry approving `request` claims: adding the invite's member
@@ -183,7 +224,9 @@ fn listed(data: &[u8], operation: OperationId) -> Result<Invite, SyncError> {
     let work: InviteWork = serde_json::from_slice(data)?;
     let shown = |code: &SecretText| code.as_str().to_owned();
     let stage = match &work.state {
-        InviteState::Requested | InviteState::Grant => crate::InviteStage::Granting,
+        InviteState::Requested | InviteState::Sharing { .. } | InviteState::Grant => {
+            crate::InviteStage::Granting
+        }
         InviteState::Waiting { code, request } => crate::InviteStage::Waiting {
             code: shown(code),
             request: request.as_deref().map(|bytes| work.present_request(bytes)).transpose()?,
@@ -193,7 +236,7 @@ fn listed(data: &[u8], operation: OperationId) -> Result<Invite, SyncError> {
             request: work.present_request(request)?,
             binding: *binding,
         },
-        InviteState::Recording | InviteState::Settled => {
+        InviteState::Recording { .. } | InviteState::Settled { .. } => {
             return Err(coven_database::DbError::Invariant {
                 what: "coven_invites lists invites that haven't ended",
             }
@@ -400,7 +443,7 @@ impl SequenceSync {
             *step = Some(record.last_step);
             let mut work = InviteWork::read(&record)?;
             if work.expired(self.clock.now()) {
-                work.state = InviteState::Settled;
+                work.end();
                 self.database.advance_operation(work.update(&record)?).await?;
                 continue;
             }
@@ -413,40 +456,43 @@ impl SequenceSync {
                     }
                     // Recorded before the grant, so no share is ever left
                     // that only this device knows of.
-                    if let Some(refused) =
-                        self.record_invite_share(session, ring, member, &work).await?
-                    {
-                        return Ok(InviteProgress::Waiting(refused));
-                    }
-                    work.state = InviteState::Grant;
-                    let changes = match work.account() {
-                        Some(account) => {
-                            vec![crate::sequence_sync::account_change(account, true, true)?]
+                    if let Some(account) = work.account() {
+                        let started =
+                            self.start_invite_share(session, member, &record, &work, account);
+                        match started.await? {
+                            Child::Journaled(_) => continue,
+                            Child::Decided(OperationOutcome::Rejected(reason)) => {
+                                return Ok(InviteProgress::Waiting(
+                                    self.error_reason(&SyncError::Rejected(reason)),
+                                ))
+                            }
+                            Child::Decided(_) => (),
                         }
-                        None => Vec::new(),
-                    };
-                    let update = work.update(&record)?;
-                    let granting = update.last_step;
-                    self.database
-                        .advance_operation_with_access::<PendingRecord>(update, changes)
-                        .await?;
-                    // A failed grant belongs to the step this attempt took.
-                    *step = Some(granting);
-                    // The account's grant, unless another open invite's grant
-                    // already shared it with an invitation (§14.2). A grant
-                    // that fails is the invite's pending record.
-                    let grant = match work.account() {
-                        Some(account) => self
-                            .database
-                            .provider_access(account.to_owned())
-                            .await?
-                            .ok_or(coven_database::DbError::DamagedDatabase)?
-                            .request
-                            .map(|request| request.operation),
-                        None => None,
-                    };
-                    if let Some(grant) = grant {
-                        self.apply_access(session, ring, member, grant).await?;
+                    }
+                    self.grant(session, ring, member, &record, work, None, step).await?;
+                }
+                InviteState::Sharing { share } => {
+                    let share = *share;
+                    let outcome = self.run_administration(session, ring, member, share).await?;
+                    match outcome {
+                        OperationOutcome::Landed(_) | OperationOutcome::Satisfied => {
+                            let shared = Some((share, outcome));
+                            self.grant(session, ring, member, &record, work, shared, step).await?;
+                        }
+                        // The invite checks again, and waits on the refusal.
+                        OperationOutcome::Rejected(_) => {
+                            work.state = InviteState::Requested;
+                            let update = work.update(&record)?;
+                            self.database
+                                .finish_operation_advancing(share, outcome, update)
+                                .await?;
+                        }
+                        OperationOutcome::Stopped(_) => {
+                            return Err(coven_database::DbError::Invariant {
+                                what: "a stop for good ends the invite with its claims",
+                            }
+                            .into())
+                        }
                     }
                 }
                 InviteState::Grant => {
@@ -550,8 +596,8 @@ impl SequenceSync {
                             OperationOutcome::Landed(_) | OperationOutcome::Satisfied,
                             InviteBinding::Replace { .. },
                             InviteGrant::S3Key(_),
-                        ) => InviteState::Recording,
-                        _ => InviteState::Settled,
+                        ) => InviteState::Recording { set_access: None },
+                        _ => InviteState::Settled { share: None, end: None },
                     };
                     self.database
                         .finish_operation_advancing(binding, outcome.clone(), work.update(&record)?)
@@ -575,34 +621,54 @@ impl SequenceSync {
                         },
                     );
                 }
-                InviteState::Recording => {
+                InviteState::Recording { set_access: None } => {
                     let change = StoreChange::SetAccess {
                         member: work.member,
                         access: work.access.member_access(),
                     };
-                    let (record_op, outcome) =
-                        self.claim_for_invite(session, ring, member, change).await?;
-                    // A refused record, as when the member was removed
-                    // meanwhile, would never be accepted, so the invite ends,
-                    // as a refused binding ends it. The person deletes the
-                    // key in the provider's console (§14.3).
-                    if let OperationOutcome::Rejected(reason) = &outcome {
-                        tracing::warn!(?id, ?reason, "a kept replacement's key record was refused");
-                    }
-                    work.state = InviteState::Settled;
-                    let update = work.update(&record)?;
-                    match record_op {
-                        Some(child) => {
-                            self.database.finish_operation_advancing(child, outcome, update).await?
+                    let recording = InviteWork::naming(&record, |set_access| {
+                        InviteState::Recording { set_access: Some(set_access) }
+                    });
+                    match self.start_child(session, member, change, recording).await? {
+                        Child::Journaled(_) => continue,
+                        Child::Decided(outcome) => {
+                            refused_record(id, &outcome);
+                            work.state = InviteState::Settled { share: None, end: None };
+                            self.database.advance_operation(work.update(&record)?).await?;
                         }
-                        None => self.database.advance_operation(update).await?,
                     }
                 }
-                InviteState::Settled => {
+                InviteState::Recording { set_access: Some(child) } => {
+                    let child = *child;
+                    let outcome = self.run_administration(session, ring, member, child).await?;
+                    refused_record(id, &outcome);
+                    work.state = InviteState::Settled { share: None, end: None };
+                    let update = work.update(&record)?;
+                    self.database.finish_operation_advancing(child, outcome, update).await?;
+                }
+                InviteState::Settled { share, end } => {
+                    let (share, end) = (*share, *end);
                     let kept_until = self.end_request(&work).await?;
+                    // The share's record the invite was claiming when it
+                    // ended: its claim may have landed, and is settled
+                    // before anything else claims (§5.1).
+                    if let Some(share) = share {
+                        self.settle_unneeded_claim(session, ring, member, share).await?;
+                    }
                     // Applying the share's end records its account's
                     // revoke, unless the account is still used (§14.2).
-                    self.end_invite_share(session, ring, member, &work).await?;
+                    let end = match end {
+                        Some(end) => Some(end),
+                        None => {
+                            self.start_share_end(session, member, &record, &work, share).await?
+                        }
+                    };
+                    if let Some(end) = end {
+                        let outcome = self.run_administration(session, ring, member, end).await?;
+                        if let OperationOutcome::Rejected(reason) = &outcome {
+                            tracing::warn!(?id, ?reason, "an invite share's end was refused");
+                        }
+                    }
                     // The marker goes once a joining device can no longer
                     // send a first request (`end_request`).
                     let removal = coven_database::ObjectRemoval {
@@ -611,11 +677,59 @@ impl SequenceSync {
                             .to_owned(),
                         after: kept_until,
                     };
-                    self.database.finish_operation_with_removal(id, removal).await?;
+                    let children = share.into_iter().chain(end).collect();
+                    self.database.finish_operation_with_removal(id, children, removal).await?;
                     return Ok(InviteProgress::Finished);
                 }
             }
         }
+    }
+
+    /// Move the checked invite to granting its access, in one transaction
+    /// with adopting its account's grant and ending the record of its share,
+    /// `shared`, with that record's outcome; then ask for the grant, unless
+    /// another open invite's grant already shared the account with an
+    /// invitation (§14.2). A grant that fails is the invite's pending record,
+    /// and `step` follows the step this takes, which that failure belongs to.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "a step of the invite's advance takes the pass's session, keys and member"
+    )]
+    async fn grant(
+        &self,
+        session: &mut Session,
+        ring: &mut StoreKeyring,
+        member: &MemberIdentity,
+        record: &OperationRecord,
+        mut work: InviteWork,
+        shared: Option<(OperationId, OperationOutcome)>,
+        step: &mut Option<u32>,
+    ) -> Result<(), SyncError> {
+        work.state = InviteState::Grant;
+        let changes = match work.account() {
+            Some(account) => vec![crate::sequence_sync::account_change(account, true, true)?],
+            None => Vec::new(),
+        };
+        let update = work.update(record)?;
+        let granting = update.last_step;
+        self.database
+            .advance_operation_with_access::<PendingRecord>(update, changes, shared)
+            .await?;
+        *step = Some(granting);
+        let grant = match work.account() {
+            Some(account) => self
+                .database
+                .provider_access(account.to_owned())
+                .await?
+                .ok_or(coven_database::DbError::DamagedDatabase)?
+                .request
+                .map(|request| request.operation),
+            None => None,
+        };
+        if let Some(grant) = grant {
+            self.apply_access(session, ring, member, grant).await?;
+        }
+        Ok(())
     }
 
     /// Put the ended invite's marker in its request's place, and return
@@ -747,6 +861,16 @@ pub(crate) enum InviteProgress {
     Waiting(PendingReason),
     /// The invite's work is done.
     Finished,
+}
+
+/// Log a kept replacement's key record the caught-up history refused, as
+/// when the member was removed meanwhile. It would never be accepted, so the
+/// invite ends without it, as a refused binding ends it; the person deletes
+/// the key in the provider's console (§14.3).
+fn refused_record(id: OperationId, outcome: &OperationOutcome) {
+    if let OperationOutcome::Rejected(reason) = outcome {
+        tracing::warn!(?id, ?reason, "a kept replacement's key record was refused");
+    }
 }
 
 /// A time as whole seconds since the Unix epoch, as codes and markers carry
