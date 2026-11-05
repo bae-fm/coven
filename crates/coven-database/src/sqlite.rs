@@ -327,17 +327,7 @@ impl DatabaseConnection {
                 };
                 if raises {
                     if let Some(operation) = operation.filter(|_| publishes) {
-                        let new = operation(supported)?;
-                        let id = crate::operation::insert(db, &new)?;
-                        crate::operation::advance(
-                            db,
-                            &crate::OperationUpdate {
-                                id,
-                                previous: 0,
-                                last_step: 1,
-                                data: new.data,
-                            },
-                        )?;
+                        crate::raise_capture::journal(db, operation, supported)?;
                     }
                 }
                 crate::row_queries::register_schema(

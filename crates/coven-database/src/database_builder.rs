@@ -326,6 +326,7 @@ impl DatabaseBuilder {
                 },
                 checkpoints,
                 migrations: outcomes,
+                raise_operation: self.migration_operation,
                 clock,
                 ids,
                 copying: Arc::new(Mutex::new(BTreeSet::new())),

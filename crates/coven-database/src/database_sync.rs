@@ -127,6 +127,7 @@ impl Database {
                                 &inner.access.write_schema,
                                 incoming,
                                 files,
+                                inner.raise_operation.as_deref(),
                                 authenticate,
                             )
                         })

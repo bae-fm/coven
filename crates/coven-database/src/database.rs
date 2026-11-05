@@ -149,6 +149,11 @@ pub struct DatabaseInner {
     inputs: input_database::InputDatabase,
     access: DatabaseAccess<StoreLock>,
     migrations: Vec<MigrationOutcome>,
+    /// The journal through which passes publish raise captures, when the
+    /// composition root supplied one (`DatabaseBuilder::migration_operation`):
+    /// a circle captured after the migration's journal finished opens it
+    /// again (§18.3).
+    raise_operation: Option<Box<crate::migration::MigrationOperation>>,
     clock: ClockRef,
     ids: IdSourceRef,
     /// The names of copies being written, or written and waiting for the

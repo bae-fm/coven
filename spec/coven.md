@@ -7441,6 +7441,29 @@ the version her app runs. Ben's phone on an app before version 2 then stops with
 `UpdateRequired`, as on any store raised past its app, instead of failing on a
 version 2 snapshot it can't read.
 
+**Who raises a circle.** A device raises the audiences it read when its app
+migrated: their raise bodies are the rows it held then, migrated. A circle its
+member makes later starts at the base its creation recorded (§15.5). When the
+entry was prepared before the update and applies after it, that base is below
+the device's newest breaking version, and the device raises the circle as the
+entry applies. The circle has no rows yet, so the rows the device holds are its
+raise body
+([`fresh_raise_body`](proofs/sequence/CovenSequence/CircleRaise.lean)), and the
+device's later writes wait for that raise as they wait for a migration's.
+
+A device that starts reading a circle with history after it migrated never held
+the circle's rows at the circle's version, so it can't make the raise body: once
+a snapshot covers a part of the circle, the raise must cover that part too, and
+the device holds the part only as it converted it on reading
+([`joiner_cannot_raise`](proofs/sequence/CovenSequence/CircleRaise.lean)). It
+doesn't raise the circle, and every device would refuse its snapshots of it
+([`below_refused_until_raised`](proofs/sequence/CovenSequence/CircleRaise.lean)).
+A member who held the circle raises it when their app updates, which the store's
+raise makes them do. Ben's app migrates while he reads only the store; Ana, on
+the old app, adds him to Garden; Ben raises nothing for Garden, and Ana's update
+raises it, after which Ben reloads Garden from her raise. A circle whose members
+who held it have all left keeps its version: nothing raises it.
+
 **Devices on an older app.** An older app can't apply an audience's newer schema.
 It records `UpdateRequired` and stops at that slot under §5's rule for stuck
 devices, which also means it stops uploading. After updating, it reloads from the
@@ -11133,6 +11156,9 @@ Write-ups explain each model and state its assumptions:
 | A counted ordinary announcement names a schema version its audience had reached at its coverage | `ordinary_version_reached` | `proofs/sequence/CovenSequence/Preparations.lean` | §16.3 |
 | *Body.* A snapshot whose body is a version ahead of its audience meets every coverage rule, and only the version rule refuses it | `ahead_refused` | `proofs/sequence/CovenSequence/Preparations.lean` | §16.3 |
 | *Body.* A circle with no raise of its own counts a snapshot at its base, the breaking version its creation recorded, and refuses a raise to that version | `based_counted` | `proofs/sequence/CovenSequence/Preparations.lean` | §15.5, §16.3 |
+| *Body.* A device reading a circle below its breaking version gets none of its snapshots counted until a raise reaches that version | `below_refused_until_raised` | `proofs/sequence/CovenSequence/CircleRaise.lean` | §18.3 |
+| *Body.* A circle no slot has touched holds its initial rows, which are its raise body when migrating leaves an empty audience empty | `untouched_rows`, `fresh_raise_body` | `proofs/sequence/CovenSequence/CircleRaise.lean` | §18.3 |
+| *Body.* A device that started reading a circle after migrating holds only converted parts, not the migrated rows a raise covering them must carry | `joiner_cannot_raise` | `proofs/sequence/CovenSequence/CircleRaise.lean` | §18.3 |
 | *Body.* A stale capture announced after a raise is refused; accepting it would strand a joiner | `slot4_refused`, `stale_floor_strands_joiner` | `proofs/sequence/CovenSequence/ReaderExamples.lean` | §16.3 |
 | Activating a prepared snapshot needs an earlier matching announcement, which makes its coverage usable | `activation_requires_preparation`, `activated_is_usable` | `proofs/sequence/CovenSequence/Preparations.lean` | §16.3 |
 | With the coverage rules, a sound reader with its key advances and reaches the end without anyone holding deletion back (honest snapshot bodies and kept raise and reset bodies assumed); a reader behind a floor snapshot's coverage may always reload | `read_progress`, `reaches_head` | `proofs/sequence/CovenSequence/Reader.lean` | §16.3, §16.4, §16.6 |

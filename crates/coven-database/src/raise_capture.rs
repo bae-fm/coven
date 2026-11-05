@@ -81,6 +81,71 @@ pub(crate) fn capture_created(
     Ok(())
 }
 
+/// Raise a circle this device's member just made, when the base its creation
+/// recorded is below this installation's newest breaking migration: it was
+/// prepared before that migration and applied after it, so the migration's
+/// capture didn't include it. The circle has no rows yet, so this device holds
+/// its state at its own version, and its later writes wait for the raise as
+/// a migration's do. A device that starts reading a circle with history holds
+/// none of it at the circle's version, and waits for a device that held it
+/// (§15.5, §18.3).
+pub(crate) fn capture_made(
+    db: &DatabaseConnection,
+    circle: coven_foundation::id_source::CircleId,
+    state: &crate::StoreState,
+    operation: Option<&crate::migration::MigrationOperation>,
+) -> Result<(), DbError> {
+    let audience = Audience::Circle(circle);
+    let device = db
+        .local_device()
+        .ok_or(DbError::Invariant { what: "a writer connection observes this device" })?;
+    let made = state
+        .devices
+        .get(&device)
+        .is_some_and(|local| local.active() && state.reads_circle(circle, &local.member));
+    if !made || state.reached(&audience) >= breaking_version(db)? {
+        return Ok(());
+    }
+    // Every capture holds the same prefix; with none, the prefix is every
+    // write this device has made so far.
+    let through = match captured_through(db)? {
+        Some(through) => through,
+        None => crate::write_metadata::newest_number(db, device)?.unwrap_or(0),
+    };
+    db.internal_execute(
+        "INSERT INTO _coven_raise_captures(audience,version,through,covers) VALUES(?1,?2,?3,?4)",
+        params![
+            audience_text(&audience),
+            db.schema_version()?,
+            through.to_be_bytes(),
+            crate::sequence::applied(db)?.to_be_bytes()
+        ],
+    )?;
+    // The migration's journal may have finished with its own raises; passes
+    // publish captures while one is open.
+    if let Some(operation) = operation {
+        if crate::operation::of_kind(db, crate::operation_kind::SCHEMA_RAISE)?.is_empty() {
+            journal(db, operation, db.schema_version()?)?;
+        }
+    }
+    Ok(())
+}
+
+/// Journal the operation through which passes publish this installation's
+/// raise captures at `version`, at its first step.
+pub(crate) fn journal(
+    db: &DatabaseConnection,
+    operation: &crate::migration::MigrationOperation,
+    version: u32,
+) -> Result<(), DbError> {
+    let new = operation(version)?;
+    let id = crate::operation::insert(db, &new)?;
+    crate::operation::advance(
+        db,
+        &crate::OperationUpdate { id, previous: 0, last_step: 1, data: new.data },
+    )
+}
+
 pub(crate) fn raise_to(
     db: &DatabaseConnection,
     _tables: &[crate::SyncedTable],

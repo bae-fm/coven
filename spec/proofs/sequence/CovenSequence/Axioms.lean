@@ -140,6 +140,10 @@ import SequenceApply
 #print axioms CovenSequence.Preparations.ordinary_version_reached
 #print axioms CovenSequence.Preparations.ahead_refused
 #print axioms CovenSequence.Preparations.based_counted
+#print axioms CovenSequence.CircleRaise.untouched_rows
+#print axioms CovenSequence.CircleRaise.fresh_raise_body
+#print axioms CovenSequence.CircleRaise.below_refused_until_raised
+#print axioms CovenSequence.CircleRaise.joiner_cannot_raise
 
 #print axioms CovenSequence.reaches_target
 #print axioms CovenSequence.QueueReload.commit_numbered

@@ -757,3 +757,118 @@ async fn a_snapshot_changed_on_the_way_is_read_again_not_refused() {
         }
     }
 }
+
+/// Ana's phone prepares Garden on the old app, so its creation entry records
+/// base 0, and her app updates with a breaking migration before the entry
+/// applies. Her migration raised only what she read then, the store, and that
+/// raise has finished. Garden has no rows when its creation applies, so her
+/// phone holds its state at version 2 and raises it; without that, Garden
+/// would stay below her version and none of her Garden snapshots would count
+/// (§15.5, §18.3).
+#[tokio::test]
+async fn a_circle_its_maker_migrated_before_creating_is_raised_by_the_maker() {
+    use crate::sequence_sync::sequence_operations::Request;
+    use coven_foundation::id_source::{CircleId, IdSource, KeyId};
+    let group = Group::new();
+    group.raises.store(true, std::sync::atomic::Ordering::SeqCst);
+    let ana = group.device(1).await;
+    let ben = group.device(2).await;
+    group.create(&ana).await;
+    group.admit(&ana, &ben).await;
+    group.version.store(2, std::sync::atomic::Ordering::SeqCst);
+    let ana = group.reopen(ana).await;
+    ana.sync.pass().await.unwrap();
+    ana.sync.pass().await.unwrap();
+    assert_eq!(
+        ana.sync.database.store_state().await.unwrap().reached(&coven_merge::Audience::Store),
+        2
+    );
+    assert!(ana.sync.database.raise_captures().await.unwrap().is_empty());
+    assert!(ana.sync.database.operations().await.unwrap().is_empty());
+
+    // The entry as her phone prepared it before the update, its key in
+    // custody.
+    let garden = CircleId(group.ids.new_id());
+    let key = coven_crypto::CircleKey::from_bytes(garden, KeyId(group.ids.new_id()), [9; 32]);
+    let mut ring = ana.sync.keys.read().unwrap().unwrap();
+    let (key_id, hash) = (key.id(), key.hash());
+    ring.insert_circle_key(key).unwrap();
+    ana.sync.keys.persist(&ring).unwrap();
+    ana.sync
+        .start_request_row(
+            Request::Change(coven_format::admin::StoreChange::CreateCircle {
+                circle: garden,
+                name: "Garden".into(),
+                breaking_version: 0,
+                key: key_id,
+                key_hash: hash,
+            }),
+            coven_database::operation_kind::COVEN,
+        )
+        .await
+        .unwrap();
+    for _ in 0..3 {
+        ana.sync.pass().await.unwrap();
+    }
+    let state = ana.sync.database.store_state().await.unwrap();
+    assert!(state.reads_circle(garden, &ana.identity.member()));
+    assert_eq!(state.circles[&garden].base, 0);
+    assert_eq!(state.reached(&coven_merge::Audience::Circle(garden)), 2);
+    assert!(ana.sync.database.raise_captures().await.unwrap().is_empty());
+    let announced = ana.sync.snapshot(coven_merge::Audience::Circle(garden)).await.unwrap();
+    let history = ana.sync.session.lock().await.history.clone();
+    assert_eq!(history.announcements[&announced].breaking_version, 2);
+    for device in [&ana, &ben] {
+        device.sync.database.close().await.unwrap();
+    }
+}
+
+/// Ben's app migrates while he reads only the store, and Ana, still on the old
+/// app, then adds him to Garden. Ben never held Garden's rows at version 0, so
+/// he can't make its raise body and doesn't raise it. Ana's update captures
+/// Garden, which she held, and raises it; Ben reloads Garden from her raise,
+/// and his Garden snapshots count from then on (§15.7, §18.3).
+#[tokio::test]
+async fn a_circle_joined_after_migrating_is_raised_by_a_member_who_held_it() {
+    let group = Group::new();
+    group.raises.store(true, std::sync::atomic::Ordering::SeqCst);
+    let ana = group.device(1).await;
+    let ben = group.device(2).await;
+    group.create(&ana).await;
+    group.admit(&ana, &ben).await;
+    let garden = ana.sync.create_circle("Garden".into()).await.unwrap();
+    ben.sync.pass().await.unwrap();
+    group.version.store(2, std::sync::atomic::Ordering::SeqCst);
+    let ben = group.reopen(ben).await;
+    ana.sync
+        .administer(coven_format::admin::StoreChange::AddCircleMember {
+            circle: garden,
+            member: ben.identity.member(),
+        })
+        .await
+        .unwrap();
+    ben.sync.pass().await.unwrap();
+    ben.sync.pass().await.unwrap();
+    let state = ben.sync.database.store_state().await.unwrap();
+    assert!(state.reads_circle(garden, &ben.identity.member()));
+    assert_eq!(state.reached(&coven_merge::Audience::Store), 2);
+    assert_eq!(state.reached(&coven_merge::Audience::Circle(garden)), 0);
+    assert!(ben.sync.database.raise_captures().await.unwrap().is_empty());
+
+    let ana = group.reopen(ana).await;
+    ana.sync.pass().await.unwrap();
+    ana.sync.pass().await.unwrap();
+    ben.sync.pass().await.unwrap();
+    let state = ben.sync.database.store_state().await.unwrap();
+    assert_eq!(state.reached(&coven_merge::Audience::Circle(garden)), 2);
+    assert_eq!(
+        state.schema[&coven_merge::Audience::Circle(garden)].snapshot.device,
+        ana.sync.device
+    );
+    let announced = ben.sync.snapshot(coven_merge::Audience::Circle(garden)).await.unwrap();
+    let history = ben.sync.session.lock().await.history.clone();
+    assert_eq!(history.announcements[&announced].breaking_version, 2);
+    for device in [&ana, &ben] {
+        device.sync.database.close().await.unwrap();
+    }
+}

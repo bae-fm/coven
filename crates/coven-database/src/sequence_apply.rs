@@ -70,6 +70,7 @@ pub(crate) fn apply<P: crate::PendingValue>(
     schema: &WriteSchema,
     incoming: IncomingSlot<PreparedWrite<'_>>,
     files: &crate::file_write::WriteFiles<'_>,
+    raises: Option<&crate::migration::MigrationOperation>,
     authenticate: impl FnOnce() -> Result<(), DbError>,
 ) -> Result<crate::ApplyOutcome, DbError> {
     crate::download::source_wait(db.stream_transaction(|db| {
@@ -109,6 +110,11 @@ pub(crate) fn apply<P: crate::PendingValue>(
                     crate::store_state_tables::replace(db, &effect.state)?;
                     if created {
                         crate::raise_capture::capture_created(db, schema)?;
+                    }
+                    if let coven_format::admin::StoreChange::CreateCircle { circle, .. } =
+                        &effect.change
+                    {
+                        crate::raise_capture::capture_made(db, *circle, &effect.state, raises)?;
                     }
                     crate::provider_access::adopt::<P>(db, &effect.provider_access)?;
                     for circle in effect.state.circle_deletions.keys().filter(|circle| !old.contains_key(circle)) {

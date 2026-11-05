@@ -610,6 +610,23 @@ landed under the existing claim protocol; it precedes the raise slot (§18.5).
   replay agrees with the actual next sequence writes slot under the same
   admission/reset gates; conversion never rewrites the publication queue.
 
+[`CircleRaise`](sequence/CovenSequence/CircleRaise.lean) shows which device can
+raise an audience it reads below its breaking version. It assumes migrating
+leaves an audience with no rows empty: a migration changes rows that exist,
+and a circle made after it has none.
+
+- `below_refused_until_raised`: a device whose breaking version is 2, reading
+  a circle at version 1, gets none of its snapshots counted until a raise to
+  2 applies; then the same snapshot counts. This is the state a device that
+  never raises the circle stays in.
+- `untouched_rows`, `fresh_raise_body`: an audience no slot has touched holds
+  its initial rows, so the raise body of a circle that has no parts yet is
+  its initial rows, which its maker holds whatever version it runs.
+- `joiner_cannot_raise`: once another member's snapshot covers a part of the
+  circle, a raise must cover it too, and its body is those rows migrated. A
+  device that started reading the circle after migrating holds only the part
+  it converted on reading, which isn't that body.
+
 ## Operations
 
 [`Operation`](sequence/CovenSequence/Operation.lean) models an admin operation's entry claim
