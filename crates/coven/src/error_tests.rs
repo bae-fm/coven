@@ -34,7 +34,7 @@ fn setup_unlock_and_sync_preserve_the_storage_classification_and_cause() {
 
 #[test]
 fn filesystem_and_settings_errors_accept_boxed_native_causes() {
-    use crate::{DiskError, SettingsError};
+    use crate::{FileError, SettingsError};
     use std::{io, path::PathBuf};
 
     for error in [
@@ -52,7 +52,7 @@ fn filesystem_and_settings_errors_accept_boxed_native_causes() {
             source: Box::new(io::Error::from(io::ErrorKind::PermissionDenied)),
         },
     ] {
-        let disk: DiskError = error;
+        let disk: FileError = error;
         assert_eq!(
             disk.source().unwrap().downcast_ref::<io::Error>().unwrap().kind(),
             io::ErrorKind::PermissionDenied

@@ -241,7 +241,7 @@ pub enum Audience {
   in, which it reads without opening the file.
 - Choosing no class after choosing one doesn't undo it: the files keep the
   class they were last given until an open chooses another. A file the walk
-  can't open for writing fails the call with its `DiskError`, inside
+  can't open for writing fails the call with its `FileError`, inside
   `DbError::Disk` for an open, and so does Apple's refusal, for a few
   milliseconds after it changes a file's class, to set that file's class again
   (`ResourceBusy`). Nothing records a walk until it completes; the next call
@@ -253,7 +253,7 @@ pub enum Audience {
   There a store whose app chose a class is refused before any of its files
   change: creating, restoring or joining it fails and leaves no store, and a
   writable open, a resumed restore or join and a replacement fail, even when
-  `file-protection.json` names the class. The `DiskError` names the store's
+  `file-protection.json` names the class. The `FileError` names the store's
   directory and has an `Unsupported` cause, inside `DbError::Disk` for an
   open. Without a class, a store opens on any volume.
 - Opening a store needs its declared tables ([E2](#e2-declaring-synced-tables))
@@ -1457,7 +1457,7 @@ pub enum DbError {
     /// (§17.3).
     CopyPathTaken { path: PathBuf },
     /// Reading or keeping file bytes failed (E3).
-    Disk(DiskError),
+    Disk(FileError),
     /// The staging write could not create its file's random key (§17.3).
     FileKey(CryptoError),
     /// Retaining the store while staging file bytes failed.
@@ -1715,9 +1715,6 @@ impl FileError {
     /// Whether readers already see the replacement despite a durability error.
     pub fn installed_new_bytes(&self) -> bool;
 }
-
-/// File reads and custody report the same filesystem failures (§17, E1).
-pub use coven_foundation::files::FileError as DiskError;
 
 /// Replace an app-owned file using coven's durable replacement operation.
 /// Writes and syncs a temporary sibling, replaces the target, then syncs its
@@ -6217,7 +6214,7 @@ pub enum CopyPathError {
     /// The folder's path isn't valid Unicode.
     NotUnicode(PathBuf),
     /// Inspecting a path failed.
-    File(DiskError),
+    File(FileError),
     /// Inspecting the paths panicked on the blocking pool: a bug (E15).
     Bug(Bug),
 }
@@ -6270,7 +6267,7 @@ pub enum DeviceOnlyError {
     /// Downloading a file failed.
     Download { file: FileId, error: FileReadError },
     /// Writing a folder or a copy failed.
-    Disk(DiskError),
+    Disk(FileError),
     /// The app cancelled the call before its files switched.
     Cancelled,
     /// The write switching the files failed other than in the database, as
@@ -6387,7 +6384,7 @@ pub enum FileReadError {
     /// The database failed, with its cause.
     Database(DbError),
     /// The disk failed, with its cause.
-    Disk(DiskError),
+    Disk(FileError),
     /// The store cannot be retained while opening its file.
     Lock(StoreLockError),
     /// The write committing a prepared pin failed other than in the
@@ -8480,7 +8477,7 @@ so such a call ends with a `Shutdown` in its error instead of a panic.
   caller reads the state again before relying on it: whether the store is
   listed, or what `storage_config` and the key state say.
 - The error that carries the `Shutdown` is the call's own:
-  `DbError::Shutdown` for a database call, `DiskError::Shutdown` for file
+  `DbError::Shutdown` for a database call, `FileError::Shutdown` for file
   work, wherever a disk failure would appear, and a `Shutdown` variant of
   `CovenError`, `KeyError`, `SyncError`, `StorageSetupError`,
   `StoreKeyUnlockError`, `StoreCreationError`, `StoreDeletionError` and

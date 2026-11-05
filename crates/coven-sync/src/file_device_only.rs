@@ -10,7 +10,7 @@ use coven_database::{
     DbError, DeviceOnlyCopy, FileHasher, FilePlace, FileRef, FolderCopy, PreparedDeviceOnly,
 };
 use coven_foundation::{
-    files::{CopyFolder, CopyPathError, FileError as DiskError, FlushBatch, Flushed, RelativePath},
+    files::{CopyFolder, CopyPathError, FileError, FlushBatch, Flushed, RelativePath},
     id_source::FileId,
     progress::{Progress, ProgressReport},
 };
@@ -67,7 +67,7 @@ pub enum DeviceOnlyError {
     },
     /// Writing a folder or a copy failed.
     #[error(transparent)]
-    Disk(DiskError),
+    Disk(FileError),
     /// The app cancelled the call before its files switched.
     #[error("cancelled")]
     Cancelled,
@@ -108,10 +108,10 @@ impl From<DbError> for DeviceOnlyError {
     }
 }
 
-impl From<DiskError> for DeviceOnlyError {
-    fn from(error: DiskError) -> Self {
+impl From<FileError> for DeviceOnlyError {
+    fn from(error: FileError) -> Self {
         match error {
-            DiskError::Bug(bug) => Self::Bug(bug),
+            FileError::Bug(bug) => Self::Bug(bug),
             error => Self::Disk(error),
         }
     }

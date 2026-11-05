@@ -2,7 +2,7 @@
 
 use coven_database::{DbError, LocalFileError};
 use coven_foundation::{
-    files::{FileError as DiskError, StoreLockError},
+    files::{FileError, StoreLockError},
     id_source::{DeviceId, FileId},
 };
 use coven_storage::StorageError;
@@ -79,7 +79,7 @@ pub enum FileReadError {
     Database(DbError),
     /// A disk failure, retaining its cause.
     #[error(transparent)]
-    Disk(DiskError),
+    Disk(FileError),
     /// The store cannot be retained while opening its file.
     #[error(transparent)]
     Lock(StoreLockError),
@@ -94,10 +94,10 @@ pub enum FileReadError {
     #[error(transparent)]
     Bug(#[from] coven_foundation::task::Bug),
 }
-impl From<DiskError> for FileReadError {
-    fn from(error: DiskError) -> Self {
+impl From<FileError> for FileReadError {
+    fn from(error: FileError) -> Self {
         match error {
-            DiskError::Bug(bug) => Self::Bug(bug),
+            FileError::Bug(bug) => Self::Bug(bug),
             error => Self::Disk(error),
         }
     }
@@ -221,8 +221,8 @@ impl From<DbError> for TransferError {
         Self::File(error.into())
     }
 }
-impl From<DiskError> for TransferError {
-    fn from(error: DiskError) -> Self {
+impl From<FileError> for TransferError {
+    fn from(error: FileError) -> Self {
         Self::File(error.into())
     }
 }

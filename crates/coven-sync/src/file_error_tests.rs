@@ -5,7 +5,7 @@ use std::error::Error;
 #[test]
 fn cache_disk_failures_keep_their_file_error_class() {
     for local in [false, true] {
-        let disk = DiskError::Io {
+        let disk = FileError::Io {
             operation: "write cache",
             path: PathBuf::from("cache"),
             source: Box::new(std::io::Error::other("disk unavailable")),
@@ -57,7 +57,7 @@ fn a_bug_in_file_work_is_the_calls_bug() {
     use coven_foundation::task::{Bug, CarriesBug};
     let bug = Bug { operation: "read the file", message: "it panicked".into() };
     let reads = [
-        FileReadError::from(DiskError::Bug(bug.clone())),
+        FileReadError::from(FileError::Bug(bug.clone())),
         FileReadError::from(StoreLockError::Bug(bug.clone())),
         FileReadError::from(StorageError::Bug(bug.clone())),
         FileReadError::from(DbError::Bug(bug.clone())),
@@ -68,12 +68,12 @@ fn a_bug_in_file_work_is_the_calls_bug() {
         assert!(matches!(&read, FileReadError::Bug(found) if *found == bug), "{read:?}");
         assert_eq!(read.bug(), Some(&bug));
     }
-    let path = CopyPathError::from(DiskError::Bug(bug.clone()));
+    let path = CopyPathError::from(FileError::Bug(bug.clone()));
     assert!(matches!(&path, CopyPathError::Bug(found) if *found == bug));
     let copies = [
         crate::DeviceOnlyError::from(path),
         crate::DeviceOnlyError::from(DbError::Bug(bug.clone())),
-        crate::DeviceOnlyError::from(DiskError::Bug(bug.clone())),
+        crate::DeviceOnlyError::from(FileError::Bug(bug.clone())),
         crate::DeviceOnlyError::from(coven_database::CovenError::Bug(bug.clone())),
     ];
     for copy in copies {
