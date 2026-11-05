@@ -891,3 +891,40 @@ async fn a_losing_raise_deletes_its_announced_body_and_publishes_no_entry() {
         device.sync.database.close().await.unwrap();
     }
 }
+
+/// The app drops the future of a key rotation after its first key copy's
+/// creation is under way. The journal row stays, the operation finishes
+/// without the waiter, and the rotation lands once (§11.4).
+#[tokio::test]
+async fn dropping_an_operations_call_keeps_its_journal_and_the_rotation_lands_once() {
+    let group = Group::new();
+    let ana = group.device(1).await;
+    let ben = group.device(2).await;
+    group.create(&ana).await;
+    group.admit(&ana, &ben).await;
+    let introductions = ana.sync.session.lock().await.history.introductions.len();
+    let (started, observed) = tokio::sync::oneshot::channel();
+    let (resume, held) = tokio::sync::oneshot::channel();
+    group
+        .storage
+        .hold_next_creation(coven_storage::ObjectPrefix::all(group.store), started, held)
+        .await;
+    tokio::select! {
+        result = ana.sync.rotate_key(coven_merge::Audience::Store) => {
+            panic!("the held creation keeps the rotation running: {result:?}")
+        }
+        held = observed => held.unwrap(),
+    }
+    let journal = ana.sync.database.operations().await.unwrap();
+    assert_eq!(journal.len(), 1, "the dropped call leaves its journal row");
+    resume.send(()).unwrap();
+    tokio::time::timeout(HANG_GUARD, ana.sync.pass()).await.unwrap().unwrap();
+    assert!(ana.sync.database.operations().await.unwrap().is_empty());
+    assert_eq!(
+        ana.sync.session.lock().await.history.introductions.len(),
+        introductions + 1,
+        "the rotation lands once"
+    );
+    ben.sync.pass().await.unwrap();
+    close(&[&ana, &ben]).await;
+}
