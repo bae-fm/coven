@@ -668,6 +668,69 @@ async fn a_reset_replaces_a_database_a_call_found_damaged() {
     handle.close().await.unwrap();
 }
 
+/// A keychain that refuses a read while the reset unlocks its keys fails the
+/// call with the keychain's error. The store's files, settings and custody
+/// stay as they were, and the store opens as before (§19.3).
+#[tokio::test]
+async fn a_reset_with_an_unavailable_key_leaves_the_damaged_files_and_names_it() {
+    for after in 0..3 {
+        let f = Fixture::new().await;
+        f.setup().await.unwrap();
+        synced(&f.handle).await;
+        uploaded(&f, "kept").await;
+        f.handle.close().await.unwrap();
+        let old = f.directory.settings().unwrap().device_id;
+        let path = f.directory.database_path().parent().unwrap().to_owned();
+        let files = files_under(&path);
+        f.app.fail_keychain_operations_after(&[after]);
+        let refused = reopen(&f).reset_device(f.directory.id(), "Phone", |_| ()).await;
+        assert!(
+            matches!(&refused, Err(BootstrapError::SecureStorage(_) | BootstrapError::Sync(_))),
+            "after {after} reads: {:?}",
+            refused.as_ref().err()
+        );
+        assert_eq!(files_under(&path), files, "after {after} reads");
+        assert_eq!(f.directory.unfinished_replacement().unwrap(), None);
+        assert_eq!(f.directory.settings().unwrap().device_id, old);
+        assert_eq!(custody(&f).device_id().unwrap(), Some(old));
+        assert!(!loading_area(&f).exists());
+        let handle = reopen(&f).open(f.directory.id(), |_| ()).await.unwrap();
+        assert_eq!(handle.device_reset().await.unwrap(), None);
+        assert_eq!(notes(&handle).await, ["kept"]);
+        handle.close().await.unwrap();
+    }
+}
+
+/// A reset moves the replaced installation's local state aside whole, the
+/// database and every other local entry, and no handle opens it as the
+/// store (§19.3).
+#[tokio::test]
+async fn a_reset_keeps_the_old_installation_whole_for_inspection() {
+    let f = Fixture::new().await;
+    f.setup().await.unwrap();
+    synced(&f.handle).await;
+    uploaded(&f, "kept").await;
+    f.handle.close().await.unwrap();
+    let old = f.directory.settings().unwrap().device_id;
+    let path = f.directory.database_path().parent().unwrap().to_owned();
+    std::fs::create_dir(path.join("local-sources")).unwrap();
+    std::fs::write(path.join("local-sources").join("cover"), b"device-only bytes").unwrap();
+    let handle = reopen(&f).reset_device(f.directory.id(), "Phone", |_| ()).await.unwrap();
+    assert_eq!(notes(&handle).await, ["kept"]);
+    let archive = path.join(format!("discarded-device-{}", old.0));
+    assert!(archive.join("store.db").exists());
+    assert_eq!(
+        std::fs::read(archive.join("local-sources").join("cover")).unwrap(),
+        b"device-only bytes"
+    );
+    assert!(!path.join("local-sources").exists());
+    handle.close().await.unwrap();
+    // The live store is the new installation; the archive is not a store.
+    let handle = reopen(&f).open(f.directory.id(), |_| ()).await.unwrap();
+    assert_eq!(handle.device_reset().await.unwrap().unwrap().old_device, old);
+    handle.close().await.unwrap();
+}
+
 /// A reset reads the replaced database's operation journal for owed cleanup,
 /// and a journal SQLite reports damaged supplies none: the reset still
 /// completes, as it does past damage to a table of the app's (§19.3).
