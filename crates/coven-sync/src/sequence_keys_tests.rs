@@ -272,3 +272,144 @@ async fn key_custody_preparation_matches_lean() {
         );
     }
 }
+
+/// Ana removes Ben, then writes. Every store key was exposed to Ben, so
+/// Ana's device rotates first, and the write is sealed with a key introduced
+/// after the removal that no copy names Ben for (§12.2).
+#[tokio::test]
+async fn a_device_with_no_usable_key_rotates_before_sending() {
+    let group = Group::new();
+    let ana = group.device(1).await;
+    let ben = group.device(2).await;
+    group.create(&ana).await;
+    group.admit(&ana, &ben).await;
+    let removal = ana.database().applied_slot().await.unwrap() + 1;
+    ana.sync.administer(StoreChange::RemoveMember { member: ben.identity.member() }).await.unwrap();
+    insert(ana.database(), "after", "the removal").await;
+    // The first pass rotates; the write waits for the replacement key.
+    ana.sync.pass().await.unwrap();
+    ana.sync.pass().await.unwrap();
+
+    let last = ana.database().applied_slot().await.unwrap();
+    let mut written = None;
+    for number in (removal..=last).rev() {
+        let path = coven_storage::ObjectPath::slot(group.store, number.try_into().unwrap());
+        let bytes = coven_storage::Storage::read(&group.storage, &path).await.unwrap();
+        let prefix =
+            SlotObjectPrefix::decode(&bytes[..SlotObjectPrefix::length(&bytes).unwrap()]).unwrap();
+        if matches!(prefix.kind, SlotKind::Writes) {
+            written = Some(prefix);
+            break;
+        }
+    }
+    let sealed_with = written.expect("the write was sent").key;
+    let session = ana.sync.session.lock().await;
+    let introduced = session
+        .history
+        .introductions
+        .iter()
+        .find(|introduction| introduction.key == sealed_with)
+        .expect("the write's key was introduced");
+    assert_eq!(introduced.audience, Audience::Store);
+    assert!(
+        introduced.slot.0 > removal,
+        "introduced at {:?}, removal at {removal}",
+        introduced.slot
+    );
+    assert!(session.history.copies.iter().all(|copy| {
+        let SlotKind::KeyCopy(copy) = &copy.prefix.kind else { panic!("copy") };
+        copy.routing.key != sealed_with || copy.routing.member != ben.identity.member()
+    }));
+    assert!(!session.history.exposed(&Audience::Store, sealed_with));
+    drop(session);
+    for device in [&ana, &ben] {
+        device.sync.database.close().await.unwrap();
+    }
+}
+
+/// Carol joins after the store key was rotated: she is sent a copy of the
+/// older key too, so she reads what was written under it. A retried
+/// operation sends no copy that is already in the sequence (§12.1).
+#[tokio::test]
+async fn a_member_lacking_an_older_key_gets_a_copy_once() {
+    let group = Group::new();
+    let ana = group.device(1).await;
+    let carol = MemberIdentity::new(
+        coven_foundation::id_source::MemberId(coven_foundation::id_source::IdSource::new_id(
+            group.ids.as_ref(),
+        )),
+        coven_format::test_utils::keys_from_seed(9),
+    );
+    group.create(&ana).await;
+    insert(ana.database(), "old", "under the first key").await;
+    ana.sync.pass().await.unwrap();
+    ana.sync.rotate_key(Audience::Store).await.unwrap();
+    let keys: Vec<_> = ana
+        .sync
+        .session
+        .lock()
+        .await
+        .history
+        .introductions
+        .iter()
+        .filter(|introduction| introduction.audience == Audience::Store)
+        .map(|introduction| introduction.key)
+        .collect();
+    assert_eq!(keys.len(), 2);
+
+    // The admission's claim fails once, after its copies landed.
+    let first = ana.database().applied_slot().await.unwrap() + 1;
+    let claim = coven_storage::ObjectPath::slot(group.store, (first + 2).try_into().unwrap());
+    ana.storage
+        .set_faults(coven_storage::test_utils::Faults {
+            create_failures: [(claim, (coven_storage::StorageFailure::Network, 500))].into(),
+            ..coven_storage::test_utils::Faults::none()
+        })
+        .await;
+    let admission = StoreChange::AddMember {
+        member: carol.member(),
+        keys: carol.keys().public_keys(),
+        role: coven_format::admin::MemberRole::Member,
+        access: group.access("carol"),
+    };
+    assert!(ana.sync.administer(admission).await.is_err());
+    ana.storage.set_faults(coven_storage::test_utils::Faults::none()).await;
+    group.clock.set(std::time::UNIX_EPOCH + std::time::Duration::from_secs(120));
+    ana.sync.pass().await.unwrap();
+
+    {
+        let session = ana.sync.session.lock().await;
+        assert!(session.history.state.members.contains_key(&carol.member()));
+        let mut sent: Vec<_> = session
+            .history
+            .copies
+            .iter()
+            .filter_map(|copy| match &copy.prefix.kind {
+                SlotKind::KeyCopy(copy) if copy.routing.member == carol.member() => {
+                    Some(copy.routing.key)
+                }
+                _ => None,
+            })
+            .collect();
+        sent.sort();
+        let mut expected = keys.clone();
+        expected.sort();
+        assert_eq!(sent, expected, "one copy of each store key");
+    }
+    // Carol's phone holds no key but what the copies sent to her give it.
+    let phone = group.newcomer(carol, group.storage.for_device()).await;
+    phone.sync.pass().await.unwrap();
+    phone
+        .sync
+        .administer(StoreChange::AddDevice { name: "Carol".into(), replaces: None })
+        .await
+        .unwrap();
+    phone.sync.pass().await.unwrap();
+    assert_eq!(
+        rows(phone.database()).await,
+        vec![("old".to_owned(), "under the first key".to_owned())]
+    );
+    for device in [&ana, &phone] {
+        device.sync.database.close().await.unwrap();
+    }
+}
