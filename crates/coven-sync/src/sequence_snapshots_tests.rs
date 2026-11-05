@@ -311,3 +311,145 @@ async fn an_abandoned_preparation_deletes_its_body_and_keeps_a_failed_deletion()
         device.sync.database.close().await.unwrap();
     }
 }
+
+/// Ana and Ben are admitted and have read through the same slot. Ben takes
+/// an ordinary snapshot of it whose announcement can't land yet: the claim's
+/// slot is refused, so his journal keeps the uploaded body and its
+/// announcement. Returns the group, both devices, the slot Ben read through
+/// and his operation.
+async fn ben_with_an_unannounced_snapshot(
+) -> (Group, Device, Device, u64, coven_database::OperationId) {
+    let group = Group::new();
+    let ana = group.device(1).await;
+    let ben = group.device(2).await;
+    group.create(&ana).await;
+    group.admit(&ana, &ben).await;
+    insert(&ana.sync.database, "a", "before the snapshot").await;
+    ana.sync.pass().await.unwrap();
+    ben.sync.pass().await.unwrap();
+    let covers = ben.sync.database.applied_slot().await.unwrap();
+    let claimed = ObjectPath::slot(group.store, (covers + 1).try_into().unwrap());
+    group
+        .storage
+        .set_faults(Faults {
+            create_failures: [(claimed, (StorageFailure::ProviderUnavailable, 503))].into(),
+            ..Faults::none()
+        })
+        .await;
+    assert!(ben.sync.snapshot(coven_merge::Audience::Store).await.is_err());
+    group.storage.set_faults(Faults::none()).await;
+    let operation = ben.sync.database.operations().await.unwrap()[0].id;
+    (group, ana, ben, covers, operation)
+}
+
+/// The announcement `ben` could send for the store, covering `covers`.
+fn announcement_by(
+    ben: &Device,
+    covers: u64,
+) -> (coven_format::sequence::SnapshotAnnouncement, coven_format::sequence::SlotHeader) {
+    (
+        coven_format::sequence::SnapshotAnnouncement {
+            snapshot: coven_format::admin::SnapshotId {
+                audience: coven_merge::Audience::Store,
+                device: ben.sync.device,
+                number: 99,
+            },
+            covers,
+            purpose: coven_format::sequence::Purpose::Ordinary,
+            digest: [7; 32],
+        },
+        coven_format::sequence::SlotHeader {
+            device: ben.sync.device,
+            claim: 99,
+            author: ben.identity.member(),
+            after: 0,
+        },
+    )
+}
+
+/// An announcement counts only if its coverage is no lower than what its
+/// audience already announced and no lower than the latest raise or reset's
+/// entry; equal coverage counts, and the later slot is the one used. An
+/// honest device recaptures a stale snapshot before claiming (so only a
+/// stale claim already on its way reaches this rule), hence the rule is
+/// asked about the history a device holds (§16.2, §16.3).
+#[tokio::test]
+async fn an_announcement_counts_only_at_or_above_the_coverage_and_the_latest_reset() {
+    let group = Group::new();
+    let ana = group.device(1).await;
+    let ben = group.device(2).await;
+    group.create(&ana).await;
+    group.admit(&ana, &ben).await;
+    insert(&ana.sync.database, "a", "before the snapshot").await;
+    ana.sync.pass().await.unwrap();
+    let announced = ana.sync.snapshot(coven_merge::Audience::Store).await.unwrap();
+    let covers = ana.sync.session.lock().await.history.announcements[&announced].covers;
+    let allowed = |history: &crate::history::History, covers: u64| {
+        let (announcement, header) = announcement_by(&ben, covers);
+        history.announcement_allowed(coven_merge::Slot(1_000), &header, &announcement)
+    };
+    let history = ana.sync.session.lock().await.history.clone();
+    assert!(allowed(&history, covers), "equal coverage counts");
+    assert!(allowed(&history, covers + 1));
+    assert!(!allowed(&history, covers - 1), "lower coverage does not");
+
+    ana.sync.reset(coven_merge::Audience::Store).await.unwrap();
+    let history = ana.sync.session.lock().await.history.clone();
+    let entry = history.boundaries.last().unwrap().boundary.entry().0;
+    assert!(allowed(&history, entry), "covering the reset's entry counts");
+    assert!(!allowed(&history, entry - 1), "covering less than the reset does not");
+    for device in [&ana, &ben] {
+        device.sync.database.close().await.unwrap();
+    }
+}
+
+/// Of two announcements with the same coverage, the later one is the one a
+/// reload uses (§16.2).
+#[tokio::test]
+async fn of_two_announcements_with_equal_coverage_a_reload_uses_the_later() {
+    let (group, ana, ben, covers, operation) = ben_with_an_unannounced_snapshot().await;
+    // Ana snapshots the same slot Ben did, and her announcement lands first.
+    let first = ana.sync.snapshot(coven_merge::Audience::Store).await.unwrap();
+    ben.sync.retry_pending_operation(operation).await.unwrap();
+    ben.sync.pass().await.unwrap();
+    let (later, bodies) = {
+        let session = ben.sync.session.lock().await;
+        let counted: Vec<_> = session
+            .history
+            .announcements
+            .iter()
+            .map(|(slot, announcement)| (*slot, announcement.covers))
+            .collect();
+        assert_eq!(counted.len(), 2, "{counted:?}");
+        assert_eq!(counted[0], (first, covers));
+        assert_eq!(counted[1].1, covers);
+        let paths: Vec<_> = session
+            .history
+            .announcements
+            .values()
+            .map(|announcement| {
+                crate::snapshot_object::path(group.store, &announcement.snapshot).unwrap()
+            })
+            .collect();
+        (counted[1].0, paths)
+    };
+    assert!(later > first);
+    let before = ben.storage.request_trace().len();
+    ben.sync.reload_from_snapshot().await.unwrap();
+    let read: Vec<_> = ben.storage.request_trace()[before..]
+        .iter()
+        .filter_map(|request| match request {
+            coven_storage::test_utils::MemoryRequest::Read(path, ..)
+                if path.snapshot_id().is_some() =>
+            {
+                Some(path.clone())
+            }
+            _ => None,
+        })
+        .collect();
+    assert!(!read.is_empty());
+    assert!(read.iter().all(|path| *path == bodies[1]), "{read:?}");
+    for device in [&ana, &ben] {
+        device.sync.database.close().await.unwrap();
+    }
+}
