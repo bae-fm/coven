@@ -232,3 +232,11 @@ fn failed_save_and_forget_preserve_held_keys_and_reuse_the_sealing_capability() 
         assert!(matches!(custody.persist(&first), Err(KeyError::StoreClosed)));
     });
 }
+
+/// A passphrase erases its allocation when dropped (E1).
+#[test]
+fn a_passphrase_erases_its_allocation_when_dropped() {
+    fn erases<T: zeroize::ZeroizeOnDrop>(_: &T) {}
+    let passphrase = Passphrase::new("correct horse".to_owned());
+    erases(&passphrase.0);
+}

@@ -527,3 +527,23 @@ fn write_header_signatures_bind_path_prefix_header_and_every_root() {
     // A header signature is not a whole-object or prefix signature.
     assert!(signing.verify_prefix(path, b"prefix", &signature).is_err());
 }
+
+/// Every private pair a member holds erases when dropped (Appendix D).
+#[test]
+fn member_private_keys_erase_when_dropped() {
+    fn erases<T: zeroize::ZeroizeOnDrop>(_: &T) {}
+    let first = MemberKeys::generate().unwrap();
+    erases(&first.signing);
+    erases(&first.sealing);
+    let identity = MemberIdentity::new(MemberId(Uuid::from_u128(9)), first)
+        .with_candidate(MemberKeys::generate().unwrap())
+        .retire_candidate()
+        .with_candidate(MemberKeys::generate().unwrap());
+    let mut held = 0;
+    for keys in identity.held() {
+        erases(&keys.signing);
+        erases(&keys.sealing);
+        held += 1;
+    }
+    assert_eq!(held, 3, "the active pair, a retired one and the candidate");
+}
