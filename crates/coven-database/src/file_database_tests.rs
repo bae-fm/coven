@@ -448,28 +448,59 @@ fn fifo(path: &std::path::Path) {
     assert!(std::process::Command::new("mkfifo").arg(path).status().unwrap().success());
 }
 
-/// Let a write blocked opening the FIFO at `path` go on, reading whatever
-/// it writes.
+/// Let a write blocked opening the FIFO at `path` go on. A read end's open
+/// returns once a write end is opening, and that write's open returns once a
+/// read end has opened, so the write is on its way once this end opens; this
+/// end then closes without reading. The write refuses a FIFO before writing a
+/// byte, so there is nothing to read, and a read could wait forever: on macOS
+/// a reader whose open overlaps the writer's can miss the writer's close and
+/// stay blocked in `read` with no writer left.
 #[cfg(unix)]
 async fn release_fifo_writer(path: std::path::PathBuf) {
-    let mut reading = tokio::task::spawn_blocking({
+    let mut opening = tokio::task::spawn_blocking({
         let path = path.clone();
-        move || {
-            use std::io::Read;
-            let mut fifo = std::fs::File::open(path).unwrap();
-            fifo.read_to_end(&mut Vec::new()).unwrap();
-        }
+        move || drop(std::fs::File::open(path).unwrap())
     });
-    match tokio::time::timeout(HANG_GUARD, &mut reading).await {
-        Ok(read) => read.unwrap(),
-        Err(_) => {
-            // A write end of our own, opened and closed, ends the read, so
-            // the test fails here instead of its runtime waiting on the
-            // blocked read as it drops.
-            drop(std::fs::OpenOptions::new().write(true).open(&path));
-            drop(reading.await);
-            panic!("the FIFO's writer never closed its end: {}", path.display());
-        }
+    if let Ok(opened) = tokio::time::timeout(HANG_GUARD, &mut opening).await {
+        return opened.unwrap();
+    }
+    // A write end of our own, opened and closed, ends the open, so the test
+    // fails here instead of its runtime waiting on the blocked open as it
+    // drops.
+    drop(std::fs::OpenOptions::new().write(true).open(&path));
+    drop(opening.await);
+    panic!("no write opened the FIFO: {}", path.display());
+}
+
+/// The release ends, and lets the write go on, however its open and the
+/// write's overlap. Each round races a write's open against the release's:
+/// the overlap that leaves a reading end blocked falls inside the two opens,
+/// where no gate reaches, so the rounds go looking for it. Each round has a
+/// FIFO of its own, as each stalled write does: a process another test starts
+/// can hold a copy of an end for a moment, and an end left over from an
+/// earlier round on the same FIFO would let one open pass without the other.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_released_fifo_writer_goes_on_however_the_opens_overlap() {
+    const ROUNDS: usize = 50_000;
+    let dir = tempfile::tempdir().unwrap();
+    // One mkfifo makes a batch, its names short enough for one command line.
+    for batch in (0..ROUNDS).collect::<Vec<_>>().chunks(10_000) {
+        let made = std::process::Command::new("mkfifo")
+            .current_dir(dir.path())
+            .args(batch.iter().map(usize::to_string))
+            .status()
+            .unwrap();
+        assert!(made.success());
+    }
+    for round in 0..ROUNDS {
+        let path = dir.path().join(round.to_string());
+        let writing = tokio::task::spawn_blocking({
+            let path = path.clone();
+            move || drop(std::fs::OpenOptions::new().write(true).open(path).unwrap())
+        });
+        release_fifo_writer(path).await;
+        writing.await.unwrap();
     }
 }
 
