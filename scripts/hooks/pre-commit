@@ -19,40 +19,21 @@ run_check() {
         return 0
     else
         echo ""
-        echo "❌ $name failed:"
+        echo "$name failed:"
         cat "$TMPFILE"
         return 1
     fi
 }
 
-# Re-stage anything the formatter changed and fail, so the dev reviews the new
-# diff and re-runs `git commit`.
-restage_and_fail_if_changed() {
-    local tool_name="$1"
-    local diff
-    diff=$(git --no-pager diff --name-only)
-    [ -z "$diff" ] && return 0
-    local restaged=0
-    while IFS= read -r file; do
-        if echo "$CHANGED_FILES" | grep -qF "$file"; then
-            git add "$file"
-            restaged=1
-        fi
-    done <<< "$diff"
-    if [ "$restaged" -eq 1 ]; then
-        echo ""
-        echo "❌ $tool_name reformatted staged files. Changes have been re-staged."
-        echo "   Review the diff and commit again."
-        exit 1
-    fi
-}
+source "$(dirname "$0")/restage-formatted.sh"
 
 # Formatting, clippy and the checker's rules run before every commit (Appendix F.6).
+snapshot_staged_files
 run_check "cargo fmt" cargo fmt --all || {
     echo "cargo fmt failed"
     exit 1
 }
-restage_and_fail_if_changed "cargo fmt"
+restage_and_fail_if_formatted "cargo fmt" || exit 1
 
 run_check "formatting, clippy and the checker" scripts/check-fast.sh || {
     echo "Fix the findings above and try again"
@@ -73,6 +54,13 @@ if echo "$CHANGED_FILES" | grep -qE '^scripts/(check-fast\.sh|cargo\.sh|check_fa
     }
 fi
 
+if echo "$CHANGED_FILES" | grep -qE '^scripts/(hooks/restage-formatted\.sh|hooks/pre-commit|hook_restage_tests\.py)$'; then
+    run_check "the pre-commit restage's tests" python3 scripts/hook_restage_tests.py || {
+        echo "Fix the findings above and try again"
+        exit 1
+    }
+fi
+
 # Full test runs are periodic, not per-commit: CI runs the complete suite on
 # three platforms at every push. Set COVEN_HOOK_TESTS=1 to run it locally too.
 if [ "${COVEN_HOOK_TESTS:-0}" = "1" ]; then
@@ -82,4 +70,4 @@ if [ "${COVEN_HOOK_TESTS:-0}" = "1" ]; then
     }
 fi
 
-echo "✅ All checks passed"
+echo "All checks passed"
