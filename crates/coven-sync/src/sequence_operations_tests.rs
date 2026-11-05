@@ -523,3 +523,83 @@ async fn a_copy_stopped_by_history_ends_its_operations_and_invites() {
         .all(|record| record.kind != "invite"));
     close(&[&ana, &copy]).await;
 }
+
+/// A rejected operation whose undo fails keeps both causes in the call's
+/// error and the pending list, stays in the journal, and finishes its undo
+/// on the retry (§11.3).
+#[tokio::test]
+async fn a_failed_undo_keeps_both_causes_in_the_journal_and_retries() {
+    let group = Group::new();
+    let ana = group.device(1).await;
+    let ben = group.device(2).await;
+    group.create(&ana).await;
+    group.admit(&ana, &ben).await;
+    ben.sync.pass().await.unwrap();
+    let (upload_started, upload_observed) = tokio::sync::oneshot::channel();
+    let (upload_resume, upload_held) = tokio::sync::oneshot::channel();
+    group
+        .storage
+        .hold_next_creation(
+            coven_storage::ObjectPrefix::all(group.store),
+            upload_started,
+            upload_held,
+        )
+        .await;
+    let prepare = ben.sync.reset(coven_merge::Audience::Store);
+    let remove = async {
+        upload_observed.await.unwrap();
+        let body = ben
+            .storage
+            .request_trace()
+            .into_iter()
+            .find_map(|request| match request {
+                coven_storage::test_utils::MemoryRequest::Create(path)
+                    if path.snapshot_id().is_some() =>
+                {
+                    Some(path)
+                }
+                _ => None,
+            })
+            .expect("the snapshot body is being created");
+        ben.storage
+            .set_faults(coven_storage::test_utils::Faults {
+                delete_failures: [(body.clone(), coven_storage::StorageFailure::Network)].into(),
+                ..coven_storage::test_utils::Faults::none()
+            })
+            .await;
+        ana.sync
+            .administer(StoreChange::ChangeRole {
+                member: ben.identity.member(),
+                role: MemberRole::Member,
+            })
+            .await
+            .unwrap();
+        upload_resume.send(()).unwrap();
+        body
+    };
+    let (result, body) = tokio::time::timeout(HANG_GUARD, async { tokio::join!(prepare, remove) })
+        .await
+        .expect("publication controls must finish");
+    match &result {
+        Err(SyncError::Cleanup { operation, cleanup }) => {
+            assert!(matches!(**operation, SyncError::Rejected(OperationRejection::NotAllowed)));
+            assert!(matches!(**cleanup, SyncError::Storage(_)), "{cleanup:?}");
+        }
+        other => panic!("both causes are kept: {other:?}"),
+    }
+    assert_eq!(ben.sync.database.operations().await.unwrap().len(), 1);
+    let pending = ben.sync.database.pending::<PendingRecord>().await.unwrap();
+    assert!(
+        pending.iter().any(|record| matches!(record.reason, PendingReason::Cleanup { .. })),
+        "{pending:?}"
+    );
+
+    ben.storage.set_faults(coven_storage::test_utils::Faults::none()).await;
+    group.clock.set(std::time::UNIX_EPOCH + std::time::Duration::from_secs(10));
+    ben.sync.pass().await.unwrap();
+    assert!(ben.sync.database.operations().await.unwrap().is_empty());
+    assert!(group.storage.status(&body).await.unwrap().is_none());
+    for device in [&ana, &ben] {
+        device.sync.database.close().await.unwrap();
+    }
+}
