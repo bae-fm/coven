@@ -1131,6 +1131,26 @@ it, or it is at or below the floor's `at`.
   a check lands on, reads as the end at 11; a gap at 13 is passed over by the
   check of 14 and reported.
 
+## The floor a reload checks
+
+[`ReloadFloor`](sequence/CovenSequence/ReloadFloor.lean) models the floor a
+reload reads before it commits. The reload has loaded its starts and the kept
+slots after them to its target. A floor whose first kept slot has passed the
+slot after the lowest start sends it to load again from that floor. Otherwise
+the floor's check is `Settle.FloorAnnounced` against the history the reload
+holds: through the target, then the kept slots it reads through the floor's
+`at`.
+
+- `atTarget_refuses_honest_floor` is a checked counterexample to checking at the
+  target. In `Settle.lostStore`, slot 1 adds a member and slot 2 announces a
+  snapshot covering it; the honest floor names that announcement, with `at` 2.
+  A reload activated by slot 1 targets slot 1; checked against the slots
+  through 1, the floor is refused.
+- `honest_floor_installs`: reading the kept slots through the floor's `at`
+  first, a reload in storage in good order never refuses an honest floor.
+  `install_eq_atTarget`: for a floor whose `at` is at most the target, the two
+  checks are the same.
+
 ## JSON runner
 
 Build with `cd spec/proofs/sequence && lake build`; the executable is

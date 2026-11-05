@@ -123,6 +123,8 @@ enum ReloadStart {
 struct ReloadInputs {
     target: u64,
     history: History,
+    /// The slot `history` holds the slots through.
+    through: u64,
     operation: Option<OperationUpdate>,
 }
 
@@ -493,7 +495,7 @@ impl SequenceSync {
                 .install_selected(
                     session,
                     starts,
-                    ReloadInputs { target, history, operation: None },
+                    ReloadInputs { target, history, through: floor.header.at, operation: None },
                     &mut tentative_ring,
                     member,
                     Some(&floor),
@@ -631,12 +633,15 @@ impl SequenceSync {
             .max()
             .expect("required audience")
             .max(slot.0);
-        let history = through_floor.unwrap_or(history);
+        let (history, through) = match (through_floor, &floor) {
+            (Some(later), Some(floor)) => (later, floor.header.at.max(slot.0)),
+            _ => (history, slot.0),
+        };
         if let Some(newer) = self
             .install_selected(
                 session,
                 starts,
-                ReloadInputs { target, history, operation: None },
+                ReloadInputs { target, history, through, operation: None },
                 &mut ring,
                 member,
                 floor.as_ref(),
@@ -690,7 +695,7 @@ impl SequenceSync {
         previous_floor: Option<&FloorObject>,
         reporting: bool,
     ) -> Result<Option<FloorObject>, SyncError> {
-        let ReloadInputs { target, history, operation } = inputs;
+        let ReloadInputs { target, history, through, operation } = inputs;
         let first = starts
             .iter()
             .map(|start| start.covers(session.through))
@@ -753,8 +758,11 @@ impl SequenceSync {
                 Refusal::Parse { cause: None },
             ));
         }
+        // This floor can be newer than the target: one written after a later
+        // announcement names it. It is checked against the history through
+        // its `at` (§16.4, §16.5).
         if let Some(floor) = &floor {
-            self.authenticate_floor(floor, &history, ring, member).await?;
+            self.authenticate_floor_from(floor, &history, through, ring, member).await?;
         }
         let fetched = slots.len();
         let reading = self.clock.elapsed() - started;

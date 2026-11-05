@@ -593,8 +593,9 @@ async fn unreadable_evidence_keeps_a_file_and_an_unchanged_pass_reads_it_no_more
     ana.sync.pass().await.unwrap();
     assert_eq!(reads(ana), before, "an unchanged pass reads the snapshot no more");
 
-    // Ben reads everything first, then adds Ana to Gifts.
-    ben.sync.pass().await.unwrap();
+    // Ben adds Ana to Gifts with no pass since the clock moved: his next
+    // pass announces a newer Gifts snapshot and writes a floor naming it,
+    // past the addition Ana's reload of Gifts targets.
     ben.sync
         .administer(StoreChange::AddCircleMember { circle: gifts, member: ana.identity.member() })
         .await

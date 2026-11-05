@@ -5514,6 +5514,10 @@ its authenticated `first` to equal the prefix's, or refuses the floor as damaged
 
 **Reading with a floor.** A pass reads the floor when its next slot is missing,
 and again before committing the slots it read; §6.1 and §6.2 give those rules.
+Every check of a floor holds the history through its `at`, since the snapshots
+it names were announced up to there. A device whose history stops short of it
+reads the kept slots up to `at` first: a settling claim (§5.2), a reload before
+it commits (§16.5), and retention settling a lost reply (§16.6) all do.
 A floor read back unchanged since the device last checked it isn't checked again:
 the check reads only history through the floor's `at`, which never changes once
 applied. So a quiet pass under a floor decodes nothing (§21.2).
@@ -5564,6 +5568,17 @@ naming them. Tried again, it selects the newest snapshots and loads.
 **A reload commits all at once:** rows, merge records, lost values, source
 verdicts and the applied slot, in one transaction. A failed reload leaves the old
 state visible.
+
+**The floor before the commit.** Before committing, the reload reads the floor
+again. If its first kept slot has passed the slots the starts need, loading
+starts over from it. Otherwise the reload checks it, and that floor can be newer
+than the target. Ana adds Ben to Gifts at slot 15, announces a newer Gifts
+snapshot at 16, and writes a floor at 16 that names it. Ben's laptop reloads
+Gifts from the earlier snapshot to target 15, the slot that added him, then
+reads that floor. It reads slot 16 into a copy of its history and checks the
+floor against that copy, as a settling claim does (§5.2). Checked against the
+slots through the target only, the honest floor would be refused as damaged
+([`atTarget_refuses_honest_floor`](proofs/sequence/CovenSequence/ReloadFloor.lean)).
 
 **The removal rules run where they can reach.** A snapshot holds its author's
 merge state; the device runs the removal rules over it itself (§8.4). A row is
@@ -5700,7 +5715,10 @@ The rules:
   fails. The device reads the current floor and decides again. It never moves
   `first`, or any audience's coverage, backward.
 - **A lost reply is settled by reading the floor** before deleting anything. The
-  device deletes only slots the confirmed floor puts below `first`.
+  device deletes only slots the confirmed floor puts below `first`. Another
+  device may have replaced the floor since, past the slots this one has applied,
+  so the device reads forward first, as a pass does (§6.1, §6.2), and checks the
+  floor against the history through its `at`.
 - **Failed deletions stay journaled and reported** (§19.1). A later floor update
   doesn't wait for them to finish.
 - **Keep the snapshots still in use:** those the floor names, those a pending
@@ -10921,7 +10939,7 @@ Write-ups explain each model and state its assumptions:
 | A settled claim, kept or claimed again after it didn't land (the model's `notLanded`), ends in exactly one slot (no bound on contention or time) | `lands_once_never_lost` | `proofs/sequence/CovenSequence/Settle.lean` | §5.3 |
 | A snapshot's per-device claim numbers settle claims of every kind after deletion; they don't describe surviving effects | `claims_ge` | `proofs/sequence/CovenSequence/Settle.lean` | §16.1 |
 | A device missing a followed audience key cannot reload any audience past its blocked slot, even before noticing the block; a stopped device applies and reloads nothing | `device_stops`, `missing_key_blocks_reload`, `stopped_stays`, `Device.stopped_checks_nothing` | `proofs/sequence/CovenSequence/Device.lean` | §5.4, §22 |
-| A pass whose reading stops at or below the floor's `at` applies the slots before the stop and reports the stop; it reports the floor as damaged only after holding the slots through the floor's `at` and failing the check, which an honest floor in storage in good order never does. A stop past the floor's `at` reads as it did with the floor checked first | `gap_report_wins`, `floor_blamed_only_when_held`, `honest_floor_never_blamed`, `pass_eq_checkFirst` | `proofs/sequence/CovenSequence/ReadPass.lean` | §6.1, §6.2 |
+| A pass whose reading stops at or below the floor's `at` applies the slots before the stop and reports the stop; it reports the floor as damaged only after holding the slots through the floor's `at` and failing the check, which an honest floor in storage in good order never does. A stop past the floor's `at` reads as it did with the floor checked first | `gap_report_wins`, `floor_blamed_only_when_held`, `honest_floor_never_blamed`, `pass_eq_checkFirst` | `proofs/sequence/CovenSequence/ReadPass.lean` | §6.1, §6.2, §16.6 |
 | In storage in good order every slot from the first kept slot through the floor's `at` is present, so a missing one there is damage | `gap_below_at_is_damage` | `proofs/sequence/CovenSequence/ReadPass.lean` | §6.1 |
 | *Body.* Checked first against the slots before a gap, an honest floor is reported as damaged instead of the gap | `checkFirst_blames_honest_floor` | `proofs/sequence/CovenSequence/ReadPass.lean` | §6.1 |
 | *Body.* The end search answers the same on storage that ends at its answer, so a missing slot its checks land on reads as the end until a later slot is known to exist; one they pass over is found | `end_search_sees_an_end`, `checked_gap_reads_as_end` | `proofs/sequence/CovenSequence/ReadPass.lean` | §6.1 |
@@ -11025,6 +11043,8 @@ Write-ups explain each model and state its assumptions:
 | With the coverage rules, a sound reader with its key advances and reaches the end without anyone holding deletion back (honest snapshot bodies and kept raise and reset bodies assumed); a reader behind a floor snapshot's coverage may always reload | `read_progress`, `reaches_head` | `proofs/sequence/CovenSequence/Reader.lean` | §16.3, §16.4, §16.6 |
 | A preparation announcement alone changes no rows, schema version, reset or usable ordinary snapshots, though its coverage still limits later preparations and entries. In one example history, a reset preparation never activated stays out of the snapshots, never becomes a reset, and is never usable | `preparation_no_effect`, `abandoned_supplies_no_coverage`, `abandoned_not_usable` | `proofs/sequence/CovenSequence/Preparations.lean` | §16.3 |
 | Loading a floor snapshot and the slots after it reaches the full state; sound readers at one position agree | `joiner_reaches_head`, `readers_agree` | `proofs/sequence/CovenSequence/Reader.lean` | §16.4, §16.5 |
+| A reload that reads the kept slots through the floor's `at` before checking the floor it reads before committing never refuses an honest floor; for a floor whose `at` is at most the target, checking at the target is the same check | `honest_floor_installs`, `install_eq_atTarget` | `proofs/sequence/CovenSequence/ReloadFloor.lean` | §16.4, §16.5 |
+| *Body.* Checked against only the slots through its target, a reload refuses an honest floor written past it, as after a newer snapshot of a circle a device was just added to | `atTarget_refuses_honest_floor` | `proofs/sequence/CovenSequence/ReloadFloor.lean` | §16.5 |
 | A running device with fixed audiences and all their keys brings every reader to the end of the sequence | `device_reaches_head` | `proofs/sequence/CovenSequence/Device.lean` | §16.5 |
 | A reload installs the queue as it stands at commit, including writes made while loading, and keeps originals that aren't eligible | `queued_originals_preserved`, `write_during_reload` | `proofs/sequence/CovenSequence/QueueReload.lean` | §16.5 |
 | Each eligible original is applied over the loaded state exactly once; consumed ones are left out; repeating the step rebuilds from the loaded state | `queued_exactly_once`, `covered_not_reapplied`, `install_twice` | `proofs/sequence/CovenSequence/QueueReload.lean` | §16.5 |

@@ -386,6 +386,9 @@ import SequenceApply
 #print axioms CovenSequence.ReadPass.checkFirst_blames_honest_floor
 #print axioms CovenSequence.ReadPass.end_search_sees_an_end
 #print axioms CovenSequence.ReadPass.checked_gap_reads_as_end
+#print axioms CovenSequence.ReloadFloor.install_eq_atTarget
+#print axioms CovenSequence.ReloadFloor.honest_floor_installs
+#print axioms CovenSequence.ReloadFloor.atTarget_refuses_honest_floor
 #print axioms CovenSequence.JoinScan.readOrDamage_undamaged
 #print axioms CovenSequence.JoinScan.damaged_not_passed
 #print axioms CovenSequence.JoinScan.stop_strands_scan

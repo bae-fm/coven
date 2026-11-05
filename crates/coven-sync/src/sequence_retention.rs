@@ -388,21 +388,20 @@ impl SequenceSync {
             if record.last_step > 1 {
                 // A sent conditional request may have committed despite its
                 // missing reply. This observation alone authorizes deletion.
-                let current = self.read_floor(session.floor.as_ref(), ring, member).await?;
-                if let Some(floor) = &current {
-                    self.authenticate_floor(floor, &session.history, ring, member).await?;
-                }
+                // Another device may have replaced the floor since, past the
+                // slots this one has applied: reading forward checks it
+                // against the history through its `at` (§16.4, §16.6).
+                self.read_forward(session, ring, member).await?;
                 // A changed floor whose `first` reaches this one's authorizes
                 // the deletions. An unchanged one never does: a write that
                 // moves only the names keeps the previous `first`.
                 let same_revision =
-                    current.as_ref().map(|floor| floor.object()) == previous.as_ref();
-                if let Some(floor) = current.as_ref().filter(|_| !same_revision) {
+                    session.floor.as_ref().map(|floor| floor.object()) == previous.as_ref();
+                if let Some(floor) = session.floor.as_ref().filter(|_| !same_revision) {
                     if floor.header.first.0 >= first {
                         confirmed = Some(floor.header.first.0);
                     }
                 }
-                session.floor = current;
                 if confirmed.is_none() && !same_revision {
                     self.cleanup_floor(artifact).await?;
                     self.database.finish_operation(record.id).await?;

@@ -195,20 +195,22 @@ impl SequenceSync {
                 };
                 starts.push(start);
             }
-            let history = match floor.as_ref().filter(|floor| floor.header.at > *target) {
+            let (history, through) = match floor.as_ref().filter(|floor| floor.header.at > *target)
+            {
                 // A later floor can require newer authentication history without
                 // changing the selected bodies or their installation target.
                 Some(floor) => match self.floor_history(floor, ring, member).await {
-                    Ok((history, _)) => history,
+                    Ok((history, _)) => (history, floor.header.at),
                     Err(error) => return release(starts, Err(error)).await,
                 },
-                None => session.history.clone(),
+                None => (session.history.clone(), session.through),
             };
             let operation = match ReloadWork::Installed.update(&record) {
                 Ok(operation) => operation,
                 Err(error) => return release(starts, Err(error)).await,
             };
-            let inputs = ReloadInputs { target: *target, history, operation: Some(operation) };
+            let inputs =
+                ReloadInputs { target: *target, history, through, operation: Some(operation) };
             match self
                 .install_selected(session, starts, inputs, ring, member, floor.as_ref(), false)
                 .await?

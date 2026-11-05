@@ -150,6 +150,61 @@ async fn a_lost_floor_reply_deletes_nothing_until_the_floor_is_observed() {
     ana.sync.database.close().await.unwrap();
 }
 
+/// Ana's floor write lands but its reply is lost. Before her retention
+/// resumes, Ben announces a newer snapshot and writes a floor naming it, past
+/// the slots Ana has applied. Ana reads forward to that floor's `at` before
+/// checking it, accepts it, and its `first` authorizes her deletions (§16.4,
+/// §16.6).
+#[tokio::test]
+async fn a_lost_floor_reply_accepts_a_newer_floor_written_past_the_applied_slots() {
+    let group = Group::new();
+    let ana = group.device(1).await;
+    let ben = group.device(2).await;
+    group.create(&ana).await;
+    group.admit(&ana, &ben).await;
+    insert(&ana.sync.database, "published", "retained").await;
+    ana.sync.pass().await.unwrap();
+    let covered = ana.sync.database.applied_slot().await.unwrap();
+    ana.sync.snapshot(coven_merge::Audience::Store).await.unwrap();
+    group.clock.set(
+        std::time::UNIX_EPOCH
+            + crate::sequence_sync::sequence_retention::GRACE
+            + std::time::Duration::from_secs(1),
+    );
+    ana.storage.set_faults(Faults { lose_completion_reply: true, ..Faults::none() }).await;
+    // Retention alone, so the lost reply is the floor's.
+    let mut session = ana.sync.session.lock().await;
+    ana.sync.retain_sequence(&mut session, &mut group.ring.clone(), &ana.identity).await.unwrap();
+    drop(session);
+    ana.storage.set_faults(Faults::none()).await;
+    let path = ObjectPath::slot(group.store, covered.try_into().unwrap());
+    assert!(group.storage.status(&path).await.unwrap().is_some());
+    ben.sync.pass().await.unwrap();
+    ben.sync.snapshot(coven_merge::Audience::Store).await.unwrap();
+    ben.sync.pass().await.unwrap();
+    let applied = ana.sync.database.applied_slot().await.unwrap();
+    assert!(
+        crate::sequence_sync::sequence_reload::tests::stored_floor(&ben).await.header.at > applied
+    );
+    // Retention alone again, once its retry is due, as in a pass whose read
+    // forward came before Ben's floor.
+    group.clock.set(
+        std::time::UNIX_EPOCH
+            + crate::sequence_sync::sequence_retention::GRACE
+            + std::time::Duration::from_secs(5),
+    );
+    let mut session = ana.sync.session.lock().await;
+    ana.sync.retain_sequence(&mut session, &mut group.ring.clone(), &ana.identity).await.unwrap();
+    drop(session);
+    let pending = ana.sync.database.pending::<crate::PendingRecord>().await.unwrap();
+    assert!(pending.is_empty(), "{pending:?}");
+    assert!(group.storage.status(&path).await.unwrap().is_none());
+    assert!(ana.sync.database.operations().await.unwrap().is_empty());
+    for device in [&ana, &ben] {
+        device.sync.database.close().await.unwrap();
+    }
+}
+
 /// The floor a quiet pass reads back unchanged was authenticated when it was
 /// first read; checking it again decodes its copies and announcements.
 #[tokio::test]

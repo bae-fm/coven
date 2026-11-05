@@ -444,6 +444,41 @@ async fn a_newly_readable_circle_starts_from_the_floor_snapshot_announced_after_
     }
 }
 
+/// Ana adds Ben to Gifts, announces a newer Gifts snapshot, and her pass
+/// writes a floor naming it, so the floor's `at` passes the addition. Ben's
+/// reload of Gifts starts from its earlier snapshot and targets the
+/// addition; the floor it reads before committing is checked against the
+/// history through the floor's `at`, not the target, and accepted (§16.4,
+/// §16.5).
+#[tokio::test]
+async fn a_newly_readable_circle_accepts_a_floor_written_past_the_addition() {
+    let group = Group::new();
+    let ana = group.device(1).await;
+    let ben = group.device(2).await;
+    group.create(&ana).await;
+    group.admit(&ana, &ben).await;
+    let gifts = ana.sync.create_circle("Gifts".into()).await.unwrap();
+    pin(&ana.sync.database, PIN_1, gifts, "before Ben").await;
+    ana.sync.pass().await.unwrap();
+    ana.sync.snapshot(Audience::Circle(gifts)).await.unwrap();
+    ana.sync.snapshot(Audience::Store).await.unwrap();
+    ben.sync.pass().await.unwrap();
+    ana.sync
+        .administer(StoreChange::AddCircleMember { circle: gifts, member: ben.identity.member() })
+        .await
+        .unwrap();
+    let added = ana.sync.database.applied_slot().await.unwrap();
+    ana.sync.snapshot(Audience::Circle(gifts)).await.unwrap();
+    ana.sync.pass().await.unwrap();
+    assert!(stored_floor(&ana).await.header.at > added);
+    ben.sync.pass().await.unwrap();
+    assert_eq!(pins(&ben.sync.database).await, [(PIN_1.into(), "before Ben".into())]);
+    assert!(ben.sync.database.reloading_audiences().await.unwrap().is_empty());
+    for device in [&ana, &ben] {
+        device.sync.database.close().await.unwrap();
+    }
+}
+
 /// Without a floor no slot is deleted, so a circle that never had a snapshot
 /// loads from slot zero when it becomes readable.
 #[tokio::test]
