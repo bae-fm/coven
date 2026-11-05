@@ -353,6 +353,72 @@ async fn a_retry_during_a_cooldown_says_when_it_ends() {
     f.handle.close().await.unwrap();
 }
 
+/// An administrative call on a device with no storage fails with `NoStorage`
+/// before it journals anything or sends a request (§11.1).
+#[tokio::test]
+async fn an_operation_on_a_device_without_storage_fails_before_journaling() {
+    let f = Fixture::new().await;
+    let circle = CircleId(uuid::Uuid::from_u128(1));
+    let requests = f.storage.request_count();
+    assert!(matches!(f.handle.reset_store().await, Err(SyncError::NoStorage)));
+    assert!(matches!(f.handle.circles().reset(circle).await, Err(SyncError::NoStorage)));
+    assert!(matches!(f.handle.reload_from_snapshot().await, Err(SyncError::NoStorage)));
+    let journal: i64 = f
+        .handle
+        .read(|sql| Ok(sql.query_row("SELECT count(*) FROM coven_operations", [], |r| r.get(0))?))
+        .await
+        .unwrap();
+    assert_eq!(journal, 0);
+    assert_eq!(f.storage.request_count(), requests);
+    f.handle.close().await.unwrap();
+}
+
+/// An operation's pass meets a provider cooldown. Retrying the operation
+/// makes it due, but the next attempt still starts no request before the
+/// cooldown ends (E6).
+#[tokio::test]
+async fn a_retried_operation_still_waits_out_a_provider_cooldown() {
+    let f = Fixture::new().await;
+    f.setup().await.unwrap();
+    synced(&f.handle).await;
+    stop(&f).await;
+    let (_, operation) = f.handle.circles().create("Gifts").await.unwrap();
+    f.storage
+        .set_faults(Faults {
+            fail_next: 1,
+            failure: StorageFailure::RateLimited,
+            retry_after: Some(200),
+            ..Faults::none()
+        })
+        .await;
+    f.handle.start_sync().await.unwrap();
+    last_pass(&f.handle, failed).await;
+    f.handle.retry_pending_operation(operation).await.unwrap();
+    let requests = f.storage.request_count();
+    let outcome = tokio::time::timeout(HANG_GUARD, answer(f.handle.retry_now().await.unwrap()))
+        .await
+        .expect("the retry is answered at once");
+    assert!(matches!(outcome, RetryOutcome::CoolingDown { .. }), "{outcome:?}");
+    assert_eq!(f.storage.request_count(), requests, "the operation started a request");
+
+    f.advance(Duration::from_secs(201));
+    let outcome = answer(f.handle.retry_now().await.unwrap()).await;
+    assert!(matches!(outcome, RetryOutcome::Synced { .. }), "{outcome:?}");
+    let finished: Option<OperationOutcome> = f
+        .handle
+        .read(move |sql| {
+            Ok(sql.query_row(
+                "SELECT outcome FROM coven_operations WHERE operation=?1",
+                [operation.0],
+                |r| r.get(0),
+            )?)
+        })
+        .await
+        .unwrap();
+    assert!(finished.is_some());
+    f.handle.close().await.unwrap();
+}
+
 /// A failed attempt answers with its cause; a failure only new credentials
 /// can clear answers with itself at once, making no attempt.
 #[tokio::test]
