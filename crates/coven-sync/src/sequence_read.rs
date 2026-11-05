@@ -322,3 +322,7 @@ impl SlotStep {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "sequence_read_tests.rs"]
+mod tests;

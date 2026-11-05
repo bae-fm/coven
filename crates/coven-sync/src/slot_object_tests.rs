@@ -1,6 +1,7 @@
 use super::*;
-use crate::sequence_sync::tests::Group;
+use crate::sequence_sync::tests::{insert, pin, Group};
 use coven_format::FormatVersion;
+use coven_storage::Storage;
 use std::num::NonZeroU64;
 
 #[tokio::test]
@@ -139,4 +140,52 @@ async fn a_writes_slot_is_read_once() {
         "read {read} bytes of a {size}-byte slot"
     );
     ben.database().close().await.unwrap();
+}
+
+/// Neither the provider nor an outsider reads names, values, key commitments
+/// or operation contents: every object the store holds is ciphertext around
+/// what the app wrote (§2.3).
+#[tokio::test]
+async fn stored_objects_never_hold_names_values_or_operation_contents() {
+    let group = Group::new();
+    let ana = group.device(1).await;
+    let ben = group.device(2).await;
+    group.create(&ana).await;
+    group.admit(&ana, &ben).await;
+    let gifts = ana.sync.create_circle("Moonlit Gifts".into()).await.unwrap();
+    pin(ana.database(), "00000000-0000-4000-8000-000000000001", gifts, "a distinctive pin value")
+        .await;
+    insert(ana.database(), "note-id-distinct", "a distinctive note title").await;
+    ana.sync.pass().await.unwrap();
+    ben.sync.pass().await.unwrap();
+    ana.sync.snapshot(coven_merge::Audience::Store).await.unwrap();
+    ana.sync.snapshot(coven_merge::Audience::Circle(gifts)).await.unwrap();
+
+    let objects = group.storage.list(&coven_storage::ObjectPrefix::all(group.store)).await.unwrap();
+    assert!(objects.len() > 3, "slots, snapshots and the floor are stored: {}", objects.len());
+    let key = [7u8; 32];
+    let secrets: [&[u8]; 8] = [
+        b"a distinctive note title",
+        b"a distinctive pin value",
+        b"note-id-distinct",
+        b"Moonlit Gifts",
+        b"notes",
+        b"pins",
+        b"INSERT",
+        &key,
+    ];
+    for object in objects {
+        let bytes = group.storage.read(&object.path).await.unwrap();
+        for secret in secrets {
+            assert!(
+                !bytes.windows(secret.len()).any(|window| window == secret),
+                "{:?} holds {:?}",
+                object.path,
+                String::from_utf8_lossy(secret)
+            );
+        }
+    }
+    for device in [&ana, &ben] {
+        device.database().close().await.unwrap();
+    }
 }
