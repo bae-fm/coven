@@ -145,12 +145,17 @@ async fn versioning_refusal_commits_nothing_and_preserves_an_existing_connection
     assert_eq!(coven_storage::recorded_config(&opened.directory).unwrap(), None);
     *connector.versioning.lock().unwrap() = Ok(S3BucketVersioning::Disabled);
     setup(&opened.handle, location.clone()).await.unwrap();
+    // The connection's first pass runs beside the test: count from where
+    // its workers have parked, and again once they have taken whatever the
+    // refused setup left them.
+    opened.handle.test_parked().await;
     let before = storage.request_count();
     *connector.versioning.lock().unwrap() = Ok(S3BucketVersioning::Enabled);
     assert!(matches!(
         setup(&opened.handle, location.clone()).await.unwrap_err(),
         StorageSetupError::Check(StorageCheckError::S3VersioningUnsupported { .. })
     ));
+    opened.handle.test_parked().await;
     assert_eq!(storage.request_count(), before);
     assert_eq!(coven_storage::recorded_config(&opened.directory).unwrap(), Some(location));
     opened.handle.close().await.unwrap();
