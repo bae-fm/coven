@@ -1,6 +1,6 @@
 //! Fixed floor bytes held outside the database's bounded operation record.
 use super::*;
-use crate::sealed_stream::SealedStream;
+use crate::sealed_stream::StreamSealer;
 use coven_format::{
     floor::{FloorFrames, FloorHeader, OriginalSlot},
     sealed_floor::FloorPrefixEncoder,
@@ -105,30 +105,33 @@ impl SequenceSync {
                 originals.remove(&Slot(*slot)).ok_or(coven_database::DbError::DamagedDatabase)
             })
             .collect::<Result<Vec<_>, _>>()?;
-        let plaintext = FloorPlaintext {
+        let mut plaintext = FloorPlaintext {
             frames,
             originals: announcements.into_iter(),
             piece: Cursor::new(header),
             ended: false,
         };
-        let mut sealed = SealedStream::new(
-            plaintext,
+        let (mut sealer, start) = StreamSealer::start(
             ObjectPath::floor(self.store()),
             prefix,
             None,
             crate::write_seal::derive(ring, &Audience::Store, capture.key)?,
-            member.clone(),
         );
-        let mut buffer = vec![0; coven_format::chunks::CHUNK_SIZE];
-        let mut size = 0u64;
+        writer.append(&start).await?;
         loop {
-            let length = sealed.read(&mut buffer).map_err(SyncError::disk)?;
-            if length == 0 {
+            let mut chunk = zeroize::Zeroizing::new(Vec::new());
+            plaintext
+                .by_ref()
+                .take(coven_format::chunks::CHUNK_SIZE as u64)
+                .read_to_end(&mut chunk)
+                .map_err(SyncError::disk)?;
+            if chunk.is_empty() {
                 break;
             }
-            writer.append(&buffer[..length]).await?;
-            size = size.checked_add(length as u64).ok_or(SyncError::SequenceExhausted)?;
+            writer.append(&sealer.chunk(&chunk)?).await?;
         }
+        let (signature, _, size) = sealer.finish(member);
+        writer.append(signature.as_bytes()).await?;
         writer.finish().await?;
         Ok(FloorArtifact { capture: capture.clone(), size, session: None })
     }

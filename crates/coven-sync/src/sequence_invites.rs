@@ -705,9 +705,7 @@ impl SequenceSync {
     /// device's by less than that sends no request after it is gone (§13.2).
     /// A request sent in between the delete and the create is taken too.
     async fn end_request(&self, work: &InviteWork) -> Result<u64, SyncError> {
-        let kept_until = seconds(work.expires_at)?
-            .checked_add(super::sequence_retention::GRACE.as_secs())
-            .ok_or(SyncError::SequenceExhausted)?;
+        let kept_until = kept_until(seconds(work.expires_at)?)?;
         let marker = InviteEnd { kept_until }.encode();
         let path = ObjectPath::join_request(self.store(), work.device, work.id);
         loop {
@@ -828,6 +826,17 @@ fn refused_record(id: OperationId, outcome: &OperationOutcome) {
 
 /// A time as whole seconds since the Unix epoch, as codes and markers carry
 /// it.
+/// When the marker of an invite that expires at `expires`, in seconds since
+/// 1970, may go: the retention grace after it (§13.2). A time the marker's
+/// seconds can't hold is refused as the expiry the clock can't represent is.
+fn kept_until(expires: u64) -> Result<u64, SyncError> {
+    expires.checked_add(super::sequence_retention::GRACE.as_secs()).ok_or_else(|| {
+        StorageFailure::InvalidConfiguration
+            .with_source("the clock cannot represent when an ended invite's marker may go")
+            .into()
+    })
+}
+
 fn seconds(at: SystemTime) -> Result<u64, SyncError> {
     Ok(at
         .duration_since(std::time::UNIX_EPOCH)

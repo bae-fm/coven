@@ -1,7 +1,9 @@
 //! Fixed-size encryption of plaintext streams before provider publication.
 
 use crate::SyncError;
-use coven_crypto::{DerivedKeys, MemberIdentity, ObjectDigest, ObjectHasher, Signature};
+use coven_crypto::{
+    DerivedKeys, MemberIdentity, ObjectDigest, ObjectHasher, Signature, SIGNATURE_LEN,
+};
 use coven_format::{chunks::CHUNK_SIZE, sealed_stream::StreamObjectLayout};
 use coven_storage::ObjectPath;
 use std::io::{self, Read};
@@ -15,6 +17,8 @@ pub(crate) struct StreamSealer {
     key: DerivedKeys,
     layout: StreamObjectLayout,
     hash: ObjectHasher,
+    /// The object's bytes so far.
+    size: u64,
 }
 
 impl StreamSealer {
@@ -32,7 +36,8 @@ impl StreamSealer {
         }
         let mut hash = ObjectHasher::new();
         hash.update(&bytes);
-        (Self { path, prefix, key, layout: StreamObjectLayout::new(), hash }, bytes)
+        let size = bytes.len() as u64;
+        (Self { path, prefix, key, layout: StreamObjectLayout::new(), hash, size }, bytes)
     }
 
     /// Seal the next chunk, of at most `CHUNK_SIZE` plaintext bytes. A
@@ -46,18 +51,33 @@ impl StreamSealer {
             self.key.seal_object_chunk(path, &self.prefix, 0, index, plaintext)?
         };
         let piece = self.layout.encode_chunk(&sealed)?;
+        self.size = grown(self.size, piece.len())?;
         self.hash.update(&piece);
         Ok(piece)
     }
 
     /// The object's last bytes, the signature of every byte before them,
-    /// and the digest of the whole object, signature included.
-    pub(crate) fn finish(self, member: &MemberIdentity) -> (Signature, ObjectDigest) {
+    /// the digest of the whole object, signature included, and its size.
+    pub(crate) fn finish(self, member: &MemberIdentity) -> (Signature, ObjectDigest, u64) {
         let mut hash = self.hash;
         let signature = member.keys().sign_object(self.path.as_str(), &hash.clone().finish());
         hash.update(signature.as_bytes());
-        (signature, hash.finish())
+        (signature, hash.finish(), self.size + SIGNATURE_LEN as u64)
     }
+}
+
+/// An object of `size` bytes grown by a piece of `length`. Its size is a
+/// `u64`, which must still hold the final signature.
+fn grown(size: u64, length: usize) -> Result<u64, SyncError> {
+    size.checked_add(length as u64)
+        .filter(|grown| *grown <= u64::MAX - SIGNATURE_LEN as u64)
+        .ok_or_else(|| {
+            coven_format::Error::Invalid {
+                field: "sealed stream size",
+                rule: coven_format::error::Rule::Chunk,
+            }
+            .into()
+        })
 }
 
 /// A sealed stream object read from its plaintext.
@@ -105,3 +125,7 @@ impl<R: Read> Read for SealedStream<R> {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "sealed_stream_tests.rs"]
+mod tests;

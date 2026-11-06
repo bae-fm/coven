@@ -184,7 +184,6 @@ async fn seal_frames(
     let (mut sealer, start) =
         crate::sealed_stream::StreamSealer::start(path.clone(), prefix, Some(signature), key);
     writer.append(&start).await?;
-    let mut size = start.len() as u64;
     let mut chunk = zeroize::Zeroizing::new(Vec::with_capacity(coven_format::chunks::CHUNK_SIZE));
     while let Some(frame) = receiver.recv().await {
         let mut remaining = frame.as_slice();
@@ -195,7 +194,6 @@ async fn seal_frames(
             if chunk.len() == coven_format::chunks::CHUNK_SIZE {
                 let piece = sealer.chunk(&chunk)?;
                 writer.append(&piece).await?;
-                size += piece.len() as u64;
                 chunk.clear();
             }
         }
@@ -203,11 +201,9 @@ async fn seal_frames(
     if !chunk.is_empty() {
         let piece = sealer.chunk(&chunk)?;
         writer.append(&piece).await?;
-        size += piece.len() as u64;
     }
-    let (signature, digest) = sealer.finish(member);
+    let (signature, digest, size) = sealer.finish(member);
     writer.append(signature.as_bytes()).await?;
-    size += signature.as_bytes().len() as u64;
     writer.finish().await?;
     Ok((header.covers, *digest.as_bytes(), size))
 }

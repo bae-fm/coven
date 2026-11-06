@@ -979,3 +979,17 @@ async fn a_recovery_invite_for_a_removed_member_is_refused() {
         device.sync.database.close().await.unwrap();
     }
 }
+
+/// An ended invite's marker is kept a grace past the expiry, and a time its
+/// seconds can't hold is refused as one the clock can't represent (§13.2).
+#[test]
+fn a_marker_kept_past_the_last_second_is_refused() {
+    let grace = crate::sequence_sync::sequence_retention::GRACE.as_secs();
+    assert_eq!(super::kept_until(u64::MAX - grace).unwrap(), u64::MAX);
+    let refused = super::kept_until(u64::MAX - grace + 1);
+    assert!(
+        matches!(&refused, Err(SyncError::Storage(error))
+            if error.failure() == coven_storage::StorageFailure::InvalidConfiguration),
+        "{refused:?}"
+    );
+}

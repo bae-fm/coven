@@ -178,8 +178,9 @@ fn sealed_stream(
     for chunk in plain.chunks(coven_format::chunks::CHUNK_SIZE) {
         bytes.extend(sealer.chunk(chunk).unwrap());
     }
-    let (signature, digest) = sealer.finish(signer);
+    let (signature, digest, size) = sealer.finish(signer);
     bytes.extend_from_slice(signature.as_bytes());
+    assert_eq!(size, bytes.len() as u64);
     (bytes, *digest.as_bytes())
 }
 
