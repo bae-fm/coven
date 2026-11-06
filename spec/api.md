@@ -4386,7 +4386,10 @@ while let Some(Ok(values)) = lost.next().await {
   the last pass and the last synced time. Setup, joining and restoring write
   storage set up and their finish as the last synced time. The loop writes
   that the pass moved a slot as it first does, and how the pass ended as it
-  ends, before its retries hear the answer. A row that can't be written fails
+  ends, before its retries hear the answer. The loop, or the attempt to
+  connect, that ends on a failure of its own or a panic, in a pass or
+  outside one, writes the failure as the last pass and that nothing moves,
+  so the state shows it, never syncing. A row that can't be written fails
   the handle, as a pending record does (below), and the loop ends. Each error
   is kept as its text, with its typed category beside it (`StatusFailure`),
   so a state read after its process ended still says why. The row is there

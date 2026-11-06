@@ -202,8 +202,20 @@ moves; `quiet_pass_keeps` that a pass moving nothing leaves the state as it
 was while it runs, and after it when it ends as the last pass did.
 `last_synced_never_back` proves the time of the last finished sync never
 goes backward, even when the clock does, and `last_synced_kept` that only a
-pass reaching the read end changes it: every other event, reopening
-included, keeps it.
+pass reaching the read end, or setup, joining or restoring finishing,
+changes it: every other event, reopening included, keeps it.
+
+A store's long-lived workers end in one of the model's events. A pass ends
+with `finish`; the sync loop, or the attempt to connect that starts it,
+ending on a failure of its own work or a panic, in a pass or outside one,
+is `halt`: the last pass shows the failure, nothing moves, and sync stops
+(api.md E15). The upload worker's end drops its attempts, an `uploads`
+change. The invite expiry, the network follower and a read-ahead change no
+fact the state reads. `only_setup_changes_storage` proves no event but
+opening, setup or forgetting changes whether storage is set up, so a
+worker's failure never undoes a setup; `failed_worker_shows` proves that
+after `finish` or `halt` with a failure naming a state, the state shown is
+that one or one that outranks it, never synced.
 
 Synced means nothing waits: this device's data and files are in storage.
 `synced_files_stored` proves synced shows only while every upload in the
@@ -240,7 +252,8 @@ cooldown, is no failure either: it waits to sync (`waiting_pass_waits`),
 without moving the time of the last finished sync.
 
 The model takes the facts as given: that the loop records how each pass
-ended and whether it moved a slot, that opening records whether storage is
+ended and whether it moved a slot, that a loop or attempt ending outside a
+pass's end records its failure and that nothing moves, that opening records whether storage is
 set up, and that the live query reads them together in one transaction.
 The `sync_state` case of `ioRunner` takes a set of facts as JSON and
 answers the state's name and, for waiting to sync, its wait.

@@ -453,6 +453,33 @@ async fn a_bug_in_the_loops_own_write_reaches_the_sink_once() {
     }
 }
 
+/// A loop that ends in a pass that has moved a slot, on a panic or on a
+/// failure of its own work, shows the failure: once the last pass records
+/// it nothing moves, so the state is failed, never syncing (§19.1, E15,
+/// IO `failed_worker_shows`).
+#[tokio::test]
+async fn a_loop_ending_mid_pass_shows_its_failure() {
+    let group = Group::new();
+    let ana = group.device(1).await;
+    group.create(&ana).await;
+    for panic in [true, false] {
+        ana.database().record_moving().await.unwrap();
+        assert_eq!(crate::sync_status(ana.database()).await.unwrap().state, SyncState::Syncing);
+        if panic {
+            let bug = coven_foundation::task::Bug {
+                operation: "the sync loop",
+                message: "a pass broke after reading a slot".into(),
+            };
+            super::panicked(&ana.sync, bug).await;
+        } else {
+            super::give_up(&ana.sync, SyncError::NoStorage).await;
+        }
+        let shown = crate::sync_status(ana.database()).await.unwrap().state;
+        assert!(matches!(shown, SyncState::Failed(_)), "panic {panic}: {shown:?}");
+    }
+    ana.database().close().await.unwrap();
+}
+
 /// Set the group's clock `seconds` after the epoch.
 fn at(group: &Group, seconds: u64) {
     group.clock.set(std::time::UNIX_EPOCH + std::time::Duration::from_secs(seconds));

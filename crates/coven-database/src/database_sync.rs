@@ -322,8 +322,9 @@ impl Database {
     }
 
     /// Record how the last pass ended, as sync encodes it, when sync failed
-    /// outside a pass: starting, stopping or a local failure of the loop's.
-    /// A failure fails this handle, as `record_opened`'s does.
+    /// outside a pass's end: starting, stopping, or a local failure or panic
+    /// of the loop's, in a pass or outside one; and that nothing moves. A
+    /// failure fails this handle, as `record_opened`'s does.
     pub async fn record_last_pass(&self, last_pass: Vec<u8>) -> Result<(), DbError> {
         self.save_sync_status(move |db| {
             crate::internal_schema::sync_status::save_last_pass(db, &last_pass)

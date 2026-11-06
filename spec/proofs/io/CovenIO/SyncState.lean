@@ -801,8 +801,14 @@ inductive Event
   | queue (unsent : Bool)
   /-- The pending records change. -/
   | pending (records : List Reason)
-  /-- Opening, setup or forgetting records whether storage is set up here. -/
-  | storage (s : Storage)
+  /-- Opening, setup or forgetting records whether storage is set up here;
+  setup, joining or restoring also records when it finished, which counts
+  as the last finished sync. -/
+  | storage (s : Storage) (finished : Option Nat)
+  /-- The sync loop, or the attempt to connect that starts it, ends on a
+  failure of its own work or a panic, in a pass or outside one: the last
+  pass shows the failure, nothing moves, and sync stops (api.md E15). -/
+  | halt (failure : PassFailure)
   /-- Sync starts or stops, a cooldown begins or ends, the app pauses or
   resumes uploads, or turns the setting to transfer only on unmetered
   networks on or off. -/
@@ -836,7 +842,12 @@ def step (f : Facts) : Event → Option Facts
   | .uploads us => some { f with uploads := us }
   | .queue u => some { f with unsent := u }
   | .pending rs => some { f with records := rs }
-  | .storage s => some { f with storage := s }
+  | .storage s finished =>
+      some { f with storage := s,
+                    lastSynced := match finished with
+                      | none => f.lastSynced
+                      | some now => some (later f.lastSynced now) }
+  | .halt p => some { f with passing := false, moving := false, last := .failed p, running := false }
   | .settings r c p m => some { f with running := r, cooling := c, paused := p, unmeteredOnly := m }
   | .network m => some { f with metered := m }
   | .reopen =>
@@ -884,13 +895,20 @@ theorem last_synced_never_back (f g : Facts) (e : Event) (h : step f e = some g)
       split at h
       · simp only [Option.some.injEq] at h; subst h; exact ⟨t, kept, Nat.le_refl t⟩
       · simp at h
+  | storage s finished =>
+      simp only [step, Option.some.injEq] at h; subst h
+      cases finished with
+      | none => exact ⟨t, kept, Nat.le_refl t⟩
+      | some now => exact ⟨_, rfl, by simp [kept, later]; omega⟩
   | _ =>
       simp only [step, Option.some.injEq] at h; subst h; exact ⟨t, kept, Nat.le_refl t⟩
 
-/-- Only a pass reaching the read end changes that time: every other event,
-a reopen and every change of state included, keeps it. -/
+/-- Only a pass reaching the read end, or setup, joining or restoring
+finishing, changes that time: every other event, a reopen and every change
+of state included, keeps it. -/
 theorem last_synced_kept (f g : Facts) (e : Event) (h : step f e = some g)
-    (other : ∀ now, e ≠ .finish .synced now) : g.lastSynced = f.lastSynced := by
+    (other : ∀ now, e ≠ .finish .synced now)
+    (unfinished : ∀ s now, e ≠ .storage s (some now)) : g.lastSynced = f.lastSynced := by
   cases e with
   | finish last now =>
       simp only [step] at h
@@ -909,6 +927,11 @@ theorem last_synced_kept (f g : Facts) (e : Event) (h : step f e = some g)
       split at h
       · simp only [Option.some.injEq] at h; subst h; rfl
       · simp at h
+  | storage s finished =>
+      simp only [step, Option.some.injEq] at h; subst h
+      cases finished with
+      | none => rfl
+      | some now => exact absurd rfl (unfinished s now)
   | _ => simp only [step, Option.some.injEq] at h; subst h; rfl
 
 theorem ended_queued (f : Facts) (h : f.ended = .offline) :
@@ -1038,6 +1061,56 @@ theorem network_keeps_state (f : Facts) (m : Bool) :
   simp only [step, Option.map_some, Option.some.injEq]
   exact state_view (by simp [Facts.view])
 
+/-! ## Workers ending, and storage set up -/
+
+/-- Only opening, setup or forgetting changes whether storage is set up
+here: no pass, worker's end, upload, write, record, setting or reopen does,
+so a failure after setup stands shows through the state, never by undoing
+the setup. -/
+theorem only_setup_changes_storage (f g : Facts) (e : Event) (h : step f e = some g)
+    (other : ∀ s t, e ≠ .storage s t) : g.storage = f.storage := by
+  cases e with
+  | storage s t => exact absurd rfl (other s t)
+  | begin => simp only [step] at h; split at h <;> simp at h; subst h; rfl
+  | move => simp only [step] at h; split at h <;> simp at h; subst h; rfl
+  | finish last now => simp only [step] at h; split at h <;> simp at h; subst h; rfl
+  | _ => simp only [step, Option.some.injEq] at h; subst h; rfl
+
+/-- The loop's candidate is never above the state shown. -/
+theorem loop_le_state (f : Facts) : f.loop.rank ≤ (state f).rank := by
+  by_cases n : f.storage = .none
+  · simp only [state, n, ite_true]
+    cases f.loop <;> simp [State.rank]
+  · exact (one_state f n).2.1 _ (List.mem_cons_self ..)
+
+/-- A pass ending on a failure that names a state shows that state, or the
+offline state with unsent changes beside it, with nothing moving. -/
+theorem ended_names (f : Facts) (p : PassFailure) (s : State) (h : f.last = .failed p)
+    (named : p.state = some s) : s.rank ≤ f.ended.rank := by
+  unfold Facts.ended
+  rw [h]
+  simp only [named]
+  cases s <;> cases f.unsentWork <;> simp [State.rank]
+
+/-- A worker's end shows: once a pass, the sync loop or the attempt to
+connect ends on a failure that names a state, the state shown is that one
+or one that outranks it, and never synced. The setup stands meanwhile
+(`only_setup_changes_storage`), so this is how such a failure shows. -/
+theorem failed_worker_shows (f g : Facts) (p : PassFailure) (s : State)
+    (named : p.state = some s) (e : Event)
+    (ends : e = .halt p ∨ ∃ now, e = .finish (.failed p) now) (h : step f e = some g) :
+    s.rank ≤ (state g).rank ∧ state g ≠ .synced := by
+  have ⟨still, last⟩ : g.moving = false ∧ g.last = .failed p := by
+    rcases ends with e' | ⟨now, e'⟩ <;> subst e'
+    · simp only [step, Option.some.injEq] at h; subst h; exact ⟨rfl, rfl⟩
+    · simp only [step] at h; split at h <;> simp at h; subst h; exact ⟨rfl, rfl⟩
+  have loop : g.loop = g.ended := by simp [Facts.loop, still]
+  refine ⟨?_, failed_pass_not_synced g p last⟩
+  have := ended_names g p s last named
+  have := loop_le_state g
+  rw [loop] at this
+  omega
+
 namespace Examples
 
 def connected : Facts :=
@@ -1112,12 +1185,17 @@ example : (run connected [.pending [.storage .quotaExceeded true]]).map state =
     some .storageFull := by decide
 
 /-- Dan's sign-in is gone from the keychain: signed out, last synced kept. -/
-example : (run connected [.storage .signedOut, .reopen]).map (fun f => (state f, f.lastSynced)) =
+example : (run connected [.storage .signedOut none, .reopen]).map (fun f => (state f, f.lastSynced)) =
     some (.signedOut, some 100) := by decide
 
 /-- Dan's device was removed while it was signed out: removed outranks. -/
-example : (run connected [.storage .signedOut, .pending [.removed]]).map state =
+example : (run connected [.storage .signedOut none, .pending [.removed]]).map state =
     some .removed := by decide
+
+/-- Ben's sync loop panics after reading a slot: failed, never syncing,
+and sync stops. -/
+example : (run connected [.begin, .move, .halt .other]).map (fun f => (state f, f.running)) =
+    some (.failed, false) := by decide
 
 /-- Ana's pending invite waits for Dan's request: no state of its own. -/
 example : (run connected [.pending [.missing, .paused]]).map state = some .synced := by decide

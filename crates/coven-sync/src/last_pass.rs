@@ -84,7 +84,9 @@ impl LastPass {
     }
 
     /// Write this as how the last pass ended when sync failed outside a
-    /// pass's end: starting, stopping, or a local failure of the loop's. A
+    /// pass's end: starting, stopping, or a local failure or panic of the
+    /// loop's, in a pass or outside one; and that nothing moves, so the
+    /// state shows the failure (IO `failed_worker_shows`). A
     /// failure fails the store's handle with its cause
     /// (`DbError::StatePersistence`), so the caller stops the work that
     /// failed.

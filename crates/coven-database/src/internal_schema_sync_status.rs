@@ -171,13 +171,16 @@ pub(crate) fn save_start(db: &crate::sqlite::DatabaseConnection) -> Result<(), D
     Ok(())
 }
 
-/// Write how the last pass ended, as sync encodes it.
+/// Write how the last pass ended, as sync encodes it, when sync failed
+/// outside a pass's end, and that nothing moves: a loop that ends in a pass
+/// that moved a slot shows its failure, never syncing.
 pub(crate) fn save_last_pass(
     db: &crate::sqlite::DatabaseConnection,
     last_pass: &[u8],
 ) -> Result<(), DbError> {
     db.internal_execute(
-        "UPDATE coven_sync_status SET last_pass=?1 WHERE singleton=1 AND last_pass IS NOT ?1",
+        "UPDATE coven_sync_status SET last_pass=?1,moving=0
+         WHERE singleton=1 AND (last_pass IS NOT ?1 OR moving=1)",
         [last_pass],
     )?;
     Ok(())
