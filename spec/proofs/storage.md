@@ -228,6 +228,20 @@ files and folders between steps are left free, so a folder the person puts
 in place of the call's own after its mkdir counts as made, and goes if
 empty.
 
+[LocalBytes.lean](storage/CovenStorage/LocalBytes.lean) models a device's own
+file bytes and the rows naming them across crashes (Appendix C.3): a name is
+recorded for cleanup before its file exists, bytes are durable before a row
+naming them commits, which clears the record, a release records the bytes for
+deletion in its own commit, and a crash loses only bytes not yet durable.
+`rows_durable` shows no row ever names bytes that aren't durable;
+`bytes_findable` that every file on disk is named by a row or recorded for
+cleanup; and `delete_spares_rows` that a deletion, going by its record, never
+takes bytes a row names. `early_commit_strands` and `unrecorded_file_lost` are
+the counterexamples: a row committed before its bytes are durable names
+missing bytes after a crash, and a file created before its name is recorded is
+left where no deletion finds it. A flush that reaches the drive's storage is
+§3's assumption, and reads that race a deletion are §17.7's.
+
 `change_keeps_candidates` and `settle_keeps_candidates` show that no write of
 this device makes stored bytes a deletion candidate: a deleted record's
 coordinates stay with its unpublished write, and `publish_releases` shows

@@ -229,3 +229,8 @@ import CovenStorage
 #print axioms CovenStorage.UploadSession.never_retried
 #print axioms CovenStorage.UploadSession.run_good
 #print axioms CovenStorage.UploadSession.next_run_sweeps
+#print axioms CovenStorage.LocalBytes.rows_durable
+#print axioms CovenStorage.LocalBytes.bytes_findable
+#print axioms CovenStorage.LocalBytes.delete_spares_rows
+#print axioms CovenStorage.LocalBytes.early_commit_strands
+#print axioms CovenStorage.LocalBytes.unrecorded_file_lost

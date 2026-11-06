@@ -10037,7 +10037,8 @@ pins) consistent with its database across crashes.
 
 - Write owned bytes to disk and make them durable before committing a row that
   names them. Remove the row before deleting its bytes. A crash then can't leave
-  a row naming missing bytes.
+  a row naming missing bytes
+  ([`early_commit_strands`](proofs/storage/CovenStorage/LocalBytes.lean)).
 - **The files one commit records are flushed together.** Ana imports an album
   of 12 tracks in one write. Each track's copy is synced with a plain `fsync` as
   it finishes. Before the write commits, coven syncs the folder holding the
@@ -10060,7 +10061,9 @@ pins) consistent with its database across crashes.
   `fsync`, then its folder's flush.
 - Record every new file's name before creating it. Keeping the file, as a
   staged copy or a cache file, clears its cleanup record in the same
-  transaction; a failure leaves the cleanup recorded.
+  transaction; a failure leaves the cleanup recorded. A file created first
+  would be left where no deletion finds it after a crash
+  ([`unrecorded_file_lost`](proofs/storage/CovenStorage/LocalBytes.lean)).
 - An unfinished cache write keeps its own name until the transaction exposing its
   verified range commits. Opening never deletes bytes another live writer still
   owns.
@@ -11768,6 +11771,8 @@ Write-ups explain each model and state its assumptions:
 | With a raise's marker between a held write and its completion, the raise waits while the upload is queued, a pass publishing the held write publishes through the marker, and the completion waits for the raise | `raise_waits_for_held`, `held_with_marker`, `completion_after_raise` | `proofs/storage/CovenStorage/Holds.lean` | §17.4, §18.5 |
 | A kept file's pin request is recorded in the write switching it to the cloud, and ends only when the pin is made, the app unpins the file, the file's record goes or the file leaves the cloud; the app's unpin ends it with the pin | `requested_by_switch`, `unkept_unrequested`, `unpin_ends_request`, `request_ends_made_unpinned_or_gone` | `proofs/storage/CovenStorage/Keep.lean` | §17.3, §17.8 |
 | Making files device-only is one write that switches every file it names to this device, or changes nothing, and makes no path a candidate before it is published; so is the app's write that carries the switch beside its own change, refused whole if that change removes a switched file's last reference | `make_local_whole`, `make_local_keeps_candidates`, `make_local_with_whole`, `make_local_with_keeps_candidates` | `proofs/storage/CovenStorage/Files.lean` | §17.3, §17.10 |
+| Across crashes, no row names bytes that aren't durable on disk, every file on disk is named by a row or recorded for cleanup, and a deletion never takes bytes a row names | `rows_durable`, `bytes_findable`, `delete_spares_rows` | `proofs/storage/CovenStorage/LocalBytes.lean` | §17.11, C.3 |
+| *Body.* A row committed before its bytes are durable names missing bytes after a crash; a file created before its name is recorded is left where no deletion finds it | `early_commit_strands`, `unrecorded_file_lost` | `proofs/storage/CovenStorage/LocalBytes.lean` | C.3 |
 | Removing a copy coven placed, as it left it, leaves nothing at its path; no step of coven's, a call's own abandon included, takes away a file the person wrote or changed, or a kept copy; a call's switch keeps all its copies, each placed before it | `removal_takes_unchanged`, `person_files_stay`, `abandon_person_files_stay`, `kept_stays`, `abandon_kept_stays`, `switch_whole` | `proofs/storage/CovenStorage/DeviceOnly.lean` | §17.1, §17.3, C.3 |
 | A folder counts as made only where the call's mkdir found nothing; only an empty made folder no recorded copy needs is taken, so a folder that was there stays; while a call reserves a copy, no step but its own abandon takes the copy, its record or its folders, and once the reservation drops the next write can | `made_only_by_mkdir`, `folder_removal_made_empty`, `found_folder_stays`, `needed_folder_stays`, `reserved_stays`, `released_removable` | `proofs/storage/CovenStorage/DeviceOnly.lean` | §17.3, C.3 |
 | A pin coven keeps for an app file reads no storage when coven's copy checks out, and no attempt reads a user's original for the cache | `copy_reads_no_storage`, `failed_copy_downloads`, `user_downloads`, `original_never_read` | `proofs/io/CovenIO/Keep.lean` | §17.1, §17.8 |

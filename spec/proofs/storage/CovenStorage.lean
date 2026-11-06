@@ -7,6 +7,7 @@ import CovenStorage.Shared
 import CovenStorage.Seen
 import CovenStorage.Keep
 import CovenStorage.DeviceOnly
+import CovenStorage.LocalBytes
 import CovenStorage.Clocks
 import CovenStorage.Examples
 import CovenStorage.RowAuthorship
