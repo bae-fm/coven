@@ -1536,8 +1536,7 @@ they do not replace the separate byte-format, merge or queue tests.
   slot's device, claim number and each part's audience: they are sealed under
   the store key, which every member holds. Public observations include slot
   kinds and store-key ids, key-copy routing with exact public sealing keys,
-  S3 delivery recipients, public sealing keys and authors, and object kinds,
-  format versions and framing (format.md D9). These are fixed public inputs
+  and object kinds, format versions and framing (format.md D9). These are fixed public inputs
   to the model's encryption observations.
 - Unique values and owner rows are per audience; uniqueness across audiences is
   not modelled.

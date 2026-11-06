@@ -2279,8 +2279,7 @@ kind, sealed object, file and code. Format 1 includes:
   numbers;
 - a floor with original boxes, announcements and the first kept slot;
 - restore and invite codes with S3 storage parts, which `coven-storage`'s
-  tests decode and reproduce, a saved restore code, signed join requests and
-  delivered S3 keys.
+  tests decode and reproduce, a saved restore code and signed join requests.
 
 **Decoding.**
 

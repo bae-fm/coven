@@ -200,7 +200,7 @@ applied. This relies on SQLite's transactions being atomic.
 
 Neither the provider nor an outsider can read encrypted contents. Only members'
 devices hold the store key, and only a circle's members hold its key. The
-provider sees each slot's kind and store-key id, key-copy and S3 delivery routing,
+provider sees each slot's kind and store-key id, key-copy routing,
 object framing, and the sizes, counts, timing and accounts §3 lists. §12 says
 exactly who can read what.
 Names, values, key commitments and operation contents stay encrypted.
@@ -3562,7 +3562,7 @@ can apply the same sequence; circle row values remain separately encrypted.
 
 | Who can read it | What |
 |---|---|
-| The provider (in the clear) | each slot's kind and the id of the store key sealing its body; a key copy's audience, copied key id, recipient member and exact public sealing key (§12.1); an S3 delivery's recipient member, exact public sealing key and author; object kinds, format versions, framing and sizes ([format.md D9](format.md#d9-sealed-objects)); the probes S3 detection writes (§20.7); the device and audience that file and snapshot paths name (§3) |
+| The provider (in the clear) | each slot's kind and the id of the store key sealing its body; a key copy's audience, copied key id, recipient member and exact public sealing key (§12.1); object kinds, format versions, framing and sizes ([format.md D9](format.md#d9-sealed-objects)); the probes S3 detection writes (§20.7); the device and audience that file and snapshot paths name (§3) |
 | Holders of the store key | store row values, slot headers and all admin contents, including circle names, key commitments and membership operations |
 | A circle's members (sealed under its key) | the contents of that circle's parts |
 
