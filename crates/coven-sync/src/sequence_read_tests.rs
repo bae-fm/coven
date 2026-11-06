@@ -591,18 +591,36 @@ async fn sequence_end_search_matches_lean() {
     ana.database().close().await.unwrap();
 }
 
+/// A claim of Ana's lost under a floor of Ben's, and her pass that settles it.
+struct SettledUnderFloor {
+    group: Group,
+    ana: Device,
+    ben: Device,
+    /// The slot Ana had applied when she claimed the next one.
+    applied: u64,
+    /// Ana's pass.
+    result: Result<crate::SequenceStatus, SyncError>,
+    /// Whether the lost slot is at or below the floor's `at`.
+    fits: bool,
+    /// The floor check's `floorCheck` input.
+    input: serde_json::Value,
+}
+
+impl SettledUnderFloor {
+    async fn close(self) {
+        for device in [&self.ana, &self.ben] {
+            device.sync.database.close().await.unwrap();
+        }
+    }
+}
+
 /// Ana's create of the slot after hers is held while Ben's snapshot takes
 /// it. Ben writes `later` slots after it and writes a floor; with `compacted`,
 /// he writes another, snapshots again and writes a floor whose first kept slot
 /// has passed Ana's claim. With `lost`, the slot `offset` after Ana's claim
-/// slot is then gone. Ana's pass settles her claim against that floor: what it
-/// reports against `floorCheck`, returning that report; none when the lost
-/// slot is past the floor's `at`.
-async fn compare_settle_floor(
-    later: usize,
-    compacted: bool,
-    lost: Option<u64>,
-) -> Option<serde_json::Value> {
+/// slot is then gone, when it is at or below the floor's `at`. Ana's pass then
+/// settles her claim against that floor.
+async fn settle_under_floor(later: usize, compacted: bool, lost: Option<u64>) -> SettledUnderFloor {
     let group = Group::new();
     let ana = group.device(1).await;
     let ben = group.device(2).await;
@@ -672,12 +690,25 @@ async fn compare_settle_floor(
         (fits, input)
     };
     let (result, (fits, input)) = tokio::join!(ana.sync.pass(), retention);
-    let report = fits.then(|| crate::tests::run_lean("COVEN_SEQUENCE_LEAN", &input));
+    SettledUnderFloor { group, ana, ben, applied, result, fits, input }
+}
+
+/// Ana's settle under Ben's floor, as `settle_under_floor` sets it up: what
+/// it reports against `floorCheck`, returning that report; none when the lost
+/// slot is past the floor's `at`.
+async fn compare_settle_floor(
+    later: usize,
+    compacted: bool,
+    lost: Option<u64>,
+) -> Option<serde_json::Value> {
+    let settled = settle_under_floor(later, compacted, lost).await;
+    let SettledUnderFloor { group, ana, applied, result, fits, input, .. } = &settled;
+    let report = fits.then(|| crate::tests::run_lean("COVEN_SEQUENCE_LEAN", input));
     if let Some(expected) = &report {
         // Once the floor checks, the claim settles and the pass moves on, to
         // a later slot's claim or to work that can meet the lost slot; only
         // a claim still unsettled at its slot shows the check's own failure.
-        let contested = ObjectPath::slot(group.store, (applied + 1).try_into().unwrap());
+        let contested = ObjectPath::slot(group.store, (*applied + 1).try_into().unwrap());
         let unsettled = ana.sync.database.current_claim().await.unwrap().is_some_and(|claim| {
             claim.attempts.last() == Some(&contested)
                 && claim.settlement == coven_database::ClaimSettlement::Unknown
@@ -703,10 +734,28 @@ async fn compare_settle_floor(
         };
         assert_eq!(&actual, expected, "{input}");
     }
-    for device in [&ana, &ben] {
-        device.sync.database.close().await.unwrap();
-    }
+    settled.close().await;
     report
+}
+
+/// Ana's claim is lost under a floor of Ben's whose first kept slot has passed
+/// it, and slot 9 is then lost from storage: kept, below the slots Ana applies,
+/// and the slot of an announcement her history holds. Settling reads past it
+/// from the floor's store snapshot; retention's floor proposal reads the
+/// announcement's publication time, finds the slot missing and reports it as
+/// damaged, as a read of a kept slot does (§6.1, §16.6).
+#[tokio::test]
+async fn a_floor_proposal_reports_a_missing_kept_announcement_slot_damaged() {
+    let settled = settle_under_floor(0, true, Some(3)).await;
+    assert!(settled.fits);
+    let lost = ObjectPath::slot(settled.group.store, (settled.applied + 4).try_into().unwrap());
+    assert!(
+        matches!(&settled.result, Err(SyncError::Damaged(object)) if object.path == lost.as_str()),
+        "{:?}; {}",
+        settled.result,
+        settled.input
+    );
+    settled.close().await;
 }
 
 /// A claim lost to Ben's snapshot, under floors whose `at` is past the slots

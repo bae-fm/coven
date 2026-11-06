@@ -5752,6 +5752,14 @@ absences a full reload; correctness, including a joiner's key scan, does not nee
 it. Grace bounds only `first`. No new device waits for it: the floor names each
 new snapshot as soon as it is announced.
 
+Reading that publication time can find the announcement's slot missing. A slot
+at or above `first` is kept, and storage in good order holds every kept slot,
+so the device reports the slot as damaged, as a pass does when it can't find a
+kept slot (§6.1). Ben's laptop reloaded from a floor with `first` 9 and holds
+the announcement at slot 9 in the floor snapshot's history without having read
+the slot; if slot 9 is gone, retention reports slot 9 damaged rather than a
+failed request that would only be tried again.
+
 The rules:
 
 - **Every introduced audience needs checked coverage** (§16.4), even one with
@@ -11178,7 +11186,7 @@ Write-ups explain each model and state its assumptions:
 | A snapshot's per-device claim numbers settle claims of every kind after deletion; they don't describe surviving effects | `claims_ge` | `proofs/sequence/CovenSequence/Settle.lean` | §16.1 |
 | A device missing a followed audience key cannot reload any audience past its blocked slot, even before noticing the block; a stopped device applies and reloads nothing | `device_stops`, `missing_key_blocks_reload`, `stopped_stays`, `Device.stopped_checks_nothing` | `proofs/sequence/CovenSequence/Device.lean` | §5.4, §22 |
 | A pass whose reading stops at or below the floor's `at` applies the slots before the stop and reports the stop; it reports the floor as damaged only after holding the slots through the floor's `at` and failing the check, which an honest floor in storage in good order never does. A stop past the floor's `at` reads as it did with the floor checked first | `gap_report_wins`, `floor_blamed_only_when_held`, `honest_floor_never_blamed`, `pass_eq_checkFirst` | `proofs/sequence/CovenSequence/ReadPass.lean` | §6.1, §6.2, §16.6 |
-| In storage in good order every slot from the first kept slot through the floor's `at` is present, so a missing one there is damage | `gap_below_at_is_damage` | `proofs/sequence/CovenSequence/ReadPass.lean` | §6.1 |
+| In storage in good order every slot from the first kept slot through the head is present, so one missing there, through the floor's `at` or a slot the device has applied, is damage | `gap_below_at_is_damage` | `proofs/sequence/CovenSequence/ReadPass.lean` | §6.1, §16.6 |
 | *Body.* Checked first against the slots before a gap, an honest floor is reported as damaged instead of the gap | `checkFirst_blames_honest_floor` | `proofs/sequence/CovenSequence/ReadPass.lean` | §6.1 |
 | *Body.* The end search answers the same on storage that ends at its answer, so a missing slot its checks land on reads as the end until a later slot is known to exist; one they pass over is found | `end_search_sees_an_end`, `checked_gap_reads_as_end` | `proofs/sequence/CovenSequence/ReadPass.lean` | §6.1 |
 | Bookkeeping requests no pass, and no write is lost even when passes race | `write_never_lost`, `racing_passes`, `bookkeeping_retains_none` | `proofs/io/CovenIO/Wakes.lean` | §6.7 |

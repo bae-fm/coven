@@ -50,12 +50,41 @@ impl SequenceSync {
         &self,
         path: &ObjectPath,
     ) -> Result<StoredObject, SyncError> {
+        Ok(self.observed_metadata(path).await?.ok_or(StorageFailure::NotFound)?)
+    }
+
+    /// The object's one immutable observation, or none when storage holds no
+    /// object at `path`.
+    async fn observed_metadata(
+        &self,
+        path: &ObjectPath,
+    ) -> Result<Option<StoredObject>, SyncError> {
         if let Some(input) = ObjectInput::retained(&self.database, path).await? {
-            return Ok(input.object().clone());
+            return Ok(Some(input.object().clone()));
         }
-        let object = self.storage.status(path).await?.ok_or(StorageFailure::NotFound)?;
+        let Some(object) = self.storage.status(path).await? else {
+            return Ok(None);
+        };
         ObjectInput::observe(&self.database, &object).await?;
-        Ok(object)
+        Ok(Some(object))
+    }
+
+    /// The publication of the announcement at `slot`. A slot at or above the
+    /// floor's first kept slot, `first`, is kept: missing from storage, it is
+    /// damaged, as a pass reports a kept slot it can't find (§6.1, §16.6).
+    async fn announcement_metadata(
+        &self,
+        slot: Slot,
+        first: u64,
+    ) -> Result<StoredObject, SyncError> {
+        let path = self.path(slot.0)?;
+        match self.observed_metadata(&path).await? {
+            Some(object) => Ok(object),
+            None if slot.0 >= first => {
+                Err(crate::write_object::damaged(&path, crate::Refusal::Parse { cause: None }))
+            }
+            None => Err(StorageFailure::NotFound.into()),
+        }
     }
 
     pub(crate) fn past_grace(&self, object: &StoredObject) -> bool {
@@ -140,6 +169,7 @@ impl SequenceSync {
             return Ok(());
         }
         let history = &session.history;
+        let first_kept = session.floor.as_ref().map_or(1, |floor| floor.header.first.0);
         // The devices gone for good whose files this device deletes: their
         // stored bytes are its to delete, and they never return to delete
         // their own (§16.6).
@@ -226,6 +256,7 @@ impl SequenceSync {
             }
             let replacement = self
                 .newest_mature_snapshot(
+                    first_kept,
                     history
                         .announcements
                         .range((std::ops::Bound::Excluded(*slot), std::ops::Bound::Unbounded))
@@ -254,12 +285,14 @@ impl SequenceSync {
 
     /// Candidates are in descending announcement-slot order. An immature
     /// announcement cannot hide an older snapshot whose grace has passed.
+    /// `first` is the floor's first kept slot.
     async fn newest_mature_snapshot<'a>(
         &self,
+        first: u64,
         candidates: impl Iterator<Item = (&'a Slot, &'a SnapshotAnnouncement)>,
     ) -> Result<Option<(&'a Slot, &'a SnapshotAnnouncement)>, SyncError> {
         for (slot, snapshot) in candidates {
-            if self.past_grace(&self.immutable_metadata(&self.path(slot.0)?).await?) {
+            if self.past_grace(&self.announcement_metadata(*slot, first).await?) {
                 return Ok(Some((slot, snapshot)));
             }
         }
@@ -274,6 +307,7 @@ impl SequenceSync {
         // Every introduced audience needs coverage, even without data writes:
         // its membership and boundary history also crosses the floor.
         let audiences = session.history.introduced_audiences();
+        let previous_first = session.floor.as_ref().map_or(1, |floor| floor.header.first.0);
         // Two selections per audience. The floor names the newest applicable
         // snapshot, mature or not, so a new device starts from it at once.
         // `first`, which says what may be deleted, follows only snapshots past
@@ -309,12 +343,11 @@ impl SequenceSync {
             }
             named.push(slot.0);
             mature.push(
-                self.newest_mature_snapshot(candidates())
+                self.newest_mature_snapshot(previous_first, candidates())
                     .await?
                     .map(|(_, snapshot)| snapshot.covers),
             );
         }
-        let previous_first = session.floor.as_ref().map_or(1, |floor| floor.header.first.0);
         // Every audience needs a mature snapshot before `first` moves; until
         // then it stays where it is. It never moves back.
         let first = match mature.into_iter().collect::<Option<Vec<_>>>() {
