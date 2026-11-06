@@ -30,6 +30,11 @@ pub(crate) fn database_failure(path: &ObjectPath, error: coven_database::DbError
         DbError::WriteFormat(error) | DbError::Snapshot(SnapshotError::Format(error)) => {
             damaged(path, Refusal::from(error))
         }
+        // A snapshot at a schema newer than this app's needs an update, as a
+        // slot at one does (§18.3).
+        DbError::Snapshot(SnapshotError::Schema { snapshot, database }) if snapshot > database => {
+            SyncError::UpdateRequired(crate::RequiredUpdate::AppSchema { version: snapshot })
+        }
         // A snapshot's body failed as the loader read it.
         DbError::Snapshot(SnapshotError::Body { error, .. }) => database_failure(path, *error),
         // Write evidence a snapshot carries that doesn't authenticate, or

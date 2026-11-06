@@ -7466,7 +7466,10 @@ who held it have all left keeps its version: nothing raises it.
 
 **Devices on an older app.** An older app can't apply an audience's newer schema.
 It records `UpdateRequired` and stops at that slot under §5's rule for stuck
-devices, which also means it stops uploading. After updating, it reloads from the
+devices, which also means it stops uploading. A snapshot at the newer schema
+is the same: Ana's laptop, restored on the old app after the floor moved past
+her raise, starts from a version 2 snapshot, and records `UpdateRequired` for
+it instead of refusing it. After updating, it reloads from the
 raise's snapshot, and it sends its waiting old-schema records unchanged, including
 records it never tried to send before migrating.
 

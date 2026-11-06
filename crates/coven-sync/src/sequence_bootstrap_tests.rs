@@ -852,3 +852,57 @@ async fn a_restore_s_scan_goes_on_past_a_damaged_slot_once_a_floor_carries_its_c
         device.sync.database.close().await.unwrap();
     }
 }
+
+/// Ana's update raises the store to version 2, and the floor moves past the
+/// raise, so her laptop, restored on the old app, starts from a snapshot at
+/// version 2, which it can't read. That needs an update, as a slot at a newer schema
+/// does, and refuses nothing: the snapshot is what the store holds, and the
+/// updated app loads it (§18.3).
+#[tokio::test]
+async fn an_old_app_starting_from_a_newer_snapshot_needs_an_update() {
+    let group = Group::new();
+    group.raises.store(true, std::sync::atomic::Ordering::SeqCst);
+    let ana = group.device(1).await;
+    group.create(&ana).await;
+    insert(&ana.sync.database, "a", "before the raise").await;
+    ana.sync.pass().await.unwrap();
+    group.version.store(2, std::sync::atomic::Ordering::SeqCst);
+    let ana = group.reopen(ana).await;
+    ana.sync.pass().await.unwrap();
+    ana.sync.pass().await.unwrap();
+    let state = ana.sync.database.store_state().await.unwrap();
+    assert_eq!(state.reached(&coven_merge::Audience::Store), 2);
+    // Past the grace period, the floor names a snapshot after the raise, and
+    // the slots it covers go, the raise's own among them.
+    ana.sync.snapshot(coven_merge::Audience::Store).await.unwrap();
+    group.clock.set(
+        std::time::UNIX_EPOCH
+            + crate::sequence_sync::sequence_retention::GRACE
+            + std::time::Duration::from_secs(1),
+    );
+    ana.sync.pass().await.unwrap();
+    assert!(group
+        .storage
+        .status(&ObjectPath::slot(group.store, 1.try_into().unwrap()))
+        .await
+        .unwrap()
+        .is_none());
+    group.version.store(1, std::sync::atomic::Ordering::SeqCst);
+    let laptop = group.newcomer(ana.identity.clone(), group.storage.for_device()).await;
+    let failed = laptop.sync.pass().await.unwrap_err();
+    let update = RequiredUpdate::AppSchema { version: 2 };
+    assert!(
+        matches!(&failed, SyncError::UpdateRequired(required) if *required == update)
+            || matches!(&failed, SyncError::Pending(record)
+                if record.reason == PendingReason::UpdateRequired(update)),
+        "{failed:?}"
+    );
+    let pending = laptop.database().pending::<PendingRecord>().await.unwrap();
+    assert!(
+        pending.iter().all(|record| !matches!(record.reason, PendingReason::Refused(_))),
+        "{pending:?}"
+    );
+    for device in [&ana, &laptop] {
+        device.sync.database.close().await.unwrap();
+    }
+}
