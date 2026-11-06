@@ -41,7 +41,8 @@ pub(crate) async fn upload_bytes(
                 .map_err(|error| StorageFailure::InvalidPart.with_source(error))?;
             let remaining = bytes.get(start..).ok_or(StorageFailure::InvalidPart)?;
             let length = remaining.len().min(session.part_size());
-            storage.upload_part_checked(&mut session, &remaining[..length], sent).await?;
+            let permit = storage.part_permit(&mut session, &remaining[..length])?;
+            storage.send_permitted(permit, &mut session, sent).await?;
             if session.confirmed_bytes() <= start as u64 {
                 return Err(StorageFailure::Protocol.with_source("upload did not advance"));
             }

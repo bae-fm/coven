@@ -56,11 +56,12 @@ private def step (s : State) (event : Json) : Except String State := do
   | "reopen" => pure (Step.crash.apply s)
   | other => throw s!"unknown event {other}"
 
-/-- One case: the file's parts and the events, at a place that is the
-device's own, a file's in its folder. -/
+/-- One case: the file's parts, whether its place is the device's own, and
+the events. -/
 private def runCase (input : Json) : Except String Json := do
   let total ← input.getObjValAs? Nat "total"
-  let mut s := initial total ⟨1, 1, List.range total, true⟩
+  let owned ← input.getObjValAs? Bool "owned"
+  let mut s := initial total ⟨1, 1, List.range total, owned⟩
   let mut seen := #[]
   for event in ← input.getObjValAs? (Array Json) "events" do
     s ← step s event

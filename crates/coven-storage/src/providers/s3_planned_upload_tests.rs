@@ -29,6 +29,9 @@ async fn missing_native_identity_retains_both_claimants_uploads_and_refuses_rein
         storage.upload_part(&mut other, b"rival").await.unwrap_err();
         storage.upload_part(&mut other, b"peer").await.unwrap();
         let mut upload = storage.begin_upload(&path, 4).await.unwrap();
+        // The caller saves the plan its first part's admission marked.
+        let permit = storage.admit_part(&mut upload, b"ours").unwrap();
+        assert!(permit.marked());
         let recorded = upload.encode().unwrap();
         if lost == "initiation" {
             state.lock().unwrap().lose_initiation_reply = true;
@@ -36,7 +39,11 @@ async fn missing_native_identity_retains_both_claimants_uploads_and_refuses_rein
             state.lock().unwrap().fail_part_reply = true;
         }
         assert_eq!(
-            storage.upload_part(&mut upload, b"ours").await.unwrap_err().failure(),
+            storage
+                .send_part(permit, &mut upload, &ByteProgress::unread())
+                .await
+                .unwrap_err()
+                .failure(),
             StorageFailure::Network
         );
         let mut restored = UploadSession::decode(recorded.as_bytes()).unwrap();
@@ -66,13 +73,99 @@ async fn missing_native_identity_retains_both_claimants_uploads_and_refuses_rein
     }
 }
 
+/// A claim's recording names its upload at the slot before the first part
+/// starts it. The device stops, or the part is refused, before any request
+/// starts the upload: nothing exists at the slot, and the restored recording
+/// resumes and publishes (§17.9, Appendix E.10).
+#[tokio::test]
+async fn a_restored_plan_that_never_started_resumes_at_a_shared_slot() {
+    let (_server, storage, state) = planned_fixture().await;
+    let path = planned_path();
+    let upload = storage.begin_upload(&path, 4).await.unwrap();
+    let recorded = upload.encode().unwrap();
+    assert!(state.lock().unwrap().requests.is_empty(), "named before any request");
+    let mut restored = UploadSession::decode(recorded.as_bytes()).unwrap();
+    storage.resume_upload(&mut restored).await.unwrap();
+    assert!(state.lock().unwrap().requests.is_empty(), "nothing to look for at the slot");
+    storage.upload_part(&mut restored, b"data").await.unwrap();
+    storage.finish_upload(&mut restored).await.unwrap();
+    assert_eq!(storage.read(&path).await.unwrap(), b"data");
+}
+
+/// A cooldown armed by another consumer, which the next request waits out.
+#[derive(Default)]
+struct Cooling(std::sync::atomic::AtomicBool);
+#[async_trait::async_trait]
+impl Cooldown for Cooling {
+    fn remaining(&self) -> Option<std::time::Duration> {
+        self.0
+            .load(std::sync::atomic::Ordering::SeqCst)
+            .then_some(std::time::Duration::from_secs(30))
+    }
+    async fn record(&self, _: std::time::Duration) -> Result<(), StorageError> {
+        Ok(())
+    }
+}
+
+/// A sync state that requires a catch-up before anything is published.
+#[derive(Default)]
+struct CatchingUp(std::sync::atomic::AtomicBool);
+impl PublicationGate for CatchingUp {
+    fn check(&self, _: &ObjectPath) -> Result<(), StorageError> {
+        if self.0.load(std::sync::atomic::Ordering::SeqCst) {
+            Err(StorageFailure::CatchUpRequired.into())
+        } else {
+            Ok(())
+        }
+    }
+}
+
+/// The connection admits a claim's first part before anything may start its
+/// upload. A provider cooldown, or a catch-up the slot waits for, refuses it
+/// and sends nothing, and the plan stays unmarked: its recording, restored,
+/// resumes at the shared slot and publishes once the refusal ends (§17.9,
+/// Appendix E.10).
+#[tokio::test]
+async fn a_refused_first_part_leaves_its_plan_unmarked() {
+    for refusal in [StorageFailure::RateLimited, StorageFailure::CatchUpRequired] {
+        let (_server, storage, state) = planned_fixture().await;
+        let cooldown = Arc::new(Cooling::default());
+        let gate = Arc::new(CatchingUp::default());
+        let storage = StorageConnection::with_gate(
+            storage.provider().clone(),
+            crate::test_utils::DEVICE,
+            gate.clone(),
+            cooldown.clone(),
+            Arc::new(crate::TransferBudget::new(crate::TransferLimits::default())),
+            Arc::new(FixedClock::new(SystemTime::UNIX_EPOCH)),
+        );
+        let path = planned_path();
+        let mut upload = storage.begin_upload(&path, 4).await.unwrap();
+        let lever = match refusal {
+            StorageFailure::RateLimited => &cooldown.0,
+            _ => &gate.0,
+        };
+        lever.store(true, std::sync::atomic::Ordering::SeqCst);
+        let refused = storage.admit_part(&mut upload, b"data").err().unwrap();
+        assert_eq!(refused.failure(), refusal);
+        assert!(state.lock().unwrap().requests.is_empty(), "the refusal sent nothing");
+        lever.store(false, std::sync::atomic::Ordering::SeqCst);
+        let mut restored = UploadSession::decode(upload.encode().unwrap().as_bytes()).unwrap();
+        storage.resume_upload(&mut restored).await.unwrap();
+        storage.upload_part(&mut restored, b"data").await.unwrap();
+        storage.finish_upload(&mut restored).await.unwrap();
+        assert_eq!(storage.read(&path).await.unwrap(), b"data");
+    }
+}
+
 #[tokio::test]
 async fn restored_planned_session_can_confirm_its_completed_publication() {
     let (_server, storage, state) = planned_fixture().await;
     let path = planned_path();
     let mut upload = storage.begin_upload(&path, 4).await.unwrap();
+    let permit = storage.admit_part(&mut upload, b"ours").unwrap();
     let recording = upload.encode().unwrap();
-    storage.upload_part(&mut upload, b"ours").await.unwrap();
+    storage.send_part(permit, &mut upload, &ByteProgress::unread()).await.unwrap();
     storage.finish_upload(&mut upload).await.unwrap();
     let mut restored = UploadSession::decode(recording.as_bytes()).unwrap();
     storage.resume_upload(&mut restored).await.unwrap();
@@ -92,15 +185,14 @@ async fn a_planned_file_upload_aborts_what_its_unrecorded_initiation_left() {
         let object = coven_foundation::id_source::ObjectId(uuid::Uuid::from_u128(9));
         let path = ObjectPath::file(STORE_ID, crate::test_utils::DEVICE, object);
         let mut session = storage.begin_upload(&path, 4).await.unwrap();
+        let permit = storage.admit_part(&mut session, b"data").unwrap();
         let recorded = session.encode().unwrap();
+        state.lock().unwrap().lose_initiation_reply = lost;
+        let sent = storage.send_part(permit, &mut session, &ByteProgress::unread()).await;
         if lost {
-            state.lock().unwrap().lose_initiation_reply = true;
-            assert_eq!(
-                storage.upload_part(&mut session, b"data").await.unwrap_err().failure(),
-                StorageFailure::Network
-            );
+            assert_eq!(sent.unwrap_err().failure(), StorageFailure::Network);
         } else {
-            storage.upload_part(&mut session, b"data").await.unwrap();
+            sent.unwrap();
         }
         assert_eq!(state.lock().unwrap().uploads.len(), 1);
         let mut restored = UploadSession::decode(recorded.as_bytes()).unwrap();

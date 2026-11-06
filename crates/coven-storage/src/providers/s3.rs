@@ -1,6 +1,6 @@
 use super::pagination::Pagination;
 use crate::providers::http_client::HttpClient;
-use crate::session::{S3Part, SessionState};
+use crate::session::{PlanStart, S3Part, SessionState};
 use crate::*;
 use async_trait::async_trait;
 use aws_sdk_s3::{
@@ -547,7 +547,7 @@ impl ProviderOps for S3Storage {
             total,
             confirmed: 0,
             part_size,
-            state: SessionState::S3Planned { token, unstarted: true },
+            state: SessionState::S3Planned { token, started: PlanStart::Unstarted },
         })
     }
     async fn resume_upload(
@@ -560,18 +560,20 @@ impl ProviderOps for S3Storage {
                 .require_restart(publication, session, StorageFailure::SessionExpired.into())
                 .await;
         }
-        if let SessionState::S3Planned { unstarted, .. } = &session.state {
+        if let SessionState::S3Planned { started, .. } = session.state {
+            // Nothing is at an unmarked plan's name, nor yet at a marked one
+            // whose first part this process has not sent (Appendix E.10).
+            if started != PlanStart::MayHaveStarted {
+                return Ok(());
+            }
             if self.owns_session_key(session) {
                 // Every upload at this name is this plan's: one whose start's
                 // reply was lost, or one started before the device stopped.
                 self.abort_initiated(publication, session).await?;
                 self.recover_completed_upload(publication, session).await?;
-                if let SessionState::S3Planned { unstarted, .. } = &mut session.state {
-                    *unstarted = true;
+                if let SessionState::S3Planned { started, .. } = &mut session.state {
+                    *started = PlanStart::Unstarted;
                 }
-                return Ok(());
-            }
-            if *unstarted {
                 return Ok(());
             }
             return self.completed(session).await.map_err(|error| match error.failure() {
@@ -653,11 +655,13 @@ impl ProviderOps for S3Storage {
         if matches!(session.state, SessionState::S3Restart { .. }) {
             return Err(StorageFailure::SessionExpired.into());
         }
-        if let SessionState::S3Planned { token, unstarted } = &mut session.state {
-            if !*unstarted {
+        if let SessionState::S3Planned { token, started } = &mut session.state {
+            // A restored marked plan resumes first, and one whose start this
+            // process sent may have started an upload already.
+            if *started == PlanStart::MayHaveStarted {
                 return Err(StorageFailure::SessionIdentityUnknown.into());
             }
-            *unstarted = false;
+            *started = PlanStart::MayHaveStarted;
             let token = token.clone();
             let id = self.initiate(publication, &self.session_key(session)?, &token).await?;
             session.state = SessionState::S3 { id, token, parts: Vec::new() };
@@ -780,8 +784,9 @@ impl ProviderOps for S3Storage {
         publication: &PublicationRequest,
         session: &UploadSession,
     ) -> Result<(), StorageError> {
-        if let SessionState::S3Planned { unstarted, .. } = &session.state {
-            if *unstarted && !self.owns_session_key(session) {
+        if let SessionState::S3Planned { started, .. } = session.state {
+            // Nothing is at the name of a plan whose first part was never sent.
+            if started != PlanStart::MayHaveStarted {
                 return Ok(());
             }
             let aborted = self.abort_initiated(publication, session).await;

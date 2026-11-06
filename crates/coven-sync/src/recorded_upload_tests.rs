@@ -83,16 +83,23 @@ impl Storage for PlannedStorage {
         );
         Ok(())
     }
-    async fn upload_part_reporting(
+    fn admit_part<'a>(
         &self,
         session: &mut UploadSession,
-        bytes: &[u8],
+        bytes: &'a [u8],
+    ) -> Result<coven_storage::PartPermit<'a>, StorageError> {
+        assert_eq!(bytes, b"data");
+        coven_storage::test_utils::admitted_part(session, bytes)
+    }
+    async fn send_part(
+        &self,
+        _: coven_storage::PartPermit<'_>,
+        session: &mut UploadSession,
         _: &coven_storage::ByteProgress,
     ) -> Result<(), StorageError> {
         let mut events = self.0.lock().unwrap();
         assert!(events.contains(&"save native"), "native capability was not saved before sending");
         events.push("part");
-        assert_eq!(bytes, b"data");
         *session = with_state(
             session,
             json!({"OneDrive": {
@@ -207,5 +214,84 @@ async fn identity_and_native_capability_are_saved_before_their_first_use() {
             _ => unreachable!(),
         };
         assert_eq!(*events.lock().unwrap(), expected);
+    }
+}
+
+/// A source whose saves keep the recording and close `lever` once the plan
+/// is saved, as another consumer arming a provider cooldown, or sync
+/// falling behind, would between the plan and its first part.
+struct ClosingSource {
+    saved: Vec<coven_crypto::SecretBytes>,
+    lever: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl UploadSource for ClosingSource {
+    type Error = StorageError;
+    async fn read(&mut self, offset: u64, length: usize) -> Result<Vec<u8>, StorageError> {
+        Ok(b"data"[offset as usize..offset as usize + length].to_vec())
+    }
+    async fn save(&mut self, session: UploadSession) -> Result<(), StorageError> {
+        self.saved.push(session.encode()?);
+        self.lever.store(true, std::sync::atomic::Ordering::SeqCst);
+        Ok(())
+    }
+    fn keep_going(&self) -> bool {
+        true
+    }
+}
+
+/// A provider cooldown another consumer armed.
+struct Cooling(Arc<std::sync::atomic::AtomicBool>);
+#[async_trait::async_trait]
+impl coven_storage::Cooldown for Cooling {
+    fn remaining(&self) -> Option<std::time::Duration> {
+        self.0
+            .load(std::sync::atomic::Ordering::SeqCst)
+            .then_some(std::time::Duration::from_secs(30))
+    }
+    async fn record(&self, _: std::time::Duration) -> Result<(), StorageError> {
+        Ok(())
+    }
+}
+
+/// Sync falling behind: nothing may be published until a catch-up.
+struct CatchingUp(Arc<std::sync::atomic::AtomicBool>);
+impl coven_storage::PublicationGate for CatchingUp {
+    fn check(&self, _: &ObjectPath) -> Result<(), StorageError> {
+        if self.0.load(std::sync::atomic::Ordering::SeqCst) {
+            Err(StorageFailure::CatchUpRequired.into())
+        } else {
+            Ok(())
+        }
+    }
+}
+
+/// A claim's plan is saved, and then a provider cooldown, or a catch-up,
+/// refuses its first part before any request: the saved plan stays unmarked,
+/// so the next attempt goes on from it at the shared slot, and publishes
+/// (§17.9, Appendix E.10).
+#[tokio::test]
+async fn a_part_refused_before_any_request_leaves_the_saved_plan_unmarked() {
+    for refusal in [StorageFailure::RateLimited, StorageFailure::CatchUpRequired] {
+        let lever = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let raw = coven_storage::test_utils::MemoryStorage::builder().build().unwrap();
+        let storage = match refusal {
+            StorageFailure::RateLimited => raw.with_cooldown(Arc::new(Cooling(lever.clone()))),
+            _ => raw.with_publication_gate(Arc::new(CatchingUp(lever.clone()))),
+        };
+        let path = ObjectPath::slot(coven_storage::test_utils::STORE_ID, std::num::NonZeroU64::MIN);
+        let target = UploadTarget::Create(path.clone());
+        let mut source = ClosingSource { saved: Vec::new(), lever: lever.clone() };
+        let error = upload(&storage, &target, 4, None, &mut source).await.unwrap_err();
+        assert_eq!(error.failure(), refusal);
+        assert_eq!(source.saved.len(), 1, "only the plan was saved");
+        assert!(storage.unfinished_uploads().await.is_empty(), "nothing was started");
+        let plan = UploadSession::decode(source.saved[0].as_bytes()).unwrap();
+        let mut source =
+            RecordingSource { events: Arc::new(Mutex::new(Vec::new())), fail_save: None, saves: 0 };
+        lever.store(false, std::sync::atomic::Ordering::SeqCst);
+        let stored = upload(&storage, &target, 4, Some(plan), &mut source).await.unwrap();
+        assert!(matches!(stored, Uploaded::Stored(None)));
+        assert_eq!(storage.read(&path).await.unwrap(), b"data");
     }
 }

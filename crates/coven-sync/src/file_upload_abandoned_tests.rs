@@ -186,8 +186,10 @@ async fn a_session_no_record_names_is_ended_by_the_next_pass() {
 /// The upload worker's provider sessions against the storage model's
 /// `UploadSession` (§17.9): a file in three parts, through runs that meet a
 /// lost reply to a session's start or a part, a dropped part, a crash, an
-/// expired session, a lost completion reply and failures of each retry
-/// class, and the abort of a session no file waits for any more.
+/// expired session, a lost completion reply, failures of each retry class, a
+/// pause before the first part and a refused start, and the abort of a
+/// session no file waits for any more. Each case runs at the device's own
+/// place, and at one the in-memory provider treats as shared, as a slot is.
 mod sessions {
     use super::{Fixture, CHUNK};
     use coven_database::{FileLocation, FilePlace, FileRef, Provenance};
@@ -243,6 +245,11 @@ mod sessions {
     fn losing_completion() -> Value {
         run(false, json!({"kind": "lose_completion"}))
     }
+    /// The app pauses uploads as the run records its plan; only for a run
+    /// whose first request records or sweeps a plan.
+    fn pausing() -> Value {
+        run(false, json!({"kind": "pause"}))
+    }
     fn event(op: &str) -> Value {
         json!({"op": op})
     }
@@ -257,7 +264,10 @@ mod sessions {
     }
 
     impl Device {
-        async fn new() -> Self {
+        /// `owned`: the connection writes for the photo's device, so its
+        /// path is in the connection's own folder; otherwise the in-memory
+        /// provider treats the path as shared (Appendix E.10).
+        async fn new(owned: bool) -> Self {
             let clock =
                 Arc::new(FixedClock::new(SystemTime::UNIX_EPOCH + Duration::from_secs(1000)));
             let mut f = Fixture::with_clock(Provenance::AppProvided, clock.clone()).await;
@@ -265,7 +275,9 @@ mod sessions {
             f.set_uploads_paused(false).await;
             let file = f.attach("files", "photo", photo()).await;
             let location = f.location(&file).await;
-            f.connect_as(location.uploader()).await;
+            if owned {
+                f.connect_as(location.uploader()).await;
+            }
             let item = f.files.inner.database.uploads().await.unwrap().remove(0);
             assert_eq!(parts(item.bytes_total), PARTS);
             Self { f, clock, file, location }
@@ -318,6 +330,7 @@ mod sessions {
                         .set_faults(Faults { lose_completion_reply: true, ..Faults::none() })
                         .await;
                 }
+                "pause" => return self.pause_as_planned().await,
                 "none" | "parts" => {}
                 other => panic!("unknown fault {other}"),
             }
@@ -392,6 +405,25 @@ mod sessions {
             if fault["then"] == "crash" {
                 self.reopen().await;
             }
+        }
+
+        /// One run that the app pauses while its first request is held: the
+        /// run stops before its first part, keeping its plan, unmarked.
+        async fn pause_as_planned(&mut self) {
+            let (started, observed) = tokio::sync::oneshot::channel();
+            let (resume, held) = tokio::sync::oneshot::channel();
+            self.f.storage.hold_next_request(started, held).await;
+            let inner = self.f.files.inner.clone();
+            let task = tokio::spawn(async move { inner.drain_uploads().await });
+            tokio::time::timeout(HANG_GUARD, observed)
+                .await
+                .expect("the run's first request")
+                .unwrap();
+            self.f.files.inner.set_paused(true);
+            resume.send(()).unwrap();
+            let ended = tokio::time::timeout(HANG_GUARD, task).await.expect("the run ends");
+            assert_eq!(ended.unwrap().expect("the run"), crate::DrainOutcome::Paused);
+            self.f.set_uploads_paused(false).await;
         }
 
         async fn apply(&mut self, event: &Value) {
@@ -553,18 +585,32 @@ mod sessions {
             vec![failing("never"), elapse(), event("connect"), event("reopen"), plain(), retried()],
             vec![after(1, "crash"), failing("automatic"), elapse(), plain()],
             vec![after(1, "lost"), retried()],
+            // A pause stops the run before its first part: its plan is
+            // unmarked, nothing is at its place, and the next run goes on,
+            // or the abort forgets it, wherever the place is.
+            vec![pausing(), plain()],
+            vec![pausing(), event("delete"), plain()],
+            // The next run's first request is the start. Refused, or its
+            // reply lost, it leaves the plan marked: at the device's own
+            // place the next attempt, or the abort, ends what is there; at a
+            // shared one each fails, never to retry.
+            vec![pausing(), failing("automatic"), elapse(), plain()],
+            vec![pausing(), failing("automatic"), event("delete"), elapse(), plain()],
+            vec![pausing(), losing_begin(), elapse(), plain()],
         ]
     }
 
-    fn model(cases: &[Vec<Value>]) -> Vec<Value> {
+    fn model(owned: bool, cases: &[Vec<Value>]) -> Vec<Value> {
         use std::{
             io::Write,
             process::{Command, Stdio},
         };
         let runner =
             std::env::var("COVEN_UPLOAD_SESSION_LEAN").expect("Lean upload session runner");
-        let inputs: Vec<Value> =
-            cases.iter().map(|events| json!({"total": PARTS, "events": events})).collect();
+        let inputs: Vec<Value> = cases
+            .iter()
+            .map(|events| json!({"total": PARTS, "owned": owned, "events": events}))
+            .collect();
         let mut child =
             Command::new(runner).stdin(Stdio::piped()).stdout(Stdio::piped()).spawn().unwrap();
         child.stdin.take().unwrap().write_all(&serde_json::to_vec(&inputs).unwrap()).unwrap();
@@ -577,16 +623,19 @@ mod sessions {
     #[ignore = "requires COVEN_UPLOAD_SESSION_LEAN; scripts/check.sh builds uploadSessionRunner"]
     async fn upload_sessions_match_the_storage_model() {
         let cases = cases();
-        let expected = model(&cases);
-        for (events, expected) in cases.iter().zip(expected) {
-            let mut device = Device::new().await;
-            let mut seen = Vec::new();
-            for event in events {
-                device.apply(event).await;
-                seen.push(device.observe().await);
+        for owned in [true, false] {
+            let expected = model(owned, &cases);
+            for (events, expected) in cases.iter().zip(expected) {
+                let mut device = Device::new(owned).await;
+                let mut seen = Vec::new();
+                for event in events {
+                    device.apply(event).await;
+                    seen.push(device.observe().await);
+                }
+                let case = Value::Array(events.clone());
+                assert_eq!(Value::Array(seen), expected, "owned: {owned}, {case}");
+                device.f.close().await;
             }
-            assert_eq!(Value::Array(seen), expected, "{}", Value::Array(events.clone()));
-            device.f.close().await;
         }
     }
 }

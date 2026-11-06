@@ -53,7 +53,8 @@ impl UploadTarget {
 ///
 /// Record it before sending parts and after each call, including failed calls:
 /// a publication conflict invalidates the native session even if abort fails.
-/// After a crash,
+/// Record it, too, after admitting a part that marks its plan
+/// ([`crate::PartPermit::marked`]), before sending that part. After a crash,
 /// call `resume_upload` to discover bytes accepted before a reply was lost. The
 /// bytes of this value include an upload capability: keep them secret. Dropping
 /// a session never aborts it; explicit abort abandons its pending bytes.
@@ -132,12 +133,7 @@ pub(crate) enum SessionState {
     /// name (Appendix E.10).
     S3Planned {
         token: SecretText,
-        /// True only while this process knows no initiation was attempted.
-        /// A restored journal cannot establish that fact. Read only at a
-        /// shared name: at a name the session owns, resuming or aborting
-        /// ends every upload there whatever this says (Appendix E.10).
-        #[serde(skip)]
-        unstarted: bool,
+        started: PlanStart,
     },
     Dropbox {
         id: SecretText,
@@ -157,12 +153,47 @@ pub(crate) enum SessionState {
     /// The deterministic provider's session named before its first part
     /// starts it, as an S3 multipart upload is (Appendix E.10).
     #[cfg(any(test, feature = "test-utils"))]
-    MemoryPlanned,
+    MemoryPlanned {
+        started: PlanStart,
+    },
     #[cfg(any(test, feature = "test-utils"))]
     Memory {
         id: u64,
         complete: bool,
     },
+}
+
+/// Whether a planned session's first part may have started its upload
+/// (§17.9, Appendix E.10). The recording keeps one fact, whether the plan is
+/// marked; what this process knows besides lives in memory only.
+#[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(from = "bool", into = "bool")]
+pub(crate) enum PlanStart {
+    /// Unmarked: no request that may start the upload was sent, so nothing
+    /// is at the plan's name.
+    Unstarted,
+    /// Marked by the connection's admission of the first part, which has not
+    /// been sent: this process knows nothing is at the name yet.
+    Starting,
+    /// Marked, and the first part may have started an upload at the name: it
+    /// was sent here, or the recording was restored.
+    MayHaveStarted,
+}
+
+impl From<bool> for PlanStart {
+    fn from(marked: bool) -> Self {
+        if marked {
+            Self::MayHaveStarted
+        } else {
+            Self::Unstarted
+        }
+    }
+}
+
+impl From<PlanStart> for bool {
+    fn from(start: PlanStart) -> Self {
+        start != PlanStart::Unstarted
+    }
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -211,6 +242,22 @@ impl S3Part {
 }
 
 impl UploadSession {
+    /// Mark a planned session's plan as its first part is admitted, before
+    /// the part is sent: whether that changed the recording, which the caller
+    /// then saves before sending (§17.9, Appendix E.10).
+    pub(crate) fn mark_start(&mut self) -> bool {
+        let started = match &mut self.state {
+            SessionState::S3Planned { started, .. } => started,
+            #[cfg(any(test, feature = "test-utils"))]
+            SessionState::MemoryPlanned { started } => started,
+            _ => return false,
+        };
+        if *started != PlanStart::Unstarted {
+            return false;
+        }
+        *started = PlanStart::Starting;
+        true
+    }
     /// Whether native initiation must follow recording this identity, before
     /// any part is sent. Resume it and save the returned session first (§20.6).
     pub fn needs_initiation(&self) -> bool {
@@ -368,7 +415,7 @@ impl UploadSession {
             }
             SessionState::Complete => {}
             #[cfg(any(test, feature = "test-utils"))]
-            SessionState::MemoryPlanned => {
+            SessionState::MemoryPlanned { .. } => {
                 return if self.confirmed == 0 {
                     Ok(())
                 } else {

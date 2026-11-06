@@ -49,7 +49,19 @@ impl MemoryStorage {
     ) {
         let mut state = self.provider.state.lock().await;
         assert!(state.held_request.is_none(), "a request is already held");
-        state.held_request = Some(HeldNext { started, resume });
+        state.held_request = Some(HeldNext { request: None, started, resume });
+    }
+    /// Hold the next request that is `request` once it is recorded, as
+    /// [`Self::hold_next_request`] does; every other request goes through.
+    pub async fn hold_next_request_of(
+        &self,
+        request: MemoryRequest,
+        started: tokio::sync::oneshot::Sender<()>,
+        resume: tokio::sync::oneshot::Receiver<()>,
+    ) {
+        let mut state = self.provider.state.lock().await;
+        assert!(state.held_request.is_none(), "a request is already held");
+        state.held_request = Some(HeldNext { request: Some(request), started, resume });
     }
     /// Hold a single-request creation before publication, notifying its observer.
     pub async fn hold_next_creation(

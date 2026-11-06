@@ -325,12 +325,14 @@ impl<P: ProviderOps + ?Sized> StorageConnection<P> {
         .await
         .map_err(|error| target.error(error))
     }
-    pub(crate) async fn upload_part_checked(
+    /// Admit `bytes` as `session`'s next part, sending nothing: the session
+    /// names this location, the part fits it, and its destination can be
+    /// published now. A planned session's first part marks its plan.
+    pub(crate) fn part_permit<'a>(
         &self,
         session: &mut UploadSession,
-        bytes: &[u8],
-        sent: &ByteProgress,
-    ) -> Result<(), StorageError> {
+        bytes: &'a [u8],
+    ) -> Result<PartPermit<'a>, StorageError> {
         let config = self.config();
         // Preserve native refusal order for a wrong location and an invalid part.
         let end = match config.provider() {
@@ -344,9 +346,18 @@ impl<P: ProviderOps + ?Sized> StorageConnection<P> {
                 session.end_of_part(bytes.len())?
             }
         };
+        let publication = self.publication(session.path())?;
+        Ok(PartPermit::admit(session, bytes, end, publication))
+    }
+    pub(crate) async fn send_permitted(
+        &self,
+        permit: PartPermit<'_>,
+        session: &mut UploadSession,
+        sent: &ByteProgress,
+    ) -> Result<(), StorageError> {
         // The part's bytes are heard from where it starts in the object.
         let sent = sent.starting_at(session.confirmed_bytes());
-        let publication = self.publication(session.path())?;
+        let PartPermit { bytes, end, publication, .. } = permit;
         let result = self
             .send(
                 RequestKind::Upload,
@@ -605,14 +616,21 @@ impl<P: ProviderOps + ?Sized> Storage for StorageConnection<P> {
         .await;
         self.observed(result).await
     }
-    async fn upload_part_reporting(
+    fn admit_part<'a>(
         &self,
         session: &mut UploadSession,
-        bytes: &[u8],
+        bytes: &'a [u8],
+    ) -> Result<PartPermit<'a>, StorageError> {
+        self.cooling()?;
+        self.part_permit(session, bytes)
+    }
+    async fn send_part(
+        &self,
+        permit: PartPermit<'_>,
+        session: &mut UploadSession,
         sent: &ByteProgress,
     ) -> Result<(), StorageError> {
-        self.cooling()?;
-        self.observed(self.upload_part_checked(session, bytes, sent).await).await
+        self.observed(self.send_permitted(permit, session, sent).await).await
     }
     async fn finish_upload(&self, session: &mut UploadSession) -> Result<(), StorageError> {
         self.cooling()?;

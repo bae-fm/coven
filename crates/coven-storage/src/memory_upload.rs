@@ -1,5 +1,6 @@
 //! Atomic conditional publication in the deterministic provider.
 use super::*;
+use crate::session::PlanStart;
 
 pub(super) struct Pending {
     device: coven_foundation::id_source::DeviceId,
@@ -40,15 +41,17 @@ fn confirm_published(
     Ok(())
 }
 
-/// End every session a planned one's first part may have started, whose
-/// start's reply was lost or never recorded, where its destination is a name
-/// its device alone uses: a path in its own file or snapshot folders, as on
-/// S3 (Appendix E.10). A shared slot or floor path proves nothing, so a plan
-/// there ends nothing.
+/// Whether every session at a planned one's name is its own: a name its
+/// device alone uses, a path in its own file or snapshot folders, as on S3
+/// (Appendix E.10). A shared slot or floor path proves nothing.
+fn owns_name(session: &UploadSession) -> bool {
+    session.path().device() == Some(session.device)
+}
+
+/// End every session at a planned one's name it owns: one its first part
+/// started, whose start's reply was lost or never recorded.
 fn end_planned(state: &mut MemoryState, session: &UploadSession) {
-    if session.path().device() == Some(session.device) {
-        state.uploads.retain(|_, pending| pending.target.path() != session.path());
-    }
+    state.uploads.retain(|_, pending| pending.target.path() != session.path());
 }
 
 fn check_target(state: &MemoryState, target: &UploadTarget) -> Result<(), StorageError> {
@@ -192,7 +195,7 @@ impl MemoryProvider {
             total,
             confirmed: 0,
             part_size: self.part_size,
-            state: SessionState::MemoryPlanned,
+            state: SessionState::MemoryPlanned { started: PlanStart::Unstarted },
         })
     }
     pub(super) async fn memory_resume_upload(
@@ -200,12 +203,24 @@ impl MemoryProvider {
         publication: &PublicationRequest,
         session: &mut UploadSession,
     ) -> Result<(), StorageError> {
-        publication.check()?;
-        self.before(MemoryRequest::Other("resume_upload")).await?;
-        if matches!(session.state, SessionState::MemoryPlanned) {
+        if let SessionState::MemoryPlanned { started } = session.state {
+            // Nothing is at the name of a plan whose first part was never
+            // sent, and nothing tells a stray at a shared name from another
+            // device's session (Appendix E.10).
+            if started != PlanStart::MayHaveStarted {
+                return Ok(());
+            }
+            if !owns_name(session) {
+                return Err(StorageFailure::SessionIdentityUnknown.into());
+            }
+            publication.check()?;
+            self.before(MemoryRequest::Other("resume_upload")).await?;
             end_planned(&mut *self.state.lock().await, session);
+            session.state = SessionState::MemoryPlanned { started: PlanStart::Unstarted };
             return Ok(());
         }
+        publication.check()?;
+        self.before(MemoryRequest::Other("resume_upload")).await?;
         let id = self.session_id(session)?;
         let state = self.state.lock().await;
         match state.uploads.get(&id) {
@@ -228,7 +243,13 @@ impl MemoryProvider {
         publication.check()?;
         // The whole part is taken as the call starts, as for a create.
         sent.moved(bytes.len() as u64);
-        if matches!(session.state, SessionState::MemoryPlanned) {
+        if let SessionState::MemoryPlanned { started } = &mut session.state {
+            // A restored marked plan resumes first, and one whose start this
+            // process sent may have started a session already.
+            if *started == PlanStart::MayHaveStarted {
+                return Err(StorageFailure::SessionIdentityUnknown.into());
+            }
+            *started = PlanStart::MayHaveStarted;
             self.initiate(session).await?;
         }
         self.before(MemoryRequest::Other("upload_part")).await?;
@@ -292,7 +313,7 @@ impl MemoryProvider {
     ) -> Result<(), StorageError> {
         publication.check()?;
         self.before(MemoryRequest::Other("finish_upload")).await?;
-        if matches!(session.state, SessionState::MemoryPlanned) {
+        if matches!(session.state, SessionState::MemoryPlanned { .. }) {
             // Nothing is sent before the first part starts the session.
             return Err(StorageFailure::InvalidPart.into());
         }
@@ -334,10 +355,20 @@ impl MemoryProvider {
         publication: &PublicationRequest,
         session: &UploadSession,
     ) -> Result<(), StorageError> {
+        if let SessionState::MemoryPlanned { started } = session.state {
+            // A plan whose first part was never sent has nothing to end
+            // (Appendix E.10).
+            if started != PlanStart::MayHaveStarted {
+                return Ok(());
+            }
+            if !owns_name(session) {
+                return Err(StorageFailure::SessionIdentityUnknown.into());
+            }
+        }
         publication.check()?;
         self.before(MemoryRequest::Other("abort_upload")).await?;
         let id = match session.state {
-            SessionState::MemoryPlanned => None,
+            SessionState::MemoryPlanned { .. } => None,
             _ => Some(self.session_id(session)?),
         };
         let mut state = self.state.lock().await;

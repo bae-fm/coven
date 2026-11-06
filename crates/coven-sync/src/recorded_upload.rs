@@ -136,8 +136,14 @@ pub(crate) async fn upload<S: UploadSource>(
         let length = (session.part_size() as u64 - offset % session.part_size() as u64)
             .min(total - offset) as usize;
         let part = source.read(offset, length).await?;
-        if let Err(error) = storage.upload_part_reporting(&mut session, &part, &source.sent()).await
-        {
+        // A refusal before any request leaves the recording as it was, a
+        // plan unmarked. The mark admitting a plan's first part is saved
+        // before the part can start the upload (Appendix E.10).
+        let permit = storage.admit_part(&mut session, &part)?;
+        if permit.marked() {
+            source.save(session.clone()).await?;
+        }
+        if let Err(error) = storage.send_part(permit, &mut session, &source.sent()).await {
             return Err(save_failure(source, session, error).await?.into());
         }
         source.save(session.clone()).await?;

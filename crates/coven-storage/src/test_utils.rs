@@ -145,8 +145,10 @@ impl RequestWatch {
     }
 }
 
-/// The next request of any kind, held once it is recorded.
+/// The next request, of any kind or only `request`, held once it is
+/// recorded.
 struct HeldNext {
+    request: Option<MemoryRequest>,
     started: tokio::sync::oneshot::Sender<()>,
     resume: tokio::sync::oneshot::Receiver<()>,
 }
@@ -223,6 +225,19 @@ impl PublicationGate for UnrestrictedPublications {
     fn check(&self, _: &ObjectPath) -> Result<(), StorageError> {
         Ok(())
     }
+}
+
+/// Admit `bytes` as `session`'s next part as a connection does with no
+/// cooldown live and every destination open, for a fake [`Storage`] of a
+/// test: the part must fit the session, and a plan's first part marks it.
+pub fn admitted_part<'a>(
+    session: &mut UploadSession,
+    bytes: &'a [u8],
+) -> Result<PartPermit<'a>, StorageError> {
+    let end = session.end_of_part(bytes.len())?;
+    let publication =
+        PublicationRequest::new(Arc::new(UnrestrictedPublications), session.path().clone());
+    Ok(PartPermit::admit(session, bytes, end, publication))
 }
 
 impl MemoryStorage {
@@ -428,7 +443,15 @@ impl MemoryProvider {
         self.peak_requests.fetch_max(active, std::sync::atomic::Ordering::SeqCst);
         self.request_trace.lock().expect("request trace poisoned").push(request.clone());
         self.requests.send_modify(|count| *count += 1);
-        let held = self.state.lock().await.held_request.take();
+        let held = {
+            let mut state = self.state.lock().await;
+            match &state.held_request {
+                Some(held) if held.request.as_ref().is_none_or(|kind| *kind == request) => {
+                    state.held_request.take()
+                }
+                _ => None,
+            }
+        };
         if let Some(held) = held {
             held.started
                 .send(())

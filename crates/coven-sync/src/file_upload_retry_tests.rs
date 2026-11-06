@@ -395,14 +395,21 @@ impl coven_storage::Storage for StepStorage {
         let result = self.storage.resume_upload(session).await;
         self.record("resume", time, result)
     }
-    async fn upload_part_reporting(
+    fn admit_part<'a>(
         &self,
         session: &mut coven_storage::UploadSession,
-        bytes: &[u8],
+        bytes: &'a [u8],
+    ) -> Result<coven_storage::PartPermit<'a>, coven_storage::StorageError> {
+        self.storage.admit_part(session, bytes)
+    }
+    async fn send_part(
+        &self,
+        permit: coven_storage::PartPermit<'_>,
+        session: &mut coven_storage::UploadSession,
         sent: &coven_storage::ByteProgress,
     ) -> Result<(), coven_storage::StorageError> {
         let time = self.tick();
-        let result = self.storage.upload_part_reporting(session, bytes, sent).await;
+        let result = self.storage.send_part(permit, session, sent).await;
         if result.is_ok() {
             if let Some(then) = self.on_part.lock().unwrap().take() {
                 then();

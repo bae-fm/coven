@@ -476,7 +476,10 @@ async fn recipient_access_follows_account_grants_and_acceptance() {
         };
         kept.join(STORE_ID, &kept_invite).await.unwrap();
         let upload_path = ObjectPath::slot(STORE_ID, 2.try_into().unwrap());
-        let mut upload = member.begin_upload(&upload_path, 4).await.unwrap();
+        // The member's upload has started: its first part is stored.
+        let first = vec![7; member.provider().part_size];
+        let mut upload = member.begin_upload(&upload_path, first.len() as u64 + 4).await.unwrap();
+        member.upload_part(&mut upload, &first).await.unwrap();
         owner.revoke_access("member").await.unwrap();
         for error in [
             member.read(&path).await.unwrap_err(),
@@ -498,7 +501,7 @@ async fn recipient_access_follows_account_grants_and_acceptance() {
         member.join(STORE_ID, &invitation).await.unwrap();
         member.upload_part(&mut upload, b"data").await.unwrap();
         member.finish_upload(&mut upload).await.unwrap();
-        assert_eq!(owner.read(&upload_path).await.unwrap(), b"data");
+        assert_eq!(owner.read(&upload_path).await.unwrap(), [first, b"data".to_vec()].concat());
     }
 }
 

@@ -184,13 +184,15 @@ async fn gcs_resume_reuses_its_temporary_after_assembly_copy_or_delete_reply_los
         let storage = gcs_provider(&server.url);
         let path = ObjectPath::slot(STORE_ID, std::num::NonZeroU64::MIN);
         let mut session = storage.begin_upload(&path, 4).await.unwrap();
+        // The caller saves the plan its first part's admission marked.
+        let permit = storage.admit_part(&mut session, b"data").unwrap();
         let recorded = session.encode().unwrap();
         let temporary = storage.provider().session_key(&session).unwrap();
         assert!(temporary
             .starts_with(&format!("{STORE_ID}/.coven-uploads/{}/", crate::test_utils::DEVICE.0)));
         assert_eq!(session.device(), crate::test_utils::DEVICE);
         assert!(ObjectPath::parse(&temporary).is_err());
-        storage.upload_part(&mut session, b"data").await.unwrap();
+        storage.send_part(permit, &mut session, &ByteProgress::unread()).await.unwrap();
         {
             let mut state = state.lock().unwrap();
             state.fail_completion_reply = lost == "assembly";
@@ -230,8 +232,9 @@ async fn gcs_abandoned_recording_cleans_assembled_temporary_after_a_crash() {
     let path = ObjectPath::slot(STORE_ID, std::num::NonZeroU64::MIN);
     for assembled in [false, true] {
         let mut session = storage.begin_upload(&path, 4).await.unwrap();
+        let permit = storage.admit_part(&mut session, b"data").unwrap();
         let recorded = session.encode().unwrap();
-        storage.upload_part(&mut session, b"data").await.unwrap();
+        storage.send_part(permit, &mut session, &ByteProgress::unread()).await.unwrap();
         if assembled {
             state.lock().unwrap().fail_completion_reply = true;
             assert_eq!(
@@ -483,11 +486,16 @@ async fn a_planned_session_aborts_an_initiation_whose_reply_was_lost() {
         let (_server, state, storage) = every_object_provider().await;
         let path = ObjectPath::slot(STORE_ID, std::num::NonZeroU64::MIN);
         let mut session = storage.begin_upload(&path, 4).await.unwrap();
+        let permit = storage.admit_part(&mut session, b"data").unwrap();
         let recorded = session.encode().unwrap();
         assert!(state.lock().unwrap().requests.is_empty(), "named before any request");
         state.lock().unwrap().lose_initiation_reply = true;
         assert_eq!(
-            storage.upload_part(&mut session, b"data").await.unwrap_err().failure(),
+            storage
+                .send_part(permit, &mut session, &ByteProgress::unread())
+                .await
+                .unwrap_err()
+                .failure(),
             StorageFailure::Network
         );
         assert_eq!(state.lock().unwrap().uploads.len(), 1);
@@ -689,10 +697,9 @@ async fn put_and_part_bytes_are_heard_through_the_object() {
         assert!(part < total);
         while upload.confirmed_bytes() < total {
             let length = part.min(total - upload.confirmed_bytes());
-            storage
-                .upload_part_reporting(&mut upload, &vec![2; length as usize], &sent)
-                .await
-                .unwrap();
+            let bytes = vec![2; length as usize];
+            let permit = storage.admit_part(&mut upload, &bytes).unwrap();
+            storage.send_part(permit, &mut upload, &sent).await.unwrap();
             assert_eq!(heard.lock().unwrap().last(), Some(&upload.confirmed_bytes()));
         }
         let heard = heard.lock().unwrap().clone();

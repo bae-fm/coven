@@ -1,6 +1,6 @@
 use crate::{
-    ByteProgress, CloudProvider, ObjectPath, ObjectPrefix, ObjectRead, StorageConfig, StorageError,
-    StorageFailure, StoredObject, UploadSession,
+    ByteProgress, CloudProvider, ObjectPath, ObjectPrefix, ObjectRead, PublicationRequest,
+    StorageConfig, StorageError, StorageFailure, StoredObject, UploadSession,
 };
 use async_trait::async_trait;
 
@@ -52,6 +52,37 @@ impl ByteRange {
             .get(start..end)
             .map(<[u8]>::to_vec)
             .ok_or(StorageError::Failure(StorageFailure::InvalidRange))
+    }
+}
+
+/// A part the connection admitted (§17.9): no provider cooldown was live, the
+/// session names the connection's location, the part fits the session, and
+/// its destination could be published. Admitting a planned session's first
+/// part marked its plan. Sending the part consumes the permit.
+#[must_use = "a part goes to the provider only through its permit"]
+pub struct PartPermit<'a> {
+    pub(crate) bytes: &'a [u8],
+    pub(crate) end: u64,
+    pub(crate) publication: PublicationRequest,
+    marked: bool,
+}
+
+impl<'a> PartPermit<'a> {
+    /// Admit `bytes` ending at `end`, marking a planned session's plan.
+    pub(crate) fn admit(
+        session: &mut UploadSession,
+        bytes: &'a [u8],
+        end: u64,
+        publication: PublicationRequest,
+    ) -> Self {
+        let marked = session.mark_start();
+        Self { bytes, end, publication, marked }
+    }
+    /// Whether admitting the part marked the session's plan, changing what
+    /// the caller records: save the session before sending the part, so a
+    /// recording that may name an upload says so (Appendix E.10).
+    pub fn marked(&self) -> bool {
+        self.marked
     }
 }
 
@@ -321,25 +352,40 @@ pub trait Storage: Send + Sync {
     /// Refresh a recorded session from the provider after interruption.
     /// Persist the returned state even on failure, as with `finish_upload`.
     async fn resume_upload(&self, session: &mut UploadSession) -> Result<(), StorageError>;
-    /// Send the next part, advancing the value only after confirmation. After
+    /// Admit `bytes` as the session's next part, sending nothing. Refused
+    /// while a provider cooldown is live, for a session naming another
+    /// location, for a part that doesn't fit the session, and while its
+    /// destination can't be published (§17.9). Admitting a planned
+    /// session's first part marks its plan, before any request that may
+    /// start its upload: when [`PartPermit::marked`] says so, save the
+    /// session before sending the part (Appendix E.10).
+    fn admit_part<'a>(
+        &self,
+        session: &mut UploadSession,
+        bytes: &'a [u8],
+    ) -> Result<PartPermit<'a>, StorageError>;
+    /// Send an admitted part, advancing the value only after confirmation,
+    /// and telling `sent` how far through the object the part's bytes the
+    /// connection has taken reach, as [`Self::create_reporting`] does. After
     /// a lost publication reply this verifies the stored bytes instead; see
     /// [`UploadSession`].
+    async fn send_part(
+        &self,
+        permit: PartPermit<'_>,
+        session: &mut UploadSession,
+        sent: &ByteProgress,
+    ) -> Result<(), StorageError>;
+    /// Admit and send the next part, for a caller that records the session
+    /// only after the part: one that never resumes a planned session from a
+    /// recording.
     async fn upload_part(
         &self,
         session: &mut UploadSession,
         bytes: &[u8],
     ) -> Result<(), StorageError> {
-        self.upload_part_reporting(session, bytes, &ByteProgress::unread()).await
+        let permit = self.admit_part(session, bytes)?;
+        self.send_part(permit, session, &ByteProgress::unread()).await
     }
-    /// [`Self::upload_part`], telling `sent` how far through the object the
-    /// part's bytes the connection has taken reach, as
-    /// [`Self::create_reporting`] does.
-    async fn upload_part_reporting(
-        &self,
-        session: &mut UploadSession,
-        bytes: &[u8],
-        sent: &ByteProgress,
-    ) -> Result<(), StorageError>;
     /// Publish all stored parts at the destination. A repeated completion is safe.
     /// Persist the session even on failure. `SessionExpired` requires a fresh
     /// session with the same bytes; a `Cleanup` error must not bypass failed abort.

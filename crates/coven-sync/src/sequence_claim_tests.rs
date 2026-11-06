@@ -744,6 +744,62 @@ async fn a_large_writes_slot_is_visible_only_once_complete() {
     }
 }
 
+/// Ana's large note goes up in parts. Its claim records the plan of its
+/// upload at the slot, and then a provider cooldown, which another request
+/// met meanwhile, refuses the first part before anything is sent: the plan
+/// stays unmarked. Once the cooldown has passed, the next pass sends the
+/// claim from its plan at the slot, which no device owns (§17.9, Appendix
+/// E.10).
+#[tokio::test]
+async fn a_claim_refused_before_its_first_part_goes_on_from_its_plan() {
+    use coven_storage::test_utils::MemoryRequest;
+    let mut group = Group::new();
+    group.storage = coven_storage::test_utils::MemoryStorage::builder()
+        .clock(group.clock.clone())
+        .transfer_limits(256, 128)
+        .build()
+        .unwrap();
+    let ana = group.device(1).await;
+    group.create(&ana).await;
+    let slot = ana.database().applied_slot().await.unwrap() + 1;
+    let path = ObjectPath::slot(group.store, slot.try_into().unwrap());
+    let title: &'static str = Box::leak("x".repeat(1000).into_boxed_str());
+    insert(ana.database(), "big", title).await;
+
+    let (started, planning) = tokio::sync::oneshot::channel();
+    let (resume, held) = tokio::sync::oneshot::channel();
+    group.storage.hold_next_request_of(MemoryRequest::Other("begin_upload"), started, held).await;
+    let sending = tokio::spawn({
+        let sync = ana.sync.clone();
+        async move { sync.pass().await }
+    });
+    coven_foundation::clock::within(planning).await.expect("the claim plans").unwrap();
+    ana.storage
+        .set_faults(Faults {
+            fail_next: 1,
+            failure: coven_storage::StorageFailure::RateLimited,
+            retry_after: Some(60),
+            ..Faults::none()
+        })
+        .await;
+    ana.storage.status(&path).await.unwrap_err();
+    resume.send(()).unwrap();
+    let refused = sending.await.unwrap().unwrap_err();
+    assert!(
+        matches!(&refused, SyncError::Storage(error)
+            if error.failure() == coven_storage::StorageFailure::RateLimited),
+        "{refused:?}"
+    );
+    assert!(group.storage.unfinished_uploads().await.is_empty(), "nothing started");
+
+    group.clock.set(group.clock.now() + std::time::Duration::from_secs(60));
+    ana.sync.pass().await.unwrap();
+    assert!(group.storage.status(&path).await.unwrap().is_some());
+    assert_eq!(ana.database().applied_slot().await.unwrap(), slot);
+    assert_eq!(rows(ana.database()).await, [("big".into(), title.into())]);
+    ana.database().close().await.unwrap();
+}
+
 /// The first device's writes made before storage was set up read nothing and
 /// are checked against slot 1's record of the store's creation; no other
 /// device can write at zero (§7.1).
