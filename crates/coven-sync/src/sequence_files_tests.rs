@@ -804,3 +804,35 @@ async fn stored_objects_never_hold_a_files_key_hashes_or_path() {
         device.database().close().await.unwrap();
     }
 }
+
+/// Deleting stored files waits for a snapshot that has not finished (§17.10):
+/// its journal still owns references no row holds. Ana's snapshot fails on
+/// its announcement, so the cleanup of gone devices' files is refused with
+/// the snapshot's id, and once the snapshot finishes it runs.
+#[tokio::test]
+async fn deleting_stored_files_waits_for_an_unfinished_snapshot() {
+    use coven_storage::{test_utils::Faults, StorageFailure};
+    let group = Group::new();
+    let ana = group.device(1).await;
+    group.create(&ana).await;
+    let next = ana.database().applied_slot().await.unwrap() + 1;
+    let announcement = ObjectPath::slot(group.store, next.try_into().unwrap());
+    group
+        .storage
+        .set_faults(Faults {
+            create_failures: [(announcement, (StorageFailure::ProviderUnavailable, 503))].into(),
+            ..Faults::none()
+        })
+        .await;
+    assert!(ana.sync.snapshot(coven_merge::Audience::Store).await.is_err());
+    group.storage.set_faults(Faults::none()).await;
+    let snapshot = ana.database().operations().await.unwrap()[0].id;
+    let refused = ana.sync.clean_up_gone_devices_files().await;
+    assert!(
+        matches!(&refused, Err(crate::SyncError::SnapshotPending(id)) if *id == snapshot),
+        "{refused:?}"
+    );
+    ana.sync.retry_pending_operation(snapshot).await.unwrap();
+    ana.sync.clean_up_gone_devices_files().await.unwrap();
+    ana.database().close().await.unwrap();
+}

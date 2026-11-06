@@ -267,3 +267,22 @@ fn a_bug_in_what_coven_calls_keep_is_the_calls_bug() {
         assert_eq!(open.bug(), Some(&bug));
     }
 }
+
+/// A storage setup or key unlock that meets a runtime shutting down reports
+/// the shutdown, naming whether anything ran, and not an internal failure (E15).
+#[test]
+fn a_setup_or_unlock_on_a_shutting_down_runtime_reports_the_shutdown() {
+    use crate::task::{Shutdown, ShutdownOutcome};
+    use crate::{StorageSetupError, StoreKeyUnlockError};
+    let shutdown = Shutdown { operation: "set up storage", outcome: ShutdownOutcome::NotRun };
+    let setup = super::setup_error(SyncError::Shutdown(shutdown));
+    assert!(
+        matches!(&setup, StorageSetupError::Shutdown(found) if *found == shutdown),
+        "{setup:?}"
+    );
+    let unlock = super::unlock_error(SyncError::Shutdown(shutdown));
+    assert!(
+        matches!(&unlock, StoreKeyUnlockError::Shutdown(found) if *found == shutdown),
+        "{unlock:?}"
+    );
+}

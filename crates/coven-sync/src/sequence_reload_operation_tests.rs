@@ -791,3 +791,45 @@ async fn other_audiences_take_writes_while_a_newly_readable_circle_loads() {
         device.database().close().await.unwrap();
     }
 }
+
+/// Publishing waits for a retained reload (§11): while Ben's reload that
+/// failed on a refused read waits for its retry, his snapshot is refused with
+/// the reload's id, and once the reload ends it goes through.
+#[tokio::test]
+async fn publishing_waits_for_a_retained_reload() {
+    let group = Group::new();
+    let ana = group.device(1).await;
+    let ben = group.device(2).await;
+    group.create(&ana).await;
+    group.admit(&ana, &ben).await;
+    insert(ana.database(), "a", "first").await;
+    ana.sync.pass().await.unwrap();
+    let slot = ana.sync.snapshot(Audience::Store).await.unwrap();
+    ben.sync.pass().await.unwrap();
+    let announcement = ben.sync.session.lock().await.history.announcements[&slot].clone();
+    let path = crate::snapshot_object::path(group.store, &announcement.snapshot).unwrap();
+    ben.storage
+        .set_faults(Faults {
+            read_failures: [(path, StorageFailure::PermissionDenied)].into(),
+            ..Faults::none()
+        })
+        .await;
+    assert!(ben.sync.reload_from_snapshot().await.is_err());
+    let reload = ben
+        .database()
+        .operations()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|record| record.kind == "sequence-reload")
+        .expect("the failed reload is retained")
+        .id;
+    let refused = ben.sync.snapshot(Audience::Store).await;
+    assert!(matches!(&refused, Err(SyncError::ReloadPending(id)) if *id == reload), "{refused:?}");
+    ben.storage.set_faults(Faults::none()).await;
+    ben.sync.reload_from_snapshot().await.unwrap();
+    ben.sync.snapshot(Audience::Store).await.unwrap();
+    for device in [&ana, &ben] {
+        device.database().close().await.unwrap();
+    }
+}
