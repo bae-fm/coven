@@ -143,9 +143,9 @@ pub enum Audience {
 - A store lives in one directory on the device, its `StoreDir`, which holds
   the database, coven's copies of files, the cache, the store's settings
   (its id and this device's id), and its storage settings, which
-  coven-storage keeps in a file of their own. The store's name is not a setting: a rename is synced, so the name is
-  the database's committed state, which listing the stores reads without
-  opening the store (`StoreInfo::name`, E9).
+  coven-storage keeps in a file of their own. The store's name is not a setting: a rename is synced,
+  so the name is the database's committed state, which listing the stores reads without opening the
+  store (`StoreInfo::name`, E9).
 - Creating, restoring or joining a store makes the directory and writes
   the settings, so the app never chooses a device id ([§10](coven.md#10-members-roles-and-devices)).
 - A `create_store` error carries no open handle. If the store becomes visible
@@ -189,10 +189,10 @@ pub enum Audience {
   releases and removes every lock file, so a deleted store leaves nothing named
   for it. What a cut deletion leaves, the renamed directory or the lock files
   alone, would refuse the store's id to creation, restore and join; listing the
-  stores, and a restore or join of the store, finish it first (§11.6). Holding the bootstrap lock keeps out a running restore, join or
-  replacement: after its swap, a running `reset_device`, `restore_device` or
-  `resume_replacement` holds only that lock between steps, and deletion must
-  not remove files under it. Lock acquisition, creation and lock-file removal are serialized by the
+  stores, and a restore or join of the store, finish it first (§11.6). Holding the bootstrap lock
+  keeps out a running restore, join or replacement: after its swap, a running `reset_device`,
+  `restore_device` or `resume_replacement` holds only that lock between steps, and deletion must not
+  remove files under it. Lock acquisition, creation and lock-file removal are serialized by the
   layout, so no one can lock a lock file between its release and its removal.
 - Deleting a store with storage set up loses whatever hasn't been uploaded.
   So before Ana deletes the Household store from her phone, the app shows
@@ -252,8 +252,8 @@ pub enum Audience {
   `DbError::Disk` for an open, and so does Apple's refusal, for a few
   milliseconds after it changes a file's class, to set that file's class again
   (`ResourceBusy`). Nothing records a walk until it completes; the next call
-  finishes it, leaving alone the files that already have the class. macOS takes `None` but keeps the file at
-  `CompleteUntilFirstUserAuthentication`.
+  finishes it, leaving alone the files that already have the class. macOS takes `None` but keeps the
+  file at `CompleteUntilFirstUserAuthentication`.
 - Only a volume mounted with content protection keeps classes (`mount` lists
   it as `protect`). On one without, such as a disk image, Apple reports every
   file at `CompleteUntilFirstUserAuthentication` and refuses any other class.
@@ -350,17 +350,15 @@ pub enum Audience {
   growing. A store created with `AutoVacuum::Incremental` gives back free
   pages only through `incremental_vacuum`.
 - `release_memory()` frees the cached pages no statement is using, as SQLite's
-  `sqlite3_db_release_memory` does ([§4](coven.md#4-writing-locally)). A host calls it when the OS warns of
-  low memory and when the app goes to the background: on Android from
-  `onTrimMemory`, whose `TRIM_MEMORY_UI_HIDDEN` and `TRIM_MEMORY_BACKGROUND`
-  levels report the app leaving the screen and waiting in the background; on
-  iOS on `didReceiveMemoryWarningNotification` and
-  `didEnterBackgroundNotification`.
-  A desktop app needn't. SQLite, as coven builds it, keeps every connection's
-  unused pages in one pool for the process, which one release empties: so the
-  call releases once, on an idle reader, and frees the pages of every
-  connection, and of every store the process has open. It is safe at any time
-  and never waits for a write. Later reads load what they need again.
+  `sqlite3_db_release_memory` does ([§4](coven.md#4-writing-locally)). A host calls it when the OS
+  warns of low memory and when the app goes to the background: on Android from `onTrimMemory`, whose
+  `TRIM_MEMORY_UI_HIDDEN` and `TRIM_MEMORY_BACKGROUND` levels report the app leaving the screen and
+  waiting in the background; on iOS on `didReceiveMemoryWarningNotification` and
+  `didEnterBackgroundNotification`. A desktop app needn't. SQLite, as coven builds it, keeps every
+  connection's unused pages in one pool for the process, which one release empties: so the call
+  releases once, on an idle reader, and frees the pages of every connection, and of every store the
+  process has open. It is safe at any time and never waits for a write. Later reads load what they
+  need again.
 
 Every SQLite setting, and who chooses it. Settings marked *app* are fields of
 `SqliteSettings`; the rest have no field.
@@ -4048,10 +4046,10 @@ while let Some(Ok(values)) = lost.next().await {
     and a bucket whose member keys reach all of it hold one store each
     (below).
   - Once a location is recorded, setup reconnects at it, such as after this
-    device's credentials were lost. It refuses a different location with `LocationChangeUnsupported`;
-    setup does not relocate a store already used by other devices. The
-    member whose account holds the store reconnects with that account;
-    another account fails with `StoreOwner` (§20.9).
+    device's credentials were lost. It refuses a different location with
+    `LocationChangeUnsupported`; setup does not relocate a store already used by other devices. The
+    member whose account holds the store reconnects with that account; another account fails with
+    `StoreOwner` (§20.9).
   - Creating claims slot 1, then the creator’s key-copy slot (§10.3). Waiting
     writes then claim a writes slot through ordinary sync.
   - Setup can take a while: it may wait out a minute of rate limits, and a
@@ -6744,13 +6742,11 @@ match stream.read_at(resume_at, 256 * 1024).await {
   that records provider access work.
 - The pending list describes unresolved access work, on the owner's devices
   only: no other device records it, since it could neither do the work nor
-  see it done. Each owner's device serializes grant and revoke requests, and performs the opposite request
-  when a later slot changes the required access (§20.9, §14.2).
-  Pending and failed work appears in `pending()`, with the operation id for
-  retry. Derived provider work cannot be discarded while its current
-  intention remains unmet: disappearance from this list must not hide a
-  retained grant. A later slot can replace or remove an account-sharing
-  intention.
+  see it done. Each owner's device serializes grant and revoke requests, and performs the opposite
+  request when a later slot changes the required access (§20.9, §14.2). Pending and failed work
+  appears in `pending()`, with the operation id for retry. Derived provider work cannot be discarded
+  while its current intention remains unmet: disappearance from this list must not hide a retained
+  grant. A later slot can replace or remove an account-sharing intention.
 - A superseded or removed member's S3 key, and an ended invite's, leave no
   record: coven forgets them, and the person deletes them in the provider's
   console (§14.3).
@@ -8975,8 +8971,8 @@ poisoned, and code that SQLite calls can't fail at all. What coven does
 depends on whose state it is. State of one open store that a panic may have
 left wrong fails that store's handle with the bug, `DbError::Bug`, and every
 later call and live query reports it, as for the other failures that fail a
-handle ([§4](coven.md#4-writing-locally)). State the whole process shares ends the process. Elsewhere a
-panic leaves nothing half-changed, by how the state changes.
+handle ([§4](coven.md#4-writing-locally)). State the whole process shares ends the process.
+Elsewhere a panic leaves nothing half-changed, by how the state changes.
 
 - Dan's app writes a note, and a bug in coven's SQL authorizer panics while
   it judges the `INSERT`. SQLite's authorizer can't fail, and what the

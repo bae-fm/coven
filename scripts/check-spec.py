@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Keep the spec readable: check spec/coven.md and spec/format.md.
+"""Keep the spec readable: check every markdown file directly under spec/.
 
     scripts/check-spec.py [spec directory]
 
@@ -20,14 +20,15 @@ a machine can see:
   that hold only links are exempt);
 - no paragraph or list is broken by two blank lines in a row.
 
-Exit status 0 when both files pass, 1 with one line per finding otherwise.
+Exit status 0 when every file passes, 1 with one line per finding otherwise.
 """
 
 from pathlib import Path
 import re
 import sys
 
-FILES = ("coven.md", "format.md")
+# The files the other documents refer into, which must exist.
+REQUIRED = ("coven.md", "format.md", "api.md")
 MAX_WIDTH = 100
 
 FENCE = re.compile(r"^\s*(```|~~~)")
@@ -383,18 +384,20 @@ def main(argv):
         return 2
     spec = Path(argv[1]) if len(argv) == 2 else Path(__file__).resolve().parent.parent / "spec"
     documents = {}
-    for name in FILES + ("api.md",):
-        path = (spec / name).resolve()
-        if not path.exists():
+    for name in REQUIRED:
+        if not (spec / name).exists():
             print(f"{spec / name}: missing", file=sys.stderr)
             return 1
+    names = sorted(path.name for path in spec.glob("*.md"))
+    for name in names:
+        path = (spec / name).resolve()
         documents[path] = Document(path)
     coven = documents[(spec / "coven.md").resolve()]
     sections = coven_sections(coven)
     format_sections = numbered(documents[(spec / "format.md").resolve()], "D")
     api_sections = numbered(documents[(spec / "api.md").resolve()], "E")
     findings = []
-    for name in FILES:
+    for name in names:
         document = documents[(spec / name).resolve()]
         check_references(document, sections, format_sections, api_sections, findings)
         check_links(document, documents, findings)

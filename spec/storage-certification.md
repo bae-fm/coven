@@ -66,7 +66,8 @@ run in every provider's live test; the races are separate tests.
   one with equal bytes where the provider's revision says so. The same live
   tests.
 - **Listing lag:** the time from a successful upload to its listing. `s3_live.rs`
-  and `onedrive_live.rs` (`onedrive_live_listing_lag`); CloudKit waits one hour before checking completeness.
+  and `onedrive_live.rs` (`onedrive_live_listing_lag`); CloudKit waits one hour before checking
+  completeness.
 - **Upload sessions and their resumption:** recorded sessions, expiry and
   continuation after a lost reply. `onedrive_live.rs`, `dropbox_live.rs`, the
   CloudKit tests.
@@ -96,7 +97,8 @@ each has its tests in a `_tests.rs` file beside it.
   races and the sharing test are in
   [`cloudkit-live.md`](../crates/coven-storage/cloudkit-live.md): see
   [Create-once race](../crates/coven-storage/cloudkit-live.md#create-once-race)
-  and [Sharing conformance on two accounts](../crates/coven-storage/cloudkit-live.md#sharing-conformance-on-two-accounts).
+  and [Sharing conformance on two
+  accounts](../crates/coven-storage/cloudkit-live.md#sharing-conformance-on-two-accounts).
 
 A run adds its section to the results below, newest first, and changes the
 table above.
@@ -131,24 +133,19 @@ with versioning disabled and enabled
 ([SeaweedFS every-object copy publication](#seaweedfs-every-object-copy-publication-2026-10-15)).
 A [full battery](#full-battery-2026-10-14) run later that day ran suite 5
 against R2, RustFS, Ceph RGW, SeaweedFS and Garage in every bucket state they
-support, and the cloud drives' and CloudKit's live tests: R2 and RustFS (both states) passed suite 5, Ceph RGW passed
-unversioned and failed versioned, SeaweedFS failed unversioned, Garage failed
-every race, and GCS's key could not read versioning, so suite 5 did not run
-there. After the key was granted bucket metadata access, GCS passed suite 5,
-and Versity Gateway 1.9.0 passed it with versioning disabled and enabled
-([GCS and Versity Gateway](#gcs-and-versity-gateway-2026-10-14)). On
-2026-10-15 the named `VersityGw` entry passed suite 5 in both states
-([Versity Gateway profile](#versity-gateway-profile-2026-10-15)). After every
-S3 session came to be recorded before its native upload, it passed suite 5
-three times in each state
-([Versity Gateway reruns](#versity-gateway-reruns-2026-10-15)).
-Suite version 6 adds the copy reply observation, which never decides the
-verdict. On 2026-10-28 it passed GCS, SeaweedFS and RustFS 1.0.2 (both bucket
-states where versioned), Ceph RGW unversioned and the `VersityGw` entry in both
-states. No copy profile's reply describes the object as its HEAD does, so the
-HEAD after each copy stays; R2's key was refused and it was not run
-([suite 6](#suite-6-2026-10-28)).
-The selected entries are in
+support, and the cloud drives' and CloudKit's live tests: R2 and RustFS (both states) passed suite
+5, Ceph RGW passed unversioned and failed versioned, SeaweedFS failed unversioned, Garage failed
+every race, and GCS's key could not read versioning, so suite 5 did not run there. After the key was
+granted bucket metadata access, GCS passed suite 5, and Versity Gateway 1.9.0 passed it with
+versioning disabled and enabled ([GCS and Versity Gateway](#gcs-and-versity-gateway-2026-10-14)). On
+2026-10-15 the named `VersityGw` entry passed suite 5 in both states ([Versity Gateway
+profile](#versity-gateway-profile-2026-10-15)). After every S3 session came to be recorded before
+its native upload, it passed suite 5 three times in each state ([Versity Gateway
+reruns](#versity-gateway-reruns-2026-10-15)). Suite version 6 adds the copy reply observation, which
+never decides the verdict. On 2026-10-28 it passed GCS, SeaweedFS and RustFS 1.0.2 (both bucket
+states where versioned), Ceph RGW unversioned and the `VersityGw` entry in both states. No copy
+profile's reply describes the object as its HEAD does, so the HEAD after each copy stays; R2's key
+was refused and it was not run ([suite 6](#suite-6-2026-10-28)). The selected entries are in
 [`s3_profile.rs`](../crates/coven-storage/src/providers/s3_profile.rs); the
 contract and certification procedure are in [§20](coven.md#20-what-coven-needs-from-a-provider)
 and [Appendix E.6](coven.md#e6-running-the-certification-suite).
@@ -594,8 +591,8 @@ The requests began 0.000157 and 0.000280 seconds after the same origin and ended
 at 1.788820 and 1.526390 seconds. Their shared condition's SHA-256 was
 `9221d98e5f596a1082daa8a541fef73402bad12834e895f3f232a74fea35f8fb`.
 The probe recorded every round's HTTP statuses, request-body
-hashes, condition hashes, returned eTag hashes, read-back matches and intervals. The probe deleted its own folder
-and confirmed HTTP 404. An earlier one-round probe also recorded HTTP 409
+hashes, condition hashes, returned eTag hashes, read-back matches and intervals. The probe deleted
+its own folder and confirmed HTTP 404. An earlier one-round probe also recorded HTTP 409
 `resourceModified`, a legitimate replacement conflict, and cleaned its folder.
 
 The production replacement call chain was checked: the supplied eTag is sent
@@ -638,9 +635,10 @@ rounds were discarded in this paced rerun.
 
 All seven case namespaces completed cleanup, including temporaries and
 unfinished uploads, and final versioning remained unchanged. Exit 0; elapsed
-2,340.42 seconds. The earlier HTTP 500 run remains a separate failed run; the successful rerun does not erase it. An audit reads every native writer reply and
-checks the trial sequence, overlap, winner count, summaries, process result
-and cleanup confirmations. The same audit of the GCS run passed.
+2,340.42 seconds. The earlier HTTP 500 run remains a separate failed run; the successful rerun does
+not erase it. An audit reads every native writer reply and checks the trial sequence, overlap,
+winner count, summaries, process result and cleanup confirmations. The same audit of the GCS run
+passed.
 
 #### Runs not made
 
@@ -730,10 +728,30 @@ errors. This changes failure accounting, not the positive live observations.
 
 ### Cross-account create-once probes, 2026-10-16
 
-- **Dropbox create-without-overwrite (`files/upload` mode `add`, `autorename=false`, `strict_conflict=true`), two accounts on a shared folder (probe 2026-10-16):** 200/200 two-account races had one 200 and one 409 `path/conflict`; 50/50 eight-writer races (4 per account) had one 200 and seven 409; content = winner every time; no 429 or 5xx (M). Documented behavior.
-- **OneDrive create with `conflictBehavior=fail` + `If-None-Match: *`, two personal accounts on a shared folder (probes 2026-10-16):** first run 200/200 two-account and 50/50 eight-writer (4 per account) races had one 201 and the rest 409 `nameAlreadyExists`; copy publication (temp name, then `copy` with `conflictBehavior=fail`) 50/50 had one completed copy and one 409. Rerun with content checks: 100/100, 30/30 and 30/30, winner's bytes stored every time, no 429 or 5xx (M).
-- **CloudKit create-once through coven's native adapter, one account (2026-10-16):** 200/200 two-writer and 50/50 eight-writer races had one winner; every loser refused as `AlreadyExists` (CloudKit server-record-changed); winner's bytes read back; 0 retries (M). Caveat: within one process all writers share one CKContainer/CKDatabase, so the framework may serialize them (owner-0 won 41/50). Two-account mode (`COVEN_CLOUDKIT_TEST_ROLE=owner|recipient`) needs a second Apple ID in a second macOS user session; the next probe used it.
-- **CloudKit create-once, two accounts (the owner account through its private database, the recipient account through the shared database; 2026-10-16):** 200 two-writer rounds and 50 eight-writer rounds; every round stored exactly one writer's bytes; 3 RateLimited replies (retry after 2 s) were retried. In 2 rounds (2-writer attempt 1, 8-writer attempt 253) EVERY writer was told `AlreadyExists`, including the one whose bytes the record holds: the winner's own save was reported as a conflict (likely a lost reply retried inside CloudKit). So a refused create-once is not proof of losing: the claimant must read the slot and compare it with its own bytes. Wins: the owner's private-DB writers won every other round (recipient 0/199, 0/50), so shared-DB writes arrive later.
+- **Dropbox create-without-overwrite (`files/upload` mode `add`, `autorename=false`,
+  `strict_conflict=true`), two accounts on a shared folder (probe 2026-10-16):** 200/200 two-account
+  races had one 200 and one 409 `path/conflict`; 50/50 eight-writer races (4 per account) had one
+  200 and seven 409; content = winner every time; no 429 or 5xx (M). Documented behavior.
+- **OneDrive create with `conflictBehavior=fail` + `If-None-Match: *`, two personal accounts on a
+  shared folder (probes 2026-10-16):** first run 200/200 two-account and 50/50 eight-writer (4 per
+  account) races had one 201 and the rest 409 `nameAlreadyExists`; copy publication (temp name, then
+  `copy` with `conflictBehavior=fail`) 50/50 had one completed copy and one 409. Rerun with content
+  checks: 100/100, 30/30 and 30/30, winner's bytes stored every time, no 429 or 5xx (M).
+- **CloudKit create-once through coven's native adapter, one account (2026-10-16):** 200/200
+  two-writer and 50/50 eight-writer races had one winner; every loser refused as `AlreadyExists`
+  (CloudKit server-record-changed); winner's bytes read back; 0 retries (M). Caveat: within one
+  process all writers share one CKContainer/CKDatabase, so the framework may serialize them (owner-0
+  won 41/50). Two-account mode (`COVEN_CLOUDKIT_TEST_ROLE=owner|recipient`) needs a second Apple ID
+  in a second macOS user session; the next probe used it.
+- **CloudKit create-once, two accounts (the owner account through its private database, the
+  recipient account through the shared database; 2026-10-16):** 200 two-writer rounds and 50
+  eight-writer rounds; every round stored exactly one writer's bytes; 3 RateLimited replies (retry
+  after 2 s) were retried. In 2 rounds (2-writer attempt 1, 8-writer attempt 253) EVERY writer was
+  told `AlreadyExists`, including the one whose bytes the record holds: the winner's own save was
+  reported as a conflict (likely a lost reply retried inside CloudKit). So a refused create-once is
+  not proof of losing: the claimant must read the slot and compare it with its own bytes. Wins: the
+  owner's private-DB writers won every other round (recipient 0/199, 0/50), so shared-DB writes
+  arrive later.
 
 ### SeaweedFS reruns as the named entry, 2026-10-15
 
@@ -3777,6 +3795,20 @@ certification suite=2 PASS
 
 ### Earlier live findings, 2026-10-11 to 2026-10-12
 
-- **GCS through its S3 interface:** ignores `If-None-Match: *` on PUT (create-once silently overwrote an object), but honors `x-goog-if-generation-match: 0` on a single PUT (412). Multipart completion overwrites despite that header, and initiating the upload with it fails with 400 NotImplemented. A conditional server-side copy onto an existing object returns 412 and keeps the object, which is why GCS multipart uploads to a temporary name and then copies. A GCS XML copy over 5 GiB was never tested (s3_profile.rs assumes GCS has no copy limit).
-- **Dropbox (probe 2026-10-12):** create-once answers 409; a partial upload session is invisible; `server_modified` is the completion time; listings lag 1.1–1.4 s; overwriting with identical bytes keeps the revision. Sharing needs the Full Dropbox app type; verified with two accounts: share, mount, read and write both ways.
-- **OneDrive (probe 2026-10-12):** a session creating an item at its final name exposed it unfinished: with 7,864,320 of 7,864,321 bytes confirmed, a listing included the destination and a read succeeded (live test; Graph's documentation says the file appears only after the last byte). a temporary name plus `copy` with `conflictBehavior=fail` hides partial uploads and refuses taken names (409); the copy's `createdDateTime` is the source session's start, its `lastModifiedDateTime` the copy's completion, so a copied object's publication time is its last-modified time.
+- **GCS through its S3 interface:** ignores `If-None-Match: *` on PUT (create-once silently
+  overwrote an object), but honors `x-goog-if-generation-match: 0` on a single PUT (412). Multipart
+  completion overwrites despite that header, and initiating the upload with it fails with 400
+  NotImplemented. A conditional server-side copy onto an existing object returns 412 and keeps the
+  object, which is why GCS multipart uploads to a temporary name and then copies. A GCS XML copy
+  over 5 GiB was never tested (s3_profile.rs assumes GCS has no copy limit).
+- **Dropbox (probe 2026-10-12):** create-once answers 409; a partial upload session is invisible;
+  `server_modified` is the completion time; listings lag 1.1–1.4 s; overwriting with identical bytes
+  keeps the revision. Sharing needs the Full Dropbox app type; verified with two accounts: share,
+  mount, read and write both ways.
+- **OneDrive (probe 2026-10-12):** a session creating an item at its final name exposed it
+  unfinished: with 7,864,320 of 7,864,321 bytes confirmed, a listing included the destination and a
+  read succeeded (live test; Graph's documentation says the file appears only after the last byte).
+  a temporary name plus `copy` with `conflictBehavior=fail` hides partial uploads and refuses taken
+  names (409); the copy's `createdDateTime` is the source session's start, its
+  `lastModifiedDateTime` the copy's completion, so a copied object's publication time is its
+  last-modified time.
