@@ -7583,9 +7583,9 @@ impl CovenWrite<'_> {
     /// Declines an open invite's checked request. The write ends the invite,
     /// which leaves `coven_invites` with it; once it commits, a pass deletes
     /// the request, so the requester's join ends as declined, and takes back
-    /// the storage access the invite granted. On S3 the key stays pending
-    /// until deleted and cleared under E9. A request the invite no longer
-    /// shows, an invite whose approval has begun, and one whose lifetime has
+    /// the storage access the invite granted. On S3 there is nothing to take
+    /// back: the person deletes the invite's key in the provider's console,
+    /// and coven forgets it (§14.3). A request the invite no longer shows, an invite whose approval has begun, and one whose lifetime has
     /// ended fail with InvitationChanged; an ended one leaves the list when
     /// coven writes its expiry.
     pub fn decline_join_request(&self, request: &JoinRequest) -> Result<(), SyncError>;
@@ -7593,8 +7593,9 @@ impl CovenWrite<'_> {
     /// Cancels an invite before anyone joins with it. The write ends the
     /// invite, which leaves `coven_invites` with it; once it commits, a pass
     /// deletes a waiting request, so the requester's join ends as declined,
-    /// and takes back the storage access the invite granted. On S3 the key
-    /// stays pending until deleted and cleared under E9. An invite whose
+    /// and takes back the storage access the invite granted. On S3 there is
+    /// nothing to take back: the person deletes the invite's key in the
+    /// provider's console, and coven forgets it (§14.3). An invite whose
     /// approval has begun, including an in-person invite's own, and one
     /// whose lifetime has ended fail with InvitationChanged.
     pub fn cancel_invite(&self, invite: &InviteId) -> Result<(), SyncError>;
