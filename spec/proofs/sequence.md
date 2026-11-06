@@ -322,6 +322,14 @@ These are permanent abstract claims. Unique values that can be released use
   ahead of a new claim 3. This agrees with §9.2's returning-loser rule.
 - `readers_agree`: applying the selector to sound sequence readers' merged
   rows gives the same winner. Later removal does not rerun uniqueness.
+- `landing_agrees`, `queued_loss_stands`, `published_before_queued`: a write
+  still in a device's queue ranks after every published claim, in
+  write-number order. The device holds published claims from the slots it has
+  applied only, and its queued writes land after them in number order. So it
+  orders every pair of claims it holds as their landed slots will, and the row
+  it selects for a value is the row selected once its queued writes land: a
+  row created locally that loses its value before it claims a slot still
+  loses it after, unless a claim the device doesn't yet hold arrives.
 
 [`Owners`](sequence/CovenSequence/Owners.lean):
 
@@ -331,6 +339,14 @@ These are permanent abstract claims. Unique values that can be released use
   subsequent claims, updates, deletion, reinsertion and audience moves retain
   the selected original write and its authenticated member. The move's slot
   does not become the creation slot.
+- `provisional_owner_lands`, `published_owner_first`: a creation still in
+  the queue is provisional, ranked as a queued claim is. Among the creations
+  it holds, a device picks the owner every receiver picks once its queued
+  creations land. A published creation it holds owns the key before every
+  queued one, so the device checks its queued changes against that owner,
+  which later claims never change. Only a key no published creation holds
+  has a provisional owner: another device's creation that lands first owns
+  it instead.
 
 ## Authority and roles
 

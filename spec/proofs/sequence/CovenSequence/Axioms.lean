@@ -113,11 +113,17 @@ import SequenceApply
 #print axioms CovenSequence.LiveClaims.first_after_release
 #print axioms CovenSequence.LiveClaims.readers_agree
 #print axioms CovenSequence.LiveClaims.older_loser_returns
+#print axioms CovenSequence.LiveClaims.select_congr
+#print axioms CovenSequence.LiveClaims.landing_agrees
+#print axioms CovenSequence.LiveClaims.queued_loss_stands
+#print axioms CovenSequence.LiveClaims.published_before_queued
 #print axioms CovenSequence.Owners.selected_creation
 #print axioms CovenSequence.Owners.lower_write_number_wins
 #print axioms CovenSequence.Owners.later_claim_preserves_creator
 #print axioms CovenSequence.Owners.move_preserves_owner
 #print axioms CovenSequence.Owners.retained_creator
+#print axioms CovenSequence.Owners.provisional_owner_lands
+#print axioms CovenSequence.Owners.published_owner_first
 
 #print axioms CovenSequence.Authority.every_prefix_has_admin
 #print axioms CovenSequence.Authority.applied_membership_authorized

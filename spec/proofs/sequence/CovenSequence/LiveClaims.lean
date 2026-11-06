@@ -195,6 +195,111 @@ theorem readers_agree {S : Sig} (R : Rules S) [DecidableEq Value]
     (same : a.pos = b.pos) (v : Value) : winner (inputs a.rows) v = winner (inputs b.rows) v := by
   rw [(CovenSequence.readers_agree R ha hb same).2.2]
 
+/-- Two ranks that order every pair of rows alike select the same row. -/
+theorem select_congr (r₁ r₂ : Row → Rank) (rs : List Row)
+    (agree : ∀ a ∈ rs, ∀ b ∈ rs, le (r₁ a) (r₁ b) ↔ le (r₂ a) (r₂ b)) :
+    select r₁ rs = select r₂ rs := by
+  induction rs with
+  | nil => rfl
+  | cons x xs ih =>
+    have tail := ih (fun a ha b hb => agree a (List.mem_cons_of_mem _ ha) b
+      (List.mem_cons_of_mem _ hb))
+    simp only [select, tail]
+    cases chosen : select r₂ xs with
+    | none => rfl
+    | some s =>
+      have member := (select_min r₂ xs s chosen).1
+      simp only [agree x List.mem_cons_self s (List.mem_cons_of_mem _ member)]
+
+/-! ## Claims still in the queue (§9.2)
+
+A write still in this device's queue has no slot yet. Its claim ranks after
+every published claim, in write-number order, as if it sat in the slot after
+the device's position `pos`. The device holds published claims from the slots
+through `pos` only, and its queued writes land, in number order, in slots after
+`pos`. So the device orders every pair of claims it holds as the slots they
+land in will. -/
+
+/-- Where a claim's write stands on the device: published in a slot, or still
+queued, with its write number. -/
+inductive Standing where
+  | published (slot number : Nat)
+  | queued (number : Nat)
+  deriving DecidableEq
+
+/-- The claim's position on a device at `pos`: a queued write ranks after
+every published one. -/
+def Standing.held (pos : Nat) : Standing → Position
+  | .published slot number => (slot, number)
+  | .queued number => (pos + 1, number)
+
+/-- The claim's position once the queued writes have landed, write `n` in
+slot `slotOf n`. -/
+def Standing.landed (slotOf : Nat → Nat) : Standing → Position
+  | .published slot number => (slot, number)
+  | .queued number => (slotOf number, number)
+
+/-- A claim the device at `pos` holds: published in a slot it applied, or its
+own queued write. -/
+def Standing.applied (pos : Nat) : Standing → Prop
+  | .published slot _ => slot ≤ pos
+  | .queued _ => True
+
+/-- The device's queued writes land after `pos`, in write-number order. -/
+structure Lands (pos : Nat) (slotOf : Nat → Nat) : Prop where
+  after : ∀ n, pos < slotOf n
+  ordered : ∀ n m, n ≤ m → slotOf n ≤ slotOf m
+
+/-- A claim's position with the row's primary-key rank. -/
+def withKey (p : Position) (key : Nat) : Rank := (p.1, p.2, key)
+
+/-- **A device orders the claims it holds as their landed slots will.** -/
+theorem landing_agrees {pos : Nat} {slotOf : Nat → Nat} (lands : Lands pos slotOf)
+    {a b : Standing} (ha : a.applied pos) (hb : b.applied pos) (ka kb : Nat) :
+    le (withKey (a.held pos) ka) (withKey (b.held pos) kb) ↔
+      le (withKey (a.landed slotOf) ka) (withKey (b.landed slotOf) kb) := by
+  cases a with
+  | published sa na =>
+    cases b with
+    | published sb nb => simp only [Standing.held, Standing.landed]
+    | queued nb =>
+      have := lands.after nb
+      simp only [Standing.applied] at ha
+      simp only [Standing.held, Standing.landed, withKey, le]
+      omega
+  | queued na =>
+    cases b with
+    | published sb nb =>
+      have := lands.after na
+      simp only [Standing.applied] at hb
+      simp only [Standing.held, Standing.landed, withKey, le]
+      omega
+    | queued nb =>
+      have h₁ := lands.ordered na nb
+      have h₂ := lands.ordered nb na
+      simp only [Standing.held, Standing.landed, withKey, le, Nat.lt_irrefl, false_or, true_and]
+      constructor <;> intro h <;> omega
+
+/-- **A queued claim's loss stands once it lands.** Among candidates whose
+claims the device holds, the row it selects for a value, ranking queued claims
+after every published one in write-number order, is the row selected once the
+queued writes land, so a row created locally that loses its value before it
+claims a slot still loses it after. -/
+theorem queued_loss_stands {pos : Nat} {slotOf : Nat → Nat} (lands : Lands pos slotOf)
+    (rows : List Row) (claim : Row → Standing) (key : Row → Nat)
+    (applied : ∀ r ∈ rows, (claim r).applied pos) :
+    select (fun r => withKey ((claim r).held pos) (key r)) rows =
+      select (fun r => withKey ((claim r).landed slotOf) (key r)) rows :=
+  select_congr _ _ rows fun a ha b hb =>
+    landing_agrees lands (applied a ha) (applied b hb) (key a) (key b)
+
+/-- A published claim the device holds ranks before every queued one. -/
+theorem published_before_queued {pos slot n m : Nat} (applied : slot ≤ pos) (ka kb : Nat) :
+    ¬ le (withKey ((Standing.queued m).held pos) kb)
+      (withKey ((Standing.published slot n).held pos) ka) := by
+  simp only [Standing.held, withKey, le]
+  omega
+
 def releaseExample (deleted : Bool) : Inputs Nat Unit where
   rows := [1, 2, 3]
   live := fun r => !(deleted && r == 1)
