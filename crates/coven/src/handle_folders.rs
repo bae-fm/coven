@@ -33,4 +33,17 @@ impl CovenHandle {
     pub async fn dropbox_shared_folders(&self) -> Result<Vec<StorageFolder>, StorageSetupError> {
         self.storage.dropbox_shared_folders().await
     }
+
+    /// Make a folder named `name` at the top of the signed-in person's
+    /// Dropbox and share it, for "New folder…" in the picker; a name already
+    /// taken fails with `AlreadyExists` and nothing is made or shared.
+    /// Requires Full Dropbox sign-in. Returns a setup location without
+    /// committing it. Close waits for the folder, including when the
+    /// awaiting app drops its future.
+    pub async fn create_dropbox_shared_folder(
+        &self,
+        name: &str,
+    ) -> Result<StorageFolder, StorageSetupError> {
+        self.storage.create_dropbox_shared_folder(name).await
+    }
 }

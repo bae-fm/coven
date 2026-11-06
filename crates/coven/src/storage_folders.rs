@@ -71,6 +71,21 @@ impl StorageConnections {
         })
         .await
     }
+
+    pub(crate) async fn create_dropbox_shared_folder(
+        self: &Arc<Self>,
+        name: &str,
+    ) -> Result<StorageFolder, StorageSetupError> {
+        let name = name.to_owned();
+        self.call(move |owner| async move {
+            owner
+                .folders(CloudProvider::Dropbox, |auth| {
+                    owner.connector.create_dropbox_shared_folder(&name, auth, owner.waits.clone())
+                })
+                .await
+        })
+        .await
+    }
 }
 
 #[cfg(test)]

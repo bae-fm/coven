@@ -66,6 +66,17 @@ pub trait StorageConnector: Send + Sync {
         Err(StorageFailure::ProviderUnavailable.into())
     }
 
+    /// Make a folder named `name` at the top of the signed-in Dropbox and
+    /// share it, refusing a name already taken.
+    async fn create_dropbox_shared_folder(
+        &self,
+        _name: &str,
+        _auth: ProviderAuth,
+        _cooldown: Arc<dyn crate::Cooldown>,
+    ) -> Result<StorageFolder, StorageError> {
+        Err(StorageFailure::ProviderUnavailable.into())
+    }
+
     /// Create the owner's CloudKit location from the entitled container.
     /// A connector without native CloudKit support refuses this capability.
     async fn prepare_cloudkit(
@@ -259,6 +270,20 @@ impl StorageConnector for ProviderConnector {
     ) -> Result<Vec<StorageFolder>, StorageError> {
         self.with_folders(auth, cooldown, |folders| async move {
             folders.dropbox_shared_folders().await
+        })
+        .await
+    }
+
+    /// Make a folder named `name` at the top of the signed-in Dropbox and
+    /// share it, refusing a name already taken.
+    async fn create_dropbox_shared_folder(
+        &self,
+        name: &str,
+        auth: ProviderAuth,
+        cooldown: Arc<dyn crate::Cooldown>,
+    ) -> Result<StorageFolder, StorageError> {
+        self.with_folders(auth, cooldown, |folders| async move {
+            folders.create_dropbox_shared_folder(name).await
         })
         .await
     }

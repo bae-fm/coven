@@ -80,6 +80,7 @@ pub(crate) use s3::{
 };
 mod dropbox;
 mod dropbox_access;
+mod dropbox_job;
 pub(crate) use dropbox::DropboxStorage;
 mod onedrive;
 mod onedrive_access;

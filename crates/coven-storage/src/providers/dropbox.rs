@@ -8,8 +8,6 @@ use coven_crypto::SecretText;
 use reqwest::Method;
 use serde_json::{json, Value};
 const PROVIDER: CloudProvider = CloudProvider::Dropbox;
-/// Member-removal job checks before reporting a timeout.
-const REMOVAL_CHECKS: u32 = 7;
 
 /// Dropbox objects rooted in the app folder or a shared namespace.
 pub(crate) struct DropboxStorage {
@@ -182,10 +180,8 @@ impl DropboxStorage {
             return Err(StorageFailure::Protocol.with_source("invalid Dropbox remove launch"));
         }
         let job = http::string(&value, "async_job_id")?;
-        // Status checks back off like every automatic wait: about a minute
-        // across seven checks, 1, 2, 4, …, 32 seconds apart.
-        for attempt in 0..REMOVAL_CHECKS {
-            let (value, original) = http::json_response(
+        let status = super::dropbox_job::completed(&self.session, "member removal", || async {
+            http::json_response(
                 PROVIDER,
                 self.rpc_response(
                     "sharing/check_remove_member_job_status",
@@ -193,31 +189,12 @@ impl DropboxStorage {
                 )
                 .await?,
             )
-            .await?;
-            match http::string(&value, ".tag")? {
-                // MemberAccessLevelResult is a struct: Dropbox inlines its fields
-                // beside .tag, including when all optional fields are absent.
-                "complete" => return remaining_parent_access(&value, member),
-                "in_progress" if attempt + 1 < REMOVAL_CHECKS => {
-                    self.session.wait_out(crate::retry_delay(attempt)).await
-                }
-                "in_progress" => break,
-                "failed" => return Err(original.into_error(PROVIDER)),
-                _ => {
-                    return Err(
-                        StorageFailure::Protocol.with_source("invalid Dropbox remove status")
-                    )
-                }
-            }
-        }
-        Err(StorageError::Provider {
-            provider: PROVIDER,
-            failure: StorageFailure::Network,
-            source: Box::new(std::io::Error::new(
-                std::io::ErrorKind::TimedOut,
-                "Dropbox member removal timed out",
-            )),
+            .await
         })
+        .await?;
+        // MemberAccessLevelResult is a struct: Dropbox inlines its fields
+        // beside .tag, including when all optional fields are absent.
+        remaining_parent_access(&status, member)
     }
 }
 enum UploadLookup {

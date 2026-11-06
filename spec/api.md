@@ -856,6 +856,17 @@ pub trait StorageConnector: Send + Sync {
         Err(StorageFailure::ProviderUnavailable.into())
     }
 
+    /// Make a folder named `name` at the top of the signed-in Dropbox and
+    /// share it, refusing a name already taken.
+    async fn create_dropbox_shared_folder(
+        &self,
+        _name: &str,
+        _auth: ProviderAuth,
+        _cooldown: Arc<dyn Cooldown>,
+    ) -> Result<StorageFolder, StorageError> {
+        Err(StorageFailure::ProviderUnavailable.into())
+    }
+
     /// Create the owner's CloudKit location from the entitled container.
     /// A connector without native CloudKit support refuses this capability.
     async fn prepare_cloudkit(
@@ -4509,6 +4520,16 @@ impl CovenHandle {
 
     /// Shared namespaces accessible through the pending Full Dropbox sign-in.
     pub async fn dropbox_shared_folders(&self) -> Result<Vec<StorageFolder>, StorageSetupError>;
+
+    /// Make a folder named `name` at the top of the signed-in Dropbox and
+    /// share it, for the picker's New folder (§20.3). A name already taken
+    /// fails with `AlreadyExists` and nothing is made or shared; a name with
+    /// a slash, or an empty one, fails with `InvalidConfiguration` before any
+    /// request. Requires Full Dropbox sign-in; returns a setup location
+    /// without committing it.
+    pub async fn create_dropbox_shared_folder(
+        &self, name: &str,
+    ) -> Result<StorageFolder, StorageSetupError>;
 }
 ```
 

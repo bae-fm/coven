@@ -8841,7 +8841,13 @@ Before setup, the app chooses a provider location. The folder calls in Appendix 
 use coven's held sign-in to show OneDrive folders or Dropbox shared namespaces;
 they return names and location ids, without reading the files inside. Ana can pick
 Household or create a OneDrive folder for it, then pass that location to setup.
-Choosing the location is separate from accessing the store's objects below it.
+On Dropbox she can make a new shared folder for it instead. Coven looks the name
+up at the top of her Dropbox first, and refuses one already taken with
+`StorageFailure::AlreadyExists`, so no folder of hers is shared by mistake; then
+one `sharing/share_folder` request makes the folder and shares it, and coven
+checks the job Dropbox may run for it until it completes. A name with a slash
+is refused before any request. Choosing the location is separate from accessing
+the store's objects below it.
 
 Every object path starts with the store's id: slots, the floor, snapshots, files,
 the setup check's test objects, and S3 detection's probes. The one exception is

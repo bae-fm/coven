@@ -144,6 +144,15 @@ impl StorageConnector for Connector {
     ) -> Result<Vec<StorageFolder>, StorageError> {
         self.native.dropbox_shared_folders(auth, cooldown).await
     }
+    /// Make a Dropbox folder and share it, refusing an occupied name.
+    async fn create_dropbox_shared_folder(
+        &self,
+        name: &str,
+        auth: ProviderAuth,
+        cooldown: Arc<dyn coven_storage::Cooldown>,
+    ) -> Result<StorageFolder, StorageError> {
+        self.native.create_dropbox_shared_folder(name, auth, cooldown).await
+    }
     async fn connect(
         &self,
         config: StorageConfig,
@@ -388,6 +397,51 @@ async fn dropbox_namespaces_follow_cursors_and_refresh_in_the_same_sign_in_used_
     };
     assert_eq!(tokens.access_token.as_str(), "access-1");
     f.fake.consumed();
+    f.handle.close().await.unwrap();
+}
+
+/// Ana's picker makes a new folder in her Dropbox for the library. Coven
+/// finds the name free, then makes the folder and shares it in one request,
+/// whose job it checks until it completes, and gives back the shared folder
+/// as a setup location, recording nothing. A name already taken is refused
+/// before anything is made or shared (§20.2).
+#[tokio::test]
+async fn a_new_dropbox_folder_is_made_shared_and_given_as_a_setup_location() {
+    let f = Fixture::new(dropbox("789")).await;
+    f.handle.authenticate(OAuthAccess::Dropbox(DropboxAccess::FullDropbox)).await.unwrap();
+    let not_found = json!({
+        "error_summary":"path/not_found/.",
+        "error":{".tag":"path","path":{".tag":"not_found"}}
+    });
+    let lookup = |path: &str| Some(json!({ "path": path }));
+    f.fake.expect(
+        Reply::new("POST", "/files/get_metadata", lookup("/Household"), not_found).status(409),
+    );
+    f.fake.expect(Reply::new(
+        "POST",
+        "/sharing/share_folder",
+        Some(json!({"path":"/Household","force_async":false})),
+        json!({".tag":"async_job_id","async_job_id":"share"}),
+    ));
+    f.fake.expect(Reply::new(
+        "POST",
+        "/sharing/check_share_job_status",
+        Some(json!({"async_job_id":"share"})),
+        json!({".tag":"complete","name":"Household","shared_folder_id":"789"}),
+    ));
+    let made = f.handle.create_dropbox_shared_folder("Household").await.unwrap();
+    assert_eq!(made, StorageFolder { name: "Household".into(), storage: dropbox("789") });
+    f.fake.expect(Reply::new(
+        "POST",
+        "/files/get_metadata",
+        lookup("/Music"),
+        json!({".tag":"folder","name":"Music","id":"id:music","path_display":"/Music"}),
+    ));
+    let taken = failure(f.handle.create_dropbox_shared_folder("Music").await.unwrap_err());
+    assert_eq!(taken.failure(), StorageFailure::AlreadyExists);
+    f.fake.consumed();
+    f.no_credentials();
+    assert_eq!(f.handle.storage_config().await.unwrap(), None);
     f.handle.close().await.unwrap();
 }
 
