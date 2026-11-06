@@ -418,12 +418,14 @@ impl DatabaseBuilder {
 /// in place and read-only on a blocking thread, never opened as a store. A
 /// journal SQLite reports damaged, or whose records don't decode, is
 /// `DamagedDatabase`. Like `read_store_name`, it reads only coven's table and
-/// needs none of the app's collations or functions.
+/// needs none of the app's collations or functions. A caller that stops
+/// waiting leaves the read to finish, and its panic goes to `bugs` (E15).
 pub async fn discarded_operations(
     path: std::path::PathBuf,
+    bugs: &coven_foundation::task::BugSinkRef,
 ) -> Result<Vec<crate::OperationRecord>, DbError> {
     finish_blocking(
-        coven_foundation::task::blocking("read the discarded operations", move || {
+        blocking_completing("read the discarded operations", bugs.clone(), move || {
             let db = coven_only(&path, true)?;
             crate::operation::read(&db)
         })
@@ -434,10 +436,12 @@ pub async fn discarded_operations(
 /// Read the name for a local store listing without migrations or a writer.
 /// It reads only coven's `_coven_store_state`, and SQLite looks a collation
 /// or function up only for a statement that uses it, so the app's aren't
-/// needed.
+/// needed. A caller that stops waiting leaves the read to finish, and its
+/// panic goes to the store's bug sink (E15).
 pub async fn read_store_name(directory: StoreDir) -> Result<String, OpenError> {
+    let bugs = directory.bugs().clone();
     finish_blocking(
-        coven_foundation::task::blocking("read the store name", move || {
+        blocking_completing("read the store name", bugs, move || {
             let _lock = directory.lock_read_only()?;
             let database = coven_only(&directory.database_path(), true)?;
             Ok(crate::store_state_tables::name(&database)?)
@@ -449,10 +453,14 @@ pub async fn read_store_name(directory: StoreDir) -> Result<String, OpenError> {
 /// The local creation name in a reset's discarded database. The reset owner
 /// holds its directory lease while reading this setting. Like
 /// `read_store_name`, it reads only `_coven_store_state` and needs none of
-/// the app's collations or functions.
-pub async fn discarded_store_name(path: std::path::PathBuf) -> Result<String, DbError> {
+/// the app's collations or functions. A caller that stops waiting leaves
+/// the read to finish, and its panic goes to `bugs` (E15).
+pub async fn discarded_store_name(
+    path: std::path::PathBuf,
+    bugs: &coven_foundation::task::BugSinkRef,
+) -> Result<String, DbError> {
     finish_blocking(
-        coven_foundation::task::blocking("read the discarded store name", move || {
+        blocking_completing("read the discarded store name", bugs.clone(), move || {
             let database = coven_only(&path, true)?;
             crate::store_state_tables::name(&database)
         })

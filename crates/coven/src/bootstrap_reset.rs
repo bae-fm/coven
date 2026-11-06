@@ -108,7 +108,7 @@ pub(super) async fn carry_discarded_provider_work(
         return Ok(());
     }
     let path = replacement.discarded_database_path();
-    let records = match coven_database::discarded_operations(path).await {
+    let records = match coven_database::discarded_operations(path, database.bugs()).await {
         Ok(records) => records,
         Err(coven_database::DbError::DamagedDatabase) => Vec::new(),
         Err(error) => return Err(SyncError::from(error).into()),
@@ -133,13 +133,21 @@ async fn reset_unconnected(
     let reset = replacement.device_reset();
     if !replacement.is_swapped() {
         let prepared = async {
-            let name = coven_database::discarded_store_name(replacement.discarded_database_path())
-                .await
-                .map_err(CovenError::from)?;
+            let name = coven_database::discarded_store_name(
+                replacement.discarded_database_path(),
+                builder.directories.bugs(),
+            )
+            .await
+            .map_err(CovenError::from)?;
             // As a connected reset reads it: a journal SQLite reports
             // damaged carries nothing.
             let path = replacement.discarded_database_path();
-            let carried = match coven_database::discarded_operations(path).await {
+            let carried = match coven_database::discarded_operations(
+                path,
+                builder.directories.bugs(),
+            )
+            .await
+            {
                 Ok(records) => coven_sync::DetectionRecord::carried(&records),
                 Err(coven_database::DbError::DamagedDatabase) => Vec::new(),
                 Err(error) => return Err(CovenError::from(error).into()),

@@ -823,7 +823,11 @@ async fn a_reset_completes_when_the_replaced_journal_is_damaged() {
                 file.seek(SeekFrom::Start(at)).unwrap();
                 file.write_all(&[0xff]).unwrap();
                 file.sync_all().unwrap();
-                let read = coven_database::discarded_operations(f.directory.database_path()).await;
+                let read = coven_database::discarded_operations(
+                    f.directory.database_path(),
+                    f.directory.bugs(),
+                )
+                .await;
                 file.seek(SeekFrom::Start(at)).unwrap();
                 file.write_all(&bytes[candidate * page..candidate * page + 1]).unwrap();
                 file.sync_all().unwrap();
@@ -848,7 +852,9 @@ async fn a_reset_completes_when_the_replaced_journal_is_damaged() {
         }
         file.sync_all().unwrap();
 
-        let journal = coven_database::discarded_operations(f.directory.database_path()).await;
+        let journal =
+            coven_database::discarded_operations(f.directory.database_path(), f.directory.bugs())
+                .await;
         match journal {
             Err(coven_database::DbError::DamagedDatabase) => assert!(damage_journal),
             Ok(records) => assert!(!damage_journal && records.len() == 1, "{records:?}"),

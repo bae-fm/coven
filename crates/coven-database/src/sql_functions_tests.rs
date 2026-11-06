@@ -231,10 +231,23 @@ async fn reading_a_discarded_database_needs_none_of_the_apps_collations() {
     sql(&database, "INSERT INTO notes VALUES ('1','apples')").await.unwrap();
     database.close().await.unwrap();
 
-    let operations = crate::discarded_operations(store.database_path()).await.unwrap();
+    let operations = crate::discarded_operations(
+        store.database_path(),
+        coven_foundation::files::StoreDirAccess::bugs(&store.directory()),
+    )
+    .await
+    .unwrap();
     assert!(operations.is_empty());
     assert_eq!(crate::read_store_name(store.directory()).await.unwrap(), "Household");
-    assert_eq!(crate::discarded_store_name(store.database_path()).await.unwrap(), "Household");
+    assert_eq!(
+        crate::discarded_store_name(
+            store.database_path(),
+            coven_foundation::files::StoreDirAccess::bugs(&store.directory())
+        )
+        .await
+        .unwrap(),
+        "Household"
+    );
 }
 
 /// The child process of the test below: a write whose index comparison
@@ -629,10 +642,23 @@ async fn reading_a_discarded_database_needs_none_of_the_apps_functions() {
     sql(&database, "INSERT INTO notes VALUES ('1','École')").await.unwrap();
     database.close().await.unwrap();
 
-    let operations = crate::discarded_operations(store.database_path()).await.unwrap();
+    let operations = crate::discarded_operations(
+        store.database_path(),
+        coven_foundation::files::StoreDirAccess::bugs(&store.directory()),
+    )
+    .await
+    .unwrap();
     assert!(operations.is_empty());
     assert_eq!(crate::read_store_name(store.directory()).await.unwrap(), "Household");
-    assert_eq!(crate::discarded_store_name(store.database_path()).await.unwrap(), "Household");
+    assert_eq!(
+        crate::discarded_store_name(
+            store.database_path(),
+            coven_foundation::files::StoreDirAccess::bugs(&store.directory())
+        )
+        .await
+        .unwrap(),
+        "Household"
+    );
 }
 
 /// The child process of the test below: a write whose index computation

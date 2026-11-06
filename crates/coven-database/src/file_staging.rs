@@ -122,22 +122,27 @@ impl FileStaging {
     pub(super) async fn write(
         mut self,
     ) -> Result<(Self, Result<Flushed, DbError>), coven_foundation::task::TaskFailed> {
-        let mut batch = {
+        let (bugs, mut batch) = {
             let slot = read_unpoisoned(&self.database);
             let inner = slot.as_ref().expect("staging holds close guard");
-            let batch = FlushBatch::new(inner.access.directory.bugs().clone());
+            let bugs = inner.access.directory.bugs().clone();
+            let batch = FlushBatch::new(bugs.clone());
             #[cfg(test)]
             let batch = batch
                 .with_hook(coven_foundation::locks::lock_unpoisoned(&inner.flush_hook).clone());
-            batch
+            (bugs, batch)
         };
         while let Some(source) = self.sources.pop_front() {
             let StagingSource { namespace, id, name, source, place } = source;
             // Creation owns the staging guard until it finishes. Cancellation
             // cannot remove a name before this blocking call creates its bytes.
             let file_name = name.clone();
-            let (next, writer) = coven_foundation::task::blocking(
+            // The staging comes back with the writer, or with why it wasn't
+            // made, so no error reaches the sink unread: a dropped caller's
+            // staging releases its names as it drops.
+            let (next, writer) = coven_foundation::task::blocking_completing(
                 "create a staged copy",
+                bugs.clone(),
                 crate::commit_scope::bind(move || {
                     let writer = (|| -> Result<_, DbError> {
                         let slot = read_unpoisoned(&self.database);
@@ -147,10 +152,11 @@ impl FileStaging {
                             .directory
                             .create_writer(FileArea::AppProvided, &file_name)?)
                     })();
-                    (self, writer)
+                    Ok::<_, std::convert::Infallible>((self, writer))
                 }),
             )
-            .await?;
+            .await?
+            .unwrap_or_else(|never| match never {});
             self = next;
             let writer = match writer {
                 Ok(writer) => writer,

@@ -94,7 +94,12 @@ async fn damage_a_statement_meets_after_opening_fails_that_statement() {
     assert!(matches!(read, Err(DbError::DamagedDatabase)), "{read:?}");
     reading.close().await.unwrap();
 
-    let operations = crate::discarded_operations(store.database_path()).await.unwrap();
+    let operations = crate::discarded_operations(
+        store.database_path(),
+        coven_foundation::files::StoreDirAccess::bugs(&store.directory()),
+    )
+    .await
+    .unwrap();
     assert!(operations.is_empty());
 }
 
@@ -151,7 +156,12 @@ async fn a_discarded_journal_is_read_past_damage_elsewhere_but_not_when_it_is_da
     database.close().await.unwrap();
 
     damage_overflow(&store, b'A');
-    let records = crate::discarded_operations(store.database_path()).await.unwrap();
+    let records = crate::discarded_operations(
+        store.database_path(),
+        coven_foundation::files::StoreDirAccess::bugs(&store.directory()),
+    )
+    .await
+    .unwrap();
     assert_eq!(records.len(), 1);
     assert_eq!(records[0].kind, crate::operation_kind::PROVIDER_ACCESS);
     assert_eq!(records[0].data, owed);
@@ -171,6 +181,10 @@ async fn a_discarded_journal_is_read_past_damage_elsewhere_but_not_when_it_is_da
     file.seek(SeekFrom::Start((at / size * size) as u64)).unwrap();
     file.write_all(&[0xff]).unwrap();
     file.sync_all().unwrap();
-    let damaged = crate::discarded_operations(store.database_path()).await;
+    let damaged = crate::discarded_operations(
+        store.database_path(),
+        coven_foundation::files::StoreDirAccess::bugs(&store.directory()),
+    )
+    .await;
     assert!(matches!(damaged, Err(DbError::DamagedDatabase)), "{damaged:?}");
 }

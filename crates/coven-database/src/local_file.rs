@@ -120,6 +120,8 @@ impl CarriesBug for LocalFileError {
 /// finished.
 pub struct LocalFileStream {
     file: Arc<LocalFileReader>,
+    /// Where a panic in a read its caller stopped waiting for goes (E15).
+    bugs: coven_foundation::task::BugSinkRef,
 }
 
 struct LocalFileReader {
@@ -136,12 +138,18 @@ impl LocalFileStream {
         self.file.plaintext_size()
     }
 
-    /// Read a positioned range on a blocking worker, retaining this open handle.
+    /// Read a positioned range on a blocking worker, retaining this open
+    /// handle. A caller that stops waiting leaves the read to finish, and
+    /// its panic goes to the store's bug sink (E15).
     pub async fn read_at(&self, offset: u64, len: u64) -> Result<Vec<u8>, LocalFileError> {
         let file = self.file.clone();
-        coven_foundation::task::blocking("read the local file", move || file.read_at(offset, len))
-            .await
-            .map_err(FileError::from)?
+        coven_foundation::task::blocking_completing(
+            "read the local file",
+            self.bugs.clone(),
+            move || file.read_at(offset, len),
+        )
+        .await
+        .map_err(FileError::from)?
     }
 
     /// Read a complete plaintext chunk and compare its first-read hash before
@@ -311,7 +319,10 @@ pub(crate) fn open_source(
             (reader, None)
         }
     };
-    Ok(LocalFileStream { file: Arc::new(LocalFileReader { reader, _lock: lock, id, original }) })
+    Ok(LocalFileStream {
+        file: Arc::new(LocalFileReader { reader, _lock: lock, id, original }),
+        bugs: directory.bugs().clone(),
+    })
 }
 
 fn observation(error: ObservationError, id: &str, original: bool) -> LocalFileError {

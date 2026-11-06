@@ -8965,7 +8965,9 @@ forever.
   none is, the bug goes to the sink, as does a bug the call's error carries.
 - Every database call runs on the blocking pool with `blocking_completing`:
   a read, a write, a live query's run and its processing, staging files,
-  and opening and closing a store. Ana's app drops a write's future while
+  opening and closing a store, reading a store's name for its listing and
+  a reset's discarded database, and reading a file on this device for its
+  upload. Ana's app drops a write's future while
   the write runs, and its closure panics with "note 43 has no title". The
   write rolls back and returns `DbError::Bug` to no one, so the sink hears
   `Bug { operation: "write", message: "note 43 has no title" }`.
