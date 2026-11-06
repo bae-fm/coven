@@ -604,6 +604,82 @@ fn a_member_reaches_the_store_with_the_access_kind_it_was_created_with() {
     assert!(household.check(1, household.ana, add(s3("carol"))).unwrap().is_some());
 }
 
+/// Set-access changes its author's own access, or, for an admin, another
+/// member's S3 key; and the member it names must be active (format.md D6).
+#[test]
+fn set_access_names_an_active_member_and_only_an_admin_sets_anothers_key() {
+    let mut household = Household::new();
+    let (ana, ben, carol) = (household.ana, household.ben, member(3));
+    let key = |name: &str| crate::sequence_sync::tests::access(name);
+    household.entry(
+        1,
+        ana,
+        StoreChange::AddMember {
+            member: carol,
+            keys: coven_format::test_utils::keys_from_seed(3).public_keys(),
+            role: MemberRole::Member,
+            access: key("carol"),
+        },
+    );
+    household.entry(
+        4,
+        carol,
+        StoreChange::AddDevice { name: "Carol's phone".into(), replaces: None },
+    );
+    let set = |member, name: &str| StoreChange::SetAccess { member, access: key(name) };
+
+    // An admin sets another member's key; a member sets her own.
+    assert!(household.check(1, ana, set(carol, "carol-2")).unwrap().is_some());
+    assert!(household.check(4, carol, set(carol, "carol-2")).unwrap().is_some());
+    // A member who is not an admin cannot set another's.
+    for target in [ana, ben] {
+        assert_eq!(
+            household.check(4, carol, set(target, "taken")).err(),
+            Some(OperationRejection::NotAllowed)
+        );
+    }
+    // A member who left cannot be named.
+    household.entry(1, ana, StoreChange::RemoveMember { member: carol });
+    assert_eq!(
+        household.check(1, ana, set(carol, "carol-3")).err(),
+        Some(OperationRejection::TargetGone(coven_database::EntryTarget::Member(carol)))
+    );
+}
+
+/// A rotation introduces a key for an audience and nothing else: the store's
+/// members and devices and the circle's members stay as they were (format.md
+/// D6).
+#[test]
+fn a_rotation_changes_no_membership() {
+    let mut household = Household::new();
+    let (ana, ben) = (household.ana, household.ben);
+    let gifts = CircleId(uuid::Uuid::from_u128(7));
+    household.entry(
+        1,
+        ana,
+        StoreChange::CreateCircle {
+            circle: gifts,
+            name: "Gifts".into(),
+            breaking_version: 0,
+            key: key(91),
+            key_hash: [2; 32],
+        },
+    );
+    household.entry(1, ana, StoreChange::AddCircleMember { circle: gifts, member: ben });
+    for (n, audience) in [Audience::Store, Audience::Circle(gifts)].into_iter().enumerate() {
+        let before = household.history.state.clone();
+        household.entry(
+            1,
+            ana,
+            StoreChange::RotateKey { audience, key: key(100 + n as u128), key_hash: [3; 32] },
+        );
+        let after = &household.history.state;
+        assert_eq!(after.members, before.members);
+        assert_eq!(after.devices, before.devices);
+        assert_eq!(after.circles[&gifts].members, before.circles[&gifts].members);
+    }
+}
+
 fn invite(n: u128) -> coven_foundation::id_source::InviteId {
     coven_foundation::id_source::InviteId(uuid::Uuid::from_u128(n))
 }
