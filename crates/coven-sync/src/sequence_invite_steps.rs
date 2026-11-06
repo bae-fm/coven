@@ -39,6 +39,7 @@ pub(crate) fn make_invite(
     ids: &dyn IdSource,
     now: SystemTime,
     location: &coven_storage::StorageConfig,
+    custody: &crate::DeviceCredentials,
     invite: NewInvite,
 ) -> Result<(InviteId, MemberId, OperationId), SyncError> {
     let NewInvite { target, access, lifetime } = invite;
@@ -54,7 +55,7 @@ pub(crate) fn make_invite(
     ) {
         return Err(StorageFailure::DropboxAppFolderNotShareable.into());
     }
-    let grant = invite_grant(access, location.provider())?;
+    let grant = invite_grant(access, location.provider(), custody)?;
     let secret = InviteSecret::generate()?;
     let secret = SecretText::new(serde_json::to_string(secret.to_secret_bytes().as_bytes())?);
     let expires_at = now.checked_add(lifetime.duration()).ok_or(
@@ -121,8 +122,13 @@ pub(crate) fn make_invite(
 }
 
 /// The storage access an invite grants, as the location allows it: a
-/// provider account to share with, or an S3 key made for the person.
-fn invite_grant(access: InviteAccess, provider: CloudProvider) -> Result<InviteGrant, SyncError> {
+/// provider account to share with, or on S3 a key the person made for the
+/// invitee or the one this device connects with, read from `custody`.
+fn invite_grant(
+    access: InviteAccess,
+    provider: CloudProvider,
+    custody: &crate::DeviceCredentials,
+) -> Result<InviteGrant, SyncError> {
     match access {
         InviteAccess::ProviderAccount { email } => {
             let email = MemberAccess::normalized_account(&email);
@@ -138,16 +144,27 @@ fn invite_grant(access: InviteAccess, provider: CloudProvider) -> Result<InviteG
             }
             Ok(InviteGrant::Account { email })
         }
+        InviteAccess::S3AccessKey { .. } | InviteAccess::HeldS3AccessKey
+            if provider != CloudProvider::S3 =>
+        {
+            Err(StorageFailure::InvalidConfiguration
+                .with_source("an access-key invitation requires S3")
+                .into())
+        }
         InviteAccess::S3AccessKey { access_key_id, secret_access_key } => {
             let credentials = S3Credentials { access_key_id, secret_access_key };
             credentials.validate()?;
-            if provider != CloudProvider::S3 {
-                return Err(StorageFailure::InvalidConfiguration
-                    .with_source("an access-key invitation requires S3")
-                    .into());
-            }
             Ok(InviteGrant::S3Key(credentials))
         }
+        InviteAccess::HeldS3AccessKey => match custody.connection()? {
+            Some(coven_storage::ConnectionCredentials {
+                credentials: coven_storage::StorageCredentials::S3(key),
+                ..
+            }) => Ok(InviteGrant::S3Key(key)),
+            Some(_) | None => Err(StorageFailure::InvalidConfiguration
+                .with_source("this device holds no S3 key to give")
+                .into()),
+        },
     }
 }
 

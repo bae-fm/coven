@@ -7660,6 +7660,11 @@ pub enum InviteAccess {
     ProviderAccount { email: String },
     /// S3: a member key made in the provider's console (§20.10).
     S3AccessKey { access_key_id: String, secret_access_key: SecretText },
+    /// S3: the key this device connects with, which coven reads from the
+    /// device's custody into the invite, so the app never handles its
+    /// secret; the invite names its id (§14.3). A device holding no S3 key
+    /// fails the call with `StorageFailure::InvalidConfiguration`.
+    HeldS3AccessKey,
 }
 
 /// How long an invite stays open after it is made (§13.2).

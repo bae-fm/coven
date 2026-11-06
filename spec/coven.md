@@ -5078,7 +5078,10 @@ are never referred to; the app's cleanup of the files of devices gone for good
 (§17.10) deletes them.
 
 **Two members on one key.** An invite may carry a key another member already
-uses. Ana, with no console at hand, gives Dan her own key. Coven records the
+uses. Ana, with no console at hand, gives Dan her own key. Her app asks for
+the key her phone connects with, the one history records for her, and coven
+reads it from her phone's custody into the invite, so its secret never passes
+through her app (api.md `InviteAccess::HeldS3AccessKey`). Coven records the
 same key id as both members' access; it checks only that the access is an S3
 key, as creation's is (format.md D6), and at the provider the two are one
 credential. Removing Dan then leaves the key in use: deleting it would lock

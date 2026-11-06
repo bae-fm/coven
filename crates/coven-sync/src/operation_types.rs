@@ -121,6 +121,9 @@ pub enum InviteAccess {
         /// The key's secret, carried only in the invitation.
         secret_access_key: SecretText,
     },
+    /// The S3 key this device connects with, which coven reads from its
+    /// custody, so the secret never reaches the app (§14.3).
+    HeldS3AccessKey,
 }
 
 /// How long an invite stays open after it is made, by the inviting

@@ -26,6 +26,9 @@ pub struct OperationSteps {
     ids: IdSourceRef,
     clock: ClockRef,
     directory: StoreDir,
+    /// This device's storage credentials, which an invite giving its own S3
+    /// key reads (§14.3).
+    credentials: Arc<crate::DeviceCredentials>,
     waits: Arc<RetryWaits>,
     state: Arc<SequenceState>,
 }
@@ -38,10 +41,11 @@ impl OperationSteps {
         ids: IdSourceRef,
         clock: ClockRef,
         directory: StoreDir,
+        credentials: Arc<crate::DeviceCredentials>,
         waits: Arc<RetryWaits>,
         state: Arc<SequenceState>,
     ) -> Self {
-        Self { device, identity, ids, clock, directory, waits, state }
+        Self { device, identity, ids, clock, directory, credentials, waits, state }
     }
 
     /// The member pair this installation holds, which an admin step checks
@@ -97,6 +101,7 @@ impl OperationSteps {
             self.ids.as_ref(),
             self.clock.now(),
             &location,
+            &self.credentials,
             invite,
         )?;
         let state = self.state.clone();

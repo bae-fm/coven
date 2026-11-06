@@ -322,3 +322,31 @@ async fn operations(handle: &CovenHandle) -> Vec<i64> {
         .await
         .unwrap()
 }
+
+/// Ana, with no console at hand, gives Dan the S3 key her phone uses. The
+/// invite reads it from her phone's custody, so her app never handles its
+/// secret: her list names the key, and the code carries it (§14.3).
+#[tokio::test]
+async fn an_invite_carries_the_s3_key_this_device_holds() {
+    let network = Network::new(1).await;
+    let ana = &network.devices[0].handle;
+    let invite = crate::tests::invite(
+        ana,
+        InviteTarget::NewMember { role: MemberRole::Member, name: "Dan".into() },
+        InviteAccess::HeldS3AccessKey,
+        crate::InviteLifetime::Day,
+    )
+    .await;
+    assert_eq!(invite.access, MemberAccess::S3AccessKey { access_key_id: "owner-key".into() });
+    let code = coven_sync::read_invite_code(invite.shown_code()).unwrap();
+    let coven_storage::InviteStorage::S3 { credentials, .. } =
+        coven_storage::InviteStorage::decode(code.storage.as_bytes()).unwrap()
+    else {
+        panic!("an S3 invite carries a key");
+    };
+    assert_eq!(
+        (credentials.access_key_id.as_str(), credentials.secret_access_key.as_str()),
+        ("owner-key", "secret")
+    );
+    network.close().await;
+}

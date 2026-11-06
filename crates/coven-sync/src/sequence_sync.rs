@@ -164,12 +164,22 @@ impl SequenceSync {
     /// run a step beside the pass.
     #[cfg(test)]
     pub(crate) fn operation_steps(&self) -> crate::OperationSteps {
+        // Custody holding no storage credentials: these tests give an
+        // invite's key in the call.
+        let keychain = coven_crypto::custody::Keychain::in_memory("operation steps").unwrap();
+        let credentials = crate::DeviceCredentials::new(
+            Arc::new(coven_crypto::custody::StoreKeychain::new(keychain.clone(), self.store())),
+            Arc::new(coven_crypto::custody::PersonEntries::new(keychain, self.store())),
+            self.directory.clone(),
+            None,
+        );
         crate::OperationSteps::new(
             self.device,
             self.member.clone(),
             self.ids.clone(),
             self.clock.clone(),
             self.directory.clone(),
+            Arc::new(credentials),
             self.waits.clone(),
             self.state.clone(),
         )

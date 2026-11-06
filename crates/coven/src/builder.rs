@@ -905,6 +905,7 @@ impl OpeningOwners {
             self.ids.clone(),
             self.clock.clone(),
             self.directory.clone(),
+            self.credentials.clone(),
             waits.clone(),
             self.state.clone(),
         ));
