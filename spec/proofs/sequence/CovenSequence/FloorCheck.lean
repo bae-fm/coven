@@ -23,6 +23,10 @@ Every slot the check reads is kept (`check_reads_kept`), so in storage in good
 order it is present, and an honest floor is accepted (`check_from_floor`).
 Reading forward from `through` instead, past a first kept slot beyond
 `through + 1`, needs a deleted slot (`history_needs_deleted_slot`).
+
+`check` is the floor check as the JSON runner runs it, with a missing slot
+reported where the check meets it; in storage in good order it accepts an
+honest floor (`honest_floor_accepted`).
 -/
 namespace CovenSequence.FloorCheck
 
@@ -143,5 +147,68 @@ theorem history_needs_deleted_slot :
     | n + 3 => intro _; omega
   · exact (check_from_floor adminRules compactStore_good () (through := 1) (reach := 3)
       (by decide) fun A => by cases A; exact Or.inr ⟨3, false, 0, by decide, by decide, rfl⟩).2
+
+/-! ## The check, as the runner runs it
+
+`check` reads the slots after `checkFrom` through the floor's `at` in order. The
+first one missing stops it, reported at that slot; otherwise `announced n`, the
+floor's check against the history through `n`, accepts or refuses the floor.
+A claim settling against a floor (§5.3) does this, with `through` the slot
+before its claim's. -/
+
+/-- What checking a floor does. -/
+inductive Outcome where
+  /-- The floor checks. -/
+  | accepted
+  /-- A slot the check reads is missing. -/
+  | stops (slot : Nat)
+  /-- The history through the floor's `at` lacks an announcement it names. -/
+  | floorDamaged
+  deriving DecidableEq
+
+/-- The slots after `start` through `reach`, in order. -/
+def reads (start reach : Nat) : List Nat := (List.range (reach - start)).map (start + 1 + ·)
+
+theorem mem_reads {start reach a : Nat} : a ∈ reads start reach ↔ start < a ∧ a ≤ reach := by
+  simp only [reads, List.mem_map, List.mem_range]
+  constructor
+  · rintro ⟨k, hk, rfl⟩; omega
+  · intro h; exact ⟨a - start - 1, by omega, by omega⟩
+
+/-- Check the floor `f`, whose store snapshot covers `covers`, from the slots
+through `through`. -/
+def check (present announced : Nat → Bool) (through covers : Nat) (f : ReadPass.FloorView) :
+    Outcome :=
+  let start := checkFrom through covers f.first
+  match (reads start f.reach).find? (fun a => !present a) with
+  | some a => .stops a
+  | none => if announced (max start f.reach) then .accepted else .floorDamaged
+
+section Store
+variable {S : Sig} (R : Rules S)
+
+/-- **An honest floor is accepted.** In storage in good order, with `present`
+what storage holds and `announced` the floor's check `Settle.FloorAnnounced`
+against the history the check holds, a floor whose named snapshots were
+announced through its `at` is accepted: no slot it reads is missing. -/
+theorem honest_floor_accepted {seq : Nat → Slot S} {st : Store S} (g : Good R st seq)
+    (store : S.Aud) {through reach : Nat} (announced : Nat → Bool)
+    (hcheck : ∀ n, announced n = true ↔ FloorAnnounced
+      (heldAt st seq (checkFrom through (st.floor.covers store) st.floor.start) n) st)
+    (hat : reach ≤ st.head)
+    (hnamed : ∀ A, st.floor.covers A = 0 ∨ ∃ a au w, 1 ≤ a ∧ a ≤ reach ∧
+      seq a = .snapshot au A (st.floor.covers A) w (st.floor.path A)) :
+    check (fun a => (st.slot a).isSome) announced through (st.floor.covers store)
+      ⟨st.floor.start, reach⟩ = .accepted := by
+  obtain ⟨present, accepted⟩ := check_from_floor R g store (through := through) hat hnamed
+  have hnone : (reads (checkFrom through (st.floor.covers store) st.floor.start) reach).find?
+      (fun a => !(st.slot a).isSome) = none := by
+    rw [List.find?_eq_none]
+    intro a ha
+    obtain ⟨h1, h2⟩ := mem_reads.mp ha
+    simp [present a h1 h2]
+  simp only [check, hnone, (hcheck _).2 accepted, ite_true]
+
+end Store
 
 end CovenSequence.FloorCheck

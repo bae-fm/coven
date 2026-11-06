@@ -591,6 +591,151 @@ async fn sequence_end_search_matches_lean() {
     ana.database().close().await.unwrap();
 }
 
+/// Ana's create of the slot after hers is held while Ben's snapshot takes
+/// it. Ben writes `later` slots after it and writes a floor; with `compacted`,
+/// he writes another, snapshots again and writes a floor whose first kept slot
+/// has passed Ana's claim. With `lost`, the slot `offset` after Ana's claim
+/// slot is then gone. Ana's pass settles her claim against that floor: what it
+/// reports against `floorCheck`, returning that report; none when the lost
+/// slot is past the floor's `at`.
+async fn compare_settle_floor(
+    later: usize,
+    compacted: bool,
+    lost: Option<u64>,
+) -> Option<serde_json::Value> {
+    let group = Group::new();
+    let ana = group.device(1).await;
+    let ben = group.device(2).await;
+    group.create(&ana).await;
+    group.admit(&ana, &ben).await;
+    ben.sync.pass().await.unwrap();
+    let applied = ana.sync.database.applied_slot().await.unwrap();
+    assert_eq!(ben.sync.database.applied_slot().await.unwrap(), applied);
+    insert(&ana.sync.database, "ana", "waiting").await;
+    let (started, observed) = tokio::sync::oneshot::channel();
+    let (resume, held) = tokio::sync::oneshot::channel();
+    group
+        .storage
+        .hold_next_creation(coven_storage::ObjectPrefix::all(group.store), started, held)
+        .await;
+    let grace = crate::sequence_sync::sequence_retention::GRACE;
+    let second = std::time::Duration::from_secs(1);
+    let retention = async {
+        observed.await.unwrap();
+        ben.sync.snapshot(coven_merge::Audience::Store).await.unwrap();
+        for id in &["later-0", "later-1"][..later] {
+            insert(&ben.sync.database, id, "after the snapshot").await;
+            ben.sync.pass().await.unwrap();
+        }
+        group.clock.set(std::time::UNIX_EPOCH + grace + second);
+        ben.sync.pass().await.unwrap();
+        if compacted {
+            insert(&ben.sync.database, "past", "the claim").await;
+            ben.sync.pass().await.unwrap();
+            ben.sync.snapshot(coven_merge::Audience::Store).await.unwrap();
+            group.clock.set(std::time::UNIX_EPOCH + grace * 2 + second * 3);
+            ben.sync.pass().await.unwrap();
+        }
+        let floor = crate::sequence_sync::sequence_reload::tests::stored_floor(&ben).await;
+        let covers = ben
+            .sync
+            .session
+            .lock()
+            .await
+            .history
+            .announcements
+            .get(&floor.announcements[0].slot)
+            .expect("floor's store announcement")
+            .covers;
+        assert_eq!(floor.header.first.0 > applied + 1, compacted, "{:?}", floor.header);
+        let lost = lost.map(|offset| applied + 1 + offset);
+        let fits = lost.is_none_or(|slot| slot <= floor.header.at);
+        if let Some(slot) = lost.filter(|_| fits) {
+            group
+                .storage
+                .delete(&ObjectPath::slot(group.store, slot.try_into().unwrap()))
+                .await
+                .unwrap();
+        }
+        let mut missing = Vec::new();
+        for slot in 1..=floor.header.at {
+            let path = ObjectPath::slot(group.store, slot.try_into().unwrap());
+            if group.storage.status(&path).await.unwrap().is_none() {
+                missing.push(slot);
+            }
+        }
+        resume.send(()).unwrap();
+        let named: Vec<u64> = floor.announcements.iter().map(|original| original.slot.0).collect();
+        let input = serde_json::json!({"kind":"floorCheck","applied":applied,"covers":covers,
+            "floor":{"first":floor.header.first.0,"at":floor.header.at,"named":named},
+            "missing":missing});
+        (fits, input)
+    };
+    let (result, (fits, input)) = tokio::join!(ana.sync.pass(), retention);
+    let report = fits.then(|| crate::tests::run_lean("COVEN_SEQUENCE_LEAN", &input));
+    if let Some(expected) = &report {
+        // Once the floor checks, the claim settles and the pass moves on, to
+        // a later slot's claim or to work that can meet the lost slot; only
+        // a claim still unsettled at its slot shows the check's own failure.
+        let contested = ObjectPath::slot(group.store, (applied + 1).try_into().unwrap());
+        let unsettled = ana.sync.database.current_claim().await.unwrap().is_some_and(|claim| {
+            claim.attempts.last() == Some(&contested)
+                && claim.settlement == coven_database::ClaimSettlement::Unknown
+        });
+        let actual = match &result {
+            _ if !unsettled => serde_json::json!("accepted"),
+            Ok(_) => panic!("an unsettled claim after a successful pass; {input}"),
+            Err(SyncError::Damaged(object))
+                if object.path == ObjectPath::floor(group.store).as_str() =>
+            {
+                serde_json::json!("floorDamaged")
+            }
+            Err(SyncError::Damaged(object)) => {
+                let slot = (1..)
+                    .find(|slot: &u64| {
+                        object.path
+                            == ObjectPath::slot(group.store, (*slot).try_into().unwrap()).as_str()
+                    })
+                    .expect("a slot's path");
+                serde_json::json!({"stops":slot})
+            }
+            Err(error) => panic!("{error:?}; {input}"),
+        };
+        assert_eq!(&actual, expected, "{input}");
+    }
+    for device in [&ana, &ben] {
+        device.sync.database.close().await.unwrap();
+    }
+    report
+}
+
+/// A claim lost to Ben's snapshot, under floors whose `at` is past the slots
+/// Ana has applied, whose first kept slot has passed her claim or not, with
+/// one slot after her claim gone or none (§5.2, §5.3, `FloorCheck.check`).
+#[tokio::test]
+#[ignore = "requires COVEN_SEQUENCE_LEAN; scripts/check.sh builds sequenceRunner"]
+async fn sequence_settle_floor_matches_lean() {
+    let mut reports = std::collections::BTreeMap::new();
+    for later in 0..=2 {
+        for compacted in [false, true] {
+            for lost in [None, Some(1), Some(2), Some(3), Some(4), Some(5)] {
+                if let Some(report) = compare_settle_floor(later, compacted, lost).await {
+                    let kind = if report.get("stops").is_some() { "stops" } else { "accepted" };
+                    *reports.entry((compacted, kind)).or_insert(0) += 1;
+                }
+            }
+        }
+    }
+    eprintln!("settle floor: {reports:?}");
+    // Each floor, compacting Ana's claim slot or not, is accepted in some
+    // cases and stopped at a lost slot in others.
+    for compacted in [false, true] {
+        for kind in ["accepted", "stops"] {
+            assert!(reports.contains_key(&(compacted, kind)), "{reports:?}");
+        }
+    }
+}
+
 /// Ben follows his notes with a live query. Ana writes a note and passes;
 /// Ben's pass applies her slot, and his query reports the new result (E4).
 #[tokio::test]

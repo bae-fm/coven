@@ -546,6 +546,24 @@ def keyCase (slots held current : List Json) : Json := json% {
   rejects (pass 3 4 "missing" Json.null)
   rejects (pass 5 4 "lost" Json.null)
 
+-- A floor whose first kept slot is at most the slot after the applied one is
+-- checked from the device's slots; past it, from the floor's store snapshot,
+-- and the slots between are never read.
+#eval do
+  let floorCheck := fun (first reach : Nat) (named missing : List Nat) =>
+    json% {"kind":"floorCheck","applied":3,"covers":6,
+      "floor":{"first":$(first),"at":$(reach),"named":$(named)},"missing":$(missing)}
+  check (floorCheck 4 7 [7] []) (toJson "accepted")
+  check (floorCheck 4 7 [7] [5]) (json% {"stops":5})
+  check (floorCheck 4 7 [9] []) (toJson "floorDamaged")
+  check (floorCheck 4 3 [2] []) (toJson "accepted")
+  check (floorCheck 7 7 [7] [1, 2, 3, 4, 5, 6]) (toJson "accepted")
+  check (floorCheck 7 7 [7] [7]) (json% {"stops":7})
+  check (floorCheck 7 8 [7] [8]) (json% {"stops":8})
+  rejects (floorCheck 8 9 [7] [])
+  rejects (floorCheck 4 7 [0] [])
+  rejects (floorCheck 4 7 [7] [5, 5])
+
 -- A gap the end search checks reads as the end; one it skips is found.
 #eval do
   let present := fun (gap : Nat) => ((List.range 21).filter (fun i => i ≠ 0 ∧ i ≠ gap))

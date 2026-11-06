@@ -409,6 +409,7 @@ import SequenceApply
 #print axioms CovenSequence.FloorCheck.check_from_floor
 #print axioms CovenSequence.FloorCheck.compactStore_good
 #print axioms CovenSequence.FloorCheck.history_needs_deleted_slot
+#print axioms CovenSequence.FloorCheck.honest_floor_accepted
 #print axioms CovenSequence.RetentionConfirm.landed_confirms
 #print axioms CovenSequence.RetentionConfirm.unconfirmed_not_landed
 #print axioms CovenSequence.RetentionConfirm.confirmed_deletes

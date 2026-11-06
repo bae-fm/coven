@@ -11,6 +11,7 @@ import CovenSequence.QueueReloadExamples
 import CovenSequence.MemberKeyReplacement
 import CovenSequence.JoinScan
 import CovenSequence.ReadPass
+import CovenSequence.FloorCheck
 
 /-! One case per process; malformed inputs fail on stderr with nonzero exit. -/
 namespace SequenceJson
@@ -178,6 +179,26 @@ def readPass (j : Json) : Except String Json := do
   return match ReadPass.pass check applied stop why (← nat j "known") floor with
     | .reload => toJson "reload"
     | .synced through => Json.mkObj [("synced", toJson through)]
+    | .stops slot => Json.mkObj [("stops", toJson slot)]
+    | .floorDamaged => toJson "floorDamaged"
+
+/-- `FloorCheck.check`, with the floor's check passing once the history held
+reaches every slot that announced a snapshot the floor names. -/
+def readFloorCheck (j : Json) : Except String Json := do
+  let applied ← nat j "applied"
+  let covers ← nat j "covers"
+  let floor ← j.getObjVal? "floor"
+  let first ← positive floor "first"
+  let reach ← nat floor "at"
+  let named ← floor.getObjValAs? (List Nat) "named"
+  if named.any (· == 0) then throw "named snapshots' slots must be positive"
+  if first > covers + 1 then throw "the floor's store snapshot must cover first - 1"
+  let missing ← j.getObjValAs? (List Nat) "missing"
+  distinct missing "missing slot"
+  let present := fun a => !missing.contains a
+  let announced := fun n => named.all (· ≤ n)
+  return match FloorCheck.check present announced applied covers ⟨first, reach⟩ with
+    | .accepted => toJson "accepted"
     | .stops slot => Json.mkObj [("stops", toJson slot)]
     | .floorDamaged => toJson "floorDamaged"
 
@@ -362,6 +383,7 @@ def run (j : Json) : Except String Json := do
   | "read" => readRead j
   | "readPass" => readPass j
   | "endSearch" => readEndSearch j
+  | "floorCheck" => readFloorCheck j
   | "joinScan" => readJoinScan j
   | "retention" => readRetention j
   | "floor" => return toJson (Retention.floorStart (← j.getObjValAs? (List (Option Nat)) "coverage"))

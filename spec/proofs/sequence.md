@@ -1229,6 +1229,10 @@ snapshot's body as honest (`Good.floor_body`).
   with first kept slot 3; slots 1 and 2 are deleted. A device at slot 1 would
   need slot 2, and against slot 1 alone the floor is refused. Starting from the
   floor's store snapshot, it reads only slot 3 and accepts the floor.
+- `check` runs the floor check as the JSON runner does: it reads the slots after
+  `checkFrom` through the floor's `at` in order, reports the first one missing,
+  and otherwise accepts or refuses the floor. `honest_floor_accepted`: in
+  storage in good order it accepts an honest floor.
 
 ## Settling a lost floor reply
 
@@ -1314,6 +1318,21 @@ reach every named slot. The answer is `"reload"`, `{"synced":n}`,
 ```
 
 Answer: `{"stops":5}`.
+
+**`floorCheck`** calls `FloorCheck.check`, a settling claim's check of the floor
+it reads (§5.2, §5.3). `applied` is the device's applied slot, the slot before
+its claim's; `covers` is the coverage of the floor's store snapshot, at least
+`first - 1`; `floor` is `{first, at, named}`, with `named` the slots that
+announced the floor's snapshots; `missing` lists the distinct slots absent from
+storage. The floor check passes once the history held reaches every named slot.
+The answer is `"accepted"`, `{"stops":n}` or `"floorDamaged"`:
+
+```json
+{"kind":"floorCheck","applied":3,"covers":6,"floor":{"first":7,"at":7,"named":[7]},"missing":[4,5,6]}
+```
+
+Answer: `"accepted"`; the floor's first kept slot has passed slot 4, so the
+check starts after its store snapshot's coverage and never reads 4 to 6.
 
 **`endSearch`** calls `ReadPass.locateEnd` from `start` over the distinct
 `present` slots; every other slot is missing. It returns the end found:
@@ -1521,6 +1540,12 @@ and settlement comparisons also include deterministic seeded cases.
   floor, and compares what the real pass applies and reports with `readPass`.
   `sequence_end_search_matches_lean` compares the real end search over storage
   missing one slot with `endSearch`.
+- `coven-sync`'s `sequence_settle_floor_matches_lean` loses Ana's claim to
+  Ben's snapshot announcement while her create is held. Ben writes zero to two
+  slots after it and writes a floor; in half the cases he snapshots again past
+  her claim slot, so the floor's first kept slot passes it. With one of the
+  slots after her claim slot lost, or none, it compares what her settling pass
+  reports with `floorCheck`.
 - `coven-database` applies write slots and compares visible unique winners,
   permanent owner creations (slot, write number, author and member) and consumed
   cut-off refusals at every prefix.
