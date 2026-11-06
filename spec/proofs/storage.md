@@ -262,10 +262,11 @@ attempt this process is running, in memory only; and whether the upload's
 place is the device's own. A part is its index. The steps are the upload
 worker's: start an attempt when the upload is due, resume the recorded session
 or record a plan, mark the plan, begin the planned session, record a session,
-send a part, publish, complete, fail with a class, stop for a pause, crash,
-abort and forget what an upload no file waits for records, and retire one that
-records nothing. The provider may lose the reply to a begin or a part, drop a
-part, expire its sessions or lose the completion reply.
+send a part, publish, complete, fail with a class, refuse a begin before its
+request goes out, stop for a pause, crash, abort and forget what an upload no
+file waits for records, and retire one that records nothing. The provider may
+lose the reply to a begin or a part, drop a part, expire its sessions or lose
+the completion reply.
 
 `steps_good` carries one invariant through every step. The provider's session
 holds parts `0 … n-1` in order (`held_nodup`), and the published object is
@@ -284,7 +285,10 @@ changes the location, key and chunk hashes the staging write fixed
 The row records a plan before the provider begins a session, and marks it
 before the request that may begin it (`begin_needs_plan`). Only that step marks
 a plan, so a failure, a refused request, a pause or a crash before it leaves
-the plan unmarked (`only_mark_marks`). A session begun whose name the row never
+the plan unmarked (`only_mark_marks`). A begin refused after the mark but
+before its request goes out, as when the publication gate closes after the
+part's admission, began nothing, so its failure unmarks the plan again
+(`refusal_unmarks`). A session begun whose name the row never
 recorded, because the begin's reply was lost or the process stopped before the
 record, is a stray, and only those steps leave one (`steps_stray_le`). Every
 stray sits at the place of the marked plan the row still records

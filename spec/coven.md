@@ -7222,6 +7222,12 @@ condition in the session, because a retry must not overwrite a competing floor.
     has nothing at its name, whatever stopped the attempt first: a crash, a
     pause, a failed read or a refusal that sent nothing. The next attempt goes
     on from it, and an abort forgets it, with no request, wherever the name is.
+  - The destination is checked again as the start's request goes out, and a
+    provider cooldown can begin in between, so the start can still be refused
+    after the plan was marked. Such a refusal sent nothing, and the row records
+    the plan unmarked again before the failure is reported. Only a start whose
+    request went out, even one the provider never answered, leaves the plan
+    marked.
   - On OneDrive the plan names the temporary, and on CloudKit the upload
     record, which the next attempt finds again; a OneDrive session whose start
     reply was lost holds no item and expires (Appendix E.2).
@@ -10645,7 +10651,10 @@ object, or the floor. That reserved place is distinct from every coven path.
 multipart upload exists. The first part starts the native upload, and the record
 then gains the native id, saved with that part. Before that part's request, once
 the connection has admitted it (§17.9), the record is marked: from then on an
-upload may exist at the name. A record never marked names none.
+upload may exist at the name. A start refused before its request went out, by
+the publication gate or a cooldown checked again as it goes, leaves the record
+unmarked again, saved before the failure is reported. A record never marked
+names none.
 
 - A marked record without the native id may name an upload that exists: one
   whose start's reply was lost, or one started before the device stopped.
@@ -11517,7 +11526,7 @@ Write-ups explain each model and state its assumptions:
 | An upload going up in parts records only parts the provider holds, so the progress the app is shown is never ahead of them; the part an attempt sends next is the first the provider lacks, and the provider gets no part twice and publishes every part once, in order, after any crashes, failed attempts and expired sessions | `steps_good`, `progress_never_ahead`, `next_part_new`, `held_nodup`, `published_whole` | `proofs/storage/CovenStorage/UploadSession.lean` | §17.9 |
 | A crash forgets only memory, and every session the provider holds stays; after it, a session the provider still has continues from the parts it holds, and one it expired starts over with a new plan; no step changes the location, key or chunk hashes | `crash_keeps`, `resume_continues`, `expired_starts_over`, `steps_keep_fixed` | `proofs/storage/CovenStorage/UploadSession.lean` | §17.9 |
 | A session is begun only once its plan is recorded and marked, and only the step before that request marks a plan; a session begun but never named, after a lost begin reply or a stop before the record, sits at the place of the marked plan the row records, and where that place is the device's own, the attempt's first request, an abort, and the next run that fails nothing each end every such session | `begin_needs_plan`, `only_mark_marks`, `steps_stray_le`, `stray_named`, `open_sweeps`, `abort_sweeps`, `next_run_sweeps` | `proofs/storage/CovenStorage/UploadSession.lean` | §17.9, E.10 |
-| A plan never marked has nothing at its place, so at any place its attempt goes on from it and its abort forgets it; a marked plan at a shared place fails, never to retry, attempt and abort alike | `unmarked_resumes`, `unmarked_aborts`, `marked_shared_never`, `abort_sweeps` | `proofs/storage/CovenStorage/UploadSession.lean` | §17.9, E.10 |
+| A plan never marked has nothing at its place, so at any place its attempt goes on from it and its abort forgets it; a begin refused after the mark but before its request goes out unmarks the plan again; a marked plan at a shared place fails, never to retry, attempt and abort alike | `unmarked_resumes`, `unmarked_aborts`, `refusal_unmarks`, `marked_shared_never`, `abort_sweeps` | `proofs/storage/CovenStorage/UploadSession.lean` | §17.9, E.10 |
 | What a row records is forgotten only by aborting it, which ends the provider's session and every session begun at its plan's place; an upload retires only once it records nothing, so it retires with no session left; a failed abort keeps the upload queued with what it records, as its failure | `forgotten_by_abort`, `retire_needs_no_session`, `retired_no_session`, `failed_abort_queued` | `proofs/storage/CovenStorage/UploadSession.lean` | §17.9 |
 | Uploads retry by class: a failure waits as its class says, an attempt starts only when due or covered by the app's retry, and an abort only once its wait is over; a delay ends only when it passes and a connection wait only on a new connection; a `Never` failure is never retried, by automatic work or the app | `failure_waits_by_class`, `start_needs_due`, `abort_needs_ready`, `wait_ends`, `never_retried` | `proofs/storage/CovenStorage/UploadSession.lean` | §17.9 |
 | Every file whose coordinates say cloud is in storage, and every stored path is named by a record, queued, kept by an unpublished write or a deletion candidate | `steps_cloud_stored`, `steps_reachable` | `proofs/storage/CovenStorage/Files.lean` | §17.3, §17.10 |
