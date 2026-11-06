@@ -634,6 +634,7 @@ async fn a_write_while_offline_shows_unsent_changes_with_no_pass() {
     else {
         panic!("offline names the pass: {unsent:?}");
     };
+    ana_loop.parked_from_now().await;
     assert_eq!(ana.storage.request_count(), requests, "no pass ran for the write");
     ana_loop.close().await.unwrap();
     ana.database().close().await.unwrap();

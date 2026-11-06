@@ -55,8 +55,13 @@ async fn each_network_that_appears_is_one_report() {
     assert_eq!(waits.network_reported(), 1);
     assert_eq!(shown(&database).await, (Some(true), false));
     let mut reports = waits.network_reports();
+    // Each change is followed before the next, so the metered flip and the
+    // loss are each seen reporting nothing, and only the join reports.
     network.set_metered(true);
+    follow.parked_from_now().await;
     network.lose();
+    follow.parked_from_now().await;
+    assert_eq!(waits.network_reported(), 1);
     network.join(false);
     reports.changed().await.unwrap();
     assert_eq!(waits.network_reported(), 2);

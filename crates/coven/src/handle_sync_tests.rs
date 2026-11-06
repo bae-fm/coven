@@ -239,6 +239,7 @@ async fn stopping_finishes_a_held_file_upload_and_restarting_resumes_the_queue()
     assert!(file_stored(device, first).await);
     let second = attach(&device.handle, "second", vec![2; 2048]).await;
     // Stopped, the store has no connection to send it on.
+    device.handle.test_parked().await;
     assert_eq!(file_creates(device), creates + 1, "a stopped connection sent a file");
     device.handle.start_sync().await.unwrap();
     wait_for_empty_queue(&device.handle).await;

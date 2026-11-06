@@ -183,6 +183,7 @@ async fn a_connected_pass_waits_for_new_credentials_after_authentication_failure
     f.handle.sync_now();
     last_pass(&f.handle, failed).await;
     assert!(f.handle.test_connection_retry_wait().await.is_none());
+    f.handle.test_parked().await;
     let requests = f.storage.request_count();
     f.advance(Duration::from_secs(600));
     f.handle.sync_now();
@@ -342,6 +343,7 @@ async fn a_retry_during_a_cooldown_says_when_it_ends() {
         .await;
     f.handle.sync_now();
     last_pass(&f.handle, failed).await;
+    f.handle.test_parked().await;
     let requests = f.storage.request_count();
     let outcome = answer(f.handle.retry_now().await.unwrap()).await;
     assert!(
@@ -349,6 +351,7 @@ async fn a_retry_during_a_cooldown_says_when_it_ends() {
             if until == f.clock.now() + Duration::from_secs(200)),
         "{outcome:?}"
     );
+    f.handle.test_parked().await;
     assert_eq!(f.storage.request_count(), requests, "a pass ran in the cooldown");
     f.handle.close().await.unwrap();
 }
@@ -359,6 +362,7 @@ async fn a_retry_during_a_cooldown_says_when_it_ends() {
 async fn an_operation_on_a_device_without_storage_fails_before_journaling() {
     let f = Fixture::new().await;
     let circle = CircleId(uuid::Uuid::from_u128(1));
+    f.handle.test_parked().await;
     let requests = f.storage.request_count();
     assert!(matches!(f.handle.reset_store().await, Err(SyncError::NoStorage)));
     assert!(matches!(f.handle.circles().reset(circle).await, Err(SyncError::NoStorage)));
@@ -400,11 +404,13 @@ async fn a_retried_operation_still_waits_out_a_provider_cooldown() {
     f.handle.start_sync().await.unwrap();
     last_pass(&f.handle, failed).await;
     f.handle.retry_pending_operation(operation).await.unwrap();
+    f.handle.test_parked().await;
     let requests = f.storage.request_count();
     let outcome = tokio::time::timeout(HANG_GUARD, answer(f.handle.retry_now().await.unwrap()))
         .await
         .expect("the retry is answered at once");
     assert!(matches!(outcome, RetryOutcome::CoolingDown { .. }), "{outcome:?}");
+    f.handle.test_parked().await;
     assert_eq!(f.storage.request_count(), requests, "the operation started a request");
 
     f.advance(Duration::from_secs(201));
@@ -532,12 +538,14 @@ async fn a_cooldown_is_published_as_the_retry_answers_it() {
     last_pass(&f.handle, failed).await;
     let until = f.clock.now() + Duration::from_secs(200);
     assert_eq!(effect(&f).await, RetryEffect::CoolingDown { until });
+    f.handle.test_parked().await;
     let requests = f.storage.request_count();
     let outcome = answer(f.handle.retry_now().await.unwrap()).await;
     assert!(
         matches!(outcome, RetryOutcome::CoolingDown { until: at } if at == until),
         "{outcome:?}"
     );
+    f.handle.test_parked().await;
     assert_eq!(f.storage.request_count(), requests, "a pass ran in the cooldown");
     f.advance(Duration::from_secs(200));
     effect_becomes(&f, RetryEffect::Pass).await;
@@ -565,6 +573,7 @@ async fn a_failure_only_new_credentials_clear_is_published_as_the_retry_answers_
     f.handle.sync_now();
     last_pass(&f.handle, failed).await;
     assert_eq!(effect(&f).await, RetryEffect::Failed);
+    f.handle.test_parked().await;
     let requests = f.storage.request_count();
     let outcome = answer(f.handle.retry_now().await.unwrap()).await;
     assert!(
@@ -573,6 +582,7 @@ async fn a_failure_only_new_credentials_clear_is_published_as_the_retry_answers_
         }) if error.failure() == StorageFailure::Authentication),
         "{outcome:?}"
     );
+    f.handle.test_parked().await;
     assert_eq!(f.storage.request_count(), requests, "the held pass ran");
     assert_eq!(effect(&f).await, RetryEffect::Failed);
     f.storage.set_faults(Faults::none()).await;
