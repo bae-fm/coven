@@ -61,3 +61,7 @@ impl SequenceSync {
         Ok(())
     }
 }
+
+#[cfg(test)]
+#[path = "floor_upload_tests.rs"]
+mod tests;

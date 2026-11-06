@@ -532,6 +532,12 @@ what make one conditional floor write safe.
 - `store_good`, `stores_good`: claims, stale creates, floor writes, deletions and
   uploads keep storage good.
 - `store_reader`: storage steps keep every sound reader sound.
+- Each deletion is a `StoreStep.delete` of its own, and `writeFloor` takes no
+  premise on the slots below `first` and none on grace. A deletion that fails
+  is a run without its step, and a floor written after any grace, or none, is
+  a run with its write: `stores_good` and `deletion_keeps_reachable` cover both.
+  So a failed deletion holds no later floor back, and correctness needs no
+  grace; grace enters only `choose` and `Deadline`.
 - `read_progress`, `reaches_head`: with its audience's key, a sound reader below
   the head can fetch and step forward, and some run reaches the head.
 - `joiner_reaches_head`: a joiner of `A` that loads the floor's snapshot for `A`
