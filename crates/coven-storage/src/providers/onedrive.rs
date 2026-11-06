@@ -384,6 +384,12 @@ impl ProviderOps for OneDriveStorage {
         }
         Ok(())
     }
+    /// Redeeming the link granted the account durable access, and Graph
+    /// documents no way for the recipient to give it up: it ends when the
+    /// invite does (E.2).
+    async fn leave(&self, _invitation: &StorageInvitation) -> Result<(), StorageError> {
+        Ok(())
+    }
     async fn revoke_access(&self, email: &str) -> Result<Vec<RetainedAccess>, StorageError> {
         self.require_owner().await?;
         let permissions = self.permissions().await?;

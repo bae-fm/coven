@@ -124,6 +124,18 @@ pub(super) async fn endpoint(
             }
             reply(json!({"shared_folder_id":"namespace"}))
         }
+        "/2/sharing/unmount_folder" => {
+            assert_eq!(arg["shared_folder_id"], "namespace");
+            let email = recipient.expect("unmount runs under recipient account");
+            if !state.mounted.remove(email) {
+                return response(
+                    409,
+                    json!({"error":{".tag":"access_error","access_error":{".tag":"unmounted"}}})
+                        .to_string(),
+                );
+            }
+            reply(Value::Null)
+        }
         "/2/sharing/get_folder_metadata" => {
             assert_eq!(arg["shared_folder_id"], "namespace");
             if state.missing_namespace {
@@ -671,6 +683,45 @@ async fn recipient_join_mounts_the_invited_namespace_and_retries_a_lost_reply() 
         let StorageError::Provider { source, .. } = error else { panic!() };
         assert!(source.downcast_ref::<http::ProviderResponse>().is_some());
     }
+}
+
+/// A join cancelled before sending unmounts the folder. The account stays a
+/// member, so joining again mounts it again; an unmount that finds nothing
+/// mounted, already unmounted or no longer shared, is done (E.2).
+#[tokio::test]
+async fn leaving_unmounts_and_keeps_the_invite_usable() {
+    let state = Arc::new(Mutex::new(Remote::default()));
+    let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
+    let owner = provider(&server.url);
+    owner.claim_location(STORE_ID).await.unwrap();
+    let path = ObjectPath::slot(STORE_ID, std::num::NonZeroU64::MIN);
+    owner.create(&path, b"first").await.unwrap();
+    let AccessGrant::Granted { invitation } = owner.grant_access("member").await.unwrap() else {
+        panic!()
+    };
+    let recipient = provider(&server.url);
+    recipient
+        .set_oauth_tokens(OAuthTokens {
+            client_id: "dropbox".into(),
+            access: crate::OAuthAccess::Dropbox(crate::DropboxAccess::FullDropbox),
+            access_token: SecretText::new("recipient:member".into()),
+            refresh_token: None,
+        })
+        .await
+        .unwrap();
+    recipient.join(STORE_ID, &invitation).await.unwrap();
+    for _ in 0..2 {
+        recipient.leave(&invitation).await.unwrap();
+        assert!(!state.lock().unwrap().mounted.contains("member"));
+        assert_eq!(
+            recipient.read(&path).await.unwrap_err().failure(),
+            StorageFailure::PermissionDenied
+        );
+    }
+    recipient.join(STORE_ID, &invitation).await.unwrap();
+    assert_eq!(recipient.read(&path).await.unwrap(), b"first");
+    owner.revoke_access("member").await.unwrap();
+    recipient.leave(&invitation).await.unwrap();
 }
 
 #[tokio::test]

@@ -315,6 +315,12 @@ impl ProviderOps for CloudKitStorage {
     async fn join(&self, invitation: &StorageInvitation) -> Result<(), StorageError> {
         self.accept(invitation).await
     }
+    /// A participant that deletes the share is removed from it, and Apple
+    /// doesn't say whether it can accept the same URL again, so the
+    /// acceptance stays: it ends when the invite does (E.1, E.2).
+    async fn leave(&self, _invitation: &StorageInvitation) -> Result<(), StorageError> {
+        Ok(())
+    }
     async fn begin_upload(
         &self,
         publication: &PublicationRequest,

@@ -441,6 +441,14 @@ impl MemoryStorage {
     pub async fn shared_with(&self, account: &str) -> bool {
         self.provider.state.lock().await.accounts.contains_key(&account.to_ascii_lowercase())
     }
+    /// Whether `account` has accepted the store's share, as a Dropbox mount
+    /// does, and not since left it or lost it.
+    pub async fn joined(&self, account: &str) -> bool {
+        matches!(
+            self.provider.state.lock().await.accounts.get(&account.to_ascii_lowercase()),
+            Some(AccountAccess::Joined)
+        )
+    }
     /// Model native grants that remain until the owner changes them in the provider.
     pub async fn set_retained_access(&self, account: &str, shares: Vec<RetainedAccess>) {
         let mut state = self.provider.state.lock().await;
@@ -778,6 +786,21 @@ impl ProviderOps for MemoryProvider {
             let mut state = self.state.lock().await;
             let access = state.accounts.get_mut(email).ok_or(StorageFailure::PermissionDenied)?;
             *access = AccountAccess::Joined;
+        }
+        Ok(())
+    }
+    /// As Dropbox's unmount, the only provider undo: a mounted recipient
+    /// goes back to invited; one not joined, or no longer shared, is done.
+    /// Other providers' acceptance stays, as theirs does.
+    async fn leave(&self, invitation: &StorageInvitation) -> Result<(), StorageError> {
+        self.before_request(MemoryRequest::Other("leave")).await?;
+        use crate::invitation::InvitationAcceptance as Acceptance;
+        if let (Acceptance::DropboxMount, Account::Recipient(email)) =
+            (&invitation.acceptance, &self.account)
+        {
+            if let Some(access) = self.state.lock().await.accounts.get_mut(email) {
+                *access = AccountAccess::Invited;
+            }
         }
         Ok(())
     }

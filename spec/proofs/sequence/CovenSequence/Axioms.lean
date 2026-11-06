@@ -361,6 +361,7 @@ import SequenceApply
 #print axioms CovenSequence.RestoreRegistration.replaced_restore_stuck
 #print axioms CovenSequence.FirstInstallation.restore_strands_join
 #print axioms CovenSequence.FirstInstallation.join_strands_restore
+#print axioms CovenSequence.FirstInstallation.cancel_strands_acceptance
 #print axioms CovenSequence.FirstInstallation.never_stranded
 #print axioms CovenSequence.DeviceReplacement.old_never_stale
 #print axioms CovenSequence.DeviceReplacement.never_missing

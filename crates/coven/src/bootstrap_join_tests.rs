@@ -554,6 +554,63 @@ async fn cancel_before_sending(provider: CloudProvider) {
     owner.close().await;
 }
 
+/// Dan's phone mounts Household in his Dropbox, and Dropbox refuses his
+/// request, so it was never sent. Cancelled from a later call, before it
+/// sends again, the join unmounts Household before it removes itself: the
+/// cancel knows of the mount only from what the join recorded (§13.2).
+#[tokio::test]
+async fn cancelling_an_unsent_join_unmounts_its_dropbox_folder() {
+    let owner = Owner::new(CloudProvider::Dropbox, false).await;
+    let invite = owner.invite().await;
+    owner
+        .storage
+        .set_faults(coven_storage::test_utils::Faults {
+            create_failures: [(
+                crate::tests::request_path(&invite),
+                (StorageFailure::PermissionDenied, 403),
+            )]
+            .into(),
+            ..coven_storage::test_utils::Faults::none()
+        })
+        .await;
+    let install = Installation::new();
+    let control = JoinControl::new();
+    let (_, running) = watch::channel(false);
+    let refused = install
+        .run(
+            &owner,
+            Installation::join_request(&invite, &control),
+            owner.recipient(),
+            &running,
+            |_| {},
+        )
+        .await;
+    assert!(
+        matches!(&refused, Err(BootstrapError::Sync(SyncError::Storage(error)))
+            if error.failure() == StorageFailure::PermissionDenied),
+        "{:?}",
+        refused.as_ref().err()
+    );
+    assert!(owner.storage.joined("join@example.com").await);
+    owner.storage.set_faults(coven_storage::test_utils::Faults::none()).await;
+    let (_, cancelled) = watch::channel(true);
+    let result = install
+        .run(
+            &owner,
+            Installation::join_request(&invite, &control),
+            owner.recipient(),
+            &cancelled,
+            |_| {},
+        )
+        .await;
+    assert!(matches!(result, Err(BootstrapError::Cancelled)), "{result:?}");
+    assert!(!owner.storage.joined("join@example.com").await);
+    install.absent(owner.directory.id()).await;
+    assert!(saved_code(&install, owner.directory.id()).is_none());
+    assert!(!install.root.path().join("stores").join(owner.directory.id().to_string()).exists());
+    owner.close().await;
+}
+
 /// An approved join cancelled while it loads keeps its installation too: the
 /// entry adding Carol has landed, and only this installation holds her keys.
 #[tokio::test]

@@ -99,8 +99,13 @@ pub struct JoiningIdentity {
 /// How far the join has come, as its saved request records it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum JoinStage {
-    /// Not sent: a retry sends it.
+    /// Not sent, and the invite's share not accepted: a cancel has nothing
+    /// to take back.
     Unsent,
+    /// Not sent, and the provider's acceptance of the invite's share may be
+    /// in the joining account: a retry sends it, and a cancel takes the
+    /// acceptance back first (§13.2).
+    Accepted,
     /// It may have been sent: on restart an absent request is final.
     Sent,
     /// Its copies opened this member's keys: approval has begun (§13.2).
@@ -111,16 +116,18 @@ impl JoinStage {
     fn byte(self) -> u8 {
         match self {
             Self::Unsent => 0,
-            Self::Sent => 1,
-            Self::Opened => 2,
+            Self::Accepted => 1,
+            Self::Sent => 2,
+            Self::Opened => 3,
         }
     }
 
     fn from_byte(byte: u8) -> Option<Self> {
         match byte {
             0 => Some(Self::Unsent),
-            1 => Some(Self::Sent),
-            2 => Some(Self::Opened),
+            1 => Some(Self::Accepted),
+            2 => Some(Self::Sent),
+            3 => Some(Self::Opened),
             _ => None,
         }
     }
@@ -292,7 +299,14 @@ impl JoiningIdentity {
 
     /// Whether publication may already have happened before an interruption.
     pub fn attempted(&self) -> bool {
-        self.state != JoinStage::Unsent
+        matches!(self.state, JoinStage::Sent | JoinStage::Opened)
+    }
+
+    /// Whether the invite's share may have been accepted for the joining
+    /// account while the request is unsent: a cancel takes it back before
+    /// it removes the join (§13.2).
+    pub fn accepted(&self) -> bool {
+        self.state == JoinStage::Accepted
     }
 
     /// Whether this member's keys have opened, in this call or an earlier
@@ -302,6 +316,17 @@ impl JoiningIdentity {
         self.state == JoinStage::Opened
     }
 
+    /// Record, before accepting the invite's share, that the acceptance may
+    /// be in the joining account, so a cancel before sending, in this call
+    /// or after a restart, takes it back (§13.2). A join already accepted,
+    /// or one that may have sent, is past this.
+    pub fn record_acceptance(&mut self) -> Result<(), SyncError> {
+        match self.state {
+            JoinStage::Unsent => self.record(JoinStage::Accepted),
+            JoinStage::Accepted | JoinStage::Sent | JoinStage::Opened => Ok(()),
+        }
+    }
+
     /// Record possible publication before issuing it. On restart an absent
     /// request is terminal: re-creating it could resurrect a declined invite.
     pub fn record_attempt(&mut self) -> Result<(), SyncError> {
@@ -309,9 +334,10 @@ impl JoiningIdentity {
     }
 
     /// The provider refused the request, so it was never published: a
-    /// retry sends it again (§13.2).
+    /// retry sends it again, and a cancel takes back the acceptance that
+    /// came before it (§13.2).
     pub fn record_refusal(&mut self) -> Result<(), SyncError> {
-        self.record(JoinStage::Unsent)
+        self.record(JoinStage::Accepted)
     }
 
     /// This member's copies opened its keys. Recorded before the join

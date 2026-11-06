@@ -452,6 +452,28 @@ impl Admission {
             (result, _) => result,
         }
     }
+
+    /// Whether a join may have accepted the share without sending its
+    /// request.
+    fn accepted(&self) -> bool {
+        matches!(self, Self::Joining(joining) if joining.accepted())
+    }
+
+    /// A join cancelled before sending takes back the acceptance it recorded
+    /// before it is removed. An undo that fails fails the cancel, and the
+    /// join stays listed for another (§13.2).
+    async fn leave_cancelled<T>(
+        &self,
+        sync: &SequenceSync,
+        result: Result<T, BootstrapError>,
+    ) -> Result<T, BootstrapError> {
+        match (result, self) {
+            (Err(BootstrapError::Cancelled), Self::Joining(joining)) if joining.accepted() => {
+                combine(Err(BootstrapError::Cancelled), joining.leave(sync).await)
+            }
+            (result, _) => result,
+        }
+    }
 }
 
 /// A loaded store awaiting publication, with what reaches its storage.
@@ -501,7 +523,11 @@ async fn prepare_and_load(
             )
         }
     };
-    admission.cancellable(check_cancel(cancel))?;
+    // A join that may have accepted the share connects even when cancelled
+    // already, so its cancel can take the acceptance back (§13.2).
+    if !admission.accepted() {
+        admission.cancellable(check_cancel(cancel))?;
+    }
     // A restore records itself before it registers: a new device's (§13.1),
     // and a replacement of this device's installation (§19.3).
     let recording = match (request, pending) {
@@ -730,7 +756,8 @@ async fn prepare_and_load(
         Ok(None) => Ok(false),
         Err(error) => Err(error),
     };
-    let result = sign_in.refused(provider, admission.cancellable(result));
+    let result = admission.leave_cancelled(&sync, admission.cancellable(result)).await;
+    let result = sign_in.refused(provider, result);
     files.close().await;
     drop(sync);
     let result = result.and_then(|loaded| {

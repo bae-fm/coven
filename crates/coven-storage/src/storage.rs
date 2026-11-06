@@ -302,6 +302,23 @@ pub trait Storage: Send + Sync {
         self.status(&ObjectPath::floor(store)).await?;
         Ok(())
     }
+    /// Undo [`Self::join`]'s acceptance under the invited account, for a join
+    /// cancelled before its request was sent, keeping the invite usable
+    /// (§13.2, E.2). Dropbox unmounts the shared namespace, which leaves the
+    /// account a member, so joining again mounts it again; finding it
+    /// unmounted already, or the account no longer a member, is done. S3
+    /// accepts nothing. OneDrive and CloudKit undo nothing: Graph documents no
+    /// way for the recipient to give up a redeemed link's access, and a
+    /// CloudKit participant that deletes the share is removed from it.
+    async fn leave(&self, invitation: &crate::StorageInvitation) -> Result<(), StorageError> {
+        invitation.check(&self.config())?;
+        if !matches!(invitation.acceptance, crate::invitation::InvitationAcceptance::Granted) {
+            return Err(
+                StorageFailure::InvalidConfiguration.with_source("provider acceptance required")
+            );
+        }
+        Ok(())
+    }
     /// Unshare through the owner's account. Coven shares nothing on S3, so
     /// there is nothing to take back.
     /// Ownership is checked as for [`Self::grant_access`]. Only grants exclusive to

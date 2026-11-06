@@ -33,7 +33,7 @@ the run exercised. The linked sections hold the output.
 | Ceph RGW | 20.2.4 | off only | suite 6, 2026-10-28; sequence races and member keys, 2026-10-17 ([S7c](#s7c-sequence-live-tests-2026-10-17)) | Versioned buckets fail the races and are refused |
 | Versity Gateway | 1.9.0, POSIX backend | off and on | suite 6, 2026-10-28; sequence races, 2026-10-17 ([S7](#s7-sequence-live-tests-2026-10-17)) | |
 | AWS S3 | | | none | No account to run against: uncertified |
-| Dropbox | Full Dropbox app and App folder | not applicable | live tests, 2026-10-14; two-account sequence races, 2026-10-17 ([S7](#s7-sequence-live-tests-2026-10-17)) | Listing lag: the suite has no measurement, a probe measured 1.1 to 1.4 s |
+| Dropbox | Full Dropbox app and App folder | not applicable | live tests, 2026-10-14; two-account sequence races, 2026-10-17 ([S7](#s7-sequence-live-tests-2026-10-17)) | Listing lag: the suite has no measurement, a probe measured 1.1 to 1.4 s. Unmounting and mounting again (`dropbox_live_account_sharing`), never run |
 | OneDrive (personal) | Microsoft Graph | not applicable | live tests, 2026-10-14; two-account sequence races, 2026-10-17 ([floor replacement](#onedrive-floor-replacement-through-an-upload-session-2026-10-17)) | Personal accounts only were run |
 | CloudKit | `iCloud.fm.bae.desktop`, Development | not applicable | live test, 2026-10-14; one-account sequence races, 2026-10-17 ([S7](#s7-sequence-live-tests-2026-10-17)); two-account create-once, 2026-10-16 ([probes](#cross-account-create-once-probes-2026-10-16)) | Sharing on two accounts (`cloudkit_live_sharing`) never run |
 
@@ -78,6 +78,9 @@ run in every provider's live test; the races are separate tests.
 - **Sharing and revoking access:** a recipient reads and writes after a grant
   and is refused after revocation. `access_live.rs`, `dropbox_live.rs`,
   `onedrive_live.rs`, `cloudkit_live_sharing` in the CloudKit tests.
+- **Undoing a join's acceptance:** a Dropbox recipient unmounts the shared
+  folder twice, mounts it again and reads, and unmounting after revocation
+  is done (coven.md E.2). `dropbox_live.rs` (`dropbox_live_account_sharing`).
 - **Cross-account create-once:** writers on two accounts race one name in a
   shared folder or zone. `sequence_live.rs` for Dropbox and OneDrive,
   `cloudkit_race.rs` for CloudKit.

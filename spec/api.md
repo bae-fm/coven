@@ -7222,6 +7222,8 @@ pub enum ProviderSignOut {
   each as `decode_code_info` reads its code, and `resume_join` continues one
   with neither the code nor a new sign-in. Once the request may have been
   sent, a join can't be cancelled; it ends only by approval, decline or expiry.
+  Before then a cancel unmounts the Dropbox folder the join may have mounted,
+  then removes the join ([§13.2](coven.md#132-adding-a-person-invites)).
 - A join sends no first request once the invite's `expires_at` has passed by
   the joining device's clock: it ends as an expired one does. An ended
   invite's marker at the request's path (format.md D8) ends a join that
@@ -8001,8 +8003,12 @@ pub async fn restore_from_saved_code(
 /// approval, then loads the store. Returns `None` when the request is declined
 /// or the invite expires, including when it expired before the request was
 /// sent, which then isn't. Dropping the call keeps the unfinished join for
-/// `resume_join`. Cancelling through `control` once the request may have been
-/// sent ends the call with `BootstrapError::JoinRequestSent`, keeping the
+/// `resume_join`. Cancelling through `control` before the request may have
+/// been sent unmounts a Dropbox folder the join may have mounted, then
+/// removes the unfinished installation; an unmount that fails ends the call
+/// with `BootstrapError::Cleanup`, `Cancelled` with the unmount's failure as
+/// its `cleanup`, and keeps the join listed for another cancel. Cancelling once the request may have
+/// been sent ends the call with `BootstrapError::JoinRequestSent`, keeping the
 /// unfinished join, as dropping does. A store whose unfinished installation
 /// holds a restore's record is refused with `StoreLockError::BootstrapPending`
 /// before anything changes (§13.4).

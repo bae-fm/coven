@@ -4540,6 +4540,18 @@ reuses them, and the same device id.
 - It sends no first request once the invite has expired by its own clock: the
   code carries the expiry, and the join ends as an expired one does, leaving
   nothing. No device would ever answer that request.
+- It records that it is accepting the share before it accepts. On Dropbox,
+  accepting mounts Household in Dan's Dropbox, which counts its full size
+  against his space (§20.9). Dan cancels before sending: his phone unmounts
+  Household, then removes the join. Dropbox keeps him a member, so entering
+  the same code again mounts it again. Without the record, a cancel after a
+  restart couldn't tell that Household was mounted, and would leave it in
+  Dan's Dropbox with no join listed to take it out
+  ([`cancel_strands_acceptance`](proofs/sequence/CovenSequence/FirstInstallation.lean)).
+  An unmount that fails fails the cancel, and the join stays listed until a
+  cancel succeeds. On OneDrive and iCloud a cancel takes nothing back: the
+  folder or zone counts against Ana's account only, and Dan's access ends
+  with the invite (Appendix E.2). On S3 there is nothing to accept.
 - It records the create before sending it. If the reply is lost, and on retry
   neither the request nor his sealed keys exist, it treats the invite as finished.
   Sending the request again could revive an invite Ana already declined; Ana can
@@ -4582,7 +4594,8 @@ sent its request:
   sign-in always belongs to a listed join.
 - Ending without loading, declined, expired, or cancelled before sending, it
   deletes the store's entries on the device, the kept sign-in before the code,
-  then the installation. Stopping
+  then the installation; cancelled, it unmounts a Dropbox folder first, while
+  the sign-in it unmounts with is still kept (above). Stopping
   after the sign-in leaves a join that still lists, and the next call ends it
   once Dan signs in. Stopping after the code leaves an installation without a
   code, which lists as no join. A sign-in is never left without its code, where
@@ -4608,7 +4621,7 @@ approval could land after Dan's phone had thrown away the keys it approved. That
 would leave a member that no device can act as. So after sending, a join ends
 only by approval, decline or expiry. The app may leave the waiting screen at any
 time; the join stays unfinished and listed. Cancelling before the request is
-sent removes everything, as for a restore.
+sent takes back a Dropbox mount, then removes everything, as for a restore.
 
 **Ending an invite.** Once Ana approves, declines or cancels, the invite
 expires, or her phone refuses its request, Ana's phone replaces the request
@@ -4843,7 +4856,9 @@ everything is encrypted.
   would have outlived the installation
   ([`cut_commit_orphans_custody`](proofs/sequence/CovenSequence/BootstrapCommit.lean)).
 - **Cancelling.** Cancelling closes the installation and removes its local work.
-  A join whose request may have been sent can't be cancelled (§13.2), nor a
+  A join cancelled before sending first unmounts the Dropbox folder it may
+  have mounted (§13.2). A join whose request may have been sent can't be
+  cancelled (§13.2), nor a
   restore whose device may be registered (§13.1). A restore that fails
   before it records itself removes its installation too. Dropping a
   join that is waiting for approval keeps its encrypted request and saved code,
@@ -10290,6 +10305,30 @@ it. A marker read that finds
 nothing first confirms the location is still there, as an exact status does
 (§20.5), so a shared folder or folder that is gone keeps its own cause.
 
+**Joining, and cancelling before sending.** A cancelled join undoes the
+acceptance where the provider documents an undo that keeps the invite usable
+(§13.2):
+
+- Dropbox: joining mounts the shared folder with `sharing/mount_folder`, and
+  `already_mounted` counts as done. A cancel unmounts it with
+  `sharing/unmount_folder`, which keeps the account a member, so the folder
+  can be mounted again
+  ([sharing_folders.stone](https://github.com/dropbox/dropbox-api-spec/blob/main/sharing_folders.stone)).
+  An unmount answered `access_error` with `unmounted`, `not_a_member` or
+  `invalid_id` finds nothing mounted, and counts as done, so a cancel that
+  failed after its unmount landed can be retried.
+- OneDrive: joining redeems the invite's sharing link with `Prefer:
+  redeemSharingLink`, which grants the account durable access, as opening
+  the link in a browser does
+  ([shares-get](https://learn.microsoft.com/en-us/graph/api/shares-get?view=graph-rest-1.0)).
+  Graph documents no way for the recipient to give that access up, so a
+  cancel leaves it; it ends when the invite does.
+- iCloud: a participant that deletes a share is removed from it
+  ([CKShare](https://developer.apple.com/documentation/cloudkit/ckshare)),
+  and Apple doesn't say whether it can accept the same URL again. Leaving
+  could make the invite unusable while it is still open, so a cancel leaves
+  the acceptance; it ends when the invite does.
+
 **OneDrive floor replacement.** OneDrive's direct `PUT …/content` with
 `If-Match` let two writers holding one eTag both succeed, so the floor is
 replaced through an upload session instead.
@@ -11553,8 +11592,8 @@ Write-ups explain each model and state its assumptions:
 | *Body.* A restore that doesn't record itself before registering leaves its device registered with nothing listed after a crash; a cancel that doesn't wait for the registration leaves it registered with nothing on the device | `crashed_registration_ghost`, `cancelled_registration_ghost` | `proofs/sequence/CovenSequence/RestoreRegistration.lean` | §13.1 |
 | *Body.* A restore whose facts count only a removal stays listed for good once its member's keys are replaced after it registers: every resume fails | `replaced_restore_stuck` | `proofs/sequence/CovenSequence/RestoreRegistration.lean` | §13.1, §14.1 |
 | *Body.* A restore's call that ends other than by a crash publishes the store, removes its installation or leaves the restore listed; only a crash leaves an installation nothing refers to, which listing reclaims. A failure before the record that keeps its installation leaves it unlisted | `ended_call_leaves_nothing_unlisted`, `failure_keeps_installation` | `proofs/sequence/CovenSequence/RestoreRegistration.lean` | §11.6, §13.4 |
-| A join and a restore of one store begin on the device's one unfinished installation of it; while a restore refuses an installation holding an invite code, and a join one holding a restore's record, whatever storage may hold of a join's request or a restore's registration, the call that sent it stays listed until it meets its outcome | `never_stranded` | `proofs/sequence/CovenSequence/FirstInstallation.lean` | §13.4 |
-| *Body.* Without that refusal, a restore cancelled on a waiting join's installation removes the join's code, and a join cancelled on a registering restore's installation removes the restore's record | `restore_strands_join`, `join_strands_restore` | `proofs/sequence/CovenSequence/FirstInstallation.lean` | §13.4 |
+| A join and a restore of one store begin on the device's one unfinished installation of it; while a restore refuses an installation holding an invite code, and a join one holding a restore's record, and a join records that it is accepting the share before it accepts, whatever storage may hold of a join's request or a restore's registration, and whatever acceptance the joining account holds, the call that made it stays listed until it meets its outcome | `never_stranded` | `proofs/sequence/CovenSequence/FirstInstallation.lean` | §13.2, §13.4 |
+| *Body.* Without that refusal, a restore cancelled on a waiting join's installation removes the join's code, and a join cancelled on a registering restore's installation removes the restore's record. Without the record, a join cancelled after a restart leaves its acceptance in the joining account | `restore_strands_join`, `join_strands_restore`, `cancel_strands_acceptance` | `proofs/sequence/CovenSequence/FirstInstallation.lean` | §13.2, §13.4 |
 | A join's reported phases never go back: waiting, loading, done, across its checks and the calls that resume it. Keeping the opened keys only in the call, or reporting a scan that finds no copy as loading, makes them go back | `phases_forward`, `opened_never_waits`, `resumed_waits_again`, `scan_shown_as_loading` | `proofs/sequence/CovenSequence/JoinStatus.lean` | §13.2 |
 | Writes after a removal or key replacement are refused with rows unchanged and no new unique-value or owner claim, while the claim number is recorded | `cutoff` | `proofs/sequence/CovenSequence/Cutoff.lean` | §14.1 |
 | Circle permission is judged at the authored applied prefix; landing still checks store membership, device removal and key generation | `write_permission_at_authored_prefix` | `proofs/sequence/CovenSequence/Authorship.lean` | §15.6, §15.8 |

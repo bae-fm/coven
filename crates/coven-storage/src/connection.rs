@@ -567,6 +567,15 @@ impl<P: ProviderOps + ?Sized> Storage for StorageConnection<P> {
         .await;
         self.observed(result).await
     }
+    async fn leave(&self, invitation: &StorageInvitation) -> Result<(), StorageError> {
+        self.cooling()?;
+        let result = async {
+            invitation.check(&self.config())?;
+            self.send(RequestKind::Account, 0, self.provider.leave(invitation)).await
+        }
+        .await;
+        self.observed(result).await
+    }
     async fn begin_upload(
         &self,
         path: &ObjectPath,

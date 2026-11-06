@@ -960,22 +960,30 @@ and a restore both begin on (§13.4). A join keeps its invite code from
 before its request may be sent, and a restore its record from before its
 registration may be sent; each lists its call to resume. A join cancelled
 before sending, or declined, and a restore cancelled or failed before its
-record, remove the installation and everything kept beside it. The app
-drops either call at any point. Under `Rules.correct` a restore refuses an
-installation holding an invite code, and a join one holding a restore's
-record.
+record, remove the installation and everything kept beside it. A join
+accepts the provider's share before it sends, and a cancel takes back the
+acceptance it records first; a decline's acceptance ends with the invite, and
+an approval's becomes the store's access. The app drops either call at any
+point. Under `Rules.correct` a restore refuses an installation holding an
+invite code, and a join one holding a restore's record, and a join records
+that it is accepting before it accepts.
 
 - `never_stranded`: whatever storage may hold of a join's request or a
-  restore's registration, the call that sent it stays listed until it meets
-  its outcome.
+  restore's registration, and whatever acceptance the joining account
+  holds, the call that made it stays listed until it meets its outcome.
 
-The rule is needed; without it one call's removal takes the other's listing:
+Each rule is needed. Without the first, one call's removal takes the other's
+listing:
 
 - `restore_strands_join`: a restore begun on a waiting join's installation
   is cancelled before its record, and removes the join's code.
 - `join_strands_restore`: a join begun on a registering restore's
   installation is cancelled before its request, and removes the restore's
   record.
+
+Without the second, `cancel_strands_acceptance`: a join accepts, the app
+closes, and the resumed join is cancelled; it removes its code and leaves
+the acceptance in the joining account.
 
 [`DeviceReplacement`](sequence/CovenSequence/DeviceReplacement.lean)
 models `reset_device` and `restore_device` past loading (§19.3, §13.1): the

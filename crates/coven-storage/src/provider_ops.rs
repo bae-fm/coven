@@ -104,6 +104,17 @@ pub trait ProviderOps: Send + Sync {
         }
         Ok(())
     }
+    /// Undo [`Self::join`]'s acceptance so the invite stays usable
+    /// ([`crate::Storage::leave`]). Access an invite grants without native
+    /// acceptance has nothing to undo.
+    async fn leave(&self, invitation: &StorageInvitation) -> Result<(), StorageError> {
+        if !matches!(invitation.acceptance, crate::invitation::InvitationAcceptance::Granted) {
+            return Err(
+                StorageFailure::InvalidConfiguration.with_source("provider acceptance required")
+            );
+        }
+        Ok(())
+    }
     /// Remove exclusive grants and return grants that still reach the account.
     async fn revoke_access(&self, account: &str) -> Result<Vec<RetainedAccess>, StorageError>;
     /// Begin a nonempty upload with its original publication condition, for

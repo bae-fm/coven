@@ -43,6 +43,12 @@ impl SequenceSync {
         Ok(self.storage.join(self.store(), invitation).await?)
     }
 
+    /// Take back `accept_join`'s provider acceptance, for a join cancelled
+    /// before its request was sent; one already taken back is done (§13.2).
+    pub async fn leave_join(&self, invitation: &StorageInvitation) -> Result<(), SyncError> {
+        Ok(self.storage.leave(invitation).await?)
+    }
+
     /// Whether the invite still lets the request be sent first now: no
     /// first request goes out once the invite has ended by this device's
     /// clock (§13.2).

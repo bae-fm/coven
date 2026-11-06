@@ -86,6 +86,16 @@ fn dropbox_live_account_sharing() {
         recipient.join(live.store, &invitation).await.unwrap();
         recipient.join(live.store, &invitation).await.unwrap();
         assert_eq!(recipient.read(&path).await.unwrap(), b"owner");
+        // A join cancelled before sending unmounts; the account stays a
+        // member, a second unmount is done, and joining again mounts it
+        // again (E.2).
+        for _ in 0..2 {
+            recipient.leave(&invitation).await.unwrap();
+            let unmounted = recipient.read(&path).await.unwrap_err();
+            println!("Dropbox sharing: unmounted_read={:?}", unmounted.failure());
+        }
+        recipient.join(live.store, &invitation).await.unwrap();
+        assert_eq!(recipient.read(&path).await.unwrap(), b"owner");
         let written = live.path(2);
         recipient.create(&written, b"recipient").await.unwrap();
         assert_eq!(storage.read(&written).await.unwrap(), b"recipient");
@@ -98,6 +108,8 @@ fn dropbox_live_account_sharing() {
         let read = recipient.read(&path).await.unwrap_err();
         println!("Dropbox sharing: recipient_read_write=true revoked_read={:?}", read.failure());
         assert_eq!(read.failure(), StorageFailure::PermissionDenied);
+        // Unmounting a folder no longer shared with the account is done.
+        recipient.leave(&invitation).await.unwrap();
         assert_eq!(storage.read(&path).await.unwrap(), b"owner");
     });
 }

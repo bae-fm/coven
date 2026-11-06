@@ -437,6 +437,31 @@ impl ProviderOps for DropboxStorage {
         }
         Ok(())
     }
+    /// Unmounting keeps the account a member, so joining again mounts the
+    /// folder again (E.2). A folder already unmounted, one the account is no
+    /// longer a member of, or one gone has nothing mounted: the retry of a
+    /// cancel whose unmount landed is done.
+    async fn leave(&self, _invitation: &StorageInvitation) -> Result<(), StorageError> {
+        let response = self
+            .rpc_response("sharing/unmount_folder", json!({"shared_folder_id":self.namespace()?}))
+            .await?;
+        if response.status().is_success() {
+            return Ok(());
+        }
+        let error = http::response_error(PROVIDER, response).await;
+        let unmounted = http::provider_json(&error).is_some_and(|value| {
+            value["error"][".tag"].as_str() == Some("access_error")
+                && matches!(
+                    value["error"]["access_error"][".tag"].as_str(),
+                    Some("unmounted" | "not_a_member" | "invalid_id")
+                )
+        });
+        if unmounted {
+            Ok(())
+        } else {
+            Err(error)
+        }
+    }
     async fn revoke_access(&self, email: &str) -> Result<Vec<RetainedAccess>, StorageError> {
         self.require_owner().await?;
         let members = self.members(email, false).await?;

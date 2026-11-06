@@ -73,6 +73,19 @@ impl Joining {
         self.identity.attempted()
     }
 
+    /// Whether the invite's share may have been accepted for this account
+    /// while the request is unsent, here or before a restart: a cancel takes
+    /// the acceptance back first (§13.2).
+    pub(super) fn accepted(&self) -> bool {
+        self.identity.accepted()
+    }
+
+    /// Take back the provider acceptance, for a join cancelled before its
+    /// request was sent (§13.2).
+    pub(super) async fn leave(&self, sync: &SequenceSync) -> Result<(), BootstrapError> {
+        Ok(sync.leave_join(&self.invitation).await?)
+    }
+
     /// Accept provider access, send the request once, and wait for its outcome.
     /// Returns false when the request was declined or expired.
     /// The connection refreshes its sign-in on rejection however long the
@@ -88,6 +101,7 @@ impl Joining {
             return Ok(false);
         }
         status(BootstrapStatus::Connecting);
+        self.identity.record_acceptance()?;
         sync.accept_join(&self.invitation).await?;
         if !self.identity.attempted() {
             self.identity.record_attempt()?;
