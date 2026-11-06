@@ -272,6 +272,7 @@ async fn a_panicking_upload_worker_answers_app_retries_with_its_bug() {
         matches!(f.files.retry_uploads_now().await, Err(SyncError::Bug(later)) if later == bug),
         "a later retry hears the bug"
     );
+    assert_eq!(f.bugs.take(), [bug], "the app's bug sink heard it too");
     f.close().await;
 }
 

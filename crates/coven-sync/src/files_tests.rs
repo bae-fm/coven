@@ -25,6 +25,8 @@ struct Fixture {
     namespaces: Vec<Namespace>,
     /// The device's network, which starts on an unmetered one.
     network: coven_foundation::network_watch::TestNetwork,
+    /// The app's bug sink, which a test that expects a bug takes it from.
+    bugs: Arc<coven_foundation::task::HeardBugs>,
 }
 impl Fixture {
     /// Pause trailing uploads, or resume them, in a write as the app does.
@@ -63,10 +65,8 @@ impl Fixture {
     ) -> Self {
         let root = tempfile::tempdir().unwrap();
         let ids: IdSourceRef = Arc::new(UuidIds);
-        let layout = StoreDirectories::new(
-            root.path().to_owned(),
-            coven_foundation::task::HeardBugs::shared(),
-        );
+        let bugs = coven_foundation::task::HeardBugs::shared();
+        let layout = StoreDirectories::new(root.path().to_owned(), bugs.clone());
         let directory =
             layout.create_store_dir(StoreId(uuid::Uuid::from_u128(1)), ids.as_ref()).unwrap();
         let namespaces = vec![
@@ -108,7 +108,19 @@ impl Fixture {
             watched(&network),
         )
         .await;
-        Self { root, directory, ids, clock, send, database, files, storage, namespaces, network }
+        Self {
+            root,
+            directory,
+            ids,
+            clock,
+            send,
+            database,
+            files,
+            storage,
+            namespaces,
+            network,
+            bugs,
+        }
     }
     async fn reopen(&mut self) {
         self.files.close().await;
