@@ -51,35 +51,6 @@ pub(crate) async fn label_location(
     Ok(location)
 }
 
-/// Record the folder's name and web address as this sign-in sees it, never a
-/// label the app passed. Setup alone reads them (§20.2); the Dropbox App
-/// folder has none.
-pub(crate) async fn label_folder(
-    connector: &dyn coven_storage::providers::StorageConnector,
-    mut location: crate::StorageConfig,
-    auth: coven_storage::ProviderAuth,
-    cooldown: std::sync::Arc<dyn coven_storage::Cooldown>,
-) -> Result<crate::StorageConfig, crate::StorageError> {
-    let label = match &location {
-        crate::StorageConfig::Dropbox {
-            location: crate::DropboxLocation::SharedFolder { .. },
-            ..
-        }
-        | crate::StorageConfig::OneDrive { .. } => {
-            Some(connector.folder_label(&location, auth, cooldown).await?)
-        }
-        crate::StorageConfig::Dropbox { location: crate::DropboxLocation::AppFolder, .. }
-        | crate::StorageConfig::S3 { .. }
-        | crate::StorageConfig::CloudKit { .. } => None,
-    };
-    match &mut location {
-        crate::StorageConfig::Dropbox { folder_label, .. }
-        | crate::StorageConfig::OneDrive { folder_label, .. } => *folder_label = label,
-        crate::StorageConfig::S3 { .. } | crate::StorageConfig::CloudKit { .. } => {}
-    }
-    Ok(location)
-}
-
 #[cfg(test)]
 #[path = "authentication_tests.rs"]
 mod tests;

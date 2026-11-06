@@ -641,6 +641,22 @@ pub(crate) fn as_coded(mut location: crate::StorageConfig) -> crate::StorageConf
     location
 }
 
+/// `location` with its folder renamed `name`, as a device that read the
+/// folder's label after the rename records it (§20.2).
+pub(crate) fn folder_renamed(
+    mut location: crate::StorageConfig,
+    name: &str,
+) -> crate::StorageConfig {
+    match &mut location {
+        crate::StorageConfig::Dropbox { folder_label: Some(label), .. }
+        | crate::StorageConfig::OneDrive { folder_label: Some(label), .. } => {
+            label.name = name.into();
+        }
+        other => panic!("a location with a folder label: {other:?}"),
+    }
+    location
+}
+
 /// The readable entries of a listing, for fixtures that save only codes coven
 /// reads; an unreadable entry fails the test.
 pub(crate) fn readable(entries: Vec<SavedRestoreEntry>) -> Vec<SavedRestoreCode> {

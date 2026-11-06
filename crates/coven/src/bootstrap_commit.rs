@@ -38,7 +38,8 @@ impl Publish for PublishedLater {
     }
 }
 
-/// Commit the installation's storage settings, store keys, member identity,
+/// Commit the installation's storage settings (`location`, which loading's
+/// connection labelled, §20.2), store keys, member identity,
 /// device id and credentials, with the restore code saved beside the loaded
 /// store's `name` (§13.1), then `publish` it. A restore's OAuth store commits
 /// its session sign-in's current tokens, which then refresh in device
@@ -57,6 +58,7 @@ impl Publish for PublishedLater {
 pub(super) fn commit(
     directory: &StoreDir,
     code: &RestoreCode,
+    location: &StorageConfig,
     name: &coven_sync::SavedName,
     credentials: &StorageCredentials,
     sign_in: &SignInCustody,
@@ -67,10 +69,8 @@ pub(super) fn commit(
     let keys = &owners.keys;
     let identity = &owners.identity;
     let keychain = &owners.keychain;
-    let location =
-        RestoreStorage::decode(code.storage.as_bytes()).map_err(SyncError::from)?.location;
     let commit = || -> Result<(), BootstrapError> {
-        coven_storage::record_config(directory, &location).map_err(SyncError::from)?;
+        coven_storage::record_config(directory, location).map_err(SyncError::from)?;
         keys.persist(ring)?;
         identity.persist(&MemberIdentity::new(code.member, code.member_keys.clone()))?;
         keychain.set_device_id(owners.device)?;
@@ -121,6 +121,7 @@ pub(super) fn commit(
 pub(super) async fn publish_bootstrap(
     pending: &BootstrapStore,
     code: RestoreCode,
+    location: StorageConfig,
     name: coven_sync::SavedName,
     credentials: StorageCredentials,
     sign_in: SignInCustody,
@@ -130,8 +131,17 @@ pub(super) async fn publish_bootstrap(
     waits: Arc<coven_sync::RetryWaits>,
 ) -> Result<CovenHandle, BootstrapError> {
     let directory = pending.directory();
-    let publication_error =
-        commit(&directory, &code, &name, &credentials, &sign_in, &ring, &owners, pending)?;
+    let publication_error = commit(
+        &directory,
+        &code,
+        &location,
+        &name,
+        &credentials,
+        &sign_in,
+        &ring,
+        &owners,
+        pending,
+    )?;
     let handle = owners.into_handle(database, waits, true, false);
     let cleanup = directory
         .owned_file(StoreFile::Bootstrap)

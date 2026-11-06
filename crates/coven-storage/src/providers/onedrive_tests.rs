@@ -40,6 +40,9 @@ async fn completed_parts_wait_for_publication_and_temporaries_are_not_listed() {
 
 #[derive(Default)]
 pub(super) struct Remote {
+    /// What the folder's item answers for its name and web address, in
+    /// place of Household's.
+    folder_answer: Option<Value>,
     pub(super) requests: Vec<(Method, String)>,
     pub(super) dirs: BTreeMap<String, String>,
     pub(super) files: BTreeMap<String, Vec<u8>>,
@@ -215,6 +218,14 @@ pub(super) async fn endpoint(
         );
     }
     let tail = uri.path().strip_prefix("/graph/drives/drive/items/").unwrap();
+    if tail == "root"
+        && method == Method::GET
+        && q.get("$select").map(String::as_str) == Some("name,webUrl")
+    {
+        return reply(state.folder_answer.clone().unwrap_or_else(
+            || json!({"name":"Household","webUrl":"https://onedrive.live.com/?id=root"}),
+        ));
+    }
     let value: Value = if body.is_empty()
         || headers
             .get("content-type")
@@ -423,6 +434,34 @@ pub(super) async fn endpoint(
     }
 }
 
+/// A connection labels its folder with the item's name and web address,
+/// and refuses an address a browser shouldn't open (§20.2).
+#[tokio::test]
+async fn the_folder_label_is_the_items_name_and_web_address() {
+    let state = Arc::new(Mutex::new(Remote::default()));
+    let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
+    let storage = provider(&server.url);
+    let StorageConfig::OneDrive { folder_label, .. } = storage.labelled_config().await.unwrap()
+    else {
+        panic!("a OneDrive location")
+    };
+    assert_eq!(
+        folder_label,
+        Some(crate::FolderLabel {
+            name: "Household".into(),
+            web_url: "https://onedrive.live.com/?id=root".parse().unwrap(),
+        })
+    );
+    for answer in [
+        json!({"name":"Household","webUrl":null}),
+        json!({"name":"","webUrl":"https://onedrive.live.com/?id=root"}),
+        json!({"name":"Household","webUrl":"file:///Users/ana"}),
+    ] {
+        state.lock().unwrap().folder_answer = Some(answer);
+        let error = storage.labelled_config().await.unwrap_err();
+        assert_eq!(error.failure(), StorageFailure::Protocol);
+    }
+}
 pub(super) fn provider(url: &str) -> StorageConnection<OneDriveStorage> {
     let mut storage = OneDriveStorage::new(
         StorageConfig::OneDrive {

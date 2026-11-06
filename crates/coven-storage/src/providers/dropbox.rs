@@ -289,6 +289,15 @@ fn check_file(value: &Value, path: &ObjectPath, size: u64) -> Result<(), Storage
 }
 #[async_trait]
 impl ProviderOps for DropboxStorage {
+    async fn folder_label(&self) -> Result<crate::FolderLabel, StorageError> {
+        let value = self
+            .rpc("sharing/get_folder_metadata", json!({"shared_folder_id":self.namespace()?}))
+            .await?;
+        crate::FolderLabel::answered(
+            http::string(&value, "name")?,
+            http::string(&value, "preview_url")?,
+        )
+    }
     async fn account(&self) -> Result<String, StorageError> {
         self.session.account().await
     }

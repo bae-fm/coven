@@ -672,8 +672,11 @@ impl<P: ?Sized> StorageConnection<P> {
     }
 }
 
-// The connection's location claim requests and the in-memory connection's own
-// calls read its private parts, so they live beneath it.
+// The connection's location claim and folder label requests and the
+// in-memory connection's own calls read its private parts, so they live
+// beneath it.
+#[path = "folder_label.rs"]
+mod folder_label;
 #[path = "location_claim.rs"]
 pub(crate) mod location_claim;
 #[cfg(any(test, feature = "test-utils"))]

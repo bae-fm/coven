@@ -22,11 +22,11 @@ pub enum StorageSetupStep {
     /// iCloud, creating the store: reading the account and saving the
     /// store's zone.
     PreparingZone,
-    /// Dropbox or OneDrive: reading the signed-in account's name, then the
-    /// folder's name and web address as that account sees them.
+    /// Dropbox or OneDrive: reading the signed-in account's name.
     ReadingAccount,
-    /// Connecting, then checking the provider with a fresh sealed object it
-    /// must create once, read back and delete.
+    /// Connecting, reading a Dropbox or OneDrive folder's name and web
+    /// address (§20.2), then checking the provider with a fresh sealed
+    /// object it must create once, read back and delete.
     Connecting,
     /// Creating the store, past the point of no return: claiming the
     /// location where it holds one store (§20.3), then slot 1, which

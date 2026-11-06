@@ -62,8 +62,8 @@ pub enum StorageConfig {
         location: crate::DropboxLocation,
         /// Signed-in member's display label; absent before setup. Never routes or authorizes.
         account_label: Option<String>,
-        /// The shared folder's name and web address as setup read them;
-        /// absent before setup and in the App folder (§20.2).
+        /// The shared folder's name and web address as the latest connection
+        /// read them; absent before setup and in the App folder (§20.2).
         folder_label: Option<FolderLabel>,
     },
     /// A OneDrive folder; paths within it start with the store id.
@@ -74,8 +74,8 @@ pub enum StorageConfig {
         folder_id: String,
         /// Signed-in member's display label; absent before setup. Never routes or authorizes.
         account_label: Option<String>,
-        /// The folder's name and web address as setup read them; absent
-        /// before setup (§20.2).
+        /// The folder's name and web address as the latest connection read
+        /// them; absent before setup (§20.2).
         folder_label: Option<FolderLabel>,
     },
     /// The custom zone reached by the built-in CloudKit adapter.
@@ -90,8 +90,8 @@ pub enum StorageConfig {
 }
 
 /// A Dropbox shared folder's or a OneDrive folder's name and web address,
-/// as the member's account saw them at setup (§20.2). Display only: coven
-/// never reaches storage through them.
+/// as the member's account named them at this device's latest connection
+/// (§20.2). Display only: coven never reaches storage through them.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FolderLabel {

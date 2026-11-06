@@ -258,6 +258,7 @@ async fn bootstrap_device(
     match result {
         Ok(Some(Loaded {
             code,
+            location,
             provider,
             credentials,
             sign_in,
@@ -315,6 +316,7 @@ async fn bootstrap_device(
                     let published = commit::publish_bootstrap(
                         &pending,
                         code,
+                        location,
                         name,
                         credentials,
                         sign_in,
@@ -479,6 +481,9 @@ impl Admission {
 /// A loaded store awaiting publication, with what reaches its storage.
 struct Loaded {
     code: RestoreCode,
+    /// The location as loading's connection labelled it, which the commit
+    /// records (§20.2).
+    location: StorageConfig,
     /// The provider of the location loaded from.
     provider: CloudProvider,
     credentials: StorageCredentials,
@@ -654,6 +659,9 @@ async fn prepare_and_load(
             requests = %storage.requests().since(&unlocking.1),
             "read the store forward with this member's keys"
         );
+        // The folder's label as this member's account names it, read once a
+        // join has accepted the share (§20.2).
+        let labelled = storage.labelled_config().await.map_err(SyncError::from)?;
         status(BootstrapStatus::Registering);
         // A restore checks the access it reaches storage with before it
         // registers, and records it after, as setup does, so the member's
@@ -675,7 +683,7 @@ async fn prepare_and_load(
             .devices
             .get(&settings.device_id)
             .is_some_and(|device| device.member == member.member());
-        Ok::<_, BootstrapError>(Some((access, registered)))
+        Ok::<_, BootstrapError>(Some((access, registered, labelled)))
     };
     let mut cancellation = cancel.clone();
     let loaded = tokio::select! {
@@ -684,7 +692,8 @@ async fn prepare_and_load(
         result = loading => result,
     };
     let result = match loaded {
-        Ok(Some((access, registered))) => {
+        Ok(Some((access, registered, labelled))) => {
+            data.location = labelled;
             // The work that writes to storage. A cancel stops it only between
             // its steps: one under way, a registration on its way above all,
             // runs to its end first (§11.6).
@@ -767,13 +776,15 @@ async fn prepare_and_load(
         let ring = ring.read()?.ok_or(SyncError::from(StorageFailure::MemberKeysMissing))?;
         Ok(Some((
             coven_sync::location_code(settings.id, &member, data.location.clone())?,
+            data.location,
             data.credentials,
             ring,
         )))
     });
     match result {
-        Ok(Some((code, credentials, ring))) => Ok(Some(Loaded {
+        Ok(Some((code, location, credentials, ring))) => Ok(Some(Loaded {
             code,
+            location,
             provider,
             credentials,
             sign_in,

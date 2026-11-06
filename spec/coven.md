@@ -8790,25 +8790,35 @@ This lets Ana distinguish stores on her personal and work accounts. The label is
 only for display, never routing or authority, and contains no tokens. S3 has no
 account label, and coven records none for CloudKit (§13.1).
 
-Setup on Dropbox and OneDrive also records the folder's name and web address,
-so the app can show which folder holds the store and open it in a browser. Ana
-sets up Household in her Dropbox shared folder `Household`; her laptop records
-that name and the folder's Dropbox address. A namespace id means nothing to
-her. Setup reads both from the provider with the same sign-in, after the
-account label: Dropbox's `name` and `preview_url` from
-`sharing/get_folder_metadata`, or the OneDrive item's `name` and `webUrl`. An
-address other than https refuses setup with `StorageFailure::Protocol`, so the
-app never opens another kind of link. Like the account label, they are labels
-only: coven never reaches storage through them, and setup replaces any the app
-passed.
+On Dropbox and OneDrive a device also records the folder's name and web
+address, so the app can show which folder holds the store and open it in a
+browser. Ana sets up Household in her Dropbox shared folder `Household`; her
+laptop records that name and the folder's Dropbox address. A namespace id
+means nothing to her. The device reads both from the provider with its own
+sign-in: Dropbox's `name` and `preview_url` from `sharing/get_folder_metadata`,
+or the OneDrive item's `name` and `webUrl`. An address other than https fails
+the read with `StorageFailure::Protocol`, so the app never opens another kind
+of link. Like the account label, they are labels only: coven never reaches
+storage through them, and a label the app passes to setup is replaced.
 
-Each device keeps them beside its recorded location, never in a synced table
-or a code. A folder's name and address are what one member's account sees; on
+The label is the folder as the provider names it now, so a device reads it
+each time it connects, and records it when it changed. Ben renames the folder
+to Family while Ana's laptop is closed; the next time her laptop opens
+Household and connects, it shows Family. Recorded once, a label would go
+wrong at the first rename, with nothing to correct it. So:
+
+- setup reads it once connected, before it commits the location;
+- every later connection a store syncs through reads it once connected,
+  before its first pass; a read-only handle's doesn't, since it sits beside a
+  handle that has the store open;
+- a restore reads it as it connects, and a join once it has accepted the share
+  (§13.2), since until then Carol's account can't reach the folder.
+
+A failed read fails that connection like any other request of it, and keeps
+its provider cause. Each device keeps the label beside its recorded location,
+never in a synced table or a code: it is what one member's account sees, and on
 Dropbox a member who renames a shared folder renames it for themselves alone.
-Signing in again and completing setup reads them again, so a folder renamed
-since shows its new name. The Dropbox App folder isn't picked, and has none.
-Joining and restoring record none, since codes don't carry them; setting up
-again on that device reads them.
+The Dropbox App folder isn't picked, and has none.
 
 Token expiry never consults the device clock. Ben sets his laptop's clock back a
 year; his token still works until Dropbox rejects it, and one refresh lets the

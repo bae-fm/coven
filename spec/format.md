@@ -2118,8 +2118,8 @@ storage      bytes
   S3, whether the member's access key follows, then the key. Dropbox and
   OneDrive locations include the member's display-only account label, so saved
   codes can distinguish accounts without carrying credentials. They never
-  include the folder's name and web address that setup records beside a
-  device's location
+  include the folder's name and web address that each device reads when it
+  connects and records beside its location
   ([§20.2](coven.md#202-the-providers-and-signing-in)): those are one
   account's view, and each device reads its own.
 - The private-pair blob is unchanged, and explicitly belongs to `member`.

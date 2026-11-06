@@ -4,6 +4,11 @@
 use super::*;
 
 impl MemoryStorage {
+    /// Rename the store's folder as its owner would in Dropbox or OneDrive,
+    /// without a request: the next folder label read answers `name`.
+    pub async fn rename_folder(&self, name: &str) {
+        self.provider.state.lock().await.folder_name = name.into();
+    }
     /// Replace or remove the location marker as an external actor, without a request.
     pub async fn plant_location_marker(&self, bytes: Option<Vec<u8>>) {
         self.provider.state.lock().await.location_marker = bytes;
@@ -91,32 +96,6 @@ impl crate::providers::StorageConnector for MemoryStorage {
         .await?
         .account()
         .await
-    }
-
-    /// Memory has no folder of its own to read: a Dropbox shared folder or
-    /// a OneDrive folder is named after its id, at an address under
-    /// `storage.example.test`, and the answer sends no request.
-    async fn folder_label(
-        &self,
-        location: &StorageConfig,
-        _auth: crate::ProviderAuth,
-        _cooldown: Arc<dyn crate::Cooldown>,
-    ) -> Result<crate::FolderLabel, StorageError> {
-        let id = match location {
-            StorageConfig::Dropbox {
-                location: crate::DropboxLocation::SharedFolder { namespace_id },
-                ..
-            } => namespace_id,
-            StorageConfig::OneDrive { folder_id, .. } => folder_id,
-            _ => {
-                return Err(StorageFailure::InvalidConfiguration
-                    .with_source("only a Dropbox shared folder or a OneDrive folder has a label"))
-            }
-        };
-        let mut web_url = url::Url::parse("https://storage.example.test/folders/")
-            .expect("a fixed address parses");
-        web_url.path_segments_mut().expect("an https address holds paths").pop_if_empty().push(id);
-        Ok(crate::FolderLabel { name: id.clone(), web_url })
     }
 
     async fn prepare_cloudkit(

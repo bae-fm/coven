@@ -29,6 +29,12 @@ pub trait ProviderOps: Send + Sync {
     async fn read_location_marker(&self) -> Result<Vec<u8>, StorageError> {
         Err(StorageFailure::ProviderUnavailable.into())
     }
+    /// The store's folder's name and web address as this connection's
+    /// account names them now (§20.2). Only a Dropbox shared folder or a
+    /// OneDrive folder has them; nothing asks another location.
+    async fn folder_label(&self) -> Result<FolderLabel, StorageError> {
+        Err(StorageFailure::ProviderUnavailable.into())
+    }
     /// Signed-in account; coven shares nothing on S3, so it has none.
     async fn account(&self) -> Result<String, StorageError> {
         Err(StorageFailure::InvalidConfiguration.with_source("provider has no sharing account"))

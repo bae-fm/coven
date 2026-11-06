@@ -486,6 +486,9 @@ impl StorageConnections {
             )
             .await?;
         storage.check_location_claim(self.store()).await?;
+        // The folder's label as its provider names it now, so a rename since
+        // the last connection shows (§20.2).
+        self.codes.record_labels(&storage.labelled_config().await?).await?;
         s3::end_detection_runs(&self.database, self.store(), &data.location, &storage).await?;
         self.attach(live, storage).await
     }
@@ -547,30 +550,15 @@ impl StorageConnections {
                     .check_new_location(journal, &storage, auth.clone(), &waits, &mut progress)
                     .await?;
                 let (connector, cooldown) = (owner.connector.as_ref(), &owner.waits);
-                let (location, signed_in, clock) = (&storage, &auth, owner.clock.as_ref());
-                let reading = async {
-                    let location = waits
-                        .resend(clock, move || {
-                            crate::authentication::label_location(
-                                connector,
-                                location.clone(),
-                                signed_in.clone(),
-                                cooldown.clone(),
-                            )
-                        })
-                        .await?;
-                    let location = &location;
-                    waits
-                        .resend(clock, move || {
-                            crate::authentication::label_folder(
-                                connector,
-                                location.clone(),
-                                signed_in.clone(),
-                                cooldown.clone(),
-                            )
-                        })
-                        .await
-                };
+                let (location, signed_in) = (&storage, &auth);
+                let reading = waits.resend(owner.clock.as_ref(), move || {
+                    crate::authentication::label_location(
+                        connector,
+                        location.clone(),
+                        signed_in.clone(),
+                        cooldown.clone(),
+                    )
+                });
                 let storage =
                     setup_step::single(&mut progress, StorageSetupStep::ReadingAccount, reading)
                         .await?;

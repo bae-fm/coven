@@ -188,11 +188,12 @@ pub(super) async fn replace_installation(
         cancel,
     )
     .await;
-    let Loaded { code, provider, credentials, sign_in, ring, database, waits, .. } = match loaded {
-        Ok(Some(loaded)) => loaded,
-        Ok(None) => unreachable!("only a join waits for approval"),
-        Err(error) => return ended(&builder, replacement, &entries, error).await,
-    };
+    let Loaded { code, location, provider, credentials, sign_in, ring, database, waits, .. } =
+        match loaded {
+            Ok(Some(loaded)) => loaded,
+            Ok(None) => unreachable!("only a join waits for approval"),
+            Err(error) => return ended(&builder, replacement, &entries, error).await,
+        };
     #[cfg(test)]
     if builder.interrupt_after_registering {
         // As if the process stopped here: nothing is undone.
@@ -240,6 +241,7 @@ pub(super) async fn replace_installation(
     if let Err(error) = commit::commit(
         &directory,
         &code,
+        &location,
         &name,
         &credentials,
         &sign_in,

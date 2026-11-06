@@ -423,6 +423,9 @@ impl StorageConnections {
         if !journal.creating() {
             setup.check_location_claim(self.store()).await?;
         }
+        // The folder's label as this sign-in reads it, never one the app
+        // passed (§20.2).
+        let config = setup.labelled_config().await?;
         let path = ObjectPath::file(self.store(), self.device, ObjectId(self.ids.new_id()));
         let plaintext = b"coven storage check";
         let header = coven_format::file::FileHeader::new(plaintext.len() as u64);

@@ -162,6 +162,7 @@ async fn restore_replaces_a_codes_label_with_the_members_own_sign_in() {
             }
             code.storage =
                 coven_storage::RestoreStorage::location_only(location.clone()).encode().unwrap();
+            owner.storage.rename_folder("Family").await;
             let builder = install.authenticated_builder(&owner, owner.storage.clone()).await;
             let (_, cancel) = watch::channel(false);
             let handle = if from_keychain {
@@ -188,10 +189,13 @@ async fn restore_replaces_a_codes_label_with_the_members_own_sign_in() {
                 .await
                 .unwrap()
             };
-            // A restore records the code's location: no folder label.
-            let expected =
-                crate::tests::as_coded(owner.handle.storage_config().await.unwrap().unwrap());
-            assert_eq!(handle.storage_config().await.unwrap(), Some(expected.clone()));
+            // The restored device reads the folder's label as it connects:
+            // the name it has now, not the one Ana's laptop recorded.
+            let recorded = owner.handle.storage_config().await.unwrap().unwrap();
+            let expected = crate::tests::folder_renamed(recorded.clone(), "Family");
+            assert_eq!(handle.storage_config().await.unwrap(), Some(expected));
+            // The saved code carries no folder label.
+            let expected = crate::tests::as_coded(recorded);
             assert_eq!(
                 crate::tests::readable(
                     crate::saved_restore::list(install.keychain.clone()).unwrap()
@@ -242,6 +246,39 @@ async fn a_closed_join_on_dropbox_resumes_with_the_sign_in_it_kept() {
     assert!(saved_code(&install, store).is_none());
     handle.close().await.unwrap();
     owner.close().await;
+}
+
+/// Ben renamed Household's folder after Ana invited Carol. Carol's phone
+/// reads the folder's name and address with her own sign-in once her join
+/// has accepted the share, and records them (§20.2).
+#[tokio::test]
+async fn a_join_records_the_folder_label_once_it_accepted_the_share() {
+    for provider in [CloudProvider::Dropbox, CloudProvider::OneDrive] {
+        let owner = Owner::new(provider, false).await;
+        let invite = owner.invite().await;
+        owner.storage.rename_folder("Family").await;
+        let install = Installation::new();
+        let sign_in = SignIn::new().await;
+        let mut builder = sign_in.configure(install.builder(&owner, owner.recipient()));
+        let access = owner.storage.config().oauth_access().unwrap();
+        sign_in_held(&owner, &mut builder, access).await;
+        let control = JoinControl::new();
+        let joining = join_with_invite(builder, invite.shown_code(), "New phone", |_| {}, &control);
+        let (joined, _) = owner.join_and_approve(joining, &control, |_| async {}).await;
+        let handle = joined.unwrap().unwrap();
+        let recorded = owner.handle.storage_config().await.unwrap().unwrap();
+        let joined = handle.storage_config().await.unwrap().unwrap();
+        let expected = crate::tests::folder_renamed(recorded, "Family");
+        assert!(joined.same_location(&expected));
+        let folder = |location: &StorageConfig| match location {
+            StorageConfig::Dropbox { folder_label, .. }
+            | StorageConfig::OneDrive { folder_label, .. } => folder_label.clone(),
+            _ => unreachable!(),
+        };
+        assert_eq!(folder(&joined), folder(&expected));
+        handle.close().await.unwrap();
+        owner.close().await;
+    }
 }
 
 /// Dropbox rejects Carol's token while she waits. Its one refresh is

@@ -3,19 +3,21 @@ use crate::builder::Continuing;
 use coven_crypto::custody::KeyringCustody;
 use coven_storage::S3Credentials;
 
+fn location() -> StorageConfig {
+    StorageConfig::S3 {
+        bucket: "bucket".into(),
+        region: "us-east-1".into(),
+        endpoint: None,
+        profile: None,
+    }
+}
+
 fn code(store: StoreId) -> RestoreCode {
     RestoreCode {
         store,
         member: MemberId(uuid::Uuid::from_u128(0x4d)),
         member_keys: MemberKeys::generate().unwrap(),
-        storage: coven_storage::RestoreStorage::location_only(StorageConfig::S3 {
-            bucket: "bucket".into(),
-            region: "us-east-1".into(),
-            endpoint: None,
-            profile: None,
-        })
-        .encode()
-        .unwrap(),
+        storage: coven_storage::RestoreStorage::location_only(location()).encode().unwrap(),
     }
 }
 
@@ -125,8 +127,7 @@ fn committed(
     let id = pending.directory().id();
     let scoped = Arc::new(StoreKeychain::new(keychain.clone(), id));
     let person = PersonEntries::new(keychain.clone(), id);
-    let location = coven_storage::RestoreStorage::decode(code.storage.as_bytes()).unwrap().location;
-    assert_eq!(coven_storage::recorded_config(&pending.directory()).unwrap(), Some(location));
+    assert_eq!(coven_storage::recorded_config(&pending.directory()).unwrap(), Some(location()));
     assert_eq!(
         Custody::<StoreKeyring>::unlock(&KeyringCustody::new(scoped.clone()))
             .unwrap()
@@ -179,6 +180,7 @@ async fn a_failed_custody_step_keeps_what_it_wrote_and_the_next_commit_finishes(
     let error = commit(
         &pending.directory(),
         &code,
+        &location(),
         &household(),
         &credentials(),
         &SignInCustody::None,
@@ -208,6 +210,7 @@ async fn a_failed_custody_step_keeps_what_it_wrote_and_the_next_commit_finishes(
     let published = commit(
         &pending.directory(),
         &code,
+        &location(),
         &household(),
         &credentials(),
         &SignInCustody::None,
@@ -248,6 +251,7 @@ async fn a_failed_publication_keeps_the_committed_custody() {
     let error = commit(
         &pending.directory(),
         &code,
+        &location(),
         &household(),
         &credentials(),
         &SignInCustody::None,
@@ -288,6 +292,7 @@ async fn a_commit_refused_at_any_keychain_operation_finishes_when_run_again() {
             commit(
                 &pending.directory(),
                 &code,
+                &location(),
                 &household(),
                 &credentials(),
                 &SignInCustody::None,
@@ -328,10 +333,10 @@ async fn cleanup_failure_returns_the_open_handle_with_its_session_keys() {
         prepared(&app, id, keychain, CustodyChoice::InMemory, CustodyChoice::InMemory).await;
     let leftover = root.path().join("stores").join(id.to_string()).join("bootstrap.sealed");
     std::fs::create_dir(leftover).unwrap();
-    let location = coven_storage::RestoreStorage::decode(code.storage.as_bytes()).unwrap().location;
     let error = publish_bootstrap(
         &pending,
         code,
+        location(),
         household(),
         credentials(),
         SignInCustody::None,
@@ -346,7 +351,7 @@ async fn cleanup_failure_returns_the_open_handle_with_its_session_keys() {
         panic!("expected published handle")
     };
     assert_eq!(app.stores().await.unwrap().len(), 1);
-    assert_eq!(coven_storage::recorded_config(&pending.directory()).unwrap(), Some(location));
+    assert_eq!(coven_storage::recorded_config(&pending.directory()).unwrap(), Some(location()));
     assert_eq!(handle.store_key_state().unwrap(), StoreKeyState::Available);
     handle.read(|_| Ok::<_, CovenError>(())).await.unwrap();
     handle.close().await.unwrap();
@@ -367,6 +372,7 @@ async fn publication_returns_the_handle_without_rereading_custody() {
     let result = publish_bootstrap(
         &pending,
         code(id),
+        location(),
         household(),
         credentials(),
         SignInCustody::None,
@@ -412,6 +418,7 @@ async fn publication_with_a_loaded_provider_does_not_suspend() {
     let mut publishing = Box::pin(publish_bootstrap(
         &pending,
         code(id),
+        location(),
         household(),
         credentials(),
         SignInCustody::None,
@@ -473,6 +480,7 @@ async fn a_panicking_custody_step_keeps_what_the_commit_wrote() {
     let error = publish_bootstrap(
         &pending,
         code(id),
+        location(),
         household(),
         credentials(),
         SignInCustody::None,
@@ -535,6 +543,7 @@ async fn a_panicking_publication_settles_by_the_marker() {
         let committing = commit(
             &pending.directory(),
             &code,
+            &location(),
             &household(),
             &credentials(),
             &SignInCustody::None,

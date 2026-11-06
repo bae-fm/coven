@@ -68,6 +68,8 @@ enum AccountAccess {
 }
 struct MemoryState {
     location_marker: Option<Vec<u8>>,
+    /// The store's folder's name, which `rename_folder` changes.
+    folder_name: String,
     objects: memory_objects::MemoryObjects,
     uploads: BTreeMap<u64, Pending>,
     next: u64,
@@ -512,6 +514,23 @@ impl ProviderOps for MemoryProvider {
     async fn read_location_marker(&self) -> Result<Vec<u8>, StorageError> {
         self.before(MemoryRequest::Other("read_location_marker")).await?;
         self.state.lock().await.location_marker.clone().ok_or(StorageFailure::NotFound.into())
+    }
+    /// A Dropbox shared folder's or a OneDrive folder's address is under
+    /// `storage.example.test`, after its id.
+    async fn folder_label(&self) -> Result<crate::FolderLabel, StorageError> {
+        self.before(MemoryRequest::Other("folder_label")).await?;
+        let id = match &self.config {
+            StorageConfig::Dropbox {
+                location: crate::DropboxLocation::SharedFolder { namespace_id },
+                ..
+            } => namespace_id,
+            StorageConfig::OneDrive { folder_id, .. } => folder_id,
+            _ => return Err(StorageFailure::ProviderUnavailable.into()),
+        };
+        let mut web_url = url::Url::parse("https://storage.example.test/folders/")
+            .expect("a fixed address parses");
+        web_url.path_segments_mut().expect("an https address holds paths").pop_if_empty().push(id);
+        Ok(crate::FolderLabel { name: self.state.lock().await.folder_name.clone(), web_url })
     }
     async fn account(&self) -> Result<String, StorageError> {
         self.before_request(MemoryRequest::Other("account")).await?;

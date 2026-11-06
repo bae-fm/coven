@@ -97,6 +97,19 @@ impl RestoreCodes {
         Ok(coven_storage::recorded_config(&owner.directory)?)
     }
 
+    /// Record `location`, the recorded location as a connection made from it
+    /// just labelled it (§20.2). Writes only when its labels changed.
+    pub async fn record_labels(&self, location: &StorageConfig) -> Result<(), SyncError> {
+        let owner = self.inner.lock().await;
+        let owner = owner.as_ref().ok_or(coven_database::DbError::StoreClosed)?;
+        let recorded =
+            coven_storage::recorded_config(&owner.directory)?.ok_or(SyncError::NoStorage)?;
+        if recorded != *location {
+            coven_storage::record_config(&owner.directory, location)?;
+        }
+        Ok(())
+    }
+
     /// Compose at the facade's opening boundary. The settings and credentials
     /// are also the narrow persisted connection contract used by storage setup.
     pub fn new(

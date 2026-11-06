@@ -28,6 +28,9 @@ struct BufferedUpload {
 #[derive(Default)]
 pub(super) struct Remote {
     app_folder: bool,
+    /// What `get_folder_metadata` answers for the folder's name and preview
+    /// address, in place of Household's.
+    folder_answer: Option<Value>,
     requests: usize,
     non_owner: bool,
     pub(super) missing_namespace: bool,
@@ -141,9 +144,14 @@ pub(super) async fn endpoint(
             if state.missing_namespace {
                 return response(409, json!({"error":{".tag":"shared_folder_access_error","shared_folder_access_error":{".tag":"no_permission"}}}).to_string());
             }
-            reply(
-                json!({"shared_folder_id":"namespace", "access_type":{".tag":if state.non_owner || recipient.is_some() {"editor"} else {"owner"}}}),
-            )
+            let mut value = json!({"shared_folder_id":"namespace", "access_type":{".tag":if state.non_owner || recipient.is_some() {"editor"} else {"owner"}}});
+            let folder = state.folder_answer.clone().unwrap_or_else(|| {
+                json!({"name":"Household","preview_url":"https://www.dropbox.com/scl/fo/namespace"})
+            });
+            for (field, answer) in folder.as_object().unwrap() {
+                value[field] = answer.clone();
+            }
+            reply(value)
         }
         "/2/files/upload" => {
             if body.len() > 150 * 1024 * 1024 {
@@ -451,6 +459,36 @@ async fn lost_completion_requires_byte_verification() {
     storage.finish_upload(&mut upload).await.unwrap();
     assert!(upload.is_complete());
     assert!(state.lock().unwrap().uploads.is_empty());
+}
+/// A connection labels its shared folder with the name and preview address
+/// `get_folder_metadata` answers, and refuses an address a browser
+/// shouldn't open (§20.2).
+#[tokio::test]
+async fn the_folder_label_is_the_shared_folders_name_and_preview_address() {
+    let state = Arc::new(Mutex::new(Remote::default()));
+    let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
+    let storage = provider(&server.url);
+    let StorageConfig::Dropbox { folder_label, .. } = storage.labelled_config().await.unwrap()
+    else {
+        panic!("a Dropbox location")
+    };
+    assert_eq!(
+        folder_label,
+        Some(crate::FolderLabel {
+            name: "Household".into(),
+            web_url: "https://www.dropbox.com/scl/fo/namespace".parse().unwrap(),
+        })
+    );
+    for answer in [
+        json!({"name":"Household"}),
+        json!({"name":"","preview_url":"https://www.dropbox.com/scl/fo/namespace"}),
+        json!({"name":"Household","preview_url":"http://www.dropbox.com/scl/fo/namespace"}),
+        json!({"name":"Household","preview_url":"javascript:alert(1)"}),
+    ] {
+        state.lock().unwrap().folder_answer = Some(answer);
+        let error = storage.labelled_config().await.unwrap_err();
+        assert_eq!(error.failure(), StorageFailure::Protocol);
+    }
 }
 pub(super) fn provider(url: &str) -> StorageConnection<DropboxStorage> {
     let mut storage = DropboxStorage::new(

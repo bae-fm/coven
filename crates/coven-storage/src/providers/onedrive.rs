@@ -255,6 +255,15 @@ fn validate_download_url(api: &str, target: &str) -> Result<(), StorageError> {
 }
 #[async_trait]
 impl ProviderOps for OneDriveStorage {
+    async fn folder_label(&self) -> Result<crate::FolderLabel, StorageError> {
+        let url = http::endpoint(
+            &self.api,
+            &["drives", &self.drive, "items", &self.folder],
+            &[("$select", "name,webUrl")],
+        )?;
+        let value = http::json(PROVIDER, self.send(Method::GET, &url, Body::Empty).await?).await?;
+        crate::FolderLabel::answered(http::string(&value, "name")?, http::string(&value, "webUrl")?)
+    }
     async fn account(&self) -> Result<String, StorageError> {
         self.session.account().await
     }
