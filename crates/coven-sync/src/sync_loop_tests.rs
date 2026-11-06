@@ -190,7 +190,22 @@ async fn a_pass_end_that_cant_be_written_fails_the_handle() {
     assert!(matches!(*original, coven_database::DbError::Sqlite(_)), "{original:?}");
     let later = ana.database().read(|_| Ok(())).await.unwrap_err();
     assert!(std::sync::Arc::ptr_eq(&original, &cause(later)));
-    assert!(ana_loop.close().await.is_err(), "the loop ended on the failure");
+    // The loop ended on that failure, and every later command hears it,
+    // not a closed store: the store is still open.
+    ana_loop.parked_from_now().await;
+    for ended in [ana_loop.sync_now().unwrap_err(), ana_loop.close().await.unwrap_err()] {
+        let SyncError::Failed { source, .. } = &ended else {
+            panic!("the command heard another failure: {ended:?}");
+        };
+        assert!(
+            matches!(
+                source.downcast_ref::<SyncError>(),
+                Some(SyncError::Database(coven_database::DbError::StatePersistence(cause)))
+                    if std::sync::Arc::ptr_eq(cause, &original)
+            ),
+            "{ended:?}"
+        );
+    }
 }
 
 /// A local failure that clears by itself, here a keychain refusing to save
@@ -226,6 +241,10 @@ async fn a_local_failure_retries_the_pass_on_its_own() {
     reached(&ben, slot).await;
     assert_eq!(rows(ben.database()).await, [("a".into(), "applied on retry".into())]);
     ben_loop.close().await.unwrap();
+    assert!(
+        matches!(ben_loop.sync_now(), Err(SyncError::NoStorage)),
+        "its connection was released"
+    );
     for device in [&ana, &ben] {
         device.database().close().await.unwrap();
     }
@@ -371,6 +390,11 @@ async fn a_bug_in_the_loops_own_write_reaches_the_sink_once() {
         panic!("the last pass shows no failure: {shown:?}");
     };
     assert!(shown.contains(&bug.message), "{shown}");
+    ben_loop.parked_from_now().await;
+    assert!(
+        matches!(ben_loop.start().await, Err(SyncError::WorkerFailed(heard)) if heard == bug),
+        "a later start hears the loop's bug"
+    );
     assert!(group.bugs.take().is_empty(), "the sink heard the bug once");
     for device in [&ana, &ben] {
         device.database().close().await.unwrap();
