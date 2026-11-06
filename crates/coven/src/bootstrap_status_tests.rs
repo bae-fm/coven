@@ -205,9 +205,9 @@ async fn a_join_reports_finding_its_keys_before_it_loads() {
 }
 
 /// A join reports opening its new installation, then connecting, then
-/// waiting for approval, then loading (E10). While it waits, a sent invite's
-/// status carries the number Ana's phone shows with the request, and when the
-/// next check runs. Carol's waits end only when the test moves the clock, so
+/// waiting for approval, then loading (E10). While it waits, its status
+/// carries the number Ana's phone shows with the request, and when the next
+/// check runs. Carol's waits end only when the test moves the clock, so
 /// Ana approves while the join waits, and Check now runs the next check.
 #[tokio::test]
 async fn a_join_reports_each_bootstrap_phase_in_order() {
@@ -264,7 +264,7 @@ async fn a_join_reports_each_bootstrap_phase_in_order() {
         let BootstrapStatus::WaitingForApproval { confirmation, next_check } = status else {
             panic!("{status:?} while waiting");
         };
-        assert_eq!(*confirmation, Some(request.confirmation));
+        assert_eq!(*confirmation, request.confirmation);
         // The first check runs at once; then checks and waits alternate.
         assert_eq!(matches!(next_check, NextCheck::Checking), index % 2 == 0, "{reported:?}");
     }

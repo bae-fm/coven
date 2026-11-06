@@ -620,10 +620,10 @@ def keyCase (slots held current : List Json) : Json := json% {
 
 -- An invite's events, through the lifecycle model's steps under the Rust's rules.
 #eval do
-  let case := fun (delivery : String) (events : List String) =>
-    json% {"kind":"inviteLifecycle","delivery":$(delivery),"records":false,"events":$(events)}
+  let case := fun (events : List String) =>
+    json% {"kind":"inviteLifecycle","records":false,"events":$(events)}
   -- Shown, requested, approved, bound and acknowledged.
-  let approved ← run (case "sent" ["send", "pass", "approve", "pass", "ack"])
+  let approved ← run (case ["send", "pass", "approve", "pass", "ack"])
   checkField approved ["2","invite"] (toJson "requested")
   checkField approved ["2","accepted"] (json% ["approve","decline","cancel","retry"])
   checkField approved ["3","invite"] (toJson "approving")
@@ -631,43 +631,38 @@ def keyCase (slots held current : List Json) : Json := json% {
   checkField approved ["4","invite"] Json.null
   checkField approved ["4","binding"] (toJson "landed")
   checkField approved ["5","binding"] Json.null
-  -- An in-person request is approved in the pass that reads it.
-  let inPerson ← run (case "inPerson" ["send", "pass"])
-  checkField inPerson ["2","journal"] (toJson false)
+  -- A checked request waits for the app; no pass approves it.
+  let waiting ← run (case ["send", "pass", "pass"])
+  checkField waiting ["3","invite"] (toJson "requested")
+  checkField waiting ["3","binding"] Json.null
   -- A cancel while the pass reads the request: nothing is saved over it.
-  let raced ← run (case "sent" ["raceCancel"])
+  let raced ← run (case ["raceCancel"])
   checkField raced ["1","invite"] Json.null
   checkField raced ["1","pending"] Json.null
   -- A stop for good ends an approval under way with the device.
-  let stopped ← run (case "sent" ["send", "pass", "approve", "remove", "pass"])
+  let stopped ← run (case ["send", "pass", "approve", "remove", "pass"])
   checkField stopped ["5","invite"] Json.null
   checkField stopped ["5","journal"] (toJson false)
   checkField stopped ["5","binding"] (toJson "stopped")
   -- A request whose keys a member already holds is neither offered nor
   -- approved: the pass that reads it ends the invite, with its marker in the
   -- request's place and no pending record, and the next takes the share back.
-  let used ← run (case "sent" ["sendUsed", "pass", "pass"])
+  let used ← run (case ["sendUsed", "pass", "pass"])
   checkField used ["2","invite"] Json.null
   checkField used ["2","pending"] Json.null
   checkField used ["2","journal"] (toJson false)
   checkField used ["2","request"] (toJson false)
   checkField used ["2","accepted"] (json% [])
   checkField used ["3","shared"] (toJson false)
-  let usedInPerson ← run (case "inPerson" ["sendUsed", "pass"])
-  checkField usedInPerson ["2","invite"] Json.null
-  checkField usedInPerson ["2","binding"] Json.null
-  checkField usedInPerson ["2","journal"] (toJson false)
-  -- History refuses the binding an in-person invite's pass approved on its
-  -- own: the invite ends as a decline does, its refusal holds no later pass,
+  -- History refuses the binding of an approval the demoted admin made: the
+  -- invite ends as a decline does, the refusal is the binding's outcome,
   -- and the next pass takes the share back.
-  let refused ← run (case "inPerson" ["demote", "send", "pass", "pass"])
-  checkField refused ["3","invite"] Json.null
-  checkField refused ["3","journal"] (toJson false)
-  checkField refused ["3","request"] (toJson false)
-  checkField refused ["3","held"] (toJson false)
-  checkField refused ["4","shared"] (toJson false)
-  checkField refused ["4","held"] (toJson false)
-  rejects (case "sent" ["wave"])
-  rejects (json% {"kind":"inviteLifecycle","delivery":"posted","records":false,"events":[]})
+  let refused ← run (case ["send", "pass", "approve", "demote", "pass", "pass"])
+  checkField refused ["5","invite"] Json.null
+  checkField refused ["5","binding"] (toJson "rejected")
+  checkField refused ["5","journal"] (toJson false)
+  checkField refused ["5","request"] (toJson false)
+  checkField refused ["6","shared"] (toJson false)
+  rejects (case ["wave"])
 
 end SequenceTests

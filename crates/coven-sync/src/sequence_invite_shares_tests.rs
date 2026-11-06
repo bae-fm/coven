@@ -70,7 +70,7 @@ async fn an_uncancellable_provider_grant_keeps_its_cleanup_until_it_ends() {
     let making = phone.sync.create_invite(
         InviteTarget::NewMember { role: MemberRole::Member, name: "Carol".into() },
         InviteAccess::ProviderAccount { email: CAROL.into() },
-        InviteDelivery::Sent { lifetime: InviteLifetime::Day },
+        InviteLifetime::Day,
     );
     let cancelling = async {
         entering.await.unwrap();
@@ -163,7 +163,7 @@ async fn a_gone_devices_share_stays_while_another_devices_invite_is_open() {
     }
 }
 
-/// The phone shows Carol a second invite in person, and she joins with it:
+/// The phone shows Carol a second invite, and she joins with it:
 /// her account is now an active member's. When Ben removes the phone, its
 /// first invite's share ends with it, and the laptop keeps the account
 /// shared for Carol (§14.2).
@@ -172,10 +172,12 @@ async fn a_gone_devices_share_stays_for_an_active_member() {
     let group = Group::shared();
     let (phone, ben, laptop) = household(&group).await;
     invite(&phone).await;
-    let in_person = carol_invite(&phone, crate::InviteDelivery::InPerson).await;
-    let mut carol = join(&group, in_person.shown_code(), "Carol's phone").await;
+    let shown = carol_invite(&phone, crate::InviteLifetime::Hour).await;
+    let mut carol = join(&group, shown.shown_code(), "Carol's phone").await;
     group.clock.set(group.clock.now() + std::time::Duration::from_secs(1));
     phone.sync.pass().await.unwrap();
+    let request = listed(&phone).await[1].shown_request().cloned().expect("Carol's request");
+    phone.sync.approve_join_request(&request).await.unwrap();
     assert_eq!(
         carol.device.sync.join_outcome(&mut carol.request).await.unwrap(),
         JoinOutcome::Admitted
@@ -302,7 +304,7 @@ async fn an_invite_cancelled_while_its_share_lands_settles_the_share() {
         phone.sync.create_invite(
             InviteTarget::NewMember { role: MemberRole::Member, name: "Carol".into() },
             InviteAccess::ProviderAccount { email: CAROL.into() },
-            InviteDelivery::Sent { lifetime: InviteLifetime::Day },
+            InviteLifetime::Day,
         ),
     )
     .await;
@@ -429,7 +431,7 @@ async fn an_admin_whose_account_doesnt_hold_the_store_cannot_share_it() {
         .create_invite(
             InviteTarget::NewMember { role: MemberRole::Member, name: "Carol".into() },
             InviteAccess::ProviderAccount { email: CAROL.into() },
-            crate::InviteDelivery::Sent { lifetime: crate::InviteLifetime::Day },
+            crate::InviteLifetime::Day,
         )
         .await;
     let Err(SyncError::Pending(pending)) = result else { panic!("{:?}", result.err()) };
@@ -463,7 +465,7 @@ async fn a_recovery_invites_cleanup_takes_back_only_its_new_grant() {
         .create_invite(
             InviteTarget::ReplaceMemberKeys { member: ben.identity.member() },
             InviteAccess::ProviderAccount { email: "Ben@example.org".into() },
-            crate::InviteDelivery::Sent { lifetime: crate::InviteLifetime::Day },
+            crate::InviteLifetime::Day,
         )
         .await
         .unwrap();

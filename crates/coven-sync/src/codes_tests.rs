@@ -24,7 +24,6 @@ fn invite(storage: InviteStorage) -> InviteCode {
         store: StoreId(uuid::Uuid::from_u128(1)),
         name: "Household".into(),
         invitee: Some("Dan".into()),
-        delivery: InviteDeliveryKind::Sent,
         expires_at: 86_400,
         invite: InviteId(uuid::Uuid::from_u128(2)),
         // The admin's chosen id for the invited person, not the inviter's.
@@ -156,7 +155,6 @@ fn metadata_validates_kind_checksum_and_storage_without_exposing_secrets() {
                     metadata,
                     store_name: "Household".into(),
                     invitee: Some("Dan".into()),
-                    delivery: InviteDeliveryKind::Sent,
                     expires_at: std::time::UNIX_EPOCH + std::time::Duration::from_secs(86_400),
                 }),
             }

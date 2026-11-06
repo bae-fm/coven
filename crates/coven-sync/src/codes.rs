@@ -1,6 +1,6 @@
 //! Checked code metadata used by bootstrap (E10).
 
-use coven_format::codes::{InviteCode, InviteDeliveryKind, RestoreCode};
+use coven_format::codes::{InviteCode, RestoreCode};
 use coven_foundation::id_source::{MemberId, StoreId};
 use coven_storage::{CloudProvider, InviteStorage, OAuthAccess, RestoreStorage, StorageConfig};
 
@@ -20,8 +20,8 @@ pub enum CodeKind {
 pub enum CodeInfo {
     /// A restore code reveals no store name before loading.
     Restore(CodeMetadata),
-    /// An invite carries the store's name captured when the admin made it,
-    /// the new person's name and how it is approved.
+    /// An invite carries the store's name captured when the admin made it
+    /// and the new person's name.
     Invite(InviteInfo),
 }
 
@@ -45,9 +45,6 @@ pub struct InviteInfo {
     /// The new person's name, as the admin typed it; `None` for a
     /// replacement.
     pub invitee: Option<String>,
-    /// In person or sent: whether the joining device shows a confirmation
-    /// number (§13.2).
-    pub delivery: InviteDeliveryKind,
     /// When the invite ends, by the inviting device's clock, to the second:
     /// the joining device sends no first request after it (§13.2).
     pub expires_at: std::time::SystemTime,
@@ -127,7 +124,6 @@ pub fn decode_code_info(code: &str) -> Result<CodeInfo, CodeError> {
             metadata: metadata(code.store, code.member),
             store_name: code.name,
             invitee: code.invitee,
-            delivery: code.delivery,
             expires_at: std::time::UNIX_EPOCH + std::time::Duration::from_secs(code.expires_at),
         }),
     })

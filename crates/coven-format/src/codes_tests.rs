@@ -165,34 +165,24 @@ fn padding_material_lengths_and_hostile_sizes_are_errors() {
     encoded[43] = b'X';
     assert!(matches!(RestoreCode::from_bytes(&encoded), Err(Error::Material(_))));
     let mut encoded = test_utils::invite().to_bytes().unwrap();
-    encoded[134..138].copy_from_slice(&u32::MAX.to_be_bytes());
+    encoded[133..137].copy_from_slice(&u32::MAX.to_be_bytes());
     assert!(matches!(InviteCode::from_bytes(&encoded), Err(Error::Limit { .. })));
 }
 
 #[test]
-fn invite_carries_the_person_and_its_delivery_after_the_store_name() {
+fn invite_carries_the_person_after_the_store_name() {
     let mut invite = test_utils::invite();
     invite.invitee = Some("Dan".into());
-    invite.delivery = InviteDeliveryKind::InPerson;
     let bytes = invite.to_bytes().unwrap();
     // Prefix, store id, then the store name `S`.
     assert_eq!(&bytes[23..28], b"\0\0\0\x01S");
-    assert_eq!(&bytes[28..37], b"\x01\0\0\0\x03Dan\0");
+    assert_eq!(&bytes[28..36], b"\x01\0\0\0\x03Dan");
     let decoded = InviteCode::from_bytes(&bytes).unwrap();
     assert_eq!(decoded.invitee.as_deref(), Some("Dan"));
-    assert_eq!(decoded.delivery, InviteDeliveryKind::InPerson);
     assert_eq!(decoded.invite, invite.invite);
-    // The fixture's replacement names no person and was sent.
+    // The fixture's replacement names no person.
     let fixture = test_utils::invite().to_bytes().unwrap();
-    assert_eq!(&fixture[28..30], b"\0\x01");
-    for byte in 2..=u8::MAX {
-        let mut changed = fixture.clone();
-        changed[29] = byte;
-        assert_eq!(
-            InviteCode::from_bytes(&changed).unwrap_err(),
-            Error::UnknownTag { field: "delivery", tag: byte }
-        );
-    }
+    assert_eq!(fixture[28], 0);
     invite.invitee = Some(String::new());
     assert!(invite.to_bytes().is_err());
 }

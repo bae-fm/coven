@@ -1984,7 +1984,7 @@ as its info, and a 32-byte output.
 
 ### Confirmation numbers
 
-A sent invite's request shows a six-digit confirmation number on both phones
+Every join request shows a six-digit confirmation number on both phones
 (§13.2). It is SHA-256 of a context of three strings:
 `coven/confirmation-number/v1`, the invite id's 16 bytes, and the 64 bytes of
 the request's `keys:MemberKeys` encoding. The first 8 bytes of the hash, as a
@@ -2154,15 +2154,14 @@ code      bytes
 ### Invite code (kind 11)
 
 An invite code lets a new person ask to join (§13.2). It is
-`store:uuid | name:name | invitee:Option<name> | delivery:u8 | expires_at:u64 |
-invite:uuid | member:MemberId | secret:32 bytes | initial_key:uuid |
-inviting_writer:DeviceId | read_through:u64 | storage:bytes`:
+`store:uuid | name:name | invitee:Option<name> | expires_at:u64 | invite:uuid |
+member:MemberId | secret:32 bytes | initial_key:uuid | inviting_writer:DeviceId |
+read_through:u64 | storage:bytes`:
 
 ```
 store            uuid
 name             name
 invitee          Option<name>
-delivery         u8
 expires_at       u64
 invite           uuid
 member           MemberId
@@ -2177,7 +2176,6 @@ storage          bytes
 | --- | --- |
 | `name` | the current store name copied when the invite is made; loading the store supplies its current name (§13.2) |
 | `invitee` | the new person's name, as the admin typed it; `None` for a replacement, whose member already has one |
-| `delivery` | how the invite reaches the person, which fixes how its request is approved. `0` in person: the inviting device approves on its own. `1` sent: the admin approves after comparing the confirmation number. Any other byte is refused. |
 | `expires_at` | when the invite ends, in whole seconds since the Unix epoch by the inviting device's clock: the joining device sends no first request after it (§13.2) |
 | `invite` | the join request's path |
 | `member` | fixed by the admin: a fresh id for an addition, or an existing active id for a replacement. The signed request must repeat that id. |

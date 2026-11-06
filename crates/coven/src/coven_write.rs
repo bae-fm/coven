@@ -280,34 +280,33 @@ impl<'write> CovenWrite<'write> {
     /// catches up with, grants the storage access and fixes the code, which
     /// `coven_invites` then shows. A check that fails there, or a failed
     /// grant, is the invite's pending record under its operation in
-    /// `coven_pending`; cancelling the invite ends it. An in-person invite
-    /// expires an hour after it is made; a sent one after the lifetime
-    /// chosen. Made by a device that isn't a registered admin it fails with
+    /// `coven_pending`; cancelling the invite ends it. It expires `lifetime`
+    /// after it is made. Made by a device that isn't a registered admin it
+    /// fails with
     /// `Rejected(NotAllowed)`; an empty name with `Format`; an App-folder
     /// Dropbox store with `DropboxAppFolderNotShareable`.
     pub fn create_invite(
         &self,
         target: InviteTarget,
         access: InviteAccess,
-        delivery: InviteDelivery,
+        lifetime: InviteLifetime,
     ) -> Result<(InviteId, MemberId, OperationId), SyncError> {
-        self.steps.create_invite(&self.sql, coven_sync::NewInvite { target, access, delivery })
+        self.steps.create_invite(&self.sql, coven_sync::NewInvite { target, access, lifetime })
     }
 
-    /// Approves exactly this checked request of a sent invite (§13.2, E10),
-    /// and returns the operation that binds its pair, which
-    /// `coven_operations` lists from this write's commit until the app
-    /// acknowledges its outcome. The write checks the approval against the
-    /// state this device has applied and journals it, with or without
-    /// storage; one that state refuses fails with `Rejected`. Once it
+    /// Approves exactly this checked request (§13.2, E10), and returns the
+    /// operation that binds its pair, which `coven_operations` lists from
+    /// this write's commit until the app acknowledges its outcome. The write
+    /// journals it, with or without storage, without checking it against the
+    /// state this device has applied: one the caught-up history refuses,
+    /// such as this admin's demotion, is the operation's outcome. Once it
     /// commits, a pass catches up, claims copies of every store key and the
     /// held circle keys for the request's pair, then adds the new member
     /// with the invite's role, or replaces the existing member's pair; once
     /// begun, approval finishes. A rejection there ends the invite as a
     /// decline does, and is the operation's outcome; it is not retried with
-    /// a new entry. An in-person invite's request is approved without this
-    /// call, and calling it fails with `InvitationChanged`, as do a request
-    /// the invite no longer shows and an invite whose lifetime has ended.
+    /// a new entry. A request the invite no longer shows, and an invite
+    /// whose lifetime has ended, fail with `InvitationChanged`.
     pub fn approve_join_request(&self, request: &JoinRequest) -> Result<OperationId, SyncError> {
         self.steps.approve_join_request(&self.sql, request)
     }
@@ -330,9 +329,8 @@ impl<'write> CovenWrite<'write> {
     /// commits, a pass deletes a waiting request, so the requester's join
     /// ends as declined, and takes back the storage access the invite
     /// granted. On S3 the key stays pending until deleted and cleared under
-    /// E9. An invite whose approval has begun, including an in-person
-    /// invite's own, and one whose lifetime has ended fail with
-    /// `InvitationChanged`.
+    /// E9. An invite whose approval has begun, and one whose lifetime has
+    /// ended, fail with `InvitationChanged`.
     pub fn cancel_invite(&self, invite: &InviteId) -> Result<(), SyncError> {
         self.steps.cancel_invite(&self.sql, *invite)
     }

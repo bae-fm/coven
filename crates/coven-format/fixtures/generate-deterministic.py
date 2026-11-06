@@ -470,10 +470,10 @@ def restore_code():
 
 
 def invite_code():
-    """A sent re-binding invite fixing Ana's existing id, so it names no person,
+    """A re-binding invite fixing Ana's existing id, so it names no person,
     for the S3 location with the key made for it."""
     storage = s3_location() + text(b"id") + text(b"secret")
-    return frame(11, STORE + text(b"S") + b"\x00" + u8(1) + u64(86400) + bytes([0x55]) * 16 + ANA
+    return frame(11, STORE + text(b"S") + b"\x00" + u64(86400) + bytes([0x55]) * 16 + ANA
                  + bytes([0x66]) * 32 + bytes([1]) * 16 + u64(1) + u64(12) + text(storage))
 
 

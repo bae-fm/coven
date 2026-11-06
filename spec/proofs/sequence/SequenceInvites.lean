@@ -53,11 +53,10 @@ def attempt (c : Config) (during : List Act) : Nat → World → World × Bool
       let next := (take c w .commit).1
       let moved := next.row.map (·.step) != some r.step
       -- A refused request ends the invite, which the attempt goes on to
-      -- settle; a checked one goes on only to an in-person approval.
+      -- settle; a checked one waits for the app.
       let goesOn : Bool := applies && moved && match r.stage with
         | .grant | .waiting true | .settled => false
-        | .waiting false =>
-          c.delivery == .inPerson || next.row.map (·.stage) == some .settled
+        | .waiting false => next.row.map (·.stage) == some .settled
         | _ => true
       if goesOn then
         let (w, ran) := attempt c (if reading then [] else during) fuel next
@@ -151,17 +150,12 @@ def observe (w : World) (result : String) : Json :=
     ("journal", toJson w.row.isSome),
     ("request", toJson w.request),
     ("shared", toJson w.shared),
-    ("held", toJson w.held),
     ("accepted", toJson ([("approve", Act.approve), ("decline", .decline), ("cancel", .cancel),
       ("retry", .retry), ("ack", .ack), ("ackOp", .ackOp)].filterMap fun (n, a) =>
         if accepted Rules.rust w a then some n else none))]
 
 def readCase (j : Json) : Except String Json := do
-  let delivery ← match ← j.getObjValAs? String "delivery" with
-    | "sent" => pure Delivery.sent
-    | "inPerson" => pure .inPerson
-    | _ => throw "unknown delivery"
-  let c : Config := ⟨delivery, ← j.getObjValAs? Bool "records"⟩
+  let c : Config := ⟨← j.getObjValAs? Bool "records"⟩
   let events ← j.getObjValAs? (List String) "events"
   let mut run : Run := ⟨made, [], false, false, false, false⟩
   -- The app's write made the invite; the pass after its commit shows it.

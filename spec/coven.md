@@ -4260,15 +4260,17 @@ failed. Instead the app passes Carol's current code to
 
 Ana adds Dan to Household on Dropbox, with Dan beside her:
 
-1. Ana enters Dan's name and Dropbox email, picks his role, and chooses to show
-   the invite in person. Her phone shares the store's folder with that account
-   and shows an *invite*: a QR code holding the store's location, Dan's name, a
-   member id chosen for Dan, and a one-time *invite secret*.
+1. Ana enters Dan's name and Dropbox email, and picks his role. Her phone
+   shares the store's folder with that account and shows an *invite*: a QR code
+   holding the store's location, Dan's name, a member id chosen for Dan, and a
+   one-time *invite secret*.
 2. Dan's phone scans it, signs in to his own Dropbox, mounts the shared folder,
    makes Dan's member keys, and writes a *join request* to storage, encrypted with
-   a key derived from the invite secret and signed with Dan's new key.
+   a key derived from the invite secret and signed with Dan's new key. It shows
+   a six-digit *confirmation number*.
 3. Ana's phone, the only device holding the secret, reads the request, checks it
-   and approves it on its own.
+   and shows it to Ana with the same number. The numbers on the two screens
+   match, and Ana approves.
 4. Ana's phone claims copies of every store key it holds, sealed to Dan's new
    sealing key, then the entry adding him. Every key, not just the newest, so Dan
    can read a late write made under an older one.
@@ -4281,26 +4283,23 @@ invite still shows Household until it expires. Loading the store gives Dan its
 current name; the invite's label never becomes a local setting. Dan's name is
 the one Ana typed: the app uses it for his profile, and Dan can change it later.
 
-**In person or sent.** Ana chooses how the invite reaches Dan when she makes it,
-and that fixes how it is approved:
-
-- **In person:** Ana shows the QR code and watches Dan scan it. Her phone
-  approves the request as soon as it reads and checks it. An invite has exactly
-  one request path, so the phone Ana watched scan is the one let in. The invite
-  expires an hour after it was made.
-- **Sent:** Ana sends the code by message or email, which she doesn't control.
-  Someone else who sees it could use it before Dan. So Ana's phone waits for her
-  to approve, and she approves only after Dan tells her his *confirmation
-  number*. She picks when the invite expires: an hour, a day or a week after it
-  was made.
+**Every request waits for Ana.** Ana may show the code to Dan beside her, or
+send it by message or email, which she doesn't control. Either way, someone
+else may see it: a photo of her screen, or the message on Dan's lock screen.
+Whoever sees it could use it before Dan, and the invite has one request path,
+so the first request is the only one. So Ana's phone never approves a request
+on its own: it waits for her, and she approves only once Dan's confirmation
+number matches. She picks when the invite expires when she makes it: an hour,
+a day or a week after.
 
 **The confirmation number.** Dan's phone shows a six-digit number computed from
 the invite id and the two public keys in his request (format.md D11). Ana's
 phone computes the same number from the request it reads, and shows it with
-Dan's name. Ana asks Dan for his number over a call or a message thread she
-knows is his, and approves only if they match.
+Dan's name. Ana compares it with Dan's screen beside her, or asks Dan for it
+over a call or a message thread she knows is his, and approves only if they
+match.
 
-Ana texts Dan a sent invite. Eve sees it on Dan's lock screen and uses it first.
+Ana texts Dan the invite. Eve sees it on Dan's lock screen and uses it first.
 Her phone makes its own keys and shows 412 778, and Ana's phone shows the request
 as "Dan · 412 778". When Dan enters the code, his phone can't send a request,
 because the invite already has one, and says so. Ana asks Dan for his number, he
@@ -4333,7 +4332,6 @@ while either invite is open (§14.2), whichever of Ana's devices made it.
 | store id and location | finding the store |
 | current store name, copied when the invite is made | showing which store the invite is for |
 | the person's name, as Ana typed it; none when recovering an existing member | the new member's profile, which the app writes |
-| in person or sent | whether Dan's phone shows his confirmation number |
 | when it expires, to the second | Dan's phone sends no first request after it |
 | invite id | the join request's path |
 | the chosen member id | fixed by Ana before she shows the invite |
@@ -4363,8 +4361,7 @@ inviting device's id and the invite's id.
 A request that fails a check is neither offered nor approved. A request
 carrying Ben's keys, which history bound when he joined, fails, though his
 signing key verifies it. Were the keys checked only when the binding applies,
-an in-person invite would approve that request on its own, and a sent invite
-would offer Ana an approval that history can only refuse
+Ana's phone would offer her an approval that history can only refuse
 ([`unchecked_keys_approved`](proofs/sequence/CovenSequence/InviteLifecycle.lean)).
 
 A failed check ends the invite, as a decline does, in the pass that found it.
@@ -4382,9 +4379,8 @@ it expired
 A request in a newer format than Ana's phone reads hasn't failed a check: it
 waits for her update, as any newer object does.
 
-An in-person invite's request is approved as soon as these checks pass, in the
-sync pass that read it. A sent invite's request waits for Ana's decision, with
-its confirmation number. Ana's approval is a step of a write (§4), with or
+A request that passes these checks waits for Ana's decision, with its
+confirmation number. Ana's approval is a step of a write (§4), with or
 without storage: the write journals the operation that binds Dan's pair,
 which `coven_operations` lists until her app acknowledges its outcome
 (§11.4). It doesn't check the approval against the slots her phone has
@@ -4403,17 +4399,6 @@ moves the invite on. A crash between any two of the approval's writes leaves
 both under way or both ended. Ending them apart, a crash between the two left
 the binding's outcome in `coven_operations` beside an approval
 `coven_invites` still listed as under way.
-
-An in-person invite's refusal ends it the same way, and fails no pass. Ben
-demotes Ana while Dan's phone scans her code; her phone catches up, reads
-Dan's request, approves it on its own, and history refuses the binding with
-`NotAllowed`. The invite ends as a decline does, her phone logs the refusal,
-and the pass goes on. No app call made that approval, so no call hears the
-refusal; the invite leaving Ana's list without Dan as a member is what her
-app shows. Failing the pass with the refusal instead would leave the
-connection a pending record that never retries, holding every later pass,
-her own next write's included, until she reset the device
-([`refused_approval_holds`](proofs/sequence/CovenSequence/InviteLifecycle.lean)).
 
 Approval records exactly the pair it checked: as *add member* for a fresh id, or
 *replace member keys* for an existing one. A request that changes afterwards
@@ -4469,10 +4454,10 @@ never send a write again
 [`cancelled_share_strands_claim`](proofs/sequence/CovenSequence/InviteClaims.lean)).
 
 **Ana's open invites.** Ana's phone lists the invites it made that haven't
-ended: the person's name, the access granted, in person or sent, when it
-expires, the operation that names its pending record, and where each is:
-granting its access, waiting for its request or Ana's decision with the code to
-show again, or approving it. An approval under way names the
+ended: the person's name, the access granted, when it expires, the operation
+that names its pending record, and where each is: granting its access, waiting
+for its request or Ana's decision with the code to show again, or approving
+it. An approval under way names the
 operation that binds the pair, so Ana's app shows it as being approved,
 follows its outcome, and offers no second decision. They
 are a view of its operations journal, `coven_invites` (§4), which a live query
@@ -4536,8 +4521,8 @@ no wait, even before its first check opens his keys again. Without the record,
 it would show the wait again until that check.
 
 **Checking for approval.** Dan's phone checks for his copies on the same doubling
-waits, kept across restarts. Its status says when the next check is, and for a
-sent invite shows his confirmation number. The app can ask for a check now: Dan
+waits, kept across restarts. Its status says when the next check is, and shows
+his confirmation number. The app can ask for a check now: Dan
 may be on a call with Ana as she approves, and shouldn't sit through a 5-minute
 wait. A provider's cooldown still holds, and the status then says when it ends.
 
@@ -4727,7 +4712,7 @@ connected and online.
 **Taking back a gone phone's shares.** A share that Ana's phone recorded
 stays open until the phone ends it, and a phone gone for good never will. So
 an invite share counts only while its device isn't gone for good. Ana's phone
-shares Household with Dan's account for a sent invite; Ben removes the phone
+shares Household with Dan's account for an invite; Ben removes the phone
 before Dan answers. When Ana's laptop applies the removal, the share stops
 counting, and in the same transaction the laptop records the revocation of
 Dan's account; its next pass sends it. The laptop keeps the account shared if
@@ -11526,12 +11511,11 @@ Write-ups explain each model and state its assumptions:
 | A share an invite granted is always one history records, so the owner's other devices can take it back once the inviting device is gone for good | `share_recorded` | `proofs/sequence/CovenSequence/InviteLifecycle.lean` | §13.2 |
 | A request is offered for approval, or approved, only once its keys are checked fresh, so history refuses an approval's binding only when the approving device may no longer approve, never for the request's keys | `offered_fresh`, `binding_fresh` | `proofs/sequence/CovenSequence/InviteLifecycle.lean` | §13.2 |
 | A request that fails its checks ends the invite in the pass that finds it, as a decline does, with no pending record, and the pass goes on to put the marker in its place, without the app's retry or the invite's expiry | `refused_ends` | `proofs/sequence/CovenSequence/InviteLifecycle.lean` | §13.2 |
-| The listed invite and its binding's entry only move forward; the app's offer of approving, declining, cancelling and acknowledging is exactly what the write steps accept; a sent invite is listed as approving exactly while its binding runs | `forward`, `offered_accepted`, `approval_runs_binding` | `proofs/sequence/CovenSequence/InviteLifecycle.lean` | §11.4, §13.2 |
+| The listed invite and its binding's entry only move forward; the app's offer of approving, declining, cancelling and acknowledging is exactly what the write steps accept; an invite is listed as approving exactly while its binding runs | `forward`, `offered_accepted`, `approval_runs_binding` | `proofs/sequence/CovenSequence/InviteLifecycle.lean` | §11.4, §13.2 |
 | Each rule those results need is needed: leaving out the step check, ending operations or invites at a stop, ending a refused access record, ending the binding with its invite, recording the binding, listing approval as its own stage, leaving an approval's refusal to its pass, or recording the share before the grant each has a counterexample | `unguarded_finding_is_stale`, `forgetful_stop_runs_forever`, `stop_strands_approval`, `refused_record_strands`, `split_binding_disagrees`, `reclaim_binds_twice`, `approval_shown_as_waiting`, `demoted_approval_offered`, `unrecorded_share_strands` | `proofs/sequence/CovenSequence/InviteLifecycle.lean` | §13.2, §14.1 |
-| *Body.* A request whose keys are checked only when its binding applies is offered for approval though a member holds its keys, and an in-person invite approves it on its own; history then refuses the binding | `unchecked_keys_approved` | `proofs/sequence/CovenSequence/InviteLifecycle.lean` | §13.2 |
-| *Body.* An invite left waiting on a request that failed its checks offers the app a retry that comes back to the same state, sent or in person, and stays listed with its share standing until the app cancels it or it expires | `refused_request_retried` | `proofs/sequence/CovenSequence/InviteLifecycle.lean` | §13.2 |
-| An approval whose binding history refuses ends the invite as a decline does, an in-person invite's too, and no pass fails with the refusal, so no failure holds a later pass | `refused_approval_ends`, `never_held` | `proofs/sequence/CovenSequence/InviteLifecycle.lean` | §13.2 |
-| *Body.* A pass that fails with an in-person invite's refused approval leaves the connection a record that never retries: every later pass is held, and the app's admin change journaled before never runs, until a reset | `refused_approval_holds` | `proofs/sequence/CovenSequence/InviteLifecycle.lean` | §13.2 |
+| *Body.* A request whose keys are checked only when its binding applies is offered for approval though a member holds its keys, and history refuses the binding only once the admin approves it | `unchecked_keys_approved` | `proofs/sequence/CovenSequence/InviteLifecycle.lean` | §13.2 |
+| *Body.* An invite left waiting on a request that failed its checks offers the app a retry that comes back to the same state, and stays listed with its share standing until the app cancels it or it expires | `refused_request_retried` | `proofs/sequence/CovenSequence/InviteLifecycle.lean` | §13.2 |
+| An approval whose binding history refuses ends the invite as a decline does, in the pass that ran the binding, and the next pass puts the marker in the request's place | `refused_approval_ends` | `proofs/sequence/CovenSequence/InviteLifecycle.lean` | §13.2 |
 | An invite ends together with every operation it started for its own entries, its share, the share's end and a recovery's key record, and leaves no claim open; from every reachable state, crashes between a claim landing and its end included, its own slots read before their claims settle, slots lost to other devices and a cancel while the share's record is claimed, coven's own steps end the invite with no claim open, so the device's writes go out | `children_end_with_invite`, `settles` | `proofs/sequence/CovenSequence/InviteClaims.lean` | §5.1, §13.2 |
 | *Body.* An ended invite that looks only at history leaves a claim open for good: its share's end, when its own slot showed the share ended before the claim settled, or its share's record, when the app cancelled it while that claim landed | `ended_share_strands_claim`, `cancelled_share_strands_claim` | `proofs/sequence/CovenSequence/InviteClaims.lean` | §13.2 |
 | While history names a restoring device as active, or a claim of its registration is open, the restore is published or listed for the app to finish; from every reachable state, crashes, dropped calls, failures, cancels, lost slots, the member's removal and the replacement of its keys included, coven's own steps and the app resuming what is listed end the restore published, with its device registered, or with no installation left, its device not active and no claim open | `registered_listed`, `settles`, `settled_outcome` | `proofs/sequence/CovenSequence/RestoreRegistration.lean` | §11.6, §13.1 |

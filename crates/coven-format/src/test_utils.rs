@@ -539,7 +539,6 @@ pub fn invite() -> InviteCode {
         name: "S".into(),
         // A replacement carries no name for the person.
         invitee: None,
-        delivery: crate::codes::InviteDeliveryKind::Sent,
         expires_at: 86_400,
         invite: InviteId(Uuid::from_bytes([0x55; 16])),
         // A re-binding invite names Ana's existing id (D13).

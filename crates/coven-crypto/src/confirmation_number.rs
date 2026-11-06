@@ -1,4 +1,4 @@
-//! The six digits a sent invite's requester and admin compare (§13.2, D11).
+//! The six digits an invite's requester and admin compare (§13.2, D11).
 
 use crate::{cipher, derivation::CONFIRMATION_NUMBER, MemberPublicKeys};
 use coven_foundation::id_source::InviteId;

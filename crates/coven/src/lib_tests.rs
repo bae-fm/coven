@@ -125,9 +125,9 @@ pub(crate) async fn invite(
     owner: &CovenHandle,
     target: InviteTarget,
     access: InviteAccess,
-    delivery: crate::InviteDelivery,
+    lifetime: crate::InviteLifetime,
 ) -> Invite {
-    let (id, _, _) = owner.create_invite(target, access, delivery).await.unwrap();
+    let (id, _, _) = owner.create_invite(target, access, lifetime).await.unwrap();
     owner
         .test_invites()
         .wait_for(|invites| {

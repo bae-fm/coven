@@ -182,7 +182,7 @@ fn app_tests_can_find_open_files_and_assert_they_are_released() {
 #[test]
 fn bootstrap_and_operation_futures_stay_small() {
     use crate::{
-        BootstrapStatus, CovenBuilder, CovenHandle, InviteAccess, InviteDelivery, InviteId,
+        BootstrapStatus, CovenBuilder, CovenHandle, InviteAccess, InviteId, InviteLifetime,
         InviteTarget, JoinControl, JoinRequest, MemberId, MemberPublicKeys, OperationId,
         S3Credentials, SavedRestoreCode, StoreId,
     };
@@ -275,7 +275,7 @@ fn bootstrap_and_operation_futures_stay_small() {
                     &'static CovenHandle,
                     InviteTarget,
                     InviteAccess,
-                    InviteDelivery,
+                    InviteLifetime,
                 )| h.create_invite(t, a, d),
             ),
         ),

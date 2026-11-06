@@ -55,7 +55,6 @@ pub use coven_database::{
 };
 pub use coven_format::admin::{MemberRole, SnapshotId};
 pub use coven_format::chunks::CHUNK_SIZE;
-pub use coven_format::codes::InviteDeliveryKind;
 pub use coven_format::value::StorageTime;
 pub use coven_format::MemberAccess;
 pub use coven_foundation::clock::{Clock, ClockRef, SystemClock, WallTimerError};
@@ -117,12 +116,12 @@ pub use coven_sync::{
 };
 pub use coven_sync::{
     Circle, CircleMemberInfo, DamagedObject, DeviceIdEvidence, DeviceInfo, DeviceState, DeviceStop,
-    EntryTarget, FileMissingReason, FileSourceFailure, Invite, InviteAccess, InviteDelivery,
-    InviteLifetime, InviteStage, InviteTarget, JoinRequest, LastPass, LocalFailure, MemberInfo,
-    NextCheck, OperationError, OperationId, OperationKind, OperationOutcome, OperationRejection,
-    PassFailure, PendingReason, PendingRecord, PendingSubject, Prerequisite, ProviderAccessAction,
-    Refusal, RequiredUpdate, Retry, RetryAnswer, RetryEffect, RetryOutcome, StatusFailure,
-    SyncCause, SyncError, SyncFailure, SyncOftenGuard, SyncState, SyncStatus, SyncWait, UndoCause,
+    EntryTarget, FileMissingReason, FileSourceFailure, Invite, InviteAccess, InviteLifetime,
+    InviteStage, InviteTarget, JoinRequest, LastPass, LocalFailure, MemberInfo, NextCheck,
+    OperationError, OperationId, OperationKind, OperationOutcome, OperationRejection, PassFailure,
+    PendingReason, PendingRecord, PendingSubject, Prerequisite, ProviderAccessAction, Refusal,
+    RequiredUpdate, Retry, RetryAnswer, RetryEffect, RetryOutcome, StatusFailure, SyncCause,
+    SyncError, SyncFailure, SyncOftenGuard, SyncState, SyncStatus, SyncWait, UndoCause,
     WriteCutoff,
 };
 pub use coven_sync::{

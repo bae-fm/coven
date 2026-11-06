@@ -154,7 +154,7 @@ impl Joining {
 /// What a waiting join shows: the unmet conditions its last check found, or
 /// its wait for approval.
 fn waiting(
-    confirmation: Option<ConfirmationNumber>,
+    confirmation: ConfirmationNumber,
     pending: &[coven_sync::PendingRecord],
     next_check: NextCheck,
 ) -> BootstrapStatus {

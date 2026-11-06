@@ -47,13 +47,10 @@ struct Case {
     sent: bool,
     demoted: bool,
     removed: bool,
-    /// A pass failed with an error the sync loop records as the
-    /// connection's record that never retries: no later pass runs (E5).
-    held: bool,
 }
 
 impl Case {
-    async fn new(delivery: InviteDelivery) -> Self {
+    async fn new() -> Self {
         let group = Group::shared();
         let ana = group.device(1).await;
         let ben = group.device(2).await;
@@ -74,7 +71,7 @@ impl Case {
         let laptop = group.laptop(&ana).await;
         ana.sync.pass().await.unwrap();
         ben.sync.pass().await.unwrap();
-        let invite = carol_invite(&ana, delivery).await;
+        let invite = carol_invite(&ana, InviteLifetime::Day).await;
         let operation = invite.operation;
         Self {
             group,
@@ -92,7 +89,6 @@ impl Case {
             sent: false,
             demoted: false,
             removed: false,
-            held: false,
         }
     }
 
@@ -171,19 +167,15 @@ impl Case {
         self.ana.database().operation(self.operation).await.unwrap().is_some()
     }
 
-    /// A pass, unless a failure holds every pass, as the sync loop holds it.
     async fn pass(&mut self) {
         self.group.clock.set(self.group.clock.now() + Duration::from_secs(301));
-        if !self.held {
-            self.held = holds(&self.ana.sync, self.ana.sync.pass().await);
-        }
+        passed(self.ana.sync.pass().await);
     }
 
     /// A pass with `during` committed while it reads the request, when it
     /// reads one; otherwise after it.
     async fn race(&mut self, during: &'static str) {
         let reads = !self.removed
-            && !self.held
             && self.group.clock.now() < self.invite.expires_at
             && matches!(
                 self.listed().await.map(|invite| invite.stage),
@@ -191,9 +183,7 @@ impl Case {
             );
         self.group.clock.set(self.group.clock.now() + Duration::from_secs(301));
         if !reads {
-            if !self.held {
-                self.held = holds(&self.ana.sync, self.ana.sync.pass().await);
-            }
+            passed(self.ana.sync.pass().await);
             self.during(during).await;
             return;
         }
@@ -216,7 +206,7 @@ impl Case {
         read.await.unwrap();
         self.during(during).await;
         resume.send(()).unwrap();
-        self.held = holds(&self.ana.sync, pass.await.unwrap());
+        passed(pass.await.unwrap());
     }
 
     async fn during(&mut self, step: &str) {
@@ -470,7 +460,6 @@ impl Case {
             "journal": self.journaled().await,
             "request": request,
             "shared": self.group.storage.shared_with("carol@example.org").await,
-            "held": self.held,
             "accepted": accepted,
         })
     }
@@ -485,65 +474,53 @@ impl Case {
     }
 }
 
-/// Whether the pass's failure holds every later pass: the sync loop records
-/// it as the connection's record, and that record never retries (E5). A pass
-/// ends in `Removed` once this device stops, which the views say; any other
-/// failure fails the case.
-fn holds(sync: &SequenceSync, result: Result<SequenceStatus, SyncError>) -> bool {
+/// A pass ends in `Removed` once this device stops, which the views say; any
+/// other failure fails the case.
+fn passed(result: Result<SequenceStatus, SyncError>) {
     match result {
-        Ok(_) | Err(SyncError::Removed) => false,
-        Err(error) => {
-            let record = PendingRecord::new(PendingSubject::Connection, sync.error_reason(&error));
-            assert_eq!(record.retry(), Retry::Never, "the pass failed: {error}");
-            true
-        }
+        Ok(_) | Err(SyncError::Removed) => (),
+        Err(error) => panic!("the pass failed: {error}"),
     }
 }
 
 /// The event sequences: one per gap and fixed bug the model names, then
 /// seeded ones over every event.
-fn cases() -> Vec<(&'static str, Vec<&'static str>)> {
+fn cases() -> Vec<Vec<&'static str>> {
     let mut cases = vec![
-        ("sent", vec!["send", "pass", "approve", "pass", "ack"]),
-        ("sent", vec!["send", "pass", "pass", "retry", "decline", "pass"]),
-        ("sent", vec!["pass", "send", "pass", "cancel", "pass", "send"]),
-        ("sent", vec!["raceCancel", "pass"]),
-        ("sent", vec!["send", "raceCancel", "pass"]),
-        ("sent", vec!["send", "raceExpire", "pass"]),
-        ("inPerson", vec!["send", "raceExpire", "pass"]),
-        ("inPerson", vec!["send", "pass"]),
-        ("inPerson", vec!["demote", "send", "pass"]),
-        // History refuses the binding an in-person invite's pass approved on
-        // its own: the invite ends as a decline does, the refusal holds no
-        // later pass, and the next takes the share back.
-        ("inPerson", vec!["demote", "send", "pass", "pass", "expire", "pass"]),
+        vec!["send", "pass", "approve", "pass", "ack"],
+        vec!["send", "pass", "pass", "retry", "decline", "pass"],
+        vec!["pass", "send", "pass", "cancel", "pass", "send"],
+        vec!["raceCancel", "pass"],
+        vec!["send", "raceCancel", "pass"],
+        vec!["send", "raceExpire", "pass"],
+        vec!["demote", "send", "pass"],
         // An approval under way when the device stops.
-        ("sent", vec!["send", "pass", "approve", "remove", "pass", "expire", "cancel"]),
+        vec!["send", "pass", "approve", "remove", "pass", "expire", "cancel"],
         // Another admin's device ends the stopped device's requests, and its
         // gone marker turns a later one away.
-        ("sent", vec!["send", "remove", "pass"]),
-        ("inPerson", vec!["remove", "send", "pass"]),
+        vec!["send", "remove", "pass"],
+        vec!["remove", "send", "pass"],
         // Waiting invites and the app's operation on a stopped device.
-        ("sent", vec!["administer", "send", "pass", "remove", "pass", "cancel", "pass"]),
+        vec!["administer", "send", "pass", "remove", "pass", "cancel", "pass"],
         // A demoted approver's decisions.
-        ("sent", vec!["send", "pass", "demote", "pass", "approve", "decline", "pass"]),
-        ("sent", vec!["send", "pass", "approve", "demote", "pass", "ack"]),
-        ("sent", vec!["demote", "pass", "pass", "retry", "cancel", "pass"]),
-        ("sent", vec!["send", "pass", "expire", "approve", "pass"]),
-        ("sent", vec!["administer", "pass", "ackOp", "administer", "demote", "pass", "ackOp"]),
+        vec!["send", "pass", "demote", "pass", "approve", "decline", "pass"],
+        vec!["send", "pass", "approve", "demote", "pass", "ack"],
+        vec!["demote", "pass", "pass", "retry", "cancel", "pass"],
+        vec!["send", "pass", "expire", "approve", "pass"],
+        vec!["administer", "pass", "ackOp", "administer", "demote", "pass", "ackOp"],
         // The share's end applies in the pass that ends the invite, and the
         // next takes the account back; a removed device's share is taken
         // back by the laptop, unless Carol is a member by then.
-        ("sent", vec!["send", "pass", "decline", "pass", "pass"]),
-        ("sent", vec!["pass", "remove", "send", "pass"]),
-        ("inPerson", vec!["send", "pass", "remove", "pass"]),
+        vec!["send", "pass", "decline", "pass", "pass"],
+        vec!["pass", "remove", "send", "pass"],
+        vec!["send", "pass", "remove", "pass"],
         // A request whose keys a member already holds is neither offered
         // nor approved: the pass that reads it ends the invite, which no
         // retry, cancel or expiry reaches after, and the next pass takes the
         // share back.
-        ("sent", vec!["sendUsed", "pass", "retry", "pass", "expire", "pass"]),
-        ("inPerson", vec!["sendUsed", "pass", "pass", "cancel", "pass"]),
-        ("sent", vec!["sendUsed", "raceCancel", "pass"]),
+        vec!["sendUsed", "pass", "retry", "pass", "expire", "pass"],
+        vec!["sendUsed", "pass", "pass", "cancel", "pass"],
+        vec!["sendUsed", "raceCancel", "pass"],
     ];
     const EVENTS: [&str; 16] = [
         "pass",
@@ -564,7 +541,7 @@ fn cases() -> Vec<(&'static str, Vec<&'static str>)> {
         "raceExpire",
     ];
     let mut seed: u64 = 0x5eed;
-    for case in 0..48 {
+    for _ in 0..48 {
         let mut events = Vec::new();
         for _ in 0..8 {
             seed = seed
@@ -572,7 +549,7 @@ fn cases() -> Vec<(&'static str, Vec<&'static str>)> {
                 .wrapping_add(1_442_695_040_888_963_407);
             events.push(EVENTS[(seed >> 33) as usize % EVENTS.len()]);
         }
-        cases.push((if case % 3 == 0 { "inPerson" } else { "sent" }, events));
+        cases.push(events);
     }
     cases
 }
@@ -580,25 +557,20 @@ fn cases() -> Vec<(&'static str, Vec<&'static str>)> {
 #[tokio::test]
 #[ignore = "requires COVEN_SEQUENCE_LEAN; scripts/check.sh builds sequenceRunner"]
 async fn invite_lifecycle_matches_lean() {
-    for (delivery, events) in cases() {
+    for events in cases() {
         let input = json!({
             "kind": "inviteLifecycle",
-            "delivery": delivery,
             "records": false,
             "events": events,
         });
         let expected = crate::tests::run_lean("COVEN_SEQUENCE_LEAN", &input);
-        let mut case = Case::new(match delivery {
-            "sent" => InviteDelivery::Sent { lifetime: InviteLifetime::Day },
-            _ => InviteDelivery::InPerson,
-        })
-        .await;
+        let mut case = Case::new().await;
         let mut actual = vec![case.observe("ok").await];
         for event in &events {
             let result = case.event(event).await;
             actual.push(case.observe(result).await);
         }
-        assert_eq!(Value::Array(actual), expected, "{delivery} {events:?}");
+        assert_eq!(Value::Array(actual), expected, "{events:?}");
         case.close().await;
     }
 }

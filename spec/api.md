@@ -7034,9 +7034,8 @@ pub enum ProviderSignOut {
 - A restore code carries no name. Before connecting, a device restoring from
   a typed or scanned code may show the id, provider and account or location,
   never a store name; it learns the name only after loading. An invite carries
-  the current name copied when it was made, the new person's name, and whether it
-  was shown in person or sent; it expires at the time fixed when it was made
-  (§13.2).
+  the current name copied when it was made and the new person's name; it
+  expires at the time fixed when it was made (§13.2).
   `decode_code_info` exposes the same location as a saved entry, so a
   typed or scanned code can show which account it is for before connecting.
 - Coven's saved entry, in iCloud Keychain or Block Store, saves the code with
@@ -7135,9 +7134,10 @@ pub enum ProviderSignOut {
   `Coven::discard_store` can delete the store from the device instead, both
   copies with it. The person's restore code and S3 key stay.
 - An admin adds a person with an invite
-  ([§13.2](coven.md#132-adding-a-person-invites)). An in-person invite's request
-  is approved by the inviting device as soon as it is read and checked. A sent
-  invite's request waits for the admin's decision, with its confirmation number.
+  ([§13.2](coven.md#132-adding-a-person-invites)). Every invite's checked
+  request waits for the admin's decision, with its confirmation number: a code
+  someone else saw could be used before the person's, so no request is
+  approved on its own.
 - Making an invite is a step of the app's write (`CovenWrite::create_invite`),
   with or without storage: it returns the invite's id, the member id it fixes
   and its operation, and the invite is listed from the write's commit as
@@ -7161,12 +7161,6 @@ pub enum ProviderSignOut {
   the invite's one path, so no retry could pass it. The invite leaves
   `coven_invites` with no pending record, and the requester's join ends as
   declined ([§13.2](coven.md#132-adding-a-person-invites)).
-- History refusing the binding of an in-person invite's request, which the
-  inviting device approved on its own, ends the invite as a decline does, in
-  the pass that ran the binding. The device logs the refusal, and the pass
-  goes on: no call made that approval, and a pass failed with it would leave
-  the connection a record that never retries, holding every later pass
-  ([§13.2](coven.md#132-adding-a-person-invites)).
 - An invite ends in a write: approval, decline and cancel each write it, and
   so does expiry. Approving, declining and cancelling are steps of the app's
   write (`CovenWrite::approve_join_request`, `CovenWrite::decline_join_request`,
@@ -7213,8 +7207,8 @@ pub enum ProviderSignOut {
 - A join that ends without a store removes its kept sign-in, then its code,
   then its installation. A failure part way leaves a join that still lists
   and that the next call ends; a sign-in is never left without its code.
-- While it waits, the join's status gives the next check's time and, for a sent
-  invite, the confirmation number. `JoinControl::check_now` checks at once,
+- While it waits, the join's status gives the next check's time and the
+  confirmation number. `JoinControl::check_now` checks at once,
   ending the join's wait; a provider cooldown still holds.
 - Before `create_invite` makes any provider change, an App-folder Dropbox
   store fails with `DropboxAppFolderNotShareable`: sharing it requires store
@@ -7329,8 +7323,8 @@ pub struct ObjectId(pub Uuid);
 pub enum CodeInfo {
     /// A restore code reveals no name before loading.
     Restore(CodeMetadata),
-    /// An invite carries the store's name captured when the admin made it,
-    /// the new person's name (None for a replacement) and how it is approved.
+    /// An invite carries the store's name captured when the admin made it
+    /// and the new person's name (None for a replacement).
     Invite(InviteInfo),
 }
 
@@ -7346,7 +7340,6 @@ pub struct InviteInfo {
     pub metadata: CodeMetadata,
     pub store_name: String,
     pub invitee: Option<String>,
-    pub delivery: InviteDeliveryKind,
     /// When the invite ends, by the inviting device's clock, to the second:
     /// the joining device sends no first request after it, so the app can
     /// say until when it may be used (§13.2).
@@ -7537,7 +7530,7 @@ impl CovenHandle {
         &self,
         target: InviteTarget,
         access: InviteAccess,
-        delivery: InviteDelivery,
+        lifetime: InviteLifetime,
     ) -> Result<(InviteId, MemberId, OperationId), SyncError>;
 
     /// Approves a request, in a write of its own
@@ -7562,18 +7555,18 @@ impl CovenWrite<'_> {
     /// state, offline too: one made by a device that isn't a registered
     /// admin fails with `Rejected(NotAllowed)`, a replacement of a member who
     /// isn't active with `Rejected(TargetGone)`. A pass then checks it again,
-    /// grants its access and fixes its code, which `coven_invites` shows. An
-    /// in-person invite expires an hour after it is made; a sent one after
-    /// the lifetime chosen. Replacement preserves role, circle memberships
-    /// and device ids; changed provider access is separate.
+    /// grants its access and fixes its code, which `coven_invites` shows. It
+    /// expires `lifetime` after it is made, by this device's clock.
+    /// Replacement preserves role, circle memberships and device ids; changed
+    /// provider access is separate.
     pub fn create_invite(
         &self,
         target: InviteTarget,
         access: InviteAccess,
-        delivery: InviteDelivery,
+        lifetime: InviteLifetime,
     ) -> Result<(InviteId, MemberId, OperationId), SyncError>;
 
-    /// For a sent invite: approves exactly this checked request, and returns
+    /// Approves exactly this checked request, and returns
     /// the operation that binds its pair, listed in `coven_operations` until
     /// the app acknowledges its outcome (E6). The write journals it, offline
     /// too, without checking it against the applied state: a pass checks it
@@ -7582,10 +7575,9 @@ impl CovenWrite<'_> {
     /// key copies, then adds the new member with the invite's role or
     /// replaces the existing member's keys. Approval, once begun, finishes. A
     /// rejection is the operation's outcome and ends the invite as a decline
-    /// does; it is never retried with a new entry. An in-person invite's
-    /// request is approved without this call, and calling it fails with
-    /// InvitationChanged, as do a request the invite no longer shows and an
-    /// invite whose lifetime has ended.
+    /// does; it is never retried with a new entry. A request the invite no
+    /// longer shows and an invite whose lifetime has ended fail with
+    /// InvitationChanged.
     pub fn approve_join_request(&self, request: &JoinRequest) -> Result<OperationId, SyncError>;
 
     /// Declines an open invite's checked request. The write ends the invite,
@@ -7604,8 +7596,8 @@ impl CovenWrite<'_> {
     /// and takes back the storage access the invite granted. On S3 there is
     /// nothing to take back: the person deletes the invite's key in the
     /// provider's console, and coven forgets it (§14.3). An invite whose
-    /// approval has begun, including an in-person invite's own, and one
-    /// whose lifetime has ended fail with InvitationChanged.
+    /// approval has begun, and one whose lifetime has ended, fail with
+    /// InvitationChanged.
     pub fn cancel_invite(&self, invite: &InviteId) -> Result<(), SyncError>;
 }
 
@@ -7628,23 +7620,7 @@ pub enum InviteAccess {
     S3AccessKey { access_key_id: String, secret_access_key: SecretText },
 }
 
-/// How the invite reaches the person, which fixes how it is approved (§13.2).
-pub enum InviteDelivery {
-    /// Shown as a QR code to the person beside the admin; the inviting device
-    /// approves the request on its own. Expires after an hour.
-    InPerson,
-    /// Sent by message or email; the admin approves after comparing the
-    /// confirmation number.
-    Sent { lifetime: InviteLifetime },
-}
-
-/// The same choice without its lifetime, as the code carries it.
-pub enum InviteDeliveryKind {
-    InPerson,
-    Sent,
-}
-
-/// How long a sent invite stays open.
+/// How long an invite stays open after it is made (§13.2).
 pub enum InviteLifetime {
     Hour,
     Day,
@@ -7660,7 +7636,6 @@ pub struct Invite {
     pub member: MemberId,
     /// The new person's name; None for a replacement.
     pub invitee: Option<String>,
-    pub delivery: InviteDeliveryKind,
     /// The access the invite grants: the account shared with, or the id of
     /// the S3 key it carries; never a secret (§14.3).
     pub access: MemberAccess,
@@ -7682,10 +7657,9 @@ pub enum InviteStage {
     Waiting { code: String, request: Option<JoinRequest> },
     /// Approval of `request` has begun and finishes without the app;
     /// approving, declining or cancelling fail with InvitationChanged.
-    /// `binding` is the operation that binds the request's pair: for a sent
-    /// invite, the one `approve_join_request` returned, which
-    /// `coven_operations` lists until its outcome is acknowledged; an
-    /// in-person invite's approval is the inviting device's own.
+    /// `binding` is the operation that binds the request's pair: the one
+    /// `approve_join_request` returned, which `coven_operations` lists until
+    /// its outcome is acknowledged.
     Approving { code: String, request: JoinRequest, binding: OperationId },
 }
 
@@ -7710,7 +7684,7 @@ pub struct JoinRequest {
 }
 
 /// Six digits naming a request's keys, compared by the admin and the
-/// requester before a sent invite is approved (§13.2). Displays as `041 778`.
+/// requester before an invite's request is approved (§13.2). Displays as `041 778`.
 pub struct ConfirmationNumber(pub u32);
 
 /// The store and member ids, provider location and account, and sign-in requirement. Only an
@@ -7727,11 +7701,11 @@ pub enum BootstrapStatus {
     /// Connecting to storage, accepting provider access and sending a join
     /// request.
     Connecting,
-    /// The request is sent. `confirmation` is set for a sent invite. A new
-    /// status is reported each time the next check changes: `Checking` while
-    /// a check runs, then when the next one is due.
+    /// The request is sent; `confirmation` is the number the admin compares.
+    /// A new status is reported each time the next check changes: `Checking`
+    /// while a check runs, then when the next one is due.
     WaitingForApproval {
-        confirmation: Option<ConfirmationNumber>,
+        confirmation: ConfirmationNumber,
         next_check: NextCheck,
     },
     /// Loading the store from storage, with loading's steps (§13.4). A
@@ -8235,7 +8209,7 @@ let (invite, _, _) = handle
     .create_invite(
         InviteTarget::NewMember { role: MemberRole::Member, name: "Carol".into() },
         InviteAccess::ProviderAccount { email: "carol@example.com".into() },
-        InviteDelivery::Sent { lifetime: InviteLifetime::Day },
+        InviteLifetime::Day,
     )
     .await?;
 

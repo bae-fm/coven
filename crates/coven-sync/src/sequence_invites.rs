@@ -5,7 +5,7 @@ use super::{SequenceSync, Session};
 use crate::sequence_sync::sequence_operations::SequenceOperation;
 use crate::sequence_sync::OperationState;
 use crate::{
-    Invite, InviteAccess, InviteDelivery, InviteTarget, JoinRequest, OperationKind,
+    Invite, InviteAccess, InviteLifetime, InviteTarget, JoinRequest, OperationKind,
     OperationOutcome, OperationRejection, PendingReason, PendingRecord, PendingSubject,
     ProviderAccessAction, SyncError,
 };
@@ -16,7 +16,7 @@ use coven_database::{
 };
 use coven_format::{
     admin::{MemberRole, StoreChange},
-    codes::{InviteCode, InviteDeliveryKind},
+    codes::InviteCode,
     invite_end::InviteEnd,
     MemberAccess, Object,
 };
@@ -105,7 +105,6 @@ pub(crate) struct InviteWork {
     member: MemberId,
     /// The new person's name; `None` for a replacement.
     invitee: Option<String>,
-    delivery: InviteDeliveryKind,
     binding: InviteBinding,
     access: InviteGrant,
     secret: SecretText,
@@ -195,7 +194,6 @@ impl InviteWork {
             operation,
             member: self.member,
             invitee: self.invitee.clone(),
-            delivery: self.delivery,
             access: self.access.member_access(),
             expires_at: self.expires_at,
             stage,
@@ -303,7 +301,7 @@ impl SequenceSync {
         &self,
         target: InviteTarget,
         access: InviteAccess,
-        delivery: InviteDelivery,
+        lifetime: InviteLifetime,
     ) -> Result<Invite, SyncError> {
         let steps = self.operation_steps();
         let location = self.storage.config().clone();
@@ -311,7 +309,7 @@ impl SequenceSync {
         let (invite, _, operation) = self
             .database
             .write_as(move |sql| {
-                let made = NewInvite { target, access, delivery };
+                let made = NewInvite { target, access, lifetime };
                 steps.create_invite(&sql, made)
             })
             .await?;
@@ -374,8 +372,7 @@ impl SequenceSync {
     }
 
     /// Advance this device's invites in a pass: grant, read the request
-    /// under backoff, approve an in-person invite's checked request, revoke
-    /// on expiry, and finish decided work.
+    /// under backoff, revoke on expiry, and finish decided work.
     pub(crate) async fn resume_invites(
         &self,
         session: &mut Session,
@@ -558,27 +555,12 @@ impl SequenceSync {
                             continue;
                         }
                     };
-                    let code = code.clone();
-                    match work.delivery {
-                        // Ana watched the phone that scanned her code: an
-                        // invite has one request path, so the checked request
-                        // is approved in the pass that read it (§13.2).
-                        InviteDeliveryKind::InPerson => {
-                            let binding = SequenceOperation::change(work.binding_change(&request)?)
-                                .journaled(operation_kind::INVITE)?;
-                            self.database
-                                .start_operation_advancing(binding, move |binding| {
-                                    work.state = InviteState::Approving { code, request, binding };
-                                    work.update(&record)
-                                })
-                                .await?;
-                        }
-                        InviteDeliveryKind::Sent => {
-                            work.state = InviteState::Waiting { code, request: Some(request) };
-                            self.database.advance_operation(work.update(&record)?).await?;
-                            return Ok(InviteProgress::Waiting(PendingReason::Paused));
-                        }
-                    }
+                    // A checked request waits for the app's decision: someone
+                    // who saw the code may have sent it first (§13.2).
+                    work.state =
+                        InviteState::Waiting { code: code.clone(), request: Some(request) };
+                    self.database.advance_operation(work.update(&record)?).await?;
+                    return Ok(InviteProgress::Waiting(PendingReason::Paused));
                 }
                 InviteState::Approving { binding, .. } => {
                     let binding = *binding;
@@ -599,21 +581,12 @@ impl SequenceSync {
                         ) => InviteState::Recording { set_access: None },
                         _ => InviteState::Settled { share: None, end: None },
                     };
+                    // A refusal is the binding's outcome, which
+                    // `coven_operations` lists for the app that approved it;
+                    // the invite ends as a decline does.
                     self.database
-                        .finish_operation_advancing(binding, outcome.clone(), work.update(&record)?)
+                        .finish_operation_advancing(binding, outcome, work.update(&record)?)
                         .await?;
-                    // A sent invite's refusal is its binding's outcome, which
-                    // `coven_operations` lists for the app that approved it.
-                    // Coven approved an in-person request on its own, so no
-                    // call hears its refusal: the invite ends as a decline
-                    // does, and the pass goes on. Failed with the refusal, the
-                    // pass would leave the connection a record that never
-                    // retries, holding every later pass (§13.2).
-                    if let OperationOutcome::Rejected(reason) = &outcome {
-                        if work.delivery == InviteDeliveryKind::InPerson {
-                            tracing::warn!(?id, ?reason, "history refused an in-person approval");
-                        }
-                    }
                 }
                 InviteState::Recording { set_access: None } => {
                     let change = StoreChange::SetAccess {
@@ -819,7 +792,6 @@ impl SequenceSync {
             store: store.id,
             name: store.name.clone(),
             invitee: work.invitee.clone(),
-            delivery: work.delivery,
             expires_at: seconds(work.expires_at)?,
             invite: work.id,
             member: work.member,

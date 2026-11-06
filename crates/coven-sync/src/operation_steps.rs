@@ -73,9 +73,9 @@ impl OperationSteps {
     /// grants its storage access and fixes its code. A check that fails
     /// there, or a failed grant, is the invite's pending record in
     /// `coven_pending`, under its operation; the app cancels the invite to
-    /// end it. The invite expires after the delivery's lifetime by this
-    /// device's clock, from now. The invite is made at the store's recorded
-    /// location; a store with none fails with `NoStorage`.
+    /// end it. The invite expires after its lifetime by this device's clock,
+    /// from now. The invite is made at the store's recorded location; a store
+    /// with none fails with `NoStorage`.
     ///
     /// Made by a device that isn't a registered admin, the step fails with
     /// `Rejected(NotAllowed)`; for a replacement of a member who isn't
@@ -104,8 +104,8 @@ impl OperationSteps {
         Ok(made)
     }
 
-    /// Approve exactly this checked request of a sent invite, as a step of a
-    /// write (§13.2), and return the operation that binds its pair: the
+    /// Approve exactly this checked request, as a step of a write (§13.2),
+    /// and return the operation that binds its pair: the
     /// write journals it, and the invite's approval begins, with or without
     /// storage. Once the write commits, a pass is asked for, which catches
     /// up, claims copies of every store key and the held circle keys for the
@@ -116,8 +116,7 @@ impl OperationSteps {
     /// state, so the app is never refused an approval it was shown as
     /// waiting: one the history refuses, as when this admin was demoted, is
     /// refused by the pass, as its binding's outcome. A request the invite no
-    /// longer shows, an in-person invite's, whose approval began on its own,
-    /// and an invite whose lifetime ended fail the step with
+    /// longer shows, and an invite whose lifetime ended, fail the step with
     /// `InvitationChanged`.
     pub fn approve_join_request(
         &self,
@@ -151,9 +150,8 @@ impl OperationSteps {
     /// `coven_invites`, with or without storage. Once the write commits, a
     /// pass is asked for, which deletes a waiting request, so the requester's
     /// join ends as declined, and takes back the access the invite granted.
-    /// An invite whose approval has begun, including an in-person invite's
-    /// own, and one whose lifetime ended, fail the step with
-    /// `InvitationChanged`.
+    /// An invite whose approval has begun, and one whose lifetime ended, fail
+    /// the step with `InvitationChanged`.
     pub fn cancel_invite(
         &self,
         sql: &SqlContext<'_, '_>,

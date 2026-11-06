@@ -6,14 +6,14 @@
 use super::*;
 
 /// What the app asks an invite for: whom it adds or recovers, how they
-/// reach storage, and how the invite reaches them (§13.2).
+/// reach storage, and how long it stays open (§13.2).
 pub struct NewInvite {
     /// A new person, or an existing member whose pair the invite replaces.
     pub target: InviteTarget,
     /// The provider account to share with, or the S3 key made for them.
     pub access: InviteAccess,
-    /// In person or sent, which fixes its lifetime and its approval.
-    pub delivery: InviteDelivery,
+    /// How long after it is made the invite expires.
+    pub lifetime: InviteLifetime,
 }
 
 /// Make an invite, as a step of a write (§13.2), and return its id, the
@@ -24,8 +24,8 @@ pub struct NewInvite {
 /// invite again against the history it catches up with, grants its storage
 /// access and fixes its code. A check that fails there, or a failed grant,
 /// is the invite's pending record in `coven_pending`, under its operation;
-/// the app cancels the invite to end it. The invite expires after the
-/// delivery's lifetime by this device's clock, from `now`.
+/// the app cancels the invite to end it. The invite expires after its
+/// lifetime by this device's clock, from `now`.
 ///
 /// Made by a device that isn't a registered admin, the step fails with
 /// `Rejected(NotAllowed)`; for a replacement of a member who isn't active,
@@ -41,7 +41,7 @@ pub(crate) fn make_invite(
     location: &coven_storage::StorageConfig,
     invite: NewInvite,
 ) -> Result<(InviteId, MemberId, OperationId), SyncError> {
-    let NewInvite { target, access, delivery } = invite;
+    let NewInvite { target, access, lifetime } = invite;
     if let InviteTarget::NewMember { name, .. } = &target {
         coven_format::value::name(name)?;
     }
@@ -57,7 +57,7 @@ pub(crate) fn make_invite(
     let grant = invite_grant(access, location.provider())?;
     let secret = InviteSecret::generate()?;
     let secret = SecretText::new(serde_json::to_string(secret.to_secret_bytes().as_bytes())?);
-    let expires_at = now.checked_add(delivery.lifetime()).ok_or(
+    let expires_at = now.checked_add(lifetime.duration()).ok_or(
         StorageFailure::InvalidConfiguration
             .with_source("the clock cannot represent the invite's expiry"),
     )?;
@@ -103,7 +103,6 @@ pub(crate) fn make_invite(
             device,
             member,
             invitee,
-            delivery: delivery.kind(),
             binding,
             access: grant,
             secret,
@@ -152,20 +151,19 @@ fn invite_grant(access: InviteAccess, provider: CloudProvider) -> Result<InviteG
     }
 }
 
-/// Approve exactly this checked request of a sent invite, as a step of a
-/// write (§13.2), and return the operation that binds its pair: the write
-/// journals it, and the invite's approval begins, with or without storage.
-/// Once the write commits, a pass is asked for, which catches up, claims
-/// copies of every store key and the held circle keys for the request's
-/// pair, then the entry adding the member or replacing their pair; once
-/// begun, approval finishes. The operation's outcome is listed in
-/// `coven_operations`: a rejection ends the invite as a decline does. The
-/// step doesn't check the approval against the applied state, so the app is
-/// never refused an approval it was shown as waiting: one the history
-/// refuses, as when this admin was demoted, is refused by the pass, as its
-/// binding's outcome. A request the invite no longer shows, an in-person
-/// invite's, whose approval began on its own, and an invite whose lifetime
-/// ended by `now` fail the step with `InvitationChanged`.
+/// Approve exactly this checked request, as a step of a write (§13.2), and
+/// return the operation that binds its pair: the write journals it, and the
+/// invite's approval begins, with or without storage. Once the write commits, a
+/// pass is asked for, which catches up, claims copies of every store key and
+/// the held circle keys for the request's pair, then the entry adding the
+/// member or replacing their pair; once begun, approval finishes. The
+/// operation's outcome is listed in `coven_operations`: a rejection ends the
+/// invite as a decline does. The step doesn't check the approval against the
+/// applied state, so the app is never refused an approval it was shown as
+/// waiting: one the history refuses, as when this admin was demoted, is refused
+/// by the pass, as its binding's outcome. A request the invite no longer shows,
+/// and an invite whose lifetime ended by `now`, fail the step with
+/// `InvitationChanged`.
 pub(crate) fn approve_request(
     sql: &SqlContext<'_, '_>,
     now: SystemTime,

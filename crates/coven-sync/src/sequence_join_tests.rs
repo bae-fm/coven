@@ -434,42 +434,18 @@ async fn check_now_ends_the_joins_wait_but_not_a_provider_cooldown() {
     }
 }
 
-/// Only a sent invite's join has a confirmation number: Ana compares it
-/// before approving. In person, she watched the phone that scanned.
+/// Carol's phone shows the number Ana's phone shows with her request: Ana
+/// compares the two before approving (§13.2).
 #[tokio::test]
-async fn only_a_sent_invites_join_has_a_confirmation_number() {
+async fn a_joins_confirmation_number_is_the_one_the_inviting_device_shows() {
     let group = Group::shared();
     let ana = group.device(1).await;
     group.create(&ana).await;
-    let sent = invite(&ana).await;
-    let in_person = ana
-        .sync
-        .create_invite(
-            crate::InviteTarget::NewMember {
-                role: coven_format::admin::MemberRole::Member,
-                name: "Dan".into(),
-            },
-            crate::InviteAccess::ProviderAccount { email: "dan@example.org".into() },
-            crate::InviteDelivery::InPerson,
-        )
-        .await
-        .unwrap();
-    let carol = join(&group, sent.shown_code(), "Carol's phone").await;
-    let (_temp, directory) = group.directory();
-    let dan = crate::JoiningIdentity::prepare(
-        &directory,
-        &crate::read_invite_code(in_person.shown_code()).unwrap(),
-        "Dan's phone",
-    )
-    .unwrap();
-    assert_eq!(
-        carol.request.confirmation(),
-        Some(coven_crypto::ConfirmationNumber::of(
-            sent.id,
-            &carol.request.identity().keys().public_keys()
-        ))
-    );
-    assert_eq!(dan.confirmation(), None);
+    let invite = invite(&ana).await;
+    let carol = join(&group, invite.shown_code(), "Carol's phone").await;
+    ana.sync.pass().await.unwrap();
+    let request = listed(&ana).await[0].shown_request().cloned().expect("Carol's request");
+    assert_eq!(carol.request.confirmation(), request.confirmation);
     for device in [&ana, &carol.device] {
         device.database().close().await.unwrap();
     }

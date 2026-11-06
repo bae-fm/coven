@@ -30,7 +30,7 @@ impl Owner {
     /// Ana's store with two rows of notes, the first in a snapshot when
     /// `snapshot` says. Her waits are held, as every network's are: a
     /// backoff or cooldown of hers ends only as the test moves the clock or
-    /// asks for a pass, so a sent invite looks for its request only then.
+    /// asks for a pass, so an invite looks for its request only then.
     pub(super) async fn new(provider: CloudProvider, snapshot: bool) -> Self {
         let network = crate::tests::Network::with_schema(provider, tables(), migrations()).await;
         let device = &network.devices[0];
@@ -182,7 +182,7 @@ impl Owner {
             &self.handle,
             InviteTarget::NewMember { role: MemberRole::Member, name: "Carol".into() },
             access,
-            InviteDelivery::Sent { lifetime: InviteLifetime::Day },
+            InviteLifetime::Day,
         )
         .await
     }
@@ -484,7 +484,7 @@ pub(super) fn assert_load_order(loading: &[Progress<LoadStep>]) {
     }
 }
 
-/// Start Carol's join with a sent invite and stop it while it waits, as when
+/// Start Carol's join with an invite and stop it while it waits, as when
 /// the app is closed.
 pub(super) async fn waiting_join(owner: &Owner, install: &Installation, invite: &Invite) {
     waiting_join_with(install.authenticated_builder(owner, owner.recipient()).await, invite).await;

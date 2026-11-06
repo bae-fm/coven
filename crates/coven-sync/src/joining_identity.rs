@@ -2,11 +2,10 @@
 
 use crate::SyncError;
 use coven_crypto::{
-    ConfirmationNumber, EncryptionKey, InviteSecret, MemberIdentity, MemberKeys, MemberPublicKeys,
-    ObjectHasher,
+    ConfirmationNumber, EncryptionKey, InviteSecret, MemberIdentity, MemberKeys, ObjectHasher,
 };
 use coven_format::{
-    codes::{InviteCode, InviteDeliveryKind},
+    codes::InviteCode,
     objects::JoinRequest,
     sealed_single::{SingleChunkObject, SingleChunkPrefix},
     Object,
@@ -93,8 +92,8 @@ pub struct JoiningIdentity {
     /// When the invite ends, in seconds since the Unix epoch: no first
     /// request is sent after it.
     expires_at: u64,
-    /// Set for a sent invite, whose admin compares it before approving.
-    confirmation: Option<ConfirmationNumber>,
+    /// The number the admin compares before approving.
+    confirmation: ConfirmationNumber,
 }
 
 /// How far the join has come, as its saved request records it.
@@ -207,7 +206,7 @@ impl JoiningIdentity {
         }
         Ok(Some(Self {
             file,
-            confirmation: confirmation(code, &keys),
+            confirmation: ConfirmationNumber::of(code.invite, &keys),
             identity,
             request,
             path,
@@ -242,7 +241,7 @@ impl JoiningIdentity {
         )?;
         let identity = Self {
             file: directory.owned_file(StoreFile::Bootstrap),
-            confirmation: confirmation(code, &identity.keys().public_keys()),
+            confirmation: ConfirmationNumber::of(code.invite, &identity.keys().public_keys()),
             identity,
             request,
             path,
@@ -280,9 +279,9 @@ impl JoiningIdentity {
         &self.device_name
     }
 
-    /// The number the admin of a sent invite compares before approving; the
-    /// admin's device computes it from the same keys (format.md D11).
-    pub fn confirmation(&self) -> Option<ConfirmationNumber> {
+    /// The number the admin compares before approving; the admin's device
+    /// computes it from the same keys (format.md D11).
+    pub fn confirmation(&self) -> ConfirmationNumber {
         self.confirmation
     }
 
@@ -408,13 +407,6 @@ impl JoiningIdentity {
     pub(crate) fn open_at(&self, now: std::time::SystemTime) -> bool {
         now.duration_since(std::time::UNIX_EPOCH)
             .map_or(true, |since| since.as_secs() < self.expires_at)
-    }
-}
-
-fn confirmation(code: &InviteCode, keys: &MemberPublicKeys) -> Option<ConfirmationNumber> {
-    match code.delivery {
-        InviteDeliveryKind::InPerson => None,
-        InviteDeliveryKind::Sent => Some(ConfirmationNumber::of(code.invite, keys)),
     }
 }
 

@@ -16,8 +16,8 @@ pub enum BootstrapStatus {
     Connecting,
     /// The join request is sent and waits for approval (§13.2).
     WaitingForApproval {
-        /// The number the admin of a sent invite compares; `None` in person.
-        confirmation: Option<ConfirmationNumber>,
+        /// The number the admin compares before approving.
+        confirmation: ConfirmationNumber,
         /// When the join checks for approval next.
         next_check: NextCheck,
     },

@@ -339,8 +339,6 @@ import SequenceApply
 #print axioms CovenSequence.InviteLifecycle.unchecked_keys_approved
 #print axioms CovenSequence.InviteLifecycle.refused_request_retried
 #print axioms CovenSequence.InviteLifecycle.refused_ends
-#print axioms CovenSequence.InviteLifecycle.refused_approval_holds
-#print axioms CovenSequence.InviteLifecycle.never_held
 #print axioms CovenSequence.InviteLifecycle.refused_approval_ends
 #print axioms CovenSequence.InviteClaims.reachable_inv
 #print axioms CovenSequence.InviteClaims.children_end_with_invite

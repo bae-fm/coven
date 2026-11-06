@@ -111,7 +111,7 @@ async fn a_recovery_invite_rebinds_a_lost_member_through_the_public_calls() {
             access_key_id: "recovery-key".into(),
             secret_access_key: SecretText::new("recovery-secret".into()),
         },
-        crate::InviteDelivery::Sent { lifetime: crate::InviteLifetime::Day },
+        crate::InviteLifetime::Day,
     )
     .await;
     assert_eq!(recovery.member, carol);
@@ -313,66 +313,6 @@ async fn a_restore_learns_the_renamed_name_from_the_floor_snapshot() {
     assert_eq!(handle.store_name().await.unwrap(), "Retained name");
     handle.reload_from_snapshot().await.unwrap();
     assert_eq!(handle.store_name().await.unwrap(), "Retained name");
-    handle.close().await.unwrap();
-    owner.close().await;
-}
-
-/// Ana's own sync pass approves an in-person invite's request: Carol's join
-/// loads the store with no call from Ana's app (§13.2). Ana's invite looks
-/// for the request, and Carol's join for its approval, between backoffs
-/// the test holds: Ana's pass reads the request once Carol waits, and
-/// Carol's Check now runs once the invite has ended with its approval
-/// landed.
-#[tokio::test]
-async fn an_in_person_join_loads_without_an_approval_call() {
-    let owner = Owner::new(CloudProvider::S3, false).await;
-    let invite = crate::tests::invite(
-        &owner.handle,
-        InviteTarget::NewMember { role: MemberRole::Member, name: "Carol".into() },
-        InviteAccess::S3AccessKey {
-            access_key_id: "invited-key".into(),
-            secret_access_key: SecretText::new("invited-secret".into()),
-        },
-        InviteDelivery::InPerson,
-    )
-    .await;
-    let install = Installation::new();
-    let builder = install.builder(&owner, owner.recipient());
-    let control = JoinControl::new();
-    let (waits, mut waiting) = watch::channel(false);
-    let joining = join_with_invite(
-        builder,
-        invite.shown_code(),
-        "New phone",
-        |status| {
-            if matches!(
-                status,
-                BootstrapStatus::WaitingForApproval { next_check: NextCheck::At(_), .. }
-            ) {
-                waits.send_replace(true);
-            }
-        },
-        &control,
-    );
-    let approved = async {
-        waiting.wait_for(|waiting| *waiting).await.unwrap();
-        // Ana's next pass reads the request and approves it; the invite
-        // ends once its binding has landed.
-        owner.pass().await;
-        owner.handle.test_invites().wait_for(|invites| invites.is_empty()).await;
-        control.check_now();
-    };
-    let (handle, ()) = join_with_response(joining, approved).await;
-    let handle = handle.unwrap().unwrap();
-    assert!(handle
-        .members()
-        .await
-        .unwrap()
-        .iter()
-        .any(|member| member.is_self && member.id == invite.member));
-    assert!(owner.handle.read(Invite::list).await.unwrap().is_empty());
-    // The finished join no longer keeps its code.
-    assert!(saved_code(&install, owner.directory.id()).is_none());
     handle.close().await.unwrap();
     owner.close().await;
 }
@@ -910,7 +850,7 @@ async fn a_removed_members_retained_grant_stays_pending_until_a_retry_revokes_it
     owner.close().await;
 }
 
-/// Carol scans a sent invite but opens it only once it has ended. Her phone
+/// Carol scans an invite but opens it only once it has ended. Her phone
 /// sends no request, which no device would ever answer, and the join ends as
 /// an expired one does, leaving nothing behind (§13.2).
 #[tokio::test]

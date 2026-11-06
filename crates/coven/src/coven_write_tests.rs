@@ -246,7 +246,7 @@ async fn invites_are_made_and_ended_in_the_apps_writes_with_sync_stopped() {
                 access_key_id: key.into(),
                 secret_access_key: SecretText::new("secret".into()),
             },
-            crate::InviteDelivery::Sent { lifetime: crate::InviteLifetime::Day },
+            crate::InviteLifetime::Day,
         )
     };
     let (first, second) = (invite("first"), invite("second"));

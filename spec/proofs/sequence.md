@@ -761,13 +761,11 @@ steps are every writer that acts on them:
   bound to a member, current or past;
 - what a pass learns: the approver's demotion, and a stop for good, from a
   slot it applies or from history showing another copy of this device;
-- a pass's failure that no retry clears: the connection's record that never
-  retries holds every later pass until the person resets the device (E5);
 - another admin's device applying that stop, which may come first: it writes
   this device's gone marker and deletes the joiner's request, and the joiner
   sends none after it (§13.2);
 - the owner's devices taking back the invite's share: the inviting device once
-  it ended the share, while no failure holds its passes, any of them once history records the share and the
+  it ended the share, any of them once history records the share and the
   inviting device is gone for good, unless the account is a member's by then
   (§13.2, §14.2).
 
@@ -796,8 +794,8 @@ record. The properties are proved under `Rules.correct`:
   `coven_pending` alone, the app's offer of approving, declining, cancelling
   and acknowledging is exactly what the write steps accept, and every record it
   is offered to retry can be retried.
-- `approval_runs_binding`: a sent invite listed as approving is exactly one
-  whose binding is listed as running.
+- `approval_runs_binding`: an invite listed as approving is exactly one whose
+  binding is listed as running.
 - `offered_fresh`, `binding_fresh`: the pass checks the request's keys when it
   opens the request, so the app is offered approving only a request whose keys
   are fresh, and an approval under way binds only such a request (`KeysInv`).
@@ -807,11 +805,9 @@ record. The properties are proved under `Rules.correct`:
   invite, as a decline does, with no pending record, and the pass goes on to
   put the marker in the request's place. The invite ends without the app's
   retry and without its expiry.
-- `refused_approval_ends`, `never_held`: an approval whose binding history
-  refuses ends the invite as a decline does, an in-person invite's too, and
-  the next read and write put the marker in the request's place. No pass
-  fails with the refusal, so no failure holds a later pass, and `settles`
-  runs every operation to its end.
+- `refused_approval_ends`: an approval whose binding history refuses ends the
+  invite as a decline does, with the refusal as the binding's outcome, and the
+  next read and write put the marker in the request's place.
 
 Each rule `correct` has is needed; leaving one out is a checked counterexample:
 
@@ -834,19 +830,13 @@ Each rule `correct` has is needed; leaving one out is a checked counterexample:
 - `unrecorded_share_strands`: a share granted without its record, on a device
   that then stops for good, stands forever: no other device knows of it.
 - `unchecked_keys_approved`: with the request's keys checked only when the
-  binding applies, a sent invite offers the app a request whose keys a member
-  holds, and an in-person invite's pass approves one and journals a binding
-  history refuses.
+  binding applies, the app is offered a request whose keys a member holds, and
+  approving it journals a binding history refuses.
 - `refused_request_retried`: an invite left waiting on a request that failed
-  its checks offers the app a retry that comes back to the same state, sent
-  or in person: the request stays at the invite's one path, so the pass
-  refuses it again, and the invite stays listed, with its share standing,
-  until the app cancels it or it expires.
-- `refused_approval_holds`: a pass that fails with an in-person invite's
-  refused approval, once it has ended the invite, leaves the connection a
-  record that never retries. Every later pass is held: the app's admin change
-  journaled before never runs or ends, and this device never takes the
-  invite's share back, until the person resets the device.
+  its checks offers the app a retry that comes back to the same state: the
+  request stays at the invite's one path, so the pass refuses it again, and
+  the invite stays listed, with its share standing, until the app cancels it
+  or it expires.
 
 `Rules.rust` names the rules the Rust follows; the differential test compares
 it.

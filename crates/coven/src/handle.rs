@@ -378,9 +378,9 @@ impl CovenHandle {
         &self,
         target: InviteTarget,
         access: InviteAccess,
-        delivery: InviteDelivery,
+        lifetime: InviteLifetime,
     ) -> Result<(InviteId, MemberId, OperationId), SyncError> {
-        self.write(move |write| write.create_invite(target, access, delivery)).await
+        self.write(move |write| write.create_invite(target, access, lifetime)).await
     }
     /// Follow `coven_invites` with a live query, as an app does (E10).
     #[cfg(any(test, feature = "test-utils"))]
