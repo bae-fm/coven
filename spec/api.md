@@ -3928,8 +3928,10 @@ impl CovenReadHandle {
 
     /// Closes read and cache connections on all clones, releases their
     /// storage client and their store lock, while the app still holds the
-    /// handle. Reports connection-close failures; cancellation does not stop
-    /// closing.
+    /// handle. From its first poll every clone refuses calls with
+    /// `StoreClosed`, so none runs after closing begins; a call running then
+    /// answers `StoreClosed` too. Reports connection-close failures;
+    /// cancellation does not stop closing, which runs as its own task (E15).
     pub async fn close(&self) -> Result<(), DbError>;
 
     pub fn read<F, R, E>(&self, read: F) -> Read<'_, F, ReadOnly>

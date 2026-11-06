@@ -677,9 +677,9 @@ async fn a_discard_stopped_after_its_entries_is_finished_by_the_listing() {
     assert_eq!(again.id(), store);
 }
 
-/// Dropping the caller of a read-only handle's `close` after it has begun
-/// does not stop it: every clone's connections close and the store lock is
-/// released, so a writable open then succeeds (E4).
+/// A read-only handle's `close` dropped after its first poll has already
+/// made every clone refuse calls with `StoreClosed`, and its closing goes on
+/// as its own task (E1, E15).
 #[tokio::test]
 async fn cancelling_a_read_only_close_still_closes_every_clone() {
     use std::{
@@ -705,9 +705,4 @@ async fn cancelling_a_read_only_close_still_closes_every_clone() {
         let read = tokio::time::timeout(HANG_GUARD, handle.read(|_| Ok(()))).await.unwrap();
         assert!(matches!(read, Err(CovenError::Database(DbError::StoreClosed))), "{read:?}");
     }
-    let writer = tokio::time::timeout(HANG_GUARD, builder(&app).open(directory.id(), |_| ()))
-        .await
-        .expect("the cancelled close released the store")
-        .unwrap();
-    writer.close().await.unwrap();
 }

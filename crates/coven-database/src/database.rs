@@ -896,6 +896,13 @@ impl Database {
 }
 
 impl Database<ReadOnly> {
+    /// Refuse every later call on every clone of this handle with
+    /// `StoreClosed`, at once and before its connections close; a call
+    /// already running answers `StoreClosed` too (E1).
+    pub fn refuse_calls(&self) {
+        self.observer.close();
+    }
+
     /// Wait for active calls and close every clone of this handle.
     pub async fn close(&self) -> Result<(), DbError> {
         let handle = self.clone();

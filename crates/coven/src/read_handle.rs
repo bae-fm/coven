@@ -70,8 +70,12 @@ impl CovenReadHandle {
     }
     /// Closes read and cache connections on all clones and releases their
     /// storage client and shared store lock, while the app still holds the
-    /// handle. File streams retain their own locks.
+    /// handle. From its first poll every clone refuses new calls with
+    /// `StoreClosed`; the closing itself runs as its own task, so dropping
+    /// this future doesn't stop it (E1, E15). File streams retain their own
+    /// locks.
     pub async fn close(&self) -> Result<(), DbError> {
+        self.database.refuse_calls();
         let handle = self.clone();
         let bugs = self.database.bugs().clone();
         let closing = async move {

@@ -571,8 +571,16 @@ impl CommitObserver {
         })
     }
 
+    /// What every call on the handle fails with: its failure, or
+    /// `StoreClosed` once it closed.
     pub(crate) fn error(&self) -> Option<DbError> {
-        self.with_state(|state| state.failure.as_ref().map(HandleFailure::error))
+        self.with_state(|state| {
+            state
+                .failure
+                .as_ref()
+                .map(HandleFailure::error)
+                .or_else(|| state.closed.then_some(DbError::StoreClosed))
+        })
     }
 
     /// Fail every later call and subscription; the first failure is kept.
