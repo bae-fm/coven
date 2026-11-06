@@ -4,6 +4,7 @@
 
 use super::FileWrite;
 use crate::{
+    declaration::AudienceSource,
     file_location::Place,
     file_table::{self, Record},
     write_rows::{AppKey, AppValues, AppView},
@@ -56,6 +57,14 @@ impl FileWrite<'_> {
     ) -> Result<Copies, DbError> {
         let db = self.database;
         let mut copies = Copies::default();
+        // A store table's rows never change audience, so only a table that
+        // can move and names a file gets copies; without one, no move is
+        // walked.
+        if !self.files.schema.declarations.iter().any(|declaration| {
+            !matches!(declaration.audience, AudienceSource::Store) && !declaration.files.is_empty()
+        }) {
+            return Ok(copies);
+        }
         let before = AppView::before(db, self.files.schema, captured)?;
         let after = AppView::after(db, self.files.schema);
         let store = crate::merge_store::MergeStore::new(db, &before);

@@ -9489,6 +9489,13 @@ rechecks (§20.5) and any container-existence check count here.
   whole merge state, uses that read. Reading them again at each stage took 25 statements a
   row instead of 22 for a write inserting tracks under existing albums, and
   four or five more for each track a move of its album carried.
+- **A write walks its moves for new files only when a move can need one.**
+  A row moved to another audience gets a new file there for each file it
+  names (§17.2), so before coven records a write it finds every row the
+  write's moves carry. Only a table whose rows can change audience and that
+  names a file can need one; a store with no such table skips the walk. In
+  one of albums and tracks, a move of every album took 59 statements for
+  each track it carried with the walk and 49 without.
 - **Applying a streamed write keeps only the rows it used last.** Merging
   and putting back a region reads each row's merge state and evaluation
   several times, and a region can be the whole write, so it keeps the rows it
