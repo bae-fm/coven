@@ -28,7 +28,7 @@ mod transaction_capture;
 mod write_constants;
 #[path = "write_transaction.rs"]
 mod write_transaction;
-use app_statements::ReadSteps;
+use app_statements::StepsOf;
 pub(crate) use event_capture::Event;
 use transaction_capture::ChangeCapture;
 use write_transaction::WriteTransaction;
@@ -575,7 +575,11 @@ impl DatabaseConnection {
         self.begin_app_statement()?;
         let mut statement = self.authorization.app_result(self.app_statement(sql))?;
         let _scope = self.authorization.step();
-        let changed = self.authorization.app_result(statement.execute(params))?;
+        let changed = self.authorization.app_result(self.counting_steps(
+            &mut statement,
+            StepsOf::AppWrite,
+            |statement| statement.execute(params),
+        ))?;
         drop(statement);
         self.bound_stream_cache()?;
         Ok(changed)
@@ -603,12 +607,12 @@ impl DatabaseConnection {
             }
             let cookie = migration.map(|_| self.schema_cookie()).transpose()?;
             // Step every row so later execution errors cannot be discarded.
-            let result = (|| {
+            let result = self.counting_steps(&mut statement, StepsOf::AppWrite, |statement| {
                 let mut rows = statement.raw_query();
                 let _scope = self.authorization.step();
                 while rows.next()?.is_some() {}
                 Ok(())
-            })();
+            });
             self.authorization.app_result(result)?;
             if let (Some(cookie), Some(migration), Some(text)) = (cookie, migration, text) {
                 if self.schema_cookie()? != cookie {
@@ -681,7 +685,7 @@ impl DatabaseConnection {
             let mut statement = self.app_statement(sql)?;
             let parameters = crate::sql_value::parameters(&self.connection, &statement, params)?;
             let plan = self.live_scope_plan(sql, &statement)?;
-            let result = self.counting_steps(&mut statement, ReadSteps::App, |statement| {
+            let result = self.counting_steps(&mut statement, StepsOf::AppRead, |statement| {
                 let mut rows = statement.query(rusqlite::params_from_iter(&parameters))?;
                 loop {
                     let row = {

@@ -367,3 +367,60 @@ async fn app_tests_count_the_steps_a_read_runs() {
     assert!(costs[1].1 > 10 * costs[0].1, "{costs:?}");
     handle.close().await.unwrap();
 }
+
+/// An app's test measures a write's cost through its handle: an INSERT run
+/// with `execute` counts steps as writes, not reads, and a trigger on the
+/// table doing more work makes the same INSERT count more.
+#[tokio::test]
+async fn app_tests_count_the_steps_a_write_runs() {
+    use crate::{Coven, Migration, RowIdentity, SyncedTable, WorkCounter, WorkCounts};
+    let insert_into_store = |name: &'static str, with_trigger: bool| async move {
+        let root = tempfile::tempdir().unwrap();
+        let mut migrations = vec![
+            Migration::addition(1, "anchors", "CREATE TABLE anchors(id TEXT NOT NULL PRIMARY KEY)"),
+            Migration::addition(
+                2,
+                "notes",
+                "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY,title TEXT NOT NULL)",
+            ),
+            Migration::addition(
+                3,
+                "note_log",
+                "CREATE TABLE note_log(id INTEGER PRIMARY KEY,note_id TEXT NOT NULL)",
+            ),
+        ];
+        if with_trigger {
+            migrations.push(Migration::addition(
+                4,
+                "log_note",
+                "CREATE TRIGGER log_note AFTER INSERT ON notes
+                 BEGIN INSERT INTO note_log(note_id) VALUES(new.id); END",
+            ));
+        }
+        let handle = Coven::in_memory(root.path().into())
+            .builder()
+            .synced_tables(vec![SyncedTable::new("anchors", RowIdentity::SharedKey)])
+            .migrations(migrations)
+            .create_store(name)
+            .await
+            .unwrap();
+        let counter = WorkCounter::new();
+        handle.test_track_work(counter.clone()).await.unwrap();
+        handle
+            .write(|sql| {
+                sql.execute("INSERT INTO notes VALUES('a', 'title')", [])?;
+                Ok::<_, crate::CovenError>(())
+            })
+            .await
+            .unwrap();
+        let work: WorkCounts = counter.take();
+        handle.close().await.unwrap();
+        work
+    };
+    let plain = insert_into_store("Plain", false).await;
+    let triggered = insert_into_store("Triggered", true).await;
+    assert!(plain.app_write_steps > 0, "{plain:?}");
+    assert_eq!(plain.app_read_steps, 0);
+    assert!(triggered.app_write_steps > plain.app_write_steps, "{plain:?} then {triggered:?}");
+    assert_eq!(triggered.app_read_steps, 0);
+}

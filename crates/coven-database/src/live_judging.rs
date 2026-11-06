@@ -80,7 +80,7 @@ impl DatabaseConnection {
         // each multiple of the limit, so the count starts at zero.
         statement.reset_status(rusqlite::StatementStatus::VmStep);
         self.lookups.arm();
-        let found = self.counting_steps(&mut statement, super::ReadSteps::Lookup, |statement| {
+        let found = self.counting_steps(&mut statement, super::StepsOf::Lookup, |statement| {
             statement.raw_query().next().map(|row| row.is_some())
         });
         let stopped = self.lookups.disarm();

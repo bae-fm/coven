@@ -112,7 +112,7 @@ impl DatabaseConnection {
     pub(super) fn counting_steps<T>(
         &self,
         statement: &mut Statement<'_>,
-        steps: ReadSteps,
+        steps: StepsOf,
         run: impl FnOnce(&mut Statement<'_>) -> T,
     ) -> T {
         #[cfg(any(test, feature = "test-utils"))]
@@ -125,8 +125,9 @@ impl DatabaseConnection {
             let ran = statement.get_status(rusqlite::StatementStatus::VmStep).wrapping_sub(before)
                 as u32 as usize;
             self.record_work(|work| match steps {
-                ReadSteps::App => work.app_read_steps += ran,
-                ReadSteps::Lookup => work.lookup_steps += ran,
+                StepsOf::AppRead => work.app_read_steps += ran,
+                StepsOf::AppWrite => work.app_write_steps += ran,
+                StepsOf::Lookup => work.lookup_steps += ran,
             });
         }
         #[cfg(not(any(test, feature = "test-utils")))]
@@ -163,9 +164,11 @@ impl DatabaseConnection {
 
 /// Whose statement's steps a connection ran (WorkCounts).
 #[derive(Clone, Copy)]
-pub(super) enum ReadSteps {
-    /// The app's own statement.
-    App,
+pub(super) enum StepsOf {
+    /// The app's own statement that returns rows.
+    AppRead,
+    /// The app's own statement run for its changes.
+    AppWrite,
     /// Coven's lookup judging whether a write reruns a live query (§4).
     Lookup,
 }
