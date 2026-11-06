@@ -6176,7 +6176,8 @@ count it as a reference.
   never changes what the other reads: making A device-only (§17.3) leaves
   Gifts' file stored. A file on this device only gives a new file on this
   device only, over the same original or coven's copy, and any upload stores
-  both. The member must be in the new file's audience (`NotInCircle`,
+  both. The new file's audience must not be a deleted circle
+  (`DeletedCircle`, §15.9), and the member must be in it (`NotInCircle`,
   §15.6). A file this device has no record of fails the write with
   `FileAbsent`, and a new file no row names with `FileUnreferenced`.
 - **Moving a row to another audience** (§15.4) gives it a new file there for

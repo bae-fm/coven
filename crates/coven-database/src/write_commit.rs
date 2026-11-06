@@ -340,7 +340,8 @@ pub(crate) fn queue(
 }
 
 /// Check a write's rows, its file records among them, against the same
-/// committed membership.
+/// committed membership. A deleted circle refuses every write into it, as its
+/// deletion, before any question of who is in it (§15.9).
 /// The caller must keep its write transaction open until the authorized work commits.
 pub(crate) fn check_membership(
     database: &DatabaseConnection,
@@ -348,6 +349,14 @@ pub(crate) fn check_membership(
     audience: &Audience,
 ) -> Result<(), DbError> {
     if let Audience::Circle(circle) = audience {
+        let deleted: bool = database.query_row(
+            "SELECT EXISTS(SELECT 1 FROM _coven_circle_deletions WHERE circle=?1)",
+            params![circle.to_string()],
+            |row| row.get(0),
+        )?;
+        if deleted {
+            return Err(DbError::DeletedCircle(*circle));
+        }
         let member: bool = database.query_row(
             "SELECT EXISTS(
                 SELECT 1 FROM _coven_circle_members cm
@@ -355,7 +364,6 @@ pub(crate) fn check_membership(
                 JOIN _coven_devices d ON d.member=cm.member
                 JOIN _coven_members m ON m.member=d.member
                 WHERE cm.circle=?1 AND d.device=?2
-                  AND NOT EXISTS(SELECT 1 FROM _coven_circle_deletions WHERE circle=c.circle)
                   AND d.state<>'removed' AND m.removed=0
             )",
             params![circle.to_string(), device],

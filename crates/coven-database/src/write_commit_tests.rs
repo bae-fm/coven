@@ -206,6 +206,55 @@ async fn a_refused_attachment_rolls_back_its_file_and_keeps_the_original() {
     }
 }
 
+/// A file written into a deleted circle, staged for a new row or made for a
+/// row the write moves there, is refused as the circle's deletion, as a row
+/// written there is, not as a membership the device lacks (§15.9).
+#[tokio::test]
+async fn a_file_written_into_a_deleted_circle_is_refused_as_deleted() {
+    const STORE_ROW: &str = "00000000-0000-4000-8000-000000000002";
+    let store = TestStore::new();
+    let db = files_store(&store, crate::Provenance::AppProvided).await;
+    store.join_circle(&db, circle());
+    db.staged_write::<_, _, _, _, crate::DbError>(
+        |batch| Ok(batch.put_file("files", b"kept".to_vec(), crate::Place::Cloud)),
+        |sql, file| {
+            sql.execute(
+                "INSERT INTO files(id,file,audience) VALUES(?1,?2,'store')",
+                (STORE_ROW, file),
+            )?;
+            Ok(())
+        },
+    )
+    .await
+    .unwrap();
+    crate::tests::delete_circle(&db, circle()).await.unwrap();
+    let before = contents(&db);
+    let staged = db
+        .staged_write::<_, _, _, _, crate::DbError>(
+            |batch| Ok(batch.put_file("files", b"new".to_vec(), crate::Place::Cloud)),
+            |sql, file| {
+                sql.execute(
+                    "INSERT INTO files(id,file,audience) VALUES(?1,?2,?3)",
+                    (ROOT, file, CIRCLE),
+                )?;
+                Ok(())
+            },
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(staged, crate::DbError::DeletedCircle(id) if id == circle()), "{staged:?}");
+    let moved = db
+        .write(|sql| {
+            sql.execute("UPDATE files SET audience=?1 WHERE id=?2", (CIRCLE, STORE_ROW))?;
+            Ok(())
+        })
+        .await
+        .unwrap_err();
+    assert!(matches!(moved, crate::DbError::DeletedCircle(id) if id == circle()), "{moved:?}");
+    assert_eq!(contents(&db), before);
+    db.close().await.unwrap();
+}
+
 const STEPS: &[(&str, &str)] = &[
     ("notes", "UPDATE"),
     ("_coven_writes", "INSERT"),
