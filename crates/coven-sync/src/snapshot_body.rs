@@ -37,10 +37,11 @@ pub(crate) struct SnapshotBody {
     pub(crate) digest: SignedDigest,
 }
 
-/// A body read's failure, and whether a second read of the stored object
-/// already confirmed it: a mismatch with the announced digest is refused only
-/// once the second read's digest agrees, so nothing remains to confirm
-/// (§19.1).
+/// A body read's failure, and whether it judged the stored object's bytes,
+/// which need no second staging to confirm (§19.1): a mismatch with the
+/// announced digest, refused once a second read's digest agrees, or a check
+/// of bytes whose digest is the announced one. A failure to stage a record
+/// judges a staged record, so it is not confirmed.
 pub(crate) struct BodyFailure {
     pub(crate) error: SyncError,
     pub(crate) confirmed: bool,
@@ -112,11 +113,16 @@ impl SnapshotObject {
         while body.remaining > 0 {
             match opening.chunk(&mut body, staging.as_deref_mut()).await {
                 Ok(()) => (),
-                Err(error @ (SyncError::Damaged(_) | SyncError::UpdateRequired(_))) => {
-                    refused = Some(error);
+                Err(
+                    failure @ BodyFailure {
+                        error: SyncError::Damaged(_) | SyncError::UpdateRequired(_),
+                        ..
+                    },
+                ) => {
+                    refused = Some(failure);
                     body.pass_over().await?;
                 }
-                Err(error) => return Err(error.into()),
+                Err(failure) => return Err(failure.error.into()),
             }
             // Everything but the final signature and what is still to come.
             if let Some(progress) = progress.as_deref_mut() {
@@ -145,18 +151,21 @@ impl SnapshotObject {
                 confirmed: true,
             });
         }
+        // The digest is the announced one: the bytes are the announced bytes,
+        // and each check from here judges them alone.
+        let judged = |error: SyncError| BodyFailure { error, confirmed: true };
         if let Some(refused) = refused {
-            return Err(refused.into());
+            return Err(refused);
         }
         if opening.opened != plaintext {
-            return Err(damaged(path, Refusal::Parse { cause: None }).into());
+            return Err(judged(damaged(path, Refusal::Parse { cause: None })));
         }
-        checked(path, opening.layout.read_signature(&signature))?;
-        checked(path, opening.decoder.finish())?;
+        checked(path, opening.layout.read_signature(&signature)).map_err(judged)?;
+        checked(path, opening.decoder.finish()).map_err(judged)?;
         let Opening { decoder, mut originals, claims, .. } = opening;
         let header = decoder.header().expect("finished snapshot").clone();
         if header.id != announcement.snapshot {
-            return Err(crate::write_object::wrong_identity(path).into());
+            return Err(judged(crate::write_object::wrong_identity(path)));
         }
         originals.sort_by_key(|original| original.slot);
         Ok(SnapshotBody { header, originals, claims, digest })
@@ -227,7 +236,28 @@ impl Opening<'_> {
         &mut self,
         body: &mut HashedBody<'_>,
         staging: Option<&mut SnapshotStaging>,
-    ) -> Result<(), SyncError> {
+    ) -> Result<(), BodyFailure> {
+        let path = body.path;
+        let chunk =
+            self.open(body).await.map_err(|error| BodyFailure { error, confirmed: true })?;
+        if let Some(staging) = staging {
+            self.batch.extend_from_slice(&chunk);
+            if self.batch.len() >= STAGED_BATCH || body.remaining == 0 {
+                staging
+                    .stage(std::mem::take(&mut self.batch))
+                    .await
+                    .map_err(|error| database_failure(path, error))?;
+            }
+        }
+        Ok(())
+    }
+
+    /// The next chunk's plaintext, whose history records are read: a check
+    /// of the bytes alone.
+    async fn open(
+        &mut self,
+        body: &mut HashedBody<'_>,
+    ) -> Result<zeroize::Zeroizing<Vec<u8>>, SyncError> {
         let path = body.path;
         let mut piece = body.read(4).await?;
         let length = checked(path, self.layout.chunk_length(&piece))?;
@@ -255,15 +285,6 @@ impl Opening<'_> {
                 _ => unreachable!("history decoding returns only history"),
             }
         }
-        if let Some(staging) = staging {
-            self.batch.extend_from_slice(&chunk);
-            if self.batch.len() >= STAGED_BATCH || body.remaining == 0 {
-                staging
-                    .stage(std::mem::take(&mut self.batch))
-                    .await
-                    .map_err(|error| database_failure(path, error))?;
-            }
-        }
-        Ok(())
+        Ok(chunk)
     }
 }

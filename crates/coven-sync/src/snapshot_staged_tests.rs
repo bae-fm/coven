@@ -110,3 +110,48 @@ async fn a_refusal_a_second_read_confirmed_is_not_staged_again() {
     ana.sync.database.close().await.unwrap();
     ben.sync.database.close().await.unwrap();
 }
+
+/// A chunk of the stored snapshot fails to open, and its announcement names
+/// the digest of the bytes as stored, so they are the announced bytes: the
+/// refusal judges them alone, and no second staging streams them again
+/// (§19.1).
+#[tokio::test]
+async fn a_refusal_of_announced_bytes_is_not_staged_again() {
+    use coven_storage::{test_utils::MemoryRequest, Storage};
+    let (group, ana, ben) = snapshotted().await;
+    let history = ben.sync.session.lock().await.history.clone();
+    let mut announcement = history
+        .announcements
+        .values()
+        .find(|a| a.snapshot.audience == Audience::Store)
+        .unwrap()
+        .clone();
+    let path = crate::snapshot_object::path(group.store, &announcement.snapshot).unwrap();
+    let size = group.storage.status(&path).await.unwrap().unwrap().size;
+    // Inside the first chunk, past the prefix.
+    group.storage.corrupt_byte(&path, 100).await.unwrap();
+    let stored = group.storage.read_object(&path, None).await.unwrap().bytes;
+    let mut hash = coven_crypto::ObjectHasher::new();
+    hash.update(&stored);
+    announcement.digest = *hash.finish().as_bytes();
+    let ring = ben.sync.keys.read().unwrap().unwrap();
+    let before = ben.storage.request_trace().len();
+    let result = ben.sync.select(announcement, &ring, None).await.err();
+    assert!(
+        matches!(
+            &result,
+            Some(SyncError::Damaged(DamagedObject { failure: Refusal::Decryption { .. }, .. }))
+        ),
+        "{result:?}"
+    );
+    let streams = ben.storage.request_trace()[before..]
+        .iter()
+        .filter(|request| {
+            matches!(request, MemoryRequest::Read(read, range)
+            if *read == path && range.is_some_and(|range| range.end() == size))
+        })
+        .count();
+    assert_eq!(streams, 1, "{:?}", &ben.storage.request_trace()[before..]);
+    ana.sync.database.close().await.unwrap();
+    ben.sync.database.close().await.unwrap();
+}

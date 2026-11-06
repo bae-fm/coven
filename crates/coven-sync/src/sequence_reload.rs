@@ -299,7 +299,7 @@ impl SequenceSync {
     /// reporting it to `progress` as a Streaming step for its audience. A
     /// failed read removes what it staged before reporting (§16.2), and a
     /// refusal stands only once a second staging agrees (§19.1).
-    async fn select(
+    pub(crate) async fn select(
         &self,
         announcement: SnapshotAnnouncement,
         ring: &StoreKeyring,
