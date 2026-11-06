@@ -42,3 +42,18 @@ fn a_bug_in_a_requests_file_work_is_storages_bug() {
     assert_eq!(cleanup.bug(), Some(&bug));
     assert_eq!(OAuthError::Storage(storage()).bug(), Some(&bug));
 }
+
+/// A failed cleanup keeps the original operation's failure as its own
+/// classification, so a caller retries or reports the operation; it has no
+/// failure of the request alone, since its cleanup left state behind (E5).
+#[test]
+fn a_cleanup_reports_its_operations_failure() {
+    let error = StorageError::Cleanup {
+        operation: Box::new(StorageFailure::AlreadyExists.into()),
+        cleanup: Box::new(StorageFailure::Network.into()),
+    };
+    assert_eq!(error.failure(), StorageFailure::AlreadyExists);
+    assert_eq!(error.own_failure(), None);
+    let alone = StorageError::from(StorageFailure::AlreadyExists);
+    assert_eq!(alone.own_failure(), Some(StorageFailure::AlreadyExists));
+}
