@@ -3,7 +3,6 @@ use crate::clock::HANG_GUARD;
 use crate::files::StoreDirAccess;
 use crate::files::StoreDirectories;
 use crate::id_source::UuidIds;
-use std::future::Future;
 use uuid::Uuid;
 
 #[test]
@@ -265,35 +264,31 @@ async fn lock_file_removal_and_new_locks_wait_for_the_layout_lock() {
     let deletion = store.lock_for_deletion().unwrap().unwrap();
 
     let layout_lock = lock_layout(&stores).unwrap();
-    let (starting, started) = std::sync::mpsc::channel();
+    let removal_waits = crate::files::when_reached(&super::layout_lock(&stores));
     let (removed, finished) = std::sync::mpsc::channel();
     let remover = std::thread::spawn(move || {
-        starting.send(()).unwrap();
         removed.send(deletion.remove_directory()).unwrap();
     });
-    started.recv_timeout(HANG_GUARD).unwrap();
-    // Blocked on the layout lock, the removal reports nothing and removes
-    // nothing; no event says that, so this is the one bounded wait.
+    crate::clock::within(removal_waits).await.unwrap().unwrap();
+    // Waiting on the layout lock, the removal has reported nothing and
+    // removed nothing.
     assert_eq!(
-        finished.recv_timeout(std::time::Duration::from_millis(250)).map(|_| ()),
-        Err(std::sync::mpsc::RecvTimeoutError::Timeout),
+        finished.try_recv().map(|_| ()),
+        Err(std::sync::mpsc::TryRecvError::Empty),
         "removal went ahead of the layout lock"
     );
     for path in &paths {
         assert!(path.is_file(), "{path:?} was removed under the layout lock");
     }
-    let mut opening = Box::pin(other.lock_for_open());
-    assert!(
-        std::future::poll_fn(|cx| std::task::Poll::Ready(opening.as_mut().poll(cx)))
-            .await
-            .is_pending(),
-        "a new lock was taken under the layout lock"
-    );
-    drop(opening);
+    let opening_waits = crate::files::when_reached(&super::layout_lock(&stores));
+    let opening = tokio::spawn(async move { other.lock_for_open().await });
+    crate::clock::within(opening_waits).await.unwrap().unwrap();
+    assert!(!opening.is_finished(), "a new lock was taken under the layout lock");
 
     drop(layout_lock);
     finished.recv_timeout(HANG_GUARD).unwrap().unwrap();
     remover.join().unwrap();
+    drop(crate::clock::within(opening).await.unwrap().unwrap().unwrap());
     for path in &paths {
         assert!(!path.exists(), "{path:?}");
     }

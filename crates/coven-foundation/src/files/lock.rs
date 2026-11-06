@@ -84,22 +84,23 @@ const CACHE_WRITES: &str = ".coven-cache-writes.lock";
 pub(super) fn cache_writes(store: &Path, shared: bool) -> Result<CacheWriteLock, FileError> {
     let path = store.join(CACHE_WRITES);
     let mode = if shared { LockMode::Shared } else { LockMode::Exclusive };
-    let file = open_lock(&path)?;
-    let attempt =
-        file.try_clone().map_err(|source| FileError::at("lock cache writes", &path, source))?;
+    Ok(CacheWriteLock { _file: wait_for_lock(&path, mode, "lock cache writes")? })
+}
+
+/// Wait for the lock on the file at `path`. A test hears when the lock is
+/// held and the call is about to wait for it (`when_reached`).
+fn wait_for_lock(path: &Path, mode: LockMode, what: &'static str) -> Result<FileLock, FileError> {
+    let file = open_lock(path)?;
+    let attempt = file.try_clone().map_err(|source| FileError::at(what, path, source))?;
     match FileLock::try_lock(attempt, mode) {
-        Ok(file) => return Ok(CacheWriteLock { _file: file }),
-        Err(std::fs::TryLockError::WouldBlock) => {
+        Ok(file) => return Ok(file),
+        Err(TryLockError::WouldBlock) => {
             #[cfg(any(test, feature = "test-utils"))]
-            super::reached::reached(&path);
+            super::reached::reached(path);
         }
-        Err(std::fs::TryLockError::Error(source)) => {
-            return Err(FileError::at("lock cache writes", &path, source))
-        }
+        Err(TryLockError::Error(source)) => return Err(FileError::at(what, path, source)),
     }
-    let file = FileLock::lock(file, mode)
-        .map_err(|source| FileError::at("lock cache writes", &path, source))?;
-    Ok(CacheWriteLock { _file: file })
+    FileLock::lock(file, mode).map_err(|source| FileError::at(what, path, source))
 }
 
 /// The cache-write lock file of the store at `store`, which a test waits on
@@ -291,9 +292,13 @@ pub(crate) fn try_lock(path: &Path, id: StoreId, shared: bool) -> Result<FileLoc
 // acquisition, creation, and lock-file removal across processes, so no caller
 // can hold an unlinked lock while another locks a new file at the same path.
 pub(crate) fn lock_layout(root: &Path) -> Result<FileLock, FileError> {
-    let path = root.join(".coven-stores.lock");
-    FileLock::lock(open_lock(&path)?, LockMode::Exclusive)
-        .map_err(|source| FileError::at("lock store layout", &path, source))
+    wait_for_lock(&layout_lock(root), LockMode::Exclusive, "lock store layout")
+}
+
+/// The layout's lock file under `root`, which a test waits on to know a
+/// lock, creation or removal waits for the layout.
+pub(crate) fn layout_lock(root: &Path) -> PathBuf {
+    root.join(".coven-stores.lock")
 }
 
 #[cfg(any(test, feature = "test-utils"))]
