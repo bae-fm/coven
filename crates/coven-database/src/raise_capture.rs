@@ -42,6 +42,7 @@ pub(crate) fn capture(
     for selected in state.readable_audiences(&member) {
         db.internal_execute("INSERT INTO _coven_raise_captures(audience,version,through,covers) VALUES(?1,?2,?3,?4)",params![audience_text(&selected),version,marker.number.to_be_bytes(),crate::sequence::applied(db)?.to_be_bytes()])?;
     }
+    crate::pending::end_captured_raise_waits(db, marker.number)?;
     Ok(true)
 }
 
@@ -121,6 +122,7 @@ pub(crate) fn capture_made(
             crate::sequence::applied(db)?.to_be_bytes()
         ],
     )?;
+    crate::pending::end_captured_raise_waits(db, through)?;
     // The migration's journal may have finished with its own raises; passes
     // publish captures while one is open.
     if let Some(operation) = operation {
@@ -162,6 +164,7 @@ pub(crate) fn raise_to(
         "UPDATE _coven_raise_captures SET version=?1,through=?2,covers=?3",
         params![version, newest.to_be_bytes(), crate::sequence::applied(db)?.to_be_bytes()],
     )?;
+    crate::pending::end_captured_raise_waits(db, newest)?;
     Ok(true)
 }
 

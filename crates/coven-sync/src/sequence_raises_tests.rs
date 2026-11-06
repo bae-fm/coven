@@ -527,3 +527,60 @@ async fn a_raise_resumed_at_its_snapshot_after_a_pass_applied_more_publishes() {
         device.sync.database.close().await.unwrap();
     }
 }
+
+/// Ben's pin into Garden waits for Garden's raise to 2, and its record says
+/// so. His app then runs a second breaking migration, which captures his
+/// writes through its marker, the pin among them: they go out before his
+/// raise, so the pin waits for no raise any more. Its record ends as the
+/// migration captures it, not once a raise of Garden installs (§18.5).
+#[tokio::test]
+async fn a_second_breaking_migration_ends_the_wait_of_a_write_it_captures() {
+    let group = Group::new();
+    group.raises.store(true, std::sync::atomic::Ordering::SeqCst);
+    let ana = group.device(1).await;
+    let ben = group.device(2).await;
+    group.create(&ana).await;
+    group.admit(&ana, &ben).await;
+    let garden = ana.sync.create_circle("Garden".into()).await.unwrap();
+    ben.sync.pass().await.unwrap();
+    group.version.store(2, std::sync::atomic::Ordering::SeqCst);
+    let ben = group.reopen(ben).await;
+    ana.sync
+        .administer(coven_format::admin::StoreChange::AddCircleMember {
+            circle: garden,
+            member: ben.identity.member(),
+        })
+        .await
+        .unwrap();
+    ben.sync.pass().await.unwrap();
+    ben.sync.pass().await.unwrap();
+    pin(ben.database(), "00000000-0000-4000-8000-000000000001", garden, "seeds").await;
+    ben.sync.pass().await.unwrap();
+    let raise_waits = async |ben: &Device| {
+        ben.database()
+            .pending::<crate::PendingRecord>()
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|record| {
+                matches!(
+                    record.reason,
+                    crate::PendingReason::Waits(crate::Prerequisite::Raise { .. })
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(raise_waits(&ben).await.len(), 1);
+
+    group.version.store(4, std::sync::atomic::Ordering::SeqCst);
+    let ben = group.reopen(ben).await;
+    let pin = ben.database().waiting_snapshot_headers().await.unwrap()[0].header.position;
+    let captured = ben.database().raise_captures().await.unwrap();
+    assert!(!captured.is_empty());
+    assert!(captured.iter().all(|capture| capture.through.number > pin.number), "{captured:?}");
+    let waits = raise_waits(&ben).await;
+    assert!(waits.is_empty(), "{waits:?}");
+    for device in [&ana, &ben] {
+        device.sync.database.close().await.unwrap();
+    }
+}

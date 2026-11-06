@@ -7898,9 +7898,11 @@ it are new-version writes and wait behind it.
   the pass that finds it held (§19.1). The store state that reaches that
   version, applied from the raise's slot or loaded with a snapshot, ends the
   record as it installs, and a write still below another audience's version
-  records that wait in the same commit. An audience's version never goes
-  down, so once the device has applied the raise, the part counts wherever it
-  lands
+  records that wait in the same commit. A capture that takes the write into a
+  raise's prefix, such as a later breaking migration's, ends the record in
+  the commit that captures it: the write then goes out before that raise. An
+  audience's version never goes down, so once the device has applied the
+  raise, the part counts wherever it lands
   ([`waiting_part_counts`](proofs/sequence/CovenSequence/WriteVersion.lean)).
   Ben's app reached version 2 before Ana added him to Garden, which nobody had
   raised; his pin in Garden waits until Ana's update raises it (§18.3). A pass
@@ -10082,7 +10084,7 @@ Coven's other tables, besides the merge records Appendix B.1 lists:
 | `_coven_move_files` | the files each moving or failed move lists, by file, since a file is in at most one move: written in the write that records the move, and as a new file over a moving file's bytes joins it; a file leaves as its record goes, and a switch or a cancel ends the move's list, while a failure keeps it (§17.3) |
 | `_coven_copy_chunks` | the plaintext chunk hashes of coven's copy of each app file, by the copy, which a move's upload checks (§17.3) |
 | `_coven_unreferenced_files` | the files other devices' writes left with no reference, whose records this device's next write deletes (§17.2) |
-| `_coven_pending` | one record per thing that can't proceed, with the stored object it describes and whether it is about its upload or its downloads, or the move it describes, if any, the text of the error behind it that this run met, and the build of coven that recorded it, numbered in the order the records arose (§19.1) |
+| `_coven_pending` | one record per thing that can't proceed, with the stored object it describes and whether it is about its upload or its downloads, or the move it describes, or the own write a raise wait holds, if any, the text of the error behind it that this run met, and the build of coven that recorded it, numbered in the order the records arose (§19.1) |
 | `_coven_device_reset` | the reset notice with old and new device ids (§19.3) |
 | `_coven_sql_versions` | the version of each app collation and deterministic function the store's indexes were last built with, and of the SQLite that last opened the store for writing (§4) |
 

@@ -7,7 +7,7 @@ use coven_crypto::{
     MemberIdentity, StoreKey, StoreKeyring,
 };
 use coven_database::DbError;
-use coven_database::{Database, DatabaseBuilder, Migration, RowIdentity, SyncedTable};
+use coven_database::{Database, DatabaseBuilder, Migration, OldWrites, RowIdentity, SyncedTable};
 use coven_format::admin::{MemberRole, StoreChange};
 use coven_foundation::clock::HANG_GUARD;
 use coven_foundation::files::StoreDirAccess;
@@ -207,6 +207,7 @@ impl Group {
                         coven_database::OldWrites::Drop,
                     ),
                     Migration::addition(3, "colors", "ALTER TABLE notes ADD COLUMN color TEXT"),
+                    Migration::breaking(4, "p", "CREATE INDEX p ON pins(title)", OldWrites::Drop),
                 ]
                 .into_iter()
                 .take(self.version.load(std::sync::atomic::Ordering::SeqCst) as usize)
