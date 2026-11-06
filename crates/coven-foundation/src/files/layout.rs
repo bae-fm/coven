@@ -176,6 +176,7 @@ impl StoreDirectories {
             match settings::read(&path, id) {
                 Ok(_) => stores.push(id),
                 Err(SettingsError::File(error)) => return Err(error),
+                Err(SettingsError::Bug(bug)) => return Err(FileError::Bug(bug)),
                 Err(error) => {
                     tracing::warn!(path = %path.display(), error = %error, "directory has no valid store settings")
                 }

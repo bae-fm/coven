@@ -1852,6 +1852,8 @@ pub enum SettingsError {
     NotRegularFile(StoreId),
     /// The filesystem operation failed.
     File(FileError),
+    /// Reading or writing the settings panicked: a bug (E15).
+    Bug(Bug),
 }
 
 /// The requested writer, reader or deletion lock could not be taken (E1).
@@ -8867,10 +8869,11 @@ call's own error says it was a bug.
   device, and `StorageError::Bug`, whose failure is `StorageFailure::Bug`,
   for a provider request's local work.
 - Each error that keeps one of those, or another call's error, does the
-  same: `DbError`, `IdentityError`, `CovenError`, `SyncError`,
-  `StorageSetupError`, `FileReadError`, `CopyPathError`, `DeviceOnlyError`,
-  `BootstrapDirectoryError`, `BootstrapError`, `StoreCreationError`,
-  `StoreDeletionError`, `StoreKeyUnlockError` and `ReadOnlyOpenError`.
+  same: `DbError`, `IdentityError`, `SettingsError`, `CovenError`,
+  `SyncError`, `StorageSetupError`, `FileReadError`, `CopyPathError`,
+  `DeviceOnlyError`, `BootstrapDirectoryError`, `BootstrapError`,
+  `StoreCreationError`, `StoreDeletionError`, `StoreKeyUnlockError` and
+  `ReadOnlyOpenError`.
 - `CovenError` keeps a database call's bug as
   `CovenError::Database(DbError::Bug)`, as it keeps the call's other
   failures, and a sync step's bug as `CovenError::Bug`.

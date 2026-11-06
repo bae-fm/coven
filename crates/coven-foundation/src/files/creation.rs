@@ -40,6 +40,17 @@ pub enum DirectoryCreationError {
     },
 }
 
+impl crate::task::CarriesBug for DirectoryCreationError {
+    fn bug(&self) -> Option<&crate::task::Bug> {
+        match self {
+            Self::File(error) => error.bug(),
+            Self::Settings(error) => error.bug(),
+            Self::Rollback { operation, .. } => operation.bug(),
+            Self::AlreadyExists(_) | Self::Published { .. } => None,
+        }
+    }
+}
+
 impl DirectoryCreationError {
     /// The file failure that stopped the creation, if a file operation did.
     pub(crate) fn file(&self) -> Option<&FileError> {

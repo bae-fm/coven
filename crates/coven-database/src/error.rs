@@ -768,7 +768,7 @@ pub enum OpenError {
     CovenMigration(#[from] CovenMigrationError),
     /// The directory's settings could not be read.
     #[error(transparent)]
-    Settings(#[from] SettingsError),
+    Settings(SettingsError),
     /// The store's lock could not be taken.
     #[error(transparent)]
     Lock(StoreLockError),
@@ -790,6 +790,7 @@ impl CarriesBug for OpenError {
             Self::Bug(bug) => Some(bug),
             Self::Database(error) => error.bug(),
             Self::Lock(error) => error.bug(),
+            Self::Settings(error) => error.bug(),
             Self::Migration(MigrationError::Failed { source, .. })
             | Self::CovenMigration(CovenMigrationError::Failed { source }) => source.bug(),
             Self::Migration(
@@ -798,8 +799,16 @@ impl CarriesBug for OpenError {
             | Self::CovenMigration(
                 CovenMigrationError::ReadOnly | CovenMigrationError::SchemaTooNew { .. },
             )
-            | Self::Settings(_)
             | Self::MissingConfiguration { .. } => None,
+        }
+    }
+}
+
+impl From<SettingsError> for OpenError {
+    fn from(error: SettingsError) -> Self {
+        match error {
+            SettingsError::Bug(bug) => Self::Bug(bug),
+            error => Self::Settings(error),
         }
     }
 }

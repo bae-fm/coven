@@ -55,7 +55,7 @@ impl crate::task::CarriesBug for BootstrapDirectoryError {
         match self {
             Self::Bug(bug) => Some(bug),
             Self::File(error) => error.bug(),
-            Self::Create(creation) => creation.file().and_then(|error| error.bug()),
+            Self::Create(creation) => creation.bug(),
             Self::Lock(error) => error.bug(),
         }
     }

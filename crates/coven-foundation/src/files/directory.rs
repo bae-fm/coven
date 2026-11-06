@@ -168,6 +168,7 @@ impl StoreDir {
         let unfinished =
             super::device_reset::unfinished(&self.path, self.id).map_err(|error| match error {
                 SettingsError::File(error) => StoreLockError::from(error),
+                SettingsError::Bug(bug) => StoreLockError::Bug(bug),
                 error => FileError::at(
                     "read the store's settings beside its replacement record",
                     &self.path,

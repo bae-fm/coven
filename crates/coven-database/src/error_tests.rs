@@ -25,3 +25,16 @@ fn a_bug_in_file_or_custody_work_is_each_errors_bug() {
         assert_eq!(local.bug(), Some(&bug()));
     }
 }
+
+/// A bug in reading the store's settings while opening is opening's own
+/// bug, not a settings failure (api.md E15).
+#[test]
+fn a_bug_reading_settings_is_openings_bug() {
+    let settings = SettingsError::from(FileError::Bug(bug()));
+    assert!(matches!(&settings, SettingsError::Bug(found) if *found == bug()), "{settings:?}");
+    let open = OpenError::from(settings);
+    assert!(matches!(&open, OpenError::Bug(found) if *found == bug()), "{open:?}");
+    assert_eq!(open.bug(), Some(&bug()));
+    let file = OpenError::Settings(SettingsError::File(FileError::Bug(bug())));
+    assert_eq!(file.bug(), Some(&bug()));
+}

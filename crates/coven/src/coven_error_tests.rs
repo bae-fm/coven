@@ -71,3 +71,17 @@ fn a_sync_steps_refusal_keeps_a_failed_rollback_in_its_own_error() {
     };
     assert!(matches!(**operation, SyncError::NoStorage), "{operation:?}");
 }
+
+/// A bug in reading the store's settings is the call's own bug, not a
+/// settings failure, and one a settings error holds is still found
+/// (api.md E15).
+#[test]
+fn a_bug_reading_settings_is_the_calls_bug() {
+    let settings = || crate::SettingsError::from(crate::FileError::Bug(bug()));
+    for error in [CovenError::from(settings()), CovenError::from(OpenError::from(settings()))] {
+        assert!(matches!(&error, CovenError::Bug(found) if *found == bug()), "{error:?}");
+        assert_eq!(error.bug(), Some(&bug()));
+    }
+    let held = CovenError::Settings(crate::SettingsError::File(crate::FileError::Bug(bug())));
+    assert_eq!(held.bug(), Some(&bug()));
+}

@@ -50,7 +50,7 @@ pub enum CovenError {
     CovenMigration(#[from] CovenMigrationError),
     /// The directory's settings could not be read.
     #[error(transparent)]
-    Settings(#[from] SettingsError),
+    Settings(SettingsError),
     /// The writer's lock could not be acquired.
     #[error(transparent)]
     Lock(StoreLockError),
@@ -109,6 +109,7 @@ impl CarriesBug for CovenError {
             Self::Sync(error) => error.bug(),
             Self::Key(error) => error.bug(),
             Self::Lock(error) => error.bug(),
+            Self::Settings(error) => error.bug(),
             Self::Rollback { operation, .. } => operation.bug(),
             Self::FileCleanup { write, failures } => {
                 write.bug().or_else(|| failures.iter().find_map(DbError::bug))
@@ -125,6 +126,15 @@ impl From<KeyError> for CovenError {
         match error {
             KeyError::Bug(bug) => Self::Bug(bug),
             error => Self::Key(error),
+        }
+    }
+}
+
+impl From<SettingsError> for CovenError {
+    fn from(error: SettingsError) -> Self {
+        match error {
+            SettingsError::Bug(bug) => Self::Bug(bug),
+            error => Self::Settings(error),
         }
     }
 }
@@ -158,7 +168,7 @@ impl From<OpenError> for CovenError {
             OpenError::Database(error) => Self::Database(error),
             OpenError::Migration(error) => Self::Migration(error),
             OpenError::CovenMigration(error) => Self::CovenMigration(error),
-            OpenError::Settings(error) => Self::Settings(error),
+            OpenError::Settings(error) => Self::from(error),
             OpenError::Lock(error) => Self::Lock(error),
             OpenError::MissingConfiguration { field } => Self::MissingConfiguration { field },
             OpenError::Bug(bug) => Self::Bug(bug),

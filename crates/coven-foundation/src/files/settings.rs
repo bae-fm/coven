@@ -42,7 +42,33 @@ pub enum SettingsError {
     NotRegularFile(StoreId),
     /// Reading or writing settings failed at the filesystem boundary.
     #[error("store settings: {0}")]
-    File(#[from] FileError),
+    File(FileError),
+    /// Reading or writing settings panicked: a bug, which the caller
+    /// reports (E15).
+    #[error(transparent)]
+    Bug(#[from] crate::task::Bug),
+}
+
+impl From<FileError> for SettingsError {
+    fn from(error: FileError) -> Self {
+        match error {
+            FileError::Bug(bug) => Self::Bug(bug),
+            error => Self::File(error),
+        }
+    }
+}
+
+impl crate::task::CarriesBug for SettingsError {
+    fn bug(&self) -> Option<&crate::task::Bug> {
+        match self {
+            Self::Bug(bug) => Some(bug),
+            Self::File(error) => error.bug(),
+            Self::Missing(_)
+            | Self::Corrupt(_)
+            | Self::WrongStore { .. }
+            | Self::NotRegularFile(_) => None,
+        }
+    }
 }
 
 pub(crate) fn read(directory: &Path, id: StoreId) -> Result<StoreSettings, SettingsError> {
